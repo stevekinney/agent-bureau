@@ -1,17 +1,29 @@
 {
   "$schema": "https://turborepo.dev/schema.json",
   "ui": "tui",
+  "globalDependencies": [
+    ".prettierrc.json",
+    "bunfig.toml"
+  ],
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
-      "inputs": ["$TURBO_DEFAULT$", ".env*"],
-      "outputs": [".next/**", "!.next/cache/**"]
+      "outputs": ["dist/**"],
+      "outputLogs": "new-only"
     },
-    "lint": {
-      "dependsOn": ["^lint"]
+    "transit": {
+      "dependsOn": ["^transit"]
     },
     "check-types": {
-      "dependsOn": ["^check-types"]
+      "dependsOn": ["transit"],
+      "outputs": []
+    },
+    "test": {
+      "outputs": [],
+      "passThroughEnv": ["CI", "NODE_ENV"]
+    },
+    "lint": {
+      "outputs": []
     },
     "dev": {
       "cache": false,
