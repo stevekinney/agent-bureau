@@ -197,7 +197,12 @@ export function createRegistry(options: RegistryOptions = {}): ToolRegistry {
 function normalizeDefinition(definition: ToolDefinition): ToolDefinition {
   const identity = normalizeIdentity(definition.identity);
   const id = formatToolId(identity);
-  if (definition.id === id && definition.identity === identity) {
+  if (
+    definition.id === id &&
+    definition.identity.namespace === identity.namespace &&
+    definition.identity.name === identity.name &&
+    definition.identity.version === identity.version
+  ) {
     return definition;
   }
   return {
@@ -343,3 +348,7 @@ function comparePrerelease(a: string, b: string): number {
   }
   return 0;
 }
+
+export const internalRegistryModuleTestUtilities = {
+  comparePrerelease,
+};

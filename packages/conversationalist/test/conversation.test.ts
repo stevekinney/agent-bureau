@@ -337,6 +337,26 @@ describe('conversation (functional)', () => {
     expect(messages[1]?.toolResult?.content).toEqual({ tempF: 72 });
   });
 
+  test('deserialize rejects non-object roots and malformed message entries', () => {
+    expect(() => deserializeConversation(null)).toThrow(ConversationalistError);
+
+    const now = new Date().toISOString();
+    const malformed = {
+      schemaVersion: 4,
+      id: 'malformed',
+      status: 'active' as const,
+      metadata: {},
+      ids: ['m1'],
+      messages: {
+        m1: 'not-an-object',
+      },
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    expect(() => deserializeConversation(malformed)).toThrow(ConversationalistError);
+  });
+
   test('tool linkage is validated across batch', () => {
     let c = createConversation();
     expect(() =>

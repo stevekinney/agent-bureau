@@ -292,6 +292,60 @@ describe('OpenAI Adapter', () => {
       expect(toolMsg?.content).toBe('String result');
     });
 
+    it('includes error and action payloads for non-success tool results', () => {
+      let conv = createConversation({ id: 'test' }, testEnvironment);
+      conv = appendMessages(
+        conv,
+        {
+          role: 'tool-call',
+          content: '',
+          toolCall: { id: 'call-1', name: 'tool', arguments: {} },
+        },
+        {
+          role: 'tool-result',
+          content: '',
+          toolResult: {
+            callId: 'call-1',
+            outcome: 'action_required',
+            content: 'Need approval',
+            error: {
+              code: 'tool.pending',
+              category: 'permission',
+              retryable: false,
+              message: 'Approval required',
+            },
+            action: {
+              type: 'approval',
+              message: 'Approve this request',
+            },
+          },
+        },
+        testEnvironment,
+      );
+
+      const messages = toOpenAIMessages(conv);
+      const toolMessage = messages.find((message) => message.role === 'tool');
+      expect(toolMessage?.role).toBe('tool');
+      if (!toolMessage || toolMessage.role !== 'tool') {
+        throw new Error('Expected tool message');
+      }
+
+      expect(JSON.parse(toolMessage.content as string)).toEqual({
+        outcome: 'action_required',
+        content: 'Need approval',
+        error: {
+          code: 'tool.pending',
+          category: 'permission',
+          retryable: false,
+          message: 'Approval required',
+        },
+        action: {
+          type: 'approval',
+          message: 'Approve this request',
+        },
+      });
+    });
+
     it('does not emit tool results without matching tool calls after truncation', () => {
       let conv = createConversation({ id: 'test' }, testEnvironment);
       conv = appendMessages(
@@ -1020,6 +1074,63 @@ describe('Gemini Adapter', () => {
         (p: any) => 'functionResponse' in p,
       ) as any;
       expect(responsePart.functionResponse.response).toEqual({ result: 'ok' });
+    });
+
+    it('preserves error and action payloads for non-success tool results', () => {
+      let conv = createConversation({ id: 'test' }, testEnvironment);
+      conv = appendMessages(
+        conv,
+        {
+          role: 'tool-call',
+          content: '',
+          toolCall: { id: 'call-1', name: 'tool', arguments: {} },
+        },
+        {
+          role: 'tool-result',
+          content: '',
+          toolResult: {
+            callId: 'call-1',
+            outcome: 'action_required',
+            content: 'Need approval',
+            error: {
+              code: 'tool.pending',
+              category: 'permission',
+              retryable: false,
+              message: 'Approval required',
+            },
+            action: {
+              type: 'approval',
+              message: 'Approve this request',
+            },
+          },
+        },
+        testEnvironment,
+      );
+
+      const { contents } = toGeminiMessages(conv);
+      const userContent = contents.find(
+        (content) =>
+          content.role === 'user' &&
+          content.parts.some((part: any) => 'functionResponse' in part),
+      );
+      const responsePart = userContent?.parts.find(
+        (part: any) => 'functionResponse' in part,
+      ) as any;
+
+      expect(responsePart.functionResponse.response).toEqual({
+        outcome: 'action_required',
+        content: 'Need approval',
+        error: {
+          code: 'tool.pending',
+          category: 'permission',
+          retryable: false,
+          message: 'Approval required',
+        },
+        action: {
+          type: 'approval',
+          message: 'Approve this request',
+        },
+      });
     });
 
     it('rejects tool results without matching tool calls', () => {

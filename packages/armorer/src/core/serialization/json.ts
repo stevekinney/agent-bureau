@@ -54,7 +54,6 @@ export function assertJsonValue(
       stack.delete(record);
       return;
     }
-    throw new TypeError(`Unsupported JSON value at ${currentPath}`);
   };
 
   walk(value, path);

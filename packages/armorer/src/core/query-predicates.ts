@@ -719,3 +719,8 @@ function levenshteinDistance(a: string, b: string): number {
   }
   return prev[bLen] ?? 0;
 }
+
+export const internalQueryPredicateTestUtilities = {
+  maxSimilarityPossible,
+  normalizeForSearch,
+};

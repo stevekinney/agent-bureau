@@ -216,18 +216,21 @@ function stripSchemaId(schema: JSONSchema): JSONSchema {
 }
 
 function stringifyToolContent(content: unknown): string {
-  return typeof content === 'string'
-    ? content
-    : content === undefined || content === null
-      ? 'null'
-      : (() => {
-          try {
-            return JSON.stringify(content);
-          } catch {
-            // eslint-disable-next-line @typescript-eslint/no-base-to-string
-            return String(content);
-          }
-        })();
+  if (typeof content === 'string') {
+    return content;
+  }
+  if (content === undefined || content === null) {
+    return 'null';
+  }
+  try {
+    const serialized = JSON.stringify(content);
+    // JSON.stringify(Symbol()) and JSON.stringify(() => {}) return undefined.
+    // Fall back to String(...) so provider payloads stay string-typed.
+    return serialized ?? String(content);
+  } catch {
+    // eslint-disable-next-line @typescript-eslint/no-base-to-string
+    return String(content);
+  }
 }
 
 function isAsyncIterable(value: unknown): value is AsyncIterable<unknown> {

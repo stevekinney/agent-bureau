@@ -897,6 +897,45 @@ Calling search`;
       });
     });
 
+    test('drops malformed legacy toolCall metadata', () => {
+      const markdown = `---
+id: conv-1
+status: active
+metadata: {}
+createdAt: '2024-01-15T10:00:00.000Z'
+updatedAt: '2024-01-15T10:00:00.000Z'
+messages:
+  msg-1:
+    position: 0
+    createdAt: '2024-01-15T10:00:00.000Z'
+    metadata: {}
+    hidden: false
+    toolCall:
+      id: call-1
+      args:
+        query: test
+  msg-2:
+    position: 1
+    createdAt: '2024-01-15T10:01:00.000Z'
+    metadata: {}
+    hidden: false
+    toolCall: invalid
+---
+
+### Tool Call (msg-1)
+
+Calling search
+
+### Tool Call (msg-2)
+
+Calling invalid`;
+
+      const conversation = fromMarkdown(markdown);
+      const ordered = getOrderedMessages(conversation);
+      expect(ordered[0]?.toolCall).toBeUndefined();
+      expect(ordered[1]?.toolCall).toBeUndefined();
+    });
+
     test('parses toolResult metadata', () => {
       const markdown = `---
 id: conv-1
@@ -938,6 +977,77 @@ Search results`;
       expect(ordered[1]?.toolResult).toBeDefined();
       expect(ordered[1]?.toolResult?.callId).toBe('call-1');
       expect(ordered[1]?.toolResult?.outcome).toBe('success');
+    });
+
+  test('drops malformed legacy toolResult metadata', () => {
+      const markdown = `---
+id: conv-1
+status: active
+metadata: {}
+createdAt: '2024-01-15T10:00:00.000Z'
+updatedAt: '2024-01-15T10:00:00.000Z'
+messages:
+  msg-1:
+    position: 0
+    createdAt: '2024-01-15T10:00:00.000Z'
+    metadata: {}
+    hidden: false
+    toolCall:
+      id: call-1
+      name: search
+      arguments: {}
+  msg-2:
+    position: 1
+    createdAt: '2024-01-15T10:01:00.000Z'
+    metadata: {}
+    hidden: false
+    toolResult:
+      callId: call-1
+      outcome: success
+      result:
+        ok: true
+  msg-3:
+    position: 2
+    createdAt: '2024-01-15T10:02:00.000Z'
+    metadata: {}
+    hidden: false
+    toolResult: invalid
+  msg-4:
+    position: 3
+    createdAt: '2024-01-15T10:03:00.000Z'
+    metadata: {}
+    hidden: false
+    toolResult:
+      callId: call-1
+      outcome: pending
+      content: nope
+---
+
+### Tool Call (msg-1)
+
+Calling search
+
+### Tool Result (msg-2)
+
+Search results
+
+### Tool Result (msg-3)
+
+String metadata
+
+### Tool Result (msg-4)
+
+Bad results`;
+
+      const conversation = fromMarkdown(markdown);
+      const ordered = getOrderedMessages(conversation);
+      expect(ordered[1]?.toolResult).toEqual({
+        callId: 'call-1',
+        outcome: 'success',
+        content: { ok: true },
+      });
+      expect(ordered[2]?.toolResult).toBeUndefined();
+      expect(ordered[3]?.toolResult).toBeUndefined();
     });
 
     test('parses tokenUsage metadata', () => {

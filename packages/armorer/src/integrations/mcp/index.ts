@@ -667,12 +667,16 @@ function isString(value: unknown): value is string {
 type McpSdk = typeof import('@modelcontextprotocol/sdk/server/mcp.js');
 
 let cachedMcpSdk: McpSdk | undefined;
+const defaultMcpLoader = (): McpSdk => {
+  const require = createRequire(import.meta.url);
+  return require('@modelcontextprotocol/sdk/server/mcp.js') as McpSdk;
+};
+let mcpLoader = defaultMcpLoader;
 
 function requireMcp(): McpSdk {
   if (cachedMcpSdk) return cachedMcpSdk;
-  const require = createRequire(import.meta.url);
   try {
-    cachedMcpSdk = require('@modelcontextprotocol/sdk/server/mcp.js') as McpSdk;
+    cachedMcpSdk = mcpLoader();
     return cachedMcpSdk;
   } catch (error) {
     const hint =
@@ -682,3 +686,14 @@ function requireMcp(): McpSdk {
     throw wrapped;
   }
 }
+
+export const internalMcpTestUtilities = {
+  resetModuleState() {
+    cachedMcpSdk = undefined;
+    mcpLoader = defaultMcpLoader;
+  },
+  setModuleLoader(loader: (() => McpSdk) | undefined) {
+    cachedMcpSdk = undefined;
+    mcpLoader = loader ?? defaultMcpLoader;
+  },
+};

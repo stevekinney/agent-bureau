@@ -5,6 +5,7 @@ import {
   appendToolCalls,
   appendToolResult,
   appendToolResultAsync,
+  appendToolResults,
   appendToolResultsAsync,
   createConversation,
   getPendingToolCalls,
@@ -144,6 +145,11 @@ describe('tool interaction helpers', () => {
     expect(messages[1]?.toolCall?.id).toBe('call-2');
   });
 
+  it('returns the original conversation for empty tool-call batches', () => {
+    const conv = createConversation({ id: 'test' }, testEnvironment);
+    expect(appendToolCalls(conv, [], testEnvironment)).toBe(conv);
+  });
+
   it('collects streamed tool results before persisting them', async () => {
     let conv = createConversation({ id: 'test' }, testEnvironment);
     conv = appendToolCall(conv, {
@@ -222,6 +228,16 @@ describe('tool interaction helpers', () => {
     expect(messages[2]?.toolResult?.content).toEqual(['alpha', 'beta']);
     expect(messages[3]?.toolResult?.content).toEqual([{ code: 'denied' }]);
     expect(messages[3]?.toolResult?.error?.category).toBe('permission');
+  });
+
+  it('returns the original conversation for empty tool-result batches', () => {
+    const conv = createConversation({ id: 'test' }, testEnvironment);
+    expect(appendToolResults(conv, [], testEnvironment)).toBe(conv);
+  });
+
+  it('returns the original conversation for empty async tool-result batches', async () => {
+    const conv = createConversation({ id: 'test' }, testEnvironment);
+    expect(await appendToolResultsAsync(conv, [], testEnvironment)).toBe(conv);
   });
 
   it('rejects streamed tool results in the synchronous helper', () => {

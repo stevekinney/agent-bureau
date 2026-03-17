@@ -1139,10 +1139,12 @@ export function createToolbox<const TEntries extends ToolboxEntries = []>(
         for (const middleware of options.middleware) {
           const result = middleware(configuration);
           if (isPromise(result)) {
-            throw new Error(
+            const message =
               source === 'deserializing'
                 ? 'Async middleware is not supported when deserializing. Provide synchronous middleware only.'
-                : 'Async middleware is not supported. Provide synchronous middleware only.',
+                : 'Async middleware is not supported. Provide synchronous middleware only.';
+            throw new Error(
+              message,
             );
           }
           configuration = result;
@@ -1343,13 +1345,11 @@ function checkBudget(
   if (typeof budget.maxCalls === 'number' && calls >= budget.maxCalls) {
     return `Budget exceeded: max calls ${budget.maxCalls}`;
   }
-  if (typeof budget.maxDurationMs === 'number') {
-    const elapsed = Date.now() - startedAt;
-    if (elapsed >= budget.maxDurationMs) {
-      return `Budget exceeded: max duration ${budget.maxDurationMs}ms`;
-    }
+  if (typeof budget.maxDurationMs !== 'number') {
+    return undefined;
   }
-  return undefined;
+  const elapsed = Date.now() - startedAt;
+  return elapsed >= budget.maxDurationMs ? `Budget exceeded: max duration ${budget.maxDurationMs}ms` : undefined;
 }
 
 function createLazyExecuteResolver(
@@ -1500,3 +1500,16 @@ function isTestRuntime(): boolean {
   const testEntrypoint = /\.(test|spec)\.[cm]?[jt]sx?$/.test(entry);
   return nodeEnvIsTest || testEntrypoint;
 }
+
+export const internalToolboxTestUtilities = {
+  checkBudget,
+  createCachedEmbedder,
+  createLazyExecuteResolver,
+  deriveRiskFromMetadata,
+  isDangerousToolContext,
+  isMutatingToolContext,
+  mergePolicies,
+  normalizeToolSchema,
+  resolvePolicyDecision,
+  toPolicyContextProvider,
+};

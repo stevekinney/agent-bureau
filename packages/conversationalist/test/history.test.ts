@@ -515,5 +515,41 @@ describe('ConversationHistory', () => {
       const result = history.addEventListener('change', null);
       expect(result).toBeUndefined();
     });
+
+    it('supports boolean listener options overloads', () => {
+      const history = new ConversationHistory(createConversation());
+      let calls = 0;
+      const handler = () => {
+        calls += 1;
+      };
+
+      history.addEventListener('change', handler, false);
+      history.dispatchEvent({
+        type: 'change',
+        detail: { type: 'push', conversation: history.current },
+      } as any);
+      expect(calls).toBe(1);
+
+      history.removeEventListener('change', handler, false);
+      history.dispatchEvent({
+        type: 'change',
+        detail: { type: 'push', conversation: history.current },
+      } as any);
+      expect(calls).toBe(1);
+    });
+
+    it('falls back to a no-op unsubscribe when subscribe cannot get one from addEventListener', () => {
+      const history = new ConversationHistory(createConversation());
+      const originalAddEventListener = history.addEventListener.bind(history);
+
+      history.addEventListener = (() => undefined) as typeof history.addEventListener;
+
+      const unsubscribe = history.subscribe(() => {});
+
+      expect(typeof unsubscribe).toBe('function');
+      expect(() => unsubscribe()).not.toThrow();
+
+      history.addEventListener = originalAddEventListener;
+    });
   });
 });

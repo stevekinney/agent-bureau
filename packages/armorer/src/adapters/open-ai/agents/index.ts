@@ -264,11 +264,14 @@ function stringifyResult(value: unknown): string {
 
 let cachedOpenAIAgentsModule: OpenAIAgentsModule | undefined;
 let cachedOpenAIAgentsModulePromise: Promise<OpenAIAgentsModule> | undefined;
+const defaultOpenAIAgentsModuleLoader = () => import('@openai/agents');
+let openAIAgentsModuleLoader: () => Promise<OpenAIAgentsModule> =
+  defaultOpenAIAgentsModuleLoader;
 
 async function loadOpenAIAgentsModule(): Promise<OpenAIAgentsModule> {
   if (cachedOpenAIAgentsModule) return cachedOpenAIAgentsModule;
   if (!cachedOpenAIAgentsModulePromise) {
-    cachedOpenAIAgentsModulePromise = import('@openai/agents')
+    cachedOpenAIAgentsModulePromise = openAIAgentsModuleLoader()
       .then((module) => {
         cachedOpenAIAgentsModule = module;
         return module;
@@ -283,3 +286,16 @@ async function loadOpenAIAgentsModule(): Promise<OpenAIAgentsModule> {
   }
   return cachedOpenAIAgentsModulePromise;
 }
+
+export const internalOpenAIAgentsTestUtilities = {
+  resetModuleState() {
+    cachedOpenAIAgentsModule = undefined;
+    cachedOpenAIAgentsModulePromise = undefined;
+    openAIAgentsModuleLoader = defaultOpenAIAgentsModuleLoader;
+  },
+  setModuleLoader(loader: (() => Promise<OpenAIAgentsModule>) | undefined) {
+    cachedOpenAIAgentsModule = undefined;
+    cachedOpenAIAgentsModulePromise = undefined;
+    openAIAgentsModuleLoader = loader ?? defaultOpenAIAgentsModuleLoader;
+  },
+};

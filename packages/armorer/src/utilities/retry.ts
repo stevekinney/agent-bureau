@@ -138,7 +138,6 @@ export function retry<TTool extends AnyTool>(
             tool(value) as Promise<InferToolOutput<TTool>>;
     let attempt = 0;
     let lastError: unknown;
-    let rethrowOriginal = false;
 
     while (attempt < attempts) {
       attempt += 1;
@@ -156,10 +155,7 @@ export function retry<TTool extends AnyTool>(
 
         if (shouldRetry) {
           const allowed = await shouldRetry({ attempt, error, context });
-          if (!allowed) {
-            rethrowOriginal = true;
-            break;
-          }
+          if (!allowed) throw toError(error);
         }
 
         if (onRetry) {
@@ -173,9 +169,6 @@ export function retry<TTool extends AnyTool>(
       }
     }
 
-    if (rethrowOriginal) {
-      throw toError(lastError);
-    }
     throw toError(lastError ?? new Error('retry() failed without an error'));
   };
 
@@ -262,3 +255,9 @@ function wait(
     signal.addEventListener('abort', onAbort, { once: true });
   });
 }
+
+export const internalRetryTestUtilities = {
+  resolveRetryDelay,
+  toError,
+  wait,
+};

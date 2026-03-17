@@ -145,35 +145,30 @@ function normalizeToolArguments(argumentsValue: unknown): unknown {
 }
 
 function stringifyToolContent(content: unknown): string {
-  return typeof content === 'string'
-    ? content
-    : content === undefined || content === null
-      ? 'null'
-      : (() => {
-          try {
-            return JSON.stringify(content);
-          } catch {
-            if (typeof content === 'symbol') {
-              return content.description
-                ? `Symbol(${content.description})`
-                : 'Symbol()';
-            }
-            if (typeof content === 'object') {
-              return '[unserializable object]';
-            }
-            if (typeof content === 'function') {
-              return '[function]';
-            }
-            if (
-              typeof content === 'number' ||
-              typeof content === 'boolean' ||
-              typeof content === 'bigint'
-            ) {
-              return String(content);
-            }
-            return '[unsupported value]';
-          }
-        })();
+  if (typeof content === 'string') {
+    return content;
+  }
+  if (content === undefined || content === null) {
+    return 'null';
+  }
+  if (typeof content === 'symbol') {
+    return content.description ? `Symbol(${content.description})` : 'Symbol()';
+  }
+  if (typeof content === 'function') {
+    return '[function]';
+  }
+  if (
+    typeof content === 'number' ||
+    typeof content === 'boolean' ||
+    typeof content === 'bigint'
+  ) {
+    return String(content);
+  }
+  try {
+    return JSON.stringify(content);
+  } catch {
+    return '[unserializable object]';
+  }
 }
 
 function isAsyncIterable(value: unknown): value is AsyncIterable<unknown> {

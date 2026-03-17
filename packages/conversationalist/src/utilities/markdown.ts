@@ -563,14 +563,10 @@ function parseMarkdownWithMetadata(trimmed: string): Conversation {
       metadata: toReadonly({ ...messageMeta.metadata }),
       hidden: messageMeta.hidden,
       toolCall: messageMeta.toolCall
-        ? toReadonly(normalizeLegacyMarkdownToolCall(messageMeta.toolCall) ?? {
-            ...messageMeta.toolCall,
-          })
+        ? toReadonly(normalizeLegacyMarkdownToolCall(messageMeta.toolCall))
         : undefined,
       toolResult: messageMeta.toolResult
-        ? toReadonly(normalizeLegacyMarkdownToolResult(messageMeta.toolResult) ?? {
-            ...messageMeta.toolResult,
-          })
+        ? toReadonly(normalizeLegacyMarkdownToolResult(messageMeta.toolResult))
         : undefined,
       tokenUsage: messageMeta.tokenUsage
         ? toReadonly({ ...messageMeta.tokenUsage })

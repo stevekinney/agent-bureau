@@ -191,6 +191,26 @@ export function lazy<TExecute extends (...args: unknown[]) => Promise<unknown>>(
   }) as TExecute;
 }
 
+function formatNonStringReason(reason: unknown): string | undefined {
+  if (reason === undefined || reason === null) return undefined;
+  if (
+    typeof reason === 'number' ||
+    typeof reason === 'boolean' ||
+    typeof reason === 'bigint'
+  ) {
+    return String(reason);
+  }
+  if (typeof reason === 'symbol') {
+    return reason.description ?? 'Symbol';
+  }
+  if (typeof reason !== 'object') return undefined;
+  try {
+    return JSON.stringify(reason);
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Creates a validated, executable AI tool with input schema, metadata, and lifecycle hooks.
  *
@@ -512,11 +532,9 @@ export function createTool<
   ): Promise<TReturn> => {
     const toolCall = createToolCall<TInput>(name, params);
     const result = await executeCall(toolCall, options);
-    if (result.error) {
-      throw new Error(result.error.message);
-    }
-    if (result.errorMessage) {
-      throw new Error(result.errorMessage);
+    const errorMessage = result.error?.message ?? result.errorMessage;
+    if (errorMessage) {
+      throw new Error(errorMessage);
     }
     return result.result as TReturn;
   };
@@ -1052,28 +1070,6 @@ export function createTool<
       } as ToolResult;
     }
   };
-
-  function formatNonStringReason(reason: unknown): string | undefined {
-    if (reason === undefined || reason === null) return undefined;
-    if (
-      typeof reason === 'number' ||
-      typeof reason === 'boolean' ||
-      typeof reason === 'bigint'
-    ) {
-      return String(reason);
-    }
-    if (typeof reason === 'symbol') {
-      return reason.description ?? 'Symbol';
-    }
-    if (typeof reason === 'object') {
-      try {
-        return JSON.stringify(reason);
-      } catch {
-        return undefined;
-      }
-    }
-    return undefined;
-  }
 
   const callable = async (params: unknown) => executeParams(params as TInput);
 
@@ -1736,3 +1732,11 @@ function isPromise<T>(value: unknown): value is PromiseLike<T> {
   const candidate = value as PromiseLike<unknown>;
   return typeof candidate.then === 'function';
 }
+
+export const internalToolTestUtilities = {
+  classifyErrorCategory,
+  createLazyExecuteResolver,
+  defaultErrorCode,
+  formatNonStringReason,
+  stableStringify,
+};
