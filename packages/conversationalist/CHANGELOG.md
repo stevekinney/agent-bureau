@@ -7,16 +7,16 @@
 - Removed legacy deserialization/migration support; `deserializeConversation` now requires a full `Conversation` shape with `schemaVersion`, `ids`, and `messages` aligned.
 - Removed `migrateConversation` export and compatibility shims around legacy schema formats.
 - Removed legacy tool result alias fields (`toolCallId`, `toolName`, `result`, `error`); only `callId`, `outcome`, and `content` remain.
-- `appendToolUse` and `appendToolResult` now accept `toolId`/`args` and `result` payloads instead of raw `ToolCall`/`ToolResult` objects.
+- `appendToolCall` and `appendToolResult` now use the canonical `ToolCallInput` / `ToolResult` shapes (`id`, `arguments`, `content`) so they align directly with `armorer`.
 - Schema validation is now strict (unknown fields are rejected) and `jsonValueSchema` rejects non-plain objects and non-finite numbers.
 
 ### Added
 
 - Tool-aware truncation and slicing with `preserveToolPairs` defaults.
 - Integrity validation helpers: `validateConversationIntegrity` and `assertConversationIntegrity`.
-- Tool interaction helpers: `appendToolUse`, `appendToolResult`, `getPendingToolCalls`, `getToolInteractions`.
+- Tool interaction helpers: `appendToolCall`, `appendToolResult`, `getPendingToolCalls`, `getToolInteractions`.
 - Unsafe escape hatches: `createConversationUnsafe`, `appendUnsafeMessage`.
-- Tool helper input types: `ToolUseInput`, `ToolResultInput`.
+- Tool helper input types: `ToolCallInput`, `ToolResultInput`.
 
 ### Changed
 

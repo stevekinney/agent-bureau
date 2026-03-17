@@ -83,28 +83,41 @@ import { inspectTool, inspectRegistry } from 'armorer/inspect';
 
 ### Provider Adapters
 
-#### `armorer/adapters/openai` (or `armorer/openai`)
+#### `armorer/adapters/openai`
 
 OpenAI Chat Completions API format:
 
 ```typescript
-import { toOpenAI, parseToolCalls, formatToolResults } from 'armorer/openai';
+import {
+  formatOpenAIToolResults,
+  formatOpenAIToolResultsAsync,
+  parseOpenAIToolCalls,
+  toOpenAITools,
+} from 'armorer/adapters/openai';
 ```
 
-#### `armorer/adapters/anthropic` (or `armorer/anthropic`)
+#### `armorer/adapters/anthropic`
 
 Anthropic Messages API format:
 
 ```typescript
-import { toAnthropic, parseToolCalls, formatToolResults } from 'armorer/anthropic';
+import {
+  formatAnthropicToolResults,
+  parseAnthropicToolCalls,
+  toAnthropicTools,
+} from 'armorer/adapters/anthropic';
 ```
 
-#### `armorer/adapters/gemini` (or `armorer/gemini`)
+#### `armorer/adapters/gemini`
 
 Google Gemini API format:
 
 ```typescript
-import { toGemini } from 'armorer/gemini';
+import {
+  formatGeminiToolResults,
+  parseGeminiToolCalls,
+  toGeminiTools,
+} from 'armorer/adapters/gemini';
 ```
 
 ### Infrastructure
@@ -143,12 +156,15 @@ Model Context Protocol server integration:
 import { createMCP, toMcpTools, fromMcpTools } from 'armorer/mcp';
 ```
 
-#### `armorer/open-ai/agents` (or `armorer/adapters/open-ai/agents`)
+#### `armorer/adapters/open-ai/agents`
 
 OpenAI Agents SDK integration with tool gating:
 
 ```typescript
-import { toOpenAIAgentTools, createOpenAIToolGate } from 'armorer/open-ai/agents';
+import {
+  toOpenAIAgentTools,
+  createOpenAIToolGate,
+} from 'armorer/adapters/open-ai/agents';
 ```
 
 ### Other Utilities
@@ -272,28 +288,54 @@ Toolbox provides helpers to integrate with LLM providers like OpenAI.
 
 ```typescript
 import {
-  toOpenAI,
-  parseToolCalls,
-  formatToolResults,
-  formatToolResultsAsync,
+  formatOpenAIToolResults,
+  formatOpenAIToolResultsAsync,
+  parseOpenAIToolCalls,
+  toOpenAITools,
 } from 'armorer/adapters/openai';
 
 // 1. Export tools
-const tools = toOpenAI(toolbox);
+const tools = toOpenAITools(toolbox);
 
 // 2. Call model
 const completion = await openai.chat.completions.create({ tools, ... });
 
 // 3. Parse and execute
-const toolCalls = parseToolCalls(completion.choices[0].message.tool_calls);
+const toolCalls = parseOpenAIToolCalls(completion.choices[0].message.tool_calls);
 const results = await toolbox.execute(toolCalls);
 
 // 4. Format results
-const messages = formatToolResults(results);
+const messages = formatOpenAIToolResults(results);
 
 // Use async formatter when any tool call uses { stream: true }
-const streamingMessages = await formatToolResultsAsync(results);
+const streamingMessages = await formatOpenAIToolResultsAsync(results);
 ```
+
+## Using with Conversationalist
+
+Use `armorer` for tool schemas, provider tool definitions, tool-call parsing, and execution. Use `conversationalist` for the persistent conversation state and provider message history.
+
+```typescript
+import { appendToolCalls, appendToolResultsAsync, appendUserMessage, createConversation } from 'conversationalist/conversation';
+import { toOpenAIMessagesGrouped } from 'conversationalist/adapters/openai';
+import { createToolbox } from 'armorer';
+import { parseOpenAIToolCalls, toOpenAITools } from 'armorer/adapters/openai';
+
+let conversation = createConversation({ title: 'Weather' });
+conversation = appendUserMessage(conversation, 'What is the weather in Denver?');
+
+const tools = toOpenAITools(toolbox);
+const messages = toOpenAIMessagesGrouped(conversation);
+const completion = await openai.chat.completions.create({ model: 'gpt-4o', messages, tools });
+
+const toolCalls = parseOpenAIToolCalls(completion.choices[0]?.message?.tool_calls);
+conversation = appendToolCalls(conversation, toolCalls);
+
+const results = await toolbox.execute(toolCalls, { stream: true });
+conversation = await appendToolResultsAsync(conversation, results);
+```
+
+See [Using `armorer` with `conversationalist`](documentation/conversationalist-integration.md) for complete OpenAI, Anthropic, and Gemini examples.
 
 ## Observability (OpenTelemetry)
 
@@ -693,7 +735,7 @@ The search tool:
 
 - **Auto-registers** with the toolbox when created
 - **Discovers tools dynamically** - finds tools registered before or after it
-- **Works with provider adapters** - included in `toOpenAI(toolbox)`, etc.
+- **Works with provider adapters** - included in `toOpenAITools(toolbox)`, `toAnthropicTools(toolbox)`, and `toGeminiTools(toolbox)`
 - **Supports semantic search** when embeddings are configured on the toolbox
 
 See [Search Tool documentation](documentation/search-tool.md) for filtering by tags, configuration options, and agentic workflow examples.

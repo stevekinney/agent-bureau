@@ -89,13 +89,13 @@ describe('getRecentMessages', () => {
     expect(recent[0]?.content).toBe('Visible');
   });
 
-  it('preserves tool-use when the recent slice includes a tool-result', () => {
+  it('preserves tool-call when the recent slice includes a tool-result', () => {
     let conv = createConversation({ id: 'test' }, testEnvironment);
     conv = appendMessages(
       conv,
       { role: 'user', content: 'Before' },
       {
-        role: 'tool-use',
+        role: 'tool-call',
         content: '',
         toolCall: { id: 'call-1', name: 'tool', arguments: {} },
       },
@@ -108,7 +108,7 @@ describe('getRecentMessages', () => {
     );
 
     const recent = getRecentMessages(conv, 1);
-    expect(recent.some((m) => m.role === 'tool-use')).toBe(true);
+    expect(recent.some((m) => m.role === 'tool-call')).toBe(true);
     expect(recent.some((m) => m.role === 'tool-result')).toBe(true);
   });
 
@@ -133,7 +133,7 @@ describe('getRecentMessages', () => {
     conv = appendMessages(
       conv,
       {
-        role: 'tool-use',
+        role: 'tool-call',
         content: '',
         toolCall: { id: 'call-1', name: 'tool', arguments: {} },
       },
@@ -237,13 +237,13 @@ describe('truncateFromPosition', () => {
     expect(Array.isArray(getOrderedMessages(truncated)[0].content)).toBe(true);
   });
 
-  it('preserves tool-use when truncating from a position that includes a tool-result', () => {
+  it('preserves tool-call when truncating from a position that includes a tool-result', () => {
     let conv = createConversation({ id: 'test' }, testEnvironment);
     conv = appendMessages(
       conv,
       { role: 'user', content: 'Hello' },
       {
-        role: 'tool-use',
+        role: 'tool-call',
         content: '',
         toolCall: { id: 'call-1', name: 'tool', arguments: {} },
       },
@@ -258,7 +258,7 @@ describe('truncateFromPosition', () => {
 
     const truncated = truncateFromPosition(conv, 3, undefined, testEnvironment);
     const messages = getOrderedMessages(truncated);
-    expect(messages.some((m) => m.role === 'tool-use')).toBe(true);
+    expect(messages.some((m) => m.role === 'tool-call')).toBe(true);
     expect(messages.some((m) => m.role === 'tool-result')).toBe(true);
   });
 
@@ -268,7 +268,7 @@ describe('truncateFromPosition', () => {
       conv,
       { role: 'user', content: 'Hello' },
       {
-        role: 'tool-use',
+        role: 'tool-call',
         content: '',
         toolCall: { id: 'call-1', name: 'tool', arguments: {} },
       },
@@ -287,7 +287,7 @@ describe('truncateFromPosition', () => {
       testEnvironment,
     );
     const messages = getOrderedMessages(truncated);
-    expect(messages.some((m) => m.role === 'tool-use')).toBe(true);
+    expect(messages.some((m) => m.role === 'tool-call')).toBe(true);
     expect(messages.some((m) => m.role === 'tool-result')).toBe(true);
   });
 
@@ -297,7 +297,7 @@ describe('truncateFromPosition', () => {
       conv,
       { role: 'user', content: 'Hello' },
       {
-        role: 'tool-use',
+        role: 'tool-call',
         content: '',
         toolCall: { id: 'call-1', name: 'tool', arguments: {} },
       },
@@ -525,7 +525,7 @@ describe('truncateToTokenLimit', () => {
       { role: 'system', content: 'System prompt' },
       { role: 'user', content: 'Do something' },
       {
-        role: 'tool-use',
+        role: 'tool-call',
         content: '',
         toolCall: { id: 'call-1', name: 'tool', arguments: '{}' },
       },
@@ -558,7 +558,7 @@ describe('truncateToTokenLimit', () => {
       conv,
       { role: 'user', content: 'Start' },
       {
-        role: 'tool-use',
+        role: 'tool-call',
         content: '',
         toolCall: { id: 'call-1', name: 'tool', arguments: {} },
       },
@@ -582,7 +582,7 @@ describe('truncateToTokenLimit', () => {
     );
 
     const messages = getOrderedMessages(truncated);
-    expect(messages.some((m) => m.role === 'tool-use')).toBe(true);
+    expect(messages.some((m) => m.role === 'tool-call')).toBe(true);
     expect(messages.some((m) => m.role === 'tool-result')).toBe(true);
   });
 
@@ -592,7 +592,7 @@ describe('truncateToTokenLimit', () => {
       conv,
       { role: 'user', content: 'Start' },
       {
-        role: 'tool-use',
+        role: 'tool-call',
         content: '',
         toolCall: { id: 'call-1', name: 'tool', arguments: {} },
       },

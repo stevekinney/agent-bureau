@@ -61,7 +61,7 @@ describe('conversation (functional)', () => {
     c = appendMessages(
       c,
       {
-        role: 'tool-use',
+        role: 'tool-call',
         content: '',
         toolCall: { id: 'call-1', name: 'tool', arguments: { key: 'value' } },
       },
@@ -102,7 +102,7 @@ describe('conversation (functional)', () => {
   test('redaction can clear tool metadata when requested', () => {
     let c = createConversation();
     c = appendMessages(c, {
-      role: 'tool-use',
+      role: 'tool-call',
       content: '',
       toolCall: { id: 'call-1', name: 'tool', arguments: {} },
     });
@@ -151,7 +151,7 @@ describe('conversation (functional)', () => {
       { role: 'system', content: 's' },
       { role: 'developer', content: 'd' },
       {
-        role: 'tool-use',
+        role: 'tool-call',
         content: 'fc',
         toolCall: { id: 'c1', name: 't', arguments: {} },
       },
@@ -294,6 +294,49 @@ describe('conversation (functional)', () => {
     expect(getOrderedMessages(restored)[0]!.metadata.foo).toBe(1);
     expect(restored.ids).toEqual(c.ids);
   });
+
+  test('deserialize migrates legacy tool-use payloads', () => {
+    const now = new Date().toISOString();
+    const legacy = {
+      schemaVersion: 3,
+      id: 'legacy',
+      status: 'active' as const,
+      metadata: {},
+      ids: ['m1', 'm2'],
+      messages: {
+        m1: {
+          id: 'm1',
+          role: 'tool-use',
+          content: '',
+          position: 0,
+          createdAt: now,
+          metadata: {},
+          hidden: false,
+          toolCall: { id: 'call-1', name: 'weather', args: { location: 'Denver' } },
+        },
+        m2: {
+          id: 'm2',
+          role: 'tool-result',
+          content: '',
+          position: 1,
+          createdAt: now,
+          metadata: {},
+          hidden: false,
+          toolResult: { callId: 'call-1', outcome: 'success', result: { tempF: 72 } },
+        },
+      },
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    const restored = deserializeConversation(legacy);
+    const messages = getOrderedMessages(restored);
+
+    expect(messages[0]?.role).toBe('tool-call');
+    expect(messages[0]?.toolCall?.arguments).toEqual({ location: 'Denver' });
+    expect(messages[1]?.toolResult?.content).toEqual({ tempF: 72 });
+  });
+
   test('tool linkage is validated across batch', () => {
     let c = createConversation();
     expect(() =>
@@ -304,11 +347,11 @@ describe('conversation (functional)', () => {
       }),
     ).toThrow(ConversationalistError);
 
-    // Valid when tool-use precedes in batch
+    // Valid when tool-call precedes in batch
     c = appendMessages(
       c,
       {
-        role: 'tool-use',
+        role: 'tool-call',
         content: 'call',
         toolCall: { id: 'call-1', name: 't', arguments: {} },
       },
@@ -321,18 +364,53 @@ describe('conversation (functional)', () => {
     expect(c.ids.length).toBe(2);
   });
 
+  test('rejects non-JSON tool payloads', () => {
+    const conversation = createConversation();
+
+    expect(() =>
+      appendMessages(conversation, {
+        role: 'tool-call',
+        content: '',
+        toolCall: {
+          id: 'call-1',
+          name: 'tool',
+          arguments: new Date() as unknown as JSONValue,
+        },
+      }),
+    ).toThrow(ConversationalistError);
+
+    expect(() =>
+      appendMessages(
+        appendMessages(conversation, {
+          role: 'tool-call',
+          content: '',
+          toolCall: { id: 'call-2', name: 'tool', arguments: {} },
+        }),
+        {
+          role: 'tool-result',
+          content: '',
+          toolResult: {
+            callId: 'call-2',
+            outcome: 'success',
+            content: new Date() as unknown as JSONValue,
+          },
+        },
+      ),
+    ).toThrow(ConversationalistError);
+  });
+
   test('appendMessages rejects duplicate tool call ids', () => {
     const c = createConversation();
     expect(() =>
       appendMessages(
         c,
         {
-          role: 'tool-use',
+          role: 'tool-call',
           content: '',
           toolCall: { id: 'dup', name: 'tool', arguments: {} },
         },
         {
-          role: 'tool-use',
+          role: 'tool-call',
           content: '',
           toolCall: { id: 'dup', name: 'tool', arguments: {} },
         },
@@ -340,14 +418,14 @@ describe('conversation (functional)', () => {
     ).toThrow(ConversationalistError);
   });
 
-  test('append tool referencing prior tool-use in existing conversation', () => {
+  test('append tool referencing prior tool-call in existing conversation', () => {
     let c = createConversation();
     c = appendMessages(c, {
-      role: 'tool-use',
+      role: 'tool-call',
       content: 'call',
       toolCall: { id: 'prev-call', name: 't', arguments: {} },
     });
-    // Second append references tool-use from previous state
+    // Second append references tool-call from previous state
     c = appendMessages(c, {
       role: 'tool-result',
       content: 'ok',
@@ -358,12 +436,12 @@ describe('conversation (functional)', () => {
     expect(messages[1]!.role).toBe('tool-result');
   });
 
-  test('deserialize with tool-use and tool-result preserves linkage', () => {
+  test('deserialize with tool-call and tool-result preserves linkage', () => {
     let c = createConversation();
     c = appendMessages(
       c,
       {
-        role: 'tool-use',
+        role: 'tool-call',
         content: 'call',
         toolCall: { id: 'dc1', name: 't', arguments: {} },
       },

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 import { z } from 'zod';
 
-import { createNameMapper, toOpenAI } from '../src/adapters/openai/index';
+import { createNameMapper, toOpenAITools } from '../src/adapters/openai/index';
 import { pipe } from '../src/compose';
 import { createTool } from '../src/create-tool';
 import { createToolbox } from '../src/create-toolbox';
@@ -157,7 +157,7 @@ describe('Core Runtime Completeness', () => {
         execute: async () => '1',
       });
 
-      const openAiTool = toOpenAI(tool, { naming: 'safe-id' });
+      const openAiTool = toOpenAITools(tool, { naming: 'safe-id' });
       expect(openAiTool.function.name).not.toBe('my-tool');
       expect(openAiTool.function.name).toContain('ns1');
       expect(openAiTool.function.name).not.toContain(':');
@@ -173,7 +173,7 @@ describe('Core Runtime Completeness', () => {
       });
 
       const mapper = createNameMapper([tool]);
-      const safeName = toOpenAI(tool, { naming: 'safe-id' }).function.name;
+      const safeName = toOpenAITools(tool, { naming: 'safe-id' }).function.name;
 
       const originalId = mapper(safeName);
       expect(originalId).toBe(tool.id);

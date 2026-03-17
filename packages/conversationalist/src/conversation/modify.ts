@@ -76,7 +76,7 @@ export function redactMessageAtPosition(
     toolCall = undefined;
     toolResult = undefined;
   } else {
-    if (original.role === 'tool-use' && toolCall) {
+    if (original.role === 'tool-call' && toolCall) {
       toolCall = {
         ...toolCall,
         arguments: redactToolArguments ? placeholder : toolCall.arguments,

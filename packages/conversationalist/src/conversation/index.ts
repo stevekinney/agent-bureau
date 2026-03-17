@@ -1,5 +1,6 @@
 // Re-export environment type
 export type { ConversationEnvironment } from '../environment';
+export { withEnvironment } from '../environment';
 
 // Create
 export { createConversation, createConversationUnsafe } from './create';
@@ -48,16 +49,19 @@ export { assertConversationIntegrity, validateConversationIntegrity } from './in
 export { toChatMessages } from './transform';
 
 // Tool interactions
+export type { ToolCallInput } from '../types';
 export type {
+  AppendToolCallOptions,
   AppendToolResultOptions,
-  AppendToolUseOptions,
   ToolInteraction,
-  ToolResultInput,
-  ToolUseInput,
 } from './tool-interactions';
 export {
+  appendToolCall,
+  appendToolCalls,
   appendToolResult,
-  appendToolUse,
+  appendToolResultAsync,
+  appendToolResults,
+  appendToolResultsAsync,
   getPendingToolCalls,
   getToolInteractions,
 } from './tool-interactions';

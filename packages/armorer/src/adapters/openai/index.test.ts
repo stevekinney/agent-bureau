@@ -4,13 +4,13 @@ import { z } from 'zod';
 import { createTool } from '../../create-tool';
 import { createToolbox } from '../../create-toolbox';
 import {
-  formatToolResults,
-  formatToolResultsAsync,
-  parseToolCalls,
-  toOpenAI,
+  formatOpenAIToolResults,
+  formatOpenAIToolResultsAsync,
+  parseOpenAIToolCalls,
+  toOpenAITools,
 } from './index';
 
-describe('toOpenAI', () => {
+describe('toOpenAITools', () => {
   const tool = createTool({
     name: 'test-tool',
     description: 'A test tool',
@@ -22,7 +22,7 @@ describe('toOpenAI', () => {
   });
 
   describe('single tool conversion', () => {
-    const openAI = toOpenAI(tool);
+    const openAI = toOpenAITools(tool);
 
     it('returns correct type', () => {
       expect(openAI.type).toBe('function');
@@ -52,13 +52,13 @@ describe('toOpenAI', () => {
 
   describe('array conversion', () => {
     it('returns array for array input', () => {
-      const openAI = toOpenAI([tool]);
+      const openAI = toOpenAITools([tool]);
       expect(Array.isArray(openAI)).toBe(true);
       expect(openAI).toHaveLength(1);
     });
 
     it('returns array for empty array', () => {
-      const openAI = toOpenAI([]);
+      const openAI = toOpenAITools([]);
       expect(Array.isArray(openAI)).toBe(true);
       expect(openAI).toHaveLength(0);
     });
@@ -67,7 +67,7 @@ describe('toOpenAI', () => {
   describe('registry conversion', () => {
     it('returns array for registry input', () => {
       const toolbox = createToolbox([tool]);
-      const openAI = toOpenAI(toolbox);
+      const openAI = toOpenAITools(toolbox);
       expect(Array.isArray(openAI)).toBe(true);
       expect(openAI).toHaveLength(1);
       expect(openAI[0]?.function.name).toBe('test-tool');
@@ -75,17 +75,17 @@ describe('toOpenAI', () => {
 
     it('returns empty array for empty registry', () => {
       const toolbox = createToolbox();
-      const openAI = toOpenAI(toolbox);
+      const openAI = toOpenAITools(toolbox);
       expect(Array.isArray(openAI)).toBe(true);
       expect(openAI).toHaveLength(0);
     });
   });
 });
 
-describe('parseToolCalls', () => {
+describe('parseOpenAIToolCalls', () => {
   it('returns an empty array when tool calls are missing', () => {
-    expect(parseToolCalls(undefined)).toEqual([]);
-    expect(parseToolCalls(null)).toEqual([]);
+    expect(parseOpenAIToolCalls(undefined)).toEqual([]);
+    expect(parseOpenAIToolCalls(null)).toEqual([]);
   });
 
   it('parses valid tool calls', () => {
@@ -99,7 +99,7 @@ describe('parseToolCalls', () => {
         },
       },
     ];
-    const parsed = parseToolCalls(calls);
+    const parsed = parseOpenAIToolCalls(calls);
     expect(parsed).toEqual([
       {
         id: 'call_1',
@@ -120,7 +120,7 @@ describe('parseToolCalls', () => {
         },
       },
     ];
-    const parsed = parseToolCalls(calls);
+    const parsed = parseOpenAIToolCalls(calls);
     expect(parsed).toEqual([
       {
         id: 'call_1',
@@ -131,7 +131,7 @@ describe('parseToolCalls', () => {
   });
 });
 
-describe('formatToolResults', () => {
+describe('formatOpenAIToolResults', () => {
   it('formats single result', () => {
     const result = {
       callId: 'call_1',
@@ -141,7 +141,7 @@ describe('formatToolResults', () => {
       toolName: 'tool1',
       result: 'result',
     };
-    const messages = formatToolResults(result);
+    const messages = formatOpenAIToolResults(result);
     expect(messages).toEqual([
       {
         role: 'tool',
@@ -170,7 +170,7 @@ describe('formatToolResults', () => {
         result: { foo: 'bar' },
       },
     ];
-    const messages = formatToolResults(results);
+    const messages = formatOpenAIToolResults(results);
     expect(messages).toEqual([
       {
         role: 'tool',
@@ -204,13 +204,13 @@ describe('formatToolResults', () => {
       },
     };
 
-    expect(() => formatToolResults(result)).toThrow(
-      'formatToolResults does not support streaming results.',
+    expect(() => formatOpenAIToolResults(result)).toThrow(
+      'formatOpenAIToolResults does not support streaming results. Use formatOpenAIToolResultsAsync or execute without { stream: true }.',
     );
   });
 });
 
-describe('formatToolResultsAsync', () => {
+describe('formatOpenAIToolResultsAsync', () => {
   it('formats non-streaming results without collection', async () => {
     const result = {
       callId: 'call_plain',
@@ -221,7 +221,7 @@ describe('formatToolResultsAsync', () => {
       result: { ok: true },
     };
 
-    const messages = await formatToolResultsAsync(result as any);
+    const messages = await formatOpenAIToolResultsAsync(result as any);
     expect(messages).toEqual([
       {
         role: 'tool',
@@ -252,7 +252,7 @@ describe('formatToolResultsAsync', () => {
       },
     };
 
-    const messages = await formatToolResultsAsync(result as any);
+    const messages = await formatOpenAIToolResultsAsync(result as any);
     expect(messages).toEqual([
       {
         role: 'tool',
@@ -277,7 +277,7 @@ describe('formatToolResultsAsync', () => {
       },
     };
 
-    const messages = await formatToolResultsAsync(result as any);
+    const messages = await formatOpenAIToolResultsAsync(result as any);
     expect(messages).toEqual([
       {
         role: 'tool',

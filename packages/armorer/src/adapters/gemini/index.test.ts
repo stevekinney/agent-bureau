@@ -3,9 +3,13 @@ import { z } from 'zod';
 
 import type { AnyToolDefinition } from '../../core';
 import { createRegistry, defineTool, serializeToolDefinition } from '../../core';
-import { toGemini } from './index';
+import {
+  formatGeminiToolResults,
+  parseGeminiToolCalls,
+  toGeminiTools,
+} from './index';
 
-describe('toGemini', () => {
+describe('toGeminiTools', () => {
   const schema = z.object({
     query: z.string().describe('Search query'),
     limit: z.number().optional().describe('Max results'),
@@ -21,42 +25,52 @@ describe('toGemini', () => {
 
   describe('single tool conversion', () => {
     it('includes function name', () => {
-      const result = toGemini(serializedTool);
-      expect(result.name).toBe('search');
+      const result = toGeminiTools(serializedTool);
+      expect(result[0]?.functionDeclarations[0]?.name).toBe('search');
     });
 
     it('includes function description', () => {
-      const result = toGemini(serializedTool);
-      expect(result.description).toBe('Search for items');
+      const result = toGeminiTools(serializedTool);
+      expect(result[0]?.functionDeclarations[0]?.description).toBe('Search for items');
     });
 
     it('includes parameters object', () => {
-      const result = toGemini(serializedTool);
-      expect(result.parameters).toHaveProperty('type', 'object');
-      expect(result.parameters).toHaveProperty('properties');
+      const result = toGeminiTools(serializedTool);
+      expect(result[0]?.functionDeclarations[0]?.parameters).toHaveProperty(
+        'type',
+        'object',
+      );
+      expect(result[0]?.functionDeclarations[0]?.parameters).toHaveProperty(
+        'properties',
+      );
     });
 
     it('includes required fields', () => {
-      const result = toGemini(serializedTool);
-      expect(result.parameters).toHaveProperty('required');
-      expect(result.parameters.required).toContain('query');
+      const result = toGeminiTools(serializedTool);
+      expect(result[0]?.functionDeclarations[0]?.parameters).toHaveProperty('required');
+      expect(result[0]?.functionDeclarations[0]?.parameters.required).toContain(
+        'query',
+      );
     });
 
     it('does not include $schema property', () => {
-      const result = toGemini(serializedTool);
-      expect(result.parameters).not.toHaveProperty('$schema');
+      const result = toGeminiTools(serializedTool);
+      expect(result[0]?.functionDeclarations[0]?.parameters).not.toHaveProperty(
+        '$schema',
+      );
     });
   });
 
   describe('array conversion', () => {
-    it('returns array for array input', () => {
-      const result = toGemini([serializedTool, serializedTool]);
+    it('returns a single Gemini tool for array input', () => {
+      const result = toGeminiTools([serializedTool, serializedTool]);
       expect(Array.isArray(result)).toBe(true);
-      expect(result).toHaveLength(2);
+      expect(result).toHaveLength(1);
+      expect(result[0]?.functionDeclarations).toHaveLength(2);
     });
 
     it('returns array for empty array', () => {
-      const result = toGemini([]);
+      const result = toGeminiTools([]);
       expect(Array.isArray(result)).toBe(true);
       expect(result).toHaveLength(0);
     });
@@ -66,14 +80,14 @@ describe('toGemini', () => {
     it('returns array for registry input', () => {
       const registry = createRegistry();
       registry.register(tool);
-      const result = toGemini(registry);
+      const result = toGeminiTools(registry);
       expect(Array.isArray(result)).toBe(true);
       expect(result).toHaveLength(1);
     });
 
     it('returns empty array for empty registry', () => {
       const registry = createRegistry();
-      const result = toGemini(registry);
+      const result = toGeminiTools(registry);
       expect(Array.isArray(result)).toBe(true);
       expect(result).toHaveLength(0);
     });
@@ -82,19 +96,87 @@ describe('toGemini', () => {
   describe('serialized tool conversion', () => {
     it('works with serialized tool definitions', () => {
       const serialized = serializeToolDefinition(tool);
-      const result = toGemini(serialized);
-      expect(result.name).toBe('search');
-      expect(result.parameters).toHaveProperty('type', 'object');
+      const result = toGeminiTools(serialized);
+      expect(result[0]?.functionDeclarations[0]?.name).toBe('search');
+      expect(result[0]?.functionDeclarations[0]?.parameters).toHaveProperty(
+        'type',
+        'object',
+      );
     });
   });
 
   describe('usage pattern', () => {
-    it('can be wrapped in functionDeclarations', () => {
-      const declarations = toGemini([tool]);
-      const geminiTool = { functionDeclarations: declarations };
+    it('returns Gemini tools that are ready for the SDK', () => {
+      const tools = toGeminiTools([tool]);
 
-      expect(geminiTool.functionDeclarations).toHaveLength(1);
-      expect(geminiTool.functionDeclarations[0]?.name).toBe('search');
+      expect(tools).toEqual([
+        {
+          functionDeclarations: [
+            expect.objectContaining({
+              name: 'search',
+            }),
+          ],
+        },
+      ]);
     });
+  });
+});
+
+describe('parseGeminiToolCalls', () => {
+  it('parses function call parts', () => {
+    expect(
+      parseGeminiToolCalls([
+        { text: 'thinking' },
+        { functionCall: { name: 'search', args: { query: 'gemini' } } },
+      ]),
+    ).toEqual([{ name: 'search', arguments: { query: 'gemini' } }]);
+  });
+
+  it('returns an empty array for missing parts', () => {
+    expect(parseGeminiToolCalls(undefined)).toEqual([]);
+    expect(parseGeminiToolCalls(null)).toEqual([]);
+  });
+});
+
+describe('formatGeminiToolResults', () => {
+  it('formats provider responses for success and action-required outcomes', () => {
+    expect(
+      formatGeminiToolResults([
+        {
+          callId: 'call-1',
+          outcome: 'success',
+          content: { ok: true },
+          toolCallId: 'call-1',
+          toolName: 'search',
+          result: { ok: true },
+        },
+        {
+          callId: 'call-2',
+          outcome: 'action_required',
+          content: { prompt: 'approve' },
+          toolCallId: 'call-2',
+          toolName: 'approve',
+          result: { prompt: 'approve' },
+          action: { type: 'approval', message: 'Approve this request' },
+        },
+      ]),
+    ).toEqual([
+      {
+        functionResponse: {
+          name: 'search',
+          response: { ok: true },
+        },
+      },
+      {
+        functionResponse: {
+          name: 'approve',
+          response: {
+            outcome: 'action_required',
+            content: { prompt: 'approve' },
+            action: { type: 'approval', message: 'Approve this request' },
+          },
+        },
+      },
+    ]);
   });
 });

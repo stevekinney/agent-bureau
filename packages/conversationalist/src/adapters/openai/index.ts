@@ -185,7 +185,7 @@ function convertMessage(message: Message): OpenAIMessage | null {
         content: toOpenAITextContent(message.content),
       };
 
-    case 'tool-use':
+    case 'tool-call':
       if (!message.toolCall) {
         return null;
       }
@@ -215,10 +215,20 @@ function convertMessage(message: Message): OpenAIMessage | null {
  * Converts a tool result to a string for OpenAI.
  */
 function stringifyToolResult(result: ToolResult): string {
-  if (typeof result.content === 'string') {
-    return result.content;
+  const payload =
+    result.outcome === 'success'
+      ? result.content
+      : {
+          outcome: result.outcome,
+          content: result.content,
+          ...(result.error ? { error: result.error } : {}),
+          ...(result.action ? { action: result.action } : {}),
+        };
+
+  if (typeof payload === 'string') {
+    return payload;
   }
-  return JSON.stringify(result.content);
+  return JSON.stringify(payload);
 }
 
 /**
@@ -227,7 +237,7 @@ function stringifyToolResult(result: ToolResult): string {
  *
  * @example
  * ```ts
- * import { toOpenAIMessages } from 'conversationalist/openai';
+ * import { toOpenAIMessages } from 'conversationalist/adapters/openai';
  *
  * const messages = toOpenAIMessages(conversation);
  * const response = await openai.chat.completions.create({
@@ -251,7 +261,7 @@ export function toOpenAIMessages(conversation: Conversation): OpenAIMessage[] {
 }
 
 /**
- * Groups consecutive tool-use messages into a single assistant message with multiple tool_calls.
+ * Groups consecutive tool-call messages into a single assistant message with multiple tool_calls.
  * This is useful when the model made multiple tool calls in sequence.
  */
 export function toOpenAIMessagesGrouped(conversation: Conversation): OpenAIMessage[] {
@@ -262,7 +272,7 @@ export function toOpenAIMessagesGrouped(conversation: Conversation): OpenAIMessa
   for (const message of getOrderedMessages(conversation)) {
     if (message.hidden) continue;
 
-    if (message.role === 'tool-use' && message.toolCall) {
+    if (message.role === 'tool-call' && message.toolCall) {
       pendingToolCalls.push(toOpenAIToolCall(message.toolCall));
       continue;
     }
@@ -278,7 +288,7 @@ export function toOpenAIMessagesGrouped(conversation: Conversation): OpenAIMessa
     }
 
     const converted = convertMessage(message);
-    if (converted && message.role !== 'tool-use') {
+    if (converted && message.role !== 'tool-call') {
       messages.push(converted);
     }
   }

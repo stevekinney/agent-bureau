@@ -7,6 +7,10 @@ export {
   messageSchema,
   multiModalContentSchema,
   tokenUsageSchema,
+  toolActionSchema,
+  toolCallInputSchema,
   toolCallSchema,
+  toolErrorCategorySchema,
+  toolErrorSchema,
   toolResultSchema,
 } from '../schemas';

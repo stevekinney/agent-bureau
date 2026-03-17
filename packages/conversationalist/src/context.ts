@@ -90,7 +90,7 @@ const buildMessageBlocks = (
   const toolUses = new Map<string, MessageBlock>();
 
   for (const message of messages) {
-    if (message.role === 'tool-use' && message.toolCall) {
+    if (message.role === 'tool-call' && message.toolCall) {
       const block = createMessageBlock(message, estimator);
       toolUses.set(message.toolCall.id, block);
       blocks.push(block);

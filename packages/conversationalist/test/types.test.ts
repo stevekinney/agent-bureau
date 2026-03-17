@@ -29,7 +29,7 @@ describe('conversationalist types Type Inference', () => {
         | 'assistant'
         | 'system'
         | 'developer'
-        | 'tool-use'
+        | 'tool-call'
         | 'tool-result'
         | 'snapshot'
       >();
@@ -57,7 +57,9 @@ describe('conversationalist types Type Inference', () => {
   describe('ToolResult', () => {
     it('has required properties', () => {
       expectTypeOf<ToolResult['callId']>().toEqualTypeOf<string>();
-      expectTypeOf<ToolResult['outcome']>().toEqualTypeOf<'success' | 'error'>();
+      expectTypeOf<ToolResult['outcome']>().toEqualTypeOf<
+        'success' | 'error' | 'action_required'
+      >();
       expectTypeOf<ToolResult['content']>().toEqualTypeOf<JSONValue>();
     });
 
@@ -82,9 +84,21 @@ describe('conversationalist types Type Inference', () => {
         outcome: 'error',
         content: 'Error message',
       };
+      const actionRequired: ToolResult = {
+        callId: 'call-1',
+        outcome: 'action_required',
+        content: { prompt: 'approve' },
+      };
 
-      expectTypeOf(success.outcome).toEqualTypeOf<'success' | 'error'>();
-      expectTypeOf(error.outcome).toEqualTypeOf<'success' | 'error'>();
+      expectTypeOf(success.outcome).toEqualTypeOf<
+        'success' | 'error' | 'action_required'
+      >();
+      expectTypeOf(error.outcome).toEqualTypeOf<
+        'success' | 'error' | 'action_required'
+      >();
+      expectTypeOf(actionRequired.outcome).toEqualTypeOf<
+        'success' | 'error' | 'action_required'
+      >();
     });
   });
 

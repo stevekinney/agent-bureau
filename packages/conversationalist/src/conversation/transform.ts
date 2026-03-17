@@ -19,7 +19,7 @@ export function toChatMessages(conversation: Conversation): ExternalMessage[] {
     assistant: 'assistant',
     system: 'system',
     developer: 'system',
-    'tool-use': 'assistant',
+    'tool-call': 'assistant',
     'tool-result': 'user',
     snapshot: 'system',
   };

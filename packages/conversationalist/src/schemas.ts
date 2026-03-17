@@ -9,7 +9,11 @@ import type {
   MessageInput,
   MessageRole,
   TokenUsage,
+  ToolAction,
   ToolCall,
+  ToolCallInput,
+  ToolError,
+  ToolErrorCategory,
   ToolResult,
 } from './types';
 
@@ -90,7 +94,7 @@ export const messageRoleSchema = z.enum([
   'assistant',
   'system',
   'developer',
-  'tool-use',
+  'tool-call',
   'tool-result',
   'snapshot',
 ]) satisfies z.ZodType<MessageRole>;
@@ -106,14 +110,55 @@ export const toolCallSchema = z
   })
   .strict() satisfies z.ZodType<ToolCall>;
 
+export const toolCallInputSchema = z
+  .object({
+    id: z.string().optional(),
+    name: z.string(),
+    arguments: jsonValueSchema.optional(),
+  })
+  .strict() satisfies z.ZodType<ToolCallInput>;
+
+export const toolErrorCategorySchema = z.enum([
+  'validation',
+  'permission',
+  'not_found',
+  'conflict',
+  'transient',
+  'timeout',
+  'cancelled',
+  'internal',
+]) satisfies z.ZodType<ToolErrorCategory>;
+
+export const toolErrorSchema = z
+  .object({
+    code: z.string(),
+    category: toolErrorCategorySchema,
+    retryable: z.boolean(),
+    message: z.string(),
+    details: jsonValueSchema.optional(),
+  })
+  .strict() satisfies z.ZodType<ToolError>;
+
+export const toolActionSchema = z
+  .object({
+    type: z.enum(['approval', 'input']),
+    message: z.string().optional(),
+    schema: jsonValueSchema.optional(),
+  })
+  .strict() satisfies z.ZodType<ToolAction>;
+
 /**
  * Zod schema for tool result metadata.
  */
 export const toolResultSchema = z
   .object({
     callId: z.string(),
-    outcome: z.enum(['success', 'error']),
+    outcome: z.enum(['success', 'error', 'action_required']),
     content: jsonValueSchema,
+    error: toolErrorSchema.optional(),
+    action: toolActionSchema.optional(),
+    inputDigest: z.string().optional(),
+    outputDigest: z.string().optional(),
   })
   .strict() satisfies z.ZodType<ToolResult>;
 

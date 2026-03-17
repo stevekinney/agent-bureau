@@ -4,7 +4,7 @@ import type { MultiModalContent } from '@lasercat/homogenaize';
  * Current schema version for serialized conversation data.
  * Increment when making breaking changes to the schema.
  */
-export const CURRENT_SCHEMA_VERSION = 3;
+export const CURRENT_SCHEMA_VERSION = 4;
 
 /**
  * JSON-serializable value types.
@@ -20,12 +20,12 @@ export type MessageRole =
   | 'assistant'
   | 'system'
   | 'developer'
-  | 'tool-use'
+  | 'tool-call'
   | 'tool-result'
   | 'snapshot';
 
 /**
- * Tool call metadata for tool-use messages.
+ * Tool call metadata for tool-call messages.
  */
 export interface ToolCall {
   id: string;
@@ -34,12 +34,49 @@ export interface ToolCall {
 }
 
 /**
+ * Tool call input compatible with external tool call parsers.
+ */
+export interface ToolCallInput {
+  id?: string | undefined;
+  name: string;
+  arguments?: JSONValue | undefined;
+}
+
+export type ToolErrorCategory =
+  | 'validation'
+  | 'permission'
+  | 'not_found'
+  | 'conflict'
+  | 'transient'
+  | 'timeout'
+  | 'cancelled'
+  | 'internal';
+
+export interface ToolError {
+  code: string;
+  category: ToolErrorCategory;
+  retryable: boolean;
+  message: string;
+  details?: JSONValue | undefined;
+}
+
+export interface ToolAction {
+  type: 'approval' | 'input';
+  message?: string | undefined;
+  schema?: JSONValue | undefined;
+}
+
+/**
  * Tool execution result metadata for tool-result messages.
  */
 export interface ToolResult {
   callId: string;
-  outcome: 'success' | 'error';
+  outcome: 'success' | 'error' | 'action_required';
   content: JSONValue;
+  error?: ToolError | undefined;
+  action?: ToolAction | undefined;
+  inputDigest?: string | undefined;
+  outputDigest?: string | undefined;
 }
 
 /**

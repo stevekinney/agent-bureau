@@ -151,7 +151,7 @@ describe('redactPii', () => {
       appendMessages(
         conv,
         {
-          role: 'tool-use',
+          role: 'tool-call',
           content: '',
           toolCall: { id: 'valid-id', name: 'test', arguments: {} },
         },
@@ -165,6 +165,6 @@ describe('redactPii', () => {
 
     // This should fail because the plugin changes the callId to 'invalid-id'
     // If it doesn't fail, it means validation happened before the plugin.
-    expect(action).toThrow(/tool result references non-existent tool-use: invalid-id/);
+    expect(action).toThrow(/tool result references non-existent tool-call: invalid-id/);
   });
 });

@@ -36,7 +36,7 @@ describe('errors', () => {
   test('invalid tool reference', () => {
     const e = createInvalidToolReferenceError('missing');
     expect(e.code).toBe('error:invalid-tool-reference');
-    expect(e.toDetailedString()).toContain('tool-use');
+    expect(e.toDetailedString()).toContain('tool-call');
   });
 
   test('duplicate id', () => {

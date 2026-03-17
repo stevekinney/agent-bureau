@@ -1,61 +1,93 @@
 import type { SerializedToolDefinition } from '../../core/serialization';
 import type { AnyToolDefinition } from '../../core/tool-definition';
-import {
-  type AdapterInput,
-  isSingleInput,
-  normalizeToSerializedDefinitions,
-  type ToolRegistryLike,
-} from '../shared';
-import type { GeminiFunctionDeclaration, GeminiSchema } from './types';
+import type { ToolCallInput, ToolResult } from '../../types';
+import { normalizeToSerializedDefinitions, type ToolRegistryLike } from '../shared';
+import type {
+  GeminiFunctionCallPart,
+  GeminiFunctionDeclaration,
+  GeminiFunctionResponsePart,
+  GeminiPart,
+  GeminiSchema,
+  GeminiTool,
+} from './types';
 
-export type { GeminiFunctionDeclaration, GeminiSchema, GeminiTool } from './types';
+export type {
+  GeminiFileDataPart,
+  GeminiFunctionCallPart,
+  GeminiFunctionDeclaration,
+  GeminiFunctionResponsePart,
+  GeminiInlineDataPart,
+  GeminiPart,
+  GeminiSchema,
+  GeminiTextPart,
+  GeminiTool,
+} from './types';
 
 /**
  * Converts Toolbox tools to Google Gemini API format.
  *
- * Returns function declarations that should be wrapped in a tool object:
- * `{ functionDeclarations: toGemini(tools) }`
- *
  * @example
  * ```ts
- * import { toGemini } from 'armorer/adapters/gemini';
+ * import { toGeminiTools } from 'armorer/adapters/gemini';
  *
- * // Single tool
- * const declaration = toGemini(myTool);
- *
- * // Multiple tools
- * const declarations = toGemini([tool1, tool2]);
- *
- * // From registry
- * const declarations = toGemini(toolbox);
+ * const tools = toGeminiTools(toolbox);
  *
  * // Use with Gemini SDK
  * const model = genAI.getGenerativeModel({
  *   model: 'gemini-pro',
- *   tools: [{ functionDeclarations: toGemini(toolbox) }],
+ *   tools: toGeminiTools(toolbox),
  * });
  * ```
  */
-export function toGemini(
-  tool: SerializedToolDefinition | AnyToolDefinition,
-): GeminiFunctionDeclaration;
-export function toGemini(
-  tools: (SerializedToolDefinition | AnyToolDefinition)[],
-): GeminiFunctionDeclaration[];
-export function toGemini(registry: ToolRegistryLike): GeminiFunctionDeclaration[];
-export function toGemini(
-  input: AdapterInput,
-): GeminiFunctionDeclaration | GeminiFunctionDeclaration[];
-export function toGemini(
-  input: AdapterInput,
-): GeminiFunctionDeclaration | GeminiFunctionDeclaration[] {
+export function toGeminiTools(
+  input:
+    | SerializedToolDefinition
+    | AnyToolDefinition
+    | readonly (SerializedToolDefinition | AnyToolDefinition)[]
+    | ToolRegistryLike,
+): GeminiTool[] {
   const definitions = normalizeToSerializedDefinitions(input);
-  const converted = definitions.map(convertToGemini);
+  const converted = definitions.map(convertToGeminiFunctionDeclaration);
 
-  return isSingleInput(input) ? converted[0]! : converted;
+  return converted.length === 0 ? [] : [{ functionDeclarations: converted }];
 }
 
-function convertToGemini(tool: SerializedToolDefinition): GeminiFunctionDeclaration {
+export function parseGeminiToolCalls(
+  parts: GeminiPart[] | undefined | null,
+): ToolCallInput[] {
+  if (!parts || !Array.isArray(parts)) {
+    return [];
+  }
+
+  return parts.flatMap((part) =>
+    'functionCall' in part ? [convertFunctionCallPart(part)] : [],
+  );
+}
+
+export function formatGeminiToolResults(
+  results: ToolResult | ToolResult[],
+): GeminiFunctionResponsePart[] {
+  const resultList = Array.isArray(results) ? results : [results];
+
+  for (const result of resultList) {
+    if (result.stream || isAsyncIterable(result.result)) {
+      throw new Error(
+        'formatGeminiToolResults does not support streaming results. Persist or collect the stream before formatting Gemini tool results.',
+      );
+    }
+  }
+
+  return resultList.map((result) => ({
+    functionResponse: {
+      name: result.toolName,
+      response: normalizeGeminiResponse(result),
+    },
+  }));
+}
+
+function convertToGeminiFunctionDeclaration(
+  tool: SerializedToolDefinition,
+): GeminiFunctionDeclaration {
   return {
     name: tool.identity.name,
     description: tool.display.description,
@@ -72,4 +104,40 @@ function transformToGeminiSchema(schema: Record<string, unknown>): GeminiSchema 
   const { $schema, ...rest } = schema;
 
   return rest as GeminiSchema;
+}
+
+function convertFunctionCallPart(part: GeminiFunctionCallPart): ToolCallInput {
+  return {
+    name: part.functionCall.name,
+    arguments: part.functionCall.args,
+  };
+}
+
+function normalizeGeminiResponse(result: ToolResult): Record<string, unknown> {
+  if (result.outcome === 'success') {
+    return normalizeGeminiPayload(result.content);
+  }
+
+  return {
+    outcome: result.outcome,
+    content: result.content,
+    ...(result.error ? { error: result.error } : {}),
+    ...(result.action ? { action: result.action } : {}),
+  };
+}
+
+function normalizeGeminiPayload(content: unknown): Record<string, unknown> {
+  if (content !== null && typeof content === 'object' && !Array.isArray(content)) {
+    return content as Record<string, unknown>;
+  }
+
+  return { result: content };
+}
+
+function isAsyncIterable(value: unknown): value is AsyncIterable<unknown> {
+  if (!value || (typeof value !== 'object' && typeof value !== 'function')) {
+    return false;
+  }
+
+  return Symbol.asyncIterator in value;
 }

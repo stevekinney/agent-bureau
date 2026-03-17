@@ -39,7 +39,7 @@ function createToolCallConversation(): Conversation {
     conv,
     { role: 'user', content: 'What is the weather?' },
     {
-      role: 'tool-use',
+      role: 'tool-call',
       content: '',
       toolCall: {
         id: 'call-123',
@@ -223,12 +223,12 @@ describe('OpenAI Adapter', () => {
       expect(messages[0]?.role).toBe('system');
     });
 
-    it('skips tool-use messages without toolCall', () => {
+    it('skips tool-call messages without toolCall', () => {
       let conv = createConversation({ id: 'test' }, testEnvironment);
       conv = appendMessages(
         conv,
         { role: 'user', content: 'Hello' },
-        { role: 'tool-use', content: '' }, // No toolCall
+        { role: 'tool-call', content: '' }, // No toolCall
         testEnvironment,
       );
 
@@ -271,7 +271,7 @@ describe('OpenAI Adapter', () => {
         conv,
         { role: 'user', content: 'Hello' },
         {
-          role: 'tool-use',
+          role: 'tool-call',
           content: '',
           toolCall: { id: 'call-1', name: 'tool', arguments: '{}' },
         },
@@ -298,7 +298,7 @@ describe('OpenAI Adapter', () => {
         conv,
         { role: 'user', content: 'Run tool' },
         {
-          role: 'tool-use',
+          role: 'tool-call',
           content: '',
           toolCall: { id: 'call-1', name: 'tool', arguments: {} },
         },
@@ -350,12 +350,12 @@ describe('OpenAI Adapter', () => {
         conv,
         { role: 'user', content: 'Do two things' },
         {
-          role: 'tool-use',
+          role: 'tool-call',
           content: '',
           toolCall: { id: 'call-1', name: 'tool_one', arguments: '{}' },
         },
         {
-          role: 'tool-use',
+          role: 'tool-call',
           content: '',
           toolCall: { id: 'call-2', name: 'tool_two', arguments: '{}' },
         },
@@ -383,7 +383,7 @@ describe('OpenAI Adapter', () => {
         conv,
         { role: 'user', content: 'Do something' },
         {
-          role: 'tool-use',
+          role: 'tool-call',
           content: '',
           toolCall: { id: 'call-1', name: 'tool_one', arguments: '{}' },
         },
@@ -418,7 +418,7 @@ describe('OpenAI Adapter', () => {
         conv,
         { role: 'user', content: 'Visible' },
         {
-          role: 'tool-use',
+          role: 'tool-call',
           content: '',
           toolCall: { id: 'call-1', name: 'tool', arguments: '{}' },
           hidden: true,
@@ -564,7 +564,7 @@ describe('Anthropic Adapter', () => {
         conv,
         { role: 'user', content: 'Do something' },
         {
-          role: 'tool-use',
+          role: 'tool-call',
           content: '',
           toolCall: { id: 'call-1', name: 'tool', arguments: '{}' },
         },
@@ -641,7 +641,7 @@ describe('Anthropic Adapter', () => {
         conv,
         { role: 'user', content: 'Do something' },
         {
-          role: 'tool-use',
+          role: 'tool-call',
           content: '',
           toolCall: { id: 'call-1', name: 'tool', arguments: { key: 'value' } },
         },
@@ -656,12 +656,12 @@ describe('Anthropic Adapter', () => {
       expect(toolUse.input).toEqual({ key: 'value' });
     });
 
-    it('skips tool-use messages without toolCall', () => {
+    it('skips tool-call messages without toolCall', () => {
       let conv = createConversation({ id: 'test' }, testEnvironment);
       conv = appendMessages(
         conv,
         { role: 'user', content: 'Hello' },
-        { role: 'tool-use', content: '' },
+        { role: 'tool-call', content: '' },
         testEnvironment,
       );
 
@@ -676,7 +676,7 @@ describe('Anthropic Adapter', () => {
         conv,
         { role: 'user', content: 'Do something' },
         {
-          role: 'tool-use',
+          role: 'tool-call',
           content: '',
           toolCall: { id: 'call-1', name: 'tool', arguments: '{invalid' },
         },
@@ -879,7 +879,7 @@ describe('Gemini Adapter', () => {
         conv,
         { role: 'user', content: 'Do something' },
         {
-          role: 'tool-use',
+          role: 'tool-call',
           content: '',
           toolCall: { id: 'call-1', name: 'tool', arguments: 'invalid json {' },
         },
@@ -896,12 +896,12 @@ describe('Gemini Adapter', () => {
       expect(functionCallPart.functionCall.args).toEqual({ _raw: 'invalid json {' });
     });
 
-    it('skips tool-use messages without toolCall', () => {
+    it('skips tool-call messages without toolCall', () => {
       let conv = createConversation({ id: 'test' }, testEnvironment);
       conv = appendMessages(
         conv,
         { role: 'user', content: 'Hello' },
-        { role: 'tool-use', content: '' },
+        { role: 'tool-call', content: '' },
         testEnvironment,
       );
 
@@ -916,7 +916,7 @@ describe('Gemini Adapter', () => {
         conv,
         { role: 'user', content: 'Do something' },
         {
-          role: 'tool-use',
+          role: 'tool-call',
           content: '',
           toolCall: { id: 'call-1', name: 'tool', arguments: 'true' },
         },
@@ -939,7 +939,7 @@ describe('Gemini Adapter', () => {
         conv,
         { role: 'user', content: 'Do something' },
         {
-          role: 'tool-use',
+          role: 'tool-call',
           content: '',
           toolCall: { id: 'call-1', name: 'tool', arguments: { key: 'value' } },
         },
@@ -962,7 +962,7 @@ describe('Gemini Adapter', () => {
         conv,
         { role: 'user', content: 'Do something' },
         {
-          role: 'tool-use',
+          role: 'tool-call',
           content: '',
           toolCall: { id: 'call-1', name: 'tool', arguments: 42 },
         },
@@ -1000,7 +1000,7 @@ describe('Gemini Adapter', () => {
         conv,
         { role: 'user', content: 'Do something' },
         {
-          role: 'tool-use',
+          role: 'tool-call',
           content: '',
           toolCall: { id: 'call-1', name: 'tool', arguments: {} },
         },

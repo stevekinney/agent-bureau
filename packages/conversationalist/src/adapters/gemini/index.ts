@@ -105,11 +105,21 @@ function resolveMimeType(url: string, explicit?: string): string {
   return explicit ?? inferMimeType(url) ?? DEFAULT_FILE_MIME_TYPE;
 }
 
-function normalizeGeminiResponse(content: unknown): Record<string, unknown> {
-  if (content !== null && typeof content === 'object') {
-    return content as Record<string, unknown>;
+function normalizeGeminiResponse(toolResult: ToolResult): Record<string, unknown> {
+  if (toolResult.outcome === 'success') {
+    if (toolResult.content !== null && typeof toolResult.content === 'object') {
+      return toolResult.content as Record<string, unknown>;
+    }
+
+    return { result: toolResult.content };
   }
-  return { result: content };
+
+  return {
+    outcome: toolResult.outcome,
+    content: toolResult.content,
+    ...(toolResult.error ? { error: toolResult.error } : {}),
+    ...(toolResult.action ? { action: toolResult.action } : {}),
+  };
 }
 
 /**
@@ -199,7 +209,7 @@ function toFunctionResponsePart(
   return {
     functionResponse: {
       name: functionName,
-      response: normalizeGeminiResponse(toolResult.content),
+      response: normalizeGeminiResponse(toolResult),
     },
   };
 }
@@ -240,7 +250,7 @@ function extractSystemInstruction(
  *
  * @example
  * ```ts
- * import { toGeminiMessages } from 'conversationalist/gemini';
+ * import { toGeminiMessages } from 'conversationalist/adapters/gemini';
  *
  * const { systemInstruction, contents } = toGeminiMessages(conversation);
  * const response = await genAI.getGenerativeModel({ model: 'gemini-pro' }).generateContent({
@@ -257,7 +267,7 @@ export function toGeminiMessages(conversation: Conversation): GeminiConversation
   // Build a map of tool call IDs to function names for tool results
   const toolCallNames = new Map<string, string>();
   for (const message of ordered) {
-    if (message.role === 'tool-use' && message.toolCall) {
+    if (message.role === 'tool-call' && message.toolCall) {
       toolCallNames.set(message.toolCall.id, message.toolCall.name);
     }
   }
@@ -301,7 +311,7 @@ export function toGeminiMessages(conversation: Conversation): GeminiConversation
     } else if (message.role === 'assistant') {
       targetRole = 'model';
       parts = toGeminiParts(message.content);
-    } else if (message.role === 'tool-use' && message.toolCall) {
+    } else if (message.role === 'tool-call' && message.toolCall) {
       targetRole = 'model';
       parts = [toFunctionCallPart(message.toolCall)];
     } else if (message.role === 'tool-result' && message.toolResult) {

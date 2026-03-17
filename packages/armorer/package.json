@@ -100,30 +100,6 @@
       "require": "./dist/integrations/mcp/index.cjs",
       "default": "./dist/integrations/mcp/index.js"
     },
-    "./openai": {
-      "types": "./dist/adapters/openai/index.d.ts",
-      "import": "./dist/adapters/openai/index.js",
-      "require": "./dist/adapters/openai/index.cjs",
-      "default": "./dist/adapters/openai/index.js"
-    },
-    "./anthropic": {
-      "types": "./dist/adapters/anthropic/index.d.ts",
-      "import": "./dist/adapters/anthropic/index.js",
-      "require": "./dist/adapters/anthropic/index.cjs",
-      "default": "./dist/adapters/anthropic/index.js"
-    },
-    "./gemini": {
-      "types": "./dist/adapters/gemini/index.d.ts",
-      "import": "./dist/adapters/gemini/index.js",
-      "require": "./dist/adapters/gemini/index.cjs",
-      "default": "./dist/adapters/gemini/index.js"
-    },
-    "./open-ai/agents": {
-      "types": "./dist/open-ai/agents/index.d.ts",
-      "import": "./dist/open-ai/agents/index.js",
-      "require": "./dist/open-ai/agents/index.cjs",
-      "default": "./dist/open-ai/agents/index.js"
-    },
     "./adapters/open-ai/agents": {
       "types": "./dist/adapters/open-ai/agents/index.d.ts",
       "import": "./dist/adapters/open-ai/agents/index.js",

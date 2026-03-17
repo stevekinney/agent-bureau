@@ -29,7 +29,7 @@ describe('tool call pairing', () => {
     const messages: Message[] = [
       createMessage({
         id: 'msg-1',
-        role: 'tool-use',
+        role: 'tool-call',
         toolCall: { id: 'call-1', name: 'search', arguments: { query: 'test' } },
       }),
       createMessage({
@@ -51,7 +51,7 @@ describe('tool call pairing', () => {
     const messages: Message[] = [
       createMessage({
         id: 'msg-1',
-        role: 'tool-use',
+        role: 'tool-call',
         toolCall: { id: 'call-1', name: 'search', arguments: {} },
       }),
     ];
@@ -66,12 +66,12 @@ describe('tool call pairing', () => {
     const messages: Message[] = [
       createMessage({
         id: 'msg-1',
-        role: 'tool-use',
+        role: 'tool-call',
         toolCall: { id: 'call-1', name: 'search', arguments: {} },
       }),
       createMessage({
         id: 'msg-2',
-        role: 'tool-use',
+        role: 'tool-call',
         toolCall: { id: 'call-2', name: 'fetch', arguments: {} },
       }),
       createMessage({
@@ -100,7 +100,7 @@ describe('tool call pairing', () => {
       }),
       createMessage({
         id: 'msg-2',
-        role: 'tool-use',
+        role: 'tool-call',
         toolCall: { id: 'call-1', name: 'search', arguments: {} },
       }),
     ];
@@ -115,17 +115,17 @@ describe('tool call pairing', () => {
     const messages: Message[] = [
       createMessage({
         id: 'msg-1',
-        role: 'tool-use',
+        role: 'tool-call',
         toolCall: { id: 'call-a', name: 'first', arguments: {} },
       }),
       createMessage({
         id: 'msg-2',
-        role: 'tool-use',
+        role: 'tool-call',
         toolCall: { id: 'call-b', name: 'second', arguments: {} },
       }),
       createMessage({
         id: 'msg-3',
-        role: 'tool-use',
+        role: 'tool-call',
         toolCall: { id: 'call-c', name: 'third', arguments: {} },
       }),
     ];
@@ -138,13 +138,13 @@ describe('tool call pairing', () => {
     const messages: Record<string, Message> = {
       a: createMessage({
         id: 'a',
-        role: 'tool-use',
+        role: 'tool-call',
         position: 1,
         toolCall: { id: 'call-1', name: 'alpha', arguments: {} },
       }),
       b: createMessage({
         id: 'b',
-        role: 'tool-use',
+        role: 'tool-call',
         position: 0,
         toolCall: { id: 'call-2', name: 'beta', arguments: {} },
       }),

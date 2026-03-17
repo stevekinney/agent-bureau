@@ -52,42 +52,42 @@ export function createNameMapper(
  *
  * @example
  * ```ts
- * import { toOpenAI } from 'armorer/adapters/openai';
+ * import { toOpenAITools } from 'armorer/adapters/openai';
  *
  * // Single tool
- * const tool = toOpenAI(myTool);
+ * const tool = toOpenAITools(myTool);
  *
  * // Multiple tools
- * const tools = toOpenAI([tool1, tool2]);
+ * const tools = toOpenAITools([tool1, tool2]);
  *
  * // From registry
- * const tools = toOpenAI(toolbox);
+ * const tools = toOpenAITools(toolbox);
  *
  * // Use with OpenAI SDK
  * const response = await openai.chat.completions.create({
  *   model: 'gpt-4',
  *   messages,
- *   tools: toOpenAI(toolbox),
+ *   tools: toOpenAITools(toolbox),
  * });
  * ```
  */
-export function toOpenAI(
+export function toOpenAITools(
   tool: SerializedToolDefinition | AnyToolDefinition,
   options?: OpenAIAdapterOptions,
 ): OpenAITool;
-export function toOpenAI(
+export function toOpenAITools(
   tools: (SerializedToolDefinition | AnyToolDefinition)[],
   options?: OpenAIAdapterOptions,
 ): OpenAITool[];
-export function toOpenAI(
+export function toOpenAITools(
   registry: ToolRegistryLike,
   options?: OpenAIAdapterOptions,
 ): OpenAITool[];
-export function toOpenAI(
+export function toOpenAITools(
   input: AdapterInput,
   options?: OpenAIAdapterOptions,
 ): OpenAITool | OpenAITool[];
-export function toOpenAI(
+export function toOpenAITools(
   input: AdapterInput,
   options?: OpenAIAdapterOptions,
 ): OpenAITool | OpenAITool[] {
@@ -103,11 +103,11 @@ export function toOpenAI(
  * @example
  * ```ts
  * const completion = await openai.chat.completions.create({...});
- * const toolCalls = parseToolCalls(completion.choices[0].message.tool_calls);
+ * const toolCalls = parseOpenAIToolCalls(completion.choices[0].message.tool_calls);
  * const results = await toolbox.execute(toolCalls);
  * ```
  */
-export function parseToolCalls(
+export function parseOpenAIToolCalls(
   toolCalls: OpenAIToolCall[] | undefined | null,
   mapper?: (name: string) => string,
 ): ToolCallInput[] {
@@ -140,18 +140,18 @@ export function parseToolCalls(
  * @example
  * ```ts
  * const results = await toolbox.execute(toolCalls);
- * const messages = formatToolResults(results);
+ * const messages = formatOpenAIToolResults(results);
  * // Add messages to conversation history
  * ```
  */
-export function formatToolResults(
+export function formatOpenAIToolResults(
   results: ToolResult | ToolResult[],
 ): OpenAIToolMessage[] {
   const list = Array.isArray(results) ? results : [results];
   return list.map((result) => {
     if (result.stream || isAsyncIterable(result.result)) {
       throw new Error(
-        'formatToolResults does not support streaming results. Use formatToolResultsAsync or execute without { stream: true }.',
+        'formatOpenAIToolResults does not support streaming results. Use formatOpenAIToolResultsAsync or execute without { stream: true }.',
       );
     }
     const content = stringifyToolContent(result.content);
@@ -165,10 +165,10 @@ export function formatToolResults(
 }
 
 /**
- * Async variant of `formatToolResults(...)` that supports streaming results.
+ * Async variant of `formatOpenAIToolResults(...)` that supports streaming results.
  * Streaming payloads are collected into arrays before serialization.
  */
-export async function formatToolResultsAsync(
+export async function formatOpenAIToolResultsAsync(
   results: ToolResult | ToolResult[],
 ): Promise<OpenAIToolMessage[]> {
   const list = Array.isArray(results) ? results : [results];

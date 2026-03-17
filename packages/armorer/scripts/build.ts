@@ -13,7 +13,6 @@ const entrypoints = [
   './src/middleware/index.ts',
   './src/test/index.ts',
   './src/integrations/mcp/index.ts',
-  './src/open-ai/agents/index.ts',
   './src/adapters/open-ai/agents/index.ts',
   './src/adapters/openai/index.ts',
   './src/adapters/anthropic/index.ts',

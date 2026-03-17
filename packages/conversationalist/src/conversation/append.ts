@@ -145,7 +145,7 @@ const appendMessagesInternal = (
       }
 
       let toolUses = state.toolUses;
-      if (processedInput.role === 'tool-use' && processedInput.toolCall) {
+      if (processedInput.role === 'tool-call' && processedInput.toolCall) {
         if (validate && state.toolUses.has(processedInput.toolCall.id)) {
           throw createIntegrityError('duplicate toolCall.id in conversation', {
             toolCallId: processedInput.toolCall.id,

@@ -397,26 +397,29 @@ Pipelines created with `pipe()` and tools created with `parallel()` emit `Compos
 - `ComposedTool`: composed tool type
 - `ComposedToolEvents`: step event map
 
-### Subpath export: `armorer/adapters/openai` (also `armorer/openai`)
+### Subpath export: `armorer/adapters/openai`
 
-- `toOpenAI(input)`: converts a tool, tool array, or `Toolbox` to OpenAI Chat Completions tools (`OpenAITool` or `OpenAITool[]`)
-- `parseToolCalls(toolCalls, mapper?)`: parses OpenAI tool calls into `ToolCallInput[]`
-- `formatToolResults(results)`: sync formatter for non-streaming results
-- `formatToolResultsAsync(results)`: async formatter that collects streaming results before formatting
+- `toOpenAITools(input)`: converts a tool, tool array, or `Toolbox` to OpenAI Chat Completions tools (`OpenAITool` or `OpenAITool[]`)
+- `parseOpenAIToolCalls(toolCalls, mapper?)`: parses OpenAI tool calls into `ToolCallInput[]`
+- `formatOpenAIToolResults(results)`: sync formatter for non-streaming results
+- `formatOpenAIToolResultsAsync(results)`: async formatter that collects streaming results before formatting
 - Types: `JSONSchema`, `OpenAIFunction`, `OpenAITool`
 
-### Subpath export: `armorer/adapters/anthropic` (also `armorer/anthropic`)
+### Subpath export: `armorer/adapters/anthropic`
 
-- `toAnthropic(input)`: converts a tool, tool array, or `Toolbox` to Anthropic Messages tools (`AnthropicTool` or `AnthropicTool[]`)
-- Types: `AnthropicInputSchema`, `AnthropicTool`, `JSONSchemaProperty`
+- `toAnthropicTools(input)`: converts a tool, tool array, or `Toolbox` to Anthropic Messages tools (`AnthropicTool` or `AnthropicTool[]`)
+- `parseAnthropicToolCalls(contentBlocks)`: parses Anthropic `tool_use` blocks into `ToolCallInput[]`
+- `formatAnthropicToolResults(results)`: formats tool execution results into Anthropic `tool_result` blocks
+- Types: `AnthropicContentBlock`, `AnthropicInputSchema`, `AnthropicTextBlock`, `AnthropicTool`, `AnthropicToolResultBlock`, `AnthropicToolUseBlock`, `JSONSchemaProperty`
 
-### Subpath export: `armorer/adapters/gemini` (also `armorer/gemini`)
+### Subpath export: `armorer/adapters/gemini`
 
-- `toGemini(input)`: converts a tool, tool array, or `Toolbox` to Gemini function declarations (`GeminiFunctionDeclaration` or array)
-- Type helper: `GeminiTool` for wrapper objects with `functionDeclarations`
-- Types: `GeminiFunctionDeclaration`, `GeminiSchema`, `GeminiTool`
+- `toGeminiTools(input)`: converts a tool, tool array, or `Toolbox` to Gemini tool wrappers (`GeminiTool[]`)
+- `parseGeminiToolCalls(parts)`: parses Gemini `functionCall` parts into `ToolCallInput[]`
+- `formatGeminiToolResults(results)`: formats tool execution results into Gemini `functionResponse` parts
+- Types: `GeminiFileDataPart`, `GeminiFunctionCallPart`, `GeminiFunctionDeclaration`, `GeminiFunctionResponsePart`, `GeminiInlineDataPart`, `GeminiPart`, `GeminiSchema`, `GeminiTextPart`, `GeminiTool`
 
-### Subpath export: `armorer/open-ai/agents` (also `armorer/adapters/open-ai/agents`)
+### Subpath export: `armorer/adapters/open-ai/agents`
 
 OpenAI Agents SDK adapter for integrating Toolbox tools with `@openai/agents`.
 

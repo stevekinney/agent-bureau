@@ -1,13 +1,8 @@
 import { describe, expect, expectTypeOf, it } from 'bun:test';
 
-import {
-  appendUserMessage,
-  ConversationHistory,
-  createConversation,
-  estimateConversationTokens,
-  getStatistics,
-  truncateToTokenLimit,
-} from '../src';
+import { estimateConversationTokens, truncateToTokenLimit } from '../src/context';
+import { ConversationHistory } from '../src/history';
+import { appendUserMessage, createConversation, getStatistics } from '../src/index';
 import {
   conversationHistoryFromMarkdown,
   conversationHistoryToMarkdown,

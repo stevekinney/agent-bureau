@@ -4,7 +4,7 @@
 
 Integrate Toolbox tools with the OpenAI Agents SDK (`@openai/agents`). This integration converts Toolbox tools into live, executable SDK tool objects with tool classification (mutating/dangerous/read-only) and permission-based gating.
 
-> **Not the same as `toOpenAI()`**: The [provider adapter](./provider-adapters.md) `toOpenAI()` produces static JSON Schema definitions for the OpenAI Chat Completions API. This integration is different — it produces runnable tool objects that the OpenAI Agents SDK's `tool()` function expects, including execution handlers and tool classification. Use `toOpenAI()` when calling the Chat Completions API directly; use this integration when building with the OpenAI Agents SDK.
+> **Not the same as `toOpenAITools()`**: The [provider adapter](./provider-adapters.md) `toOpenAITools()` produces static JSON Schema definitions for the OpenAI Chat Completions API. This integration is different. It produces runnable tool objects that the OpenAI Agents SDK's `tool()` function expects, including execution handlers and tool classification. Use `toOpenAITools()` when calling the Chat Completions API directly; use this integration when building with the OpenAI Agents SDK.
 
 ## Prerequisites
 
@@ -20,7 +20,7 @@ Use `toOpenAIAgentTools` to convert Toolbox tools to OpenAI Agents SDK tools. Th
 
 ```typescript
 import { createToolbox, createTool } from 'armorer';
-import { toOpenAIAgentTools } from 'armorer/open-ai/agents';
+import { toOpenAIAgentTools } from 'armorer/adapters/open-ai/agents';
 import { Agent, run } from '@openai/agents';
 import { z } from 'zod';
 
@@ -92,7 +92,7 @@ Use `createOpenAIToolGate` to implement permission-based tool access control. Th
 
 ```typescript
 import { createToolbox, createTool } from 'armorer';
-import { createOpenAIToolGate } from 'armorer/open-ai/agents';
+import { createOpenAIToolGate } from 'armorer/adapters/open-ai/agents';
 import { z } from 'zod';
 
 const toolbox = createToolbox();

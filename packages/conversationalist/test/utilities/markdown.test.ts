@@ -1,6 +1,5 @@
 import { describe, expect, test } from 'bun:test';
 
-import { isAssistantMessage } from '../../src';
 import {
   fromMarkdown,
   getRoleFromLabel,
@@ -17,6 +16,7 @@ import type {
   Message,
   MessageRole,
 } from '../../src/types';
+import { isAssistantMessage } from '../../src/utilities';
 
 type ConversationMessage = Message | AssistantMessage;
 
@@ -137,7 +137,7 @@ describe('toMarkdown', () => {
         },
         {
           id: 'msg-3',
-          role: 'tool-use',
+          role: 'tool-call',
           content: 'Tool',
           position: 2,
           createdAt: '2024-01-15T10:02:00.000Z',
@@ -167,7 +167,7 @@ describe('toMarkdown', () => {
       const result = toMarkdown(conversation);
       expect(result).toContain('### System');
       expect(result).toContain('### Developer');
-      expect(result).toContain('### Tool Use');
+      expect(result).toContain('### Tool Call');
       expect(result).toContain('### Tool Result');
       expect(result).toContain('### Snapshot');
     });
@@ -282,7 +282,7 @@ describe('toMarkdown', () => {
       const conversation = createConversation([
         {
           id: 'msg-1',
-          role: 'tool-use',
+          role: 'tool-call',
           content: 'Calling search',
           position: 0,
           createdAt: '2024-01-15T10:00:00.000Z',
@@ -302,7 +302,7 @@ describe('toMarkdown', () => {
       const conversation = createConversation([
         {
           id: 'msg-1',
-          role: 'tool-use',
+          role: 'tool-call',
           content: '',
           position: 0,
           createdAt: '2024-01-15T10:00:00.000Z',
@@ -482,7 +482,7 @@ describe('toMarkdown', () => {
       const conversation = createConversation([
         {
           id: 'msg-1',
-          role: 'tool-use',
+          role: 'tool-call',
           content: 'Calling tool',
           position: 0,
           createdAt: '2024-01-15T10:00:00.000Z',
@@ -594,7 +594,7 @@ S
 
 D
 
-### Tool Use
+### Tool Call
 
 TU
 
@@ -611,7 +611,7 @@ SN`;
       expect(getOrderedMessages(conversation)[1].role).toBe('assistant');
       expect(getOrderedMessages(conversation)[2].role).toBe('system');
       expect(getOrderedMessages(conversation)[3].role).toBe('developer');
-      expect(getOrderedMessages(conversation)[4].role).toBe('tool-use');
+      expect(getOrderedMessages(conversation)[4].role).toBe('tool-call');
       expect(getOrderedMessages(conversation)[5].role).toBe('tool-result');
       expect(getOrderedMessages(conversation)[6].role).toBe('snapshot');
     });
@@ -884,7 +884,7 @@ messages:
         query: test
 ---
 
-### Tool Use (msg-1)
+### Tool Call (msg-1)
 
 Calling search`;
 
@@ -925,7 +925,7 @@ messages:
       content: Found it
 ---
 
-### Tool Use (msg-1)
+### Tool Call (msg-1)
 
 Calling search
 
@@ -1101,7 +1101,7 @@ describe('toMarkdown/fromMarkdown round-trip', () => {
       'assistant',
       'system',
       'developer',
-      'tool-use',
+      'tool-call',
       'tool-result',
       'snapshot',
     ] as const;
@@ -1173,7 +1173,7 @@ describe('toMarkdown/fromMarkdown round-trip', () => {
   test('round-trip preserves toolCall', () => {
     const original = createConversation([
       createMessage({
-        role: 'tool-use',
+        role: 'tool-call',
         toolCall: {
           id: 'call-123',
           name: 'search_documents',
@@ -1193,7 +1193,7 @@ describe('toMarkdown/fromMarkdown round-trip', () => {
     const original = createConversation([
       createMessage({
         id: 'msg-1',
-        role: 'tool-use',
+        role: 'tool-call',
         toolCall: {
           id: 'call-123',
           name: 'search_documents',
@@ -1322,8 +1322,8 @@ describe('toMarkdown/fromMarkdown round-trip', () => {
         hidden: false,
       },
       {
-        id: 'msg-tool-use',
-        role: 'tool-use',
+        id: 'msg-tool-call',
+        role: 'tool-call',
         content: 'Analyzing image...',
         position: 2,
         createdAt: '2024-01-15T10:01:05.000Z',
@@ -1423,7 +1423,7 @@ describe('role labels', () => {
         'assistant',
         'system',
         'developer',
-        'tool-use',
+        'tool-call',
         'tool-result',
         'snapshot',
       ];
@@ -1439,7 +1439,7 @@ describe('role labels', () => {
       expect(ROLE_LABELS.assistant).toBe('Assistant');
       expect(ROLE_LABELS.system).toBe('System');
       expect(ROLE_LABELS.developer).toBe('Developer');
-      expect(ROLE_LABELS['tool-use']).toBe('Tool Use');
+      expect(ROLE_LABELS['tool-call']).toBe('Tool Call');
       expect(ROLE_LABELS['tool-result']).toBe('Tool Result');
       expect(ROLE_LABELS.snapshot).toBe('Snapshot');
     });
@@ -1459,7 +1459,7 @@ describe('role labels', () => {
       expect(LABEL_TO_ROLE['Assistant']).toBe('assistant');
       expect(LABEL_TO_ROLE['System']).toBe('system');
       expect(LABEL_TO_ROLE['Developer']).toBe('developer');
-      expect(LABEL_TO_ROLE['Tool Use']).toBe('tool-use');
+      expect(LABEL_TO_ROLE['Tool Call']).toBe('tool-call');
       expect(LABEL_TO_ROLE['Tool Result']).toBe('tool-result');
       expect(LABEL_TO_ROLE['Snapshot']).toBe('snapshot');
     });
@@ -1471,7 +1471,7 @@ describe('role labels', () => {
       expect(getRoleLabel('assistant')).toBe('Assistant');
       expect(getRoleLabel('system')).toBe('System');
       expect(getRoleLabel('developer')).toBe('Developer');
-      expect(getRoleLabel('tool-use')).toBe('Tool Use');
+      expect(getRoleLabel('tool-call')).toBe('Tool Call');
       expect(getRoleLabel('tool-result')).toBe('Tool Result');
       expect(getRoleLabel('snapshot')).toBe('Snapshot');
     });
@@ -1483,7 +1483,7 @@ describe('role labels', () => {
       expect(getRoleFromLabel('Assistant')).toBe('assistant');
       expect(getRoleFromLabel('System')).toBe('system');
       expect(getRoleFromLabel('Developer')).toBe('developer');
-      expect(getRoleFromLabel('Tool Use')).toBe('tool-use');
+      expect(getRoleFromLabel('Tool Call')).toBe('tool-call');
       expect(getRoleFromLabel('Tool Result')).toBe('tool-result');
       expect(getRoleFromLabel('Snapshot')).toBe('snapshot');
     });

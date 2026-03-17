@@ -25,6 +25,34 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
+    "./conversation": {
+      "types": "./dist/conversation/index.d.ts",
+      "import": "./dist/conversation/index.js"
+    },
+    "./context": {
+      "types": "./dist/context.d.ts",
+      "import": "./dist/context.js"
+    },
+    "./streaming": {
+      "types": "./dist/streaming.d.ts",
+      "import": "./dist/streaming.js"
+    },
+    "./history": {
+      "types": "./dist/history.d.ts",
+      "import": "./dist/history.js"
+    },
+    "./message": {
+      "types": "./dist/message.d.ts",
+      "import": "./dist/message.js"
+    },
+    "./utilities": {
+      "types": "./dist/utilities.d.ts",
+      "import": "./dist/utilities.js"
+    },
+    "./test": {
+      "types": "./dist/test/index.d.ts",
+      "import": "./dist/test/index.js"
+    },
     "./markdown": {
       "types": "./dist/markdown/index.d.ts",
       "import": "./dist/markdown/index.js"
@@ -37,21 +65,17 @@
       "types": "./dist/schemas/index.d.ts",
       "import": "./dist/schemas/index.js"
     },
-    "./openai": {
+    "./adapters/openai": {
       "types": "./dist/adapters/openai/index.d.ts",
       "import": "./dist/adapters/openai/index.js"
     },
-    "./anthropic": {
+    "./adapters/anthropic": {
       "types": "./dist/adapters/anthropic/index.d.ts",
       "import": "./dist/adapters/anthropic/index.js"
     },
-    "./gemini": {
+    "./adapters/gemini": {
       "types": "./dist/adapters/gemini/index.d.ts",
       "import": "./dist/adapters/gemini/index.js"
-    },
-    "./plugins": {
-      "types": "./dist/plugins/index.d.ts",
-      "import": "./dist/plugins/index.js"
     },
     "./redaction": {
       "types": "./dist/redaction/index.d.ts",

@@ -241,10 +241,10 @@ toolbox.register(searchTool);
 The search tool integrates seamlessly with provider adapters:
 
 ```typescript
-import { toOpenAI } from 'armorer/adapters/openai';
+import { toOpenAITools } from 'armorer/adapters/openai';
 
 // Get all tools including the search tool
-const tools = toOpenAI(toolbox);
+const tools = toOpenAITools(toolbox);
 
 // Use with OpenAI
 const response = await openai.chat.completions.create({
@@ -261,7 +261,7 @@ Here's a complete example of using the search tool in an agentic workflow:
 ```typescript
 import { createToolbox, createTool } from 'armorer';
 import { createSearchTool } from 'armorer/tools';
-import { toOpenAI } from 'armorer/adapters/openai';
+import { toOpenAITools } from 'armorer/adapters/openai';
 import OpenAI from 'openai';
 import { z } from 'zod';
 
@@ -333,7 +333,7 @@ Always explain which tools you found and why you chose the one you're using.`,
     const response = await openai.chat.completions.create({
       model: 'gpt-4',
       messages,
-      tools: toOpenAI(toolbox),
+      tools: toOpenAITools(toolbox),
     });
 
     const choice = response.choices[0];

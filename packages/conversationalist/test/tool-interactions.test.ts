@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'bun:test';
 
 import {
+  appendToolCall,
+  appendToolCalls,
   appendToolResult,
-  appendToolUse,
+  appendToolResultAsync,
+  appendToolResultsAsync,
   createConversation,
   getPendingToolCalls,
   getToolInteractions,
@@ -23,11 +26,11 @@ const getOrderedMessages = (conversation: Conversation): Message[] =>
     .filter((message): message is Message => Boolean(message));
 
 describe('tool interaction helpers', () => {
-  it('appends tool-use and tool-result messages', () => {
+  it('appends tool-call and tool-result messages', () => {
     let conv = createConversation({ id: 'test' }, testEnvironment);
-    conv = appendToolUse(conv, {
-      toolId: 'tool',
-      args: { input: 'value' },
+    conv = appendToolCall(conv, {
+      name: 'tool',
+      arguments: { input: 'value' },
     });
     const callId = getOrderedMessages(conv)[0]?.toolCall?.id;
     expect(callId).toBeDefined();
@@ -35,20 +38,20 @@ describe('tool interaction helpers', () => {
     conv = appendToolResult(conv, {
       callId: callId!,
       outcome: 'success',
-      result: { ok: true },
+      content: { ok: true },
     });
 
     const messages = getOrderedMessages(conv);
-    expect(messages[0]?.role).toBe('tool-use');
+    expect(messages[0]?.role).toBe('tool-call');
     expect(messages[1]?.role).toBe('tool-result');
   });
 
   it('returns pending tool calls without results', () => {
     let conv = createConversation({ id: 'test' }, testEnvironment);
-    conv = appendToolUse(conv, {
-      toolId: 'tool',
-      callId: 'call-1',
-      args: { input: 'value' },
+    conv = appendToolCall(conv, {
+      name: 'tool',
+      id: 'call-1',
+      arguments: { input: 'value' },
     });
 
     const pending = getPendingToolCalls(conv);
@@ -58,15 +61,15 @@ describe('tool interaction helpers', () => {
 
   it('returns no pending calls after results are recorded', () => {
     let conv = createConversation({ id: 'test' }, testEnvironment);
-    conv = appendToolUse(conv, {
-      toolId: 'tool',
-      callId: 'call-1',
-      args: { input: 'value' },
+    conv = appendToolCall(conv, {
+      name: 'tool',
+      id: 'call-1',
+      arguments: { input: 'value' },
     });
     conv = appendToolResult(conv, {
       callId: 'call-1',
       outcome: 'success',
-      result: { ok: true },
+      content: { ok: true },
     });
 
     const pending = getPendingToolCalls(conv);
@@ -75,15 +78,15 @@ describe('tool interaction helpers', () => {
 
   it('pairs tool calls with results', () => {
     let conv = createConversation({ id: 'test' }, testEnvironment);
-    conv = appendToolUse(conv, {
-      toolId: 'tool',
-      callId: 'call-1',
-      args: { input: 'value' },
+    conv = appendToolCall(conv, {
+      name: 'tool',
+      id: 'call-1',
+      arguments: { input: 'value' },
     });
     conv = appendToolResult(conv, {
       callId: 'call-1',
       outcome: 'success',
-      result: { ok: true },
+      content: { ok: true },
     });
 
     const interactions = getToolInteractions(conv);
@@ -94,11 +97,11 @@ describe('tool interaction helpers', () => {
 
   it('generates call IDs when omitted', () => {
     let conv = createConversation({ id: 'test' }, testEnvironment);
-    conv = appendToolUse(
+    conv = appendToolCall(
       conv,
       {
-        toolId: 'tool',
-        args: { input: 'value' },
+        name: 'tool',
+        arguments: { input: 'value' },
       },
       undefined,
       testEnvironment,
@@ -116,11 +119,127 @@ describe('tool interaction helpers', () => {
         {
           callId: 'missing',
           outcome: 'success',
-          result: { ok: true },
+          content: { ok: true },
         },
         undefined,
         testEnvironment,
       ),
     ).toThrow();
+  });
+
+  it('appends batches of tool calls in order', () => {
+    let conv = createConversation({ id: 'test' }, testEnvironment);
+    conv = appendToolCalls(
+      conv,
+      [
+        { id: 'call-1', name: 'search', arguments: { query: 'alpha' } },
+        { id: 'call-2', name: 'search', arguments: { query: 'beta' } },
+      ],
+      testEnvironment,
+    );
+
+    const messages = getOrderedMessages(conv);
+    expect(messages).toHaveLength(2);
+    expect(messages[0]?.toolCall?.id).toBe('call-1');
+    expect(messages[1]?.toolCall?.id).toBe('call-2');
+  });
+
+  it('collects streamed tool results before persisting them', async () => {
+    let conv = createConversation({ id: 'test' }, testEnvironment);
+    conv = appendToolCall(conv, {
+      id: 'call-1',
+      name: 'tool',
+      arguments: { input: 'value' },
+    });
+
+    conv = await appendToolResultAsync(
+      conv,
+      {
+        callId: 'call-1',
+        outcome: 'success',
+        content: [],
+        stream: {
+          async *[Symbol.asyncIterator]() {
+            yield { chunk: 'a' };
+            yield { chunk: 'b' };
+          },
+        },
+      },
+      undefined,
+      testEnvironment,
+    );
+
+    const messages = getOrderedMessages(conv);
+    expect(messages[1]?.toolResult?.content).toEqual([{ chunk: 'a' }, { chunk: 'b' }]);
+  });
+
+  it('collects batches of streamed armorer-style tool results', async () => {
+    let conv = createConversation({ id: 'test' }, testEnvironment);
+    conv = appendToolCalls(
+      conv,
+      [
+        { id: 'call-1', name: 'tool', arguments: { index: 1 } },
+        { id: 'call-2', name: 'tool', arguments: { index: 2 } },
+      ],
+      testEnvironment,
+    );
+
+    conv = await appendToolResultsAsync(
+      conv,
+      [
+        {
+          callId: 'call-1',
+          outcome: 'success',
+          content: [],
+          result: {
+            async *[Symbol.asyncIterator]() {
+              yield 'alpha';
+              yield 'beta';
+            },
+          },
+        },
+        {
+          callId: 'call-2',
+          outcome: 'error',
+          content: [],
+          stream: {
+            async *[Symbol.asyncIterator]() {
+              yield { code: 'denied' };
+            },
+          },
+          error: {
+            code: 'tool.denied',
+            category: 'permission',
+            retryable: false,
+            message: 'Denied',
+          },
+        },
+      ],
+      testEnvironment,
+    );
+
+    const messages = getOrderedMessages(conv);
+    expect(messages[2]?.toolResult?.content).toEqual(['alpha', 'beta']);
+    expect(messages[3]?.toolResult?.content).toEqual([{ code: 'denied' }]);
+    expect(messages[3]?.toolResult?.error?.category).toBe('permission');
+  });
+
+  it('rejects streamed tool results in the synchronous helper', () => {
+    const conv = createConversation({ id: 'test' }, testEnvironment);
+
+    expect(() =>
+      appendToolResult(conv, {
+        callId: 'call-1',
+        outcome: 'success',
+        content: [],
+        stream: {
+          async *[Symbol.asyncIterator]() {
+            yield 'chunk';
+          },
+        },
+      }),
+    ).toThrow(
+      'appendToolResult does not support streaming tool results. Use appendToolResultAsync or appendToolResultsAsync.',
+    );
   });
 });

@@ -94,7 +94,7 @@ describe('integrity', () => {
     });
     const toolUse = createMessage({
       id: 'm2',
-      role: 'tool-use',
+      role: 'tool-call',
       toolCall: { id: 'call-1', name: 'tool', arguments: {} },
     });
 
@@ -113,12 +113,12 @@ describe('integrity', () => {
   it('reports duplicate tool call ids', () => {
     const first = createMessage({
       id: 'm1',
-      role: 'tool-use',
+      role: 'tool-call',
       toolCall: { id: 'call-1', name: 'tool', arguments: {} },
     });
     const second = createMessage({
       id: 'm2',
-      role: 'tool-use',
+      role: 'tool-call',
       toolCall: { id: 'call-1', name: 'tool', arguments: {} },
     });
 

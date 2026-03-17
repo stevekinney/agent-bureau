@@ -84,5 +84,5 @@ For async-iterable outputs:
 
 ## OpenAI Adapter Note
 
-- `formatToolResults(...)` is sync-only and throws on streaming results.
-- `formatToolResultsAsync(...)` collects stream chunks and returns formatted tool messages.
+- `formatOpenAIToolResults(...)` is sync-only and throws on streaming results.
+- `formatOpenAIToolResultsAsync(...)` collects stream chunks and returns formatted tool messages.

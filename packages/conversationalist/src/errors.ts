@@ -106,12 +106,12 @@ export function createInvalidPositionError(
 
 /**
  * Creates an invalid tool reference error (ERR_INVALID_TOOL_REFERENCE).
- * Thrown when a tool result references a non-existent tool-use message.
+ * Thrown when a tool result references a non-existent tool-call message.
  */
 export function createInvalidToolReferenceError(callId: string): ConversationalistError {
   return new ConversationalistError(
     'error:invalid-tool-reference',
-    `tool result references non-existent tool-use: ${callId}`,
+    `tool result references non-existent tool-call: ${callId}`,
     { context: { callId } },
   );
 }

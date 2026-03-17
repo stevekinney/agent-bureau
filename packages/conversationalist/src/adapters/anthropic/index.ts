@@ -149,16 +149,23 @@ function toToolUseBlock(toolCall: ToolCall): AnthropicToolUseBlock {
  * Converts an internal ToolResult to Anthropic tool_result block.
  */
 function toToolResultBlock(toolResult: ToolResult): AnthropicToolResultBlock {
+  const payload =
+    toolResult.outcome === 'success'
+      ? toolResult.content
+      : {
+          outcome: toolResult.outcome,
+          content: toolResult.content,
+          ...(toolResult.error ? { error: toolResult.error } : {}),
+          ...(toolResult.action ? { action: toolResult.action } : {}),
+        };
   const result: AnthropicToolResultBlock = {
     type: 'tool_result',
     tool_use_id: toolResult.callId,
     content:
-      typeof toolResult.content === 'string'
-        ? toolResult.content
-        : JSON.stringify(toolResult.content),
+      typeof payload === 'string' ? payload : JSON.stringify(payload),
   };
 
-  if (toolResult.outcome === 'error') {
+  if (toolResult.outcome !== 'success') {
     result.is_error = true;
   }
 
@@ -200,7 +207,7 @@ function extractSystemContent(messages: ReadonlyArray<Message>): string | undefi
  *
  * @example
  * ```ts
- * import { toAnthropicMessages } from 'conversationalist/anthropic';
+ * import { toAnthropicMessages } from 'conversationalist/adapters/anthropic';
  *
  * const { system, messages } = toAnthropicMessages(conversation);
  * const response = await anthropic.messages.create({
@@ -266,7 +273,7 @@ export function toAnthropicMessages(conversation: Conversation): AnthropicConver
       } else {
         blocks = content;
       }
-    } else if (message.role === 'tool-use' && message.toolCall) {
+    } else if (message.role === 'tool-call' && message.toolCall) {
       targetRole = 'assistant';
       blocks = [toToolUseBlock(message.toolCall)];
     } else if (message.role === 'tool-result' && message.toolResult) {

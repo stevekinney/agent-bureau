@@ -54,21 +54,21 @@ export function validateConversationIntegrity(
     }
   }
 
-  const toolUses = new Map<string, { position: number; messageId: string }>();
+  const toolCalls = new Map<string, { position: number; messageId: string }>();
 
   conversation.ids.forEach((id, index) => {
     const message = conversation.messages[id];
     if (!message) return;
 
-    if (message.role === 'tool-use' && message.toolCall) {
-      if (toolUses.has(message.toolCall.id)) {
+    if (message.role === 'tool-call' && message.toolCall) {
+      if (toolCalls.has(message.toolCall.id)) {
         issues.push({
           code: 'integrity:duplicate-tool-call',
           message: `duplicate toolCall.id ${message.toolCall.id}`,
           data: { toolCallId: message.toolCall.id, messageId: message.id },
         });
       } else {
-        toolUses.set(message.toolCall.id, { position: index, messageId: message.id });
+        toolCalls.set(message.toolCall.id, { position: index, messageId: message.id });
       }
     }
   });
@@ -78,21 +78,21 @@ export function validateConversationIntegrity(
     if (!message) return;
 
     if (message.role === 'tool-result' && message.toolResult) {
-      const toolUse = toolUses.get(message.toolResult.callId);
-      if (!toolUse) {
+      const toolCall = toolCalls.get(message.toolResult.callId);
+      if (!toolCall) {
         issues.push({
           code: 'integrity:orphan-tool-result',
-          message: `tool-result references missing tool-use ${message.toolResult.callId}`,
+          message: `tool-result references missing tool-call ${message.toolResult.callId}`,
           data: { callId: message.toolResult.callId, messageId: message.id },
         });
-      } else if (toolUse.position >= index) {
+      } else if (toolCall.position >= index) {
         issues.push({
           code: 'integrity:tool-result-before-call',
-          message: `tool-result ${message.toolResult.callId} occurs before tool-use`,
+          message: `tool-result ${message.toolResult.callId} occurs before tool-call`,
           data: {
             callId: message.toolResult.callId,
             messageId: message.id,
-            toolUseMessageId: toolUse.messageId,
+            toolCallMessageId: toolCall.messageId,
           },
         });
       }

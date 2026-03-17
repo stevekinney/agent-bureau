@@ -27,7 +27,7 @@ import { toReadonly } from './type-helpers';
  *
  * @example
  * ```ts
- * ROLE_LABELS['tool-use']; // 'Tool Use'
+ * ROLE_LABELS['tool-call']; // 'Tool Call'
  * ROLE_LABELS.assistant;   // 'Assistant'
  * ```
  */
@@ -36,7 +36,7 @@ export const ROLE_LABELS: Record<MessageRole, string> = {
   assistant: 'Assistant',
   system: 'System',
   developer: 'Developer',
-  'tool-use': 'Tool Use',
+  'tool-call': 'Tool Call',
   'tool-result': 'Tool Result',
   snapshot: 'Snapshot',
 };
@@ -46,7 +46,7 @@ export const ROLE_LABELS: Record<MessageRole, string> = {
  *
  * @example
  * ```ts
- * LABEL_TO_ROLE['Tool Use']; // 'tool-use'
+ * LABEL_TO_ROLE['Tool Call']; // 'tool-call'
  * LABEL_TO_ROLE.User;        // 'user'
  * ```
  */
@@ -55,7 +55,8 @@ export const LABEL_TO_ROLE: Record<string, MessageRole> = {
   Assistant: 'assistant',
   System: 'system',
   Developer: 'developer',
-  'Tool Use': 'tool-use',
+  'Tool Use': 'tool-call',
+  'Tool Call': 'tool-call',
   'Tool Result': 'tool-result',
   Snapshot: 'snapshot',
 };
@@ -69,7 +70,7 @@ export const LABEL_TO_ROLE: Record<string, MessageRole> = {
  * @example
  * ```ts
  * getRoleLabel('assistant');  // 'Assistant'
- * getRoleLabel('tool-use');   // 'Tool Use'
+ * getRoleLabel('tool-call');  // 'Tool Call'
  * ```
  */
 export function getRoleLabel(role: MessageRole): string {
@@ -85,7 +86,7 @@ export function getRoleLabel(role: MessageRole): string {
  * @example
  * ```ts
  * getRoleFromLabel('Assistant');  // 'assistant'
- * getRoleFromLabel('Tool Use');   // 'tool-use'
+ * getRoleFromLabel('Tool Call');  // 'tool-call'
  * getRoleFromLabel('Unknown');    // undefined
  * ```
  */
@@ -249,6 +250,76 @@ interface ConversationFrontmatter {
   createdAt: string;
   updatedAt: string;
   messages: Record<string, MessageFrontmatter>;
+}
+
+function normalizeLegacyMarkdownToolCall(toolCall: unknown): ToolCall | undefined {
+  if (!toolCall || typeof toolCall !== 'object') {
+    return undefined;
+  }
+
+  const record = { ...(toolCall as Record<string, JSONValue | undefined>) };
+
+  if (record['arguments'] === undefined && record['args'] !== undefined) {
+    record['arguments'] = record['args'];
+  }
+
+  delete record['args'];
+
+  if (
+    typeof record['id'] !== 'string' ||
+    typeof record['name'] !== 'string' ||
+    record['arguments'] === undefined
+  ) {
+    return undefined;
+  }
+
+  return {
+    id: record['id'],
+    name: record['name'],
+    arguments: record['arguments'],
+  };
+}
+
+function normalizeLegacyMarkdownToolResult(toolResult: unknown): ToolResult | undefined {
+  if (!toolResult || typeof toolResult !== 'object') {
+    return undefined;
+  }
+
+  const record = { ...(toolResult as Record<string, JSONValue | undefined>) };
+
+  if (record['content'] === undefined && record['result'] !== undefined) {
+    record['content'] = record['result'];
+  }
+
+  delete record['result'];
+
+  if (
+    typeof record['callId'] !== 'string' ||
+    record['content'] === undefined ||
+    (record['outcome'] !== 'success' &&
+      record['outcome'] !== 'error' &&
+      record['outcome'] !== 'action_required')
+  ) {
+    return undefined;
+  }
+
+  return {
+    callId: record['callId'],
+    outcome: record['outcome'],
+    content: record['content'],
+    ...(record['error'] !== undefined
+      ? { error: record['error'] as unknown as ToolResult['error'] }
+      : {}),
+    ...(record['action'] !== undefined
+      ? { action: record['action'] as unknown as ToolResult['action'] }
+      : {}),
+    ...(typeof record['inputDigest'] === 'string'
+      ? { inputDigest: record['inputDigest'] }
+      : {}),
+    ...(typeof record['outputDigest'] === 'string'
+      ? { outputDigest: record['outputDigest'] }
+      : {}),
+  };
 }
 
 /**
@@ -492,10 +563,14 @@ function parseMarkdownWithMetadata(trimmed: string): Conversation {
       metadata: toReadonly({ ...messageMeta.metadata }),
       hidden: messageMeta.hidden,
       toolCall: messageMeta.toolCall
-        ? toReadonly({ ...messageMeta.toolCall })
+        ? toReadonly(normalizeLegacyMarkdownToolCall(messageMeta.toolCall) ?? {
+            ...messageMeta.toolCall,
+          })
         : undefined,
       toolResult: messageMeta.toolResult
-        ? toReadonly({ ...messageMeta.toolResult })
+        ? toReadonly(normalizeLegacyMarkdownToolResult(messageMeta.toolResult) ?? {
+            ...messageMeta.toolResult,
+          })
         : undefined,
       tokenUsage: messageMeta.tokenUsage
         ? toReadonly({ ...messageMeta.tokenUsage })

@@ -11,7 +11,7 @@ A TypeScript-first library for managing LLM conversation state with **immutable 
 
 In a modern AI application, a conversation is more than just a list of strings. It involves:
 
-- **Tool Use**: Pairing function calls with their results and ensuring they stay in sync.
+- **Tool Call**: Pairing function calls with their results and ensuring they stay in sync.
 - **Hidden Logic**: Internal "thought" messages or snapshots that should be saved but never sent to the provider.
 - **Metadata**: Tracking custom IDs and tokens across different steps.
 - **Streaming**: Gracefully handling partial messages in a UI without messy state transitions.
@@ -42,7 +42,7 @@ This approach offers several critical advantages for modern application developm
 
 - **Multi-Model Chatbots**: Build a UI where users can switch between GPT-4o and Claude 3.5 Sonnet mid-conversation without losing history.
 - **Chain-of-Thought Workflows**: Use `hidden` messages to store internal reasoning or intermediate steps that the AI uses to reach a final answer, without cluttering the user's view.
-- **Agentic Workflows**: Track complex tool-use loops where multiple functions are called in sequence, ensuring every result is correctly paired with its corresponding call ID.
+- **Agentic Workflows**: Track complex tool-call loops where multiple functions are called in sequence, ensuring every result is correctly paired with its corresponding call ID.
 - **Token Budgeting**: Automatically trim old messages when a conversation gets too long, ensuring your API costs stay predictable and you never hit provider limits.
 - **Deterministic Testing**: Use the custom `environment` parameter to mock IDs and timestamps, allowing you to write 100% deterministic tests for your chat logic.
 
@@ -66,7 +66,7 @@ import {
   appendUserMessage,
   createConversation,
 } from 'conversationalist';
-import { toOpenAIMessages } from 'conversationalist/openai';
+import { toOpenAIMessages } from 'conversationalist/adapters/openai';
 
 // 1. Create a conversation
 let conversation = createConversation({
@@ -82,6 +82,22 @@ conversation = appendAssistantMessage(conversation, 'Let me check that for you.'
 const openAIMessages = toOpenAIMessages(conversation);
 // [{ role: 'user', content: 'Where is my order?' }, ...]
 ```
+
+## Public Surface
+
+The package now has one consistent import model:
+
+- `conversationalist`: convenience exports for conversation creation, core appenders, guards, errors, and history.
+- `conversationalist/conversation`: canonical conversation-state helpers, including tool-call appenders.
+- `conversationalist/context`: token estimation and truncation helpers.
+- `conversationalist/streaming`: streaming-message helpers.
+- `conversationalist/history`, `conversationalist/message`, `conversationalist/utilities`, `conversationalist/test`: focused subpaths for those domains.
+- `conversationalist/adapters/openai`, `conversationalist/adapters/anthropic`, `conversationalist/adapters/gemini`: provider message adapters.
+
+When you are combining this package with `armorer`, the split is:
+
+- `armorer`: tool schemas, provider tool definitions, provider tool-call parsing, and tool execution.
+- `conversationalist`: conversation state, persistence, and provider message history.
 
 ## Core Concepts
 
@@ -108,7 +124,7 @@ with `messages`. Use `getMessages(conversation)` for ordered arrays, or
 
 Messages have roles and can contain text or multi-modal content. Optional fields include `metadata`, `hidden`, `tokenUsage`, `toolCall`, and `toolResult`. Assistant messages can also include `goalCompleted` (see `AssistantMessage`). Use `isAssistantMessage` to narrow when you need `goalCompleted`. Metadata and tool payloads are typed as `JSONValue` so conversations remain JSON-serializable.
 
-**Roles**: `user`, `assistant`, `system`, `developer`, `tool-use`, `tool-result`, `snapshot`. The `snapshot` role is for internal state and is skipped by adapters.
+**Roles**: `user`, `assistant`, `system`, `developer`, `tool-call`, `tool-result`, `snapshot`. The `snapshot` role is for internal state and is skipped by adapters.
 
 ```ts
 import { appendMessages } from 'conversationalist';
@@ -126,13 +142,13 @@ conversation = appendMessages(conversation, {
 
 ### Tool Calls
 
-Tool calls are represented as paired `tool-use` and `tool-result` messages. Tool results are validated to ensure the referenced call exists.
+Tool calls are represented as paired `tool-call` and `tool-result` messages. Tool results are validated to ensure the referenced call exists.
 
 ```ts
 conversation = appendMessages(
   conversation,
   {
-    role: 'tool-use',
+    role: 'tool-call',
     content: '',
     toolCall: { id: 'call_123', name: 'getWeather', arguments: { city: 'NYC' } },
   },
@@ -155,33 +171,35 @@ You can also use tool-specific helpers to reduce agent-loop glue code:
 ```ts
 import {
   appendToolResult,
-  appendToolUse,
+  appendToolCall,
   getPendingToolCalls,
   getToolInteractions,
 } from 'conversationalist';
 
-conversation = appendToolUse(conversation, {
-  toolId: 'getWeather',
-  callId: 'call_123',
-  args: { city: 'NYC' },
+conversation = appendToolCall(conversation, {
+  name: 'getWeather',
+  id: 'call_123',
+  arguments: { city: 'NYC' },
 });
 
 conversation = appendToolResult(conversation, {
   callId: 'call_123',
   outcome: 'success',
-  result: { tempF: 72, condition: 'sunny' },
+  content: { tempF: 72, condition: 'sunny' },
 });
 
 const pending = getPendingToolCalls(conversation);
 const interactions = getToolInteractions(conversation);
 ```
 
+If you are appending `armorer` execution results, use `appendToolResultsAsync(...)` when any tool result may still expose a live async stream.
+
 ### Correctness Guarantees
 
 Conversationalist treats integrity and JSON-safety as first-class invariants:
 
 - `conversation.ids` and `conversation.messages` stay in sync.
-- Every `tool-result` references an earlier `tool-use`.
+- Every `tool-result` references an earlier `tool-call`.
 - `toolCall.id` values are unique per conversation.
 - Conversation payloads are JSON-serializable (`JSONValue` everywhere).
 
@@ -253,7 +271,7 @@ conversation = truncateToTokenLimit(conversation, 4000, {
 });
 ```
 
-By default, truncation and recent-message helpers treat a `tool-use` + `tool-result`
+By default, truncation and recent-message helpers treat a `tool-call` + `tool-result`
 as an atomic block (`preserveToolPairs: true`) so tool results are never stranded.
 If a tool block doesn't fit inside the budget, both messages are dropped. Set
 `preserveToolPairs: false` to revert to message-level truncation. When disabled,
@@ -431,9 +449,9 @@ appendUser('My key is sk-12345...'); // Automatically redacted
 Convert the same conversation into provider-specific formats. Adapters automatically skip hidden/snapshot messages and map roles correctly.
 
 ```ts
-import { toOpenAIMessages } from 'conversationalist/openai';
-import { toAnthropicMessages } from 'conversationalist/anthropic';
-import { toGeminiMessages } from 'conversationalist/gemini';
+import { toOpenAIMessages } from 'conversationalist/adapters/openai';
+import { toAnthropicMessages } from 'conversationalist/adapters/anthropic';
+import { toGeminiMessages } from 'conversationalist/adapters/gemini';
 ```
 
 - Adapter outputs are SDK-compatible (OpenAI `ChatCompletionMessageParam[]`, Anthropic `MessageParam[]`, Gemini `Content[]`).
@@ -443,98 +461,87 @@ import { toGeminiMessages } from 'conversationalist/gemini';
 
 ### Provider-Specific Examples
 
-#### OpenAI (with Tool Calls)
+### Using with `armorer`
+
+The canonical shared loop is:
+
+1. `to<Provider>Messages(conversation)` from `conversationalist/adapters/*`
+2. `to<Provider>Tools(toolbox)` from `armorer/adapters/*`
+3. provider API call
+4. `parse<Provider>ToolCalls(response)` from `armorer/adapters/*`
+5. `appendToolCalls(conversation, calls)` from `conversationalist/conversation`
+6. `toolbox.execute(calls)`
+7. `appendToolResults(...)` or `appendToolResultsAsync(...)`
+8. repeat until the model stops calling tools
+
+#### OpenAI
 
 ```ts
-import { appendAssistantMessage, appendMessages } from 'conversationalist';
-import { toOpenAIMessages } from 'conversationalist/openai';
+import { appendToolCalls, appendToolResultsAsync } from 'conversationalist/conversation';
+import { toOpenAIMessagesGrouped } from 'conversationalist/adapters/openai';
+import { parseOpenAIToolCalls, toOpenAITools } from 'armorer/adapters/openai';
 
-const response = await openai.chat.completions.create({
+const completion = await openai.chat.completions.create({
   model: 'gpt-4o',
-  messages: toOpenAIMessages(conversation),
-  tools: [{ type: 'function', function: { name: 'getWeather', ... } }],
+  messages: toOpenAIMessagesGrouped(conversation),
+  tools: toOpenAITools(toolbox),
 });
 
-const toolCalls = response.choices[0]?.message?.tool_calls ?? [];
-for (const call of toolCalls) {
-  conversation = appendMessages(conversation, {
-    role: 'tool-use',
-    content: '',
-    toolCall: { id: call.id, name: call.function.name, arguments: call.function.arguments },
-  });
+const toolCalls = parseOpenAIToolCalls(completion.choices[0]?.message?.tool_calls);
+conversation = appendToolCalls(conversation, toolCalls);
 
-  const result = await getWeather(JSON.parse(call.function.arguments));
-  conversation = appendMessages(conversation, {
-    role: 'tool-result',
-    content: '',
-    toolResult: { callId: call.id, outcome: 'success', content: result },
-  });
-}
+const results = await toolbox.execute(toolCalls, { stream: true });
+conversation = await appendToolResultsAsync(conversation, results);
 ```
 
-#### Anthropic (with Tool Calls)
+#### Anthropic
 
 ```ts
-import { appendAssistantMessage, appendMessages } from 'conversationalist';
-import { toAnthropicMessages } from 'conversationalist/anthropic';
+import { appendToolCalls, appendToolResults } from 'conversationalist/conversation';
+import { toAnthropicMessages } from 'conversationalist/adapters/anthropic';
+import { parseAnthropicToolCalls, toAnthropicTools } from 'armorer/adapters/anthropic';
 
 const { system, messages } = toAnthropicMessages(conversation);
 const response = await anthropic.messages.create({
-  model: 'claude-3-5-sonnet-20240620',
+  model: 'claude-sonnet-4-20250514',
   system,
   messages,
-  tools: [{ name: 'getWeather', ... }],
+  tools: toAnthropicTools(toolbox),
 });
 
-for (const block of response.content) {
-  if (block.type !== 'tool_use') continue;
-  conversation = appendMessages(conversation, {
-    role: 'tool-use',
-    content: '',
-    toolCall: { id: block.id, name: block.name, arguments: block.input },
-  });
+const toolCalls = parseAnthropicToolCalls(response.content);
+conversation = appendToolCalls(conversation, toolCalls);
 
-  const result = await getWeather(block.input);
-  conversation = appendMessages(conversation, {
-    role: 'tool-result',
-    content: '',
-    toolResult: { callId: block.id, outcome: 'success', content: result },
-  });
-}
+const results = await toolbox.execute(toolCalls);
+conversation = appendToolResults(conversation, results);
 ```
 
-#### Gemini (with Tool Calls)
+#### Gemini
 
 ```ts
-import { appendMessages } from 'conversationalist';
-import { toGeminiMessages } from 'conversationalist/gemini';
+import { appendToolCalls, appendToolResultsAsync } from 'conversationalist/conversation';
+import { toGeminiMessages } from 'conversationalist/adapters/gemini';
+import { parseGeminiToolCalls, toGeminiTools } from 'armorer/adapters/gemini';
 
 const { systemInstruction, contents } = toGeminiMessages(conversation);
 const response = await model.generateContent({
   systemInstruction,
   contents,
-  tools: [{ functionDeclarations: [{ name: 'getWeather', ... }] }],
+  tools: toGeminiTools(toolbox),
 });
 
-const parts = response.response.candidates?.[0]?.content?.parts ?? [];
-for (const part of parts) {
-  if (!('functionCall' in part)) continue;
-  const callId = crypto.randomUUID(); // Gemini doesn't provide IDs, so we generate one
-  const args = part.functionCall.args;
+const parsedCalls = parseGeminiToolCalls(
+  response.response.candidates?.[0]?.content?.parts ?? [],
+);
+const toolCalls = parsedCalls.map((toolCall, index) => ({
+  ...toolCall,
+  id: `call-gemini-${index + 1}`,
+}));
 
-  conversation = appendMessages(conversation, {
-    role: 'tool-use',
-    content: '',
-    toolCall: { id: callId, name: part.functionCall.name, arguments: args },
-  });
+conversation = appendToolCalls(conversation, toolCalls);
 
-  const result = await getWeather(args);
-  conversation = appendMessages(conversation, {
-    role: 'tool-result',
-    content: '',
-    toolResult: { callId, outcome: 'success', content: result },
-  });
-}
+const results = await toolbox.execute(toolCalls, { stream: true });
+conversation = await appendToolResultsAsync(conversation, results);
 ```
 
 ## Builder Pattern (Fluent API)
@@ -680,7 +687,7 @@ const restoredWithEnv = ConversationHistory.from(snapshot, {
 
 ### Schema Versioning
 
-Conversations include a `schemaVersion` field for forward compatibility. Deserialization expects the current schema version; migrate legacy data before calling `deserializeConversation`.
+Conversations include a `schemaVersion` field for forward compatibility. `deserializeConversation(...)` migrates legacy `tool-use` roles and legacy `args` / `result` tool payload fields where possible before validation.
 
 ```ts
 import { deserializeConversation } from 'conversationalist';
@@ -747,7 +754,7 @@ import {
 } from 'conversationalist/markdown';
 
 // Get display label for a role
-getRoleLabel('tool-use'); // 'Tool Use'
+getRoleLabel('tool-call'); // 'Tool Call'
 getRoleLabel('assistant'); // 'Assistant'
 
 // Get role from a label
@@ -980,7 +987,7 @@ Svelte 5's runes pair perfectly with **Conversationalist**. You can use the `Con
 | Category         | Key Functions                                                                                                                                                                                                               |
 | :--------------- | :-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Creation**     | `createConversation`, `deserializeConversation`                                                                                                                                                                             |
-| **Appending**    | `appendUserMessage`, `appendAssistantMessage`, `appendSystemMessage`, `appendToolUse`, `appendToolResult`, `appendMessages`                                                                                                 |
+| **Appending**    | `appendUserMessage`, `appendAssistantMessage`, `appendSystemMessage`, `appendToolCall`, `appendToolResult`, `appendMessages`                                                                                                 |
 | **Unsafe**       | `createConversationUnsafe`, `appendUnsafeMessage`                                                                                                                                                                           |
 | **Streaming**    | `appendStreamingMessage`, `updateStreamingMessage`, `finalizeStreamingMessage`, `cancelStreamingMessage`                                                                                                                    |
 | **Modification** | `redactMessageAtPosition`, `replaceSystemMessage`, `collapseSystemMessages`                                                                                                                                                 |

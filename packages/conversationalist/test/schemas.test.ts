@@ -16,8 +16,8 @@ import {
 import { CURRENT_SCHEMA_VERSION } from '../src/versioning';
 
 describe('schemas', () => {
-  test('messageRoleSchema accepts tool-use literal', () => {
-    const res = messageRoleSchema.safeParse('tool-use');
+  test('messageRoleSchema accepts tool-call literal', () => {
+    const res = messageRoleSchema.safeParse('tool-call');
     expect(res.success).toBeTrue();
   });
 

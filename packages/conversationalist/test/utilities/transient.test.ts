@@ -179,7 +179,7 @@ describe('transient utilities', () => {
         messages: [
           {
             id: 'msg-1',
-            role: 'tool-use',
+            role: 'tool-call',
             content: '',
             position: 0,
             createdAt: '2024-01-15T10:00:00.000Z',

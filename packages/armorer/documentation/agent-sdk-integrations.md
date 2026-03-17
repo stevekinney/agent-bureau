@@ -7,7 +7,7 @@ Toolbox supports Agent SDK workflows through MCP and direct adapters.
 For OpenAI Agents, you can either:
 
 1. Connect to a Toolbox MCP server
-2. Use the direct OpenAI Agents adapter (`armorer/open-ai/agents` or `armorer/adapters/open-ai/agents`)
+2. Use the direct OpenAI Agents adapter (`armorer/adapters/open-ai/agents`)
 
 For Anthropic Claude Agent SDK, use MCP server integration.
 
@@ -16,7 +16,7 @@ For Anthropic Claude Agent SDK, use MCP server integration.
 The OpenAI Agents SDK can consume Toolbox tools in two ways:
 
 1. **MCP servers** (shown below) - Run Toolbox as an MCP server that the SDK connects to
-2. **Direct adapter** - Convert tools directly using the [OpenAI Agents adapter](./openai-agents-sdk.md) (`armorer/open-ai/agents` or `armorer/adapters/open-ai/agents`)
+2. **Direct adapter** - Convert tools directly using the [OpenAI Agents adapter](./openai-agents-sdk.md) (`armorer/adapters/open-ai/agents`)
 
 The MCP approach is useful when you want to run tools in a separate process or expose them over HTTP. The direct integration is simpler for in-process usage.
 

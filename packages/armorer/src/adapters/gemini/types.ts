@@ -34,3 +34,42 @@ export interface GeminiFunctionDeclaration {
 export interface GeminiTool {
   functionDeclarations: GeminiFunctionDeclaration[];
 }
+
+export interface GeminiFunctionCallPart {
+  functionCall: {
+    name: string;
+    args: Record<string, unknown>;
+  };
+}
+
+export interface GeminiFunctionResponsePart {
+  functionResponse: {
+    name: string;
+    response: Record<string, unknown>;
+  };
+}
+
+export interface GeminiTextPart {
+  text: string;
+}
+
+export interface GeminiInlineDataPart {
+  inlineData: {
+    mimeType: string;
+    data: string;
+  };
+}
+
+export interface GeminiFileDataPart {
+  fileData: {
+    mimeType: string;
+    fileUri: string;
+  };
+}
+
+export type GeminiPart =
+  | GeminiFileDataPart
+  | GeminiFunctionCallPart
+  | GeminiFunctionResponsePart
+  | GeminiInlineDataPart
+  | GeminiTextPart;
