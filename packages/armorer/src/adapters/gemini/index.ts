@@ -1,6 +1,8 @@
 import type { SerializedToolDefinition } from '../../core/serialization';
 import type { AnyToolDefinition } from '../../core/tool-definition';
+import type { ImportedToolConfiguration } from '../../create-toolbox';
 import type { ToolCallInput, ToolResult } from '../../types';
+import { importToolSchema } from '../imported-schema';
 import { normalizeToSerializedDefinitions, type ToolRegistryLike } from '../shared';
 import type {
   GeminiFunctionCallPart,
@@ -52,6 +54,17 @@ export function toGeminiTools(
   return converted.length === 0 ? [] : [{ functionDeclarations: converted }];
 }
 
+export function fromGeminiTools(
+  input:
+    | GeminiFunctionDeclaration
+    | readonly GeminiFunctionDeclaration[]
+    | GeminiTool
+    | readonly GeminiTool[],
+): ImportedToolConfiguration[] {
+  const declarations = normalizeGeminiDeclarations(input);
+  return declarations.map(convertFromGeminiDeclaration);
+}
+
 export function parseGeminiToolCalls(
   parts: GeminiPart[] | undefined | null,
 ): ToolCallInput[] {
@@ -95,6 +108,16 @@ function convertToGeminiFunctionDeclaration(
   };
 }
 
+function convertFromGeminiDeclaration(
+  declaration: GeminiFunctionDeclaration,
+): ImportedToolConfiguration {
+  return {
+    name: declaration.name,
+    description: declaration.description,
+    input: importToolSchema(declaration.parameters),
+  };
+}
+
 /**
  * Transforms JSON Schema to Gemini-compatible schema format.
  * Gemini uses OpenAPI 3.0 style schemas.
@@ -126,6 +149,28 @@ function normalizeGeminiResponse(result: ToolResult): Record<string, unknown> {
   };
 }
 
+function normalizeGeminiDeclarations(
+  input:
+    | GeminiFunctionDeclaration
+    | readonly GeminiFunctionDeclaration[]
+    | GeminiTool
+    | readonly GeminiTool[],
+): GeminiFunctionDeclaration[] {
+  if (Array.isArray(input)) {
+    return input.flatMap((value) =>
+      isGeminiTool(value)
+        ? [...value.functionDeclarations]
+        : [value as GeminiFunctionDeclaration],
+    );
+  }
+
+  if (isGeminiTool(input)) {
+    return [...input.functionDeclarations];
+  }
+
+  return [input as GeminiFunctionDeclaration];
+}
+
 function normalizeGeminiPayload(content: unknown): Record<string, unknown> {
   if (content !== null && typeof content === 'object' && !Array.isArray(content)) {
     return content as Record<string, unknown>;
@@ -140,4 +185,13 @@ function isAsyncIterable(value: unknown): value is AsyncIterable<unknown> {
   }
 
   return Symbol.asyncIterator in value;
+}
+
+function isGeminiTool(value: unknown): value is GeminiTool {
+  return (
+    value !== null &&
+    typeof value === 'object' &&
+    'functionDeclarations' in value &&
+    Array.isArray((value as GeminiTool).functionDeclarations)
+  );
 }

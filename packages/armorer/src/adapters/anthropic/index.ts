@@ -1,6 +1,8 @@
 import type { SerializedToolDefinition } from '../../core/serialization';
 import type { AnyToolDefinition } from '../../core/tool-definition';
+import type { ImportedToolConfiguration } from '../../create-toolbox';
 import type { ToolCallInput, ToolResult } from '../../types';
+import { importToolSchema } from '../imported-schema';
 import {
   type AdapterInput,
   isSingleInput,
@@ -63,6 +65,18 @@ export function toAnthropicTools(input: AdapterInput): AnthropicTool | Anthropic
   return isSingleInput(input) ? converted[0]! : converted;
 }
 
+export function fromAnthropicTools(tool: AnthropicTool): ImportedToolConfiguration;
+export function fromAnthropicTools(
+  tools: readonly AnthropicTool[],
+): ImportedToolConfiguration[];
+export function fromAnthropicTools(
+  input: AnthropicTool | readonly AnthropicTool[],
+): ImportedToolConfiguration | ImportedToolConfiguration[] {
+  const tools = Array.isArray(input) ? input : [input];
+  const converted = tools.map(convertFromAnthropic);
+  return Array.isArray(input) ? converted : converted[0]!;
+}
+
 export function parseAnthropicToolCalls(
   contentBlocks: AnthropicContentBlock[] | undefined | null,
 ): ToolCallInput[] {
@@ -112,6 +126,14 @@ function convertToAnthropic(tool: SerializedToolDefinition): AnthropicTool {
     name: tool.identity.name,
     description: tool.display.description,
     input_schema: inputSchema,
+  };
+}
+
+function convertFromAnthropic(tool: AnthropicTool): ImportedToolConfiguration {
+  return {
+    name: tool.name,
+    description: tool.description,
+    input: importToolSchema(tool.input_schema),
   };
 }
 

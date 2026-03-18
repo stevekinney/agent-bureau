@@ -1,6 +1,8 @@
 import type { SerializedToolDefinition } from '../../core/serialization';
 import type { AnyToolDefinition } from '../../core/tool-definition';
+import type { ImportedToolConfiguration } from '../../create-toolbox';
 import type { ToolCallInput, ToolResult } from '../../types';
+import { importToolSchema } from '../imported-schema';
 import {
   type AdapterInput,
   isSingleInput,
@@ -95,6 +97,16 @@ export function toOpenAITools(
   const converted = definitions.map((def) => convertToOpenAI(def, options));
 
   return isSingleInput(input) ? converted[0]! : converted;
+}
+
+export function fromOpenAITools(tool: OpenAITool): ImportedToolConfiguration;
+export function fromOpenAITools(tools: readonly OpenAITool[]): ImportedToolConfiguration[];
+export function fromOpenAITools(
+  input: OpenAITool | readonly OpenAITool[],
+): ImportedToolConfiguration | ImportedToolConfiguration[] {
+  const tools = Array.isArray(input) ? input : [input];
+  const converted = tools.map(convertFromOpenAI);
+  return Array.isArray(input) ? converted : converted[0]!;
 }
 
 /**
@@ -206,6 +218,14 @@ function convertToOpenAI(
   };
 }
 
+function convertFromOpenAI(tool: OpenAITool): ImportedToolConfiguration {
+  return {
+    name: tool.function.name,
+    description: tool.function.description,
+    input: importToolSchema(tool.function.parameters),
+  };
+}
+
 function stripSchemaId(schema: JSONSchema): JSONSchema {
   if (!schema || typeof schema !== 'object') return schema;
   const copy = { ...(schema as Record<string, unknown>) } as JSONSchema;
@@ -226,6 +246,7 @@ function stringifyToolContent(content: unknown): string {
     const serialized = JSON.stringify(content);
     // JSON.stringify(Symbol()) and JSON.stringify(() => {}) return undefined.
     // Fall back to String(...) so provider payloads stay string-typed.
+    // eslint-disable-next-line @typescript-eslint/no-base-to-string
     return serialized ?? String(content);
   } catch {
     // eslint-disable-next-line @typescript-eslint/no-base-to-string

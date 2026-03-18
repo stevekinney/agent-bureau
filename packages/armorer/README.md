@@ -49,7 +49,7 @@ The primary API for creating and managing tools:
 import { createToolbox, createTool, isTool } from 'armorer';
 ```
 
-**Exports:** `createToolbox`, `createTool`, `createToolCall`, `combineToolboxes` (plus deprecated alias `combineToolbox`), `lazy`, `withContext`, `isTool`, `isToolbox`, `createMiddleware`, and all core types.
+**Exports:** `createToolbox`, `createTool`, `createToolCall`, `combineToolboxes` (plus deprecated alias `combineToolbox`), `lazy`, `withContext`, `isTool`, `isToolbox`, `createMiddleware`, provider import helpers on `createToolbox`, and all core types.
 
 #### `armorer/utilities`
 
@@ -91,6 +91,7 @@ OpenAI Chat Completions API format:
 import {
   formatOpenAIToolResults,
   formatOpenAIToolResultsAsync,
+  fromOpenAITools,
   parseOpenAIToolCalls,
   toOpenAITools,
 } from 'armorer/adapters/openai';
@@ -103,6 +104,7 @@ Anthropic Messages API format:
 ```typescript
 import {
   formatAnthropicToolResults,
+  fromAnthropicTools,
   parseAnthropicToolCalls,
   toAnthropicTools,
 } from 'armorer/adapters/anthropic';
@@ -115,9 +117,23 @@ Google Gemini API format:
 ```typescript
 import {
   formatGeminiToolResults,
+  fromGeminiTools,
   parseGeminiToolCalls,
   toGeminiTools,
 } from 'armorer/adapters/gemini';
+```
+
+Toolboxes also expose lazy provider exporters, and `createToolbox` exposes matching lazy provider import helpers:
+
+```typescript
+const openAITools = await toolbox.toOpenAITools();
+const importedToolbox = await createToolbox.fromOpenAITools(openAITools, {
+  getTool(configuration) {
+    return async (params) => {
+      throw new Error(`Add execute for ${configuration.name}`);
+    };
+  },
+});
 ```
 
 ### Infrastructure
@@ -311,17 +327,33 @@ const messages = formatOpenAIToolResults(results);
 const streamingMessages = await formatOpenAIToolResultsAsync(results);
 ```
 
+If you want the root package to stay adapter-light until you need it, use the lazy toolbox methods instead:
+
+```typescript
+const tools = await toolbox.toOpenAITools();
+const imported = await createToolbox.fromOpenAITools(tools, {
+  getTool(configuration) {
+    return async (params) => loadExecute(configuration.name, params);
+  },
+});
+```
+
 ## Using with Conversationalist
 
 Use `armorer` for tool schemas, provider tool definitions, tool-call parsing, and execution. Use `conversationalist` for the persistent conversation state and provider message history.
 
 ```typescript
-import { appendToolCalls, appendToolResultsAsync, appendUserMessage, createConversation } from 'conversationalist/conversation';
+import {
+  appendToolCalls,
+  appendToolResultsAsync,
+  appendUserMessage,
+  createConversationHistory,
+} from 'conversationalist/conversation';
 import { toOpenAIMessagesGrouped } from 'conversationalist/adapters/openai';
 import { createToolbox } from 'armorer';
 import { parseOpenAIToolCalls, toOpenAITools } from 'armorer/adapters/openai';
 
-let conversation = createConversation({ title: 'Weather' });
+let conversation = createConversationHistory({ title: 'Weather' });
 conversation = appendUserMessage(conversation, 'What is the weather in Denver?');
 
 const tools = toOpenAITools(toolbox);

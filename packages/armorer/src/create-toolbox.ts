@@ -7,6 +7,9 @@ import {
 import type { ObservableLike, Observer, Subscription } from 'event-emission/types';
 import { z } from 'zod';
 
+import type { AnthropicTool } from './adapters/anthropic/types';
+import type { GeminiTool } from './adapters/gemini/types';
+import type { OpenAITool } from './adapters/openai/types';
 import type { ToolError, ToolErrorCategory } from './core/errors';
 import {
   type InspectorDetailLevel,
@@ -240,6 +243,26 @@ export interface ToolboxExecuteOptions extends ToolExecuteOptions {
 export type ToolboxEntry = ToolConfiguration | Tool;
 export type ToolboxEntries = readonly ToolboxEntry[];
 
+export type ImportedToolConfiguration = {
+  name: string;
+  description: string;
+  input: ToolParametersSchema;
+  namespace?: string;
+  version?: string;
+  title?: string;
+  examples?: readonly string[];
+  tags?: ToolConfiguration['tags'];
+  metadata?: ToolConfiguration['metadata'];
+  risk?: ToolConfiguration['risk'];
+  lifecycle?: ToolConfiguration['lifecycle'];
+  execute?: ToolConfiguration['execute'];
+  policy?: ToolConfiguration['policy'];
+  policyContext?: ToolConfiguration['policyContext'];
+  digests?: ToolConfiguration['digests'];
+  concurrency?: ToolConfiguration['concurrency'];
+  diagnostics?: ToolConfiguration['diagnostics'];
+};
+
 type EntryToTool<TEntry> = TEntry extends Tool ? TEntry : Tool;
 
 export type ToolsFromEntries<TEntries extends ToolboxEntries> = ReadonlyArray<
@@ -326,6 +349,9 @@ export interface Toolbox<TTools extends readonly Tool[] = readonly Tool[]> {
    *   - `full`: Includes complete schema shape details
    */
   inspect: (detailLevel?: InspectorDetailLevel) => RegistryInspection;
+  toOpenAITools: () => Promise<OpenAITool[]>;
+  toAnthropicTools: () => Promise<AnthropicTool[]>;
+  toGeminiTools: () => Promise<GeminiTool[]>;
   toJSON: {
     (): SerializedToolbox;
     (options: { format: 'configuration' }): SerializedToolbox;
@@ -438,7 +464,7 @@ export interface Toolbox<TTools extends readonly Tool[] = readonly Tool[]> {
  * });
  * ```
  */
-export function createToolbox<const TEntries extends ToolboxEntries = []>(
+function createToolboxBase<const TEntries extends ToolboxEntries = []>(
   entries: TEntries = [] as unknown as TEntries,
   options: ToolboxOptions = {},
 ): Toolbox<ToolsFromEntries<TEntries>> {
@@ -735,7 +761,7 @@ export function createToolbox<const TEntries extends ToolboxEntries = []>(
       mergedEntries.push(...(inputs as ToolboxEntries));
     }
 
-    return createToolbox(mergedEntries, {
+    return createToolboxBase(mergedEntries, {
       ...options,
       context,
     });
@@ -811,6 +837,23 @@ export function createToolbox<const TEntries extends ToolboxEntries = []>(
     return inspectRegistry(tools, detailLevel);
   }
 
+  async function toOpenAITools(): Promise<OpenAITool[]> {
+    const { toOpenAITools: convertToOpenAITools } = await import('./adapters/openai');
+    return convertToOpenAITools(api);
+  }
+
+  async function toAnthropicTools(): Promise<AnthropicTool[]> {
+    const { toAnthropicTools: convertToAnthropicTools } = await import(
+      './adapters/anthropic'
+    );
+    return convertToAnthropicTools(api);
+  }
+
+  async function toGeminiTools(): Promise<GeminiTool[]> {
+    const { toGeminiTools: convertToGeminiTools } = await import('./adapters/gemini');
+    return convertToGeminiTools(api);
+  }
+
   function toJSON(): SerializedToolbox;
   function toJSON(options: { format: 'configuration' }): SerializedToolbox;
   function toJSON(options: { format: 'json-schema' }): SerializedToolboxJSONSchema;
@@ -834,6 +877,9 @@ export function createToolbox<const TEntries extends ToolboxEntries = []>(
     getMissingTools,
     hasAllTools,
     inspect,
+    toOpenAITools,
+    toAnthropicTools,
+    toGeminiTools,
     toJSON,
     addEventListener,
     dispatchEvent,
@@ -1156,6 +1202,128 @@ export function createToolbox<const TEntries extends ToolboxEntries = []>(
       registerConfiguration(configuration);
     }
   }
+}
+
+async function createToolboxFromOpenAITools(
+  tools: OpenAITool | readonly OpenAITool[],
+  options: ToolboxOptions = {},
+): Promise<Toolbox> {
+  const { fromOpenAITools: convertFromOpenAITools } = await import('./adapters/openai');
+  if (Array.isArray(tools)) {
+    return createImportedToolbox(convertFromOpenAITools(tools), options);
+  }
+
+  return createImportedToolbox(convertFromOpenAITools(tools as OpenAITool), options);
+}
+
+async function createToolboxFromAnthropicTools(
+  tools: AnthropicTool | readonly AnthropicTool[],
+  options: ToolboxOptions = {},
+): Promise<Toolbox> {
+  const { fromAnthropicTools: convertFromAnthropicTools } = await import(
+    './adapters/anthropic'
+  );
+  if (Array.isArray(tools)) {
+    return createImportedToolbox(convertFromAnthropicTools(tools), options);
+  }
+
+  return createImportedToolbox(convertFromAnthropicTools(tools as AnthropicTool), options);
+}
+
+async function createToolboxFromGeminiTools(
+  tools: GeminiTool | readonly GeminiTool[],
+  options: ToolboxOptions = {},
+): Promise<Toolbox> {
+  const { fromGeminiTools: convertFromGeminiTools } = await import('./adapters/gemini');
+  return createImportedToolbox(convertFromGeminiTools(tools), options);
+}
+
+export type CreateToolbox = typeof createToolboxBase & {
+  fromOpenAITools: typeof createToolboxFromOpenAITools;
+  fromAnthropicTools: typeof createToolboxFromAnthropicTools;
+  fromGeminiTools: typeof createToolboxFromGeminiTools;
+};
+
+export const createToolbox: CreateToolbox = Object.assign(createToolboxBase, {
+  fromOpenAITools: createToolboxFromOpenAITools,
+  fromAnthropicTools: createToolboxFromAnthropicTools,
+  fromGeminiTools: createToolboxFromGeminiTools,
+});
+
+function createImportedToolbox(
+  importedConfigurations: ImportedToolConfiguration | readonly ImportedToolConfiguration[],
+  options: ToolboxOptions,
+): Toolbox {
+  const configurations = Array.isArray(importedConfigurations)
+    ? importedConfigurations
+    : [importedConfigurations];
+
+  return createToolboxBase(
+    configurations.map((configuration) =>
+      materializeImportedToolConfiguration(configuration, options),
+    ),
+    options,
+  );
+}
+
+function materializeImportedToolConfiguration(
+  configuration: ImportedToolConfiguration,
+  options: ToolboxOptions,
+): ToolConfiguration {
+  const definition = defineTool({
+    name: configuration.name,
+    description: configuration.description,
+    ...(configuration.namespace !== undefined
+      ? { namespace: configuration.namespace }
+      : {}),
+    ...(configuration.version !== undefined ? { version: configuration.version } : {}),
+    ...(configuration.title !== undefined ? { title: configuration.title } : {}),
+    ...(configuration.examples !== undefined
+      ? { examples: configuration.examples }
+      : {}),
+    ...(configuration.tags !== undefined ? { tags: configuration.tags } : {}),
+    ...(configuration.metadata !== undefined ? { metadata: configuration.metadata } : {}),
+    ...(configuration.risk !== undefined ? { risk: configuration.risk } : {}),
+    ...(configuration.lifecycle !== undefined
+      ? { lifecycle: configuration.lifecycle }
+      : {}),
+    input: configuration.input,
+  }) as AnyToolDefinition;
+
+  const importedConfiguration = {
+    ...definition,
+    input: configuration.input,
+  } as Omit<ToolConfiguration, 'execute'>;
+
+  if (configuration.policy) {
+    importedConfiguration.policy = configuration.policy;
+  }
+  if (configuration.policyContext) {
+    importedConfiguration.policyContext = configuration.policyContext;
+  }
+  if (configuration.digests !== undefined) {
+    importedConfiguration.digests = configuration.digests;
+  }
+  if (configuration.concurrency !== undefined) {
+    importedConfiguration.concurrency = configuration.concurrency;
+  }
+  if (configuration.diagnostics) {
+    importedConfiguration.diagnostics = configuration.diagnostics;
+  }
+
+  const execute =
+    configuration.execute ??
+    options.getTool?.(importedConfiguration) ??
+    createImportedExecute(configuration.name);
+
+  return {
+    ...importedConfiguration,
+    execute,
+  };
+}
+
+function createImportedExecute(toolName: string): ToolConfiguration['execute'] {
+  return () => Promise.reject(new Error(`Imported tool "${toolName}" does not have an execute implementation. Provide createToolbox.from<Provider>Tools(..., { getTool }) or supply execute before creating the toolbox.`));
 }
 
 function resolveToolConcurrency(
@@ -1504,10 +1672,13 @@ function isTestRuntime(): boolean {
 export const internalToolboxTestUtilities = {
   checkBudget,
   createCachedEmbedder,
+  createImportedExecute,
+  createImportedToolbox,
   createLazyExecuteResolver,
   deriveRiskFromMetadata,
   isDangerousToolContext,
   isMutatingToolContext,
+  materializeImportedToolConfiguration,
   mergePolicies,
   normalizeToolSchema,
   resolvePolicyDecision,

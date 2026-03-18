@@ -99,6 +99,7 @@ try {
     `Coverage report not found at ${lcovPath}: ${
       error instanceof Error ? error.message : String(error)
     }`,
+    { cause: error },
   );
 }
 

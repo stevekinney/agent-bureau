@@ -9,6 +9,10 @@ import {
   lazy,
   type ToolConfiguration,
 } from '../src';
+import { toAnthropicTools } from '../src/adapters/anthropic';
+import { toGeminiTools } from '../src/adapters/gemini';
+import { toOpenAITools } from '../src/adapters/openai';
+import { internalToolboxTestUtilities } from '../src/create-toolbox';
 import { queryTools, reindexSearchIndex, searchTools } from '../src/registry';
 
 const makeConfiguration = (
@@ -36,6 +40,179 @@ describe('createToolbox', () => {
     expect(result.toolCallId).toBe('abc');
     expect(result.toolName).toBe('sum');
     expect(result.result).toBe(3);
+  });
+
+  it('exports provider tools through lazy toolbox methods', async () => {
+    const toolbox = createToolbox([makeConfiguration()]);
+
+    await expect(toolbox.toOpenAITools()).resolves.toEqual(toOpenAITools(toolbox));
+    await expect(toolbox.toAnthropicTools()).resolves.toEqual(toAnthropicTools(toolbox));
+    await expect(toolbox.toGeminiTools()).resolves.toEqual(toGeminiTools(toolbox));
+  });
+
+  it('imports OpenAI tools through createToolbox.fromOpenAITools', async () => {
+    const imported = await createToolbox.fromOpenAITools([
+      {
+        type: 'function',
+        function: {
+          name: 'sum',
+          description: 'add two numbers',
+          parameters: {
+            type: 'object',
+            properties: {
+              a: { type: 'number' },
+              b: { type: 'number' },
+            },
+            required: ['a', 'b'],
+            additionalProperties: false,
+          },
+        },
+      },
+    ]);
+
+    expect(imported.getTool('sum')).toBeDefined();
+    const result = await imported.execute({
+      id: 'import-openai',
+      name: 'sum',
+      arguments: { a: 1, b: 2 },
+    });
+    expect(result.error?.message).toContain('Imported tool "sum" does not have an execute implementation');
+  });
+
+  it('imports a single OpenAI tool input through createToolbox.fromOpenAITools', async () => {
+    const imported = await createToolbox.fromOpenAITools({
+      type: 'function',
+      function: {
+        name: 'single-openai',
+        description: 'single tool',
+        parameters: {
+          type: 'object',
+          properties: {
+            value: { type: 'string' },
+          },
+          required: ['value'],
+        },
+      },
+    });
+
+    expect(imported.getTool('single-openai')).toBeDefined();
+  });
+
+  it('resolves imported tool execute functions through getTool', async () => {
+    const imported = await createToolbox.fromAnthropicTools(
+      [
+        {
+          name: 'sum',
+          description: 'add two numbers',
+          input_schema: {
+            type: 'object',
+            properties: {
+              a: { type: 'number' },
+              b: { type: 'number' },
+            },
+            required: ['a', 'b'],
+          },
+        },
+      ],
+      {
+        getTool(configuration) {
+          expect(configuration.name).toBe('sum');
+          return async (params) => {
+            const values = params as { a: number; b: number };
+            return values.a + values.b;
+          };
+        },
+      },
+    );
+
+    const result = await imported.execute({
+      id: 'import-anthropic',
+      name: 'sum',
+      arguments: { a: 2, b: 3 },
+    });
+
+    expect(result.result).toBe(5);
+  });
+
+  it('imports a single Anthropic tool input through createToolbox.fromAnthropicTools', async () => {
+    const imported = await createToolbox.fromAnthropicTools({
+      name: 'single-anthropic',
+      description: 'single tool',
+      input_schema: {
+        type: 'object',
+        properties: {
+          query: { type: 'string' },
+        },
+        required: ['query'],
+      },
+    });
+
+    expect(imported.getTool('single-anthropic')).toBeDefined();
+  });
+
+  it('imports Gemini tools through createToolbox.fromGeminiTools', async () => {
+    const imported = await createToolbox.fromGeminiTools([
+      {
+        functionDeclarations: [
+          {
+            name: 'lookup',
+            description: 'Lookup values',
+            parameters: {
+              type: 'object',
+              properties: {
+                query: { type: 'string' },
+              },
+              required: ['query'],
+            },
+          },
+        ],
+      },
+    ]);
+
+    expect(imported.getTool('lookup')).toBeDefined();
+    const result = await imported.execute({
+      id: 'import-gemini',
+      name: 'lookup',
+      arguments: { query: 'docs' },
+    });
+    expect(result.error?.message).toContain('Imported tool "lookup" does not have an execute implementation');
+  });
+
+  it('materializes imported tool configuration metadata for lazy imports', () => {
+    const { createImportedExecute, materializeImportedToolConfiguration } =
+      internalToolboxTestUtilities;
+    const diagnostics = {
+      safeParseWithReport: () => ({
+        success: true as const,
+        data: {},
+        report: { warnings: [], cost: 0 },
+      }),
+    };
+    const policy = {
+      beforeExecute: () => ({ allow: true }),
+    };
+    const configuration = materializeImportedToolConfiguration(
+      {
+        name: 'materialized-tool',
+        description: 'materialized',
+        input: z.object({ value: z.string() }),
+        policy,
+        policyContext: () => ({ scope: 'test' }),
+        digests: { input: true, output: true },
+        concurrency: 2,
+        diagnostics,
+      },
+      {},
+    );
+
+    expect(configuration.policy).toBe(policy);
+    expect(configuration.policyContext).toBeDefined();
+    expect(configuration.digests).toEqual({ input: true, output: true });
+    expect(configuration.concurrency).toBe(2);
+    expect(configuration.diagnostics).toBe(diagnostics);
+
+    const placeholder = createImportedExecute('missing-tool');
+    expect(placeholder({}, {})).rejects.toThrow('Imported tool "missing-tool"');
   });
 
   it('generates a call id when missing', async () => {

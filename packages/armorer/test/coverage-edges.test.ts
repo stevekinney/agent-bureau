@@ -1,19 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import { z } from 'zod';
 
-import { createTool, internalToolTestUtilities } from '../src/create-tool';
-import { createToolbox, internalToolboxTestUtilities } from '../src/create-toolbox';
-import { defineTool, serializeToolDefinition } from '../src/core';
-import { normalizeIdentity } from '../src/core/identity';
-import { unwrapSchema } from '../src/core/schema-utilities';
-import { assertJsonValue } from '../src/core/serialization/json';
-import {
-  getQueryEmbeddingInfo,
-  getToolEmbeddings,
-  registerRegistryEmbedder,
-  warmToolEmbeddings,
-} from '../src/core/registry/embeddings';
-import { internalQueryPredicateTestUtilities } from '../src/core/query-predicates';
 import { formatAnthropicToolResults, toAnthropicTools } from '../src/adapters/anthropic';
 import { formatGeminiToolResults } from '../src/adapters/gemini';
 import {
@@ -25,7 +12,20 @@ import {
   formatOpenAIToolResults,
   formatOpenAIToolResultsAsync,
 } from '../src/adapters/openai';
-import { createMCP, internalMcpTestUtilities, toMcpTools } from '../src/integrations/mcp';
+import { defineTool, serializeToolDefinition } from '../src/core';
+import { normalizeIdentity } from '../src/core/identity';
+import { internalQueryPredicateTestUtilities } from '../src/core/query-predicates';
+import {
+  getQueryEmbeddingInfo,
+  getToolEmbeddings,
+  registerRegistryEmbedder,
+  warmToolEmbeddings,
+} from '../src/core/registry/embeddings';
+import { unwrapSchema } from '../src/core/schema-utilities';
+import { assertJsonValue } from '../src/core/serialization/json';
+import { createTool, internalToolTestUtilities } from '../src/create-tool';
+import { createToolbox, internalToolboxTestUtilities } from '../src/create-toolbox';
+import { createMCP, internalMcpTestUtilities } from '../src/integrations/mcp';
 import { createSearchTool } from '../src/tools/search-tools';
 import { internalRetryTestUtilities, retry } from '../src/utilities/retry';
 

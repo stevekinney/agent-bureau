@@ -5,6 +5,7 @@ import type { AnyToolDefinition } from '../../core';
 import { createRegistry, defineTool, serializeToolDefinition } from '../../core';
 import {
   formatGeminiToolResults,
+  fromGeminiTools,
   parseGeminiToolCalls,
   toGeminiTools,
 } from './index';
@@ -178,5 +179,73 @@ describe('formatGeminiToolResults', () => {
         },
       },
     ]);
+  });
+});
+
+describe('fromGeminiTools', () => {
+  it('converts Gemini tools into imported tool configurations', () => {
+    const imported = fromGeminiTools([
+      {
+        functionDeclarations: [
+          {
+            name: 'search',
+            description: 'Search for items',
+            parameters: {
+              type: 'object',
+              properties: {
+                query: { type: 'string' },
+                includeArchived: { type: 'boolean', nullable: true },
+              },
+              required: ['query'],
+            },
+          },
+        ],
+      },
+    ]);
+
+    expect(imported).toHaveLength(1);
+    expect(imported[0]?.name).toBe('search');
+    expect(imported[0]?.input.safeParse({ query: 'gemini', includeArchived: null }).success).toBe(
+      true,
+    );
+  });
+
+  it('accepts direct function declaration input', () => {
+    const imported = fromGeminiTools({
+      name: 'lookup',
+      description: 'Lookup',
+      parameters: { type: 'object', properties: {} },
+    });
+
+    expect(imported).toHaveLength(1);
+    expect(imported[0]?.name).toBe('lookup');
+  });
+
+  it('accepts direct function declaration arrays', () => {
+    const imported = fromGeminiTools([
+      {
+        name: 'array-tool',
+        description: 'Array input',
+        parameters: { type: 'object', properties: {} },
+      },
+    ]);
+
+    expect(imported).toHaveLength(1);
+    expect(imported[0]?.name).toBe('array-tool');
+  });
+
+  it('accepts a single Gemini tool input', () => {
+    const imported = fromGeminiTools({
+      functionDeclarations: [
+        {
+          name: 'single-tool',
+          description: 'Single tool import',
+          parameters: { type: 'object', properties: {} },
+        },
+      ],
+    });
+
+    expect(imported).toHaveLength(1);
+    expect(imported[0]?.name).toBe('single-tool');
   });
 });

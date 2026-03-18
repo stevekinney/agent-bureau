@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test';
 import { z } from 'zod';
 
 import { defineTool } from '../src/core';
-import { createTool } from '../src/create-tool';
+import type { NormalizedTextQuery, TextSearchIndex } from '../src/core/query-predicates';
 import {
   internalRegistryTestUtilities,
   queryTools,
@@ -12,11 +12,11 @@ import {
   unregisterToolIndexes,
 } from '../src/core/registry';
 import {
+  type EmbeddingInfo,
   registerRegistryEmbedder,
   warmToolEmbeddings,
-  type EmbeddingInfo,
 } from '../src/core/registry/embeddings';
-import type { NormalizedTextQuery, TextSearchIndex } from '../src/core/query-predicates';
+import { createTool } from '../src/create-tool';
 
 const {
   addFieldTokens,

@@ -5,6 +5,7 @@ import type { AnyToolDefinition } from '../../core';
 import { createRegistry, defineTool, serializeToolDefinition } from '../../core';
 import {
   formatAnthropicToolResults,
+  fromAnthropicTools,
   parseAnthropicToolCalls,
   toAnthropicTools,
 } from './index';
@@ -154,5 +155,48 @@ describe('formatAnthropicToolResults', () => {
         is_error: true,
       },
     ]);
+  });
+});
+
+describe('fromAnthropicTools', () => {
+  it('converts anthropic tools into imported tool configurations', () => {
+    const imported = fromAnthropicTools({
+      name: 'search',
+      description: 'Search for items',
+      input_schema: {
+        type: 'object',
+        properties: {
+          query: { type: 'string' },
+          filters: {
+            type: 'object',
+            properties: {
+              tag: { type: 'string' },
+            },
+            additionalProperties: false,
+          },
+        },
+        required: ['query'],
+        additionalProperties: false,
+      },
+    });
+
+    expect(imported.name).toBe('search');
+    expect(imported.input.safeParse({ query: 'claude', filters: { tag: 'docs' } }).success).toBe(
+      true,
+    );
+    expect(imported.input.safeParse({ query: 'claude', extra: true }).success).toBe(false);
+  });
+
+  it('returns arrays for array input', () => {
+    const imported = fromAnthropicTools([
+      {
+        name: 'lookup',
+        description: 'Lookup',
+        input_schema: { type: 'object', properties: {} },
+      },
+    ]);
+
+    expect(imported).toHaveLength(1);
+    expect(imported[0]?.name).toBe('lookup');
   });
 });

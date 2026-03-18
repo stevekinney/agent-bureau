@@ -6,6 +6,7 @@ import { createToolbox } from '../../create-toolbox';
 import {
   formatOpenAIToolResults,
   formatOpenAIToolResultsAsync,
+  fromOpenAITools,
   parseOpenAIToolCalls,
   toOpenAITools,
 } from './index';
@@ -128,6 +129,50 @@ describe('parseOpenAIToolCalls', () => {
         arguments: {},
       },
     ]);
+  });
+});
+
+describe('fromOpenAITools', () => {
+  it('converts provider tools into imported tool configurations', () => {
+    const imported = fromOpenAITools({
+      type: 'function',
+      function: {
+        name: 'search-documents',
+        description: 'Searches documents',
+        parameters: {
+          type: 'object',
+          properties: {
+            query: { type: 'string', description: 'Query text' },
+            limit: { type: 'integer', default: 5 },
+          },
+          required: ['query'],
+          additionalProperties: false,
+        },
+      },
+    });
+
+    expect(imported.name).toBe('search-documents');
+    expect(imported.description).toBe('Searches documents');
+    const parsed = imported.input.safeParse({ query: 'armorer' });
+    expect(parsed.success).toBe(true);
+    expect(imported.input.safeParse({}).success).toBe(false);
+    expect(imported.input.safeParse({ query: 'armorer', extra: true }).success).toBe(false);
+  });
+
+  it('returns arrays for array input', () => {
+    const imported = fromOpenAITools([
+      {
+        type: 'function',
+        function: {
+          name: 'lookup',
+          description: 'Lookup',
+          parameters: { type: 'object', properties: {} },
+        },
+      },
+    ]);
+
+    expect(imported).toHaveLength(1);
+    expect(imported[0]?.name).toBe('lookup');
   });
 });
 

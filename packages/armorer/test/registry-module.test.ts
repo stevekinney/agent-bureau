@@ -2,8 +2,10 @@ import { describe, expect, it } from 'bun:test';
 import { z } from 'zod';
 
 import { defineTool } from '../src/core';
-import { createRegistry } from '../src/core/registry/registry';
-import { internalRegistryModuleTestUtilities } from '../src/core/registry/registry';
+import {
+  createRegistry,
+  internalRegistryModuleTestUtilities,
+} from '../src/core/registry/registry';
 
 describe('registry module coverage', () => {
   it('covers prerelease comparisons that are not reachable through normal registry sorting', () => {
