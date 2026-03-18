@@ -14,7 +14,7 @@
       "name": "armorer",
       "version": "0.7.1",
       "dependencies": {
-        "event-emission": "0.2.1",
+        "event-emission": "0.3.0",
         "interoperability": "workspace:*",
       },
       "devDependencies": {
@@ -67,7 +67,7 @@
       "version": "0.0.12",
       "dependencies": {
         "change-case": "^5.4.4",
-        "event-emission": "0.2.1",
+        "event-emission": "0.3.0",
         "gray-matter": "^4.0.3",
         "interoperability": "workspace:*",
       },
@@ -495,7 +495,7 @@
 
     "etag": ["etag@1.8.1", "", {}, "sha512-aIL5Fx7mawVa300al2BnEE4iNvo1qETxLrPI/o05L7z6go7fCw1J6EQmbK4FmJ2AS7kgVF/KEZWufBfdClMcPg=="],
 
-    "event-emission": ["event-emission@0.2.1", "", {}, "sha512-bQMhkEhmC2QtF618B6jt6BNvAfjwqkLZMdPVlOSdM6B3mmmJMzMSW5DNU6NLFIpAg0OjoFtlHyEKL8ylsIDa5Q=="],
+    "event-emission": ["event-emission@0.3.0", "", {}, "sha512-SvuOMl9uZ2kjAbHKaL1m8tPmjs5+KkThkAj96U8K0JE0SSCpaozKas4hDH0c2BB/B41UROrS7EOzRLmoyvJHyg=="],
 
     "eventsource": ["eventsource@3.0.7", "", { "dependencies": { "eventsource-parser": "^3.0.1" } }, "sha512-CRT1WTyuQoD771GW56XEZFQ/ZoSfWid1alKGDYMmkt2yl8UXrVR4pspqWNEcqKvVIzg6PAltWjxcSSPrboA4iA=="],
 

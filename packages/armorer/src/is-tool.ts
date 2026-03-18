@@ -299,8 +299,9 @@ export type Tool<
     options?: AddEventListenerOptionsLike,
   ) => () => void;
   dispatchEvent: <K extends keyof E & string>(event: ToolCustomEvent<E[K]>) => boolean;
+  emit: <K extends keyof E & string>(type: K, detail: E[K]) => boolean;
 
-  // Observable-based event methods (new in event-emission 0.2.0)
+  // Observable-based event methods (new in event-emission 0.3.0)
   on: <K extends keyof E & string>(
     type: K,
     options?: AddEventListenerOptionsLike | boolean,
@@ -320,7 +321,7 @@ export type Tool<
   ) => Subscription;
   toObservable: () => ObservableLike<ToolCustomEvent<E[keyof E]>>;
 
-  // Async iteration (new in event-emission 0.2.0)
+  // Async iteration (new in event-emission 0.3.0)
   events: <K extends keyof E & string>(
     type: K,
     options?: AsyncIteratorOptions,

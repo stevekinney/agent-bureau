@@ -406,7 +406,7 @@ export function createTool<
   const customMetadata = resolvedMetadata ?? (undefined as M);
   const normalizedInput = normalizeSchema(toolInput);
 
-  const hub = createEventTarget<E>();
+  const emitter = createEventTarget<E>();
   const {
     addEventListener,
     dispatchEvent,
@@ -416,11 +416,13 @@ export function createTool<
     toObservable,
     events,
     complete,
-  } = hub;
+  } = emitter;
 
-  // Helper to emit events with proper typing (event-emission accepts partial events at runtime)
+  // Typed wrapper: emitter.emit is generic over E, but within this generic
+  // function TypeScript can't verify literal event payloads satisfy E[K].
+  // Cast is safe because DefaultToolEvents defines all event shapes used below.
   const emit = (type: string, detail: unknown) =>
-    dispatchEvent({ type, detail } as Parameters<typeof dispatchEvent>[0]);
+    emitter.emit(type as keyof E & string, detail as E[keyof E & string]);
 
   const metadataValue = customMetadata ?? (undefined as M);
   const resolvedRisk = mergeRisk(metadataValue, risk);
@@ -1124,17 +1126,18 @@ export function createTool<
     // Event listener methods
     addEventListener,
     dispatchEvent,
-    // Observable-based event methods (event-emission 0.2.0)
+    emit,
+    // Observable-based event methods (event-emission 0.3.0)
     on,
     once,
     subscribe,
     toObservable,
-    // Async iteration (event-emission 0.2.0)
+    // Async iteration (event-emission 0.3.0)
     events,
     // Lifecycle methods
     complete,
     get completed() {
-      return hub.completed;
+      return emitter.completed;
     },
     toJSON,
     toString: () =>

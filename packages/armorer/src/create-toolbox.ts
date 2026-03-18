@@ -162,6 +162,7 @@ export interface ImportedToolboxOptions extends ToolboxOptions {
 
 export interface ToolboxFactoryContext {
   dispatchEvent: ToolboxEventDispatcher;
+  emit: <K extends ToolboxEventType>(type: K, detail: ToolboxEvents[K]) => boolean;
   baseContext: ToolboxContext;
   buildDefaultTool: (configuration: ToolConfiguration) => Tool;
 }
@@ -399,8 +400,9 @@ export interface Toolbox<TTools extends readonly Tool[] = readonly Tool[]> {
     options?: AddEventListenerOptionsLike,
   ) => () => void;
   dispatchEvent: ToolboxEventDispatcher;
+  emit: <K extends ToolboxEventType>(type: K, detail: ToolboxEvents[K]) => boolean;
 
-  // Observable-based event methods (event-emission 0.2.0)
+  // Observable-based event methods (event-emission 0.3.0)
   on: <K extends ToolboxEventType>(
     type: K,
     options?: AddEventListenerOptionsLike | boolean,
@@ -420,7 +422,7 @@ export interface Toolbox<TTools extends readonly Tool[] = readonly Tool[]> {
   ) => Subscription;
   toObservable: () => ObservableLike<EmissionEvent<ToolboxEvents[keyof ToolboxEvents]>>;
 
-  // Async iteration (event-emission 0.2.0)
+  // Async iteration (event-emission 0.3.0)
   events: <K extends ToolboxEventType>(
     type: K,
     options?: AsyncIteratorOptions,
@@ -511,10 +513,11 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
   // const registry = new Map<string, Tool>();
 
   const storedConfigurations = new Map<string, ToolConfiguration>();
-  const hub = createEventTarget<ToolboxEvents>();
+  const emitter = createEventTarget<ToolboxEvents>();
   const {
     addEventListener,
     dispatchEvent,
+    emit,
     clear,
     on,
     once,
@@ -522,11 +525,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
     toObservable,
     events,
     complete,
-  } = hub;
-
-  // Helper to emit events with proper typing (event-emission accepts partial events at runtime)
-  const emit = <K extends ToolboxEventType>(type: K, detail: ToolboxEvents[K]) =>
-    dispatchEvent({ type, detail } as EmissionEvent<ToolboxEvents[K]>);
+  } = emitter;
   const baseContext = options.context ? { ...options.context } : {};
   const readOnly = options.readOnly ?? false;
   const allowMutation = options.allowMutation ?? !readOnly;
@@ -545,6 +544,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
       ? (configuration: ToolConfiguration) =>
           options.toolFactory!(configuration, {
             dispatchEvent,
+            emit,
             baseContext,
             buildDefaultTool,
           })
@@ -954,17 +954,18 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
     toJSON,
     addEventListener,
     dispatchEvent,
-    // Observable-based event methods (event-emission 0.2.0)
+    emit,
+    // Observable-based event methods (event-emission 0.3.0)
     on,
     once,
     subscribe,
     toObservable,
-    // Async iteration (event-emission 0.2.0)
+    // Async iteration (event-emission 0.3.0)
     events,
     // Lifecycle methods
     complete,
     get completed() {
-      return hub.completed;
+      return emitter.completed;
     },
     // Internal method to get toolbox context
     getContext: () => baseContext,
@@ -980,7 +981,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
 
     const legacyApi = api as LegacyMutableToolbox;
     const emitLegacy = (type: string, detail: unknown) =>
-      dispatchEvent({ type, detail } as EmissionEvent<unknown>);
+      emit(type as ToolboxEventType, detail as ToolboxEvents[ToolboxEventType]);
 
     legacyApi.register = (...toolEntries: ToolboxEntries): LegacyMutableToolbox => {
       for (const toolEntry of toolEntries) {
@@ -1074,6 +1075,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
         return executeFn(params, {
           ...baseContext,
           dispatchEvent,
+          emit,
           configuration: toolContext.configuration,
           toolCall: toolContext.toolCall,
           signal: toolContext.signal,

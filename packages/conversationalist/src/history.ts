@@ -223,7 +223,7 @@ async function loadConversationAdapter(
 export class Conversation extends EventTarget {
   private currentNode: HistoryNode;
   private environment: ConversationEnvironment;
-  private readonly eventHub = createEventTarget<ConversationEvents>();
+  private readonly emitter = createEventTarget<ConversationEvents>();
 
   constructor(
     initial: ConversationHistory = createConversationHistory(),
@@ -261,7 +261,7 @@ export class Conversation extends EventTarget {
     type: ConversationEventType,
     detail: ConversationEventDetail,
   ): void {
-    this.eventHub.dispatchEvent({ type, detail });
+    this.emitter.emit(type, detail);
   }
 
   private commit(
@@ -334,7 +334,7 @@ export class Conversation extends EventTarget {
     options?: boolean | AddEventListenerOptions,
   ): void | (() => void) {
     if (!callback) return;
-    return this.eventHub.addEventListener(
+    return this.emitter.addEventListener(
       type as ConversationEventType,
       callback as EventListenerLike<ConversationEvent>,
       this.toAddListenerOptions(options),
@@ -353,7 +353,7 @@ export class Conversation extends EventTarget {
     options?: boolean | EventListenerOptions,
   ): void {
     if (!callback) return;
-    this.eventHub.removeEventListener(
+    this.emitter.removeEventListener(
       type as ConversationEventType,
       callback as EventListenerLike<ConversationEvent>,
       this.toRemoveListenerOptions(options),
@@ -368,9 +368,19 @@ export class Conversation extends EventTarget {
       | Event
       | EmissionEvent<ConversationEvents[ConversationEventType], ConversationEventType>,
   ): boolean {
-    return this.eventHub.dispatchEvent(
-      event as Parameters<typeof this.eventHub.dispatchEvent>[0],
+    return this.emitter.dispatchEvent(
+      event as Parameters<typeof this.emitter.dispatchEvent>[0],
     );
+  }
+
+  /**
+   * Emits a typed event through the event hub.
+   */
+  emit<K extends ConversationEventType>(
+    type: K,
+    detail: ConversationEvents[K],
+  ): boolean {
+    return this.emitter.emit(type, detail);
   }
 
   /**
@@ -398,7 +408,7 @@ export class Conversation extends EventTarget {
     type: K,
     options?: AddEventListenerOptionsLike | boolean,
   ): ObservableLike<EmissionEvent<ConversationEvents[K], K>> {
-    return this.eventHub.on(type, options);
+    return this.emitter.on(type, options);
   }
 
   once<K extends ConversationEventType>(
@@ -406,7 +416,7 @@ export class Conversation extends EventTarget {
     listener: (event: EmissionEvent<ConversationEvents[K], K>) => void | Promise<void>,
     options?: Omit<AddEventListenerOptionsLike, 'once'>,
   ): () => void {
-    return this.eventHub.once(type, listener, options);
+    return this.emitter.once(type, listener, options);
   }
 
   subscribe<K extends ConversationEventType>(
@@ -417,28 +427,28 @@ export class Conversation extends EventTarget {
     error?: (err: unknown) => void,
     complete?: () => void,
   ): Subscription {
-    return this.eventHub.subscribe(type, observerOrNext, error, complete);
+    return this.emitter.subscribe(type, observerOrNext, error, complete);
   }
 
   toObservable(): ObservableLike<
     EmissionEvent<ConversationEvents[ConversationEventType], ConversationEventType>
   > {
-    return this.eventHub.toObservable();
+    return this.emitter.toObservable();
   }
 
   events<K extends ConversationEventType>(
     type: K,
     options?: AsyncIteratorOptions,
   ): AsyncIterableIterator<EmissionEvent<ConversationEvents[K], K>> {
-    return this.eventHub.events(type, options);
+    return this.emitter.events(type, options);
   }
 
   complete(): void {
-    this.eventHub.complete();
+    this.emitter.complete();
   }
 
   get completed(): boolean {
-    return this.eventHub.completed;
+    return this.emitter.completed;
   }
 
   /**
@@ -1294,7 +1304,7 @@ export class Conversation extends EventTarget {
     };
 
     if (root) clearNode(root);
-    this.eventHub.clear();
+    this.emitter.clear();
   }
 }
 
