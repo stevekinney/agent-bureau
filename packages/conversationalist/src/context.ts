@@ -1,5 +1,3 @@
-import type { MultiModalContent } from '@lasercat/homogenaize';
-
 import {
   assertConversationSafe,
   ensureConversationSafe,
@@ -12,6 +10,7 @@ import {
 } from './environment';
 import { ConversationalistError, createIntegrityError } from './errors';
 import { copyContent } from './multi-modal';
+import type { MultiModalContent } from './multi-modal';
 import type {
   AssistantMessage,
   ConversationHistory as Conversation,

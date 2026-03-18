@@ -1,9 +1,5 @@
-import type {
-  Message as ExternalMessage,
-  MultiModalContent,
-} from '@lasercat/homogenaize';
-
-import type { ConversationHistory as Conversation } from '../types';
+import type { MultiModalContent } from '../multi-modal';
+import type { ChatMessage, ConversationHistory as Conversation } from '../types';
 import { getOrderedMessages } from '../utilities/message-store';
 import { assertConversationSafe } from './validation';
 
@@ -12,7 +8,7 @@ import { assertConversationSafe } from './validation';
  * Maps internal roles to standard user/assistant/system roles.
  * Hidden messages are excluded from the output.
  */
-export function toChatMessages(conversation: Conversation): ExternalMessage[] {
+export function toChatMessages(conversation: Conversation): ChatMessage[] {
   assertConversationSafe(conversation);
   const roleMap: Record<string, 'user' | 'assistant' | 'system'> = {
     user: 'user',
@@ -24,7 +20,7 @@ export function toChatMessages(conversation: Conversation): ExternalMessage[] {
     snapshot: 'system',
   };
 
-  const result: ExternalMessage[] = [];
+  const result: ChatMessage[] = [];
   for (const message of getOrderedMessages(conversation)) {
     if (message.hidden) continue;
     const externalRole = roleMap[message.role] as 'user' | 'assistant' | 'system';

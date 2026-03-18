@@ -1,11 +1,10 @@
-import type { MultiModalContent } from '@lasercat/homogenaize';
-
 import { ensureConversationSafe } from './conversation/validation';
 import {
   type ConversationEnvironment,
   isConversationEnvironmentParameter,
   resolveConversationEnvironment,
 } from './environment';
+import type { MultiModalContent } from './multi-modal';
 import type {
   AssistantMessage,
   ConversationHistory as Conversation,

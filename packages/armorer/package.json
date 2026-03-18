@@ -184,7 +184,6 @@
     "@eslint/eslintrc": "^3.3.3",
     "@eslint/js": "^10.0.1",
     "@eslint/markdown": "^7.5.1",
-    "@lasercat/homogenaize": "^1.2.41",
     "@modelcontextprotocol/sdk": "^1.26.0",
     "@openai/agents": "^0.4.7",
     "@opentelemetry/api": "^1.9.0",

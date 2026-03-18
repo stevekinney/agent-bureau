@@ -1,5 +1,3 @@
-import type { MultiModalContent } from '@lasercat/homogenaize';
-
 import { truncateFromPosition, truncateToTokenLimit } from './context';
 import type { RedactMessageOptions } from './conversation/index';
 import {
@@ -26,6 +24,7 @@ import type {
   MessageInput,
   TokenUsage,
 } from './types';
+import type { MultiModalContent } from './multi-modal';
 
 /**
  * A mutable draft wrapper around a conversation.

@@ -1,6 +1,6 @@
-import type { MultiModalContent } from '@lasercat/homogenaize';
 import { z } from 'zod';
 
+import type { MultiModalContent } from './multi-modal';
 import type {
   ConversationHistory as Conversation,
   ConversationStatus,
@@ -31,11 +31,19 @@ type RawMultiModalContent = {
 };
 
 function toMultiModalContent(value: RawMultiModalContent): MultiModalContent {
-  const result: MultiModalContent = { type: value.type };
-  if (value.text !== undefined) result.text = value.text;
-  if (value.url !== undefined) result.url = value.url;
-  if (value.mimeType !== undefined) result.mimeType = value.mimeType;
-  return result;
+  if (value.type === 'text') {
+    return {
+      type: 'text',
+      text: value.text ?? '',
+    };
+  }
+
+  return {
+    type: 'image',
+    url: value.url ?? '',
+    ...(value.mimeType !== undefined ? { mimeType: value.mimeType } : {}),
+    ...(value.text !== undefined ? { text: value.text } : {}),
+  };
 }
 
 /**

@@ -1,7 +1,7 @@
-import type { MultiModalContent } from '@lasercat/homogenaize';
 import matter from 'gray-matter';
 
 import { assertConversationSafe } from '../conversation/validation';
+import type { MultiModalContent } from '../multi-modal';
 import { copyContent } from '../multi-modal';
 import type {
   AssistantMessage,

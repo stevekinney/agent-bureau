@@ -80,13 +80,15 @@ export type {
   ConversationEvents,
   ConversationEventType,
 } from './history';
-export type { ImageContent, TextContent } from './multi-modal';
+export type { ImageContent, MultiModalContent, TextContent } from './multi-modal';
 export type {
   AppendableToolAction,
   AppendableToolCallInput,
   AppendableToolError,
   AppendableToolResult,
   AssistantMessage,
+  ChatMessage,
+  ChatMessageRole,
   ConversationHistory,
   ConversationProvider,
   ConversationStatus,
@@ -108,7 +110,3 @@ export {
   pipeConversationHistory,
   withConversationHistory,
 } from './with-conversation';
-export type {
-  Message as ExternalMessage,
-  MultiModalContent,
-} from '@lasercat/homogenaize';

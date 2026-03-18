@@ -1,4 +1,4 @@
-import type { MultiModalContent } from '@lasercat/homogenaize';
+import type { MultiModalContent } from '../multi-modal';
 
 /**
  * Converts content to a multi-modal array format.

@@ -1,10 +1,9 @@
-import type { MultiModalContent } from '@lasercat/homogenaize';
-
 import {
   appendMessages,
   createConversationHistory,
 } from '../../conversation/index';
 import { assertConversationSafe } from '../../conversation/validation';
+import type { MultiModalContent } from '../../multi-modal';
 import type {
   ConversationHistory as Conversation,
   JSONValue,

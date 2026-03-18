@@ -1,22 +1,8 @@
-/**
- * Re-exports multi-modal types from @lasercat/homogenaize
- */
-
-import type { MultiModalContent } from '@lasercat/homogenaize';
-
-export type { Message, MultiModalContent } from '@lasercat/homogenaize';
-
-/**
- * TextContent and ImageContent are convenience types for discriminating MultiModalContent.
- */
 export interface TextContent {
   type: 'text';
   text: string;
 }
 
-/**
- * ImageContent is a convenience type for image parts in multi-modal content.
- */
 export interface ImageContent {
   type: 'image';
   url: string;
@@ -24,20 +10,24 @@ export interface ImageContent {
   text?: string;
 }
 
+export type MultiModalContent = TextContent | ImageContent;
+
 /**
  * Creates a shallow copy of a MultiModalContent item.
  */
 export function copyMultiModalContent(item: MultiModalContent): MultiModalContent {
   if (item.type === 'text') {
-    const result: MultiModalContent = { type: 'text' };
-    if (item.text !== undefined) result.text = item.text;
-    return result;
+    return {
+      type: 'text',
+      text: item.text,
+    };
   }
-  const result: MultiModalContent = { type: 'image' };
-  if (item.url !== undefined) result.url = item.url;
-  if (item.mimeType !== undefined) result.mimeType = item.mimeType;
-  if (item.text !== undefined) result.text = item.text;
-  return result;
+  return {
+    type: 'image',
+    url: item.url,
+    ...(item.mimeType !== undefined ? { mimeType: item.mimeType } : {}),
+    ...(item.text !== undefined ? { text: item.text } : {}),
+  };
 }
 
 /**

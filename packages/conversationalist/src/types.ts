@@ -1,4 +1,4 @@
-import type { MultiModalContent } from '@lasercat/homogenaize';
+import type { MultiModalContent } from './multi-modal';
 
 /**
  * Current schema version for serialized conversation data.
@@ -16,6 +16,12 @@ export type JSONValue =
   | { [key: string]: JSONValue };
 
 export type ConversationProvider = 'openai' | 'anthropic' | 'gemini';
+export type ChatMessageRole = 'user' | 'assistant' | 'system';
+
+export interface ChatMessage {
+  role: ChatMessageRole;
+  content: string | MultiModalContent[];
+}
 
 /**
  * Supported message roles in a conversation.

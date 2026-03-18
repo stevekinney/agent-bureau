@@ -1,6 +1,5 @@
-import type { MultiModalContent } from '@lasercat/homogenaize';
-
 import { copyContent } from '../multi-modal';
+import type { MultiModalContent } from '../multi-modal';
 import type { AssistantMessage, Message } from '../types';
 import { toReadonly } from './type-helpers';
 

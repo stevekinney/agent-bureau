@@ -1,11 +1,10 @@
-import type { MultiModalContent } from '@lasercat/homogenaize';
-
 import {
   type ConversationEnvironment,
   isConversationEnvironmentParameter,
   resolveConversationEnvironment,
 } from '../environment';
 import { createIntegrityError } from '../errors';
+import type { MultiModalContent } from '../multi-modal';
 import type {
   AssistantMessage,
   ConversationHistory as Conversation,
