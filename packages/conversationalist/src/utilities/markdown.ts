@@ -5,7 +5,7 @@ import { assertConversationSafe } from '../conversation/validation';
 import { copyContent } from '../multi-modal';
 import type {
   AssistantMessage,
-  Conversation,
+  ConversationHistory as Conversation,
   ConversationStatus,
   JSONValue,
   Message,

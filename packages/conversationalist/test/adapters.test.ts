@@ -7,11 +7,11 @@ import { simpleTokenEstimator, truncateToTokenLimit } from '../src/context';
 import {
   appendMessages,
   appendUnsafeMessage,
-  createConversation,
-  createConversationUnsafe,
+  createConversationHistory as createConversation,
+  createConversationHistoryUnsafe as createConversationUnsafe,
 } from '../src/conversation/index';
 import { ConversationalistError } from '../src/errors';
-import type { Conversation } from '../src/types';
+import type { ConversationHistory as Conversation } from '../src/types';
 
 const testEnvironment = {
   now: () => '2024-01-01T00:00:00.000Z',

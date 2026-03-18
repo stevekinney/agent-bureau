@@ -22,7 +22,7 @@ import {
   appendToolResults,
   appendToolResultsAsync,
   appendUserMessage,
-  createConversation,
+  createConversationHistory as createConversation,
 } from '../src/conversation/index';
 import { createTestConversationEnvironment } from '../src/test';
 

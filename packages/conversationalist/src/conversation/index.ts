@@ -3,7 +3,10 @@ export type { ConversationEnvironment } from '../environment';
 export { withEnvironment } from '../environment';
 
 // Create
-export { createConversation, createConversationUnsafe } from './create';
+export {
+  createConversationHistory,
+  createConversationHistoryUnsafe,
+} from './create';
 
 // Append
 export {
@@ -39,11 +42,14 @@ export type { RedactMessageOptions } from './modify';
 export { redactMessageAtPosition } from './modify';
 
 // Serialization
-export { deserializeConversation } from './serialization';
+export { deserializeConversationHistory } from './serialization';
 
 // Integrity
 export type { IntegrityIssue, IntegrityIssueCode } from './integrity';
-export { assertConversationIntegrity, validateConversationIntegrity } from './integrity';
+export {
+  assertConversationHistoryIntegrity,
+  validateConversationHistoryIntegrity,
+} from './integrity';
 
 // Transform
 export { toChatMessages } from './transform';

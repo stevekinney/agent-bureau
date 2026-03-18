@@ -12,7 +12,12 @@ import {
 } from './environment';
 import { ConversationalistError, createIntegrityError } from './errors';
 import { copyContent } from './multi-modal';
-import type { AssistantMessage, Conversation, Message, TokenEstimator } from './types';
+import type {
+  AssistantMessage,
+  ConversationHistory as Conversation,
+  Message,
+  TokenEstimator,
+} from './types';
 import { createMessage, isAssistantMessage, toReadonly } from './utilities';
 import { getOrderedMessages, toIdRecord } from './utilities/message-store';
 

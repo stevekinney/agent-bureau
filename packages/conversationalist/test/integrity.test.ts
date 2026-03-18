@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'bun:test';
 
 import {
-  assertConversationIntegrity,
-  validateConversationIntegrity,
+  assertConversationHistoryIntegrity as assertConversationIntegrity,
+  validateConversationHistoryIntegrity as validateConversationIntegrity,
 } from '../src/conversation/index';
-import type { Conversation, Message } from '../src/types';
+import type { ConversationHistory as Conversation, Message } from '../src/types';
 
 const createMessage = (overrides: Partial<Message>): Message => ({
   id: 'msg-1',

@@ -1,4 +1,4 @@
-import type { Conversation, Message } from '../types';
+import type { ConversationHistory as Conversation, Message } from '../types';
 
 export function getOrderedMessages(conversation: Conversation): Message[] {
   const ordered: Message[] = [];

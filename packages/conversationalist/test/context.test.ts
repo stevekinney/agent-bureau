@@ -10,11 +10,11 @@ import {
 import {
   appendMessages,
   appendUnsafeMessage,
-  createConversation,
-  createConversationUnsafe,
+  createConversationHistory as createConversation,
+  createConversationHistoryUnsafe as createConversationUnsafe,
 } from '../src/conversation/index';
 import { isConversationEnvironmentParameter } from '../src/environment';
-import type { Conversation, Message } from '../src/types';
+import type { ConversationHistory as Conversation, Message } from '../src/types';
 import { createMessage } from '../src/utilities';
 
 const getOrderedMessages = (conversation: Conversation): Message[] =>

@@ -12,7 +12,7 @@ import {
   toolResultSchema,
 } from './schemas';
 import type {
-  Conversation,
+  ConversationHistory,
   ConversationStatus,
   JSONValue,
   Message,
@@ -31,7 +31,7 @@ function isSchema<T>(schema: SchemaGuard, value: unknown): value is T {
   return schema.safeParse(value).success;
 }
 
-export function isConversation(value: unknown): value is Conversation {
+export function isConversationHistory(value: unknown): value is ConversationHistory {
   return isSchema(conversationSchema, value);
 }
 

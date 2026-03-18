@@ -1,9 +1,13 @@
 import { describe, expect, it } from 'bun:test';
 
 import type { ConversationEnvironment } from '../src';
-import { appendMessages, ConversationHistory, createConversation } from '../src';
+import {
+  appendMessages,
+  Conversation,
+  createConversationHistory as createConversation,
+} from '../src';
 import { createPIIRedactionPlugin, redactPii } from '../src/redaction';
-import type { Conversation, Message, MessageInput } from '../src/types';
+import type { ConversationHistory as ConversationHistory, Message, MessageInput } from '../src/types';
 
 const getOrderedMessages = (conversation: Conversation): Message[] =>
   conversation.ids
@@ -83,9 +87,9 @@ describe('redactPii', () => {
     expect(getOrderedMessages(conv)[0].content).toBe('My email is test@example.com');
   });
 
-  it('should work when bound to ConversationHistory', () => {
+  it('should work when bound to Conversation', () => {
     const env = { plugins: [redactPii] };
-    const history = new ConversationHistory(createConversation(), env);
+    const history = new Conversation(createConversation(), env);
     const boundAppend = history.bind(
       (conversation, input: MessageInput, boundEnv?: Partial<ConversationEnvironment>) =>
         appendMessages(conversation, input, boundEnv),

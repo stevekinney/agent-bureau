@@ -1,7 +1,18 @@
 import type { MultiModalContent } from '@lasercat/homogenaize';
 
+import {
+  appendMessages,
+  createConversationHistory,
+} from '../../conversation/index';
 import { assertConversationSafe } from '../../conversation/validation';
-import type { Conversation, Message, ToolCall, ToolResult } from '../../types';
+import type {
+  ConversationHistory as Conversation,
+  JSONValue,
+  Message,
+  MessageInput,
+  ToolCall,
+  ToolResult,
+} from '../../types';
 import { getOrderedMessages } from '../../utilities/message-store';
 
 /**
@@ -300,4 +311,184 @@ export function toAnthropicMessages(conversation: Conversation): AnthropicConver
     result.system = system;
   }
   return result;
+}
+
+function toJSONValue(value: unknown): JSONValue {
+  if (
+    value === null ||
+    typeof value === 'string' ||
+    typeof value === 'number' ||
+    typeof value === 'boolean'
+  ) {
+    return value;
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((item) => toJSONValue(item));
+  }
+
+  if (value && typeof value === 'object') {
+    const record: Record<string, JSONValue> = {};
+    for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+      record[key] = toJSONValue(entry);
+    }
+    return record;
+  }
+
+  return String(value);
+}
+
+function parseJSONValue(value: string): JSONValue | undefined {
+  try {
+    return JSON.parse(value) as JSONValue;
+  } catch {
+    return undefined;
+  }
+}
+
+function isCanonicalToolResultPayload(
+  value: JSONValue,
+): value is JSONValue & {
+  outcome: ToolResult['outcome'];
+  content: JSONValue;
+  error?: ToolResult['error'];
+  action?: ToolResult['action'];
+  inputDigest?: string;
+  outputDigest?: string;
+} {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return false;
+  }
+
+  return (
+    'outcome' in value &&
+    (value['outcome'] === 'success' ||
+      value['outcome'] === 'error' ||
+      value['outcome'] === 'action_required') &&
+    'content' in value
+  );
+}
+
+function parseToolResultContent(
+  callId: string,
+  content: string,
+  isError?: boolean,
+): ToolResult {
+  const parsed = parseJSONValue(content);
+
+  if (parsed !== undefined && isCanonicalToolResultPayload(parsed)) {
+    return {
+      callId,
+      outcome: parsed.outcome,
+      content: parsed.content,
+      ...(parsed.error ? { error: parsed.error } : {}),
+      ...(parsed.action ? { action: parsed.action } : {}),
+      ...(typeof parsed.inputDigest === 'string'
+        ? { inputDigest: parsed.inputDigest }
+        : {}),
+      ...(typeof parsed.outputDigest === 'string'
+        ? { outputDigest: parsed.outputDigest }
+        : {}),
+    };
+  }
+
+  return {
+    callId,
+    outcome: isError ? 'error' : 'success',
+    content: parsed ?? content,
+  };
+}
+
+function toMessageInputFromBlock(
+  role: AnthropicMessage['role'],
+  block: AnthropicContentBlock,
+): MessageInput {
+  if (block.type === 'text') {
+    return {
+      role,
+      content: block.text,
+    };
+  }
+
+  if (block.type === 'image') {
+    if (block.source.type === 'url') {
+      return {
+        role,
+        content: [
+          {
+            type: 'image',
+            url: block.source.url,
+          },
+        ],
+      };
+    }
+
+    return {
+      role,
+      content: [
+        {
+          type: 'image',
+          url: `data:${block.source.media_type};base64,${block.source.data}`,
+          mimeType: block.source.media_type,
+        },
+      ],
+    };
+  }
+
+  if (block.type === 'tool_use') {
+    return {
+      role: 'tool-call',
+      content: '',
+      toolCall: {
+        id: block.id,
+        name: block.name,
+        arguments: toJSONValue(block.input),
+      },
+    };
+  }
+
+  return {
+    role: 'tool-result',
+    content: '',
+    toolResult: parseToolResultContent(
+      block.tool_use_id,
+      block.content,
+      block.is_error,
+    ),
+  };
+}
+
+/**
+ * Converts Anthropic Messages API payloads back into a ConversationHistory.
+ */
+export function fromAnthropicMessages(payload: AnthropicConversation): Conversation {
+  let conversation = createConversationHistory();
+  const inputs: MessageInput[] = [];
+
+  if (payload.system !== undefined) {
+    inputs.push({
+      role: 'system',
+      content: payload.system,
+    });
+  }
+
+  for (const message of payload.messages) {
+    if (typeof message.content === 'string') {
+      inputs.push({
+        role: message.role,
+        content: message.content,
+      });
+      continue;
+    }
+
+    for (const block of message.content) {
+      inputs.push(toMessageInputFromBlock(message.role, block));
+    }
+  }
+
+  if (inputs.length > 0) {
+    conversation = appendMessages(conversation, ...inputs);
+  }
+
+  return conversation;
 }

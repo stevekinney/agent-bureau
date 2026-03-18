@@ -1,4 +1,4 @@
-import type { Conversation, Message } from '../types';
+import type { ConversationHistory as Conversation, Message } from '../types';
 import { messageHasImages } from '../utilities';
 import { getOrderedMessages } from '../utilities/message-store';
 

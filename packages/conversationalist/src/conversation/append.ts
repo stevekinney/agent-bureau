@@ -8,7 +8,7 @@ import {
 import { createIntegrityError } from '../errors';
 import type {
   AssistantMessage,
-  Conversation,
+  ConversationHistory as Conversation,
   JSONValue,
   Message,
   MessageInput,

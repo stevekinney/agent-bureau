@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'bun:test';
 
-import { createConversation,withEnvironment  } from '../src/conversation';
+import {
+  createConversationHistory as createConversation,
+  withEnvironment,
+} from '../src/conversation';
 
 describe('withEnvironment', () => {
   it('should bind environment to createConversation', () => {

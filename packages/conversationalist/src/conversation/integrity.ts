@@ -1,5 +1,5 @@
 import { createIntegrityError } from '../errors';
-import type { Conversation } from '../types';
+import type { ConversationHistory } from '../types';
 
 export type IntegrityIssueCode =
   | 'integrity:missing-message'
@@ -18,8 +18,8 @@ export interface IntegrityIssue {
 /**
  * Validates conversation invariants and returns a list of issues.
  */
-export function validateConversationIntegrity(
-  conversation: Conversation,
+export function validateConversationHistoryIntegrity(
+  conversation: ConversationHistory,
 ): IntegrityIssue[] {
   const issues: IntegrityIssue[] = [];
   const seenIds = new Set<string>();
@@ -105,8 +105,10 @@ export function validateConversationIntegrity(
 /**
  * Throws an integrity error if the conversation fails validation.
  */
-export function assertConversationIntegrity(conversation: Conversation): void {
-  const issues = validateConversationIntegrity(conversation);
+export function assertConversationHistoryIntegrity(
+  conversation: ConversationHistory,
+): void {
+  const issues = validateConversationHistoryIntegrity(conversation);
   if (issues.length === 0) return;
 
   throw createIntegrityError('conversation integrity check failed', { issues });

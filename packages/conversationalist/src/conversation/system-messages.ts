@@ -4,7 +4,7 @@ import {
   resolveConversationEnvironment,
 } from '../environment';
 import { copyContent } from '../multi-modal';
-import type { Conversation, JSONValue, Message } from '../types';
+import type { ConversationHistory as Conversation, JSONValue, Message } from '../types';
 import { createMessage, toReadonly } from '../utilities';
 import { getOrderedMessages, toIdRecord } from '../utilities/message-store';
 import { ensureConversationSafe } from './validation';

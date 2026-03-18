@@ -6,6 +6,9 @@ import type {
   EventTargetLike,
 } from 'event-emission';
 import { createEventTarget } from 'event-emission';
+import type { AnthropicConversation } from './adapters/anthropic';
+import type { GeminiConversation } from './adapters/gemini';
+import type { OpenAIMessage } from './adapters/openai';
 
 import {
   estimateConversationTokens,
@@ -21,8 +24,8 @@ import {
   appendSystemMessage,
   appendUserMessage,
   collapseSystemMessages,
-  createConversation,
-  deserializeConversation,
+  createConversationHistory,
+  deserializeConversationHistory,
   getFirstSystemMessage,
   getMessageAtPosition,
   getMessageById,
@@ -50,9 +53,9 @@ import {
   updateStreamingMessage,
 } from './streaming';
 import type {
-  Conversation,
-  ConversationHistorySnapshot,
-  HistoryNodeSnapshot,
+  ConversationHistory,
+  ConversationNodeSnapshot,
+  ConversationSnapshot,
   JSONValue,
   Message,
   MessageInput,
@@ -60,28 +63,28 @@ import type {
 } from './types';
 
 /**
- * Event detail for conversation history changes.
+ * Event detail for conversation changes.
  */
-export interface ConversationHistoryEventDetail {
-  type: ConversationHistoryActionType;
-  conversation: Conversation;
+export interface ConversationEventDetail {
+  type: ConversationActionType;
+  conversation: ConversationHistory;
 }
 
-export type ConversationHistoryEvent = EmissionEvent<
-  ConversationHistoryEventDetail,
-  ConversationHistoryEventType
+export type ConversationEvent = EmissionEvent<
+  ConversationEventDetail,
+  ConversationEventType
 >;
 
-type ConversationHistoryActionType = 'push' | 'undo' | 'redo' | 'switch';
-type ConversationHistoryEventType = 'change' | ConversationHistoryActionType;
-type ConversationHistoryEventMap = Record<
-  ConversationHistoryEventType,
-  ConversationHistoryEventDetail
+type ConversationActionType = 'push' | 'undo' | 'redo' | 'switch';
+type ConversationEventType = 'change' | ConversationActionType;
+type ConversationEventMap = Record<
+  ConversationEventType,
+  ConversationEventDetail
 >;
-type ConversationHistoryEventTarget = EventTargetLike<ConversationHistoryEventMap>;
+type ConversationEventTarget = EventTargetLike<ConversationEventMap>;
 
 interface HistoryNode {
-  conversation: Conversation;
+  conversation: ConversationHistory;
   parent: HistoryNode | null;
   children: HistoryNode[];
 }
@@ -89,18 +92,18 @@ interface HistoryNode {
 /**
  * Manages a stack of conversation versions to support undo, redo, and branching.
  */
-export class ConversationHistory extends EventTarget {
+export class Conversation extends EventTarget {
   private currentNode: HistoryNode;
   private environment: ConversationEnvironment;
-  private readonly events: ConversationHistoryEventTarget;
+  private readonly events: ConversationEventTarget;
 
   constructor(
-    initial: Conversation = createConversation(),
+    initial: ConversationHistory = createConversationHistory(),
     environment?: Partial<ConversationEnvironment>,
   ) {
     super();
     this.environment = resolveConversationEnvironment(environment);
-    this.events = createEventTarget<ConversationHistoryEventMap>();
+    this.events = createEventTarget<ConversationEventMap>();
     const safeInitial = ensureConversationSafe(initial);
     this.currentNode = {
       conversation: safeInitial,
@@ -112,8 +115,8 @@ export class ConversationHistory extends EventTarget {
   /**
    * Dispatches a change event.
    */
-  private notifyChange(type: ConversationHistoryActionType): void {
-    const detail: ConversationHistoryEventDetail = {
+  private notifyChange(type: ConversationActionType): void {
+    const detail: ConversationEventDetail = {
       type,
       conversation: this.current,
     };
@@ -153,15 +156,15 @@ export class ConversationHistory extends EventTarget {
   override addEventListener(
     type: string,
     callback:
-      | ((event: ConversationHistoryEvent) => void)
+      | ((event: ConversationEvent) => void)
       | EventListenerOrEventListenerObject
       | null,
     options?: boolean | AddEventListenerOptions,
   ): void | (() => void) {
     if (!callback) return;
     return this.events.addEventListener(
-      type as ConversationHistoryEventType,
-      callback as EventListenerLike<ConversationHistoryEvent>,
+      type as ConversationEventType,
+      callback as EventListenerLike<ConversationEvent>,
       this.toAddListenerOptions(options),
     );
   }
@@ -172,15 +175,15 @@ export class ConversationHistory extends EventTarget {
   override removeEventListener(
     type: string,
     callback:
-      | ((event: ConversationHistoryEvent) => void)
+      | ((event: ConversationEvent) => void)
       | EventListenerOrEventListenerObject
       | null,
     options?: boolean | EventListenerOptions,
   ): void {
     if (!callback) return;
     this.events.removeEventListener(
-      type as ConversationHistoryEventType,
-      callback as EventListenerLike<ConversationHistoryEvent>,
+      type as ConversationEventType,
+      callback as EventListenerLike<ConversationEvent>,
       this.toRemoveListenerOptions(options),
     );
   }
@@ -190,21 +193,21 @@ export class ConversationHistory extends EventTarget {
    */
   override dispatchEvent(event: Event): boolean {
     return this.events.dispatchEvent(
-      event as Parameters<ConversationHistoryEventTarget['dispatchEvent']>[0],
+      event as Parameters<ConversationEventTarget['dispatchEvent']>[0],
     );
   }
 
   /**
    * Subscribes to conversation changes.
-   * This follows the Svelte store contract, making ConversationHistory a valid Svelte store.
+   * This follows the Svelte store contract, making Conversation a valid Svelte store.
    * @param run - Callback called with the current conversation whenever it changes.
    * @returns An unsubscribe function.
    */
-  subscribe(run: (value: Conversation) => void): () => void {
+  subscribe(run: (value: ConversationHistory) => void): () => void {
     // Call immediately with current value (Svelte store contract)
     run(this.current);
 
-    const handler = (event: ConversationHistoryEvent) => {
+    const handler = (event: ConversationEvent) => {
       if (event?.detail?.conversation) {
         run(event.detail.conversation);
       }
@@ -212,7 +215,7 @@ export class ConversationHistory extends EventTarget {
 
     const unsubscribe = this.addEventListener(
       'change',
-      handler as (event: ConversationHistoryEvent) => void,
+      handler as (event: ConversationEvent) => void,
     );
     return (unsubscribe as () => void) || (() => {});
   }
@@ -221,14 +224,14 @@ export class ConversationHistory extends EventTarget {
    * Returns the current conversation.
    * Useful for useSyncExternalStore in React.
    */
-  getSnapshot(): Conversation {
+  getSnapshot(): ConversationHistory {
     return this.current;
   }
 
   /**
    * The current conversation state.
    */
-  get current(): Conversation {
+  get current(): ConversationHistory {
     return this.currentNode.conversation;
   }
 
@@ -286,7 +289,7 @@ export class ConversationHistory extends EventTarget {
    * Pushes a new conversation state onto the history.
    * If the current state is not a leaf, a new branch is created.
    */
-  push(next: Conversation): void {
+  push(next: ConversationHistory): void {
     const newNode: HistoryNode = {
       conversation: next,
       parent: this.currentNode,
@@ -301,7 +304,7 @@ export class ConversationHistory extends EventTarget {
    * Reverts to the previous conversation state.
    * @returns The conversation state after undo, or undefined if not possible.
    */
-  undo(): Conversation | undefined {
+  undo(): ConversationHistory | undefined {
     if (this.currentNode.parent) {
       this.currentNode = this.currentNode.parent;
       this.notifyChange('undo');
@@ -315,7 +318,7 @@ export class ConversationHistory extends EventTarget {
    * @param childIndex - The index of the branch to follow (default: 0).
    * @returns The conversation state after redo, or undefined if not possible.
    */
-  redo(childIndex: number = 0): Conversation | undefined {
+  redo(childIndex: number = 0): ConversationHistory | undefined {
     const next = this.currentNode.children[childIndex];
     if (next) {
       this.currentNode = next;
@@ -330,7 +333,7 @@ export class ConversationHistory extends EventTarget {
    * @param index - The index of the sibling branch to switch to.
    * @returns The new conversation state, or undefined if not possible.
    */
-  switchToBranch(index: number): Conversation | undefined {
+  switchToBranch(index: number): ConversationHistory | undefined {
     if (this.currentNode.parent) {
       const target = this.currentNode.parent.children[index];
       if (target) {
@@ -345,8 +348,8 @@ export class ConversationHistory extends EventTarget {
   /**
    * Returns the sequence of conversations from root to current.
    */
-  getPath(): Conversation[] {
-    const path: Conversation[] = [];
+  getPath(): ConversationHistory[] {
+    const path: ConversationHistory[] = [];
     let curr: HistoryNode | null = this.currentNode;
     while (curr) {
       path.unshift(curr.conversation);
@@ -592,7 +595,7 @@ export class ConversationHistory extends EventTarget {
   /**
    * Captures the entire history tree and current state in a plain snapshot.
    */
-  snapshot(): ConversationHistorySnapshot {
+  snapshot(): ConversationSnapshot {
     const getPath = (node: HistoryNode): number[] => {
       const path: number[] = [];
       let curr = node;
@@ -603,7 +606,7 @@ export class ConversationHistory extends EventTarget {
       return path;
     };
 
-    const serializeNode = (node: HistoryNode): HistoryNodeSnapshot => ({
+    const serializeNode = (node: HistoryNode): ConversationNodeSnapshot => ({
       conversation: node.conversation,
       children: node.children.map(serializeNode),
     });
@@ -620,21 +623,21 @@ export class ConversationHistory extends EventTarget {
   }
 
   /**
-   * Reconstructs a ConversationHistory instance from JSON.
+   * Reconstructs a Conversation instance from JSON.
    */
   static from(
-    json: ConversationHistorySnapshot,
+    json: ConversationSnapshot,
     environment?: Partial<ConversationEnvironment>,
-  ): ConversationHistory {
-    const rootConv = deserializeConversation(json.root.conversation);
-    const history = new ConversationHistory(rootConv, environment);
+  ): Conversation {
+    const rootConv = deserializeConversationHistory(json.root.conversation);
+    const conversation = new Conversation(rootConv, environment);
 
     // Recursive function to build the tree
     const buildTree = (
-      nodeJSON: HistoryNodeSnapshot,
+      nodeJSON: ConversationNodeSnapshot,
       parentNode: HistoryNode,
     ): HistoryNode => {
-      const nodeConv = deserializeConversation(nodeJSON.conversation);
+      const nodeConv = deserializeConversationHistory(nodeJSON.conversation);
       const node: HistoryNode = {
         conversation: nodeConv,
         parent: parentNode,
@@ -644,7 +647,7 @@ export class ConversationHistory extends EventTarget {
       return node;
     };
 
-    const h = history as unknown as { currentNode: HistoryNode };
+    const h = conversation as unknown as { currentNode: HistoryNode };
     const rootNode = h.currentNode;
     rootNode.children = json.root.children.map((child) => buildTree(child, rootNode));
 
@@ -658,26 +661,91 @@ export class ConversationHistory extends EventTarget {
     }
     h.currentNode = current;
 
-    return history;
+    return conversation;
+  }
+
+  /**
+   * Creates a Conversation from OpenAI SDK messages.
+   */
+  static async fromOpenAIMessages(
+    messages: ReadonlyArray<OpenAIMessage>,
+    environment?: Partial<ConversationEnvironment>,
+  ): Promise<Conversation> {
+    const { fromOpenAIMessages } = await import('./adapters/openai');
+    return new Conversation(fromOpenAIMessages(messages), environment);
+  }
+
+  /**
+   * Creates a Conversation from Anthropic SDK messages.
+   */
+  static async fromAnthropicMessages(
+    payload: AnthropicConversation,
+    environment?: Partial<ConversationEnvironment>,
+  ): Promise<Conversation> {
+    const { fromAnthropicMessages } = await import('./adapters/anthropic');
+    return new Conversation(fromAnthropicMessages(payload), environment);
+  }
+
+  /**
+   * Creates a Conversation from Gemini SDK messages.
+   */
+  static async fromGeminiMessages(
+    payload: GeminiConversation,
+    environment?: Partial<ConversationEnvironment>,
+  ): Promise<Conversation> {
+    const { fromGeminiMessages } = await import('./adapters/gemini');
+    return new Conversation(fromGeminiMessages(payload), environment);
+  }
+
+  /**
+   * Converts the current conversation to OpenAI Chat Completions messages.
+   */
+  async toOpenAIMessages(): Promise<OpenAIMessage[]> {
+    const { toOpenAIMessages } = await import('./adapters/openai');
+    return toOpenAIMessages(this.current);
+  }
+
+  /**
+   * Converts the current conversation to grouped OpenAI Chat Completions messages.
+   */
+  async toOpenAIMessagesGrouped(): Promise<OpenAIMessage[]> {
+    const { toOpenAIMessagesGrouped } = await import('./adapters/openai');
+    return toOpenAIMessagesGrouped(this.current);
+  }
+
+  /**
+   * Converts the current conversation to Anthropic Messages payloads.
+   */
+  async toAnthropicMessages(): Promise<AnthropicConversation> {
+    const { toAnthropicMessages } = await import('./adapters/anthropic');
+    return toAnthropicMessages(this.current);
+  }
+
+  /**
+   * Converts the current conversation to Gemini contents.
+   */
+  async toGeminiMessages(): Promise<GeminiConversation> {
+    const { toGeminiMessages } = await import('./adapters/gemini');
+    return toGeminiMessages(this.current);
   }
 
   /**
    * Binds a function to this history instance.
-   * The first argument of the function must be a Conversation.
-   * If the function returns a new Conversation, it is automatically pushed to the history.
+   * The first argument of the function must be a ConversationHistory.
+   * If the function returns a new ConversationHistory, it is automatically pushed to the history.
    */
   bind<T extends unknown[], R>(
     fn: (
-      conversation: Conversation,
+      conversation: ConversationHistory,
       ...args: [...T, Partial<ConversationEnvironment>?]
     ) => R,
   ): (...args: T) => R {
     return (...args: T): R => {
       // We pass the history's environment as the last argument if the function supports it
-      const boundFn = fn as (conversation: Conversation, ...args: unknown[]) => R;
+      const boundFn = fn as (conversation: ConversationHistory, ...args: unknown[]) => R;
       const result = boundFn(this.current, ...args, this.env);
 
-      if (isConversation(result)) {
+      if (isConversationHistory(result)) {
         this.push(result);
       }
 
@@ -714,22 +782,22 @@ export class ConversationHistory extends EventTarget {
 }
 
 /**
- * Simple type guard to check if a value is a Conversation.
+ * Simple type guard to check if a value is a ConversationHistory.
  */
-function isConversation(value: unknown): value is Conversation {
+function isConversationHistory(value: unknown): value is ConversationHistory {
   return (
     value !== null &&
     typeof value === 'object' &&
-    typeof (value as Conversation).schemaVersion === 'number' &&
-    typeof (value as Conversation).id === 'string' &&
-    typeof (value as Conversation).status === 'string' &&
-    (value as Conversation).metadata !== null &&
-    typeof (value as Conversation).metadata === 'object' &&
-    Array.isArray((value as Conversation).ids) &&
-    typeof (value as Conversation).messages === 'object' &&
-    (value as Conversation).messages !== null &&
-    !Array.isArray((value as Conversation).messages) &&
-    typeof (value as Conversation).createdAt === 'string' &&
-    typeof (value as Conversation).updatedAt === 'string'
+    typeof (value as ConversationHistory).schemaVersion === 'number' &&
+    typeof (value as ConversationHistory).id === 'string' &&
+    typeof (value as ConversationHistory).status === 'string' &&
+    (value as ConversationHistory).metadata !== null &&
+    typeof (value as ConversationHistory).metadata === 'object' &&
+    Array.isArray((value as ConversationHistory).ids) &&
+    typeof (value as ConversationHistory).messages === 'object' &&
+    (value as ConversationHistory).messages !== null &&
+    !Array.isArray((value as ConversationHistory).messages) &&
+    typeof (value as ConversationHistory).createdAt === 'string' &&
+    typeof (value as ConversationHistory).updatedAt === 'string'
   );
 }

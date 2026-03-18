@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 
-import { createConversation } from '../src/conversation/index';
+import { createConversationHistory as createConversation } from '../src/conversation/index';
 import {
   appendStreamingMessage,
   cancelStreamingMessage,
@@ -9,7 +9,7 @@ import {
   isStreamingMessage,
   updateStreamingMessage,
 } from '../src/streaming';
-import type { Conversation, Message } from '../src/types';
+import type { ConversationHistory as Conversation, Message } from '../src/types';
 
 const getOrderedMessages = (conversation: Conversation): Message[] =>
   conversation.ids

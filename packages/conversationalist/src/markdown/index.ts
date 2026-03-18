@@ -1,5 +1,5 @@
 import type { ConversationEnvironment } from '../environment';
-import { ConversationHistory } from '../history';
+import { Conversation } from '../history';
 import type { ToMarkdownOptions } from '../types';
 import {
   fromMarkdown,
@@ -24,22 +24,22 @@ export {
 };
 
 /**
- * Converts a ConversationHistory instance to Markdown.
+ * Converts a Conversation instance to Markdown.
  */
-export function conversationHistoryToMarkdown(
-  history: ConversationHistory,
+export function conversationToMarkdown(
+  conversation: Conversation,
   options?: ToMarkdownOptions,
 ): string {
-  return toMarkdown(history.current, options);
+  return toMarkdown(conversation.current, options);
 }
 
 /**
- * Creates a ConversationHistory instance from a Markdown string.
+ * Creates a Conversation instance from a Markdown string.
  */
-export function conversationHistoryFromMarkdown(
+export function conversationFromMarkdown(
   markdown: string,
   environment?: Partial<ConversationEnvironment>,
-): ConversationHistory {
+): Conversation {
   const conversation = fromMarkdown(markdown);
-  return new ConversationHistory(conversation, environment);
+  return new Conversation(conversation, environment);
 }

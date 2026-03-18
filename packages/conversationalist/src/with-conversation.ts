@@ -19,7 +19,13 @@ import {
   finalizeStreamingMessage,
   updateStreamingMessage,
 } from './streaming';
-import type { Conversation, JSONValue, Message, MessageInput, TokenUsage } from './types';
+import type {
+  ConversationHistory,
+  JSONValue,
+  Message,
+  MessageInput,
+  TokenUsage,
+} from './types';
 
 /**
  * A mutable draft wrapper around a conversation.
@@ -27,7 +33,7 @@ import type { Conversation, JSONValue, Message, MessageInput, TokenUsage } from 
  *
  * @example
  * ```ts
- * const result = withConversation(conversation, (draft) => {
+ * const result = withConversationHistory(conversation, (draft) => {
  *   draft
  *     .appendSystemMessage('You are helpful.')
  *     .appendUserMessage('Hello!')
@@ -35,15 +41,15 @@ import type { Conversation, JSONValue, Message, MessageInput, TokenUsage } from 
  * });
  * ```
  */
-export interface ConversationDraft {
+export interface ConversationHistoryDraft {
   /** The current immutable conversation value. */
-  readonly value: Conversation;
+  readonly value: ConversationHistory;
 
   /**
    * Appends one or more messages to the conversation.
    * @param inputs - Message inputs to append.
    */
-  appendMessages: (...inputs: MessageInput[]) => ConversationDraft;
+  appendMessages: (...inputs: MessageInput[]) => ConversationHistoryDraft;
 
   /**
    * Appends a user message to the conversation.
@@ -53,7 +59,7 @@ export interface ConversationDraft {
   appendUserMessage: (
     content: MessageInput['content'],
     metadata?: Record<string, JSONValue>,
-  ) => ConversationDraft;
+  ) => ConversationHistoryDraft;
 
   /**
    * Appends an assistant message to the conversation.
@@ -63,7 +69,7 @@ export interface ConversationDraft {
   appendAssistantMessage: (
     content: MessageInput['content'],
     metadata?: Record<string, JSONValue>,
-  ) => ConversationDraft;
+  ) => ConversationHistoryDraft;
 
   /**
    * Appends a system message to the conversation.
@@ -73,7 +79,7 @@ export interface ConversationDraft {
   appendSystemMessage: (
     content: string,
     metadata?: Record<string, JSONValue>,
-  ) => ConversationDraft;
+  ) => ConversationHistoryDraft;
 
   /**
    * Prepends a system message at position 0, renumbering existing messages.
@@ -83,7 +89,7 @@ export interface ConversationDraft {
   prependSystemMessage: (
     content: string,
     metadata?: Record<string, JSONValue>,
-  ) => ConversationDraft;
+  ) => ConversationHistoryDraft;
 
   /**
    * Replaces the first system message, or prepends if none exists.
@@ -93,12 +99,12 @@ export interface ConversationDraft {
   replaceSystemMessage: (
     content: string,
     metadata?: Record<string, JSONValue>,
-  ) => ConversationDraft;
+  ) => ConversationHistoryDraft;
 
   /**
    * Collapses all system messages into the first one, deduplicating content.
    */
-  collapseSystemMessages: () => ConversationDraft;
+  collapseSystemMessages: () => ConversationHistoryDraft;
 
   /**
    * Redacts a message at the given position, replacing its content.
@@ -108,7 +114,7 @@ export interface ConversationDraft {
   redactMessageAtPosition: (
     position: number,
     placeholderOrOptions?: string | RedactMessageOptions,
-  ) => ConversationDraft;
+  ) => ConversationHistoryDraft;
 
   /**
    * Appends a streaming message placeholder.
@@ -119,7 +125,7 @@ export interface ConversationDraft {
   appendStreamingMessage: (
     role: 'assistant' | 'user',
     metadata?: Record<string, JSONValue>,
-  ) => { draft: ConversationDraft; messageId: string };
+  ) => { draft: ConversationHistoryDraft; messageId: string };
 
   /**
    * Updates the content of a streaming message.
@@ -129,7 +135,7 @@ export interface ConversationDraft {
   updateStreamingMessage: (
     messageId: string,
     content: string | MultiModalContent[],
-  ) => ConversationDraft;
+  ) => ConversationHistoryDraft;
 
   /**
    * Finalizes a streaming message, removing the streaming flag.
@@ -139,13 +145,13 @@ export interface ConversationDraft {
   finalizeStreamingMessage: (
     messageId: string,
     options?: { tokenUsage?: TokenUsage; metadata?: Record<string, JSONValue> },
-  ) => ConversationDraft;
+  ) => ConversationHistoryDraft;
 
   /**
    * Cancels a streaming message by removing it from the conversation.
    * @param messageId - The ID of the streaming message to cancel.
    */
-  cancelStreamingMessage: (messageId: string) => ConversationDraft;
+  cancelStreamingMessage: (messageId: string) => ConversationHistoryDraft;
 
   /**
    * Truncates the conversation to keep only messages from position onwards.
@@ -155,7 +161,7 @@ export interface ConversationDraft {
   truncateFromPosition: (
     position: number,
     options?: { preserveSystemMessages?: boolean; preserveToolPairs?: boolean },
-  ) => ConversationDraft;
+  ) => ConversationHistoryDraft;
 
   /**
    * Truncates the conversation to fit within a token limit.
@@ -171,16 +177,16 @@ export interface ConversationDraft {
       preserveLastN?: number;
       preserveToolPairs?: boolean;
     },
-  ) => ConversationDraft;
+  ) => ConversationHistoryDraft;
 }
 
 /**
  * Creates a mutable draft wrapper around a conversation.
  */
-function createDraft(initial: Conversation): ConversationDraft {
+function createDraft(initial: ConversationHistory): ConversationHistoryDraft {
   let current = initial;
 
-  const draft: ConversationDraft = {
+  const draft: ConversationHistoryDraft = {
     get value() {
       return current;
     },
@@ -260,10 +266,10 @@ function createDraft(initial: Conversation): ConversationDraft {
  * Executes a function with a mutable draft and returns the final conversation.
  * Supports both synchronous and asynchronous operations.
  */
-export function withConversation(
-  conversation: Conversation,
-  fn: (draft: ConversationDraft) => void | Promise<void>,
-): Conversation | Promise<Conversation> {
+export function withConversationHistory(
+  conversation: ConversationHistory,
+  fn: (draft: ConversationHistoryDraft) => void | Promise<void>,
+): ConversationHistory | Promise<ConversationHistory> {
   const draft = createDraft(ensureConversationSafe(conversation));
   const maybePromise = fn(draft);
   if (
@@ -280,10 +286,10 @@ export function withConversation(
  * Applies a series of transformation functions to a conversation.
  * Each function receives the result of the previous one.
  */
-export function pipeConversation(
-  conversation: Conversation,
-  ...fns: Array<(conversation: Conversation) => Conversation>
-): Conversation {
+export function pipeConversationHistory(
+  conversation: ConversationHistory,
+  ...fns: Array<(conversation: ConversationHistory) => ConversationHistory>
+): ConversationHistory {
   const result = fns.reduce((current, fn) => fn(current), conversation);
   return ensureConversationSafe(result);
 }

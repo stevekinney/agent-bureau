@@ -8,7 +8,7 @@ import {
 } from './environment';
 import type {
   AssistantMessage,
-  Conversation,
+  ConversationHistory as Conversation,
   JSONValue,
   Message,
   TokenUsage,

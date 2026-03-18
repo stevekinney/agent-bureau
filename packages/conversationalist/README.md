@@ -25,11 +25,11 @@ Managing LLM conversations manually often leads to "provider lock-in" or fragile
 - **Decoupling Logic from Providers**: Write your business logic once using Conversationalist's message model, and use adapters to talk to OpenAI, Anthropic, or Gemini.
 - **Built-in Context Management**: Automatically handle context window limits by truncating history while preserving critical system instructions or recent messages.
 - **Type Safety Out-of-the-Box**: Built with Zod and TypeScript, ensuring that your conversation data is valid at runtime and compile-time.
-- **Unified Serialization**: One standard format (`Conversation`) for your database, your frontend, and your backend.
+- **Unified Serialization**: One standard format (`ConversationHistory`) for your database, your frontend, and your backend.
 
 ## The Immutable Advantage
 
-At its core, Conversationalist is **strictly immutable**. Every change to a conversation—whether appending a message, updating a stream, or redacting sensitive data—returns a _new_ conversation object.
+At its core, Conversationalist is **strictly immutable**. Every change to a conversation history, whether appending a message, updating a stream, or redacting sensitive data, returns a new `ConversationHistory` value.
 
 This approach offers several critical advantages for modern application development:
 
@@ -62,24 +62,28 @@ This package is ESM-only. Use `import` syntax. Zod is a peer dependency and must
 
 ```ts
 import {
+  Conversation,
   appendAssistantMessage,
   appendUserMessage,
-  createConversation,
+  createConversationHistory,
 } from 'conversationalist';
-import { toOpenAIMessages } from 'conversationalist/adapters/openai';
 
-// 1. Create a conversation
-let conversation = createConversation({
+// 1. Create immutable conversation history
+let conversationHistory = createConversationHistory({
   title: 'Order Support',
   metadata: { userId: 'user_123' },
 });
 
-// 2. Add messages (returns a new conversation object)
-conversation = appendUserMessage(conversation, 'Where is my order?');
-conversation = appendAssistantMessage(conversation, 'Let me check that for you.');
+// 2. Add messages (returns a new immutable value)
+conversationHistory = appendUserMessage(conversationHistory, 'Where is my order?');
+conversationHistory = appendAssistantMessage(
+  conversationHistory,
+  'Let me check that for you.',
+);
 
-// 3. Adapt for a provider
-const openAIMessages = toOpenAIMessages(conversation);
+// 3. Use the lazy Conversation class when you want provider conversion
+const conversation = new Conversation(conversationHistory);
+const openAIMessages = await conversation.toOpenAIMessages();
 // [{ role: 'user', content: 'Where is my order?' }, ...]
 ```
 
@@ -103,21 +107,23 @@ When you are combining this package with `armorer`, the split is:
 
 ### Conversations
 
-A conversation is an immutable record with metadata, timestamps, a `messages` record keyed
+A `ConversationHistory` is an immutable record with metadata, timestamps, a `messages` record keyed
 by message ID, and an `ids` array that preserves order.
 
 ```ts
-import { createConversation } from 'conversationalist';
+import { createConversationHistory } from 'conversationalist';
 
-const conversation = createConversation({
+const conversationHistory = createConversationHistory({
   title: 'My Chat',
   status: 'active',
   metadata: { customerId: 'cus_123' },
 });
 ```
 
-Conversations track message order via `conversation.ids`. Every mutation keeps `ids` in sync
-with `messages`. Use `getMessages(conversation)` for ordered arrays, or
+A `Conversation` is the runtime class for undo/redo, branching, subscriptions, and lazy provider conversion.
+
+Conversation histories track message order via `conversationHistory.ids`. Every mutation keeps `ids` in sync
+with `messages`. Use `getMessages(conversationHistory)` for ordered arrays, or
 `getMessageIds()` if you just need the IDs.
 
 ### Messages
@@ -203,14 +209,14 @@ Conversationalist treats integrity and JSON-safety as first-class invariants:
 - `toolCall.id` values are unique per conversation.
 - Conversation payloads are JSON-serializable (`JSONValue` everywhere).
 
-`validateConversationIntegrity`/`assertConversationIntegrity` are the canonical integrity
+`validateConversationHistoryIntegrity`/`assertConversationHistoryIntegrity` are the canonical integrity
 checks and are used internally at public boundaries (adapters, markdown import,
 deserialization, truncation, redaction).
 
 Safe APIs (default) validate schema + integrity and throw on failure. Unsafe escape hatches
 skip validation and require manual checks:
 
-- `createConversationUnsafe`
+- `createConversationHistoryUnsafe`
 - `appendUnsafeMessage`
 
 Schema validation is strict; unknown fields are rejected. Use `metadata` for extensions.
@@ -219,15 +225,15 @@ For custom transforms, validate the shape and then re-assert integrity:
 
 ```ts
 import {
-  assertConversationIntegrity,
-  validateConversationIntegrity,
+  assertConversationHistoryIntegrity,
+  validateConversationHistoryIntegrity,
   conversationSchema,
 } from 'conversationalist';
 
-const issues = validateConversationIntegrity(conversation);
+const issues = validateConversationHistoryIntegrity(conversation);
 // issues: IntegrityIssue[]
 
-assertConversationIntegrity(conversation);
+assertConversationHistoryIntegrity(conversation);
 
 conversationSchema.parse(conversation);
 ```
@@ -298,27 +304,27 @@ conversation = truncateToTokenLimit(conversation, 4000, {
 });
 
 // 2. Or bind to a history instance/environment
-const history = new ConversationHistory(conversation, {
+const conversationState = new Conversation(conversation, {
   estimateTokens: tiktokenEstimator,
 });
 
-const boundTruncate = history.bind(truncateToTokenLimit);
+const boundTruncate = conversationState.bind(truncateToTokenLimit);
 boundTruncate(4000); // Uses tiktokenEstimator automatically
 ```
 
 ### Markdown Conversion
 
-Convert conversations to human-readable Markdown format, or parse Markdown back into a conversation object. These helpers live in `conversationalist/markdown`.
+Convert conversations to human-readable Markdown format, or parse Markdown back into a `ConversationHistory`. These helpers live in `conversationalist/markdown`.
 
 #### Basic Usage (Clean Markdown)
 
 By default, `toMarkdown` produces clean, readable Markdown without metadata:
 
 ```ts
-import { appendMessages, createConversation } from 'conversationalist';
+import { appendMessages, createConversationHistory } from 'conversationalist';
 import { fromMarkdown, toMarkdown } from 'conversationalist/markdown';
 
-let conversation = createConversation({ id: 'conv-1' });
+let conversation = createConversationHistory({ id: 'conv-1' });
 conversation = appendMessages(
   conversation,
   { role: 'user', content: 'What is 2 + 2?' },
@@ -412,7 +418,11 @@ const md = toMarkdown(conversation);
 The library includes a built-in `redactPii` plugin that can automatically redact emails, phone numbers, and common API key patterns.
 
 ```ts
-import { appendUserMessage, createConversation, getMessages } from 'conversationalist';
+import {
+  appendUserMessage,
+  createConversationHistory,
+  getMessages,
+} from 'conversationalist';
 import { redactPii } from 'conversationalist/redaction';
 
 // 1. Enable by adding to your environment
@@ -421,7 +431,7 @@ const env = {
 };
 
 // 2. Use the environment when appending messages
-let conversation = createConversation({}, env);
+let conversation = createConversationHistory({}, env);
 conversation = appendUserMessage(
   conversation,
   'Contact me at test@example.com',
@@ -433,31 +443,41 @@ console.log(getMessages(conversation)[0]?.content);
 // "Contact me at [EMAIL_REDACTED]"
 ```
 
-When using `ConversationHistory`, you only need to provide the plugin once during initialization:
+When using `Conversation`, you only need to provide the plugin once during initialization:
 
 ```ts
-const history = new ConversationHistory(createConversation(), {
+const conversation = new Conversation(createConversationHistory(), {
   plugins: [redactPii],
 });
 
-const appendUser = history.bind(appendUserMessage);
+const appendUser = conversation.bind(appendUserMessage);
 appendUser('My key is sk-12345...'); // Automatically redacted
 ```
 
 ## Provider Adapters
 
-Convert the same conversation into provider-specific formats. Adapters automatically skip hidden/snapshot messages and map roles correctly.
+Convert the same conversation history into provider-specific formats, or convert those provider payloads back into a `ConversationHistory`. The `Conversation` class exposes lazy async helpers so provider adapters are only imported when needed.
 
 ```ts
-import { toOpenAIMessages } from 'conversationalist/adapters/openai';
-import { toAnthropicMessages } from 'conversationalist/adapters/anthropic';
-import { toGeminiMessages } from 'conversationalist/adapters/gemini';
+import {
+  fromOpenAIMessages,
+  toOpenAIMessages,
+} from 'conversationalist/adapters/openai';
+import { Conversation } from 'conversationalist';
 ```
 
-- Adapter outputs are SDK-compatible (OpenAI `ChatCompletionMessageParam[]`, Anthropic `MessageParam[]`, Gemini `Content[]`).
+- Adapter outputs are SDK-compatible, and the reverse adapters accept the same SDK-facing message payloads.
 - **OpenAI**: Supports `toOpenAIMessages` and `toOpenAIMessagesGrouped` (which groups consecutive tool calls).
-- **Anthropic**: Maps system messages and tool blocks to Anthropic's specific format.
-- **Gemini**: Handles Gemini's unique content/part structure.
+- **Anthropic**: Supports `toAnthropicMessages` and `fromAnthropicMessages`.
+- **Gemini**: Supports `toGeminiMessages` and `fromGeminiMessages`.
+
+```ts
+const history = fromOpenAIMessages(openAIMessages);
+const conversation = await Conversation.fromOpenAIMessages(openAIMessages);
+
+const openAIAgain = await conversation.toOpenAIMessages();
+const groupedOpenAI = await conversation.toOpenAIMessagesGrouped();
+```
 
 ### Provider-Specific Examples
 
@@ -546,12 +566,12 @@ conversation = await appendToolResultsAsync(conversation, results);
 
 ## Builder Pattern (Fluent API)
 
-If you prefer a more fluent style, use `withConversation` or `pipeConversation`. These allow you to "mutate" a draft within a scope while still resulting in an immutable object.
+If you prefer a more fluent style, use `withConversationHistory` or `pipeConversationHistory`. These allow you to "mutate" a draft within a scope while still resulting in an immutable object.
 
 ```ts
-import { withConversation, createConversation } from 'conversationalist';
+import { withConversationHistory, createConversationHistory } from 'conversationalist';
 
-const conversation = withConversation(createConversation(), (draft) => {
+const conversationHistory = withConversationHistory(createConversationHistory(), (draft) => {
   draft
     .appendSystemMessage('You are a helpful assistant.')
     .appendUserMessage('Hello!')
@@ -559,70 +579,70 @@ const conversation = withConversation(createConversation(), (draft) => {
 });
 ```
 
-`pipeConversation` allows you to chain multiple transformation functions together:
+`pipeConversationHistory` allows you to chain multiple transformation functions together:
 
 ```ts
 import {
-  createConversation,
-  pipeConversation,
+  createConversationHistory,
+  pipeConversationHistory,
   appendSystemMessage,
   appendUserMessage,
 } from 'conversationalist';
 
-const conversation = pipeConversation(
-  createConversation(),
+const conversationHistory = pipeConversationHistory(
+  createConversationHistory(),
   (c) => appendSystemMessage(c, 'You are a helpful assistant.'),
   (c) => appendUserMessage(c, 'Hello!'),
   (c) => appendAssistantMessage(c, 'Hi there!'),
 );
 ```
 
-## Conversation History (Undo/Redo)
+## Conversation Class (Undo/Redo)
 
-Use the `ConversationHistory` class to manage a stack of conversation states. Because every change returns a new immutable object, supporting undo/redo is built into the architecture.
+Use the `Conversation` class to manage a stack of conversation states. Because every change returns a new immutable `ConversationHistory` object, supporting undo/redo is built into the architecture.
 
 ```ts
-import { ConversationHistory } from 'conversationalist';
+import { Conversation } from 'conversationalist';
 
 // Create a new history (defaults to an empty conversation)
-const history = new ConversationHistory();
+const conversation = new Conversation();
 
 // You can use convenience methods that automatically track state
-history.appendUserMessage('Hello!');
-history.appendAssistantMessage('How are you?');
+conversation.appendUserMessage('Hello!');
+conversation.appendAssistantMessage('How are you?');
 
-history.undo(); // State reverts to just "Hello!"
-history.redo(); // State advances back to "How are you?"
+conversation.undo(); // State reverts to just "Hello!"
+conversation.redo(); // State advances back to "How are you?"
 
 // Convenience methods for all library utilities are built-in
-history.appendUserMessage('Another message');
-history.redactMessageAtPosition(0);
-history.truncateToTokenLimit(4000);
+conversation.appendUserMessage('Another message');
+conversation.redactMessageAtPosition(0);
+conversation.truncateToTokenLimit(4000);
 
 // Query methods work on the current state
-const messages = history.getMessages();
-const stats = history.getStatistics();
-const tokens = history.estimateTokens();
-const ids = history.ids;
-const firstMessage = history.get(ids[0]!);
+const messages = conversation.getMessages();
+const stats = conversation.getStatistics();
+const tokens = conversation.estimateTokens();
+const ids = conversation.ids;
+const firstMessage = conversation.get(ids[0]!);
 ```
 
 ### Event Subscription
 
-`ConversationHistory` implements `EventTarget` (and follows the Svelte store contract). You can listen for changes using standard DOM events or the `subscribe` method.
+`Conversation` implements `EventTarget` (and follows the Svelte store contract). You can listen for changes using standard DOM events or the `subscribe` method.
 
 #### Using DOM Events
 
 ```ts
-const history = new ConversationHistory();
+const conversation = new Conversation();
 
 // addEventListener returns a convenient unsubscribe function
-const unsubscribe = history.addEventListener('change', (event) => {
+const unsubscribe = conversation.addEventListener('change', (event) => {
   const { type, conversation } = event.detail;
-  console.log(`History updated via ${type}`);
+  console.log(`Conversation updated via ${type}`);
 });
 
-history.appendUserMessage('Hello!'); // Fires 'push' and 'change' events
+conversation.appendUserMessage('Hello!'); // Fires 'push' and 'change' events
 
 unsubscribe(); // Clean up when done
 ```
@@ -631,7 +651,7 @@ unsubscribe(); // Clean up when done
 
 ```ts
 // Subscribe returns an unsubscribe function and calls the callback immediately
-const unsubscribe = history.subscribe((conversation) => {
+const unsubscribe = conversation.subscribe((conversation) => {
   console.log('Current conversation state:', conversation);
 });
 ```
@@ -640,7 +660,7 @@ You can also use an `AbortSignal` for automatic cleanup:
 
 ```ts
 const controller = new AbortController();
-history.addEventListener('change', (e) => { ... }, { signal: controller.signal });
+conversation.addEventListener('change', (e) => { ... }, { signal: controller.signal });
 
 // Later...
 controller.abort();
@@ -648,37 +668,37 @@ controller.abort();
 
 ### Conversation Branching
 
-The `ConversationHistory` class supports branching. When you undo to a previous state and push a new update, it creates an alternate path instead of deleting the old history.
+The `Conversation` class supports branching. When you undo to a previous state and push a new update, it creates an alternate path instead of deleting the old history.
 
 ```ts
-const history = new ConversationHistory();
+const conversation = new Conversation();
 
-history.appendUserMessage('Path A');
-history.undo();
+conversation.appendUserMessage('Path A');
+conversation.undo();
 
-history.appendUserMessage('Path B');
+conversation.appendUserMessage('Path B');
 
-console.log(history.branchCount); // 2
-console.log(history.getMessages()[0]?.content); // "Path B"
+console.log(conversation.branchCount); // 2
+console.log(conversation.getMessages()[0]?.content); // "Path B"
 
-history.switchToBranch(0);
-console.log(history.getMessages()[0]?.content); // "Path A"
+conversation.switchToBranch(0);
+console.log(conversation.getMessages()[0]?.content); // "Path A"
 ```
 
 ### Serialization
 
-You can serialize the entire history tree (including all branches) to JSON and reconstruct it later.
+You can serialize the entire conversation tree, including all branches, to JSON and reconstruct it later.
 
 ```ts
 // 1. Capture a snapshot
-const snapshot = history.snapshot();
+const snapshot = conversation.snapshot();
 // localStorage.setItem('chat_history', JSON.stringify(snapshot));
 
 // 2. Restore from a snapshot
-const restored = ConversationHistory.from(snapshot);
+const restored = Conversation.from(snapshot);
 
 // You can also provide a new environment (e.g. with fresh token counters)
-const restoredWithEnv = ConversationHistory.from(snapshot, {
+const restoredWithEnv = Conversation.from(snapshot, {
   estimateTokens: myNewEstimator,
 });
 ```
@@ -687,13 +707,13 @@ const restoredWithEnv = ConversationHistory.from(snapshot, {
 
 ### Schema Versioning
 
-Conversations include a `schemaVersion` field for forward compatibility. `deserializeConversation(...)` migrates legacy `tool-use` roles and legacy `args` / `result` tool payload fields where possible before validation.
+Conversations include a `schemaVersion` field for forward compatibility. `deserializeConversationHistory(...)` migrates legacy `tool-use` roles and legacy `args` / `result` tool payload fields where possible before validation.
 
 ```ts
-import { deserializeConversation } from 'conversationalist';
+import { deserializeConversationHistory } from 'conversationalist';
 import { CURRENT_SCHEMA_VERSION } from 'conversationalist/versioning';
 
-const conversation = deserializeConversation(JSON.parse(storage));
+const conversation = deserializeConversationHistory(JSON.parse(storage));
 ```
 
 Conversations are already JSON-serializable; persist them directly and apply utilities
@@ -771,16 +791,16 @@ LABEL_TO_ROLE['System']; // 'system'
 You can also convert a conversation to Markdown format for human-readable storage or export, and restore it later.
 
 ```ts
-import { ConversationHistory } from 'conversationalist';
+import { Conversation } from 'conversationalist';
 import {
-  conversationHistoryFromMarkdown,
-  conversationHistoryToMarkdown,
+  conversationFromMarkdown,
+  conversationToMarkdown,
 } from 'conversationalist/markdown';
 
-const history = new ConversationHistory();
+const conversation = new Conversation();
 
 // Export to clean, readable Markdown
-const markdown = conversationHistoryToMarkdown(history);
+const markdown = conversationToMarkdown(conversation);
 // ### User
 //
 // Hello!
@@ -790,12 +810,12 @@ const markdown = conversationHistoryToMarkdown(history);
 // Hi there!
 
 // Export with full metadata (lossless round-trip)
-const markdownWithMetadata = conversationHistoryToMarkdown(history, {
+const markdownWithMetadata = conversationToMarkdown(conversation, {
   includeMetadata: true,
 });
 
 // Export with additional controls (redaction, transient stripping, hidden handling)
-const markdownSafe = conversationHistoryToMarkdown(history, {
+const markdownSafe = conversationToMarkdown(conversation, {
   includeMetadata: true,
   stripTransient: true,
   redactToolArguments: true,
@@ -804,7 +824,7 @@ const markdownSafe = conversationHistoryToMarkdown(history, {
 });
 
 // Restore from Markdown
-const restored = conversationHistoryFromMarkdown(markdownWithMetadata);
+const restored = conversationFromMarkdown(markdownWithMetadata);
 ```
 
 ### Export Helpers
@@ -826,13 +846,17 @@ Because **Conversationalist** is immutable, it works perfectly with React's `use
 
 ```tsx
 import { useState } from 'react';
-import { appendUserMessage, createConversation, getMessages } from 'conversationalist';
+import {
+  appendUserMessage,
+  createConversationHistory,
+  getMessages,
+} from 'conversationalist';
 
 export function ChatApp() {
-  const [conversation, setConversation] = useState(() => createConversation());
+  const [conversation, setConversation] = useState(() => createConversationHistory());
 
   const handleSend = (text: string) => {
-    // The new conversation object is set into state
+    // The new ConversationHistory value is set into state
     setConversation((prev) => appendUserMessage(prev, text));
   };
 
@@ -853,73 +877,77 @@ For more complex applications, you can wrap the logic into a custom hook. This e
 
 ```tsx
 import { useState, useCallback, useEffect } from 'react';
-import { ConversationHistory, createConversation, getMessages } from 'conversationalist';
+import { Conversation, getMessages } from 'conversationalist';
 
 export function useChat() {
   // 1. Initialize history (this could also come from context or props)
-  const [history] = useState(() => new ConversationHistory());
+  const [conversation] = useState(() => new Conversation());
 
   // 2. Sync history with local state for reactivity
-  const [conversation, setConversation] = useState(history.current);
+  const [historyState, setHistoryState] = useState(conversation.current);
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
     // addEventListener returns a cleanup function!
-    return history.addEventListener('change', (e) => {
-      setConversation(e.detail.conversation);
+    return conversation.addEventListener('change', (e) => {
+      setHistoryState(e.detail.conversation);
     });
-  }, [history]);
+  }, [conversation]);
 
   const sendMessage = useCallback(
     async (text: string) => {
-      history.appendUserMessage(text);
+      conversation.appendUserMessage(text);
       setLoading(true);
 
       try {
         const response = await fetch('/api/chat', {
           method: 'POST',
           body: JSON.stringify({
-            messages: history.toChatMessages(),
+            messages: conversation.toChatMessages(),
           }),
         });
         const data = await response.json();
-        history.appendAssistantMessage(data.answer);
+        conversation.appendAssistantMessage(data.answer);
       } finally {
         setLoading(false);
       }
     },
-    [history],
+    [conversation],
   );
 
   return {
-    conversation,
-    messages: getMessages(conversation),
+    conversation: historyState,
+    messages: getMessages(historyState),
     loading,
     sendMessage,
-    undo: () => history.undo(),
-    redo: () => history.redo(),
+    undo: () => conversation.undo(),
+    redo: () => conversation.redo(),
   };
 }
 ```
 
-> **Note**: `ConversationHistory.addEventListener()` returns an unsubscribe function, which is ideal for cleaning up effects in React (`useEffect`) or Svelte.
+> **Note**: `Conversation.addEventListener()` returns an unsubscribe function, which is ideal for cleaning up effects in React (`useEffect`) or Svelte.
 
 ### Using with Redux
 
-Redux requires immutable state updates, making **Conversationalist** an ideal companion. You can store the conversation object directly in your store.
+Redux requires immutable state updates, making **Conversationalist** an ideal companion. You can store the `ConversationHistory` value directly in your store.
 
 ```ts
 import { createSlice, PayloadAction } from '@reduxjs/toolkit';
-import { createConversation, appendUserMessage, Conversation } from 'conversationalist';
+import {
+  ConversationHistory,
+  appendUserMessage,
+  createConversationHistory,
+} from 'conversationalist';
 
 interface ChatState {
-  conversation: Conversation;
+  conversation: ConversationHistory;
 }
 
 const chatSlice = createSlice({
   name: 'chat',
   initialState: {
-    conversation: createConversation(),
+    conversation: createConversationHistory(),
   } as ChatState,
   reducers: {
     userMessageReceived: (state, action: PayloadAction<string>) => {
@@ -933,17 +961,17 @@ const chatSlice = createSlice({
 
 ### Using with Svelte (Runes)
 
-In Svelte 5, you can manage conversation state using the `$state` rune. Since **Conversationalist** is immutable, you update the state by re-assigning the variable with a new conversation object.
+In Svelte 5, you can manage conversation state using the `$state` rune. Since **Conversationalist** is immutable, you update the state by re-assigning the variable with a new `ConversationHistory` value.
 
 ```svelte
 <script lang="ts">
   import {
     appendUserMessage,
-    createConversation,
+    createConversationHistory,
     getMessages,
   } from 'conversationalist';
 
-  let conversation = $state(createConversation());
+  let conversation = $state(createConversationHistory());
 
   function handleSend(text: string) {
     conversation = appendUserMessage(conversation, text);
@@ -960,61 +988,61 @@ In Svelte 5, you can manage conversation state using the `$state` rune. Since **
 
 #### Custom Svelte Rune Example
 
-Svelte 5's runes pair perfectly with **Conversationalist**. You can use the `ConversationHistory` class directly as a store, or wrap it in a class with runes.
+Svelte 5's runes pair perfectly with **Conversationalist**. You can use the `Conversation` class directly as a store, or wrap it in a class with runes.
 
 ```svelte
 <script lang="ts">
-  import { ConversationHistory, getMessages } from 'conversationalist';
+  import { Conversation, getMessages } from 'conversationalist';
 
-  // history implements the Svelte store contract
-  const history = new ConversationHistory();
+  // conversation implements the Svelte store contract
+  const conversation = new Conversation();
 </script>
 
 <div>
-  {#each getMessages($history) as m (m.id)}
+  {#each getMessages($conversation) as m (m.id)}
     <div>{String(m.content)}</div>
   {/each}
-  <button onclick={() => history.appendUserMessage('Hello!')}>
+  <button onclick={() => conversation.appendUserMessage('Hello!')}>
     Send
   </button>
 </div>
 ```
 
-> **Note**: `ConversationHistory.addEventListener()` returns an unsubscribe function, which is ideal for cleaning up reactive effects in Svelte 5 or React hooks.
+> **Note**: `Conversation.addEventListener()` returns an unsubscribe function, which is ideal for cleaning up reactive effects in Svelte 5 or React hooks.
 
 ## API Overview
 
 | Category         | Key Functions                                                                                                                                                                                                               |
 | :--------------- | :-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Creation**     | `createConversation`, `deserializeConversation`                                                                                                                                                                             |
+| **Creation**     | `createConversationHistory`, `deserializeConversationHistory`                                                                                                                                                               |
 | **Appending**    | `appendUserMessage`, `appendAssistantMessage`, `appendSystemMessage`, `appendToolCall`, `appendToolResult`, `appendMessages`                                                                                                 |
-| **Unsafe**       | `createConversationUnsafe`, `appendUnsafeMessage`                                                                                                                                                                           |
+| **Unsafe**       | `createConversationHistoryUnsafe`, `appendUnsafeMessage`                                                                                                                                                                    |
 | **Streaming**    | `appendStreamingMessage`, `updateStreamingMessage`, `finalizeStreamingMessage`, `cancelStreamingMessage`                                                                                                                    |
 | **Modification** | `redactMessageAtPosition`, `replaceSystemMessage`, `collapseSystemMessages`                                                                                                                                                 |
 | **Context**      | `truncateToTokenLimit`, `truncateFromPosition`, `getRecentMessages`, `estimateConversationTokens`                                                                                                                           |
 | **Querying**     | `getMessages`, `getMessageIds`, `getMessageById`, `getStatistics`                                                                                                                                                           |
 | **Conversion**   | `toChatMessages`                                                                                                                                                                                                            |
-| **Tooling**      | `getPendingToolCalls`, `getToolInteractions`, `pairToolCallsWithResults`                                                                                                                                                    |
-| **Integrity**    | `validateConversationIntegrity`, `assertConversationIntegrity`                                                                                                                                                              |
-| **Markdown**     | `toMarkdown`, `fromMarkdown`, `conversationHistoryToMarkdown`, `conversationHistoryFromMarkdown` (from `conversationalist/markdown`)                                                                                        |
+| **Tooling**      | `getPendingToolCalls`, `getToolInteractions`, `appendToolCall`, `appendToolResult`, `appendToolResultsAsync`                                                                                                               |
+| **Integrity**    | `validateConversationHistoryIntegrity`, `assertConversationHistoryIntegrity`                                                                                                                                                |
+| **Markdown**     | `toMarkdown`, `fromMarkdown`, `conversationToMarkdown`, `conversationFromMarkdown` (from `conversationalist/markdown`)                                                                                                      |
 | **Export**       | `exportMarkdown`, `normalizeLineEndings` (from `conversationalist/export`)                                                                                                                                                  |
 | **Schemas**      | `conversationSchema`, `messageSchema`, `messageInputSchema`, `messageRoleSchema`, `multiModalContentSchema`, `jsonValueSchema`, `toolCallSchema`, `toolResultSchema`, `tokenUsageSchema` (from `conversationalist/schemas`) |
-| **Type Guards**  | `isConversation`, `isMessage`, `isMessageInput`, `isToolCall`, `isToolResult`, `isMessageRole`, `isConversationStatus`, `isJSONValue`, `isTokenUsage`, `isMultiModalContent`                                                |
+| **Type Guards**  | `isConversationHistory`, `isMessage`, `isMessageInput`, `isToolCall`, `isToolResult`, `isMessageRole`, `isConversationStatus`, `isJSONValue`, `isTokenUsage`, `isMultiModalContent`                                        |
 | **Role Labels**  | `ROLE_LABELS`, `LABEL_TO_ROLE`, `getRoleLabel`, `getRoleFromLabel` (from `conversationalist/markdown`)                                                                                                                      |
 | **Transient**    | `isTransientKey`, `stripTransientFromRecord`, `stripTransientMetadata`                                                                                                                                                      |
 | **Redaction**    | `redactPii`, `createPIIRedactionPlugin`, `createPIIRedaction`, `DEFAULT_PII_RULES` (from `conversationalist/redaction`)                                                                                                     |
 | **Versioning**   | `CURRENT_SCHEMA_VERSION` (from `conversationalist/versioning`)                                                                                                                                                              |
 | **Sort**         | `sortObjectKeys`, `sortMessagesByPosition` (from `conversationalist/sort`)                                                                                                                                                  |
-| **History**      | `ConversationHistory`                                                                                                                                                                                                       |
+| **Conversation** | `Conversation`                                                                                                                                                                                                               |
 
 ## Type Guards
 
 Use the built-in type guards to validate unknown values before operating on them:
 
 ```ts
-import { isConversation, isMessage } from 'conversationalist';
+import { isConversationHistory, isMessage } from 'conversationalist';
 
-if (isConversation(data)) {
+if (isConversationHistory(data)) {
   console.log(data.id);
 }
 
@@ -1023,9 +1051,9 @@ if (isMessage(value)) {
 }
 ```
 
-## ConversationHistory Events
+## Conversation Events
 
-`ConversationHistory` emits typed events for every mutation. Listen to `change` for any mutation,
+`Conversation` emits typed events for every mutation. Listen to `change` for any mutation,
 or to specific action events if you only care about a subset.
 
 Events and payloads:
@@ -1037,15 +1065,15 @@ Events and payloads:
 - `switch`: fired after switching branches
 
 ```ts
-import { ConversationHistory, createConversation } from 'conversationalist';
+import { Conversation, createConversationHistory } from 'conversationalist';
 
-const history = new ConversationHistory(createConversation());
+const conversation = new Conversation(createConversationHistory());
 
-history.addEventListener('change', (event) => {
+conversation.addEventListener('change', (event) => {
   console.log(event.detail.type, event.detail.conversation.id);
 });
 
-history.addEventListener('push', (event) => {
+conversation.addEventListener('push', (event) => {
   console.log('pushed', event.detail.conversation.ids.length);
 });
 ```
@@ -1108,7 +1136,7 @@ const testEnv = {
   randomId: () => 'fixed-id',
 };
 
-let conversation = createConversation({ title: 'Test' }, testEnv);
+let conversation = createConversationHistory({ title: 'Test' }, testEnv);
 ```
 
 ## Development

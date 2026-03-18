@@ -1,5 +1,10 @@
 import { ensureConversationSafe } from '../conversation/validation';
-import type { AssistantMessage, Conversation, JSONValue, Message } from '../types';
+import type {
+  AssistantMessage,
+  ConversationHistory as Conversation,
+  JSONValue,
+  Message,
+} from '../types';
 import { isAssistantMessage } from './message';
 import { getOrderedMessages, toIdRecord } from './message-store';
 import { toReadonly } from './type-helpers';

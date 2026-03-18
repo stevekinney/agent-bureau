@@ -1,9 +1,14 @@
 import { createInvalidPositionError, createSerializationError } from '../errors';
 import { conversationSchema } from '../schemas';
-import type { AssistantMessage, Conversation, Message, ToolResult } from '../types';
+import type {
+  AssistantMessage,
+  ConversationHistory,
+  Message,
+  ToolResult,
+} from '../types';
 import { createMessage, isAssistantMessage, toReadonly } from '../utilities';
 import { toIdRecord } from '../utilities/message-store';
-import { assertConversationIntegrity } from './integrity';
+import { assertConversationHistoryIntegrity } from './integrity';
 import { assertToolReference, registerToolUse, type ToolUseIndex } from './tool-tracking';
 
 function normalizeLegacyToolCall(toolCall: unknown): unknown {
@@ -123,10 +128,10 @@ function normalizeMessage(message: Message): Message | AssistantMessage {
  * Throws a serialization error if validation fails.
  *
  * @param json - The conversation JSON to deserialize (may be from an older version)
- * @returns A Conversation object
+ * @returns A ConversationHistory object
  * @throws {SerializationError} If validation fails
  */
-export function deserializeConversation(json: unknown): Conversation {
+export function deserializeConversationHistory(json: unknown): ConversationHistory {
   const parsed = conversationSchema.safeParse(normalizeLegacyConversationData(json));
   if (!parsed.success) {
     throw createSerializationError('failed to deserialize conversation: invalid data');
@@ -173,7 +178,7 @@ export function deserializeConversation(json: unknown): Conversation {
     const messageInstances: Message[] = orderedMessages.map((message) =>
       createMessage(message),
     );
-    const conv: Conversation = {
+    const conv: ConversationHistory = {
       schemaVersion: data.schemaVersion,
       id: data.id,
       title: data.title,
@@ -185,7 +190,7 @@ export function deserializeConversation(json: unknown): Conversation {
       updatedAt: data.updatedAt,
     };
     const readonly = toReadonly(conv);
-    assertConversationIntegrity(readonly);
+    assertConversationHistoryIntegrity(readonly);
     return readonly;
   } catch (error) {
     throw createSerializationError(

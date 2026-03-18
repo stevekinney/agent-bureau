@@ -2,7 +2,7 @@ import {
   type ConversationEnvironment,
   resolveConversationEnvironment,
 } from '../environment';
-import type { Conversation, ConversationStatus, JSONValue } from '../types';
+import type { ConversationHistory, ConversationStatus, JSONValue } from '../types';
 import { CURRENT_SCHEMA_VERSION } from '../types';
 import { toReadonly } from '../utilities';
 import { ensureConversationSafe } from './validation';
@@ -11,7 +11,7 @@ import { ensureConversationSafe } from './validation';
  * Creates a new empty conversation with the specified options.
  * Returns an immutable conversation object with timestamps set to the current time.
  */
-export function createConversation(
+export function createConversationHistory(
   options?: {
     id?: string;
     title?: string;
@@ -19,10 +19,10 @@ export function createConversation(
     metadata?: Record<string, JSONValue>;
   },
   environment?: Partial<ConversationEnvironment>,
-): Conversation {
+): ConversationHistory {
   const resolvedEnvironment = resolveConversationEnvironment(environment);
   const now = resolvedEnvironment.now();
-  const conv: Conversation = {
+  const conv: ConversationHistory = {
     schemaVersion: CURRENT_SCHEMA_VERSION,
     id: options?.id ?? resolvedEnvironment.randomId(),
     title: options?.title,
@@ -39,7 +39,7 @@ export function createConversation(
 /**
  * Creates a new empty conversation without validating schema or integrity.
  */
-export function createConversationUnsafe(
+export function createConversationHistoryUnsafe(
   options?: {
     id?: string;
     title?: string;
@@ -47,10 +47,10 @@ export function createConversationUnsafe(
     metadata?: Record<string, JSONValue>;
   },
   environment?: Partial<ConversationEnvironment>,
-): Conversation {
+): ConversationHistory {
   const resolvedEnvironment = resolveConversationEnvironment(environment);
   const now = resolvedEnvironment.now();
-  const conv: Conversation = {
+  const conv: ConversationHistory = {
     schemaVersion: CURRENT_SCHEMA_VERSION,
     id: options?.id ?? resolvedEnvironment.randomId(),
     title: options?.title,

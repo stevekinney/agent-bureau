@@ -1,4 +1,4 @@
-import type { Conversation, ToMarkdownOptions } from '../types';
+import type { ConversationHistory as Conversation, ToMarkdownOptions } from '../types';
 import { normalizeLineEndings } from '../utilities/line-endings';
 import { toMarkdown } from '../utilities/markdown';
 

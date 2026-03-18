@@ -134,9 +134,9 @@ export interface AssistantMessage extends Message {
 export type ConversationStatus = 'active' | 'archived' | 'deleted';
 
 /**
- * Immutable conversation state.
+ * Immutable conversation transcript state.
  */
-export interface Conversation {
+export interface ConversationHistory {
   schemaVersion: number;
   id: string;
   title?: string | undefined;
@@ -159,18 +159,18 @@ export type TokenEstimator = (message: Message) => number;
 export type MessagePlugin = (input: MessageInput) => MessageInput;
 
 /**
- * Serialized form of a single node in the conversation history tree.
+ * Serialized form of a single node in the conversation tree.
  */
-export interface HistoryNodeSnapshot {
-  conversation: Conversation;
-  children: HistoryNodeSnapshot[];
+export interface ConversationNodeSnapshot {
+  conversation: ConversationHistory;
+  children: ConversationNodeSnapshot[];
 }
 
 /**
- * Serialized form of the entire conversation history.
+ * Serialized form of the entire conversation tree.
  */
-export interface ConversationHistorySnapshot {
-  root: HistoryNodeSnapshot;
+export interface ConversationSnapshot {
+  root: ConversationNodeSnapshot;
   currentPath: number[];
 }
 

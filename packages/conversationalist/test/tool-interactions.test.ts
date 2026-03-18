@@ -7,11 +7,11 @@ import {
   appendToolResultAsync,
   appendToolResults,
   appendToolResultsAsync,
-  createConversation,
+  createConversationHistory as createConversation,
   getPendingToolCalls,
   getToolInteractions,
 } from '../src/conversation/index';
-import type { Conversation, Message } from '../src/types';
+import type { ConversationHistory as Conversation, Message } from '../src/types';
 
 const testEnvironment = {
   now: () => '2024-01-01T00:00:00.000Z',

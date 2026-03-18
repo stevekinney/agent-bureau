@@ -1,6 +1,9 @@
 import { describe, expect, test } from 'bun:test';
 
-import { appendUserMessage, createConversation } from '../src/conversation/index';
+import {
+  appendUserMessage,
+  createConversationHistory as createConversation,
+} from '../src/conversation/index';
 import { exportMarkdown, normalizeLineEndings } from '../src/export';
 
 describe('export helpers', () => {

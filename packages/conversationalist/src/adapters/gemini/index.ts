@@ -1,7 +1,18 @@
 import type { MultiModalContent } from '@lasercat/homogenaize';
 
+import {
+  appendMessages,
+  createConversationHistory,
+} from '../../conversation/index';
 import { assertConversationSafe } from '../../conversation/validation';
-import type { Conversation, Message, ToolCall, ToolResult } from '../../types';
+import type {
+  ConversationHistory as Conversation,
+  JSONValue,
+  Message,
+  MessageInput,
+  ToolCall,
+  ToolResult,
+} from '../../types';
 import { getOrderedMessages } from '../../utilities/message-store';
 
 /**
@@ -343,4 +354,256 @@ export function toGeminiMessages(conversation: Conversation): GeminiConversation
     result.systemInstruction = systemInstruction;
   }
   return result;
+}
+
+function toJSONValue(value: unknown): JSONValue {
+  if (
+    value === null ||
+    typeof value === 'string' ||
+    typeof value === 'number' ||
+    typeof value === 'boolean'
+  ) {
+    return value;
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((item) => toJSONValue(item));
+  }
+
+  if (value && typeof value === 'object') {
+    const record: Record<string, JSONValue> = {};
+    for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+      record[key] = toJSONValue(entry);
+    }
+    return record;
+  }
+
+  return String(value);
+}
+
+function isCanonicalToolResultPayload(
+  value: JSONValue,
+): value is JSONValue & {
+  outcome: ToolResult['outcome'];
+  content: JSONValue;
+  error?: ToolResult['error'];
+  action?: ToolResult['action'];
+  inputDigest?: string;
+  outputDigest?: string;
+} {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return false;
+  }
+
+  return (
+    'outcome' in value &&
+    (value['outcome'] === 'success' ||
+      value['outcome'] === 'error' ||
+      value['outcome'] === 'action_required') &&
+    'content' in value
+  );
+}
+
+function parseFunctionArguments(args: Record<string, unknown>): JSONValue {
+  if (
+    Object.keys(args).length === 1 &&
+    Object.hasOwn(args, '_value')
+  ) {
+    return toJSONValue(args['_value']);
+  }
+
+  if (
+    Object.keys(args).length === 1 &&
+    Object.hasOwn(args, '_raw') &&
+    typeof args['_raw'] === 'string'
+  ) {
+    return args['_raw'];
+  }
+
+  return toJSONValue(args);
+}
+
+function parseFunctionResponse(
+  callId: string,
+  response: Record<string, unknown>,
+): ToolResult {
+  const value = toJSONValue(response);
+
+  if (isCanonicalToolResultPayload(value)) {
+    return {
+      callId,
+      outcome: value.outcome,
+      content: value.content,
+      ...(value.error ? { error: value.error } : {}),
+      ...(value.action ? { action: value.action } : {}),
+      ...(typeof value.inputDigest === 'string'
+        ? { inputDigest: value.inputDigest }
+        : {}),
+      ...(typeof value.outputDigest === 'string'
+        ? { outputDigest: value.outputDigest }
+        : {}),
+    };
+  }
+
+  if (
+    value &&
+    typeof value === 'object' &&
+    !Array.isArray(value) &&
+    Object.keys(value).length === 1 &&
+    Object.hasOwn(value, 'result')
+  ) {
+    return {
+      callId,
+      outcome: 'success',
+      content: toJSONValue(value['result']),
+    };
+  }
+
+  return {
+    callId,
+    outcome: 'success',
+    content: value,
+  };
+}
+
+function toContentFromGeminiPart(
+  part: GeminiTextPart | GeminiInlineDataPart | GeminiFileDataPart,
+): MessageInput['content'] {
+  if ('text' in part) {
+    return part.text;
+  }
+
+  if ('inlineData' in part) {
+    return [
+      {
+        type: 'image',
+        url: `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`,
+        mimeType: part.inlineData.mimeType,
+      },
+    ];
+  }
+
+  return [
+    {
+      type: 'image',
+      url: part.fileData.fileUri,
+      mimeType: part.fileData.mimeType,
+    },
+  ];
+}
+
+function toSystemInstructionContent(parts: GeminiPart[]): MessageInput['content'] | undefined {
+  const contentParts: MultiModalContent[] = [];
+
+  for (const part of parts) {
+    if ('text' in part) {
+      contentParts.push({ type: 'text', text: part.text });
+    } else if ('inlineData' in part) {
+      contentParts.push({
+        type: 'image',
+        url: `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`,
+        mimeType: part.inlineData.mimeType,
+      });
+    } else if ('fileData' in part) {
+      contentParts.push({
+        type: 'image',
+        url: part.fileData.fileUri,
+        mimeType: part.fileData.mimeType,
+      });
+    }
+  }
+
+  if (contentParts.length === 0) {
+    return undefined;
+  }
+
+  if (contentParts.length === 1 && contentParts[0]?.type === 'text') {
+    return contentParts[0].text ?? '';
+  }
+
+  return contentParts;
+}
+
+/**
+ * Converts Gemini SDK contents back into a ConversationHistory.
+ */
+export function fromGeminiMessages(payload: GeminiConversation): Conversation {
+  let conversation = createConversationHistory();
+  const inputs: MessageInput[] = [];
+  let syntheticToolCallCount = 0;
+  const pendingToolCalls = new Map<string, string[]>();
+
+  const queueToolCall = (name: string, callId: string) => {
+    const queued = pendingToolCalls.get(name) ?? [];
+    queued.push(callId);
+    pendingToolCalls.set(name, queued);
+  };
+
+  const dequeueToolCall = (name: string): string | undefined => {
+    const queued = pendingToolCalls.get(name);
+    if (!queued || queued.length === 0) {
+      return undefined;
+    }
+    const [callId, ...rest] = queued;
+    if (rest.length === 0) {
+      pendingToolCalls.delete(name);
+    } else {
+      pendingToolCalls.set(name, rest);
+    }
+    return callId;
+  };
+
+  const systemContent = payload.systemInstruction
+    ? toSystemInstructionContent(payload.systemInstruction.parts)
+    : undefined;
+  if (systemContent !== undefined) {
+    inputs.push({
+      role: 'system',
+      content: systemContent,
+    });
+  }
+
+  for (const content of payload.contents) {
+    const role = content.role === 'model' ? 'assistant' : 'user';
+
+    for (const part of content.parts) {
+      if ('functionCall' in part) {
+        const callId = `gemini-call-${++syntheticToolCallCount}`;
+        queueToolCall(part.functionCall.name, callId);
+        inputs.push({
+          role: 'tool-call',
+          content: '',
+          toolCall: {
+            id: callId,
+            name: part.functionCall.name,
+            arguments: parseFunctionArguments(part.functionCall.args),
+          },
+        });
+        continue;
+      }
+
+      if ('functionResponse' in part) {
+        const callId =
+          dequeueToolCall(part.functionResponse.name) ??
+          `gemini-call-${++syntheticToolCallCount}`;
+        inputs.push({
+          role: 'tool-result',
+          content: '',
+          toolResult: parseFunctionResponse(callId, part.functionResponse.response),
+        });
+        continue;
+      }
+
+      inputs.push({
+        role,
+        content: toContentFromGeminiPart(part),
+      });
+    }
+  }
+
+  if (inputs.length > 0) {
+    conversation = appendMessages(conversation, ...inputs);
+  }
+
+  return conversation;
 }

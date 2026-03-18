@@ -2,7 +2,7 @@ import type { MultiModalContent } from '@lasercat/homogenaize';
 import { z } from 'zod';
 
 import type {
-  Conversation,
+  ConversationHistory as Conversation,
   ConversationStatus,
   JSONValue,
   Message,

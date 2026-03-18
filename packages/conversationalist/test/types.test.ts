@@ -1,10 +1,10 @@
 import { describe, expectTypeOf, it } from 'bun:test';
 
-import { ConversationHistory } from '../src/history';
+import { Conversation } from '../src/history';
 import type { MultiModalContent } from '../src/multi-modal';
 import type {
   AssistantMessage,
-  Conversation,
+  ConversationHistory,
   ConversationStatus,
   JSONValue,
   Message,
@@ -16,9 +16,9 @@ import type {
 } from '../src/types';
 
 describe('conversationalist types Type Inference', () => {
-  describe('ConversationHistory', () => {
+  describe('Conversation', () => {
     it('implements EventTarget', () => {
-      expectTypeOf<ConversationHistory>().toMatchTypeOf<EventTarget>();
+      expectTypeOf<Conversation>().toMatchTypeOf<EventTarget>();
     });
   });
 
@@ -180,37 +180,37 @@ describe('conversationalist types Type Inference', () => {
     });
   });
 
-  describe('Conversation', () => {
+  describe('ConversationHistory', () => {
     it('has required properties', () => {
-      expectTypeOf<Conversation['schemaVersion']>().toEqualTypeOf<number>();
-      expectTypeOf<Conversation['id']>().toEqualTypeOf<string>();
-      expectTypeOf<Conversation['status']>().toEqualTypeOf<ConversationStatus>();
-      expectTypeOf<Conversation['createdAt']>().toEqualTypeOf<string>();
-      expectTypeOf<Conversation['updatedAt']>().toEqualTypeOf<string>();
+      expectTypeOf<ConversationHistory['schemaVersion']>().toEqualTypeOf<number>();
+      expectTypeOf<ConversationHistory['id']>().toEqualTypeOf<string>();
+      expectTypeOf<ConversationHistory['status']>().toEqualTypeOf<ConversationStatus>();
+      expectTypeOf<ConversationHistory['createdAt']>().toEqualTypeOf<string>();
+      expectTypeOf<ConversationHistory['updatedAt']>().toEqualTypeOf<string>();
     });
 
     it('has readonly nested types', () => {
       // Metadata is readonly
-      expectTypeOf<Conversation['metadata']>().toEqualTypeOf<
+      expectTypeOf<ConversationHistory['metadata']>().toEqualTypeOf<
         Readonly<Record<string, JSONValue>>
       >();
 
       // Ids are readonly
-      expectTypeOf<Conversation['ids']>().toEqualTypeOf<ReadonlyArray<string>>();
+      expectTypeOf<ConversationHistory['ids']>().toEqualTypeOf<ReadonlyArray<string>>();
 
       // Messages are readonly
-      expectTypeOf<Conversation['messages']>().toEqualTypeOf<
+      expectTypeOf<ConversationHistory['messages']>().toEqualTypeOf<
         Readonly<Record<string, Message>>
       >();
     });
 
     it('has optional title', () => {
-      expectTypeOf<Conversation['title']>().toEqualTypeOf<string | undefined>();
+      expectTypeOf<ConversationHistory['title']>().toEqualTypeOf<string | undefined>();
     });
 
     it('is immutable (all nested arrays are readonly)', () => {
-      // This verifies that the Conversation type enforces immutability
-      const conv: Conversation = {
+      // This verifies that the ConversationHistory type enforces immutability
+      const conv: ConversationHistory = {
         schemaVersion: 1,
         id: 'conv-1',
         status: 'active',
@@ -231,7 +231,7 @@ describe('conversationalist types Type Inference', () => {
       conv.metadata['key'] = 'value';
 
       // Just to verify the test compiles (the errors above are expected)
-      expectTypeOf(conv).toMatchTypeOf<Conversation>();
+      expectTypeOf(conv).toMatchTypeOf<ConversationHistory>();
     });
   });
 });

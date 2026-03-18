@@ -19,11 +19,11 @@ export {
   appendToolResultsAsync,
   appendUnsafeMessage,
   appendUserMessage,
-  assertConversationIntegrity,
+  assertConversationHistoryIntegrity,
   collapseSystemMessages,
-  createConversation,
-  createConversationUnsafe,
-  deserializeConversation,
+  createConversationHistory,
+  createConversationHistoryUnsafe,
+  deserializeConversationHistory,
   getFirstSystemMessage,
   getMessageAtPosition,
   getMessageById,
@@ -39,7 +39,7 @@ export {
   replaceSystemMessage,
   searchConversationMessages,
   toChatMessages,
-  validateConversationIntegrity,
+  validateConversationHistoryIntegrity,
 } from './conversation/index';
 export type { ConversationalistErrorCode } from './errors';
 export {
@@ -54,7 +54,7 @@ export {
   createValidationError,
 } from './errors';
 export {
-  isConversation,
+  isConversationHistory,
   isConversationStatus,
   isJSONValue,
   isMessage,
@@ -65,11 +65,11 @@ export {
   isToolCall,
   isToolResult,
 } from './guards';
-export { ConversationHistory } from './history';
+export { Conversation } from './history';
 export type { ImageContent, TextContent } from './multi-modal';
 export type {
   AssistantMessage,
-  Conversation,
+  ConversationHistory,
   ConversationStatus,
   JSONValue,
   Message,
@@ -83,9 +83,12 @@ export type {
   ToolErrorCategory,
   ToolResult,
 } from './types';
-export type { ConversationHistorySnapshot, HistoryNodeSnapshot } from './types';
-export type { ConversationDraft } from './with-conversation';
-export { pipeConversation, withConversation } from './with-conversation';
+export type { ConversationNodeSnapshot, ConversationSnapshot } from './types';
+export type { ConversationHistoryDraft } from './with-conversation';
+export {
+  pipeConversationHistory,
+  withConversationHistory,
+} from './with-conversation';
 export type {
   Message as ExternalMessage,
   MultiModalContent,

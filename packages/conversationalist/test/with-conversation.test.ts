@@ -4,11 +4,14 @@ import { simpleTokenEstimator } from '../src/context';
 import {
   appendAssistantMessage,
   appendUserMessage,
-  createConversation,
+  createConversationHistory as createConversation,
 } from '../src/conversation/index';
 import { isStreamingMessage } from '../src/streaming';
-import type { Conversation, Message } from '../src/types';
-import { pipeConversation, withConversation } from '../src/with-conversation';
+import type { ConversationHistory as Conversation, Message } from '../src/types';
+import {
+  pipeConversationHistory as pipeConversation,
+  withConversationHistory as withConversation,
+} from '../src/with-conversation';
 
 const getOrderedMessages = (conversation: Conversation): Message[] =>
   conversation.ids

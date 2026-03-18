@@ -1,20 +1,24 @@
 import { describe, expect, expectTypeOf, it } from 'bun:test';
 
 import { estimateConversationTokens, truncateToTokenLimit } from '../src/context';
-import { ConversationHistory } from '../src/history';
-import { appendUserMessage, createConversation, getStatistics } from '../src/index';
+import { Conversation as ConversationHistory } from '../src/history';
 import {
-  conversationHistoryFromMarkdown,
-  conversationHistoryToMarkdown,
+  appendUserMessage,
+  createConversationHistory as createConversation,
+  getStatistics,
+} from '../src/index';
+import {
+  conversationFromMarkdown as conversationHistoryFromMarkdown,
+  conversationToMarkdown as conversationHistoryToMarkdown,
 } from '../src/markdown';
-import type { Conversation, Message } from '../src/types';
+import type { ConversationHistory as ConversationState, Message } from '../src/types';
 
-const getOrderedMessages = (conversation: Conversation): Message[] =>
+const getOrderedMessages = (conversation: ConversationState): Message[] =>
   conversation.ids
     .map((id) => conversation.messages[id])
     .filter((message): message is Message => Boolean(message));
 
-describe('ConversationHistory', () => {
+describe('Conversation', () => {
   it('should implement EventTarget', () => {
     expectTypeOf<ConversationHistory>().toMatchTypeOf<EventTarget>();
     const history = new ConversationHistory(createConversation());

@@ -2,6 +2,8 @@ import { readFileSync } from 'node:fs';
 
 import { describe, expect, it } from 'bun:test';
 
+import * as root from '../src';
+
 const pkg = JSON.parse(
   readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
 ) as {
@@ -30,5 +32,38 @@ describe('public API export map', () => {
     expect(exportsMap['./anthropic']).toBeUndefined();
     expect(exportsMap['./gemini']).toBeUndefined();
     expect(exportsMap['./plugins']).toBeUndefined();
+  });
+
+  it('exposes the renamed canonical root runtime API', () => {
+    expect(root.Conversation).toBeDefined();
+    expect(root.createConversationHistory).toBeDefined();
+    expect(root.createConversationHistoryUnsafe).toBeDefined();
+    expect(root.deserializeConversationHistory).toBeDefined();
+    expect(root.withConversationHistory).toBeDefined();
+    expect(root.pipeConversationHistory).toBeDefined();
+
+    expect('ConversationHistory' in root).toBeFalse();
+    expect('createConversation' in root).toBeFalse();
+    expect('createConversationUnsafe' in root).toBeFalse();
+    expect('deserializeConversation' in root).toBeFalse();
+    expect('withConversation' in root).toBeFalse();
+    expect('pipeConversation' in root).toBeFalse();
+  });
+
+  it('uses dynamic imports for provider adapters in the Conversation class', () => {
+    const historySource = readFileSync(
+      new URL('../src/history.ts', import.meta.url),
+      'utf8',
+    );
+
+    expect(historySource).toContain("await import('./adapters/openai')");
+    expect(historySource).toContain("await import('./adapters/anthropic')");
+    expect(historySource).toContain("await import('./adapters/gemini')");
+    expect(historySource).not.toMatch(
+      /import\s+\{[^}]+\}\s+from\s+['"]\.\/adapters\/(?:openai|anthropic|gemini)['"]/,
+    );
+    expect(historySource).not.toMatch(
+      /import\s+\*\s+as\s+\w+\s+from\s+['"]\.\/adapters\/(?:openai|anthropic|gemini)['"]/,
+    );
   });
 });

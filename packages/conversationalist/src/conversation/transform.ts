@@ -3,7 +3,7 @@ import type {
   MultiModalContent,
 } from '@lasercat/homogenaize';
 
-import type { Conversation } from '../types';
+import type { ConversationHistory as Conversation } from '../types';
 import { getOrderedMessages } from '../utilities/message-store';
 import { assertConversationSafe } from './validation';
 

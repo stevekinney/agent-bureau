@@ -4,7 +4,7 @@ import {
   resolveConversationEnvironment,
 } from '../environment';
 import type {
-  Conversation,
+  ConversationHistory as Conversation,
   JSONValue,
   MessageInput,
   TokenUsage,

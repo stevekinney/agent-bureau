@@ -4,7 +4,7 @@ import {
   resolveConversationEnvironment,
 } from '../environment';
 import { createInvalidPositionError } from '../errors';
-import type { Conversation, Message } from '../types';
+import type { ConversationHistory as Conversation, Message } from '../types';
 import { createMessage, toReadonly } from '../utilities';
 import { redactToolResult } from '../utilities/tool-results';
 import { ensureConversationSafe } from './validation';

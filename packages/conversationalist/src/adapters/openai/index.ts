@@ -1,7 +1,18 @@
 import type { MultiModalContent } from '@lasercat/homogenaize';
 
+import {
+  appendMessages,
+  createConversationHistory,
+} from '../../conversation/index';
 import { assertConversationSafe } from '../../conversation/validation';
-import type { Conversation, Message, ToolCall, ToolResult } from '../../types';
+import type {
+  ConversationHistory as Conversation,
+  JSONValue,
+  Message,
+  MessageInput,
+  ToolCall,
+  ToolResult,
+} from '../../types';
 import { getOrderedMessages } from '../../utilities/message-store';
 
 /**
@@ -91,14 +102,6 @@ export type OpenAIMessage =
  */
 function toOpenAIContent(
   content: string | ReadonlyArray<MultiModalContent>,
-  options: { allowImages: false },
-): string | OpenAITextContentPart[];
-function toOpenAIContent(
-  content: string | ReadonlyArray<MultiModalContent>,
-  options?: { allowImages?: true },
-): string | OpenAIContentPart[];
-function toOpenAIContent(
-  content: string | ReadonlyArray<MultiModalContent>,
   options: { allowImages?: boolean } = {},
 ): string | OpenAIContentPart[] | OpenAITextContentPart[] {
   if (typeof content === 'string') {
@@ -135,7 +138,9 @@ function toOpenAIContent(
 function toOpenAITextContent(
   content: string | ReadonlyArray<MultiModalContent>,
 ): string | OpenAITextContentPart[] {
-  return toOpenAIContent(content, { allowImages: false });
+  return toOpenAIContent(content, { allowImages: false }) as
+    | string
+    | OpenAITextContentPart[];
 }
 
 /**
@@ -231,6 +236,102 @@ function stringifyToolResult(result: ToolResult): string {
   return JSON.stringify(payload);
 }
 
+function toConversationContent(
+  content: string | OpenAIContentPart[] | OpenAITextContentPart[] | null,
+): MessageInput['content'] | undefined {
+  if (content === null) {
+    return undefined;
+  }
+
+  if (typeof content === 'string') {
+    return content;
+  }
+
+  const parts: MultiModalContent[] = content.map((part) =>
+    part.type === 'text'
+      ? { type: 'text', text: part.text }
+      : { type: 'image', url: part.image_url.url },
+  );
+
+  if (parts.length === 0) {
+    return '';
+  }
+
+  if (parts.length === 1 && parts[0]?.type === 'text') {
+    return parts[0].text ?? '';
+  }
+
+  return parts;
+}
+
+function parseJSONValue(value: string): JSONValue | undefined {
+  try {
+    return JSON.parse(value) as JSONValue;
+  } catch {
+    return undefined;
+  }
+}
+
+function parseToolArguments(value: string): JSONValue {
+  return parseJSONValue(value) ?? value;
+}
+
+function isCanonicalToolResultPayload(
+  value: JSONValue,
+): value is JSONValue & {
+  outcome: ToolResult['outcome'];
+  content: JSONValue;
+  error?: ToolResult['error'];
+  action?: ToolResult['action'];
+  inputDigest?: string;
+  outputDigest?: string;
+} {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return false;
+  }
+
+  return (
+    'outcome' in value &&
+    (value['outcome'] === 'success' ||
+      value['outcome'] === 'error' ||
+      value['outcome'] === 'action_required') &&
+    'content' in value
+  );
+}
+
+function parseToolResult(
+  callId: string,
+  content: string | OpenAITextContentPart[],
+): ToolResult {
+  const serialized =
+    typeof content === 'string'
+      ? content
+      : content.map((part) => part.text).join('\n\n');
+  const parsed = parseJSONValue(serialized);
+
+  if (parsed !== undefined && isCanonicalToolResultPayload(parsed)) {
+    return {
+      callId,
+      outcome: parsed.outcome,
+      content: parsed.content,
+      ...(parsed.error ? { error: parsed.error } : {}),
+      ...(parsed.action ? { action: parsed.action } : {}),
+      ...(typeof parsed.inputDigest === 'string'
+        ? { inputDigest: parsed.inputDigest }
+        : {}),
+      ...(typeof parsed.outputDigest === 'string'
+        ? { outputDigest: parsed.outputDigest }
+        : {}),
+    };
+  }
+
+  return {
+    callId,
+    outcome: 'success',
+    content: parsed ?? serialized,
+  };
+}
+
 /**
  * Converts a conversation to OpenAI Chat Completions API message format.
  * Handles role mapping, tool calls, and multi-modal content.
@@ -303,4 +404,73 @@ export function toOpenAIMessagesGrouped(conversation: Conversation): OpenAIMessa
   }
 
   return messages;
+}
+
+/**
+ * Converts OpenAI Chat Completions API messages back into a ConversationHistory.
+ */
+export function fromOpenAIMessages(messages: ReadonlyArray<OpenAIMessage>): Conversation {
+  let conversation = createConversationHistory();
+  const inputs: MessageInput[] = [];
+
+  for (const message of messages) {
+    switch (message.role) {
+      case 'system':
+        inputs.push({
+          role: 'system',
+          content: toConversationContent(message.content) ?? '',
+        });
+        break;
+
+      case 'user':
+        inputs.push({
+          role: 'user',
+          content: toConversationContent(message.content) ?? '',
+        });
+        break;
+
+      case 'assistant': {
+        const assistantContent = toConversationContent(message.content);
+        const hasAssistantContent =
+          assistantContent !== undefined &&
+          (typeof assistantContent === 'string'
+            ? assistantContent.length > 0
+            : assistantContent.length > 0);
+
+        if (hasAssistantContent) {
+          inputs.push({
+            role: 'assistant',
+            content: assistantContent,
+          });
+        }
+
+        for (const toolCall of message.tool_calls ?? []) {
+          inputs.push({
+            role: 'tool-call',
+            content: '',
+            toolCall: {
+              id: toolCall.id,
+              name: toolCall.function.name,
+              arguments: parseToolArguments(toolCall.function.arguments),
+            },
+          });
+        }
+        break;
+      }
+
+      case 'tool':
+        inputs.push({
+          role: 'tool-result',
+          content: '',
+          toolResult: parseToolResult(message.tool_call_id, message.content),
+        });
+        break;
+    }
+  }
+
+  if (inputs.length > 0) {
+    conversation = appendMessages(conversation, ...inputs);
+  }
+
+  return conversation;
 }

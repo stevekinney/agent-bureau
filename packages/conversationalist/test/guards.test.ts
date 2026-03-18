@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 
 import {
-  isConversation,
+  isConversationHistory as isConversation,
   isConversationStatus,
   isJSONValue,
   isMessage,
