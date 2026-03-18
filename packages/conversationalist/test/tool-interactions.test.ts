@@ -10,6 +10,9 @@ import {
   createConversationHistory as createConversation,
   getPendingToolCalls,
   getToolInteractions,
+  materializeToolCall,
+  materializeToolResult,
+  materializeToolResultAsync,
 } from '../src/conversation/index';
 import type { ConversationHistory as Conversation, Message } from '../src/types';
 
@@ -110,6 +113,24 @@ describe('tool interaction helpers', () => {
 
     const [message] = getOrderedMessages(conv);
     expect(message?.toolCall?.id).toBe('call-1');
+  });
+
+  it('materializes tool calls with a shared ID generator interface', () => {
+    expect(
+      materializeToolCall(
+        {
+          name: 'tool',
+          arguments: { value: 1 },
+        },
+        {
+          generateId: () => 'materialized-call',
+        },
+      ),
+    ).toEqual({
+      id: 'materialized-call',
+      name: 'tool',
+      arguments: { value: 1 },
+    });
   });
 
   it('rejects tool results without a matching tool call', () => {
@@ -255,7 +276,111 @@ describe('tool interaction helpers', () => {
         },
       }),
     ).toThrow(
-      'appendToolResult does not support streaming tool results. Use appendToolResultAsync or appendToolResultsAsync.',
+      'materializeToolResult does not support streaming tool results. Use materializeToolResultAsync or materializeToolResultsAsync.',
     );
+  });
+
+  it('normalizes materialized tool-result payload details to JSON-safe values', () => {
+    expect(
+      materializeToolResult({
+        callId: 'call-1',
+        outcome: 'action_required',
+        content: { allowed: true },
+        action: {
+          type: 'approval',
+          schema: { approved: true },
+        },
+        error: {
+          code: 'TOOL_ERROR',
+          category: 'internal',
+          retryable: false,
+          message: 'Failure',
+          details: { retryAfterSeconds: 5 },
+        },
+      }),
+    ).toEqual({
+      callId: 'call-1',
+      outcome: 'action_required',
+      content: { allowed: true },
+      action: {
+        type: 'approval',
+        schema: { approved: true },
+      },
+      error: {
+        code: 'TOOL_ERROR',
+        category: 'internal',
+        retryable: false,
+        message: 'Failure',
+        details: { retryAfterSeconds: 5 },
+      },
+    });
+  });
+
+  it('materializes non-streaming tool results asynchronously without runtime fields', async () => {
+    expect(
+      await materializeToolResultAsync({
+        callId: 'call-async',
+        outcome: 'action_required',
+        content: undefined,
+        action: {
+          type: 'approval',
+          schema: Symbol('schema'),
+        },
+        result: 'ignored runtime payload',
+      }),
+    ).toEqual({
+      callId: 'call-async',
+      outcome: 'action_required',
+      content: null,
+      action: {
+        type: 'approval',
+        schema: 'Symbol(schema)',
+      },
+    });
+  });
+
+  it('stringifies non-serializable asynchronous tool-result payloads', async () => {
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+
+    expect(
+      await materializeToolResultAsync({
+        callId: 'call-circular',
+        outcome: 'error',
+        content: circular,
+        error: {
+          code: 'tool.circular',
+          category: 'internal',
+          retryable: false,
+          message: 'circular',
+          details: circular,
+        },
+      }),
+    ).toEqual({
+      callId: 'call-circular',
+      outcome: 'error',
+      content: '[object Object]',
+      error: {
+        code: 'tool.circular',
+        category: 'internal',
+        retryable: false,
+        message: 'circular',
+        details: '[object Object]',
+      },
+    });
+  });
+
+  it('preserves primitive content when materializing tool results asynchronously', async () => {
+    expect(
+      await materializeToolResultAsync({
+        callId: 'call-primitive',
+        outcome: 'success',
+        content: 42,
+      }),
+    ).toEqual({
+      callId: 'call-primitive',
+      outcome: 'success',
+      content: 42,
+    });
   });
 });

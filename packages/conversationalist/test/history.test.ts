@@ -365,24 +365,24 @@ describe('Conversation', () => {
       const unsubscribe = history.addEventListener('change', (e: any) => {
         changeCount++;
         expect(e.type).toBe('change');
-        lastType = e.detail.type;
+        lastType = e.detail.action;
       }) as () => void;
       const unsubPush = history.addEventListener('push', (e: any) => {
-        actionEvents.push({ type: e.type, detailType: e.detail.type });
+        actionEvents.push({ type: e.type, detailType: e.detail.action });
       }) as () => void;
       const unsubUndo = history.addEventListener('undo', (e: any) => {
-        actionEvents.push({ type: e.type, detailType: e.detail.type });
+        actionEvents.push({ type: e.type, detailType: e.detail.action });
       }) as () => void;
       const unsubRedo = history.addEventListener('redo', (e: any) => {
-        actionEvents.push({ type: e.type, detailType: e.detail.type });
+        actionEvents.push({ type: e.type, detailType: e.detail.action });
       }) as () => void;
       const unsubSwitch = history.addEventListener('switch', (e: any) => {
-        actionEvents.push({ type: e.type, detailType: e.detail.type });
+        actionEvents.push({ type: e.type, detailType: e.detail.action });
       }) as () => void;
 
       history.appendUserMessage('test');
       expect(changeCount).toBe(1);
-      expect(lastType).toBe('push');
+      expect(lastType).toBe('messages.appended');
 
       history.undo();
       expect(changeCount).toBe(2);
@@ -450,10 +450,10 @@ describe('Conversation', () => {
       expect(() => history[Symbol.dispose]()).not.toThrow();
     });
 
-    it('should support Svelte store subscribe contract', () => {
+    it('should support watch for state observation', () => {
       const history = new ConversationHistory(createConversation({ id: 'test' }));
-      let current: Conversation | undefined;
-      const unsubscribe = history.subscribe((v) => {
+      let current: ConversationState | undefined;
+      const unsubscribe = history.watch((v) => {
         current = v;
       });
 
@@ -491,7 +491,11 @@ describe('Conversation', () => {
 
       history.dispatchEvent({
         type: 'change',
-        detail: { type: 'push', conversation: history.current },
+        detail: {
+          action: 'push',
+          conversation: history.current,
+          previousConversation: history.current,
+        },
       } as any);
 
       expect(calls).toBe(0);
@@ -501,14 +505,18 @@ describe('Conversation', () => {
       const history = new ConversationHistory(createConversation());
       let seen = false;
       history.addEventListener('change', (event) => {
-        if (event.detail.type === 'push') {
+        if (event.detail.action === 'push') {
           seen = true;
         }
       });
 
       history.dispatchEvent({
         type: 'change',
-        detail: { type: 'push', conversation: history.current },
+        detail: {
+          action: 'push',
+          conversation: history.current,
+          previousConversation: history.current,
+        },
       } as any);
 
       expect(seen).toBe(true);
@@ -530,30 +538,156 @@ describe('Conversation', () => {
       history.addEventListener('change', handler, false);
       history.dispatchEvent({
         type: 'change',
-        detail: { type: 'push', conversation: history.current },
+        detail: {
+          action: 'push',
+          conversation: history.current,
+          previousConversation: history.current,
+        },
       } as any);
       expect(calls).toBe(1);
 
       history.removeEventListener('change', handler, false);
       history.dispatchEvent({
         type: 'change',
-        detail: { type: 'push', conversation: history.current },
+        detail: {
+          action: 'push',
+          conversation: history.current,
+          previousConversation: history.current,
+        },
       } as any);
       expect(calls).toBe(1);
     });
 
-    it('falls back to a no-op unsubscribe when subscribe cannot get one from addEventListener', () => {
+    it('falls back to a no-op unsubscribe when watch cannot get one from addEventListener', () => {
       const history = new ConversationHistory(createConversation());
       const originalAddEventListener = history.addEventListener.bind(history);
 
       history.addEventListener = (() => undefined) as typeof history.addEventListener;
 
-      const unsubscribe = history.subscribe(() => {});
+      const unsubscribe = history.watch(() => {});
 
       expect(typeof unsubscribe).toBe('function');
       expect(() => unsubscribe()).not.toThrow();
 
       history.addEventListener = originalAddEventListener;
+    });
+
+    it('supports observable event helpers and tool interaction wrappers', async () => {
+      let identifierIndex = 0;
+      const history = new ConversationHistory(createConversation(), {
+        randomId: () => `tool-call-${++identifierIndex}`,
+      });
+
+      const typedEvents: string[] = [];
+      const allEvents: string[] = [];
+      const onEvents: string[] = [];
+      let onceCount = 0;
+
+      const onSubscription = history
+        .on('tool-calls.appended')
+        .subscribe((event) => onEvents.push(event.type));
+      const typedSubscription = history.subscribe('tool-results.appended', (event) => {
+        typedEvents.push(event.type);
+      });
+      const allSubscription = history.toObservable().subscribe((event) => {
+        allEvents.push(event.type);
+      });
+      history.once('tool-calls.appended', () => {
+        onceCount += 1;
+      });
+
+      history.appendToolCall({
+        name: 'lookup-weather',
+        arguments: { city: 'Denver' },
+      });
+      history.appendToolCalls([]);
+
+      const [firstPendingToolCall] = history.getPendingToolCalls();
+      expect(firstPendingToolCall?.id).toBe('tool-call-1');
+      expect(firstPendingToolCall?.arguments).toEqual({ city: 'Denver' });
+
+      const nextToolResultEvent = history.events('tool-results.appended').next();
+
+      history.appendToolResult({
+        callId: 'tool-call-1',
+        outcome: 'success',
+        content: { forecast: 'sunny' },
+      });
+
+      const emittedToolResultEvent = await nextToolResultEvent;
+      expect(emittedToolResultEvent.done).toBe(false);
+      expect(emittedToolResultEvent.value?.type).toBe('tool-results.appended');
+
+      history.appendToolCalls([
+        {
+          id: 'tool-call-2',
+          name: 'lookup-weather',
+          arguments: { city: 'Boulder' },
+        },
+      ]);
+      history.appendToolResults([]);
+
+      await history.appendToolResultAsync({
+        callId: 'tool-call-2',
+        outcome: 'success',
+        content: [],
+        stream: {
+          async *[Symbol.asyncIterator]() {
+            yield { forecast: 'snow' };
+          },
+        },
+      });
+
+      history.appendToolCalls([
+        {
+          id: 'tool-call-3',
+          name: 'lookup-weather',
+          arguments: { city: 'Fort Collins' },
+        },
+        {
+          id: 'tool-call-4',
+          name: 'lookup-weather',
+          arguments: { city: 'Colorado Springs' },
+        },
+      ]);
+
+      await history.appendToolResultsAsync([
+        {
+          callId: 'tool-call-3',
+          outcome: 'success',
+          content: [],
+          result: {
+            async *[Symbol.asyncIterator]() {
+              yield 'warm';
+              yield 'dry';
+            },
+          },
+        },
+        {
+          callId: 'tool-call-4',
+          outcome: 'action_required',
+          content: { prompt: 'Approve request' },
+          action: {
+            type: 'approval',
+            message: 'Need approval',
+          },
+        },
+      ]);
+
+      expect(history.getPendingToolCalls()).toHaveLength(0);
+      expect(history.getToolInteractions()).toHaveLength(4);
+      expect(onEvents).toContain('tool-calls.appended');
+      expect(typedEvents).toContain('tool-results.appended');
+      expect(allEvents).toContain('tool-calls.appended');
+      expect(allEvents).toContain('tool-results.appended');
+      expect(onceCount).toBe(1);
+
+      onSubscription.unsubscribe();
+      typedSubscription.unsubscribe();
+      allSubscription.unsubscribe();
+
+      history.complete();
+      expect(history.completed).toBe(true);
     });
   });
 });

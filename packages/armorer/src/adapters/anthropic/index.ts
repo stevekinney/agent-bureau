@@ -1,7 +1,7 @@
 import type { SerializedToolDefinition } from '../../core/serialization';
 import type { AnyToolDefinition } from '../../core/tool-definition';
 import type { ImportedToolConfiguration } from '../../create-toolbox';
-import type { ToolCallInput, ToolResult } from '../../types';
+import type { ToolCallInput, ToolResultLike } from '../../types';
 import { importToolSchema } from '../imported-schema';
 import {
   type AdapterInput,
@@ -25,6 +25,15 @@ export type {
   AnthropicToolUseBlock,
   JSONSchemaProperty,
 } from './types';
+
+type AnthropicToolCallSource =
+  | AnthropicContentBlock[]
+  | { content?: AnthropicContentBlock[] | undefined | null }
+  | {
+      message?: { content?: AnthropicContentBlock[] | undefined | null } | undefined | null;
+    }
+  | undefined
+  | null;
 
 /**
  * Converts Toolbox tools to Anthropic Messages API format.
@@ -78,24 +87,25 @@ export function fromAnthropicTools(
 }
 
 export function parseAnthropicToolCalls(
-  contentBlocks: AnthropicContentBlock[] | undefined | null,
+  contentBlocks: AnthropicToolCallSource,
 ): ToolCallInput[] {
-  if (!contentBlocks || !Array.isArray(contentBlocks)) {
+  const resolvedContentBlocks = extractAnthropicContentBlocks(contentBlocks);
+  if (!resolvedContentBlocks || !Array.isArray(resolvedContentBlocks)) {
     return [];
   }
 
-  return contentBlocks.flatMap((contentBlock) =>
+  return resolvedContentBlocks.flatMap((contentBlock) =>
     contentBlock.type === 'tool_use' ? [convertToolUseBlock(contentBlock)] : [],
   );
 }
 
 export function formatAnthropicToolResults(
-  results: ToolResult | ToolResult[],
+  results: ToolResultLike | ToolResultLike[],
 ): AnthropicToolResultBlock[] {
   const resultList = Array.isArray(results) ? results : [results];
 
   for (const result of resultList) {
-    if (result.stream || isAsyncIterable(result.result)) {
+    if (getStreamingPayload(result)) {
       throw new Error(
         'formatAnthropicToolResults does not support streaming results. Persist or collect the stream before formatting Anthropic tool results.',
       );
@@ -103,6 +113,24 @@ export function formatAnthropicToolResults(
   }
 
   return resultList.map((result) => convertToolResult(result, result.content));
+}
+
+export async function formatAnthropicToolResultsAsync(
+  results: ToolResultLike | ToolResultLike[],
+): Promise<AnthropicToolResultBlock[]> {
+  const resultList = Array.isArray(results) ? results : [results];
+  return Promise.all(
+    resultList.map(async (result) => {
+      const stream =
+        'stream' in result && isAsyncIterable(result.stream)
+          ? result.stream
+          : 'result' in result && isAsyncIterable(result.result)
+            ? result.result
+            : null;
+      const content = stream === null ? result.content : await collectAsyncIterable(stream);
+      return convertToolResult(result, content);
+    }),
+  );
 }
 
 function convertToAnthropic(tool: SerializedToolDefinition): AnthropicTool {
@@ -146,12 +174,12 @@ function convertToolUseBlock(contentBlock: AnthropicToolUseBlock): ToolCallInput
 }
 
 function convertToolResult(
-  result: ToolResult,
+  result: ToolResultLike,
   content: unknown,
 ): AnthropicToolResultBlock {
   const toolResult: AnthropicToolResultBlock = {
     type: 'tool_result',
-    tool_use_id: result.toolCallId,
+    tool_use_id: getToolCallId(result),
     content: stringifyToolContent(content),
   };
 
@@ -161,6 +189,14 @@ function convertToolResult(
 
   return toolResult;
 }
+
+export const anthropicToolAdapter = {
+  export: toAnthropicTools,
+  import: fromAnthropicTools,
+  parseCalls: parseAnthropicToolCalls,
+  formatResults: formatAnthropicToolResults,
+  formatResultsAsync: formatAnthropicToolResultsAsync,
+} as const;
 
 function normalizeToolArguments(argumentsValue: unknown): unknown {
   return argumentsValue === undefined ? {} : argumentsValue;
@@ -199,4 +235,44 @@ function isAsyncIterable(value: unknown): value is AsyncIterable<unknown> {
   }
 
   return Symbol.asyncIterator in value;
+}
+
+async function collectAsyncIterable(stream: AsyncIterable<unknown>): Promise<unknown[]> {
+  const chunks: unknown[] = [];
+  for await (const chunk of stream) {
+    chunks.push(chunk);
+  }
+  return chunks;
+}
+
+function extractAnthropicContentBlocks(
+  input: AnthropicToolCallSource,
+): AnthropicContentBlock[] | undefined | null {
+  if (!input) {
+    return input;
+  }
+  if (Array.isArray(input)) {
+    return input;
+  }
+  if ('content' in input) {
+    return input.content;
+  }
+  if ('message' in input) {
+    return input.message?.content;
+  }
+  return undefined;
+}
+
+function getToolCallId(result: ToolResultLike): string {
+  return 'toolCallId' in result ? result.toolCallId : result.callId;
+}
+
+function getStreamingPayload(result: ToolResultLike): AsyncIterable<unknown> | undefined {
+  if ('stream' in result && isAsyncIterable(result.stream)) {
+    return result.stream;
+  }
+  if ('result' in result && isAsyncIterable(result.result)) {
+    return result.result;
+  }
+  return undefined;
 }

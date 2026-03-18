@@ -4,6 +4,7 @@ export type {
   ConversationEnvironment,
   IntegrityIssue,
   IntegrityIssueCode,
+  MaterializeToolCallOptions,
   RedactMessageOptions,
   ToolInteraction,
 } from './conversation/index';
@@ -34,6 +35,12 @@ export {
   getSystemMessages,
   getToolInteractions,
   hasSystemMessage,
+  materializeToolCall,
+  materializeToolCalls,
+  materializeToolResult,
+  materializeToolResultAsync,
+  materializeToolResults,
+  materializeToolResultsAsync,
   prependSystemMessage,
   redactMessageAtPosition,
   replaceSystemMessage,
@@ -66,6 +73,13 @@ export {
   isToolResult,
 } from './guards';
 export { Conversation } from './history';
+export type {
+  ConversationActionType,
+  ConversationEvent,
+  ConversationEventDetail,
+  ConversationEvents,
+  ConversationEventType,
+} from './history';
 export type { ImageContent, TextContent } from './multi-modal';
 export type {
   AppendableToolAction,
@@ -74,6 +88,7 @@ export type {
   AppendableToolResult,
   AssistantMessage,
   ConversationHistory,
+  ConversationProvider,
   ConversationStatus,
   JSONValue,
   Message,

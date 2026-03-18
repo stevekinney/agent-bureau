@@ -524,6 +524,36 @@ describe('coverage edges', () => {
     ]);
   });
 
+  it('covers createTool content normalization fallbacks', async () => {
+    const symbolResult = await (createTool({
+      name: 'symbol-result',
+      description: 'symbol result',
+      input: z.object({}),
+      async execute() {
+        return Symbol('result');
+      },
+    }) as any).executeWith({ params: {} });
+
+    expect(symbolResult.content).toBe('Symbol(result)');
+
+    const throwingError = new Error('explode');
+    (throwingError as Error & { toJSON?: () => never }).toJSON = () => {
+      throw new Error('cannot serialize error');
+    };
+
+    const errorResult = await (createTool({
+      name: 'error-result',
+      description: 'error result',
+      input: z.object({}),
+      async execute() {
+        return throwingError;
+      },
+    }) as any).executeWith({ params: {} });
+
+    expect(errorResult.content).toContain('"name":"Error"');
+    expect(errorResult.content).toContain('"message":"explode"');
+  });
+
   it('covers loader failure seams for MCP and OpenAI agents adapters', async () => {
     internalOpenAIAgentsTestUtilities.resetModuleState();
     internalOpenAIAgentsTestUtilities.setModuleLoader(async () => {

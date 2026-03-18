@@ -452,10 +452,11 @@ function parseFunctionResponse(
     Object.keys(value).length === 1 &&
     Object.hasOwn(value, 'result')
   ) {
+    const resultWrapper = value as { result: JSONValue };
     return {
       callId,
       outcome: 'success',
-      content: toJSONValue(value['result']),
+      content: toJSONValue(resultWrapper.result),
     };
   }
 
@@ -524,11 +525,7 @@ function toSystemInstructionContent(parts: GeminiPart[]): MessageInput['content'
   return contentParts;
 }
 
-/**
- * Converts Gemini SDK contents back into a ConversationHistory.
- */
-export function fromGeminiMessages(payload: GeminiConversation): Conversation {
-  let conversation = createConversationHistory();
+function toMessageInputs(payload: GeminiConversation): MessageInput[] {
   const inputs: MessageInput[] = [];
   let syntheticToolCallCount = 0;
   const pendingToolCalls = new Map<string, string[]>();
@@ -601,9 +598,45 @@ export function fromGeminiMessages(payload: GeminiConversation): Conversation {
     }
   }
 
+  return inputs;
+}
+
+/**
+ * Converts Gemini SDK contents back into a ConversationHistory.
+ */
+export function fromGeminiMessages(payload: GeminiConversation): Conversation {
+  let conversation = createConversationHistory();
+  const inputs = toMessageInputs(payload);
+
   if (inputs.length > 0) {
     conversation = appendMessages(conversation, ...inputs);
   }
 
   return conversation;
 }
+
+export function appendGeminiMessages(
+  conversation: Conversation,
+  payload: GeminiConversation,
+): Conversation {
+  const inputs = toMessageInputs(payload);
+  if (inputs.length === 0) {
+    return conversation;
+  }
+  return appendMessages(conversation, ...inputs);
+}
+
+export const geminiConversationAdapter = {
+  export(conversation: Conversation): GeminiConversation {
+    return toGeminiMessages(conversation);
+  },
+  import(payload: GeminiConversation): Conversation {
+    return fromGeminiMessages(payload);
+  },
+  append(
+    conversation: Conversation,
+    payload: GeminiConversation,
+  ): Conversation {
+    return appendGeminiMessages(conversation, payload);
+  },
+} as const;

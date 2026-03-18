@@ -28,9 +28,17 @@ describe('public API export map', () => {
   });
 
   it('exposes lazy provider import helpers on createToolbox', () => {
+    expect(root.createToolbox.fromProvider).toBeDefined();
     expect(root.createToolbox.fromOpenAITools).toBeDefined();
     expect(root.createToolbox.fromAnthropicTools).toBeDefined();
     expect(root.createToolbox.fromGeminiTools).toBeDefined();
+  });
+
+  it('exposes shared interop materializers and types on the root surface', () => {
+    expect(root.materializeToolCall).toBeDefined();
+    expect(root.materializeToolCalls).toBeDefined();
+    expect(root.materializeToolResult).toBeDefined();
+    expect(root.materializeToolResultsAsync).toBeDefined();
   });
 
   it('uses dynamic imports for provider adapters in createToolbox', () => {

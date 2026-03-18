@@ -31,6 +31,10 @@ export interface AppendToolResultOptions {
   tokenUsage?: TokenUsage;
 }
 
+export interface MaterializeToolCallOptions {
+  generateId?: () => string;
+}
+
 export interface ToolInteraction {
   call: ToolCall;
   result?: ToolResult | undefined;
@@ -55,7 +59,9 @@ export function appendToolCall(
   return appendMessages(
     conversation,
     createToolCallMessageInput(
-      normalizeToolCallInput(toolCall, resolvedEnvironment),
+      materializeToolCall(toolCall, {
+        generateId: resolvedEnvironment.randomId,
+      }),
       resolvedOptions,
     ),
     resolvedEnvironment,
@@ -75,12 +81,9 @@ export function appendToolCalls(
   }
 
   const resolvedEnvironment = resolveConversationEnvironment(environment);
-  const messageInputs = toolCalls.map((toolCall) =>
-    createToolCallMessageInput(
-      normalizeToolCallInput(toolCall, resolvedEnvironment),
-      undefined,
-    ),
-  );
+  const messageInputs = materializeToolCalls(toolCalls, {
+    generateId: resolvedEnvironment.randomId,
+  }).map((toolCall) => createToolCallMessageInput(toolCall, undefined));
 
   return appendMessages(conversation, ...messageInputs, resolvedEnvironment);
 }
@@ -97,7 +100,7 @@ export function appendToolResult(
   const resolvedOptions = isConversationEnvironmentParameter(options)
     ? undefined
     : options;
-  const normalizedToolResult = normalizeToolResultSync(toolResult);
+  const normalizedToolResult = materializeToolResult(toolResult);
 
   return appendMessages(
     conversation,
@@ -118,8 +121,8 @@ export function appendToolResults(
     return conversation;
   }
 
-  const messageInputs = toolResults.map((toolResult) =>
-    createToolResultMessageInput(normalizeToolResultSync(toolResult), undefined),
+  const messageInputs = materializeToolResults(toolResults).map((toolResult) =>
+    createToolResultMessageInput(toolResult, undefined),
   );
 
   return appendMessages(conversation, ...messageInputs, environment);
@@ -137,7 +140,7 @@ export async function appendToolResultAsync(
   const resolvedOptions = isConversationEnvironmentParameter(options)
     ? undefined
     : options;
-  const normalizedToolResult = await normalizeToolResultAsync(toolResult);
+  const normalizedToolResult = await materializeToolResultAsync(toolResult);
 
   return appendMessages(
     conversation,
@@ -158,9 +161,7 @@ export async function appendToolResultsAsync(
     return conversation;
   }
 
-  const normalizedToolResults = await Promise.all(
-    toolResults.map((toolResult) => normalizeToolResultAsync(toolResult)),
-  );
+  const normalizedToolResults = await materializeToolResultsAsync(toolResults);
 
   const messageInputs = normalizedToolResults.map((toolResult) =>
     createToolResultMessageInput(toolResult, undefined),
@@ -229,37 +230,61 @@ function createToolResultMessageInput(
   };
 }
 
-function normalizeToolCallInput(
+export function materializeToolCall(
   toolCall: AppendableToolCallInput,
-  environment: ConversationEnvironment,
+  options: MaterializeToolCallOptions = {},
 ): ToolCall {
   return {
-    id: toolCall.id ?? environment.randomId(),
+    id: toolCall.id ?? options.generateId?.() ?? crypto.randomUUID(),
     name: toolCall.name,
-    arguments: (toolCall.arguments ?? {}) as JSONValue,
+    arguments: normalizeJSONValue(toolCall.arguments ?? {}),
   };
 }
 
-function normalizeToolResultSync(toolResult: AppendableToolResult): ToolResult {
+export function materializeToolCalls(
+  toolCalls: ReadonlyArray<AppendableToolCallInput>,
+  options: MaterializeToolCallOptions = {},
+): ToolCall[] {
+  return toolCalls.map((toolCall) => materializeToolCall(toolCall, options));
+}
+
+export function materializeToolResult(toolResult: AppendableToolResult): ToolResult {
   if (hasStreamingPayload(toolResult)) {
     throw new Error(
-      'appendToolResult does not support streaming tool results. Use appendToolResultAsync or appendToolResultsAsync.',
+      'materializeToolResult does not support streaming tool results. Use materializeToolResultAsync or materializeToolResultsAsync.',
     );
   }
 
-  return stripRuntimeToolResultFields(toolResult, toolResult.content as JSONValue);
+  return stripRuntimeToolResultFields(toolResult, normalizeJSONValue(toolResult.content));
 }
 
-async function normalizeToolResultAsync(
+export function materializeToolResults(
+  toolResults: ReadonlyArray<AppendableToolResult>,
+): ToolResult[] {
+  return toolResults.map((toolResult) => materializeToolResult(toolResult));
+}
+
+export async function materializeToolResultAsync(
   toolResult: AppendableToolResult,
 ): Promise<ToolResult> {
   const streamingPayload = getStreamingPayload(toolResult);
   if (!streamingPayload) {
-    return stripRuntimeToolResultFields(toolResult, toolResult.content as JSONValue);
+    return stripRuntimeToolResultFields(
+      toolResult,
+      normalizeJSONValue(toolResult.content),
+    );
   }
 
   const chunks = await collectAsyncIterable(streamingPayload);
-  return stripRuntimeToolResultFields(toolResult, chunks as JSONValue);
+  return stripRuntimeToolResultFields(toolResult, normalizeJSONValue(chunks));
+}
+
+export async function materializeToolResultsAsync(
+  toolResults: ReadonlyArray<AppendableToolResult>,
+): Promise<ToolResult[]> {
+  return Promise.all(
+    toolResults.map((toolResult) => materializeToolResultAsync(toolResult)),
+  );
 }
 
 function stripRuntimeToolResultFields(
@@ -270,8 +295,32 @@ function stripRuntimeToolResultFields(
     callId: toolResult.callId,
     outcome: toolResult.outcome,
     content,
-    ...(toolResult.error ? { error: toolResult.error as ToolResult['error'] } : {}),
-    ...(toolResult.action ? { action: toolResult.action as ToolResult['action'] } : {}),
+    ...(toolResult.error
+      ? {
+          error: {
+            code: toolResult.error.code,
+            category: toolResult.error.category,
+            retryable: toolResult.error.retryable,
+            message: toolResult.error.message,
+            ...(toolResult.error.details !== undefined
+              ? { details: normalizeJSONValue(toolResult.error.details) }
+              : {}),
+          } satisfies NonNullable<ToolResult['error']>,
+        }
+      : {}),
+    ...(toolResult.action
+      ? {
+          action: {
+            type: toolResult.action.type,
+            ...(toolResult.action.message
+              ? { message: toolResult.action.message }
+              : {}),
+            ...(toolResult.action.schema !== undefined
+              ? { schema: normalizeJSONValue(toolResult.action.schema) }
+              : {}),
+          } satisfies NonNullable<ToolResult['action']>,
+        }
+      : {}),
     ...(toolResult.inputDigest ? { inputDigest: toolResult.inputDigest } : {}),
     ...(toolResult.outputDigest ? { outputDigest: toolResult.outputDigest } : {}),
   };
@@ -301,6 +350,31 @@ function isAsyncIterable(value: unknown): value is AsyncIterable<unknown> {
   }
 
   return Symbol.asyncIterator in value;
+}
+
+function normalizeJSONValue(value: unknown): JSONValue {
+  if (value === undefined) {
+    return null;
+  }
+
+  if (
+    value === null ||
+    typeof value === 'string' ||
+    typeof value === 'number' ||
+    typeof value === 'boolean'
+  ) {
+    return value;
+  }
+
+  try {
+    const serialized = JSON.stringify(value);
+    if (serialized === undefined) {
+      return String(value);
+    }
+    return JSON.parse(serialized) as JSONValue;
+  } catch {
+    return String(value);
+  }
 }
 
 async function collectAsyncIterable(stream: AsyncIterable<unknown>): Promise<unknown[]> {

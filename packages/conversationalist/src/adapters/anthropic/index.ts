@@ -458,11 +458,7 @@ function toMessageInputFromBlock(
   };
 }
 
-/**
- * Converts Anthropic Messages API payloads back into a ConversationHistory.
- */
-export function fromAnthropicMessages(payload: AnthropicConversation): Conversation {
-  let conversation = createConversationHistory();
+function toMessageInputs(payload: AnthropicConversation): MessageInput[] {
   const inputs: MessageInput[] = [];
 
   if (payload.system !== undefined) {
@@ -486,9 +482,45 @@ export function fromAnthropicMessages(payload: AnthropicConversation): Conversat
     }
   }
 
+  return inputs;
+}
+
+/**
+ * Converts Anthropic Messages API payloads back into a ConversationHistory.
+ */
+export function fromAnthropicMessages(payload: AnthropicConversation): Conversation {
+  let conversation = createConversationHistory();
+  const inputs = toMessageInputs(payload);
+
   if (inputs.length > 0) {
     conversation = appendMessages(conversation, ...inputs);
   }
 
   return conversation;
 }
+
+export function appendAnthropicMessages(
+  conversation: Conversation,
+  payload: AnthropicConversation,
+): Conversation {
+  const inputs = toMessageInputs(payload);
+  if (inputs.length === 0) {
+    return conversation;
+  }
+  return appendMessages(conversation, ...inputs);
+}
+
+export const anthropicConversationAdapter = {
+  export(conversation: Conversation): AnthropicConversation {
+    return toAnthropicMessages(conversation);
+  },
+  import(payload: AnthropicConversation): Conversation {
+    return fromAnthropicMessages(payload);
+  },
+  append(
+    conversation: Conversation,
+    payload: AnthropicConversation,
+  ): Conversation {
+    return appendAnthropicMessages(conversation, payload);
+  },
+} as const;

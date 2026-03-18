@@ -1,7 +1,16 @@
 export { combineToolbox, combineToolboxes } from './combine-toolboxes';
 export type { CreateToolOptions, WithContext } from './create-tool';
 export { createTool, createToolCall, lazy, withContext } from './create-tool';
+export {
+  materializeToolCall,
+  materializeToolCalls,
+  materializeToolResult,
+  materializeToolResultAsync,
+  materializeToolResults,
+  materializeToolResultsAsync,
+} from './tool-materialization';
 export type {
+  ImportedToolboxOptions,
   ImportedToolConfiguration,
   SerializedToolbox,
   SerializedToolboxJSONSchema,
@@ -49,11 +58,17 @@ export type {
   ToolValidationWarning,
 } from './is-tool';
 export { isTool } from './is-tool';
+export type { ToolError, ToolErrorCategory } from './core/errors';
 
 // Types
 export type {
+  JSONValue,
   MinimalToolConfiguration,
+  ToolAction,
   ToolCall,
   ToolCallInput,
+  ToolExecutionResult,
+  ToolProvider,
   ToolResult,
+  ToolResultLike,
 } from './types';

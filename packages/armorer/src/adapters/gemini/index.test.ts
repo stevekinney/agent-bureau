@@ -5,6 +5,7 @@ import type { AnyToolDefinition } from '../../core';
 import { createRegistry, defineTool, serializeToolDefinition } from '../../core';
 import {
   formatGeminiToolResults,
+  formatGeminiToolResultsAsync,
   fromGeminiTools,
   parseGeminiToolCalls,
   toGeminiTools,
@@ -137,6 +138,32 @@ describe('parseGeminiToolCalls', () => {
     expect(parseGeminiToolCalls(undefined)).toEqual([]);
     expect(parseGeminiToolCalls(null)).toEqual([]);
   });
+
+  it('parses function calls from Gemini envelope shapes', () => {
+    const parts = [
+      {
+        functionCall: {
+          name: 'search',
+          args: { query: 'envelope' },
+        },
+      },
+    ];
+
+    expect(parseGeminiToolCalls({ parts })).toEqual([
+      { name: 'search', arguments: { query: 'envelope' } },
+    ]);
+    expect(parseGeminiToolCalls({ content: { parts } })).toEqual([
+      { name: 'search', arguments: { query: 'envelope' } },
+    ]);
+    expect(parseGeminiToolCalls({ contents: [{ parts }] })).toEqual([
+      { name: 'search', arguments: { query: 'envelope' } },
+    ]);
+  });
+
+  it('returns an empty array for unsupported Gemini envelope shapes', () => {
+    expect(parseGeminiToolCalls({ contents: undefined })).toEqual([]);
+    expect(parseGeminiToolCalls({ unrelated: true } as never)).toEqual([]);
+  });
 });
 
 describe('formatGeminiToolResults', () => {
@@ -176,6 +203,111 @@ describe('formatGeminiToolResults', () => {
             content: { prompt: 'approve' },
             action: { type: 'approval', message: 'Approve this request' },
           },
+        },
+      },
+    ]);
+  });
+
+  it('resolves tool names from explicit mappings and defaults', () => {
+    expect(
+      formatGeminiToolResults(
+        {
+          callId: 'call-function',
+          outcome: 'success',
+          content: { ok: true },
+        },
+        {
+          toolNameByCallId: (callId) => (callId === 'call-function' ? 'function-mapped' : undefined),
+        },
+      ),
+    ).toEqual([
+      {
+        functionResponse: {
+          name: 'function-mapped',
+          response: { ok: true },
+        },
+      },
+    ]);
+
+    expect(
+      formatGeminiToolResults(
+        {
+          callId: 'call-object',
+          outcome: 'success',
+          content: { ok: true },
+        },
+        {
+          toolNameByCallId: { 'call-object': 'object-mapped' },
+        },
+      ),
+    ).toEqual([
+      {
+        functionResponse: {
+          name: 'object-mapped',
+          response: { ok: true },
+        },
+      },
+    ]);
+
+    expect(
+      formatGeminiToolResults(
+        {
+          callId: 'call-default',
+          outcome: 'success',
+          content: { ok: true },
+        },
+        {
+          defaultToolName: 'fallback-name',
+        },
+      ),
+    ).toEqual([
+      {
+        functionResponse: {
+          name: 'fallback-name',
+          response: { ok: true },
+        },
+      },
+    ]);
+  });
+});
+
+describe('formatGeminiToolResultsAsync', () => {
+  it('collects stream payloads and stringifies non-JSON chunks', async () => {
+    await expect(
+      formatGeminiToolResultsAsync([
+        {
+          callId: 'call-stream',
+          outcome: 'success',
+          content: [],
+          result: {
+            async *[Symbol.asyncIterator]() {
+              yield 'alpha';
+              yield 'beta';
+            },
+          },
+        },
+        {
+          callId: 'call-symbol',
+          outcome: 'success',
+          content: [],
+          stream: {
+            async *[Symbol.asyncIterator]() {
+              yield Symbol('chunk');
+            },
+          },
+        },
+      ]),
+    ).resolves.toEqual([
+      {
+        functionResponse: {
+          name: 'unknown',
+          response: { result: ['alpha', 'beta'] },
+        },
+      },
+      {
+        functionResponse: {
+          name: 'unknown',
+          response: { result: ['Symbol(chunk)'] },
         },
       },
     ]);

@@ -5,9 +5,11 @@ import {
   createToolbox,
   type Toolbox,
   type ToolboxEntries,
+  type ToolboxEvents,
 } from '../create-toolbox';
 import type { Tool, ToolCallWithArguments } from '../is-tool';
-import type { ToolResult } from '../types';
+import type { ToolExecutionResult } from '../types';
+import type { EmissionEvent } from 'event-emission';
 
 type AnyToolbox = Toolbox<any>;
 
@@ -75,15 +77,20 @@ export function createMockTool<TInput extends object = any, TOutput = any>(
 }
 
 export type TestRegistry = AnyToolbox & {
-  history: { call: ToolCallWithArguments; result?: ToolResult; error?: unknown }[];
+  history: { call: ToolCallWithArguments; result?: ToolExecutionResult; error?: unknown }[];
   clearHistory: () => void;
+};
+
+export type ToolboxRecorder = {
+  events: Array<EmissionEvent<ToolboxEvents[keyof ToolboxEvents]>>;
+  clear: () => void;
 };
 
 /**
  * Creates a Toolbox instance configured for testing.
  * Records execution history.
  */
-export function createTestRegistry(entries: ToolboxEntries = []): TestRegistry {
+export function createTestToolbox(entries: ToolboxEntries = []): TestRegistry {
   const toolbox = createToolbox(entries);
   const history: TestRegistry['history'] = [];
 
@@ -105,4 +112,33 @@ export function createTestRegistry(entries: ToolboxEntries = []): TestRegistry {
   };
 
   return testRegistry;
+}
+
+export function createTestRegistry(entries: ToolboxEntries = []): TestRegistry {
+  return createTestToolbox(entries);
+}
+
+export function createToolboxRecorder(toolbox: Toolbox): ToolboxRecorder {
+  const events: ToolboxRecorder['events'] = [];
+  const subscriptions = [
+    toolbox.addEventListener('call', (event) => {
+      events.push(event);
+    }),
+    toolbox.addEventListener('complete', (event) => {
+      events.push(event);
+    }),
+    toolbox.addEventListener('error', (event) => {
+      events.push(event);
+    }),
+  ];
+
+  return {
+    events,
+    clear: () => {
+      events.length = 0;
+    },
+    [Symbol.dispose]: () => {
+      subscriptions.forEach((unsubscribe) => unsubscribe());
+    },
+  } as ToolboxRecorder;
 }

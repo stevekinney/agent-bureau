@@ -112,6 +112,46 @@ describe('createMCP', () => {
     expect(result.content?.[0]?.text).toContain('"total": 5');
   });
 
+  it('formats canonical and legacy execution payloads when exporting MCP handlers', async () => {
+    const tool = {
+      name: 'canonical-result',
+      description: 'formats canonical results',
+      input: z.object({}),
+      metadata: {},
+      executeWith: async () => ({
+        callId: 'canonical-call',
+        outcome: 'success' as const,
+        content: { ok: true },
+      }),
+    };
+
+    const [mcpTool] = toMcpTools(tool as any);
+    const canonicalResult = await mcpTool!.handler({});
+    expect(canonicalResult.structuredContent).toEqual({ ok: true });
+    expect(canonicalResult.content?.[0]?.text).toContain('"ok": true');
+
+    tool.executeWith = async () => ({
+      callId: 'legacy-call',
+      outcome: 'error' as const,
+      content: { message: 'fallback error' },
+      errorMessage: 'legacy error',
+    });
+
+    const legacyErrorResult = await mcpTool!.handler({});
+    expect(legacyErrorResult.isError).toBe(true);
+    expect(legacyErrorResult.content?.[0]?.text).toBe('legacy error');
+
+    tool.executeWith = async () => ({
+      callId: 'content-fallback-call',
+      outcome: 'error' as const,
+      content: { message: 'content fallback' },
+    });
+
+    const contentFallbackResult = await mcpTool!.handler({});
+    expect(contentFallbackResult.isError).toBe(true);
+    expect(contentFallbackResult.content?.[0]?.text).toContain('content fallback');
+  });
+
   it('converts MCP tools with handlers into executable toolbox tools', async () => {
     const [tool] = fromMcpTools([
       {

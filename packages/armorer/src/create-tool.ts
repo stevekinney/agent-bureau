@@ -7,7 +7,7 @@ import type { ToolError, ToolErrorCategory } from './core/errors';
 import type { ToolRisk } from './core/risk';
 import { isZodObjectSchema, isZodSchema } from './core/schema-utilities';
 import { serializeToolDefinition } from './core/serialization';
-import type { JsonValue } from './core/serialization/json';
+import { assertJsonValue, type JsonValue } from './core/serialization/json';
 import {
   assertKebabCaseTag,
   type NormalizeTagsOption,
@@ -38,7 +38,7 @@ import type {
   ToolRepairHint,
   ToolValidationReport,
 } from './is-tool';
-import type { ToolCall, ToolResult } from './types';
+import type { ToolCall, ToolExecutionResult } from './types';
 import { createConcurrencyLimiter, normalizeConcurrency } from './utilities/concurrency';
 
 /**
@@ -515,7 +515,7 @@ export function createTool<
   const executeCall = async (
     toolCall: ToolCallWithArguments,
     options?: ToolExecuteOptions,
-  ): Promise<ToolResult> => {
+  ): Promise<ToolExecutionResult> => {
     const resolvedTimeout = options?.timeout ?? timeout;
     const executeOptions: ToolExecuteOptions = {
       ...options,
@@ -530,7 +530,10 @@ export function createTool<
     params: TInput,
     options?: ToolExecuteOptions,
   ): Promise<TReturn> => {
-    const toolCall = createToolCall<TInput>(name, params);
+    const toolCall = createToolCall(
+      name,
+      normalizeToolContent(params),
+    ) as ToolCallWithArguments;
     const result = await executeCall(toolCall, options);
     const errorMessage = result.error?.message ?? result.errorMessage;
     if (errorMessage) {
@@ -542,7 +545,7 @@ export function createTool<
   const execute = (
     input: ToolCallWithArguments | TInput,
     options?: ToolExecuteOptions,
-  ): Promise<ToolResult | TReturn> => {
+  ): Promise<ToolExecutionResult | TReturn> => {
     if (looksLikeToolCall(input, name)) {
       return executeCall(input, options);
     }
@@ -552,7 +555,7 @@ export function createTool<
   const executeInner = async (
     toolCall: ToolCall & { arguments: unknown },
     options: ToolExecuteOptions = {},
-  ): Promise<ToolResult> => {
+  ): Promise<ToolExecutionResult> => {
     const baseDetail = { toolCall, configuration };
     const startedAt = telemetryEnabled ? Date.now() : 0;
     const inputDigest = digestOptions.input
@@ -591,7 +594,7 @@ export function createTool<
       });
     }
 
-    const handleCancellation = (reason?: unknown): ToolResult => {
+    const handleCancellation = (reason?: unknown): ToolExecutionResult => {
       let message = 'Cancelled';
       if (typeof reason === 'string') {
         message = reason || 'Cancelled';
@@ -631,7 +634,7 @@ export function createTool<
         errorMessage: toolError.message,
         errorCategory: toolError.category,
         inputDigest,
-      } as ToolResult;
+      } as ToolExecutionResult;
     };
 
     if (options.signal?.aborted) {
@@ -689,7 +692,7 @@ export function createTool<
             schema: decision.action?.schema,
           },
           inputDigest,
-        } as ToolResult;
+        } as ToolExecutionResult;
       }
 
       if (decision?.allow === false) {
@@ -729,7 +732,7 @@ export function createTool<
           errorMessage: toolError.message,
           errorCategory: toolError.category,
           inputDigest,
-        } as ToolResult;
+        } as ToolExecutionResult;
       }
       const meta: { toolName: string; callId?: string } = { toolName: name };
       if (typedToolCall.id) {
@@ -906,7 +909,7 @@ export function createTool<
             result: stream,
             stream,
             inputDigest,
-          } as ToolResult;
+          } as ToolExecutionResult;
         }
 
         emit('stream-start', { mode: 'collect' });
@@ -957,13 +960,13 @@ export function createTool<
       return {
         callId,
         outcome: 'success',
-        content: value,
+        content: normalizeToolContent(value),
         toolCallId: callId,
         toolName: name,
         result: value,
         inputDigest,
         outputDigest,
-      } as ToolResult;
+      } as ToolExecutionResult;
     } catch (error) {
       if (isAbortRejection(error)) {
         return handleCancellation(error.reason);
@@ -1067,7 +1070,7 @@ export function createTool<
         errorMessage: toolError.message,
         errorCategory: toolError.category,
         inputDigest,
-      } as ToolResult;
+      } as ToolExecutionResult;
     }
   };
 
@@ -1179,7 +1182,11 @@ export function createTool<
   };
 
   bag['executeWith'] = (options: ToolExecuteWithOptions) => {
-    const toolCall = createToolCall(name, options.params, options.callId);
+    const toolCall = createToolCall(
+      name,
+      normalizeToolContent(options.params),
+      options.callId,
+    ) as ToolCallWithArguments;
     const resolvedTimeout = options.timeout ?? timeout;
     const executeOptions: ToolExecuteOptions = {
       ...options,
@@ -1413,7 +1420,7 @@ const ABORT_REJECTION_SYMBOL = Symbol('toolbox.abort');
  * const result = await toolbox.execute(call);
  * ```
  */
-export function createToolCall<Args>(
+export function createToolCall<Args extends JsonValue>(
   toolName: string,
   args: Args,
   id?: string,
@@ -1490,10 +1497,36 @@ function computeDigest(value: unknown, algorithm: 'sha256'): string {
   return createHash(algorithm).update(serialized).digest('hex');
 }
 
+function normalizeToolContent(value: unknown): JsonValue {
+  if (value === undefined) {
+    return null;
+  }
+  try {
+    assertJsonValue(value, 'tool result');
+    return value;
+  } catch {
+    try {
+      const serialized = JSON.stringify(value);
+      if (serialized === undefined) {
+        return String(value);
+      }
+      return JSON.parse(serialized) as JsonValue;
+    } catch {
+      return stableStringify(value);
+    }
+  }
+}
+
 function stableStringify(value: unknown): string {
   if (value === null || value === undefined) return String(value);
   if (typeof value === 'string') return value;
-  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  if (
+    typeof value === 'number' ||
+    typeof value === 'boolean' ||
+    typeof value === 'bigint'
+  ) {
+    return String(value);
+  }
   if (value instanceof Error) {
     return JSON.stringify({
       name: value.name,

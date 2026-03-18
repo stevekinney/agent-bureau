@@ -3,10 +3,10 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "transit": "bun --cwd ../armorer run build && bun --cwd ../conversationalist run build",
+    "transit": "bun run --cwd ../armorer build && bun run --cwd ../conversationalist build",
     "test": "bun run scripts/run-tests.ts",
     "check-types": "tsc --noEmit",
-    "validate": "bun run test && bun run check-types",
+    "validate": "bun run transit && bun run test && bun run check-types",
     "integration": "bun run validate"
   },
   "dependencies": {

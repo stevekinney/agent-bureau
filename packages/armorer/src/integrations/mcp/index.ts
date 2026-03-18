@@ -19,7 +19,7 @@ import { isZodSchema } from '../../core/schema-utilities';
 import { createTool } from '../../create-tool';
 import type { Tool, ToolExecuteWithOptions } from '../../is-tool';
 import { isTool } from '../../is-tool';
-import type { ToolResult } from '../../types';
+import type { ToolResultLike } from '../../types';
 
 type ToolboxLike = {
   tools: () => readonly Tool[];
@@ -61,7 +61,7 @@ export type MCPToolSource = MCPTool | MCPToolLike | MCPToolDefinition;
 
 export type ToMCPToolsOptions = {
   toolConfiguration?: (tool: Tool) => MCPToolConfiguration;
-  formatResult?: (result: ToolResult) => CallToolResult;
+  formatResult?: (result: ToolResultLike) => CallToolResult;
 };
 
 export type FromMCPToolsOptions = {
@@ -185,10 +185,10 @@ function toMcpToolDefinition(tool: Tool, options: ToMCPToolsOptions): MCPToolDef
     inputSchema: resolvedInputSchema,
     handler: async (args, extra) => {
       const params = args ?? {};
-      let result: ToolResult;
+      let result: ToolResultLike;
       try {
         const runnable = tool as unknown as {
-          executeWith: (options: ToolExecuteWithOptions) => Promise<ToolResult>;
+          executeWith: (options: ToolExecuteWithOptions) => Promise<ToolResultLike>;
         };
         const executeOptions: ToolExecuteWithOptions = { params };
         if (extra?.requestId !== undefined) {
@@ -377,19 +377,22 @@ function isTextContentBlock(value: unknown): value is { type: 'text'; text: stri
   return isRecord(value) && value['type'] === 'text' && isString(value['text']);
 }
 
-function toCallToolResult(result: ToolResult): CallToolResult {
+function toCallToolResult(result: ToolResultLike): CallToolResult {
   if (result.outcome === 'error') {
     const message =
-      result.error?.message ?? result.errorMessage ?? stringifyResult(result.content);
+      result.error?.message ??
+      getLegacyErrorMessage(result) ??
+      stringifyResult(result.content);
     return {
       content: toTextContent(message),
       isError: true,
     };
   }
 
-  const text = stringifyResult(result.result);
+  const executionValue = getExecutionValue(result);
+  const text = stringifyResult(executionValue);
   const content = toTextContent(text);
-  const structured = toStructuredContent(result.result);
+  const structured = toStructuredContent(executionValue);
 
   if (structured) {
     return {
@@ -412,6 +415,20 @@ function stringifyResult(value: unknown): string {
   } catch {
     return '[unserializable]';
   }
+}
+
+function getExecutionValue(result: ToolResultLike): unknown {
+  if ('result' in result) {
+    return result.result;
+  }
+  return result.content;
+}
+
+function getLegacyErrorMessage(result: ToolResultLike): string | undefined {
+  if ('errorMessage' in result && typeof result.errorMessage === 'string') {
+    return result.errorMessage;
+  }
+  return undefined;
 }
 
 function toStructuredContent(value: unknown): Record<string, unknown> | undefined {

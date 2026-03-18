@@ -130,6 +130,50 @@ describe('parseOpenAIToolCalls', () => {
       },
     ]);
   });
+
+  it('parses tool calls from OpenAI response envelope shapes', () => {
+    const toolCalls = [
+      {
+        id: 'call_1',
+        type: 'function' as const,
+        function: {
+          name: 'tool1',
+          arguments: '{"foo":"bar"}',
+        },
+      },
+    ];
+
+    expect(parseOpenAIToolCalls({ tool_calls: toolCalls })).toEqual([
+      {
+        id: 'call_1',
+        name: 'tool1',
+        arguments: { foo: 'bar' },
+      },
+    ]);
+    expect(parseOpenAIToolCalls({ message: { tool_calls: toolCalls } })).toEqual([
+      {
+        id: 'call_1',
+        name: 'tool1',
+        arguments: { foo: 'bar' },
+      },
+    ]);
+    expect(
+      parseOpenAIToolCalls({
+        choices: [{ message: { tool_calls: toolCalls } }],
+      }),
+    ).toEqual([
+      {
+        id: 'call_1',
+        name: 'tool1',
+        arguments: { foo: 'bar' },
+      },
+    ]);
+  });
+
+  it('returns an empty array for unsupported OpenAI envelope shapes', () => {
+    expect(parseOpenAIToolCalls({ choices: undefined })).toEqual([]);
+    expect(parseOpenAIToolCalls({ unrelated: true } as never)).toEqual([]);
+  });
 });
 
 describe('fromOpenAITools', () => {

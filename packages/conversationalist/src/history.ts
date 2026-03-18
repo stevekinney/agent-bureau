@@ -1,11 +1,12 @@
 import type {
   AddEventListenerOptionsLike,
+  AsyncIteratorOptions,
   EmissionEvent,
   EventListenerLike,
   EventListenerOptionsLike,
-  EventTargetLike,
 } from 'event-emission';
 import { createEventTarget } from 'event-emission';
+import type { ObservableLike, Observer, Subscription } from 'event-emission/types';
 import type { AnthropicConversation } from './adapters/anthropic';
 import type { GeminiConversation } from './adapters/gemini';
 import type { OpenAIMessage } from './adapters/openai';
@@ -22,6 +23,12 @@ import {
   appendAssistantMessage,
   appendMessages,
   appendSystemMessage,
+  appendToolCall,
+  appendToolCalls,
+  appendToolResult,
+  appendToolResultAsync,
+  appendToolResults,
+  appendToolResultsAsync,
   appendUserMessage,
   collapseSystemMessages,
   createConversationHistory,
@@ -31,8 +38,10 @@ import {
   getMessageById,
   getMessageIds,
   getMessages,
+  getPendingToolCalls,
   getStatistics,
   getSystemMessages,
+  getToolInteractions,
   hasSystemMessage,
   prependSystemMessage,
   redactMessageAtPosition,
@@ -54,20 +63,27 @@ import {
 } from './streaming';
 import type {
   ConversationHistory,
+  ConversationProvider,
   ConversationNodeSnapshot,
   ConversationSnapshot,
   JSONValue,
   Message,
   MessageInput,
   TokenUsage,
+  AppendableToolCallInput,
+  AppendableToolResult,
 } from './types';
+import type { ToolInteraction } from './conversation/index';
 
 /**
  * Event detail for conversation changes.
  */
 export interface ConversationEventDetail {
-  type: ConversationActionType;
+  action: ConversationActionType;
   conversation: ConversationHistory;
+  previousConversation: ConversationHistory;
+  messageIds?: readonly string[];
+  toolCallIds?: readonly string[];
 }
 
 export type ConversationEvent = EmissionEvent<
@@ -75,18 +91,130 @@ export type ConversationEvent = EmissionEvent<
   ConversationEventType
 >;
 
-type ConversationActionType = 'push' | 'undo' | 'redo' | 'switch';
-type ConversationEventType = 'change' | ConversationActionType;
-type ConversationEventMap = Record<
-  ConversationEventType,
-  ConversationEventDetail
->;
-type ConversationEventTarget = EventTargetLike<ConversationEventMap>;
+export type ConversationActionType =
+  | 'push'
+  | 'undo'
+  | 'redo'
+  | 'switch'
+  | 'messages.appended'
+  | 'messages.updated'
+  | 'messages.removed'
+  | 'tool-calls.appended'
+  | 'tool-results.appended'
+  | 'stream.started'
+  | 'stream.updated'
+  | 'stream.finalized'
+  | 'stream.cancelled';
+
+export interface ConversationEvents {
+  change: ConversationEventDetail;
+  push: ConversationEventDetail;
+  undo: ConversationEventDetail;
+  redo: ConversationEventDetail;
+  switch: ConversationEventDetail;
+  'messages.appended': ConversationEventDetail;
+  'messages.updated': ConversationEventDetail;
+  'messages.removed': ConversationEventDetail;
+  'tool-calls.appended': ConversationEventDetail;
+  'tool-results.appended': ConversationEventDetail;
+  'stream.started': ConversationEventDetail;
+  'stream.updated': ConversationEventDetail;
+  'stream.finalized': ConversationEventDetail;
+  'stream.cancelled': ConversationEventDetail;
+}
+
+export type ConversationEventType = Extract<keyof ConversationEvents, string>;
 
 interface HistoryNode {
   conversation: ConversationHistory;
   parent: HistoryNode | null;
   children: HistoryNode[];
+}
+
+type ConversationAdapter = {
+  export: (conversation: ConversationHistory, options?: any) => unknown;
+  import: (payload: any) => ConversationHistory;
+  append: (conversation: ConversationHistory, payload: any) => ConversationHistory;
+};
+
+type ConversationChangeContext = {
+  messageIds?: string[];
+  toolCallIds?: string[];
+};
+
+function diffConversationMessages(
+  previousConversation: ConversationHistory,
+  nextConversation: ConversationHistory,
+): {
+  appended: string[];
+  updated: string[];
+  removed: string[];
+} {
+  const previousIds = new Set(previousConversation.ids);
+  const nextIds = new Set(nextConversation.ids);
+  const appended = nextConversation.ids.filter((id) => !previousIds.has(id));
+  const removed = previousConversation.ids.filter((id) => !nextIds.has(id));
+  const updated: string[] = [];
+
+  for (const id of nextConversation.ids) {
+    if (!previousIds.has(id)) {
+      continue;
+    }
+    const previousMessage = previousConversation.messages[id];
+    const nextMessage = nextConversation.messages[id];
+    if (!previousMessage || !nextMessage) {
+      continue;
+    }
+    if (JSON.stringify(previousMessage) !== JSON.stringify(nextMessage)) {
+      updated.push(id);
+    }
+  }
+
+  return { appended, updated, removed };
+}
+
+function collectToolCallIds(
+  conversation: ConversationHistory,
+  messageIds?: readonly string[],
+): string[] | undefined {
+  if (!messageIds || messageIds.length === 0) {
+    return undefined;
+  }
+
+  const ids = new Set<string>();
+  for (const messageId of messageIds) {
+    const message = conversation.messages[messageId];
+    if (!message) {
+      continue;
+    }
+    if (message.toolCall?.id) {
+      ids.add(message.toolCall.id);
+    }
+    if (message.toolResult?.callId) {
+      ids.add(message.toolResult.callId);
+    }
+  }
+
+  return ids.size > 0 ? [...ids] : undefined;
+}
+
+async function loadConversationAdapter(
+  provider: ConversationProvider,
+): Promise<ConversationAdapter> {
+  switch (provider) {
+    case 'openai': {
+      const module = await import('./adapters/openai');
+      return module.openAIConversationAdapter;
+    }
+    case 'anthropic': {
+      const module = await import('./adapters/anthropic');
+      return module.anthropicConversationAdapter;
+    }
+    case 'gemini': {
+      const module = await import('./adapters/gemini');
+      return module.geminiConversationAdapter;
+    }
+  }
 }
 
 /**
@@ -95,7 +223,7 @@ interface HistoryNode {
 export class Conversation extends EventTarget {
   private currentNode: HistoryNode;
   private environment: ConversationEnvironment;
-  private readonly events: ConversationEventTarget;
+  private readonly eventHub = createEventTarget<ConversationEvents>();
 
   constructor(
     initial: ConversationHistory = createConversationHistory(),
@@ -103,7 +231,6 @@ export class Conversation extends EventTarget {
   ) {
     super();
     this.environment = resolveConversationEnvironment(environment);
-    this.events = createEventTarget<ConversationEventMap>();
     const safeInitial = ensureConversationSafe(initial);
     this.currentNode = {
       conversation: safeInitial,
@@ -112,16 +239,61 @@ export class Conversation extends EventTarget {
     };
   }
 
-  /**
-   * Dispatches a change event.
-   */
-  private notifyChange(type: ConversationActionType): void {
-    const detail: ConversationEventDetail = {
-      type,
+  private buildEventDetail(
+    action: ConversationActionType,
+    previousConversation: ConversationHistory,
+    context: ConversationChangeContext = {},
+  ): ConversationEventDetail {
+    return {
+      action,
       conversation: this.current,
+      previousConversation,
+      ...(context.messageIds && context.messageIds.length > 0
+        ? { messageIds: context.messageIds }
+        : {}),
+      ...(context.toolCallIds && context.toolCallIds.length > 0
+        ? { toolCallIds: context.toolCallIds }
+        : {}),
     };
-    this.events.dispatchEvent({ type: 'change', detail });
-    this.events.dispatchEvent({ type, detail });
+  }
+
+  private emitConversationEvent(
+    type: ConversationEventType,
+    detail: ConversationEventDetail,
+  ): void {
+    this.eventHub.dispatchEvent({ type, detail });
+  }
+
+  private commit(
+    next: ConversationHistory,
+    changeAction: ConversationActionType,
+    emittedEvents: readonly ConversationEventType[],
+    context?: ConversationChangeContext,
+  ): void {
+    const previousConversation = this.current;
+    const newNode: HistoryNode = {
+      conversation: next,
+      parent: this.currentNode,
+      children: [],
+    };
+    this.currentNode.children.push(newNode);
+    this.currentNode = newNode;
+
+    this.emitConversationEvent(
+      'change',
+      this.buildEventDetail(changeAction, previousConversation, context),
+    );
+
+    for (const eventType of emittedEvents) {
+      if (eventType === 'change') {
+        continue;
+      }
+      const eventAction = eventType as ConversationActionType;
+      this.emitConversationEvent(
+        eventType,
+        this.buildEventDetail(eventAction, previousConversation, context),
+      );
+    }
   }
 
   private toAddListenerOptions(
@@ -162,7 +334,7 @@ export class Conversation extends EventTarget {
     options?: boolean | AddEventListenerOptions,
   ): void | (() => void) {
     if (!callback) return;
-    return this.events.addEventListener(
+    return this.eventHub.addEventListener(
       type as ConversationEventType,
       callback as EventListenerLike<ConversationEvent>,
       this.toAddListenerOptions(options),
@@ -181,7 +353,7 @@ export class Conversation extends EventTarget {
     options?: boolean | EventListenerOptions,
   ): void {
     if (!callback) return;
-    this.events.removeEventListener(
+    this.eventHub.removeEventListener(
       type as ConversationEventType,
       callback as EventListenerLike<ConversationEvent>,
       this.toRemoveListenerOptions(options),
@@ -191,20 +363,22 @@ export class Conversation extends EventTarget {
   /**
    * Dispatches a DOM-style event through the event-emission target.
    */
-  override dispatchEvent(event: Event): boolean {
-    return this.events.dispatchEvent(
-      event as Parameters<ConversationEventTarget['dispatchEvent']>[0],
+  override dispatchEvent(
+    event:
+      | Event
+      | EmissionEvent<ConversationEvents[ConversationEventType], ConversationEventType>,
+  ): boolean {
+    return this.eventHub.dispatchEvent(
+      event as Parameters<typeof this.eventHub.dispatchEvent>[0],
     );
   }
 
   /**
-   * Subscribes to conversation changes.
-   * This follows the Svelte store contract, making Conversation a valid Svelte store.
+   * Watches the current conversation state.
    * @param run - Callback called with the current conversation whenever it changes.
    * @returns An unsubscribe function.
    */
-  subscribe(run: (value: ConversationHistory) => void): () => void {
-    // Call immediately with current value (Svelte store contract)
+  watch(run: (value: ConversationHistory) => void): () => void {
     run(this.current);
 
     const handler = (event: ConversationEvent) => {
@@ -218,6 +392,53 @@ export class Conversation extends EventTarget {
       handler as (event: ConversationEvent) => void,
     );
     return (unsubscribe as () => void) || (() => {});
+  }
+
+  on<K extends ConversationEventType>(
+    type: K,
+    options?: AddEventListenerOptionsLike | boolean,
+  ): ObservableLike<EmissionEvent<ConversationEvents[K], K>> {
+    return this.eventHub.on(type, options);
+  }
+
+  once<K extends ConversationEventType>(
+    type: K,
+    listener: (event: EmissionEvent<ConversationEvents[K], K>) => void | Promise<void>,
+    options?: Omit<AddEventListenerOptionsLike, 'once'>,
+  ): () => void {
+    return this.eventHub.once(type, listener, options);
+  }
+
+  subscribe<K extends ConversationEventType>(
+    type: K,
+    observerOrNext?:
+      | Observer<EmissionEvent<ConversationEvents[K], K>>
+      | ((value: EmissionEvent<ConversationEvents[K], K>) => void),
+    error?: (err: unknown) => void,
+    complete?: () => void,
+  ): Subscription {
+    return this.eventHub.subscribe(type, observerOrNext, error, complete);
+  }
+
+  toObservable(): ObservableLike<
+    EmissionEvent<ConversationEvents[ConversationEventType], ConversationEventType>
+  > {
+    return this.eventHub.toObservable();
+  }
+
+  events<K extends ConversationEventType>(
+    type: K,
+    options?: AsyncIteratorOptions,
+  ): AsyncIterableIterator<EmissionEvent<ConversationEvents[K], K>> {
+    return this.eventHub.events(type, options);
+  }
+
+  complete(): void {
+    this.eventHub.complete();
+  }
+
+  get completed(): boolean {
+    return this.eventHub.completed;
   }
 
   /**
@@ -285,19 +506,45 @@ export class Conversation extends EventTarget {
     return this.currentNode.children.length;
   }
 
+  private createChangeContext(
+    previousConversation: ConversationHistory,
+    nextConversation: ConversationHistory,
+    action: Extract<
+      ConversationActionType,
+      'messages.appended' | 'messages.updated' | 'messages.removed'
+    >,
+  ): ConversationChangeContext {
+    const diff = diffConversationMessages(previousConversation, nextConversation);
+    const messageIds =
+      action === 'messages.appended'
+        ? diff.appended
+        : action === 'messages.updated'
+          ? diff.updated
+          : diff.removed;
+    const toolCallIds = collectToolCallIds(
+      action === 'messages.removed' ? previousConversation : nextConversation,
+      messageIds,
+    );
+    return {
+      ...(messageIds.length > 0 ? { messageIds } : {}),
+      ...(toolCallIds ? { toolCallIds } : {}),
+    };
+  }
+
+  private pushWithEvents(
+    next: ConversationHistory,
+    changeAction: Exclude<ConversationActionType, 'push' | 'undo' | 'redo' | 'switch'>,
+    context?: ConversationChangeContext,
+  ): void {
+    this.commit(next, changeAction, ['push', changeAction], context);
+  }
+
   /**
    * Pushes a new conversation state onto the history.
    * If the current state is not a leaf, a new branch is created.
    */
   push(next: ConversationHistory): void {
-    const newNode: HistoryNode = {
-      conversation: next,
-      parent: this.currentNode,
-      children: [],
-    };
-    this.currentNode.children.push(newNode);
-    this.currentNode = newNode;
-    this.notifyChange('push');
+    this.commit(next, 'push', ['push']);
   }
 
   /**
@@ -306,8 +553,13 @@ export class Conversation extends EventTarget {
    */
   undo(): ConversationHistory | undefined {
     if (this.currentNode.parent) {
+      const previousConversation = this.current;
       this.currentNode = this.currentNode.parent;
-      this.notifyChange('undo');
+      this.emitConversationEvent(
+        'change',
+        this.buildEventDetail('undo', previousConversation),
+      );
+      this.emitConversationEvent('undo', this.buildEventDetail('undo', previousConversation));
       return this.current;
     }
     return undefined;
@@ -321,8 +573,13 @@ export class Conversation extends EventTarget {
   redo(childIndex: number = 0): ConversationHistory | undefined {
     const next = this.currentNode.children[childIndex];
     if (next) {
+      const previousConversation = this.current;
       this.currentNode = next;
-      this.notifyChange('redo');
+      this.emitConversationEvent(
+        'change',
+        this.buildEventDetail('redo', previousConversation),
+      );
+      this.emitConversationEvent('redo', this.buildEventDetail('redo', previousConversation));
       return this.current;
     }
     return undefined;
@@ -337,8 +594,16 @@ export class Conversation extends EventTarget {
     if (this.currentNode.parent) {
       const target = this.currentNode.parent.children[index];
       if (target) {
+        const previousConversation = this.current;
         this.currentNode = target;
-        this.notifyChange('switch');
+        this.emitConversationEvent(
+          'change',
+          this.buildEventDetail('switch', previousConversation),
+        );
+        this.emitConversationEvent(
+          'switch',
+          this.buildEventDetail('switch', previousConversation),
+        );
         return this.current;
       }
     }
@@ -471,7 +736,13 @@ export class Conversation extends EventTarget {
    * Appends one or more messages to the history.
    */
   appendMessages(...inputs: MessageInput[]): void {
-    this.push(appendMessages(this.current, ...inputs, this.env));
+    const previousConversation = this.current;
+    const nextConversation = appendMessages(this.current, ...inputs, this.env);
+    this.pushWithEvents(
+      nextConversation,
+      'messages.appended',
+      this.createChangeContext(previousConversation, nextConversation, 'messages.appended'),
+    );
   }
 
   /**
@@ -481,7 +752,13 @@ export class Conversation extends EventTarget {
     content: MessageInput['content'],
     metadata?: Record<string, JSONValue>,
   ): void {
-    this.push(appendUserMessage(this.current, content, metadata, this.env));
+    const previousConversation = this.current;
+    const nextConversation = appendUserMessage(this.current, content, metadata, this.env);
+    this.pushWithEvents(
+      nextConversation,
+      'messages.appended',
+      this.createChangeContext(previousConversation, nextConversation, 'messages.appended'),
+    );
   }
 
   /**
@@ -491,35 +768,69 @@ export class Conversation extends EventTarget {
     content: MessageInput['content'],
     metadata?: Record<string, JSONValue>,
   ): void {
-    this.push(appendAssistantMessage(this.current, content, metadata, this.env));
+    const previousConversation = this.current;
+    const nextConversation = appendAssistantMessage(this.current, content, metadata, this.env);
+    this.pushWithEvents(
+      nextConversation,
+      'messages.appended',
+      this.createChangeContext(previousConversation, nextConversation, 'messages.appended'),
+    );
   }
 
   /**
    * Appends a system message to the history.
    */
   appendSystemMessage(content: string, metadata?: Record<string, JSONValue>): void {
-    this.push(appendSystemMessage(this.current, content, metadata, this.env));
+    const previousConversation = this.current;
+    const nextConversation = appendSystemMessage(this.current, content, metadata, this.env);
+    this.pushWithEvents(
+      nextConversation,
+      'messages.appended',
+      this.createChangeContext(previousConversation, nextConversation, 'messages.appended'),
+    );
   }
 
   /**
    * Prepends a system message to the history.
    */
   prependSystemMessage(content: string, metadata?: Record<string, JSONValue>): void {
-    this.push(prependSystemMessage(this.current, content, metadata, this.env));
+    const previousConversation = this.current;
+    const nextConversation = prependSystemMessage(this.current, content, metadata, this.env);
+    this.pushWithEvents(
+      nextConversation,
+      'messages.appended',
+      this.createChangeContext(previousConversation, nextConversation, 'messages.appended'),
+    );
   }
 
   /**
    * Replaces the first system message or prepends one if none exist.
    */
   replaceSystemMessage(content: string, metadata?: Record<string, JSONValue>): void {
-    this.push(replaceSystemMessage(this.current, content, metadata, this.env));
+    const previousConversation = this.current;
+    const nextConversation = replaceSystemMessage(this.current, content, metadata, this.env);
+    this.pushWithEvents(
+      nextConversation,
+      'messages.updated',
+      this.createChangeContext(previousConversation, nextConversation, 'messages.updated'),
+    );
   }
 
   /**
    * Collapses multiple system messages into a single message.
    */
   collapseSystemMessages(): void {
-    this.push(collapseSystemMessages(this.current, this.env));
+    const previousConversation = this.current;
+    const nextConversation = collapseSystemMessages(this.current, this.env);
+    const action =
+      previousConversation.ids.length === nextConversation.ids.length
+        ? 'messages.updated'
+        : 'messages.removed';
+    this.pushWithEvents(
+      nextConversation,
+      action,
+      this.createChangeContext(previousConversation, nextConversation, action),
+    );
   }
 
   /**
@@ -529,8 +840,17 @@ export class Conversation extends EventTarget {
     position: number,
     placeholderOrOptions?: string | RedactMessageOptions,
   ): void {
-    this.push(
-      redactMessageAtPosition(this.current, position, placeholderOrOptions, this.env),
+    const previousConversation = this.current;
+    const nextConversation = redactMessageAtPosition(
+      this.current,
+      position,
+      placeholderOrOptions,
+      this.env,
+    );
+    this.pushWithEvents(
+      nextConversation,
+      'messages.updated',
+      this.createChangeContext(previousConversation, nextConversation, 'messages.updated'),
     );
   }
 
@@ -541,14 +861,26 @@ export class Conversation extends EventTarget {
     position: number,
     options?: { preserveSystemMessages?: boolean; preserveToolPairs?: boolean },
   ): void {
-    this.push(truncateFromPosition(this.current, position, options, this.env));
+    const previousConversation = this.current;
+    const nextConversation = truncateFromPosition(this.current, position, options, this.env);
+    this.pushWithEvents(
+      nextConversation,
+      'messages.removed',
+      this.createChangeContext(previousConversation, nextConversation, 'messages.removed'),
+    );
   }
 
   /**
    * Truncates the conversation to fit within a token limit.
    */
   truncateToTokenLimit(maxTokens: number, options?: TruncateOptions): void {
-    this.push(truncateToTokenLimit(this.current, maxTokens, options, this.env));
+    const previousConversation = this.current;
+    const nextConversation = truncateToTokenLimit(this.current, maxTokens, options, this.env);
+    this.pushWithEvents(
+      nextConversation,
+      'messages.removed',
+      this.createChangeContext(previousConversation, nextConversation, 'messages.removed'),
+    );
   }
 
   /**
@@ -564,7 +896,9 @@ export class Conversation extends EventTarget {
       metadata,
       this.env,
     );
-    this.push(conversation);
+    this.commit(conversation, 'stream.started', ['push', 'messages.appended', 'stream.started'], {
+      messageIds: [messageId],
+    });
     return messageId;
   }
 
@@ -572,7 +906,10 @@ export class Conversation extends EventTarget {
    * Updates a streaming message's content.
    */
   updateStreamingMessage(messageId: string, content: string): void {
-    this.push(updateStreamingMessage(this.current, messageId, content, this.env));
+    const nextConversation = updateStreamingMessage(this.current, messageId, content, this.env);
+    this.commit(nextConversation, 'stream.updated', ['push', 'messages.updated', 'stream.updated'], {
+      messageIds: [messageId],
+    });
   }
 
   /**
@@ -582,14 +919,200 @@ export class Conversation extends EventTarget {
     messageId: string,
     options?: { tokenUsage?: TokenUsage; metadata?: Record<string, JSONValue> },
   ): void {
-    this.push(finalizeStreamingMessage(this.current, messageId, options, this.env));
+    const nextConversation = finalizeStreamingMessage(
+      this.current,
+      messageId,
+      options,
+      this.env,
+    );
+    this.commit(
+      nextConversation,
+      'stream.finalized',
+      ['push', 'messages.updated', 'stream.finalized'],
+      { messageIds: [messageId] },
+    );
   }
 
   /**
    * Cancels a streaming message by removing it from the conversation.
    */
   cancelStreamingMessage(messageId: string): void {
-    this.push(cancelStreamingMessage(this.current, messageId, this.env));
+    const nextConversation = cancelStreamingMessage(this.current, messageId, this.env);
+    this.commit(
+      nextConversation,
+      'stream.cancelled',
+      ['push', 'messages.removed', 'stream.cancelled'],
+      { messageIds: [messageId] },
+    );
+  }
+
+  appendToolCall(
+    toolCall: AppendableToolCallInput,
+    options?: Parameters<typeof appendToolCall>[2],
+  ): void {
+    const nextConversation = appendToolCall(this.current, toolCall, options, this.env);
+    const context = this.createChangeContext(
+      this.current,
+      nextConversation,
+      'messages.appended',
+    );
+    this.commit(nextConversation, 'tool-calls.appended', ['push', 'messages.appended', 'tool-calls.appended'], context);
+  }
+
+  appendToolCalls(toolCalls: ReadonlyArray<AppendableToolCallInput>): void {
+    const nextConversation = appendToolCalls(this.current, toolCalls, this.env);
+    if (nextConversation === this.current) {
+      return;
+    }
+    const context = this.createChangeContext(
+      this.current,
+      nextConversation,
+      'messages.appended',
+    );
+    this.commit(nextConversation, 'tool-calls.appended', ['push', 'messages.appended', 'tool-calls.appended'], context);
+  }
+
+  appendToolResult(
+    toolResult: AppendableToolResult,
+    options?: Parameters<typeof appendToolResult>[2],
+  ): void {
+    const nextConversation = appendToolResult(this.current, toolResult, options, this.env);
+    const context = this.createChangeContext(
+      this.current,
+      nextConversation,
+      'messages.appended',
+    );
+    this.commit(
+      nextConversation,
+      'tool-results.appended',
+      ['push', 'messages.appended', 'tool-results.appended'],
+      context,
+    );
+  }
+
+  appendToolResults(toolResults: ReadonlyArray<AppendableToolResult>): void {
+    const nextConversation = appendToolResults(this.current, toolResults, this.env);
+    if (nextConversation === this.current) {
+      return;
+    }
+    const context = this.createChangeContext(
+      this.current,
+      nextConversation,
+      'messages.appended',
+    );
+    this.commit(
+      nextConversation,
+      'tool-results.appended',
+      ['push', 'messages.appended', 'tool-results.appended'],
+      context,
+    );
+  }
+
+  async appendToolResultAsync(
+    toolResult: AppendableToolResult,
+    options?: Parameters<typeof appendToolResultAsync>[2],
+  ): Promise<void> {
+    const nextConversation = await appendToolResultAsync(
+      this.current,
+      toolResult,
+      options,
+      this.env,
+    );
+    const context = this.createChangeContext(
+      this.current,
+      nextConversation,
+      'messages.appended',
+    );
+    this.commit(
+      nextConversation,
+      'tool-results.appended',
+      ['push', 'messages.appended', 'tool-results.appended'],
+      context,
+    );
+  }
+
+  async appendToolResultsAsync(
+    toolResults: ReadonlyArray<AppendableToolResult>,
+  ): Promise<void> {
+    const nextConversation = await appendToolResultsAsync(
+      this.current,
+      toolResults,
+      this.env,
+    );
+    if (nextConversation === this.current) {
+      return;
+    }
+    const context = this.createChangeContext(
+      this.current,
+      nextConversation,
+      'messages.appended',
+    );
+    this.commit(
+      nextConversation,
+      'tool-results.appended',
+      ['push', 'messages.appended', 'tool-results.appended'],
+      context,
+    );
+  }
+
+  getPendingToolCalls(): ReturnType<typeof getPendingToolCalls> {
+    return getPendingToolCalls(this.current);
+  }
+
+  getToolInteractions(): ToolInteraction[] {
+    return getToolInteractions(this.current);
+  }
+
+  static async fromProvider(
+    provider: ConversationProvider,
+    payload: OpenAIMessage[] | AnthropicConversation | GeminiConversation,
+    environment?: Partial<ConversationEnvironment>,
+  ): Promise<Conversation> {
+    const adapter = await loadConversationAdapter(provider);
+    return new Conversation(adapter.import(payload), environment);
+  }
+
+  async toProvider(
+    provider: ConversationProvider,
+    options?: unknown,
+  ): Promise<OpenAIMessage[] | AnthropicConversation | GeminiConversation> {
+    const adapter = await loadConversationAdapter(provider);
+    return adapter.export(this.current, options) as
+      | OpenAIMessage[]
+      | AnthropicConversation
+      | GeminiConversation;
+  }
+
+  async appendProvider(
+    provider: ConversationProvider,
+    payload: OpenAIMessage[] | AnthropicConversation | GeminiConversation,
+  ): Promise<void> {
+    const adapter = await loadConversationAdapter(provider);
+    const nextConversation = adapter.append(this.current, payload);
+    if (nextConversation === this.current) {
+      return;
+    }
+    const diff = diffConversationMessages(this.current, nextConversation);
+    const appendedIds = diff.appended;
+    const updatedIds = diff.updated;
+    const removedIds = diff.removed;
+    const action =
+      removedIds.length > 0
+        ? 'messages.removed'
+        : updatedIds.length > 0
+          ? 'messages.updated'
+          : 'messages.appended';
+    const messageIds =
+      action === 'messages.removed'
+        ? removedIds
+        : action === 'messages.updated'
+          ? updatedIds
+          : appendedIds;
+    const toolCallIds = collectToolCallIds(nextConversation, messageIds);
+    this.commit(nextConversation, action, ['push', action], {
+      ...(messageIds.length > 0 ? { messageIds } : {}),
+      ...(toolCallIds ? { toolCallIds } : {}),
+    });
   }
 
   /**
@@ -671,8 +1194,7 @@ export class Conversation extends EventTarget {
     messages: ReadonlyArray<OpenAIMessage>,
     environment?: Partial<ConversationEnvironment>,
   ): Promise<Conversation> {
-    const { fromOpenAIMessages } = await import('./adapters/openai');
-    return new Conversation(fromOpenAIMessages(messages), environment);
+    return Conversation.fromProvider('openai', [...messages], environment);
   }
 
   /**
@@ -682,8 +1204,7 @@ export class Conversation extends EventTarget {
     payload: AnthropicConversation,
     environment?: Partial<ConversationEnvironment>,
   ): Promise<Conversation> {
-    const { fromAnthropicMessages } = await import('./adapters/anthropic');
-    return new Conversation(fromAnthropicMessages(payload), environment);
+    return Conversation.fromProvider('anthropic', payload, environment);
   }
 
   /**
@@ -693,40 +1214,35 @@ export class Conversation extends EventTarget {
     payload: GeminiConversation,
     environment?: Partial<ConversationEnvironment>,
   ): Promise<Conversation> {
-    const { fromGeminiMessages } = await import('./adapters/gemini');
-    return new Conversation(fromGeminiMessages(payload), environment);
+    return Conversation.fromProvider('gemini', payload, environment);
   }
 
   /**
    * Converts the current conversation to OpenAI Chat Completions messages.
    */
   async toOpenAIMessages(): Promise<OpenAIMessage[]> {
-    const { toOpenAIMessages } = await import('./adapters/openai');
-    return toOpenAIMessages(this.current);
+    return this.toProvider('openai', { groupToolCalls: false }) as Promise<OpenAIMessage[]>;
   }
 
   /**
    * Converts the current conversation to grouped OpenAI Chat Completions messages.
    */
   async toOpenAIMessagesGrouped(): Promise<OpenAIMessage[]> {
-    const { toOpenAIMessagesGrouped } = await import('./adapters/openai');
-    return toOpenAIMessagesGrouped(this.current);
+    return this.toProvider('openai', { groupToolCalls: true }) as Promise<OpenAIMessage[]>;
   }
 
   /**
    * Converts the current conversation to Anthropic Messages payloads.
    */
   async toAnthropicMessages(): Promise<AnthropicConversation> {
-    const { toAnthropicMessages } = await import('./adapters/anthropic');
-    return toAnthropicMessages(this.current);
+    return this.toProvider('anthropic') as Promise<AnthropicConversation>;
   }
 
   /**
    * Converts the current conversation to Gemini contents.
    */
   async toGeminiMessages(): Promise<GeminiConversation> {
-    const { toGeminiMessages } = await import('./adapters/gemini');
-    return toGeminiMessages(this.current);
+    return this.toProvider('gemini') as Promise<GeminiConversation>;
   }
 
   /**
@@ -757,6 +1273,7 @@ export class Conversation extends EventTarget {
    * Cleans up all listeners and resources.
    */
   [Symbol.dispose](): void {
+    this.complete();
     // Clear references to help GC
     let root: HistoryNode | null = this.currentNode;
     while (root?.parent) {
@@ -777,7 +1294,7 @@ export class Conversation extends EventTarget {
     };
 
     if (root) clearNode(root);
-    this.events.clear();
+    this.eventHub.clear();
   }
 }
 

@@ -1,7 +1,7 @@
 import type { SerializedToolDefinition } from '../../core/serialization';
 import type { AnyToolDefinition } from '../../core/tool-definition';
 import type { ImportedToolConfiguration } from '../../create-toolbox';
-import type { ToolCallInput, ToolResult } from '../../types';
+import type { ToolCallInput, ToolResultLike } from '../../types';
 import { importToolSchema } from '../imported-schema';
 import {
   type AdapterInput,
@@ -27,6 +27,20 @@ export interface OpenAIAdapterOptions {
    */
   naming?: 'default' | 'safe-id';
 }
+
+type OpenAIToolCallSource =
+  | OpenAIToolCall[]
+  | { tool_calls?: OpenAIToolCall[] | null | undefined }
+  | {
+      message?: { tool_calls?: OpenAIToolCall[] | null | undefined } | null | undefined;
+    }
+  | {
+      choices?: ReadonlyArray<{
+        message?: { tool_calls?: OpenAIToolCall[] | null | undefined } | null | undefined;
+      }>;
+    }
+  | undefined
+  | null;
 
 /**
  * Maps a tool ID to an OpenAI-safe name (sanitized).
@@ -120,14 +134,15 @@ export function fromOpenAITools(
  * ```
  */
 export function parseOpenAIToolCalls(
-  toolCalls: OpenAIToolCall[] | undefined | null,
+  toolCalls: OpenAIToolCallSource,
   mapper?: (name: string) => string,
 ): ToolCallInput[] {
-  if (!toolCalls || !Array.isArray(toolCalls)) {
+  const resolvedToolCalls = extractOpenAIToolCalls(toolCalls);
+  if (!resolvedToolCalls || !Array.isArray(resolvedToolCalls)) {
     return [];
   }
 
-  return toolCalls.map((call) => {
+  return resolvedToolCalls.map((call) => {
     let args: unknown = {};
     try {
       args = JSON.parse(call.function.arguments);
@@ -157,11 +172,11 @@ export function parseOpenAIToolCalls(
  * ```
  */
 export function formatOpenAIToolResults(
-  results: ToolResult | ToolResult[],
+  results: ToolResultLike | ToolResultLike[],
 ): OpenAIToolMessage[] {
   const list = Array.isArray(results) ? results : [results];
   return list.map((result) => {
-    if (result.stream || isAsyncIterable(result.result)) {
+    if (getStreamingPayload(result)) {
       throw new Error(
         'formatOpenAIToolResults does not support streaming results. Use formatOpenAIToolResultsAsync or execute without { stream: true }.',
       );
@@ -170,7 +185,7 @@ export function formatOpenAIToolResults(
 
     return {
       role: 'tool',
-      tool_call_id: result.toolCallId,
+      tool_call_id: getToolCallId(result),
       content,
     };
   });
@@ -181,24 +196,31 @@ export function formatOpenAIToolResults(
  * Streaming payloads are collected into arrays before serialization.
  */
 export async function formatOpenAIToolResultsAsync(
-  results: ToolResult | ToolResult[],
+  results: ToolResultLike | ToolResultLike[],
 ): Promise<OpenAIToolMessage[]> {
   const list = Array.isArray(results) ? results : [results];
   const messages = await Promise.all(
     list.map(async (result) => {
-      const stream =
-        result.stream ?? (isAsyncIterable(result.result) ? result.result : null);
+      const stream = getStreamingPayload(result) ?? null;
       const contentSource =
         stream !== null ? await collectAsyncIterable(stream) : result.content;
       return {
         role: 'tool' as const,
-        tool_call_id: result.toolCallId,
+        tool_call_id: getToolCallId(result),
         content: stringifyToolContent(contentSource),
       };
     }),
   );
   return messages;
 }
+
+export const openAIToolAdapter = {
+  export: toOpenAITools,
+  import: fromOpenAITools,
+  parseCalls: parseOpenAIToolCalls,
+  formatResults: formatOpenAIToolResults,
+  formatResultsAsync: formatOpenAIToolResultsAsync,
+} as const;
 
 function convertToOpenAI(
   tool: SerializedToolDefinition,
@@ -252,6 +274,39 @@ function stringifyToolContent(content: unknown): string {
     // eslint-disable-next-line @typescript-eslint/no-base-to-string
     return String(content);
   }
+}
+
+function extractOpenAIToolCalls(input: OpenAIToolCallSource): OpenAIToolCall[] | undefined | null {
+  if (!input) {
+    return input;
+  }
+  if (Array.isArray(input)) {
+    return input;
+  }
+  if ('tool_calls' in input) {
+    return input.tool_calls;
+  }
+  if ('message' in input) {
+    return input.message?.tool_calls;
+  }
+  if ('choices' in input) {
+    return input.choices?.[0]?.message?.tool_calls;
+  }
+  return undefined;
+}
+
+function getToolCallId(result: ToolResultLike): string {
+  return 'toolCallId' in result ? result.toolCallId : result.callId;
+}
+
+function getStreamingPayload(result: ToolResultLike): AsyncIterable<unknown> | undefined {
+  if ('stream' in result && isAsyncIterable(result.stream)) {
+    return result.stream;
+  }
+  if ('result' in result && isAsyncIterable(result.result)) {
+    return result.result;
+  }
+  return undefined;
 }
 
 function isAsyncIterable(value: unknown): value is AsyncIterable<unknown> {

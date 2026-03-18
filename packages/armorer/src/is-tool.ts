@@ -11,7 +11,7 @@ import type { ToolContext as CoreToolContext } from './core/context';
 import type { ToolErrorCategory } from './core/errors';
 import type { JsonObject } from './core/serialization/json';
 import type { ToolDefinition } from './core/tool-definition';
-import type { ToolCall, ToolResult } from './types';
+import type { ToolCall, ToolExecutionResult } from './types';
 
 export type ToolParametersSchema = z.ZodTypeAny;
 export type { AddEventListenerOptionsLike, AsyncIteratorOptions } from 'event-emission';
@@ -332,10 +332,10 @@ export type Tool<
 
   // Tool execution methods
   execute: {
-    (call: ToolCallWithArguments, options?: ToolExecuteOptions): Promise<ToolResult>;
+    (call: ToolCallWithArguments, options?: ToolExecuteOptions): Promise<ToolExecutionResult>;
     (params: unknown, options?: ToolExecuteOptions): Promise<R>;
   };
-  executeWith: (options: ToolExecuteWithOptions) => Promise<ToolResult>;
+  executeWith: (options: ToolExecuteWithOptions) => Promise<ToolExecutionResult>;
   rawExecute: (params: unknown, context: ToolContext<E>) => Promise<R>;
 };
 

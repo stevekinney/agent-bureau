@@ -50,6 +50,109 @@ describe('createToolbox', () => {
     await expect(toolbox.toGeminiTools()).resolves.toEqual(toGeminiTools(toolbox));
   });
 
+  it('exports provider tools through the generic toolbox.toProvider helper', async () => {
+    const toolbox = createToolbox([makeConfiguration()]);
+
+    await expect(toolbox.toProvider('openai')).resolves.toEqual(toOpenAITools(toolbox));
+    await expect(toolbox.toProvider('anthropic')).resolves.toEqual(
+      toAnthropicTools(toolbox),
+    );
+    await expect(toolbox.toProvider('gemini')).resolves.toEqual(toGeminiTools(toolbox));
+  });
+
+  it('rehydrates imported tools through createToolbox.fromProvider with sourceToolbox', async () => {
+    const toolbox = createToolbox([makeConfiguration()]);
+    const imported = await createToolbox.fromProvider(
+      'openai',
+      await toolbox.toProvider('openai'),
+      {
+        sourceToolbox: toolbox,
+      },
+    );
+
+    const result = await imported.execute({
+      id: 'import-provider',
+      name: 'sum',
+      arguments: { a: 4, b: 5 },
+    });
+
+    expect(result.result).toBe(9);
+  });
+
+  it('rehydrates Anthropic and Gemini imports through createToolbox.fromProvider', async () => {
+    const toolbox = createToolbox([makeConfiguration()]);
+
+    const importedAnthropic = await createToolbox.fromProvider(
+      'anthropic',
+      await toolbox.toProvider('anthropic'),
+      {
+        sourceToolbox: toolbox,
+      },
+    );
+    const importedGemini = await createToolbox.fromProvider(
+      'gemini',
+      await toolbox.toProvider('gemini'),
+      {
+        sourceToolbox: toolbox,
+      },
+    );
+
+    await expect(
+      importedAnthropic.execute({
+        id: 'anthropic-import',
+        name: 'sum',
+        arguments: { a: 5, b: 6 },
+      }),
+    ).resolves.toMatchObject({ result: 11 });
+
+    await expect(
+      importedGemini.execute({
+        id: 'gemini-import',
+        name: 'sum',
+        arguments: { a: 6, b: 7 },
+      }),
+    ).resolves.toMatchObject({ result: 13 });
+  });
+
+  it('exposes execute resolvers for imported toolboxes', async () => {
+    const toolbox = createToolbox([makeConfiguration()]);
+    const execute = toolbox.asExecuteResolver()({
+      name: 'sum',
+      description: 'add two numbers',
+      input: z.object({ a: z.number(), b: z.number() }),
+    });
+
+    expect(execute).toBeDefined();
+    await expect(execute?.({ a: 1, b: 2 }, {} as never)).resolves.toBe(3);
+  });
+
+  it('falls back to imported execute placeholders when an execute resolver cannot find a tool', async () => {
+    const toolbox = createToolbox([makeConfiguration()]);
+    const execute = toolbox.asExecuteResolver()({
+      name: 'missing-tool',
+      description: 'missing tool',
+      input: z.object({}),
+    });
+
+    expect(execute).toBeDefined();
+    await expect(execute?.({}, {} as never)).rejects.toThrow(
+      'Imported tool "missing-tool" does not have an execute implementation',
+    );
+  });
+
+  it('normalizes missing and non-serializable tool-call arguments through the internal helper seam', () => {
+    const circularArguments: Record<string, unknown> = {};
+    circularArguments.self = circularArguments;
+
+    expect(internalToolboxTestUtilities.normalizeToolCallArguments(undefined)).toEqual({});
+    expect(internalToolboxTestUtilities.normalizeToolCallArguments(Symbol('arguments'))).toBe(
+      'Symbol(arguments)',
+    );
+    expect(internalToolboxTestUtilities.normalizeToolCallArguments(circularArguments)).toBe(
+      '[object Object]',
+    );
+  });
+
   it('imports OpenAI tools through createToolbox.fromOpenAITools', async () => {
     const imported = await createToolbox.fromOpenAITools([
       {
@@ -228,6 +331,56 @@ describe('createToolbox', () => {
     expect(result.toolCallId).toBe(result.callId);
     expect(result.outcome).toBe('success');
     expect(result.content).toBe(3);
+  });
+
+  it('normalizes missing and non-JSON tool-call arguments before execution', async () => {
+    const toolbox = createToolbox([
+      createTool({
+        name: 'inspect-arguments',
+        description: 'inspects arguments',
+        input: z.object({}).passthrough(),
+        async execute(parameters) {
+          return parameters;
+        },
+      }),
+    ]);
+
+    await expect(
+      toolbox.execute({
+        id: 'missing-arguments',
+        name: 'inspect-arguments',
+      } as any),
+    ).resolves.toMatchObject({
+      result: {},
+      content: {},
+    });
+
+    await expect(
+      toolbox.execute({
+        id: 'symbol-arguments',
+        name: 'inspect-arguments',
+        arguments: Symbol('tool-arguments'),
+      } as any),
+    ).resolves.toMatchObject({
+      error: expect.objectContaining({
+        message: expect.stringContaining('expected object'),
+      }),
+    });
+
+    const circularArguments: Record<string, unknown> = {};
+    circularArguments.self = circularArguments;
+
+    await expect(
+      toolbox.execute({
+        id: 'circular-arguments',
+        name: 'inspect-arguments',
+        arguments: circularArguments as any,
+      }),
+    ).resolves.toMatchObject({
+      error: expect.objectContaining({
+        message: expect.stringContaining('expected object'),
+      }),
+    });
   });
 
   it('supports lazy execute functions in configurations', async () => {

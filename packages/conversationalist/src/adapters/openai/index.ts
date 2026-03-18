@@ -15,6 +15,10 @@ import type {
 } from '../../types';
 import { getOrderedMessages } from '../../utilities/message-store';
 
+export interface OpenAIConversationExportOptions {
+  groupToolCalls?: boolean;
+}
+
 /**
  * OpenAI text content part.
  */
@@ -332,6 +336,67 @@ function parseToolResult(
   };
 }
 
+function toMessageInputs(messages: ReadonlyArray<OpenAIMessage>): MessageInput[] {
+  const inputs: MessageInput[] = [];
+
+  for (const message of messages) {
+    switch (message.role) {
+      case 'system':
+        inputs.push({
+          role: 'system',
+          content: toConversationContent(message.content) ?? '',
+        });
+        break;
+
+      case 'user':
+        inputs.push({
+          role: 'user',
+          content: toConversationContent(message.content) ?? '',
+        });
+        break;
+
+      case 'assistant': {
+        const assistantContent = toConversationContent(message.content);
+        const hasAssistantContent =
+          assistantContent !== undefined &&
+          (typeof assistantContent === 'string'
+            ? assistantContent.length > 0
+            : assistantContent.length > 0);
+
+        if (hasAssistantContent) {
+          inputs.push({
+            role: 'assistant',
+            content: assistantContent,
+          });
+        }
+
+        for (const toolCall of message.tool_calls ?? []) {
+          inputs.push({
+            role: 'tool-call',
+            content: '',
+            toolCall: {
+              id: toolCall.id,
+              name: toolCall.function.name,
+              arguments: parseToolArguments(toolCall.function.arguments),
+            },
+          });
+        }
+        break;
+      }
+
+      case 'tool':
+        inputs.push({
+          role: 'tool-result',
+          content: '',
+          toolResult: parseToolResult(message.tool_call_id, message.content),
+        });
+        break;
+    }
+  }
+
+  return inputs;
+}
+
 /**
  * Converts a conversation to OpenAI Chat Completions API message format.
  * Handles role mapping, tool calls, and multi-modal content.
@@ -411,62 +476,7 @@ export function toOpenAIMessagesGrouped(conversation: Conversation): OpenAIMessa
  */
 export function fromOpenAIMessages(messages: ReadonlyArray<OpenAIMessage>): Conversation {
   let conversation = createConversationHistory();
-  const inputs: MessageInput[] = [];
-
-  for (const message of messages) {
-    switch (message.role) {
-      case 'system':
-        inputs.push({
-          role: 'system',
-          content: toConversationContent(message.content) ?? '',
-        });
-        break;
-
-      case 'user':
-        inputs.push({
-          role: 'user',
-          content: toConversationContent(message.content) ?? '',
-        });
-        break;
-
-      case 'assistant': {
-        const assistantContent = toConversationContent(message.content);
-        const hasAssistantContent =
-          assistantContent !== undefined &&
-          (typeof assistantContent === 'string'
-            ? assistantContent.length > 0
-            : assistantContent.length > 0);
-
-        if (hasAssistantContent) {
-          inputs.push({
-            role: 'assistant',
-            content: assistantContent,
-          });
-        }
-
-        for (const toolCall of message.tool_calls ?? []) {
-          inputs.push({
-            role: 'tool-call',
-            content: '',
-            toolCall: {
-              id: toolCall.id,
-              name: toolCall.function.name,
-              arguments: parseToolArguments(toolCall.function.arguments),
-            },
-          });
-        }
-        break;
-      }
-
-      case 'tool':
-        inputs.push({
-          role: 'tool-result',
-          content: '',
-          toolResult: parseToolResult(message.tool_call_id, message.content),
-        });
-        break;
-    }
-  }
+  const inputs = toMessageInputs(messages);
 
   if (inputs.length > 0) {
     conversation = appendMessages(conversation, ...inputs);
@@ -474,3 +484,34 @@ export function fromOpenAIMessages(messages: ReadonlyArray<OpenAIMessage>): Conv
 
   return conversation;
 }
+
+export function appendOpenAIMessages(
+  conversation: Conversation,
+  messages: ReadonlyArray<OpenAIMessage>,
+): Conversation {
+  const inputs = toMessageInputs(messages);
+  if (inputs.length === 0) {
+    return conversation;
+  }
+  return appendMessages(conversation, ...inputs);
+}
+
+export const openAIConversationAdapter = {
+  export(
+    conversation: Conversation,
+    options: OpenAIConversationExportOptions = {},
+  ): OpenAIMessage[] {
+    return options.groupToolCalls === false
+      ? toOpenAIMessages(conversation)
+      : toOpenAIMessagesGrouped(conversation);
+  },
+  import(messages: ReadonlyArray<OpenAIMessage>): Conversation {
+    return fromOpenAIMessages(messages);
+  },
+  append(
+    conversation: Conversation,
+    messages: ReadonlyArray<OpenAIMessage>,
+  ): Conversation {
+    return appendOpenAIMessages(conversation, messages);
+  },
+} as const;

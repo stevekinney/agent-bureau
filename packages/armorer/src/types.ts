@@ -1,7 +1,20 @@
+import type { JsonValue } from './core/serialization/json';
+
 /**
  * Types for tool calls and results.
  * These are compatible with LLM provider tool call formats.
  */
+
+export type JSONValue = JsonValue;
+export type ToolProvider = 'openai' | 'anthropic' | 'gemini';
+export type ToolError = import('./core/errors').ToolError;
+export type ToolErrorCategory = import('./core/errors').ToolErrorCategory;
+
+export interface ToolAction {
+  type: 'approval' | 'input';
+  message?: string;
+  schema?: JsonValue;
+}
 
 /**
  * A tool call from an LLM.
@@ -9,7 +22,7 @@
 export interface ToolCall {
   id: string;
   name: string;
-  arguments: unknown;
+  arguments: JsonValue;
 }
 
 /**
@@ -22,12 +35,22 @@ export interface ToolCallInput {
 }
 
 /**
- * The result of executing a tool.
+ * Canonical tool result shape shared with conversationalist.
  */
 export interface ToolResult {
   callId: string;
   outcome: 'success' | 'error' | 'action_required';
-  content: unknown;
+  content: JsonValue;
+  error?: ToolError;
+  inputDigest?: string;
+  outputDigest?: string;
+  action?: ToolAction;
+}
+
+/**
+ * Runtime tool execution result with additional non-persisted execution data.
+ */
+export interface ToolExecutionResult extends ToolResult {
   toolCallId: string;
   toolName: string;
   result: unknown;
@@ -39,19 +62,14 @@ export interface ToolResult {
    * `stream: true` and rely on collect mode fallback.
    */
   stream?: AsyncIterable<unknown>;
-  error?: import('./core/errors').ToolError;
+  error?: ToolError;
   /** @deprecated Use error.message instead. */
   errorMessage?: string;
   /** @deprecated Use error.category instead. */
-  errorCategory?: import('./core/errors').ToolErrorCategory;
-  inputDigest?: string;
-  outputDigest?: string;
-  action?: {
-    type: 'approval' | 'input';
-    message?: string;
-    schema?: unknown;
-  };
+  errorCategory?: ToolErrorCategory;
 }
+
+export type ToolResultLike = ToolResult | ToolExecutionResult;
 
 /**
  * Minimal tool configuration for JSON schema output.

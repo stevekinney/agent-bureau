@@ -10,7 +10,12 @@ export const CURRENT_SCHEMA_VERSION = 4;
  * JSON-serializable value types.
  */
 export type JSONPrimitive = string | number | boolean | null;
-export type JSONValue = JSONPrimitive | JSONValue[] | { [key: string]: JSONValue };
+export type JSONValue =
+  | JSONPrimitive
+  | ReadonlyArray<JSONValue>
+  | { [key: string]: JSONValue };
+
+export type ConversationProvider = 'openai' | 'anthropic' | 'gemini';
 
 /**
  * Supported message roles in a conversation.

@@ -1,4 +1,4 @@
-import type { Tool, ToolResult } from '../../../index';
+import type { Tool, ToolExecutionResult } from '../../../index';
 import { isTool } from '../../../is-tool';
 
 type ToolboxLike = {
@@ -22,7 +22,7 @@ export type OpenAIAgentToolConfiguration = {
 
 export type OpenAIAgentToolOptions = {
   toolConfiguration?: (tool: Tool) => OpenAIAgentToolConfiguration;
-  formatResult?: (result: ToolResult) => unknown;
+  formatResult?: (result: ToolExecutionResult) => unknown;
 };
 
 export type OpenAIAgentToolsResult = {
@@ -239,7 +239,7 @@ function isDangerous(tool: Tool): boolean {
   return false;
 }
 
-function formatToolResult(result: ToolResult): unknown {
+function formatToolResult(result: ToolExecutionResult): unknown {
   if (result.outcome === 'error') {
     const message =
       result.error?.message ?? result.errorMessage ?? stringifyResult(result.content);

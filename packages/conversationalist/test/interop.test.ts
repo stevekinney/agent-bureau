@@ -164,7 +164,7 @@ describe('package-local structural interop', () => {
         {
           functionResponse: {
             name: 'stream_weather',
-            response: { result: ['Denver:72F', 'sunny'] },
+            response: ['Denver:72F', 'sunny'],
           },
         },
       ],

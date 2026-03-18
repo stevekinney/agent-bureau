@@ -2,7 +2,13 @@ import {
   type ConversationEnvironment,
   simpleTokenEstimator,
 } from '../environment';
-import type { MessagePlugin, TokenEstimator } from '../types';
+import { Conversation, type ConversationEvent } from '../history';
+import { createConversationHistory } from '../conversation';
+import type {
+  ConversationHistory,
+  MessagePlugin,
+  TokenEstimator,
+} from '../types';
 
 export interface TestConversationEnvironmentOptions {
   identifiers?: readonly string[];
@@ -37,3 +43,43 @@ export function createTestConversationEnvironment(
 export type TestConversationEnvironment = ReturnType<
   typeof createTestConversationEnvironment
 >;
+
+export function createTestConversation(
+  initial?: ConversationHistory,
+  options: TestConversationEnvironmentOptions = {},
+): Conversation {
+  const environment = createTestConversationEnvironment(options);
+  return new Conversation(initial ?? createConversationHistory(undefined, environment), environment);
+}
+
+export type ConversationRecorder = {
+  events: ConversationEvent[];
+  clear: () => void;
+};
+
+export function createConversationRecorder(
+  conversation: Conversation,
+): ConversationRecorder {
+  const events: ConversationEvent[] = [];
+  const subscriptions = [
+    conversation.addEventListener('change', (event: ConversationEvent) => {
+      events.push(event);
+    }),
+    conversation.addEventListener('push', (event: ConversationEvent) => {
+      events.push(event);
+    }),
+    conversation.addEventListener('undo', (event: ConversationEvent) => {
+      events.push(event);
+    }),
+  ];
+
+  return {
+    events,
+    clear: () => {
+      events.length = 0;
+    },
+    [Symbol.dispose]: () => {
+      subscriptions.forEach((unsubscribe) => unsubscribe?.());
+    },
+  } as ConversationRecorder;
+}

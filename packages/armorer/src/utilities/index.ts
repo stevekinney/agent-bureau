@@ -1,4 +1,12 @@
 export { bind, pipe, PipelineError } from '../compose';
+export {
+  materializeToolCall,
+  materializeToolCalls,
+  materializeToolResult,
+  materializeToolResultAsync,
+  materializeToolResults,
+  materializeToolResultsAsync,
+} from '../tool-materialization';
 export type {
   AnyTool,
   ComposedTool,

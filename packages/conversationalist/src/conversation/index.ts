@@ -65,6 +65,7 @@ export type {
 export type {
   AppendToolCallOptions,
   AppendToolResultOptions,
+  MaterializeToolCallOptions,
   ToolInteraction,
 } from './tool-interactions';
 export {
@@ -76,4 +77,10 @@ export {
   appendToolResultsAsync,
   getPendingToolCalls,
   getToolInteractions,
+  materializeToolCall,
+  materializeToolCalls,
+  materializeToolResult,
+  materializeToolResultAsync,
+  materializeToolResults,
+  materializeToolResultsAsync,
 } from './tool-interactions';

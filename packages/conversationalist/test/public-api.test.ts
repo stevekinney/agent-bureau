@@ -39,6 +39,10 @@ describe('public API export map', () => {
     expect(root.createConversationHistory).toBeDefined();
     expect(root.createConversationHistoryUnsafe).toBeDefined();
     expect(root.deserializeConversationHistory).toBeDefined();
+    expect(root.materializeToolCall).toBeDefined();
+    expect(root.materializeToolCalls).toBeDefined();
+    expect(root.materializeToolResult).toBeDefined();
+    expect(root.materializeToolResultsAsync).toBeDefined();
     expect(root.withConversationHistory).toBeDefined();
     expect(root.pipeConversationHistory).toBeDefined();
 
@@ -48,6 +52,13 @@ describe('public API export map', () => {
     expect('deserializeConversation' in root).toBeFalse();
     expect('withConversation' in root).toBeFalse();
     expect('pipeConversation' in root).toBeFalse();
+  });
+
+  it('exposes generic provider helpers on the Conversation class surface', () => {
+    expect(root.Conversation.fromProvider).toBeDefined();
+    const conversation = new root.Conversation(root.createConversationHistory());
+    expect(conversation.toProvider).toBeDefined();
+    expect(conversation.appendProvider).toBeDefined();
   });
 
   it('uses dynamic imports for provider adapters in the Conversation class', () => {

@@ -31,6 +31,7 @@ import {
   type SerializedToolDefinition,
   serializeToolDefinition,
 } from './core/serialization';
+import { assertJsonValue } from './core/serialization/json';
 import type { AnyToolDefinition } from './core/tool-definition';
 import { defineTool } from './core/tool-definition';
 import {
@@ -56,7 +57,13 @@ import type {
   ToolPolicyHooks,
 } from './is-tool';
 import { isTool } from './is-tool';
-import type { ToolCall, ToolCallInput, ToolResult } from './types';
+import type {
+  JSONValue,
+  ToolCall,
+  ToolCallInput,
+  ToolExecutionResult,
+  ToolProvider,
+} from './types';
 import { createConcurrencyLimiter, normalizeConcurrency } from './utilities/concurrency';
 
 export type ToolboxContext = Record<string, unknown>;
@@ -70,6 +77,26 @@ export type ToolboxRuntimeContext<Ctx extends ToolboxContext = ToolboxContext> =
   timeout?: number;
   stream?: boolean;
 };
+
+function normalizeToolCallArguments(argumentsValue: unknown): JSONValue {
+  if (argumentsValue === undefined) {
+    return {};
+  }
+
+  try {
+    assertJsonValue(argumentsValue, 'tool call arguments');
+    return argumentsValue;
+  } catch {
+    try {
+      const serialized = JSON.stringify(argumentsValue);
+      return serialized === undefined
+        ? String(argumentsValue)
+        : (JSON.parse(serialized) as JSONValue);
+    } catch {
+      return String(argumentsValue);
+    }
+  }
+}
 
 export type SerializedToolbox = readonly ToolConfiguration[];
 export type SerializedToolboxJSONSchema = readonly SerializedToolDefinition[];
@@ -129,6 +156,10 @@ export interface ToolboxOptions {
   middleware?: ToolMiddleware[];
 }
 
+export interface ImportedToolboxOptions extends ToolboxOptions {
+  sourceToolbox?: Toolbox;
+}
+
 export interface ToolboxFactoryContext {
   dispatchEvent: ToolboxEventDispatcher;
   baseContext: ToolboxContext;
@@ -149,8 +180,8 @@ export interface ToolStatusUpdate {
 
 export interface ToolboxEvents {
   call: { tool: Tool; call: ToolCall };
-  complete: { tool: Tool; result: ToolResult };
-  error: { tool?: Tool; result: ToolResult };
+  complete: { tool: Tool; result: ToolExecutionResult };
+  error: { tool?: Tool; result: ToolExecutionResult };
   'not-found': ToolCall;
   query: { criteria?: ToolQuery; results: QuerySelectionResult };
   search: { options: ToolSearchOptions; results: ToolMatch<unknown>[] };
@@ -296,7 +327,7 @@ export type ToolboxCallInputForTools<TTools extends readonly Tool[]> = {
 }[ToolboxToolName<TTools>];
 
 type ToolboxResultForTool<TTool extends Tool> = Omit<
-  ToolResult,
+  ToolExecutionResult,
   'toolName' | 'result'
 > & {
   toolName: TTool['name'];
@@ -309,7 +340,7 @@ type ToolboxResultForCall<
 > =
   TCall['name'] extends ToolboxToolName<TTools>
     ? ToolboxResultForTool<ToolboxToolByNameOrFallback<TTools, TCall['name']>>
-    : ToolResult;
+    : ToolExecutionResult;
 
 export interface Toolbox<TTools extends readonly Tool[] = readonly Tool[]> {
   execute<const TCall extends ToolboxCallInputForTools<TTools>>(
@@ -320,8 +351,8 @@ export interface Toolbox<TTools extends readonly Tool[] = readonly Tool[]> {
     calls: [...TCalls],
     options?: ToolboxExecuteOptions,
   ): Promise<{ [K in keyof TCalls]: ToolboxResultForCall<TTools, TCalls[K]> }>;
-  execute(call: ToolCallInput, options?: ToolboxExecuteOptions): Promise<ToolResult>;
-  execute(calls: ToolCallInput[], options?: ToolboxExecuteOptions): Promise<ToolResult[]>;
+  execute(call: ToolCallInput, options?: ToolboxExecuteOptions): Promise<ToolExecutionResult>;
+  execute(calls: ToolCallInput[], options?: ToolboxExecuteOptions): Promise<ToolExecutionResult[]>;
   extend<const TEntries extends ToolboxEntries>(
     ...entries: TEntries
   ): Toolbox<MergeTools<TTools, ToolsFromEntries<TEntries>>>;
@@ -349,9 +380,14 @@ export interface Toolbox<TTools extends readonly Tool[] = readonly Tool[]> {
    *   - `full`: Includes complete schema shape details
    */
   inspect: (detailLevel?: InspectorDetailLevel) => RegistryInspection;
+  toProvider: (
+    provider: ToolProvider,
+    options?: unknown,
+  ) => Promise<OpenAITool[] | AnthropicTool[] | GeminiTool[]>;
   toOpenAITools: () => Promise<OpenAITool[]>;
   toAnthropicTools: () => Promise<AnthropicTool[]>;
   toGeminiTools: () => Promise<GeminiTool[]>;
+  asExecuteResolver: () => NonNullable<ToolboxOptions['getTool']>;
   toJSON: {
     (): SerializedToolbox;
     (options: { format: 'configuration' }): SerializedToolbox;
@@ -544,15 +580,15 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
   async function execute(
     call: ToolCallInput,
     options?: ToolboxExecuteOptions,
-  ): Promise<ToolResult>;
+  ): Promise<ToolExecutionResult>;
   async function execute(
     calls: ToolCallInput[],
     options?: ToolboxExecuteOptions,
-  ): Promise<ToolResult[]>;
+  ): Promise<ToolExecutionResult[]>;
   async function execute(
     input: ToolCallInput | ToolCallInput[],
     options?: ToolboxExecuteOptions,
-  ): Promise<ToolResult | ToolResult[]> {
+  ): Promise<ToolExecutionResult | ToolExecutionResult[]> {
     const calls = Array.isArray(input) ? input : [input];
     const isMultiple = Array.isArray(input);
     const mode = options?.mode ?? 'parallel';
@@ -575,7 +611,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
           'NOT_FOUND',
           false,
         );
-        const notFound: ToolResult = {
+        const notFound: ToolExecutionResult = {
           callId: toolCall.id,
           outcome: 'error',
           content: toolError.message,
@@ -604,7 +640,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
           'BUDGET_EXCEEDED',
           false,
         );
-        const denied: ToolResult = {
+        const denied: ToolExecutionResult = {
           callId: toolCall.id,
           outcome: 'error',
           content: toolError.message,
@@ -722,7 +758,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
           extractErrorCode(error) ?? 'EXECUTION_ERROR',
           false,
         );
-        const errResult: ToolResult = {
+        const errResult: ToolExecutionResult = {
           callId: toolCall.id,
           outcome: 'error',
           content: toolError.message,
@@ -772,10 +808,12 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
       ? call.arguments
       : {};
     const id = typeof call.id === 'string' && call.id.length ? call.id : undefined;
-    return createToolCall(call.name, args, id);
+    return createToolCall(call.name, normalizeToolCallArguments(args), id);
   }
 
-  function resolveResultStream(result: ToolResult): AsyncIterable<unknown> | undefined {
+  function resolveResultStream(
+    result: ToolExecutionResult,
+  ): AsyncIterable<unknown> | undefined {
     if (isAsyncIterable(result.stream)) {
       return result.stream;
     }
@@ -854,6 +892,37 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
     return convertToGeminiTools(api);
   }
 
+  async function toProvider(
+    provider: ToolProvider,
+    adapterOptions?: unknown,
+  ): Promise<OpenAITool[] | AnthropicTool[] | GeminiTool[]> {
+    switch (provider) {
+      case 'openai': {
+        const { openAIToolAdapter } = await import('./adapters/openai');
+        return openAIToolAdapter.export(api, adapterOptions as never) as OpenAITool[];
+      }
+      case 'anthropic': {
+        const { anthropicToolAdapter } = await import('./adapters/anthropic');
+        return anthropicToolAdapter.export(api) as AnthropicTool[];
+      }
+      case 'gemini': {
+        const { geminiToolAdapter } = await import('./adapters/gemini');
+        return geminiToolAdapter.export(api) as GeminiTool[];
+      }
+    }
+  }
+
+  function asExecuteResolver(): NonNullable<ToolboxOptions['getTool']> {
+    return (configuration) => {
+      const sourceTool = getTool(configuration.name);
+      if (!sourceTool) {
+        return createImportedExecute(configuration.name);
+      }
+      return async (parameters, context) =>
+        sourceTool.run(parameters, context as ToolContext);
+    };
+  }
+
   function toJSON(): SerializedToolbox;
   function toJSON(options: { format: 'configuration' }): SerializedToolbox;
   function toJSON(options: { format: 'json-schema' }): SerializedToolboxJSONSchema;
@@ -877,9 +946,11 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
     getMissingTools,
     hasAllTools,
     inspect,
+    toProvider,
     toOpenAITools,
     toAnthropicTools,
     toGeminiTools,
+    asExecuteResolver,
     toJSON,
     addEventListener,
     dispatchEvent,
@@ -1206,7 +1277,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
 
 async function createToolboxFromOpenAITools(
   tools: OpenAITool | readonly OpenAITool[],
-  options: ToolboxOptions = {},
+  options: ImportedToolboxOptions = {},
 ): Promise<Toolbox> {
   const { fromOpenAITools: convertFromOpenAITools } = await import('./adapters/openai');
   if (Array.isArray(tools)) {
@@ -1218,7 +1289,7 @@ async function createToolboxFromOpenAITools(
 
 async function createToolboxFromAnthropicTools(
   tools: AnthropicTool | readonly AnthropicTool[],
-  options: ToolboxOptions = {},
+  options: ImportedToolboxOptions = {},
 ): Promise<Toolbox> {
   const { fromAnthropicTools: convertFromAnthropicTools } = await import(
     './adapters/anthropic'
@@ -1232,19 +1303,45 @@ async function createToolboxFromAnthropicTools(
 
 async function createToolboxFromGeminiTools(
   tools: GeminiTool | readonly GeminiTool[],
-  options: ToolboxOptions = {},
+  options: ImportedToolboxOptions = {},
 ): Promise<Toolbox> {
   const { fromGeminiTools: convertFromGeminiTools } = await import('./adapters/gemini');
   return createImportedToolbox(convertFromGeminiTools(tools), options);
 }
 
+async function createToolboxFromProvider(
+  provider: ToolProvider,
+  definitions:
+    | OpenAITool
+    | readonly OpenAITool[]
+    | AnthropicTool
+    | readonly AnthropicTool[]
+    | GeminiTool
+    | readonly GeminiTool[],
+  options: ImportedToolboxOptions = {},
+): Promise<Toolbox> {
+  switch (provider) {
+    case 'openai':
+      return createToolboxFromOpenAITools(definitions as OpenAITool | readonly OpenAITool[], options);
+    case 'anthropic':
+      return createToolboxFromAnthropicTools(
+        definitions as AnthropicTool | readonly AnthropicTool[],
+        options,
+      );
+    case 'gemini':
+      return createToolboxFromGeminiTools(definitions as GeminiTool | readonly GeminiTool[], options);
+  }
+}
+
 export type CreateToolbox = typeof createToolboxBase & {
+  fromProvider: typeof createToolboxFromProvider;
   fromOpenAITools: typeof createToolboxFromOpenAITools;
   fromAnthropicTools: typeof createToolboxFromAnthropicTools;
   fromGeminiTools: typeof createToolboxFromGeminiTools;
 };
 
 export const createToolbox: CreateToolbox = Object.assign(createToolboxBase, {
+  fromProvider: createToolboxFromProvider,
   fromOpenAITools: createToolboxFromOpenAITools,
   fromAnthropicTools: createToolboxFromAnthropicTools,
   fromGeminiTools: createToolboxFromGeminiTools,
@@ -1252,17 +1349,18 @@ export const createToolbox: CreateToolbox = Object.assign(createToolboxBase, {
 
 function createImportedToolbox(
   importedConfigurations: ImportedToolConfiguration | readonly ImportedToolConfiguration[],
-  options: ToolboxOptions,
+  options: ImportedToolboxOptions,
 ): Toolbox {
+  const resolvedOptions = resolveImportedToolboxOptions(options);
   const configurations = Array.isArray(importedConfigurations)
     ? importedConfigurations
     : [importedConfigurations];
 
   return createToolboxBase(
     configurations.map((configuration) =>
-      materializeImportedToolConfiguration(configuration, options),
+      materializeImportedToolConfiguration(configuration, resolvedOptions),
     ),
-    options,
+    resolvedOptions,
   );
 }
 
@@ -1323,7 +1421,20 @@ function materializeImportedToolConfiguration(
 }
 
 function createImportedExecute(toolName: string): ToolConfiguration['execute'] {
-  return () => Promise.reject(new Error(`Imported tool "${toolName}" does not have an execute implementation. Provide createToolbox.from<Provider>Tools(..., { getTool }) or supply execute before creating the toolbox.`));
+  return () => Promise.reject(new Error(`Imported tool "${toolName}" does not have an execute implementation. Provide createToolbox.fromProvider(..., { sourceToolbox }), createToolbox.from<Provider>Tools(..., { getTool }), or supply execute before creating the toolbox.`));
+}
+
+function resolveImportedToolboxOptions(
+  options: ImportedToolboxOptions,
+): ToolboxOptions {
+  const { sourceToolbox, ...rest } = options;
+  if (!sourceToolbox) {
+    return rest;
+  }
+  return {
+    ...rest,
+    getTool: rest.getTool ?? sourceToolbox.asExecuteResolver(),
+  };
 }
 
 function resolveToolConcurrency(
@@ -1680,6 +1791,7 @@ export const internalToolboxTestUtilities = {
   isMutatingToolContext,
   materializeImportedToolConfiguration,
   mergePolicies,
+  normalizeToolCallArguments,
   normalizeToolSchema,
   resolvePolicyDecision,
   toPolicyContextProvider,

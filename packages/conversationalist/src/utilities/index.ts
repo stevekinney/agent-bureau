@@ -17,6 +17,15 @@ export {
 // Tool call pairing
 export type { ToolCallPair } from './tool-calls';
 export { pairToolCallsWithResults } from './tool-calls';
+export {
+  materializeToolCall,
+  materializeToolCalls,
+  materializeToolResult,
+  materializeToolResultAsync,
+  materializeToolResults,
+  materializeToolResultsAsync,
+} from '../conversation/tool-interactions';
+export type { MaterializeToolCallOptions } from '../conversation/tool-interactions';
 
 // Transient metadata
 export {

@@ -5,6 +5,7 @@ import type { AnyToolDefinition } from '../../core';
 import { createRegistry, defineTool, serializeToolDefinition } from '../../core';
 import {
   formatAnthropicToolResults,
+  formatAnthropicToolResultsAsync,
   fromAnthropicTools,
   parseAnthropicToolCalls,
   toAnthropicTools,
@@ -119,6 +120,37 @@ describe('parseAnthropicToolCalls', () => {
     expect(parseAnthropicToolCalls(undefined)).toEqual([]);
     expect(parseAnthropicToolCalls(null)).toEqual([]);
   });
+
+  it('parses tool calls from Anthropic content envelopes', () => {
+    const content = [
+      {
+        type: 'tool_use' as const,
+        id: 'toolu_456',
+        name: 'search',
+        input: { query: 'envelope' },
+      },
+    ];
+
+    expect(parseAnthropicToolCalls({ content })).toEqual([
+      {
+        id: 'toolu_456',
+        name: 'search',
+        arguments: { query: 'envelope' },
+      },
+    ]);
+    expect(parseAnthropicToolCalls({ message: { content } })).toEqual([
+      {
+        id: 'toolu_456',
+        name: 'search',
+        arguments: { query: 'envelope' },
+      },
+    ]);
+  });
+
+  it('returns an empty array for unsupported Anthropic envelope shapes', () => {
+    expect(parseAnthropicToolCalls({ message: undefined })).toEqual([]);
+    expect(parseAnthropicToolCalls({ unrelated: true } as never)).toEqual([]);
+  });
 });
 
 describe('formatAnthropicToolResults', () => {
@@ -152,6 +184,65 @@ describe('formatAnthropicToolResults', () => {
         type: 'tool_result',
         tool_use_id: 'call-2',
         content: '{"message":"denied"}',
+        is_error: true,
+      },
+    ]);
+  });
+
+  it('rejects streaming payloads exposed through runtime result streams', () => {
+    expect(() =>
+      formatAnthropicToolResults({
+        callId: 'call-stream',
+        outcome: 'success',
+        content: [],
+        result: {
+          async *[Symbol.asyncIterator]() {
+            yield 'alpha';
+          },
+        },
+      }),
+    ).toThrow(
+      'formatAnthropicToolResults does not support streaming results. Persist or collect the stream before formatting Anthropic tool results.',
+    );
+  });
+});
+
+describe('formatAnthropicToolResultsAsync', () => {
+  it('collects stream payloads from runtime result streams', async () => {
+    await expect(
+      formatAnthropicToolResultsAsync([
+        {
+          callId: 'call-1',
+          outcome: 'success',
+          content: [],
+          result: {
+            async *[Symbol.asyncIterator]() {
+              yield 'alpha';
+              yield 'beta';
+            },
+          },
+        },
+        {
+          callId: 'call-2',
+          outcome: 'error',
+          content: [],
+          stream: {
+            async *[Symbol.asyncIterator]() {
+              yield { reason: 'denied' };
+            },
+          },
+        },
+      ]),
+    ).resolves.toEqual([
+      {
+        type: 'tool_result',
+        tool_use_id: 'call-1',
+        content: '["alpha","beta"]',
+      },
+      {
+        type: 'tool_result',
+        tool_use_id: 'call-2',
+        content: '[{"reason":"denied"}]',
         is_error: true,
       },
     ]);
