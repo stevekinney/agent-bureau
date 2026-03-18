@@ -100,6 +100,17 @@
         "@openai/agents",
       ],
     },
+    "packages/armorer-conversationalist-integration": {
+      "name": "armorer-conversationalist-integration",
+      "dependencies": {
+        "armorer": "workspace:*",
+        "conversationalist": "workspace:*",
+        "zod": "^4.3.6",
+      },
+      "devDependencies": {
+        "@types/bun": "^1.3.9",
+      },
+    },
     "packages/conversationalist": {
       "name": "conversationalist",
       "version": "0.0.12",
@@ -432,6 +443,8 @@
     "argparse": ["argparse@2.0.1", "", {}, "sha512-8+9WqebbFzpX9OR+Wa6O29asIogeRMzcGtAINdpMHHyAg10f05aSFVBbcEqGf/PXw1EjAZ+q2/bEBg3DvurK3Q=="],
 
     "armorer": ["armorer@workspace:packages/armorer"],
+
+    "armorer-conversationalist-integration": ["armorer-conversationalist-integration@workspace:packages/armorer-conversationalist-integration"],
 
     "array-buffer-byte-length": ["array-buffer-byte-length@1.0.2", "", { "dependencies": { "call-bound": "^1.0.3", "is-array-buffer": "^3.0.5" } }, "sha512-LHE+8BuR7RYGDKvnrmcuSq3tDcKv9OFEXQt/HpbZhY7V6h0zlUXutnAD82GiFx9rdieCMjkvtcsPqBwgUl1Iiw=="],
 

@@ -19,12 +19,12 @@ The canonical loop is the same for every provider:
 ## OpenAI
 
 ```ts
-import { appendToolCalls, appendToolResultsAsync, appendUserMessage, createConversation } from 'conversationalist/conversation';
+import { appendToolCalls, appendToolResultsAsync, appendUserMessage, createConversationHistory } from 'conversationalist/conversation';
 import { toOpenAIMessagesGrouped } from 'conversationalist/adapters/openai';
 import { createToolbox } from 'armorer';
 import { parseOpenAIToolCalls, toOpenAITools } from 'armorer/adapters/openai';
 
-let conversation = createConversation({ title: 'Weather' });
+let conversation = createConversationHistory({ title: 'Weather' });
 conversation = appendUserMessage(conversation, 'What is the weather in Denver?');
 
 const tools = toOpenAITools(toolbox);
@@ -45,12 +45,12 @@ conversation = await appendToolResultsAsync(conversation, results);
 ## Anthropic
 
 ```ts
-import { appendToolCalls, appendToolResults, appendUserMessage, createConversation } from 'conversationalist/conversation';
+import { appendToolCalls, appendToolResults, appendUserMessage, createConversationHistory } from 'conversationalist/conversation';
 import { toAnthropicMessages } from 'conversationalist/adapters/anthropic';
 import { createToolbox } from 'armorer';
 import { parseAnthropicToolCalls, toAnthropicTools } from 'armorer/adapters/anthropic';
 
-let conversation = createConversation({ title: 'Weather' });
+let conversation = createConversationHistory({ title: 'Weather' });
 conversation = appendUserMessage(conversation, 'Use the weather tool for Denver.');
 
 const { system, messages } = toAnthropicMessages(conversation);
@@ -73,12 +73,12 @@ conversation = appendToolResults(conversation, results);
 Gemini function calls do not include stable call IDs, so assign them before you append the calls and before you execute them.
 
 ```ts
-import { appendToolCalls, appendToolResultsAsync, appendUserMessage, createConversation } from 'conversationalist/conversation';
+import { appendToolCalls, appendToolResultsAsync, appendUserMessage, createConversationHistory } from 'conversationalist/conversation';
 import { toGeminiMessages } from 'conversationalist/adapters/gemini';
 import { createToolbox } from 'armorer';
 import { parseGeminiToolCalls, toGeminiTools } from 'armorer/adapters/gemini';
 
-let conversation = createConversation({ title: 'Weather' });
+let conversation = createConversationHistory({ title: 'Weather' });
 conversation = appendUserMessage(conversation, 'Stream the weather for Denver.');
 
 const { systemInstruction, contents } = toGeminiMessages(conversation);

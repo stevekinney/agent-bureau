@@ -55,7 +55,13 @@ export {
 export { toChatMessages } from './transform';
 
 // Tool interactions
-export type { ToolCallInput } from '../types';
+export type {
+  AppendableToolAction,
+  AppendableToolCallInput,
+  AppendableToolError,
+  AppendableToolResult,
+  ToolCallInput,
+} from '../types';
 export type {
   AppendToolCallOptions,
   AppendToolResultOptions,

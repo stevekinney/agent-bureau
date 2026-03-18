@@ -68,6 +68,10 @@ export {
 export { Conversation } from './history';
 export type { ImageContent, TextContent } from './multi-modal';
 export type {
+  AppendableToolAction,
+  AppendableToolCallInput,
+  AppendableToolError,
+  AppendableToolResult,
   AssistantMessage,
   ConversationHistory,
   ConversationStatus,

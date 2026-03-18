@@ -4,12 +4,13 @@ import {
   resolveConversationEnvironment,
 } from '../environment';
 import type {
+  AppendableToolCallInput,
+  AppendableToolResult,
   ConversationHistory as Conversation,
   JSONValue,
   MessageInput,
   TokenUsage,
   ToolCall,
-  ToolCallInput,
   ToolResult,
 } from '../types';
 import { getOrderedMessages } from '../utilities/message-store';
@@ -30,11 +31,6 @@ export interface AppendToolResultOptions {
   tokenUsage?: TokenUsage;
 }
 
-type AppendableToolResult = ToolResult & {
-  result?: unknown;
-  stream?: AsyncIterable<unknown> | undefined;
-};
-
 export interface ToolInteraction {
   call: ToolCall;
   result?: ToolResult | undefined;
@@ -45,7 +41,7 @@ export interface ToolInteraction {
  */
 export function appendToolCall(
   conversation: Conversation,
-  toolCall: ToolCallInput,
+  toolCall: AppendableToolCallInput,
   options?: AppendToolCallOptions,
   environment?: Partial<ConversationEnvironment>,
 ): Conversation {
@@ -71,7 +67,7 @@ export function appendToolCall(
  */
 export function appendToolCalls(
   conversation: Conversation,
-  toolCalls: ReadonlyArray<ToolCallInput>,
+  toolCalls: ReadonlyArray<AppendableToolCallInput>,
   environment?: Partial<ConversationEnvironment>,
 ): Conversation {
   if (toolCalls.length === 0) {
@@ -234,13 +230,13 @@ function createToolResultMessageInput(
 }
 
 function normalizeToolCallInput(
-  toolCall: ToolCallInput,
+  toolCall: AppendableToolCallInput,
   environment: ConversationEnvironment,
 ): ToolCall {
   return {
     id: toolCall.id ?? environment.randomId(),
     name: toolCall.name,
-    arguments: toolCall.arguments ?? {},
+    arguments: (toolCall.arguments ?? {}) as JSONValue,
   };
 }
 
@@ -251,7 +247,7 @@ function normalizeToolResultSync(toolResult: AppendableToolResult): ToolResult {
     );
   }
 
-  return stripRuntimeToolResultFields(toolResult, toolResult.content);
+  return stripRuntimeToolResultFields(toolResult, toolResult.content as JSONValue);
 }
 
 async function normalizeToolResultAsync(
@@ -259,7 +255,7 @@ async function normalizeToolResultAsync(
 ): Promise<ToolResult> {
   const streamingPayload = getStreamingPayload(toolResult);
   if (!streamingPayload) {
-    return stripRuntimeToolResultFields(toolResult, toolResult.content);
+    return stripRuntimeToolResultFields(toolResult, toolResult.content as JSONValue);
   }
 
   const chunks = await collectAsyncIterable(streamingPayload);
@@ -274,8 +270,8 @@ function stripRuntimeToolResultFields(
     callId: toolResult.callId,
     outcome: toolResult.outcome,
     content,
-    ...(toolResult.error ? { error: toolResult.error } : {}),
-    ...(toolResult.action ? { action: toolResult.action } : {}),
+    ...(toolResult.error ? { error: toolResult.error as ToolResult['error'] } : {}),
+    ...(toolResult.action ? { action: toolResult.action as ToolResult['action'] } : {}),
     ...(toolResult.inputDigest ? { inputDigest: toolResult.inputDigest } : {}),
     ...(toolResult.outputDigest ? { outputDigest: toolResult.outputDigest } : {}),
   };

@@ -29,106 +29,123 @@
   "type": "module",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
+      "bun": "./dist/index.js",
       "require": "./dist/index.cjs",
-      "default": "./dist/index.js"
+      "default": "./dist/index.js",
+      "types": "./dist/index.d.ts"
     },
     "./core": {
-      "types": "./dist/core/index.d.ts",
       "import": "./dist/core/index.js",
+      "bun": "./dist/core/index.js",
       "require": "./dist/core/index.cjs",
-      "default": "./dist/core/index.js"
+      "default": "./dist/core/index.js",
+      "types": "./dist/core/index.d.ts"
     },
     "./query": {
-      "types": "./dist/query/index.d.ts",
       "import": "./dist/query/index.js",
+      "bun": "./dist/query/index.js",
       "require": "./dist/query/index.cjs",
-      "default": "./dist/query/index.js"
+      "default": "./dist/query/index.js",
+      "types": "./dist/query/index.d.ts"
     },
     "./inspect": {
-      "types": "./dist/inspect/index.d.ts",
       "import": "./dist/inspect/index.js",
+      "bun": "./dist/inspect/index.js",
       "require": "./dist/inspect/index.cjs",
-      "default": "./dist/inspect/index.js"
+      "default": "./dist/inspect/index.js",
+      "types": "./dist/inspect/index.d.ts"
     },
     "./adapters/openai": {
-      "types": "./dist/adapters/openai/index.d.ts",
       "import": "./dist/adapters/openai/index.js",
+      "bun": "./dist/adapters/openai/index.js",
       "require": "./dist/adapters/openai/index.cjs",
-      "default": "./dist/adapters/openai/index.js"
+      "default": "./dist/adapters/openai/index.js",
+      "types": "./dist/adapters/openai/index.d.ts"
     },
     "./adapters/anthropic": {
-      "types": "./dist/adapters/anthropic/index.d.ts",
       "import": "./dist/adapters/anthropic/index.js",
+      "bun": "./dist/adapters/anthropic/index.js",
       "require": "./dist/adapters/anthropic/index.cjs",
-      "default": "./dist/adapters/anthropic/index.js"
+      "default": "./dist/adapters/anthropic/index.js",
+      "types": "./dist/adapters/anthropic/index.d.ts"
     },
     "./adapters/gemini": {
-      "types": "./dist/adapters/gemini/index.d.ts",
       "import": "./dist/adapters/gemini/index.js",
+      "bun": "./dist/adapters/gemini/index.js",
       "require": "./dist/adapters/gemini/index.cjs",
-      "default": "./dist/adapters/gemini/index.js"
+      "default": "./dist/adapters/gemini/index.js",
+      "types": "./dist/adapters/gemini/index.d.ts"
     },
     "./utilities": {
-      "types": "./dist/utilities/index.d.ts",
       "import": "./dist/utilities/index.js",
+      "bun": "./dist/utilities/index.js",
       "require": "./dist/utilities/index.cjs",
-      "default": "./dist/utilities/index.js"
+      "default": "./dist/utilities/index.js",
+      "types": "./dist/utilities/index.d.ts"
     },
     "./lazy": {
-      "types": "./dist/lazy/index.d.ts",
       "import": "./dist/lazy/index.js",
+      "bun": "./dist/lazy/index.js",
       "require": "./dist/lazy/index.cjs",
-      "default": "./dist/lazy/index.js"
+      "default": "./dist/lazy/index.js",
+      "types": "./dist/lazy/index.d.ts"
     },
     "./registry": {
-      "types": "./dist/registry/index.d.ts",
       "import": "./dist/registry/index.js",
+      "bun": "./dist/registry/index.js",
       "require": "./dist/registry/index.cjs",
-      "default": "./dist/registry/index.js"
+      "default": "./dist/registry/index.js",
+      "types": "./dist/registry/index.d.ts"
     },
     "./mcp": {
-      "types": "./dist/integrations/mcp/index.d.ts",
       "import": "./dist/integrations/mcp/index.js",
+      "bun": "./dist/integrations/mcp/index.js",
       "require": "./dist/integrations/mcp/index.cjs",
-      "default": "./dist/integrations/mcp/index.js"
+      "default": "./dist/integrations/mcp/index.js",
+      "types": "./dist/integrations/mcp/index.d.ts"
     },
     "./integrations/mcp": {
-      "types": "./dist/integrations/mcp/index.d.ts",
       "import": "./dist/integrations/mcp/index.js",
+      "bun": "./dist/integrations/mcp/index.js",
       "require": "./dist/integrations/mcp/index.cjs",
-      "default": "./dist/integrations/mcp/index.js"
+      "default": "./dist/integrations/mcp/index.js",
+      "types": "./dist/integrations/mcp/index.d.ts"
     },
     "./adapters/open-ai/agents": {
-      "types": "./dist/adapters/open-ai/agents/index.d.ts",
       "import": "./dist/adapters/open-ai/agents/index.js",
+      "bun": "./dist/adapters/open-ai/agents/index.js",
       "require": "./dist/adapters/open-ai/agents/index.cjs",
-      "default": "./dist/adapters/open-ai/agents/index.js"
+      "default": "./dist/adapters/open-ai/agents/index.js",
+      "types": "./dist/adapters/open-ai/agents/index.d.ts"
     },
     "./tools": {
-      "types": "./dist/tools/index.d.ts",
       "import": "./dist/tools/index.js",
+      "bun": "./dist/tools/index.js",
       "require": "./dist/tools/index.cjs",
-      "default": "./dist/tools/index.js"
+      "default": "./dist/tools/index.js",
+      "types": "./dist/tools/index.d.ts"
     },
     "./instrumentation": {
-      "types": "./dist/instrumentation/index.d.ts",
       "import": "./dist/instrumentation/index.js",
+      "bun": "./dist/instrumentation/index.js",
       "require": "./dist/instrumentation/index.cjs",
-      "default": "./dist/instrumentation/index.js"
+      "default": "./dist/instrumentation/index.js",
+      "types": "./dist/instrumentation/index.d.ts"
     },
     "./middleware": {
-      "types": "./dist/middleware/index.d.ts",
       "import": "./dist/middleware/index.js",
+      "bun": "./dist/middleware/index.js",
       "require": "./dist/middleware/index.cjs",
-      "default": "./dist/middleware/index.js"
+      "default": "./dist/middleware/index.js",
+      "types": "./dist/middleware/index.d.ts"
     },
     "./test": {
-      "types": "./dist/test/index.d.ts",
       "import": "./dist/test/index.js",
+      "bun": "./dist/test/index.js",
       "require": "./dist/test/index.cjs",
-      "default": "./dist/test/index.js"
+      "default": "./dist/test/index.js",
+      "types": "./dist/test/index.d.ts"
     }
   },
   "main": "./dist/index.js",

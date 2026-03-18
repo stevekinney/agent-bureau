@@ -22,72 +22,106 @@
   "type": "module",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "import": "./dist/index.js",
+      "bun": "./dist/index.js",
+      "default": "./dist/index.js",
+      "types": "./dist/index.d.ts"
     },
     "./conversation": {
-      "types": "./dist/conversation/index.d.ts",
-      "import": "./dist/conversation/index.js"
+      "import": "./dist/conversation/index.js",
+      "bun": "./dist/conversation/index.js",
+      "default": "./dist/conversation/index.js",
+      "types": "./dist/conversation/index.d.ts"
     },
     "./context": {
-      "types": "./dist/context.d.ts",
-      "import": "./dist/context.js"
+      "import": "./dist/context.js",
+      "bun": "./dist/context.js",
+      "default": "./dist/context.js",
+      "types": "./dist/context.d.ts"
     },
     "./streaming": {
-      "types": "./dist/streaming.d.ts",
-      "import": "./dist/streaming.js"
+      "import": "./dist/streaming.js",
+      "bun": "./dist/streaming.js",
+      "default": "./dist/streaming.js",
+      "types": "./dist/streaming.d.ts"
     },
     "./history": {
-      "types": "./dist/history.d.ts",
-      "import": "./dist/history.js"
+      "import": "./dist/history.js",
+      "bun": "./dist/history.js",
+      "default": "./dist/history.js",
+      "types": "./dist/history.d.ts"
     },
     "./message": {
-      "types": "./dist/message.d.ts",
-      "import": "./dist/message.js"
+      "import": "./dist/message.js",
+      "bun": "./dist/message.js",
+      "default": "./dist/message.js",
+      "types": "./dist/message.d.ts"
     },
     "./utilities": {
-      "types": "./dist/utilities.d.ts",
-      "import": "./dist/utilities.js"
+      "import": "./dist/utilities.js",
+      "bun": "./dist/utilities.js",
+      "default": "./dist/utilities.js",
+      "types": "./dist/utilities.d.ts"
     },
     "./test": {
-      "types": "./dist/test/index.d.ts",
-      "import": "./dist/test/index.js"
+      "import": "./dist/test/index.js",
+      "bun": "./dist/test/index.js",
+      "default": "./dist/test/index.js",
+      "types": "./dist/test/index.d.ts"
     },
     "./markdown": {
-      "types": "./dist/markdown/index.d.ts",
-      "import": "./dist/markdown/index.js"
+      "import": "./dist/markdown/index.js",
+      "bun": "./dist/markdown/index.js",
+      "default": "./dist/markdown/index.js",
+      "types": "./dist/markdown/index.d.ts"
     },
     "./export": {
-      "types": "./dist/export/index.d.ts",
-      "import": "./dist/export/index.js"
+      "import": "./dist/export/index.js",
+      "bun": "./dist/export/index.js",
+      "default": "./dist/export/index.js",
+      "types": "./dist/export/index.d.ts"
     },
     "./schemas": {
-      "types": "./dist/schemas/index.d.ts",
-      "import": "./dist/schemas/index.js"
+      "import": "./dist/schemas/index.js",
+      "bun": "./dist/schemas/index.js",
+      "default": "./dist/schemas/index.js",
+      "types": "./dist/schemas/index.d.ts"
     },
     "./adapters/openai": {
-      "types": "./dist/adapters/openai/index.d.ts",
-      "import": "./dist/adapters/openai/index.js"
+      "import": "./dist/adapters/openai/index.js",
+      "bun": "./dist/adapters/openai/index.js",
+      "default": "./dist/adapters/openai/index.js",
+      "types": "./dist/adapters/openai/index.d.ts"
     },
     "./adapters/anthropic": {
-      "types": "./dist/adapters/anthropic/index.d.ts",
-      "import": "./dist/adapters/anthropic/index.js"
+      "import": "./dist/adapters/anthropic/index.js",
+      "bun": "./dist/adapters/anthropic/index.js",
+      "default": "./dist/adapters/anthropic/index.js",
+      "types": "./dist/adapters/anthropic/index.d.ts"
     },
     "./adapters/gemini": {
-      "types": "./dist/adapters/gemini/index.d.ts",
-      "import": "./dist/adapters/gemini/index.js"
+      "import": "./dist/adapters/gemini/index.js",
+      "bun": "./dist/adapters/gemini/index.js",
+      "default": "./dist/adapters/gemini/index.js",
+      "types": "./dist/adapters/gemini/index.d.ts"
     },
     "./redaction": {
-      "types": "./dist/redaction/index.d.ts",
-      "import": "./dist/redaction/index.js"
+      "import": "./dist/redaction/index.js",
+      "bun": "./dist/redaction/index.js",
+      "default": "./dist/redaction/index.js",
+      "types": "./dist/redaction/index.d.ts"
     },
     "./versioning": {
-      "types": "./dist/versioning/index.d.ts",
-      "import": "./dist/versioning/index.js"
+      "import": "./dist/versioning/index.js",
+      "bun": "./dist/versioning/index.js",
+      "default": "./dist/versioning/index.js",
+      "types": "./dist/versioning/index.d.ts"
     },
     "./sort": {
-      "types": "./dist/sort/index.d.ts",
-      "import": "./dist/sort/index.js"
+      "import": "./dist/sort/index.js",
+      "bun": "./dist/sort/index.js",
+      "default": "./dist/sort/index.js",
+      "types": "./dist/sort/index.d.ts"
     }
   },
   "main": "./dist/index.js",

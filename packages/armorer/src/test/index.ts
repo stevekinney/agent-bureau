@@ -1,7 +1,11 @@
 import { z } from 'zod';
 
 import { createTool } from '../create-tool';
-import { createToolbox, type Toolbox } from '../create-toolbox';
+import {
+  createToolbox,
+  type Toolbox,
+  type ToolboxEntries,
+} from '../create-toolbox';
 import type { Tool, ToolCallWithArguments } from '../is-tool';
 import type { ToolResult } from '../types';
 
@@ -79,8 +83,8 @@ export type TestRegistry = AnyToolbox & {
  * Creates a Toolbox instance configured for testing.
  * Records execution history.
  */
-export function createTestRegistry(): TestRegistry {
-  const toolbox = createToolbox([] as Tool[]);
+export function createTestRegistry(entries: ToolboxEntries = []): TestRegistry {
+  const toolbox = createToolbox(entries);
   const history: TestRegistry['history'] = [];
 
   // Listen to finished events to record history.

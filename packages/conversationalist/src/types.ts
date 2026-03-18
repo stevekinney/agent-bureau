@@ -39,7 +39,7 @@ export interface ToolCall {
 export interface ToolCallInput {
   id?: string | undefined;
   name: string;
-  arguments?: JSONValue | undefined;
+  arguments?: unknown;
 }
 
 export type ToolErrorCategory =
@@ -64,6 +64,46 @@ export interface ToolAction {
   type: 'approval' | 'input';
   message?: string | undefined;
   schema?: JSONValue | undefined;
+}
+
+/**
+ * Public input shape accepted by tool-call append helpers.
+ * Compatible with external tool parsers and armorer tool calls.
+ */
+export interface AppendableToolCallInput {
+  id?: string | undefined;
+  name: string;
+  arguments?: unknown;
+}
+
+/**
+ * Public input shape accepted by tool-result append helpers.
+ * Compatible with armorer tool results and other external tool executors.
+ */
+export interface AppendableToolError {
+  code: string;
+  category: ToolErrorCategory;
+  retryable: boolean;
+  message: string;
+  details?: unknown;
+}
+
+export interface AppendableToolAction {
+  type: 'approval' | 'input';
+  message?: string | undefined;
+  schema?: unknown;
+}
+
+export interface AppendableToolResult {
+  callId: string;
+  outcome: 'success' | 'error' | 'action_required';
+  content: unknown;
+  error?: AppendableToolError | undefined;
+  action?: AppendableToolAction | undefined;
+  inputDigest?: string | undefined;
+  outputDigest?: string | undefined;
+  result?: unknown;
+  stream?: AsyncIterable<unknown>;
 }
 
 /**

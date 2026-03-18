@@ -18,7 +18,12 @@
       "dependsOn": ["transit"],
       "outputs": []
     },
+    "integration": {
+      "dependsOn": ["^build"],
+      "outputs": []
+    },
     "test": {
+      "dependsOn": ["transit"],
       "outputs": [],
       "passThroughEnv": ["CI", "NODE_ENV"]
     },
