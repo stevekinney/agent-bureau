@@ -1,5 +1,5 @@
 {
-  "name": "armorer-conversationalist-integration",
+  "name": "integration",
   "private": true,
   "type": "module",
   "scripts": {
