@@ -176,7 +176,8 @@
     "validate": "bun run lint && bun run check-types && bun run coverage:check && bun run check:boundaries"
   },
   "dependencies": {
-    "event-emission": "0.2.1"
+    "event-emission": "0.2.1",
+    "interoperability": "workspace:*"
   },
   "devDependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.39",

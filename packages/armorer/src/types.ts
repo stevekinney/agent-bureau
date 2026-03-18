@@ -1,51 +1,27 @@
-import type { JsonValue } from './core/serialization/json';
+import type {
+  JSONValue as SharedJSONValue,
+  ToolAction as SharedToolAction,
+  ToolActionInput as SharedToolActionInput,
+  ToolCall as SharedToolCall,
+  ToolCallInput as SharedToolCallInput,
+  ToolError as SharedToolError,
+  ToolErrorCategory as SharedToolErrorCategory,
+  ToolErrorInput as SharedToolErrorInput,
+  ToolResult as SharedToolResult,
+  ToolResultInput as SharedToolResultInput,
+} from 'interoperability';
 
-/**
- * Types for tool calls and results.
- * These are compatible with LLM provider tool call formats.
- */
-
-export type JSONValue = JsonValue;
+export type JSONValue = SharedJSONValue;
 export type ToolProvider = 'openai' | 'anthropic' | 'gemini';
-export type ToolError = import('./core/errors').ToolError;
-export type ToolErrorCategory = import('./core/errors').ToolErrorCategory;
-
-export interface ToolAction {
-  type: 'approval' | 'input';
-  message?: string;
-  schema?: JsonValue;
-}
-
-/**
- * A tool call from an LLM.
- */
-export interface ToolCall {
-  id: string;
-  name: string;
-  arguments: JsonValue;
-}
-
-/**
- * Input shape for tool calls (ID/arguments may be missing and normalized).
- */
-export interface ToolCallInput {
-  id?: string;
-  name: string;
-  arguments?: unknown;
-}
-
-/**
- * Canonical tool result shape shared with conversationalist.
- */
-export interface ToolResult {
-  callId: string;
-  outcome: 'success' | 'error' | 'action_required';
-  content: JsonValue;
-  error?: ToolError;
-  inputDigest?: string;
-  outputDigest?: string;
-  action?: ToolAction;
-}
+export type ToolError = SharedToolError;
+export type ToolErrorCategory = SharedToolErrorCategory;
+export type ToolErrorInput = SharedToolErrorInput;
+export type ToolAction = SharedToolAction;
+export type ToolActionInput = SharedToolActionInput;
+export type ToolCall = SharedToolCall;
+export type ToolCallInput = SharedToolCallInput;
+export type ToolResult = SharedToolResult;
+export type ToolResultInput = SharedToolResultInput;
 
 /**
  * Runtime tool execution result with additional non-persisted execution data.
@@ -69,7 +45,7 @@ export interface ToolExecutionResult extends ToolResult {
   errorCategory?: ToolErrorCategory;
 }
 
-export type ToolResultLike = ToolResult | ToolExecutionResult;
+export type ToolResultLike = ToolResultInput | ToolExecutionResult;
 
 /**
  * Minimal tool configuration for JSON schema output.

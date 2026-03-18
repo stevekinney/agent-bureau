@@ -65,10 +65,13 @@ export type {
   JSONValue,
   MinimalToolConfiguration,
   ToolAction,
+  ToolActionInput,
   ToolCall,
   ToolCallInput,
+  ToolErrorInput,
   ToolExecutionResult,
   ToolProvider,
   ToolResult,
+  ToolResultInput,
   ToolResultLike,
 } from './types';

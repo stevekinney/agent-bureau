@@ -98,11 +98,14 @@ export type {
   MessageRole,
   TokenUsage,
   ToolAction,
+  ToolActionInput,
   ToolCall,
   ToolCallInput,
   ToolError,
   ToolErrorCategory,
+  ToolErrorInput,
   ToolResult,
+  ToolResultInput,
 } from './types';
 export type { ConversationNodeSnapshot, ConversationSnapshot } from './types';
 export type { ConversationHistoryDraft } from './with-conversation';

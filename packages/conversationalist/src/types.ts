@@ -1,3 +1,16 @@
+import type {
+  JSONPrimitive as SharedJSONPrimitive,
+  JSONValue as SharedJSONValue,
+  ToolAction as SharedToolAction,
+  ToolActionInput as SharedToolActionInput,
+  ToolCall as SharedToolCall,
+  ToolCallInput as SharedToolCallInput,
+  ToolError as SharedToolError,
+  ToolErrorCategory as SharedToolErrorCategory,
+  ToolErrorInput as SharedToolErrorInput,
+  ToolResult as SharedToolResult,
+  ToolResultInput as SharedToolResultInput,
+} from 'interoperability';
 import type { MultiModalContent } from './multi-modal';
 
 /**
@@ -9,11 +22,8 @@ export const CURRENT_SCHEMA_VERSION = 4;
 /**
  * JSON-serializable value types.
  */
-export type JSONPrimitive = string | number | boolean | null;
-export type JSONValue =
-  | JSONPrimitive
-  | ReadonlyArray<JSONValue>
-  | { [key: string]: JSONValue };
+export type JSONPrimitive = SharedJSONPrimitive;
+export type JSONValue = SharedJSONValue;
 
 export type ConversationProvider = 'openai' | 'anthropic' | 'gemini';
 export type ChatMessageRole = 'user' | 'assistant' | 'system';
@@ -38,97 +48,40 @@ export type MessageRole =
 /**
  * Tool call metadata for tool-call messages.
  */
-export interface ToolCall {
-  id: string;
-  name: string;
-  arguments: JSONValue;
-}
+export type ToolCall = SharedToolCall;
 
 /**
  * Tool call input compatible with external tool call parsers.
  */
-export interface ToolCallInput {
-  id?: string | undefined;
-  name: string;
-  arguments?: unknown;
-}
+export type ToolCallInput = SharedToolCallInput;
 
-export type ToolErrorCategory =
-  | 'validation'
-  | 'permission'
-  | 'not_found'
-  | 'conflict'
-  | 'transient'
-  | 'timeout'
-  | 'cancelled'
-  | 'internal';
+export type ToolErrorCategory = SharedToolErrorCategory;
 
-export interface ToolError {
-  code: string;
-  category: ToolErrorCategory;
-  retryable: boolean;
-  message: string;
-  details?: JSONValue | undefined;
-}
+export type ToolError = SharedToolError;
+export type ToolErrorInput = SharedToolErrorInput;
 
-export interface ToolAction {
-  type: 'approval' | 'input';
-  message?: string | undefined;
-  schema?: JSONValue | undefined;
-}
+export type ToolAction = SharedToolAction;
+export type ToolActionInput = SharedToolActionInput;
 
 /**
  * Public input shape accepted by tool-call append helpers.
  * Compatible with external tool parsers and armorer tool calls.
  */
-export interface AppendableToolCallInput {
-  id?: string | undefined;
-  name: string;
-  arguments?: unknown;
-}
+export type AppendableToolCallInput = SharedToolCallInput;
 
 /**
  * Public input shape accepted by tool-result append helpers.
  * Compatible with armorer tool results and other external tool executors.
  */
-export interface AppendableToolError {
-  code: string;
-  category: ToolErrorCategory;
-  retryable: boolean;
-  message: string;
-  details?: unknown;
-}
-
-export interface AppendableToolAction {
-  type: 'approval' | 'input';
-  message?: string | undefined;
-  schema?: unknown;
-}
-
-export interface AppendableToolResult {
-  callId: string;
-  outcome: 'success' | 'error' | 'action_required';
-  content: unknown;
-  error?: AppendableToolError | undefined;
-  action?: AppendableToolAction | undefined;
-  inputDigest?: string | undefined;
-  outputDigest?: string | undefined;
-  result?: unknown;
-  stream?: AsyncIterable<unknown>;
-}
+export type AppendableToolError = SharedToolErrorInput;
+export type AppendableToolAction = SharedToolActionInput;
+export type AppendableToolResult = SharedToolResultInput;
 
 /**
  * Tool execution result metadata for tool-result messages.
  */
-export interface ToolResult {
-  callId: string;
-  outcome: 'success' | 'error' | 'action_required';
-  content: JSONValue;
-  error?: ToolError | undefined;
-  action?: ToolAction | undefined;
-  inputDigest?: string | undefined;
-  outputDigest?: string | undefined;
-}
+export type ToolResult = SharedToolResult;
+export type ToolResultInput = SharedToolResultInput;
 
 /**
  * Token usage accounting for a message.

@@ -150,7 +150,8 @@
   "dependencies": {
     "change-case": "^5.4.4",
     "event-emission": "0.2.1",
-    "gray-matter": "^4.0.3"
+    "gray-matter": "^4.0.3",
+    "interoperability": "workspace:*"
   },
   "devDependencies": {
     "@anthropic-ai/sdk": "^0.71.2",

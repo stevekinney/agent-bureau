@@ -1,22 +1,10 @@
-import type { JsonValue } from './serialization/json';
+import type {
+  ToolError as SharedToolError,
+  ToolErrorCategory as SharedToolErrorCategory,
+} from 'interoperability';
 
-export type ToolErrorCategory =
-  | 'validation'
-  | 'permission'
-  | 'not_found'
-  | 'conflict'
-  | 'transient'
-  | 'timeout'
-  | 'cancelled'
-  | 'internal';
-
-export type ToolError = {
-  code: string;
-  category: ToolErrorCategory;
-  retryable: boolean;
-  message: string;
-  details?: JsonValue;
-};
+export type ToolErrorCategory = SharedToolErrorCategory;
+export type ToolError = SharedToolError;
 
 export function isToolError(value: unknown): value is ToolError {
   if (!value || typeof value !== 'object') return false;
