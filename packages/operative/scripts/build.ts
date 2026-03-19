@@ -8,6 +8,8 @@ const entrypoints = [
   './src/events.ts',
   './src/streaming.ts',
   './src/types.ts',
+  './src/define-agent.ts',
+  './src/create-subagent-tool.ts',
   './src/conditions/index.ts',
   './src/conditions/predicates.ts',
   './src/test/index.ts',

@@ -1,6 +1,9 @@
 import type { ToolExecuteOptions, ToolExecutionResult, Toolbox } from 'armorer';
 import type { Conversation, ConversationHistory, TokenUsage } from 'conversationalist';
 import type { JSONValue, ToolCall, ToolCallInput } from 'interoperability';
+import type { ZodType } from 'zod';
+
+import type { ActiveRun } from './create-run';
 
 export type { TokenUsage } from 'conversationalist';
 export type { JSONValue, ToolCall, ToolCallInput } from 'interoperability';
@@ -17,6 +20,24 @@ export interface OperativeExecuteOptions extends ToolExecuteOptions {
 }
 
 /**
+ * Options for retrying the generate call on transient failures.
+ */
+export interface RetryOptions {
+  attempts: number;
+  delay?: number | ((attempt: number) => number);
+  shouldRetry?: (error: unknown, attempt: number) => boolean | Promise<boolean>;
+}
+
+/**
+ * Options for automatic context window management.
+ */
+export interface ContextManagementOptions {
+  maxTokens: number;
+  onCompact: (conversation: Conversation, context: StepContext) => Promise<void>;
+  tokenEstimator?: (conversation: Conversation) => number;
+}
+
+/**
  * Finish reasons for the agent loop.
  */
 export type FinishReason = 'stop-condition' | 'maximum-steps' | 'aborted' | 'error';
@@ -28,6 +49,7 @@ export interface GenerateContext {
   conversation: Conversation;
   step: number;
   signal?: AbortSignal;
+  toolbox: Toolbox;
 }
 
 /**
@@ -100,6 +122,7 @@ export interface RunResult {
   content: string;
   usage: TokenUsage;
   finishReason: FinishReason;
+  schemaValidation?: { success: boolean; error?: unknown };
 }
 
 /**
@@ -118,6 +141,19 @@ export interface RunOptions {
   executeOptions?: OperativeExecuteOptions;
   signal?: AbortSignal;
   collectAsync?: boolean;
+  retry?: RetryOptions;
+  validateResponse?: (
+    response: GenerateResponse,
+    context: StepContext,
+  ) => Promise<GenerateResponse | void>;
+  validateToolResult?: (
+    result: ToolExecutionResult,
+    context: ToolExecutionResultContext,
+  ) => Promise<ToolExecutionResult | void>;
+  selectTools?: (context: StepContext) => Promise<Toolbox> | Toolbox;
+  contextManagement?: ContextManagementOptions;
+  responseSchema?: ZodType;
+  schemaRetries?: number;
 }
 
 /**
@@ -134,3 +170,59 @@ export interface StreamingHandle {
 export type StreamingGenerateFunction = (
   context: GenerateContext & { streaming: StreamingHandle },
 ) => Promise<GenerateResponse>;
+
+/**
+ * Options for defining a reusable agent configuration.
+ */
+export interface DefineAgentOptions {
+  name: string;
+  instructions?: string;
+  generate: GenerateFunction;
+  toolbox: Toolbox;
+  stopWhen?: StopCondition | StopCondition[];
+  maximumSteps?: number;
+  prepareStep?: RunOptions['prepareStep'];
+  beforeToolExecution?: RunOptions['beforeToolExecution'];
+  afterToolExecution?: RunOptions['afterToolExecution'];
+  onStep?: RunOptions['onStep'];
+  retry?: RetryOptions;
+  validateResponse?: RunOptions['validateResponse'];
+  validateToolResult?: RunOptions['validateToolResult'];
+  selectTools?: RunOptions['selectTools'];
+  contextManagement?: ContextManagementOptions;
+  responseSchema?: RunOptions['responseSchema'];
+  schemaRetries?: RunOptions['schemaRetries'];
+  executeOptions?: OperativeExecuteOptions;
+  collectAsync?: boolean;
+}
+
+/**
+ * Options for running a defined agent.
+ */
+export interface AgentRunOptions {
+  conversation?: Conversation | ConversationHistory | string;
+  signal?: AbortSignal;
+  stopWhen?: StopCondition | StopCondition[];
+}
+
+/**
+ * A reusable agent definition returned by defineAgent().
+ */
+export interface AgentDefinition {
+  readonly name: string;
+  readonly options: Readonly<DefineAgentOptions>;
+  run(input: string | AgentRunOptions): Promise<RunResult>;
+  createRun(input: string | AgentRunOptions): ActiveRun;
+}
+
+/**
+ * Options for creating a subagent tool.
+ */
+export interface CreateSubagentToolOptions {
+  name: string;
+  description: string;
+  agent: AgentDefinition;
+  input: ZodType;
+  mapInput?: (input: unknown) => string | AgentRunOptions;
+  mapOutput?: (result: RunResult) => unknown;
+}

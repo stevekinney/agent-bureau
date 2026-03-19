@@ -1,10 +1,11 @@
-import type { ToolExecutionResult } from 'armorer';
+import type { Toolbox, ToolExecutionResult } from 'armorer';
 import { Conversation, materializeToolCalls } from 'conversationalist';
 import type { ToolCall } from 'interoperability';
 
 import type { OperativeEvents, OperativeEventType } from './events';
 import type {
   GenerateResponse,
+  RetryOptions,
   RunOptions,
   RunResult,
   StepResult,
@@ -52,6 +53,75 @@ function isConversation(value: unknown): value is Conversation {
   );
 }
 
+function resolveDelay(delay: RetryOptions['delay'], attempt: number): number {
+  if (typeof delay === 'function') return delay(attempt);
+  return delay ?? 0;
+}
+
+async function callGenerateWithRetry(
+  generate: RunOptions['generate'],
+  context: { conversation: Conversation; step: number; signal?: AbortSignal; toolbox: Toolbox },
+  retry: RetryOptions | undefined,
+  emitter: EventEmitter | undefined,
+): Promise<GenerateResponse> {
+  if (!retry || retry.attempts <= 1) {
+    return generate(context);
+  }
+
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= retry.attempts; attempt++) {
+    try {
+      return await generate(context);
+    } catch (error) {
+      lastError = error;
+
+      if (attempt >= retry.attempts) break;
+
+      if (retry.shouldRetry) {
+        const shouldContinue = await retry.shouldRetry(error, attempt);
+        if (!shouldContinue) break;
+      }
+
+      emitter?.emit('generate.retry', { step: context.step, attempt, error });
+
+      const delayMs = resolveDelay(retry.delay, attempt);
+      if (delayMs > 0) {
+        if (context.signal?.aborted) break;
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, delayMs);
+          if (context.signal) {
+            const onAbort = () => {
+              clearTimeout(timer);
+              resolve();
+            };
+            context.signal.addEventListener('abort', onAbort, { once: true });
+          }
+        });
+        if (context.signal?.aborted) break;
+      }
+    }
+  }
+
+  throw lastError;
+}
+
+function defaultTokenEstimator(conversation: Conversation): number {
+  const messages = conversation.getMessages();
+  let total = 0;
+  for (const message of messages) {
+    if (typeof message.content === 'string') {
+      total += Math.ceil(message.content.length / 4);
+    } else if (Array.isArray(message.content)) {
+      for (const part of message.content) {
+        if ('text' in part && typeof part.text === 'string') {
+          total += Math.ceil(part.text.length / 4);
+        }
+      }
+    }
+  }
+  return total;
+}
+
 export async function executeLoop(
   options: RunOptions,
   emitter?: EventEmitter,
@@ -67,6 +137,13 @@ export async function executeLoop(
     executeOptions,
     signal,
     collectAsync = false,
+    retry,
+    validateResponse,
+    validateToolResult,
+    selectTools,
+    contextManagement,
+    responseSchema,
+    schemaRetries = 0,
   } = options;
 
   const conversation = isConversation(options.conversation)
@@ -77,6 +154,7 @@ export async function executeLoop(
   const steps: StepResult[] = [];
   const totalUsage: TokenUsage = { prompt: 0, completion: 0, total: 0 };
   let lastContent = '';
+  let schemaAttempts = 0;
 
   emitter?.emit('run.started', { conversation });
 
@@ -92,7 +170,34 @@ export async function executeLoop(
       };
     }
 
+    // Context management: compact if over token threshold
+    if (contextManagement) {
+      const estimator = contextManagement.tokenEstimator ?? defaultTokenEstimator;
+      const tokensBefore = estimator(conversation);
+      if (tokensBefore > contextManagement.maxTokens) {
+        try {
+          await contextManagement.onCompact(conversation, { conversation, step, signal });
+          const tokensAfter = estimator(conversation);
+          emitter?.emit('context.compacted', { step, tokensBefore, tokensAfter });
+        } catch (error) {
+          emitter?.emit('run.error', { step, error });
+          return {
+            conversation,
+            steps,
+            content: lastContent,
+            usage: totalUsage,
+            finishReason: 'error',
+          };
+        }
+      }
+    }
+
     emitter?.emit('step.started', { conversation, step });
+
+    // Resolve per-step toolbox
+    const stepToolbox: Toolbox = selectTools
+      ? await selectTools({ conversation, step, signal })
+      : toolbox;
 
     let response: GenerateResponse;
     try {
@@ -103,9 +208,24 @@ export async function executeLoop(
       if (prepareResult) {
         response = prepareResult;
       } else {
-        response = await generate({ conversation, step, signal });
+        response = await callGenerateWithRetry(
+          generate,
+          { conversation, step, signal, toolbox: stepToolbox },
+          retry,
+          emitter,
+        );
       }
     } catch (error) {
+      if (signal?.aborted) {
+        emitter?.emit('run.aborted', { step, reason: signal.reason as string | undefined });
+        return {
+          conversation,
+          steps,
+          content: lastContent,
+          usage: totalUsage,
+          finishReason: 'aborted',
+        };
+      }
       emitter?.emit('run.error', { step, error });
       return {
         conversation,
@@ -114,6 +234,27 @@ export async function executeLoop(
         usage: totalUsage,
         finishReason: 'error',
       };
+    }
+
+    // Validate response guardrail
+    if (validateResponse) {
+      try {
+        const originalResponse = { ...response };
+        const validated = await validateResponse(response, { conversation, step, signal });
+        if (validated) {
+          emitter?.emit('response.validated', { step, original: originalResponse, validated });
+          response = validated;
+        }
+      } catch (error) {
+        emitter?.emit('run.error', { step, error });
+        return {
+          conversation,
+          steps,
+          content: lastContent,
+          usage: totalUsage,
+          finishReason: 'error',
+        };
+      }
     }
 
     if (signal?.aborted) {
@@ -177,9 +318,9 @@ export async function executeLoop(
         });
 
         try {
-          const executeResult = await toolbox.execute(
-            callsToExecute as Parameters<typeof toolbox.execute>[0],
-            { ...executeOptions, signal } as Parameters<typeof toolbox.execute>[1],
+          const executeResult = await stepToolbox.execute(
+            callsToExecute as Parameters<typeof stepToolbox.execute>[0],
+            { ...executeOptions, signal } as Parameters<typeof stepToolbox.execute>[1],
           );
 
           results = Array.isArray(executeResult)
@@ -194,6 +335,42 @@ export async function executeLoop(
             usage: totalUsage,
             finishReason: 'error',
           };
+        }
+
+        // Validate tool results guardrail
+        if (validateToolResult) {
+          try {
+            const validatedResults: ToolExecutionResult[] = [];
+            for (const result of results) {
+              const originalResult = { ...result };
+              const validated = await validateToolResult(result, {
+                conversation,
+                step,
+                toolCalls: callsToExecute,
+                results,
+              });
+              if (validated) {
+                emitter?.emit('tool-result.validated', {
+                  step,
+                  original: originalResult,
+                  validated,
+                });
+                validatedResults.push(validated);
+              } else {
+                validatedResults.push(result);
+              }
+            }
+            results = validatedResults;
+          } catch (error) {
+            emitter?.emit('run.error', { step, error });
+            return {
+              conversation,
+              steps,
+              content: lastContent,
+              usage: totalUsage,
+              finishReason: 'error',
+            };
+          }
         }
 
         if (collectAsync) {
@@ -243,7 +420,7 @@ export async function executeLoop(
       final: false,
     };
 
-    const shouldStop = await evaluateStopConditions(stopConditions, stepResult);
+    let shouldStop = await evaluateStopConditions(stopConditions, stepResult);
     stepResult.final = shouldStop;
 
     emitter?.emit('step.completed', stepResult);
@@ -264,6 +441,66 @@ export async function executeLoop(
     }
 
     steps.push(stepResult);
+
+    // Structured output enforcement: validate on final step
+    if (shouldStop && responseSchema) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(lastContent);
+      } catch {
+        parsed = lastContent;
+      }
+
+      try {
+        responseSchema.parse(parsed);
+        // Schema validation passed
+        const runResult: RunResult = {
+          conversation,
+          steps,
+          content: lastContent,
+          usage: totalUsage,
+          finishReason: 'stop-condition',
+          schemaValidation: { success: true },
+        };
+        emitter?.emit('run.completed', runResult);
+        return runResult;
+      } catch (validationError) {
+        schemaAttempts++;
+        if (schemaAttempts <= schemaRetries) {
+          emitter?.emit('response.schema-failed', {
+            step,
+            content: lastContent,
+            error: validationError,
+            retriesRemaining: schemaRetries - schemaAttempts,
+          });
+          // Append a user message with the validation error to prompt correction
+          conversation.appendUserMessage(
+            `Your response did not match the required schema. Error: ${String(validationError)}. Please try again with a valid response.`,
+          );
+          shouldStop = false;
+          stepResult.final = false;
+          continue;
+        }
+
+        // Schema retries exhausted
+        emitter?.emit('response.schema-failed', {
+          step,
+          content: lastContent,
+          error: validationError,
+          retriesRemaining: 0,
+        });
+        const runResult: RunResult = {
+          conversation,
+          steps,
+          content: lastContent,
+          usage: totalUsage,
+          finishReason: 'stop-condition',
+          schemaValidation: { success: false, error: validationError },
+        };
+        emitter?.emit('run.completed', runResult);
+        return runResult;
+      }
+    }
 
     if (shouldStop) {
       const runResult: RunResult = {

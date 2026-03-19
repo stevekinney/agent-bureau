@@ -3,7 +3,7 @@ import type { ToolCall } from 'interoperability';
 
 import type { ToolExecutionResult } from 'armorer';
 
-import type { RunResult, StepResult, TokenUsage } from './types';
+import type { GenerateResponse, RunResult, StepResult, TokenUsage } from './types';
 
 /**
  * Event map for the operative agent loop.
@@ -27,6 +27,24 @@ export interface OperativeEvents {
   'run.completed': RunResult;
   'run.error': { step: number; error: unknown };
   'run.aborted': { step: number; reason?: string };
+  'generate.retry': { step: number; attempt: number; error: unknown };
+  'response.validated': {
+    step: number;
+    original: GenerateResponse;
+    validated: GenerateResponse;
+  };
+  'tool-result.validated': {
+    step: number;
+    original: ToolExecutionResult;
+    validated: ToolExecutionResult;
+  };
+  'context.compacted': { step: number; tokensBefore: number; tokensAfter: number };
+  'response.schema-failed': {
+    step: number;
+    content: string;
+    error: unknown;
+    retriesRemaining: number;
+  };
 }
 
 export type OperativeEventType = keyof OperativeEvents;
