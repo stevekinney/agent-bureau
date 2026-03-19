@@ -18,6 +18,14 @@ const entrypoints = [
   './src/adapters/openai/index.ts',
   './src/adapters/anthropic/index.ts',
   './src/adapters/gemini/index.ts',
+  // Internal modules referenced by index.d.ts (needed for Bun resolution)
+  './src/combine-toolboxes.ts',
+  './src/core/errors.ts',
+  './src/create-tool.ts',
+  './src/create-toolbox.ts',
+  './src/is-tool.ts',
+  './src/tool-materialization.ts',
+  './src/types.ts',
 ];
 
 const root = './src';

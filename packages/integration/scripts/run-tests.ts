@@ -28,6 +28,7 @@ if (!nodeBinary) {
 }
 
 await run(['bun', 'test', 'test/import-boundary.test.ts']);
+await run(['bun', 'test', 'test/operative.test.ts']);
 const nodeEnvironment = Object.fromEntries(
   Object.entries(process.env).filter(
     ([key, value]) =>

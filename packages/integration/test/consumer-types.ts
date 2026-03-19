@@ -25,6 +25,13 @@ import {
 import type { AnthropicConversation } from 'conversationalist/adapters/anthropic';
 import type { GeminiConversation } from 'conversationalist/adapters/gemini';
 import type { OpenAIMessage } from 'conversationalist/adapters/openai';
+import type {
+  GenerateFunction as OperativeGenerateFunction,
+  RunResult as OperativeRunResult,
+  StepResult as OperativeStepResult,
+  StopCondition as OperativeStopCondition,
+  ToolCall as OperativeToolCall,
+} from 'operative';
 
 type Assert<T extends true> = T;
 type IsAssignable<From, To> = [From] extends [To] ? true : false;
@@ -114,3 +121,27 @@ void Conversation.fromProvider('gemini', geminiConversation).then((conversationS
   void typedConversationState.toProvider('gemini');
   void typedConversationState.appendProvider('gemini', geminiConversation);
 });
+
+// Operative type compatibility assertions
+const operativeToolCallCompat: Assert<
+  IsAssignable<OperativeToolCall, ArmorerToolCall>
+> = true;
+const operativeToolCallCompatReverse: Assert<
+  IsAssignable<ArmorerToolCall, OperativeToolCall>
+> = true;
+const operativeToolCallConversationalistCompat: Assert<
+  IsAssignable<OperativeToolCall, ConversationalistToolCall>
+> = true;
+void operativeToolCallCompat;
+void operativeToolCallCompatReverse;
+void operativeToolCallConversationalistCompat;
+
+// Operative RunResult and StepResult are structurally valid
+const _runResultCheck: OperativeRunResult = {} as OperativeRunResult;
+const _stepResultCheck: OperativeStepResult = {} as OperativeStepResult;
+const _generateFunctionCheck: OperativeGenerateFunction = {} as OperativeGenerateFunction;
+const _stopConditionCheck: OperativeStopCondition = {} as OperativeStopCondition;
+void _runResultCheck;
+void _stepResultCheck;
+void _generateFunctionCheck;
+void _stopConditionCheck;

@@ -1,19 +1,24 @@
 {
   "compilerOptions": {
-    "baseUrl": ".",
     "lib": ["ESNext", "DOM", "DOM.Iterable"],
     "target": "ES2022",
     "module": "ESNext",
-    "moduleResolution": "bundler",
     "moduleDetection": "auto",
+    "jsx": "react-jsx",
+    "allowJs": false,
+    "checkJs": false,
+
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
     "verbatimModuleSyntax": true,
     "isolatedModules": true,
-    "allowImportingTsExtensions": true,
+    "noEmit": true,
     "resolveJsonModule": true,
     "esModuleInterop": true,
-    "allowSyntheticDefaultImports": true,
     "forceConsistentCasingInFileNames": true,
+
     "strict": true,
+
     "noImplicitReturns": true,
     "noFallthroughCasesInSwitch": true,
     "noUncheckedIndexedAccess": true,
@@ -21,27 +26,31 @@
     "allowUnreachableCode": false,
     "noUnusedLocals": true,
     "noUnusedParameters": true,
-    "exactOptionalPropertyTypes": true,
+    "exactOptionalPropertyTypes": false,
     "noPropertyAccessFromIndexSignature": true,
+
     "pretty": true,
     "noErrorTruncation": true,
+
     "skipLibCheck": true,
-    "noEmit": true,
+
     "incremental": true,
     "tsBuildInfoFile": "node_modules/.cache/tsconfig.tsbuildinfo",
     "assumeChangesOnlyAffectDirectDependencies": true,
     "diagnostics": true,
+
+    "baseUrl": ".",
+    "rootDir": ".",
     "paths": {
-      "armorer": ["../armorer/dist/index.d.ts"],
-      "armorer/*": ["../armorer/dist/*"],
-      "conversationalist": ["../conversationalist/dist/index.d.ts"],
-      "conversationalist/*": ["../conversationalist/dist/*"],
-      "operative": ["../operative/dist/index.d.ts"],
-      "operative/*": ["../operative/dist/*"]
+      "@/*": ["./src/*"]
     },
+
+    "allowSyntheticDefaultImports": true,
+    "preserveWatchOutput": true,
+
     "typeRoots": ["node_modules/@types"],
     "types": ["bun"]
   },
-  "include": ["test/**/*.ts"],
+  "include": ["src", "scripts"],
   "exclude": ["node_modules", "coverage", "**/dist/**", "**/build/**"]
 }

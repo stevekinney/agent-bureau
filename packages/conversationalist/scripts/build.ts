@@ -28,6 +28,14 @@ async function build() {
     { entry: './src/redaction/index.ts', outdir: 'dist/redaction' },
     { entry: './src/versioning/index.ts', outdir: 'dist/versioning' },
     { entry: './src/sort/index.ts', outdir: 'dist/sort' },
+    // Internal modules referenced by index.d.ts (needed for Bun resolution)
+    { entry: './src/errors.ts', outdir: 'dist' },
+    { entry: './src/guards.ts', outdir: 'dist' },
+    { entry: './src/types.ts', outdir: 'dist' },
+    { entry: './src/multi-modal.ts', outdir: 'dist' },
+    { entry: './src/with-conversation.ts', outdir: 'dist' },
+    { entry: './src/compaction/index.ts', outdir: 'dist/compaction' },
+    { entry: './src/environment.ts', outdir: 'dist' },
   ];
 
   // Build JavaScript with Bun (target node for npm compatibility)
