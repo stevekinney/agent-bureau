@@ -31,10 +31,7 @@ class Logger {
 
     // Also log to console
     const logFn = console[level] ?? console.log;
-    logFn(
-      `[${entry.timestamp}] [${level.toUpperCase()}] [${toolName}] ${message}`,
-      data ?? '',
-    );
+    logFn(`[${entry.timestamp}] [${level.toUpperCase()}] [${toolName}] ${message}`, data ?? '');
   }
 
   getEntries(filter?: { level?: LogLevel; toolName?: string }): LogEntry[] {
@@ -73,9 +70,7 @@ function createLoggingMiddleware(logger: Logger, logLevel: LogLevel = 'info') {
 
         try {
           const executeFn =
-            typeof originalExecute === 'function'
-              ? originalExecute
-              : await originalExecute;
+            typeof originalExecute === 'function' ? originalExecute : await originalExecute;
 
           const result = await executeFn(params, context);
           const duration = Date.now() - startTime;

@@ -596,14 +596,9 @@ describe('createMCP', () => {
 
     const { client, server } = await connect(toolbox, {
       resources: (mcp) => {
-        mcp.registerResource(
-          'readme',
-          'toolbox://readme',
-          { title: 'README' },
-          async () => ({
-            contents: [{ uri: 'toolbox://readme', text: 'hello' }],
-          }),
-        );
+        mcp.registerResource('readme', 'toolbox://readme', { title: 'README' }, async () => ({
+          contents: [{ uri: 'toolbox://readme', text: 'hello' }],
+        }));
       },
       prompts: (mcp) => {
         mcp.registerPrompt('hello', { description: 'say hello' }, async () => ({
@@ -738,27 +733,21 @@ describe('createMCP', () => {
       ],
       prompts: [
         (mcp) => {
-          mcp.registerPrompt(
-            'array-prompt',
-            { description: 'array prompt' },
-            async () => ({
-              messages: [
-                {
-                  role: 'assistant',
-                  content: { type: 'text', text: 'array hello' },
-                },
-              ],
-            }),
-          );
+          mcp.registerPrompt('array-prompt', { description: 'array prompt' }, async () => ({
+            messages: [
+              {
+                role: 'assistant',
+                content: { type: 'text', text: 'array hello' },
+              },
+            ],
+          }));
         },
       ],
     });
 
     try {
       const resources = await client.listResources();
-      expect(resources.resources.some((entry) => entry.name === 'array-resource')).toBe(
-        true,
-      );
+      expect(resources.resources.some((entry) => entry.name === 'array-resource')).toBe(true);
 
       const prompts = await client.listPrompts();
       expect(prompts.prompts.some((entry) => entry.name === 'array-prompt')).toBe(true);
@@ -825,11 +814,7 @@ describe('createMCP', () => {
           case 'one-of':
             return {
               schema: {
-                oneOf: [
-                  { type: ['string', 'number'] },
-                  { type: 'integer' },
-                  { type: 'null' },
-                ],
+                oneOf: [{ type: ['string', 'number'] }, { type: 'integer' }, { type: 'null' }],
               },
             };
           case 'all-of':
@@ -996,13 +981,12 @@ describe('createMCP', () => {
     expect(() => toMcpTools([{} as unknown as ReturnType<typeof createTool>])).toThrow(
       'Invalid tool input',
     );
-    expect(
-      () =>
-        toMcpTools({
-          name: 'not-a-tool',
-          description: 'missing executeWith',
-          input: z.object({}),
-        } as unknown as ReturnType<typeof createTool>),
+    expect(() =>
+      toMcpTools({
+        name: 'not-a-tool',
+        description: 'missing executeWith',
+        input: z.object({}),
+      } as unknown as ReturnType<typeof createTool>),
     ).toThrow('Invalid input');
     expect(() => toMcpTools(42 as unknown as ReturnType<typeof createTool>)).toThrow(
       'Invalid input',

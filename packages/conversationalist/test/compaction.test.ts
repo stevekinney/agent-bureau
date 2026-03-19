@@ -1,18 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 
 import {
-  appendAssistantMessage,
-  appendMessages,
-  appendSystemMessage,
-  appendUserMessage,
-  compactConversation,
-  stripToolResultDetails,
-  createConversationHistory as createConversation,
-  getMessages,
-  getMessageById,
-  getSystemMessages,
-} from '../src/conversation/index';
-import {
   calculateChunkSize,
   chunkMessages,
   compactConversation as compactWithSummarizer,
@@ -21,9 +9,17 @@ import {
   type Summarizer,
 } from '../src/compaction/index';
 import {
-  appendStreamingMessage,
-  isStreamingMessage,
-} from '../src/streaming';
+  appendAssistantMessage,
+  appendMessages,
+  appendSystemMessage,
+  appendUserMessage,
+  compactConversation,
+  createConversationHistory as createConversation,
+  getMessages,
+  getSystemMessages,
+  stripToolResultDetails,
+} from '../src/conversation/index';
+import { appendStreamingMessage, isStreamingMessage } from '../src/streaming';
 import type { CompactionOptions, Message } from '../src/types';
 
 const mockSummarizer = (messages: ReadonlyArray<Message>): string => {
@@ -1038,10 +1034,7 @@ describe('summarizer-based compaction', () => {
       for (let i = 0; i < 8; i++) {
         conversation = appendUserMessage(conversation, `user ${i}`);
       }
-      const { conversation: withStreaming } = appendStreamingMessage(
-        conversation,
-        'assistant',
-      );
+      const { conversation: withStreaming } = appendStreamingMessage(conversation, 'assistant');
 
       const { compactable, preserved } = partitionMessages(withStreaming, {
         preserveRecentCount: 2,
@@ -1058,15 +1051,15 @@ describe('summarizer-based compaction', () => {
         conversation = appendUserMessage(conversation, `Message ${i}`);
         conversation = appendAssistantMessage(conversation, `Reply ${i}`);
       }
-      const { conversation: withStreaming } = appendStreamingMessage(
-        conversation,
-        'assistant',
-      );
+      const { conversation: withStreaming } = appendStreamingMessage(conversation, 'assistant');
 
-      const { conversation: result, result: compactionResult } =
-        await compactWithSummarizer(withStreaming, summarizingMock, {
+      const { conversation: result, result: compactionResult } = await compactWithSummarizer(
+        withStreaming,
+        summarizingMock,
+        {
           preserveRecentCount: 2,
-        });
+        },
+      );
 
       expect(compactionResult.compacted).toBe(true);
 

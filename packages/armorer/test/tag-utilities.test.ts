@@ -9,9 +9,7 @@ describe('tag-utilities', () => {
   });
 
   it('throws if tag is not a string', () => {
-    expect(() => assertKebabCaseTag(123 as unknown as string, 'test')).toThrow(
-      /must be a string/,
-    );
+    expect(() => assertKebabCaseTag(123 as unknown as string, 'test')).toThrow(/must be a string/);
   });
 
   it('throws if tag is empty after trimming', () => {

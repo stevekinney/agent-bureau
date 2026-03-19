@@ -83,9 +83,7 @@ describe('pipe()', () => {
       const pipeline = pipe(parseNumber, double);
       // Pass wrong type - str should be string, not number
       // eslint-disable-next-line @typescript-eslint/await-thenable
-      await expect(
-        pipeline({ str: 123 } as unknown as { str: string }),
-      ).rejects.toThrow();
+      await expect(pipeline({ str: 123 } as unknown as { str: string })).rejects.toThrow();
     });
 
     it('validates intermediate results at each step', async () => {
@@ -249,15 +247,11 @@ describe('pipe()', () => {
         );
 
       // eslint-disable-next-line @typescript-eslint/await-thenable
-      await expect(runWithReason(new Error('direct-error'))).rejects.toThrow(
-        'direct-error',
-      );
+      await expect(runWithReason(new Error('direct-error'))).rejects.toThrow('direct-error');
       // eslint-disable-next-line @typescript-eslint/await-thenable
       await expect(runWithReason('direct-string')).rejects.toThrow('direct-string');
       // eslint-disable-next-line @typescript-eslint/await-thenable
-      await expect(runWithReason({ code: 'DIRECT_OBJECT' })).rejects.toThrow(
-        'DIRECT_OBJECT',
-      );
+      await expect(runWithReason({ code: 'DIRECT_OBJECT' })).rejects.toThrow('DIRECT_OBJECT');
 
       const circular: any = { code: 'DIRECT_CYCLE' };
       circular.self = circular;
@@ -356,9 +350,7 @@ describe('pipe()', () => {
       const pipeline = pipe(parseNumber, failing);
 
       // eslint-disable-next-line @typescript-eslint/await-thenable
-      await expect(pipeline({ str: '5' })).rejects.toThrow(
-        'Pipeline failed at step 1 (failing)',
-      );
+      await expect(pipeline({ str: '5' })).rejects.toThrow('Pipeline failed at step 1 (failing)');
     });
 
     it('executeWith returns error details', async () => {
@@ -531,9 +523,7 @@ describe('bind()', () => {
     (rawTool as any).tags = [];
     (rawTool as any).metadata = undefined;
 
-    expect(() => bind(rawTool as any, { a: 'ok' }, { name: 'raw-bound' })).toThrow(
-      /object schema/,
-    );
+    expect(() => bind(rawTool as any, { a: 'ok' }, { name: 'raw-bound' })).toThrow(/object schema/);
   });
 
   it('forwards stream options to the bound tool', async () => {
@@ -978,9 +968,7 @@ describe('retry()', () => {
 
     const wrapped = retry(unstable, { attempts: 1 });
     // eslint-disable-next-line @typescript-eslint/await-thenable
-    await expect(wrapped({ value: 1 })).rejects.toThrow(
-      JSON.stringify({ code: 'OBJECT_FAIL' }),
-    );
+    await expect(wrapped({ value: 1 })).rejects.toThrow(JSON.stringify({ code: 'OBJECT_FAIL' }));
   });
 
   it('falls back when thrown objects are not serializable', async () => {
@@ -1103,8 +1091,7 @@ describe('type inference', () => {
       name: 'format-user',
       description: 'Formats user for display',
       input: z.object({ id: z.string(), name: z.string(), enriched: z.boolean() }),
-      execute: async (user) =>
-        `User ${user.id}: ${user.name} (enriched: ${user.enriched})`,
+      execute: async (user) => `User ${user.id}: ${user.name} (enriched: ${user.enriched})`,
     });
 
     const pipeline = pipe(fetchUser, enrichUser, formatUser);

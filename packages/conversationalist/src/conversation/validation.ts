@@ -18,9 +18,7 @@ export function assertConversationSafe(conversation: ConversationHistory): void 
   assertConversationHistoryIntegrity(conversation);
 }
 
-export function ensureConversationSafe(
-  conversation: ConversationHistory,
-): ConversationHistory {
+export function ensureConversationSafe(conversation: ConversationHistory): ConversationHistory {
   assertConversationSafe(conversation);
   return conversation;
 }

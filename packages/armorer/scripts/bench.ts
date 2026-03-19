@@ -3,12 +3,7 @@ import { z } from 'zod';
 import { defineTool } from '../src/core';
 import { createToolbox } from '../src/create-toolbox';
 import type { ToolConfiguration } from '../src/is-tool';
-import {
-  queryTools,
-  reindexSearchIndex,
-  searchTools,
-  type ToolQueryInput,
-} from '../src/registry';
+import { queryTools, reindexSearchIndex, searchTools, type ToolQueryInput } from '../src/registry';
 
 const TOOL_COUNT = Number(process.env['BENCH_TOOLS'] ?? 2000);
 const RUNS = Number(process.env['BENCH_RUNS'] ?? 50);
@@ -67,9 +62,7 @@ const schemas = [
   z.object({ query: z.string(), limit: z.number().optional() }),
 ];
 
-const tools = Array.from({ length: TOOL_COUNT }, (_, index) =>
-  makeToolConfiguration(index),
-);
+const tools = Array.from({ length: TOOL_COUNT }, (_, index) => makeToolConfiguration(index));
 
 const embed = (texts: string[]) => texts.map((text) => vectorFromText(text, EMBED_DIM));
 

@@ -1,8 +1,7 @@
-import { describe, expect, it } from 'bun:test';
-import { z } from 'zod';
-
 import { createTestToolbox } from 'armorer/test';
+import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
+import { z } from 'zod';
 
 import { noToolCalls } from '../src/conditions/predicates';
 import { createRun } from '../src/create-run';

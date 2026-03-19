@@ -3,17 +3,13 @@ import { z } from 'zod';
 
 import { createTool, createToolbox } from 'armorer';
 import { createTestToolbox, createToolboxRecorder } from 'armorer/test';
-import { Conversation, createConversationHistory } from 'conversationalist';
+import { Conversation } from 'conversationalist';
 import {
   createRun,
   run,
   stopWhen,
   withStreaming,
-  type GenerateFunction,
   type GenerateResponse,
-  type RunResult,
-  type StepResult,
-  type StopCondition,
 } from 'operative';
 import {
   createMockGenerate,
@@ -259,7 +255,7 @@ describe('operative abort propagation', () => {
 
 describe('operative event ordering', () => {
   it('events fire in correct order across operative + toolbox recorders', async () => {
-    const toolbox = createToolbox([weatherTool]);
+    const toolbox = createToolbox([weatherTool]) as import('armorer').Toolbox;
     const toolboxRecorder = createToolboxRecorder(toolbox);
     const conversation = new Conversation();
     conversation.appendUserMessage('Weather?');

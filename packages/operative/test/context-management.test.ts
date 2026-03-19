@@ -1,6 +1,5 @@
-import { describe, expect, it } from 'bun:test';
-
 import { createTestToolbox } from 'armorer/test';
+import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
 
 import { noToolCalls } from '../src/conditions/predicates';

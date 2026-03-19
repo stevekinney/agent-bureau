@@ -1,11 +1,6 @@
 import { z } from 'zod';
 
-import type {
-  AnyTool,
-  ComposedTool,
-  InferToolInput,
-  InferToolOutput,
-} from '../compose-types';
+import type { AnyTool, ComposedTool, InferToolInput, InferToolOutput } from '../compose-types';
 import { createTool, type CreateToolOptions } from '../create-tool';
 import type { DefaultToolEvents, ToolContext, ToolMetadata } from '../is-tool';
 

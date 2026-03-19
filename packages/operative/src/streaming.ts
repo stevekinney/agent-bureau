@@ -14,9 +14,7 @@ import type {
  * The wrapper manages the streaming lifecycle on the Conversation:
  * appendStreamingMessage → updateStreamingMessage → finalizeStreamingMessage.
  */
-export function withStreaming(
-  fn: StreamingGenerateFunction,
-): GenerateFunction {
+export function withStreaming(fn: StreamingGenerateFunction): GenerateFunction {
   return async (context: GenerateContext): Promise<GenerateResponse> => {
     const { conversation } = context;
 
@@ -45,10 +43,7 @@ export function withStreaming(
   };
 }
 
-function cancelStreamingIfActive(
-  conversation: Conversation,
-  messageId: string,
-): void {
+function cancelStreamingIfActive(conversation: Conversation, messageId: string): void {
   const message = conversation.getStreamingMessage();
   if (message && message.id === messageId) {
     conversation.cancelStreamingMessage(messageId);

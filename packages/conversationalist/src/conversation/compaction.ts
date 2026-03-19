@@ -1,11 +1,7 @@
 import type { ConversationEnvironment } from '../environment';
 import { resolveConversationEnvironment } from '../environment';
-import type {
-  ConversationHistory,
-  Message,
-  MessageInput,
-  TokenEstimator,
-} from '../types';
+import type { MultiModalContent } from '../multi-modal';
+import type { ConversationHistory, Message, MessageInput, TokenEstimator } from '../types';
 import { CURRENT_SCHEMA_VERSION } from '../types';
 import { toReadonly } from '../utilities';
 import { appendMessages } from './append';
@@ -45,9 +41,7 @@ export interface CompactionOptions {
  * Function that summarizes a set of messages.
  * Can be synchronous or asynchronous.
  */
-export type MessageSummarizer = (
-  messages: ReadonlyArray<Message>,
-) => Promise<string> | string;
+export type MessageSummarizer = (messages: ReadonlyArray<Message>) => Promise<string> | string;
 
 /**
  * Replaces the content of a tool result message with a summary,
@@ -91,10 +85,7 @@ interface CompactionChunk {
 /**
  * Calculates total tokens for a set of messages using the provided estimator.
  */
-function calculateTokens(
-  messages: ReadonlyArray<Message>,
-  estimator: TokenEstimator,
-): number {
+function calculateTokens(messages: ReadonlyArray<Message>, estimator: TokenEstimator): number {
   return messages.reduce((total, message) => total + estimator(message), 0);
 }
 
@@ -217,7 +208,7 @@ export function compactConversation(
 
     // Check if any result is a promise
     if (results.some((r) => r instanceof Promise)) {
-      return Promise.all(results);
+      return Promise.all(results.map((r) => Promise.resolve(r)));
     }
 
     return results as string[];
@@ -307,7 +298,7 @@ function defaultTokenEstimator(message: Message): number {
   if (typeof message.content === 'string') {
     tokenCount += Math.ceil(message.content.length / 4); // Rough approximation
   } else if (Array.isArray(message.content)) {
-    for (const item of message.content) {
+    for (const item of message.content as ReadonlyArray<MultiModalContent>) {
       if (item.type === 'text') {
         tokenCount += Math.ceil(item.text.length / 4);
       } else if (item.type === 'image') {

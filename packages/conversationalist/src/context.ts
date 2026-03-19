@@ -1,7 +1,4 @@
-import {
-  assertConversationSafe,
-  ensureConversationSafe,
-} from './conversation/validation';
+import { assertConversationSafe, ensureConversationSafe } from './conversation/validation';
 import {
   type ConversationEnvironment,
   isConversationEnvironmentParameter,
@@ -9,8 +6,8 @@ import {
   simpleTokenEstimator,
 } from './environment';
 import { ConversationalistError, createIntegrityError } from './errors';
-import { copyContent } from './multi-modal';
 import type { MultiModalContent } from './multi-modal';
+import { copyContent } from './multi-modal';
 import { isStreamingMessage } from './streaming';
 import type {
   AssistantMessage,
@@ -61,10 +58,7 @@ type MessageBlock = {
   orphanToolResult?: boolean;
 };
 
-const createMessageBlock = (
-  message: Message,
-  estimator: TokenEstimator,
-): MessageBlock => ({
+const createMessageBlock = (message: Message, estimator: TokenEstimator): MessageBlock => ({
   messages: [message],
   minPosition: message.position,
   maxPosition: message.position,
@@ -200,11 +194,7 @@ export function estimateConversationTokens(
   let estimator = estimateTokens;
   let env = environment;
 
-  if (
-    !environment &&
-    estimateTokens &&
-    isConversationEnvironmentParameter(estimateTokens)
-  ) {
+  if (!environment && estimateTokens && isConversationEnvironmentParameter(estimateTokens)) {
     env = estimateTokens;
     estimator = undefined;
   }
@@ -280,11 +270,7 @@ export function truncateToTokenLimit(
   const preserveToolPairs = options.preserveToolPairs ?? true;
 
   // Calculate current token count
-  const currentTokens = estimateConversationTokens(
-    conversation,
-    estimator,
-    resolvedEnvironment,
-  );
+  const currentTokens = estimateConversationTokens(conversation, estimator, resolvedEnvironment);
   if (currentTokens <= maxTokens) {
     return conversation;
   }
@@ -298,12 +284,9 @@ export function truncateToTokenLimit(
     preserveToolPairs,
   );
 
-  const systemMessages = preserveSystem
-    ? orderedMessages.filter((m) => m.role === 'system')
-    : [];
+  const systemMessages = preserveSystem ? orderedMessages.filter((m) => m.role === 'system') : [];
   const nonSystemMessages = orderedMessages.filter((m) => m.role !== 'system');
-  const protectedMessages =
-    preserveLastN > 0 ? nonSystemMessages.slice(-preserveLastN) : [];
+  const protectedMessages = preserveLastN > 0 ? nonSystemMessages.slice(-preserveLastN) : [];
   const streamingMessages = orderedMessages.filter(isStreamingMessage);
 
   const systemBlocks = collectBlocksForMessages(systemMessages, messageToBlock);
@@ -313,10 +296,7 @@ export function truncateToTokenLimit(
   const removableBlocks = blocks.filter((block) => !lockedBlocks.has(block));
 
   const systemTokens = systemBlocks.reduce((sum, block) => sum + block.tokenCount, 0);
-  const protectedTokens = protectedBlocks.reduce(
-    (sum, block) => sum + block.tokenCount,
-    0,
-  );
+  const protectedTokens = protectedBlocks.reduce((sum, block) => sum + block.tokenCount, 0);
   const streamingTokens = streamingBlocks.reduce((sum, block) => sum + block.tokenCount, 0);
   const availableTokens = maxTokens - systemTokens - protectedTokens - streamingTokens;
 
@@ -324,9 +304,7 @@ export function truncateToTokenLimit(
   if (availableTokens <= 0) {
     selectedBlocks = [...systemBlocks, ...protectedBlocks, ...streamingBlocks];
   } else {
-    const sortedRemovable = [...removableBlocks].sort(
-      (a, b) => a.maxPosition - b.maxPosition,
-    );
+    const sortedRemovable = [...removableBlocks].sort((a, b) => a.maxPosition - b.maxPosition);
     const keptRemovable: MessageBlock[] = [];
     let usedTokens = 0;
 
@@ -416,14 +394,16 @@ export function truncateFromPosition(
   const systemMessages = preserveSystem
     ? ordered.filter((m) => m.role === 'system' && m.position < position)
     : [];
-  const streamingMessages = ordered.filter(
-    (m) => isStreamingMessage(m) && m.position < position,
-  );
+  const streamingMessages = ordered.filter((m) => isStreamingMessage(m) && m.position < position);
   const keptMessages = ordered.filter((m) => m.position >= position);
   const systemBlocks = collectBlocksForMessages(systemMessages, messageToBlock);
   const streamingBlocks = collectBlocksForMessages(streamingMessages, messageToBlock);
   const keptBlocks = collectBlocksForMessages(keptMessages, messageToBlock);
-  const allMessages = collectMessagesFromBlocks([...systemBlocks, ...streamingBlocks, ...keptBlocks]);
+  const allMessages = collectMessagesFromBlocks([
+    ...systemBlocks,
+    ...streamingBlocks,
+    ...keptBlocks,
+  ]);
 
   // Renumber positions
   const renumbered = allMessages.map((message, index) =>

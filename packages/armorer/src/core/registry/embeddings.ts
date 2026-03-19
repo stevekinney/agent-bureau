@@ -3,9 +3,7 @@ import { getSchemaKeys } from '../schema-utilities';
 import type { AnyToolDefinition as ToolDefinition } from '../tool-definition';
 
 export type EmbeddingVector = number[];
-export type Embedder = (
-  texts: string[],
-) => EmbeddingVector[] | Promise<EmbeddingVector[]>;
+export type Embedder = (texts: string[]) => EmbeddingVector[] | Promise<EmbeddingVector[]>;
 
 export type EmbeddingInfo = {
   vector: EmbeddingVector;
@@ -25,10 +23,7 @@ type EmbeddingInput = {
 };
 
 const registryEmbedders = new WeakMap<object, Embedder>();
-const toolEmbeddings = new WeakMap<
-  ToolDefinition,
-  EmbeddingEntry[] | Promise<EmbeddingEntry[]>
->();
+const toolEmbeddings = new WeakMap<ToolDefinition, EmbeddingEntry[] | Promise<EmbeddingEntry[]>>();
 const queryEmbeddings = new WeakMap<
   Embedder,
   Map<string, EmbeddingInfo | Promise<EmbeddingInfo>>
@@ -94,8 +89,7 @@ export function getQueryEmbeddingInfo(
   const key = query.trim();
   if (!key) return undefined;
   const cache =
-    queryEmbeddings.get(embedder) ??
-    new Map<string, EmbeddingInfo | Promise<EmbeddingInfo>>();
+    queryEmbeddings.get(embedder) ?? new Map<string, EmbeddingInfo | Promise<EmbeddingInfo>>();
   if (!queryEmbeddings.has(embedder)) {
     queryEmbeddings.set(embedder, cache);
   }
@@ -133,10 +127,7 @@ export function getQueryEmbeddingInfo(
   return info ?? undefined;
 }
 
-export function getQueryEmbedding(
-  embedder: Embedder,
-  query: string,
-): EmbeddingVector | undefined {
+export function getQueryEmbedding(embedder: Embedder, query: string): EmbeddingVector | undefined {
   const info = getQueryEmbeddingInfo(embedder, query);
   return info?.vector;
 }

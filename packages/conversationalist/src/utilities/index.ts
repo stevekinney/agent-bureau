@@ -15,8 +15,7 @@ export {
 } from './message';
 
 // Tool call pairing
-export type { ToolCallPair } from './tool-calls';
-export { pairToolCallsWithResults } from './tool-calls';
+export type { MaterializeToolCallOptions } from '../conversation/tool-interactions';
 export {
   materializeToolCall,
   materializeToolCalls,
@@ -25,14 +24,11 @@ export {
   materializeToolResults,
   materializeToolResultsAsync,
 } from '../conversation/tool-interactions';
-export type { MaterializeToolCallOptions } from '../conversation/tool-interactions';
+export type { ToolCallPair } from './tool-calls';
+export { pairToolCallsWithResults } from './tool-calls';
 
 // Transient metadata
-export {
-  isTransientKey,
-  stripTransientFromRecord,
-  stripTransientMetadata,
-} from './transient';
+export { isTransientKey, stripTransientFromRecord, stripTransientMetadata } from './transient';
 
 // Type helpers
 export { hasOwnProperty, toReadonly } from './type-helpers';

@@ -1,7 +1,4 @@
-import {
-  appendMessages,
-  createConversationHistory,
-} from '../../conversation/index';
+import { appendMessages, createConversationHistory } from '../../conversation/index';
 import { assertConversationSafe } from '../../conversation/validation';
 import type { MultiModalContent } from '../../multi-modal';
 import { isStreamingMessage } from '../../streaming';
@@ -142,9 +139,7 @@ function toOpenAIContent(
 function toOpenAITextContent(
   content: string | ReadonlyArray<MultiModalContent>,
 ): string | OpenAITextContentPart[] {
-  return toOpenAIContent(content, { allowImages: false }) as
-    | string
-    | OpenAITextContentPart[];
+  return toOpenAIContent(content, { allowImages: false }) as string | OpenAITextContentPart[];
 }
 
 /**
@@ -285,9 +280,7 @@ function parseToolArguments(value: string): JSONValue {
   return parseJSONValue(value) ?? value;
 }
 
-function isCanonicalToolResultPayload(
-  value: JSONValue,
-): value is JSONValue & {
+function isCanonicalToolResultPayload(value: JSONValue): value is JSONValue & {
   outcome: ToolResult['outcome'];
   content: JSONValue;
   error?: ToolResult['error'];
@@ -308,14 +301,9 @@ function isCanonicalToolResultPayload(
   );
 }
 
-function parseToolResult(
-  callId: string,
-  content: string | OpenAITextContentPart[],
-): ToolResult {
+function parseToolResult(callId: string, content: string | OpenAITextContentPart[]): ToolResult {
   const serialized =
-    typeof content === 'string'
-      ? content
-      : content.map((part) => part.text).join('\n\n');
+    typeof content === 'string' ? content : content.map((part) => part.text).join('\n\n');
   const parsed = parseJSONValue(serialized);
 
   if (parsed !== undefined && isCanonicalToolResultPayload(parsed)) {
@@ -325,12 +313,8 @@ function parseToolResult(
       content: parsed.content,
       ...(parsed.error ? { error: parsed.error } : {}),
       ...(parsed.action ? { action: parsed.action } : {}),
-      ...(typeof parsed.inputDigest === 'string'
-        ? { inputDigest: parsed.inputDigest }
-        : {}),
-      ...(typeof parsed.outputDigest === 'string'
-        ? { outputDigest: parsed.outputDigest }
-        : {}),
+      ...(typeof parsed.inputDigest === 'string' ? { inputDigest: parsed.inputDigest } : {}),
+      ...(typeof parsed.outputDigest === 'string' ? { outputDigest: parsed.outputDigest } : {}),
     };
   }
 
@@ -514,10 +498,7 @@ export const openAIConversationAdapter = {
   import(messages: ReadonlyArray<OpenAIMessage>): Conversation {
     return fromOpenAIMessages(messages);
   },
-  append(
-    conversation: Conversation,
-    messages: ReadonlyArray<OpenAIMessage>,
-  ): Conversation {
+  append(conversation: Conversation, messages: ReadonlyArray<OpenAIMessage>): Conversation {
     return appendOpenAIMessages(conversation, messages);
   },
 } as const;

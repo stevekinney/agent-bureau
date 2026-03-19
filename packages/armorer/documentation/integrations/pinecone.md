@@ -83,10 +83,7 @@ toolbox.addEventListener('registered', async (event) => {
 Use Pinecone vector queries to find semantically similar tools:
 
 ```typescript
-async function findToolsBySemanticQuery(
-  query: string,
-  topK: number = 5,
-): Promise<string[]> {
+async function findToolsBySemanticQuery(query: string, topK: number = 5): Promise<string[]> {
   const [queryEmbedding] = await embed([query]);
 
   const results = await index.query({

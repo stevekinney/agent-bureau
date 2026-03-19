@@ -41,10 +41,7 @@ export type ResolveNameOptions = {
  * @returns The normalized name
  */
 export function normalizeName(name: string): string {
-  return name
-    .trim()
-    .toLowerCase()
-    .replace(/[_.\/]/g, '-');
+  return name.trim().toLowerCase().replace(/[_./]/g, '-');
 }
 
 /**
@@ -127,10 +124,7 @@ export function resolveName(
   const toolNames = new Set(allTools.map((tool) => tool.identity.name));
 
   // Helper to build result and emit event
-  const buildResult = (
-    tier: ResolutionTier,
-    candidates: string[],
-  ): ResolutionResult => {
+  const buildResult = (tier: ResolutionTier, candidates: string[]): ResolutionResult => {
     const filtered = filterDeprecated(candidates, allTools, allowDeprecated);
 
     if (filtered.length === 0) {

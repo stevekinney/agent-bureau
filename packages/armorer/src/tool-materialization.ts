@@ -1,3 +1,4 @@
+export type { MaterializeToolCallOptions } from 'interoperability';
 export {
   materializeToolCall,
   materializeToolCalls,
@@ -6,4 +7,3 @@ export {
   materializeToolResults,
   materializeToolResultsAsync,
 } from 'interoperability';
-export type { MaterializeToolCallOptions } from 'interoperability';

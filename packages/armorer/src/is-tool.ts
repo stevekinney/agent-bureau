@@ -67,10 +67,7 @@ export type ToolDiagnosticsAdapter = {
   ) =>
     | { success: true; data: unknown; report: ToolValidationReport }
     | { success: false; error: unknown; report: ToolValidationReport };
-  createRepairHints: (
-    error: unknown,
-    options?: { rootLabel?: string },
-  ) => ToolRepairHint[];
+  createRepairHints: (error: unknown, options?: { rootLabel?: string }) => ToolRepairHint[];
 };
 
 export type ToolDiagnostics = Partial<ToolDiagnosticsAdapter>;
@@ -210,8 +207,7 @@ export interface RuntimeToolContext<
   stream?: boolean;
 }
 
-export type ToolContext<E extends ToolEventsMap = DefaultToolEvents> =
-  RuntimeToolContext<E>;
+export type ToolContext<E extends ToolEventsMap = DefaultToolEvents> = RuntimeToolContext<E>;
 
 export interface ToolExecuteOptions {
   signal?: MinimalAbortSignal;
@@ -313,9 +309,7 @@ export type Tool<
   ) => () => void;
   subscribe: <K extends keyof E & string>(
     type: K,
-    observerOrNext?:
-      | Observer<ToolCustomEvent<E[K]>>
-      | ((value: ToolCustomEvent<E[K]>) => void),
+    observerOrNext?: Observer<ToolCustomEvent<E[K]>> | ((value: ToolCustomEvent<E[K]>) => void),
     error?: (err: unknown) => void,
     complete?: () => void,
   ) => Subscription;

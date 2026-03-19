@@ -8,11 +8,7 @@ import type { ToolRisk } from './core/risk';
 import { isZodObjectSchema, isZodSchema } from './core/schema-utilities';
 import { serializeToolDefinition } from './core/serialization';
 import { assertJsonValue, type JsonValue } from './core/serialization/json';
-import {
-  assertKebabCaseTag,
-  type NormalizeTagsOption,
-  uniqTags,
-} from './core/tag-utilities';
+import { assertKebabCaseTag, type NormalizeTagsOption, uniqTags } from './core/tag-utilities';
 import type { AnyToolDefinition, ToolLifecycle } from './core/tool-definition';
 import { defineTool } from './core/tool-definition';
 import { errorString, normalizeError } from './errors';
@@ -193,11 +189,7 @@ export function lazy<TExecute extends (...args: unknown[]) => Promise<unknown>>(
 
 function formatNonStringReason(reason: unknown): string | undefined {
   if (reason === undefined || reason === null) return undefined;
-  if (
-    typeof reason === 'number' ||
-    typeof reason === 'boolean' ||
-    typeof reason === 'bigint'
-  ) {
+  if (typeof reason === 'number' || typeof reason === 'boolean' || typeof reason === 'bigint') {
     return String(reason);
   }
   if (typeof reason === 'symbol') {
@@ -293,9 +285,7 @@ export function createTool<
   M extends ToolMetadata | undefined = ToolMetadata | undefined,
   TContext extends ToolContext<E> = ToolContext<E>,
   TReturn = TOutput,
-  TMetadataInput extends ToolMetadataInput<M> | undefined =
-    | SyncToolMetadataInput<M>
-    | undefined,
+  TMetadataInput extends ToolMetadataInput<M> | undefined = SyncToolMetadataInput<M> | undefined,
   TName extends string = string,
 >(
   options: Omit<
@@ -324,9 +314,7 @@ export function createTool<
   M extends ToolMetadata | undefined = ToolMetadata | undefined,
   TContext extends ToolContext<E> = ToolContext<E>,
   TReturn = TOutput,
-  TMetadataInput extends ToolMetadataInput<M> | undefined =
-    | SyncToolMetadataInput<M>
-    | undefined,
+  TMetadataInput extends ToolMetadataInput<M> | undefined = SyncToolMetadataInput<M> | undefined,
   TName extends string = string,
 >(
   options: Omit<
@@ -345,9 +333,7 @@ export function createTool<
   M extends ToolMetadata | undefined = ToolMetadata | undefined,
   TContext extends ToolContext<E> = ToolContext<E>,
   TReturn = TOutput,
-  TMetadataInput extends ToolMetadataInput<M> | undefined =
-    | ToolMetadataInput<M>
-    | undefined,
+  TMetadataInput extends ToolMetadataInput<M> | undefined = ToolMetadataInput<M> | undefined,
   TName extends string = string,
 >(
   options: Omit<
@@ -407,16 +393,8 @@ export function createTool<
   const normalizedInput = normalizeSchema(toolInput);
 
   const emitter = createEventTarget<E>();
-  const {
-    addEventListener,
-    dispatchEvent,
-    on,
-    once,
-    subscribe,
-    toObservable,
-    events,
-    complete,
-  } = emitter;
+  const { addEventListener, dispatchEvent, on, once, subscribe, toObservable, events, complete } =
+    emitter;
 
   // Typed wrapper: emitter.emit is generic over E, but within this generic
   // function TypeScript can't verify literal event payloads satisfy E[K].
@@ -430,13 +408,10 @@ export function createTool<
   const telemetryEnabled = telemetry === true;
   const digestOptions = normalizeDigestOptions(digests);
   const concurrencyLimit = normalizeConcurrency(
-    typeof metadataValue?.concurrency === 'number'
-      ? metadataValue.concurrency
-      : concurrency,
+    typeof metadataValue?.concurrency === 'number' ? metadataValue.concurrency : concurrency,
   );
   const limiter = createConcurrencyLimiter(concurrencyLimit);
-  const runWithConcurrency = <T>(task: () => Promise<T>) =>
-    limiter ? limiter.run(task) : task();
+  const runWithConcurrency = <T>(task: () => Promise<T>) => (limiter ? limiter.run(task) : task());
 
   const resolveExecute = createLazyExecuteResolver(fn);
   const policyHooks = policy;
@@ -523,19 +498,11 @@ export function createTool<
       ...options,
       ...(resolvedTimeout !== undefined ? { timeout: resolvedTimeout } : {}),
     };
-    return runWithConcurrency(() =>
-      executeInner(normalizeToolCall(toolCall), executeOptions),
-    );
+    return runWithConcurrency(() => executeInner(normalizeToolCall(toolCall), executeOptions));
   };
 
-  const executeParams = async (
-    params: TInput,
-    options?: ToolExecuteOptions,
-  ): Promise<TReturn> => {
-    const toolCall = createToolCall(
-      name,
-      normalizeToolContent(params),
-    ) as ToolCallWithArguments;
+  const executeParams = async (params: TInput, options?: ToolExecuteOptions): Promise<TReturn> => {
+    const toolCall = createToolCall(name, normalizeToolContent(params)) as ToolCallWithArguments;
     const result = await executeCall(toolCall, options);
     const errorMessage = result.error?.message ?? result.errorMessage;
     if (errorMessage) {
@@ -763,9 +730,7 @@ export function createTool<
       const runner = resolvedExecute(parsed, toolContext as unknown as TContext);
 
       const timed =
-        typeof options.timeout === 'number'
-          ? withTimeout(runner, options.timeout)
-          : runner;
+        typeof options.timeout === 'number' ? withTimeout(runner, options.timeout) : runner;
 
       let value: unknown = await raceWithSignal(timed, options.signal);
       let outputDigest: string | undefined;
@@ -987,9 +952,7 @@ export function createTool<
             );
             report = diagnosticsResult.report;
             if (diagnostics?.createRepairHints) {
-              const hintError = diagnosticsResult.success
-                ? error
-                : diagnosticsResult.error;
+              const hintError = diagnosticsResult.success ? error : diagnosticsResult.error;
               repairHints = diagnostics.createRepairHints(hintError, {
                 rootLabel: 'arguments',
               });
@@ -1022,11 +985,7 @@ export function createTool<
       emit('settled', { ...baseDetail, error });
       const callId = toolCall.id;
       const errorCategory = classifyErrorCategory(error);
-      const errorPolicyContext = buildPolicyContext(
-        toolCall,
-        toolCall.arguments,
-        inputDigest,
-      );
+      const errorPolicyContext = buildPolicyContext(toolCall, toolCall.arguments, inputDigest);
       if (policyContextProvider) {
         const injected = await policyContextProvider(errorPolicyContext);
         if (injected && typeof injected === 'object' && !Array.isArray(injected)) {
@@ -1140,8 +1099,7 @@ export function createTool<
       return emitter.completed;
     },
     toJSON,
-    toString: () =>
-      `**${configuration.identity.name}**: ${configuration.display.description}`,
+    toString: () => `**${configuration.identity.name}**: ${configuration.display.description}`,
     [Symbol.toPrimitive]: () => configuration.identity.name,
     tags: configuration.tags,
     metadata: configuration.metadata,
@@ -1152,11 +1110,7 @@ export function createTool<
       if (Object.prototype.hasOwnProperty.call(bag, prop)) {
         return bag[prop];
       }
-      return Reflect.get(
-        target as object,
-        prop,
-        receiver as unknown as object,
-      ) as unknown;
+      return Reflect.get(target as object, prop, receiver as unknown as object) as unknown;
     },
     has(_target, prop) {
       if (Object.prototype.hasOwnProperty.call(bag, prop)) return true;
@@ -1235,10 +1189,7 @@ export function createTool<
     });
   }
 
-  function raceWithSignal<TP>(
-    promise: Promise<TP>,
-    signal?: MinimalAbortSignal,
-  ): Promise<TP> {
+  function raceWithSignal<TP>(promise: Promise<TP>, signal?: MinimalAbortSignal): Promise<TP> {
     if (!signal) return promise;
     if (signal.aborted) {
       return Promise.reject(createAbortRejection(signal.reason));
@@ -1316,15 +1267,14 @@ type CreateToolWithContextOptions<
     | Promise<(params: TInput, context: ToolContext<E> & Ctx) => Promise<TOutput>>;
 };
 
-type AnyToolWithContextOptions<Ctx extends Record<string, unknown>> =
-  CreateToolWithContextOptions<
-    Ctx,
-    Record<string, unknown>,
-    unknown,
-    DefaultToolEvents,
-    readonly string[],
-    ToolMetadata | undefined
-  >;
+type AnyToolWithContextOptions<Ctx extends Record<string, unknown>> = CreateToolWithContextOptions<
+  Ctx,
+  Record<string, unknown>,
+  unknown,
+  DefaultToolEvents,
+  readonly string[],
+  ToolMetadata | undefined
+>;
 
 /**
  * Creates a tool with additional context automatically injected into the execute function.
@@ -1442,10 +1392,7 @@ function normalizeToolCall<T extends ToolCallWithArguments>(toolCall: T): T {
   return { ...toolCall, id: crypto.randomUUID() };
 }
 
-function looksLikeToolCall(
-  value: unknown,
-  toolName: string,
-): value is ToolCallWithArguments {
+function looksLikeToolCall(value: unknown, toolName: string): value is ToolCallWithArguments {
   if (!value || typeof value !== 'object') return false;
   const candidate = value as Record<string, unknown>;
   if (typeof candidate['name'] !== 'string') return false;
@@ -1523,11 +1470,7 @@ function normalizeToolContent(value: unknown): JsonValue {
 function stableStringify(value: unknown): string {
   if (value === null || value === undefined) return String(value);
   if (typeof value === 'string') return value;
-  if (
-    typeof value === 'number' ||
-    typeof value === 'boolean' ||
-    typeof value === 'bigint'
-  ) {
+  if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') {
     return String(value);
   }
   if (value instanceof Error) {
@@ -1662,9 +1605,7 @@ function normalizeTagsWithRisk(
   if (!isStringArray(tags)) {
     throw new Error(`Tool "${toolName}": tag must be a string`);
   }
-  const baseTags = uniqTags(
-    tags.map((tag) => assertKebabCaseTag(tag, `Tool "${toolName}"`)),
-  );
+  const baseTags = uniqTags(tags.map((tag) => assertKebabCaseTag(tag, `Tool "${toolName}"`)));
   return buildTagsFromRisk(baseTags, risk);
 }
 
@@ -1723,9 +1664,7 @@ function createLazyExecuteResolver<TInput, TOutput, TContext>(
   execute: LazyToolExecute<TInput, TOutput, TContext>,
 ): () => Promise<ToolExecute<TInput, TOutput, TContext>> {
   if (!isExecutable(execute)) {
-    throw new TypeError(
-      'execute must be a function or a promise that resolves to a function',
-    );
+    throw new TypeError('execute must be a function or a promise that resolves to a function');
   }
   if (typeof execute === 'function') {
     const fn = execute;

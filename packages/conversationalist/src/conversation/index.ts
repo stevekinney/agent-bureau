@@ -3,10 +3,7 @@ export type { ConversationEnvironment } from '../environment';
 export { withEnvironment } from '../environment';
 
 // Create
-export {
-  createConversationHistory,
-  createConversationHistoryUnsafe,
-} from './create';
+export { createConversationHistory, createConversationHistoryUnsafe } from './create';
 
 // Append
 export {

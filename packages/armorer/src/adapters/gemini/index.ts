@@ -1,7 +1,7 @@
 import type { SerializedToolDefinition } from '../../core/serialization';
 import type { AnyToolDefinition } from '../../core/tool-definition';
 import type { ImportedToolConfiguration } from '../../create-toolbox';
-import type { ToolResultLike, ToolCallInput } from '../../types';
+import type { ToolCallInput, ToolResultLike } from '../../types';
 import { importToolSchema } from '../imported-schema';
 import { normalizeToSerializedDefinitions, type ToolRegistryLike } from '../shared';
 import type {
@@ -34,9 +34,7 @@ type GeminiToolCallSource =
   | null;
 
 export interface GeminiFormatToolResultsOptions {
-  toolNameByCallId?:
-    | Record<string, string>
-    | ((callId: string) => string | undefined);
+  toolNameByCallId?: Record<string, string> | ((callId: string) => string | undefined);
   defaultToolName?: string;
 }
 
@@ -80,9 +78,7 @@ export function fromGeminiTools(
   return declarations.map(convertFromGeminiDeclaration);
 }
 
-export function parseGeminiToolCalls(
-  parts: GeminiToolCallSource,
-): ToolCallInput[] {
+export function parseGeminiToolCalls(parts: GeminiToolCallSource): ToolCallInput[] {
   const resolvedParts = extractGeminiParts(parts);
   if (!resolvedParts || !Array.isArray(resolvedParts)) {
     return [];
@@ -243,7 +239,15 @@ function getStreamingPayload(result: ToolResultLike): AsyncIterable<unknown> | u
 }
 
 function normalizeAsyncContent(chunks: unknown[]): ToolResultLike['content'] {
-  if (chunks.every((chunk) => chunk === null || ['string', 'number', 'boolean'].includes(typeof chunk) || Array.isArray(chunk) || typeof chunk === 'object')) {
+  if (
+    chunks.every(
+      (chunk) =>
+        chunk === null ||
+        ['string', 'number', 'boolean'].includes(typeof chunk) ||
+        Array.isArray(chunk) ||
+        typeof chunk === 'object',
+    )
+  ) {
     return chunks as ToolResultLike['content'];
   }
   return chunks.map((chunk) => String(chunk)) as ToolResultLike['content'];
@@ -266,9 +270,7 @@ function normalizeGeminiDeclarations(
 ): GeminiFunctionDeclaration[] {
   if (Array.isArray(input)) {
     return input.flatMap((value) =>
-      isGeminiTool(value)
-        ? [...value.functionDeclarations]
-        : [value as GeminiFunctionDeclaration],
+      isGeminiTool(value) ? [...value.functionDeclarations] : [value as GeminiFunctionDeclaration],
     );
   }
 

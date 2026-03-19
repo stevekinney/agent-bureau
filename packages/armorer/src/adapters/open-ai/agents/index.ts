@@ -98,9 +98,7 @@ export async function toOpenAIAgentTools(
       strict: true,
       execute: async (args: unknown) => {
         const result = await tool.executeWith({ params: args ?? {} });
-        return options.formatResult
-          ? options.formatResult(result)
-          : formatToolResult(result);
+        return options.formatResult ? options.formatResult(result) : formatToolResult(result);
       },
     });
   });
@@ -241,8 +239,7 @@ function isDangerous(tool: Tool): boolean {
 
 function formatToolResult(result: ToolExecutionResult): unknown {
   if (result.outcome === 'error') {
-    const message =
-      result.error?.message ?? result.errorMessage ?? stringifyResult(result.content);
+    const message = result.error?.message ?? result.errorMessage ?? stringifyResult(result.content);
     throw new Error(message);
   }
 
@@ -265,8 +262,7 @@ function stringifyResult(value: unknown): string {
 let cachedOpenAIAgentsModule: OpenAIAgentsModule | undefined;
 let cachedOpenAIAgentsModulePromise: Promise<OpenAIAgentsModule> | undefined;
 const defaultOpenAIAgentsModuleLoader = () => import('@openai/agents');
-let openAIAgentsModuleLoader: () => Promise<OpenAIAgentsModule> =
-  defaultOpenAIAgentsModuleLoader;
+let openAIAgentsModuleLoader: () => Promise<OpenAIAgentsModule> = defaultOpenAIAgentsModuleLoader;
 
 async function loadOpenAIAgentsModule(): Promise<OpenAIAgentsModule> {
   if (cachedOpenAIAgentsModule) return cachedOpenAIAgentsModule;

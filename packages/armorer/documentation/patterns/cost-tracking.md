@@ -27,9 +27,7 @@ class CostTracker {
   }
 
   getCostByTool(toolName: string): number {
-    return this.entries
-      .filter((e) => e.toolName === toolName)
-      .reduce((sum, e) => sum + e.cost, 0);
+    return this.entries.filter((e) => e.toolName === toolName).reduce((sum, e) => sum + e.cost, 0);
   }
 
   getUsageStats(): Record<string, { calls: number; cost: number; units: number }> {

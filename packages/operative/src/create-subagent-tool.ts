@@ -1,5 +1,5 @@
-import { createTool } from 'armorer';
 import type { ToolContext } from 'armorer';
+import { createTool } from 'armorer';
 
 import type { CreateSubagentToolOptions, RunResult } from './types';
 
@@ -23,9 +23,10 @@ export function createSubagentTool(options: CreateSubagentToolOptions) {
     execute: async (params: unknown, context: ToolContext) => {
       const agentInput = mapInput(params);
       const signal = context.signal as AbortSignal | undefined;
-      const agentRunOptions = typeof agentInput === 'string'
-        ? { conversation: agentInput, signal }
-        : { ...agentInput, signal: signal ?? agentInput.signal };
+      const agentRunOptions =
+        typeof agentInput === 'string'
+          ? { conversation: agentInput, signal }
+          : { ...agentInput, signal: signal ?? agentInput.signal };
 
       const result = await agent.run(agentRunOptions);
 

@@ -48,9 +48,7 @@ describe('queryTools type inference', () => {
       schema: { keys: ['to'] },
     });
 
-    expectTypeOf<(typeof tools)[number]['name']>().toEqualTypeOf<
-      'send-email' | 'get-weather'
-    >();
+    expectTypeOf<(typeof tools)[number]['name']>().toEqualTypeOf<'send-email' | 'get-weather'>();
 
     const names = queryTools(toolbox, { select: 'name' });
     expectTypeOf(names).toEqualTypeOf<string[]>();

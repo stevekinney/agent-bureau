@@ -8,10 +8,7 @@ import {
   internalOpenAIAgentsTestUtilities,
   toOpenAIAgentTools,
 } from '../src/adapters/open-ai/agents';
-import {
-  formatOpenAIToolResults,
-  formatOpenAIToolResultsAsync,
-} from '../src/adapters/openai';
+import { formatOpenAIToolResults, formatOpenAIToolResultsAsync } from '../src/adapters/openai';
 import { defineTool, serializeToolDefinition } from '../src/core';
 import { normalizeIdentity } from '../src/core/identity';
 import { internalQueryPredicateTestUtilities } from '../src/core/query-predicates';
@@ -46,7 +43,9 @@ const { resolveRetryDelay, toError, wait } = internalRetryTestUtilities;
 
 describe('coverage edges', () => {
   it('covers toolbox policy and schema helper branches', async () => {
-    expect(toPolicyContextProvider(['invalid'] as unknown as Record<string, unknown>)).toBeUndefined();
+    expect(
+      toPolicyContextProvider(['invalid'] as unknown as Record<string, unknown>),
+    ).toBeUndefined();
     expect(toPolicyContextProvider({ scope: 'team' })?.({} as any)).toEqual({ scope: 'team' });
 
     const merged = mergePolicies(
@@ -135,15 +134,10 @@ describe('coverage edges', () => {
 
     const originalNow = Date.now;
     Date.now = () => 1_000;
-    expect(checkBudget({ maxDurationMs: 100 }, 900, 0)).toBe(
-      'Budget exceeded: max duration 100ms',
-    );
+    expect(checkBudget({ maxDurationMs: 100 }, 900, 0)).toBe('Budget exceeded: max duration 100ms');
     Date.now = originalNow;
 
-    const functionResolver = createLazyExecuteResolver(
-      async (params: unknown) => params,
-      'direct',
-    );
+    const functionResolver = createLazyExecuteResolver(async (params: unknown) => params, 'direct');
     expect(await functionResolver()).toBeInstanceOf(Function);
 
     expect(deriveRiskFromMetadata({ readOnly: true, dangerous: true })).toEqual({
@@ -155,10 +149,9 @@ describe('coverage edges', () => {
   it('covers toolbox fail-fast and registration edge paths', async () => {
     const failFastNotFound = createToolbox([], { errorMode: 'failFast' });
     await expect(
-      failFastNotFound.execute(
-        [{ id: 'call-missing', name: 'missing', arguments: {} }],
-        { errorMode: 'failFast' },
-      ),
+      failFastNotFound.execute([{ id: 'call-missing', name: 'missing', arguments: {} }], {
+        errorMode: 'failFast',
+      }),
     ).rejects.toThrow('Tool not found: missing');
 
     const budgeted = createToolbox(
@@ -178,10 +171,9 @@ describe('coverage edges', () => {
       },
     );
     await expect(
-      budgeted.execute(
-        [{ id: 'call-noop', name: 'noop', arguments: {} }],
-        { errorMode: 'failFast' },
-      ),
+      budgeted.execute([{ id: 'call-noop', name: 'noop', arguments: {} }], {
+        errorMode: 'failFast',
+      }),
     ).rejects.toThrow('Budget exceeded: max calls 0');
 
     expect(() =>
@@ -304,8 +296,7 @@ describe('coverage edges', () => {
   });
 
   it('covers internal create-tool stringification and error code helpers', () => {
-    const { defaultErrorCode, formatNonStringReason, stableStringify } =
-      internalToolTestUtilities;
+    const { defaultErrorCode, formatNonStringReason, stableStringify } = internalToolTestUtilities;
     const circular: Record<string, unknown> = {};
     circular.self = circular;
 
@@ -525,14 +516,16 @@ describe('coverage edges', () => {
   });
 
   it('covers createTool content normalization fallbacks', async () => {
-    const symbolResult = await (createTool({
-      name: 'symbol-result',
-      description: 'symbol result',
-      input: z.object({}),
-      async execute() {
-        return Symbol('result');
-      },
-    }) as any).executeWith({ params: {} });
+    const symbolResult = await (
+      createTool({
+        name: 'symbol-result',
+        description: 'symbol result',
+        input: z.object({}),
+        async execute() {
+          return Symbol('result');
+        },
+      }) as any
+    ).executeWith({ params: {} });
 
     expect(symbolResult.content).toBe('Symbol(result)');
 
@@ -541,14 +534,16 @@ describe('coverage edges', () => {
       throw new Error('cannot serialize error');
     };
 
-    const errorResult = await (createTool({
-      name: 'error-result',
-      description: 'error result',
-      input: z.object({}),
-      async execute() {
-        return throwingError;
-      },
-    }) as any).executeWith({ params: {} });
+    const errorResult = await (
+      createTool({
+        name: 'error-result',
+        description: 'error result',
+        input: z.object({}),
+        async execute() {
+          return throwingError;
+        },
+      }) as any
+    ).executeWith({ params: {} });
 
     expect(errorResult.content).toContain('"name":"Error"');
     expect(errorResult.content).toContain('"message":"explode"');
@@ -587,7 +582,13 @@ describe('coverage edges', () => {
     expect(resolveRetryDelay(2, 10, 'linear')).toBe(10);
     expect(resolveRetryDelay(3, 10, 'exponential', 25)).toBe(25);
     expect(toError({ ok: true }).message).toBe('{"ok":true}');
-    expect(toError({ toJSON() { throw new Error('bad'); } }).message).toBe('[object Object]');
+    expect(
+      toError({
+        toJSON() {
+          throw new Error('bad');
+        },
+      }).message,
+    ).toBe('[object Object]');
 
     const preAborted = new AbortController();
     preAborted.abort('stop');

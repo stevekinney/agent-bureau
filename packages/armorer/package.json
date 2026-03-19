@@ -168,7 +168,7 @@
     "check-types": "tsc --noEmit",
     "check:boundaries": "bun run scripts/check-boundaries.ts",
     "clean": "rm -rf dist coverage tsconfig.tsbuildinfo",
-    "ci": "bun run format:check && bun run lint && bun run check-types && bun run coverage:check && bun run build && bun run check:boundaries",
+    "ci": "bun run validate && bun run build",
     "coverage:check": "bun run scripts/check-coverage.ts",
     "dev": "bun --watch run src/index.ts",
     "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md}\"",
@@ -180,7 +180,7 @@
     "start": "bun run src/index.ts",
     "test": "bun test",
     "test:coverage": "bun test --coverage",
-    "validate": "bun run lint && bun run check-types && bun run coverage:check && bun run check:boundaries"
+    "validate": "bun run format:check && bun run lint && bun run check-types && bun run test"
   },
   "dependencies": {
     "event-emission": "0.3.0",

@@ -6,10 +6,7 @@ import { createTool } from '../src/create-tool';
 import { createToolbox } from '../src/create-toolbox';
 import { queryTools, reindexSearchIndex, searchTools } from '../src/registry';
 
-const makeTool = (
-  name: string,
-  overrides: Partial<Parameters<typeof createTool>[0]> = {},
-) =>
+const makeTool = (name: string, overrides: Partial<Parameters<typeof createTool>[0]> = {}) =>
   createTool({
     name,
     description: `${name} tool`,
@@ -63,10 +60,7 @@ describe('registry helpers', () => {
 
   it('supports AND query groups', () => {
     const toolbox = createToolbox();
-    toolbox.register(
-      makeTool('alpha', { tags: ['fast'] }),
-      makeTool('beta', { tags: ['slow'] }),
-    );
+    toolbox.register(makeTool('alpha', { tags: ['fast'] }), makeTool('beta', { tags: ['slow'] }));
 
     const results = queryTools(toolbox, {
       and: [{ tags: { any: ['fast'] } }, { text: 'alpha' }],
@@ -304,10 +298,7 @@ describe('registry helpers', () => {
       const resolved = registry.resolve({ name: 'gamma' });
       expect(resolved?.identity.version).toBe('1.0.0');
 
-      const resolvedAllow = registry.resolve(
-        { name: 'gamma' },
-        { allowDeprecated: true },
-      );
+      const resolvedAllow = registry.resolve({ name: 'gamma' }, { allowDeprecated: true });
       expect(resolvedAllow?.identity.version).toBe('2.0.0');
     });
 
@@ -329,9 +320,9 @@ describe('registry helpers', () => {
       const alpha = makeDefinition('alias', '1.0.0');
       const beta = makeDefinition('alias-two', '1.0.0');
       registry.register(alpha, { aliases: ['default:alias-key@1.0.0'] });
-      expect(() =>
-        registry.register(beta, { aliases: ['default:alias-key@1.0.0'] }),
-      ).toThrow('Alias already registered');
+      expect(() => registry.register(beta, { aliases: ['default:alias-key@1.0.0'] })).toThrow(
+        'Alias already registered',
+      );
     });
 
     it('reassigns aliases when override is true', () => {
@@ -416,9 +407,7 @@ describe('registry helpers', () => {
       registry.register(makeDefinition('numeric-pre', '1.0.0-alpha.1'));
       registry.register(makeDefinition('numeric-pre', '1.0.0-alpha.2'));
 
-      expect(registry.resolve({ name: 'numeric-pre' })?.identity.version).toBe(
-        '1.0.0-alpha.2',
-      );
+      expect(registry.resolve({ name: 'numeric-pre' })?.identity.version).toBe('1.0.0-alpha.2');
     });
 
     it('orders prerelease identifiers by length', () => {
@@ -426,9 +415,7 @@ describe('registry helpers', () => {
       registry.register(makeDefinition('length-pre', '1.0.0-alpha'));
       registry.register(makeDefinition('length-pre', '1.0.0-alpha.1'));
 
-      expect(registry.resolve({ name: 'length-pre' })?.identity.version).toBe(
-        '1.0.0-alpha',
-      );
+      expect(registry.resolve({ name: 'length-pre' })?.identity.version).toBe('1.0.0-alpha');
     });
 
     it('orders numeric prerelease identifiers before alphanumeric', () => {
@@ -436,9 +423,7 @@ describe('registry helpers', () => {
       registry.register(makeDefinition('mixed-pre', '1.0.0-alpha.1'));
       registry.register(makeDefinition('mixed-pre', '1.0.0-alpha.beta'));
 
-      expect(registry.resolve({ name: 'mixed-pre' })?.identity.version).toBe(
-        '1.0.0-alpha.1',
-      );
+      expect(registry.resolve({ name: 'mixed-pre' })?.identity.version).toBe('1.0.0-alpha.1');
     });
 
     it('orders alphanumeric prerelease identifiers lexicographically', () => {
@@ -446,9 +431,7 @@ describe('registry helpers', () => {
       registry.register(makeDefinition('lex-pre', '1.0.0-alpha.beta'));
       registry.register(makeDefinition('lex-pre', '1.0.0-alpha.gamma'));
 
-      expect(registry.resolve({ name: 'lex-pre' })?.identity.version).toBe(
-        '1.0.0-alpha.gamma',
-      );
+      expect(registry.resolve({ name: 'lex-pre' })?.identity.version).toBe('1.0.0-alpha.gamma');
     });
 
     it('orders shorter prerelease identifiers after longer ones when registered first', () => {
@@ -456,9 +439,7 @@ describe('registry helpers', () => {
       registry.register(makeDefinition('short-pre', '1.0.0-alpha.1'));
       registry.register(makeDefinition('short-pre', '1.0.0-alpha'));
 
-      expect(registry.resolve({ name: 'short-pre' })?.identity.version).toBe(
-        '1.0.0-alpha',
-      );
+      expect(registry.resolve({ name: 'short-pre' })?.identity.version).toBe('1.0.0-alpha');
     });
   });
 });

@@ -2,8 +2,8 @@ import type { ToolConfiguration } from '../is-tool';
 import {
   createTruncatingAsyncIterable,
   DEFAULT_MAX_CHARACTERS,
-  truncateToolResultContent,
   type ToolResultTruncationOptions,
+  truncateToolResultContent,
 } from '../truncation/index';
 
 /**

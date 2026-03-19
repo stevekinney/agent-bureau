@@ -88,9 +88,7 @@ describe('copyContent', () => {
   });
 
   it('handles readonly array', () => {
-    const input: readonly { type: 'text'; text: string }[] = [
-      { type: 'text', text: 'Test' },
-    ];
+    const input: readonly { type: 'text'; text: string }[] = [{ type: 'text', text: 'Test' }];
     const result = copyContent(input);
 
     expect(result).toEqual([{ type: 'text', text: 'Test' }]);

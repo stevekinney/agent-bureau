@@ -49,9 +49,7 @@ describe('integrity', () => {
     };
 
     const issues = validateConversationIntegrity(conv);
-    expect(issues.some((issue) => issue.code === 'integrity:duplicate-message-id')).toBe(
-      true,
-    );
+    expect(issues.some((issue) => issue.code === 'integrity:duplicate-message-id')).toBe(true);
   });
 
   it('reports messages not listed in ids', () => {
@@ -63,9 +61,7 @@ describe('integrity', () => {
     };
 
     const issues = validateConversationIntegrity(conv);
-    expect(issues.some((issue) => issue.code === 'integrity:unlisted-message')).toBe(
-      true,
-    );
+    expect(issues.some((issue) => issue.code === 'integrity:unlisted-message')).toBe(true);
   });
 
   it('reports orphaned tool results', () => {
@@ -81,9 +77,7 @@ describe('integrity', () => {
     };
 
     const issues = validateConversationIntegrity(conv);
-    expect(issues.some((issue) => issue.code === 'integrity:orphan-tool-result')).toBe(
-      true,
-    );
+    expect(issues.some((issue) => issue.code === 'integrity:orphan-tool-result')).toBe(true);
   });
 
   it('reports tool results that occur before their tool use', () => {
@@ -105,9 +99,7 @@ describe('integrity', () => {
     };
 
     const issues = validateConversationIntegrity(conv);
-    expect(
-      issues.some((issue) => issue.code === 'integrity:tool-result-before-call'),
-    ).toBe(true);
+    expect(issues.some((issue) => issue.code === 'integrity:tool-result-before-call')).toBe(true);
   });
 
   it('reports duplicate tool call ids', () => {
@@ -129,9 +121,7 @@ describe('integrity', () => {
     };
 
     const issues = validateConversationIntegrity(conv);
-    expect(issues.some((issue) => issue.code === 'integrity:duplicate-tool-call')).toBe(
-      true,
-    );
+    expect(issues.some((issue) => issue.code === 'integrity:duplicate-tool-call')).toBe(true);
   });
 
   it('throws an integrity error when violations exist', () => {

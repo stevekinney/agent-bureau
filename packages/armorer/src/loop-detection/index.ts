@@ -1,7 +1,7 @@
 export interface LoopDetectionOptions {
-  windowSize?: number;        // default 30
-  warningThreshold?: number;  // default 10
-  blockThreshold?: number;    // default 20
+  windowSize?: number; // default 30
+  warningThreshold?: number; // default 10
+  blockThreshold?: number; // default 20
 }
 
 export interface LoopDetectionState {
@@ -10,7 +10,13 @@ export interface LoopDetectionState {
 
 export type LoopDetectionResult =
   | { detected: false }
-  | { detected: true; level: 'warning' | 'blocked'; detector: 'simple-repeat' | 'ping-pong'; count: number; message: string };
+  | {
+      detected: true;
+      level: 'warning' | 'blocked';
+      detector: 'simple-repeat' | 'ping-pong';
+      count: number;
+      message: string;
+    };
 
 export function createLoopDetectionState(): LoopDetectionState {
   return { history: [] };
@@ -22,13 +28,19 @@ export function stableStringify(value: unknown): string {
   if (typeof value !== 'object') return JSON.stringify(value);
   if (Array.isArray(value)) return '[' + value.map(stableStringify).join(',') + ']';
   const sorted = Object.keys(value as Record<string, unknown>).sort();
-  return '{' + sorted.map(k => JSON.stringify(k) + ':' + stableStringify((value as Record<string, unknown>)[k])).join(',') + '}';
+  return (
+    '{' +
+    sorted
+      .map((k) => JSON.stringify(k) + ':' + stableStringify((value as Record<string, unknown>)[k]))
+      .join(',') +
+    '}'
+  );
 }
 
 export function hashToolCall(toolName: string, args: unknown): string {
   const hasher = new Bun.CryptoHasher('sha256');
   hasher.update(toolName + ':' + stableStringify(args));
-  return hasher.digest('hex') as string;
+  return hasher.digest('hex');
 }
 
 export function recordCall(
@@ -59,7 +71,7 @@ export function detectLoop(
   if (state.history.length === 0) return { detected: false };
 
   // Simple repeat: count occurrences of this exact hash in history
-  const count = state.history.filter(e => e.argsHash === hash).length;
+  const count = state.history.filter((e) => e.argsHash === hash).length;
 
   if (count >= blockThreshold) {
     return {
@@ -83,7 +95,8 @@ export function detectLoop(
   // Ping-pong: check if last N entries alternate between two distinct hashes
   if (state.history.length >= warningThreshold) {
     const recent = state.history.slice(-Math.max(warningThreshold, blockThreshold));
-    if (recent.length >= 4) { // Need at least A,B,A,B
+    if (recent.length >= 4) {
+      // Need at least A,B,A,B
       const hashA = recent[recent.length - 1]!.argsHash;
       const hashB = recent[recent.length - 2]!.argsHash;
       if (hashA !== hashB) {

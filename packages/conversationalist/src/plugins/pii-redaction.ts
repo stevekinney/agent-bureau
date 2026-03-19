@@ -38,9 +38,7 @@ export interface PIIRedactionOptions {
 /**
  * Creates a PII redaction function with custom rules.
  */
-export function createPIIRedaction(
-  options: PIIRedactionOptions = {},
-): (text: string) => string {
+export function createPIIRedaction(options: PIIRedactionOptions = {}): (text: string) => string {
   const rules = { ...DEFAULT_PII_RULES, ...(options.rules ?? {}) };
   const activeRules = Object.entries(rules).filter(
     ([name]) => !options.excludeRules?.includes(name),
@@ -60,9 +58,7 @@ export function createPIIRedaction(
 /**
  * Creates a PII redaction plugin with custom rules.
  */
-export function createPIIRedactionPlugin(
-  options: PIIRedactionOptions = {},
-): MessagePlugin {
+export function createPIIRedactionPlugin(options: PIIRedactionOptions = {}): MessagePlugin {
   const redact = createPIIRedaction(options);
 
   return (input: MessageInput): MessageInput => {

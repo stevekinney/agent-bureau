@@ -1,8 +1,8 @@
+import type { EmissionEvent } from 'event-emission';
+
 import type { ActiveRun } from '../create-run';
 import type { OperativeEvents, OperativeEventType } from '../events';
 import type { GenerateFunction, GenerateResponse, StepResult } from '../types';
-
-import type { EmissionEvent } from 'event-emission';
 
 /**
  * Creates a mock generate function that returns responses in sequence.
@@ -13,9 +13,7 @@ export function createMockGenerate(
   const calls: Parameters<GenerateFunction>[] = [];
   let index = 0;
 
-  const fn = async (
-    ...args: Parameters<GenerateFunction>
-  ): Promise<GenerateResponse> => {
+  const fn = async (...args: Parameters<GenerateFunction>): Promise<GenerateResponse> => {
     calls.push(args);
     const response = responses[index];
     if (!response) {
@@ -40,9 +38,7 @@ export function createMockGenerate(
  * Creates a mock generate function that returns a single response once,
  * then throws on subsequent calls.
  */
-export function createMockGenerateOnce(
-  response: GenerateResponse,
-): GenerateFunction {
+export function createMockGenerateOnce(response: GenerateResponse): GenerateFunction {
   let called = false;
   return async () => {
     if (called) {
@@ -87,12 +83,15 @@ export function createRunRecorder(activeRun: ActiveRun): RunRecorder {
   ];
 
   for (const type of eventTypes) {
-    activeRun.addEventListener(type, (event: EmissionEvent<OperativeEvents[typeof type], typeof type>) => {
-      events.push({ type, detail: event.detail });
-      if (type === 'step.completed') {
-        steps.push(event.detail as StepResult);
-      }
-    });
+    activeRun.addEventListener(
+      type,
+      (event: EmissionEvent<OperativeEvents[typeof type], typeof type>) => {
+        events.push({ type, detail: event.detail });
+        if (type === 'step.completed') {
+          steps.push(event.detail as StepResult);
+        }
+      },
+    );
   }
 
   return {

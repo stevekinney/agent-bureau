@@ -71,14 +71,7 @@ function formatPercentage(covered: number, total: number): string {
 rmSync(coverageDirectory, { recursive: true, force: true });
 
 const command = Bun.spawnSync(
-  [
-    'bun',
-    'test',
-    '--coverage',
-    '--coverage-reporter=lcov',
-    '--coverage-dir',
-    coverageDirectory,
-  ],
+  ['bun', 'test', '--coverage', '--coverage-reporter=lcov', '--coverage-dir', coverageDirectory],
   {
     cwd: packageRoot,
     stdout: 'inherit',
@@ -103,10 +96,7 @@ try {
 }
 
 const totals = await loadCoverageTotals();
-const functionPercentage = formatPercentage(
-  totals.functions.covered,
-  totals.functions.total,
-);
+const functionPercentage = formatPercentage(totals.functions.covered, totals.functions.total);
 const linePercentage = formatPercentage(totals.lines.covered, totals.lines.total);
 
 console.log(
@@ -120,7 +110,5 @@ if (totals.functions.covered !== totals.functions.total) {
 }
 
 if (totals.lines.covered !== totals.lines.total) {
-  throw new Error(
-    `Line coverage check failed: expected 100.00%, received ${linePercentage}%`,
-  );
+  throw new Error(`Line coverage check failed: expected 100.00%, received ${linePercentage}%`);
 }

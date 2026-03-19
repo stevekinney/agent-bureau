@@ -409,11 +409,7 @@ describe('inspect', () => {
 
       expect(inspection.counts.total).toBe(3);
       expect(inspection.counts.withTags).toBe(2);
-      expect(inspection.tools.map((t) => t.name).sort()).toEqual([
-        'greet',
-        'plain',
-        'sum',
-      ]);
+      expect(inspection.tools.map((t) => t.name).sort()).toEqual(['greet', 'plain', 'sum']);
     });
 
     it('supports summary detail level', () => {

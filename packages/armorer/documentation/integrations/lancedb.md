@@ -397,9 +397,7 @@ export async function createLanceDBToolRegistry(dbPath = LANCEDB_PATH) {
      * Get database statistics
      */
     async stats(): Promise<{ toolCount: number; recordCount: number }> {
-      const results = await table
-        .search(new Array(EMBEDDING_DIMENSIONS).fill(0))
-        .toArray();
+      const results = await table.search(new Array(EMBEDDING_DIMENSIONS).fill(0)).toArray();
       const toolNames = new Set(results.map((r) => r.toolName as string));
       return {
         toolCount: toolNames.size,

@@ -2,10 +2,7 @@ import { describe, expect, it } from 'bun:test';
 import { z } from 'zod';
 
 import { defineTool } from '../src/core';
-import {
-  createRegistry,
-  internalRegistryModuleTestUtilities,
-} from '../src/core/registry/registry';
+import { createRegistry, internalRegistryModuleTestUtilities } from '../src/core/registry/registry';
 
 describe('registry module coverage', () => {
   it('covers prerelease comparisons that are not reachable through normal registry sorting', () => {
@@ -58,8 +55,6 @@ describe('registry module coverage', () => {
       },
     } as any);
 
-    expect(registry.get('default:canonical-tool@1.0.0')?.id).toBe(
-      'default:canonical-tool@1.0.0',
-    );
+    expect(registry.get('default:canonical-tool@1.0.0')?.id).toBe('default:canonical-tool@1.0.0');
   });
 });

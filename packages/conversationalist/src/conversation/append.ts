@@ -53,16 +53,10 @@ function partitionAppendArgs(
  * Validates that tool results reference existing function calls.
  * Returns a new immutable conversation with the messages added.
  */
+export function appendMessages(conversation: Conversation, ...inputs: MessageInput[]): Conversation;
 export function appendMessages(
   conversation: Conversation,
-  ...inputs: MessageInput[]
-): Conversation;
-export function appendMessages(
-  conversation: Conversation,
-  ...inputsAndEnvironment: [
-    ...MessageInput[],
-    Partial<ConversationEnvironment> | undefined,
-  ]
+  ...inputsAndEnvironment: [...MessageInput[], Partial<ConversationEnvironment> | undefined]
 ): Conversation;
 export function appendMessages(
   conversation: Conversation,
@@ -106,11 +100,7 @@ const appendMessagesInternal = (
         input,
       );
 
-      if (
-        validate &&
-        processedInput.role === 'tool-result' &&
-        processedInput.toolResult
-      ) {
+      if (validate && processedInput.role === 'tool-result' && processedInput.toolResult) {
         assertToolReference(state.toolUses, processedInput.toolResult.callId);
       }
 
@@ -185,12 +175,8 @@ export function appendUserMessage(
   metadata?: Record<string, JSONValue>,
   environment?: Partial<ConversationEnvironment>,
 ): Conversation {
-  const resolvedEnvironment = isConversationEnvironmentParameter(metadata)
-    ? metadata
-    : environment;
-  const resolvedMetadata = isConversationEnvironmentParameter(metadata)
-    ? undefined
-    : metadata;
+  const resolvedEnvironment = isConversationEnvironmentParameter(metadata) ? metadata : environment;
+  const resolvedMetadata = isConversationEnvironmentParameter(metadata) ? undefined : metadata;
   return appendMessages(
     conversation,
     { role: 'user', content, metadata: resolvedMetadata },
@@ -207,12 +193,8 @@ export function appendAssistantMessage(
   metadata?: Record<string, JSONValue>,
   environment?: Partial<ConversationEnvironment>,
 ): Conversation {
-  const resolvedEnvironment = isConversationEnvironmentParameter(metadata)
-    ? metadata
-    : environment;
-  const resolvedMetadata = isConversationEnvironmentParameter(metadata)
-    ? undefined
-    : metadata;
+  const resolvedEnvironment = isConversationEnvironmentParameter(metadata) ? metadata : environment;
+  const resolvedMetadata = isConversationEnvironmentParameter(metadata) ? undefined : metadata;
   return appendMessages(
     conversation,
     { role: 'assistant', content, metadata: resolvedMetadata },
@@ -229,12 +211,8 @@ export function appendSystemMessage(
   metadata?: Record<string, JSONValue>,
   environment?: Partial<ConversationEnvironment>,
 ): Conversation {
-  const resolvedEnvironment = isConversationEnvironmentParameter(metadata)
-    ? metadata
-    : environment;
-  const resolvedMetadata = isConversationEnvironmentParameter(metadata)
-    ? undefined
-    : metadata;
+  const resolvedEnvironment = isConversationEnvironmentParameter(metadata) ? metadata : environment;
+  const resolvedMetadata = isConversationEnvironmentParameter(metadata) ? undefined : metadata;
   return appendMessages(
     conversation,
     { role: 'system', content, metadata: resolvedMetadata },

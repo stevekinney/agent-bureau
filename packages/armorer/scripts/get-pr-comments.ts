@@ -59,9 +59,7 @@ type PullRequestInfo = {
 function sh(cmd: string, args: string[]): string {
   const result = Bun.spawnSync([cmd, ...args], { stdout: 'pipe', stderr: 'pipe' });
   if (result.exitCode !== 0) {
-    throw new Error(
-      `Command failed: ${cmd} ${args.join(' ')}\n${result.stderr.toString()}`,
-    );
+    throw new Error(`Command failed: ${cmd} ${args.join(' ')}\n${result.stderr.toString()}`);
   }
   return result.stdout.toString().trim();
 }
@@ -125,9 +123,7 @@ async function githubRest<T>(
 
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(
-      `GitHub API error: ${response.status} ${response.statusText}\n${text}`,
-    );
+    throw new Error(`GitHub API error: ${response.status} ${response.statusText}\n${text}`);
   }
 
   return response.json();
@@ -150,9 +146,7 @@ async function githubGraphQL<T>(
 
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(
-      `GitHub GraphQL error: ${response.status} ${response.statusText}\n${text}`,
-    );
+    throw new Error(`GitHub GraphQL error: ${response.status} ${response.statusText}\n${text}`);
   }
 
   const json = (await response.json()) as {
@@ -161,9 +155,7 @@ async function githubGraphQL<T>(
   };
 
   if (json.errors?.length) {
-    throw new Error(
-      `GitHub GraphQL errors: ${json.errors.map((e) => e.message).join(', ')}`,
-    );
+    throw new Error(`GitHub GraphQL errors: ${json.errors.map((e) => e.message).join(', ')}`);
   }
 
   return json.data as T;
@@ -181,15 +173,11 @@ async function findOpenPrNumberForBranch(
 ): Promise<number | null> {
   const head = `${repo.owner}:${branch}`;
 
-  const prs = await githubRest<PullRequest[]>(
-    token,
-    `/repos/${repo.owner}/${repo.repo}/pulls`,
-    {
-      state: 'open',
-      head,
-      per_page: 100,
-    },
-  );
+  const prs = await githubRest<PullRequest[]>(token, `/repos/${repo.owner}/${repo.repo}/pulls`, {
+    state: 'open',
+    head,
+    per_page: 100,
+  });
 
   if (prs.length === 0) return null;
 
@@ -460,8 +448,7 @@ function formatChecksStatus(prInfo: PullRequestInfo): string {
         c.conclusion === 'TIMED_OUT',
     );
     if (failed.length > 0) {
-      result +=
-        '\n\n⚠️  CI IS FAILING - THIS MUST BE FIXED BEFORE ADDRESSING REVIEW COMMENTS ⚠️\n';
+      result += '\n\n⚠️  CI IS FAILING - THIS MUST BE FIXED BEFORE ADDRESSING REVIEW COMMENTS ⚠️\n';
       result += '\nFailed checks:\n';
       for (const check of failed) {
         result += `  • ${check.name}: ${check.conclusion ?? 'FAILED'}\n`;

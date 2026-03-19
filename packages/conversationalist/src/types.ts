@@ -11,6 +11,7 @@ import type {
   ToolResult as SharedToolResult,
   ToolResultInput as SharedToolResultInput,
 } from 'interoperability';
+
 import type { MultiModalContent } from './multi-modal';
 
 /**

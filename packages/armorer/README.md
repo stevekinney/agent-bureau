@@ -192,10 +192,7 @@ import { createMCP, toMcpTools, fromMcpTools } from 'armorer/mcp';
 OpenAI Agents SDK integration with tool gating:
 
 ```typescript
-import {
-  toOpenAIAgentTools,
-  createOpenAIToolGate,
-} from 'armorer/adapters/open-ai/agents';
+import { toOpenAIAgentTools, createOpenAIToolGate } from 'armorer/adapters/open-ai/agents';
 ```
 
 ### Other Utilities
@@ -447,7 +444,9 @@ const toolbox = createToolbox(tools, {
 });
 
 toolbox.addEventListener('name-resolved', (event) => {
-  console.log(`Resolved ${event.detail.originalName} → ${event.detail.resolvedName} (${event.detail.tier})`);
+  console.log(
+    `Resolved ${event.detail.originalName} → ${event.detail.resolvedName} (${event.detail.tier})`,
+  );
 });
 ```
 
@@ -459,7 +458,7 @@ Catch stuck models that repeat the same tool call in a loop:
 
 ```ts
 const toolbox = createToolbox(tools, {
-  loopDetection: true,  // or { warningThreshold: 5, blockThreshold: 10 }
+  loopDetection: true, // or { warningThreshold: 5, blockThreshold: 10 }
 });
 
 toolbox.addEventListener('loop-warning', (event) => {

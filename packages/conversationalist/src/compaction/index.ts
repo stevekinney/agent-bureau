@@ -1,13 +1,12 @@
-import { simpleTokenEstimator } from '../environment';
-import type { ConversationEnvironment } from '../environment';
-import { resolveConversationEnvironment } from '../environment';
+import { appendMessages } from '../conversation/append';
 import { getMessages } from '../conversation/index';
+import { ensureConversationSafe } from '../conversation/validation';
+import type { ConversationEnvironment } from '../environment';
+import { resolveConversationEnvironment, simpleTokenEstimator } from '../environment';
 import { isStreamingMessage } from '../streaming';
 import type { ConversationHistory, Message, MessageInput } from '../types';
 import { CURRENT_SCHEMA_VERSION } from '../types';
 import { toReadonly } from '../utilities';
-import { appendMessages } from '../conversation/append';
-import { ensureConversationSafe } from '../conversation/validation';
 
 export type Summarizer = (
   messages: Message[],
@@ -55,12 +54,10 @@ export function partitionMessages(
   const preserveSystem = options?.preserveSystemMessages ?? true;
   const preserveToolPairs = options?.preserveToolPairs ?? true;
 
-  const allMessages = getMessages(conversation) as Message[];
+  const allMessages = getMessages(conversation);
 
   // Separate system messages and streaming messages
-  const systemMessages = preserveSystem
-    ? allMessages.filter((m) => m.role === 'system')
-    : [];
+  const systemMessages = preserveSystem ? allMessages.filter((m) => m.role === 'system') : [];
   const streamingMessages = allMessages.filter(isStreamingMessage);
   const nonSystem = allMessages.filter((m) => m.role !== 'system');
 
@@ -121,10 +118,7 @@ export function chunkMessages(
       const nextIdx = i + 1;
       if (nextIdx < messages.length) {
         const next = messages[nextIdx]!;
-        if (
-          next.role === 'tool-result' &&
-          next.toolResult?.callId === message.toolCall.id
-        ) {
+        if (next.role === 'tool-result' && next.toolResult?.callId === message.toolCall.id) {
           pairedMessages = [message, next];
           pairedTokens = tokens + estimator(next);
           i++; // Skip the next message since we're including it
@@ -208,8 +202,7 @@ export async function compactConversation(
   }
 
   // Merge summaries
-  const summaryContent =
-    summaries.length === 1 ? summaries[0]! : summaries.join('\n\n---\n\n');
+  const summaryContent = summaries.length === 1 ? summaries[0]! : summaries.join('\n\n---\n\n');
 
   // Rebuild conversation: start fresh, add summary system message, then preserved messages
   let compacted: ConversationHistory = {

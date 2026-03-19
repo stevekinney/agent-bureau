@@ -64,12 +64,9 @@ export function when<
   whenFalse?: TElse,
 ): ComposedTool<
   InferToolInput<TTool>,
-  | InferToolOutput<TTool>
-  | (TElse extends AnyTool ? InferToolOutput<TElse> : InferToolInput<TTool>)
+  InferToolOutput<TTool> | (TElse extends AnyTool ? InferToolOutput<TElse> : InferToolInput<TTool>)
 > {
-  const name = whenFalse
-    ? `when(${whenTrue.name}, ${whenFalse.name})`
-    : `when(${whenTrue.name})`;
+  const name = whenFalse ? `when(${whenTrue.name}, ${whenFalse.name})` : `when(${whenTrue.name})`;
   const description = whenFalse
     ? `Conditional tool: ${whenTrue.name} or ${whenFalse.name}`
     : `Conditional tool: ${whenTrue.name}`;

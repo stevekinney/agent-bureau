@@ -1,6 +1,5 @@
-import { describe, expect, it } from 'bun:test';
-
 import { createToolbox } from 'armorer';
+import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
 
 import { noToolCalls } from '../src/conditions/predicates';
@@ -67,10 +66,7 @@ describe('createRun', () => {
   });
 
   it('once fires the listener only once', async () => {
-    const generate = createMockGenerate([
-      textResponse('first'),
-      textResponse('second'),
-    ]);
+    const generate = createMockGenerate([textResponse('first'), textResponse('second')]);
     const toolbox = createToolbox([]);
     const conversation = new Conversation();
 

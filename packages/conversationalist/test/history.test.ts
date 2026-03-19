@@ -251,9 +251,7 @@ describe('Conversation', () => {
       expect(history.current.title).toBe('Query');
       expect(history.toChatMessages()).toHaveLength(1);
       expect(conversationHistoryToMarkdown(history)).toContain('### User');
-      expect(conversationHistoryToMarkdown(history, { includeMetadata: true })).toContain(
-        '---',
-      );
+      expect(conversationHistoryToMarkdown(history, { includeMetadata: true })).toContain('---');
 
       const restored = conversationHistoryFromMarkdown(
         conversationHistoryToMarkdown(history, { includeMetadata: true }),

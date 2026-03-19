@@ -24,9 +24,7 @@ function accumulateUsage(accumulated: TokenUsage, step?: TokenUsage): void {
   accumulated.total += step.total;
 }
 
-function normalizeStopConditions(
-  conditions: RunOptions['stopWhen'],
-): StopCondition[] {
+function normalizeStopConditions(conditions: RunOptions['stopWhen']): StopCondition[] {
   if (!conditions) return [];
   return Array.isArray(conditions) ? conditions : [conditions];
 }
@@ -113,8 +111,8 @@ function defaultTokenEstimator(conversation: Conversation): number {
       total += Math.ceil(message.content.length / 4);
     } else if (Array.isArray(message.content)) {
       for (const part of message.content) {
-        if ('text' in part && typeof part.text === 'string') {
-          total += Math.ceil(part.text.length / 4);
+        if ('text' in part && typeof (part as { text: unknown }).text === 'string') {
+          total += Math.ceil((part as { text: string }).text.length / 4);
         }
       }
     }
@@ -122,10 +120,7 @@ function defaultTokenEstimator(conversation: Conversation): number {
   return total;
 }
 
-export async function executeLoop(
-  options: RunOptions,
-  emitter?: EventEmitter,
-): Promise<RunResult> {
+export async function executeLoop(options: RunOptions, emitter?: EventEmitter): Promise<RunResult> {
   const {
     generate,
     toolbox,
@@ -323,9 +318,7 @@ export async function executeLoop(
             { ...executeOptions, signal } as Parameters<typeof stepToolbox.execute>[1],
           );
 
-          results = Array.isArray(executeResult)
-            ? executeResult
-            : [executeResult];
+          results = Array.isArray(executeResult) ? executeResult : [executeResult];
         } catch (error) {
           emitter?.emit('run.error', { step, error });
           return {
@@ -420,7 +413,7 @@ export async function executeLoop(
       final: false,
     };
 
-    let shouldStop = await evaluateStopConditions(stopConditions, stepResult);
+    const shouldStop = await evaluateStopConditions(stopConditions, stepResult);
     stepResult.final = shouldStop;
 
     emitter?.emit('step.completed', stepResult);
@@ -477,7 +470,6 @@ export async function executeLoop(
           conversation.appendUserMessage(
             `Your response did not match the required schema. Error: ${String(validationError)}. Please try again with a valid response.`,
           );
-          shouldStop = false;
           stepResult.final = false;
           continue;
         }

@@ -315,9 +315,7 @@ export async function createChromaToolRegistry(options: ChromaToolRegistryOption
       }
 
       const whereClause =
-        whereConditions.length > 1
-          ? { $and: whereConditions }
-          : (whereConditions[0] ?? undefined);
+        whereConditions.length > 1 ? { $and: whereConditions } : (whereConditions[0] ?? undefined);
 
       const results = await collection.query({
         queryEmbeddings: [queryEmbedding],

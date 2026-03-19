@@ -14,10 +14,7 @@ import {
   createConversationHistoryUnsafe as createConversationUnsafe,
 } from '../src/conversation/index';
 import { isConversationEnvironmentParameter } from '../src/environment';
-import {
-  appendStreamingMessage,
-  isStreamingMessage,
-} from '../src/streaming';
+import { appendStreamingMessage, isStreamingMessage } from '../src/streaming';
 import type { ConversationHistory as Conversation, Message } from '../src/types';
 import { createMessage } from '../src/utilities';
 
@@ -284,12 +281,7 @@ describe('truncateFromPosition', () => {
       testEnvironment,
     );
 
-    const truncated = truncateFromPosition(
-      conv,
-      2,
-      { preserveToolPairs: true },
-      testEnvironment,
-    );
+    const truncated = truncateFromPosition(conv, 2, { preserveToolPairs: true }, testEnvironment);
     const messages = getOrderedMessages(truncated);
     expect(messages.some((m) => m.role === 'tool-call')).toBe(true);
     expect(messages.some((m) => m.role === 'tool-result')).toBe(true);
@@ -341,11 +333,7 @@ describe('estimateConversationTokens', () => {
 
   it('uses estimator from environment when only environment is provided', () => {
     let conv = createConversation({ id: 'test' }, testEnvironment);
-    conv = appendMessages(
-      conv,
-      { role: 'user', content: 'Hello world' },
-      testEnvironment,
-    );
+    conv = appendMessages(conv, { role: 'user', content: 'Hello world' }, testEnvironment);
 
     const tokens = estimateConversationTokens(conv, undefined, testEnvironment);
     expect(tokens).toBe(3); // 'Hello world' is 11 chars -> 3 tokens
@@ -410,9 +398,7 @@ describe('truncateToTokenLimit', () => {
       { estimateTokens: simpleTokenEstimator },
       testEnvironment,
     );
-    expect(getOrderedMessages(truncated).length).toBeLessThan(
-      getOrderedMessages(conv).length,
-    );
+    expect(getOrderedMessages(truncated).length).toBeLessThan(getOrderedMessages(conv).length);
   });
 
   it('preserves system messages', () => {
@@ -647,9 +633,7 @@ describe('truncateToTokenLimit', () => {
     );
 
     // Should preserve tokenUsage in truncated messages
-    const assistantMsg = getOrderedMessages(truncated).find(
-      (m) => m.role === 'assistant',
-    );
+    const assistantMsg = getOrderedMessages(truncated).find((m) => m.role === 'assistant');
     if (assistantMsg) {
       expect(assistantMsg.tokenUsage).toBeDefined();
     }
@@ -816,11 +800,7 @@ describe('streaming message protection', () => {
 
   it('truncateFromPosition preserves streaming messages below cutoff position', () => {
     let conv = createConversation({ id: 'test' }, testEnvironment);
-    conv = appendMessages(
-      conv,
-      { role: 'user', content: 'Message 0' },
-      testEnvironment,
-    );
+    conv = appendMessages(conv, { role: 'user', content: 'Message 0' }, testEnvironment);
     const { conversation: withStreaming } = appendStreamingMessage(
       conv,
       'assistant',
@@ -828,7 +808,7 @@ describe('streaming message protection', () => {
       testEnvironment,
     );
     // Add more messages after the streaming one
-    let updated = appendMessages(
+    const updated = appendMessages(
       withStreaming,
       { role: 'user', content: 'Message 2' },
       { role: 'assistant', content: 'Message 3' },

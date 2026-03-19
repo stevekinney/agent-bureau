@@ -1,7 +1,4 @@
-import {
-  type ConversationEnvironment,
-  resolveConversationEnvironment,
-} from '../environment';
+import { type ConversationEnvironment, resolveConversationEnvironment } from '../environment';
 import type { ConversationHistory, ConversationStatus, JSONValue } from '../types';
 import { CURRENT_SCHEMA_VERSION } from '../types';
 import { toReadonly } from '../utilities';

@@ -81,15 +81,11 @@ describe('textMatches', () => {
 
   it('supports field-restricted text queries', () => {
     expect(textMatches({ query: 'alpha', fields: ['name'] })(baseTool as any)).toBe(true);
-    expect(textMatches({ query: 'handles', fields: ['tags'] })(baseTool as any)).toBe(
-      false,
-    );
+    expect(textMatches({ query: 'handles', fields: ['tags'] })(baseTool as any)).toBe(false);
   });
 
   it('tokenizes queries for camelCase schema keys', () => {
-    expect(
-      textMatches({ query: 'foo id', fields: ['schemaKeys'] })(baseTool as any),
-    ).toBe(true);
+    expect(textMatches({ query: 'foo id', fields: ['schemaKeys'] })(baseTool as any)).toBe(true);
   });
 
   it('matches text without diacritics', () => {
@@ -97,18 +93,18 @@ describe('textMatches', () => {
       ...baseTool,
       description: 'Cafe \u00e9lan',
     };
-    expect(
-      textMatches({ query: 'cafe', fields: ['description'] })(diacriticsTool as any),
-    ).toBe(true);
+    expect(textMatches({ query: 'cafe', fields: ['description'] })(diacriticsTool as any)).toBe(
+      true,
+    );
   });
 
   it('supports fuzzy matching with thresholds', () => {
-    expect(
-      textMatches({ query: 'alpa', mode: 'fuzzy', threshold: 0.6 })(baseTool as any),
-    ).toBe(true);
-    expect(
-      textMatches({ query: 'alpa', mode: 'fuzzy', threshold: 0.95 })(baseTool as any),
-    ).toBe(false);
+    expect(textMatches({ query: 'alpa', mode: 'fuzzy', threshold: 0.6 })(baseTool as any)).toBe(
+      true,
+    );
+    expect(textMatches({ query: 'alpa', mode: 'fuzzy', threshold: 0.95 })(baseTool as any)).toBe(
+      false,
+    );
   });
 
   it('supports exact matching for name and tag tokens', () => {

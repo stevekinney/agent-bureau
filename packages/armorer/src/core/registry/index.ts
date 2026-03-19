@@ -41,7 +41,6 @@ export type {
   VersionSelector,
 } from './registry';
 export { createRegistry } from './registry';
-
 export type { ResolutionResult, ResolutionTier, ResolveNameOptions } from './resolve-name';
 export { buildNameCandidates, normalizeName, resolveName } from './resolve-name';
 
@@ -77,9 +76,7 @@ export type MetadataFilter<TMetadataKey extends string = string> = {
   /** Require metadata values to equal these fields. */
   eq?: Partial<Record<TMetadataKey, unknown>>;
   /** Require metadata values to contain these substrings or values. */
-  contains?: Partial<
-    Record<TMetadataKey, MetadataPrimitive | readonly MetadataPrimitive[]>
-  >;
+  contains?: Partial<Record<TMetadataKey, MetadataPrimitive | readonly MetadataPrimitive[]>>;
   /** Require metadata values to start with these strings. */
   startsWith?: Partial<Record<TMetadataKey, string>>;
   /** Require metadata numeric values to fall within ranges. */
@@ -188,8 +185,8 @@ export type ToolQueryOptions = {
   includeSchema?: boolean;
 };
 
-export type ToolQuery<TTool extends ToolDefinition = ToolDefinition> =
-  ToolQueryCriteria<TTool> & ToolQueryOptions;
+export type ToolQuery<TTool extends ToolDefinition = ToolDefinition> = ToolQueryCriteria<TTool> &
+  ToolQueryOptions;
 
 export type QueryResult<TTool extends ToolDefinition = ToolDefinition> = TTool[];
 
@@ -250,8 +247,7 @@ export type ToolRanker<TTool extends ToolDefinition = ToolDefinition> = (
 ) => ToolRankResult | number | null | undefined;
 
 /** Alias for ToolRanker for clarity when used with searchTools. */
-export type ToolSearchRanker<TTool extends ToolDefinition = ToolDefinition> =
-  ToolRanker<TTool>;
+export type ToolSearchRanker<TTool extends ToolDefinition = ToolDefinition> = ToolRanker<TTool>;
 
 export type ToolTieBreaker<TTool extends ToolDefinition = ToolDefinition> =
   | 'name'
@@ -384,15 +380,10 @@ export function queryTools<TTool extends ToolDefinition>(
   input: ToolQueryInput<TTool>,
   criteria: ToolQuery<TTool> & { select: 'summary' },
 ): ToolSummary<TTool>[];
-export function queryTools(
-  input: ToolQueryInput,
-  criteria?: ToolQuery,
-): QuerySelectionResult {
+export function queryTools(input: ToolQueryInput, criteria?: ToolQuery): QuerySelectionResult {
   const resolved = resolveTools(input);
 
-  const cacheKey = resolved.registry
-    ? createQueryCacheKey(criteria, resolved.tools.length)
-    : null;
+  const cacheKey = resolved.registry ? createQueryCacheKey(criteria, resolved.tools.length) : null;
   const shouldCache = cacheKey && !cacheKey.startsWith('no-cache:');
 
   if (shouldCache) {
@@ -677,9 +668,7 @@ function buildToolLookup(tool: ToolDefinition): ToolLookupCache {
     .filter((tag): tag is string => Boolean(tag))
     .map((tag) => String(tag));
   const tagsLower = tags.map((tag) => tag.toLowerCase());
-  const schemaKeysLower = getSchemaKeys(getToolSchema(tool)).map((key) =>
-    key.toLowerCase(),
-  );
+  const schemaKeysLower = getSchemaKeys(getToolSchema(tool)).map((key) => key.toLowerCase());
   return {
     tags,
     tagsLower,
@@ -947,11 +936,7 @@ function removeToolFromTextIndex(
   tool: ToolDefinition,
   index: TextSearchIndex,
 ): void {
-  removeFieldTokens(
-    textIndex.fields.name,
-    [index.name, ...(index.nameTokens ?? [])],
-    tool,
-  );
+  removeFieldTokens(textIndex.fields.name, [index.name, ...(index.nameTokens ?? [])], tool);
   removeFieldTokens(
     textIndex.fields.description,
     [index.description, ...(index.descriptionTokens ?? [])],
@@ -1044,10 +1029,7 @@ function buildEmbeddingIndex(tools: readonly ToolDefinition[]): EmbeddingIndex {
   return index;
 }
 
-function getEmbeddingBucketIndex(
-  index: EmbeddingIndex,
-  dimension: number,
-): EmbeddingBucketIndex {
+function getEmbeddingBucketIndex(index: EmbeddingIndex, dimension: number): EmbeddingBucketIndex {
   let bucketIndex = index.dimensions.get(dimension);
   if (!bucketIndex) {
     bucketIndex = createEmbeddingBucketIndex(dimension);
@@ -1149,10 +1131,7 @@ function removeEmbeddingBuckets(
   }
 }
 
-function getEmbeddingSignatureBits(
-  projections: number[][],
-  vector: EmbeddingVector,
-): number[] {
+function getEmbeddingSignatureBits(projections: number[][], vector: EmbeddingVector): number[] {
   if (!projections.length || vector.length !== projections[0]?.length) {
     return [];
   }
@@ -1330,17 +1309,13 @@ function selectCandidateTools(
 
   const schemaCandidates = collectSchemaCandidates(index.schemaKeyIndex, schemaKeys);
   if (schemaCandidates) {
-    candidateSet = candidateSet
-      ? intersectSets(candidateSet, schemaCandidates)
-      : schemaCandidates;
+    candidateSet = candidateSet ? intersectSets(candidateSet, schemaCandidates) : schemaCandidates;
   }
 
   if (normalizedText && !embedder) {
     const textCandidates = selectTextCandidates(getTextIndex(), normalizedText);
     if (textCandidates) {
-      candidateSet = candidateSet
-        ? intersectSets(candidateSet, textCandidates)
-        : textCandidates;
+      candidateSet = candidateSet ? intersectSets(candidateSet, textCandidates) : textCandidates;
     }
   }
 
@@ -1727,9 +1702,7 @@ function buildPredicates(
   }
 
   if (criteria.deprecated !== undefined) {
-    predicates.push(
-      (tool) => (tool.lifecycle?.deprecated === true) === criteria.deprecated,
-    );
+    predicates.push((tool) => (tool.lifecycle?.deprecated === true) === criteria.deprecated);
   }
 
   if (criteria.risk) {
@@ -1803,9 +1776,7 @@ function buildTextPredicate(
   const getIndex = options?.getIndex ?? buildTextSearchIndex;
   const embedder = options?.embedder;
   const queryEmbedding =
-    embedder && normalized.raw
-      ? getQueryEmbeddingInfo(embedder, normalized.raw)
-      : undefined;
+    embedder && normalized.raw ? getQueryEmbeddingInfo(embedder, normalized.raw) : undefined;
 
   return (tool) => {
     const textScore = scoreTextMatchFromIndex(getIndex(tool), normalized);
@@ -2040,19 +2011,14 @@ function buildToolMatch(
         matches.fields = mergeUnique(matches.fields, textScore.fields);
         matches.tags = mergeUnique(matches.tags, textScore.tagMatches);
         matches.schemaKeys = mergeUnique(matches.schemaKeys, textScore.schemaMatches);
-        matches.metadataKeys = mergeUnique(
-          matches.metadataKeys,
-          textScore.metadataMatches,
-        );
+        matches.metadataKeys = mergeUnique(matches.metadataKeys, textScore.metadataMatches);
       }
     }
     if (queryEmbedding && (!embeddingCandidates || embeddingCandidates.has(tool))) {
       const embeddingScore = scoreEmbeddingMatch(tool, normalizedText, queryEmbedding);
       if (embeddingScore) {
         score += embeddingScore.score * textWeight;
-        reasons.push(
-          `embedding:${embeddingScore.field}:${embeddingScore.similarity.toFixed(2)}`,
-        );
+        reasons.push(`embedding:${embeddingScore.field}:${embeddingScore.similarity.toFixed(2)}`);
         if (explain) {
           matches.embedding = {
             field: embeddingScore.field,
@@ -2118,11 +2084,7 @@ function createMatchComparator(
   return (a, b) => b.score - a.score;
 }
 
-function selectTopMatches<T>(
-  items: T[],
-  limit: number,
-  compare: (a: T, b: T) => number,
-): T[] {
+function selectTopMatches<T>(items: T[], limit: number, compare: (a: T, b: T) => number): T[] {
   return items.sort(compare).slice(0, limit);
 }
 
@@ -2240,10 +2202,7 @@ function isToolRegistry(value: unknown): value is ToolRegistryLike {
     return false;
   }
   const candidate = value as Record<string, unknown>;
-  return (
-    typeof candidate['tools'] === 'function' &&
-    typeof candidate['register'] === 'function'
-  );
+  return typeof candidate['tools'] === 'function' && typeof candidate['register'] === 'function';
 }
 
 function emitQuery(
@@ -2309,9 +2268,7 @@ function buildTagSet(
   return set;
 }
 
-function normalizeTagWeights(
-  weights: Record<string, number> | undefined,
-): Record<string, number> {
+function normalizeTagWeights(weights: Record<string, number> | undefined): Record<string, number> {
   const result: Record<string, number> = {};
   if (!weights) return result;
   for (const [key, value] of Object.entries(weights)) {
@@ -2363,9 +2320,7 @@ function normalizeFilterValues(value: string | readonly string[]): string[] {
 }
 
 function normalizeSchemaKeys(keys: readonly string[]): string[] {
-  return keys
-    .map((key) => key.toLowerCase())
-    .filter((key): key is string => Boolean(key));
+  return keys.map((key) => key.toLowerCase()).filter((key): key is string => Boolean(key));
 }
 
 function riskMatches(risk: ToolRisk | undefined, filter: RiskFilter): boolean {
@@ -2382,10 +2337,7 @@ function riskMatches(risk: ToolRisk | undefined, filter: RiskFilter): boolean {
   return true;
 }
 
-function metadataHasKeys(
-  metadata: JsonObject | undefined,
-  keys: readonly string[],
-): boolean {
+function metadataHasKeys(metadata: JsonObject | undefined, keys: readonly string[]): boolean {
   if (!metadata) return false;
   for (const key of keys) {
     if (!(key in metadata)) return false;
@@ -2393,10 +2345,7 @@ function metadataHasKeys(
   return true;
 }
 
-function metadataEquals(
-  metadata: JsonObject | undefined,
-  eq: Record<string, unknown>,
-): boolean {
+function metadataEquals(metadata: JsonObject | undefined, eq: Record<string, unknown>): boolean {
   if (!metadata) return false;
   for (const [key, value] of Object.entries(eq)) {
     if (metadata[key] !== value) return false;
@@ -2521,17 +2470,14 @@ function isIterable(value: unknown): value is Iterable<unknown> {
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return (
-    typeof value === 'object' &&
-    value !== null &&
-    Object.getPrototypeOf(value) === Object.prototype
+    typeof value === 'object' && value !== null && Object.getPrototypeOf(value) === Object.prototype
   );
 }
 
 function mergeMatchDetails(target: ToolMatchDetails, source: ToolMatchDetails): void {
   if (source.fields) target.fields = mergeUnique(target.fields, source.fields);
   if (source.tags) target.tags = mergeUnique(target.tags, source.tags);
-  if (source.schemaKeys)
-    target.schemaKeys = mergeUnique(target.schemaKeys, source.schemaKeys);
+  if (source.schemaKeys) target.schemaKeys = mergeUnique(target.schemaKeys, source.schemaKeys);
   if (source.metadataKeys)
     target.metadataKeys = mergeUnique(target.metadataKeys, source.metadataKeys);
   if (source.embedding) target.embedding = source.embedding;

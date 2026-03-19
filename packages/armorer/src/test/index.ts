@@ -1,3 +1,4 @@
+import type { EmissionEvent } from 'event-emission';
 import { z } from 'zod';
 
 import { createTool } from '../create-tool';
@@ -9,7 +10,6 @@ import {
 } from '../create-toolbox';
 import type { Tool, ToolCallWithArguments } from '../is-tool';
 import type { ToolExecutionResult } from '../types';
-import type { EmissionEvent } from 'event-emission';
 
 type AnyToolbox = Toolbox<any>;
 

@@ -23,10 +23,7 @@ export function parallel<
   a: A,
   b: B,
   c: C,
-): ComposedTool<
-  InferToolInput<A>,
-  [InferToolOutput<A>, InferToolOutput<B>, InferToolOutput<C>]
->;
+): ComposedTool<InferToolInput<A>, [InferToolOutput<A>, InferToolOutput<B>, InferToolOutput<C>]>;
 
 /** Parallelize 4 tools */
 export function parallel<

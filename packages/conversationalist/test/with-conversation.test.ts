@@ -53,10 +53,7 @@ describe('withConversation', () => {
   test('exposes system message helpers on the draft', async () => {
     const base = createConversation({ title: 'Systems' });
     const result = await withConversation(base, (c) => {
-      c.appendMessages(
-        { role: 'system', content: 'First' },
-        { role: 'system', content: 'Second' },
-      )
+      c.appendMessages({ role: 'system', content: 'First' }, { role: 'system', content: 'Second' })
         .prependSystemMessage('Intro')
         .replaceSystemMessage('Intro v2')
         .collapseSystemMessages();

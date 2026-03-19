@@ -1,14 +1,13 @@
+import { createTool } from 'armorer';
+import { createTestToolbox } from 'armorer/test';
 import { describe, expect, it } from 'bun:test';
-import { z } from 'zod';
-
-import { createTool, createToolbox } from 'armorer';
-import { createMockTool, createTestToolbox } from 'armorer/test';
 import { Conversation } from 'conversationalist';
+import { z } from 'zod';
 
 import { noToolCalls } from '../src/conditions/predicates';
 import { run } from '../src/run';
 import { createMockGenerate } from '../src/test/index';
-import type { GenerateResponse, StepResult } from '../src/types';
+import type { GenerateResponse } from '../src/types';
 
 const tool = createTool({
   name: 'get_weather',

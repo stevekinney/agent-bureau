@@ -20,11 +20,7 @@ describe('package-local structural interop', () => {
     });
 
     let conversation = createConversationHistory({ id: 'structural-loop' }, environment);
-    conversation = appendUserMessage(
-      conversation,
-      'What is the weather in Denver?',
-      environment,
-    );
+    conversation = appendUserMessage(conversation, 'What is the weather in Denver?', environment);
     conversation = appendToolCalls(
       conversation,
       [
@@ -104,11 +100,7 @@ describe('package-local structural interop', () => {
     });
 
     let conversation = createConversationHistory({ id: 'stream-loop' }, environment);
-    conversation = appendUserMessage(
-      conversation,
-      'Stream the weather for Denver.',
-      environment,
-    );
+    conversation = appendUserMessage(conversation, 'Stream the weather for Denver.', environment);
     conversation = appendToolCalls(
       conversation,
       [

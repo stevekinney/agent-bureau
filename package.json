@@ -3,14 +3,18 @@
   "private": true,
   "scripts": {
     "build": "turbo run build",
+    "check-types": "turbo run check-types",
     "dev": "turbo run dev",
+    "format": "prettier --write \"**/*.{ts,tsx,md}\"",
+    "format:check": "turbo run format:check",
     "integration": "turbo run integration --filter=integration",
     "lint": "turbo run lint",
     "test": "turbo run test",
-    "format": "prettier --write \"**/*.{ts,tsx,md}\"",
-    "check-types": "turbo run check-types"
+    "prepare": "lefthook install",
+    "validate": "turbo run format:check lint check-types test"
   },
   "devDependencies": {
+    "lefthook": "^2.1.4",
     "prettier": "^3.7.4",
     "turbo": "^2.8.17",
     "typescript": "5.9.2"

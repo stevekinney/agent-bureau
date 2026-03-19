@@ -126,11 +126,7 @@ describe('OpenAI Adapter', () => {
       // Tool call message
       const toolCallMsg = messages[1];
       expect(toolCallMsg?.role).toBe('assistant');
-      if (
-        !toolCallMsg ||
-        toolCallMsg.role !== 'assistant' ||
-        !('tool_calls' in toolCallMsg)
-      ) {
+      if (!toolCallMsg || toolCallMsg.role !== 'assistant' || !('tool_calls' in toolCallMsg)) {
         throw new Error('Expected tool call message with tool_calls');
       }
       expect(toolCallMsg.content).toBeNull();
@@ -141,11 +137,7 @@ describe('OpenAI Adapter', () => {
       // Tool result message
       const toolResultMsg = messages[2];
       expect(toolResultMsg?.role).toBe('tool');
-      if (
-        !toolResultMsg ||
-        toolResultMsg.role !== 'tool' ||
-        !('tool_call_id' in toolResultMsg)
-      ) {
+      if (!toolResultMsg || toolResultMsg.role !== 'tool' || !('tool_call_id' in toolResultMsg)) {
         throw new Error('Expected tool result message with tool_call_id');
       }
       expect(toolResultMsg.tool_call_id).toBe('call-123');
@@ -525,9 +517,7 @@ describe('Anthropic Adapter', () => {
       const { messages } = toAnthropicMessages(conv);
 
       // Find the assistant message with tool_use
-      const assistantMsg = messages.find(
-        (m) => m.role === 'assistant' && Array.isArray(m.content),
-      );
+      const assistantMsg = messages.find((m) => m.role === 'assistant' && Array.isArray(m.content));
       expect(assistantMsg).toBeDefined();
 
       const toolUseBlock = (assistantMsg?.content as any[])?.find(
@@ -642,9 +632,7 @@ describe('Anthropic Adapter', () => {
           Array.isArray(m.content) &&
           (m.content as any[]).some((b: any) => b.type === 'tool_result'),
       );
-      const toolResult = (userMsg?.content as any[]).find(
-        (b: any) => b.type === 'tool_result',
-      );
+      const toolResult = (userMsg?.content as any[]).find((b: any) => b.type === 'tool_result');
       expect(toolResult.is_error).toBe(true);
     });
 
@@ -705,9 +693,7 @@ describe('Anthropic Adapter', () => {
 
       const { messages } = toAnthropicMessages(conv);
       const assistantMsg = messages.find((m) => m.role === 'assistant');
-      const toolUse = (assistantMsg?.content as any[]).find(
-        (b: any) => b.type === 'tool_use',
-      );
+      const toolUse = (assistantMsg?.content as any[]).find((b: any) => b.type === 'tool_use');
       expect(toolUse.input).toEqual({ key: 'value' });
     });
 
@@ -740,9 +726,7 @@ describe('Anthropic Adapter', () => {
 
       const { messages } = toAnthropicMessages(conv);
       const assistantMsg = messages.find((m) => m.role === 'assistant');
-      const toolUse = (assistantMsg?.content as any[]).find(
-        (b: any) => b.type === 'tool_use',
-      );
+      const toolUse = (assistantMsg?.content as any[]).find((b: any) => b.type === 'tool_use');
       expect(toolUse.input).toBe('{invalid');
     });
 
@@ -808,9 +792,7 @@ describe('Gemini Adapter', () => {
       );
       expect(modelContent).toBeDefined();
 
-      const functionCallPart = modelContent?.parts.find(
-        (p: any) => 'functionCall' in p,
-      ) as any;
+      const functionCallPart = modelContent?.parts.find((p: any) => 'functionCall' in p) as any;
       expect(functionCallPart.functionCall.name).toBe('get_weather');
     });
 
@@ -823,9 +805,7 @@ describe('Gemini Adapter', () => {
       );
       expect(userContent).toBeDefined();
 
-      const responsePart = userContent?.parts.find(
-        (p: any) => 'functionResponse' in p,
-      ) as any;
+      const responsePart = userContent?.parts.find((p: any) => 'functionResponse' in p) as any;
       expect(responsePart.functionResponse.name).toBe('get_weather');
     });
 
@@ -945,9 +925,7 @@ describe('Gemini Adapter', () => {
       const modelContent = contents.find(
         (c) => c.role === 'model' && c.parts.some((p: any) => 'functionCall' in p),
       );
-      const functionCallPart = modelContent?.parts.find(
-        (p: any) => 'functionCall' in p,
-      ) as any;
+      const functionCallPart = modelContent?.parts.find((p: any) => 'functionCall' in p) as any;
       expect(functionCallPart.functionCall.args).toEqual({ _raw: 'invalid json {' });
     });
 
@@ -982,9 +960,7 @@ describe('Gemini Adapter', () => {
       const modelContent = contents.find(
         (c) => c.role === 'model' && c.parts.some((p: any) => 'functionCall' in p),
       );
-      const functionCallPart = modelContent?.parts.find(
-        (p: any) => 'functionCall' in p,
-      ) as any;
+      const functionCallPart = modelContent?.parts.find((p: any) => 'functionCall' in p) as any;
       expect(functionCallPart.functionCall.args).toEqual({ _value: true });
     });
 
@@ -1005,9 +981,7 @@ describe('Gemini Adapter', () => {
       const modelContent = contents.find(
         (c) => c.role === 'model' && c.parts.some((p: any) => 'functionCall' in p),
       );
-      const functionCallPart = modelContent?.parts.find(
-        (p: any) => 'functionCall' in p,
-      ) as any;
+      const functionCallPart = modelContent?.parts.find((p: any) => 'functionCall' in p) as any;
       expect(functionCallPart.functionCall.args).toEqual({ key: 'value' });
     });
 
@@ -1028,9 +1002,7 @@ describe('Gemini Adapter', () => {
       const modelContent = contents.find(
         (c) => c.role === 'model' && c.parts.some((p: any) => 'functionCall' in p),
       );
-      const functionCallPart = modelContent?.parts.find(
-        (p: any) => 'functionCall' in p,
-      ) as any;
+      const functionCallPart = modelContent?.parts.find((p: any) => 'functionCall' in p) as any;
       expect(functionCallPart.functionCall.args).toEqual({ _value: 42 });
     });
 
@@ -1071,9 +1043,7 @@ describe('Gemini Adapter', () => {
       const userContent = contents.find(
         (c) => c.role === 'user' && c.parts.some((p: any) => 'functionResponse' in p),
       );
-      const responsePart = userContent?.parts.find(
-        (p: any) => 'functionResponse' in p,
-      ) as any;
+      const responsePart = userContent?.parts.find((p: any) => 'functionResponse' in p) as any;
       expect(responsePart.functionResponse.response).toEqual({ result: 'ok' });
     });
 
@@ -1111,8 +1081,7 @@ describe('Gemini Adapter', () => {
       const { contents } = toGeminiMessages(conv);
       const userContent = contents.find(
         (content) =>
-          content.role === 'user' &&
-          content.parts.some((part: any) => 'functionResponse' in part),
+          content.role === 'user' && content.parts.some((part: any) => 'functionResponse' in part),
       );
       const responsePart = userContent?.parts.find(
         (part: any) => 'functionResponse' in part,
@@ -1177,12 +1146,7 @@ describe('Streaming message protection in adapters', () => {
       { role: 'assistant', content: 'Hi there!' },
       testEnvironment,
     );
-    const { conversation } = appendStreamingMessage(
-      conv,
-      'assistant',
-      undefined,
-      testEnvironment,
-    );
+    const { conversation } = appendStreamingMessage(conv, 'assistant', undefined, testEnvironment);
     return conversation;
   }
 

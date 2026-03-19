@@ -44,9 +44,7 @@ export function prependSystemMessage(
   const resolvedEnvironment = resolveConversationEnvironment(
     isConversationEnvironmentParameter(metadata) ? metadata : environment,
   );
-  const resolvedMetadata = isConversationEnvironmentParameter(metadata)
-    ? undefined
-    : metadata;
+  const resolvedMetadata = isConversationEnvironmentParameter(metadata) ? undefined : metadata;
   const now = resolvedEnvironment.now();
 
   const newMessage: Message = createMessage({
@@ -101,20 +99,13 @@ export function replaceSystemMessage(
   const resolvedEnvironment = resolveConversationEnvironment(
     isConversationEnvironmentParameter(metadata) ? metadata : environment,
   );
-  const resolvedMetadata = isConversationEnvironmentParameter(metadata)
-    ? undefined
-    : metadata;
+  const resolvedMetadata = isConversationEnvironmentParameter(metadata) ? undefined : metadata;
   const now = resolvedEnvironment.now();
   const ordered = getOrderedMessages(conversation);
   const firstSystemIndex = ordered.findIndex((m) => m.role === 'system');
 
   if (firstSystemIndex === -1) {
-    return prependSystemMessage(
-      conversation,
-      content,
-      resolvedMetadata,
-      resolvedEnvironment,
-    );
+    return prependSystemMessage(conversation, content, resolvedMetadata, resolvedEnvironment);
   }
 
   const original = ordered[firstSystemIndex]!;
@@ -163,9 +154,7 @@ export function collapseSystemMessages(
       const contentStr =
         typeof message.content === 'string'
           ? message.content
-          : message.content
-              .map((part) => (part.type === 'text' ? part.text : ''))
-              .join('');
+          : message.content.map((part) => (part.type === 'text' ? part.text : '')).join('');
 
       if (!contentStr || state.seen.has(contentStr)) {
         return state;

@@ -86,9 +86,7 @@ function asSchemaLike(value: unknown): ZodSchemaLike | undefined {
   return value as ZodSchemaLike;
 }
 
-function resolveShape(
-  value: ZodShape | (() => ZodShape) | undefined,
-): ZodShape | undefined {
+function resolveShape(value: ZodShape | (() => ZodShape) | undefined): ZodShape | undefined {
   if (!value) return undefined;
   if (typeof value === 'function') {
     try {

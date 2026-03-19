@@ -54,18 +54,12 @@ describe('shared adapter utilities', () => {
     });
 
     it('handles array of tools', () => {
-      const configurations = normalizeToSerializedDefinitions([
-        serializedTool,
-        serializedTool,
-      ]);
+      const configurations = normalizeToSerializedDefinitions([serializedTool, serializedTool]);
       expect(configurations).toHaveLength(2);
     });
 
     it('handles array of serialized tools', () => {
-      const configurations = normalizeToSerializedDefinitions([
-        serializedTool,
-        serializedTool,
-      ]);
+      const configurations = normalizeToSerializedDefinitions([serializedTool, serializedTool]);
       expect(configurations).toHaveLength(2);
     });
 
@@ -94,9 +88,7 @@ describe('shared adapter utilities', () => {
 
     it('throws TypeError for invalid item in array', () => {
       const invalidItem = { notATool: true };
-      expect(() => normalizeToSerializedDefinitions([invalidItem] as any)).toThrow(
-        TypeError,
-      );
+      expect(() => normalizeToSerializedDefinitions([invalidItem] as any)).toThrow(TypeError);
       expect(() => normalizeToSerializedDefinitions([invalidItem] as any)).toThrow(
         'Invalid tool input: expected ToolDefinition or SerializedToolDefinition',
       );
@@ -104,9 +96,7 @@ describe('shared adapter utilities', () => {
 
     it('throws TypeError for completely invalid input', () => {
       const invalidInput = 'not a tool';
-      expect(() => normalizeToSerializedDefinitions(invalidInput as any)).toThrow(
-        TypeError,
-      );
+      expect(() => normalizeToSerializedDefinitions(invalidInput as any)).toThrow(TypeError);
       expect(() => normalizeToSerializedDefinitions(invalidInput as any)).toThrow(
         'Invalid tool input: expected ToolDefinition or SerializedToolDefinition',
       );

@@ -1,5 +1,5 @@
-import { copyContent } from '../multi-modal';
 import type { MultiModalContent } from '../multi-modal';
+import { copyContent } from '../multi-modal';
 import type { AssistantMessage, Message } from '../types';
 import { toReadonly } from './type-helpers';
 
@@ -9,9 +9,7 @@ import { toReadonly } from './type-helpers';
  */
 export function createMessage(props: AssistantMessage): AssistantMessage;
 export function createMessage(props: Message): Message;
-export function createMessage(
-  props: Message | AssistantMessage,
-): Message | AssistantMessage {
+export function createMessage(props: Message | AssistantMessage): Message | AssistantMessage {
   const content =
     typeof props.content === 'string'
       ? props.content
@@ -47,9 +45,7 @@ export function createMessage(
  */
 export function messageToJSON(message: AssistantMessage): AssistantMessage;
 export function messageToJSON(message: Message): Message;
-export function messageToJSON(
-  message: Message | AssistantMessage,
-): Message | AssistantMessage {
+export function messageToJSON(message: Message | AssistantMessage): Message | AssistantMessage {
   const base: Message = {
     id: message.id,
     role: message.role,
@@ -80,9 +76,7 @@ export function messageToJSON(
  */
 export function messageParts(message: Message): ReadonlyArray<MultiModalContent> {
   if (typeof message.content === 'string') {
-    return message.content
-      ? [{ type: 'text', text: message.content } as MultiModalContent]
-      : [];
+    return message.content ? [{ type: 'text', text: message.content } as MultiModalContent] : [];
   }
   return message.content;
 }
@@ -114,9 +108,7 @@ export function messageToString(message: Message): string {
   if (typeof message.content === 'string') return message.content;
   return messageParts(message)
     .map((part) =>
-      part.type === 'text'
-        ? part.text
-        : `![${part.text ?? ''}](${(part as { url: string }).url})`,
+      part.type === 'text' ? part.text : `![${part.text ?? ''}](${(part as { url: string }).url})`,
     )
     .join('\n\n');
 }

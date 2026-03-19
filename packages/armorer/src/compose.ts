@@ -9,12 +9,7 @@ import type {
 } from './compose-types';
 import { getSchemaShape } from './core/schema-utilities';
 import { createTool, type CreateToolOptions } from './create-tool';
-import type {
-  DefaultToolEvents,
-  ToolContext,
-  ToolMetadata,
-  ToolParametersSchema,
-} from './is-tool';
+import type { DefaultToolEvents, ToolContext, ToolMetadata, ToolParametersSchema } from './is-tool';
 
 /**
  * Error thrown when a pipeline step fails.
@@ -34,8 +29,7 @@ export class PipelineError extends Error {
   }
 }
 
-type OutputAsInput<TTool extends AnyTool> = InferToolOutput<TTool> &
-  Record<string, unknown>;
+type OutputAsInput<TTool extends AnyTool> = InferToolOutput<TTool> & Record<string, unknown>;
 
 // Overloads for 2-9 tools with type inference
 
@@ -77,14 +71,7 @@ export function pipe<
   D extends ToolWithInput<OutputAsInput<C>>,
   E extends ToolWithInput<OutputAsInput<D>>,
   F extends ToolWithInput<OutputAsInput<E>>,
->(
-  a: A,
-  b: B,
-  c: C,
-  d: D,
-  e: E,
-  f: F,
-): ComposedTool<InferToolInput<A>, InferToolOutput<F>>;
+>(a: A, b: B, c: C, d: D, e: E, f: F): ComposedTool<InferToolInput<A>, InferToolOutput<F>>;
 
 /** Pipe 7 tools together */
 export function pipe<
@@ -95,15 +82,7 @@ export function pipe<
   E extends ToolWithInput<OutputAsInput<D>>,
   F extends ToolWithInput<OutputAsInput<E>>,
   G extends ToolWithInput<OutputAsInput<F>>,
->(
-  a: A,
-  b: B,
-  c: C,
-  d: D,
-  e: E,
-  f: F,
-  g: G,
-): ComposedTool<InferToolInput<A>, InferToolOutput<G>>;
+>(a: A, b: B, c: C, d: D, e: E, f: F, g: G): ComposedTool<InferToolInput<A>, InferToolOutput<G>>;
 
 /** Pipe 8 tools together */
 export function pipe<
@@ -261,9 +240,7 @@ function toError(error: unknown): Error {
 }
 
 type BindParams<TTool extends AnyTool> =
-  InferToolInput<TTool> extends object
-    ? Partial<InferToolInput<TTool>>
-    : InferToolInput<TTool>;
+  InferToolInput<TTool> extends object ? Partial<InferToolInput<TTool>> : InferToolInput<TTool>;
 
 type BindInput<TTool extends AnyTool, TBound extends BindParams<TTool>> =
   InferToolInput<TTool> extends object
@@ -330,10 +307,7 @@ export function bind<TTool extends AnyTool, TBound extends BindParams<TTool>>(
   >(toolOptions) as ComposedTool<BindInput<TTool, TBound>, InferToolOutput<TTool>>;
 }
 
-function resolveBoundSchema(
-  schema: ToolParametersSchema,
-  bound: unknown,
-): ToolParametersSchema {
+function resolveBoundSchema(schema: ToolParametersSchema, bound: unknown): ToolParametersSchema {
   const shape = getSchemaShape(schema);
   if (!shape) {
     throw new TypeError('bind() expects a tool with an object schema');
@@ -347,10 +321,7 @@ function resolveBoundSchema(
   if (unknownKeys.length) {
     throw new Error(`bind() cannot bind unknown keys: ${unknownKeys.sort().join(', ')}`);
   }
-  const mask = Object.fromEntries(boundKeys.map((key) => [key, true])) as Record<
-    string,
-    true
-  >;
+  const mask = Object.fromEntries(boundKeys.map((key) => [key, true])) as Record<string, true>;
   const objectSchema = schema as unknown as {
     omit: (mask: Record<string, true>) => ToolParametersSchema;
   };

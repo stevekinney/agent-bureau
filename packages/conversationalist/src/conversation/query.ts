@@ -38,10 +38,7 @@ export function getMessageIds(conversation: Conversation): string[] {
  * Finds a message by its unique identifier.
  * Returns undefined if no message with that ID exists.
  */
-export function getMessageById(
-  conversation: Conversation,
-  id: string,
-): Message | undefined {
+export function getMessageById(conversation: Conversation, id: string): Message | undefined {
   return conversation.messages[id];
 }
 

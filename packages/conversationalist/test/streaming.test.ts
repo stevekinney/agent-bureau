@@ -42,12 +42,7 @@ describe('appendStreamingMessage', () => {
 
   it('marks message as streaming via metadata', () => {
     const conv = createConversation({ id: 'test' }, testEnvironment);
-    const { conversation } = appendStreamingMessage(
-      conv,
-      'assistant',
-      undefined,
-      testEnvironment,
-    );
+    const { conversation } = appendStreamingMessage(conv, 'assistant', undefined, testEnvironment);
 
     expect(isStreamingMessage(getOrderedMessages(conversation)[0]!)).toBe(true);
   });
@@ -75,12 +70,7 @@ describe('updateStreamingMessage', () => {
       testEnvironment,
     );
 
-    const updated = updateStreamingMessage(
-      conversation,
-      messageId,
-      'Hello',
-      testEnvironment,
-    );
+    const updated = updateStreamingMessage(conversation, messageId, 'Hello', testEnvironment);
     expect(getOrderedMessages(updated)[0]?.content).toBe('Hello');
   });
 
@@ -93,12 +83,7 @@ describe('updateStreamingMessage', () => {
       testEnvironment,
     );
 
-    let updated = updateStreamingMessage(
-      conversation,
-      messageId,
-      'Hello',
-      testEnvironment,
-    );
+    let updated = updateStreamingMessage(conversation, messageId, 'Hello', testEnvironment);
     updated = updateStreamingMessage(updated, messageId, 'Hello world', testEnvironment);
 
     expect(getOrderedMessages(updated)[0]?.content).toBe('Hello world');
@@ -106,19 +91,9 @@ describe('updateStreamingMessage', () => {
 
   it('returns unchanged conversation for unknown message ID', () => {
     const conv = createConversation({ id: 'test' }, testEnvironment);
-    const { conversation } = appendStreamingMessage(
-      conv,
-      'assistant',
-      undefined,
-      testEnvironment,
-    );
+    const { conversation } = appendStreamingMessage(conv, 'assistant', undefined, testEnvironment);
 
-    const updated = updateStreamingMessage(
-      conversation,
-      'unknown-id',
-      'Content',
-      testEnvironment,
-    );
+    const updated = updateStreamingMessage(conversation, 'unknown-id', 'Content', testEnvironment);
     expect(updated).toBe(conversation);
   });
 
@@ -157,12 +132,7 @@ describe('updateStreamingMessage', () => {
       testEnvironment,
     );
 
-    const updated = updateStreamingMessage(
-      finalized,
-      messageId,
-      'Updated',
-      testEnvironment,
-    );
+    const updated = updateStreamingMessage(finalized, messageId, 'Updated', testEnvironment);
 
     expect(getOrderedMessages(updated)[0]?.tokenUsage).toEqual({
       prompt: 1,
@@ -182,12 +152,7 @@ describe('finalizeStreamingMessage', () => {
       testEnvironment,
     );
 
-    const finalized = finalizeStreamingMessage(
-      conversation,
-      messageId,
-      undefined,
-      testEnvironment,
-    );
+    const finalized = finalizeStreamingMessage(conversation, messageId, undefined, testEnvironment);
     expect(isStreamingMessage(getOrderedMessages(finalized)[0]!)).toBe(false);
   });
 
@@ -236,12 +201,7 @@ describe('finalizeStreamingMessage', () => {
 
   it('returns unchanged conversation for unknown message ID', () => {
     const conv = createConversation({ id: 'test' }, testEnvironment);
-    const { conversation } = appendStreamingMessage(
-      conv,
-      'assistant',
-      undefined,
-      testEnvironment,
-    );
+    const { conversation } = appendStreamingMessage(conv, 'assistant', undefined, testEnvironment);
 
     const finalized = finalizeStreamingMessage(
       conversation,
@@ -324,12 +284,7 @@ describe('cancelStreamingMessage', () => {
 
   it('returns unchanged conversation for unknown message ID', () => {
     const conv = createConversation({ id: 'test' }, testEnvironment);
-    const { conversation } = appendStreamingMessage(
-      conv,
-      'assistant',
-      undefined,
-      testEnvironment,
-    );
+    const { conversation } = appendStreamingMessage(conv, 'assistant', undefined, testEnvironment);
 
     const cancelled = cancelStreamingMessage(conversation, 'unknown-id', testEnvironment);
     expect(cancelled).toBe(conversation);
@@ -339,12 +294,7 @@ describe('cancelStreamingMessage', () => {
 describe('isStreamingMessage', () => {
   it('returns true for streaming messages', () => {
     const conv = createConversation({ id: 'test' }, testEnvironment);
-    const { conversation } = appendStreamingMessage(
-      conv,
-      'assistant',
-      undefined,
-      testEnvironment,
-    );
+    const { conversation } = appendStreamingMessage(conv, 'assistant', undefined, testEnvironment);
 
     expect(isStreamingMessage(getOrderedMessages(conversation)[0]!)).toBe(true);
   });
@@ -365,12 +315,7 @@ describe('isStreamingMessage', () => {
       undefined,
       testEnvironment,
     );
-    const finalized = finalizeStreamingMessage(
-      conversation,
-      messageId,
-      undefined,
-      testEnvironment,
-    );
+    const finalized = finalizeStreamingMessage(conversation, messageId, undefined, testEnvironment);
 
     expect(isStreamingMessage(getOrderedMessages(finalized)[0]!)).toBe(false);
   });
@@ -407,12 +352,7 @@ describe('getStreamingMessage', () => {
       undefined,
       testEnvironment,
     );
-    const finalized = finalizeStreamingMessage(
-      conversation,
-      messageId,
-      undefined,
-      testEnvironment,
-    );
+    const finalized = finalizeStreamingMessage(conversation, messageId, undefined, testEnvironment);
 
     const streaming = getStreamingMessage(finalized);
     expect(streaming).toBeUndefined();

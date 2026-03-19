@@ -7,7 +7,7 @@ import {
   createConversationHistory as createConversation,
 } from '../src';
 import { createPIIRedactionPlugin, redactPii } from '../src/redaction';
-import type { ConversationHistory as ConversationHistory, Message, MessageInput } from '../src/types';
+import type { Message, MessageInput } from '../src/types';
 
 const getOrderedMessages = (conversation: Conversation): Message[] =>
   conversation.ids
@@ -18,11 +18,7 @@ describe('redactPii', () => {
   it('should redact emails', () => {
     const env = { plugins: [redactPii] };
     let conv = createConversation({}, env);
-    conv = appendMessages(
-      conv,
-      { role: 'user', content: 'My email is test@example.com' },
-      env,
-    );
+    conv = appendMessages(conv, { role: 'user', content: 'My email is test@example.com' }, env);
 
     expect(getOrderedMessages(conv)[0].content).toBe('My email is [EMAIL_REDACTED]');
   });
@@ -30,11 +26,7 @@ describe('redactPii', () => {
   it('should redact phone numbers', () => {
     const env = { plugins: [redactPii] };
     let conv = createConversation({}, env);
-    conv = appendMessages(
-      conv,
-      { role: 'user', content: 'Call me at 123-456-7890' },
-      env,
-    );
+    conv = appendMessages(conv, { role: 'user', content: 'Call me at 123-456-7890' }, env);
 
     expect(getOrderedMessages(conv)[0].content).toBe('Call me at [PHONE_REDACTED]');
   });
@@ -51,9 +43,7 @@ describe('redactPii', () => {
       env,
     );
 
-    expect(getOrderedMessages(conv)[0].content).toBe(
-      'My key is api_key: "[KEY_REDACTED]"',
-    );
+    expect(getOrderedMessages(conv)[0].content).toBe('My key is api_key: "[KEY_REDACTED]"');
   });
 
   it('should redact multi-modal content', () => {
@@ -97,9 +87,7 @@ describe('redactPii', () => {
 
     boundAppend({ role: 'user', content: 'My email is test@example.com' });
 
-    expect(getOrderedMessages(history.current)[0].content).toBe(
-      'My email is [EMAIL_REDACTED]',
-    );
+    expect(getOrderedMessages(history.current)[0].content).toBe('My email is [EMAIL_REDACTED]');
   });
 
   it('should support custom redaction rules', () => {

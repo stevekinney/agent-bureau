@@ -185,6 +185,7 @@ Event types include:
 - `compaction.started`
 
 Streaming messages (those with `metadata.__streaming === true`) are automatically protected from compaction, truncation, and adapter export. They are preserved in `partitionMessages`, locked in `truncateToTokenLimit` and `truncateFromPosition`, and excluded from provider adapters so that incomplete content is never sent to an API.
+
 - `compaction.completed`
 
 ## Compaction
@@ -199,14 +200,16 @@ const conversation = new Conversation(existingHistory);
 const result = await conversation.compact(
   async (messages) => {
     // Call your LLM to summarize
-    const response = await llm.summarize(messages.map(m => m.content).join('\n'));
+    const response = await llm.summarize(messages.map((m) => m.content).join('\n'));
     return response.text;
   },
   { preserveRecentCount: 6 },
 );
 
 if (result.compacted) {
-  console.log(`Removed ${result.messagesRemoved} messages, created ${result.chunksProcessed} summaries`);
+  console.log(
+    `Removed ${result.messagesRemoved} messages, created ${result.chunksProcessed} summaries`,
+  );
 }
 ```
 

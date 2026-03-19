@@ -4,9 +4,7 @@ import { describe, expect, it } from 'bun:test';
 
 import * as root from '../src';
 
-const pkg = JSON.parse(
-  readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
-) as {
+const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
   exports?: Record<string, unknown>;
 };
 
@@ -62,10 +60,7 @@ describe('public API export map', () => {
   });
 
   it('uses dynamic imports for provider adapters in the Conversation class', () => {
-    const historySource = readFileSync(
-      new URL('../src/history.ts', import.meta.url),
-      'utf8',
-    );
+    const historySource = readFileSync(new URL('../src/history.ts', import.meta.url), 'utf8');
 
     expect(historySource).toContain("await import('./adapters/openai')");
     expect(historySource).toContain("await import('./adapters/anthropic')");

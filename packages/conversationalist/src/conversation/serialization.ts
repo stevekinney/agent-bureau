@@ -1,11 +1,6 @@
 import { createInvalidPositionError, createSerializationError } from '../errors';
 import { conversationSchema } from '../schemas';
-import type {
-  AssistantMessage,
-  ConversationHistory,
-  Message,
-  ToolResult,
-} from '../types';
+import type { AssistantMessage, ConversationHistory, Message, ToolResult } from '../types';
 import { createMessage, isAssistantMessage, toReadonly } from '../utilities';
 import { toIdRecord } from '../utilities/message-store';
 import { assertConversationHistoryIntegrity } from './integrity';
@@ -153,9 +148,7 @@ export function deserializeConversationHistory(json: unknown): ConversationHisto
     });
 
     if (messageIds.size > 0) {
-      throw createSerializationError(
-        `messages not listed in ids: ${[...messageIds].join(', ')}`,
-      );
+      throw createSerializationError(`messages not listed in ids: ${[...messageIds].join(', ')}`);
     }
 
     orderedMessages.reduce<{ toolUses: ToolUseIndex }>(
@@ -175,9 +168,7 @@ export function deserializeConversationHistory(json: unknown): ConversationHisto
       { toolUses: new Map<string, { name: string }>() },
     );
 
-    const messageInstances: Message[] = orderedMessages.map((message) =>
-      createMessage(message),
-    );
+    const messageInstances: Message[] = orderedMessages.map((message) => createMessage(message));
     const conv: ConversationHistory = {
       schemaVersion: data.schemaVersion,
       id: data.id,

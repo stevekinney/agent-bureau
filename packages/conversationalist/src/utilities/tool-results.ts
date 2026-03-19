@@ -10,9 +10,6 @@ export function copyToolResult(toolResult: ToolResult): ToolResult {
 /**
  * Redacts tool result payload fields while preserving the original shape.
  */
-export function redactToolResult(
-  toolResult: ToolResult,
-  placeholder: string,
-): ToolResult {
+export function redactToolResult(toolResult: ToolResult, placeholder: string): ToolResult {
   return { ...toolResult, content: placeholder };
 }

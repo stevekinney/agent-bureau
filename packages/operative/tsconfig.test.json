@@ -11,10 +11,5 @@
 
     "tsBuildInfoFile": "node_modules/.cache/tsconfig.test.tsbuildinfo"
   },
-  "include": [
-    "src/**/*.test.ts",
-    "src/**/*.spec.ts",
-    "test/**/*.ts",
-    "**/__tests__/**/*.ts"
-  ]
+  "include": ["src/**/*.test.ts", "src/**/*.spec.ts", "test/**/*.ts", "**/__tests__/**/*.ts"]
 }

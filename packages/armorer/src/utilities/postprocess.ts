@@ -1,11 +1,6 @@
 import { z } from 'zod';
 
-import type {
-  AnyTool,
-  ComposedTool,
-  InferToolInput,
-  InferToolOutput,
-} from '../compose-types';
+import type { AnyTool, ComposedTool, InferToolInput, InferToolOutput } from '../compose-types';
 import { createTool, type CreateToolOptions } from '../create-tool';
 import type { DefaultToolEvents, ToolContext, ToolMetadata } from '../is-tool';
 
@@ -48,10 +43,7 @@ export function postprocess<TTool extends AnyTool, TNewOutput>(
   const description = `Postprocessed tool: ${tool.description}`;
   const tags = tool.tags && tool.tags.length ? tool.tags : undefined;
 
-  const runPostprocess = async (
-    params: unknown,
-    context: ToolContext<DefaultToolEvents>,
-  ) => {
+  const runPostprocess = async (params: unknown, context: ToolContext<DefaultToolEvents>) => {
     const executeOptions =
       context.signal || context.timeout !== undefined || context.stream !== undefined
         ? {

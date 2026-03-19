@@ -1,7 +1,4 @@
-import {
-  appendMessages,
-  createConversationHistory,
-} from '../../conversation/index';
+import { appendMessages, createConversationHistory } from '../../conversation/index';
 import { assertConversationSafe } from '../../conversation/validation';
 import type { MultiModalContent } from '../../multi-modal';
 import { isStreamingMessage } from '../../streaming';
@@ -172,8 +169,7 @@ function toToolResultBlock(toolResult: ToolResult): AnthropicToolResultBlock {
   const result: AnthropicToolResultBlock = {
     type: 'tool_result',
     tool_use_id: toolResult.callId,
-    content:
-      typeof payload === 'string' ? payload : JSON.stringify(payload),
+    content: typeof payload === 'string' ? payload : JSON.stringify(payload),
   };
 
   if (toolResult.outcome !== 'success') {
@@ -336,7 +332,7 @@ function toJSONValue(value: unknown): JSONValue {
     return record;
   }
 
-  return String(value);
+  return String(value as string);
 }
 
 function parseJSONValue(value: string): JSONValue | undefined {
@@ -347,9 +343,7 @@ function parseJSONValue(value: string): JSONValue | undefined {
   }
 }
 
-function isCanonicalToolResultPayload(
-  value: JSONValue,
-): value is JSONValue & {
+function isCanonicalToolResultPayload(value: JSONValue): value is JSONValue & {
   outcome: ToolResult['outcome'];
   content: JSONValue;
   error?: ToolResult['error'];
@@ -370,11 +364,7 @@ function isCanonicalToolResultPayload(
   );
 }
 
-function parseToolResultContent(
-  callId: string,
-  content: string,
-  isError?: boolean,
-): ToolResult {
+function parseToolResultContent(callId: string, content: string, isError?: boolean): ToolResult {
   const parsed = parseJSONValue(content);
 
   if (parsed !== undefined && isCanonicalToolResultPayload(parsed)) {
@@ -384,12 +374,8 @@ function parseToolResultContent(
       content: parsed.content,
       ...(parsed.error ? { error: parsed.error } : {}),
       ...(parsed.action ? { action: parsed.action } : {}),
-      ...(typeof parsed.inputDigest === 'string'
-        ? { inputDigest: parsed.inputDigest }
-        : {}),
-      ...(typeof parsed.outputDigest === 'string'
-        ? { outputDigest: parsed.outputDigest }
-        : {}),
+      ...(typeof parsed.inputDigest === 'string' ? { inputDigest: parsed.inputDigest } : {}),
+      ...(typeof parsed.outputDigest === 'string' ? { outputDigest: parsed.outputDigest } : {}),
     };
   }
 
@@ -451,11 +437,7 @@ function toMessageInputFromBlock(
   return {
     role: 'tool-result',
     content: '',
-    toolResult: parseToolResultContent(
-      block.tool_use_id,
-      block.content,
-      block.is_error,
-    ),
+    toolResult: parseToolResultContent(block.tool_use_id, block.content, block.is_error),
   };
 }
 
@@ -518,10 +500,7 @@ export const anthropicConversationAdapter = {
   import(payload: AnthropicConversation): Conversation {
     return fromAnthropicMessages(payload);
   },
-  append(
-    conversation: Conversation,
-    payload: AnthropicConversation,
-  ): Conversation {
+  append(conversation: Conversation, payload: AnthropicConversation): Conversation {
     return appendAnthropicMessages(conversation, payload);
   },
 } as const;

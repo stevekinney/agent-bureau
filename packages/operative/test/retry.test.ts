@@ -1,13 +1,12 @@
-import { describe, expect, it } from 'bun:test';
-
 import { createTestToolbox } from 'armorer/test';
+import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
 
 import { noToolCalls } from '../src/conditions/predicates';
 import { createRun } from '../src/create-run';
 import { run } from '../src/run';
 import { createRunRecorder } from '../src/test/index';
-import type { GenerateContext, GenerateResponse } from '../src/types';
+import type { GenerateResponse } from '../src/types';
 
 function textResponse(content: string): GenerateResponse {
   return { content, toolCalls: [] };

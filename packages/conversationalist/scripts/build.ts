@@ -54,8 +54,7 @@ async function build() {
 
   // Generate TypeScript declarations
   console.log('Generating TypeScript declarations...');
-  const tscResult =
-    await $`bunx tsc --emitDeclarationOnly --project tsconfig.build.json`.quiet();
+  const tscResult = await $`bunx tsc --emitDeclarationOnly --project tsconfig.build.json`.quiet();
 
   if (tscResult.exitCode !== 0) {
     console.error('Declaration generation failed');

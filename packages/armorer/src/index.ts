@@ -1,14 +1,7 @@
 export { combineToolbox, combineToolboxes } from './combine-toolboxes';
+export type { ToolError, ToolErrorCategory } from './core/errors';
 export type { CreateToolOptions, WithContext } from './create-tool';
 export { createTool, createToolCall, lazy, withContext } from './create-tool';
-export {
-  materializeToolCall,
-  materializeToolCalls,
-  materializeToolResult,
-  materializeToolResultAsync,
-  materializeToolResults,
-  materializeToolResultsAsync,
-} from './tool-materialization';
 export type {
   ImportedToolboxOptions,
   ImportedToolConfiguration,
@@ -61,7 +54,14 @@ export type {
   ToolValidationWarning,
 } from './is-tool';
 export { isTool } from './is-tool';
-export type { ToolError, ToolErrorCategory } from './core/errors';
+export {
+  materializeToolCall,
+  materializeToolCalls,
+  materializeToolResult,
+  materializeToolResultAsync,
+  materializeToolResults,
+  materializeToolResultsAsync,
+} from './tool-materialization';
 
 // Types
 export type {

@@ -82,9 +82,7 @@ export function appendStreamingMessage(
   const resolvedEnvironment = resolveConversationEnvironment(
     isConversationEnvironmentParameter(metadata) ? metadata : environment,
   );
-  const resolvedMetadata = isConversationEnvironmentParameter(metadata)
-    ? undefined
-    : metadata;
+  const resolvedMetadata = isConversationEnvironmentParameter(metadata) ? undefined : metadata;
   const now = resolvedEnvironment.now();
   const messageId = resolvedEnvironment.randomId();
 
@@ -167,9 +165,7 @@ export function finalizeStreamingMessage(
   const resolvedEnvironment = resolveConversationEnvironment(
     isConversationEnvironmentParameter(options) ? options : environment,
   );
-  const resolvedOptions = isConversationEnvironmentParameter(options)
-    ? undefined
-    : options;
+  const resolvedOptions = isConversationEnvironmentParameter(options) ? undefined : options;
   const now = resolvedEnvironment.now();
 
   const original = conversation.messages[messageId];
@@ -178,10 +174,7 @@ export function finalizeStreamingMessage(
   }
 
   // Remove the streaming flag and merge in any new metadata
-  const { [STREAMING_KEY]: _, ...restMetadata } = original.metadata as Record<
-    string,
-    JSONValue
-  >;
+  const { [STREAMING_KEY]: _, ...restMetadata } = original.metadata as Record<string, JSONValue>;
   const finalMetadata: Record<string, JSONValue> = {
     ...restMetadata,
     ...(resolvedOptions?.metadata ?? {}),

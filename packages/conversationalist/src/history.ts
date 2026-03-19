@@ -7,10 +7,10 @@ import type {
 } from 'event-emission';
 import { createEventTarget } from 'event-emission';
 import type { ObservableLike, Observer, Subscription } from 'event-emission/types';
+
 import type { AnthropicConversation } from './adapters/anthropic';
 import type { GeminiConversation } from './adapters/gemini';
 import type { OpenAIMessage } from './adapters/openai';
-
 import {
   compactConversation,
   type CompactionOptions,
@@ -24,7 +24,7 @@ import {
   type TruncateOptions,
   truncateToTokenLimit,
 } from './context';
-import type { RedactMessageOptions } from './conversation/index';
+import type { RedactMessageOptions, ToolInteraction } from './conversation/index';
 import {
   appendAssistantMessage,
   appendMessages,
@@ -56,10 +56,7 @@ import {
   toChatMessages,
 } from './conversation/index';
 import { ensureConversationSafe } from './conversation/validation';
-import {
-  type ConversationEnvironment,
-  resolveConversationEnvironment,
-} from './environment';
+import { type ConversationEnvironment, resolveConversationEnvironment } from './environment';
 import {
   appendStreamingMessage,
   cancelStreamingMessage,
@@ -68,18 +65,17 @@ import {
   updateStreamingMessage,
 } from './streaming';
 import type {
+  AppendableToolCallInput,
+  AppendableToolResult,
   ConversationHistory,
-  ConversationProvider,
   ConversationNodeSnapshot,
+  ConversationProvider,
   ConversationSnapshot,
   JSONValue,
   Message,
   MessageInput,
   TokenUsage,
-  AppendableToolCallInput,
-  AppendableToolResult,
 } from './types';
-import type { ToolInteraction } from './conversation/index';
 
 /**
  * Event detail for conversation changes.
@@ -92,10 +88,7 @@ export interface ConversationEventDetail {
   toolCallIds?: readonly string[];
 }
 
-export type ConversationEvent = EmissionEvent<
-  ConversationEventDetail,
-  ConversationEventType
->;
+export type ConversationEvent = EmissionEvent<ConversationEventDetail, ConversationEventType>;
 
 export type ConversationActionType =
   | 'push'
@@ -142,8 +135,11 @@ interface HistoryNode {
 }
 
 type ConversationAdapter = {
-  export: (conversation: ConversationHistory, options?: any) => unknown;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  export: (conversation: ConversationHistory, options?: any) => any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   import: (payload: any) => ConversationHistory;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   append: (conversation: ConversationHistory, payload: any) => ConversationHistory;
 };
 
@@ -315,9 +311,7 @@ export class Conversation extends EventTarget {
     if (options.once !== undefined) mapped.once = options.once;
     if (options.passive !== undefined) mapped.passive = options.passive;
     if (options.signal !== undefined) {
-      mapped.signal = options.signal as NonNullable<
-        AddEventListenerOptionsLike['signal']
-      >;
+      mapped.signal = options.signal as NonNullable<AddEventListenerOptionsLike['signal']>;
     }
     return mapped;
   }
@@ -337,10 +331,7 @@ export class Conversation extends EventTarget {
    */
   override addEventListener(
     type: string,
-    callback:
-      | ((event: ConversationEvent) => void)
-      | EventListenerOrEventListenerObject
-      | null,
+    callback: ((event: ConversationEvent) => void) | EventListenerOrEventListenerObject | null,
     options?: boolean | AddEventListenerOptions,
   ): void | (() => void) {
     if (!callback) return;
@@ -356,10 +347,7 @@ export class Conversation extends EventTarget {
    */
   override removeEventListener(
     type: string,
-    callback:
-      | ((event: ConversationEvent) => void)
-      | EventListenerOrEventListenerObject
-      | null,
+    callback: ((event: ConversationEvent) => void) | EventListenerOrEventListenerObject | null,
     options?: boolean | EventListenerOptions,
   ): void {
     if (!callback) return;
@@ -374,22 +362,15 @@ export class Conversation extends EventTarget {
    * Dispatches a DOM-style event through the event-emission target.
    */
   override dispatchEvent(
-    event:
-      | Event
-      | EmissionEvent<ConversationEvents[ConversationEventType], ConversationEventType>,
+    event: Event | EmissionEvent<ConversationEvents[ConversationEventType], ConversationEventType>,
   ): boolean {
-    return this.emitter.dispatchEvent(
-      event as Parameters<typeof this.emitter.dispatchEvent>[0],
-    );
+    return this.emitter.dispatchEvent(event as Parameters<typeof this.emitter.dispatchEvent>[0]);
   }
 
   /**
    * Emits a typed event through the event hub.
    */
-  emit<K extends ConversationEventType>(
-    type: K,
-    detail: ConversationEvents[K],
-  ): boolean {
+  emit<K extends ConversationEventType>(type: K, detail: ConversationEvents[K]): boolean {
     return this.emitter.emit(type, detail);
   }
 
@@ -575,10 +556,7 @@ export class Conversation extends EventTarget {
     if (this.currentNode.parent) {
       const previousConversation = this.current;
       this.currentNode = this.currentNode.parent;
-      this.emitConversationEvent(
-        'change',
-        this.buildEventDetail('undo', previousConversation),
-      );
+      this.emitConversationEvent('change', this.buildEventDetail('undo', previousConversation));
       this.emitConversationEvent('undo', this.buildEventDetail('undo', previousConversation));
       return this.current;
     }
@@ -595,10 +573,7 @@ export class Conversation extends EventTarget {
     if (next) {
       const previousConversation = this.current;
       this.currentNode = next;
-      this.emitConversationEvent(
-        'change',
-        this.buildEventDetail('redo', previousConversation),
-      );
+      this.emitConversationEvent('change', this.buildEventDetail('redo', previousConversation));
       this.emitConversationEvent('redo', this.buildEventDetail('redo', previousConversation));
       return this.current;
     }
@@ -616,14 +591,8 @@ export class Conversation extends EventTarget {
       if (target) {
         const previousConversation = this.current;
         this.currentNode = target;
-        this.emitConversationEvent(
-          'change',
-          this.buildEventDetail('switch', previousConversation),
-        );
-        this.emitConversationEvent(
-          'switch',
-          this.buildEventDetail('switch', previousConversation),
-        );
+        this.emitConversationEvent('change', this.buildEventDetail('switch', previousConversation));
+        this.emitConversationEvent('switch', this.buildEventDetail('switch', previousConversation));
         return this.current;
       }
     }
@@ -768,10 +737,7 @@ export class Conversation extends EventTarget {
   /**
    * Appends a user message to the history.
    */
-  appendUserMessage(
-    content: MessageInput['content'],
-    metadata?: Record<string, JSONValue>,
-  ): void {
+  appendUserMessage(content: MessageInput['content'], metadata?: Record<string, JSONValue>): void {
     const previousConversation = this.current;
     const nextConversation = appendUserMessage(this.current, content, metadata, this.env);
     this.pushWithEvents(
@@ -907,10 +873,7 @@ export class Conversation extends EventTarget {
    * Compacts the conversation by summarizing older messages.
    * The summarizer function is caller-provided, keeping this library LLM-agnostic.
    */
-  async compact(
-    summarizer: Summarizer,
-    options?: CompactionOptions,
-  ): Promise<CompactionResult> {
+  async compact(summarizer: Summarizer, options?: CompactionOptions): Promise<CompactionResult> {
     const previous = this.current;
     this.emitConversationEvent(
       'compaction.started',
@@ -939,10 +902,7 @@ export class Conversation extends EventTarget {
   /**
    * Appends a streaming message placeholder and returns its ID.
    */
-  appendStreamingMessage(
-    role: 'assistant' | 'user',
-    metadata?: Record<string, JSONValue>,
-  ): string {
+  appendStreamingMessage(role: 'assistant' | 'user', metadata?: Record<string, JSONValue>): string {
     const { conversation, messageId } = appendStreamingMessage(
       this.current,
       role,
@@ -960,9 +920,14 @@ export class Conversation extends EventTarget {
    */
   updateStreamingMessage(messageId: string, content: string): void {
     const nextConversation = updateStreamingMessage(this.current, messageId, content, this.env);
-    this.commit(nextConversation, 'stream.updated', ['push', 'messages.updated', 'stream.updated'], {
-      messageIds: [messageId],
-    });
+    this.commit(
+      nextConversation,
+      'stream.updated',
+      ['push', 'messages.updated', 'stream.updated'],
+      {
+        messageIds: [messageId],
+      },
+    );
   }
 
   /**
@@ -972,12 +937,7 @@ export class Conversation extends EventTarget {
     messageId: string,
     options?: { tokenUsage?: TokenUsage; metadata?: Record<string, JSONValue> },
   ): void {
-    const nextConversation = finalizeStreamingMessage(
-      this.current,
-      messageId,
-      options,
-      this.env,
-    );
+    const nextConversation = finalizeStreamingMessage(this.current, messageId, options, this.env);
     this.commit(
       nextConversation,
       'stream.finalized',
@@ -1004,12 +964,13 @@ export class Conversation extends EventTarget {
     options?: Parameters<typeof appendToolCall>[2],
   ): void {
     const nextConversation = appendToolCall(this.current, toolCall, options, this.env);
-    const context = this.createChangeContext(
-      this.current,
+    const context = this.createChangeContext(this.current, nextConversation, 'messages.appended');
+    this.commit(
       nextConversation,
-      'messages.appended',
+      'tool-calls.appended',
+      ['push', 'messages.appended', 'tool-calls.appended'],
+      context,
     );
-    this.commit(nextConversation, 'tool-calls.appended', ['push', 'messages.appended', 'tool-calls.appended'], context);
   }
 
   appendToolCalls(toolCalls: ReadonlyArray<AppendableToolCallInput>): void {
@@ -1017,12 +978,13 @@ export class Conversation extends EventTarget {
     if (nextConversation === this.current) {
       return;
     }
-    const context = this.createChangeContext(
-      this.current,
+    const context = this.createChangeContext(this.current, nextConversation, 'messages.appended');
+    this.commit(
       nextConversation,
-      'messages.appended',
+      'tool-calls.appended',
+      ['push', 'messages.appended', 'tool-calls.appended'],
+      context,
     );
-    this.commit(nextConversation, 'tool-calls.appended', ['push', 'messages.appended', 'tool-calls.appended'], context);
   }
 
   appendToolResult(
@@ -1030,11 +992,7 @@ export class Conversation extends EventTarget {
     options?: Parameters<typeof appendToolResult>[2],
   ): void {
     const nextConversation = appendToolResult(this.current, toolResult, options, this.env);
-    const context = this.createChangeContext(
-      this.current,
-      nextConversation,
-      'messages.appended',
-    );
+    const context = this.createChangeContext(this.current, nextConversation, 'messages.appended');
     this.commit(
       nextConversation,
       'tool-results.appended',
@@ -1048,11 +1006,7 @@ export class Conversation extends EventTarget {
     if (nextConversation === this.current) {
       return;
     }
-    const context = this.createChangeContext(
-      this.current,
-      nextConversation,
-      'messages.appended',
-    );
+    const context = this.createChangeContext(this.current, nextConversation, 'messages.appended');
     this.commit(
       nextConversation,
       'tool-results.appended',
@@ -1071,11 +1025,7 @@ export class Conversation extends EventTarget {
       options,
       this.env,
     );
-    const context = this.createChangeContext(
-      this.current,
-      nextConversation,
-      'messages.appended',
-    );
+    const context = this.createChangeContext(this.current, nextConversation, 'messages.appended');
     this.commit(
       nextConversation,
       'tool-results.appended',
@@ -1084,22 +1034,12 @@ export class Conversation extends EventTarget {
     );
   }
 
-  async appendToolResultsAsync(
-    toolResults: ReadonlyArray<AppendableToolResult>,
-  ): Promise<void> {
-    const nextConversation = await appendToolResultsAsync(
-      this.current,
-      toolResults,
-      this.env,
-    );
+  async appendToolResultsAsync(toolResults: ReadonlyArray<AppendableToolResult>): Promise<void> {
+    const nextConversation = await appendToolResultsAsync(this.current, toolResults, this.env);
     if (nextConversation === this.current) {
       return;
     }
-    const context = this.createChangeContext(
-      this.current,
-      nextConversation,
-      'messages.appended',
-    );
+    const context = this.createChangeContext(this.current, nextConversation, 'messages.appended');
     this.commit(
       nextConversation,
       'tool-results.appended',

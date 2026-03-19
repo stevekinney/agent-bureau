@@ -17,16 +17,10 @@ export type InferToolInput<T> =
     : Record<string, unknown>;
 
 /** Extract output type from a tool */
-export type InferToolOutput<T> =
-  T extends Tool<infer _S, infer _E, infer R, infer _M> ? R : never;
+export type InferToolOutput<T> = T extends Tool<infer _S, infer _E, infer R, infer _M> ? R : never;
 
 /** Any tool (for constraint purposes) */
-export type AnyTool = Tool<
-  ToolParametersSchema,
-  ToolEventsMap,
-  unknown,
-  ToolMetadata | undefined
->;
+export type AnyTool = Tool<ToolParametersSchema, ToolEventsMap, unknown, ToolMetadata | undefined>;
 
 /** Tool that accepts a specific input type */
 export type ToolWithInput<I extends object> = Tool<

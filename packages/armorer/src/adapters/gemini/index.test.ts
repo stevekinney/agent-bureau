@@ -38,28 +38,19 @@ describe('toGeminiTools', () => {
 
     it('includes parameters object', () => {
       const result = toGeminiTools(serializedTool);
-      expect(result[0]?.functionDeclarations[0]?.parameters).toHaveProperty(
-        'type',
-        'object',
-      );
-      expect(result[0]?.functionDeclarations[0]?.parameters).toHaveProperty(
-        'properties',
-      );
+      expect(result[0]?.functionDeclarations[0]?.parameters).toHaveProperty('type', 'object');
+      expect(result[0]?.functionDeclarations[0]?.parameters).toHaveProperty('properties');
     });
 
     it('includes required fields', () => {
       const result = toGeminiTools(serializedTool);
       expect(result[0]?.functionDeclarations[0]?.parameters).toHaveProperty('required');
-      expect(result[0]?.functionDeclarations[0]?.parameters.required).toContain(
-        'query',
-      );
+      expect(result[0]?.functionDeclarations[0]?.parameters.required).toContain('query');
     });
 
     it('does not include $schema property', () => {
       const result = toGeminiTools(serializedTool);
-      expect(result[0]?.functionDeclarations[0]?.parameters).not.toHaveProperty(
-        '$schema',
-      );
+      expect(result[0]?.functionDeclarations[0]?.parameters).not.toHaveProperty('$schema');
     });
   });
 
@@ -100,10 +91,7 @@ describe('toGeminiTools', () => {
       const serialized = serializeToolDefinition(tool);
       const result = toGeminiTools(serialized);
       expect(result[0]?.functionDeclarations[0]?.name).toBe('search');
-      expect(result[0]?.functionDeclarations[0]?.parameters).toHaveProperty(
-        'type',
-        'object',
-      );
+      expect(result[0]?.functionDeclarations[0]?.parameters).toHaveProperty('type', 'object');
     });
   });
 
@@ -217,7 +205,8 @@ describe('formatGeminiToolResults', () => {
           content: { ok: true },
         },
         {
-          toolNameByCallId: (callId) => (callId === 'call-function' ? 'function-mapped' : undefined),
+          toolNameByCallId: (callId) =>
+            callId === 'call-function' ? 'function-mapped' : undefined,
         },
       ),
     ).toEqual([
@@ -273,7 +262,7 @@ describe('formatGeminiToolResults', () => {
 
 describe('formatGeminiToolResultsAsync', () => {
   it('collects stream payloads and stringifies non-JSON chunks', async () => {
-    await expect(
+    expect(
       formatGeminiToolResultsAsync([
         {
           callId: 'call-stream',

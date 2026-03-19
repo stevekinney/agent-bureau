@@ -5,10 +5,7 @@ import { createTool, createToolbox } from '../src';
 import { createSearchTool } from '../src/tools';
 
 describe('createSearchTool', () => {
-  const makeTool = (
-    name: string,
-    overrides: Partial<Parameters<typeof createTool>[0]> = {},
-  ) =>
+  const makeTool = (name: string, overrides: Partial<Parameters<typeof createTool>[0]> = {}) =>
     createTool({
       name,
       description: `${name} tool`,
@@ -241,9 +238,7 @@ describe('createSearchTool', () => {
       expect(tools1.map((t) => t.name)).toContain('after-tool');
 
       // Register even more tools
-      toolbox.register(
-        makeTool('much-later-tool', { description: 'Registered much later' }),
-      );
+      toolbox.register(makeTool('much-later-tool', { description: 'Registered much later' }));
 
       // Second search - should find all three
       const results2 = await toolbox.execute({

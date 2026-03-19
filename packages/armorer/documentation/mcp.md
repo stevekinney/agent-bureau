@@ -155,14 +155,9 @@ Register additional MCP resources and prompts via registrars:
 ```typescript
 const mcp = createMCP(toolbox, {
   resources: (server) => {
-    server.registerResource(
-      'readme',
-      'toolbox://readme',
-      { title: 'README' },
-      async () => ({
-        contents: [{ uri: 'toolbox://readme', text: 'hello' }],
-      }),
-    );
+    server.registerResource('readme', 'toolbox://readme', { title: 'README' }, async () => ({
+      contents: [{ uri: 'toolbox://readme', text: 'hello' }],
+    }));
   },
   prompts: (server) => {
     server.registerPrompt('hello', { description: 'say hello' }, async () => ({

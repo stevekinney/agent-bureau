@@ -1,11 +1,6 @@
 import { z } from 'zod';
 
-import {
-  formatToolId,
-  normalizeIdentity,
-  type ToolId,
-  type ToolIdentity,
-} from './identity';
+import { formatToolId, normalizeIdentity, type ToolId, type ToolIdentity } from './identity';
 import { type ToolRisk } from './risk';
 import { isZodObjectSchema, isZodSchema } from './schema-utilities';
 import type { JsonObject } from './serialization/json';
@@ -23,10 +18,7 @@ export type ToolLifecycle = {
   replacedBy?: ToolId;
 };
 
-export type ToolDefinition<
-  TInput extends object = Record<string, unknown>,
-  TOutput = unknown,
-> = {
+export type ToolDefinition<TInput extends object = Record<string, unknown>, TOutput = unknown> = {
   identity: ToolIdentity;
   id: ToolId;
   display: ToolDisplay;

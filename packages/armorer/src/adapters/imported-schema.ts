@@ -14,14 +14,10 @@ function convertSchema(schema: unknown): z.ZodTypeAny {
   let resolvedSchema: z.ZodTypeAny;
 
   if ('const' in schema) {
-    resolvedSchema = z.literal(
-      schema['const'] as string | number | bigint | boolean | null,
-    );
+    resolvedSchema = z.literal(schema['const'] as string | number | bigint | boolean | null);
   } else if (Array.isArray(schema['enum']) && schema['enum'].length > 0) {
     resolvedSchema = buildUnion(
-      schema['enum'].map((value) =>
-        z.literal(value as string | number | bigint | boolean | null),
-      ),
+      schema['enum'].map((value) => z.literal(value as string | number | bigint | boolean | null)),
     );
   } else if (Array.isArray(schema['anyOf']) && schema['anyOf'].length > 0) {
     resolvedSchema = buildUnion(schema['anyOf'].map(convertSchema));
@@ -31,9 +27,7 @@ function convertSchema(schema: unknown): z.ZodTypeAny {
     const resolvedTypes = normalizeTypes(schema);
 
     if (resolvedTypes.length > 0) {
-      resolvedSchema = buildUnion(
-        resolvedTypes.map((type) => convertTypedSchema(type, schema)),
-      );
+      resolvedSchema = buildUnion(resolvedTypes.map((type) => convertTypedSchema(type, schema)));
     } else {
       resolvedSchema = z.unknown();
     }
@@ -83,9 +77,7 @@ function convertObjectSchema(schema: SchemaRecord): z.ZodTypeAny {
       const propertySchema = convertSchema(value);
       return [
         key,
-        required.has(key) || hasDefaultValue(value)
-          ? propertySchema
-          : propertySchema.optional(),
+        required.has(key) || hasDefaultValue(value) ? propertySchema : propertySchema.optional(),
       ];
     }),
   );
@@ -131,16 +123,10 @@ function buildUnion(schemas: z.ZodTypeAny[]): z.ZodTypeAny {
   return z.union(schemas as [z.ZodTypeAny, z.ZodTypeAny, ...z.ZodTypeAny[]]);
 }
 
-function applySchemaAnnotations(
-  schema: z.ZodTypeAny,
-  rawSchema: SchemaRecord,
-): z.ZodTypeAny {
+function applySchemaAnnotations(schema: z.ZodTypeAny, rawSchema: SchemaRecord): z.ZodTypeAny {
   let resolvedSchema = schema;
 
-  if (
-    typeof rawSchema['description'] === 'string' &&
-    rawSchema['description'].length > 0
-  ) {
+  if (typeof rawSchema['description'] === 'string' && rawSchema['description'].length > 0) {
     resolvedSchema = resolvedSchema.describe(rawSchema['description']);
   }
 

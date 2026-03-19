@@ -25,13 +25,7 @@ describe('conversationalist types Type Inference', () => {
   describe('MessageRole', () => {
     it('is a union of literal string types', () => {
       expectTypeOf<MessageRole>().toEqualTypeOf<
-        | 'user'
-        | 'assistant'
-        | 'system'
-        | 'developer'
-        | 'tool-call'
-        | 'tool-result'
-        | 'snapshot'
+        'user' | 'assistant' | 'system' | 'developer' | 'tool-call' | 'tool-result' | 'snapshot'
       >();
     });
   });
@@ -90,15 +84,9 @@ describe('conversationalist types Type Inference', () => {
         content: { prompt: 'approve' },
       };
 
-      expectTypeOf(success.outcome).toEqualTypeOf<
-        'success' | 'error' | 'action_required'
-      >();
-      expectTypeOf(error.outcome).toEqualTypeOf<
-        'success' | 'error' | 'action_required'
-      >();
-      expectTypeOf(actionRequired.outcome).toEqualTypeOf<
-        'success' | 'error' | 'action_required'
-      >();
+      expectTypeOf(success.outcome).toEqualTypeOf<'success' | 'error' | 'action_required'>();
+      expectTypeOf(error.outcome).toEqualTypeOf<'success' | 'error' | 'action_required'>();
+      expectTypeOf(actionRequired.outcome).toEqualTypeOf<'success' | 'error' | 'action_required'>();
     });
   });
 
@@ -113,9 +101,7 @@ describe('conversationalist types Type Inference', () => {
   describe('MessageInput', () => {
     it('has required properties', () => {
       expectTypeOf<MessageInput['role']>().toEqualTypeOf<MessageRole>();
-      expectTypeOf<MessageInput['content']>().toEqualTypeOf<
-        string | MultiModalContent[]
-      >();
+      expectTypeOf<MessageInput['content']>().toEqualTypeOf<string | MultiModalContent[]>();
     });
 
     it('has optional properties', () => {
@@ -141,42 +127,30 @@ describe('conversationalist types Type Inference', () => {
 
     it('has content as string or readonly array', () => {
       // Content is either string or ReadonlyArray<MultiModalContent>
-      expectTypeOf<Message['content']>().toEqualTypeOf<
-        string | ReadonlyArray<MultiModalContent>
-      >();
+      expectTypeOf<Message['content']>().toEqualTypeOf<string | ReadonlyArray<MultiModalContent>>();
     });
 
     it('has readonly metadata', () => {
-      expectTypeOf<Message['metadata']>().toEqualTypeOf<
-        Readonly<Record<string, JSONValue>>
-      >();
+      expectTypeOf<Message['metadata']>().toEqualTypeOf<Readonly<Record<string, JSONValue>>>();
     });
 
     it('has optional readonly tool properties', () => {
       expectTypeOf<Message['toolCall']>().toEqualTypeOf<Readonly<ToolCall> | undefined>();
-      expectTypeOf<Message['toolResult']>().toEqualTypeOf<
-        Readonly<ToolResult> | undefined
-      >();
-      expectTypeOf<Message['tokenUsage']>().toEqualTypeOf<
-        Readonly<TokenUsage> | undefined
-      >();
+      expectTypeOf<Message['toolResult']>().toEqualTypeOf<Readonly<ToolResult> | undefined>();
+      expectTypeOf<Message['tokenUsage']>().toEqualTypeOf<Readonly<TokenUsage> | undefined>();
     });
   });
 
   describe('AssistantMessage', () => {
     it('sets the role to assistant and exposes goalCompleted', () => {
       expectTypeOf<AssistantMessage['role']>().toEqualTypeOf<'assistant'>();
-      expectTypeOf<AssistantMessage['goalCompleted']>().toEqualTypeOf<
-        boolean | undefined
-      >();
+      expectTypeOf<AssistantMessage['goalCompleted']>().toEqualTypeOf<boolean | undefined>();
     });
   });
 
   describe('ConversationStatus', () => {
     it('is a union of literal string types', () => {
-      expectTypeOf<ConversationStatus>().toEqualTypeOf<
-        'active' | 'archived' | 'deleted'
-      >();
+      expectTypeOf<ConversationStatus>().toEqualTypeOf<'active' | 'archived' | 'deleted'>();
     });
   });
 

@@ -253,9 +253,7 @@ describe('conversation (functional)', () => {
       createdAt: now,
       updatedAt: now,
     };
-    expect(() => deserializeConversation(missingMessage as any)).toThrow(
-      ConversationalistError,
-    );
+    expect(() => deserializeConversation(missingMessage as any)).toThrow(ConversationalistError);
 
     const unlistedMessage = {
       schemaVersion: 1,
@@ -277,9 +275,7 @@ describe('conversation (functional)', () => {
       createdAt: now,
       updatedAt: now,
     };
-    expect(() => deserializeConversation(unlistedMessage as any)).toThrow(
-      ConversationalistError,
-    );
+    expect(() => deserializeConversation(unlistedMessage as any)).toThrow(ConversationalistError);
   });
 
   test('deserialize handles conversation input with metadata', () => {
@@ -571,11 +567,7 @@ describe('system message management', () => {
 
   test('prependSystemMessage adds message at position 0', () => {
     let c = createConversation();
-    c = appendMessages(
-      c,
-      { role: 'user', content: 'u' },
-      { role: 'assistant', content: 'a' },
-    );
+    c = appendMessages(c, { role: 'user', content: 'u' }, { role: 'assistant', content: 'a' });
 
     c = prependSystemMessage(c, 'system prompt', { key: 'value' });
 
@@ -650,11 +642,7 @@ describe('system message management', () => {
 
   test('replaceSystemMessage prepends when no system message exists', () => {
     let c = createConversation();
-    c = appendMessages(
-      c,
-      { role: 'user', content: 'u' },
-      { role: 'assistant', content: 'a' },
-    );
+    c = appendMessages(c, { role: 'user', content: 'u' }, { role: 'assistant', content: 'a' });
 
     c = replaceSystemMessage(c, 'new system', { k: 'v' });
 
@@ -669,11 +657,7 @@ describe('system message management', () => {
 
   test('collapseSystemMessages with no system messages returns same conversation', () => {
     let c = createConversation();
-    c = appendMessages(
-      c,
-      { role: 'user', content: 'u' },
-      { role: 'assistant', content: 'a' },
-    );
+    c = appendMessages(c, { role: 'user', content: 'u' }, { role: 'assistant', content: 'a' });
 
     const collapsed = collapseSystemMessages(c);
     expect(collapsed).toBe(c); // Should be same reference if no changes
@@ -681,11 +665,7 @@ describe('system message management', () => {
 
   test('collapseSystemMessages with one system message returns same conversation', () => {
     let c = createConversation();
-    c = appendMessages(
-      c,
-      { role: 'system', content: 's' },
-      { role: 'user', content: 'u' },
-    );
+    c = appendMessages(c, { role: 'system', content: 's' }, { role: 'user', content: 'u' });
 
     const collapsed = collapseSystemMessages(c);
     expect(collapsed).toBe(c);

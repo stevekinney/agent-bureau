@@ -209,7 +209,7 @@ describe('formatAnthropicToolResults', () => {
 
 describe('formatAnthropicToolResultsAsync', () => {
   it('collects stream payloads from runtime result streams', async () => {
-    await expect(
+    expect(
       formatAnthropicToolResultsAsync([
         {
           callId: 'call-1',

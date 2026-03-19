@@ -6,15 +6,6 @@ import {
   materializeToolResults,
   materializeToolResultsAsync,
 } from 'interoperability';
-export {
-  materializeToolCall,
-  materializeToolCalls,
-  materializeToolResult,
-  materializeToolResultAsync,
-  materializeToolResults,
-  materializeToolResultsAsync,
-} from 'interoperability';
-export type { MaterializeToolCallOptions } from 'interoperability';
 
 import {
   type ConversationEnvironment,
@@ -34,6 +25,15 @@ import type {
 import { getOrderedMessages } from '../utilities/message-store';
 import { pairToolCallsWithResults } from '../utilities/tool-calls';
 import { appendMessages } from './append';
+export type { MaterializeToolCallOptions } from 'interoperability';
+export {
+  materializeToolCall,
+  materializeToolCalls,
+  materializeToolResult,
+  materializeToolResultAsync,
+  materializeToolResults,
+  materializeToolResultsAsync,
+} from 'interoperability';
 
 export interface AppendToolCallOptions {
   content?: MessageInput['content'];
@@ -66,9 +66,7 @@ export function appendToolCall(
   const resolvedEnvironment = resolveConversationEnvironment(
     isConversationEnvironmentParameter(options) ? options : environment,
   );
-  const resolvedOptions = isConversationEnvironmentParameter(options)
-    ? undefined
-    : options;
+  const resolvedOptions = isConversationEnvironmentParameter(options) ? undefined : options;
 
   return appendMessages(
     conversation,
@@ -111,9 +109,7 @@ export function appendToolResult(
   options?: AppendToolResultOptions,
   environment?: Partial<ConversationEnvironment>,
 ): Conversation {
-  const resolvedOptions = isConversationEnvironmentParameter(options)
-    ? undefined
-    : options;
+  const resolvedOptions = isConversationEnvironmentParameter(options) ? undefined : options;
   const normalizedToolResult = materializeToolResult(toolResult);
 
   return appendMessages(
@@ -151,9 +147,7 @@ export async function appendToolResultAsync(
   options?: AppendToolResultOptions,
   environment?: Partial<ConversationEnvironment>,
 ): Promise<Conversation> {
-  const resolvedOptions = isConversationEnvironmentParameter(options)
-    ? undefined
-    : options;
+  const resolvedOptions = isConversationEnvironmentParameter(options) ? undefined : options;
   const normalizedToolResult = await materializeToolResultAsync(toolResult);
 
   return appendMessages(

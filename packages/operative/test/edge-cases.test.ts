@@ -1,9 +1,8 @@
-import { describe, expect, it } from 'bun:test';
-import { z } from 'zod';
-
 import { createTool } from 'armorer';
 import { createTestToolbox } from 'armorer/test';
+import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
+import { z } from 'zod';
 
 import { noToolCalls } from '../src/conditions/predicates';
 import { createRun } from '../src/create-run';
@@ -137,17 +136,15 @@ describe('collectAsync option', () => {
 
 describe('test utility coverage', () => {
   it('createMockGenerate throws when exhausted', async () => {
-    const generate = createMockGenerate([
-      { content: 'only one', toolCalls: [] },
-    ]);
+    const generate = createMockGenerate([{ content: 'only one', toolCalls: [] }]);
 
     // First call succeeds
     await generate({ conversation: {} as any, step: 0 });
 
     // Second call throws
-    await expect(
-      generate({ conversation: {} as any, step: 1 }),
-    ).rejects.toThrow('createMockGenerate: no response at index 1');
+    await expect(generate({ conversation: {} as any, step: 1 })).rejects.toThrow(
+      'createMockGenerate: no response at index 1',
+    );
   });
 
   it('createMockGenerateOnce returns response on first call, throws on second', async () => {
@@ -156,17 +153,15 @@ describe('test utility coverage', () => {
     const response = await generate({ conversation: {} as any, step: 0 });
     expect(response.content).toBe('once');
 
-    await expect(
-      generate({ conversation: {} as any, step: 1 }),
-    ).rejects.toThrow('createMockGenerateOnce: already called');
+    await expect(generate({ conversation: {} as any, step: 1 })).rejects.toThrow(
+      'createMockGenerateOnce: already called',
+    );
   });
 
   it('createRunRecorder clear resets events and steps', async () => {
     const toolbox = createTestToolbox([]);
     const conversation = new Conversation();
-    const generate = createMockGenerate([
-      { content: 'Hello', toolCalls: [] },
-    ]);
+    const generate = createMockGenerate([{ content: 'Hello', toolCalls: [] }]);
 
     const activeRun = createRun({
       generate,

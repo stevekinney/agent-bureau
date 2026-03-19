@@ -14,11 +14,7 @@ interface CircuitBreakerConfiguration {
 }
 
 function createCircuitBreaker(configuration: CircuitBreakerConfiguration) {
-  const {
-    failureThreshold = 5,
-    resetTimeout = 60000,
-    halfOpenRequests = 3,
-  } = configuration;
+  const { failureThreshold = 5, resetTimeout = 60000, halfOpenRequests = 3 } = configuration;
 
   const circuits = new Map<
     string,
@@ -76,9 +72,7 @@ function createCircuitBreaker(configuration: CircuitBreakerConfiguration) {
         try {
           // Resolve execute function if lazy
           const executeFn =
-            typeof originalExecute === 'function'
-              ? originalExecute
-              : await originalExecute;
+            typeof originalExecute === 'function' ? originalExecute : await originalExecute;
 
           const result = await executeFn(params, context);
 

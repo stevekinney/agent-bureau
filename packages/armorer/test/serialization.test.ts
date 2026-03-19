@@ -70,12 +70,8 @@ describe('serialization', () => {
       metadata: { a: 2, z: 1 },
     });
 
-    const jsonA = stableStringifyJson(
-      serializeToolDefinition(toolA) as unknown as JsonValue,
-    );
-    const jsonB = stableStringifyJson(
-      serializeToolDefinition(toolB) as unknown as JsonValue,
-    );
+    const jsonA = stableStringifyJson(serializeToolDefinition(toolA) as unknown as JsonValue);
+    const jsonB = stableStringifyJson(serializeToolDefinition(toolB) as unknown as JsonValue);
 
     expect(jsonA).toBe(jsonB);
   });
@@ -93,10 +89,7 @@ describe('serialization', () => {
     });
 
     const serialized = serializeRegistry(registry);
-    expect(serialized[0]?.aliases).toEqual([
-      'default:alias-a@1.0.0',
-      'default:alias-b@1.0.0',
-    ]);
+    expect(serialized[0]?.aliases).toEqual(['default:alias-a@1.0.0', 'default:alias-b@1.0.0']);
   });
 
   it('rejects non-JSON primitives and circular references', () => {

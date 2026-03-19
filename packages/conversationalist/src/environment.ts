@@ -41,8 +41,7 @@ export function resolveConversationEnvironment(
   return {
     now: environment?.now ?? defaultConversationEnvironment.now,
     randomId: environment?.randomId ?? defaultConversationEnvironment.randomId,
-    estimateTokens:
-      environment?.estimateTokens ?? defaultConversationEnvironment.estimateTokens,
+    estimateTokens: environment?.estimateTokens ?? defaultConversationEnvironment.estimateTokens,
     plugins: [...(environment?.plugins ?? defaultConversationEnvironment.plugins)],
   };
 }

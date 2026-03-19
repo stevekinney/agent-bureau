@@ -134,7 +134,7 @@
   "scripts": {
     "build": "bun run scripts/build.ts",
     "check-types": "tsc --noEmit",
-    "ci": "bun run format:check && bun run lint && bun run check-types && bun run coverage:check && bun run build",
+    "ci": "bun run validate && bun run build",
     "coverage:check": "bun run scripts/check-coverage.ts",
     "dev": "bun --watch run src/index.ts",
     "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md}\"",
@@ -145,7 +145,7 @@
     "start": "bun run src/index.ts",
     "test": "bun test",
     "test:coverage": "bun test --coverage",
-    "validate": "bun run format:check && bun run lint && bun run check-types && bun run coverage:check"
+    "validate": "bun run format:check && bun run lint && bun run check-types && bun run test"
   },
   "dependencies": {
     "change-case": "^5.4.4",

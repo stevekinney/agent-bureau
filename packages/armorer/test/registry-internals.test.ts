@@ -56,10 +56,7 @@ const {
   selectTopMatches,
 } = internalRegistryTestUtilities;
 
-const makeTool = (
-  name: string,
-  overrides: Partial<Parameters<typeof createTool>[0]> = {},
-) =>
+const makeTool = (name: string, overrides: Partial<Parameters<typeof createTool>[0]> = {}) =>
   createTool({
     name,
     description: `${name} description`,
@@ -136,9 +133,7 @@ describe('registry internal coverage', () => {
   it('reindexes async embeddings without re-adding stale tools', async () => {
     const tool = makeTool('stale-embed');
     let live = true;
-    let resolveEmbeddings:
-      | ((vectors: number[][]) => void)
-      | undefined;
+    let resolveEmbeddings: ((vectors: number[][]) => void) | undefined;
     const registry = {
       tools: () => [tool],
       register: () => registry,
@@ -155,9 +150,7 @@ describe('registry internal coverage', () => {
 
     reindexSearchIndex(registry as any);
     live = false;
-    resolveEmbeddings?.(
-      Array.from({ length: 5 }, () => [1, 0]),
-    );
+    resolveEmbeddings?.(Array.from({ length: 5 }, () => [1, 0]));
     await Promise.resolve();
     await Promise.resolve();
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -167,9 +160,7 @@ describe('registry internal coverage', () => {
 
   it('reindexes async embeddings for still-registered tools', async () => {
     const tool = makeTool('live-embed');
-    let resolveEmbeddings:
-      | ((vectors: number[][]) => void)
-      | undefined;
+    let resolveEmbeddings: ((vectors: number[][]) => void) | undefined;
     const registry = {
       tools: () => [tool],
       register: () => registry,
@@ -307,15 +298,11 @@ describe('registry internal coverage', () => {
     expect(selectEmbeddingCandidates(indexedWithMissing, queryEmbedding, normalized)).toEqual(
       new Set([tool, missingTool]),
     );
-    expect(selectEmbeddingCandidates(indexedWithMissing, queryEmbedding, missingFieldQuery)).toEqual(
-      new Set([missingTool]),
-    );
     expect(
-      selectEmbeddingCandidates(
-        indexed,
-        { vector: [-1, -1], magnitude: Math.sqrt(2) },
-        normalized,
-      ),
+      selectEmbeddingCandidates(indexedWithMissing, queryEmbedding, missingFieldQuery),
+    ).toEqual(new Set([missingTool]));
+    expect(
+      selectEmbeddingCandidates(indexed, { vector: [-1, -1], magnitude: Math.sqrt(2) }, normalized),
     ).toBeNull();
 
     removeToolFromEmbeddingIndex(indexed, tool);
@@ -356,12 +343,7 @@ describe('registry internal coverage', () => {
     const textIndex = buildTextInvertedIndex(tools, makeTextIndex as any);
 
     expect(
-      selectCandidateTools(
-        tools,
-        { tags: { any: ['missing'] } },
-        undefined,
-        () => textIndex,
-      ),
+      selectCandidateTools(tools, { tags: { any: ['missing'] } }, undefined, () => textIndex),
     ).toEqual([]);
     expect(
       selectCandidateTools(
@@ -436,9 +418,9 @@ describe('registry internal coverage', () => {
       tools,
     );
     expect(normalizeFilterValues('ops')).toEqual(['ops']);
-    expect(
-      riskMatches(undefined, { readOnly: true, mutates: false, dangerous: false }),
-    ).toBe(false);
+    expect(riskMatches(undefined, { readOnly: true, mutates: false, dangerous: false })).toBe(
+      false,
+    );
     expect(
       riskMatches(
         { readOnly: true, mutates: false, dangerous: false },
@@ -446,22 +428,13 @@ describe('registry internal coverage', () => {
       ),
     ).toBe(true);
     expect(
-      riskMatches(
-        { readOnly: true, mutates: false, dangerous: false },
-        { readOnly: false },
-      ),
+      riskMatches({ readOnly: true, mutates: false, dangerous: false }, { readOnly: false }),
     ).toBe(false);
     expect(
-      riskMatches(
-        { readOnly: true, mutates: false, dangerous: false },
-        { mutates: true },
-      ),
+      riskMatches({ readOnly: true, mutates: false, dangerous: false }, { mutates: true }),
     ).toBe(false);
     expect(
-      riskMatches(
-        { readOnly: true, mutates: false, dangerous: false },
-        { dangerous: true },
-      ),
+      riskMatches({ readOnly: true, mutates: false, dangerous: false }, { dangerous: true }),
     ).toBe(false);
   });
 

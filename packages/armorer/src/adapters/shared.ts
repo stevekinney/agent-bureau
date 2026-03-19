@@ -5,9 +5,7 @@ import type { AnyToolDefinition } from '../core/tool-definition';
 /**
  * Type guard to check if input is a serialized tool definition.
  */
-export function isSerializedToolDefinition(
-  input: unknown,
-): input is SerializedToolDefinition {
+export function isSerializedToolDefinition(input: unknown): input is SerializedToolDefinition {
   return (
     input !== null &&
     typeof input === 'object' &&
@@ -40,9 +38,7 @@ export function normalizeToSerializedDefinitions(
   const toSerialized = (item: SerializedToolDefinition | AnyToolDefinition) => {
     if (isSerializedToolDefinition(item)) return item;
     if (isToolDefinition(item)) return serializeToolDefinition(item);
-    throw new TypeError(
-      'Invalid tool input: expected ToolDefinition or SerializedToolDefinition',
-    );
+    throw new TypeError('Invalid tool input: expected ToolDefinition or SerializedToolDefinition');
   };
 
   if (isToolRegistryLike(input)) {
@@ -50,8 +46,7 @@ export function normalizeToSerializedDefinitions(
     if (!Array.isArray(tools)) {
       throw new Error('Registry tools() must return an array.');
     }
-    const registryTools: readonly (SerializedToolDefinition | AnyToolDefinition)[] =
-      tools;
+    const registryTools: readonly (SerializedToolDefinition | AnyToolDefinition)[] = tools;
     return registryTools.map((tool) => toSerialized(tool));
   }
 

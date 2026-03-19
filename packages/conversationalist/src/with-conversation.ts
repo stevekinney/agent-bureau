@@ -11,20 +11,14 @@ import {
   replaceSystemMessage,
 } from './conversation/index';
 import { ensureConversationSafe } from './conversation/validation';
+import type { MultiModalContent } from './multi-modal';
 import {
   appendStreamingMessage,
   cancelStreamingMessage,
   finalizeStreamingMessage,
   updateStreamingMessage,
 } from './streaming';
-import type {
-  ConversationHistory,
-  JSONValue,
-  Message,
-  MessageInput,
-  TokenUsage,
-} from './types';
-import type { MultiModalContent } from './multi-modal';
+import type { ConversationHistory, JSONValue, Message, MessageInput, TokenUsage } from './types';
 
 /**
  * A mutable draft wrapper around a conversation.

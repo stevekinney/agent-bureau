@@ -36,8 +36,7 @@ describe('open-ai agents adapter', () => {
       }),
     ]);
 
-    const { toolNames, mutatingToolNames, dangerousToolNames } =
-      await toOpenAIAgentTools(toolbox);
+    const { toolNames, mutatingToolNames, dangerousToolNames } = await toOpenAIAgentTools(toolbox);
 
     expect(toolNames).toEqual(['safe-tool', 'mutating-tool', 'dangerous-tool']);
     expect(mutatingToolNames).toEqual(['mutating-tool']);
@@ -238,10 +237,7 @@ describe('open-ai agents adapter', () => {
       formatResult: (result) => ({ outcome: result.outcome }),
     });
 
-    const output = await tools[0]!.invoke(
-      undefined as never,
-      JSON.stringify({ value: 3 }),
-    );
+    const output = await tools[0]!.invoke(undefined as never, JSON.stringify({ value: 3 }));
     expect(output).toEqual({ outcome: 'success' });
   });
 
@@ -256,10 +252,7 @@ describe('open-ai agents adapter', () => {
     });
 
     const { tools } = await toOpenAIAgentTools([tool]);
-    const output = await tools[0]!.invoke(
-      undefined as never,
-      JSON.stringify({ value: 7 }),
-    );
+    const output = await tools[0]!.invoke(undefined as never, JSON.stringify({ value: 7 }));
     expect(output).toEqual({ value: 7 });
   });
 
@@ -290,8 +283,7 @@ describe('open-ai agents adapter', () => {
     ];
 
     const toolbox = {
-      tools: () =>
-        cases.map((entry, index) => makeFailingTool(`failing-${index}`, entry.content)),
+      tools: () => cases.map((entry, index) => makeFailingTool(`failing-${index}`, entry.content)),
     } as any;
     const { tools } = await toOpenAIAgentTools(toolbox);
 

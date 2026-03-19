@@ -105,9 +105,7 @@ export function validateConversationHistoryIntegrity(
 /**
  * Throws an integrity error if the conversation fails validation.
  */
-export function assertConversationHistoryIntegrity(
-  conversation: ConversationHistory,
-): void {
+export function assertConversationHistoryIntegrity(conversation: ConversationHistory): void {
   const issues = validateConversationHistoryIntegrity(conversation);
   if (issues.length === 0) return;
 

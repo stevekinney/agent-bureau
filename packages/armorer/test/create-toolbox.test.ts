@@ -13,12 +13,10 @@ import { toAnthropicTools } from '../src/adapters/anthropic';
 import { toGeminiTools } from '../src/adapters/gemini';
 import { toOpenAITools } from '../src/adapters/openai';
 import { internalToolboxTestUtilities } from '../src/create-toolbox';
-import { createTruncatingAsyncIterable } from '../src/truncation/index';
 import { queryTools, reindexSearchIndex, searchTools } from '../src/registry';
+import { createTruncatingAsyncIterable } from '../src/truncation/index';
 
-const makeConfiguration = (
-  overrides?: Partial<ToolConfiguration>,
-): ToolConfiguration => ({
+const makeConfiguration = (overrides?: Partial<ToolConfiguration>): ToolConfiguration => ({
   name: 'sum',
   description: 'add two numbers',
   input: z.object({ a: z.number(), b: z.number() }),
@@ -55,9 +53,7 @@ describe('createToolbox', () => {
     const toolbox = createToolbox([makeConfiguration()]);
 
     await expect(toolbox.toProvider('openai')).resolves.toEqual(toOpenAITools(toolbox));
-    await expect(toolbox.toProvider('anthropic')).resolves.toEqual(
-      toAnthropicTools(toolbox),
-    );
+    await expect(toolbox.toProvider('anthropic')).resolves.toEqual(toAnthropicTools(toolbox));
     await expect(toolbox.toProvider('gemini')).resolves.toEqual(toGeminiTools(toolbox));
   });
 
@@ -180,7 +176,9 @@ describe('createToolbox', () => {
       name: 'sum',
       arguments: { a: 1, b: 2 },
     });
-    expect(result.error?.message).toContain('Imported tool "sum" does not have an execute implementation');
+    expect(result.error?.message).toContain(
+      'Imported tool "sum" does not have an execute implementation',
+    );
   });
 
   it('imports a single OpenAI tool input through createToolbox.fromOpenAITools', async () => {
@@ -279,7 +277,9 @@ describe('createToolbox', () => {
       name: 'lookup',
       arguments: { query: 'docs' },
     });
-    expect(result.error?.message).toContain('Imported tool "lookup" does not have an execute implementation');
+    expect(result.error?.message).toContain(
+      'Imported tool "lookup" does not have an execute implementation',
+    );
   });
 
   it('materializes imported tool configuration metadata for lazy imports', () => {
@@ -489,9 +489,7 @@ describe('createToolbox', () => {
       captured = event.detail;
     });
 
-    const result = await tool.execute(
-      createToolCall('diagnostic-tool', { value: 123 } as any),
-    );
+    const result = await tool.execute(createToolCall('diagnostic-tool', { value: 123 } as any));
 
     expect(result.error).toBeDefined();
     expect(captured.report).toEqual(report);
@@ -610,12 +608,12 @@ describe('createToolbox', () => {
     const extra = createToolbox([beta] as const);
     const extendedWithToolbox = base.extend(extra);
 
-    expectTypeOf<
-      ReturnType<typeof extendedWithEntry.tools>[number]['name']
-    >().toEqualTypeOf<'alpha' | 'beta'>();
-    expectTypeOf<
-      ReturnType<typeof extendedWithToolbox.tools>[number]['name']
-    >().toEqualTypeOf<'alpha' | 'beta'>();
+    expectTypeOf<ReturnType<typeof extendedWithEntry.tools>[number]['name']>().toEqualTypeOf<
+      'alpha' | 'beta'
+    >();
+    expectTypeOf<ReturnType<typeof extendedWithToolbox.tools>[number]['name']>().toEqualTypeOf<
+      'alpha' | 'beta'
+    >();
   });
 
   it('exports registered tools as JSON Schema via toJSON({ format: "json-schema" })', () => {
@@ -1072,10 +1070,7 @@ describe('createToolbox', () => {
     const schemaMatches = queryTools(toolbox, {
       schema: { matches: z.object({ a: z.number() }) },
     });
-    expect(schemaMatches.map((tool) => tool.name).sort()).toEqual([
-      'double',
-      'increment',
-    ]);
+    expect(schemaMatches.map((tool) => tool.name).sort()).toEqual(['double', 'increment']);
 
     const predicateMatches = queryTools(toolbox, {
       predicate: (tool) => tool.tags?.includes('text') ?? false,
@@ -1117,10 +1112,7 @@ describe('createToolbox', () => {
 
   it('returns all tools when no query criteria is provided', () => {
     const toolbox = createToolbox();
-    toolbox.register(
-      makeConfiguration({ name: 'foo' }),
-      makeConfiguration({ name: 'bar' }),
-    );
+    toolbox.register(makeConfiguration({ name: 'foo' }), makeConfiguration({ name: 'bar' }));
 
     const allTools = queryTools(toolbox);
     expect(allTools.map((tool) => tool.name).sort()).toEqual(['bar', 'foo']);
@@ -1143,10 +1135,7 @@ describe('createToolbox', () => {
 
   it('throws when query input is not an object', () => {
     const toolbox = createToolbox();
-    toolbox.register(
-      makeConfiguration({ name: 'alpha' }),
-      makeConfiguration({ name: 'beta' }),
-    );
+    toolbox.register(makeConfiguration({ name: 'alpha' }), makeConfiguration({ name: 'beta' }));
 
     expect(() => queryTools(toolbox, 42 as unknown as any)).toThrow(
       'query expects a ToolQuery object',
@@ -1173,10 +1162,7 @@ describe('createToolbox', () => {
 
   it('ignores predicate errors while filtering', () => {
     const toolbox = createToolbox();
-    toolbox.register(
-      makeConfiguration({ name: 'ok' }),
-      makeConfiguration({ name: 'nope' }),
-    );
+    toolbox.register(makeConfiguration({ name: 'ok' }), makeConfiguration({ name: 'nope' }));
 
     const matches = queryTools(toolbox, {
       predicate: (tool) => {
@@ -1602,10 +1588,7 @@ describe('createToolbox', () => {
 
     it('returns only the missing tool names when some are not registered', () => {
       const toolbox = createToolbox();
-      toolbox.register(
-        makeConfiguration({ name: 'toolA' }),
-        makeConfiguration({ name: 'toolC' }),
-      );
+      toolbox.register(makeConfiguration({ name: 'toolA' }), makeConfiguration({ name: 'toolC' }));
 
       const missing = toolbox.getMissingTools(['toolA', 'toolB', 'toolC', 'toolD']);
       expect(missing).toEqual(['toolB', 'toolD']);
@@ -1651,10 +1634,7 @@ describe('createToolbox', () => {
 
     it('returns false when any tool is not registered', () => {
       const toolbox = createToolbox();
-      toolbox.register(
-        makeConfiguration({ name: 'toolA' }),
-        makeConfiguration({ name: 'toolB' }),
-      );
+      toolbox.register(makeConfiguration({ name: 'toolA' }), makeConfiguration({ name: 'toolB' }));
 
       expect(toolbox.hasAllTools(['toolA', 'toolB', 'toolC'])).toBe(false);
     });
@@ -2119,10 +2099,7 @@ describe('createToolbox', () => {
       const tieredResults = queryTools(toolbox, {
         metadata: { has: ['tier'] },
       });
-      expect(tieredResults.map((t) => t.name).sort()).toEqual([
-        'basic-tool',
-        'premium-tool',
-      ]);
+      expect(tieredResults.map((t) => t.name).sort()).toEqual(['basic-tool', 'premium-tool']);
 
       const undefinedResults = queryTools(toolbox, {
         metadata: { predicate: (meta) => meta === undefined },
@@ -2146,10 +2123,7 @@ describe('createToolbox', () => {
       const containsResults = queryTools(toolbox, {
         metadata: { contains: { owner: 'team-' } },
       });
-      expect(containsResults.map((t) => t.name).sort()).toEqual([
-        'alpha-tool',
-        'beta-tool',
-      ]);
+      expect(containsResults.map((t) => t.name).sort()).toEqual(['alpha-tool', 'beta-tool']);
 
       const labelResults = queryTools(toolbox, {
         metadata: { contains: { labels: 'fast' } },
@@ -2251,15 +2225,11 @@ describe('createToolbox', () => {
     it('replaces an existing tool when re-registering with same name', () => {
       const toolbox = createToolbox();
 
-      toolbox.register(
-        makeConfiguration({ name: 'calc', execute: async ({ a, b }) => a + b }),
-      );
+      toolbox.register(makeConfiguration({ name: 'calc', execute: async ({ a, b }) => a + b }));
       expect(toolbox.getTool('calc')).toBeDefined();
 
       // Register a replacement tool with the same name
-      toolbox.register(
-        makeConfiguration({ name: 'calc', execute: async ({ a, b }) => a * b }),
-      );
+      toolbox.register(makeConfiguration({ name: 'calc', execute: async ({ a, b }) => a * b }));
 
       // Should still have exactly one tool
       expect(toolbox.tools()).toHaveLength(1);
@@ -2474,8 +2444,7 @@ describe('createToolbox', () => {
         ],
         {
           getTool: async () => {
-            return async (params: unknown) =>
-              (params as { value: string }).value.toUpperCase();
+            return async (params: unknown) => (params as { value: string }).value.toUpperCase();
           },
         },
       );
@@ -2613,8 +2582,7 @@ describe('createToolbox', () => {
       }
 
       function isAsyncIterable(value: unknown): value is AsyncIterable<unknown> {
-        if (!value || (typeof value !== 'object' && typeof value !== 'function'))
-          return false;
+        if (!value || (typeof value !== 'object' && typeof value !== 'function')) return false;
         return Symbol.asyncIterator in value;
       }
 
@@ -2641,9 +2609,7 @@ describe('createToolbox', () => {
                 ...configuration,
                 execute: async (params: unknown, context: unknown) => {
                   const executeFn =
-                    typeof originalExecute === 'function'
-                      ? originalExecute
-                      : await originalExecute;
+                    typeof originalExecute === 'function' ? originalExecute : await originalExecute;
                   const result = await executeFn(params, context);
                   if (result && typeof result === 'object') {
                     const obj = result as Record<string, unknown>;
@@ -2758,10 +2724,12 @@ describe('createToolbox', () => {
 
       const results = [];
       for (let i = 0; i < 5; i++) {
-        results.push(await toolbox.execute({ id: `lb-${i}`, name: 'sum', arguments: { a: 1, b: 2 } }));
+        results.push(
+          await toolbox.execute({ id: `lb-${i}`, name: 'sum', arguments: { a: 1, b: 2 } }),
+        );
       }
 
-      const blocked = results.filter(r => r.outcome === 'error' && r.content?.includes('loop'));
+      const blocked = results.filter((r) => r.outcome === 'error' && r.content?.includes('loop'));
       expect(blocked.length).toBeGreaterThan(0);
     });
 

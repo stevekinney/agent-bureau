@@ -1,17 +1,16 @@
 import { describe, expect, it } from 'bun:test';
 
-import type { StepResult } from '../src/types';
-
 import {
   contentMatches,
   every,
   maximumSteps,
-  noToolCalls,
   not,
+  noToolCalls,
   some,
   toolCalled,
   toolOutcome,
 } from '../src/conditions/predicates';
+import type { StepResult } from '../src/types';
 
 const makeStepResult = (overrides: Partial<StepResult> = {}): StepResult => ({
   step: 0,
@@ -160,13 +159,19 @@ describe('contentMatches', () => {
 
 describe('every', () => {
   it('stops only when both conditions are true', async () => {
-    const condition = every(noToolCalls(), contentMatches((c) => c.includes('DONE')));
+    const condition = every(
+      noToolCalls(),
+      contentMatches((c) => c.includes('DONE')),
+    );
     const result = await condition(makeStepResult({ toolCalls: [], content: 'DONE' }));
     expect(result).toBe(true);
   });
 
   it('continues when the first condition is false', async () => {
-    const condition = every(noToolCalls(), contentMatches((c) => c.includes('DONE')));
+    const condition = every(
+      noToolCalls(),
+      contentMatches((c) => c.includes('DONE')),
+    );
     const result = await condition(
       makeStepResult({
         toolCalls: [{ id: 'call-1', name: 'get_weather', arguments: { location: 'Denver' } }],
@@ -177,7 +182,10 @@ describe('every', () => {
   });
 
   it('continues when the second condition is false', async () => {
-    const condition = every(noToolCalls(), contentMatches((c) => c.includes('DONE')));
+    const condition = every(
+      noToolCalls(),
+      contentMatches((c) => c.includes('DONE')),
+    );
     const result = await condition(makeStepResult({ toolCalls: [], content: 'Still working' }));
     expect(result).toBe(false);
   });
@@ -185,7 +193,10 @@ describe('every', () => {
 
 describe('some', () => {
   it('stops when either condition is true', async () => {
-    const condition = some(noToolCalls(), contentMatches((c) => c.includes('DONE')));
+    const condition = some(
+      noToolCalls(),
+      contentMatches((c) => c.includes('DONE')),
+    );
     const result = await condition(
       makeStepResult({
         toolCalls: [{ id: 'call-1', name: 'get_weather', arguments: { location: 'Denver' } }],
@@ -196,7 +207,10 @@ describe('some', () => {
   });
 
   it('continues when both conditions are false', async () => {
-    const condition = some(noToolCalls(), contentMatches((c) => c.includes('DONE')));
+    const condition = some(
+      noToolCalls(),
+      contentMatches((c) => c.includes('DONE')),
+    );
     const result = await condition(
       makeStepResult({
         toolCalls: [{ id: 'call-1', name: 'get_weather', arguments: { location: 'Denver' } }],

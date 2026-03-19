@@ -202,8 +202,7 @@ export async function formatOpenAIToolResultsAsync(
   const messages = await Promise.all(
     list.map(async (result) => {
       const stream = getStreamingPayload(result) ?? null;
-      const contentSource =
-        stream !== null ? await collectAsyncIterable(stream) : result.content;
+      const contentSource = stream !== null ? await collectAsyncIterable(stream) : result.content;
       return {
         role: 'tool' as const,
         tool_call_id: getToolCallId(result),
@@ -227,8 +226,7 @@ function convertToOpenAI(
   options?: OpenAIAdapterOptions,
 ): OpenAITool {
   const parameters = stripSchemaId(tool.input as JSONSchema);
-  const name =
-    options?.naming === 'safe-id' ? mapToOpenAIName(tool.id) : tool.identity.name;
+  const name = options?.naming === 'safe-id' ? mapToOpenAIName(tool.id) : tool.identity.name;
   return {
     type: 'function',
     function: {

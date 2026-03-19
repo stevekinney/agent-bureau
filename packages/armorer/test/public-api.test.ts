@@ -4,9 +4,7 @@ import { describe, expect, it } from 'bun:test';
 
 import * as root from '../src';
 
-const pkg = JSON.parse(
-  readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
-) as {
+const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
   exports?: Record<string, unknown>;
 };
 

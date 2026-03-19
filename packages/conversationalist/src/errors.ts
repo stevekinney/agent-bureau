@@ -133,23 +133,16 @@ export function createDuplicateIdError(id: string): ConversationalistError {
  * Thrown when a conversation cannot be found.
  */
 export function createNotFoundError(id: string): ConversationalistError {
-  return new ConversationalistError(
-    'error:not-found',
-    `conversation with id ${id} not found`,
-    {
-      context: { id },
-    },
-  );
+  return new ConversationalistError('error:not-found', `conversation with id ${id} not found`, {
+    context: { id },
+  });
 }
 
 /**
  * Creates a serialization error (ERR_SERIALIZATION).
  * Thrown when JSON serialization/deserialization fails.
  */
-export function createSerializationError(
-  message: string,
-  cause?: Error,
-): ConversationalistError {
+export function createSerializationError(message: string, cause?: Error): ConversationalistError {
   return new ConversationalistError('error:serialization', message, { cause });
 }
 

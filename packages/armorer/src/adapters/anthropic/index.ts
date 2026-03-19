@@ -59,9 +59,7 @@ type AnthropicToolCallSource =
  * });
  * ```
  */
-export function toAnthropicTools(
-  tool: SerializedToolDefinition | AnyToolDefinition,
-): AnthropicTool;
+export function toAnthropicTools(tool: SerializedToolDefinition | AnyToolDefinition): AnthropicTool;
 export function toAnthropicTools(
   tools: (SerializedToolDefinition | AnyToolDefinition)[],
 ): AnthropicTool[];
@@ -75,9 +73,7 @@ export function toAnthropicTools(input: AdapterInput): AnthropicTool | Anthropic
 }
 
 export function fromAnthropicTools(tool: AnthropicTool): ImportedToolConfiguration;
-export function fromAnthropicTools(
-  tools: readonly AnthropicTool[],
-): ImportedToolConfiguration[];
+export function fromAnthropicTools(tools: readonly AnthropicTool[]): ImportedToolConfiguration[];
 export function fromAnthropicTools(
   input: AnthropicTool | readonly AnthropicTool[],
 ): ImportedToolConfiguration | ImportedToolConfiguration[] {
@@ -86,9 +82,7 @@ export function fromAnthropicTools(
   return Array.isArray(input) ? converted : converted[0]!;
 }
 
-export function parseAnthropicToolCalls(
-  contentBlocks: AnthropicToolCallSource,
-): ToolCallInput[] {
+export function parseAnthropicToolCalls(contentBlocks: AnthropicToolCallSource): ToolCallInput[] {
   const resolvedContentBlocks = extractAnthropicContentBlocks(contentBlocks);
   if (!resolvedContentBlocks || !Array.isArray(resolvedContentBlocks)) {
     return [];
@@ -138,8 +132,7 @@ function convertToAnthropic(tool: SerializedToolDefinition): AnthropicTool {
 
   const inputSchema: AnthropicTool['input_schema'] = {
     type: 'object',
-    properties: (params['properties'] ??
-      {}) as AnthropicTool['input_schema']['properties'],
+    properties: (params['properties'] ?? {}) as AnthropicTool['input_schema']['properties'],
   };
 
   if (params['required']) {
@@ -173,10 +166,7 @@ function convertToolUseBlock(contentBlock: AnthropicToolUseBlock): ToolCallInput
   };
 }
 
-function convertToolResult(
-  result: ToolResultLike,
-  content: unknown,
-): AnthropicToolResultBlock {
+function convertToolResult(result: ToolResultLike, content: unknown): AnthropicToolResultBlock {
   const toolResult: AnthropicToolResultBlock = {
     type: 'tool_result',
     tool_use_id: getToolCallId(result),
@@ -215,11 +205,7 @@ function stringifyToolContent(content: unknown): string {
   if (typeof content === 'function') {
     return '[function]';
   }
-  if (
-    typeof content === 'number' ||
-    typeof content === 'boolean' ||
-    typeof content === 'bigint'
-  ) {
+  if (typeof content === 'number' || typeof content === 'boolean' || typeof content === 'bigint') {
     return String(content);
   }
   try {

@@ -91,9 +91,7 @@ describe('search real-world scenarios', () => {
     });
 
     expect(results[0]?.tool.name).toBe('track-shipment');
-    expect(results[0]?.reasons.some((reason) => reason.startsWith('embedding:'))).toBe(
-      true,
-    );
+    expect(results[0]?.reasons.some((reason) => reason.startsWith('embedding:'))).toBe(true);
     expect(results.map((entry) => entry.tool.name)).toEqual(
       expect.arrayContaining(['schedule-delivery']),
     );

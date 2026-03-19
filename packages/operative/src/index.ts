@@ -1,5 +1,6 @@
-export { createRun } from './create-run';
+export { stopWhen } from './conditions/index';
 export type { ActiveRun } from './create-run';
+export { createRun } from './create-run';
 export { createSubagentTool } from './create-subagent-tool';
 export { defineAgent } from './define-agent';
 export type { OperativeEvents, OperativeEventType } from './events';
@@ -8,9 +9,9 @@ export { withStreaming } from './streaming';
 export type {
   AgentDefinition,
   AgentRunOptions,
+  ContextManagementOptions,
   Conversation,
   ConversationHistory,
-  ContextManagementOptions,
   CreateSubagentToolOptions,
   DefineAgentOptions,
   FinishReason,
@@ -28,11 +29,10 @@ export type {
   StreamingGenerateFunction,
   StreamingHandle,
   TokenUsage,
+  Toolbox,
   ToolCall,
   ToolCallInput,
-  ToolExecutionResult,
   ToolExecutionHookContext,
+  ToolExecutionResult,
   ToolExecutionResultContext,
-  Toolbox,
 } from './types';
-export { stopWhen } from './conditions/index';

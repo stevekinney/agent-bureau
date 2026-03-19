@@ -139,12 +139,7 @@ export function createSearchTool(
     description,
     input: z.object({
       query: z.string().describe('The search query to find relevant tools'),
-      limit: z
-        .number()
-        .int()
-        .positive()
-        .optional()
-        .describe('Maximum number of tools to return'),
+      limit: z.number().int().positive().optional().describe('Maximum number of tools to return'),
       tags: z
         .array(z.string())
         .optional()
@@ -196,9 +191,7 @@ export function createSearchTool(
  */
 export type SearchTool = ReturnType<typeof createSearchTool>;
 
-function hasLegacyRegister(
-  value: unknown,
-): value is { register: (...entries: Tool[]) => unknown } {
+function hasLegacyRegister(value: unknown): value is { register: (...entries: Tool[]) => unknown } {
   if (!value || typeof value !== 'object') {
     return false;
   }

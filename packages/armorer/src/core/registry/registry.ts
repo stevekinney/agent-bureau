@@ -8,9 +8,7 @@ import {
 } from '../identity';
 import type { AnyToolDefinition as ToolDefinition } from '../tool-definition';
 
-export type VersionSelector = (
-  definitions: ToolDefinition[],
-) => ToolDefinition | undefined;
+export type VersionSelector = (definitions: ToolDefinition[]) => ToolDefinition | undefined;
 
 export type RegistryOptions = {
   versionSelector?: VersionSelector;
@@ -30,10 +28,7 @@ export type ToolRegistry = {
   register: (definition: ToolDefinition, options?: RegisterOptions) => ToolDefinition;
   unregister: (id: ToolId | ToolIdentityInput) => boolean;
   get: (id: ToolId | ToolIdentityInput) => ToolDefinition | undefined;
-  resolve: (
-    identity: ToolIdentityInput,
-    options?: ResolveOptions,
-  ) => ToolDefinition | undefined;
+  resolve: (identity: ToolIdentityInput, options?: ResolveOptions) => ToolDefinition | undefined;
   list: () => ToolDefinition[];
   tools: () => ToolDefinition[];
   aliases: (id: ToolId | ToolIdentityInput) => ToolId[];
@@ -62,10 +57,7 @@ export function createRegistry(options: RegistryOptions = {}): ToolRegistry {
 
   const tools = () => list();
 
-  const register = (
-    definition: ToolDefinition,
-    registerOptions: RegisterOptions = {},
-  ) => {
+  const register = (definition: ToolDefinition, registerOptions: RegisterOptions = {}) => {
     const normalized = normalizeDefinition(definition);
     const id = normalized.id;
 
@@ -139,10 +131,7 @@ export function createRegistry(options: RegistryOptions = {}): ToolRegistry {
     return entries.get(id)?.tool;
   };
 
-  const resolve = (
-    identityInput: ToolIdentityInput,
-    resolveOptions: ResolveOptions = {},
-  ) => {
+  const resolve = (identityInput: ToolIdentityInput, resolveOptions: ResolveOptions = {}) => {
     const identity = normalizeIdentity(identityInput);
     const baseId = formatToolId(identity);
     const resolvedId = resolveAlias(baseId, aliasLookup, maxAliasDepth);
@@ -260,10 +249,7 @@ function resolveAlias(
   return current !== id ? current : undefined;
 }
 
-function allowDeprecated(
-  tool: ToolDefinition | undefined,
-  options: ResolveOptions,
-): boolean {
+function allowDeprecated(tool: ToolDefinition | undefined, options: ResolveOptions): boolean {
   if (!tool) return false;
   if (options.allowDeprecated) return true;
   return tool.lifecycle?.deprecated !== true;
@@ -313,9 +299,7 @@ function compareSemver(a: string, b: string): number {
 function parseSemver(
   value: string,
 ): { major: number; minor: number; patch: number; prerelease?: string } | undefined {
-  const match = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/.exec(
-    value,
-  );
+  const match = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/.exec(value);
   if (!match) return undefined;
   return {
     major: Number(match[1]),

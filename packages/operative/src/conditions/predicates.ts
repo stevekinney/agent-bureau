@@ -25,16 +25,13 @@ export function maximumSteps(limit: number): StopCondition {
  * Stops when any tool result has the specified outcome.
  */
 export function toolOutcome(outcome: 'error' | 'action_required'): StopCondition {
-  return (context: StepResult) =>
-    context.results.some((result) => result.outcome === outcome);
+  return (context: StepResult) => context.results.some((result) => result.outcome === outcome);
 }
 
 /**
  * Stops when the assistant content matches the given predicate.
  */
-export function contentMatches(
-  predicate: (content: string) => boolean,
-): StopCondition {
+export function contentMatches(predicate: (content: string) => boolean): StopCondition {
   return (context: StepResult) => predicate(context.content);
 }
 

@@ -19,7 +19,12 @@ The canonical loop is the same for every provider:
 ## OpenAI
 
 ```ts
-import { appendToolCalls, appendToolResultsAsync, appendUserMessage, createConversationHistory } from 'conversationalist/conversation';
+import {
+  appendToolCalls,
+  appendToolResultsAsync,
+  appendUserMessage,
+  createConversationHistory,
+} from 'conversationalist/conversation';
 import { toOpenAIMessagesGrouped } from 'conversationalist/adapters/openai';
 import { createToolbox } from 'armorer';
 import { parseOpenAIToolCalls, toOpenAITools } from 'armorer/adapters/openai';
@@ -45,7 +50,12 @@ conversation = await appendToolResultsAsync(conversation, results);
 ## Anthropic
 
 ```ts
-import { appendToolCalls, appendToolResults, appendUserMessage, createConversationHistory } from 'conversationalist/conversation';
+import {
+  appendToolCalls,
+  appendToolResults,
+  appendUserMessage,
+  createConversationHistory,
+} from 'conversationalist/conversation';
 import { toAnthropicMessages } from 'conversationalist/adapters/anthropic';
 import { createToolbox } from 'armorer';
 import { parseAnthropicToolCalls, toAnthropicTools } from 'armorer/adapters/anthropic';
@@ -73,7 +83,12 @@ conversation = appendToolResults(conversation, results);
 Gemini function calls do not include stable call IDs, so assign them before you append the calls and before you execute them.
 
 ```ts
-import { appendToolCalls, appendToolResultsAsync, appendUserMessage, createConversationHistory } from 'conversationalist/conversation';
+import {
+  appendToolCalls,
+  appendToolResultsAsync,
+  appendUserMessage,
+  createConversationHistory,
+} from 'conversationalist/conversation';
 import { toGeminiMessages } from 'conversationalist/adapters/gemini';
 import { createToolbox } from 'armorer';
 import { parseGeminiToolCalls, toGeminiTools } from 'armorer/adapters/gemini';
@@ -88,9 +103,7 @@ const response = await model.generateContent({
   tools: toGeminiTools(toolbox),
 });
 
-const parsedCalls = parseGeminiToolCalls(
-  response.response.candidates?.[0]?.content?.parts ?? [],
-);
+const parsedCalls = parseGeminiToolCalls(response.response.candidates?.[0]?.content?.parts ?? []);
 const toolCalls = parsedCalls.map((toolCall, index) => ({
   ...toolCall,
   id: `call-gemini-${index + 1}`,

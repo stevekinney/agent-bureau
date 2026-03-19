@@ -85,18 +85,9 @@ const DEFAULT_SERVER_INFO: Implementation = {
   version: '0.0.0',
 };
 
-export function createMCP(
-  toolbox: ToolboxLike,
-  options: CreateMCPOptions = {},
-): McpServer {
-  const {
-    serverInfo,
-    toolConfiguration,
-    formatResult,
-    resources,
-    prompts,
-    ...serverOptions
-  } = options;
+export function createMCP(toolbox: ToolboxLike, options: CreateMCPOptions = {}): McpServer {
+  const { serverInfo, toolConfiguration, formatResult, resources, prompts, ...serverOptions } =
+    options;
   const { McpServer: McpServerClass } = requireMcp();
   const server = new McpServerClass(serverInfo ?? DEFAULT_SERVER_INFO, serverOptions);
   const registered = new Map<string, RegisteredTool>();
@@ -171,9 +162,7 @@ function toMcpToolDefinition(tool: Tool, options: ToMCPToolsOptions): MCPToolDef
   const annotations = readOnlyHint
     ? {
         ...(configuration.annotations ?? {}),
-        ...(configuration.annotations?.readOnlyHint === undefined
-          ? { readOnlyHint: true }
-          : {}),
+        ...(configuration.annotations?.readOnlyHint === undefined ? { readOnlyHint: true } : {}),
       }
     : configuration.annotations;
   const resolvedInputSchema =
@@ -205,9 +194,7 @@ function toMcpToolDefinition(tool: Tool, options: ToMCPToolsOptions): MCPToolDef
           isError: true,
         };
       }
-      return options.formatResult
-        ? options.formatResult(result)
-        : toCallToolResult(result);
+      return options.formatResult ? options.formatResult(result) : toCallToolResult(result);
     },
   };
 
@@ -380,9 +367,7 @@ function isTextContentBlock(value: unknown): value is { type: 'text'; text: stri
 function toCallToolResult(result: ToolResultLike): CallToolResult {
   if (result.outcome === 'error') {
     const message =
-      result.error?.message ??
-      getLegacyErrorMessage(result) ??
-      stringifyResult(result.content);
+      result.error?.message ?? getLegacyErrorMessage(result) ?? stringifyResult(result.content);
     return {
       content: toTextContent(message),
       isError: true,
@@ -443,9 +428,7 @@ function toTextContent(text: string): CallToolResult['content'] {
   return [{ type: 'text' as const, text }];
 }
 
-export function toolConfigurationFromMetadata(
-  tool: Tool,
-): MCPToolConfiguration | undefined {
+export function toolConfigurationFromMetadata(tool: Tool): MCPToolConfiguration | undefined {
   const metadata = tool.metadata;
   if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) {
     return undefined;
@@ -457,12 +440,9 @@ export function toolConfigurationFromMetadata(
   const configuration = mcp as Partial<MCPToolConfiguration>;
   const resolved: MCPToolConfiguration = {};
   if (configuration.title !== undefined) resolved.title = configuration.title;
-  if (configuration.description !== undefined)
-    resolved.description = configuration.description;
+  if (configuration.description !== undefined) resolved.description = configuration.description;
   if (configuration.schema !== undefined) resolved.schema = configuration.schema;
-  let annotations = configuration.annotations
-    ? { ...configuration.annotations }
-    : undefined;
+  let annotations = configuration.annotations ? { ...configuration.annotations } : undefined;
   if (metadata.readOnly === true) {
     if (!annotations) {
       annotations = { readOnlyHint: true };
@@ -537,10 +517,7 @@ function jsonSchemaToZod(schema: unknown): z.ZodTypeAny | undefined {
   }
 
   if (Array.isArray(definition.allOf)) {
-    return applyNullable(
-      intersectSchemas(definition.allOf.map(jsonSchemaToZod)),
-      definition,
-    );
+    return applyNullable(intersectSchemas(definition.allOf.map(jsonSchemaToZod)), definition);
   }
 
   if (Array.isArray(definition.enum)) {
@@ -645,18 +622,14 @@ function literalSchema(value: unknown): z.ZodTypeAny | undefined {
   return undefined;
 }
 
-function unionSchemas(
-  schemas: Array<z.ZodTypeAny | undefined>,
-): z.ZodTypeAny | undefined {
+function unionSchemas(schemas: Array<z.ZodTypeAny | undefined>): z.ZodTypeAny | undefined {
   const filtered = schemas.filter(Boolean) as z.ZodTypeAny[];
   if (!filtered.length) return undefined;
   if (filtered.length === 1) return filtered[0];
   return z.union(filtered as [z.ZodTypeAny, z.ZodTypeAny, ...z.ZodTypeAny[]]);
 }
 
-function intersectSchemas(
-  schemas: Array<z.ZodTypeAny | undefined>,
-): z.ZodTypeAny | undefined {
+function intersectSchemas(schemas: Array<z.ZodTypeAny | undefined>): z.ZodTypeAny | undefined {
   const filtered = schemas.filter(Boolean) as z.ZodTypeAny[];
   if (!filtered.length) return undefined;
   return filtered.reduce((acc, schema) => z.intersection(acc, schema));

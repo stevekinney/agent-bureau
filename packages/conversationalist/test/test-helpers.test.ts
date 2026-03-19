@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 
-import { createTestConversation, createConversationRecorder } from '../src/test';
+import { createConversationRecorder, createTestConversation } from '../src/test';
 
 describe('test helper exports', () => {
   it('creates a deterministic Conversation instance for tests', () => {

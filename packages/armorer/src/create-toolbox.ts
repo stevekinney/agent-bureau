@@ -16,6 +16,11 @@ import {
   inspectRegistry,
   type RegistryInspection,
 } from './core/inspect';
+import {
+  type LoopDetectionOptions,
+  type LoopDetectionResult,
+  LoopDetector,
+} from './core/loop-detection';
 import type {
   QuerySelectionResult,
   ToolMatch,
@@ -27,22 +32,8 @@ import type { Embedder, EmbeddingVector } from './core/registry/embeddings';
 import { registerRegistryEmbedder, warmToolEmbeddings } from './core/registry/embeddings';
 import type { ToolRisk } from './core/risk';
 import { isZodObjectSchema, isZodSchema } from './core/schema-utilities';
-import {
-  type SerializedToolDefinition,
-  serializeToolDefinition,
-} from './core/serialization';
+import { type SerializedToolDefinition, serializeToolDefinition } from './core/serialization';
 import { assertJsonValue } from './core/serialization/json';
-import {
-  LoopDetector,
-  type LoopDetectionOptions,
-  type LoopDetectionResult,
-} from './core/loop-detection';
-import {
-  createLoopDetectionState,
-  detectLoop,
-  type LoopDetectionOptions as AutoLoopDetectionOptions,
-  recordCall,
-} from './loop-detection/index';
 import type { AnyToolDefinition } from './core/tool-definition';
 import { defineTool } from './core/tool-definition';
 import {
@@ -68,6 +59,13 @@ import type {
   ToolPolicyHooks,
 } from './is-tool';
 import { isTool } from './is-tool';
+import {
+  createLoopDetectionState,
+  detectLoop,
+  type LoopDetectionOptions as AutoLoopDetectionOptions,
+  recordCall,
+} from './loop-detection/index';
+import { resolveFuzzyToolName } from './resolution/index';
 import type {
   JSONValue,
   ToolCall,
@@ -75,7 +73,6 @@ import type {
   ToolExecutionResult,
   ToolProvider,
 } from './types';
-import { resolveFuzzyToolName } from './resolution/index';
 import { createConcurrencyLimiter, normalizeConcurrency } from './utilities/concurrency';
 
 export type ToolboxContext = Record<string, unknown>;
@@ -149,18 +146,13 @@ export interface ToolboxOptions {
   readOnly?: boolean;
   allowMutation?: boolean;
   allowDangerous?: boolean;
-  toolFactory?: (
-    configuration: ToolConfiguration,
-    context: ToolboxFactoryContext,
-  ) => Tool;
+  toolFactory?: (configuration: ToolConfiguration, context: ToolboxFactoryContext) => Tool;
   /**
    * Called when a tool configuration doesn't have an execute method.
    * This typically happens when deserializing a toolbox.
    * Should return an execute function or a promise that resolves to one.
    */
-  getTool?: (
-    configuration: Omit<ToolConfiguration, 'execute'>,
-  ) => ToolConfiguration['execute'];
+  getTool?: (configuration: Omit<ToolConfiguration, 'execute'>) => ToolConfiguration['execute'];
   /**
    * Array of middleware functions to transform tool configurations during toolbox creation.
    * Middleware is applied in order before each tool is built.
@@ -325,10 +317,9 @@ export type ToolsFromEntries<TEntries extends ToolboxEntries> = ReadonlyArray<
   EntryToTool<TEntries[number]>
 >;
 
-type MergeTools<
-  TLeft extends readonly Tool[],
-  TRight extends readonly Tool[],
-> = ReadonlyArray<TLeft[number] | TRight[number]>;
+type MergeTools<TLeft extends readonly Tool[], TRight extends readonly Tool[]> = ReadonlyArray<
+  TLeft[number] | TRight[number]
+>;
 
 type ToolboxToolName<TTools extends readonly Tool[]> = TTools[number]['name'] & string;
 
@@ -351,18 +342,12 @@ export type ToolboxCallInputForTools<TTools extends readonly Tool[]> = {
   };
 }[ToolboxToolName<TTools>];
 
-type ToolboxResultForTool<TTool extends Tool> = Omit<
-  ToolExecutionResult,
-  'toolName' | 'result'
-> & {
+type ToolboxResultForTool<TTool extends Tool> = Omit<ToolExecutionResult, 'toolName' | 'result'> & {
   toolName: TTool['name'];
   result: ToolboxToolOutput<TTool> | undefined;
 };
 
-type ToolboxResultForCall<
-  TTools extends readonly Tool[],
-  TCall extends { name: string },
-> =
+type ToolboxResultForCall<TTools extends readonly Tool[], TCall extends { name: string }> =
   TCall['name'] extends ToolboxToolName<TTools>
     ? ToolboxResultForTool<ToolboxToolByNameOrFallback<TTools, TCall['name']>>
     : ToolExecutionResult;
@@ -618,7 +603,10 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
 
   const resolutionEnabled = !!options.resolution;
 
-  const loopOptions: AutoLoopDetectionOptions | undefined = typeof options.loopDetection === 'object' && options.loopDetection !== null ? options.loopDetection : undefined;
+  const loopOptions: AutoLoopDetectionOptions | undefined =
+    typeof options.loopDetection === 'object' && options.loopDetection !== null
+      ? options.loopDetection
+      : undefined;
   const loopState = options.loopDetection ? createLoopDetectionState() : undefined;
 
   // Loop detection: instances are created on demand and stored
@@ -647,9 +635,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
     }
   }
 
-  async function execute<
-    const TCall extends ToolboxCallInputForTools<ToolsFromEntries<TEntries>>,
-  >(
+  async function execute<const TCall extends ToolboxCallInputForTools<ToolsFromEntries<TEntries>>>(
     call: TCall,
     options?: ToolboxExecuteOptions,
   ): Promise<ToolboxResultForCall<ToolsFromEntries<TEntries>, TCall>>;
@@ -740,12 +726,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
 
       const budgetReason = checkBudget(budget, budgetStart, budgetCalls);
       if (budgetReason) {
-        const toolError = createToolError(
-          'conflict',
-          budgetReason,
-          'BUDGET_EXCEEDED',
-          false,
-        );
+        const toolError = createToolError('conflict', budgetReason, 'BUDGET_EXCEEDED', false);
         const denied: ToolExecutionResult = {
           callId: toolCall.id,
           outcome: 'error',
@@ -772,7 +753,13 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
       if (loopState) {
         const loopResult = detectLoop(loopState, toolCall.name, toolCall.arguments, loopOptions);
         if (loopResult.detected && loopResult.level === 'blocked') {
-          emit('loop-blocked', { tool, call: toolCall, detector: loopResult.detector, count: loopResult.count, message: loopResult.message });
+          emit('loop-blocked', {
+            tool,
+            call: toolCall,
+            detector: loopResult.detector,
+            count: loopResult.count,
+            message: loopResult.message,
+          });
           const toolError = createToolError('conflict', loopResult.message, 'LOOP_BLOCKED', false);
           const blocked: ToolExecutionResult = {
             callId: toolCall.id,
@@ -788,7 +775,13 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
           return blocked;
         }
         if (loopResult.detected) {
-          emit('loop-warning', { tool, call: toolCall, detector: loopResult.detector, count: loopResult.count, message: loopResult.message });
+          emit('loop-warning', {
+            tool,
+            call: toolCall,
+            detector: loopResult.detector,
+            count: loopResult.count,
+            message: loopResult.message,
+          });
         }
         recordCall(loopState, toolCall.name, toolCall.arguments, loopOptions);
       }
@@ -835,9 +828,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
 
       try {
         const executeOptions: ToolExecuteOptions =
-          options?.signal ||
-          options?.timeout !== undefined ||
-          options?.stream !== undefined
+          options?.signal || options?.timeout !== undefined || options?.stream !== undefined
             ? {
                 ...(options?.signal ? { signal: options.signal } : {}),
                 ...(options?.timeout !== undefined ? { timeout: options.timeout } : {}),
@@ -845,10 +836,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
               }
             : {};
 
-        const result = await tool.execute(
-          toolCall as ToolCallWithArguments,
-          executeOptions,
-        );
+        const result = await tool.execute(toolCall as ToolCallWithArguments, executeOptions);
         let hasLiveStream = false;
         const stream = resolveResultStream(result);
         if (stream) {
@@ -935,16 +923,12 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
   }
 
   function normalizeToolCall(call: ToolCallInput): ToolCall {
-    const args = Object.prototype.hasOwnProperty.call(call, 'arguments')
-      ? call.arguments
-      : {};
+    const args = Object.prototype.hasOwnProperty.call(call, 'arguments') ? call.arguments : {};
     const id = typeof call.id === 'string' && call.id.length ? call.id : undefined;
     return createToolCall(call.name, normalizeToolCallArguments(args), id);
   }
 
-  function resolveResultStream(
-    result: ToolExecutionResult,
-  ): AsyncIterable<unknown> | undefined {
+  function resolveResultStream(result: ToolExecutionResult): AsyncIterable<unknown> | undefined {
     if (isAsyncIterable(result.stream)) {
       return result.stream;
     }
@@ -1012,9 +996,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
   }
 
   async function toAnthropicTools(): Promise<AnthropicTool[]> {
-    const { toAnthropicTools: convertToAnthropicTools } = await import(
-      './adapters/anthropic'
-    );
+    const { toAnthropicTools: convertToAnthropicTools } = await import('./adapters/anthropic');
     return convertToAnthropicTools(api);
   }
 
@@ -1030,15 +1012,15 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
     switch (provider) {
       case 'openai': {
         const { openAIToolAdapter } = await import('./adapters/openai');
-        return openAIToolAdapter.export(api, adapterOptions as never) as OpenAITool[];
+        return openAIToolAdapter.export(api, adapterOptions as never);
       }
       case 'anthropic': {
         const { anthropicToolAdapter } = await import('./adapters/anthropic');
-        return anthropicToolAdapter.export(api) as AnthropicTool[];
+        return anthropicToolAdapter.export(api);
       }
       case 'gemini': {
         const { geminiToolAdapter } = await import('./adapters/gemini');
-        return geminiToolAdapter.export(api) as GeminiTool[];
+        return geminiToolAdapter.export(api);
       }
     }
   }
@@ -1049,8 +1031,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
       if (!sourceTool) {
         return createImportedExecute(configuration.name);
       }
-      return async (parameters, context) =>
-        sourceTool.run(parameters, context as ToolContext);
+      return async (parameters, context) => sourceTool.run(parameters, context as ToolContext);
     };
   }
 
@@ -1160,10 +1141,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
   return api;
 
   function buildDefaultTool(configuration: ToolConfiguration): Tool {
-    const resolveExecute = createLazyExecuteResolver(
-      configuration.execute,
-      configuration.name,
-    );
+    const resolveExecute = createLazyExecuteResolver(configuration.execute, configuration.name);
     const resolvedPolicy = mergePolicies(registryPolicy, configuration.policy, {
       readOnly,
       allowMutation,
@@ -1174,10 +1152,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
       configuration.policyContext,
     );
     const resolvedDigests = resolveToolDigests(configuration, registryDigests);
-    const resolvedConcurrency = resolveToolConcurrency(
-      configuration,
-      registryConcurrency,
-    );
+    const resolvedConcurrency = resolveToolConcurrency(configuration, registryConcurrency);
     const options: Omit<
       CreateToolOptions<
         object,
@@ -1200,16 +1175,12 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
       ...(configuration.identity?.version !== undefined
         ? { version: configuration.identity.version }
         : {}),
-      ...(configuration.display?.title !== undefined
-        ? { title: configuration.display.title }
-        : {}),
+      ...(configuration.display?.title !== undefined ? { title: configuration.display.title } : {}),
       ...(configuration.display?.examples !== undefined
         ? { examples: configuration.display.examples }
         : {}),
       ...(configuration.risk !== undefined ? { risk: configuration.risk } : {}),
-      ...(configuration.lifecycle !== undefined
-        ? { lifecycle: configuration.lifecycle }
-        : {}),
+      ...(configuration.lifecycle !== undefined ? { lifecycle: configuration.lifecycle } : {}),
       input: configuration.input,
       async execute(params, toolContext) {
         const executeFn = await resolveExecute();
@@ -1265,8 +1236,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
       throw new TypeError('createToolbox entries must be ToolConfiguration objects');
     }
     const candidate = configuration as unknown as Record<string, unknown>;
-    const name =
-      (candidate['name'] as string | undefined) ?? configuration.identity?.name;
+    const name = (candidate['name'] as string | undefined) ?? configuration.identity?.name;
     if (typeof name !== 'string' || !name.trim()) {
       throw new TypeError('createToolbox entries must be ToolConfiguration objects');
     }
@@ -1276,23 +1246,18 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
         `Tool "${name}" is missing execute. Provide execute or configure createToolbox({ getTool }) to resolve it.`,
       );
     }
-    if (
-      typeof configuration.execute !== 'function' &&
-      !isPromise(configuration.execute)
-    ) {
+    if (typeof configuration.execute !== 'function' && !isPromise(configuration.execute)) {
       throw new TypeError(
         `Tool "${name}" has invalid execute. Expected a function or a promise that resolves to a function.`,
       );
     }
     const normalizedInput = normalizeToolSchema(rawInput);
     const description =
-      (candidate['description'] as string | undefined) ??
-      configuration.display?.description;
+      (candidate['description'] as string | undefined) ?? configuration.display?.description;
     if (typeof description !== 'string' || !description.trim()) {
       throw new TypeError('createToolbox entries must be ToolConfiguration objects');
     }
-    const resolvedRisk =
-      configuration.risk ?? deriveRiskFromMetadata(configuration.metadata);
+    const resolvedRisk = configuration.risk ?? deriveRiskFromMetadata(configuration.metadata);
     const definition = defineTool({
       name,
       description,
@@ -1302,9 +1267,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
       ...(configuration.identity?.version !== undefined
         ? { version: configuration.identity.version }
         : {}),
-      ...(configuration.display?.title !== undefined
-        ? { title: configuration.display.title }
-        : {}),
+      ...(configuration.display?.title !== undefined ? { title: configuration.display.title } : {}),
       ...(configuration.display?.examples !== undefined
         ? { examples: configuration.display.examples }
         : {}),
@@ -1391,9 +1354,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
   ): void {
     for (let index = 0; index < configurations.length; index += 1) {
       const serializedConfiguration = normalizeRegistration(configurations[index]!);
-      let configuration = normalizeConfiguration(
-        resolveMissingExecute(serializedConfiguration),
-      );
+      let configuration = normalizeConfiguration(resolveMissingExecute(serializedConfiguration));
 
       if (options.middleware && options.middleware.length > 0) {
         for (const middleware of options.middleware) {
@@ -1403,9 +1364,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
               source === 'deserializing'
                 ? 'Async middleware is not supported when deserializing. Provide synchronous middleware only.'
                 : 'Async middleware is not supported. Provide synchronous middleware only.';
-            throw new Error(
-              message,
-            );
+            throw new Error(message);
           }
           configuration = result;
         }
@@ -1434,9 +1393,7 @@ async function createToolboxFromAnthropicTools(
   tools: AnthropicTool | readonly AnthropicTool[],
   options: ImportedToolboxOptions = {},
 ): Promise<Toolbox> {
-  const { fromAnthropicTools: convertFromAnthropicTools } = await import(
-    './adapters/anthropic'
-  );
+  const { fromAnthropicTools: convertFromAnthropicTools } = await import('./adapters/anthropic');
   if (Array.isArray(tools)) {
     return createImportedToolbox(convertFromAnthropicTools(tools), options);
   }
@@ -1465,14 +1422,20 @@ async function createToolboxFromProvider(
 ): Promise<Toolbox> {
   switch (provider) {
     case 'openai':
-      return createToolboxFromOpenAITools(definitions as OpenAITool | readonly OpenAITool[], options);
+      return createToolboxFromOpenAITools(
+        definitions as OpenAITool | readonly OpenAITool[],
+        options,
+      );
     case 'anthropic':
       return createToolboxFromAnthropicTools(
         definitions as AnthropicTool | readonly AnthropicTool[],
         options,
       );
     case 'gemini':
-      return createToolboxFromGeminiTools(definitions as GeminiTool | readonly GeminiTool[], options);
+      return createToolboxFromGeminiTools(
+        definitions as GeminiTool | readonly GeminiTool[],
+        options,
+      );
   }
 }
 
@@ -1514,20 +1477,14 @@ function materializeImportedToolConfiguration(
   const definition = defineTool({
     name: configuration.name,
     description: configuration.description,
-    ...(configuration.namespace !== undefined
-      ? { namespace: configuration.namespace }
-      : {}),
+    ...(configuration.namespace !== undefined ? { namespace: configuration.namespace } : {}),
     ...(configuration.version !== undefined ? { version: configuration.version } : {}),
     ...(configuration.title !== undefined ? { title: configuration.title } : {}),
-    ...(configuration.examples !== undefined
-      ? { examples: configuration.examples }
-      : {}),
+    ...(configuration.examples !== undefined ? { examples: configuration.examples } : {}),
     ...(configuration.tags !== undefined ? { tags: configuration.tags } : {}),
     ...(configuration.metadata !== undefined ? { metadata: configuration.metadata } : {}),
     ...(configuration.risk !== undefined ? { risk: configuration.risk } : {}),
-    ...(configuration.lifecycle !== undefined
-      ? { lifecycle: configuration.lifecycle }
-      : {}),
+    ...(configuration.lifecycle !== undefined ? { lifecycle: configuration.lifecycle } : {}),
     input: configuration.input,
   }) as AnyToolDefinition;
 
@@ -1564,12 +1521,15 @@ function materializeImportedToolConfiguration(
 }
 
 function createImportedExecute(toolName: string): ToolConfiguration['execute'] {
-  return () => Promise.reject(new Error(`Imported tool "${toolName}" does not have an execute implementation. Provide createToolbox.fromProvider(..., { sourceToolbox }), createToolbox.from<Provider>Tools(..., { getTool }), or supply execute before creating the toolbox.`));
+  return () =>
+    Promise.reject(
+      new Error(
+        `Imported tool "${toolName}" does not have an execute implementation. Provide createToolbox.fromProvider(..., { sourceToolbox }), createToolbox.from<Provider>Tools(..., { getTool }), or supply execute before creating the toolbox.`,
+      ),
+    );
 }
 
-function resolveImportedToolboxOptions(
-  options: ImportedToolboxOptions,
-): ToolboxOptions {
+function resolveImportedToolboxOptions(options: ImportedToolboxOptions): ToolboxOptions {
   const { sourceToolbox, ...rest } = options;
   if (!sourceToolbox) {
     return rest;
@@ -1666,17 +1626,11 @@ function mergePolicies(
           reason: `Dangerous tool "${context.toolName}" is not allowed`,
         } satisfies ToolPolicyDecision;
       }
-      const registryDecision = await resolvePolicyDecision(
-        registryPolicy?.beforeExecute,
-        context,
-      );
+      const registryDecision = await resolvePolicyDecision(registryPolicy?.beforeExecute, context);
       if (registryDecision?.allow === false) {
         return registryDecision;
       }
-      const toolDecision = await resolvePolicyDecision(
-        toolPolicy?.beforeExecute,
-        context,
-      );
+      const toolDecision = await resolvePolicyDecision(toolPolicy?.beforeExecute, context);
       if (toolDecision?.allow === false) {
         return toolDecision;
       }
@@ -1771,7 +1725,9 @@ function checkBudget(
     return undefined;
   }
   const elapsed = Date.now() - startedAt;
-  return elapsed >= budget.maxDurationMs ? `Budget exceeded: max duration ${budget.maxDurationMs}ms` : undefined;
+  return elapsed >= budget.maxDurationMs
+    ? `Budget exceeded: max duration ${budget.maxDurationMs}ms`
+    : undefined;
 }
 
 function createLazyExecuteResolver(
@@ -1783,9 +1739,7 @@ function createLazyExecuteResolver(
     return () => Promise.resolve(fn);
   }
   let resolved: ((params: unknown, context?: unknown) => Promise<unknown>) | undefined;
-  let pending:
-    | Promise<(params: unknown, context?: unknown) => Promise<unknown>>
-    | undefined;
+  let pending: Promise<(params: unknown, context?: unknown) => Promise<unknown>> | undefined;
 
   return async () => {
     if (resolved) return resolved;

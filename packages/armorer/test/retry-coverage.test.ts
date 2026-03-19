@@ -49,9 +49,7 @@ describe('retry coverage edges', () => {
     });
 
     const wrapped = retry(failing, { attempts: 1 });
-    await expect(wrapped({ value: 1 })).rejects.toThrow(
-      JSON.stringify({ code: 'OBJ_FAIL' }),
-    );
+    await expect(wrapped({ value: 1 })).rejects.toThrow(JSON.stringify({ code: 'OBJ_FAIL' }));
   });
 
   it('falls back when thrown objects are not serializable', async () => {
@@ -99,9 +97,7 @@ describe('retry coverage edges', () => {
       reason: 'stop',
     };
 
-    await expect((wrapped as any).rawExecute({ value: 1 }, { signal })).rejects.toThrow(
-      'stop',
-    );
+    await expect((wrapped as any).rawExecute({ value: 1 }, { signal })).rejects.toThrow('stop');
   });
 
   it('aborts during retry delays when the signal is triggered', async () => {

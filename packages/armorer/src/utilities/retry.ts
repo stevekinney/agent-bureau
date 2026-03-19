@@ -1,11 +1,6 @@
 import { z } from 'zod';
 
-import type {
-  AnyTool,
-  ComposedTool,
-  InferToolInput,
-  InferToolOutput,
-} from '../compose-types';
+import type { AnyTool, ComposedTool, InferToolInput, InferToolOutput } from '../compose-types';
 import { createTool, type CreateToolOptions } from '../create-tool';
 import type { DefaultToolEvents, ToolContext, ToolMetadata } from '../is-tool';
 
@@ -134,8 +129,7 @@ export function retry<TTool extends AnyTool>(
                 ) => Promise<InferToolOutput<TTool>>;
               }
             ).execute(value, executeOptions)
-        : (value: InferToolInput<TTool>) =>
-            tool(value) as Promise<InferToolOutput<TTool>>;
+        : (value: InferToolInput<TTool>) => tool(value) as Promise<InferToolOutput<TTool>>;
     let attempt = 0;
     let lastError: unknown;
 
@@ -233,10 +227,7 @@ function toError(error: unknown): Error {
   }
 }
 
-function wait(
-  ms: number,
-  signal?: ToolContext<DefaultToolEvents>['signal'],
-): Promise<void> {
+function wait(ms: number, signal?: ToolContext<DefaultToolEvents>['signal']): Promise<void> {
   if (!signal) {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }

@@ -1,8 +1,7 @@
-import { describe, expect, it } from 'bun:test';
-import { z } from 'zod';
-
 import { createTool, createToolbox } from 'armorer';
+import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
+import { z } from 'zod';
 
 import { noToolCalls } from '../src/conditions/predicates';
 import { createRun } from '../src/create-run';
@@ -195,8 +194,6 @@ describe('events', () => {
     const runCompleted = recorder.events.find((event) => event.type === 'run.completed');
     expect(runCompleted).toBeDefined();
     expect((runCompleted!.detail as { finishReason: string }).finishReason).toBe('stop-condition');
-    expect(
-      (runCompleted!.detail as { steps: readonly unknown[] }).steps,
-    ).toHaveLength(2);
+    expect((runCompleted!.detail as { steps: readonly unknown[] }).steps).toHaveLength(2);
   });
 });

@@ -110,9 +110,7 @@ type ResolvedMarkdownOptions = Required<
   >
 >;
 
-function resolveMarkdownOptions(
-  options: ToMarkdownOptions = {},
-): ResolvedMarkdownOptions {
+function resolveMarkdownOptions(options: ToMarkdownOptions = {}): ResolvedMarkdownOptions {
   return {
     includeMetadata: options.includeMetadata ?? false,
     stripTransient: options.stripTransient ?? false,
@@ -313,12 +311,8 @@ function normalizeLegacyMarkdownToolResult(toolResult: unknown): ToolResult | un
     ...(record['action'] !== undefined
       ? { action: record['action'] as unknown as ToolResult['action'] }
       : {}),
-    ...(typeof record['inputDigest'] === 'string'
-      ? { inputDigest: record['inputDigest'] }
-      : {}),
-    ...(typeof record['outputDigest'] === 'string'
-      ? { outputDigest: record['outputDigest'] }
-      : {}),
+    ...(typeof record['inputDigest'] === 'string' ? { inputDigest: record['inputDigest'] } : {}),
+    ...(typeof record['outputDigest'] === 'string' ? { outputDigest: record['outputDigest'] } : {}),
   };
 }
 
@@ -343,10 +337,7 @@ function normalizeLegacyMarkdownToolResult(toolResult: unknown): ToolResult | un
  * @param options - Options for markdown output
  * @returns A Markdown string representation of the conversation
  */
-export function toMarkdown(
-  conversation: Conversation,
-  options: ToMarkdownOptions = {},
-): string {
+export function toMarkdown(conversation: Conversation, options: ToMarkdownOptions = {}): string {
   assertConversationSafe(conversation);
   const resolved = resolveMarkdownOptions(options);
   const prepared = prepareConversationForMarkdown(conversation, resolved);
@@ -499,9 +490,7 @@ export function fromMarkdown(markdown: string): Conversation {
     assertConversationSafe(conversation);
   } catch (error) {
     throw new MarkdownParseError(
-      `Invalid markdown conversation: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
+      `Invalid markdown conversation: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
 
@@ -568,9 +557,7 @@ function parseMarkdownWithMetadata(trimmed: string): Conversation {
       toolResult: messageMeta.toolResult
         ? toReadonly(normalizeLegacyMarkdownToolResult(messageMeta.toolResult))
         : undefined,
-      tokenUsage: messageMeta.tokenUsage
-        ? toReadonly({ ...messageMeta.tokenUsage })
-        : undefined,
+      tokenUsage: messageMeta.tokenUsage ? toReadonly({ ...messageMeta.tokenUsage }) : undefined,
     };
     let message: Message | AssistantMessage = baseMessage;
     if (role === 'assistant') {

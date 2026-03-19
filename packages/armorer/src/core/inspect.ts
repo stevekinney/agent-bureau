@@ -189,8 +189,7 @@ export function inspectRegistry(
     counts: {
       total: tools.length,
       withTags: tools.filter((t) => t.tags && t.tags.length > 0).length,
-      withMetadata: tools.filter((t) => t.metadata && Object.keys(t.metadata).length > 0)
-        .length,
+      withMetadata: tools.filter((t) => t.metadata && Object.keys(t.metadata).length > 0).length,
     },
     tools: toolInspections,
   };

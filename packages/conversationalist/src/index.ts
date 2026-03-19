@@ -1,4 +1,10 @@
 export type {
+  CompactionResult,
+  Summarizer,
+  CompactionOptions as SummarizingCompactionOptions,
+} from './compaction/index';
+export { compactConversation as compactConversationWithSummarizer } from './compaction/index';
+export type {
   AppendToolCallOptions,
   AppendToolResultOptions,
   CompactionOptions,
@@ -76,13 +82,6 @@ export {
   isToolCall,
   isToolResult,
 } from './guards';
-export { compactConversation as compactConversationWithSummarizer } from './compaction/index';
-export type {
-  CompactionOptions as SummarizingCompactionOptions,
-  CompactionResult,
-  Summarizer,
-} from './compaction/index';
-export { Conversation } from './history';
 export type {
   ConversationActionType,
   ConversationEvent,
@@ -90,6 +89,7 @@ export type {
   ConversationEvents,
   ConversationEventType,
 } from './history';
+export { Conversation } from './history';
 export type { ImageContent, MultiModalContent, TextContent } from './multi-modal';
 export type {
   AppendableToolAction,
@@ -119,7 +119,4 @@ export type {
 } from './types';
 export type { ConversationNodeSnapshot, ConversationSnapshot } from './types';
 export type { ConversationHistoryDraft } from './with-conversation';
-export {
-  pipeConversationHistory,
-  withConversationHistory,
-} from './with-conversation';
+export { pipeConversationHistory, withConversationHistory } from './with-conversation';

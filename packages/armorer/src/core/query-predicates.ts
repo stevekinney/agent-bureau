@@ -10,12 +10,7 @@ export type ToolPredicate<T extends AnyTool = AnyTool> = (tool: T) => boolean;
 
 export type TextQueryMode = 'contains' | 'exact' | 'fuzzy';
 
-export type TextQueryField =
-  | 'name'
-  | 'description'
-  | 'tags'
-  | 'schemaKeys'
-  | 'metadataKeys';
+export type TextQueryField = 'name' | 'description' | 'tags' | 'schemaKeys' | 'metadataKeys';
 
 export type TextQueryWeights = Partial<Record<TextQueryField, number>>;
 
@@ -197,15 +192,9 @@ export function normalizeTextQuery(input: TextQuery): NormalizedTextQuery | null
   if (!tokens.length) return null;
   const mode = typeof input === 'string' ? 'contains' : (input.mode ?? 'contains');
   const fields =
-    typeof input === 'string'
-      ? DEFAULT_TEXT_FIELDS.slice()
-      : normalizeFields(input.fields);
-  const threshold = clampThreshold(
-    typeof input === 'string' ? undefined : input.threshold,
-  );
-  const weights = normalizeTextWeights(
-    typeof input === 'string' ? undefined : input.weights,
-  );
+    typeof input === 'string' ? DEFAULT_TEXT_FIELDS.slice() : normalizeFields(input.fields);
+  const threshold = clampThreshold(typeof input === 'string' ? undefined : input.threshold);
+  const weights = normalizeTextWeights(typeof input === 'string' ? undefined : input.weights);
   return {
     raw: rawTrimmed,
     query,
@@ -438,9 +427,7 @@ function normalizeTags(tags: readonly string[]): string[] {
   return tags.filter(Boolean).map((tag) => String(tag).toLowerCase());
 }
 
-function normalizeFields(
-  fields: readonly TextQueryField[] | undefined,
-): TextQueryField[] {
+function normalizeFields(fields: readonly TextQueryField[] | undefined): TextQueryField[] {
   if (!fields?.length) {
     return DEFAULT_TEXT_FIELDS.slice();
   }
@@ -560,12 +547,7 @@ function scoreTokenMatches(
     let best = 0;
     let bestToken: string | null = null;
     for (const token of tokens) {
-      const matchScore = scoreTokenMatch(
-        token.normalized,
-        queryToken,
-        query.mode,
-        query.threshold,
-      );
+      const matchScore = scoreTokenMatch(token.normalized, queryToken, query.mode, query.threshold);
       if (matchScore > best) {
         best = matchScore;
         bestToken = token.raw;
@@ -581,10 +563,7 @@ function scoreTokenMatches(
   return { matches: Array.from(matches), score };
 }
 
-function scoreTokenMatchValue(
-  tokens: readonly TextToken[],
-  query: NormalizedTextQuery,
-): number {
+function scoreTokenMatchValue(tokens: readonly TextToken[], query: NormalizedTextQuery): number {
   if (!tokens.length || !query.tokens.length) {
     return 0;
   }
@@ -592,12 +571,7 @@ function scoreTokenMatchValue(
   for (const queryToken of query.tokens) {
     let best = 0;
     for (const token of tokens) {
-      const matchScore = scoreTokenMatch(
-        token.normalized,
-        queryToken,
-        query.mode,
-        query.threshold,
-      );
+      const matchScore = scoreTokenMatch(token.normalized, queryToken, query.mode, query.threshold);
       if (matchScore > best) {
         best = matchScore;
         if (best === 1) {
@@ -658,11 +632,7 @@ function normalizeForSearch(value: unknown): string {
   if (typeof value === 'string') {
     return value.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
   }
-  if (
-    typeof value === 'number' ||
-    typeof value === 'boolean' ||
-    typeof value === 'bigint'
-  ) {
+  if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') {
     return String(value);
   }
   if (value && typeof value === 'object') {

@@ -243,9 +243,7 @@ describe('createTool', () => {
       return async ({ value }: { value: string }) => value.toUpperCase();
     });
 
-    await expect(loader({ value: 'x' })).rejects.toThrow(
-      'lazy loader must resolve to a function',
-    );
+    await expect(loader({ value: 'x' })).rejects.toThrow('lazy loader must resolve to a function');
     const result = await loader({ value: 'ok' });
     expect(result).toBe('OK');
   });
@@ -263,9 +261,7 @@ describe('createTool', () => {
       },
     });
 
-    const result = await tool.execute(
-      createToolCall('diagnostic-failure', { value: 123 } as any),
-    );
+    const result = await tool.execute(createToolCall('diagnostic-failure', { value: 123 } as any));
     expect(result.error).toBeDefined();
   });
 

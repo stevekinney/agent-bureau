@@ -59,9 +59,7 @@ function createAuditMiddleware(auditLog: AuditLog) {
 
         try {
           const executeFn =
-            typeof originalExecute === 'function'
-              ? originalExecute
-              : await originalExecute;
+            typeof originalExecute === 'function' ? originalExecute : await originalExecute;
 
           const result = await executeFn(params, context);
 

@@ -1,26 +1,26 @@
 import { describe, expect, it } from 'bun:test';
 
 import {
+  type AnthropicConversation,
   anthropicConversationAdapter,
   appendAnthropicMessages,
   fromAnthropicMessages,
   toAnthropicMessages,
-  type AnthropicConversation,
 } from '../src/adapters/anthropic';
 import {
   appendGeminiMessages,
-  geminiConversationAdapter,
   fromGeminiMessages,
-  toGeminiMessages,
   type GeminiConversation,
+  geminiConversationAdapter,
+  toGeminiMessages,
 } from '../src/adapters/gemini';
 import {
   appendOpenAIMessages,
   fromOpenAIMessages,
   openAIConversationAdapter,
+  type OpenAIMessage,
   toOpenAIMessages,
   toOpenAIMessagesGrouped,
-  type OpenAIMessage,
 } from '../src/adapters/openai';
 import { createConversationHistory } from '../src/conversation';
 import { ConversationalistError } from '../src/errors';
@@ -416,9 +416,7 @@ describe('provider reverse conversion', () => {
       'tool-result',
       'user',
     ]);
-    expect(messages[1]?.content).toEqual([
-      { type: 'image', url: 'https://example.com/chart.png' },
-    ]);
+    expect(messages[1]?.content).toEqual([{ type: 'image', url: 'https://example.com/chart.png' }]);
     expect(messages[2]?.content).toEqual([
       {
         type: 'image',
@@ -844,17 +842,15 @@ describe('Conversation lazy provider helpers', () => {
       'tool-call',
     ]);
 
-    await expect(
-      conversation.toProvider('openai', { groupToolCalls: true }),
-    ).resolves.toEqual(toOpenAIMessagesGrouped(conversation.current));
+    await expect(conversation.toProvider('openai', { groupToolCalls: true })).resolves.toEqual(
+      toOpenAIMessagesGrouped(conversation.current),
+    );
 
     const appendedConversation = new Conversation();
     await appendedConversation.appendProvider('openai', payload);
-    expect(getOrderedMessages(appendedConversation.current).map((message) => message.role)).toEqual([
-      'user',
-      'assistant',
-      'tool-call',
-    ]);
+    expect(getOrderedMessages(appendedConversation.current).map((message) => message.role)).toEqual(
+      ['user', 'assistant', 'tool-call'],
+    );
   });
 
   it('imports from and exports to OpenAI lazily', async () => {
@@ -938,43 +934,34 @@ describe('Conversation lazy provider helpers', () => {
       createConversationHistory(),
       anthropicPayload,
     );
-    expect(getOrderedMessages(anthropicConversation)[0]?.content).toBe(
-      'Hello from Anthropic',
-    );
+    expect(getOrderedMessages(anthropicConversation)[0]?.content).toBe('Hello from Anthropic');
     const emptyAnthropicConversation = createConversationHistory();
-    expect(
-      appendAnthropicMessages(emptyAnthropicConversation, { messages: [] }),
-    ).toBe(emptyAnthropicConversation);
+    expect(appendAnthropicMessages(emptyAnthropicConversation, { messages: [] })).toBe(
+      emptyAnthropicConversation,
+    );
     expect(
       getOrderedMessages(
         anthropicConversationAdapter.append(createConversationHistory(), anthropicPayload),
       ).map((message) => message.content),
     ).toEqual(
-      getOrderedMessages(fromAnthropicMessages(anthropicPayload)).map(
-        (message) => message.content,
-      ),
+      getOrderedMessages(fromAnthropicMessages(anthropicPayload)).map((message) => message.content),
     );
 
     const geminiPayload: GeminiConversation = {
       contents: [{ role: 'user', parts: [{ text: 'Hello from Gemini' }] }],
     };
-    const geminiConversation = appendGeminiMessages(
-      createConversationHistory(),
-      geminiPayload,
-    );
+    const geminiConversation = appendGeminiMessages(createConversationHistory(), geminiPayload);
     expect(getOrderedMessages(geminiConversation)[0]?.content).toBe('Hello from Gemini');
     const emptyGeminiConversation = createConversationHistory();
-    expect(
-      appendGeminiMessages(emptyGeminiConversation, { contents: [] }),
-    ).toBe(emptyGeminiConversation);
+    expect(appendGeminiMessages(emptyGeminiConversation, { contents: [] })).toBe(
+      emptyGeminiConversation,
+    );
     expect(
       getOrderedMessages(
         geminiConversationAdapter.append(createConversationHistory(), geminiPayload),
       ).map((message) => message.content),
     ).toEqual(
-      getOrderedMessages(fromGeminiMessages(geminiPayload)).map(
-        (message) => message.content,
-      ),
+      getOrderedMessages(fromGeminiMessages(geminiPayload)).map((message) => message.content),
     );
   });
 });

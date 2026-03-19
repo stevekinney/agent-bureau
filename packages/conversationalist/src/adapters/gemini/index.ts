@@ -1,7 +1,4 @@
-import {
-  appendMessages,
-  createConversationHistory,
-} from '../../conversation/index';
+import { appendMessages, createConversationHistory } from '../../conversation/index';
 import { assertConversationSafe } from '../../conversation/validation';
 import type { MultiModalContent } from '../../multi-modal';
 import { isStreamingMessage } from '../../streaming';
@@ -228,9 +225,7 @@ function toFunctionResponsePart(
 /**
  * Collects system message content from a conversation for Gemini's systemInstruction.
  */
-function extractSystemInstruction(
-  messages: ReadonlyArray<Message>,
-): GeminiContent | undefined {
+function extractSystemInstruction(messages: ReadonlyArray<Message>): GeminiContent | undefined {
   const systemMessages = messages.filter(
     (m) => (m.role === 'system' || m.role === 'developer') && !m.hidden && !isStreamingMessage(m),
   );
@@ -379,12 +374,10 @@ function toJSONValue(value: unknown): JSONValue {
     return record;
   }
 
-  return String(value);
+  return String(value as string);
 }
 
-function isCanonicalToolResultPayload(
-  value: JSONValue,
-): value is JSONValue & {
+function isCanonicalToolResultPayload(value: JSONValue): value is JSONValue & {
   outcome: ToolResult['outcome'];
   content: JSONValue;
   error?: ToolResult['error'];
@@ -406,10 +399,7 @@ function isCanonicalToolResultPayload(
 }
 
 function parseFunctionArguments(args: Record<string, unknown>): JSONValue {
-  if (
-    Object.keys(args).length === 1 &&
-    Object.hasOwn(args, '_value')
-  ) {
+  if (Object.keys(args).length === 1 && Object.hasOwn(args, '_value')) {
     return toJSONValue(args['_value']);
   }
 
@@ -424,10 +414,7 @@ function parseFunctionArguments(args: Record<string, unknown>): JSONValue {
   return toJSONValue(args);
 }
 
-function parseFunctionResponse(
-  callId: string,
-  response: Record<string, unknown>,
-): ToolResult {
+function parseFunctionResponse(callId: string, response: Record<string, unknown>): ToolResult {
   const value = toJSONValue(response);
 
   if (isCanonicalToolResultPayload(value)) {
@@ -437,12 +424,8 @@ function parseFunctionResponse(
       content: value.content,
       ...(value.error ? { error: value.error } : {}),
       ...(value.action ? { action: value.action } : {}),
-      ...(typeof value.inputDigest === 'string'
-        ? { inputDigest: value.inputDigest }
-        : {}),
-      ...(typeof value.outputDigest === 'string'
-        ? { outputDigest: value.outputDigest }
-        : {}),
+      ...(typeof value.inputDigest === 'string' ? { inputDigest: value.inputDigest } : {}),
+      ...(typeof value.outputDigest === 'string' ? { outputDigest: value.outputDigest } : {}),
     };
   }
 
@@ -582,8 +565,7 @@ function toMessageInputs(payload: GeminiConversation): MessageInput[] {
 
       if ('functionResponse' in part) {
         const callId =
-          dequeueToolCall(part.functionResponse.name) ??
-          `gemini-call-${++syntheticToolCallCount}`;
+          dequeueToolCall(part.functionResponse.name) ?? `gemini-call-${++syntheticToolCallCount}`;
         inputs.push({
           role: 'tool-result',
           content: '',
@@ -634,10 +616,7 @@ export const geminiConversationAdapter = {
   import(payload: GeminiConversation): Conversation {
     return fromGeminiMessages(payload);
   },
-  append(
-    conversation: Conversation,
-    payload: GeminiConversation,
-  ): Conversation {
+  append(conversation: Conversation, payload: GeminiConversation): Conversation {
     return appendGeminiMessages(conversation, payload);
   },
 } as const;

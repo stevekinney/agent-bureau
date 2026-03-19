@@ -18,9 +18,7 @@ function createFallbackMiddleware(fallbacks: Map<string, string>) {
       async execute(params: unknown, context: any) {
         try {
           const executeFn =
-            typeof originalExecute === 'function'
-              ? originalExecute
-              : await originalExecute;
+            typeof originalExecute === 'function' ? originalExecute : await originalExecute;
 
           return await executeFn(params, context);
         } catch (error) {
@@ -63,14 +61,9 @@ const fetchFromCache = createTool({
 });
 
 // Configure fallbacks
-const toolbox = createToolbox(
-  [fetchFromApi.configuration, fetchFromCache.configuration],
-  {
-    middleware: [
-      createFallbackMiddleware(new Map([['fetch-from-api', 'fetch-from-cache']])),
-    ],
-  },
-);
+const toolbox = createToolbox([fetchFromApi.configuration, fetchFromCache.configuration], {
+  middleware: [createFallbackMiddleware(new Map([['fetch-from-api', 'fetch-from-cache']]))],
+});
 ```
 
 ## Fallback Chain with `when`

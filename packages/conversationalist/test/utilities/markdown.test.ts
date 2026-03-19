@@ -10,12 +10,7 @@ import {
   toMarkdown,
 } from '../../src/markdown';
 import type { MultiModalContent } from '../../src/multi-modal';
-import type {
-  AssistantMessage,
-  Conversation,
-  Message,
-  MessageRole,
-} from '../../src/types';
+import type { AssistantMessage, Conversation, Message, MessageRole } from '../../src/types';
 import { isAssistantMessage } from '../../src/utilities';
 
 type ConversationMessage = Message | AssistantMessage;
@@ -177,9 +172,7 @@ describe('toMarkdown', () => {
         {
           id: 'msg-1',
           role: 'user',
-          content: [
-            { type: 'image', url: 'https://example.com/photo.jpg', text: 'A cat' },
-          ],
+          content: [{ type: 'image', url: 'https://example.com/photo.jpg', text: 'A cat' }],
           position: 0,
           createdAt: '2024-01-15T10:00:00.000Z',
           metadata: {},
@@ -630,9 +623,7 @@ Content`;
     test('throws MarkdownParseError when required id field is missing from frontmatter', () => {
       // gray-matter parses most YAML gracefully, so test for missing required fields instead
       expect(() => fromMarkdown('---\nstatus: active\n---')).toThrow(MarkdownParseError);
-      expect(() => fromMarkdown('---\nstatus: active\n---')).toThrow(
-        'missing required field "id"',
-      );
+      expect(() => fromMarkdown('---\nstatus: active\n---')).toThrow('missing required field "id"');
     });
 
     test('throws MarkdownParseError for invalid frontmatter YAML', () => {
@@ -979,7 +970,7 @@ Search results`;
       expect(ordered[1]?.toolResult?.outcome).toBe('success');
     });
 
-  test('drops malformed legacy toolResult metadata', () => {
+    test('drops malformed legacy toolResult metadata', () => {
       const markdown = `---
 id: conv-1
 status: active
@@ -1118,9 +1109,7 @@ describe('toMarkdown/fromMarkdown round-trip', () => {
     hidden: false,
     ...overrides,
   });
-  const createAssistantMessage = (
-    overrides: Partial<AssistantMessage> = {},
-  ): AssistantMessage => ({
+  const createAssistantMessage = (overrides: Partial<AssistantMessage> = {}): AssistantMessage => ({
     id: 'msg-1',
     role: 'assistant',
     content: 'Hello',
@@ -1194,9 +1183,7 @@ describe('toMarkdown/fromMarkdown round-trip', () => {
   });
 
   test('round-trip preserves simple text message', () => {
-    const original = createConversation([
-      createMessage({ id: 'msg-1', content: 'Hello, world!' }),
-    ]);
+    const original = createConversation([createMessage({ id: 'msg-1', content: 'Hello, world!' })]);
     const markdown = toMarkdown(original, { includeMetadata: true });
     const parsed = fromMarkdown(markdown);
 
@@ -1271,9 +1258,7 @@ describe('toMarkdown/fromMarkdown round-trip', () => {
   });
 
   test('round-trip preserves message timestamps', () => {
-    const original = createConversation([
-      createMessage({ createdAt: '2024-06-15T14:30:45.123Z' }),
-    ]);
+    const original = createConversation([createMessage({ createdAt: '2024-06-15T14:30:45.123Z' })]);
     const markdown = toMarkdown(original, { includeMetadata: true });
     const parsed = fromMarkdown(markdown);
 
@@ -1344,9 +1329,7 @@ describe('toMarkdown/fromMarkdown round-trip', () => {
   });
 
   test('round-trip preserves goalCompleted', () => {
-    const original = createConversation([
-      createAssistantMessage({ goalCompleted: true }),
-    ]);
+    const original = createConversation([createAssistantMessage({ goalCompleted: true })]);
     const markdown = toMarkdown(original, { includeMetadata: true });
     const parsed = fromMarkdown(markdown);
 
@@ -1398,9 +1381,7 @@ describe('toMarkdown/fromMarkdown round-trip', () => {
     const markdown = toMarkdown(original, { includeMetadata: true });
     const parsed = fromMarkdown(markdown);
 
-    expect(getOrderedMessages(parsed)[0].content).toEqual(
-      getOrderedMessages(original)[0].content,
-    );
+    expect(getOrderedMessages(parsed)[0].content).toEqual(getOrderedMessages(original)[0].content);
   });
 
   test('round-trip preserves complete complex conversation', () => {
@@ -1557,9 +1538,7 @@ describe('role labels', () => {
 
   describe('LABEL_TO_ROLE', () => {
     test('provides inverse mapping of ROLE_LABELS', () => {
-      for (const [role, label] of Object.entries(ROLE_LABELS) as Array<
-        [MessageRole, string]
-      >) {
+      for (const [role, label] of Object.entries(ROLE_LABELS) as Array<[MessageRole, string]>) {
         expect(LABEL_TO_ROLE[label]).toBe(role);
       }
     });

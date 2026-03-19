@@ -1,14 +1,13 @@
-import { describe, expect, it } from 'bun:test';
-import { z } from 'zod';
-
 import { createTool } from 'armorer';
 import { createTestToolbox } from 'armorer/test';
+import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
+import { z } from 'zod';
 
 import { noToolCalls } from '../src/conditions/predicates';
 import { defineAgent } from '../src/define-agent';
-import { createMockGenerate, createRunRecorder } from '../src/test/index';
-import type { GenerateResponse, StepResult } from '../src/types';
+import { createRunRecorder } from '../src/test/index';
+import type { GenerateResponse } from '../src/types';
 
 function textResponse(content: string): GenerateResponse {
   return { content, toolCalls: [] };
@@ -115,7 +114,7 @@ describe('defineAgent', () => {
   });
 
   it('merges stop conditions from definition and runtime', async () => {
-    let finalStep = -1;
+    const finalStep = -1;
 
     const agent = defineAgent({
       name: 'merge-stop',
@@ -173,7 +172,7 @@ describe('defineAgent', () => {
   });
 
   it('independent runs get separate conversations', async () => {
-    let conversations: Conversation[] = [];
+    const conversations: Conversation[] = [];
 
     const agent = defineAgent({
       name: 'independent',

@@ -26,7 +26,11 @@ function isConversation(value: unknown): value is Conversation {
 function normalizeInput(
   input: string | AgentRunOptions,
   instructions?: string,
-): { conversation: Conversation; signal?: AbortSignal; stopWhen?: StopCondition | StopCondition[] } {
+): {
+  conversation: Conversation;
+  signal?: AbortSignal;
+  stopWhen?: StopCondition | StopCondition[];
+} {
   if (typeof input === 'string') {
     const conversation = new Conversation();
     if (instructions) {
@@ -63,21 +67,18 @@ function mergeStopConditions(
   definition: DefineAgentOptions['stopWhen'],
   runtime: StopCondition | StopCondition[] | undefined,
 ): StopCondition[] | undefined {
-  const defConditions = definition
-    ? Array.isArray(definition) ? definition : [definition]
-    : [];
-  const runConditions = runtime
-    ? Array.isArray(runtime) ? runtime : [runtime]
-    : [];
+  const defConditions = definition ? (Array.isArray(definition) ? definition : [definition]) : [];
+  const runConditions = runtime ? (Array.isArray(runtime) ? runtime : [runtime]) : [];
   const merged = [...defConditions, ...runConditions];
   return merged.length > 0 ? merged : undefined;
 }
 
-function buildRunOptions(
-  options: DefineAgentOptions,
-  input: string | AgentRunOptions,
-): RunOptions {
-  const { conversation, signal, stopWhen: runtimeStopWhen } = normalizeInput(input, options.instructions);
+function buildRunOptions(options: DefineAgentOptions, input: string | AgentRunOptions): RunOptions {
+  const {
+    conversation,
+    signal,
+    stopWhen: runtimeStopWhen,
+  } = normalizeInput(input, options.instructions);
 
   return {
     generate: options.generate,

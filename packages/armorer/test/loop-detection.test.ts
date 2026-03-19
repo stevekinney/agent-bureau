@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'bun:test';
+
 import {
   createLoopDetectionState,
   detectLoop,
@@ -132,7 +133,12 @@ describe('loop detection', () => {
           recordCall(state, 'toolB', { type: 'B' });
         }
       }
-      const result = detectLoop(state, 'toolA', { type: 'A' }, { warningThreshold: 10, blockThreshold: 20 });
+      const result = detectLoop(
+        state,
+        'toolA',
+        { type: 'A' },
+        { warningThreshold: 10, blockThreshold: 20 },
+      );
       expect(result.detected).toBe(true);
       if (result.detected) {
         expect(result.detector).toBe('ping-pong');
@@ -150,7 +156,12 @@ describe('loop detection', () => {
       }
       // Set warningThreshold high enough that simple-repeat (count=10) won't trigger,
       // but ping-pong (alternatingCount=20) will hit blockThreshold
-      const result = detectLoop(state, 'toolA', { type: 'A' }, { warningThreshold: 11, blockThreshold: 20 });
+      const result = detectLoop(
+        state,
+        'toolA',
+        { type: 'A' },
+        { warningThreshold: 11, blockThreshold: 20 },
+      );
       expect(result.detected).toBe(true);
       if (result.detected) {
         expect(result.level).toBe('blocked');

@@ -31,9 +31,7 @@ function createDependencyMiddleware(dependencies: DependencyGraph) {
         const missing = deps.filter((dep) => !completed.has(dep));
 
         if (missing.length > 0) {
-          throw new Error(
-            `Tool "${toolName}" requires dependencies: ${missing.join(', ')}`,
-          );
+          throw new Error(`Tool "${toolName}" requires dependencies: ${missing.join(', ')}`);
         }
 
         // Execute
@@ -123,10 +121,5 @@ async function executeDependencyChain(
 }
 
 // Usage
-const result = await executeDependencyChain(
-  toolbox,
-  'fetch-user-data',
-  { userId: '123' },
-  deps,
-);
+const result = await executeDependencyChain(toolbox, 'fetch-user-data', { userId: '123' }, deps);
 ```

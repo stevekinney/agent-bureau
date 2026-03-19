@@ -10,10 +10,7 @@ import {
   warmToolEmbeddings,
 } from '../src/registry/embeddings';
 
-const makeTool = (
-  name: string,
-  overrides: Partial<Parameters<typeof createTool>[0]> = {},
-) =>
+const makeTool = (name: string, overrides: Partial<Parameters<typeof createTool>[0]> = {}) =>
   createTool({
     name,
     description: `${name} tool`,

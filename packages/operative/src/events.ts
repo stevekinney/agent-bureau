@@ -1,7 +1,6 @@
+import type { ToolExecutionResult } from 'armorer';
 import type { Conversation } from 'conversationalist';
 import type { ToolCall } from 'interoperability';
-
-import type { ToolExecutionResult } from 'armorer';
 
 import type { GenerateResponse, RunResult, StepResult, TokenUsage } from './types';
 
