@@ -2,6 +2,7 @@ import { describe, expect, it } from 'bun:test';
 
 import {
   containsBase64Data,
+  createTruncatingAsyncIterable,
   DEFAULT_ERROR_MAX_CHARACTERS,
   DEFAULT_MAX_CHARACTERS,
   isHighSurrogate,
@@ -155,6 +156,123 @@ describe('truncation', () => {
     it('has expected default values', () => {
       expect(DEFAULT_MAX_CHARACTERS).toBe(8000);
       expect(DEFAULT_ERROR_MAX_CHARACTERS).toBe(400);
+    });
+  });
+
+  describe('streaming truncation', () => {
+    async function* fromChunks<T>(chunks: T[]): AsyncIterable<T> {
+      for (const chunk of chunks) {
+        yield chunk;
+      }
+    }
+
+    async function collectAll<T>(iterable: AsyncIterable<T>): Promise<T[]> {
+      const results: T[] = [];
+      for await (const item of iterable) {
+        results.push(item);
+      }
+      return results;
+    }
+
+    it('stops iteration when accumulated length exceeds maxCharacters', async () => {
+      const chunks = ['aaaa', 'bbbb', 'cccc', 'dddd']; // 16 chars total
+      const wrapped = createTruncatingAsyncIterable(fromChunks(chunks), {
+        maxCharacters: 10,
+      });
+
+      const collected = await collectAll(wrapped);
+      const joined = collected.join('');
+
+      expect(joined).toContain('\u2026(truncated)\u2026');
+      // First two chunks (8 chars) fit, third chunk (4 chars) would push to 12 > 10
+      // so only 2 remaining chars from third chunk + marker
+      expect(collected[0]).toBe('aaaa');
+      expect(collected[1]).toBe('bbbb');
+      // Third chunk gets sliced to 2 chars remaining
+      expect(collected[2]).toBe('cc');
+      expect(collected[3]).toBe('\n\u2026(truncated)\u2026');
+      expect(collected).toHaveLength(4);
+    });
+
+    it('passes through short streams unchanged', async () => {
+      const chunks = ['hello', ' ', 'world'];
+      const wrapped = createTruncatingAsyncIterable(fromChunks(chunks), {
+        maxCharacters: 100,
+      });
+
+      const collected = await collectAll(wrapped);
+      expect(collected).toEqual(['hello', ' ', 'world']);
+    });
+
+    it('handles non-string chunks with length accounting via stringify', async () => {
+      const chunks = [{ a: 1 }, { b: 2 }, { c: 3 }];
+      // JSON.stringify({a:1}) = '{"a":1}' = 7 chars each
+      const wrapped = createTruncatingAsyncIterable(fromChunks(chunks), {
+        maxCharacters: 15,
+      });
+
+      const collected = await collectAll(wrapped);
+      // First two chunks: 7 + 7 = 14 chars, fits under 15
+      // Third chunk: 14 + 7 = 21 > 15, so marker emitted
+      expect(collected[0]).toEqual({ a: 1 });
+      expect(collected[1]).toEqual({ b: 2 });
+      expect(collected[2]).toBe('\n\u2026(truncated)\u2026');
+      expect(collected).toHaveLength(3);
+    });
+
+    it('handles empty stream', async () => {
+      const wrapped = createTruncatingAsyncIterable(fromChunks([]), {
+        maxCharacters: 100,
+      });
+
+      const collected = await collectAll(wrapped);
+      expect(collected).toEqual([]);
+    });
+
+    it('handles chunk exactly at limit without marker', async () => {
+      const chunks = ['aaaaa', 'bbbbb']; // 5 + 5 = 10 chars
+      const wrapped = createTruncatingAsyncIterable(fromChunks(chunks), {
+        maxCharacters: 10,
+      });
+
+      const collected = await collectAll(wrapped);
+      expect(collected).toEqual(['aaaaa', 'bbbbb']);
+    });
+
+    it('uses safeSlice to avoid splitting surrogate pairs on the cut boundary', async () => {
+      const emoji = '\uD83D\uDE00'; // 😀 — 2 code units
+      const chunks = ['aaa', emoji + 'bbb']; // 3 + 5 = 8 code units total
+      const wrapped = createTruncatingAsyncIterable(fromChunks(chunks), {
+        maxCharacters: 4, // room for 1 more char after 'aaa'
+      });
+
+      const collected = await collectAll(wrapped);
+      // After 'aaa' (3 chars), remaining is 1 char. The next chunk starts with
+      // a surrogate pair (2 code units). safeSlice('😀bbb', 1) cannot include
+      // half a surrogate pair, so it returns ''.
+      expect(collected[0]).toBe('aaa');
+      expect(collected[1]).toBe('');
+      expect(collected[2]).toBe('\n\u2026(truncated)\u2026');
+    });
+
+    it('uses default maxCharacters when none specified', async () => {
+      // DEFAULT_MAX_CHARACTERS is 8000
+      const chunks = ['a'.repeat(4000), 'b'.repeat(4000)]; // exactly 8000
+      const wrapped = createTruncatingAsyncIterable(fromChunks(chunks));
+
+      const collected = await collectAll(wrapped);
+      expect(collected).toEqual(['a'.repeat(4000), 'b'.repeat(4000)]);
+    });
+
+    it('uses custom marker', async () => {
+      const chunks = ['aaaa', 'bbbb', 'cccc'];
+      const wrapped = createTruncatingAsyncIterable(fromChunks(chunks), {
+        maxCharacters: 10,
+        marker: '...',
+      });
+
+      const collected = await collectAll(wrapped);
+      expect(collected).toContain('...');
     });
   });
 });

@@ -4,6 +4,7 @@ import {
 } from '../../conversation/index';
 import { assertConversationSafe } from '../../conversation/validation';
 import type { MultiModalContent } from '../../multi-modal';
+import { isStreamingMessage } from '../../streaming';
 import type {
   ConversationHistory as Conversation,
   JSONValue,
@@ -231,7 +232,7 @@ function extractSystemInstruction(
   messages: ReadonlyArray<Message>,
 ): GeminiContent | undefined {
   const systemMessages = messages.filter(
-    (m) => (m.role === 'system' || m.role === 'developer') && !m.hidden,
+    (m) => (m.role === 'system' || m.role === 'developer') && !m.hidden && !isStreamingMessage(m),
   );
 
   if (systemMessages.length === 0) {
@@ -301,6 +302,7 @@ export function toGeminiMessages(conversation: Conversation): GeminiConversation
 
   for (const message of ordered) {
     if (message.hidden) continue;
+    if (isStreamingMessage(message)) continue;
 
     // Skip system messages (already extracted)
     if (message.role === 'system' || message.role === 'developer') {

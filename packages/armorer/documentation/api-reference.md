@@ -529,7 +529,7 @@ This document tracks the published export map in [package.json](/Users/stevekinn
 - `createCacheMiddleware`
 - `createRateLimitMiddleware`
 - `createTimeoutMiddleware`
-- `createTruncationMiddleware`
+- `createTruncationMiddleware` — also wraps async iterable `stream`/`result` fields with character-limited iteration
 - `ToolResultTruncationOptions`
 
 ## `armorer/truncation`
@@ -537,6 +537,7 @@ This document tracks the published export map in [package.json](/Users/stevekinn
 - `truncateToolResultContent`
 - `truncateText`
 - `safeSlice`
+- `createTruncatingAsyncIterable` — wraps an `AsyncIterable`, yielding chunks until the character limit is reached then emitting a truncation marker
 - `containsBase64Data`
 - `stripBase64Data`
 - `isHighSurrogate`

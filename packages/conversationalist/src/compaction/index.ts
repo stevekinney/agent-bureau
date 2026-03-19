@@ -2,6 +2,7 @@ import { simpleTokenEstimator } from '../environment';
 import type { ConversationEnvironment } from '../environment';
 import { resolveConversationEnvironment } from '../environment';
 import { getMessages } from '../conversation/index';
+import { isStreamingMessage } from '../streaming';
 import type { ConversationHistory, Message, MessageInput } from '../types';
 import { CURRENT_SCHEMA_VERSION } from '../types';
 import { toReadonly } from '../utilities';
@@ -56,10 +57,11 @@ export function partitionMessages(
 
   const allMessages = getMessages(conversation) as Message[];
 
-  // Separate system messages
+  // Separate system messages and streaming messages
   const systemMessages = preserveSystem
     ? allMessages.filter((m) => m.role === 'system')
     : [];
+  const streamingMessages = allMessages.filter(isStreamingMessage);
   const nonSystem = allMessages.filter((m) => m.role !== 'system');
 
   if (nonSystem.length <= preserveRecent) {
@@ -87,6 +89,7 @@ export function partitionMessages(
   const preservedSet = new Set([
     ...systemMessages.map((m) => m.id),
     ...recentMessages.map((m) => m.id),
+    ...streamingMessages.map((m) => m.id),
   ]);
   const compactable = allMessages.filter((m) => !preservedSet.has(m.id));
   const preserved = allMessages.filter((m) => preservedSet.has(m.id));

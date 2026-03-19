@@ -183,6 +183,8 @@ Event types include:
 - `stream.finalized`
 - `stream.cancelled`
 - `compaction.started`
+
+Streaming messages (those with `metadata.__streaming === true`) are automatically protected from compaction, truncation, and adapter export. They are preserved in `partitionMessages`, locked in `truncateToTokenLimit` and `truncateFromPosition`, and excluded from provider adapters so that incomplete content is never sent to an API.
 - `compaction.completed`
 
 ## Compaction

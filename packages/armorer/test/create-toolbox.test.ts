@@ -13,6 +13,7 @@ import { toAnthropicTools } from '../src/adapters/anthropic';
 import { toGeminiTools } from '../src/adapters/gemini';
 import { toOpenAITools } from '../src/adapters/openai';
 import { internalToolboxTestUtilities } from '../src/create-toolbox';
+import { createTruncatingAsyncIterable } from '../src/truncation/index';
 import { queryTools, reindexSearchIndex, searchTools } from '../src/registry';
 
 const makeConfiguration = (
@@ -2602,6 +2603,89 @@ describe('createToolbox', () => {
         arguments: { a: 1, b: 2 },
       });
       expect(result.result).toBe('hello');
+    });
+
+    it('wraps streaming tool results and enforces character limit', async () => {
+      async function* generateChunks(): AsyncIterable<string> {
+        yield 'a'.repeat(5000);
+        yield 'b'.repeat(5000);
+        yield 'c'.repeat(5000);
+      }
+
+      function isAsyncIterable(value: unknown): value is AsyncIterable<unknown> {
+        if (!value || (typeof value !== 'object' && typeof value !== 'function'))
+          return false;
+        return Symbol.asyncIterator in value;
+      }
+
+      const maxCharacters = 8000;
+
+      const toolbox = createToolbox(
+        [
+          makeConfiguration({
+            name: 'stream-output',
+            async execute() {
+              return {
+                content: '[stream]',
+                stream: generateChunks(),
+                result: generateChunks(),
+              };
+            },
+          }),
+        ],
+        {
+          middleware: [
+            createMiddleware((configuration) => {
+              const originalExecute = configuration.execute;
+              return {
+                ...configuration,
+                execute: async (params: unknown, context: unknown) => {
+                  const executeFn =
+                    typeof originalExecute === 'function'
+                      ? originalExecute
+                      : await originalExecute;
+                  const result = await executeFn(params, context);
+                  if (result && typeof result === 'object') {
+                    const obj = result as Record<string, unknown>;
+                    if (isAsyncIterable(obj['stream'])) {
+                      obj['stream'] = createTruncatingAsyncIterable(obj['stream'], {
+                        maxCharacters,
+                      });
+                    }
+                    if (isAsyncIterable(obj['result'])) {
+                      obj['result'] = createTruncatingAsyncIterable(obj['result'], {
+                        maxCharacters,
+                      });
+                    }
+                  }
+                  return result;
+                },
+              };
+            }),
+          ],
+        },
+      );
+
+      const executionResult = await toolbox.execute({
+        id: 'tc-stream',
+        name: 'stream-output',
+        arguments: { a: 1, b: 2 },
+      });
+
+      const resultObject = executionResult.result as Record<string, unknown>;
+      const stream = resultObject['stream'] as AsyncIterable<string>;
+
+      const collected: string[] = [];
+      for await (const chunk of stream) {
+        collected.push(chunk);
+      }
+
+      // First chunk (5000) fits, second chunk gets sliced to 3000, then marker
+      const totalContent = collected.join('');
+      expect(totalContent).toContain('\u2026(truncated)\u2026');
+      expect(totalContent.length).toBeLessThanOrEqual(
+        maxCharacters + '\n\u2026(truncated)\u2026'.length,
+      );
     });
   });
 

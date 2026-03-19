@@ -11,6 +11,7 @@ import {
 import { ConversationalistError, createIntegrityError } from './errors';
 import { copyContent } from './multi-modal';
 import type { MultiModalContent } from './multi-modal';
+import { isStreamingMessage } from './streaming';
 import type {
   AssistantMessage,
   ConversationHistory as Conversation,
@@ -303,10 +304,12 @@ export function truncateToTokenLimit(
   const nonSystemMessages = orderedMessages.filter((m) => m.role !== 'system');
   const protectedMessages =
     preserveLastN > 0 ? nonSystemMessages.slice(-preserveLastN) : [];
+  const streamingMessages = orderedMessages.filter(isStreamingMessage);
 
   const systemBlocks = collectBlocksForMessages(systemMessages, messageToBlock);
   const protectedBlocks = collectBlocksForMessages(protectedMessages, messageToBlock);
-  const lockedBlocks = new Set([...systemBlocks, ...protectedBlocks]);
+  const streamingBlocks = collectBlocksForMessages(streamingMessages, messageToBlock);
+  const lockedBlocks = new Set([...systemBlocks, ...protectedBlocks, ...streamingBlocks]);
   const removableBlocks = blocks.filter((block) => !lockedBlocks.has(block));
 
   const systemTokens = systemBlocks.reduce((sum, block) => sum + block.tokenCount, 0);
@@ -314,11 +317,12 @@ export function truncateToTokenLimit(
     (sum, block) => sum + block.tokenCount,
     0,
   );
-  const availableTokens = maxTokens - systemTokens - protectedTokens;
+  const streamingTokens = streamingBlocks.reduce((sum, block) => sum + block.tokenCount, 0);
+  const availableTokens = maxTokens - systemTokens - protectedTokens - streamingTokens;
 
   let selectedBlocks: MessageBlock[] = [];
   if (availableTokens <= 0) {
-    selectedBlocks = [...systemBlocks, ...protectedBlocks];
+    selectedBlocks = [...systemBlocks, ...protectedBlocks, ...streamingBlocks];
   } else {
     const sortedRemovable = [...removableBlocks].sort(
       (a, b) => a.maxPosition - b.maxPosition,
@@ -336,7 +340,7 @@ export function truncateToTokenLimit(
       }
     }
 
-    selectedBlocks = [...systemBlocks, ...keptRemovable, ...protectedBlocks];
+    selectedBlocks = [...systemBlocks, ...keptRemovable, ...streamingBlocks, ...protectedBlocks];
   }
 
   const allMessages = collectMessagesFromBlocks(selectedBlocks);
@@ -412,10 +416,14 @@ export function truncateFromPosition(
   const systemMessages = preserveSystem
     ? ordered.filter((m) => m.role === 'system' && m.position < position)
     : [];
+  const streamingMessages = ordered.filter(
+    (m) => isStreamingMessage(m) && m.position < position,
+  );
   const keptMessages = ordered.filter((m) => m.position >= position);
   const systemBlocks = collectBlocksForMessages(systemMessages, messageToBlock);
+  const streamingBlocks = collectBlocksForMessages(streamingMessages, messageToBlock);
   const keptBlocks = collectBlocksForMessages(keptMessages, messageToBlock);
-  const allMessages = collectMessagesFromBlocks([...systemBlocks, ...keptBlocks]);
+  const allMessages = collectMessagesFromBlocks([...systemBlocks, ...streamingBlocks, ...keptBlocks]);
 
   // Renumber positions
   const renumbered = allMessages.map((message, index) =>

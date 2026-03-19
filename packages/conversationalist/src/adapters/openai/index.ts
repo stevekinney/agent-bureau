@@ -4,6 +4,7 @@ import {
 } from '../../conversation/index';
 import { assertConversationSafe } from '../../conversation/validation';
 import type { MultiModalContent } from '../../multi-modal';
+import { isStreamingMessage } from '../../streaming';
 import type {
   ConversationHistory as Conversation,
   JSONValue,
@@ -170,6 +171,11 @@ function toOpenAIToolCall(toolCall: ToolCall): OpenAIToolCall {
 function convertMessage(message: Message): OpenAIMessage | null {
   // Skip hidden messages
   if (message.hidden) {
+    return null;
+  }
+
+  // Skip streaming messages (incomplete, not ready for provider export)
+  if (isStreamingMessage(message)) {
     return null;
   }
 
@@ -436,6 +442,7 @@ export function toOpenAIMessagesGrouped(conversation: Conversation): OpenAIMessa
 
   for (const message of getOrderedMessages(conversation)) {
     if (message.hidden) continue;
+    if (isStreamingMessage(message)) continue;
 
     if (message.role === 'tool-call' && message.toolCall) {
       pendingToolCalls.push(toOpenAIToolCall(message.toolCall));

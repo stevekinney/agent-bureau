@@ -70,6 +70,54 @@ export function stripBase64Data(text: string, placeholder?: string): string {
   return text.replace(/data:[^;]*;base64,[^\s)"']*/g, replacement);
 }
 
+/**
+ * Wraps an async iterable, yielding chunks verbatim until the accumulated
+ * character length exceeds `maxCharacters`. For string chunks the final partial
+ * chunk is safely sliced (preserving surrogate pairs); for non-string chunks
+ * the length is accounted via `JSON.stringify` but the original object is
+ * yielded. Once the limit is reached, the truncation marker is emitted and
+ * iteration stops.
+ */
+export async function* createTruncatingAsyncIterable<T>(
+  source: AsyncIterable<T>,
+  options?: { maxCharacters?: number; marker?: string },
+): AsyncIterable<T | string> {
+  const maxCharacters = options?.maxCharacters ?? DEFAULT_MAX_CHARACTERS;
+  const marker = options?.marker ?? '\n\u2026(truncated)\u2026';
+  let accumulated = 0;
+
+  for await (const chunk of source) {
+    if (typeof chunk === 'string') {
+      const remaining = maxCharacters - accumulated;
+
+      if (chunk.length <= remaining) {
+        accumulated += chunk.length;
+        yield chunk;
+      } else {
+        // Partial yield: safely slice at the remaining boundary
+        if (remaining > 0) {
+          yield safeSlice(chunk, remaining) as T;
+        }
+        yield marker as T | string;
+        return;
+      }
+    } else {
+      const serialized = JSON.stringify(chunk);
+      const length = serialized.length;
+      const remaining = maxCharacters - accumulated;
+
+      if (length <= remaining) {
+        accumulated += length;
+        yield chunk;
+      } else {
+        // Non-string chunk exceeds limit — emit marker and stop
+        yield marker as T | string;
+        return;
+      }
+    }
+  }
+}
+
 export function truncateToolResultContent(
   content: string,
   options?: ToolResultTruncationOptions,

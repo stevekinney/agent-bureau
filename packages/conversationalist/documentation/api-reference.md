@@ -325,6 +325,14 @@ This document tracks the published export map in [package.json](/Users/stevekinn
 - `isStreamingMessage`
 - `updateStreamingMessage`
 
+### Streaming safety
+
+Messages flagged as streaming (`isStreamingMessage` returns `true`) are automatically protected across the library:
+
+- **Compaction**: `partitionMessages` adds streaming messages to the preserved set so they are never summarized away.
+- **Truncation**: `truncateToTokenLimit` locks streaming message blocks alongside system and protected blocks. `truncateFromPosition` preserves streaming messages that fall below the cutoff position.
+- **Adapters**: All three provider adapters (OpenAI, Anthropic, Gemini) skip streaming messages during export so that incomplete content is never sent to an API. Once a streaming message is finalized via `finalizeStreamingMessage`, the streaming flag is removed and the message participates normally in all subsystems.
+
 ## `conversationalist/history`
 
 - `Conversation`

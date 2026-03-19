@@ -1,5 +1,7 @@
 import type { ToolConfiguration } from '../is-tool';
 import {
+  createTruncatingAsyncIterable,
+  DEFAULT_MAX_CHARACTERS,
   truncateToolResultContent,
   type ToolResultTruncationOptions,
 } from '../truncation/index';
@@ -191,11 +193,18 @@ export function createTimeoutMiddleware(ms: number) {
   };
 }
 
+function isAsyncIterable(value: unknown): value is AsyncIterable<unknown> {
+  if (!value || (typeof value !== 'object' && typeof value !== 'function')) return false;
+  return Symbol.asyncIterator in value;
+}
+
 /**
  * Creates a truncation middleware that limits oversized tool results.
  *
  * Strips base64 data URIs, then truncates the text content to the configured
- * character limit. Handles UTF-16 surrogate pairs safely.
+ * character limit. Handles UTF-16 surrogate pairs safely. When tool results
+ * contain async iterable streams (`stream` or `result` fields), the streams
+ * are wrapped so chunks are yielded until the character limit is reached.
  *
  * @param options - Configuration options for truncation thresholds and markers.
  * @returns A middleware function.
@@ -220,6 +229,26 @@ export function createTruncationMiddleware(options?: ToolResultTruncationOptions
 
       if (result && typeof result === 'object') {
         const obj = result as Record<string, unknown>;
+
+        // Wrap async iterable stream fields before they are consumed
+        if (isAsyncIterable(obj['stream']) || isAsyncIterable(obj['result'])) {
+          const maxCharacters = options?.maxCharacters ?? DEFAULT_MAX_CHARACTERS;
+          const marker = options?.marker;
+          if (isAsyncIterable(obj['stream'])) {
+            obj['stream'] = createTruncatingAsyncIterable(obj['stream'], {
+              maxCharacters,
+              marker,
+            });
+          }
+          if (isAsyncIterable(obj['result'])) {
+            obj['result'] = createTruncatingAsyncIterable(obj['result'], {
+              maxCharacters,
+              marker,
+            });
+          }
+          return result;
+        }
+
         const isError =
           options?.isError ?? (obj['error'] !== undefined || obj['outcome'] === 'error');
 

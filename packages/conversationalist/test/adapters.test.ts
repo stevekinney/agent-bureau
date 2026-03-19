@@ -11,6 +11,7 @@ import {
   createConversationHistoryUnsafe as createConversationUnsafe,
 } from '../src/conversation/index';
 import { ConversationalistError } from '../src/errors';
+import { appendStreamingMessage } from '../src/streaming';
 import type { ConversationHistory as Conversation } from '../src/types';
 
 const testEnvironment = {
@@ -1164,5 +1165,61 @@ describe('Gemini Adapter', () => {
         expect(contents).toHaveLength(0);
       }
     });
+  });
+});
+
+describe('Streaming message protection in adapters', () => {
+  function createConversationWithStreamingMessage(): Conversation {
+    let conv = createConversation({ id: 'streaming-test' }, testEnvironment);
+    conv = appendMessages(
+      conv,
+      { role: 'user', content: 'Hello' },
+      { role: 'assistant', content: 'Hi there!' },
+      testEnvironment,
+    );
+    const { conversation } = appendStreamingMessage(
+      conv,
+      'assistant',
+      undefined,
+      testEnvironment,
+    );
+    return conversation;
+  }
+
+  it('OpenAI adapter skips streaming messages in ungrouped export', () => {
+    const conv = createConversationWithStreamingMessage();
+    const messages = toOpenAIMessages(conv);
+
+    // Should only have user and assistant, not the streaming message
+    expect(messages).toHaveLength(2);
+    expect(messages[0]?.role).toBe('user');
+    expect(messages[1]?.role).toBe('assistant');
+  });
+
+  it('OpenAI adapter skips streaming messages in grouped export', () => {
+    const conv = createConversationWithStreamingMessage();
+    const messages = toOpenAIMessagesGrouped(conv);
+
+    expect(messages).toHaveLength(2);
+    expect(messages[0]?.role).toBe('user');
+    expect(messages[1]?.role).toBe('assistant');
+  });
+
+  it('Anthropic adapter skips streaming messages', () => {
+    const conv = createConversationWithStreamingMessage();
+    const { messages } = toAnthropicMessages(conv);
+
+    expect(messages).toHaveLength(2);
+    expect(messages[0]?.role).toBe('user');
+    expect(messages[1]?.role).toBe('assistant');
+  });
+
+  it('Gemini adapter skips streaming messages', () => {
+    const conv = createConversationWithStreamingMessage();
+    const { contents } = toGeminiMessages(conv);
+
+    expect(contents).toHaveLength(2);
+    expect(contents[0]?.role).toBe('user');
+    expect(contents[1]?.role).toBe('model');
   });
 });

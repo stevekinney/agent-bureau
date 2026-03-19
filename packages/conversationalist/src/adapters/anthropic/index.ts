@@ -4,6 +4,7 @@ import {
 } from '../../conversation/index';
 import { assertConversationSafe } from '../../conversation/validation';
 import type { MultiModalContent } from '../../multi-modal';
+import { isStreamingMessage } from '../../streaming';
 import type {
   ConversationHistory as Conversation,
   JSONValue,
@@ -187,7 +188,7 @@ function toToolResultBlock(toolResult: ToolResult): AnthropicToolResultBlock {
  */
 function extractSystemContent(messages: ReadonlyArray<Message>): string | undefined {
   const systemMessages = messages.filter(
-    (m) => (m.role === 'system' || m.role === 'developer') && !m.hidden,
+    (m) => (m.role === 'system' || m.role === 'developer') && !m.hidden && !isStreamingMessage(m),
   );
 
   if (systemMessages.length === 0) {
@@ -253,6 +254,7 @@ export function toAnthropicMessages(conversation: Conversation): AnthropicConver
 
   for (const message of ordered) {
     if (message.hidden) continue;
+    if (isStreamingMessage(message)) continue;
 
     // Skip system messages (already extracted)
     if (message.role === 'system' || message.role === 'developer') {

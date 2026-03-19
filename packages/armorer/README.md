@@ -144,7 +144,7 @@ Truncation utilities for tool results:
 import { truncateToolResultContent, containsBase64Data } from 'armorer/truncation';
 ```
 
-**Exports:** `truncateToolResultContent`, `truncateText`, `safeSlice`, `containsBase64Data`, `stripBase64Data`, `isHighSurrogate`, `isLowSurrogate`, `DEFAULT_MAX_CHARACTERS`, `DEFAULT_ERROR_MAX_CHARACTERS`, and types `TruncationOptions`, `ToolResultTruncationOptions`.
+**Exports:** `truncateToolResultContent`, `truncateText`, `safeSlice`, `createTruncatingAsyncIterable`, `containsBase64Data`, `stripBase64Data`, `isHighSurrogate`, `isLowSurrogate`, `DEFAULT_MAX_CHARACTERS`, `DEFAULT_ERROR_MAX_CHARACTERS`, and types `TruncationOptions`, `ToolResultTruncationOptions`.
 
 ### Infrastructure
 
@@ -419,7 +419,7 @@ const toolbox = createToolbox([], {
 
 ### Truncation
 
-Prevent oversized tool results from blowing up context windows. The truncation utilities safely handle UTF-16 surrogate pairs and strip base64 data.
+Prevent oversized tool results from blowing up context windows. The truncation utilities safely handle UTF-16 surrogate pairs and strip base64 data. When a tool returns a streaming result (an object with `stream` or `result` fields containing an `AsyncIterable`), the middleware wraps the streams so chunks are yielded until the character limit is reached, then a truncation marker is emitted and iteration stops.
 
 ```ts
 import { truncateToolResultContent } from 'armorer/truncation';
@@ -431,7 +431,7 @@ const truncated = truncateToolResultContent(longResult, {
   isError: false,
 });
 
-// As middleware
+// As middleware (handles both string results and streaming results)
 const toolbox = createToolbox(tools, {
   middleware: [createTruncationMiddleware({ maxCharacters: 4000 })],
 });
