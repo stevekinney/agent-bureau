@@ -14,6 +14,7 @@ export function createSubagentTool(options: CreateSubagentToolOptions) {
     input,
     mapInput = (params: unknown) => String(params),
     mapOutput = (result: RunResult) => result.content,
+    treatMaximumStepsAsError = true,
   } = options;
 
   return createTool({
@@ -32,6 +33,14 @@ export function createSubagentTool(options: CreateSubagentToolOptions) {
 
       if (result.finishReason === 'error') {
         throw new Error(`Sub-agent "${agent.name}" finished with error`);
+      }
+
+      if (result.finishReason === 'aborted') {
+        throw new Error(`Sub-agent "${agent.name}" was aborted`);
+      }
+
+      if (result.finishReason === 'maximum-steps' && treatMaximumStepsAsError) {
+        throw new Error(`Sub-agent "${agent.name}" exceeded maximum steps`);
       }
 
       return mapOutput(result);

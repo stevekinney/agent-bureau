@@ -50,7 +50,7 @@ describe('withStreaming', () => {
 
     const messages = result.conversation.getMessages();
     const assistantMessages = messages.filter((message) => message.role === 'assistant');
-    expect(assistantMessages.length).toBeGreaterThanOrEqual(1);
+    expect(assistantMessages.length).toBe(1);
 
     // The streaming message should be finalized (not still streaming)
     const streamingMessage = result.conversation.getStreamingMessage();

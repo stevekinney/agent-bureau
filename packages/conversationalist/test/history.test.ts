@@ -1,4 +1,4 @@
-import { describe, expect, expectTypeOf, it } from 'bun:test';
+import { describe, expect, it } from 'bun:test';
 
 import { estimateConversationTokens, truncateToTokenLimit } from '../src/context';
 import { Conversation as ConversationHistory } from '../src/history';
@@ -19,10 +19,14 @@ const getOrderedMessages = (conversation: ConversationState): Message[] =>
     .filter((message): message is Message => Boolean(message));
 
 describe('Conversation', () => {
-  it('should implement EventTarget', () => {
-    expectTypeOf<ConversationHistory>().toMatchTypeOf<EventTarget>();
+  it('should have event methods without extending EventTarget', () => {
     const history = new ConversationHistory(createConversation());
-    expect(history instanceof EventTarget).toBe(true);
+    expect(typeof history.addEventListener).toBe('function');
+    expect(typeof history.removeEventListener).toBe('function');
+    expect(typeof history.dispatchEvent).toBe('function');
+    expect(typeof history.on).toBe('function');
+    expect(typeof history.once).toBe('function');
+    expect(typeof history.subscribe).toBe('function');
   });
 
   it('should initialize with a conversation', () => {
@@ -354,7 +358,7 @@ describe('Conversation', () => {
       expect(branchMessages[0].content).toBe('V1');
     });
 
-    it('should support EventTarget and dispatch events on mutations', () => {
+    it('should support event listeners and dispatch events on mutations', () => {
       const history = new ConversationHistory(createConversation());
       let changeCount = 0;
       let lastType = '';
@@ -518,12 +522,6 @@ describe('Conversation', () => {
       } as any);
 
       expect(seen).toBe(true);
-    });
-
-    it('should handle null callback in addEventListener', () => {
-      const history = new ConversationHistory();
-      const result = history.addEventListener('change', null);
-      expect(result).toBeUndefined();
     });
 
     it('supports boolean listener options overloads', () => {

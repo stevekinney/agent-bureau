@@ -60,9 +60,9 @@ describe('events', () => {
 
     // Step 0: tool call turn
     expect(types[1]).toBe('step.started');
-    expect(types[2]).toBe('step.generated');
-    expect(types[3]).toBe('tools.executing');
-    expect(types[4]).toBe('tools.executed');
+    expect(types[2]).toBe('tools.executing');
+    expect(types[3]).toBe('tools.executed');
+    expect(types[4]).toBe('step.generated');
     expect(types[5]).toBe('step.completed');
 
     // Step 1: text-only turn
@@ -101,15 +101,15 @@ describe('events', () => {
       'run.started',
       // Step 0
       'step.started',
-      'step.generated',
       'tools.executing',
       'tools.executed',
+      'step.generated',
       'step.completed',
       // Step 1
       'step.started',
-      'step.generated',
       'tools.executing',
       'tools.executed',
+      'step.generated',
       'step.completed',
       // Step 2 (text-only)
       'step.started',

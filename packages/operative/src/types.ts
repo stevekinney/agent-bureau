@@ -60,6 +60,12 @@ export interface GenerateResponse {
   toolCalls: ToolCallInput[];
   usage?: TokenUsage;
   metadata?: Record<string, JSONValue>;
+  /**
+   * When true, the generate function has already appended the assistant message
+   * to the conversation (e.g. via streaming finalization). The loop will skip
+   * its own `appendAssistantMessage` call to avoid duplicates.
+   */
+  messageAppended?: boolean;
 }
 
 /**
@@ -122,6 +128,7 @@ export interface RunResult {
   content: string;
   usage: TokenUsage;
   finishReason: FinishReason;
+  error?: unknown;
   schemaValidation?: { success: boolean; error?: unknown };
 }
 
@@ -140,6 +147,11 @@ export interface RunOptions {
   onStep?: (context: StepResult) => Promise<void>;
   executeOptions?: OperativeExecuteOptions;
   signal?: AbortSignal;
+  /**
+   * When true, tool results that resolve to promises are awaited and their
+   * resolved values are appended to the conversation. Useful when tools return
+   * deferred results like streaming content.
+   */
   collectAsync?: boolean;
   retry?: RetryOptions;
   validateResponse?: (
@@ -150,10 +162,23 @@ export interface RunOptions {
     result: ToolExecutionResult,
     context: ToolExecutionResultContext,
   ) => Promise<ToolExecutionResult | void>;
+  /**
+   * Called before each step to dynamically select which tools are available.
+   * Return a filtered or entirely different toolbox to control which tools
+   * the model can call on a per-step basis.
+   */
   selectTools?: (context: StepContext) => Promise<Toolbox> | Toolbox;
   contextManagement?: ContextManagementOptions;
   responseSchema?: ZodType;
   schemaRetries?: number;
+  /**
+   * Custom message factory for schema validation retries. Called when the
+   * response fails schema validation and retries remain. The returned string
+   * is appended as a user message to prompt correction.
+   *
+   * Defaults to a generic message containing the validation error.
+   */
+  schemaRetryMessage?: (error: unknown, attempt: number) => string;
 }
 
 /**
@@ -192,6 +217,7 @@ export interface DefineAgentOptions {
   contextManagement?: ContextManagementOptions;
   responseSchema?: RunOptions['responseSchema'];
   schemaRetries?: RunOptions['schemaRetries'];
+  schemaRetryMessage?: RunOptions['schemaRetryMessage'];
   executeOptions?: OperativeExecuteOptions;
   collectAsync?: boolean;
 }
@@ -225,4 +251,9 @@ export interface CreateSubagentToolOptions {
   input: ZodType;
   mapInput?: (input: unknown) => string | AgentRunOptions;
   mapOutput?: (result: RunResult) => unknown;
+  /**
+   * When true (the default), a sub-agent finishing with `maximum-steps` is
+   * treated as an error and throws. Set to false to accept partial results.
+   */
+  treatMaximumStepsAsError?: boolean;
 }

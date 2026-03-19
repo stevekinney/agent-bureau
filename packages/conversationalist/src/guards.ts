@@ -70,3 +70,19 @@ export function isToolCall(value: unknown): value is ToolCall {
 export function isToolResult(value: unknown): value is ToolResult {
   return isSchema(toolResultSchema, value);
 }
+
+/**
+ * Duck-type guard for the Conversation class. Uses structural checks rather
+ * than `instanceof` to avoid the dual-package hazard when operative bundles
+ * its own copy of conversationalist.
+ */
+export function isConversation(value: unknown): value is import('./history').Conversation {
+  if (value === null || typeof value !== 'object') return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v['appendAssistantMessage'] === 'function' &&
+    typeof v['appendToolCalls'] === 'function' &&
+    typeof v['appendToolResults'] === 'function' &&
+    'current' in v
+  );
+}

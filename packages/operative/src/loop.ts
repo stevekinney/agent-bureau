@@ -1,5 +1,5 @@
 import type { Toolbox, ToolExecutionResult } from 'armorer';
-import { Conversation, materializeToolCalls } from 'conversationalist';
+import { Conversation, isConversation, materializeToolCalls } from 'conversationalist';
 import type { ToolCall } from 'interoperability';
 
 import type { OperativeEvents, OperativeEventType } from './events';
@@ -38,17 +38,6 @@ async function evaluateStopConditions(
     if (result) return true;
   }
   return false;
-}
-
-function isConversation(value: unknown): value is Conversation {
-  return (
-    value !== null &&
-    typeof value === 'object' &&
-    typeof (value as Conversation).appendAssistantMessage === 'function' &&
-    typeof (value as Conversation).appendToolCalls === 'function' &&
-    typeof (value as Conversation).appendToolResults === 'function' &&
-    'current' in (value as Conversation)
-  );
 }
 
 function resolveDelay(delay: RetryOptions['delay'], attempt: number): number {
@@ -103,23 +92,6 @@ async function callGenerateWithRetry(
   throw lastError;
 }
 
-function defaultTokenEstimator(conversation: Conversation): number {
-  const messages = conversation.getMessages();
-  let total = 0;
-  for (const message of messages) {
-    if (typeof message.content === 'string') {
-      total += Math.ceil(message.content.length / 4);
-    } else if (Array.isArray(message.content)) {
-      for (const part of message.content) {
-        if ('text' in part && typeof (part as { text: unknown }).text === 'string') {
-          total += Math.ceil((part as { text: string }).text.length / 4);
-        }
-      }
-    }
-  }
-  return total;
-}
-
 export async function executeLoop(options: RunOptions, emitter?: EventEmitter): Promise<RunResult> {
   const {
     generate,
@@ -139,6 +111,7 @@ export async function executeLoop(options: RunOptions, emitter?: EventEmitter): 
     contextManagement,
     responseSchema,
     schemaRetries = 0,
+    schemaRetryMessage,
   } = options;
 
   const conversation = isConversation(options.conversation)
@@ -150,6 +123,15 @@ export async function executeLoop(options: RunOptions, emitter?: EventEmitter): 
   const totalUsage: TokenUsage = { prompt: 0, completion: 0, total: 0 };
   let lastContent = '';
   let schemaAttempts = 0;
+
+  const makeErrorResult = (error: unknown): RunResult => ({
+    conversation,
+    steps,
+    content: lastContent,
+    usage: totalUsage,
+    finishReason: 'error',
+    error,
+  });
 
   emitter?.emit('run.started', { conversation });
 
@@ -167,7 +149,8 @@ export async function executeLoop(options: RunOptions, emitter?: EventEmitter): 
 
     // Context management: compact if over token threshold
     if (contextManagement) {
-      const estimator = contextManagement.tokenEstimator ?? defaultTokenEstimator;
+      const estimator =
+        contextManagement.tokenEstimator ?? ((c: Conversation) => c.estimateTokens());
       const tokensBefore = estimator(conversation);
       if (tokensBefore > contextManagement.maxTokens) {
         try {
@@ -176,13 +159,7 @@ export async function executeLoop(options: RunOptions, emitter?: EventEmitter): 
           emitter?.emit('context.compacted', { step, tokensBefore, tokensAfter });
         } catch (error) {
           emitter?.emit('run.error', { step, error });
-          return {
-            conversation,
-            steps,
-            content: lastContent,
-            usage: totalUsage,
-            finishReason: 'error',
-          };
+          return makeErrorResult(error);
         }
       }
     }
@@ -222,13 +199,7 @@ export async function executeLoop(options: RunOptions, emitter?: EventEmitter): 
         };
       }
       emitter?.emit('run.error', { step, error });
-      return {
-        conversation,
-        steps,
-        content: lastContent,
-        usage: totalUsage,
-        finishReason: 'error',
-      };
+      return makeErrorResult(error);
     }
 
     // Validate response guardrail
@@ -242,13 +213,7 @@ export async function executeLoop(options: RunOptions, emitter?: EventEmitter): 
         }
       } catch (error) {
         emitter?.emit('run.error', { step, error });
-        return {
-          conversation,
-          steps,
-          content: lastContent,
-          usage: totalUsage,
-          finishReason: 'error',
-        };
+        return makeErrorResult(error);
       }
     }
 
@@ -267,19 +232,12 @@ export async function executeLoop(options: RunOptions, emitter?: EventEmitter): 
     lastContent = content;
     accumulateUsage(totalUsage, usage);
 
-    if (content) {
+    if (content && !response.messageAppended) {
       conversation.appendAssistantMessage(content, metadata);
     }
 
     let materializedToolCalls: ToolCall[] = [];
     let results: ToolExecutionResult[] = [];
-
-    emitter?.emit('step.generated', {
-      step,
-      content,
-      toolCalls: [],
-      usage,
-    });
 
     if (toolCallInputs.length > 0) {
       materializedToolCalls = materializeToolCalls(toolCallInputs);
@@ -296,13 +254,7 @@ export async function executeLoop(options: RunOptions, emitter?: EventEmitter): 
           });
         } catch (error) {
           emitter?.emit('run.error', { step, error });
-          return {
-            conversation,
-            steps,
-            content: lastContent,
-            usage: totalUsage,
-            finishReason: 'error',
-          };
+          return makeErrorResult(error);
         }
       }
 
@@ -321,13 +273,7 @@ export async function executeLoop(options: RunOptions, emitter?: EventEmitter): 
           results = Array.isArray(executeResult) ? executeResult : [executeResult];
         } catch (error) {
           emitter?.emit('run.error', { step, error });
-          return {
-            conversation,
-            steps,
-            content: lastContent,
-            usage: totalUsage,
-            finishReason: 'error',
-          };
+          return makeErrorResult(error);
         }
 
         // Validate tool results guardrail
@@ -356,13 +302,7 @@ export async function executeLoop(options: RunOptions, emitter?: EventEmitter): 
             results = validatedResults;
           } catch (error) {
             emitter?.emit('run.error', { step, error });
-            return {
-              conversation,
-              steps,
-              content: lastContent,
-              usage: totalUsage,
-              finishReason: 'error',
-            };
+            return makeErrorResult(error);
           }
         }
 
@@ -388,20 +328,18 @@ export async function executeLoop(options: RunOptions, emitter?: EventEmitter): 
             });
           } catch (error) {
             emitter?.emit('run.error', { step, error });
-            return {
-              conversation,
-              steps,
-              content: lastContent,
-              usage: totalUsage,
-              finishReason: 'error',
-            };
+            return makeErrorResult(error);
           }
         }
       }
     }
 
-    // Update the step.generated event with actual materialized tool calls
-    // (emitted above with empty array; the real tool calls are in tools.executing)
+    emitter?.emit('step.generated', {
+      step,
+      content,
+      toolCalls: materializedToolCalls,
+      usage,
+    });
 
     const stepResult: StepResult = {
       step,
@@ -423,13 +361,7 @@ export async function executeLoop(options: RunOptions, emitter?: EventEmitter): 
         await onStep(stepResult);
       } catch (error) {
         emitter?.emit('run.error', { step, error });
-        return {
-          conversation,
-          steps,
-          content: lastContent,
-          usage: totalUsage,
-          finishReason: 'error',
-        };
+        return makeErrorResult(error);
       }
     }
 
@@ -467,9 +399,10 @@ export async function executeLoop(options: RunOptions, emitter?: EventEmitter): 
             retriesRemaining: schemaRetries - schemaAttempts,
           });
           // Append a user message with the validation error to prompt correction
-          conversation.appendUserMessage(
-            `Your response did not match the required schema. Error: ${String(validationError)}. Please try again with a valid response.`,
-          );
+          const retryMessage = schemaRetryMessage
+            ? schemaRetryMessage(validationError, schemaAttempts)
+            : `Your response did not match the required schema. Error: ${String(validationError)}. Please try again with a valid response.`;
+          conversation.appendUserMessage(retryMessage);
           stepResult.final = false;
           continue;
         }

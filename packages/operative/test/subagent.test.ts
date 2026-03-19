@@ -175,6 +175,111 @@ describe('createSubagentTool', () => {
     expect(subMessages[0]).toBe(1);
   });
 
+  it('throws when sub-agent is aborted', async () => {
+    const subAgent = defineAgent({
+      name: 'aborted-sub',
+      generate: async () => textResponse('Should not finish'),
+      toolbox: createTestToolbox([]),
+      stopWhen: noToolCalls(),
+      maximumSteps: 5,
+    });
+
+    // Override run to simulate an aborted finish
+    const original = subAgent.run.bind(subAgent);
+    (subAgent as any).run = async () => {
+      const result = await original('test');
+      return { ...result, finishReason: 'aborted' as const };
+    };
+
+    const subTool = createSubagentTool({
+      name: 'delegate',
+      description: 'Delegate',
+      agent: subAgent,
+      input: z.object({ task: z.string() }),
+    });
+
+    let callCount = 0;
+    const result = await run({
+      generate: async () => {
+        callCount++;
+        if (callCount === 1)
+          return toolCallResponse([{ name: 'delegate', arguments: { task: 'abort-test' } }]);
+        return textResponse('Recovered from abort');
+      },
+      toolbox: createTestToolbox([subTool]),
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+    });
+
+    expect(result.steps[0].results[0].outcome).toBe('error');
+    expect(result.content).toBe('Recovered from abort');
+  });
+
+  it('throws when sub-agent exceeds maximum steps (default)', async () => {
+    const subAgent = defineAgent({
+      name: 'maxsteps-sub',
+      generate: async () => toolCallResponse([{ name: 'noop', arguments: {} }], 'still going'),
+      toolbox: createTestToolbox([]),
+      maximumSteps: 1,
+    });
+
+    const subTool = createSubagentTool({
+      name: 'delegate',
+      description: 'Delegate',
+      agent: subAgent,
+      input: z.object({ task: z.string() }),
+    });
+
+    let callCount = 0;
+    const result = await run({
+      generate: async () => {
+        callCount++;
+        if (callCount === 1)
+          return toolCallResponse([{ name: 'delegate', arguments: { task: 'loop-forever' } }]);
+        return textResponse('Recovered from max steps');
+      },
+      toolbox: createTestToolbox([subTool]),
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+    });
+
+    expect(result.steps[0].results[0].outcome).toBe('error');
+    expect(result.content).toBe('Recovered from max steps');
+  });
+
+  it('accepts maximum-steps result when treatMaximumStepsAsError is false', async () => {
+    const subAgent = defineAgent({
+      name: 'maxsteps-ok-sub',
+      generate: async () => toolCallResponse([{ name: 'noop', arguments: {} }], 'partial result'),
+      toolbox: createTestToolbox([]),
+      maximumSteps: 1,
+    });
+
+    const subTool = createSubagentTool({
+      name: 'delegate',
+      description: 'Delegate',
+      agent: subAgent,
+      input: z.object({ task: z.string() }),
+      treatMaximumStepsAsError: false,
+    });
+
+    let callCount = 0;
+    const result = await run({
+      generate: async () => {
+        callCount++;
+        if (callCount === 1)
+          return toolCallResponse([{ name: 'delegate', arguments: { task: 'partial' } }]);
+        return textResponse('Done');
+      },
+      toolbox: createTestToolbox([subTool]),
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+    });
+
+    expect(result.steps[0].results[0].outcome).toBe('success');
+    expect(result.content).toBe('Done');
+  });
+
   it('handles sub-agent errors gracefully as tool errors', async () => {
     const subAgent = defineAgent({
       name: 'failing-sub',

@@ -44,6 +44,8 @@ describe('error handling', () => {
     });
 
     expect(result.finishReason).toBe('error');
+    expect(result.error).toBeInstanceOf(Error);
+    expect((result.error as Error).message).toBe('API rate limit exceeded');
     expect(result.steps).toHaveLength(0);
   });
 
@@ -105,6 +107,8 @@ describe('error handling', () => {
     });
 
     expect(result.finishReason).toBe('error');
+    expect(result.error).toBeInstanceOf(Error);
+    expect((result.error as Error).message).toBe('Toolbox execute failed catastrophically');
     expect(result.steps).toHaveLength(0);
     void originalExecute;
   });
@@ -128,6 +132,8 @@ describe('error handling', () => {
     });
 
     expect(result.finishReason).toBe('error');
+    expect(result.error).toBeInstanceOf(Error);
+    expect((result.error as Error).message).toBe('Hook crashed');
     // The step where the hook threw is still partially recorded
     expect(result.steps).toHaveLength(0);
   });

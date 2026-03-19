@@ -71,6 +71,7 @@ export {
   createValidationError,
 } from './errors';
 export {
+  isConversation,
   isConversationHistory,
   isConversationStatus,
   isJSONValue,

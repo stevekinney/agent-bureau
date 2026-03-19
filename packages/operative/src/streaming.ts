@@ -35,7 +35,7 @@ export function withStreaming(fn: StreamingGenerateFunction): GenerateFunction {
         metadata: response.metadata,
       });
 
-      return response;
+      return { ...response, messageAppended: true };
     } catch (error) {
       cancelStreamingIfActive(conversation, messageId);
       throw error;

@@ -17,8 +17,10 @@ import type {
 
 describe('conversationalist types Type Inference', () => {
   describe('Conversation', () => {
-    it('implements EventTarget', () => {
-      expectTypeOf<Conversation>().toMatchTypeOf<EventTarget>();
+    it('has event methods', () => {
+      expectTypeOf<Conversation>().toHaveProperty('addEventListener');
+      expectTypeOf<Conversation>().toHaveProperty('removeEventListener');
+      expectTypeOf<Conversation>().toHaveProperty('dispatchEvent');
     });
   });
 

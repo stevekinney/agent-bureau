@@ -226,7 +226,7 @@ async function loadConversationAdapter(
 /**
  * Manages a stack of conversation versions to support undo, redo, and branching.
  */
-export class Conversation extends EventTarget {
+export class Conversation {
   private currentNode: HistoryNode;
   private environment: ConversationEnvironment;
   private readonly emitter = createEventTarget<ConversationEvents>();
@@ -235,7 +235,6 @@ export class Conversation extends EventTarget {
     initial: ConversationHistory = createConversationHistory(),
     environment?: Partial<ConversationEnvironment>,
   ) {
-    super();
     this.environment = resolveConversationEnvironment(environment);
     const safeInitial = ensureConversationSafe(initial);
     this.currentNode = {
@@ -302,69 +301,35 @@ export class Conversation extends EventTarget {
     }
   }
 
-  private toAddListenerOptions(
-    options?: boolean | AddEventListenerOptions,
-  ): AddEventListenerOptionsLike | boolean | undefined {
-    if (typeof options === 'boolean' || options === undefined) return options;
-    const mapped: AddEventListenerOptionsLike = {};
-    if (options.capture !== undefined) mapped.capture = options.capture;
-    if (options.once !== undefined) mapped.once = options.once;
-    if (options.passive !== undefined) mapped.passive = options.passive;
-    if (options.signal !== undefined) {
-      mapped.signal = options.signal as NonNullable<AddEventListenerOptionsLike['signal']>;
-    }
-    return mapped;
-  }
-
-  private toRemoveListenerOptions(
-    options?: boolean | EventListenerOptions,
-  ): EventListenerOptionsLike | boolean | undefined {
-    if (typeof options === 'boolean' || options === undefined) return options;
-    const mapped: EventListenerOptionsLike = {};
-    if (options.capture !== undefined) mapped.capture = options.capture;
-    return mapped;
-  }
-
   /**
-   * Overrides addEventListener to optionally return an unsubscribe function.
-   * This is a convenience for modern frontend frameworks.
+   * Registers a listener and optionally returns an unsubscribe function.
    */
-  override addEventListener(
-    type: string,
-    callback: ((event: ConversationEvent) => void) | EventListenerOrEventListenerObject | null,
-    options?: boolean | AddEventListenerOptions,
+  addEventListener(
+    type: ConversationEventType,
+    callback: EventListenerLike<ConversationEvent>,
+    options?: AddEventListenerOptionsLike | boolean,
   ): void | (() => void) {
-    if (!callback) return;
-    return this.emitter.addEventListener(
-      type as ConversationEventType,
-      callback as EventListenerLike<ConversationEvent>,
-      this.toAddListenerOptions(options),
-    );
+    return this.emitter.addEventListener(type, callback, options);
   }
 
   /**
    * Removes a listener registered with addEventListener.
    */
-  override removeEventListener(
-    type: string,
-    callback: ((event: ConversationEvent) => void) | EventListenerOrEventListenerObject | null,
-    options?: boolean | EventListenerOptions,
+  removeEventListener(
+    type: ConversationEventType,
+    callback: EventListenerLike<ConversationEvent>,
+    options?: EventListenerOptionsLike | boolean,
   ): void {
-    if (!callback) return;
-    this.emitter.removeEventListener(
-      type as ConversationEventType,
-      callback as EventListenerLike<ConversationEvent>,
-      this.toRemoveListenerOptions(options),
-    );
+    this.emitter.removeEventListener(type, callback, options);
   }
 
   /**
-   * Dispatches a DOM-style event through the event-emission target.
+   * Dispatches an event through the event-emission target.
    */
-  override dispatchEvent(
-    event: Event | EmissionEvent<ConversationEvents[ConversationEventType], ConversationEventType>,
+  dispatchEvent(
+    event: EmissionEvent<ConversationEvents[ConversationEventType], ConversationEventType>,
   ): boolean {
-    return this.emitter.dispatchEvent(event as Parameters<typeof this.emitter.dispatchEvent>[0]);
+    return this.emitter.dispatchEvent(event);
   }
 
   /**
@@ -388,11 +353,8 @@ export class Conversation extends EventTarget {
       }
     };
 
-    const unsubscribe = this.addEventListener(
-      'change',
-      handler as (event: ConversationEvent) => void,
-    );
-    return (unsubscribe as () => void) || (() => {});
+    const unsubscribe = this.addEventListener('change', handler);
+    return unsubscribe || (() => {});
   }
 
   on<K extends ConversationEventType>(
@@ -1163,8 +1125,7 @@ export class Conversation extends EventTarget {
       return node;
     };
 
-    const h = conversation as unknown as { currentNode: HistoryNode };
-    const rootNode = h.currentNode;
+    const rootNode = conversation.currentNode;
     rootNode.children = json.root.children.map((child) => buildTree(child, rootNode));
 
     // Traverse to find the current node
@@ -1175,7 +1136,7 @@ export class Conversation extends EventTarget {
         current = target;
       }
     }
-    h.currentNode = current;
+    conversation.currentNode = current;
 
     return conversation;
   }

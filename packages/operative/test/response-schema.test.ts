@@ -157,6 +157,42 @@ describe('structured output enforcement', () => {
     expect(detail.retriesRemaining).toBe(0);
   });
 
+  it('uses custom schemaRetryMessage when provided', async () => {
+    const retryMessages: string[] = [];
+    let callCount = 0;
+    const generate = async () => {
+      callCount++;
+      if (callCount === 1) return textResponse('bad');
+      return textResponse(JSON.stringify({ answer: 'Fixed', confidence: 0.9 }));
+    };
+
+    const result = await run({
+      generate,
+      toolbox: createTestToolbox([]),
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+      responseSchema: schema,
+      schemaRetries: 1,
+      schemaRetryMessage: (error, attempt) => {
+        const message = `Custom retry #${attempt}: ${String(error)}`;
+        retryMessages.push(message);
+        return message;
+      },
+    });
+
+    expect(result.schemaValidation?.success).toBe(true);
+    expect(retryMessages).toHaveLength(1);
+    expect(retryMessages[0]).toMatch(/^Custom retry #1:/);
+
+    // Verify the custom message was appended to the conversation
+    const messages = result.conversation.getMessages();
+    const userMessages = messages.filter((m) => m.role === 'user');
+    const retryUserMessage = userMessages.find(
+      (m) => typeof m.content === 'string' && m.content.startsWith('Custom retry'),
+    );
+    expect(retryUserMessage).toBeDefined();
+  });
+
   it('does not add schemaValidation when responseSchema is not set', async () => {
     const result = await run({
       generate: async () => textResponse('hello'),

@@ -1,4 +1,4 @@
-import { Conversation } from 'conversationalist';
+import { Conversation, isConversation } from 'conversationalist';
 
 import type { ActiveRun } from './create-run';
 import { createRun } from './create-run';
@@ -11,17 +11,6 @@ import type {
   RunResult,
   StopCondition,
 } from './types';
-
-function isConversation(value: unknown): value is Conversation {
-  return (
-    value !== null &&
-    typeof value === 'object' &&
-    typeof (value as Conversation).appendAssistantMessage === 'function' &&
-    typeof (value as Conversation).appendToolCalls === 'function' &&
-    typeof (value as Conversation).appendToolResults === 'function' &&
-    'current' in (value as Conversation)
-  );
-}
 
 function normalizeInput(
   input: string | AgentRunOptions,
@@ -80,26 +69,13 @@ function buildRunOptions(options: DefineAgentOptions, input: string | AgentRunOp
     stopWhen: runtimeStopWhen,
   } = normalizeInput(input, options.instructions);
 
+  const { name: _, instructions: __, stopWhen: definitionStopWhen, ...rest } = options;
+
   return {
-    generate: options.generate,
-    toolbox: options.toolbox,
+    ...rest,
     conversation,
-    stopWhen: mergeStopConditions(options.stopWhen, runtimeStopWhen),
-    maximumSteps: options.maximumSteps,
-    prepareStep: options.prepareStep,
-    beforeToolExecution: options.beforeToolExecution,
-    afterToolExecution: options.afterToolExecution,
-    onStep: options.onStep,
-    executeOptions: options.executeOptions,
     signal,
-    collectAsync: options.collectAsync,
-    retry: options.retry,
-    validateResponse: options.validateResponse,
-    validateToolResult: options.validateToolResult,
-    selectTools: options.selectTools,
-    contextManagement: options.contextManagement,
-    responseSchema: options.responseSchema,
-    schemaRetries: options.schemaRetries,
+    stopWhen: mergeStopConditions(definitionStopWhen, runtimeStopWhen),
   };
 }
 
