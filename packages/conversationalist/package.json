@@ -122,6 +122,12 @@
       "bun": "./dist/sort/index.js",
       "default": "./dist/sort/index.js",
       "types": "./dist/sort/index.d.ts"
+    },
+    "./persistence": {
+      "import": "./dist/persistence/index.js",
+      "bun": "./dist/persistence/index.js",
+      "default": "./dist/persistence/index.js",
+      "types": "./dist/persistence/index.d.ts"
     }
   },
   "main": "./dist/index.js",

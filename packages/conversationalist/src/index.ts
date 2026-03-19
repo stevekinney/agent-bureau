@@ -58,6 +58,7 @@ export {
   toChatMessages,
   validateConversationHistoryIntegrity,
 } from './conversation/index';
+export type { SessionInfo, SessionPersistenceAdapter } from './environment';
 export type { ConversationalistErrorCode } from './errors';
 export {
   ConversationalistError,

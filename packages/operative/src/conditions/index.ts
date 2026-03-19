@@ -1,6 +1,7 @@
 import {
   contentMatches,
   every,
+  forked,
   maximumSteps,
   not,
   noToolCalls,
@@ -12,6 +13,7 @@ import {
 export {
   contentMatches,
   every,
+  forked,
   maximumSteps,
   not,
   noToolCalls,
@@ -32,4 +34,5 @@ export const stopWhen = {
   every,
   some,
   not,
+  forked,
 } as const;

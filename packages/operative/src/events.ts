@@ -26,6 +26,7 @@ export interface OperativeEvents {
   'run.completed': RunResult;
   'run.error': { step: number; error: unknown };
   'run.aborted': { step: number; reason?: string };
+  'step.aborted': { step: number; reason?: string };
   'generate.retry': { step: number; attempt: number; error: unknown };
   'response.validated': {
     step: number;
@@ -44,6 +45,8 @@ export interface OperativeEvents {
     error: unknown;
     retriesRemaining: number;
   };
+  'elicitation.requested': { step: number; message: string };
+  'elicitation.resolved': { step: number; accepted: boolean };
 }
 
 export type OperativeEventType = keyof OperativeEvents;

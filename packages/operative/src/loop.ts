@@ -1,10 +1,13 @@
 import type { Toolbox, ToolExecutionResult } from 'armorer';
 import { Conversation, isConversation, materializeToolCalls } from 'conversationalist';
 import type { ToolCall } from 'interoperability';
+import type { ZodType } from 'zod';
 
+import { BudgetExceededError, ElicitationDeniedError } from './errors';
 import type { OperativeEvents, OperativeEventType } from './events';
 import type {
   GenerateResponse,
+  OnElicitation,
   RetryOptions,
   RunOptions,
   RunResult,
@@ -92,6 +95,26 @@ async function callGenerateWithRetry(
   throw lastError;
 }
 
+function createElicit(
+  step: number,
+  onElicitation: OnElicitation,
+  conversation: Conversation,
+  signal: AbortSignal | undefined,
+  emitter: EventEmitter | undefined,
+) {
+  return async <T>(message: string, schema: ZodType<T>): Promise<T | null> => {
+    emitter?.emit('elicitation.requested', { step, message });
+    const response = await onElicitation({
+      message,
+      schema,
+      context: { conversation, step, signal },
+    });
+    const accepted = response !== null;
+    emitter?.emit('elicitation.resolved', { step, accepted });
+    return accepted ? response.data : null;
+  };
+}
+
 export async function executeLoop(options: RunOptions, emitter?: EventEmitter): Promise<RunResult> {
   const {
     generate,
@@ -108,6 +131,7 @@ export async function executeLoop(options: RunOptions, emitter?: EventEmitter): 
     validateResponse,
     validateToolResult,
     selectTools,
+    onElicitation,
     contextManagement,
     responseSchema,
     schemaRetries = 0,
@@ -124,14 +148,40 @@ export async function executeLoop(options: RunOptions, emitter?: EventEmitter): 
   let lastContent = '';
   let schemaAttempts = 0;
 
-  const makeErrorResult = (error: unknown): RunResult => ({
-    conversation,
-    steps,
-    content: lastContent,
-    usage: totalUsage,
-    finishReason: 'error',
-    error,
-  });
+  const makeErrorResult = (error: unknown): RunResult => {
+    if (error instanceof ElicitationDeniedError) {
+      const result: RunResult = {
+        conversation,
+        steps,
+        content: lastContent,
+        usage: totalUsage,
+        finishReason: 'elicitation-denied',
+        error,
+      };
+      emitter?.emit('run.completed', result);
+      return result;
+    }
+    if (error instanceof BudgetExceededError) {
+      const result: RunResult = {
+        conversation,
+        steps,
+        content: lastContent,
+        usage: totalUsage,
+        finishReason: 'budget-exceeded',
+        error,
+      };
+      emitter?.emit('run.completed', result);
+      return result;
+    }
+    return {
+      conversation,
+      steps,
+      content: lastContent,
+      usage: totalUsage,
+      finishReason: 'error',
+      error,
+    };
+  };
 
   emitter?.emit('run.started', { conversation });
 
@@ -147,6 +197,19 @@ export async function executeLoop(options: RunOptions, emitter?: EventEmitter): 
       };
     }
 
+    const stepAbortController = new AbortController();
+    const stepSignal = signal
+      ? AbortSignal.any([signal, stepAbortController.signal])
+      : stepAbortController.signal;
+
+    const abortStep = (reason?: string) => {
+      stepAbortController.abort(reason);
+    };
+
+    const elicit = onElicitation
+      ? createElicit(step, onElicitation, conversation, stepSignal, emitter)
+      : undefined;
+
     // Context management: compact if over token threshold
     if (contextManagement) {
       const estimator =
@@ -154,7 +217,13 @@ export async function executeLoop(options: RunOptions, emitter?: EventEmitter): 
       const tokensBefore = estimator(conversation);
       if (tokensBefore > contextManagement.maxTokens) {
         try {
-          await contextManagement.onCompact(conversation, { conversation, step, signal });
+          await contextManagement.onCompact(conversation, {
+            conversation,
+            step,
+            signal: stepSignal,
+            abortStep,
+            elicit,
+          });
           const tokensAfter = estimator(conversation);
           emitter?.emit('context.compacted', { step, tokensBefore, tokensAfter });
         } catch (error) {
@@ -168,13 +237,13 @@ export async function executeLoop(options: RunOptions, emitter?: EventEmitter): 
 
     // Resolve per-step toolbox
     const stepToolbox: Toolbox = selectTools
-      ? await selectTools({ conversation, step, signal })
+      ? await selectTools({ conversation, step, signal: stepSignal, abortStep, elicit })
       : toolbox;
 
     let response: GenerateResponse;
     try {
       const prepareResult = prepareStep
-        ? await prepareStep({ conversation, step, signal })
+        ? await prepareStep({ conversation, step, signal: stepSignal, abortStep, elicit })
         : undefined;
 
       if (prepareResult) {
@@ -182,7 +251,7 @@ export async function executeLoop(options: RunOptions, emitter?: EventEmitter): 
       } else {
         response = await callGenerateWithRetry(
           generate,
-          { conversation, step, signal, toolbox: stepToolbox },
+          { conversation, step, signal: stepSignal, toolbox: stepToolbox },
           retry,
           emitter,
         );
@@ -206,7 +275,13 @@ export async function executeLoop(options: RunOptions, emitter?: EventEmitter): 
     if (validateResponse) {
       try {
         const originalResponse = { ...response };
-        const validated = await validateResponse(response, { conversation, step, signal });
+        const validated = await validateResponse(response, {
+          conversation,
+          step,
+          signal: stepSignal,
+          abortStep,
+          elicit,
+        });
         if (validated) {
           emitter?.emit('response.validated', { step, original: originalResponse, validated });
           response = validated;
@@ -226,6 +301,14 @@ export async function executeLoop(options: RunOptions, emitter?: EventEmitter): 
         usage: totalUsage,
         finishReason: 'aborted',
       };
+    }
+
+    if (stepSignal.aborted && !signal?.aborted) {
+      emitter?.emit('step.aborted', {
+        step,
+        reason: stepAbortController.signal.reason as string | undefined,
+      });
+      continue;
     }
 
     const { content, toolCalls: toolCallInputs, usage, metadata } = response;
@@ -251,6 +334,7 @@ export async function executeLoop(options: RunOptions, emitter?: EventEmitter): 
             conversation,
             step,
             toolCalls: [...materializedToolCalls],
+            elicit,
           });
         } catch (error) {
           emitter?.emit('run.error', { step, error });
@@ -267,7 +351,7 @@ export async function executeLoop(options: RunOptions, emitter?: EventEmitter): 
         try {
           const executeResult = await stepToolbox.execute(
             callsToExecute as Parameters<typeof stepToolbox.execute>[0],
-            { ...executeOptions, signal } as Parameters<typeof stepToolbox.execute>[1],
+            { ...executeOptions, signal: stepSignal } as Parameters<typeof stepToolbox.execute>[1],
           );
 
           results = Array.isArray(executeResult) ? executeResult : [executeResult];
@@ -287,6 +371,7 @@ export async function executeLoop(options: RunOptions, emitter?: EventEmitter): 
                 step,
                 toolCalls: callsToExecute,
                 results,
+                elicit,
               });
               if (validated) {
                 emitter?.emit('tool-result.validated', {
@@ -318,6 +403,14 @@ export async function executeLoop(options: RunOptions, emitter?: EventEmitter): 
           results,
         });
 
+        if (stepSignal.aborted && !signal?.aborted) {
+          emitter?.emit('step.aborted', {
+            step,
+            reason: stepAbortController.signal.reason as string | undefined,
+          });
+          continue;
+        }
+
         if (afterToolExecution) {
           try {
             await afterToolExecution({
@@ -325,6 +418,7 @@ export async function executeLoop(options: RunOptions, emitter?: EventEmitter): 
               step,
               toolCalls: callsToExecute,
               results,
+              elicit,
             });
           } catch (error) {
             emitter?.emit('run.error', { step, error });

@@ -5,6 +5,7 @@ const entrypoints = [
   './src/run.ts',
   './src/create-run.ts',
   './src/loop.ts',
+  './src/errors.ts',
   './src/events.ts',
   './src/streaming.ts',
   './src/types.ts',

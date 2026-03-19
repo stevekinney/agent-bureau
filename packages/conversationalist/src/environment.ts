@@ -1,5 +1,21 @@
-import type { Message, MessagePlugin, TokenEstimator } from './types';
+import type { ConversationHistory, Message, MessagePlugin, TokenEstimator } from './types';
 import { messageText } from './utilities';
+
+export interface SessionInfo {
+  id: string;
+  title?: string;
+  tags: string[];
+  createdAt: string;
+  updatedAt: string;
+  messageCount: number;
+}
+
+export interface SessionPersistenceAdapter {
+  save(conversation: ConversationHistory): Promise<void>;
+  load(id: string): Promise<ConversationHistory | undefined>;
+  list(): Promise<SessionInfo[]>;
+  delete(id: string): Promise<void>;
+}
 
 /**
  * Environment functions for conversation operations.
@@ -10,6 +26,7 @@ export interface ConversationEnvironment {
   randomId: () => string;
   estimateTokens: TokenEstimator;
   plugins: MessagePlugin[];
+  persistence?: SessionPersistenceAdapter;
 }
 
 /**
@@ -43,6 +60,7 @@ export function resolveConversationEnvironment(
     randomId: environment?.randomId ?? defaultConversationEnvironment.randomId,
     estimateTokens: environment?.estimateTokens ?? defaultConversationEnvironment.estimateTokens,
     plugins: [...(environment?.plugins ?? defaultConversationEnvironment.plugins)],
+    ...(environment?.persistence ? { persistence: environment.persistence } : {}),
   };
 }
 
@@ -61,7 +79,8 @@ export function isConversationEnvironmentParameter(
     typeof candidate['now'] === 'function' ||
     typeof candidate['randomId'] === 'function' ||
     typeof candidate['estimateTokens'] === 'function' ||
-    (Array.isArray(candidate['plugins']) && candidate['plugins'].length > 0)
+    (Array.isArray(candidate['plugins']) && candidate['plugins'].length > 0) ||
+    (typeof candidate['persistence'] === 'object' && candidate['persistence'] !== null)
   );
 }
 

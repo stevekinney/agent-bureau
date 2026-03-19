@@ -3,6 +3,7 @@ export type { ActiveRun } from './create-run';
 export { createRun } from './create-run';
 export { createSubagentTool } from './create-subagent-tool';
 export { defineAgent } from './define-agent';
+export { BudgetExceededError, ElicitationDeniedError } from './errors';
 export type { OperativeEvents, OperativeEventType } from './events';
 export { run } from './run';
 export { withStreaming } from './streaming';
@@ -14,11 +15,14 @@ export type {
   ConversationHistory,
   CreateSubagentToolOptions,
   DefineAgentOptions,
+  ElicitationRequest,
+  ElicitationResponse,
   FinishReason,
   GenerateContext,
   GenerateFunction,
   GenerateResponse,
   JSONValue,
+  OnElicitation,
   OperativeExecuteOptions,
   RetryOptions,
   RunOptions,

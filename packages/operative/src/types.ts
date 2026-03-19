@@ -19,6 +19,16 @@ export interface OperativeExecuteOptions extends ToolExecuteOptions {
   errorMode?: 'failFast' | 'collect';
 }
 
+export interface ElicitationRequest<T = unknown> {
+  message: string;
+  schema: ZodType<T>;
+  context: StepContext;
+}
+
+export type ElicitationResponse<T = unknown> = { data: T } | null;
+
+export type OnElicitation = <T>(request: ElicitationRequest<T>) => Promise<ElicitationResponse<T>>;
+
 /**
  * Options for retrying the generate call on transient failures.
  */
@@ -40,7 +50,13 @@ export interface ContextManagementOptions {
 /**
  * Finish reasons for the agent loop.
  */
-export type FinishReason = 'stop-condition' | 'maximum-steps' | 'aborted' | 'error';
+export type FinishReason =
+  | 'stop-condition'
+  | 'maximum-steps'
+  | 'aborted'
+  | 'error'
+  | 'elicitation-denied'
+  | 'budget-exceeded';
 
 /**
  * Context passed to the user-provided generate function.
@@ -93,6 +109,8 @@ export interface StepContext {
   conversation: Conversation;
   step: number;
   signal?: AbortSignal;
+  abortStep?: (reason?: string) => void;
+  elicit?: <T>(message: string, schema: ZodType<T>) => Promise<T | null>;
 }
 
 /**
@@ -102,6 +120,7 @@ export interface ToolExecutionHookContext {
   conversation: Conversation;
   step: number;
   toolCalls: ToolCall[];
+  elicit?: <T>(message: string, schema: ZodType<T>) => Promise<T | null>;
 }
 
 /**
@@ -112,6 +131,7 @@ export interface ToolExecutionResultContext {
   step: number;
   toolCalls: readonly ToolCall[];
   results: readonly ToolExecutionResult[];
+  elicit?: <T>(message: string, schema: ZodType<T>) => Promise<T | null>;
 }
 
 /**
@@ -168,6 +188,7 @@ export interface RunOptions {
    * the model can call on a per-step basis.
    */
   selectTools?: (context: StepContext) => Promise<Toolbox> | Toolbox;
+  onElicitation?: OnElicitation;
   contextManagement?: ContextManagementOptions;
   responseSchema?: ZodType;
   schemaRetries?: number;
@@ -214,6 +235,7 @@ export interface DefineAgentOptions {
   validateResponse?: RunOptions['validateResponse'];
   validateToolResult?: RunOptions['validateToolResult'];
   selectTools?: RunOptions['selectTools'];
+  onElicitation?: RunOptions['onElicitation'];
   contextManagement?: ContextManagementOptions;
   responseSchema?: RunOptions['responseSchema'];
   schemaRetries?: RunOptions['schemaRetries'];

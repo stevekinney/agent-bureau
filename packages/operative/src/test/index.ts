@@ -75,11 +75,14 @@ export function createRunRecorder(activeRun: ActiveRun): RunRecorder {
     'run.completed',
     'run.error',
     'run.aborted',
+    'step.aborted',
     'generate.retry',
     'response.validated',
     'tool-result.validated',
     'context.compacted',
     'response.schema-failed',
+    'elicitation.requested',
+    'elicitation.resolved',
   ];
 
   for (const type of eventTypes) {

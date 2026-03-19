@@ -50,7 +50,7 @@ describe('step hooks', () => {
         prepareStepCalls.push({
           step,
           hasConversation: conversation instanceof Conversation,
-          hasSignal: signal === undefined,
+          hasSignal: signal instanceof AbortSignal,
         });
         return undefined;
       },

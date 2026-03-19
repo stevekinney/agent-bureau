@@ -105,7 +105,10 @@ export type ConversationActionType =
   | 'stream.finalized'
   | 'stream.cancelled'
   | 'compaction.started'
-  | 'compaction.completed';
+  | 'compaction.completed'
+  | 'session.forked'
+  | 'session.tagged'
+  | 'session.renamed';
 
 export interface ConversationEvents {
   change: ConversationEventDetail;
@@ -124,6 +127,9 @@ export interface ConversationEvents {
   'stream.cancelled': ConversationEventDetail;
   'compaction.started': ConversationEventDetail;
   'compaction.completed': ConversationEventDetail;
+  'session.forked': ConversationEventDetail;
+  'session.tagged': ConversationEventDetail;
+  'session.renamed': ConversationEventDetail;
 }
 
 export type ConversationEventType = Extract<keyof ConversationEvents, string>;
@@ -242,6 +248,13 @@ export class Conversation {
       parent: null,
       children: [],
     };
+
+    if (this.environment.persistence) {
+      const persistence = this.environment.persistence;
+      this.addEventListener('change', () => {
+        void persistence.save(this.current);
+      });
+    }
   }
 
   private buildEventDetail(
@@ -559,6 +572,74 @@ export class Conversation {
       }
     }
     return undefined;
+  }
+
+  fork(messageId?: string): Conversation {
+    const previous = this.current;
+    const cloned = JSON.parse(JSON.stringify(this.current)) as ConversationHistory;
+
+    let forkedHistory: ConversationHistory;
+    if (messageId) {
+      const messageIndex = cloned.ids.indexOf(messageId);
+      if (messageIndex === -1) {
+        throw new Error(`Message with id "${messageId}" not found`);
+      }
+      const truncatedIds = cloned.ids.slice(0, messageIndex + 1);
+      const truncatedMessages: Record<string, Message> = {};
+      for (const id of truncatedIds) {
+        const message = cloned.messages[id];
+        if (message) truncatedMessages[id] = message;
+      }
+      forkedHistory = {
+        ...cloned,
+        id: this.environment.randomId(),
+        ids: truncatedIds,
+        messages: truncatedMessages,
+        updatedAt: this.environment.now(),
+      };
+    } else {
+      forkedHistory = {
+        ...cloned,
+        id: this.environment.randomId(),
+        updatedAt: this.environment.now(),
+      };
+    }
+
+    const detail = this.buildEventDetail('session.forked', previous);
+    this.emitConversationEvent('session.forked', detail);
+    this.emitConversationEvent('change', detail);
+
+    return new Conversation(forkedHistory, this.environment);
+  }
+
+  tag(label: string): void {
+    const previous = this.current;
+    const existingTags = (previous.metadata['_tags'] as string[] | undefined) ?? [];
+    if (existingTags.includes(label)) return;
+
+    const next: ConversationHistory = {
+      ...previous,
+      metadata: {
+        ...previous.metadata,
+        _tags: [...existingTags, label],
+      },
+      updatedAt: this.environment.now(),
+    };
+
+    this.commit(next, 'session.tagged', ['push', 'session.tagged']);
+  }
+
+  rename(title: string): void {
+    const previous = this.current;
+    if (previous.title === title) return;
+
+    const next: ConversationHistory = {
+      ...previous,
+      title,
+      updatedAt: this.environment.now(),
+    };
+
+    this.commit(next, 'session.renamed', ['push', 'session.renamed']);
   }
 
   /**
