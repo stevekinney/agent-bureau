@@ -1,4 +1,8 @@
 import type { ToolConfiguration } from '../is-tool';
+import {
+  truncateToolResultContent,
+  type ToolResultTruncationOptions,
+} from '../truncation/index';
 
 /**
  * Creates a rate limiting middleware that restricts the number of tool executions
@@ -184,5 +188,49 @@ export function createTimeoutMiddleware(ms: number) {
       ...configuration,
       execute: wrappedExecute,
     };
+  };
+}
+
+/**
+ * Creates a truncation middleware that limits oversized tool results.
+ *
+ * Strips base64 data URIs, then truncates the text content to the configured
+ * character limit. Handles UTF-16 surrogate pairs safely.
+ *
+ * @param options - Configuration options for truncation thresholds and markers.
+ * @returns A middleware function.
+ */
+export function createTruncationMiddleware(options?: ToolResultTruncationOptions) {
+  return (configuration: ToolConfiguration): ToolConfiguration => {
+    const originalExecute = configuration.execute;
+
+    const wrappedExecute = async (params: unknown, context: unknown) => {
+      let executeFn: (params: unknown, context: unknown) => Promise<unknown>;
+      if (typeof originalExecute === 'function') {
+        executeFn = originalExecute;
+      } else {
+        executeFn = await originalExecute;
+      }
+
+      const result = await executeFn(params, context);
+
+      if (typeof result === 'string') {
+        return truncateToolResultContent(result, options);
+      }
+
+      if (result && typeof result === 'object') {
+        const obj = result as Record<string, unknown>;
+        const isError =
+          options?.isError ?? (obj['error'] !== undefined || obj['outcome'] === 'error');
+
+        if (typeof obj['content'] === 'string') {
+          obj['content'] = truncateToolResultContent(obj['content'], { ...options, isError });
+        }
+      }
+
+      return result;
+    };
+
+    return { ...configuration, execute: wrappedExecute };
   };
 }

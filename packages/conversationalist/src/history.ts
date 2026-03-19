@@ -12,6 +12,12 @@ import type { GeminiConversation } from './adapters/gemini';
 import type { OpenAIMessage } from './adapters/openai';
 
 import {
+  compactConversation,
+  type CompactionOptions,
+  type CompactionResult,
+  type Summarizer,
+} from './compaction/index';
+import {
   estimateConversationTokens,
   getRecentMessages,
   truncateFromPosition,
@@ -104,7 +110,9 @@ export type ConversationActionType =
   | 'stream.started'
   | 'stream.updated'
   | 'stream.finalized'
-  | 'stream.cancelled';
+  | 'stream.cancelled'
+  | 'compaction.started'
+  | 'compaction.completed';
 
 export interface ConversationEvents {
   change: ConversationEventDetail;
@@ -121,6 +129,8 @@ export interface ConversationEvents {
   'stream.updated': ConversationEventDetail;
   'stream.finalized': ConversationEventDetail;
   'stream.cancelled': ConversationEventDetail;
+  'compaction.started': ConversationEventDetail;
+  'compaction.completed': ConversationEventDetail;
 }
 
 export type ConversationEventType = Extract<keyof ConversationEvents, string>;
@@ -891,6 +901,39 @@ export class Conversation extends EventTarget {
       'messages.removed',
       this.createChangeContext(previousConversation, nextConversation, 'messages.removed'),
     );
+  }
+
+  /**
+   * Compacts the conversation by summarizing older messages.
+   * The summarizer function is caller-provided, keeping this library LLM-agnostic.
+   */
+  async compact(
+    summarizer: Summarizer,
+    options?: CompactionOptions,
+  ): Promise<CompactionResult> {
+    const previous = this.current;
+    this.emitConversationEvent(
+      'compaction.started',
+      this.buildEventDetail('compaction.started', previous),
+    );
+    const { conversation, result } = await compactConversation(
+      this.current,
+      summarizer,
+      options,
+      this.env,
+    );
+    if (result.compacted) {
+      this.pushWithEvents(
+        conversation,
+        'compaction.completed',
+        this.createChangeContext(previous, conversation, 'messages.removed'),
+      );
+    }
+    this.emitConversationEvent(
+      'compaction.completed',
+      this.buildEventDetail('compaction.completed', previous),
+    );
+    return result;
   }
 
   /**

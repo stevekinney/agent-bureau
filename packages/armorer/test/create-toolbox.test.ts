@@ -2545,4 +2545,240 @@ describe('createToolbox', () => {
       expect(results[1]?.result).toBe(5);
     });
   });
+
+  describe('truncation middleware integration', () => {
+    it('truncates oversized string content', async () => {
+      const toolbox = createToolbox(
+        [
+          makeConfiguration({
+            name: 'big-output',
+            async execute() {
+              return 'x'.repeat(10000);
+            },
+          }),
+        ],
+        {
+          middleware: [
+            createMiddleware((config) => {
+              const orig = config.execute;
+              return {
+                ...config,
+                execute: async (params: unknown, ctx: unknown) => {
+                  const fn = typeof orig === 'function' ? orig : await orig;
+                  const result = await fn(params, ctx);
+                  if (typeof result === 'string' && result.length > 8000) {
+                    return result.slice(0, 7980) + '\n\u2026(truncated)\u2026';
+                  }
+                  return result;
+                },
+              };
+            }),
+          ],
+        },
+      );
+
+      const result = await toolbox.execute({
+        id: 'tc-1',
+        name: 'big-output',
+        arguments: { a: 1, b: 2 },
+      });
+      expect(typeof result.result).toBe('string');
+      expect((result.result as string).length).toBeLessThanOrEqual(8000);
+    });
+
+    it('passes small content through unchanged', async () => {
+      const toolbox = createToolbox([
+        makeConfiguration({
+          name: 'small-output',
+          async execute() {
+            return 'hello';
+          },
+        }),
+      ]);
+
+      const result = await toolbox.execute({
+        id: 'tc-2',
+        name: 'small-output',
+        arguments: { a: 1, b: 2 },
+      });
+      expect(result.result).toBe('hello');
+    });
+  });
+
+  describe('fuzzy tool name resolution', () => {
+    it('resolves misnamed tool call when resolution is enabled', async () => {
+      const toolbox = createToolbox([makeConfiguration({ name: 'read-file' })], {
+        resolution: true,
+      });
+
+      const result = await toolbox.execute({
+        id: 'r1',
+        name: 'Read-File',
+        arguments: { a: 1, b: 2 },
+      });
+
+      expect(result.outcome).not.toBe('error');
+    });
+
+    it('returns not-found without resolution enabled', async () => {
+      const toolbox = createToolbox([makeConfiguration({ name: 'read-file' })]);
+
+      const result = await toolbox.execute({
+        id: 'r2',
+        name: 'Read-File',
+        arguments: { a: 1, b: 2 },
+      });
+
+      expect(result.outcome).toBe('error');
+    });
+
+    it('emits name-resolved event', async () => {
+      const toolbox = createToolbox([makeConfiguration({ name: 'read-file' })], {
+        resolution: true,
+      });
+
+      const events: Array<{ originalName: string; resolvedName: string; tier: string }> = [];
+      toolbox.addEventListener('name-resolved', (e) => {
+        events.push(e.detail);
+      });
+
+      await toolbox.execute({ id: 'r3', name: 'read.file', arguments: { a: 1, b: 2 } });
+
+      expect(events).toHaveLength(1);
+      expect(events[0].originalName).toBe('read.file');
+      expect(events[0].resolvedName).toBe('read-file');
+      expect(events[0].tier).toBe('normalized');
+    });
+  });
+
+  describe('loop detection integration', () => {
+    it('emits loop-warning for repeated calls', async () => {
+      const toolbox = createToolbox([makeConfiguration()], {
+        loopDetection: { warningThreshold: 3, blockThreshold: 6, windowSize: 30 },
+      });
+
+      const warnings: unknown[] = [];
+      toolbox.addEventListener('loop-warning', (e) => warnings.push(e.detail));
+
+      for (let i = 0; i < 4; i++) {
+        await toolbox.execute({ id: `lw-${i}`, name: 'sum', arguments: { a: 1, b: 2 } });
+      }
+
+      expect(warnings.length).toBeGreaterThan(0);
+    });
+
+    it('blocks at block threshold', async () => {
+      const toolbox = createToolbox([makeConfiguration()], {
+        loopDetection: { warningThreshold: 2, blockThreshold: 4, windowSize: 30 },
+      });
+
+      const results = [];
+      for (let i = 0; i < 5; i++) {
+        results.push(await toolbox.execute({ id: `lb-${i}`, name: 'sum', arguments: { a: 1, b: 2 } }));
+      }
+
+      const blocked = results.filter(r => r.outcome === 'error' && r.content?.includes('loop'));
+      expect(blocked.length).toBeGreaterThan(0);
+    });
+
+    it('does not trigger loop detection when disabled', async () => {
+      const toolbox = createToolbox([makeConfiguration()]);
+
+      const warnings: unknown[] = [];
+      toolbox.addEventListener('loop-warning', (e) => warnings.push(e.detail));
+
+      for (let i = 0; i < 5; i++) {
+        await toolbox.execute({ id: `nd-${i}`, name: 'sum', arguments: { a: 1, b: 2 } });
+      }
+
+      expect(warnings).toHaveLength(0);
+    });
+
+    it('emits loop-blocked event', async () => {
+      const toolbox = createToolbox([makeConfiguration()], {
+        loopDetection: { warningThreshold: 2, blockThreshold: 4, windowSize: 30 },
+      });
+
+      const blocked: unknown[] = [];
+      toolbox.addEventListener('loop-blocked', (e) => blocked.push(e.detail));
+
+      for (let i = 0; i < 5; i++) {
+        await toolbox.execute({ id: `bl-${i}`, name: 'sum', arguments: { a: 1, b: 2 } });
+      }
+
+      expect(blocked.length).toBeGreaterThan(0);
+    });
+  });
+
+  describe('createLoopDetector', () => {
+    it('detects repeated calls via on-demand detector', async () => {
+      const toolbox = createToolbox([makeConfiguration()]);
+      const detector = toolbox.createLoopDetector({ repetitionThreshold: 3 });
+
+      for (let i = 0; i < 3; i++) {
+        await toolbox.execute({ id: `ld-${i}`, name: 'sum', arguments: { a: 1, b: 2 } });
+      }
+
+      const result = detector.detectLoop();
+      expect(result.detected).toBe(true);
+    });
+
+    it('returns statistics from on-demand detector', async () => {
+      const toolbox = createToolbox([makeConfiguration()]);
+      const detector = toolbox.createLoopDetector();
+
+      await toolbox.execute({ id: 'ls-1', name: 'sum', arguments: { a: 1, b: 2 } });
+      await toolbox.execute({ id: 'ls-2', name: 'sum', arguments: { a: 1, b: 2 } });
+
+      const stats = detector.getLoopStatistics();
+      expect(stats.callCount).toBe(2);
+    });
+
+    it('detects no loop for varied calls', async () => {
+      const toolbox = createToolbox([makeConfiguration()]);
+      const detector = toolbox.createLoopDetector();
+
+      await toolbox.execute({ id: 'v-1', name: 'sum', arguments: { a: 1, b: 2 } });
+      await toolbox.execute({ id: 'v-2', name: 'sum', arguments: { a: 3, b: 4 } });
+
+      const result = detector.detectLoop();
+      expect(result.detected).toBe(false);
+    });
+
+    it('detects ping-pong via on-demand detector', async () => {
+      const sumTool = makeConfiguration({ name: 'sum' });
+      const diffTool = makeConfiguration({
+        name: 'difference',
+        async execute({ a, b }: { a: number; b: number }) {
+          return a - b;
+        },
+      });
+      const toolbox = createToolbox([sumTool, diffTool]);
+      const detector = toolbox.createLoopDetector({ pingPongThreshold: 5, maxWindowSize: 30 });
+
+      for (let i = 0; i < 12; i++) {
+        if (i % 2 === 0) {
+          await toolbox.execute({ id: `pp-${i}`, name: 'sum', arguments: { a: 1, b: 2 } });
+        } else {
+          await toolbox.execute({ id: `pp-${i}`, name: 'difference', arguments: { a: 5, b: 3 } });
+        }
+      }
+
+      const result = detector.detectLoop();
+      expect(result.detected).toBe(true);
+      expect(result.message).toContain('ping-pong');
+    });
+
+    it('trims window when maxWindowSize is exceeded', async () => {
+      const toolbox = createToolbox([makeConfiguration()]);
+      const detector = toolbox.createLoopDetector({ maxWindowSize: 5, repetitionThreshold: 100 });
+
+      for (let i = 0; i < 10; i++) {
+        await toolbox.execute({ id: `tw-${i}`, name: 'sum', arguments: { a: i, b: i } });
+      }
+
+      const stats = detector.getLoopStatistics();
+      expect(Object.keys(stats.hashCounts).length).toBeLessThanOrEqual(5);
+    });
+  });
 });

@@ -11,6 +11,7 @@ const entrypoints = [
   './src/tools/index.ts',
   './src/instrumentation/index.ts',
   './src/middleware/index.ts',
+  './src/truncation/index.ts',
   './src/test/index.ts',
   './src/integrations/mcp/index.ts',
   './src/adapters/open-ai/agents/index.ts',

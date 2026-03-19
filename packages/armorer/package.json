@@ -146,6 +146,13 @@
       "require": "./dist/test/index.cjs",
       "default": "./dist/test/index.js",
       "types": "./dist/test/index.d.ts"
+    },
+    "./truncation": {
+      "import": "./dist/truncation/index.js",
+      "bun": "./dist/truncation/index.js",
+      "require": "./dist/truncation/index.cjs",
+      "default": "./dist/truncation/index.js",
+      "types": "./dist/truncation/index.d.ts"
     }
   },
   "main": "./dist/index.js",

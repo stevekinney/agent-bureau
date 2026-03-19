@@ -183,6 +183,29 @@ Event types include:
 - `stream.finalized`
 - `stream.cancelled`
 
+## Compaction
+
+Reclaim context window space by summarizing older messages. The summarization function is caller-provided -- no LLM dependency in the library.
+
+```ts
+import { Conversation } from 'conversationalist';
+
+const conversation = new Conversation(existingHistory);
+
+const result = await conversation.compact(
+  async (messages) => {
+    // Call your LLM to summarize
+    const response = await llm.summarize(messages.map(m => m.content).join('\n'));
+    return response.text;
+  },
+  { preserveRecentCount: 6 },
+);
+
+if (result.compacted) {
+  console.log(`Removed ${result.messagesRemoved} messages, created ${result.chunksProcessed} summaries`);
+}
+```
+
 ## Documentation
 
 - [API Reference](/Users/stevekinney/Developer/agent-bureau/packages/conversationalist/documentation/api-reference.md)

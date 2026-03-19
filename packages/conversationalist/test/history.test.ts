@@ -572,6 +572,66 @@ describe('Conversation', () => {
       history.addEventListener = originalAddEventListener;
     });
 
+    it('supports emit() for typed event emission', () => {
+      const history = new ConversationHistory(createConversation());
+      let received = false;
+      history.addEventListener('change', () => {
+        received = true;
+      });
+
+      history.emit('change', {
+        action: 'push',
+        conversation: history.current,
+        previousConversation: history.current,
+      });
+
+      expect(received).toBe(true);
+    });
+
+    describe('compaction', () => {
+      it('compacts conversation replacing old messages with summary', async () => {
+        const history = new ConversationHistory(createConversation());
+        for (let i = 0; i < 10; i++) {
+          history.appendUserMessage(`Message ${i}`);
+          history.appendAssistantMessage(`Reply ${i}`);
+        }
+        const before = history.current.ids.length;
+
+        const result = await history.compact(async (messages) => {
+          return `Summary of ${messages.length} messages`;
+        });
+
+        expect(result.compacted).toBe(true);
+        expect(result.messagesRemoved).toBeGreaterThan(0);
+        expect(history.current.ids.length).toBeLessThan(before);
+      });
+
+      it('emits compaction events', async () => {
+        const history = new ConversationHistory(createConversation());
+        for (let i = 0; i < 8; i++) {
+          history.appendUserMessage(`Msg ${i}`);
+        }
+
+        const events: string[] = [];
+        history.addEventListener('compaction.started', () => events.push('started'));
+        history.addEventListener('compaction.completed', () => events.push('completed'));
+
+        await history.compact(async () => 'summary');
+
+        expect(events).toContain('started');
+        expect(events).toContain('completed');
+      });
+
+      it('returns compacted false when nothing to compact', async () => {
+        const history = new ConversationHistory(createConversation());
+        history.appendUserMessage('one');
+        history.appendAssistantMessage('two');
+
+        const result = await history.compact(async () => 'summary');
+        expect(result.compacted).toBe(false);
+      });
+    });
+
     it('supports observable event helpers and tool interaction wrappers', async () => {
       let identifierIndex = 0;
       const history = new ConversationHistory(createConversation(), {

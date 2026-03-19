@@ -84,3 +84,7 @@ export {
   materializeToolResults,
   materializeToolResultsAsync,
 } from './tool-interactions';
+
+// Compaction
+export type { CompactionOptions, MessageSummarizer } from './compaction';
+export { compactConversation, stripToolResultDetails } from './compaction';

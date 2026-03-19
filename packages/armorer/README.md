@@ -148,10 +148,15 @@ import { instrument } from 'armorer/instrumentation';
 
 #### `armorer/middleware`
 
-Standard middleware (caching, rate limiting, timeouts):
+Standard middleware (caching, rate limiting, timeouts, truncation):
 
 ```typescript
-import { createCacheMiddleware, createRateLimitMiddleware } from 'armorer/middleware';
+import {
+  createCacheMiddleware,
+  createRateLimitMiddleware,
+  createTimeoutMiddleware,
+  createTruncationMiddleware,
+} from 'armorer/middleware';
 ```
 
 #### `armorer/test`
@@ -387,15 +392,77 @@ Batteries-included middleware for production needs.
 
 ```ts
 import { createToolbox } from 'armorer';
-import { createCacheMiddleware, createRateLimitMiddleware } from 'armorer/middleware';
+import {
+  createCacheMiddleware,
+  createRateLimitMiddleware,
+  createTruncationMiddleware,
+} from 'armorer/middleware';
 
 const toolbox = createToolbox([], {
   middleware: [
     createCacheMiddleware({ ttlMs: 60000 }),
     createRateLimitMiddleware({ limit: 100, windowMs: 60000 }),
+    createTruncationMiddleware({ maxCharacters: 2000 }),
   ],
 });
 ```
+
+### Truncation
+
+Prevent oversized tool results from blowing up context windows. The truncation utilities safely handle UTF-16 surrogate pairs and strip base64 data.
+
+```ts
+import { truncateToolResultContent } from 'armorer/truncation';
+import { createTruncationMiddleware } from 'armorer/middleware';
+
+// Standalone usage
+const truncated = truncateToolResultContent(longResult, {
+  maxCharacters: 4000,
+  isError: false,
+});
+
+// As middleware
+const toolbox = createToolbox(tools, {
+  middleware: [createTruncationMiddleware({ maxCharacters: 4000 })],
+});
+```
+
+### Fuzzy Tool Name Resolution
+
+LLMs sometimes mangle tool names (wrong case, dots instead of hyphens). Enable resolution to auto-correct:
+
+```ts
+const toolbox = createToolbox(tools, {
+  resolution: true,
+});
+
+toolbox.addEventListener('name-resolved', (event) => {
+  console.log(`Resolved ${event.detail.originalName} → ${event.detail.resolvedName} (${event.detail.tier})`);
+});
+```
+
+Resolution tiers (in order): exact → case-insensitive → normalized (dot/slash/underscore → hyphen) → suffix (last segment). Ambiguous matches return not-found for safety.
+
+### Loop Detection
+
+Catch stuck models that repeat the same tool call in a loop:
+
+```ts
+const toolbox = createToolbox(tools, {
+  loopDetection: true,  // or { warningThreshold: 5, blockThreshold: 10 }
+});
+
+toolbox.addEventListener('loop-warning', (event) => {
+  console.warn(event.detail.message);
+});
+
+toolbox.addEventListener('loop-blocked', (event) => {
+  console.error(event.detail.message);
+  // Tool call was blocked and returned an error result
+});
+```
+
+Detectors: simple repeat (same call N times) and ping-pong (alternating between two calls).
 
 ## Testing
 

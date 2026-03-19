@@ -42,6 +42,9 @@ export type {
 } from './registry';
 export { createRegistry } from './registry';
 
+export type { ResolutionResult, ResolutionTier, ResolveNameOptions } from './resolve-name';
+export { buildNameCandidates, normalizeName, resolveName } from './resolve-name';
+
 /**
  * Tag filtering for tool queries.
  */

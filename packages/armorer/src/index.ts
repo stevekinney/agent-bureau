@@ -12,6 +12,9 @@ export {
 export type {
   ImportedToolboxOptions,
   ImportedToolConfiguration,
+  LoopDetectionOptions,
+  LoopDetectionResult,
+  LoopDetectorInstance,
   SerializedToolbox,
   SerializedToolboxJSONSchema,
   Toolbox,

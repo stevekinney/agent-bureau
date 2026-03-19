@@ -21,3 +21,15 @@ export { preprocess } from './preprocess';
 export { retry } from './retry';
 export { tap } from './tap';
 export { when } from './when';
+export {
+  containsBase64Data,
+  DEFAULT_ERROR_MAX_CHARACTERS,
+  DEFAULT_MAX_CHARACTERS,
+  isHighSurrogate,
+  isLowSurrogate,
+  safeSlice,
+  stripBase64Data,
+  truncateText,
+  truncateToolResultContent,
+} from '../truncation/index';
+export type { ToolResultTruncationOptions, TruncationOptions } from '../truncation/index';

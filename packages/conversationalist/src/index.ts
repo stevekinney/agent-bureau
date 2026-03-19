@@ -1,10 +1,12 @@
 export type {
   AppendToolCallOptions,
   AppendToolResultOptions,
+  CompactionOptions,
   ConversationEnvironment,
   IntegrityIssue,
   IntegrityIssueCode,
   MaterializeToolCallOptions,
+  MessageSummarizer,
   RedactMessageOptions,
   ToolInteraction,
 } from './conversation/index';
@@ -22,6 +24,7 @@ export {
   appendUserMessage,
   assertConversationHistoryIntegrity,
   collapseSystemMessages,
+  compactConversation,
   createConversationHistory,
   createConversationHistoryUnsafe,
   deserializeConversationHistory,
@@ -45,6 +48,7 @@ export {
   redactMessageAtPosition,
   replaceSystemMessage,
   searchConversationMessages,
+  stripToolResultDetails,
   toChatMessages,
   validateConversationHistoryIntegrity,
 } from './conversation/index';
@@ -72,6 +76,12 @@ export {
   isToolCall,
   isToolResult,
 } from './guards';
+export { compactConversation as compactConversationWithSummarizer } from './compaction/index';
+export type {
+  CompactionOptions as SummarizingCompactionOptions,
+  CompactionResult,
+  Summarizer,
+} from './compaction/index';
 export { Conversation } from './history';
 export type {
   ConversationActionType,

@@ -32,6 +32,17 @@ import {
   serializeToolDefinition,
 } from './core/serialization';
 import { assertJsonValue } from './core/serialization/json';
+import {
+  LoopDetector,
+  type LoopDetectionOptions,
+  type LoopDetectionResult,
+} from './core/loop-detection';
+import {
+  createLoopDetectionState,
+  detectLoop,
+  type LoopDetectionOptions as AutoLoopDetectionOptions,
+  recordCall,
+} from './loop-detection/index';
 import type { AnyToolDefinition } from './core/tool-definition';
 import { defineTool } from './core/tool-definition';
 import {
@@ -64,6 +75,7 @@ import type {
   ToolExecutionResult,
   ToolProvider,
 } from './types';
+import { resolveFuzzyToolName } from './resolution/index';
 import { createConcurrencyLimiter, normalizeConcurrency } from './utilities/concurrency';
 
 export type ToolboxContext = Record<string, unknown>;
@@ -154,6 +166,15 @@ export interface ToolboxOptions {
    * Middleware is applied in order before each tool is built.
    */
   middleware?: ToolMiddleware[];
+  /**
+   * Enable fuzzy tool name resolution for misnamed tool calls.
+   */
+  resolution?: boolean | { tiers?: Array<'case-insensitive' | 'normalized' | 'suffix'> };
+  /**
+   * Enable loop detection for stuck tool call patterns.
+   * When true, uses default thresholds. Pass an object to customize.
+   */
+  loopDetection?: boolean | AutoLoopDetectionOptions;
 }
 
 export interface ImportedToolboxOptions extends ToolboxOptions {
@@ -258,6 +279,9 @@ export interface ToolboxEvents {
     data?: unknown;
   };
   cancelled: { tool: Tool; call: ToolCall; reason?: string };
+  'name-resolved': { originalName: string; resolvedName: string; tier: string };
+  'loop-warning': { tool: Tool; call: ToolCall; detector: string; count: number; message: string };
+  'loop-blocked': { tool: Tool; call: ToolCall; detector: string; count: number; message: string };
 }
 
 type ToolboxEventType = Extract<keyof ToolboxEvents, string>;
@@ -434,6 +458,58 @@ export interface Toolbox<TTools extends readonly Tool[] = readonly Tool[]> {
 
   // Internal method to get toolbox context.
   getContext?: () => ToolboxContext;
+
+  /**
+   * Creates a loop detector for this toolbox.
+   * The detector is shared across all execute() calls for the toolbox's lifetime.
+   *
+   * Detects:
+   * - Ping-pong loops: alternating calls (A→B→A→B...)
+   * - Repetition loops: same call repeated consecutively
+   *
+   * @param options - Loop detection configuration
+   * @returns A LoopDetector instance
+   *
+   * @example
+   * ```typescript
+   * const toolbox = createToolbox([toolA, toolB]);
+   * const detector = toolbox.createLoopDetector({
+   *   pingPongThreshold: 10,
+   *   repetitionThreshold: 10,
+   * });
+   *
+   * await toolbox.execute(...);
+   * const result = detector.detectLoop();
+   * if (result.detected) {
+   *   console.log(result.message);
+   * }
+   * ```
+   */
+  createLoopDetector: (options?: LoopDetectionOptions) => LoopDetectorInstance;
+}
+
+export interface LoopDetectorInstance {
+  /**
+   * Detect if a loop is currently happening.
+   */
+  detectLoop(): LoopDetectionResult;
+
+  /**
+   * Get statistics about loop detection state.
+   */
+  getLoopStatistics(): LoopStatistics;
+}
+
+// Re-export loop detection types for public API
+export type {
+  LoopDetectionOptions,
+  LoopDetectionResult,
+  LoopStatistics,
+} from './core/loop-detection';
+
+interface LoopStatistics {
+  callCount: number;
+  hashCounts: Record<string, number>;
 }
 
 /**
@@ -539,6 +615,14 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
   const budgetStart = Date.now();
   let budgetCalls = 0;
   const embedder = options.embed ? createCachedEmbedder(options.embed) : undefined;
+
+  const resolutionEnabled = !!options.resolution;
+
+  const loopOptions: AutoLoopDetectionOptions | undefined = typeof options.loopDetection === 'object' && options.loopDetection !== null ? options.loopDetection : undefined;
+  const loopState = options.loopDetection ? createLoopDetectionState() : undefined;
+
+  // Loop detection: instances are created on demand and stored
+  const loopDetectors = new Map<string, LoopDetector>();
   const buildTool =
     typeof options.toolFactory === 'function'
       ? (configuration: ToolConfiguration) =>
@@ -602,8 +686,25 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
 
     // Map calls to tasks
     const tasks = calls.map((call) => async () => {
-      const toolCall = normalizeToolCall(call);
-      const tool = getTool(toolCall.name) as Tool | undefined; // toolCall.name might be ID
+      let toolCall = normalizeToolCall(call);
+      let tool = getTool(toolCall.name) as Tool | undefined; // toolCall.name might be ID
+      if (!tool && resolutionEnabled) {
+        const allNames = [...toolsByName.keys()];
+        const result = resolveFuzzyToolName(toolCall.name, allNames);
+        if (result.resolved) {
+          const resolved = getTool(result.resolved);
+          if (resolved) {
+            tool = resolved;
+            emit('name-resolved', {
+              originalName: toolCall.name,
+              resolvedName: result.resolved,
+              tier: result.tier,
+            });
+            // Patch toolCall name so the tool's execute recognises it as a tool call
+            toolCall = { ...toolCall, name: result.resolved };
+          }
+        }
+      }
       if (!tool) {
         const toolError = createToolError(
           'not_found',
@@ -631,6 +732,11 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
       }
 
       emit('call', { tool, call: toolCall });
+
+      // Track call for loop detection
+      for (const detector of loopDetectors.values()) {
+        detector.recordCall(toolCall.name, toolCall.arguments ?? {});
+      }
 
       const budgetReason = checkBudget(budget, budgetStart, budgetCalls);
       if (budgetReason) {
@@ -661,6 +767,31 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
       }
 
       budgetCalls += 1;
+
+      // Loop detection
+      if (loopState) {
+        const loopResult = detectLoop(loopState, toolCall.name, toolCall.arguments, loopOptions);
+        if (loopResult.detected && loopResult.level === 'blocked') {
+          emit('loop-blocked', { tool, call: toolCall, detector: loopResult.detector, count: loopResult.count, message: loopResult.message });
+          const toolError = createToolError('conflict', loopResult.message, 'LOOP_BLOCKED', false);
+          const blocked: ToolExecutionResult = {
+            callId: toolCall.id,
+            outcome: 'error',
+            content: toolError.message,
+            toolCallId: toolCall.id,
+            toolName: toolCall.name,
+            result: undefined,
+            error: toolError,
+            errorMessage: toolError.message,
+            errorCategory: toolError.category,
+          };
+          return blocked;
+        }
+        if (loopResult.detected) {
+          emit('loop-warning', { tool, call: toolCall, detector: loopResult.detector, count: loopResult.count, message: loopResult.message });
+        }
+        recordCall(loopState, toolCall.name, toolCall.arguments, loopOptions);
+      }
 
       // Bubble up events
       const cleanup: (() => void)[] = [];
@@ -969,6 +1100,16 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
     },
     // Internal method to get toolbox context
     getContext: () => baseContext,
+    // Loop detection
+    createLoopDetector: (options?: LoopDetectionOptions) => {
+      const id = `detector-${loopDetectors.size}`;
+      const detector = new LoopDetector(options);
+      loopDetectors.set(id, detector);
+      return {
+        detectLoop: () => detector.detectLoop(),
+        getLoopStatistics: () => detector.getLoopStatistics(),
+      };
+    },
   };
 
   if (isTestRuntime()) {
