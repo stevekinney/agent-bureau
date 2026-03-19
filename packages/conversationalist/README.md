@@ -182,6 +182,8 @@ Event types include:
 - `stream.updated`
 - `stream.finalized`
 - `stream.cancelled`
+- `compaction.started`
+- `compaction.completed`
 
 ## Compaction
 

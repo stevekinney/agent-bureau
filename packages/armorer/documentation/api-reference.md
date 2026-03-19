@@ -22,6 +22,7 @@ This document tracks the published export map in [package.json](/Users/stevekinn
 | `armorer/tools`                   | Prebuilt tools                                                                                                         |
 | `armorer/instrumentation`         | OpenTelemetry instrumentation helpers                                                                                  |
 | `armorer/middleware`              | Middleware helpers                                                                                                     |
+| `armorer/truncation`             | Tool result truncation utilities                                                                                       |
 | `armorer/test`                    | Test builders and recorders                                                                                            |
 
 ## `armorer`
@@ -528,6 +529,22 @@ This document tracks the published export map in [package.json](/Users/stevekinn
 - `createCacheMiddleware`
 - `createRateLimitMiddleware`
 - `createTimeoutMiddleware`
+- `createTruncationMiddleware`
+- `ToolResultTruncationOptions`
+
+## `armorer/truncation`
+
+- `truncateToolResultContent`
+- `truncateText`
+- `safeSlice`
+- `containsBase64Data`
+- `stripBase64Data`
+- `isHighSurrogate`
+- `isLowSurrogate`
+- `DEFAULT_MAX_CHARACTERS`
+- `DEFAULT_ERROR_MAX_CHARACTERS`
+- `TruncationOptions`
+- `ToolResultTruncationOptions`
 
 ## `armorer/test`
 

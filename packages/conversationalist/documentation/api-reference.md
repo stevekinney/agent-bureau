@@ -115,6 +115,9 @@ This document tracks the published export map in [package.json](/Users/stevekinn
 - `ConversationEventDetail`
 - `ConversationEvents`
 - `ConversationEventType`
+- `CompactionOptions`
+- `CompactionResult`
+- `Summarizer`
 - `ConversationHistory`
 - `ConversationHistoryDraft`
 - `ConversationNodeSnapshot`

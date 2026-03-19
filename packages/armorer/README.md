@@ -136,6 +136,16 @@ const importedToolbox = await createToolbox.fromOpenAITools(openAITools, {
 });
 ```
 
+#### `armorer/truncation`
+
+Truncation utilities for tool results:
+
+```typescript
+import { truncateToolResultContent, containsBase64Data } from 'armorer/truncation';
+```
+
+**Exports:** `truncateToolResultContent`, `truncateText`, `safeSlice`, `containsBase64Data`, `stripBase64Data`, `isHighSurrogate`, `isLowSurrogate`, `DEFAULT_MAX_CHARACTERS`, `DEFAULT_ERROR_MAX_CHARACTERS`, and types `TruncationOptions`, `ToolResultTruncationOptions`.
+
 ### Infrastructure
 
 #### `armorer/instrumentation`
