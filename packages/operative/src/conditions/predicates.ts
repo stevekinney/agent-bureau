@@ -1,4 +1,4 @@
-import type { StepResult, StopCondition } from '../types';
+import type { StepResult, StopCondition, ToolCall, ToolExecutionResult } from '../types';
 
 /**
  * Stops when the model returns no tool calls (text-only response).
@@ -68,6 +68,75 @@ export function not(condition: StopCondition): StopCondition {
   return async (context: StepResult) => {
     const result = await condition(context);
     return !result;
+  };
+}
+
+/**
+ * Options for the repeating tool calls stop condition.
+ */
+export interface RepeatingToolCallsOptions {
+  /** Consecutive identical steps required to trigger. Default: 3 */
+  windowSize?: number;
+  /** Custom fingerprint function. Default: hash of sorted (name, arguments) tuples. */
+  fingerprint?: (toolCalls: readonly ToolCall[], results: readonly ToolExecutionResult[]) => string;
+}
+
+function defaultFingerprint(toolCalls: readonly ToolCall[]): string {
+  const sorted = [...toolCalls]
+    .map((call) => `${call.name}:${JSON.stringify(call.arguments)}`)
+    .sort();
+  return sorted.join('|');
+}
+
+/**
+ * Stops when the agent makes identical tool calls for N consecutive steps,
+ * indicating a stuck/looping agent. Text-only steps never trigger this condition.
+ */
+export function repeatingToolCalls(options?: RepeatingToolCallsOptions): StopCondition {
+  const windowSize = options?.windowSize ?? 3;
+  const fingerprintFunction = options?.fingerprint;
+  const history: string[] = [];
+  let sentinel = 0;
+
+  return (context: StepResult) => {
+    if (context.toolCalls.length === 0) {
+      history.push(`__no_tools_${sentinel++}__`);
+      return false;
+    }
+
+    const fp = fingerprintFunction
+      ? fingerprintFunction(context.toolCalls, context.results)
+      : defaultFingerprint(context.toolCalls);
+
+    history.push(fp);
+
+    if (history.length < windowSize) return false;
+
+    const recent = history.slice(-windowSize);
+    return recent.every((entry) => entry === recent[0]);
+  };
+}
+
+/**
+ * Options for the token budget stop condition.
+ */
+export interface TokenBudgetOptions {
+  /** Which counter to check. Default: 'total' */
+  counter?: 'prompt' | 'completion' | 'total';
+}
+
+/**
+ * Stops when cumulative token usage reaches or exceeds the given threshold.
+ */
+export function tokenBudget(maxTokens: number, options?: TokenBudgetOptions): StopCondition {
+  const counter = options?.counter ?? 'total';
+  let accumulated = 0;
+
+  return (context: StepResult) => {
+    if (context.usage) {
+      accumulated += context.usage[counter];
+    }
+    return accumulated >= maxTokens;
   };
 }
 

@@ -1,0 +1,56 @@
+{
+  "compilerOptions": {
+    "lib": ["ESNext", "DOM", "DOM.Iterable"],
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleDetection": "auto",
+    "jsx": "react-jsx",
+    "allowJs": false,
+    "checkJs": false,
+
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "resolveJsonModule": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+
+    "strict": true,
+
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "allowUnreachableCode": false,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "exactOptionalPropertyTypes": false,
+    "noPropertyAccessFromIndexSignature": true,
+
+    "pretty": true,
+    "noErrorTruncation": true,
+
+    "skipLibCheck": true,
+
+    "incremental": true,
+    "tsBuildInfoFile": "node_modules/.cache/tsconfig.tsbuildinfo",
+    "assumeChangesOnlyAffectDirectDependencies": true,
+    "diagnostics": true,
+
+    "baseUrl": ".",
+    "rootDir": ".",
+    "paths": {
+      "@/*": ["./src/*"]
+    },
+
+    "allowSyntheticDefaultImports": true,
+    "preserveWatchOutput": true,
+
+    "typeRoots": ["node_modules/@types"],
+    "types": ["bun"]
+  },
+  "include": ["src", "scripts"],
+  "exclude": ["node_modules", "coverage", "**/dist/**", "**/build/**"]
+}

@@ -1,0 +1,61 @@
+import type { ProviderName } from './types.ts';
+
+const RETRYABLE_STATUS_CODES = new Set([429, 500, 503]);
+
+/**
+ * Wraps SDK errors from any provider with consistent metadata.
+ */
+export class HeraldError extends Error {
+  readonly provider: ProviderName;
+  override readonly cause: unknown;
+  readonly statusCode?: number;
+  readonly retryable: boolean;
+
+  constructor(options: {
+    provider: ProviderName;
+    cause: unknown;
+    message?: string;
+    statusCode?: number;
+  }) {
+    const statusCode = options.statusCode ?? extractStatusCode(options.cause);
+    const message =
+      options.message ?? `[herald:${options.provider}] ${extractMessage(options.cause)}`;
+
+    super(message);
+    this.name = 'HeraldError';
+    this.provider = options.provider;
+    this.cause = options.cause;
+    this.statusCode = statusCode;
+    this.retryable = statusCode !== undefined && RETRYABLE_STATUS_CODES.has(statusCode);
+  }
+}
+
+function extractStatusCode(error: unknown): number | undefined {
+  if (!error || typeof error !== 'object') return undefined;
+
+  if ('status' in error && typeof error.status === 'number') {
+    return error.status;
+  }
+
+  if ('statusCode' in error && typeof error.statusCode === 'number') {
+    return error.statusCode;
+  }
+
+  if (
+    'error' in error &&
+    error.error &&
+    typeof error.error === 'object' &&
+    'status' in error.error &&
+    typeof error.error.status === 'number'
+  ) {
+    return error.error.status;
+  }
+
+  return undefined;
+}
+
+function extractMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === 'string') return error;
+  return 'Unknown error';
+}

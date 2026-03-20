@@ -1,3 +1,4 @@
+import { Conversation, isConversation } from 'conversationalist';
 import type {
   AddEventListenerOptionsLike,
   AsyncIteratorOptions,
@@ -6,9 +7,18 @@ import type {
 import { createEventTarget } from 'event-emission';
 import type { ObservableLike, Observer, Subscription } from 'event-emission/types';
 
-import type { OperativeEvents, OperativeEventType } from './events';
+import type {
+  CombinedOperativeEvents,
+  CombinedOperativeEventType,
+  OperativeEvents,
+  OperativeEventType,
+} from './events';
 import { executeLoop } from './loop';
 import type { RunOptions, RunResult } from './types';
+
+type LoopEmitter = {
+  emit: <K extends OperativeEventType>(type: K, detail: OperativeEvents[K]) => boolean;
+};
 
 /**
  * An active, event-emitting agent loop run.
@@ -16,34 +26,34 @@ import type { RunOptions, RunResult } from './types';
 export interface ActiveRun {
   result: Promise<RunResult>;
   abort: (reason?: string) => void;
-  addEventListener: <K extends OperativeEventType>(
+  addEventListener: <K extends CombinedOperativeEventType>(
     type: K,
-    listener: (event: EmissionEvent<OperativeEvents[K], K>) => void | Promise<void>,
+    listener: (event: EmissionEvent<CombinedOperativeEvents[K], K>) => void | Promise<void>,
     options?: AddEventListenerOptionsLike,
   ) => () => void;
-  on: <K extends OperativeEventType>(
+  on: <K extends CombinedOperativeEventType>(
     type: K,
     options?: AddEventListenerOptionsLike | boolean,
-  ) => ObservableLike<EmissionEvent<OperativeEvents[K], K>>;
-  once: <K extends OperativeEventType>(
+  ) => ObservableLike<EmissionEvent<CombinedOperativeEvents[K], K>>;
+  once: <K extends CombinedOperativeEventType>(
     type: K,
-    listener: (event: EmissionEvent<OperativeEvents[K], K>) => void | Promise<void>,
+    listener: (event: EmissionEvent<CombinedOperativeEvents[K], K>) => void | Promise<void>,
     options?: Omit<AddEventListenerOptionsLike, 'once'>,
   ) => () => void;
-  subscribe: <K extends OperativeEventType>(
+  subscribe: <K extends CombinedOperativeEventType>(
     type: K,
     observerOrNext?:
-      | Observer<EmissionEvent<OperativeEvents[K], K>>
-      | ((value: EmissionEvent<OperativeEvents[K], K>) => void),
+      | Observer<EmissionEvent<CombinedOperativeEvents[K], K>>
+      | ((value: EmissionEvent<CombinedOperativeEvents[K], K>) => void),
     error?: (err: unknown) => void,
     complete?: () => void,
   ) => Subscription;
-  events: <K extends OperativeEventType>(
+  events: <K extends CombinedOperativeEventType>(
     type: K,
     options?: AsyncIteratorOptions,
-  ) => AsyncIterableIterator<EmissionEvent<OperativeEvents[K], K>>;
+  ) => AsyncIterableIterator<EmissionEvent<CombinedOperativeEvents[K], K>>;
   toObservable: () => ObservableLike<
-    EmissionEvent<OperativeEvents[OperativeEventType], OperativeEventType>
+    EmissionEvent<CombinedOperativeEvents[CombinedOperativeEventType], CombinedOperativeEventType>
   >;
   complete: () => void;
   [Symbol.dispose]: () => void;
@@ -53,26 +63,59 @@ export interface ActiveRun {
  * Creates an event-emitting agent loop run.
  */
 export function createRun(options: RunOptions): ActiveRun {
-  const emitter = createEventTarget<OperativeEvents>();
+  const emitter = createEventTarget<CombinedOperativeEvents>();
   const abortController = new AbortController();
 
   const combinedSignal = options.signal
     ? AbortSignal.any([options.signal, abortController.signal])
     : abortController.signal;
 
+  const conversation = isConversation(options.conversation)
+    ? options.conversation
+    : new Conversation(options.conversation);
+
   const loopOptions: RunOptions = {
     ...options,
+    conversation,
     signal: combinedSignal,
   };
 
+  // Subscribe to toolbox and conversation events, re-emitting with prefixes.
+  const cleanups: (() => void)[] = [];
+
+  const toolboxSubscription = options.toolbox.toObservable().subscribe({
+    next(event) {
+      emitter.emit(
+        `toolbox.${event.type}` as CombinedOperativeEventType,
+        (event as { detail: CombinedOperativeEvents[CombinedOperativeEventType] }).detail,
+      );
+    },
+  });
+  cleanups.push(() => toolboxSubscription.unsubscribe());
+
+  const conversationSubscription = conversation.toObservable().subscribe({
+    next(event) {
+      emitter.emit(
+        `conversation.${event.type}` as CombinedOperativeEventType,
+        (event as { detail: CombinedOperativeEvents[CombinedOperativeEventType] }).detail,
+      );
+    },
+  });
+  cleanups.push(() => conversationSubscription.unsubscribe());
+
   // Defer the loop start to the next microtask so callers can attach listeners first.
-  const result = Promise.resolve().then(() => executeLoop(loopOptions, emitter));
+  // Cast the emitter: the loop only emits native OperativeEvents; the wider
+  // CombinedOperativeEvents type is used for forwarded events outside the loop.
+  const result = Promise.resolve().then(() =>
+    executeLoop(loopOptions, emitter as unknown as LoopEmitter),
+  );
 
   function abort(reason?: string): void {
     abortController.abort(reason);
   }
 
   function complete(): void {
+    for (const cleanup of cleanups) cleanup();
     emitter.complete();
   }
 
