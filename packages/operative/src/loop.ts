@@ -136,6 +136,7 @@ export async function executeLoop(options: RunOptions, emitter?: EventEmitter): 
     responseSchema,
     schemaRetries = 0,
     schemaRetryMessage,
+    onMaximumSteps,
   } = options;
 
   const conversation = isConversation(options.conversation)
@@ -531,6 +532,19 @@ export async function executeLoop(options: RunOptions, emitter?: EventEmitter): 
       };
       emitter?.emit('run.completed', runResult);
       return runResult;
+    }
+  }
+
+  if (onMaximumSteps) {
+    try {
+      const finalContent = await onMaximumSteps({ conversation, step: steps.length, signal });
+      if (typeof finalContent === 'string') {
+        lastContent = finalContent;
+        conversation.appendAssistantMessage(finalContent);
+      }
+    } catch (error) {
+      emitter?.emit('run.error', { step: steps.length, error });
+      return makeErrorResult(error);
     }
   }
 

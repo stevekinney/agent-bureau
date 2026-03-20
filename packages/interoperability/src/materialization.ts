@@ -39,21 +39,14 @@ export function materializeToolResult(toolResult: ToolResultInput): ToolResult {
   return stripRuntimeToolResultFields(toolResult, normalizeJSONValue(toolResult.content));
 }
 
-export function materializeToolResults(
-  toolResults: ReadonlyArray<ToolResultInput>,
-): ToolResult[] {
+export function materializeToolResults(toolResults: ReadonlyArray<ToolResultInput>): ToolResult[] {
   return toolResults.map((toolResult) => materializeToolResult(toolResult));
 }
 
-export async function materializeToolResultAsync(
-  toolResult: ToolResultInput,
-): Promise<ToolResult> {
+export async function materializeToolResultAsync(toolResult: ToolResultInput): Promise<ToolResult> {
   const streamingPayload = getStreamingPayload(toolResult);
   if (!streamingPayload) {
-    return stripRuntimeToolResultFields(
-      toolResult,
-      normalizeJSONValue(toolResult.content),
-    );
+    return stripRuntimeToolResultFields(toolResult, normalizeJSONValue(toolResult.content));
   }
 
   const chunks = await collectAsyncIterable(streamingPayload);
@@ -63,15 +56,10 @@ export async function materializeToolResultAsync(
 export async function materializeToolResultsAsync(
   toolResults: ReadonlyArray<ToolResultInput>,
 ): Promise<ToolResult[]> {
-  return Promise.all(
-    toolResults.map((toolResult) => materializeToolResultAsync(toolResult)),
-  );
+  return Promise.all(toolResults.map((toolResult) => materializeToolResultAsync(toolResult)));
 }
 
-function stripRuntimeToolResultFields(
-  toolResult: ToolResultInput,
-  content: JSONValue,
-): ToolResult {
+function stripRuntimeToolResultFields(toolResult: ToolResultInput, content: JSONValue): ToolResult {
   return {
     callId: toolResult.callId,
     outcome: toolResult.outcome,
@@ -101,9 +89,7 @@ function normalizeToolAction(
   return {
     type: action.type,
     ...(action.message ? { message: action.message } : {}),
-    ...(action.schema !== undefined
-      ? { schema: normalizeJSONValue(action.schema) }
-      : {}),
+    ...(action.schema !== undefined ? { schema: normalizeJSONValue(action.schema) } : {}),
   };
 }
 
@@ -111,9 +97,7 @@ function hasStreamingPayload(toolResult: ToolResultInput): boolean {
   return getStreamingPayload(toolResult) !== undefined;
 }
 
-function getStreamingPayload(
-  toolResult: ToolResultInput,
-): AsyncIterable<unknown> | undefined {
+function getStreamingPayload(toolResult: ToolResultInput): AsyncIterable<unknown> | undefined {
   if (toolResult.stream) {
     return toolResult.stream;
   }
@@ -151,10 +135,7 @@ function normalizeJSONValue(value: unknown): JSONValue {
   }
 }
 
-function assertJSONValue(
-  value: unknown,
-  path: string,
-): asserts value is JSONValue {
+function assertJSONValue(value: unknown, path: string): asserts value is JSONValue {
   const stack = new WeakSet<object>();
 
   const walk = (current: unknown, currentPath: string) => {
@@ -168,12 +149,7 @@ function assertJSONValue(
       throw new TypeError(`Non-finite number at ${currentPath}`);
     }
 
-    if (
-      type === 'undefined' ||
-      type === 'bigint' ||
-      type === 'function' ||
-      type === 'symbol'
-    ) {
+    if (type === 'undefined' || type === 'bigint' || type === 'function' || type === 'symbol') {
       throw new TypeError(`Invalid JSON value at ${currentPath}`);
     }
 

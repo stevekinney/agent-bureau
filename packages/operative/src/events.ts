@@ -1,5 +1,5 @@
-import type { ToolExecutionResult } from 'armorer';
-import type { Conversation } from 'conversationalist';
+import type { ToolboxEvents, ToolExecutionResult } from 'armorer';
+import type { Conversation, ConversationEvents } from 'conversationalist';
 import type { ToolCall } from 'interoperability';
 
 import type { GenerateResponse, RunResult, StepResult, TokenUsage } from './types';
@@ -50,3 +50,15 @@ export interface OperativeEvents {
 }
 
 export type OperativeEventType = keyof OperativeEvents;
+
+type PrefixedToolboxEvents = {
+  [K in keyof ToolboxEvents as `toolbox.${K & string}`]: ToolboxEvents[K];
+};
+
+type PrefixedConversationEvents = {
+  [K in keyof ConversationEvents as `conversation.${K & string}`]: ConversationEvents[K];
+};
+
+export interface ForwardedEvents extends PrefixedToolboxEvents, PrefixedConversationEvents {}
+export type CombinedOperativeEvents = OperativeEvents & ForwardedEvents;
+export type CombinedOperativeEventType = keyof CombinedOperativeEvents;

@@ -200,6 +200,13 @@ export interface RunOptions {
    * Defaults to a generic message containing the validation error.
    */
   schemaRetryMessage?: (error: unknown, attempt: number) => string;
+  /**
+   * Called when the loop exits due to reaching `maximumSteps`. If this
+   * returns a string, it replaces the final content (e.g. a forced summary
+   * from one last LLM call without tools). The `finishReason` remains
+   * `'maximum-steps'` regardless.
+   */
+  onMaximumSteps?: (context: StepContext) => Promise<string | void>;
 }
 
 /**
@@ -240,6 +247,7 @@ export interface DefineAgentOptions {
   responseSchema?: RunOptions['responseSchema'];
   schemaRetries?: RunOptions['schemaRetries'];
   schemaRetryMessage?: RunOptions['schemaRetryMessage'];
+  onMaximumSteps?: RunOptions['onMaximumSteps'];
   executeOptions?: OperativeExecuteOptions;
   collectAsync?: boolean;
 }

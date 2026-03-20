@@ -1,8 +1,5 @@
 export type JSONPrimitive = string | number | boolean | null;
-export type JSONValue =
-  | JSONPrimitive
-  | ReadonlyArray<JSONValue>
-  | { [key: string]: JSONValue };
+export type JSONValue = JSONPrimitive | ReadonlyArray<JSONValue> | { [key: string]: JSONValue };
 
 export type ToolErrorCategory =
   | 'validation'

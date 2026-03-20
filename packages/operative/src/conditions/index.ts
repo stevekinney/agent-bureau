@@ -5,11 +5,14 @@ import {
   maximumSteps,
   not,
   noToolCalls,
+  repeatingToolCalls,
   some,
+  tokenBudget,
   toolCalled,
   toolOutcome,
 } from './predicates';
 
+export type { RepeatingToolCallsOptions, TokenBudgetOptions } from './predicates';
 export {
   contentMatches,
   every,
@@ -17,7 +20,9 @@ export {
   maximumSteps,
   not,
   noToolCalls,
+  repeatingToolCalls,
   some,
+  tokenBudget,
   toolCalled,
   toolOutcome,
 } from './predicates';
@@ -35,4 +40,6 @@ export const stopWhen = {
   some,
   not,
   forked,
+  repeatingToolCalls,
+  tokenBudget,
 } as const;

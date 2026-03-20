@@ -199,6 +199,47 @@ describe('per-step abort granularity', () => {
     expect(capturedSignals[0]).not.toBe(capturedSignals[1]);
   });
 
+  it('step abort during tool execution skips afterToolExecution and continues the run', async () => {
+    let capturedAbortStep: ((reason?: string) => void) | undefined;
+
+    const abortingTool = createTool({
+      name: 'aborting_tool',
+      description: 'Aborts the step during execution',
+      input: z.object({}),
+      execute: async () => {
+        capturedAbortStep?.('abort during tool execution');
+        return { done: true };
+      },
+    });
+
+    const generate = createMockGenerate([
+      toolCallResponse([{ name: 'aborting_tool', arguments: {} }]),
+      toolCallResponse([weatherToolCall('Seattle')]),
+      textResponse('Done'),
+    ]);
+
+    const afterToolLog: number[] = [];
+
+    const result = await run({
+      generate,
+      toolbox: createTestToolbox([abortingTool, weatherTool]),
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+      prepareStep: async ({ abortStep }) => {
+        capturedAbortStep = abortStep;
+        return undefined;
+      },
+      afterToolExecution: async ({ step }) => {
+        afterToolLog.push(step);
+      },
+    });
+
+    expect(result.finishReason).toBe('stop-condition');
+    // Step 0 aborted during tool execution — afterToolExecution should be skipped for it
+    expect(afterToolLog).not.toContain(0);
+    expect(afterToolLog).toContain(1);
+  });
+
   it('aborted step skips afterToolExecution and onStep', async () => {
     const log: string[] = [];
 

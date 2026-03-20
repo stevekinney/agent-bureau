@@ -1,7 +1,12 @@
 import type { EmissionEvent } from 'event-emission';
 
 import type { ActiveRun } from '../create-run';
-import type { OperativeEvents, OperativeEventType } from '../events';
+import type {
+  CombinedOperativeEvents,
+  CombinedOperativeEventType,
+  OperativeEvents,
+  OperativeEventType,
+} from '../events';
 import type { GenerateFunction, GenerateResponse, StepResult } from '../types';
 
 /**
@@ -54,8 +59,8 @@ export function createMockGenerateOnce(response: GenerateResponse): GenerateFunc
  */
 export interface RunRecorder {
   events: Array<{
-    type: OperativeEventType;
-    detail: OperativeEvents[OperativeEventType];
+    type: CombinedOperativeEventType;
+    detail: CombinedOperativeEvents[CombinedOperativeEventType];
   }>;
   steps: StepResult[];
   clear: () => void;

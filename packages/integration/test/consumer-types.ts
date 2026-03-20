@@ -36,18 +36,11 @@ import type {
 type Assert<T extends true> = T;
 type IsAssignable<From, To> = [From] extends [To] ? true : false;
 
-const toolCallCompat: Assert<
-  IsAssignable<ArmorerToolCall, ConversationalistToolCall>
-> = true;
-const toolCallCompatReverse: Assert<
-  IsAssignable<ConversationalistToolCall, ArmorerToolCall>
-> = true;
-const toolErrorCompat: Assert<
-  IsAssignable<ArmorerToolError, ConversationalistToolError>
-> = true;
-const toolResultCompat: Assert<
-  IsAssignable<ArmorerToolResult, ConversationalistToolResult>
-> = true;
+const toolCallCompat: Assert<IsAssignable<ArmorerToolCall, ConversationalistToolCall>> = true;
+const toolCallCompatReverse: Assert<IsAssignable<ConversationalistToolCall, ArmorerToolCall>> =
+  true;
+const toolErrorCompat: Assert<IsAssignable<ArmorerToolError, ConversationalistToolError>> = true;
+const toolResultCompat: Assert<IsAssignable<ArmorerToolResult, ConversationalistToolResult>> = true;
 void toolCallCompat;
 void toolCallCompatReverse;
 void toolErrorCompat;
@@ -109,13 +102,11 @@ void Conversation.fromProvider('openai', openAIMessages).then((conversationState
   void typedConversationState.toProvider('openai', { groupToolCalls: true });
   void typedConversationState.appendProvider('openai', openAIMessages);
 });
-void Conversation.fromProvider('anthropic', anthropicConversation).then(
-  (conversationState) => {
-    const typedConversationState: Conversation = conversationState;
-    void typedConversationState.toProvider('anthropic');
-    void typedConversationState.appendProvider('anthropic', anthropicConversation);
-  },
-);
+void Conversation.fromProvider('anthropic', anthropicConversation).then((conversationState) => {
+  const typedConversationState: Conversation = conversationState;
+  void typedConversationState.toProvider('anthropic');
+  void typedConversationState.appendProvider('anthropic', anthropicConversation);
+});
 void Conversation.fromProvider('gemini', geminiConversation).then((conversationState) => {
   const typedConversationState: Conversation = conversationState;
   void typedConversationState.toProvider('gemini');
@@ -123,12 +114,9 @@ void Conversation.fromProvider('gemini', geminiConversation).then((conversationS
 });
 
 // Operative type compatibility assertions
-const operativeToolCallCompat: Assert<
-  IsAssignable<OperativeToolCall, ArmorerToolCall>
-> = true;
-const operativeToolCallCompatReverse: Assert<
-  IsAssignable<ArmorerToolCall, OperativeToolCall>
-> = true;
+const operativeToolCallCompat: Assert<IsAssignable<OperativeToolCall, ArmorerToolCall>> = true;
+const operativeToolCallCompatReverse: Assert<IsAssignable<ArmorerToolCall, OperativeToolCall>> =
+  true;
 const operativeToolCallConversationalistCompat: Assert<
   IsAssignable<OperativeToolCall, ConversationalistToolCall>
 > = true;

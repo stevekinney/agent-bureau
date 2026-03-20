@@ -15,8 +15,7 @@ describe('integration package import boundaries', () => {
   it('does not import sibling src or dist files', () => {
     const directory = new URL('.', import.meta.url).pathname;
     const files = walk(directory).filter(
-      (path) =>
-        path.endsWith('.ts') || path.endsWith('.js') || path.endsWith('.mjs'),
+      (path) => path.endsWith('.ts') || path.endsWith('.js') || path.endsWith('.mjs'),
     );
     const restrictedImportPattern =
       /\b(?:from|import\s*\()\s*['"][^'"]*(?:\/src(?:\/|['"])|\/dist(?:\/|['"]))|(?:\.\.\/src|\.\/dist|armorer\/dist|conversationalist\/dist)/;

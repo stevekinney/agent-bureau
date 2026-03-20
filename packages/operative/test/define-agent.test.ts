@@ -1,7 +1,7 @@
 import { createTool } from 'armorer';
 import { createTestToolbox } from 'armorer/test';
 import { describe, expect, it } from 'bun:test';
-import { Conversation } from 'conversationalist';
+import { Conversation, createConversationHistory } from 'conversationalist';
 import { z } from 'zod';
 
 import { noToolCalls } from '../src/conditions/predicates';
@@ -189,6 +189,67 @@ describe('defineAgent', () => {
 
     expect(conversations).toHaveLength(2);
     expect(conversations[0]).not.toBe(conversations[1]);
+  });
+
+  it('run() with AgentRunOptions string conversation includes instructions', async () => {
+    let receivedMessages: unknown[] = [];
+
+    const agent = defineAgent({
+      name: 'options-string',
+      instructions: 'Be concise.',
+      generate: async ({ conversation }) => {
+        receivedMessages = conversation.getMessages();
+        return textResponse('Ok');
+      },
+      toolbox: createTestToolbox([]),
+      stopWhen: noToolCalls(),
+    });
+
+    await agent.run({ conversation: 'Tell me about TypeScript' });
+
+    expect(receivedMessages).toHaveLength(2);
+    expect((receivedMessages[0] as { role: string }).role).toBe('system');
+    expect((receivedMessages[1] as { role: string }).role).toBe('user');
+  });
+
+  it('run() with AgentRunOptions ConversationHistory creates Conversation from it', async () => {
+    let messageCount = 0;
+    const history = createConversationHistory();
+
+    const agent = defineAgent({
+      name: 'history-input',
+      generate: async ({ conversation: conv }) => {
+        messageCount = conv.getMessages().length;
+        return textResponse('Done');
+      },
+      toolbox: createTestToolbox([]),
+      stopWhen: noToolCalls(),
+    });
+
+    const result = await agent.run({ conversation: history });
+
+    expect(result.finishReason).toBe('stop-condition');
+    expect(messageCount).toBe(0);
+  });
+
+  it('run() with AgentRunOptions and no conversation includes instructions', async () => {
+    let receivedMessages: unknown[] = [];
+
+    const agent = defineAgent({
+      name: 'no-conversation',
+      instructions: 'System prompt here.',
+      generate: async ({ conversation }) => {
+        receivedMessages = conversation.getMessages();
+        return textResponse('Hello');
+      },
+      toolbox: createTestToolbox([]),
+      stopWhen: noToolCalls(),
+    });
+
+    await agent.run({ stopWhen: noToolCalls() });
+
+    expect(receivedMessages).toHaveLength(1);
+    expect((receivedMessages[0] as { role: string }).role).toBe('system');
   });
 
   it('options property exposes the definition', () => {

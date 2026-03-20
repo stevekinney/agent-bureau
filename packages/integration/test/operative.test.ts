@@ -4,17 +4,8 @@ import { z } from 'zod';
 import { createTool, createToolbox } from 'armorer';
 import { createTestToolbox, createToolboxRecorder } from 'armorer/test';
 import { Conversation } from 'conversationalist';
-import {
-  createRun,
-  run,
-  stopWhen,
-  withStreaming,
-  type GenerateResponse,
-} from 'operative';
-import {
-  createMockGenerate,
-  createRunRecorder,
-} from 'operative/test';
+import { createRun, run, stopWhen, withStreaming, type GenerateResponse } from 'operative';
+import { createMockGenerate, createRunRecorder } from 'operative/test';
 
 const weatherTool = createTool({
   name: 'get_weather',
