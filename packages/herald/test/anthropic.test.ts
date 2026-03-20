@@ -195,6 +195,23 @@ describe('createAnthropicGenerate', () => {
     });
   });
 
+  describe('dynamic SDK import', () => {
+    it('loads the SDK when no client is provided', async () => {
+      const generate = createAnthropicGenerate({
+        model: 'claude-sonnet-4-20250514',
+        apiKey: 'sk-test-invalid',
+      });
+      const context = createTestContext();
+      try {
+        await generate(context);
+        expect.unreachable('should have thrown');
+      } catch (error) {
+        expect(error).toBeInstanceOf(HeraldError);
+        expect((error as HeraldError).provider).toBe('anthropic');
+      }
+    });
+  });
+
   describe('parameter forwarding', () => {
     it('forwards model and maximumTokens to the SDK call', async () => {
       const client = createMockAnthropicClient([anthropicTextResponse]);

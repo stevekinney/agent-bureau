@@ -1,7 +1,8 @@
 import { describe, expect, test } from 'bun:test';
 
 import {
-  isConversationHistory as isConversation,
+  isConversation,
+  isConversationHistory,
   isConversationStatus,
   isJSONValue,
   isMessage,
@@ -12,6 +13,7 @@ import {
   isToolCall,
   isToolResult,
 } from '../src/guards';
+import { Conversation } from '../src/history';
 import { CURRENT_SCHEMA_VERSION } from '../src/versioning';
 
 describe('type guards', () => {
@@ -26,7 +28,7 @@ describe('type guards', () => {
     hidden: false,
   } as const;
 
-  test('isConversation recognizes valid conversations', () => {
+  test('isConversationHistory recognizes valid conversations', () => {
     const conversation = {
       schemaVersion: CURRENT_SCHEMA_VERSION,
       id: 'conv-1',
@@ -38,8 +40,8 @@ describe('type guards', () => {
       updatedAt: now,
     } as const;
 
-    expect(isConversation(conversation)).toBeTrue();
-    expect(isConversation({})).toBeFalse();
+    expect(isConversationHistory(conversation)).toBeTrue();
+    expect(isConversationHistory({})).toBeFalse();
   });
 
   test('isMessage recognizes valid messages', () => {
@@ -77,5 +79,45 @@ describe('type guards', () => {
     expect(isMultiModalContent({ type: 'image' })).toBeFalse();
     expect(isJSONValue({ ok: [true, 1, 'two'] })).toBeTrue();
     expect(isJSONValue(undefined)).toBeFalse();
+  });
+
+  describe('isConversation', () => {
+    test('returns false for null', () => {
+      expect(isConversation(null)).toBeFalse();
+    });
+
+    test('returns false for primitives', () => {
+      expect(isConversation(42)).toBeFalse();
+      expect(isConversation('string')).toBeFalse();
+      expect(isConversation(undefined)).toBeFalse();
+    });
+
+    test('returns false for an empty object', () => {
+      expect(isConversation({})).toBeFalse();
+    });
+
+    test('returns false for a partial duck-type missing some methods', () => {
+      const partial = {
+        appendAssistantMessage: () => {},
+        appendToolCalls: () => {},
+        // missing appendToolResults and current
+      };
+      expect(isConversation(partial)).toBeFalse();
+    });
+
+    test('returns true for a real Conversation instance', () => {
+      const conversation = new Conversation();
+      expect(isConversation(conversation)).toBeTrue();
+    });
+
+    test('returns true for a plain object with all required properties', () => {
+      const duckTyped = {
+        appendAssistantMessage: () => {},
+        appendToolCalls: () => {},
+        appendToolResults: () => {},
+        current: {},
+      };
+      expect(isConversation(duckTyped)).toBeTrue();
+    });
   });
 });

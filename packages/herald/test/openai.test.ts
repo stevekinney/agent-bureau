@@ -204,6 +204,20 @@ describe('createOpenAIGenerate', () => {
     });
   });
 
+  describe('dynamic SDK import', () => {
+    it('loads the SDK when no client is provided', async () => {
+      const generate = createOpenAIGenerate({ model: 'gpt-4o', apiKey: 'sk-test-invalid' });
+      const context = createTestContext();
+      try {
+        await generate(context);
+        expect.unreachable('should have thrown');
+      } catch (error) {
+        expect(error).toBeInstanceOf(HeraldError);
+        expect((error as HeraldError).provider).toBe('openai');
+      }
+    });
+  });
+
   describe('parameter forwarding', () => {
     it('forwards the model to the SDK call', async () => {
       const client = createMockOpenAIClient([openAITextResponse]);

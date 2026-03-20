@@ -1521,12 +1521,8 @@ function materializeImportedToolConfiguration(
 }
 
 function createImportedExecute(toolName: string): ToolConfiguration['execute'] {
-  return () =>
-    Promise.reject(
-      new Error(
-        `Imported tool "${toolName}" does not have an execute implementation. Provide createToolbox.fromProvider(..., { sourceToolbox }), createToolbox.from<Provider>Tools(..., { getTool }), or supply execute before creating the toolbox.`,
-      ),
-    );
+  const message = `Imported tool "${toolName}" does not have an execute implementation. Provide createToolbox.fromProvider(..., { sourceToolbox }), createToolbox.from<Provider>Tools(..., { getTool }), or supply execute before creating the toolbox.`;
+  return () => Promise.reject(new Error(message));
 }
 
 function resolveImportedToolboxOptions(options: ImportedToolboxOptions): ToolboxOptions {

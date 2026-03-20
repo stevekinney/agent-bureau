@@ -135,6 +135,7 @@ describe('coverage edges', () => {
     const originalNow = Date.now;
     Date.now = () => 1_000;
     expect(checkBudget({ maxDurationMs: 100 }, 900, 0)).toBe('Budget exceeded: max duration 100ms');
+    expect(checkBudget({ maxDurationMs: 100 }, 999, 0)).toBeUndefined();
     Date.now = originalNow;
 
     const functionResolver = createLazyExecuteResolver(async (params: unknown) => params, 'direct');

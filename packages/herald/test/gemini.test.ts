@@ -182,6 +182,23 @@ describe('createGeminiGenerate', () => {
     });
   });
 
+  describe('dynamic SDK import', () => {
+    it('loads the SDK when no client is provided', async () => {
+      const generate = createGeminiGenerate({
+        model: 'gemini-2.0-flash',
+        apiKey: 'sk-test-invalid',
+      });
+      const context = createTestContext();
+      try {
+        await generate(context);
+        expect.unreachable('should have thrown');
+      } catch (error) {
+        expect(error).toBeInstanceOf(HeraldError);
+        expect((error as HeraldError).provider).toBe('gemini');
+      }
+    });
+  });
+
   describe('generation config forwarding', () => {
     it('forwards temperature, topP, and stopSequences via generationConfig', async () => {
       const model = createMockGeminiModel([geminiTextResponse]);

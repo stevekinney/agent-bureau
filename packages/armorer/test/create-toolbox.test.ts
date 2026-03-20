@@ -282,7 +282,7 @@ describe('createToolbox', () => {
     );
   });
 
-  it('materializes imported tool configuration metadata for lazy imports', () => {
+  it('materializes imported tool configuration metadata for lazy imports', async () => {
     const { createImportedExecute, materializeImportedToolConfiguration } =
       internalToolboxTestUtilities;
     const diagnostics = {
@@ -316,7 +316,7 @@ describe('createToolbox', () => {
     expect(configuration.diagnostics).toBe(diagnostics);
 
     const placeholder = createImportedExecute('missing-tool');
-    expect(placeholder({}, {})).rejects.toThrow('Imported tool "missing-tool"');
+    await expect(placeholder({}, {})).rejects.toThrow('Imported tool "missing-tool"');
   });
 
   it('generates a call id when missing', async () => {

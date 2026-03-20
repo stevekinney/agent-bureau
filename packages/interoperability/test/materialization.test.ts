@@ -4,6 +4,7 @@ import {
   materializeToolCall,
   materializeToolCalls,
   materializeToolResult,
+  materializeToolResults,
   materializeToolResultAsync,
   materializeToolResultsAsync,
 } from '../src';
@@ -155,5 +156,81 @@ describe('interoperability materialization', () => {
     expect(call.id.length).toBeGreaterThan(0);
     expect(call.name).toBe('search');
     expect(call.arguments).toEqual({});
+  });
+
+  test('materializeToolResults synchronously materializes an array of tool results', () => {
+    const results = materializeToolResults([
+      { callId: 'c1', outcome: 'success', content: 'text' },
+    ]);
+
+    expect(results).toEqual([
+      { callId: 'c1', outcome: 'success', content: 'text' },
+    ]);
+  });
+
+  test('normalizeJSONValue coerces undefined content to null', () => {
+    const result = materializeToolResult({
+      callId: 'c2',
+      outcome: 'success',
+      content: undefined as any,
+    });
+
+    expect(result.content).toBe(null);
+  });
+
+  test('normalizeJSONValue replaces non-finite numbers with null via JSON round-trip', () => {
+    const result = materializeToolResult({
+      callId: 'c3',
+      outcome: 'success',
+      content: { value: Infinity } as any,
+    });
+
+    expect(result.content).toEqual({ value: null });
+  });
+
+  test('normalizeJSONValue drops symbol-valued properties via JSON round-trip', () => {
+    const result = materializeToolResult({
+      callId: 'c4',
+      outcome: 'success',
+      content: { tag: Symbol('test') } as any,
+    });
+
+    expect(result.content).toEqual({});
+  });
+
+  test('normalizeJSONValue falls back to String() for bare symbols', () => {
+    const result = materializeToolResult({
+      callId: 'c5',
+      outcome: 'success',
+      content: Symbol('fallback') as any,
+    });
+
+    expect(result.content).toBe('Symbol(fallback)');
+  });
+
+  test('normalizeJSONValue falls back to String() for circular arrays', () => {
+    const circular: any[] = [1, 2];
+    circular.push(circular);
+
+    const result = materializeToolResult({
+      callId: 'c6',
+      outcome: 'success',
+      content: circular as any,
+    });
+
+    expect(result.content).toBe(String(circular));
+  });
+
+  test('normalizeJSONValue falls back to String() for circular objects', () => {
+    const circular: any = { a: 1 };
+    circular.self = circular;
+
+    const result = materializeToolResult({
+      callId: 'c7',
+      outcome: 'success',
+      content: circular as any,
+    });
+
+    expect(result.content).toBe(String(circular));
   });
 });
