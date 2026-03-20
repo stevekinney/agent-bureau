@@ -133,3 +133,20 @@ void _runResultCheck;
 void _stepResultCheck;
 void _generateFunctionCheck;
 void _stopConditionCheck;
+
+// Sentinel type compatibility assertions
+import type {
+  Action as SentinelAction,
+  RunState as SentinelRunState,
+  Store as SentinelStore,
+  StoreState as SentinelStoreState,
+} from 'sentinel';
+
+const _sentinelStoreCheck: SentinelStore = {} as SentinelStore;
+const _sentinelStoreStateCheck: SentinelStoreState = {} as SentinelStoreState;
+const _sentinelRunStateCheck: SentinelRunState = {} as SentinelRunState;
+const _sentinelActionCheck: SentinelAction = {} as SentinelAction;
+void _sentinelStoreCheck;
+void _sentinelStoreStateCheck;
+void _sentinelRunStateCheck;
+void _sentinelActionCheck;

@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "transit": "bun run --cwd ../armorer build && bun run --cwd ../conversationalist build && bun run --cwd ../operative build",
+    "transit": "bun run --cwd ../armorer build && bun run --cwd ../conversationalist build && bun run --cwd ../operative build && bun run --cwd ../sentinel build",
     "test": "bun run scripts/run-tests.ts",
     "check-types": "tsc --noEmit",
     "validate": "bun run transit && bun run test && bun run check-types",
@@ -13,6 +13,7 @@
     "armorer": "workspace:*",
     "conversationalist": "workspace:*",
     "operative": "workspace:*",
+    "sentinel": "workspace:*",
     "zod": "^4.3.6"
   },
   "devDependencies": {
