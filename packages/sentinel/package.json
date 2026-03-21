@@ -50,6 +50,7 @@
     "check-types": "tsc --noEmit",
     "clean": "rm -rf dist coverage tsconfig.tsbuildinfo",
     "ci": "bun run validate && bun run build",
+    "coverage:check": "bun run scripts/check-coverage.ts",
     "dev": "bun --watch run src/index.ts",
     "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md}\"",
     "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,json,md}\"",
