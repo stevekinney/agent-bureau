@@ -159,13 +159,9 @@ describe('interoperability materialization', () => {
   });
 
   test('materializeToolResults synchronously materializes an array of tool results', () => {
-    const results = materializeToolResults([
-      { callId: 'c1', outcome: 'success', content: 'text' },
-    ]);
+    const results = materializeToolResults([{ callId: 'c1', outcome: 'success', content: 'text' }]);
 
-    expect(results).toEqual([
-      { callId: 'c1', outcome: 'success', content: 'text' },
-    ]);
+    expect(results).toEqual([{ callId: 'c1', outcome: 'success', content: 'text' }]);
   });
 
   test('normalizeJSONValue coerces undefined content to null', () => {

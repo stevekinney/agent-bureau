@@ -94,11 +94,11 @@ describe('sentinel integration: full operative loop tracked by store', () => {
     conversation.appendUserMessage('Weather?');
 
     const generate = createMockGenerate([
-      toolCallResponse(
-        [{ name: 'get_weather', arguments: { location: 'Denver' } }],
-        '',
-        { prompt: 10, completion: 5, total: 15 },
-      ),
+      toolCallResponse([{ name: 'get_weather', arguments: { location: 'Denver' } }], '', {
+        prompt: 10,
+        completion: 5,
+        total: 15,
+      }),
       textResponse('72F.', { prompt: 20, completion: 10, total: 30 }),
     ]);
 

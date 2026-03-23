@@ -23,6 +23,8 @@
     "build": "bun run scripts/build.ts",
     "check-types": "tsc --noEmit",
     "test": "bun test",
+    "test:coverage": "bun test --coverage",
+    "coverage:check": "bun run scripts/check-coverage.ts",
     "validate": "bun run check-types && bun run test && bun run build"
   },
   "devDependencies": {
