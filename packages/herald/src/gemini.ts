@@ -6,9 +6,12 @@ import { HeraldError } from './errors.ts';
 import type {
   GeminiGenerativeModel,
   GeminiProviderOptions,
+  GeminiStreamingModel,
   GenerateContext,
   GenerateFunction,
   GenerateResponse,
+  StreamingGenerateFunction,
+  StreamingHandle,
 } from './types.ts';
 
 /**
@@ -88,6 +91,116 @@ export function createGeminiGenerate(options: GeminiProviderOptions): GenerateFu
 
       return {
         content: textParts.join(''),
+        toolCalls,
+        usage,
+      };
+    } catch (error) {
+      throw new HeraldError({ provider: 'gemini', cause: error });
+    }
+  };
+}
+
+/**
+ * Creates a StreamingGenerateFunction backed by the Google Gemini API.
+ *
+ * Streams chunks from the API, progressively calling `streaming.update`
+ * with accumulated text and collecting function call parts into complete
+ * ToolCallInput objects.
+ *
+ * When no `client` (a GeminiStreamingModel instance) is provided, dynamically
+ * imports `@google/generative-ai` and constructs one using `apiKey` or
+ * the `GOOGLE_API_KEY` env var.
+ */
+export function createGeminiGenerateStream(
+  options: Omit<GeminiProviderOptions, 'client'> & { client?: GeminiStreamingModel },
+): StreamingGenerateFunction {
+  const { model, maximumTokens, temperature, topP, stopSequences } = options;
+  let modelPromise: Promise<GeminiStreamingModel> | undefined;
+
+  function getModel(): Promise<GeminiStreamingModel> {
+    if (options.client) return Promise.resolve(options.client);
+    if (!modelPromise) {
+      modelPromise = import('@google/generative-ai').then((module) => {
+        const GoogleGenerativeAI = module.GoogleGenerativeAI;
+        const apiKey = options.apiKey ?? process.env['GOOGLE_API_KEY'] ?? '';
+        const genAI = new GoogleGenerativeAI(apiKey);
+        return genAI.getGenerativeModel({ model }) as unknown as GeminiStreamingModel;
+      });
+    }
+    return modelPromise;
+  }
+
+  return async (
+    context: GenerateContext & { streaming: StreamingHandle },
+  ): Promise<GenerateResponse> => {
+    const generativeModel = await getModel();
+    const { streaming } = context;
+    const { systemInstruction, contents } = toGeminiMessages(context.conversation.current);
+    const tools = toGeminiTools(context.toolbox);
+    const hasTools = tools.length > 0;
+
+    const params: Record<string, unknown> = {
+      contents,
+    };
+
+    if (systemInstruction !== undefined) params['systemInstruction'] = systemInstruction;
+    if (hasTools) params['tools'] = tools;
+
+    const generationConfig: Record<string, unknown> = {};
+    if (maximumTokens !== undefined) generationConfig['maxOutputTokens'] = maximumTokens;
+    if (temperature !== undefined) generationConfig['temperature'] = temperature;
+    if (topP !== undefined) generationConfig['topP'] = topP;
+    if (stopSequences !== undefined && stopSequences.length > 0) {
+      generationConfig['stopSequences'] = stopSequences;
+    }
+
+    if (Object.keys(generationConfig).length > 0) {
+      params['generationConfig'] = generationConfig;
+    }
+
+    try {
+      const result = await generativeModel.generateContentStream(params);
+
+      let accumulatedText = '';
+      const accumulatedFunctionCallParts: GeminiPart[] = [];
+      let latestUsageMetadata:
+        | { promptTokenCount?: number; candidatesTokenCount?: number; totalTokenCount?: number }
+        | undefined;
+
+      for await (const chunk of result.stream) {
+        const candidates = chunk.candidates ?? [];
+        const parts = candidates[0]?.content?.parts ?? [];
+
+        for (const part of parts) {
+          if (part.text) {
+            accumulatedText += part.text;
+            streaming.update(accumulatedText);
+          }
+          if (part.functionCall) {
+            accumulatedFunctionCallParts.push(part as unknown as GeminiPart);
+          }
+        }
+
+        if (chunk.usageMetadata) {
+          latestUsageMetadata = chunk.usageMetadata;
+        }
+      }
+
+      const toolCalls = parseGeminiToolCalls(accumulatedFunctionCallParts);
+
+      const usage = latestUsageMetadata
+        ? {
+            prompt: latestUsageMetadata.promptTokenCount ?? 0,
+            completion: latestUsageMetadata.candidatesTokenCount ?? 0,
+            total:
+              latestUsageMetadata.totalTokenCount ??
+              (latestUsageMetadata.promptTokenCount ?? 0) +
+                (latestUsageMetadata.candidatesTokenCount ?? 0),
+          }
+        : undefined;
+
+      return {
+        content: accumulatedText,
         toolCalls,
         usage,
       };

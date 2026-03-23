@@ -1,7 +1,9 @@
 import type {
   AnthropicMessageResponse,
+  AnthropicStreamEvent,
   GeminiGenerateContentResult,
   OpenAIChatCompletion,
+  OpenAIChatCompletionChunk,
 } from '../types.ts';
 
 // ── Anthropic Fixtures ───────────────────────────────────────────────
@@ -188,3 +190,146 @@ export const geminiNoUsageResponse: GeminiGenerateContentResult = {
     ],
   },
 };
+
+// ── Anthropic Streaming Fixtures ────────────────────────────────────
+
+export const anthropicStreamTextEvents: AnthropicStreamEvent[] = [
+  {
+    type: 'message_start',
+    message: { usage: { input_tokens: 10, output_tokens: 0 } },
+  },
+  {
+    type: 'content_block_start',
+    index: 0,
+    content_block: { type: 'text', text: '' },
+  },
+  {
+    type: 'content_block_delta',
+    index: 0,
+    delta: { type: 'text_delta', text: 'Hello ' },
+  },
+  {
+    type: 'content_block_delta',
+    index: 0,
+    delta: { type: 'text_delta', text: 'from Anthropic!' },
+  },
+  { type: 'content_block_stop', index: 0 },
+  {
+    type: 'message_delta',
+    delta: { stop_reason: 'end_turn' },
+    usage: { output_tokens: 5 },
+  },
+  { type: 'message_stop' },
+];
+
+export const anthropicStreamToolUseEvents: AnthropicStreamEvent[] = [
+  {
+    type: 'message_start',
+    message: { usage: { input_tokens: 15, output_tokens: 0 } },
+  },
+  {
+    type: 'content_block_start',
+    index: 0,
+    content_block: { type: 'tool_use', id: 'toolu_01', name: 'get_weather' },
+  },
+  {
+    type: 'content_block_delta',
+    index: 0,
+    delta: { type: 'input_json_delta', partial_json: '{"location":' },
+  },
+  {
+    type: 'content_block_delta',
+    index: 0,
+    delta: { type: 'input_json_delta', partial_json: '"San Francisco"}' },
+  },
+  { type: 'content_block_stop', index: 0 },
+  {
+    type: 'message_delta',
+    delta: { stop_reason: 'tool_use' },
+    usage: { output_tokens: 20 },
+  },
+  { type: 'message_stop' },
+];
+
+// ── OpenAI Streaming Fixtures ───────────────────────────────────────
+
+export const openAIStreamTextChunks: OpenAIChatCompletionChunk[] = [
+  { choices: [{ delta: { content: 'Hello ' }, finish_reason: null }], usage: null },
+  { choices: [{ delta: { content: 'from OpenAI!' }, finish_reason: null }], usage: null },
+  {
+    choices: [{ delta: {}, finish_reason: 'stop' }],
+    usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+  },
+];
+
+export const openAIStreamToolCallChunks: OpenAIChatCompletionChunk[] = [
+  {
+    choices: [
+      {
+        delta: {
+          tool_calls: [
+            {
+              index: 0,
+              id: 'call_01',
+              type: 'function',
+              function: { name: 'get_weather', arguments: '' },
+            },
+          ],
+        },
+        finish_reason: null,
+      },
+    ],
+    usage: null,
+  },
+  {
+    choices: [
+      {
+        delta: {
+          tool_calls: [{ index: 0, function: { arguments: '{"location":' } }],
+        },
+        finish_reason: null,
+      },
+    ],
+    usage: null,
+  },
+  {
+    choices: [
+      {
+        delta: {
+          tool_calls: [{ index: 0, function: { arguments: '"San Francisco"}' } }],
+        },
+        finish_reason: null,
+      },
+    ],
+    usage: null,
+  },
+  {
+    choices: [{ delta: {}, finish_reason: 'tool_calls' }],
+    usage: { prompt_tokens: 15, completion_tokens: 20, total_tokens: 35 },
+  },
+];
+
+// ── Gemini Streaming Fixtures ───────────────────────────────────────
+
+export const geminiStreamTextChunks: GeminiGenerateContentResult['response'][] = [
+  {
+    candidates: [{ content: { parts: [{ text: 'Hello ' }] } }],
+  },
+  {
+    candidates: [{ content: { parts: [{ text: 'from Gemini!' }] } }],
+    usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 5, totalTokenCount: 15 },
+  },
+];
+
+export const geminiStreamFunctionCallChunks: GeminiGenerateContentResult['response'][] = [
+  {
+    candidates: [
+      {
+        content: {
+          parts: [{ functionCall: { name: 'get_weather', args: { location: 'San Francisco' } } }],
+        },
+      },
+    ],
+    usageMetadata: { promptTokenCount: 15, candidatesTokenCount: 20, totalTokenCount: 35 },
+  },
+];

@@ -1,20 +1,36 @@
 export {
   anthropicMixedResponse,
   anthropicNoUsageResponse,
+  anthropicStreamTextEvents,
+  anthropicStreamToolUseEvents,
   anthropicTextResponse,
   anthropicToolUseResponse,
   geminiFunctionCallResponse,
   geminiMixedResponse,
   geminiNoUsageResponse,
+  geminiStreamFunctionCallChunks,
+  geminiStreamTextChunks,
   geminiTextResponse,
   openAIMixedResponse,
   openAINoUsageResponse,
+  openAIStreamTextChunks,
+  openAIStreamToolCallChunks,
   openAITextResponse,
   openAIToolCallResponse,
 } from './fixtures.ts';
-export type { MockAnthropicClient, MockGeminiModel, MockOpenAIClient } from './mock-clients.ts';
+export type {
+  MockAnthropicClient,
+  MockAnthropicStreamingClient,
+  MockGeminiModel,
+  MockGeminiStreamingModel,
+  MockOpenAIClient,
+  MockOpenAIStreamingClient,
+} from './mock-clients.ts';
 export {
   createMockAnthropicClient,
+  createMockAnthropicStreamingClient,
   createMockGeminiModel,
+  createMockGeminiStreamingModel,
   createMockOpenAIClient,
+  createMockOpenAIStreamingClient,
 } from './mock-clients.ts';

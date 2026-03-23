@@ -1,6 +1,13 @@
 import type { GenerateFunction } from 'operative';
 
-export type { GenerateContext, GenerateFunction, GenerateResponse, TokenUsage } from 'operative';
+export type {
+  GenerateContext,
+  GenerateFunction,
+  GenerateResponse,
+  StreamingGenerateFunction,
+  StreamingHandle,
+  TokenUsage,
+} from 'operative';
 
 /**
  * Provider names supported by herald.
@@ -124,3 +131,79 @@ export interface GeminiProviderOptions extends BaseProviderOptions {
 export type CreateProviderGenerate<T extends BaseProviderOptions> = (
   options: T,
 ) => GenerateFunction;
+
+// ── Streaming Types ─────────────────────────────────────────────────
+
+/**
+ * Events emitted by the Anthropic Messages API when streaming.
+ */
+export interface AnthropicStreamEvent {
+  type:
+    | 'message_start'
+    | 'content_block_start'
+    | 'content_block_delta'
+    | 'content_block_stop'
+    | 'message_delta'
+    | 'message_stop';
+  message?: {
+    usage?: { input_tokens?: number; output_tokens?: number };
+  };
+  index?: number;
+  content_block?: { type: string; id?: string; name?: string; text?: string };
+  delta?: {
+    type?: string;
+    text?: string;
+    partial_json?: string;
+    stop_reason?: string;
+    usage?: { output_tokens?: number };
+  };
+  usage?: { output_tokens?: number };
+}
+
+/**
+ * A single chunk from the OpenAI Chat Completions streaming API.
+ */
+export interface OpenAIChatCompletionChunk {
+  choices: Array<{
+    delta: {
+      content?: string | null;
+      tool_calls?: Array<{
+        index: number;
+        id?: string;
+        type?: 'function';
+        function?: { name?: string; arguments?: string };
+      }>;
+    };
+    finish_reason?: string | null;
+  }>;
+  usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } | null;
+}
+
+/**
+ * Structural interface for an Anthropic client that supports streaming.
+ */
+export interface AnthropicStreamingClient {
+  messages: {
+    create(params: Record<string, unknown>): AsyncIterable<AnthropicStreamEvent>;
+  };
+}
+
+/**
+ * Structural interface for an OpenAI client that supports streaming.
+ */
+export interface OpenAIStreamingClient {
+  chat: {
+    completions: {
+      create(params: Record<string, unknown>): AsyncIterable<OpenAIChatCompletionChunk>;
+    };
+  };
+}
+
+/**
+ * Structural interface for a Gemini GenerativeModel that supports streaming.
+ */
+export interface GeminiStreamingModel {
+  generateContentStream(
+    params: Record<string, unknown>,
+  ): Promise<{ stream: AsyncIterable<GeminiGenerateContentResult['response']> }>;
+}
