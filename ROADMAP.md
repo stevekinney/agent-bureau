@@ -1,108 +1,130 @@
 # Roadmap
 
-## 1. Observability — Full-Loop Tracing
-
-### What exists
-
-Armorer has complete OpenTelemetry instrumentation for tool execution (`instrument()` in `armorer/instrumentation`). It traces tool calls with timing, status, arguments, results, and digests. Operative emits granular events (`run.started`, `step.started`, `step.generated`, `tools.executing`, `tools.executed`, `step.completed`, `run.completed`, `run.error`, `run.aborted`, etc.) via event-emission.
+## 1. Observability and Debugging
 
 ### Done
 
-- **Herald instrumentation** (`herald/instrumentation`): `instrument()` wraps a `GenerateFunction` with OpenTelemetry spans. Each call creates a `gen_ai.generate ${provider}` span with `SpanKind.CLIENT`, sets `gen_ai.system`, `gen_ai.provider`, `gen_ai.request.model`, and optionally `gen_ai.request.max_tokens`. On success, sets `gen_ai.response.prompt_tokens`, `gen_ai.response.completion_tokens`, `gen_ai.response.total_tokens`, status OK. On error, sets ERROR status, records exception, re-throws.
-- **Operative instrumentation** (`operative/instrumentation`): `instrument()` subscribes to `ActiveRun` events and creates a span tree: `operative.run` → `operative.step.{n}` → `operative.generate` / `operative.tools`. Tracks usage, finish reason, error/abort status. Returns an unsubscribe function.
-- **Multi-agent trace context propagation**: `RunOptions` and `AgentRunOptions` accept `parentContext` (opaque OTel Context) and `withTraceContext` (callback to run functions within a parent context). The loop wraps `generate()` and `toolbox.execute()` calls through `withTraceContext` when both fields are present. `ToolContext` has a `traceContext` field and `createSubagentTool` forwards it as `parentContext` to child agents. Armorer now propagates toolbox `baseContext` to pre-built `Tool` objects via `rawExecute` on the tool configuration.
-- **Cost estimation** (`operative`): `estimateCost()` maps `TokenUsage` + model string to dollar cost. `getModelPricing()` returns pricing for a model. `defaultPricingTable` covers Anthropic Claude 4/3.5, OpenAI GPT-4o/4.1/o3/o4-mini, and Gemini 2.5/2.0. Custom pricing overrides via `CostEstimationOptions`.
+- **Herald instrumentation** (`herald/instrumentation`): `instrument()` wraps a `GenerateFunction` with OpenTelemetry spans. Each call creates a `gen_ai.generate ${provider}` span with `SpanKind.CLIENT`, sets request/response attributes (model, max tokens, token usage). On error, sets ERROR status and records exception.
+- **Operative instrumentation** (`operative/instrumentation`): `instrument()` subscribes to `ActiveRun` events and creates a span tree: `operative.run` → `operative.step.{n}` → `operative.generate` / `operative.tools`. Tracks usage, finish reason, error/abort status.
+- **Armorer instrumentation** (`armorer/instrumentation`): `instrument()` traces tool execution with timing, status, arguments, results, and digests.
+- **Multi-agent trace context propagation**: `RunOptions` accepts `parentContext` and `withTraceContext` for OpenTelemetry context threading. `createSubagentTool` forwards trace context to child agents. Armorer propagates toolbox `baseContext` to pre-built tools via `rawExecute`.
+- **Cost estimation** (`operative`): `estimateCost()` maps `TokenUsage` + model string to dollar cost. `defaultPricingTable` covers Anthropic Claude 4/3.5, OpenAI GPT-4o/4.1/o3/o4-mini, and Gemini 2.5/2.0. Custom pricing overrides via `CostEstimationOptions`.
+- **Sentinel** (`sentinel`): Event-sourced store for tracking operative runs. `createStore()` returns a `Store` that `register()`s `ActiveRun` instances and records a full action log (run/step/tool lifecycle events with timestamps and sequence numbers). Tracks state snapshots, usage accumulation, and conversation snapshots at step/run boundaries. Supports concurrent multi-run tracking.
+- **Operative event emission**: `ActiveRun` exposes `addEventListener`, `on`, `once`, `subscribe`, `toObservable()`. Events: `run.started`, `step.started`, `step.generated`, `tools.executing`, `tools.executed`, `step.completed`, `run.completed`, `run.error`, `run.aborted`, `generate.retry`. Forwards events from toolbox and conversation.
 
 ### Remaining gaps
 
-- No cost budget alerting beyond operative's existing `tokenBudget` stop condition.
+- No cost budget alerting beyond operative's `tokenBudget` stop condition.
 
 ---
 
-## 2. Streaming — End-to-End from SDK to Consumer
+## 2. Streaming
 
-### What exists
+### Done
 
-Conversationalist has a complete streaming message lifecycle: `appendStreamingMessage`, `updateStreamingMessage`, `finalizeStreamingMessage`, `cancelStreamingMessage`, plus streaming events (`stream.started`, `stream.updated`, `stream.finalized`, `stream.cancelled`). Operative has `withStreaming()` that wraps a `StreamingGenerateFunction` and manages the conversationalist streaming lifecycle automatically.
+- **Conversationalist streaming lifecycle**: `appendStreamingMessage`, `updateStreamingMessage`, `finalizeStreamingMessage`, `cancelStreamingMessage`. Events: `stream.started`, `stream.updated`, `stream.finalized`, `stream.cancelled`. Streaming messages are protected from compaction and truncation.
+- **Operative streaming wrapper**: `withStreaming()` wraps a `StreamingGenerateFunction` into a standard `GenerateFunction`, managing the conversationalist lifecycle automatically.
+- **Herald streaming factories**: `createAnthropicGenerateStream`, `createOpenAIGenerateStream`, `createGeminiGenerateStream` — each returns a `StreamingGenerateFunction` that calls the provider SDK with `stream: true`, iterates the async stream, progressively calls `streaming.update(accumulatedText)` on each text delta, accumulates tool call fragments into complete `ToolCallInput` objects, and returns a final `GenerateResponse`. All errors wrapped in `HeraldError`.
+- **Streaming types** (`herald`): `AnthropicStreamEvent`, `OpenAIChatCompletionChunk`, `AnthropicStreamingClient`, `OpenAIStreamingClient`, `GeminiStreamingModel`. Re-exports `StreamingGenerateFunction` and `StreamingHandle` from operative.
+- **Streaming test infrastructure** (`herald/test`): Mock streaming clients and fixture sets for all three providers.
+- **Usage pattern**: `withStreaming(createAnthropicGenerateStream(options))` produces a standard `GenerateFunction` that streams under the hood.
 
-### What's missing
+### Remaining gaps
 
-Herald returns complete responses only. There is no way to stream tokens from the SDK through herald into operative's streaming infrastructure. To stream today, users must bypass herald entirely and write their own generate function that calls the SDK with `stream: true` and uses `withStreaming`.
-
-### Work to do
-
-- Add streaming variants to each herald factory: `createAnthropicGenerateStream`, `createOpenAIGenerateStream`, `createGeminiGenerateStream`. Each should return a `StreamingGenerateFunction` (the type operative's `withStreaming` expects).
-- Each streaming factory should:
-  - Call the SDK with `stream: true`
-  - Iterate the SDK's stream, calling `streaming.update(content)` on each text delta
-  - Accumulate tool calls from stream events
-  - Return the final `GenerateResponse` when the stream completes
-- Add streaming mock clients to `herald/test` for testing without real API calls.
-- Document the pattern: `withStreaming(createAnthropicGenerateStream(options))` produces a standard `GenerateFunction` that streams under the hood.
+- No documentation beyond type signatures and test examples.
 
 ---
 
-## 3. Prompt and Instruction Composition
+## 3. Agent Loop Robustness
 
-### What exists
+### Done
 
-Conversationalist provides system message utilities: `appendSystemMessage`, `prependSystemMessage`, `replaceSystemMessage`, `collapseSystemMessages`, `getSystemMessages`. Operative's `defineAgent` accepts an `instructions` string that gets prepended to the conversation as a system message.
+- **Retry logic** (`operative`): `RetryOptions` with configurable `attempts`, `delay` (number or function for exponential backoff), and `shouldRetry` predicate. Emits `generate.retry` events. Herald provides `shouldRetryHeraldError()` classifying 429, 500, 502, 503, 504 as retryable.
+- **Response validation** (`operative`): `validateResponse` hook for custom rejection/regeneration. `responseSchema` with Zod for automatic validation. `schemaRetries` for configurable retry count. `schemaRetryMessage(error, attempt)` for custom validation retry prompts. `validateToolResult` hook for rejecting/re-executing tool results.
+- **Context window management** (`operative`): `ContextManagementOptions` with `maxTokens` budget, `onCompact` summarization callback, and `tokenEstimator` function. Automatic conversation compaction to stay within budget.
+- **Stop conditions** (`operative`): 12 composable predicates via `stopWhen`: `noToolCalls`, `toolCalled`, `maximumSteps`, `toolOutcome`, `contentMatches`, `tokenBudget`, `wallClockTimeout`, `repeatingToolCalls`, `forked`, plus combinators `every`, `some`, `not`.
+- **Loop detection** (`operative`): `repeatingToolCalls` with `windowSize`, custom `fingerprint` function, and `includeResults` option for result-aware fingerprinting.
+- **Wall-clock timeout** (`operative`): `wallClockTimeout(milliseconds)` stops gracefully (current step finishes, produces `stop-condition` finish reason rather than abort).
+- **Tool selection** (`operative`): `selectTools(context)` hook for dynamic per-step tool gating.
+- **Elicitation** (`operative`): `elicit<T>(message, schema)` for requesting structured user input mid-loop. `OnElicitation` callback. `elicitation-denied` finish reason when user declines.
+- **Error classification** (`herald`): `HeraldError` wraps SDK errors with `provider`, `statusCode`, and `retryable` fields. `shouldRetryHeraldError()` for integration with operative's retry system.
 
-### What's missing
+### Remaining gaps
 
-There is no structured way to:
-
-- **Compose instructions from parts** — Real agents have personas, task descriptions, tool usage guidelines, output format constraints, and safety rules. These come from different sources and need to be assembled, ordered, and deduplicated. Today you concatenate strings.
-- **Parameterize prompts** — Template variables like `{{user_name}}` or `{{current_date}}` that get resolved at runtime. Without this, every dynamic prompt requires string interpolation scattered across application code.
-- **Layer context conditionally** — Include certain instructions only when specific tools are available, or only after a certain step count, or only for certain user roles. The `prepareStep` hook can do this but it requires manual conversation manipulation.
-
-### Work to do
-
-- Create an instruction builder that composes a system prompt from named sections with ordering and deduplication. Something like `createInstructions({ persona: '...', task: '...', constraints: '...', tools: '...' })` that produces a single string or structured system message.
-- Add simple template variable resolution (mustache-style or tagged template literals) so instructions can reference runtime values without string concatenation.
-- Integrate with `defineAgent` so agent definitions can declare instruction sections that get composed at run time.
+- No automatic backpressure or adaptive rate limiting at the loop level.
 
 ---
 
-## 4. Persistence — More Adapters and Automatic Saving
+## 4. Tool Infrastructure
 
-### What exists
+### Done
 
-Conversationalist defines a `SessionPersistenceAdapter` interface with `save`, `load`, `list`, and `delete` methods. A `JsonlSessionPersistenceAdapter` implements it using append-only JSONL files. The `Conversation` class auto-saves on every `change` event when a persistence adapter is provided via the environment.
+- **Core tooling** (`armorer`): `createTool` factory with Zod schema validation, `createToolbox` for tool registries. Provider adapters: `toAnthropicTools`/`parseAnthropicToolCalls`, `toOpenAITools`/`parseOpenAIToolCalls`, `toGeminiTools`/`parseGeminiToolCalls`.
+- **Middleware** (`armorer`): `createRateLimitMiddleware`, `createCacheMiddleware`, `createTimeoutMiddleware`, `createTruncationMiddleware`. Composable chains for tool execution policies.
+- **Tool composition** (`armorer`): `pipe` (sequential), `parallel` (concurrent), `bind` (context binding), `retry` (retry failed executions), `when` (conditional), `tap` (side effects), `preprocess` (input transform), `postprocess` (output transform).
+- **MCP integration** (`armorer`): `createMCP()` for exposing tools over Model Context Protocol. `toMcpTools()` and `fromMcpTools()` for format conversion.
+- **Fuzzy name resolution** (`armorer`): `resolveFuzzyToolName()` with tiered matching (exact → case-insensitive → normalized → suffix) for recovering from model-mangled tool names.
+- **Loop detection** (`armorer`): `createLoopDetectionState()` and `detectLoop()` with warning/block thresholds and ping-pong pattern detection. Separate from operative's `repeatingToolCalls`.
+- **Tool search** (`armorer`): `createSearchTool()` for agent-callable tool discovery. `queryTools()` with text, tag, and schema matching predicates.
+- **Lazy-loaded tools** (`armorer`): `lazy(() => import(...))` for deferred SDK imports — loads only when tool is first executed.
+- **Tool inspection** (`armorer`): `inspectTool()` and `inspectRegistry()` for introspection and validation.
+- **Truncation** (`armorer`): Surrogate-pair-safe `truncateText()`, `truncateToolResultContent()`, `stripBase64Data()`. Configurable limits.
+- **Batch execution** (`armorer`): `toolbox.execute()` with `concurrency` limit and `mode` (parallel/sequential).
 
-### What's missing
+### Remaining gaps
 
-- **No additional adapters** — JSONL works for local development but is not suitable for production. There are no adapters for SQLite, Redis, PostgreSQL, or cloud storage.
-- **No agent-level persistence** — The persistence interface saves conversation history but not agent configuration, run results, or step-level data. You cannot resume an interrupted agent run.
-- **No session management** — Loading a session gives you the conversation but not the agent context (which tools were available, what stop conditions were active, what the instructions were). Resuming a session means reconstructing all of that manually.
-
-### Work to do
-
-- Implement a SQLite adapter using `bun:sqlite` for local persistence with proper indexing and querying. This is the highest-value adapter since it works without external services and supports concurrent access better than JSONL.
-- Implement a Redis adapter for distributed/serverless use cases where conversations need to be shared across processes.
-- Design an agent session type that bundles conversation history with agent configuration metadata, so a session can be fully resumed without reconstructing the agent definition.
-- Add session lifecycle hooks to operative (`onSessionSave`, `onSessionLoad`) so the loop can participate in persistence without the user wiring it manually.
+- No semantic/embedding-based tool search (only text matching).
+- No tool versioning or deprecation lifecycle.
 
 ---
 
-## 5. Multi-Agent Coordination
+## 5. Conversation Management
+
+### Done
+
+- **Core messaging** (`conversationalist`): Immutable `ConversationHistory` with mutable `Conversation` wrapper. `appendMessages`, `prependSystemMessage`, `replaceSystemMessage`, `collapseSystemMessages`, `getSystemMessages`.
+- **Compaction and summarization** (`conversationalist`): `compactConversation()` with user-provided `Summarizer` function. `partitionMessages()` splits into protected and compactible sections. `chunkMessages()` groups for summarization. `stripToolResultDetails()` removes verbose tool output. Protected messages (streaming, tool interactions) excluded.
+- **Context window management** (`conversationalist`): `estimateConversationTokens()` with pluggable `tokenEstimator`. `truncateToTokenLimit()`, `getRecentMessages()`, `truncateFromPosition()`. `simpleTokenEstimator()` for basic BPE-style counting.
+- **Multi-modal content** (`conversationalist`): `TextContent` and `ImageContent` types for vision/image support in conversations.
+- **PII redaction** (`conversationalist`): `createPIIRedaction()` plugin with default rules for emails, SSNs, credit cards. Pluggable rule sets.
+- **Persistence** (`conversationalist`): `SessionPersistenceAdapter` interface with `save`, `load`, `list`, `delete`. `JsonlSessionPersistenceAdapter` using append-only JSONL files. Auto-save on `change` event.
+- **Deserialization** (`conversationalist`): `deserializeConversationHistory()` for restoring from JSON with versioning support.
+- **Provider adapters** (`conversationalist`): `toAnthropicMessages`, `toOpenAIMessagesGrouped`, `toGeminiMessages` for converting conversations to provider-specific formats.
+- **Markdown export** (`conversationalist`): `exportMarkdown()` for human-readable conversation output.
+
+### Remaining gaps
+
+- Only JSONL persistence adapter — no SQLite, Redis, or cloud storage adapters.
+- No agent-level session persistence (conversation history only, not agent configuration or run state).
+- No session lifecycle hooks in operative (`onSessionSave`, `onSessionLoad`).
+
+---
+
+## 6. Multi-Agent Coordination
+
+### Done
+
+- **Agent definition** (`operative`): `defineAgent()` returns reusable `AgentDefinition` with `agent.run()` and `agent.createRun()`. Instructions auto-prepended as system message.
+- **Subagent tools** (`operative`): `createSubagentTool()` wraps an agent as a callable tool with `mapInput`/`mapOutput`, abort signal propagation, and error handling for max-steps scenarios.
+- **Handoff tool** (`operative`): `createHandoffTool()` terminates the current loop with a `handoff` finish reason and returns the target agent name plus handoff message. `extractHandoffTarget()` extracts routing info from run results.
+- **Early stopping handler** (`operative`): `createEarlyStoppingHandler()` calls the LLM one more time without tools when max steps is hit, asking for a summary rather than failing.
+
+### Remaining gaps
+
+- **Shared context** — No shared state primitive (scratchpad, blackboard) across collaborating agents. Each agent has its own conversation.
+- **Supervisor patterns** — No orchestrator utility for routing tasks to specialist agents and synthesizing outputs.
+- **Agent discovery** — No registry or routing mechanism to select the right agent dynamically.
+
+---
+
+## 7. Prompt and Instruction Composition
 
 ### What exists
 
-Operative provides two multi-agent primitives: `defineAgent` for creating reusable agent configurations, and `createSubagentTool` for wrapping an agent as a tool callable by a parent agent. Subagent tools support input/output mapping, abort signal propagation, and configurable error handling for max-steps scenarios. Agents can be nested to arbitrary depth.
+Conversationalist provides system message utilities. Operative's `defineAgent` accepts an `instructions` string. The `selectTools` hook enables conditional tool availability per step.
 
-### What's missing
+### Remaining gaps
 
-The current model is strictly hierarchical: a parent delegates to a child via tool calls, and the child returns a result. There is no support for:
-
-- **Peer-to-peer handoff** — Agent A decides it cannot handle the request and transfers the conversation to Agent B, with Agent B taking over the loop entirely (not as a subtask). This is the pattern used by customer service systems where a general triage agent hands off to a specialist.
-- **Shared context** — When agents collaborate, they often need shared state beyond the conversation (a scratchpad, a task list, accumulated research). Today each agent has its own conversation and there is no shared memory between them.
-- **Supervisor patterns** — A coordinator agent that routes tasks to specialist agents, monitors their progress, and synthesizes their outputs. This differs from subagent tools because the supervisor does not call specialists via tool use — it orchestrates them programmatically.
-- **Agent discovery** — When you have many defined agents, there is no registry or routing mechanism to select the right agent for a task dynamically.
-
-### Work to do
-
-- Design a handoff protocol where an agent can yield control to another agent, transferring the conversation and a handoff message. The loop should support a `handoff` finish reason and return enough context for the caller to route to the next agent.
-- Add a shared context primitive (a typed key-value store or blackboard) that can be passed to multiple agents and persisted across steps. This could integrate with operative's `StepContext`.
-- Build a supervisor utility that accepts a roster of agents and a routing function, runs the appropriate agent for each turn, and collects results. This is orchestration above the single-agent loop.
-- Add an agent registry pattern where agents register themselves with capabilities/descriptions, and a router can select the best agent for a given input (potentially using embeddings from armorer's embedding infrastructure).
+- **Structured composition** — No builder for assembling system prompts from named sections (persona, task, constraints, tools) with ordering and deduplication.
+- **Template variables** — No `{{variable}}` resolution for dynamic prompts at runtime.
+- **Conditional layering** — No declarative way to include instructions based on available tools, step count, or user role (only `prepareStep` hook).
