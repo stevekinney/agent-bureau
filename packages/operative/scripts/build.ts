@@ -13,8 +13,10 @@ const entrypoints = [
   './src/create-subagent-tool.ts',
   './src/create-early-stopping-handler.ts',
   './src/create-handoff-tool.ts',
+  './src/cost-estimation.ts',
   './src/conditions/index.ts',
   './src/conditions/predicates.ts',
+  './src/instrumentation/index.ts',
   './src/test/index.ts',
 ];
 

@@ -6,21 +6,16 @@
 
 Armorer has complete OpenTelemetry instrumentation for tool execution (`instrument()` in `armorer/instrumentation`). It traces tool calls with timing, status, arguments, results, and digests. Operative emits granular events (`run.started`, `step.started`, `step.generated`, `tools.executing`, `tools.executed`, `step.completed`, `run.completed`, `run.error`, `run.aborted`, etc.) via event-emission.
 
-### What's missing
+### Done
 
-Tracing stops at the tool boundary. There is no instrumentation for:
+- **Herald instrumentation** (`herald/instrumentation`): `instrument()` wraps a `GenerateFunction` with OpenTelemetry spans. Each call creates a `gen_ai.generate ${provider}` span with `SpanKind.CLIENT`, sets `gen_ai.system`, `gen_ai.provider`, `gen_ai.request.model`, and optionally `gen_ai.request.max_tokens`. On success, sets `gen_ai.response.prompt_tokens`, `gen_ai.response.completion_tokens`, `gen_ai.response.total_tokens`, status OK. On error, sets ERROR status, records exception, re-throws.
+- **Operative instrumentation** (`operative/instrumentation`): `instrument()` subscribes to `ActiveRun` events and creates a span tree: `operative.run` → `operative.step.{n}` → `operative.generate` / `operative.tools`. Tracks usage, finish reason, error/abort status. Returns an unsubscribe function.
+- **Multi-agent trace context propagation**: `RunOptions` and `AgentRunOptions` accept `parentContext` (opaque OTel Context) and `withTraceContext` (callback to run functions within a parent context). The loop wraps `generate()` and `toolbox.execute()` calls through `withTraceContext` when both fields are present. `ToolContext` has a `traceContext` field and `createSubagentTool` forwards it as `parentContext` to child agents. Armorer now propagates toolbox `baseContext` to pre-built `Tool` objects via `rawExecute` on the tool configuration.
+- **Cost estimation** (`operative`): `estimateCost()` maps `TokenUsage` + model string to dollar cost. `getModelPricing()` returns pricing for a model. `defaultPricingTable` covers Anthropic Claude 4/3.5, OpenAI GPT-4o/4.1/o3/o4-mini, and Gemini 2.5/2.0. Custom pricing overrides via `CostEstimationOptions`.
 
-- **LLM calls** — Herald makes SDK requests with no spans. Every generate call should produce a span with model, token usage, latency, and provider. This is the most expensive operation in the loop and the one most in need of visibility.
-- **Agent loop steps** — Operative emits events but does not produce OpenTelemetry spans. A step span wrapping generate + tool execution would let you see the full trace in Jaeger/Honeycomb/Datadog without wiring up event listeners manually.
-- **Multi-agent traces** — When a parent agent delegates to a subagent via `createSubagentTool`, the child's spans should be children of the parent's tool execution span. Right now there is no context propagation between agents.
-- **Cost tracking** — Token usage is returned per step and accumulated in `RunResult.usage`, but there is no cost estimation (dollars per model per token) or budget alerting beyond operative's `tokenBudget` stop condition.
+### Remaining gaps
 
-### Work to do
-
-- Add an `instrument()` wrapper or option to herald factories that creates spans around SDK calls with model, provider, token usage, and latency attributes.
-- Add an operative instrumentation layer (similar pattern to armorer's `instrument()`) that creates spans for each step, wrapping the generate and tool-execution phases.
-- Propagate trace context from parent to child agent runs so subagent spans nest correctly.
-- Add a cost estimation utility that maps `TokenUsage` + model identifier to estimated dollar cost.
+- No cost budget alerting beyond operative's existing `tokenBudget` stop condition.
 
 ---
 

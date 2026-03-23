@@ -52,6 +52,13 @@
       "default": "./dist/gemini.js",
       "types": "./dist/gemini.d.ts"
     },
+    "./instrumentation": {
+      "import": "./dist/instrumentation/index.js",
+      "bun": "./dist/instrumentation/index.js",
+      "require": "./dist/instrumentation/index.cjs",
+      "default": "./dist/instrumentation/index.js",
+      "types": "./dist/instrumentation/index.d.ts"
+    },
     "./test": {
       "import": "./dist/test/index.js",
       "bun": "./dist/test/index.js",
@@ -82,6 +89,7 @@
     "start": "bun run src/index.ts",
     "test": "bun test",
     "test:coverage": "bun test --coverage",
+    "coverage:check": "bun run scripts/check-coverage.ts",
     "validate": "bun run format:check && bun run lint && bun run check-types && bun run test"
   },
   "dependencies": {
@@ -91,6 +99,7 @@
   },
   "devDependencies": {
     "@anthropic-ai/sdk": "^0.71.2",
+    "@opentelemetry/api": "^1.9.0",
     "@eslint/compat": "^2.0.2",
     "@eslint/js": "^10.0.1",
     "@google/generative-ai": "^0.24.1",
@@ -115,11 +124,15 @@
   },
   "peerDependencies": {
     "@anthropic-ai/sdk": ">=0.50.0",
+    "@opentelemetry/api": "^1.9.0",
     "openai": ">=4.0.0",
     "@google/generative-ai": ">=0.20.0"
   },
   "peerDependenciesMeta": {
     "@anthropic-ai/sdk": {
+      "optional": true
+    },
+    "@opentelemetry/api": {
       "optional": true
     },
     "openai": {

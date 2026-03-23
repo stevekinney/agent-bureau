@@ -137,7 +137,14 @@ export async function executeLoop(options: RunOptions, emitter?: EventEmitter): 
     schemaRetries = 0,
     schemaRetryMessage,
     onMaximumSteps,
+    parentContext,
+    withTraceContext,
   } = options;
+
+  const wrapWithTrace =
+    parentContext !== undefined && withTraceContext !== undefined
+      ? <T>(fn: () => Promise<T>) => withTraceContext(parentContext, fn)
+      : undefined;
 
   const conversation = isConversation(options.conversation)
     ? options.conversation
@@ -250,12 +257,14 @@ export async function executeLoop(options: RunOptions, emitter?: EventEmitter): 
       if (prepareResult) {
         response = prepareResult;
       } else {
-        response = await callGenerateWithRetry(
-          generate,
-          { conversation, step, signal: stepSignal, toolbox: stepToolbox },
-          retry,
-          emitter,
-        );
+        const doGenerate = () =>
+          callGenerateWithRetry(
+            generate,
+            { conversation, step, signal: stepSignal, toolbox: stepToolbox },
+            retry,
+            emitter,
+          );
+        response = wrapWithTrace ? await wrapWithTrace(doGenerate) : await doGenerate();
       }
     } catch (error) {
       if (signal?.aborted) {
@@ -350,10 +359,14 @@ export async function executeLoop(options: RunOptions, emitter?: EventEmitter): 
         });
 
         try {
-          const executeResult = await stepToolbox.execute(
-            callsToExecute as Parameters<typeof stepToolbox.execute>[0],
-            { ...executeOptions, signal: stepSignal } as Parameters<typeof stepToolbox.execute>[1],
-          );
+          const doExecute = () =>
+            stepToolbox.execute(
+              callsToExecute as Parameters<typeof stepToolbox.execute>[0],
+              { ...executeOptions, signal: stepSignal } as Parameters<
+                typeof stepToolbox.execute
+              >[1],
+            );
+          const executeResult = wrapWithTrace ? await wrapWithTrace(doExecute) : await doExecute();
 
           results = Array.isArray(executeResult) ? executeResult : [executeResult];
         } catch (error) {

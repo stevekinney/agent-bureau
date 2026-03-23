@@ -1141,7 +1141,15 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
   return api;
 
   function buildDefaultTool(configuration: ToolConfiguration): Tool {
-    const resolveExecute = createLazyExecuteResolver(configuration.execute, configuration.name);
+    // Prefer rawExecute (the original user function) over configuration.execute
+    // (which may be a self-contained wrapper from createTool that ignores context).
+    // This ensures toolbox baseContext flows through to the user's execute function.
+    const executeSource =
+      (configuration as Record<string, unknown>)['rawExecute'] ?? configuration.execute;
+    const resolveExecute = createLazyExecuteResolver(
+      executeSource as ToolConfiguration['execute'],
+      configuration.name,
+    );
     const resolvedPolicy = mergePolicies(registryPolicy, configuration.policy, {
       readOnly,
       allowMutation,
@@ -1277,10 +1285,12 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
       ...(configuration.lifecycle ? { lifecycle: configuration.lifecycle } : {}),
       input: normalizedInput,
     }) as AnyToolDefinition;
+    const rawExecute = (configuration as Record<string, unknown>)['rawExecute'];
     const result = {
       ...definition,
       input: normalizedInput,
       execute: configuration.execute,
+      ...(rawExecute !== undefined && { rawExecute }),
     } as unknown as ToolConfiguration;
     if (configuration.policy) {
       result.policy = configuration.policy;

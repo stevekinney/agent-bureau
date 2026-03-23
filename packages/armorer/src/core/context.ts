@@ -45,4 +45,5 @@ export type ToolContext = {
   user?: ToolUser;
   tenant?: ToolTenant;
   signal?: AbortSignal | AbortSignalLike;
+  traceContext?: unknown;
 };

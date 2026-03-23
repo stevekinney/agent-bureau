@@ -1041,6 +1041,11 @@ export function createTool<
     ...definition,
     input: typedSchema,
     execute: async (params: unknown) => executeParams(params as TInput),
+    // Store the original user execute function so that `buildDefaultTool` in
+    // `createToolbox` can call it directly with toolbox context (baseContext).
+    // Without this, `configuration.execute` is a self-contained wrapper that
+    // ignores the context argument, causing toolbox baseContext to be dropped.
+    rawExecute: fn,
   } as unknown as ToolConfiguration;
   if (policyHooks) {
     configuration.policy = policyHooks;

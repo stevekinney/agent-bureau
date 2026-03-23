@@ -19,6 +19,7 @@ function normalizeInput(
   conversation: Conversation;
   signal?: AbortSignal;
   stopWhen?: StopCondition | StopCondition[];
+  parentContext?: unknown;
 } {
   if (typeof input === 'string') {
     const conversation = new Conversation();
@@ -29,7 +30,7 @@ function normalizeInput(
     return { conversation };
   }
 
-  const { signal, stopWhen } = input;
+  const { signal, stopWhen, parentContext } = input;
   let conversation: Conversation;
 
   if (typeof input.conversation === 'string') {
@@ -49,7 +50,7 @@ function normalizeInput(
     }
   }
 
-  return { conversation, signal, stopWhen };
+  return { conversation, signal, stopWhen, parentContext };
 }
 
 function mergeStopConditions(
@@ -67,6 +68,7 @@ function buildRunOptions(options: DefineAgentOptions, input: string | AgentRunOp
     conversation,
     signal,
     stopWhen: runtimeStopWhen,
+    parentContext,
   } = normalizeInput(input, options.instructions);
 
   const { name: _, instructions: __, stopWhen: definitionStopWhen, ...rest } = options;
@@ -76,6 +78,7 @@ function buildRunOptions(options: DefineAgentOptions, input: string | AgentRunOp
     conversation,
     signal,
     stopWhen: mergeStopConditions(definitionStopWhen, runtimeStopWhen),
+    ...(parentContext !== undefined && { parentContext }),
   };
 }
 

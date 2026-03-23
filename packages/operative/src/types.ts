@@ -207,6 +207,20 @@ export interface RunOptions {
    * `'maximum-steps'` regardless.
    */
   onMaximumSteps?: (context: StepContext) => Promise<string | void>;
+  /**
+   * Opaque parent trace context (e.g. an OpenTelemetry Context) passed from
+   * a parent agent. Used with `withTraceContext` to nest child spans under the
+   * parent's trace.
+   */
+  parentContext?: unknown;
+  /**
+   * Callback that runs a function within a parent trace context. When both
+   * `parentContext` and `withTraceContext` are provided, the loop wraps
+   * generate and tool-execution calls so child spans nest correctly.
+   *
+   * This keeps operative free of any `@opentelemetry/api` dependency.
+   */
+  withTraceContext?: <T>(parentContext: unknown, fn: () => Promise<T>) => Promise<T>;
 }
 
 /**
@@ -250,6 +264,7 @@ export interface DefineAgentOptions {
   onMaximumSteps?: RunOptions['onMaximumSteps'];
   executeOptions?: OperativeExecuteOptions;
   collectAsync?: boolean;
+  withTraceContext?: RunOptions['withTraceContext'];
 }
 
 /**
@@ -259,6 +274,7 @@ export interface AgentRunOptions {
   conversation?: Conversation | ConversationHistory | string;
   signal?: AbortSignal;
   stopWhen?: StopCondition | StopCondition[];
+  parentContext?: unknown;
 }
 
 /**
