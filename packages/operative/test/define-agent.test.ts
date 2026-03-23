@@ -1,7 +1,12 @@
 import { createTool } from 'armorer';
 import { createTestToolbox } from 'armorer/test';
 import { describe, expect, it } from 'bun:test';
-import { Conversation, createConversationHistory } from 'conversationalist';
+import {
+  Conversation,
+  createConditionalInstructionComposer,
+  createConversationHistory,
+  createInstructionComposer,
+} from 'conversationalist';
 import { z } from 'zod';
 
 import { noToolCalls } from '../src/conditions/predicates';
@@ -250,6 +255,56 @@ describe('defineAgent', () => {
 
     expect(receivedMessages).toHaveLength(1);
     expect((receivedMessages[0] as { role: string }).role).toBe('system');
+  });
+
+  it('accepts an InstructionComposer as instructions', async () => {
+    let receivedMessages: unknown[] = [];
+    const composer = createInstructionComposer(
+      { name: 'role', content: 'You are a helpful assistant.', priority: 0 },
+      { name: 'style', content: 'Be concise.', priority: 1 },
+    );
+
+    const agent = defineAgent({
+      name: 'composer-agent',
+      instructions: composer,
+      generate: async ({ conversation }) => {
+        receivedMessages = conversation.getMessages();
+        return textResponse('Ok');
+      },
+      toolbox: createTestToolbox([]),
+      stopWhen: noToolCalls(),
+    });
+
+    await agent.run('Hello');
+
+    expect(receivedMessages).toHaveLength(2);
+    expect((receivedMessages[0] as { content: string }).content).toBe(
+      'You are a helpful assistant.\n\nBe concise.',
+    );
+  });
+
+  it('accepts a ConditionalInstructionComposer as instructions', async () => {
+    let receivedMessages: unknown[] = [];
+    const composer = createConditionalInstructionComposer(
+      { name: 'role', content: 'You are helpful.' },
+      { name: 'hidden', content: 'Secret.', when: () => false },
+    );
+
+    const agent = defineAgent({
+      name: 'conditional-agent',
+      instructions: composer,
+      generate: async ({ conversation }) => {
+        receivedMessages = conversation.getMessages();
+        return textResponse('Ok');
+      },
+      toolbox: createTestToolbox([]),
+      stopWhen: noToolCalls(),
+    });
+
+    await agent.run('Hi');
+
+    expect(receivedMessages).toHaveLength(2);
+    expect((receivedMessages[0] as { content: string }).content).toBe('You are helpful.');
   });
 
   it('options property exposes the definition', () => {

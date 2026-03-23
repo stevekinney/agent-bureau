@@ -1,3 +1,4 @@
+import type { InstructionContext } from '../composition/conditional-section';
 import { createConversationHistory } from '../conversation';
 import { type ConversationEnvironment, simpleTokenEstimator } from '../environment';
 import { Conversation, type ConversationEvent } from '../history';
@@ -71,4 +72,14 @@ export function createConversationRecorder(conversation: Conversation): Conversa
       subscriptions.forEach((unsubscribe) => unsubscribe?.());
     },
   } as ConversationRecorder;
+}
+
+export function createTestInstructionContext(
+  options: Partial<InstructionContext> = {},
+): InstructionContext {
+  const context: InstructionContext = {};
+  if (options.toolNames !== undefined) context.toolNames = options.toolNames;
+  if (options.step !== undefined) context.step = options.step;
+  if (options.metadata !== undefined) context.metadata = options.metadata;
+  return context;
 }

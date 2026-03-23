@@ -12,6 +12,12 @@ import type {
   StopCondition,
 } from './types';
 
+function resolveInstructions(instructions: DefineAgentOptions['instructions']): string | undefined {
+  if (instructions === undefined) return undefined;
+  if (typeof instructions === 'string') return instructions;
+  return instructions.render();
+}
+
 function normalizeInput(
   input: string | AgentRunOptions,
   instructions?: string,
@@ -69,7 +75,7 @@ function buildRunOptions(options: DefineAgentOptions, input: string | AgentRunOp
     signal,
     stopWhen: runtimeStopWhen,
     parentContext,
-  } = normalizeInput(input, options.instructions);
+  } = normalizeInput(input, resolveInstructions(options.instructions));
 
   const { name: _, instructions: __, stopWhen: definitionStopWhen, ...rest } = options;
 

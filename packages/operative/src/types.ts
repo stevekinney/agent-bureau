@@ -241,9 +241,13 @@ export type StreamingGenerateFunction = (
 /**
  * Options for defining a reusable agent configuration.
  */
+interface Renderable {
+  render(options?: Record<string, unknown>): string;
+}
+
 export interface DefineAgentOptions {
   name: string;
-  instructions?: string;
+  instructions?: string | Renderable;
   generate: GenerateFunction;
   toolbox: Toolbox;
   stopWhen?: StopCondition | StopCondition[];

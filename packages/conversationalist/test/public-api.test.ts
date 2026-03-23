@@ -25,6 +25,10 @@ describe('public API export map', () => {
     expect(exportsMap['./redaction']).toBeDefined();
   });
 
+  it('includes the composition subpath', () => {
+    expect(exportsMap['./composition']).toBeDefined();
+  });
+
   it('does not expose removed alias subpaths', () => {
     expect(exportsMap['./openai']).toBeUndefined();
     expect(exportsMap['./anthropic']).toBeUndefined();
@@ -57,6 +61,19 @@ describe('public API export map', () => {
     const conversation = new root.Conversation(root.createConversationHistory());
     expect(conversation.toProvider).toBeDefined();
     expect(conversation.appendProvider).toBeDefined();
+  });
+
+  it('exposes composition API on root module', () => {
+    expect(root.createInstructionTemplate).toBeDefined();
+    expect(root.renderTemplate).toBeDefined();
+    expect(root.extractTemplateVariables).toBeDefined();
+    expect(root.createInstructionComposer).toBeDefined();
+    expect(root.createConditionalInstructionComposer).toBeDefined();
+    expect(root.whenToolsAvailable).toBeDefined();
+    expect(root.whenAnyToolAvailable).toBeDefined();
+    expect(root.whenStep).toBeDefined();
+    expect(root.whenMetadata).toBeDefined();
+    expect(root.whenMetadataPresent).toBeDefined();
   });
 
   it('uses dynamic imports for provider adapters in the Conversation class', () => {

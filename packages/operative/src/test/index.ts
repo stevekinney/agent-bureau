@@ -1,13 +1,20 @@
+import { createTestToolbox } from 'armorer/test';
 import type { EmissionEvent } from 'event-emission';
 
+import {
+  type AgentRegistry,
+  type AgentRegistryEntry,
+  createAgentRegistry,
+} from '../create-agent-registry';
 import type { ActiveRun } from '../create-run';
+import { createScratchpad, type Scratchpad } from '../create-scratchpad';
 import type {
   CombinedOperativeEvents,
   CombinedOperativeEventType,
   OperativeEvents,
   OperativeEventType,
 } from '../events';
-import type { GenerateFunction, GenerateResponse, StepResult } from '../types';
+import type { AgentDefinition, GenerateFunction, GenerateResponse, StepResult } from '../types';
 
 /**
  * Creates a mock generate function that returns responses in sequence.
@@ -64,6 +71,43 @@ export interface RunRecorder {
   }>;
   steps: StepResult[];
   clear: () => void;
+}
+
+export function createMockScratchpad(initialValues?: Record<string, unknown>): Scratchpad {
+  return createScratchpad({ initialValues });
+}
+
+export function createMockAgentDefinition(
+  name: string,
+  overrides: Partial<AgentDefinition> = {},
+): AgentDefinition {
+  return {
+    name,
+    options: {
+      name,
+      generate: async () => ({ content: `Mock response from ${name}`, toolCalls: [] }),
+      toolbox: createTestToolbox([]),
+    },
+    run: async () => ({
+      conversation: {} as never,
+      steps: [],
+      content: `Mock response from ${name}`,
+      usage: { prompt: 0, completion: 0, total: 0 },
+      finishReason: 'stop-condition' as const,
+    }),
+    createRun: () => ({}) as never,
+    ...overrides,
+  };
+}
+
+export function createMockAgentRegistry(entries?: AgentRegistryEntry[]): AgentRegistry {
+  const registry = createAgentRegistry();
+  if (entries) {
+    for (const entry of entries) {
+      registry.register(entry);
+    }
+  }
+  return registry;
 }
 
 export function createRunRecorder(activeRun: ActiveRun): RunRecorder {

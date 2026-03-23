@@ -102,6 +102,47 @@ describe('createSubagentTool', () => {
     expect(receivedInput).toBe('[high] deploy');
   });
 
+  it('uses mapInput returning AgentRunOptions object', async () => {
+    let receivedInput: string | undefined;
+
+    const subAgent = defineAgent({
+      name: 'options-sub',
+      generate: async ({ conversation }) => {
+        const messages = conversation.getMessages();
+        receivedInput = (messages[messages.length - 1] as { content: string }).content;
+        return textResponse('Options result');
+      },
+      toolbox: createTestToolbox([]),
+      stopWhen: noToolCalls(),
+    });
+
+    const subTool = createSubagentTool({
+      name: 'delegate',
+      description: 'Delegate',
+      agent: subAgent,
+      input: z.object({ task: z.string() }),
+      mapInput: (params) => ({
+        conversation: (params as { task: string }).task,
+      }),
+    });
+
+    let callCount = 0;
+    const result = await run({
+      generate: async () => {
+        callCount++;
+        if (callCount === 1)
+          return toolCallResponse([{ name: 'delegate', arguments: { task: 'object-input' } }]);
+        return textResponse('Done');
+      },
+      toolbox: createTestToolbox([subTool]),
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+    });
+
+    expect(receivedInput).toBe('object-input');
+    expect(result.steps[0].results[0].outcome).toBe('success');
+  });
+
   it('uses custom mapOutput to transform the result', async () => {
     const subAgent = defineAgent({
       name: 'output-sub',

@@ -28,6 +28,8 @@ async function build() {
     { entry: './src/redaction/index.ts', outdir: 'dist/redaction' },
     { entry: './src/versioning/index.ts', outdir: 'dist/versioning' },
     { entry: './src/sort/index.ts', outdir: 'dist/sort' },
+    { entry: './src/persistence/index.ts', outdir: 'dist/persistence' },
+    { entry: './src/composition/index.ts', outdir: 'dist/composition' },
     // Internal modules referenced by index.d.ts (needed for Bun resolution)
     { entry: './src/errors.ts', outdir: 'dist' },
     { entry: './src/guards.ts', outdir: 'dist' },

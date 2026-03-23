@@ -444,6 +444,58 @@ describe('instrument', () => {
     }
   });
 
+  it('sweeps open tool spans when toolbox.execute throws', async () => {
+    const tracer = createMockTracer();
+
+    // Create a tool whose execution throws a raw error that the toolbox propagates
+    const crashTool = createTool({
+      name: 'crash_tool',
+      description: 'A tool that crashes',
+      input: z.object({}),
+      execute: async () => {
+        throw new Error('toolbox crash');
+      },
+    });
+
+    const toolbox = createTestToolbox([crashTool]);
+
+    // Override execute to throw instead of returning an error result
+    const originalExecute = toolbox.execute.bind(toolbox);
+    (toolbox as any).execute = async (...args: any[]) => {
+      // Call the original, but if the tool errors, rethrow as an unhandled error
+      throw new Error('toolbox-level crash');
+    };
+
+    const activeRun = createRun({
+      generate: async (context) => {
+        if (context.step === 0) {
+          return toolCallResponse([{ name: 'crash_tool', arguments: {} }]);
+        }
+        return textResponse('Done');
+      },
+      toolbox,
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+      maximumSteps: 10,
+    });
+
+    const unsubscribe = instrument(activeRun, { tracer });
+    await activeRun.result;
+    activeRun.complete();
+    unsubscribe();
+
+    // The tools span should have been created by tools.executing
+    // and ended by endAllOpenSpans (called from run.error handler)
+    const toolsSpan = findSpan(tracer, 'operative.tools');
+    expect(toolsSpan).toBeDefined();
+    expect(toolsSpan!.ended).toBe(true);
+
+    // All spans should be ended
+    for (const span of tracer.spans) {
+      expect(span.ended).toBe(true);
+    }
+  });
+
   it('adds a retry event to the generate span', async () => {
     const tracer = createMockTracer();
     const toolbox = createTestToolbox([]);

@@ -128,6 +128,12 @@
       "bun": "./dist/persistence/index.js",
       "default": "./dist/persistence/index.js",
       "types": "./dist/persistence/index.d.ts"
+    },
+    "./composition": {
+      "import": "./dist/composition/index.js",
+      "bun": "./dist/composition/index.js",
+      "default": "./dist/composition/index.js",
+      "types": "./dist/composition/index.d.ts"
     }
   },
   "main": "./dist/index.js",

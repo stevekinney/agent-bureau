@@ -5,6 +5,30 @@ export type {
 } from './compaction/index';
 export { compactConversation as compactConversationWithSummarizer } from './compaction/index';
 export type {
+  ConditionalInstructionComposer,
+  ConditionalInstructionComposerRenderOptions,
+  ConditionalInstructionSection,
+  InstructionComposer,
+  InstructionComposerRenderOptions,
+  InstructionContext,
+  InstructionSection,
+  InstructionTemplate,
+  MissingVariableStrategy,
+  TemplateOptions,
+} from './composition/index';
+export {
+  createConditionalInstructionComposer,
+  createInstructionComposer,
+  createInstructionTemplate,
+  extractTemplateVariables,
+  renderTemplate,
+  whenAnyToolAvailable,
+  whenMetadata,
+  whenMetadataPresent,
+  whenStep,
+  whenToolsAvailable,
+} from './composition/index';
+export type {
   AppendToolCallOptions,
   AppendToolResultOptions,
   CompactionOptions,
