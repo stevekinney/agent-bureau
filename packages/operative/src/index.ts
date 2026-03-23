@@ -1,5 +1,9 @@
 export type { RepeatingToolCallsOptions, TokenBudgetOptions } from './conditions/index';
 export { stopWhen } from './conditions/index';
+export type { EarlyStoppingHandlerOptions } from './create-early-stopping-handler';
+export { createEarlyStoppingHandler } from './create-early-stopping-handler';
+export type { CreateHandoffToolOptions } from './create-handoff-tool';
+export { createHandoffTool, extractHandoffTarget, HANDOFF_MARKER } from './create-handoff-tool';
 export type { ActiveRun } from './create-run';
 export { createRun } from './create-run';
 export { createSubagentTool } from './create-subagent-tool';

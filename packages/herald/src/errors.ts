@@ -1,6 +1,6 @@
 import type { ProviderName } from './types.ts';
 
-const RETRYABLE_STATUS_CODES = new Set([429, 500, 503]);
+const RETRYABLE_STATUS_CODES = new Set([429, 500, 502, 503, 504]);
 
 /**
  * Wraps SDK errors from any provider with consistent metadata.
@@ -28,6 +28,14 @@ export class HeraldError extends Error {
     this.statusCode = statusCode;
     this.retryable = statusCode !== undefined && RETRYABLE_STATUS_CODES.has(statusCode);
   }
+}
+
+/**
+ * Returns true when the error is a retryable HeraldError.
+ * Designed for use as `retry.shouldRetry` in operative's RetryOptions.
+ */
+export function shouldRetryHeraldError(error: unknown): boolean {
+  return error instanceof HeraldError && error.retryable;
 }
 
 function extractStatusCode(error: unknown): number | undefined {

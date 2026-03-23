@@ -10,6 +10,7 @@ import {
   tokenBudget,
   toolCalled,
   toolOutcome,
+  wallClockTimeout,
 } from './predicates';
 
 export type { RepeatingToolCallsOptions, TokenBudgetOptions } from './predicates';
@@ -25,6 +26,7 @@ export {
   tokenBudget,
   toolCalled,
   toolOutcome,
+  wallClockTimeout,
 } from './predicates';
 
 /**
@@ -42,4 +44,5 @@ export const stopWhen = {
   forked,
   repeatingToolCalls,
   tokenBudget,
+  wallClockTimeout,
 } as const;

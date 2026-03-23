@@ -11,6 +11,8 @@ const entrypoints = [
   './src/types.ts',
   './src/define-agent.ts',
   './src/create-subagent-tool.ts',
+  './src/create-early-stopping-handler.ts',
+  './src/create-handoff-tool.ts',
   './src/conditions/index.ts',
   './src/conditions/predicates.ts',
   './src/test/index.ts',

@@ -133,10 +133,28 @@ describe('HeraldError', () => {
     expect(error.retryable).toBe(true);
   });
 
+  it('marks 502 as retryable', () => {
+    const error = new HeraldError({
+      provider: 'anthropic',
+      cause: { status: 502 },
+    });
+
+    expect(error.retryable).toBe(true);
+  });
+
   it('marks 503 as retryable', () => {
     const error = new HeraldError({
       provider: 'gemini',
       cause: { status: 503 },
+    });
+
+    expect(error.retryable).toBe(true);
+  });
+
+  it('marks 504 as retryable', () => {
+    const error = new HeraldError({
+      provider: 'openai',
+      cause: { status: 504 },
     });
 
     expect(error.retryable).toBe(true);

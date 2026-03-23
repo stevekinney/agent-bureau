@@ -72,6 +72,16 @@ export function not(condition: StopCondition): StopCondition {
 }
 
 /**
+ * Stops when the elapsed wall-clock time since creation exceeds the threshold.
+ * Unlike `AbortSignal.timeout()`, this lets the current step finish and
+ * produces `finishReason: 'stop-condition'` instead of `'aborted'`.
+ */
+export function wallClockTimeout(milliseconds: number): StopCondition {
+  const start = Date.now();
+  return () => Date.now() - start >= milliseconds;
+}
+
+/**
  * Options for the repeating tool calls stop condition.
  */
 export interface RepeatingToolCallsOptions {
@@ -79,11 +89,33 @@ export interface RepeatingToolCallsOptions {
   windowSize?: number;
   /** Custom fingerprint function. Default: hash of sorted (name, arguments) tuples. */
   fingerprint?: (toolCalls: readonly ToolCall[], results: readonly ToolExecutionResult[]) => string;
+  /**
+   * When true, the default fingerprint includes a truncated preview of each
+   * tool result (first 100 characters). This catches agents stuck retrying the
+   * same call that keeps returning the same error. Default: false.
+   */
+  includeResults?: boolean;
 }
 
-function defaultFingerprint(toolCalls: readonly ToolCall[]): string {
+function defaultFingerprint(
+  toolCalls: readonly ToolCall[],
+  results: readonly ToolExecutionResult[],
+  includeResults: boolean,
+): string {
   const sorted = [...toolCalls]
-    .map((call) => `${call.name}:${JSON.stringify(call.arguments)}`)
+    .map((call) => {
+      let fp = `${call.name}:${JSON.stringify(call.arguments)}`;
+      if (includeResults) {
+        const result = results.find((r) => r.callId === call.id);
+        if (result) {
+          const raw =
+            typeof result.content === 'string' ? result.content : JSON.stringify(result.content);
+          const preview = raw.slice(0, 100);
+          fp += `:${preview}`;
+        }
+      }
+      return fp;
+    })
     .sort();
   return sorted.join('|');
 }
@@ -95,6 +127,7 @@ function defaultFingerprint(toolCalls: readonly ToolCall[]): string {
 export function repeatingToolCalls(options?: RepeatingToolCallsOptions): StopCondition {
   const windowSize = options?.windowSize ?? 3;
   const fingerprintFunction = options?.fingerprint;
+  const includeResults = options?.includeResults ?? false;
   const history: string[] = [];
   let sentinel = 0;
 
@@ -106,7 +139,7 @@ export function repeatingToolCalls(options?: RepeatingToolCallsOptions): StopCon
 
     const fp = fingerprintFunction
       ? fingerprintFunction(context.toolCalls, context.results)
-      : defaultFingerprint(context.toolCalls);
+      : defaultFingerprint(context.toolCalls, context.results, includeResults);
 
     history.push(fp);
 
