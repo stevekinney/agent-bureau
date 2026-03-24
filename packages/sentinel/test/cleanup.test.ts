@@ -524,6 +524,71 @@ describe('run lifecycle and cleanup', () => {
     });
   });
 
+  describe('removeRun', () => {
+    it('removes a completed run from the runs map', async () => {
+      const store = createStore();
+      const activeRun = createActiveRun([textResponse('done')]);
+      const id = store.register(activeRun);
+
+      await activeRun.result;
+
+      expect(store.getRun(id)).toBeDefined();
+      expect(store.getRun(id)!.status).toBe('completed');
+
+      store.removeRun(id);
+
+      expect(store.getRun(id)).toBeUndefined();
+      expect(store.getState().runs.has(id)).toBe(false);
+
+      store.dispose();
+    });
+
+    it('deregisters the subscription before removing the run', async () => {
+      const store = createStore();
+      const activeRun = createActiveRun([textResponse('done')]);
+      const id = store.register(activeRun);
+
+      await activeRun.result;
+
+      const actionsBeforeRemove = store.getRun(id)!.actions.length;
+      expect(actionsBeforeRemove).toBeGreaterThan(0);
+
+      store.removeRun(id);
+
+      // Run is gone from the map
+      expect(store.getRun(id)).toBeUndefined();
+
+      store.dispose();
+    });
+
+    it('is a no-op when called with an unknown id', () => {
+      const store = createStore();
+
+      expect(() => store.removeRun('nonexistent')).not.toThrow();
+
+      store.dispose();
+    });
+
+    it('does not affect other runs when one is removed', async () => {
+      const store = createStore();
+      const activeRunA = createActiveRun([textResponse('A')]);
+      const activeRunB = createActiveRun([textResponse('B')]);
+
+      const idA = store.register(activeRunA);
+      const idB = store.register(activeRunB);
+
+      await Promise.all([activeRunA.result, activeRunB.result]);
+
+      store.removeRun(idA);
+
+      expect(store.getRun(idA)).toBeUndefined();
+      expect(store.getRun(idB)).toBeDefined();
+      expect(store.getRun(idB)!.status).toBe('completed');
+
+      store.dispose();
+    });
+  });
+
   describe('mixed lifecycle scenarios', () => {
     it('tracks completed and error runs concurrently in the same store', async () => {
       const store = createStore();

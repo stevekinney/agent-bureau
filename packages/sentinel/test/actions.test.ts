@@ -291,4 +291,64 @@ describe('action log behavior', () => {
 
     store.dispose();
   });
+
+  it('caps global actions to maxActions with FIFO eviction', async () => {
+    const store = createStore({ maxActions: 5 });
+    const toolbox = createTestToolbox([weatherTool]);
+    const conversation = new Conversation();
+    conversation.appendUserMessage('What is the weather in Denver?');
+
+    const generate = createMockGenerate([
+      toolCallResponse([{ name: 'get_weather', arguments: { location: 'Denver' } }]),
+      textResponse('It is 72 degrees in Denver.'),
+    ]);
+
+    const activeRun = createRun({
+      generate,
+      toolbox,
+      conversation,
+      stopWhen: stopWhen.noToolCalls(),
+    });
+
+    store.register(activeRun);
+    await activeRun.result;
+
+    const actions = store.getState().actions;
+    expect(actions.length).toBeLessThanOrEqual(5);
+
+    // Sequences should still be monotonically increasing (oldest were evicted)
+    for (let i = 1; i < actions.length; i++) {
+      expect(actions[i].sequence).toBeGreaterThan(actions[i - 1].sequence);
+    }
+
+    store.dispose();
+  });
+
+  it('does not cap actions when maxActions is not set', async () => {
+    const store = createStore();
+    const toolbox = createTestToolbox([weatherTool]);
+    const conversation = new Conversation();
+    conversation.appendUserMessage('What is the weather in Denver?');
+
+    const generate = createMockGenerate([
+      toolCallResponse([{ name: 'get_weather', arguments: { location: 'Denver' } }]),
+      textResponse('It is 72 degrees in Denver.'),
+    ]);
+
+    const activeRun = createRun({
+      generate,
+      toolbox,
+      conversation,
+      stopWhen: stopWhen.noToolCalls(),
+    });
+
+    store.register(activeRun);
+    await activeRun.result;
+
+    const actions = store.getState().actions;
+    // Without maxActions, all actions should remain (more than 5 for a tool-call run)
+    expect(actions.length).toBeGreaterThan(5);
+
+    store.dispose();
+  });
 });

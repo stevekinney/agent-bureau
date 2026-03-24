@@ -199,4 +199,66 @@ describe('snapshots', () => {
       total: 60,
     });
   });
+
+  it('caps per-run snapshots to maxSnapshots, keeping the most recent', async () => {
+    const store = createStore({ maxSnapshots: 2 });
+    const toolbox = createTestToolbox([weatherTool]);
+    const conversation = new Conversation();
+    conversation.appendUserMessage('Weather in Denver and Seattle?');
+
+    const generate = createMockGenerate([
+      toolCallResponse([weatherToolCall('Denver')]),
+      toolCallResponse([weatherToolCall('Seattle')]),
+      textResponse('Denver is 72, Seattle is 72.'),
+    ]);
+
+    const activeRun = createRun({
+      generate,
+      toolbox,
+      conversation,
+      stopWhen: stopWhen.noToolCalls(),
+    });
+
+    const runId = store.register(activeRun);
+    await activeRun.result;
+
+    const runState = store.getRun(runId);
+    expect(runState).toBeDefined();
+    // Without maxSnapshots this would be 4 (3 step.completed + 1 run.completed)
+    expect(runState!.snapshots).toHaveLength(2);
+
+    // The kept snapshots should have valid ConversationSnapshot shape
+    for (const snapshot of runState!.snapshots) {
+      expect(snapshot).toHaveProperty('root');
+      expect(snapshot).toHaveProperty('currentPath');
+    }
+  });
+
+  it('does not cap snapshots when maxSnapshots is not set', async () => {
+    const store = createStore();
+    const toolbox = createTestToolbox([weatherTool]);
+    const conversation = new Conversation();
+    conversation.appendUserMessage('Weather in Denver and Seattle?');
+
+    const generate = createMockGenerate([
+      toolCallResponse([weatherToolCall('Denver')]),
+      toolCallResponse([weatherToolCall('Seattle')]),
+      textResponse('Denver is 72, Seattle is 72.'),
+    ]);
+
+    const activeRun = createRun({
+      generate,
+      toolbox,
+      conversation,
+      stopWhen: stopWhen.noToolCalls(),
+    });
+
+    const runId = store.register(activeRun);
+    await activeRun.result;
+
+    const runState = store.getRun(runId);
+    expect(runState).toBeDefined();
+    // 3 step.completed + 1 run.completed = 4 snapshots when uncapped
+    expect(runState!.snapshots).toHaveLength(4);
+  });
 });

@@ -1,6 +1,14 @@
 import type { RunResult, StepResult, TokenUsage } from 'operative';
 
-import type { Action, RunState, Store, StoreListener, StoreState, Unsubscribe } from './types';
+import type {
+  Action,
+  RunState,
+  Store,
+  StoreListener,
+  StoreOptions,
+  StoreState,
+  Unsubscribe,
+} from './types';
 
 function addUsage(accumulated: TokenUsage, incoming: TokenUsage | undefined): TokenUsage {
   if (!incoming) return accumulated;
@@ -11,7 +19,8 @@ function addUsage(accumulated: TokenUsage, incoming: TokenUsage | undefined): To
   };
 }
 
-export function createStore(): Store {
+export function createStore(options: StoreOptions = {}): Store {
+  const { maxActions, maxSnapshots } = options;
   const runs = new Map<string, RunState>();
   const actions: Action[] = [];
   const listeners = new Set<StoreListener>();
@@ -43,6 +52,9 @@ export function createStore(): Store {
       timestamp,
     };
     actions.push(action);
+    if (maxActions !== undefined && actions.length > maxActions) {
+      actions.splice(0, actions.length - maxActions);
+    }
 
     const runState = runs.get(runId);
     if (runState) {
@@ -131,6 +143,13 @@ export function createStore(): Store {
           }
         }
 
+        if (maxSnapshots !== undefined && updated.snapshots.length > maxSnapshots) {
+          updated = {
+            ...updated,
+            snapshots: updated.snapshots.slice(-maxSnapshots),
+          };
+        }
+
         runs.set(runId, updated);
         notify(action);
       },
@@ -145,6 +164,11 @@ export function createStore(): Store {
     return () => {
       listeners.delete(listener);
     };
+  }
+
+  function removeRun(id: string): void {
+    deregister(id);
+    runs.delete(id);
   }
 
   function deregister(id: string): void {
@@ -167,6 +191,7 @@ export function createStore(): Store {
     getState,
     getRun,
     subscribe,
+    removeRun,
     deregister,
     dispose,
   };

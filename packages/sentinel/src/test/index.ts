@@ -1,13 +1,13 @@
 import { createStore } from '../store';
-import type { Action, RunState, Store } from '../types';
+import type { Action, RunState, Store, StoreOptions } from '../types';
 
-export function createTestStore(): {
+export function createTestStore(options?: StoreOptions): {
   store: Store;
   getActions(runId?: string): readonly Action[];
   getActionTypes(runId?: string): string[];
   waitForRun(runId: string): Promise<RunState>;
 } {
-  const store = createStore();
+  const store = createStore(options);
 
   function getActions(runId?: string): readonly Action[] {
     if (runId) {

@@ -5,6 +5,7 @@ export type {
   RunStatus,
   Store,
   StoreListener,
+  StoreOptions,
   StoreState,
   Unsubscribe,
 } from './types';

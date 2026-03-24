@@ -28,6 +28,11 @@ export interface StoreState {
   readonly actions: readonly Action[];
 }
 
+export interface StoreOptions {
+  maxActions?: number;
+  maxSnapshots?: number;
+}
+
 export type StoreListener = (state: StoreState, action: Action) => void;
 export type Unsubscribe = () => void;
 
@@ -36,6 +41,7 @@ export interface Store {
   getState(): StoreState;
   getRun(id: string): RunState | undefined;
   subscribe(listener: StoreListener): Unsubscribe;
+  removeRun(id: string): void;
   deregister(id: string): void;
   dispose(): void;
 }
