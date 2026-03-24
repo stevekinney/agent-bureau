@@ -2,6 +2,7 @@ import type { SerializedToolDefinition } from '../../core/serialization';
 import type { AnyToolDefinition } from '../../core/tool-definition';
 import type { ImportedToolConfiguration } from '../../create-toolbox';
 import type { ToolCallInput, ToolResultLike } from '../../types';
+import { isAsyncIterable } from '../../utilities/type-guards';
 import { importToolSchema } from '../imported-schema';
 import { normalizeToSerializedDefinitions, type ToolRegistryLike } from '../shared';
 import type {
@@ -287,14 +288,6 @@ function normalizeGeminiPayload(content: unknown): Record<string, unknown> {
   }
 
   return { result: content };
-}
-
-function isAsyncIterable(value: unknown): value is AsyncIterable<unknown> {
-  if (!value || (typeof value !== 'object' && typeof value !== 'function')) {
-    return false;
-  }
-
-  return Symbol.asyncIterator in value;
 }
 
 function isGeminiTool(value: unknown): value is GeminiTool {

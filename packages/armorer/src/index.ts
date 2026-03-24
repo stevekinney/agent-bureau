@@ -1,4 +1,4 @@
-export { combineToolbox, combineToolboxes } from './combine-toolboxes';
+export { combineToolboxes } from './combine-toolboxes';
 export type { ToolError, ToolErrorCategory } from './core/errors';
 export type { CreateToolOptions, WithContext } from './create-tool';
 export { createTool, createToolCall, lazy, withContext } from './create-tool';

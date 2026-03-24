@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'bun:test';
 import { z } from 'zod';
 
+import { searchTools } from '../src/core/registry';
 import { createToolbox } from '../src/create-toolbox';
 import type { ToolConfiguration } from '../src/is-tool';
-import { searchTools } from '../src/registry';
 
 const makeRegistry = (embed?: (texts: string[]) => number[][]) =>
   createToolbox(realWorldTools(), embed ? { embed } : undefined);

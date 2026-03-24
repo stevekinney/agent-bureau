@@ -5,6 +5,7 @@ import {
   type ToolResultTruncationOptions,
   truncateToolResultContent,
 } from '../truncation/index';
+import { isAsyncIterable } from '../utilities/type-guards';
 
 /**
  * Creates a rate limiting middleware that restricts the number of tool executions
@@ -41,8 +42,15 @@ export function createRateLimitMiddleware(
       }
       const toolState = state.get(configuration.name)!;
 
-      const key = keyGenerator(params, context);
+      // Sweep expired entries on each new invocation
       const now = Date.now();
+      for (const [entryKey, entryRecord] of toolState) {
+        if (now > entryRecord.resetTime) {
+          toolState.delete(entryKey);
+        }
+      }
+
+      const key = keyGenerator(params, context);
       let record = toolState.get(key);
 
       if (!record || now > record.resetTime) {
@@ -87,10 +95,12 @@ export function createRateLimitMiddleware(
 export function createCacheMiddleware(
   options: {
     ttlMs?: number;
+    maxSize?: number;
     keyGenerator?: (params: unknown) => string;
   } = {},
 ) {
   const ttlMs = options.ttlMs ?? 60000;
+  const maxSize = options.maxSize ?? 1000;
 
   // State: Map<ToolName, Map<CacheKey, { value: unknown; expiry: number }>>
   const cache = new Map<string, Map<string, { value: unknown; expiry: number }>>();
@@ -107,11 +117,6 @@ export function createCacheMiddleware(
   const keyGenerator = options.keyGenerator ?? defaultKeyGenerator;
 
   return (configuration: ToolConfiguration): ToolConfiguration => {
-    // Skip caching for mutating or dangerous tools unless explicitly forced?
-    // For safety, we should probably check metadata, but middleware is opted-in by the user.
-    // If the user adds cache middleware to a mutating tool, they probably know what they're doing (or making a mistake).
-    // Let's assume safety is handled by policy or user discretion.
-
     const originalExecute = configuration.execute;
 
     const wrappedExecute = async (params: unknown, context: unknown) => {
@@ -137,6 +142,14 @@ export function createCacheMiddleware(
       }
 
       const result = await executeFn(params, context);
+
+      // Evict oldest entry if cache is at capacity
+      if (toolCache.size >= maxSize) {
+        const oldestKey = toolCache.keys().next().value;
+        if (oldestKey !== undefined) {
+          toolCache.delete(oldestKey);
+        }
+      }
 
       // Store result
       toolCache.set(key, { value: result, expiry: now + ttlMs });
@@ -191,11 +204,6 @@ export function createTimeoutMiddleware(ms: number) {
       execute: wrappedExecute,
     };
   };
-}
-
-function isAsyncIterable(value: unknown): value is AsyncIterable<unknown> {
-  if (!value || (typeof value !== 'object' && typeof value !== 'function')) return false;
-  return Symbol.asyncIterator in value;
 }
 
 /**

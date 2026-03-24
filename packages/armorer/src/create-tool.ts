@@ -5,7 +5,6 @@ import { z } from 'zod';
 
 import type { ToolError, ToolErrorCategory } from './core/errors';
 import type { ToolRisk } from './core/risk';
-import { isZodObjectSchema, isZodSchema } from './core/schema-utilities';
 import { serializeToolDefinition } from './core/serialization';
 import { assertJsonValue, type JsonValue } from './core/serialization/json';
 import { assertKebabCaseTag, type NormalizeTagsOption, uniqTags } from './core/tag-utilities';
@@ -36,6 +35,8 @@ import type {
 } from './is-tool';
 import type { ToolCall, ToolExecutionResult } from './types';
 import { createConcurrencyLimiter, normalizeConcurrency } from './utilities/concurrency';
+import { normalizeSchema } from './utilities/schema-normalization';
+import { isAsyncIterable, isPromise, isTestRuntime } from './utilities/type-guards';
 
 /**
  * Options for creating a tool.
@@ -1247,13 +1248,6 @@ function hasLegacyRegister(
   return typeof candidate.register === 'function';
 }
 
-function isTestRuntime(): boolean {
-  const nodeEnvIsTest = process.env.NODE_ENV === 'test';
-  const entry = process.argv[1] ?? '';
-  const testEntrypoint = /\.(test|spec)\.[cm]?[jt]sx?$/.test(entry);
-  return nodeEnvIsTest || testEntrypoint;
-}
-
 /**
  * Options for creating a tool with additional context.
  * TInput is the input interface type - the input schema validates it at runtime.
@@ -1407,22 +1401,6 @@ function looksLikeToolCall(value: unknown, toolName: string): value is ToolCallW
   return Object.keys(candidate).every((key) => TOOL_CALL_KEYS.has(key));
 }
 
-function normalizeSchema(schema: unknown): z.ZodTypeAny {
-  if (schema === undefined) {
-    return z.object({});
-  }
-  if (isZodObjectSchema(schema)) {
-    return schema;
-  }
-  if (isZodSchema(schema)) {
-    throw new Error('Tool input must be a Zod object schema');
-  }
-  if (schema && typeof schema === 'object') {
-    return z.object(schema as Record<string, z.ZodTypeAny>);
-  }
-  throw new Error('Tool input must be a Zod object schema or an object of Zod schemas');
-}
-
 function getDiagnosticsSchema(schema: unknown): unknown {
   if (!schema || typeof schema !== 'object') return schema;
   const candidate = schema as { _def?: { out?: unknown; schema?: unknown } };
@@ -1497,13 +1475,6 @@ function stableStringify(value: unknown): string {
       .join(',')}}`;
   }
   return JSON.stringify(value);
-}
-
-function isAsyncIterable(value: unknown): value is AsyncIterable<unknown> {
-  if (!value || (typeof value !== 'object' && typeof value !== 'function')) {
-    return false;
-  }
-  return Symbol.asyncIterator in value;
 }
 
 function classifyErrorCategory(error: unknown): ToolErrorCategory {
@@ -1704,13 +1675,6 @@ function isExecutable<TInput, TOutput, TContext>(
   execute: LazyToolExecute<TInput, TOutput, TContext>,
 ): boolean {
   return typeof execute === 'function' || isPromise(execute);
-}
-
-function isPromise<T>(value: unknown): value is PromiseLike<T> {
-  if (!value || typeof value !== 'object') return false;
-  if (!('then' in value)) return false;
-  const candidate = value as PromiseLike<unknown>;
-  return typeof candidate.then === 'function';
 }
 
 export const internalToolTestUtilities = {

@@ -9,7 +9,7 @@ import { z } from 'zod';
 
 import { createTool } from '../src/create-tool';
 import { createToolbox } from '../src/create-toolbox';
-import { createMCP, fromMcpTools, toMcpTools } from '../src/mcp';
+import { createMCP, fromMcpTools, toMcpTools } from '../src/integrations/mcp';
 
 type ConnectedMcp = {
   client: Client;

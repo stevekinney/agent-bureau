@@ -2,9 +2,9 @@ import { describe, expect, it } from 'bun:test';
 import { z } from 'zod';
 
 import { createRegistry, defineTool } from '../src/core';
+import { queryTools, reindexSearchIndex, searchTools } from '../src/core/registry';
 import { createTool } from '../src/create-tool';
 import { createToolbox } from '../src/create-toolbox';
-import { queryTools, reindexSearchIndex, searchTools } from '../src/registry';
 
 const makeTool = (name: string, overrides: Partial<Parameters<typeof createTool>[0]> = {}) =>
   createTool({

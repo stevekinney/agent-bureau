@@ -31,7 +31,6 @@ import { registerToolIndexes } from './core/registry';
 import type { Embedder, EmbeddingVector } from './core/registry/embeddings';
 import { registerRegistryEmbedder, warmToolEmbeddings } from './core/registry/embeddings';
 import type { ToolRisk } from './core/risk';
-import { isZodObjectSchema, isZodSchema } from './core/schema-utilities';
 import { type SerializedToolDefinition, serializeToolDefinition } from './core/serialization';
 import { assertJsonValue } from './core/serialization/json';
 import type { AnyToolDefinition } from './core/tool-definition';
@@ -59,12 +58,6 @@ import type {
   ToolPolicyHooks,
 } from './is-tool';
 import { isTool } from './is-tool';
-import {
-  createLoopDetectionState,
-  detectLoop,
-  type LoopDetectionOptions as AutoLoopDetectionOptions,
-  recordCall,
-} from './loop-detection/index';
 import { resolveFuzzyToolName } from './resolution/index';
 import type {
   JSONValue,
@@ -74,6 +67,8 @@ import type {
   ToolProvider,
 } from './types';
 import { createConcurrencyLimiter, normalizeConcurrency } from './utilities/concurrency';
+import { normalizeSchema as normalizeToolSchema } from './utilities/schema-normalization';
+import { isAsyncIterable, isPromise, isTestRuntime } from './utilities/type-guards';
 
 export type ToolboxContext = Record<string, unknown>;
 
@@ -166,7 +161,7 @@ export interface ToolboxOptions {
    * Enable loop detection for stuck tool call patterns.
    * When true, uses default thresholds. Pass an object to customize.
    */
-  loopDetection?: boolean | AutoLoopDetectionOptions;
+  loopDetection?: boolean | LoopDetectionOptions;
   /**
    * Called when a deprecated tool is executed via this toolbox.
    * Receives the tool definition and the call info (name and optional id).
@@ -590,8 +585,13 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
     subscribe,
     toObservable,
     events,
-    complete,
+    complete: emitterComplete,
   } = emitter;
+
+  function complete() {
+    loopDetectors.clear();
+    emitterComplete();
+  }
   const baseContext = options.context ? { ...options.context } : {};
   const readOnly = options.readOnly ?? false;
   const allowMutation = options.allowMutation ?? !readOnly;
@@ -609,14 +609,17 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
   const onDeprecatedToolCalled = options.onDeprecatedToolCalled;
   const resolutionEnabled = !!options.resolution;
 
-  const loopOptions: AutoLoopDetectionOptions | undefined =
-    typeof options.loopDetection === 'object' && options.loopDetection !== null
-      ? options.loopDetection
-      : undefined;
-  const loopState = options.loopDetection ? createLoopDetectionState() : undefined;
+  const autoLoopDetector: LoopDetector | undefined = options.loopDetection
+    ? new LoopDetector(
+        typeof options.loopDetection === 'object' && options.loopDetection !== null
+          ? options.loopDetection
+          : { warningThreshold: 10, blockThreshold: 20 },
+      )
+    : undefined;
 
   // Loop detection: instances are created on demand and stored
   const loopDetectors = new Map<string, LoopDetector>();
+  let loopDetectorIdCounter = 0;
   const buildTool =
     typeof options.toolFactory === 'function'
       ? (configuration: ToolConfiguration) =>
@@ -764,13 +767,14 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
       budgetCalls += 1;
 
       // Loop detection
-      if (loopState) {
-        const loopResult = detectLoop(loopState, toolCall.name, toolCall.arguments, loopOptions);
+      if (autoLoopDetector) {
+        autoLoopDetector.recordCall(toolCall.name, toolCall.arguments ?? {});
+        const loopResult = autoLoopDetector.detectLoop();
         if (loopResult.detected && loopResult.level === 'blocked') {
           emit('loop-blocked', {
             tool,
             call: toolCall,
-            detector: loopResult.detector,
+            detector: loopResult.detector ?? 'simple-repeat',
             count: loopResult.count,
             message: loopResult.message,
           });
@@ -792,12 +796,11 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
           emit('loop-warning', {
             tool,
             call: toolCall,
-            detector: loopResult.detector,
+            detector: loopResult.detector ?? 'simple-repeat',
             count: loopResult.count,
             message: loopResult.message,
           });
         }
-        recordCall(loopState, toolCall.name, toolCall.arguments, loopOptions);
       }
 
       // Bubble up events
@@ -1097,7 +1100,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
     getContext: () => baseContext,
     // Loop detection
     createLoopDetector: (options?: LoopDetectionOptions) => {
-      const id = `detector-${loopDetectors.size}`;
+      const id = `detector-${loopDetectorIdCounter++}`;
       const detector = new LoopDetector(options);
       loopDetectors.set(id, detector);
       return {
@@ -1716,22 +1719,6 @@ function isDangerousToolContext(context: ToolPolicyContext): boolean {
   return false;
 }
 
-function normalizeToolSchema(schema: unknown): ToolParametersSchema {
-  if (schema === undefined) {
-    return z.object({});
-  }
-  if (isZodObjectSchema(schema)) {
-    return schema;
-  }
-  if (isZodSchema(schema)) {
-    throw new Error('Tool input must be a Zod object schema');
-  }
-  if (schema && typeof schema === 'object') {
-    return z.object(schema as Record<string, z.ZodTypeAny>);
-  }
-  throw new Error('Tool input must be a Zod object schema or an object of Zod schemas');
-}
-
 function checkBudget(
   budget: ToolboxOptions['budget'] | undefined,
   startedAt: number,
@@ -1783,13 +1770,6 @@ function createLazyExecuteResolver(
   };
 }
 
-function isPromise<T>(value: unknown): value is PromiseLike<T> {
-  if (!value || typeof value !== 'object') return false;
-  if (!('then' in value)) return false;
-  const candidate = value as PromiseLike<unknown>;
-  return typeof candidate.then === 'function';
-}
-
 function deriveRiskFromMetadata(metadata: ToolMetadata | undefined) {
   if (!metadata || typeof metadata !== 'object') {
     return undefined;
@@ -1816,13 +1796,6 @@ function createToolError(
   return { code, category, retryable, message };
 }
 
-function isAsyncIterable(value: unknown): value is AsyncIterable<unknown> {
-  if (!value || (typeof value !== 'object' && typeof value !== 'function')) {
-    return false;
-  }
-  return Symbol.asyncIterator in value;
-}
-
 function extractErrorCode(error: unknown): string | undefined {
   const code = getStringProperty(error, 'code');
   if (code) return code;
@@ -1842,7 +1815,9 @@ const embedderCache = new WeakMap<
   Map<string, EmbeddingVector[] | Promise<EmbeddingVector[]>>
 >();
 
-function createCachedEmbedder(embedder: Embedder): Embedder {
+function createCachedEmbedder(embedder: Embedder, options?: { maxCacheSize?: number }): Embedder {
+  const maxCacheSize = options?.maxCacheSize ?? 1000;
+
   return (texts: string[]): EmbeddingVector[] | Promise<EmbeddingVector[]> => {
     // Create a cache key from the texts array
     const cacheKey = JSON.stringify(texts);
@@ -1858,6 +1833,14 @@ function createCachedEmbedder(embedder: Embedder): Embedder {
     const cached = cache.get(cacheKey);
     if (cached !== undefined) {
       return cached;
+    }
+
+    // Evict oldest entry if cache is at capacity
+    if (cache.size >= maxCacheSize) {
+      const oldestKey = cache.keys().next().value;
+      if (oldestKey !== undefined) {
+        cache.delete(oldestKey);
+      }
     }
 
     // Call embedder and cache result
@@ -1888,13 +1871,6 @@ export function isToolbox(value: unknown): value is Toolbox<any> {
     typeof (value as Toolbox<any>).execute === 'function' &&
     typeof (value as Toolbox<any>).toJSON === 'function'
   );
-}
-
-function isTestRuntime(): boolean {
-  const nodeEnvIsTest = process.env.NODE_ENV === 'test';
-  const entry = process.argv[1] ?? '';
-  const testEntrypoint = /\.(test|spec)\.[cm]?[jt]sx?$/.test(entry);
-  return nodeEnvIsTest || testEntrypoint;
 }
 
 export const internalToolboxTestUtilities = {

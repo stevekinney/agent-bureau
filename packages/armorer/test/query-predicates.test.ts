@@ -9,7 +9,7 @@ import {
   tagsMatchAny,
   tagsMatchNone,
   textMatches,
-} from '../src/query-predicates';
+} from '../src/core/query-predicates';
 
 const baseTool = {
   name: 'alpha-sum',

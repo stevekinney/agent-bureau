@@ -273,6 +273,7 @@ async function loadOpenAIAgentsModule(): Promise<OpenAIAgentsModule> {
         return module;
       })
       .catch((error) => {
+        cachedOpenAIAgentsModulePromise = undefined;
         const hint =
           'Missing peer dependency "@openai/agents". Install it to use armorer/open-ai/agents.';
         const wrapped = error instanceof Error ? error : new Error(String(error));

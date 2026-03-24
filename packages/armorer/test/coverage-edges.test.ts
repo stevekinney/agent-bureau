@@ -558,6 +558,33 @@ describe('coverage edges', () => {
     await expect(toOpenAIAgentTools([])).rejects.toThrow(
       'Missing peer dependency "@openai/agents". Install it to use armorer/open-ai/agents.',
     );
+    // Verify that a failed load does NOT permanently cache the rejection.
+    // After the first failure, a second call with a working loader should succeed.
+    internalOpenAIAgentsTestUtilities.resetModuleState();
+
+    // Set up a loader that fails on the first call, then succeeds on the second
+    let callCount = 0;
+    internalOpenAIAgentsTestUtilities.setModuleLoader(async () => {
+      callCount++;
+      if (callCount === 1) {
+        throw new Error('transient failure');
+      }
+      return (await import('@openai/agents')) as any;
+    });
+
+    // First call should fail
+    await expect(toOpenAIAgentTools([])).rejects.toThrow('transient failure');
+
+    // Second call should retry (not return cached rejection)
+    // Since we're in tests and @openai/agents may not be available, we just verify
+    // the loader is called again (callCount increments)
+    try {
+      await toOpenAIAgentTools([]);
+    } catch {
+      // May fail for different reasons, but callCount should be 2
+    }
+    expect(callCount).toBe(2);
+
     internalOpenAIAgentsTestUtilities.resetModuleState();
 
     internalMcpTestUtilities.resetModuleState();

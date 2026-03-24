@@ -6,7 +6,7 @@ import { z } from 'zod';
 
 import { createTool } from '../src/create-tool';
 import { createToolbox } from '../src/create-toolbox';
-import { createMCP } from '../src/mcp';
+import { createMCP } from '../src/integrations/mcp';
 
 type McpSdkServerConfigurationWithInstance = ReturnType<typeof createSdkMcpServer>;
 

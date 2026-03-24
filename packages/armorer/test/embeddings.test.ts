@@ -1,14 +1,14 @@
 import { describe, expect, it } from 'bun:test';
 import { z } from 'zod';
 
-import { createTool } from '../src/create-tool';
 import {
   getQueryEmbedding,
   getRegistryEmbedder,
   getToolEmbeddings,
   registerRegistryEmbedder,
   warmToolEmbeddings,
-} from '../src/registry/embeddings';
+} from '../src/core/registry/embeddings';
+import { createTool } from '../src/create-tool';
 
 const makeTool = (name: string, overrides: Partial<Parameters<typeof createTool>[0]> = {}) =>
   createTool({
