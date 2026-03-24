@@ -215,6 +215,70 @@ describe('Gemini streaming', () => {
     });
   });
 
+  describe('signal.aborted check in streaming loop', () => {
+    it('processes no chunks when the signal is already aborted before streaming', async () => {
+      const model = createMockGeminiStreamingModel([geminiStreamTextChunks]);
+      const generate: StreamingGenerateFunction = createGeminiGenerateStream({
+        model: 'gemini-pro',
+        client: model,
+      });
+      const controller = new AbortController();
+      controller.abort();
+      const { context, updates } = createStreamingContext({ signal: controller.signal });
+
+      const result = await generate(context);
+
+      expect(result.content).toBe('');
+      expect(result.toolCalls).toEqual([]);
+      expect(updates).toEqual([]);
+    });
+
+    it('stops processing chunks after the signal is aborted mid-stream', async () => {
+      const controller = new AbortController();
+      const chunks = geminiStreamTextChunks;
+      type GeminiChunk = GeminiGenerateContentResult['response'];
+      const calls: Array<Record<string, unknown>> = [];
+      const model = {
+        _calls: calls,
+        _chunkSequences: [chunks],
+        _errors: [],
+        async generateContentStream(
+          params: Record<string, unknown>,
+        ): Promise<{ stream: AsyncIterable<GeminiChunk> }> {
+          calls.push(params);
+          let chunkIndex = 0;
+          return {
+            stream: {
+              [Symbol.asyncIterator]() {
+                return {
+                  async next() {
+                    if (chunkIndex >= chunks.length) return { done: true, value: undefined };
+                    const chunk = chunks[chunkIndex++]!;
+                    // Abort before yielding the second chunk
+                    if (chunkIndex === 2) controller.abort();
+                    return { done: false, value: chunk };
+                  },
+                };
+              },
+            },
+          };
+        },
+      };
+
+      const generate: StreamingGenerateFunction = createGeminiGenerateStream({
+        model: 'gemini-pro',
+        client: model,
+      });
+      const { context, updates } = createStreamingContext({ signal: controller.signal });
+
+      const result = await generate(context);
+
+      // Should have the first chunk but not the second
+      expect(result.content).toBe('Hello ');
+      expect(updates).toEqual(['Hello ']);
+    });
+  });
+
   describe('missing usage handling', () => {
     it('returns undefined usage when no chunk contains usageMetadata', async () => {
       const chunksWithoutUsage: GeminiGenerateContentResult['response'][] = [

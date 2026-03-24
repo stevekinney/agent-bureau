@@ -184,6 +184,26 @@ describe('createGeminiGenerate', () => {
     });
   });
 
+  describe('missing API key', () => {
+    it('throws HeraldError when no apiKey option and no GOOGLE_API_KEY env var', async () => {
+      const original = process.env['GOOGLE_API_KEY'];
+      delete process.env['GOOGLE_API_KEY'];
+      try {
+        const generate = createGeminiGenerate({ model: 'gemini-pro' });
+        const context = createTestContext();
+        await generate(context);
+        expect.unreachable('Expected an error to be thrown');
+      } catch (error) {
+        expect(error).toBeInstanceOf(HeraldError);
+        const heraldError = error as HeraldError;
+        expect(heraldError.provider).toBe('gemini');
+        expect(heraldError.message).toContain('GOOGLE_API_KEY');
+      } finally {
+        if (original !== undefined) process.env['GOOGLE_API_KEY'] = original;
+      }
+    });
+  });
+
   describe('dynamic SDK import', () => {
     it('loads the SDK when no client is provided', async () => {
       const generate = createGeminiGenerate({
@@ -554,6 +574,28 @@ describe('createGeminiGenerateStream', () => {
 
       const call = model._calls[0] as Record<string, unknown>;
       expect(call).not.toHaveProperty('generationConfig');
+    });
+  });
+
+  describe('missing API key', () => {
+    it('throws HeraldError when no apiKey option and no GOOGLE_API_KEY env var', async () => {
+      const original = process.env['GOOGLE_API_KEY'];
+      delete process.env['GOOGLE_API_KEY'];
+      try {
+        const generate: StreamingGenerateFunction = createGeminiGenerateStream({
+          model: 'gemini-pro',
+        });
+        const context = createStreamingContext();
+        await generate(context);
+        expect.unreachable('Expected an error to be thrown');
+      } catch (error) {
+        expect(error).toBeInstanceOf(HeraldError);
+        const heraldError = error as HeraldError;
+        expect(heraldError.provider).toBe('gemini');
+        expect(heraldError.message).toContain('GOOGLE_API_KEY');
+      } finally {
+        if (original !== undefined) process.env['GOOGLE_API_KEY'] = original;
+      }
     });
   });
 

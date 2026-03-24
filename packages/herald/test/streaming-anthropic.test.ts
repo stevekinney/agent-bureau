@@ -226,6 +226,94 @@ describe('Anthropic streaming', () => {
     });
   });
 
+  describe('signal.aborted check in streaming loop', () => {
+    it('processes no chunks when the signal is already aborted before streaming', async () => {
+      const client = createMockAnthropicStreamingClient([anthropicStreamTextEvents]);
+      const generate: StreamingGenerateFunction = createAnthropicGenerateStream({
+        model: 'claude-sonnet-4-20250514',
+        client,
+      });
+      const controller = new AbortController();
+      controller.abort();
+      const { context, updates } = createStreamingContext({ signal: controller.signal });
+
+      const result = await generate(context);
+
+      expect(result.content).toBe('');
+      expect(result.toolCalls).toEqual([]);
+      expect(updates).toEqual([]);
+    });
+
+    it('stops processing chunks after the signal is aborted mid-stream', async () => {
+      // Create events where the abort happens after the first text delta
+      const events: AnthropicStreamEvent[] = [
+        {
+          type: 'message_start',
+          message: { usage: { input_tokens: 10, output_tokens: 0 } },
+        },
+        {
+          type: 'content_block_start',
+          index: 0,
+          content_block: { type: 'text', text: '' },
+        },
+        {
+          type: 'content_block_delta',
+          index: 0,
+          delta: { type: 'text_delta', text: 'Hello ' },
+        },
+        {
+          type: 'content_block_delta',
+          index: 0,
+          delta: { type: 'text_delta', text: 'World' },
+        },
+        { type: 'content_block_stop', index: 0 },
+        { type: 'message_stop' },
+      ];
+
+      const controller = new AbortController();
+      // Create a custom streaming client that aborts after the first text delta is processed
+      const calls: Array<Record<string, unknown>> = [];
+      const client = {
+        _calls: calls,
+        _eventSequences: [events],
+        _errors: [],
+        messages: {
+          create(params: Record<string, unknown>): AsyncIterable<AnthropicStreamEvent> {
+            calls.push(params);
+            let eventIndex = 0;
+            return {
+              [Symbol.asyncIterator]() {
+                return {
+                  async next() {
+                    if (eventIndex >= events.length) return { done: true, value: undefined };
+                    const event = events[eventIndex++]!;
+                    // Abort before yielding the second content_block_delta (4th event)
+                    // The abort is set when yielding the 3rd event, so the check at the
+                    // top of the next iteration catches it before processing the 4th event.
+                    if (eventIndex === 4) controller.abort();
+                    return { done: false, value: event };
+                  },
+                };
+              },
+            };
+          },
+        },
+      };
+
+      const generate: StreamingGenerateFunction = createAnthropicGenerateStream({
+        model: 'claude-sonnet-4-20250514',
+        client,
+      });
+      const { context, updates } = createStreamingContext({ signal: controller.signal });
+
+      const result = await generate(context);
+
+      // Should have the first text delta but not the second
+      expect(result.content).toBe('Hello ');
+      expect(updates).toEqual(['Hello ']);
+    });
+  });
+
   describe('missing usage handling', () => {
     it('returns undefined usage when events contain no usage fields', async () => {
       const noUsageEvents: AnthropicStreamEvent[] = [

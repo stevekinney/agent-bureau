@@ -3,6 +3,7 @@ import { parseGeminiToolCalls, toGeminiTools } from 'armorer/adapters/gemini';
 import { toGeminiMessages } from 'conversationalist/adapters/gemini';
 
 import { HeraldError } from './errors.ts';
+import { resolveCommonParameters } from './resolve-common-parameters.ts';
 import type {
   GeminiGenerativeModel,
   GeminiProviderOptions,
@@ -22,7 +23,8 @@ import type {
  * the `GOOGLE_API_KEY` env var.
  */
 export function createGeminiGenerate(options: GeminiProviderOptions): GenerateFunction {
-  const { model, maximumTokens, temperature, topP, stopSequences } = options;
+  const { model } = options;
+  const common = resolveCommonParameters(options);
   let modelPromise: Promise<GeminiGenerativeModel> | undefined;
 
   function getModel(): Promise<GeminiGenerativeModel> {
@@ -30,7 +32,15 @@ export function createGeminiGenerate(options: GeminiProviderOptions): GenerateFu
     if (!modelPromise) {
       modelPromise = import('@google/generative-ai').then((module) => {
         const GoogleGenerativeAI = module.GoogleGenerativeAI;
-        const apiKey = options.apiKey ?? process.env['GOOGLE_API_KEY'] ?? '';
+        const apiKey = options.apiKey ?? process.env['GOOGLE_API_KEY'];
+        if (!apiKey) {
+          throw new HeraldError({
+            provider: 'gemini',
+            cause: undefined,
+            message:
+              '[herald:gemini] Missing API key: provide an apiKey option or set the GOOGLE_API_KEY environment variable.',
+          });
+        }
         const genAI = new GoogleGenerativeAI(apiKey);
         return genAI.getGenerativeModel({ model }) as unknown as GeminiGenerativeModel;
       });
@@ -52,12 +62,11 @@ export function createGeminiGenerate(options: GeminiProviderOptions): GenerateFu
     if (hasTools) params['tools'] = tools;
 
     const generationConfig: Record<string, unknown> = {};
-    if (maximumTokens !== undefined) generationConfig['maxOutputTokens'] = maximumTokens;
-    if (temperature !== undefined) generationConfig['temperature'] = temperature;
-    if (topP !== undefined) generationConfig['topP'] = topP;
-    if (stopSequences !== undefined && stopSequences.length > 0) {
-      generationConfig['stopSequences'] = stopSequences;
-    }
+    if (common.maximumTokens !== undefined)
+      generationConfig['maxOutputTokens'] = common.maximumTokens;
+    if (common.temperature !== undefined) generationConfig['temperature'] = common.temperature;
+    if (common.topP !== undefined) generationConfig['topP'] = common.topP;
+    if (common.stopSequences) generationConfig['stopSequences'] = common.stopSequences;
 
     if (Object.keys(generationConfig).length > 0) {
       params['generationConfig'] = generationConfig;
@@ -114,7 +123,8 @@ export function createGeminiGenerate(options: GeminiProviderOptions): GenerateFu
 export function createGeminiGenerateStream(
   options: Omit<GeminiProviderOptions, 'client'> & { client?: GeminiStreamingModel },
 ): StreamingGenerateFunction {
-  const { model, maximumTokens, temperature, topP, stopSequences } = options;
+  const { model } = options;
+  const common = resolveCommonParameters(options);
   let modelPromise: Promise<GeminiStreamingModel> | undefined;
 
   function getModel(): Promise<GeminiStreamingModel> {
@@ -122,7 +132,15 @@ export function createGeminiGenerateStream(
     if (!modelPromise) {
       modelPromise = import('@google/generative-ai').then((module) => {
         const GoogleGenerativeAI = module.GoogleGenerativeAI;
-        const apiKey = options.apiKey ?? process.env['GOOGLE_API_KEY'] ?? '';
+        const apiKey = options.apiKey ?? process.env['GOOGLE_API_KEY'];
+        if (!apiKey) {
+          throw new HeraldError({
+            provider: 'gemini',
+            cause: undefined,
+            message:
+              '[herald:gemini] Missing API key: provide an apiKey option or set the GOOGLE_API_KEY environment variable.',
+          });
+        }
         const genAI = new GoogleGenerativeAI(apiKey);
         return genAI.getGenerativeModel({ model }) as unknown as GeminiStreamingModel;
       });
@@ -147,12 +165,11 @@ export function createGeminiGenerateStream(
     if (hasTools) params['tools'] = tools;
 
     const generationConfig: Record<string, unknown> = {};
-    if (maximumTokens !== undefined) generationConfig['maxOutputTokens'] = maximumTokens;
-    if (temperature !== undefined) generationConfig['temperature'] = temperature;
-    if (topP !== undefined) generationConfig['topP'] = topP;
-    if (stopSequences !== undefined && stopSequences.length > 0) {
-      generationConfig['stopSequences'] = stopSequences;
-    }
+    if (common.maximumTokens !== undefined)
+      generationConfig['maxOutputTokens'] = common.maximumTokens;
+    if (common.temperature !== undefined) generationConfig['temperature'] = common.temperature;
+    if (common.topP !== undefined) generationConfig['topP'] = common.topP;
+    if (common.stopSequences) generationConfig['stopSequences'] = common.stopSequences;
 
     if (Object.keys(generationConfig).length > 0) {
       params['generationConfig'] = generationConfig;
@@ -168,6 +185,7 @@ export function createGeminiGenerateStream(
         | undefined;
 
       for await (const chunk of result.stream) {
+        if (context.signal?.aborted) break;
         const candidates = chunk.candidates ?? [];
         const parts = candidates[0]?.content?.parts ?? [];
 

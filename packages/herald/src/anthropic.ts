@@ -4,6 +4,7 @@ import { toAnthropicMessages } from 'conversationalist/adapters/anthropic';
 import type { ToolCallInput } from 'interoperability';
 
 import { HeraldError } from './errors.ts';
+import { resolveCommonParameters } from './resolve-common-parameters.ts';
 import type {
   AnthropicClient,
   AnthropicProviderOptions,
@@ -22,7 +23,8 @@ import type {
  * and constructs one using `apiKey` or the `ANTHROPIC_API_KEY` env var.
  */
 export function createAnthropicGenerate(options: AnthropicProviderOptions): GenerateFunction {
-  const { model, maximumTokens = 4096, temperature, topP, stopSequences } = options;
+  const { model, maximumTokens = 4096 } = options;
+  const common = resolveCommonParameters(options);
   let clientPromise: Promise<AnthropicClient> | undefined;
 
   function getClient(): Promise<AnthropicClient> {
@@ -50,11 +52,9 @@ export function createAnthropicGenerate(options: AnthropicProviderOptions): Gene
 
     if (system !== undefined) params['system'] = system;
     if (hasTools) params['tools'] = Array.isArray(tools) ? tools : [tools];
-    if (temperature !== undefined) params['temperature'] = temperature;
-    if (topP !== undefined) params['top_p'] = topP;
-    if (stopSequences !== undefined && stopSequences.length > 0) {
-      params['stop_sequences'] = stopSequences;
-    }
+    if (common.temperature !== undefined) params['temperature'] = common.temperature;
+    if (common.topP !== undefined) params['top_p'] = common.topP;
+    if (common.stopSequences) params['stop_sequences'] = common.stopSequences;
     if (context.signal) params['signal'] = context.signal;
 
     try {
@@ -103,7 +103,8 @@ export function createAnthropicGenerate(options: AnthropicProviderOptions): Gene
 export function createAnthropicGenerateStream(
   options: Omit<AnthropicProviderOptions, 'client'> & { client?: AnthropicStreamingClient },
 ): StreamingGenerateFunction {
-  const { model, maximumTokens = 4096, temperature, topP, stopSequences } = options;
+  const { model, maximumTokens = 4096 } = options;
+  const common = resolveCommonParameters(options);
   let clientPromise: Promise<AnthropicStreamingClient> | undefined;
 
   function getClient(): Promise<AnthropicStreamingClient> {
@@ -135,11 +136,9 @@ export function createAnthropicGenerateStream(
 
     if (system !== undefined) params['system'] = system;
     if (hasTools) params['tools'] = Array.isArray(tools) ? tools : [tools];
-    if (temperature !== undefined) params['temperature'] = temperature;
-    if (topP !== undefined) params['top_p'] = topP;
-    if (stopSequences !== undefined && stopSequences.length > 0) {
-      params['stop_sequences'] = stopSequences;
-    }
+    if (common.temperature !== undefined) params['temperature'] = common.temperature;
+    if (common.topP !== undefined) params['top_p'] = common.topP;
+    if (common.stopSequences) params['stop_sequences'] = common.stopSequences;
     if (context.signal) params['signal'] = context.signal;
 
     try {
@@ -155,6 +154,7 @@ export function createAnthropicGenerateStream(
         new Map();
 
       for await (const event of stream) {
+        if (context.signal?.aborted) break;
         switch (event.type) {
           case 'message_start': {
             inputTokens = event.message?.usage?.input_tokens;

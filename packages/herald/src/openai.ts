@@ -3,6 +3,7 @@ import { toOpenAIMessagesGrouped } from 'conversationalist/adapters/openai';
 import type { ToolCallInput } from 'interoperability';
 
 import { HeraldError } from './errors.ts';
+import { resolveCommonParameters } from './resolve-common-parameters.ts';
 import type {
   GenerateContext,
   GenerateFunction,
@@ -22,7 +23,8 @@ import type {
  * The optional `baseURL` enables LM Studio, Ollama, Groq, etc.
  */
 export function createOpenAIGenerate(options: OpenAIProviderOptions): GenerateFunction {
-  const { model, maximumTokens, temperature, topP, stopSequences, baseURL } = options;
+  const { model, baseURL } = options;
+  const common = resolveCommonParameters(options);
   let clientPromise: Promise<OpenAIClient> | undefined;
 
   function getClient(): Promise<OpenAIClient> {
@@ -50,13 +52,11 @@ export function createOpenAIGenerate(options: OpenAIProviderOptions): GenerateFu
       messages,
     };
 
-    if (maximumTokens !== undefined) params['max_tokens'] = maximumTokens;
+    if (common.maximumTokens !== undefined) params['max_tokens'] = common.maximumTokens;
     if (hasTools) params['tools'] = Array.isArray(tools) ? tools : [tools];
-    if (temperature !== undefined) params['temperature'] = temperature;
-    if (topP !== undefined) params['top_p'] = topP;
-    if (stopSequences !== undefined && stopSequences.length > 0) {
-      params['stop'] = stopSequences;
-    }
+    if (common.temperature !== undefined) params['temperature'] = common.temperature;
+    if (common.topP !== undefined) params['top_p'] = common.topP;
+    if (common.stopSequences) params['stop'] = common.stopSequences;
     if (context.signal) params['signal'] = context.signal;
 
     try {
@@ -101,7 +101,8 @@ export function createOpenAIGenerate(options: OpenAIProviderOptions): GenerateFu
 export function createOpenAIGenerateStream(
   options: Omit<OpenAIProviderOptions, 'client'> & { client?: OpenAIStreamingClient },
 ): StreamingGenerateFunction {
-  const { model, maximumTokens, temperature, topP, stopSequences, baseURL } = options;
+  const { model, baseURL } = options;
+  const common = resolveCommonParameters(options);
   let clientPromise: Promise<OpenAIStreamingClient> | undefined;
 
   function getClient(): Promise<OpenAIStreamingClient> {
@@ -134,13 +135,11 @@ export function createOpenAIGenerateStream(
       stream_options: { include_usage: true },
     };
 
-    if (maximumTokens !== undefined) params['max_tokens'] = maximumTokens;
+    if (common.maximumTokens !== undefined) params['max_tokens'] = common.maximumTokens;
     if (hasTools) params['tools'] = Array.isArray(tools) ? tools : [tools];
-    if (temperature !== undefined) params['temperature'] = temperature;
-    if (topP !== undefined) params['top_p'] = topP;
-    if (stopSequences !== undefined && stopSequences.length > 0) {
-      params['stop'] = stopSequences;
-    }
+    if (common.temperature !== undefined) params['temperature'] = common.temperature;
+    if (common.topP !== undefined) params['top_p'] = common.topP;
+    if (common.stopSequences) params['stop'] = common.stopSequences;
     if (context.signal) params['signal'] = context.signal;
 
     try {
@@ -155,6 +154,7 @@ export function createOpenAIGenerateStream(
         new Map();
 
       for await (const chunk of stream) {
+        if (context.signal?.aborted) break;
         const choice = chunk.choices[0];
 
         if (choice) {
