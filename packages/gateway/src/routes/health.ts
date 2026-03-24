@@ -1,15 +1,8 @@
 import { Hono } from 'hono';
-import type { GenerateFunction } from 'operative';
-import type { Store } from 'sentinel';
 
-import type { HealthResponse } from '../types';
+import type { Bureau, HealthResponse } from '../types';
 
-interface HealthDependencies {
-  store: Store;
-  generate: GenerateFunction | undefined;
-}
-
-export function createHealthRoutes(dependencies: HealthDependencies) {
+export function createHealthRoutes(bureau: Bureau) {
   const app = new Hono();
 
   app.get('/live', (context) => {
@@ -18,9 +11,8 @@ export function createHealthRoutes(dependencies: HealthDependencies) {
   });
 
   app.get('/ready', (context) => {
-    const ready = dependencies.store !== undefined && dependencies.generate !== undefined;
-    const body: HealthResponse = { status: ready ? 'ok' : 'unavailable' };
-    return context.json(body, ready ? 200 : 503);
+    const body: HealthResponse = { status: bureau.ready ? 'ok' : 'unavailable' };
+    return context.json(body, bureau.ready ? 200 : 503);
   });
 
   return app;

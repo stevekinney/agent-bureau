@@ -1,5 +1,13 @@
+import { createBureau } from '../create-bureau';
 import { createGateway } from '../create-gateway';
-import type { Gateway, GatewayOptions } from '../types';
+import type { Bureau, BureauOptions, Gateway, GatewayOptions } from '../types';
+
+/**
+ * Creates a bureau for testing without any HTTP layer.
+ */
+export function createTestBureau(options: BureauOptions = {}): Bureau {
+  return createBureau(options);
+}
 
 /**
  * Creates a gateway for testing. Uses app.request() for HTTP assertions

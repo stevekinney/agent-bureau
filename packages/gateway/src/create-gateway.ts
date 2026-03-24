@@ -1,26 +1,18 @@
 import { Hono } from 'hono';
 import { serveStatic } from 'hono/bun';
 import { cors } from 'hono/cors';
-import type { GenerateFunction } from 'operative';
-import type { Store } from 'sentinel';
-import { createStore } from 'sentinel';
 
-import { resolveGenerate } from './configuration';
+import { createBureau } from './create-bureau';
 import { createAuthentication, errorHandler, requestIdentifier } from './middleware';
 import { createRoutes } from './routes';
 import { createPages } from './server/pages';
 import type { Gateway, GatewayOptions } from './types';
-import { DEFAULT_MAXIMUM_STEPS, DEFAULT_PORT } from './types';
+import { DEFAULT_PORT } from './types';
 import { createWebSocketHandler } from './websocket';
 
 export function createGateway(options: GatewayOptions = {}): Gateway {
-  const store: Store = options.store ?? createStore();
+  const bureau = createBureau(options);
   const port = options.port ?? DEFAULT_PORT;
-
-  let generate: GenerateFunction | undefined = options.generate;
-  if (!generate && options.provider) {
-    generate = resolveGenerate(options.provider);
-  }
 
   const app = new Hono();
 
@@ -29,30 +21,20 @@ export function createGateway(options: GatewayOptions = {}): Gateway {
   app.use('*', requestIdentifier);
   app.use('/api/*', createAuthentication(options.authToken));
 
-  // Mount routes
-  const routes = createRoutes({
-    store,
-    generate,
-    toolbox: options.toolbox,
-    persistence: options.persistence,
-    provider: options.provider,
-    stopWhen: options.stopWhen,
-    maximumSteps: options.maximumSteps ?? DEFAULT_MAXIMUM_STEPS,
-    systemPrompt: options.systemPrompt,
-  });
-
-  app.route('/', routes);
+  // Mount API routes
+  app.route('/', createRoutes(bureau));
 
   // Mount SSR pages
-  const pages = createPages({
-    store,
-    provider: options.provider,
-    toolbox: options.toolbox,
-    maximumSteps: options.maximumSteps ?? DEFAULT_MAXIMUM_STEPS,
-    systemPrompt: options.systemPrompt,
-  });
-
-  app.route('/', pages);
+  app.route(
+    '/',
+    createPages({
+      store: bureau.store,
+      provider: options.provider,
+      toolbox: options.toolbox,
+      maximumSteps: bureau.getConfiguration().maximumSteps,
+      systemPrompt: options.systemPrompt,
+    }),
+  );
 
   // Serve static files
   app.use('/public/*', serveStatic({ root: 'dist/' }));
@@ -61,7 +43,7 @@ export function createGateway(options: GatewayOptions = {}): Gateway {
   app.onError(errorHandler);
 
   function start() {
-    const wsHandler = createWebSocketHandler({ store });
+    const wsHandler = createWebSocketHandler({ store: bureau.store });
 
     const server = Bun.serve({
       port,
@@ -86,10 +68,10 @@ export function createGateway(options: GatewayOptions = {}): Gateway {
       stop() {
         void server.stop();
         wsHandler.dispose();
-        store.dispose();
+        bureau.dispose();
       },
     };
   }
 
-  return { app, store, port, start };
+  return { app, bureau, store: bureau.store, port, start };
 }

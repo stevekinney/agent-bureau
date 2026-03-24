@@ -1,8 +1,11 @@
 export { resolveGenerate } from './configuration';
+export { BureauError, createBureau } from './create-bureau';
 export { createGateway } from './create-gateway';
 export { serializeRunState } from './serialization';
 export type {
   ApiErrorResponse,
+  Bureau,
+  BureauOptions,
   ClientFrame,
   ConfigurationResponse,
   CreateRunRequest,

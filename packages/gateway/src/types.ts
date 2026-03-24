@@ -1,11 +1,15 @@
 import type { Toolbox } from 'armorer';
-import type { SessionPersistenceAdapter } from 'conversationalist';
+import type {
+  ConversationHistory,
+  SessionInfo,
+  SessionPersistenceAdapter,
+} from 'conversationalist';
 import type { ProviderName } from 'herald';
 import type { Hono } from 'hono';
 import type { GenerateFunction, StopCondition } from 'operative';
 import type { Store } from 'sentinel';
 
-// ── Gateway Configuration ───────────────────────────────────────────
+// ── Provider Configuration ───────────────────────────────────────────
 
 export interface ProviderConfiguration {
   provider: ProviderName;
@@ -15,7 +19,9 @@ export interface ProviderConfiguration {
   apiKey?: string;
 }
 
-export interface GatewayOptions {
+// ── Bureau (headless, no HTTP) ──────────────────────────────────────
+
+export interface BureauOptions {
   generate?: GenerateFunction;
   provider?: ProviderConfiguration;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -25,6 +31,31 @@ export interface GatewayOptions {
   stopWhen?: StopCondition | StopCondition[];
   maximumSteps?: number;
   systemPrompt?: string;
+}
+
+export interface Bureau {
+  readonly store: Store;
+  readonly ready: boolean;
+
+  createRun(request: CreateRunRequest): Promise<RunSummary>;
+  listRuns(status?: string): RunSummary[];
+  getRun(id: string): RunSummary | undefined;
+  abortRun(id: string): RunSummary;
+  deleteRun(id: string): void;
+
+  listConversations(): Promise<SessionInfo[]>;
+  getConversation(id: string): Promise<ConversationHistory | undefined>;
+  deleteConversation(id: string): Promise<void>;
+
+  getConfiguration(): ConfigurationResponse;
+  getTools(): ToolSummary[];
+
+  dispose(): void;
+}
+
+// ── Gateway (HTTP layer wrapping Bureau) ────────────────────────────
+
+export interface GatewayOptions extends BureauOptions {
   port?: number;
   hostname?: string;
   authToken?: string;
@@ -32,6 +63,7 @@ export interface GatewayOptions {
 
 export interface Gateway {
   readonly app: Hono;
+  readonly bureau: Bureau;
   readonly store: Store;
   readonly port: number;
   start(): { stop(): void };
