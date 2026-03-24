@@ -11,6 +11,7 @@ import type {
   ToolResult,
 } from '../../types';
 import { getOrderedMessages } from '../../utilities/message-store';
+import { isCanonicalToolResultPayload, toJSONValue } from '../shared';
 
 /**
  * Gemini text part.
@@ -350,52 +351,6 @@ export function toGeminiMessages(conversation: Conversation): GeminiConversation
     result.systemInstruction = systemInstruction;
   }
   return result;
-}
-
-function toJSONValue(value: unknown): JSONValue {
-  if (
-    value === null ||
-    typeof value === 'string' ||
-    typeof value === 'number' ||
-    typeof value === 'boolean'
-  ) {
-    return value;
-  }
-
-  if (Array.isArray(value)) {
-    return value.map((item) => toJSONValue(item));
-  }
-
-  if (value && typeof value === 'object') {
-    const record: Record<string, JSONValue> = {};
-    for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
-      record[key] = toJSONValue(entry);
-    }
-    return record;
-  }
-
-  return String(value as string);
-}
-
-function isCanonicalToolResultPayload(value: JSONValue): value is JSONValue & {
-  outcome: ToolResult['outcome'];
-  content: JSONValue;
-  error?: ToolResult['error'];
-  action?: ToolResult['action'];
-  inputDigest?: string;
-  outputDigest?: string;
-} {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    return false;
-  }
-
-  return (
-    'outcome' in value &&
-    (value['outcome'] === 'success' ||
-      value['outcome'] === 'error' ||
-      value['outcome'] === 'action_required') &&
-    'content' in value
-  );
 }
 
 function parseFunctionArguments(args: Record<string, unknown>): JSONValue {

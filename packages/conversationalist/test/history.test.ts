@@ -746,4 +746,114 @@ describe('Conversation', () => {
       expect(history.completed).toBe(true);
     });
   });
+
+  describe('maxHistoryDepth', () => {
+    it('prunes oldest ancestors when depth exceeded', () => {
+      const history = new ConversationHistory(createConversation(), {
+        maxHistoryDepth: 5,
+      });
+
+      for (let i = 0; i < 10; i++) {
+        history.appendUserMessage(`Message ${i}`);
+      }
+
+      const path = history.getPath();
+      expect(path.length).toBeLessThanOrEqual(5);
+    });
+
+    it('limits undo to maxHistoryDepth', () => {
+      const history = new ConversationHistory(createConversation(), {
+        maxHistoryDepth: 5,
+      });
+
+      for (let i = 0; i < 10; i++) {
+        history.appendUserMessage(`Message ${i}`);
+      }
+
+      let undoCount = 0;
+      while (history.canUndo) {
+        history.undo();
+        undoCount++;
+      }
+
+      expect(undoCount).toBeLessThanOrEqual(4); // max depth 5 means at most 4 undos
+    });
+
+    it('does not limit when maxHistoryDepth is undefined', () => {
+      const history = new ConversationHistory(createConversation());
+
+      for (let i = 0; i < 10; i++) {
+        history.appendUserMessage(`Message ${i}`);
+      }
+
+      const path = history.getPath();
+      // 1 initial + 10 mutations = 11
+      expect(path.length).toBe(11);
+    });
+  });
+
+  describe('persistence error handling', () => {
+    it('emits persistence.error when adapter save throws', async () => {
+      const saveError = new Error('disk full');
+      const brokenAdapter = {
+        save: () => Promise.reject(saveError),
+        load: () => Promise.resolve(undefined),
+        list: () => Promise.resolve([]),
+        delete: () => Promise.resolve(),
+      };
+
+      const history = new ConversationHistory(createConversation(), {
+        persistence: brokenAdapter,
+      });
+
+      let emittedError: unknown = undefined;
+      history.addEventListener('persistence.error' as any, (event: any) => {
+        emittedError = event?.detail?.error;
+      });
+
+      history.appendUserMessage('trigger save');
+
+      // Wait for debounced save + error propagation
+      await Bun.sleep(200);
+
+      expect(emittedError).toBe(saveError);
+    });
+  });
+
+  describe('compaction event emission', () => {
+    it('emits compaction.completed exactly once when compaction occurs', async () => {
+      const history = new ConversationHistory(createConversation());
+      for (let i = 0; i < 10; i++) {
+        history.appendUserMessage(`Message ${i}`);
+        history.appendAssistantMessage(`Reply ${i}`);
+      }
+
+      let completedCount = 0;
+      history.addEventListener('compaction.completed', () => {
+        completedCount++;
+      });
+
+      const summarizer = async (messages: Message[]) => `Summary of ${messages.length} messages`;
+
+      await history.compact(summarizer, { preserveRecentCount: 2 });
+
+      expect(completedCount).toBe(1);
+    });
+
+    it('emits compaction.completed exactly once when no compaction needed', async () => {
+      const history = new ConversationHistory(createConversation());
+      history.appendUserMessage('only one');
+
+      let completedCount = 0;
+      history.addEventListener('compaction.completed', () => {
+        completedCount++;
+      });
+
+      const summarizer = async (messages: Message[]) => `Summary of ${messages.length} messages`;
+
+      await history.compact(summarizer, { preserveRecentCount: 10 });
+
+      expect(completedCount).toBe(1);
+    });
+  });
 });

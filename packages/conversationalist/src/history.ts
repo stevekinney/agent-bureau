@@ -88,7 +88,10 @@ export interface ConversationEventDetail {
   toolCallIds?: readonly string[];
 }
 
-export type ConversationEvent = EmissionEvent<ConversationEventDetail, ConversationEventType>;
+export type ConversationEvent = EmissionEvent<
+  ConversationEventDetail | PersistenceErrorDetail,
+  ConversationEventType
+>;
 
 export type ConversationActionType =
   | 'push'
@@ -110,6 +113,10 @@ export type ConversationActionType =
   | 'session.tagged'
   | 'session.renamed';
 
+export interface PersistenceErrorDetail {
+  error: unknown;
+}
+
 export interface ConversationEvents {
   change: ConversationEventDetail;
   push: ConversationEventDetail;
@@ -130,6 +137,7 @@ export interface ConversationEvents {
   'session.forked': ConversationEventDetail;
   'session.tagged': ConversationEventDetail;
   'session.renamed': ConversationEventDetail;
+  'persistence.error': PersistenceErrorDetail;
 }
 
 export type ConversationEventType = Extract<keyof ConversationEvents, string>;
@@ -251,8 +259,14 @@ export class Conversation {
 
     if (this.environment.persistence) {
       const persistence = this.environment.persistence;
+      let debounceTimer: ReturnType<typeof setTimeout> | undefined;
       this.addEventListener('change', () => {
-        void persistence.save(this.current);
+        if (debounceTimer !== undefined) clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(() => {
+          persistence.save(this.current).catch((error: unknown) => {
+            this.emitter.emit('persistence.error', { error });
+          });
+        }, 100);
       });
     }
   }
@@ -297,6 +311,11 @@ export class Conversation {
     this.currentNode.children.push(newNode);
     this.currentNode = newNode;
 
+    // Prune oldest ancestors when maxHistoryDepth is exceeded
+    if (this.environment.maxHistoryDepth !== undefined) {
+      this.pruneToDepth(this.environment.maxHistoryDepth);
+    }
+
     this.emitConversationEvent(
       'change',
       this.buildEventDetail(changeAction, previousConversation, context),
@@ -311,6 +330,41 @@ export class Conversation {
         eventType,
         this.buildEventDetail(eventAction, previousConversation, context),
       );
+    }
+  }
+
+  private pruneToDepth(maxDepth: number): void {
+    // Calculate the current path length from root to current node
+    let depth = 0;
+    let node: HistoryNode | null = this.currentNode;
+    while (node) {
+      depth++;
+      node = node.parent;
+    }
+
+    // Prune from the root until depth is within limit
+    while (depth > maxDepth) {
+      // Walk from current to root
+      let root: HistoryNode = this.currentNode;
+      while (root.parent) {
+        root = root.parent;
+      }
+
+      // Promote root's child that is on the path to current
+      const childOnPath = root.children.find((child) => {
+        let curr: HistoryNode | null = this.currentNode;
+        while (curr) {
+          if (curr === child) return true;
+          curr = curr.parent;
+        }
+        return false;
+      });
+
+      if (!childOnPath) break;
+
+      // Detach the child from the old root
+      childOnPath.parent = null;
+      depth--;
     }
   }
 
@@ -361,7 +415,7 @@ export class Conversation {
     run(this.current);
 
     const handler = (event: ConversationEvent) => {
-      if (event?.detail?.conversation) {
+      if (event?.detail && 'conversation' in event.detail) {
         run(event.detail.conversation);
       }
     };
@@ -934,11 +988,12 @@ export class Conversation {
         'compaction.completed',
         this.createChangeContext(previous, conversation, 'messages.removed'),
       );
+    } else {
+      this.emitConversationEvent(
+        'compaction.completed',
+        this.buildEventDetail('compaction.completed', previous),
+      );
     }
-    this.emitConversationEvent(
-      'compaction.completed',
-      this.buildEventDetail('compaction.completed', previous),
-    );
     return result;
   }
 

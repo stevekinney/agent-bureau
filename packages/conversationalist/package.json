@@ -52,16 +52,16 @@
       "types": "./dist/history.d.ts"
     },
     "./message": {
-      "import": "./dist/message.js",
-      "bun": "./dist/message.js",
-      "default": "./dist/message.js",
-      "types": "./dist/message.d.ts"
+      "import": "./dist/utilities/message.js",
+      "bun": "./dist/utilities/message.js",
+      "default": "./dist/utilities/message.js",
+      "types": "./dist/utilities/message.d.ts"
     },
     "./utilities": {
-      "import": "./dist/utilities.js",
-      "bun": "./dist/utilities.js",
-      "default": "./dist/utilities.js",
-      "types": "./dist/utilities.d.ts"
+      "import": "./dist/utilities/index.js",
+      "bun": "./dist/utilities/index.js",
+      "default": "./dist/utilities/index.js",
+      "types": "./dist/utilities/index.d.ts"
     },
     "./test": {
       "import": "./dist/test/index.js",
@@ -82,10 +82,10 @@
       "types": "./dist/export/index.d.ts"
     },
     "./schemas": {
-      "import": "./dist/schemas/index.js",
-      "bun": "./dist/schemas/index.js",
-      "default": "./dist/schemas/index.js",
-      "types": "./dist/schemas/index.d.ts"
+      "import": "./dist/schemas.js",
+      "bun": "./dist/schemas.js",
+      "default": "./dist/schemas.js",
+      "types": "./dist/schemas.d.ts"
     },
     "./adapters/openai": {
       "import": "./dist/adapters/openai/index.js",
@@ -106,10 +106,10 @@
       "types": "./dist/adapters/gemini/index.d.ts"
     },
     "./redaction": {
-      "import": "./dist/redaction/index.js",
-      "bun": "./dist/redaction/index.js",
-      "default": "./dist/redaction/index.js",
-      "types": "./dist/redaction/index.d.ts"
+      "import": "./dist/plugins/pii-redaction.js",
+      "bun": "./dist/plugins/pii-redaction.js",
+      "default": "./dist/plugins/pii-redaction.js",
+      "types": "./dist/plugins/pii-redaction.d.ts"
     },
     "./versioning": {
       "import": "./dist/versioning/index.js",

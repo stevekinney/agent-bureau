@@ -449,7 +449,7 @@ export class MarkdownParseError extends Error {
  * Generates a simple unique ID for use when metadata is not available.
  */
 function generateId(): string {
-  return `${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
+  return crypto.randomUUID();
 }
 
 /**
@@ -500,6 +500,27 @@ export function fromMarkdown(markdown: string): Conversation {
 /**
  * Parses markdown with full metadata (YAML frontmatter with message metadata).
  */
+const FRONTMATTER_ALLOWLIST = new Set([
+  'schemaVersion',
+  'id',
+  'title',
+  'status',
+  'metadata',
+  'createdAt',
+  'updatedAt',
+  'messages',
+]);
+
+function stripUnknownFrontmatterKeys(data: Record<string, unknown>): Record<string, unknown> {
+  const stripped: Record<string, unknown> = {};
+  for (const key of Object.keys(data)) {
+    if (FRONTMATTER_ALLOWLIST.has(key)) {
+      stripped[key] = data[key];
+    }
+  }
+  return stripped;
+}
+
 function parseMarkdownWithMetadata(trimmed: string): Conversation {
   let parsed: matter.GrayMatterFile<string>;
   try {
@@ -508,7 +529,9 @@ function parseMarkdownWithMetadata(trimmed: string): Conversation {
     throw new MarkdownParseError('Invalid frontmatter: failed to parse YAML');
   }
 
-  const frontmatter = parsed.data as ConversationFrontmatter;
+  const frontmatter = stripUnknownFrontmatterKeys(
+    parsed.data as Record<string, unknown>,
+  ) as unknown as ConversationFrontmatter;
   const body = parsed.content.trim();
 
   // Validate required frontmatter fields

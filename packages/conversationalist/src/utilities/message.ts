@@ -13,7 +13,7 @@ export function createMessage(props: Message | AssistantMessage): Message | Assi
   const content =
     typeof props.content === 'string'
       ? props.content
-      : toReadonly(props.content.map((part) => part));
+      : toReadonly(structuredClone([...props.content]));
 
   const message: Message = {
     id: props.id,
@@ -23,8 +23,8 @@ export function createMessage(props: Message | AssistantMessage): Message | Assi
     createdAt: props.createdAt,
     metadata: toReadonly({ ...props.metadata }),
     hidden: props.hidden,
-    toolCall: props.toolCall ? toReadonly({ ...props.toolCall }) : undefined,
-    toolResult: props.toolResult ? toReadonly({ ...props.toolResult }) : undefined,
+    toolCall: props.toolCall ? toReadonly(structuredClone(props.toolCall)) : undefined,
+    toolResult: props.toolResult ? toReadonly(structuredClone(props.toolResult)) : undefined,
     tokenUsage: props.tokenUsage ? toReadonly({ ...props.tokenUsage }) : undefined,
   };
 

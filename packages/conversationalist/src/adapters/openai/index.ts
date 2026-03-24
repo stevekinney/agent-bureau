@@ -11,6 +11,7 @@ import type {
   ToolResult,
 } from '../../types';
 import { getOrderedMessages } from '../../utilities/message-store';
+import { isCanonicalToolResultPayload, parseJSONValue } from '../shared';
 
 export interface OpenAIConversationExportOptions {
   groupToolCalls?: boolean;
@@ -268,37 +269,8 @@ function toConversationContent(
   return parts;
 }
 
-function parseJSONValue(value: string): JSONValue | undefined {
-  try {
-    return JSON.parse(value) as JSONValue;
-  } catch {
-    return undefined;
-  }
-}
-
 function parseToolArguments(value: string): JSONValue {
   return parseJSONValue(value) ?? value;
-}
-
-function isCanonicalToolResultPayload(value: JSONValue): value is JSONValue & {
-  outcome: ToolResult['outcome'];
-  content: JSONValue;
-  error?: ToolResult['error'];
-  action?: ToolResult['action'];
-  inputDigest?: string;
-  outputDigest?: string;
-} {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    return false;
-  }
-
-  return (
-    'outcome' in value &&
-    (value['outcome'] === 'success' ||
-      value['outcome'] === 'error' ||
-      value['outcome'] === 'action_required') &&
-    'content' in value
-  );
 }
 
 function parseToolResult(callId: string, content: string | OpenAITextContentPart[]): ToolResult {

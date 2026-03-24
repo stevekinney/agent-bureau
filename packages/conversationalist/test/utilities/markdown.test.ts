@@ -1584,4 +1584,63 @@ describe('role labels', () => {
       expect(getRoleFromLabel('ASSISTANT')).toBeUndefined(); // uppercase, not valid
     });
   });
+
+  describe('frontmatter key stripping', () => {
+    test('strips unknown/malicious frontmatter keys', () => {
+      const markdown = `---
+id: conv-1
+status: active
+metadata: {}
+createdAt: "2024-01-01T00:00:00.000Z"
+updatedAt: "2024-01-01T00:00:00.000Z"
+messages:
+  msg-1:
+    position: 0
+    createdAt: "2024-01-01T00:00:00.000Z"
+    metadata: {}
+    hidden: false
+maliciousKey: "exec('rm -rf /')"
+__proto__: "attack"
+---
+
+### User (msg-1)
+
+Hello
+`;
+      const conversation = fromMarkdown(markdown);
+      expect(conversation.id).toBe('conv-1');
+      // Malicious keys should not appear anywhere in the conversation
+      expect('maliciousKey' in conversation).toBe(false);
+      // Extra keys should not leak into metadata
+      expect(Object.hasOwn(conversation.metadata, 'maliciousKey')).toBe(false);
+    });
+
+    test('preserves all allowlisted frontmatter keys', () => {
+      const markdown = `---
+schemaVersion: 4
+id: conv-2
+title: "Test Chat"
+status: active
+metadata:
+  key: value
+createdAt: "2024-01-01T00:00:00.000Z"
+updatedAt: "2024-01-01T00:00:00.000Z"
+messages:
+  msg-1:
+    position: 0
+    createdAt: "2024-01-01T00:00:00.000Z"
+    metadata: {}
+    hidden: false
+---
+
+### User (msg-1)
+
+Hello
+`;
+      const conversation = fromMarkdown(markdown);
+      expect(conversation.id).toBe('conv-2');
+      expect(conversation.title).toBe('Test Chat');
+      expect(conversation.status).toBe('active');
+    });
+  });
 });
