@@ -7,6 +7,7 @@ const entrypoints = [
   './src/loop.ts',
   './src/errors.ts',
   './src/events.ts',
+  './src/generate-middleware.ts',
   './src/streaming.ts',
   './src/types.ts',
   './src/define-agent.ts',

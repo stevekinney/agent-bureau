@@ -87,24 +87,55 @@ export function instrument(
       stepSpans.set(step, stepSpan);
       const stepContext = trace.setSpan(context.active(), stepSpan);
       stepContexts.set(step, stepContext);
+    }),
+  );
 
+  subscriptions.push(
+    activeRun.addEventListener('generate.started', (event) => {
+      const { step } = event.detail;
+      const stepContext = stepContexts.get(step);
       const generateSpan = tracer.startSpan('operative.generate', {}, stepContext);
       generateSpans.set(step, generateSpan);
     }),
   );
 
   subscriptions.push(
-    activeRun.addEventListener('tools.executing', (event) => {
-      const { step, toolCalls } = event.detail;
-
-      // End the generate span — LLM generation is complete
+    activeRun.addEventListener('generate.completed', (event) => {
+      const { step, response, durationMilliseconds } = event.detail;
       const generateSpan = generateSpans.get(step);
       if (generateSpan?.isRecording()) {
+        if (response.usage) {
+          setUsageAttributes(generateSpan, response.usage);
+        }
+        generateSpan.setAttribute('operative.generate.duration_ms', durationMilliseconds);
         generateSpan.end();
       }
       generateSpans.delete(step);
+    }),
+  );
 
-      // Start the tools span
+  subscriptions.push(
+    activeRun.addEventListener('generate.error', (event) => {
+      const { step, error, durationMilliseconds } = event.detail;
+      const generateSpan = generateSpans.get(step);
+      if (generateSpan?.isRecording()) {
+        generateSpan.setStatus({
+          code: SpanStatusCode.ERROR,
+          message: error instanceof Error ? error.message : String(error),
+        });
+        if (error instanceof Error) {
+          generateSpan.recordException(error);
+        }
+        generateSpan.setAttribute('operative.generate.duration_ms', durationMilliseconds);
+        generateSpan.end();
+      }
+      generateSpans.delete(step);
+    }),
+  );
+
+  subscriptions.push(
+    activeRun.addEventListener('tools.executing', (event) => {
+      const { step, toolCalls } = event.detail;
       const stepContext = stepContexts.get(step);
       const toolsSpan = tracer.startSpan(
         'operative.tools',
@@ -128,23 +159,6 @@ export function instrument(
         toolsSpan.setAttribute('operative.tools.results_count', results.length);
         toolsSpan.end();
         toolsSpans.delete(step);
-      }
-    }),
-  );
-
-  subscriptions.push(
-    activeRun.addEventListener('step.generated', (event) => {
-      const { step, usage } = event.detail;
-
-      // For text-only steps the generate span is still open here.
-      // For tool steps it was already ended by tools.executing.
-      const generateSpan = generateSpans.get(step);
-      if (generateSpan?.isRecording()) {
-        if (usage) {
-          setUsageAttributes(generateSpan, usage);
-        }
-        generateSpan.end();
-        generateSpans.delete(step);
       }
     }),
   );

@@ -97,6 +97,11 @@ export interface GenerateResponse {
 export type GenerateFunction = (context: GenerateContext) => Promise<GenerateResponse>;
 
 /**
+ * Wraps a GenerateFunction, returning a new GenerateFunction.
+ */
+export type GenerateMiddleware = (next: GenerateFunction) => GenerateFunction;
+
+/**
  * Result of a single step in the agent loop.
  */
 export interface StepResult {
@@ -106,6 +111,7 @@ export interface StepResult {
   toolCalls: readonly ToolCall[];
   results: readonly ToolExecutionResult[];
   usage?: TokenUsage;
+  metadata?: Record<string, JSONValue>;
   final: boolean;
 }
 
@@ -142,6 +148,23 @@ export interface ToolExecutionResultContext {
 }
 
 /**
+ * Named hook type aliases for composable hook arrays.
+ */
+export type PrepareStepHook = (context: StepContext) => Promise<void | GenerateResponse>;
+export type BeforeToolExecutionHook = (context: ToolExecutionHookContext) => Promise<ToolCall[]>;
+export type AfterToolExecutionHook = (context: ToolExecutionResultContext) => Promise<void>;
+export type OnStepHook = (context: StepResult) => Promise<void>;
+export type SelectToolsHook = (context: StepContext) => Promise<Toolbox> | Toolbox;
+export type ValidateResponseHook = (
+  response: GenerateResponse,
+  context: StepContext,
+) => Promise<GenerateResponse | void>;
+export type ValidateToolResultHook = (
+  result: ToolExecutionResult,
+  context: ToolExecutionResultContext,
+) => Promise<ToolExecutionResult | void>;
+
+/**
  * A predicate that determines whether the loop should stop.
  */
 export type StopCondition = (context: StepResult) => boolean | Promise<boolean>;
@@ -168,10 +191,10 @@ export interface RunOptions {
   conversation: Conversation | ConversationHistory;
   stopWhen?: StopCondition | StopCondition[];
   maximumSteps?: number;
-  prepareStep?: (context: StepContext) => Promise<void | GenerateResponse>;
-  beforeToolExecution?: (context: ToolExecutionHookContext) => Promise<ToolCall[]>;
-  afterToolExecution?: (context: ToolExecutionResultContext) => Promise<void>;
-  onStep?: (context: StepResult) => Promise<void>;
+  prepareStep?: PrepareStepHook | PrepareStepHook[];
+  beforeToolExecution?: BeforeToolExecutionHook | BeforeToolExecutionHook[];
+  afterToolExecution?: AfterToolExecutionHook | AfterToolExecutionHook[];
+  onStep?: OnStepHook | OnStepHook[];
   executeOptions?: OperativeExecuteOptions;
   signal?: AbortSignal;
   /**
@@ -187,20 +210,14 @@ export interface RunOptions {
    * before proceeding with the generate call.
    */
   backpressure?: BackpressureStrategy;
-  validateResponse?: (
-    response: GenerateResponse,
-    context: StepContext,
-  ) => Promise<GenerateResponse | void>;
-  validateToolResult?: (
-    result: ToolExecutionResult,
-    context: ToolExecutionResultContext,
-  ) => Promise<ToolExecutionResult | void>;
+  validateResponse?: ValidateResponseHook | ValidateResponseHook[];
+  validateToolResult?: ValidateToolResultHook | ValidateToolResultHook[];
   /**
    * Called before each step to dynamically select which tools are available.
    * Return a filtered or entirely different toolbox to control which tools
    * the model can call on a per-step basis.
    */
-  selectTools?: (context: StepContext) => Promise<Toolbox> | Toolbox;
+  selectTools?: SelectToolsHook | SelectToolsHook[];
   onElicitation?: OnElicitation;
   contextManagement?: ContextManagementOptions;
   responseSchema?: ZodType;

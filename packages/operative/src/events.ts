@@ -28,6 +28,13 @@ export interface OperativeEvents {
   'run.error': { step: number; error: unknown };
   'run.aborted': { step: number; reason?: string };
   'step.aborted': { step: number; reason?: string };
+  'generate.started': { step: number };
+  'generate.completed': {
+    step: number;
+    response: GenerateResponse;
+    durationMilliseconds: number;
+  };
+  'generate.error': { step: number; error: unknown; durationMilliseconds: number };
   'generate.retry': { step: number; attempt: number; error: unknown };
   'response.validated': {
     step: number;
@@ -50,6 +57,7 @@ export interface OperativeEvents {
   'elicitation.resolved': { step: number; accepted: boolean };
   'backpressure.applied': { step: number; delay: number };
   'backpressure.released': { step: number };
+  'usage.accumulated': { step: number; stepUsage?: TokenUsage; totalUsage: TokenUsage };
   'budget.threshold': CostBudgetThresholdEvent;
   'budget.exceeded': CostBudgetExceededEvent;
   'session.saved': { sessionId: string; agentName: string };

@@ -121,11 +121,16 @@ async function runWithSessionLifecycle(
   // Wrap onStep for autoSave: 'step'
   if (persistence && autoSave === 'step') {
     const originalOnStep = runOptions.onStep;
+    const priorHooks = originalOnStep
+      ? Array.isArray(originalOnStep)
+        ? originalOnStep
+        : [originalOnStep]
+      : [];
     runOptions = {
       ...runOptions,
       onStep: async (stepResult) => {
-        if (originalOnStep) {
-          await originalOnStep(stepResult);
+        for (const hook of priorHooks) {
+          await hook(stepResult);
         }
         session = session
           ? {
@@ -179,9 +184,14 @@ function createRunWithSessionLifecycle(
   if (persistence && autoSave === 'step') {
     let session: AgentSession | undefined;
     const originalOnStep = runOptions.onStep;
+    const priorHooks = originalOnStep
+      ? Array.isArray(originalOnStep)
+        ? originalOnStep
+        : [originalOnStep]
+      : [];
     modifiedRunOptions.onStep = async (stepResult) => {
-      if (originalOnStep) {
-        await originalOnStep(stepResult);
+      for (const hook of priorHooks) {
+        await hook(stepResult);
       }
       session = session
         ? {

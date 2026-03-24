@@ -64,7 +64,8 @@ export {
   createSupervisor,
 } from './create-supervisor';
 export { defineAgent } from './define-agent';
-export { BudgetExceededError, ElicitationDeniedError } from './errors';
+export type { ClassifiedError, ErrorCategory } from './errors';
+export { BudgetExceededError, classifyError, ElicitationDeniedError } from './errors';
 export type {
   CombinedOperativeEvents,
   CombinedOperativeEventType,
@@ -72,11 +73,14 @@ export type {
   OperativeEvents,
   OperativeEventType,
 } from './events';
+export { composeGenerate, createFallbackGenerate } from './generate-middleware';
 export { run } from './run';
 export { withStreaming } from './streaming';
 export type {
+  AfterToolExecutionHook,
   AgentDefinition,
   AgentRunOptions,
+  BeforeToolExecutionHook,
   ContextManagementOptions,
   Conversation,
   ConversationHistory,
@@ -87,13 +91,17 @@ export type {
   FinishReason,
   GenerateContext,
   GenerateFunction,
+  GenerateMiddleware,
   GenerateResponse,
   JSONValue,
   OnElicitation,
+  OnStepHook,
   OperativeExecuteOptions,
+  PrepareStepHook,
   RetryOptions,
   RunOptions,
   RunResult,
+  SelectToolsHook,
   StepContext,
   StepResult,
   StopCondition,
@@ -106,4 +114,6 @@ export type {
   ToolExecutionHookContext,
   ToolExecutionResult,
   ToolExecutionResultContext,
+  ValidateResponseHook,
+  ValidateToolResultHook,
 } from './types';

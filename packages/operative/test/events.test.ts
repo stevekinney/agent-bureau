@@ -60,19 +60,25 @@ describe('events', () => {
 
     // Step 0: tool call turn
     expect(types[1]).toBe('step.started');
-    expect(types[2]).toBe('tools.executing');
-    expect(types[3]).toBe('tools.executed');
-    expect(types[4]).toBe('step.generated');
-    expect(types[5]).toBe('step.completed');
-
-    // Step 1: text-only turn
-    expect(types[6]).toBe('step.started');
+    expect(types[2]).toBe('generate.started');
+    expect(types[3]).toBe('generate.completed');
+    expect(types[4]).toBe('usage.accumulated');
+    expect(types[5]).toBe('tools.executing');
+    expect(types[6]).toBe('tools.executed');
     expect(types[7]).toBe('step.generated');
     expect(types[8]).toBe('step.completed');
 
+    // Step 1: text-only turn
+    expect(types[9]).toBe('step.started');
+    expect(types[10]).toBe('generate.started');
+    expect(types[11]).toBe('generate.completed');
+    expect(types[12]).toBe('usage.accumulated');
+    expect(types[13]).toBe('step.generated');
+    expect(types[14]).toBe('step.completed');
+
     // Run completed
-    expect(types[9]).toBe('run.completed');
-    expect(types).toHaveLength(10);
+    expect(types[15]).toBe('run.completed');
+    expect(types).toHaveLength(16);
   });
 
   it('chronological ordering across a multi-turn loop', async () => {
@@ -101,18 +107,27 @@ describe('events', () => {
       'run.started',
       // Step 0
       'step.started',
+      'generate.started',
+      'generate.completed',
+      'usage.accumulated',
       'tools.executing',
       'tools.executed',
       'step.generated',
       'step.completed',
       // Step 1
       'step.started',
+      'generate.started',
+      'generate.completed',
+      'usage.accumulated',
       'tools.executing',
       'tools.executed',
       'step.generated',
       'step.completed',
       // Step 2 (text-only)
       'step.started',
+      'generate.started',
+      'generate.completed',
+      'usage.accumulated',
       'step.generated',
       'step.completed',
       // Done
@@ -145,6 +160,9 @@ describe('events', () => {
     expect(types).toEqual([
       'run.started',
       'step.started',
+      'generate.started',
+      'generate.completed',
+      'usage.accumulated',
       'step.generated',
       'step.completed',
       'run.completed',

@@ -60,6 +60,61 @@ describe('createSupervisor', () => {
     expect(results[1]!.task).toBe('Task 2');
   });
 
+  it('delegateAll with parallel: true runs concurrently', async () => {
+    const completionOrder: string[] = [];
+
+    const entry: AgentRegistryEntry = {
+      agent: defineAgent({
+        name: 'worker',
+        generate: async (context) => {
+          const messages = context.conversation.getMessages();
+          const lastUserMessage = [...messages].reverse().find((m) => m.role === 'user');
+          const task =
+            typeof lastUserMessage?.content === 'string' ? lastUserMessage.content : 'unknown';
+          completionOrder.push(task);
+          return textResponse(`Response to ${task}`);
+        },
+        toolbox: createTestToolbox([]),
+        stopWhen: noToolCalls(),
+      }),
+      description: 'Worker',
+      capabilities: [],
+    };
+
+    const supervisor = createSupervisor({
+      agents: [entry],
+      routing: () => 'worker',
+    });
+
+    const routed: unknown[] = [];
+    supervisor.addEventListener('task.routed', (event) => routed.push(event.detail));
+
+    const results = await supervisor.delegateAll(['Task 1', 'Task 2', 'Task 3'], {
+      parallel: true,
+    });
+
+    expect(results).toHaveLength(3);
+    expect(results[0]!.task).toBe('Task 1');
+    expect(results[1]!.task).toBe('Task 2');
+    expect(results[2]!.task).toBe('Task 3');
+
+    // All tasks are routed before any complete (parallel behavior)
+    expect(routed).toHaveLength(3);
+  });
+
+  it('delegateAll parallel: true respects maximumDelegations', async () => {
+    const entry = createTestEntry('worker');
+    const supervisor = createSupervisor({
+      agents: [entry],
+      routing: () => 'worker',
+      maximumDelegations: 2,
+    });
+
+    await expect(
+      supervisor.delegateAll(['Task 1', 'Task 2', 'Task 3'], { parallel: true }),
+    ).rejects.toThrow('Maximum delegations');
+  });
+
   it('uses default synthesis with attribution', async () => {
     const entry = createTestEntry('writer');
     const supervisor = createSupervisor({

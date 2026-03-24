@@ -27,6 +27,11 @@ function accumulateUsage(accumulated: TokenUsage, step?: TokenUsage): void {
   accumulated.total += step.total;
 }
 
+function normalizeToArray<T>(value: T | T[] | undefined): T[] {
+  if (!value) return [];
+  return Array.isArray(value) ? value : [value];
+}
+
 function normalizeStopConditions(conditions: RunOptions['stopWhen']): StopCondition[] {
   if (!conditions) return [];
   return Array.isArray(conditions) ? conditions : [conditions];
@@ -120,18 +125,11 @@ export async function executeLoop(options: RunOptions, emitter?: EventEmitter): 
     generate,
     toolbox,
     maximumSteps = 25,
-    prepareStep,
-    beforeToolExecution,
-    afterToolExecution,
-    onStep,
     executeOptions,
     signal,
     collectAsync = false,
     retry,
     backpressure,
-    validateResponse,
-    validateToolResult,
-    selectTools,
     onElicitation,
     contextManagement,
     responseSchema,
@@ -141,6 +139,14 @@ export async function executeLoop(options: RunOptions, emitter?: EventEmitter): 
     parentContext,
     withTraceContext,
   } = options;
+
+  const prepareStepHooks = normalizeToArray(options.prepareStep);
+  const beforeToolExecutionHooks = normalizeToArray(options.beforeToolExecution);
+  const afterToolExecutionHooks = normalizeToArray(options.afterToolExecution);
+  const onStepHooks = normalizeToArray(options.onStep);
+  const selectToolsHooks = normalizeToArray(options.selectTools);
+  const validateResponseHooks = normalizeToArray(options.validateResponse);
+  const validateToolResultHooks = normalizeToArray(options.validateToolResult);
 
   const wrapWithTrace =
     parentContext !== undefined && withTraceContext !== undefined
@@ -286,27 +292,44 @@ export async function executeLoop(options: RunOptions, emitter?: EventEmitter): 
     emitter?.emit('step.started', { conversation, step });
 
     // Resolve per-step toolbox
-    const stepToolbox: Toolbox = selectTools
-      ? await selectTools({ conversation, step, signal: stepSignal, abortStep, elicit })
-      : toolbox;
+    let stepToolbox: Toolbox = toolbox;
+    for (const hook of selectToolsHooks) {
+      stepToolbox = await hook({ conversation, step, signal: stepSignal, abortStep, elicit });
+    }
 
     let response: GenerateResponse;
     try {
-      const prepareResult = prepareStep
-        ? await prepareStep({ conversation, step, signal: stepSignal, abortStep, elicit })
-        : undefined;
+      let prepareResult: GenerateResponse | void = undefined;
+      for (const hook of prepareStepHooks) {
+        prepareResult = await hook({ conversation, step, signal: stepSignal, abortStep, elicit });
+        if (prepareResult) break;
+      }
 
       if (prepareResult) {
         response = prepareResult;
       } else {
-        const doGenerate = () =>
-          callGenerateWithRetry(
-            generate,
-            { conversation, step, signal: stepSignal, toolbox: stepToolbox },
-            retry,
-            emitter,
-          );
-        response = wrapWithTrace ? await wrapWithTrace(doGenerate) : await doGenerate();
+        emitter?.emit('generate.started', { step });
+        const generateStart = performance.now();
+        try {
+          const doGenerate = () =>
+            callGenerateWithRetry(
+              generate,
+              { conversation, step, signal: stepSignal, toolbox: stepToolbox },
+              retry,
+              emitter,
+            );
+          response = wrapWithTrace ? await wrapWithTrace(doGenerate) : await doGenerate();
+          const durationMilliseconds = performance.now() - generateStart;
+          emitter?.emit('generate.completed', { step, response, durationMilliseconds });
+        } catch (generateError) {
+          const durationMilliseconds = performance.now() - generateStart;
+          emitter?.emit('generate.error', {
+            step,
+            error: generateError,
+            durationMilliseconds,
+          });
+          throw generateError;
+        }
       }
       backpressure?.onSuccess();
     } catch (error) {
@@ -326,19 +349,21 @@ export async function executeLoop(options: RunOptions, emitter?: EventEmitter): 
     }
 
     // Validate response guardrail
-    if (validateResponse) {
+    if (validateResponseHooks.length > 0) {
       try {
-        const originalResponse = { ...response };
-        const validated = await validateResponse(response, {
-          conversation,
-          step,
-          signal: stepSignal,
-          abortStep,
-          elicit,
-        });
-        if (validated) {
-          emitter?.emit('response.validated', { step, original: originalResponse, validated });
-          response = validated;
+        for (const hook of validateResponseHooks) {
+          const originalResponse = { ...response };
+          const validated = await hook(response, {
+            conversation,
+            step,
+            signal: stepSignal,
+            abortStep,
+            elicit,
+          });
+          if (validated) {
+            emitter?.emit('response.validated', { step, original: originalResponse, validated });
+            response = validated;
+          }
         }
       } catch (error) {
         emitter?.emit('run.error', { step, error });
@@ -368,6 +393,11 @@ export async function executeLoop(options: RunOptions, emitter?: EventEmitter): 
     const { content, toolCalls: toolCallInputs, usage, metadata } = response;
     lastContent = content;
     accumulateUsage(totalUsage, usage);
+    emitter?.emit('usage.accumulated', {
+      step,
+      stepUsage: usage,
+      totalUsage: { ...totalUsage },
+    });
 
     if (content && !response.messageAppended) {
       conversation.appendAssistantMessage(content, metadata);
@@ -382,14 +412,16 @@ export async function executeLoop(options: RunOptions, emitter?: EventEmitter): 
 
       let callsToExecute = materializedToolCalls;
 
-      if (beforeToolExecution) {
+      if (beforeToolExecutionHooks.length > 0) {
         try {
-          callsToExecute = await beforeToolExecution({
-            conversation,
-            step,
-            toolCalls: [...materializedToolCalls],
-            elicit,
-          });
+          for (const hook of beforeToolExecutionHooks) {
+            callsToExecute = await hook({
+              conversation,
+              step,
+              toolCalls: [...callsToExecute],
+              elicit,
+            });
+          }
         } catch (error) {
           emitter?.emit('run.error', { step, error });
           return makeErrorResult(error);
@@ -419,28 +451,30 @@ export async function executeLoop(options: RunOptions, emitter?: EventEmitter): 
         }
 
         // Validate tool results guardrail
-        if (validateToolResult) {
+        if (validateToolResultHooks.length > 0) {
           try {
             const validatedResults: ToolExecutionResult[] = [];
-            for (const result of results) {
-              const originalResult = { ...result };
-              const validated = await validateToolResult(result, {
-                conversation,
-                step,
-                toolCalls: callsToExecute,
-                results,
-                elicit,
-              });
-              if (validated) {
-                emitter?.emit('tool-result.validated', {
+            for (const originalResult of results) {
+              let currentResult = originalResult;
+              for (const hook of validateToolResultHooks) {
+                const snapshot = { ...currentResult };
+                const validated = await hook(currentResult, {
+                  conversation,
                   step,
-                  original: originalResult,
-                  validated,
+                  toolCalls: callsToExecute,
+                  results,
+                  elicit,
                 });
-                validatedResults.push(validated);
-              } else {
-                validatedResults.push(result);
+                if (validated) {
+                  emitter?.emit('tool-result.validated', {
+                    step,
+                    original: snapshot,
+                    validated,
+                  });
+                  currentResult = validated;
+                }
               }
+              validatedResults.push(currentResult);
             }
             results = validatedResults;
           } catch (error) {
@@ -469,15 +503,17 @@ export async function executeLoop(options: RunOptions, emitter?: EventEmitter): 
           continue;
         }
 
-        if (afterToolExecution) {
+        if (afterToolExecutionHooks.length > 0) {
           try {
-            await afterToolExecution({
-              conversation,
-              step,
-              toolCalls: callsToExecute,
-              results,
-              elicit,
-            });
+            for (const hook of afterToolExecutionHooks) {
+              await hook({
+                conversation,
+                step,
+                toolCalls: callsToExecute,
+                results,
+                elicit,
+              });
+            }
           } catch (error) {
             emitter?.emit('run.error', { step, error });
             return makeErrorResult(error);
@@ -500,6 +536,7 @@ export async function executeLoop(options: RunOptions, emitter?: EventEmitter): 
       toolCalls: materializedToolCalls,
       results,
       usage,
+      metadata,
       final: false,
     };
 
@@ -508,9 +545,11 @@ export async function executeLoop(options: RunOptions, emitter?: EventEmitter): 
 
     emitter?.emit('step.completed', stepResult);
 
-    if (onStep) {
+    if (onStepHooks.length > 0) {
       try {
-        await onStep(stepResult);
+        for (const hook of onStepHooks) {
+          await hook(stepResult);
+        }
       } catch (error) {
         emitter?.emit('run.error', { step, error });
         return makeErrorResult(error);

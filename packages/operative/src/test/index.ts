@@ -125,6 +125,9 @@ export function createRunRecorder(activeRun: ActiveRun): RunRecorder {
     'run.error',
     'run.aborted',
     'step.aborted',
+    'generate.started',
+    'generate.completed',
+    'generate.error',
     'generate.retry',
     'response.validated',
     'tool-result.validated',
@@ -134,6 +137,7 @@ export function createRunRecorder(activeRun: ActiveRun): RunRecorder {
     'elicitation.resolved',
     'backpressure.applied',
     'backpressure.released',
+    'usage.accumulated',
     'session.saved',
     'session.loaded',
   ];

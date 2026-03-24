@@ -51,7 +51,7 @@ export interface PipelineStage {
 
 export interface Supervisor {
   delegate(task: string): Promise<SupervisorResult>;
-  delegateAll(tasks: string[]): Promise<SupervisorResult[]>;
+  delegateAll(tasks: string[], options?: { parallel?: boolean }): Promise<SupervisorResult[]>;
   pipeline(task: string, stages: PipelineStage[]): Promise<SupervisorResult>;
   addEventListener: <K extends SupervisorEventType>(
     type: K,
@@ -211,7 +211,13 @@ export function createSupervisor(options: CreateSupervisorOptions): Supervisor {
   return {
     delegate: delegateOne,
 
-    async delegateAll(tasks: string[]): Promise<SupervisorResult[]> {
+    async delegateAll(
+      tasks: string[],
+      options?: { parallel?: boolean },
+    ): Promise<SupervisorResult[]> {
+      if (options?.parallel) {
+        return Promise.all(tasks.map((task) => delegateOne(task)));
+      }
       const results: SupervisorResult[] = [];
       for (const task of tasks) {
         results.push(await delegateOne(task));
