@@ -1,12 +1,10 @@
 import { Hono } from 'hono';
-import type { Store } from 'sentinel';
 
-import { serializeRunState } from '../serialization';
-import type { ProviderConfiguration, RunSummary } from '../types';
+import type { Bureau, ProviderConfiguration, RunSummary } from '../types';
 import { renderPage } from './render';
 
 interface PageDependencies {
-  store: Store;
+  bureau: Bureau;
   provider: Omit<ProviderConfiguration, 'apiKey'> | undefined;
   maximumSteps: number;
   systemPrompt: string | undefined;
@@ -92,11 +90,7 @@ export function createPages(dependencies: PageDependencies) {
   });
 
   app.get('/dashboard', async () => {
-    const state = dependencies.store.getState();
-    const runs: RunSummary[] = [];
-    for (const [, runState] of state.runs) {
-      runs.push(serializeRunState(runState));
-    }
+    const runs: RunSummary[] = dependencies.bureau.listRuns();
 
     const stream = await renderPage({
       title: 'Dashboard',
@@ -110,12 +104,10 @@ export function createPages(dependencies: PageDependencies) {
   });
 
   app.get('/runs/:id', async (context) => {
-    const runState = dependencies.store.getRun(context.req.param('id'));
-    if (!runState) {
+    const run = dependencies.bureau.getRun(context.req.param('id'));
+    if (!run) {
       return context.text('Run not found', 404);
     }
-
-    const run = serializeRunState(runState);
     const stream = await renderPage({
       title: `Run ${run.id}`,
       data: { run },

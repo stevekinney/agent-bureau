@@ -19,7 +19,7 @@ export function createGateway(options: GatewayOptions = {}): Gateway {
   // Global middleware
   app.use('*', cors());
   app.use('*', requestIdentifier);
-  app.use('/api/*', createAuthentication(options.authToken));
+  app.use('*', createAuthentication(options.authToken));
 
   // Mount API routes
   app.route('/', createRoutes(bureau));
@@ -29,7 +29,7 @@ export function createGateway(options: GatewayOptions = {}): Gateway {
   app.route(
     '/',
     createPages({
-      store: bureau.store,
+      bureau,
       provider: configuration.provider,
       maximumSteps: configuration.maximumSteps,
       systemPrompt: options.systemPrompt,
