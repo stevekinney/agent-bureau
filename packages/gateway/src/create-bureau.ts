@@ -70,17 +70,25 @@ export function createBureau(options: BureauOptions = {}): Bureau {
     }
 
     let conversation: InstanceType<typeof Conversation>;
+    let isExistingConversation = false;
 
     if (request.conversationId && persistence) {
       const history = await persistence.load(request.conversationId);
-      conversation = history ? new Conversation(history) : new Conversation();
+      if (history) {
+        conversation = new Conversation(history);
+        isExistingConversation = true;
+      } else {
+        conversation = new Conversation();
+      }
     } else {
       conversation = new Conversation();
     }
 
-    const prompt = request.systemPrompt ?? systemPrompt;
-    if (prompt) {
-      conversation.appendSystemMessage(prompt);
+    if (!isExistingConversation) {
+      const prompt = request.systemPrompt ?? systemPrompt;
+      if (prompt) {
+        conversation.appendSystemMessage(prompt);
+      }
     }
     conversation.appendUserMessage(request.message);
 
