@@ -8,7 +8,7 @@ import {
   isZodSchema,
   schemasLooselyMatch,
   unwrapSchema,
-} from '../src/schema-utilities';
+} from '../src/core/schema-utilities';
 
 describe('schema utilities', () => {
   it('derives shapes from direct shape functions and objects', () => {

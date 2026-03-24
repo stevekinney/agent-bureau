@@ -20,6 +20,7 @@ import { createTool } from '../../create-tool';
 import type { Tool, ToolExecuteWithOptions } from '../../is-tool';
 import { isTool } from '../../is-tool';
 import type { ToolResultLike } from '../../types';
+import { jsonSchemaToZod } from '../../utilities/json-schema-to-zod';
 
 type ToolboxLike = {
   tools: () => readonly Tool[];
@@ -474,20 +475,6 @@ function applyRegistrars(
   registrars(server);
 }
 
-type JsonSchemaObject = {
-  type?: string | string[];
-  properties?: Record<string, unknown>;
-  required?: unknown;
-  items?: unknown;
-  enum?: unknown[];
-  const?: unknown;
-  nullable?: boolean;
-  additionalProperties?: boolean | Record<string, unknown>;
-  anyOf?: unknown[];
-  oneOf?: unknown[];
-  allOf?: unknown[];
-};
-
 function resolveMcpSchema(schema: unknown): AnySchema | undefined {
   if (schema === undefined) return undefined;
   if (isZodSchema(schema)) return schema as unknown as AnySchema;
@@ -502,148 +489,6 @@ function isZodRawShape(value: unknown): value is Record<string, z.ZodTypeAny> {
   if (!isRecord(value)) return false;
   const entries = Object.values(value);
   return entries.length > 0 && entries.every((entry) => isZodSchema(entry));
-}
-
-function jsonSchemaToZod(schema: unknown): z.ZodTypeAny | undefined {
-  if (!isRecord(schema)) return undefined;
-  const definition = schema as JsonSchemaObject;
-
-  if (Array.isArray(definition.anyOf)) {
-    return applyNullable(unionSchemas(definition.anyOf.map(jsonSchemaToZod)), definition);
-  }
-
-  if (Array.isArray(definition.oneOf)) {
-    return applyNullable(unionSchemas(definition.oneOf.map(jsonSchemaToZod)), definition);
-  }
-
-  if (Array.isArray(definition.allOf)) {
-    return applyNullable(intersectSchemas(definition.allOf.map(jsonSchemaToZod)), definition);
-  }
-
-  if (Array.isArray(definition.enum)) {
-    return applyNullable(enumToZod(definition.enum), definition);
-  }
-
-  if (Object.prototype.hasOwnProperty.call(definition, 'const')) {
-    return applyNullable(literalSchema(definition.const), definition);
-  }
-
-  const schemaType = definition.type;
-  let base: z.ZodTypeAny | undefined;
-
-  if (Array.isArray(schemaType)) {
-    base = unionSchemas(schemaType.map((type) => schemaFromType(definition, type)));
-  } else if (typeof schemaType === 'string') {
-    base = schemaFromType(definition, schemaType);
-  } else if (definition.properties || definition.additionalProperties !== undefined) {
-    base = objectSchema(definition);
-  }
-
-  return applyNullable(base, definition);
-}
-
-function schemaFromType(
-  definition: JsonSchemaObject,
-  schemaType: string,
-): z.ZodTypeAny | undefined {
-  switch (schemaType) {
-    case 'string':
-      return z.string();
-    case 'number':
-      return z.number();
-    case 'integer':
-      return z.number().int();
-    case 'boolean':
-      return z.boolean();
-    case 'null':
-      return z.null();
-    case 'array':
-      return arraySchema(definition);
-    case 'object':
-      return objectSchema(definition);
-    default:
-      return undefined;
-  }
-}
-
-function arraySchema(definition: JsonSchemaObject): z.ZodTypeAny {
-  const { items } = definition;
-  if (Array.isArray(items)) {
-    const itemSchema = unionSchemas(items.map(jsonSchemaToZod)) ?? z.any();
-    return z.array(itemSchema);
-  }
-  const itemSchema = jsonSchemaToZod(items) ?? z.any();
-  return z.array(itemSchema);
-}
-
-function objectSchema(definition: JsonSchemaObject): z.ZodTypeAny {
-  const properties = isRecord(definition.properties) ? definition.properties : {};
-  const required = new Set(
-    Array.isArray(definition.required) ? definition.required.filter(isString) : [],
-  );
-  const shape: Record<string, z.ZodTypeAny> = {};
-  for (const [key, value] of Object.entries(properties)) {
-    const schema = jsonSchemaToZod(value) ?? z.any();
-    shape[key] = required.has(key) ? schema : schema.optional();
-  }
-  let objectSchema = z.object(shape);
-  const additional = definition.additionalProperties;
-  if (additional === false) {
-    objectSchema = objectSchema.strict();
-  } else if (isRecord(additional)) {
-    const catchall = jsonSchemaToZod(additional) ?? z.any();
-    objectSchema = objectSchema.catchall(catchall);
-  } else {
-    objectSchema = objectSchema.passthrough();
-  }
-  return objectSchema;
-}
-
-function enumToZod(values: unknown[]): z.ZodTypeAny | undefined {
-  if (!values.length) {
-    return z.never();
-  }
-  if (values.every((value) => typeof value === 'string')) {
-    return z.enum(values as [string, ...string[]]);
-  }
-  const literals = values.map(literalSchema).filter(Boolean) as z.ZodTypeAny[];
-  return unionSchemas(literals);
-}
-
-function literalSchema(value: unknown): z.ZodTypeAny | undefined {
-  if (
-    value === null ||
-    typeof value === 'string' ||
-    typeof value === 'number' ||
-    typeof value === 'boolean'
-  ) {
-    return z.literal(value);
-  }
-  return undefined;
-}
-
-function unionSchemas(schemas: Array<z.ZodTypeAny | undefined>): z.ZodTypeAny | undefined {
-  const filtered = schemas.filter(Boolean) as z.ZodTypeAny[];
-  if (!filtered.length) return undefined;
-  if (filtered.length === 1) return filtered[0];
-  return z.union(filtered as [z.ZodTypeAny, z.ZodTypeAny, ...z.ZodTypeAny[]]);
-}
-
-function intersectSchemas(schemas: Array<z.ZodTypeAny | undefined>): z.ZodTypeAny | undefined {
-  const filtered = schemas.filter(Boolean) as z.ZodTypeAny[];
-  if (!filtered.length) return undefined;
-  return filtered.reduce((acc, schema) => z.intersection(acc, schema));
-}
-
-function applyNullable(
-  schema: z.ZodTypeAny | undefined,
-  definition: JsonSchemaObject,
-): z.ZodTypeAny | undefined {
-  if (!schema) return undefined;
-  if (definition.nullable === true) {
-    return z.union([schema, z.null()]);
-  }
-  return schema;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

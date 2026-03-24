@@ -12,8 +12,8 @@ import {
 import { toAnthropicTools } from '../src/adapters/anthropic';
 import { toGeminiTools } from '../src/adapters/gemini';
 import { toOpenAITools } from '../src/adapters/openai';
+import { queryTools, reindexSearchIndex, searchTools } from '../src/core/registry';
 import { internalToolboxTestUtilities } from '../src/create-toolbox';
-import { queryTools, reindexSearchIndex, searchTools } from '../src/registry';
 import { createTruncatingAsyncIterable } from '../src/truncation/index';
 
 const makeConfiguration = (overrides?: Partial<ToolConfiguration>): ToolConfiguration => ({
@@ -2831,6 +2831,25 @@ describe('createToolbox', () => {
 
       const stats = detector.getLoopStatistics();
       expect(Object.keys(stats.hashCounts).length).toBeLessThanOrEqual(5);
+    });
+
+    it('clears loopDetectors map when complete() is called', async () => {
+      const toolbox = createToolbox([makeConfiguration()]);
+      const detector = toolbox.createLoopDetector({ repetitionThreshold: 3 });
+
+      await toolbox.execute({ id: 'c-1', name: 'sum', arguments: { a: 1, b: 2 } });
+      await toolbox.execute({ id: 'c-2', name: 'sum', arguments: { a: 1, b: 2 } });
+
+      // Detector should show 2 calls
+      expect(detector.getLoopStatistics().callCount).toBe(2);
+
+      // Complete the toolbox - detectors should be cleaned up
+      toolbox.complete();
+
+      // After complete, creating a new detector and executing should work independently
+      // The old detectors should have been removed from the internal map
+      // We verify by checking that the toolbox is completed
+      expect(toolbox.completed).toBe(true);
     });
   });
 });

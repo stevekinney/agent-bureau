@@ -1,8 +1,8 @@
 import { z } from 'zod';
 
+import { normalizeSchema } from '../utilities/schema-normalization';
 import { formatToolId, normalizeIdentity, type ToolId, type ToolIdentity } from './identity';
 import { type ToolRisk } from './risk';
-import { isZodObjectSchema, isZodSchema } from './schema-utilities';
 import type { JsonObject } from './serialization/json';
 import { assertKebabCaseTag, type NormalizeTagsOption, uniqTags } from './tag-utilities';
 
@@ -98,22 +98,6 @@ export function defineTool<
     ...(lifecycle !== undefined ? { lifecycle } : {}),
     input: normalizedInput as z.ZodType<TInput>,
   };
-}
-
-function normalizeSchema(schema: unknown): z.ZodTypeAny {
-  if (schema === undefined) {
-    return z.object({});
-  }
-  if (isZodObjectSchema(schema)) {
-    return schema;
-  }
-  if (isZodSchema(schema)) {
-    throw new Error('Tool input must be a Zod object schema');
-  }
-  if (schema && typeof schema === 'object') {
-    return z.object(schema as Record<string, z.ZodTypeAny>);
-  }
-  throw new Error('Tool input must be a Zod object schema or an object of Zod schemas');
 }
 
 function normalizeTags(

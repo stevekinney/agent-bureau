@@ -9,6 +9,17 @@ export interface LoopDetectionOptions {
   maxWindowSize?: number;
   /** Custom hash function for tool calls. Default: SHA256 of tool name + arguments. */
   hashFunction?: (toolName: string, args: unknown) => string;
+
+  /**
+   * Threshold at which a 'warning' level is emitted (for level-based detection).
+   * When set, `level` and `detector` fields are populated on the result.
+   */
+  warningThreshold?: number;
+  /**
+   * Threshold at which a 'blocked' level is emitted (for level-based detection).
+   * When set, `level` and `detector` fields are populated on the result.
+   */
+  blockThreshold?: number;
 }
 
 export interface LoopDetectionResult {
@@ -18,6 +29,10 @@ export interface LoopDetectionResult {
   message: string;
   /** Count of how many calls triggered the loop detection */
   count: number;
+  /** Severity level of the loop detection (only present when warningThreshold/blockThreshold are set) */
+  level?: 'warning' | 'blocked';
+  /** Which detector pattern matched (only present when warningThreshold/blockThreshold are set) */
+  detector?: 'simple-repeat' | 'ping-pong';
 }
 
 export interface LoopStatistics {
@@ -35,8 +50,12 @@ interface InternalLoopDetectorState {
 
 /**
  * Detects execution loops in tool calls:
- * - Ping-pong loops: alternating between two different calls (A→B→A→B)
+ * - Ping-pong loops: alternating between two different calls (A->B->A->B)
  * - Repetition loops: same call repeated consecutively
+ *
+ * Supports two modes:
+ * 1. Classic mode: uses `pingPongThreshold` and `repetitionThreshold`
+ * 2. Level mode: uses `warningThreshold` and `blockThreshold` to report `level` and `detector`
  *
  * Created per toolbox instance, shared across all execute() calls.
  */
@@ -46,10 +65,24 @@ export class LoopDetector {
   private readonly maxWindowSize: number;
   private readonly hashFunction: (toolName: string, args: unknown) => string;
   private readonly state: InternalLoopDetectorState;
+  private readonly warningThreshold: number | undefined;
+  private readonly blockThreshold: number | undefined;
+  private readonly levelMode: boolean;
 
   constructor(options: LoopDetectionOptions = {}) {
-    this.pingPongThreshold = options.pingPongThreshold ?? 10;
-    this.repetitionThreshold = options.repetitionThreshold ?? 10;
+    this.warningThreshold = options.warningThreshold;
+    this.blockThreshold = options.blockThreshold;
+    this.levelMode = options.warningThreshold !== undefined || options.blockThreshold !== undefined;
+
+    // In level mode, derive classic thresholds from warning/block thresholds
+    if (this.levelMode) {
+      this.repetitionThreshold = options.warningThreshold ?? 10;
+      this.pingPongThreshold = options.warningThreshold ?? 10;
+    } else {
+      this.pingPongThreshold = options.pingPongThreshold ?? 10;
+      this.repetitionThreshold = options.repetitionThreshold ?? 10;
+    }
+
     this.maxWindowSize = options.maxWindowSize ?? 100;
     this.hashFunction = options.hashFunction ?? this.defaultHashFunction;
     this.state = {
@@ -107,19 +140,110 @@ export class LoopDetector {
       return { detected: false, message: '', count: 0 };
     }
 
-    // Check for ping-pong loop: alternating pattern (A,B,A,B,...)
+    if (this.levelMode) {
+      return this.detectWithLevels(window);
+    }
+
+    // Classic mode: check ping-pong first, then repetition
     const pingPongResult = this.detectPingPong(window);
     if (pingPongResult) {
       return pingPongResult;
     }
 
-    // Check for repetition loop: same hash repeated
     const repetitionResult = this.detectRepetition(window);
     if (repetitionResult) {
       return repetitionResult;
     }
 
     return { detected: false, message: '', count: 0 };
+  }
+
+  /**
+   * Level-based detection: uses warningThreshold/blockThreshold to report
+   * `level` ('warning' | 'blocked') and `detector` ('simple-repeat' | 'ping-pong').
+   */
+  private detectWithLevels(window: string[]): LoopDetectionResult {
+    const warningThreshold = this.warningThreshold ?? 10;
+    const blockThreshold = this.blockThreshold ?? 20;
+
+    // Check simple repetition: count occurrences of each hash
+    for (const [, count] of this.state.hashCounts) {
+      if (count >= blockThreshold) {
+        return {
+          detected: true,
+          level: 'blocked',
+          detector: 'simple-repeat',
+          count,
+          message: `Tool call loop detected: repeated ${count} times with same arguments (blocked at threshold ${blockThreshold})`,
+        };
+      }
+      if (count >= warningThreshold) {
+        // Check ping-pong first at block level before returning simple-repeat warning
+        const pingPong = this.detectPingPongWithLevels(window, warningThreshold, blockThreshold);
+        if (pingPong) return pingPong;
+
+        return {
+          detected: true,
+          level: 'warning',
+          detector: 'simple-repeat',
+          count,
+          message: `Tool call loop warning: repeated ${count} times with same arguments`,
+        };
+      }
+    }
+
+    // Check ping-pong
+    const pingPong = this.detectPingPongWithLevels(window, warningThreshold, blockThreshold);
+    if (pingPong) return pingPong;
+
+    return { detected: false, message: '', count: 0 };
+  }
+
+  /**
+   * Detect ping-pong pattern with level semantics.
+   */
+  private detectPingPongWithLevels(
+    window: string[],
+    warningThreshold: number,
+    blockThreshold: number,
+  ): LoopDetectionResult | null {
+    if (window.length < 4) return null;
+
+    // Check alternating from the end of the window
+    const hashA = window[window.length - 1]!;
+    const hashB = window[window.length - 2]!;
+    if (hashA === hashB) return null;
+
+    let alternatingCount = 2;
+    for (let i = window.length - 3; i >= 0; i--) {
+      const expected = (window.length - 1 - i) % 2 === 0 ? hashA : hashB;
+      if (window[i] === expected) {
+        alternatingCount++;
+      } else {
+        break;
+      }
+    }
+
+    if (alternatingCount >= blockThreshold) {
+      return {
+        detected: true,
+        level: 'blocked',
+        detector: 'ping-pong',
+        count: alternatingCount,
+        message: `Ping-pong loop detected: alternating between two tool calls ${alternatingCount} times (blocked at threshold ${blockThreshold})`,
+      };
+    }
+    if (alternatingCount >= warningThreshold) {
+      return {
+        detected: true,
+        level: 'warning',
+        detector: 'ping-pong',
+        count: alternatingCount,
+        message: `Ping-pong loop warning: alternating between two tool calls ${alternatingCount} times`,
+      };
+    }
+
+    return null;
   }
 
   /**
@@ -198,9 +322,20 @@ export class LoopDetector {
 
 /**
  * Stable stringify: produces consistent JSON-like output for objects.
+ * Recursively sorts object keys so that key order does not affect the result.
  * Similar to JSON.stringify but omits undefined values (same behavior as JSON.stringify).
  * Does NOT preserve function values, BigInt, circular refs, or symbols.
  */
-function stableStringify(value: unknown): string {
-  return JSON.stringify(value);
+export function stableStringify(value: unknown): string {
+  if (value === null || value === undefined) return JSON.stringify(value);
+  if (typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return '[' + value.map(stableStringify).join(',') + ']';
+  const sorted = Object.keys(value as Record<string, unknown>).sort();
+  return (
+    '{' +
+    sorted
+      .map((k) => JSON.stringify(k) + ':' + stableStringify((value as Record<string, unknown>)[k]))
+      .join(',') +
+    '}'
+  );
 }

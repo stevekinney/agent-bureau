@@ -46,12 +46,3 @@ export function combineToolboxes<const TBoxes extends readonly [ToolboxLike, ...
   const configurations = toolboxes.flatMap((toolbox) => toolbox.toJSON());
   return createToolbox(configurations, { context }) as unknown as Toolbox<ConcatenateTools<TBoxes>>;
 }
-
-/**
- * @deprecated Use `combineToolboxes(...)` instead.
- */
-export function combineToolbox<const TBoxes extends readonly [ToolboxLike, ...ToolboxLike[]]>(
-  ...toolboxes: TBoxes
-): Toolbox<ConcatenateTools<TBoxes>> {
-  return combineToolboxes(...toolboxes);
-}

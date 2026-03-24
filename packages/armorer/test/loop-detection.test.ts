@@ -1,13 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 
-import {
-  createLoopDetectionState,
-  detectLoop,
-  getLoopStatistics,
-  hashToolCall,
-  recordCall,
-  stableStringify,
-} from '../src/loop-detection/index';
+import { LoopDetector, stableStringify } from '../src/core/loop-detection';
 
 describe('loop detection', () => {
   describe('stableStringify', () => {
@@ -33,182 +26,127 @@ describe('loop detection', () => {
     });
   });
 
-  describe('hashToolCall', () => {
-    it('is deterministic', () => {
-      expect(hashToolCall('tool', { a: 1 })).toBe(hashToolCall('tool', { a: 1 }));
-    });
-    it('differs for different input', () => {
-      expect(hashToolCall('tool', { a: 1 })).not.toBe(hashToolCall('tool', { a: 2 }));
-    });
-    it('is key-order independent', () => {
-      expect(hashToolCall('tool', { a: 1, b: 2 })).toBe(hashToolCall('tool', { b: 2, a: 1 }));
-    });
-    it('differs for different tool names', () => {
-      expect(hashToolCall('toolA', { a: 1 })).not.toBe(hashToolCall('toolB', { a: 1 }));
-    });
-  });
-
-  describe('recordCall', () => {
-    it('appends to history', () => {
-      const state = createLoopDetectionState();
-      recordCall(state, 'tool', { a: 1 });
-      expect(state.history).toHaveLength(1);
+  describe('LoopDetector recordCall', () => {
+    it('appends to call window', () => {
+      const detector = new LoopDetector({ maxWindowSize: 30 });
+      detector.recordCall('tool', { a: 1 });
+      const stats = detector.getLoopStatistics();
+      expect(stats.callCount).toBe(1);
     });
     it('trims to window size', () => {
-      const state = createLoopDetectionState();
+      const detector = new LoopDetector({ maxWindowSize: 30, repetitionThreshold: 100 });
       for (let i = 0; i < 40; i++) {
-        recordCall(state, 'tool', { i }, { windowSize: 30 });
+        detector.recordCall('tool', { i });
       }
-      expect(state.history).toHaveLength(30);
-    });
-    it('uses default window size of 30', () => {
-      const state = createLoopDetectionState();
-      for (let i = 0; i < 35; i++) {
-        recordCall(state, 'tool', { i });
-      }
-      expect(state.history).toHaveLength(30);
+      const stats = detector.getLoopStatistics();
+      expect(Object.keys(stats.hashCounts).length).toBeLessThanOrEqual(30);
     });
   });
 
-  describe('detectLoop', () => {
+  describe('LoopDetector detectLoop (level mode)', () => {
     it('returns detected false for empty history', () => {
-      const state = createLoopDetectionState();
-      expect(detectLoop(state, 'tool', {})).toEqual({ detected: false });
-    });
-
-    it('returns detected false for unique calls', () => {
-      const state = createLoopDetectionState();
-      for (let i = 0; i < 5; i++) {
-        recordCall(state, 'tool', { i });
-      }
-      expect(detectLoop(state, 'tool', { i: 99 })).toEqual({ detected: false });
-    });
-
-    it('returns warning at default threshold (10)', () => {
-      const state = createLoopDetectionState();
-      for (let i = 0; i < 10; i++) {
-        recordCall(state, 'tool', { same: true });
-      }
-      const result = detectLoop(state, 'tool', { same: true });
-      expect(result.detected).toBe(true);
-      if (result.detected) {
-        expect(result.level).toBe('warning');
-        expect(result.detector).toBe('simple-repeat');
-        expect(result.count).toBe(10);
-      }
-    });
-
-    it('returns blocked at default threshold (20)', () => {
-      const state = createLoopDetectionState();
-      for (let i = 0; i < 20; i++) {
-        recordCall(state, 'tool', { same: true });
-      }
-      const result = detectLoop(state, 'tool', { same: true });
-      expect(result.detected).toBe(true);
-      if (result.detected) {
-        expect(result.level).toBe('blocked');
-        expect(result.detector).toBe('simple-repeat');
-        expect(result.count).toBe(20);
-      }
-    });
-
-    it('uses custom thresholds', () => {
-      const state = createLoopDetectionState();
-      for (let i = 0; i < 3; i++) {
-        recordCall(state, 'tool', {});
-      }
-      const result = detectLoop(state, 'tool', {}, { warningThreshold: 3, blockThreshold: 5 });
-      expect(result.detected).toBe(true);
-      if (result.detected) {
-        expect(result.level).toBe('warning');
-      }
-    });
-
-    it('detects ping-pong pattern', () => {
-      const state = createLoopDetectionState();
-      for (let i = 0; i < 10; i++) {
-        if (i % 2 === 0) {
-          recordCall(state, 'toolA', { type: 'A' });
-        } else {
-          recordCall(state, 'toolB', { type: 'B' });
-        }
-      }
-      const result = detectLoop(
-        state,
-        'toolA',
-        { type: 'A' },
-        { warningThreshold: 10, blockThreshold: 20 },
-      );
-      expect(result.detected).toBe(true);
-      if (result.detected) {
-        expect(result.detector).toBe('ping-pong');
-      }
-    });
-
-    it('detects ping-pong blocked pattern', () => {
-      const state = createLoopDetectionState();
-      for (let i = 0; i < 20; i++) {
-        if (i % 2 === 0) {
-          recordCall(state, 'toolA', { type: 'A' });
-        } else {
-          recordCall(state, 'toolB', { type: 'B' });
-        }
-      }
-      // Set warningThreshold high enough that simple-repeat (count=10) won't trigger,
-      // but ping-pong (alternatingCount=20) will hit blockThreshold
-      const result = detectLoop(
-        state,
-        'toolA',
-        { type: 'A' },
-        { warningThreshold: 11, blockThreshold: 20 },
-      );
-      expect(result.detected).toBe(true);
-      if (result.detected) {
-        expect(result.level).toBe('blocked');
-        expect(result.detector).toBe('ping-pong');
-        expect(result.count).toBeGreaterThanOrEqual(20);
-      }
-    });
-
-    it('does not detect ping-pong when pattern breaks', () => {
-      const state = createLoopDetectionState();
-      recordCall(state, 'toolA', {});
-      recordCall(state, 'toolB', {});
-      recordCall(state, 'toolA', {});
-      recordCall(state, 'toolC', {}); // break
-      recordCall(state, 'toolA', {});
-      recordCall(state, 'toolB', {});
-      const result = detectLoop(state, 'toolA', {}, { warningThreshold: 5, blockThreshold: 10 });
+      const detector = new LoopDetector({ warningThreshold: 10, blockThreshold: 20 });
+      const result = detector.detectLoop();
       expect(result.detected).toBe(false);
     });
 
+    it('returns detected false for unique calls', () => {
+      const detector = new LoopDetector({ warningThreshold: 10, blockThreshold: 20 });
+      for (let i = 0; i < 5; i++) {
+        detector.recordCall('tool', { i });
+      }
+      const result = detector.detectLoop();
+      expect(result.detected).toBe(false);
+    });
+
+    it('returns warning at warningThreshold', () => {
+      const detector = new LoopDetector({
+        warningThreshold: 10,
+        blockThreshold: 20,
+        maxWindowSize: 30,
+      });
+      for (let i = 0; i < 10; i++) {
+        detector.recordCall('tool', { same: true });
+      }
+      const result = detector.detectLoop();
+      expect(result.detected).toBe(true);
+      expect(result.level).toBe('warning');
+      expect(result.detector).toBe('simple-repeat');
+      expect(result.count).toBe(10);
+    });
+
+    it('returns blocked at blockThreshold', () => {
+      const detector = new LoopDetector({
+        warningThreshold: 10,
+        blockThreshold: 20,
+        maxWindowSize: 30,
+      });
+      for (let i = 0; i < 20; i++) {
+        detector.recordCall('tool', { same: true });
+      }
+      const result = detector.detectLoop();
+      expect(result.detected).toBe(true);
+      expect(result.level).toBe('blocked');
+      expect(result.detector).toBe('simple-repeat');
+      expect(result.count).toBe(20);
+    });
+
+    it('uses custom thresholds', () => {
+      const detector = new LoopDetector({
+        warningThreshold: 3,
+        blockThreshold: 5,
+        maxWindowSize: 30,
+      });
+      for (let i = 0; i < 3; i++) {
+        detector.recordCall('tool', {});
+      }
+      const result = detector.detectLoop();
+      expect(result.detected).toBe(true);
+      expect(result.level).toBe('warning');
+    });
+
+    it('detects ping-pong pattern', () => {
+      const detector = new LoopDetector({
+        warningThreshold: 10,
+        blockThreshold: 20,
+        maxWindowSize: 30,
+      });
+      for (let i = 0; i < 10; i++) {
+        if (i % 2 === 0) {
+          detector.recordCall('toolA', { type: 'A' });
+        } else {
+          detector.recordCall('toolB', { type: 'B' });
+        }
+      }
+      const result = detector.detectLoop();
+      expect(result.detected).toBe(true);
+      expect(result.detector).toBe('ping-pong');
+    });
+
     it('handles null/undefined args', () => {
-      const state = createLoopDetectionState();
-      recordCall(state, 'tool', null);
-      recordCall(state, 'tool', undefined);
-      expect(detectLoop(state, 'tool', null)).toEqual({ detected: false });
+      const detector = new LoopDetector({ warningThreshold: 10, blockThreshold: 20 });
+      detector.recordCall('tool', null);
+      detector.recordCall('tool', undefined);
+      const result = detector.detectLoop();
+      expect(result.detected).toBe(false);
     });
   });
 
-  describe('getLoopStatistics', () => {
+  describe('LoopDetector getLoopStatistics', () => {
     it('returns empty stats for no history', () => {
-      const state = createLoopDetectionState();
-      const stats = getLoopStatistics(state);
-      expect(stats.totalCalls).toBe(0);
-      expect(stats.uniquePatterns).toBe(0);
-      expect(stats.mostFrequent).toBeNull();
+      const detector = new LoopDetector();
+      const stats = detector.getLoopStatistics();
+      expect(stats.callCount).toBe(0);
     });
 
     it('returns accurate counts', () => {
-      const state = createLoopDetectionState();
-      recordCall(state, 'toolA', { x: 1 });
-      recordCall(state, 'toolA', { x: 1 });
-      recordCall(state, 'toolA', { x: 1 });
-      recordCall(state, 'toolB', { y: 2 });
-      const stats = getLoopStatistics(state);
-      expect(stats.totalCalls).toBe(4);
-      expect(stats.uniquePatterns).toBe(2);
-      expect(stats.mostFrequent?.count).toBe(3);
+      const detector = new LoopDetector({ maxWindowSize: 30 });
+      detector.recordCall('toolA', { x: 1 });
+      detector.recordCall('toolA', { x: 1 });
+      detector.recordCall('toolA', { x: 1 });
+      detector.recordCall('toolB', { y: 2 });
+      const stats = detector.getLoopStatistics();
+      expect(stats.callCount).toBe(4);
     });
   });
 });

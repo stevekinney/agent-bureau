@@ -1,3 +1,4 @@
+import { isPromise } from '../../utilities/type-guards';
 import type { TextQueryField } from '../query-predicates';
 import { getSchemaKeys } from '../schema-utilities';
 import type { AnyToolDefinition as ToolDefinition } from '../tool-definition';
@@ -257,13 +258,4 @@ export async function awaitToolEmbeddings(
     return cached;
   }
   return cached;
-}
-
-function isPromise<T>(value: unknown): value is PromiseLike<T> {
-  return (
-    typeof value === 'object' &&
-    value !== null &&
-    'then' in value &&
-    typeof (value as PromiseLike<T>).then === 'function'
-  );
 }

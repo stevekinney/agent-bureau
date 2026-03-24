@@ -1,9 +1,14 @@
 import { z } from 'zod';
 
 import { defineTool } from '../src/core';
+import {
+  queryTools,
+  reindexSearchIndex,
+  searchTools,
+  type ToolQueryInput,
+} from '../src/core/registry';
 import { createToolbox } from '../src/create-toolbox';
 import type { ToolConfiguration } from '../src/is-tool';
-import { queryTools, reindexSearchIndex, searchTools, type ToolQueryInput } from '../src/registry';
 
 const TOOL_COUNT = Number(process.env['BENCH_TOOLS'] ?? 2000);
 const RUNS = Number(process.env['BENCH_RUNS'] ?? 50);

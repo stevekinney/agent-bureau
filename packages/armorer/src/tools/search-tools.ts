@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { queryTools, type ToolQuery, type ToolQueryInput } from '../core/registry';
 import { createTool } from '../create-tool';
 import type { Tool } from '../is-tool';
+import { isTestRuntime } from '../utilities/type-guards';
 
 type SearchableToolbox = {
   tools: () => readonly Tool[];
@@ -197,11 +198,4 @@ function hasLegacyRegister(value: unknown): value is { register: (...entries: To
   }
   const candidate = value as { register?: unknown };
   return typeof candidate.register === 'function';
-}
-
-function isTestRuntime(): boolean {
-  const nodeEnvIsTest = process.env.NODE_ENV === 'test';
-  const entry = process.argv[1] ?? '';
-  const testEntrypoint = /\.(test|spec)\.[cm]?[jt]sx?$/.test(entry);
-  return nodeEnvIsTest || testEntrypoint;
 }

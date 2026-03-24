@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'bun:test';
 import { z } from 'zod';
 
+import { textMatches } from '../src/core/query-predicates';
 import { createTool } from '../src/create-tool';
-import { textMatches } from '../src/query-predicates';
 
 describe('fuzzy text properties', () => {
   it('matches when similarity is at or above threshold', () => {

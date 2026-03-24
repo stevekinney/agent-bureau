@@ -1,7 +1,7 @@
 import { describe, expect, expectTypeOf, it } from 'bun:test';
 import { z } from 'zod';
 
-import { combineToolbox, combineToolboxes, createTool, createToolbox } from '../src';
+import { combineToolboxes, createTool, createToolbox } from '../src';
 
 describe('combineToolboxes', () => {
   it('throws when no toolboxes are provided', () => {
@@ -123,30 +123,5 @@ describe('combineToolboxes', () => {
     expectTypeOf<ReturnType<typeof combined.tools>[number]['name']>().toEqualTypeOf<
       'alpha' | 'beta'
     >();
-  });
-});
-
-describe('combineToolbox', () => {
-  it('is a compatibility alias of combineToolboxes', async () => {
-    const a = createToolbox([
-      {
-        name: 'alias-a',
-        description: 'a',
-        input: z.object({}),
-        execute: async () => 'A',
-      },
-    ]);
-    const b = createToolbox([
-      {
-        name: 'alias-b',
-        description: 'b',
-        input: z.object({}),
-        execute: async () => 'B',
-      },
-    ]);
-
-    const combined = combineToolbox(a, b);
-    const result = await combined.execute({ id: 'alias', name: 'alias-b', arguments: {} });
-    expect(result.result).toBe('B');
   });
 });

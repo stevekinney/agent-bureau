@@ -8,7 +8,7 @@ import { z } from 'zod';
 
 import { createTool } from '../src/create-tool';
 import { createToolbox } from '../src/create-toolbox';
-import { createMCP } from '../src/mcp';
+import { createMCP } from '../src/integrations/mcp';
 
 const fixturePath = () => {
   const currentDir = dirname(fileURLToPath(import.meta.url));

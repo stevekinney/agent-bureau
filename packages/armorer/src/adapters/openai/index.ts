@@ -2,6 +2,7 @@ import type { SerializedToolDefinition } from '../../core/serialization';
 import type { AnyToolDefinition } from '../../core/tool-definition';
 import type { ImportedToolConfiguration } from '../../create-toolbox';
 import type { ToolCallInput, ToolResultLike } from '../../types';
+import { isAsyncIterable } from '../../utilities/type-guards';
 import { importToolSchema } from '../imported-schema';
 import {
   type AdapterInput,
@@ -305,13 +306,6 @@ function getStreamingPayload(result: ToolResultLike): AsyncIterable<unknown> | u
     return result.result;
   }
   return undefined;
-}
-
-function isAsyncIterable(value: unknown): value is AsyncIterable<unknown> {
-  if (!value || (typeof value !== 'object' && typeof value !== 'function')) {
-    return false;
-  }
-  return Symbol.asyncIterator in value;
 }
 
 async function collectAsyncIterable(stream: AsyncIterable<unknown>): Promise<unknown[]> {

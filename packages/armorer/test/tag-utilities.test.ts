@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 
-import { assertKebabCaseTag, uniqTags } from '../src/tag-utilities';
+import { assertKebabCaseTag, uniqTags } from '../src/core/tag-utilities';
 
 describe('tag-utilities', () => {
   it('assertKebabCaseTag trims and returns valid kebab-case tags', () => {

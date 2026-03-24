@@ -85,27 +85,20 @@
       "types": "./dist/utilities/index.d.ts"
     },
     "./lazy": {
-      "import": "./dist/lazy/index.js",
-      "bun": "./dist/lazy/index.js",
-      "require": "./dist/lazy/index.cjs",
-      "default": "./dist/lazy/index.js",
-      "types": "./dist/lazy/index.d.ts"
+      "import": "./dist/create-tool.js",
+      "bun": "./dist/create-tool.js",
+      "require": "./dist/create-tool.cjs",
+      "default": "./dist/create-tool.js",
+      "types": "./dist/create-tool.d.ts"
     },
     "./registry": {
-      "import": "./dist/registry/index.js",
-      "bun": "./dist/registry/index.js",
-      "require": "./dist/registry/index.cjs",
-      "default": "./dist/registry/index.js",
-      "types": "./dist/registry/index.d.ts"
+      "import": "./dist/core/registry/index.js",
+      "bun": "./dist/core/registry/index.js",
+      "require": "./dist/core/registry/index.cjs",
+      "default": "./dist/core/registry/index.js",
+      "types": "./dist/core/registry/index.d.ts"
     },
     "./mcp": {
-      "import": "./dist/integrations/mcp/index.js",
-      "bun": "./dist/integrations/mcp/index.js",
-      "require": "./dist/integrations/mcp/index.cjs",
-      "default": "./dist/integrations/mcp/index.js",
-      "types": "./dist/integrations/mcp/index.d.ts"
-    },
-    "./integrations/mcp": {
       "import": "./dist/integrations/mcp/index.js",
       "bun": "./dist/integrations/mcp/index.js",
       "require": "./dist/integrations/mcp/index.cjs",
