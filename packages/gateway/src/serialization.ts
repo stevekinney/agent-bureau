@@ -22,12 +22,39 @@ function stripConversation(record: Record<string, unknown>): Record<string, unkn
 }
 
 /**
- * Strips non-serializable properties (e.g. Conversation instances) from
- * action detail objects before they are sent over WebSocket.
+ * Converts an `error` property inside a record to a JSON-safe string.
+ * `Error` instances are replaced with their `message`; other non-string
+ * values are passed through `safeStringify`. Returns the original record
+ * unchanged when no `error` key is present.
+ */
+function serializeError(record: Record<string, unknown>): Record<string, unknown> {
+  if (!('error' in record)) return record;
+
+  const { error, ...rest } = record;
+
+  const serialized =
+    error instanceof Error
+      ? error.message
+      : typeof error === 'string'
+        ? error
+        : error !== undefined
+          ? safeStringify(error)
+          : undefined;
+
+  return { ...rest, error: serialized };
+}
+
+/**
+ * Strips non-serializable properties (e.g. Conversation instances, Error
+ * objects) from action detail objects before they are sent over WebSocket.
  *
  * For `run.completed`, this strips the top-level `conversation` as well as
  * the nested `conversation` inside each element of the `steps` array
  * (each step is a `StepResult` which also holds a `Conversation` instance).
+ *
+ * For error events (`run.error`, `generate.error`, `generate.retry`), the
+ * `error` property is serialized to a string so `Error` instances don't
+ * collapse to `{}` under `JSON.stringify`.
  */
 export function serializeActionDetail(eventType: string, detail: unknown): unknown {
   if (!detail || typeof detail !== 'object') return detail;
@@ -49,6 +76,14 @@ export function serializeActionDetail(eventType: string, detail: unknown): unkno
     }
 
     return stripped;
+  }
+
+  if (
+    eventType === 'run.error' ||
+    eventType === 'generate.error' ||
+    eventType === 'generate.retry'
+  ) {
+    return serializeError(record);
   }
 
   return detail;

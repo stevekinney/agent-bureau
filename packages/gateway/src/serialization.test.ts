@@ -167,4 +167,48 @@ describe('serializeActionDetail', () => {
     expect(serializeActionDetail('run.error', null)).toBeNull();
     expect(serializeActionDetail('run.error', 42)).toBe(42);
   });
+
+  it('serializes Error instances in run.error details to their message', () => {
+    const detail = { step: 3, error: new Error('Connection refused') };
+    const result = serializeActionDetail('run.error', detail) as Record<string, unknown>;
+    expect(result['step']).toBe(3);
+    expect(result['error']).toBe('Connection refused');
+  });
+
+  it('preserves string errors in run.error details', () => {
+    const detail = { step: 1, error: 'something went wrong' };
+    const result = serializeActionDetail('run.error', detail) as Record<string, unknown>;
+    expect(result['step']).toBe(1);
+    expect(result['error']).toBe('something went wrong');
+  });
+
+  it('serializes non-string non-Error errors in run.error details', () => {
+    const detail = { step: 2, error: { code: 'TIMEOUT', retryable: true } };
+    const result = serializeActionDetail('run.error', detail) as Record<string, unknown>;
+    expect(result['step']).toBe(2);
+    expect(result['error']).toBe('{"code":"TIMEOUT","retryable":true}');
+  });
+
+  it('produces valid JSON for run.error with Error instances', () => {
+    const detail = { step: 5, error: new Error('Boom') };
+    const serialized = serializeActionDetail('run.error', detail);
+    const json = JSON.stringify(serialized);
+    const parsed = JSON.parse(json);
+    expect(parsed.error).toBe('Boom');
+    expect(parsed.step).toBe(5);
+  });
+
+  it('serializes Error instances in generate.error details', () => {
+    const detail = { step: 1, error: new Error('Rate limited'), durationMilliseconds: 150 };
+    const result = serializeActionDetail('generate.error', detail) as Record<string, unknown>;
+    expect(result['error']).toBe('Rate limited');
+    expect(result['durationMilliseconds']).toBe(150);
+  });
+
+  it('serializes Error instances in generate.retry details', () => {
+    const detail = { step: 2, attempt: 3, error: new Error('Timeout') };
+    const result = serializeActionDetail('generate.retry', detail) as Record<string, unknown>;
+    expect(result['error']).toBe('Timeout');
+    expect(result['attempt']).toBe(3);
+  });
 });
