@@ -6,7 +6,7 @@ import {
   Conversation,
   createConversationHistory as createConversation,
 } from '../src';
-import { createPIIRedactionPlugin, redactPii } from '../src/redaction';
+import { createPIIRedactionPlugin, redactPii } from '../src/plugins/pii-redaction';
 import type { Message, MessageInput } from '../src/types';
 
 const getOrderedMessages = (conversation: Conversation): Message[] =>
@@ -158,5 +158,78 @@ describe('redactPii', () => {
     // This should fail because the plugin changes the callId to 'invalid-id'
     // If it doesn't fail, it means validation happened before the plugin.
     expect(action).toThrow(/tool result references non-existent tool-call: invalid-id/);
+  });
+});
+
+describe('PII redaction in tool arguments, results, and metadata', () => {
+  it('redacts PII in toolCall.arguments', () => {
+    const plugin = createPIIRedactionPlugin();
+    const input: MessageInput = {
+      role: 'tool-call',
+      content: '',
+      toolCall: {
+        id: 'tc-1',
+        name: 'sendEmail',
+        arguments: { to: 'user@example.com', subject: 'Hello' },
+      },
+    };
+
+    const result = plugin(input);
+    const args = result.toolCall!.arguments as Record<string, unknown>;
+    expect(args.to).toBe('[EMAIL_REDACTED]');
+    expect(args.subject).toBe('Hello');
+  });
+
+  it('redacts PII in toolResult.content', () => {
+    const plugin = createPIIRedactionPlugin();
+    const input: MessageInput = {
+      role: 'tool-result',
+      content: 'Result',
+      toolResult: {
+        callId: 'tc-1',
+        outcome: 'success',
+        content: 'Contact user@example.com or call 555-123-4567',
+      },
+    };
+
+    const result = plugin(input);
+    const content = result.toolResult!.content as string;
+    expect(content).toContain('[EMAIL_REDACTED]');
+    expect(content).toContain('[PHONE_REDACTED]');
+  });
+
+  it('redacts PII in nested arrays within tool result content', () => {
+    const plugin = createPIIRedactionPlugin();
+    const input: MessageInput = {
+      role: 'tool-result',
+      content: 'Result',
+      toolResult: {
+        callId: 'tc-1',
+        outcome: 'success',
+        content: { contacts: ['alice@example.com', 'bob@example.com'] },
+      },
+    };
+
+    const result = plugin(input);
+    const content = result.toolResult!.content as Record<string, unknown>;
+    const contacts = content.contacts as string[];
+    expect(contacts[0]).toBe('[EMAIL_REDACTED]');
+    expect(contacts[1]).toBe('[EMAIL_REDACTED]');
+  });
+
+  it('redacts PII in metadata values', () => {
+    const plugin = createPIIRedactionPlugin();
+    const input: MessageInput = {
+      role: 'user',
+      content: 'Hello',
+      metadata: {
+        email: 'secret@example.com',
+        nested: { phone: '555-123-4567' },
+      },
+    };
+
+    const result = plugin(input);
+    expect(result.metadata!.email).toBe('[EMAIL_REDACTED]');
+    expect((result.metadata!.nested as Record<string, unknown>).phone).toBe('[PHONE_REDACTED]');
   });
 });

@@ -1,5 +1,13 @@
+import { z } from 'zod';
+
 import type { SessionInfo, SessionPersistenceAdapter } from '../environment';
+import { conversationShape } from '../schemas';
 import type { ConversationHistory } from '../types';
+
+/**
+ * Lenient conversation schema that tolerates extra keys from older/newer schema versions.
+ */
+const lenientConversationSchema = z.object(conversationShape).passthrough();
 
 export interface SQLitePersistenceAdapterOptions {
   path: string;
@@ -8,6 +16,17 @@ export interface SQLitePersistenceAdapterOptions {
 
 export interface SQLitePersistenceAdapter extends SessionPersistenceAdapter {
   close(): void;
+}
+
+const TABLE_NAME_PATTERN = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
+const MAX_TABLE_NAME_LENGTH = 128;
+
+function validateTableName(name: string): void {
+  if (name.length > MAX_TABLE_NAME_LENGTH || !TABLE_NAME_PATTERN.test(name)) {
+    throw new Error(
+      `Invalid table name "${name}": must match ${TABLE_NAME_PATTERN.source} and be at most ${MAX_TABLE_NAME_LENGTH} characters`,
+    );
+  }
 }
 
 function wrapSync<T>(fn: () => T): Promise<T> {
@@ -23,6 +42,7 @@ export async function createSQLitePersistenceAdapter(
 ): Promise<SQLitePersistenceAdapter> {
   const { Database } = await import('bun:sqlite');
   const tableName = options.tableName ?? 'sessions';
+  validateTableName(tableName);
   const database = new Database(options.path);
 
   database.run(`
@@ -70,7 +90,10 @@ export async function createSQLitePersistenceAdapter(
       return wrapSync(() => {
         const row = selectStatement.get({ $id: id }) as { data: string } | null;
         if (!row) return undefined;
-        return JSON.parse(row.data) as ConversationHistory;
+        const parsed: unknown = JSON.parse(row.data);
+        const result = lenientConversationSchema.safeParse(parsed);
+        if (!result.success) return undefined;
+        return result.data as ConversationHistory;
       });
     },
 

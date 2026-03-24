@@ -67,8 +67,8 @@ describe('message helpers', () => {
     expect(messageToString(msg)).toContain('![');
   });
 
-  test('public message entry re-exports helpers', async () => {
-    const mod = await import('../src/message');
+  test('utilities module re-exports message helpers', async () => {
+    const mod = await import('../src/utilities/message');
     expect(typeof mod.createMessage).toBe('function');
   });
 
@@ -86,6 +86,43 @@ describe('message helpers', () => {
     expect(messageParts(msg)).toEqual([]);
     expect(messageToString(msg)).toBe('');
     expect(messageText(msg)).toBe('');
+  });
+
+  test('createMessage produces a deep copy immune to source mutation', () => {
+    const toolCallArgs = { query: 'original' };
+    const toolResultContent = { data: 'original' };
+    const multiModalParts: Array<{ type: 'text'; text: string }> = [
+      { type: 'text', text: 'original' },
+    ];
+
+    const original: Message = {
+      id: 'deep-copy',
+      role: 'tool-call',
+      content: multiModalParts,
+      position: 0,
+      createdAt: new Date().toISOString(),
+      metadata: {},
+      hidden: false,
+      toolCall: { id: 'tc-1', name: 'search', arguments: toolCallArgs },
+      toolResult: { callId: 'tc-1', outcome: 'success', content: toolResultContent },
+    };
+
+    const copy = createMessage(original);
+
+    // Mutate the originals
+    toolCallArgs.query = 'mutated';
+    toolResultContent.data = 'mutated';
+    multiModalParts[0].text = 'mutated';
+
+    // Copy should be unaffected
+    const copyArgs = copy.toolCall!.arguments as Record<string, unknown>;
+    expect(copyArgs.query).toBe('original');
+
+    const copyResultContent = copy.toolResult!.content as Record<string, unknown>;
+    expect(copyResultContent.data).toBe('original');
+
+    const copyParts = copy.content as ReadonlyArray<{ type: string; text: string }>;
+    expect(copyParts[0].text).toBe('original');
   });
 
   test('isAssistantMessage narrows assistant messages', () => {

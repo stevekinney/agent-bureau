@@ -4,13 +4,13 @@ import type { MultiModalContent } from '../../multi-modal';
 import { isStreamingMessage } from '../../streaming';
 import type {
   ConversationHistory as Conversation,
-  JSONValue,
   Message,
   MessageInput,
   ToolCall,
   ToolResult,
 } from '../../types';
 import { getOrderedMessages } from '../../utilities/message-store';
+import { isCanonicalToolResultPayload, parseJSONValue, toJSONValue } from '../shared';
 
 /**
  * Anthropic text content block.
@@ -308,60 +308,6 @@ export function toAnthropicMessages(conversation: Conversation): AnthropicConver
     result.system = system;
   }
   return result;
-}
-
-function toJSONValue(value: unknown): JSONValue {
-  if (
-    value === null ||
-    typeof value === 'string' ||
-    typeof value === 'number' ||
-    typeof value === 'boolean'
-  ) {
-    return value;
-  }
-
-  if (Array.isArray(value)) {
-    return value.map((item) => toJSONValue(item));
-  }
-
-  if (value && typeof value === 'object') {
-    const record: Record<string, JSONValue> = {};
-    for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
-      record[key] = toJSONValue(entry);
-    }
-    return record;
-  }
-
-  return String(value as string);
-}
-
-function parseJSONValue(value: string): JSONValue | undefined {
-  try {
-    return JSON.parse(value) as JSONValue;
-  } catch {
-    return undefined;
-  }
-}
-
-function isCanonicalToolResultPayload(value: JSONValue): value is JSONValue & {
-  outcome: ToolResult['outcome'];
-  content: JSONValue;
-  error?: ToolResult['error'];
-  action?: ToolResult['action'];
-  inputDigest?: string;
-  outputDigest?: string;
-} {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    return false;
-  }
-
-  return (
-    'outcome' in value &&
-    (value['outcome'] === 'success' ||
-      value['outcome'] === 'error' ||
-      value['outcome'] === 'action_required') &&
-    'content' in value
-  );
 }
 
 function parseToolResultContent(callId: string, content: string, isError?: boolean): ToolResult {

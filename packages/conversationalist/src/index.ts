@@ -1,9 +1,5 @@
-export type {
-  CompactionResult,
-  Summarizer,
-  CompactionOptions as SummarizingCompactionOptions,
-} from './compaction/index';
-export { compactConversation as compactConversationWithSummarizer } from './compaction/index';
+export type { CompactionOptions, CompactionResult, Summarizer } from './compaction/index';
+export { compactConversation, stripToolResultDetails } from './compaction/index';
 export type {
   ConditionalInstructionComposer,
   ConditionalInstructionComposerRenderOptions,
@@ -31,12 +27,10 @@ export {
 export type {
   AppendToolCallOptions,
   AppendToolResultOptions,
-  CompactionOptions,
   ConversationEnvironment,
   IntegrityIssue,
   IntegrityIssueCode,
   MaterializeToolCallOptions,
-  MessageSummarizer,
   RedactMessageOptions,
   ToolInteraction,
 } from './conversation/index';
@@ -54,7 +48,6 @@ export {
   appendUserMessage,
   assertConversationHistoryIntegrity,
   collapseSystemMessages,
-  compactConversation,
   createConversationHistory,
   createConversationHistoryUnsafe,
   deserializeConversationHistory,
@@ -78,7 +71,6 @@ export {
   redactMessageAtPosition,
   replaceSystemMessage,
   searchConversationMessages,
-  stripToolResultDetails,
   toChatMessages,
   validateConversationHistoryIntegrity,
 } from './conversation/index';

@@ -1,8 +1,16 @@
 import { existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 
+import { z } from 'zod';
+
 import type { SessionInfo, SessionPersistenceAdapter } from '../environment';
+import { conversationShape } from '../schemas';
 import type { ConversationHistory } from '../types';
+
+/**
+ * Lenient conversation schema that tolerates extra keys from older/newer schema versions.
+ */
+const lenientConversationSchema = z.object(conversationShape).passthrough();
 
 export class JsonlSessionPersistenceAdapter implements SessionPersistenceAdapter {
   private readonly directory: string;
@@ -37,7 +45,10 @@ export class JsonlSessionPersistenceAdapter implements SessionPersistenceAdapter
     const lastLine = lines[lines.length - 1];
     if (!lastLine) return undefined;
 
-    return JSON.parse(lastLine) as ConversationHistory;
+    const parsed: unknown = JSON.parse(lastLine);
+    const result = lenientConversationSchema.safeParse(parsed);
+    if (!result.success) return undefined;
+    return result.data as ConversationHistory;
   }
 
   async list(): Promise<SessionInfo[]> {

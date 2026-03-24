@@ -1,4 +1,4 @@
-import type { MessageInput, MessagePlugin } from '../types';
+import type { JSONValue, MessageInput, MessagePlugin } from '../types';
 
 /**
  * Default regex rules for redacting common PII.
@@ -56,31 +56,82 @@ export function createPIIRedaction(options: PIIRedactionOptions = {}): (text: st
 }
 
 /**
+ * Recursively redacts string leaves in a JSON value using the provided redaction function.
+ */
+function redactJSONValue(value: unknown, redact: (text: string) => string): unknown {
+  if (typeof value === 'string') return redact(value);
+  if (value === null || value === undefined || typeof value !== 'object') return value;
+  if (Array.isArray(value)) return value.map((item) => redactJSONValue(item, redact));
+  const result: Record<string, unknown> = {};
+  for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
+    result[key] = redactJSONValue(val, redact);
+  }
+  return result;
+}
+
+/**
  * Creates a PII redaction plugin with custom rules.
  */
 export function createPIIRedactionPlugin(options: PIIRedactionOptions = {}): MessagePlugin {
   const redact = createPIIRedaction(options);
 
   return (input: MessageInput): MessageInput => {
+    let result: MessageInput;
+
     if (typeof input.content === 'string') {
-      return {
+      result = {
         ...input,
         content: redact(input.content),
       };
+    } else {
+      result = {
+        ...input,
+        content: input.content.map((part) => {
+          if (part.type === 'text' && part.text) {
+            return {
+              ...part,
+              text: redact(part.text),
+            };
+          }
+          return part;
+        }),
+      };
     }
 
-    return {
-      ...input,
-      content: input.content.map((part) => {
-        if (part.type === 'text' && part.text) {
-          return {
-            ...part,
-            text: redact(part.text),
-          };
-        }
-        return part;
-      }),
-    };
+    if (result.toolCall?.arguments !== undefined) {
+      result = {
+        ...result,
+        toolCall: {
+          ...result.toolCall,
+          arguments: redactJSONValue(
+            result.toolCall.arguments,
+            redact,
+          ) as MessageInput['toolCall'] extends { arguments: infer A } ? A : never,
+        },
+      };
+    }
+
+    if (result.toolResult?.content !== undefined) {
+      result = {
+        ...result,
+        toolResult: {
+          ...result.toolResult,
+          content: redactJSONValue(
+            result.toolResult.content,
+            redact,
+          ) as MessageInput['toolResult'] extends { content: infer C } ? C : never,
+        },
+      };
+    }
+
+    if (result.metadata !== undefined) {
+      result = {
+        ...result,
+        metadata: redactJSONValue(result.metadata, redact) as Record<string, JSONValue>,
+      };
+    }
+
+    return result;
   };
 }
 

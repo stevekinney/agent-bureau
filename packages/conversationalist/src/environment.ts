@@ -27,6 +27,8 @@ export interface ConversationEnvironment {
   estimateTokens: TokenEstimator;
   plugins: MessagePlugin[];
   persistence?: SessionPersistenceAdapter;
+  /** Maximum depth of the undo/redo history tree. When exceeded, the oldest ancestor is pruned. */
+  maxHistoryDepth?: number;
 }
 
 /**
@@ -61,6 +63,9 @@ export function resolveConversationEnvironment(
     estimateTokens: environment?.estimateTokens ?? defaultConversationEnvironment.estimateTokens,
     plugins: [...(environment?.plugins ?? defaultConversationEnvironment.plugins)],
     ...(environment?.persistence ? { persistence: environment.persistence } : {}),
+    ...(environment?.maxHistoryDepth !== undefined
+      ? { maxHistoryDepth: environment.maxHistoryDepth }
+      : {}),
   };
 }
 

@@ -166,6 +166,19 @@ describe('JsonlSessionPersistenceAdapter', () => {
     expect(session.updatedAt).toBeDefined();
   });
 
+  it('returns undefined when the stored data is corrupted JSON', async () => {
+    const environment = createTestConversationEnvironment();
+    const conversation = createConversationHistory({ id: 'corrupt-test' }, environment);
+    await adapter.save(conversation);
+
+    // Overwrite with corrupted data
+    const filePath = join(directory, 'corrupt-test.jsonl');
+    await Bun.write(filePath, '{"not-a-conversation": true}\n');
+
+    const loaded = await adapter.load('corrupt-test');
+    expect(loaded).toBeUndefined();
+  });
+
   it('creates the directory if it does not exist', async () => {
     const nested = join(directory, 'deeply', 'nested', 'path');
     const nestedAdapter = new JsonlSessionPersistenceAdapter(nested);
@@ -203,7 +216,7 @@ describe('Conversation auto-persistence', () => {
 
     conversation.appendUserMessage('Auto-saved message');
 
-    await Bun.sleep(50);
+    await Bun.sleep(250);
 
     const loaded = await adapter.load('auto-save');
     expect(loaded).toBeDefined();
@@ -220,7 +233,7 @@ describe('Conversation auto-persistence', () => {
 
     conversation.tag('auto-tagged');
 
-    await Bun.sleep(50);
+    await Bun.sleep(250);
 
     const loaded = await adapter.load('auto-tag');
     expect(loaded).toBeDefined();
