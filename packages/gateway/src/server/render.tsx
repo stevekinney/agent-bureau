@@ -5,12 +5,16 @@ interface RenderPageOptions {
   title: string;
   data: unknown;
   content: ReactNode;
+  clientScript?: string;
+  stylesheet?: string;
 }
 
 export async function renderPage({
   title,
   data,
   content,
+  clientScript = '/public/entry.js',
+  stylesheet = '/public/styles.css',
 }: RenderPageOptions): Promise<ReadableStream> {
   const serializedData = JSON.stringify(data).replace(/</g, '\\u003c');
 
@@ -20,7 +24,7 @@ export async function renderPage({
         <meta charSet="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <title>{title}</title>
-        <link rel="stylesheet" href="/public/styles.css" />
+        <link rel="stylesheet" href={stylesheet} />
       </head>
       <body>
         <div id="root">{content}</div>
@@ -29,7 +33,7 @@ export async function renderPage({
             __html: `window.__INITIAL_DATA__ = ${serializedData}`,
           }}
         />
-        <script type="module" src="/public/client.js" />
+        <script type="module" src={clientScript} />
       </body>
     </html>,
   );

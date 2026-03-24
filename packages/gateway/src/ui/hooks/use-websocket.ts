@@ -28,6 +28,7 @@ export function useWebSocket({
   onMessageRef.current = onMessage;
 
   const mountedRef = useRef(true);
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -44,15 +45,19 @@ export function useWebSocket({
       });
 
       ws.addEventListener('message', (event) => {
-        const frame = JSON.parse(event.data as string) as ServerFrame;
-        onMessageRef.current?.(frame);
+        try {
+          const frame = JSON.parse(event.data as string) as ServerFrame;
+          onMessageRef.current?.(frame);
+        } catch {
+          // Silently ignore malformed frames
+        }
       });
 
       ws.addEventListener('close', () => {
         if (!mountedRef.current) return;
         setStatus('disconnected');
         wsRef.current = null;
-        setTimeout(connect, reconnectInterval);
+        reconnectTimerRef.current = setTimeout(connect, reconnectInterval);
       });
     }
 
@@ -60,6 +65,10 @@ export function useWebSocket({
 
     return () => {
       mountedRef.current = false;
+      if (reconnectTimerRef.current !== null) {
+        clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
       const ws = wsRef.current;
       if (ws) {
         ws.close();

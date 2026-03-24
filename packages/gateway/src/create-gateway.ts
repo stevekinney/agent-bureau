@@ -30,7 +30,6 @@ export function createGateway(options: GatewayOptions = {}): Gateway {
     createPages({
       store: bureau.store,
       provider: options.provider,
-      toolbox: options.toolbox,
       maximumSteps: bureau.getConfiguration().maximumSteps,
       systemPrompt: options.systemPrompt,
     }),
@@ -49,8 +48,21 @@ export function createGateway(options: GatewayOptions = {}): Gateway {
       port,
       hostname: options.hostname,
       fetch(request, server) {
+        const url = new URL(request.url);
+
         // WebSocket upgrade
-        if (new URL(request.url).pathname === '/ws') {
+        if (url.pathname === '/ws') {
+          if (options.authToken) {
+            const authHeader = request.headers.get('authorization') ?? '';
+            const token = authHeader.toLowerCase().startsWith('bearer ')
+              ? authHeader.slice(7).trim()
+              : url.searchParams.get('token');
+
+            if (!token || token !== options.authToken) {
+              return new Response('Unauthorized', { status: 401 });
+            }
+          }
+
           const upgraded = server.upgrade(request, { data: undefined });
           if (upgraded) return undefined as unknown as Response;
           return new Response('WebSocket upgrade failed', { status: 400 });

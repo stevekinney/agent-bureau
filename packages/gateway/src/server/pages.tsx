@@ -1,5 +1,4 @@
 import { Hono } from 'hono';
-import type { Toolbox } from 'operative';
 import type { Store } from 'sentinel';
 
 import { serializeRunState } from '../serialization';
@@ -9,7 +8,6 @@ import { renderPage } from './render';
 interface PageDependencies {
   store: Store;
   provider: ProviderConfiguration | undefined;
-  toolbox: Toolbox | undefined;
   maximumSteps: number;
   systemPrompt: string | undefined;
 }
@@ -77,7 +75,7 @@ function Chat() {
   return (
     <main>
       <h1>Chat</h1>
-      <form method="post" action="/api/v1/runs">
+      <form>
         <label htmlFor="message">Message</label>
         <textarea id="message" name="message" rows={4} />
         <button type="submit">Send</button>

@@ -23,7 +23,7 @@ import { DEFAULT_MAXIMUM_STEPS } from './types';
 class BureauError extends Error {
   constructor(
     message: string,
-    readonly code: 'NOT_FOUND' | 'CONFLICT' | 'NOT_CONFIGURED' | 'NOT_IMPLEMENTED',
+    readonly code: 'NOT_FOUND' | 'CONFLICT' | 'NOT_CONFIGURED' | 'NOT_IMPLEMENTED' | 'BAD_REQUEST',
   ) {
     super(message);
     this.name = 'BureauError';
@@ -33,6 +33,7 @@ class BureauError extends Error {
 export { BureauError };
 
 export function createBureau(options: BureauOptions = {}): Bureau {
+  const ownsStore = !options.store;
   const store: Store = options.store ?? createStore();
   const emitter = createEventTarget<BureauEvents>();
   const maximumSteps = options.maximumSteps ?? DEFAULT_MAXIMUM_STEPS;
@@ -65,7 +66,7 @@ export function createBureau(options: BureauOptions = {}): Bureau {
     }
 
     if (!request.message || typeof request.message !== 'string') {
-      throw new BureauError('Request must include a "message" string', 'NOT_CONFIGURED');
+      throw new BureauError('Request must include a "message" string', 'BAD_REQUEST');
     }
 
     let conversation: InstanceType<typeof Conversation>;
@@ -202,7 +203,9 @@ export function createBureau(options: BureauOptions = {}): Bureau {
     emitter.emit('bureau.disposed', {} as Record<string, never>);
     storeSubscription.unsubscribe();
     emitter.complete();
-    store.dispose();
+    if (ownsStore) {
+      store.dispose();
+    }
   }
 
   return {

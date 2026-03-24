@@ -11,6 +11,7 @@ export interface UseChatResult {
   messages: ChatMessage[];
   runId: string | undefined;
   sending: boolean;
+  error: string | undefined;
   send: (message: string) => Promise<void>;
   handleMessage: (frame: ServerFrame) => void;
 }
@@ -20,21 +21,34 @@ export function useChat(): UseChatResult {
   const [runId, setRunId] = useState<string | undefined>(undefined);
   const runIdRef = useRef<string | undefined>(undefined);
   const [sending, setSending] = useState(false);
+  const [error, setError] = useState<string | undefined>(undefined);
 
   const send = useCallback(async (message: string) => {
     setSending(true);
+    setError(undefined);
     setMessages((previous) => [...previous, { role: 'user', content: message }]);
 
-    const response = await fetch('/api/v1/runs', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ message }),
-    });
+    try {
+      const response = await fetch('/api/v1/runs', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ message }),
+      });
 
-    const data = (await response.json()) as RunSummary;
-    runIdRef.current = data.id;
-    setRunId(data.id);
-    setSending(false);
+      if (!response.ok) {
+        const errorBody = await response.text();
+        setError(errorBody || `Request failed with status ${response.status}`);
+        return;
+      }
+
+      const data = (await response.json()) as RunSummary;
+      runIdRef.current = data.id;
+      setRunId(data.id);
+    } catch (fetchError) {
+      setError(fetchError instanceof Error ? fetchError.message : 'Network error');
+    } finally {
+      setSending(false);
+    }
   }, []);
 
   const handleMessage = useCallback((frame: ServerFrame) => {
@@ -52,5 +66,5 @@ export function useChat(): UseChatResult {
     }
   }, []);
 
-  return { messages, runId, sending, send, handleMessage };
+  return { messages, runId, sending, error, send, handleMessage };
 }

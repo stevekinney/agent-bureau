@@ -62,7 +62,7 @@ describe('renderPage', () => {
     });
 
     const html = await streamToString(stream);
-    expect(html).toContain('/public/client.js');
+    expect(html).toContain('/public/entry.js');
     expect(html).toContain('type="module"');
   });
 

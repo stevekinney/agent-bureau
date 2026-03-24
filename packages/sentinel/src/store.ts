@@ -185,6 +185,7 @@ export function createStore(options: StoreOptions = {}): Store {
   }
 
   function removeRun(id: string): void {
+    if (!runs.has(id)) return;
     emitter.emit('run.removed', { runId: id });
     deregister(id);
     runs.delete(id);

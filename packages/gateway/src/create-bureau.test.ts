@@ -53,14 +53,14 @@ describe('createBureau', () => {
       }
     });
 
-    it('throws NOT_CONFIGURED when message is missing', async () => {
+    it('throws BAD_REQUEST when message is missing', async () => {
       const bureau = createBureau({ generate: createMockGenerate() });
       try {
         await bureau.createRun({ message: '' });
         expect.unreachable('should have thrown');
       } catch (error) {
         expect(error).toBeInstanceOf(BureauError);
-        expect((error as BureauError).code).toBe('NOT_CONFIGURED');
+        expect((error as BureauError).code).toBe('BAD_REQUEST');
       }
     });
 

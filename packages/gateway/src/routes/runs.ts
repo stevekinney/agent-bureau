@@ -8,16 +8,20 @@ export function createRunsRoutes(bureau: Bureau) {
   const app = new Hono();
 
   app.post('/', async (context) => {
-    const body = await context.req.json<CreateRunRequest>();
+    let body: CreateRunRequest;
+    try {
+      body = await context.req.json<CreateRunRequest>();
+    } catch {
+      throw new HTTPException(400, { message: 'Invalid JSON body' });
+    }
     try {
       const summary = await bureau.createRun(body);
       return context.json(summary, 201);
     } catch (error) {
       if (error instanceof BureauError) {
         if (error.code === 'NOT_CONFIGURED')
-          throw new HTTPException(error.message.includes('generate') ? 503 : 400, {
-            message: error.message,
-          });
+          throw new HTTPException(503, { message: error.message });
+        if (error.code === 'BAD_REQUEST') throw new HTTPException(400, { message: error.message });
       }
       throw error;
     }

@@ -1,3 +1,5 @@
+import { useEffect, useRef } from 'react';
+
 import type { ConfigurationResponse, RunSummary } from '../types';
 import { useChat } from './hooks/use-chat';
 import { useRunDetail } from './hooks/use-run-detail';
@@ -18,7 +20,8 @@ interface InitialData {
 
 export function App({ initialData, pathname }: { initialData: InitialData; pathname: string }) {
   const route = matchRoute(pathname);
-  const wsUrl = `ws://${window.location.host}/ws`;
+  const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const wsUrl = `${wsProtocol}//${window.location.host}/ws`;
 
   const runsHook = useRuns(initialData.runs ?? []);
   const runDetailHook = useRunDetail(
@@ -34,7 +37,11 @@ export function App({ initialData, pathname }: { initialData: InitialData; pathn
   );
   const chat = useChat();
 
-  const { status: connectionStatus } = useWebSocket({
+  const {
+    status: connectionStatus,
+    subscribe,
+    unsubscribe,
+  } = useWebSocket({
     url: wsUrl,
     onMessage(frame) {
       runsHook.handleMessage(frame);
@@ -42,6 +49,26 @@ export function App({ initialData, pathname }: { initialData: InitialData; pathn
       chat.handleMessage(frame);
     },
   });
+
+  // Subscribe to the chat run when it's created
+  const previousChatRunIdRef = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (chat.runId && chat.runId !== previousChatRunIdRef.current) {
+      if (previousChatRunIdRef.current) {
+        unsubscribe(previousChatRunIdRef.current);
+      }
+      subscribe(chat.runId);
+      previousChatRunIdRef.current = chat.runId;
+    }
+  }, [chat.runId, subscribe, unsubscribe]);
+
+  // Subscribe to the run detail page's run
+  const detailRunId = route?.name === 'run-detail' ? route.params?.['id'] : undefined;
+  useEffect(() => {
+    if (!detailRunId) return;
+    subscribe(detailRunId);
+    return () => unsubscribe(detailRunId);
+  }, [detailRunId, subscribe, unsubscribe]);
 
   function renderPage() {
     switch (route?.name) {
