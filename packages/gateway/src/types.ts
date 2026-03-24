@@ -148,7 +148,7 @@ export interface CreateRunRequest {
 }
 
 export interface ConfigurationResponse {
-  provider: ProviderConfiguration | undefined;
+  provider: Omit<ProviderConfiguration, 'apiKey'> | undefined;
   maximumSteps: number;
   systemPrompt: string | undefined;
   tools: ToolSummary[];

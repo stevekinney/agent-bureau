@@ -14,6 +14,7 @@ import type {
   BureauOptions,
   ConfigurationResponse,
   CreateRunRequest,
+  ProviderConfiguration,
   RunSummary,
   ToolSummary,
 } from './types';
@@ -180,9 +181,15 @@ export function createBureau(options: BureauOptions = {}): Bureau {
     }));
   }
 
+  function redactProvider(): Omit<ProviderConfiguration, 'apiKey'> | undefined {
+    if (!provider) return undefined;
+    const { apiKey: _apiKey, ...safeProvider } = provider;
+    return safeProvider;
+  }
+
   function getConfiguration(): ConfigurationResponse {
     return {
-      provider,
+      provider: redactProvider(),
       maximumSteps,
       systemPrompt,
       tools: getToolSummaries(),

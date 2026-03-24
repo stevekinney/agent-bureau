@@ -27,13 +27,21 @@ export function useWebSocket({
   const onMessageRef = useRef(onMessage);
   onMessageRef.current = onMessage;
 
+  const mountedRef = useRef(true);
+
   useEffect(() => {
+    mountedRef.current = true;
+
     function connect() {
+      if (!mountedRef.current) return;
+
       setStatus('connecting');
       const ws = new WebSocket(url);
       wsRef.current = ws;
 
-      ws.addEventListener('open', () => setStatus('connected'));
+      ws.addEventListener('open', () => {
+        if (mountedRef.current) setStatus('connected');
+      });
 
       ws.addEventListener('message', (event) => {
         const frame = JSON.parse(event.data as string) as ServerFrame;
@@ -41,6 +49,7 @@ export function useWebSocket({
       });
 
       ws.addEventListener('close', () => {
+        if (!mountedRef.current) return;
         setStatus('disconnected');
         wsRef.current = null;
         setTimeout(connect, reconnectInterval);
@@ -50,6 +59,7 @@ export function useWebSocket({
     connect();
 
     return () => {
+      mountedRef.current = false;
       const ws = wsRef.current;
       if (ws) {
         ws.close();

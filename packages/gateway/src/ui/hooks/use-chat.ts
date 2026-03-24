@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 
 import type { RunSummary, ServerFrame } from '../../types';
 
@@ -18,6 +18,7 @@ export interface UseChatResult {
 export function useChat(): UseChatResult {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [runId, setRunId] = useState<string | undefined>(undefined);
+  const runIdRef = useRef<string | undefined>(undefined);
   const [sending, setSending] = useState(false);
 
   const send = useCallback(async (message: string) => {
@@ -31,27 +32,25 @@ export function useChat(): UseChatResult {
     });
 
     const data = (await response.json()) as RunSummary;
+    runIdRef.current = data.id;
     setRunId(data.id);
     setSending(false);
   }, []);
 
-  const handleMessage = useCallback(
-    (frame: ServerFrame) => {
-      if (frame.type !== 'event') return;
-      if (frame.runId !== runId) return;
+  const handleMessage = useCallback((frame: ServerFrame) => {
+    if (frame.type !== 'event') return;
+    if (frame.runId !== runIdRef.current) return;
 
-      if (frame.event === 'run.completed') {
-        const detail = frame.detail as { content?: string };
-        if (detail.content) {
-          setMessages((previous) => [
-            ...previous,
-            { role: 'assistant', content: detail.content as string },
-          ]);
-        }
+    if (frame.event === 'run.completed') {
+      const detail = frame.detail as { content?: string };
+      if (detail.content) {
+        setMessages((previous) => [
+          ...previous,
+          { role: 'assistant', content: detail.content as string },
+        ]);
       }
-    },
-    [runId],
-  );
+    }
+  }, []);
 
   return { messages, runId, sending, send, handleMessage };
 }

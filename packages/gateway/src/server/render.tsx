@@ -12,7 +12,7 @@ export async function renderPage({
   data,
   content,
 }: RenderPageOptions): Promise<ReadableStream> {
-  const serializedData = JSON.stringify(data);
+  const serializedData = JSON.stringify(data).replace(/</g, '\\u003c');
 
   const stream = await renderToReadableStream(
     <html lang="en">

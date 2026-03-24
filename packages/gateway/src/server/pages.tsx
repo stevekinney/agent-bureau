@@ -54,7 +54,7 @@ function Configuration({
   maximumSteps,
   systemPrompt,
 }: {
-  provider: ProviderConfiguration | undefined;
+  provider: Omit<ProviderConfiguration, 'apiKey'> | undefined;
   maximumSteps: number;
   systemPrompt: string | undefined;
 }) {
@@ -130,8 +130,12 @@ export function createPages(dependencies: PageDependencies) {
   });
 
   app.get('/configuration', async () => {
+    const { apiKey: _apiKey, ...safeProvider } = dependencies.provider ?? {};
+    const redactedProvider = dependencies.provider
+      ? (safeProvider as Omit<typeof dependencies.provider, 'apiKey'>)
+      : undefined;
     const data = {
-      provider: dependencies.provider,
+      provider: redactedProvider,
       maximumSteps: dependencies.maximumSteps,
       systemPrompt: dependencies.systemPrompt,
     };
@@ -141,7 +145,7 @@ export function createPages(dependencies: PageDependencies) {
       data,
       content: (
         <Configuration
-          provider={dependencies.provider}
+          provider={redactedProvider}
           maximumSteps={dependencies.maximumSteps}
           systemPrompt={dependencies.systemPrompt}
         />
