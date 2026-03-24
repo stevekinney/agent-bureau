@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
 
-import type { ConfigurationResponse, RunSummary } from '../types';
+import type { ConfigurationResponse, RunSummary, ServerFrame } from '../types';
 import { useChat } from './hooks/use-chat';
 import { useRunDetail } from './hooks/use-run-detail';
 import { useRuns } from './hooks/use-runs';
@@ -35,7 +35,10 @@ export function App({ initialData, pathname }: { initialData: InitialData; pathn
       actionCount: 0,
     },
   );
-  const chat = useChat();
+
+  // Use a ref for the chat message handler so useWebSocket's onMessage can
+  // reference it without a circular hook dependency.
+  const chatHandleMessageRef = useRef<(frame: ServerFrame) => void>(() => {});
 
   const {
     status: connectionStatus,
@@ -46,21 +49,15 @@ export function App({ initialData, pathname }: { initialData: InitialData; pathn
     onMessage(frame) {
       runsHook.handleMessage(frame);
       runDetailHook.handleMessage(frame);
-      chat.handleMessage(frame);
+      chatHandleMessageRef.current(frame);
     },
   });
 
-  // Subscribe to the chat run when it's created
-  const previousChatRunIdRef = useRef<string | undefined>(undefined);
-  useEffect(() => {
-    if (chat.runId && chat.runId !== previousChatRunIdRef.current) {
-      if (previousChatRunIdRef.current) {
-        unsubscribe(previousChatRunIdRef.current);
-      }
-      subscribe(chat.runId);
-      previousChatRunIdRef.current = chat.runId;
-    }
-  }, [chat.runId, subscribe, unsubscribe]);
+  // useChat now subscribes to the WebSocket synchronously on run creation,
+  // eliminating the race where the run completes before the useEffect-based
+  // subscription could fire.
+  const chat = useChat({ subscribe, unsubscribe });
+  chatHandleMessageRef.current = chat.handleMessage;
 
   // Subscribe to the run detail page's run
   const detailRunId = route?.name === 'run-detail' ? route.params?.['id'] : undefined;

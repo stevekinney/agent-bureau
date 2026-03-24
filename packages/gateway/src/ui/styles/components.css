@@ -44,19 +44,6 @@
   color: var(--color-error);
 }
 
-.tool-call-card {
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius);
-  padding: 0.75rem;
-  margin-bottom: 0.5rem;
-}
-
-.tool-call-card h4 {
-  font-family: var(--font-mono);
-  font-size: 0.85rem;
-  margin-bottom: 0.5rem;
-}
-
 .message-list {
   display: flex;
   flex-direction: column;
