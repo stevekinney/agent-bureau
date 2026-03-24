@@ -118,6 +118,44 @@ describe('serializeActionDetail', () => {
     expect(result['finishReason']).toBe('stop-condition');
   });
 
+  it('strips nested conversation from each step inside run.completed details', () => {
+    const detail = {
+      conversation: { snapshot: () => ({}) },
+      steps: [
+        {
+          step: 1,
+          conversation: { snapshot: () => ({}) },
+          content: 'a',
+          toolCalls: [],
+          results: [],
+          final: false,
+        },
+        {
+          step: 2,
+          conversation: { snapshot: () => ({}) },
+          content: 'b',
+          toolCalls: [],
+          results: [],
+          final: true,
+        },
+      ],
+      content: 'done',
+      usage: { prompt: 10, completion: 20, total: 30 },
+      finishReason: 'stop-condition',
+    };
+
+    const result = serializeActionDetail('run.completed', detail) as Record<string, unknown>;
+    expect(result).not.toHaveProperty('conversation');
+
+    const steps = result['steps'] as Record<string, unknown>[];
+    expect(steps).toHaveLength(2);
+    for (const step of steps) {
+      expect(step).not.toHaveProperty('conversation');
+    }
+    expect(steps[0]!['content']).toBe('a');
+    expect(steps[1]!['content']).toBe('b');
+  });
+
   it('passes through other event types unchanged', () => {
     const detail = { some: 'data' };
     const result = serializeActionDetail('run.started', detail);
