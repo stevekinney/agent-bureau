@@ -117,6 +117,14 @@ export type {
 } from './history';
 export { Conversation } from './history';
 export type { ImageContent, MultiModalContent, TextContent } from './multi-modal';
+export type { InMemoryPersistenceAdapterOptions } from './persistence/in-memory-adapter';
+export { createInMemoryPersistenceAdapter } from './persistence/in-memory-adapter';
+export { JsonlSessionPersistenceAdapter } from './persistence/jsonl-adapter';
+export type {
+  SQLitePersistenceAdapter,
+  SQLitePersistenceAdapterOptions,
+} from './persistence/sqlite-adapter';
+export { createSQLitePersistenceAdapter } from './persistence/sqlite-adapter';
 export type {
   AppendableToolAction,
   AppendableToolCallInput,

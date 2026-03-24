@@ -83,7 +83,7 @@ function filterDeprecated(
 
   return toolNames.filter((name) => {
     const tool = toolsByName.get(name);
-    return tool && tool.lifecycle?.deprecated !== true;
+    return tool && !tool.lifecycle?.deprecated;
   });
 }
 

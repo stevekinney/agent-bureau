@@ -21,6 +21,11 @@ const entrypoints = [
   // Internal modules referenced by index.d.ts (needed for Bun resolution)
   './src/combine-toolboxes.ts',
   './src/core/errors.ts',
+  './src/core/registry/embeddings.ts',
+  './src/core/registry/registry.ts',
+  './src/core/registry/resolve-name.ts',
+  './src/core/registry/index.ts',
+  './src/core/tool-definition.ts',
   './src/create-tool.ts',
   './src/create-toolbox.ts',
   './src/is-tool.ts',

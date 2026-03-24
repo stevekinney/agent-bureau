@@ -132,6 +132,10 @@ export function createRunRecorder(activeRun: ActiveRun): RunRecorder {
     'response.schema-failed',
     'elicitation.requested',
     'elicitation.resolved',
+    'backpressure.applied',
+    'backpressure.released',
+    'session.saved',
+    'session.loaded',
   ];
 
   for (const type of eventTypes) {

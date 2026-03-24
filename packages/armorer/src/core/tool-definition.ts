@@ -13,7 +13,7 @@ export type ToolDisplay = {
 };
 
 export type ToolLifecycle = {
-  deprecated?: boolean;
+  deprecated?: boolean | string;
   message?: string;
   replacedBy?: ToolId;
 };

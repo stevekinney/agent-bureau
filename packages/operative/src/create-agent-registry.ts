@@ -10,6 +10,7 @@ export interface AgentRegistryEntry {
   agent: AgentDefinition;
   description: string;
   capabilities: string[];
+  tags?: string[];
   metadata?: Record<string, unknown>;
 }
 
@@ -17,6 +18,7 @@ export interface AgentRegistryQuery {
   text?: string;
   capabilities?: string[];
   allCapabilities?: string[];
+  tags?: string[];
   predicate?: (entry: AgentRegistryEntry) => boolean;
   limit?: number;
 }
@@ -122,6 +124,14 @@ export function createAgentRegistry(): AgentRegistry {
         });
       }
 
+      if (query.tags) {
+        const queryTags = query.tags.map((t) => t.toLowerCase());
+        results = results.filter((entry) => {
+          const entryTags = (entry.tags ?? []).map((t) => t.toLowerCase());
+          return queryTags.some((tag) => entryTags.includes(tag));
+        });
+      }
+
       if (query.predicate) {
         results = results.filter(query.predicate);
       }
@@ -149,22 +159,24 @@ export function createAgentDiscoveryTool(registry: AgentRegistry) {
   return createTool({
     name: 'discover-agents',
     description:
-      'Discover available agents by searching their names, descriptions, and capabilities.',
+      'Discover available agents by searching their names, descriptions, capabilities, and tags.',
     input: z.object({
       text: z
         .string()
         .optional()
         .describe('Search text to match against agent names and descriptions.'),
       capabilities: z.array(z.string()).optional().describe('Filter by capabilities (any match).'),
+      tags: z.array(z.string()).optional().describe('Filter by tags (any match).'),
     }),
-    execute: ({ text, capabilities }) => {
-      const results = registry.query({ text, capabilities });
+    execute: ({ text, capabilities, tags }) => {
+      const results = registry.query({ text, capabilities, tags });
       return Promise.resolve(
         JSON.stringify(
           results.map((entry) => ({
             name: entry.agent.name,
             description: entry.description,
             capabilities: entry.capabilities,
+            tags: entry.tags ?? [],
           })),
         ),
       );

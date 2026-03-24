@@ -431,3 +431,184 @@ describe('supervisor with scratchpad (shared state)', () => {
     expect(scratchpadContent).toBe('shared-value');
   });
 });
+
+describe('supervisor pipeline', () => {
+  function createNamedEntry(name: string, responsePrefix?: string): AgentRegistryEntry {
+    const prefix = responsePrefix ?? name;
+    const agent = defineAgent({
+      name,
+      generate: async (context) => {
+        const messages = context.conversation.getMessages();
+        const lastUserMessage = [...messages].reverse().find((m) => m.role === 'user');
+        const content = lastUserMessage?.content ?? '';
+        const input = typeof content === 'string' ? content : '';
+        return textResponse(`${prefix}: ${input}`);
+      },
+      toolbox: createTestToolbox([]),
+      stopWhen: noToolCalls(),
+    });
+    return {
+      agent,
+      description: `${name} agent`,
+      capabilities: [],
+    };
+  }
+
+  it('2-stage chain passes output as next input', async () => {
+    const entries = [createNamedEntry('stage-a', 'A'), createNamedEntry('stage-b', 'B')];
+    const supervisor = createSupervisor({
+      agents: entries,
+      routing: () => 'stage-a',
+    });
+
+    const result = await supervisor.pipeline('hello', [
+      { agentName: 'stage-a' },
+      { agentName: 'stage-b' },
+    ]);
+
+    expect(result.agentResults).toHaveLength(2);
+    expect(result.agentResults[0]!.agentName).toBe('stage-a');
+    expect(result.agentResults[1]!.agentName).toBe('stage-b');
+    // Stage A receives the original task, stage B receives stage A's output
+    expect(result.agentResults[0]!.result?.content).toBe('A: hello');
+    expect(result.agentResults[1]!.result?.content).toBe('B: A: hello');
+    expect(result.synthesis).toBe('B: A: hello');
+  });
+
+  it('3-stage chain', async () => {
+    const entries = [
+      createNamedEntry('first', '1'),
+      createNamedEntry('second', '2'),
+      createNamedEntry('third', '3'),
+    ];
+    const supervisor = createSupervisor({
+      agents: entries,
+      routing: () => 'first',
+    });
+
+    const result = await supervisor.pipeline('start', [
+      { agentName: 'first' },
+      { agentName: 'second' },
+      { agentName: 'third' },
+    ]);
+
+    expect(result.agentResults).toHaveLength(3);
+    expect(result.synthesis).toBe('3: 2: 1: start');
+  });
+
+  it('custom mapInput transforms between stages', async () => {
+    const entries = [createNamedEntry('alpha', 'A'), createNamedEntry('beta', 'B')];
+    const supervisor = createSupervisor({
+      agents: entries,
+      routing: () => 'alpha',
+    });
+
+    const result = await supervisor.pipeline('original', [
+      { agentName: 'alpha' },
+      {
+        agentName: 'beta',
+        mapInput: (previousOutput, originalTask) =>
+          `transformed(${previousOutput}, ${originalTask})`,
+      },
+    ]);
+
+    expect(result.agentResults).toHaveLength(2);
+    expect(result.agentResults[1]!.result?.content).toBe('B: transformed(A: original, original)');
+  });
+
+  it('error mid-pipeline stops and returns partial results', async () => {
+    const good = createNamedEntry('good', 'OK');
+    const failing: AgentRegistryEntry = {
+      agent: {
+        name: 'failing',
+        options: {
+          name: 'failing',
+          generate: async () => textResponse(''),
+          toolbox: createTestToolbox([]),
+        },
+        async run() {
+          throw new Error('Pipeline stage failed');
+        },
+        createRun: () => ({}) as never,
+      },
+      description: 'Failing agent',
+      capabilities: [],
+    };
+    const afterFail = createNamedEntry('after-fail', 'AFTER');
+
+    const supervisor = createSupervisor({
+      agents: [good, failing, afterFail],
+      routing: () => 'good',
+    });
+
+    const result = await supervisor.pipeline('task', [
+      { agentName: 'good' },
+      { agentName: 'failing' },
+      { agentName: 'after-fail' },
+    ]);
+
+    // Pipeline should stop at the failing stage
+    expect(result.agentResults).toHaveLength(2);
+    expect(result.agentResults[0]!.agentName).toBe('good');
+    expect(result.agentResults[1]!.agentName).toBe('failing');
+    expect(result.agentResults[1]!.error).toBeDefined();
+  });
+
+  it('abort signal cancels pipeline', async () => {
+    const controller = new AbortController();
+    const entry = createNamedEntry('worker');
+    const supervisor = createSupervisor({
+      agents: [entry],
+      routing: () => 'worker',
+      signal: controller.signal,
+    });
+
+    controller.abort('cancelled');
+
+    await expect(
+      supervisor.pipeline('task', [{ agentName: 'worker' }, { agentName: 'worker' }]),
+    ).rejects.toThrow();
+  });
+
+  it('empty stages array returns empty result', async () => {
+    const entry = createNamedEntry('worker');
+    const supervisor = createSupervisor({
+      agents: [entry],
+      routing: () => 'worker',
+    });
+
+    const result = await supervisor.pipeline('task', []);
+    expect(result.agentResults).toHaveLength(0);
+    expect(result.synthesis).toBe('');
+    expect(result.task).toBe('task');
+  });
+
+  it('events emitted for each stage', async () => {
+    const entries = [createNamedEntry('one', '1'), createNamedEntry('two', '2')];
+    const supervisor = createSupervisor({
+      agents: entries,
+      routing: () => 'one',
+    });
+
+    const routed: unknown[] = [];
+    const completed: unknown[] = [];
+    const synthesisStarted: unknown[] = [];
+    const synthesisCompleted: unknown[] = [];
+
+    supervisor.addEventListener('task.routed', (event) => routed.push(event.detail));
+    supervisor.addEventListener('task.completed', (event) => completed.push(event.detail));
+    supervisor.addEventListener('synthesis.started', (event) =>
+      synthesisStarted.push(event.detail),
+    );
+    supervisor.addEventListener('synthesis.completed', (event) =>
+      synthesisCompleted.push(event.detail),
+    );
+
+    await supervisor.pipeline('go', [{ agentName: 'one' }, { agentName: 'two' }]);
+
+    expect(routed).toHaveLength(2);
+    expect(completed).toHaveLength(2);
+    expect(synthesisStarted).toHaveLength(1);
+    expect(synthesisCompleted).toHaveLength(1);
+  });
+});

@@ -63,6 +63,10 @@ export {
   materializeToolResultsAsync,
 } from './tool-materialization';
 
+// Embedding search API
+export type { Embedder, EmbeddingEntry, EmbeddingVector } from './core/registry/embeddings';
+export { awaitToolEmbeddings, registerToolEmbeddings } from './core/registry/embeddings';
+
 // Types
 export type {
   JSONValue,

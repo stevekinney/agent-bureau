@@ -148,14 +148,19 @@ export interface MockAnthropicStreamingClient extends AnthropicStreamingClient {
 
 /**
  * Creates a mock Anthropic streaming client that yields queued event sequences.
+ *
+ * When `errorAfterEvents` is set, the async generator yields that many events
+ * from the current sequence before throwing the next error from `errors`.
  */
 export function createMockAnthropicStreamingClient(
   eventSequences: AnthropicStreamEvent[][],
   errors: Error[] = [],
+  options?: { errorAfterEvents?: number },
 ): MockAnthropicStreamingClient {
   const calls: Array<Record<string, unknown>> = [];
   let sequenceIndex = 0;
   let errorIndex = 0;
+  const errorAfterEvents = options?.errorAfterEvents;
 
   return {
     _calls: calls,
@@ -165,15 +170,28 @@ export function createMockAnthropicStreamingClient(
       create(params: Record<string, unknown>): AsyncIterable<AnthropicStreamEvent> {
         calls.push(params);
         const error = errors[errorIndex];
-        if (error && errorIndex < errors.length) {
+        if (error && errorIndex < errors.length && errorAfterEvents === undefined) {
           errorIndex++;
           throw error;
         }
         const events = eventSequences[sequenceIndex++] ?? [];
+        const midStreamError =
+          errorAfterEvents !== undefined && errorIndex < errors.length
+            ? errors[errorIndex++]
+            : undefined;
+        const threshold = errorAfterEvents ?? 0;
 
         return (async function* () {
+          let yielded = 0;
           for (const event of events) {
+            if (midStreamError && yielded >= threshold) {
+              throw midStreamError;
+            }
             yield event;
+            yielded++;
+          }
+          if (midStreamError && yielded <= threshold) {
+            throw midStreamError;
           }
         })();
       },
@@ -189,14 +207,19 @@ export interface MockOpenAIStreamingClient extends OpenAIStreamingClient {
 
 /**
  * Creates a mock OpenAI streaming client that yields queued chunk sequences.
+ *
+ * When `errorAfterEvents` is set, the async generator yields that many chunks
+ * from the current sequence before throwing the next error from `errors`.
  */
 export function createMockOpenAIStreamingClient(
   chunkSequences: OpenAIChatCompletionChunk[][],
   errors: Error[] = [],
+  options?: { errorAfterEvents?: number },
 ): MockOpenAIStreamingClient {
   const calls: Array<Record<string, unknown>> = [];
   let sequenceIndex = 0;
   let errorIndex = 0;
+  const errorAfterEvents = options?.errorAfterEvents;
 
   return {
     _calls: calls,
@@ -207,15 +230,28 @@ export function createMockOpenAIStreamingClient(
         create(params: Record<string, unknown>): AsyncIterable<OpenAIChatCompletionChunk> {
           calls.push(params);
           const error = errors[errorIndex];
-          if (error && errorIndex < errors.length) {
+          if (error && errorIndex < errors.length && errorAfterEvents === undefined) {
             errorIndex++;
             throw error;
           }
           const chunks = chunkSequences[sequenceIndex++] ?? [];
+          const midStreamError =
+            errorAfterEvents !== undefined && errorIndex < errors.length
+              ? errors[errorIndex++]
+              : undefined;
+          const threshold = errorAfterEvents ?? 0;
 
           return (async function* () {
+            let yielded = 0;
             for (const chunk of chunks) {
+              if (midStreamError && yielded >= threshold) {
+                throw midStreamError;
+              }
               yield chunk;
+              yielded++;
+            }
+            if (midStreamError && yielded <= threshold) {
+              throw midStreamError;
             }
           })();
         },
@@ -232,14 +268,19 @@ export interface MockGeminiStreamingModel extends GeminiStreamingModel {
 
 /**
  * Creates a mock Gemini streaming model that yields queued chunk sequences.
+ *
+ * When `errorAfterEvents` is set, the async generator yields that many chunks
+ * from the current sequence before throwing the next error from `errors`.
  */
 export function createMockGeminiStreamingModel(
   chunkSequences: Array<GeminiGenerateContentResult['response'][]>,
   errors: Error[] = [],
+  options?: { errorAfterEvents?: number },
 ): MockGeminiStreamingModel {
   const calls: Array<Record<string, unknown>> = [];
   let sequenceIndex = 0;
   let errorIndex = 0;
+  const errorAfterEvents = options?.errorAfterEvents;
 
   return {
     _calls: calls,
@@ -250,16 +291,29 @@ export function createMockGeminiStreamingModel(
     ): Promise<{ stream: AsyncIterable<GeminiGenerateContentResult['response']> }> {
       calls.push(params);
       const error = errors[errorIndex];
-      if (error && errorIndex < errors.length) {
+      if (error && errorIndex < errors.length && errorAfterEvents === undefined) {
         errorIndex++;
         throw error;
       }
       const chunks = chunkSequences[sequenceIndex++] ?? [];
+      const midStreamError =
+        errorAfterEvents !== undefined && errorIndex < errors.length
+          ? errors[errorIndex++]
+          : undefined;
+      const threshold = errorAfterEvents ?? 0;
 
       return {
         stream: (async function* () {
+          let yielded = 0;
           for (const chunk of chunks) {
+            if (midStreamError && yielded >= threshold) {
+              throw midStreamError;
+            }
             yield chunk;
+            yielded++;
+          }
+          if (midStreamError && yielded <= threshold) {
+            throw midStreamError;
           }
         })(),
       };

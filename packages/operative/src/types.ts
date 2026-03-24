@@ -1,8 +1,15 @@
 import type { Toolbox, ToolExecuteOptions, ToolExecutionResult } from 'armorer';
-import type { Conversation, ConversationHistory, TokenUsage } from 'conversationalist';
+import type {
+  Conversation,
+  ConversationHistory,
+  SessionPersistenceAdapter,
+  TokenUsage,
+} from 'conversationalist';
 import type { JSONValue, ToolCall, ToolCallInput } from 'interoperability';
 import type { ZodType } from 'zod';
 
+import type { AgentSession } from './agent-session';
+import type { BackpressureStrategy } from './backpressure';
 import type { ActiveRun } from './create-run';
 
 export type { Toolbox, ToolExecuteOptions, ToolExecutionResult } from 'armorer';
@@ -174,6 +181,12 @@ export interface RunOptions {
    */
   collectAsync?: boolean;
   retry?: RetryOptions;
+  /**
+   * Backpressure strategy applied before each step. When set, the loop
+   * calls `backpressure.beforeStep()` and waits for the returned delay
+   * before proceeding with the generate call.
+   */
+  backpressure?: BackpressureStrategy;
   validateResponse?: (
     response: GenerateResponse,
     context: StepContext,
@@ -269,6 +282,11 @@ export interface DefineAgentOptions {
   executeOptions?: OperativeExecuteOptions;
   collectAsync?: boolean;
   withTraceContext?: RunOptions['withTraceContext'];
+  persistence?: SessionPersistenceAdapter;
+  sessionId?: string;
+  onSessionSave?: (session: AgentSession) => Promise<void> | void;
+  onSessionLoad?: (session: AgentSession) => Promise<void> | void;
+  autoSave?: 'step' | 'completion' | false;
 }
 
 /**

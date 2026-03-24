@@ -1,5 +1,7 @@
 import { Conversation, isConversation } from 'conversationalist';
 
+import type { AgentSession } from './agent-session';
+import { createAgentSession, loadAgentSession, saveAgentSession } from './agent-session';
 import type { ActiveRun } from './create-run';
 import { createRun } from './create-run';
 import { run } from './run';
@@ -77,7 +79,17 @@ function buildRunOptions(options: DefineAgentOptions, input: string | AgentRunOp
     parentContext,
   } = normalizeInput(input, resolveInstructions(options.instructions));
 
-  const { name: _, instructions: __, stopWhen: definitionStopWhen, ...rest } = options;
+  const {
+    name: _,
+    instructions: __,
+    stopWhen: definitionStopWhen,
+    persistence: ___,
+    sessionId: ____,
+    onSessionSave: _____,
+    onSessionLoad: ______,
+    autoSave: _______,
+    ...rest
+  } = options;
 
   return {
     ...rest,
@@ -88,10 +100,166 @@ function buildRunOptions(options: DefineAgentOptions, input: string | AgentRunOp
   };
 }
 
+async function runWithSessionLifecycle(
+  options: DefineAgentOptions,
+  runOptions: RunOptions,
+): Promise<RunResult> {
+  const { persistence, sessionId, onSessionLoad, onSessionSave, autoSave = 'completion' } = options;
+
+  let session: AgentSession | undefined;
+
+  // Load existing session if persistence and sessionId are configured
+  if (persistence && sessionId) {
+    session = await loadAgentSession(persistence, sessionId);
+    if (session) {
+      await onSessionLoad?.(session);
+      // Use the loaded conversation history
+      runOptions = { ...runOptions, conversation: new Conversation(session.conversationHistory) };
+    }
+  }
+
+  // Wrap onStep for autoSave: 'step'
+  if (persistence && autoSave === 'step') {
+    const originalOnStep = runOptions.onStep;
+    runOptions = {
+      ...runOptions,
+      onStep: async (stepResult) => {
+        if (originalOnStep) {
+          await originalOnStep(stepResult);
+        }
+        session = session
+          ? {
+              ...session,
+              conversationHistory: stepResult.conversation.current,
+              updatedAt: new Date().toISOString(),
+            }
+          : createAgentSession({
+              agentName: options.name,
+              conversationHistory: stepResult.conversation.current,
+              id: sessionId,
+            });
+        await saveAgentSession(persistence, session);
+        await onSessionSave?.(session);
+      },
+    };
+  }
+
+  const result = await run(runOptions);
+
+  // Save session on completion
+  if (persistence && autoSave !== false) {
+    if (autoSave !== 'step') {
+      session = session
+        ? {
+            ...session,
+            conversationHistory: result.conversation.current,
+            updatedAt: new Date().toISOString(),
+          }
+        : createAgentSession({
+            agentName: options.name,
+            conversationHistory: result.conversation.current,
+            id: sessionId,
+          });
+      await saveAgentSession(persistence, session);
+      await onSessionSave?.(session);
+    }
+  }
+
+  return result;
+}
+
+function createRunWithSessionLifecycle(
+  options: DefineAgentOptions,
+  runOptions: RunOptions,
+): ActiveRun {
+  const { persistence, sessionId, onSessionLoad, onSessionSave, autoSave = 'completion' } = options;
+
+  // Wrap onStep for autoSave: 'step'
+  const modifiedRunOptions = { ...runOptions };
+  if (persistence && autoSave === 'step') {
+    let session: AgentSession | undefined;
+    const originalOnStep = runOptions.onStep;
+    modifiedRunOptions.onStep = async (stepResult) => {
+      if (originalOnStep) {
+        await originalOnStep(stepResult);
+      }
+      session = session
+        ? {
+            ...session,
+            conversationHistory: stepResult.conversation.current,
+            updatedAt: new Date().toISOString(),
+          }
+        : createAgentSession({
+            agentName: options.name,
+            conversationHistory: stepResult.conversation.current,
+            id: sessionId,
+          });
+      await saveAgentSession(persistence, session);
+      await onSessionSave?.(session);
+    };
+  }
+
+  const activeRun = createRun(modifiedRunOptions);
+
+  if (persistence && sessionId) {
+    // Load session before the run starts, emit events, and handle completion
+    const originalResult = activeRun.result;
+    const wrappedResult = (async () => {
+      const loadedSession = await loadAgentSession(persistence, sessionId);
+      if (loadedSession) {
+        await onSessionLoad?.(loadedSession);
+      }
+
+      const result = await originalResult;
+
+      if (autoSave !== false && autoSave !== 'step') {
+        const session = loadedSession
+          ? {
+              ...loadedSession,
+              conversationHistory: result.conversation.current,
+              updatedAt: new Date().toISOString(),
+            }
+          : createAgentSession({
+              agentName: options.name,
+              conversationHistory: result.conversation.current,
+              id: sessionId,
+            });
+        await saveAgentSession(persistence, session);
+        await onSessionSave?.(session);
+      }
+
+      return result;
+    })();
+
+    return { ...activeRun, result: wrappedResult };
+  }
+
+  if (persistence && autoSave !== false && autoSave !== 'step') {
+    const originalResult = activeRun.result;
+    const wrappedResult = (async () => {
+      const result = await originalResult;
+      const session = createAgentSession({
+        agentName: options.name,
+        conversationHistory: result.conversation.current,
+        id: sessionId,
+      });
+      await saveAgentSession(persistence, session);
+      await onSessionSave?.(session);
+      return result;
+    })();
+
+    return { ...activeRun, result: wrappedResult };
+  }
+
+  return activeRun;
+}
+
 /**
  * Creates a reusable agent definition that can be run multiple times.
  */
 export function defineAgent(options: DefineAgentOptions): AgentDefinition {
+  const hasPersistence = options.persistence !== undefined;
+
   return {
     get name() {
       return options.name;
@@ -100,10 +268,18 @@ export function defineAgent(options: DefineAgentOptions): AgentDefinition {
       return options;
     },
     async run(input: string | AgentRunOptions): Promise<RunResult> {
-      return run(buildRunOptions(options, input));
+      const runOptions = buildRunOptions(options, input);
+      if (hasPersistence) {
+        return runWithSessionLifecycle(options, runOptions);
+      }
+      return run(runOptions);
     },
     createRun(input: string | AgentRunOptions): ActiveRun {
-      return createRun(buildRunOptions(options, input));
+      const runOptions = buildRunOptions(options, input);
+      if (hasPersistence) {
+        return createRunWithSessionLifecycle(options, runOptions);
+      }
+      return createRun(runOptions);
     },
   };
 }

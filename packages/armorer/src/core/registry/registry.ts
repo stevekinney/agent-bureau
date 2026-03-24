@@ -32,6 +32,7 @@ export type ToolRegistry = {
   list: () => ToolDefinition[];
   tools: () => ToolDefinition[];
   aliases: (id: ToolId | ToolIdentityInput) => ToolId[];
+  getDeprecatedTools: () => ToolDefinition[];
 };
 
 type RegistryEntry = {
@@ -172,6 +173,9 @@ export function createRegistry(options: RegistryOptions = {}): ToolRegistry {
     return Array.from(entry.aliases.values());
   };
 
+  const getDeprecatedTools = (): ToolDefinition[] =>
+    list().filter((tool) => !!tool.lifecycle?.deprecated);
+
   return {
     register,
     unregister,
@@ -180,6 +184,7 @@ export function createRegistry(options: RegistryOptions = {}): ToolRegistry {
     list,
     tools,
     aliases,
+    getDeprecatedTools,
   };
 }
 
@@ -252,7 +257,7 @@ function resolveAlias(
 function allowDeprecated(tool: ToolDefinition | undefined, options: ResolveOptions): boolean {
   if (!tool) return false;
   if (options.allowDeprecated) return true;
-  return tool.lifecycle?.deprecated !== true;
+  return !tool.lifecycle?.deprecated;
 }
 
 function selectCandidates(
@@ -267,7 +272,7 @@ function selectCandidates(
   for (const id of ids) {
     const entry = entries.get(id);
     if (!entry) continue;
-    if (!options.allowDeprecated && entry.tool.lifecycle?.deprecated === true) {
+    if (!options.allowDeprecated && !!entry.tool.lifecycle?.deprecated) {
       continue;
     }
     resolved.push(entry);

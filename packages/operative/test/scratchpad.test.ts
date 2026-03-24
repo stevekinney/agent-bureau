@@ -5,6 +5,7 @@ import {
   createScratchpad,
   createScratchpadReadTool,
   createScratchpadWriteTool,
+  createTypedScratchpad,
 } from '../src/create-scratchpad';
 
 describe('createScratchpad', () => {
@@ -223,5 +224,74 @@ describe('scratchpad tools', () => {
     await writeTool({ key: 'count', value: 42 });
     const result = await readTool({ key: 'count' });
     expect(JSON.parse(result as string)).toEqual({ found: true, key: 'count', value: 42 });
+  });
+});
+
+describe('createTypedScratchpad', () => {
+  interface TestSchema {
+    name: string;
+    count: number;
+    active: boolean;
+  }
+
+  it('get/set with correct types at runtime', () => {
+    const pad = createTypedScratchpad<TestSchema>();
+    pad.set('name', 'Alice');
+    pad.set('count', 42);
+    pad.set('active', true);
+
+    expect(pad.get('name')).toBe('Alice');
+    expect(pad.get('count')).toBe(42);
+    expect(pad.get('active')).toBe(true);
+  });
+
+  it('get returns undefined for unset key', () => {
+    const pad = createTypedScratchpad<TestSchema>();
+    expect(pad.get('name')).toBeUndefined();
+  });
+
+  it('preserves all other Scratchpad methods', () => {
+    const pad = createTypedScratchpad<TestSchema>();
+    pad.set('name', 'Bob');
+    pad.set('count', 10);
+
+    expect(pad.has('name')).toBe(true);
+    expect(pad.has('count')).toBe(true);
+    expect([...pad.keys()]).toEqual(['name', 'count']);
+    expect([...pad.entries()]).toEqual([
+      ['name', 'Bob'],
+      ['count', 10],
+    ]);
+    expect(pad.toJSON()).toEqual({ name: 'Bob', count: 10 });
+
+    expect(pad.delete('name')).toBe(true);
+    expect(pad.has('name')).toBe(false);
+
+    pad.clear();
+    expect(pad.toJSON()).toEqual({});
+  });
+
+  it('works with schema validation', () => {
+    const pad = createTypedScratchpad<{ age: number }>({
+      schema: z.object({ age: z.number() }),
+    });
+
+    pad.set('age', 25);
+    expect(pad.get('age')).toBe(25);
+
+    expect(() =>
+      (pad as never as { set(k: string, v: unknown): void }).set('age', 'not a number'),
+    ).toThrow();
+  });
+
+  it('events fire correctly', () => {
+    const pad = createTypedScratchpad<TestSchema>();
+    const events: unknown[] = [];
+    pad.addEventListener('entry.set', (event) => {
+      events.push(event.detail);
+    });
+
+    pad.set('name', 'Charlie');
+    expect(events).toEqual([{ key: 'name', value: 'Charlie', previousValue: undefined }]);
   });
 });

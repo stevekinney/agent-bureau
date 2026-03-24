@@ -26,9 +26,15 @@ function createEntry(
   name: string,
   description: string,
   capabilities: string[],
-  metadata?: Record<string, unknown>,
+  options?: { metadata?: Record<string, unknown>; tags?: string[] },
 ): AgentRegistryEntry {
-  return { agent: createStubAgent(name), description, capabilities, metadata };
+  return {
+    agent: createStubAgent(name),
+    description,
+    capabilities,
+    ...(options?.tags && { tags: options.tags }),
+    ...(options?.metadata && { metadata: options.metadata }),
+  };
 }
 
 describe('createAgentRegistry', () => {
@@ -255,5 +261,78 @@ describe('createAgentDiscoveryTool', () => {
     const result = await tool({});
     const parsed = JSON.parse(result as string) as unknown[];
     expect(parsed).toHaveLength(2);
+  });
+
+  it('includes tags in discovery tool output', async () => {
+    const registry = createAgentRegistry();
+    registry.register(
+      createEntry('tagger', 'Tagged agent', ['writing'], { tags: ['production', 'v2'] }),
+    );
+
+    const tool = createAgentDiscoveryTool(registry);
+    const result = await tool({});
+    const parsed = JSON.parse(result as string) as { name: string; tags: string[] }[];
+    expect(parsed).toHaveLength(1);
+    expect(parsed[0]!.tags).toEqual(['production', 'v2']);
+  });
+
+  it('discovery tool filters by tags', async () => {
+    const registry = createAgentRegistry();
+    registry.register(createEntry('tagged', 'Tagged agent', ['writing'], { tags: ['production'] }));
+    registry.register(createEntry('untagged', 'Untagged agent', ['writing']));
+
+    const tool = createAgentDiscoveryTool(registry);
+    const result = await tool({ tags: ['production'] });
+    const parsed = JSON.parse(result as string) as { name: string }[];
+    expect(parsed).toHaveLength(1);
+    expect(parsed[0]!.name).toBe('tagged');
+  });
+});
+
+describe('query by tags', () => {
+  function taggedRegistry() {
+    const registry = createAgentRegistry();
+    registry.register(
+      createEntry('alpha', 'Alpha agent', ['writing'], { tags: ['production', 'v2'] }),
+    );
+    registry.register(createEntry('beta', 'Beta agent', ['coding'], { tags: ['staging', 'v2'] }));
+    registry.register(createEntry('gamma', 'Gamma agent', ['analysis'], { tags: ['production'] }));
+    registry.register(createEntry('delta', 'Delta agent', ['search']));
+    return registry;
+  }
+
+  it('query by tags returns matching entries', () => {
+    const registry = taggedRegistry();
+    const results = registry.query({ tags: ['staging'] });
+    expect(results).toHaveLength(1);
+    expect(results[0]!.agent.name).toBe('beta');
+  });
+
+  it('query by tags + capabilities combined', () => {
+    const registry = taggedRegistry();
+    const results = registry.query({ tags: ['production'], capabilities: ['writing'] });
+    expect(results).toHaveLength(1);
+    expect(results[0]!.agent.name).toBe('alpha');
+  });
+
+  it('tags are case-insensitive', () => {
+    const registry = taggedRegistry();
+    const results = registry.query({ tags: ['PRODUCTION'] });
+    expect(results).toHaveLength(2);
+    const names = results.map((r) => r.agent.name).sort();
+    expect(names).toEqual(['alpha', 'gamma']);
+  });
+
+  it('query with no matching tags returns empty', () => {
+    const registry = taggedRegistry();
+    const results = registry.query({ tags: ['nonexistent'] });
+    expect(results).toHaveLength(0);
+  });
+
+  it('entries without tags are excluded when filtering by tags', () => {
+    const registry = taggedRegistry();
+    const results = registry.query({ tags: ['production'] });
+    // delta has no tags, should not appear
+    expect(results.every((r) => r.agent.name !== 'delta')).toBe(true);
   });
 });

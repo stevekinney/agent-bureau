@@ -167,6 +167,11 @@ export interface ToolboxOptions {
    * When true, uses default thresholds. Pass an object to customize.
    */
   loopDetection?: boolean | AutoLoopDetectionOptions;
+  /**
+   * Called when a deprecated tool is executed via this toolbox.
+   * Receives the tool definition and the call info (name and optional id).
+   */
+  onDeprecatedToolCalled?: (tool: ToolConfiguration, call: { name: string; id?: string }) => void;
 }
 
 export interface ImportedToolboxOptions extends ToolboxOptions {
@@ -601,6 +606,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
   let budgetCalls = 0;
   const embedder = options.embed ? createCachedEmbedder(options.embed) : undefined;
 
+  const onDeprecatedToolCalled = options.onDeprecatedToolCalled;
   const resolutionEnabled = !!options.resolution;
 
   const loopOptions: AutoLoopDetectionOptions | undefined =
@@ -718,6 +724,14 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
       }
 
       emit('call', { tool, call: toolCall });
+
+      // Notify if a deprecated tool is being called
+      if (onDeprecatedToolCalled) {
+        const config = storedConfigurations.get(tool.id);
+        if (config?.lifecycle?.deprecated) {
+          onDeprecatedToolCalled(config, { name: toolCall.name, id: toolCall.id });
+        }
+      }
 
       // Track call for loop detection
       for (const detector of loopDetectors.values()) {

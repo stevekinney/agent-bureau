@@ -128,6 +128,7 @@ export async function executeLoop(options: RunOptions, emitter?: EventEmitter): 
     signal,
     collectAsync = false,
     retry,
+    backpressure,
     validateResponse,
     validateToolResult,
     selectTools,
@@ -205,6 +206,45 @@ export async function executeLoop(options: RunOptions, emitter?: EventEmitter): 
       };
     }
 
+    // Backpressure: wait before proceeding if the strategy requires it
+    if (backpressure) {
+      const { delay: backpressureDelay } = backpressure.beforeStep();
+      if (backpressureDelay > 0) {
+        emitter?.emit('backpressure.applied', { step, delay: backpressureDelay });
+        if (signal?.aborted) {
+          emitter?.emit('run.aborted', { step, reason: signal.reason as string | undefined });
+          return {
+            conversation,
+            steps,
+            content: lastContent,
+            usage: totalUsage,
+            finishReason: 'aborted',
+          };
+        }
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, backpressureDelay);
+          if (signal) {
+            const onAbort = () => {
+              clearTimeout(timer);
+              resolve();
+            };
+            signal.addEventListener('abort', onAbort, { once: true });
+          }
+        });
+        if (signal?.aborted) {
+          emitter?.emit('run.aborted', { step, reason: signal.reason as string | undefined });
+          return {
+            conversation,
+            steps,
+            content: lastContent,
+            usage: totalUsage,
+            finishReason: 'aborted',
+          };
+        }
+        emitter?.emit('backpressure.released', { step });
+      }
+    }
+
     const stepAbortController = new AbortController();
     const stepSignal = signal
       ? AbortSignal.any([signal, stepAbortController.signal])
@@ -266,7 +306,9 @@ export async function executeLoop(options: RunOptions, emitter?: EventEmitter): 
           );
         response = wrapWithTrace ? await wrapWithTrace(doGenerate) : await doGenerate();
       }
+      backpressure?.onSuccess();
     } catch (error) {
+      backpressure?.onError(error);
       if (signal?.aborted) {
         emitter?.emit('run.aborted', { step, reason: signal.reason as string | undefined });
         return {

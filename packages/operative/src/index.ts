@@ -1,5 +1,22 @@
+export type { AgentSession } from './agent-session';
+export { createAgentSession, loadAgentSession, saveAgentSession } from './agent-session';
+export type {
+  AdaptiveBackoffOptions,
+  BackpressureSignal,
+  BackpressureStrategy,
+  SlidingWindowOptions,
+  TokenBucketOptions,
+} from './backpressure';
+export { createAdaptiveBackoff, createSlidingWindow, createTokenBucket } from './backpressure';
 export type { RepeatingToolCallsOptions, TokenBudgetOptions } from './conditions/index';
 export { stopWhen } from './conditions/index';
+export type {
+  CostBudgetExceededEvent,
+  CostBudgetMonitor,
+  CostBudgetOptions,
+  CostBudgetThresholdEvent,
+} from './cost-budget-monitor';
+export { createCostBudgetMonitor } from './cost-budget-monitor';
 export type { CostEstimate, CostEstimationOptions, ModelPricing } from './cost-estimation';
 export { defaultPricingTable, estimateCost, getModelPricing } from './cost-estimation';
 export type {
@@ -15,15 +32,22 @@ export type { CreateHandoffToolOptions } from './create-handoff-tool';
 export { createHandoffTool, extractHandoffTarget, HANDOFF_MARKER } from './create-handoff-tool';
 export type { ActiveRun } from './create-run';
 export { createRun } from './create-run';
-export type { CreateScratchpadOptions, Scratchpad, ScratchpadEvents } from './create-scratchpad';
+export type {
+  CreateScratchpadOptions,
+  Scratchpad,
+  ScratchpadEvents,
+  TypedScratchpad,
+} from './create-scratchpad';
 export {
   createScratchpad,
   createScratchpadReadTool,
   createScratchpadWriteTool,
+  createTypedScratchpad,
 } from './create-scratchpad';
 export { createSubagentTool } from './create-subagent-tool';
 export type {
   CreateSupervisorOptions,
+  PipelineStage,
   RoutingStrategy,
   Supervisor,
   SupervisorEvents,

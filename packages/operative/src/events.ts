@@ -2,6 +2,7 @@ import type { ToolboxEvents, ToolExecutionResult } from 'armorer';
 import type { Conversation, ConversationEvents } from 'conversationalist';
 import type { ToolCall } from 'interoperability';
 
+import type { CostBudgetExceededEvent, CostBudgetThresholdEvent } from './cost-budget-monitor';
 import type { GenerateResponse, RunResult, StepResult, TokenUsage } from './types';
 
 /**
@@ -47,6 +48,12 @@ export interface OperativeEvents {
   };
   'elicitation.requested': { step: number; message: string };
   'elicitation.resolved': { step: number; accepted: boolean };
+  'backpressure.applied': { step: number; delay: number };
+  'backpressure.released': { step: number };
+  'budget.threshold': CostBudgetThresholdEvent;
+  'budget.exceeded': CostBudgetExceededEvent;
+  'session.saved': { sessionId: string; agentName: string };
+  'session.loaded': { sessionId: string; agentName: string };
 }
 
 export type OperativeEventType = keyof OperativeEvents;

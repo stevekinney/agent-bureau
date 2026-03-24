@@ -43,9 +43,15 @@ export interface CreateSupervisorOptions {
   signal?: AbortSignal;
 }
 
+export interface PipelineStage {
+  agentName: string;
+  mapInput?: (previousOutput: string, originalTask: string) => string;
+}
+
 export interface Supervisor {
   delegate(task: string): Promise<SupervisorResult>;
   delegateAll(tasks: string[]): Promise<SupervisorResult[]>;
+  pipeline(task: string, stages: PipelineStage[]): Promise<SupervisorResult>;
   addEventListener: <K extends SupervisorEventType>(
     type: K,
     listener: (event: EmissionEvent<SupervisorEvents[K], K>) => void | Promise<void>,
@@ -209,6 +215,44 @@ export function createSupervisor(options: CreateSupervisorOptions): Supervisor {
         results.push(await delegateOne(task));
       }
       return results;
+    },
+
+    async pipeline(task: string, stages: PipelineStage[]): Promise<SupervisorResult> {
+      if (stages.length === 0) {
+        return { task, agentResults: [], synthesis: '' };
+      }
+
+      const pool = resolveAgentPool(agentSource);
+      const allStageResults: SupervisorTaskResult[] = [];
+      let previousOutput = '';
+
+      for (const stage of stages) {
+        signal?.throwIfAborted();
+
+        const stageInput = stage.mapInput
+          ? stage.mapInput(previousOutput, task)
+          : previousOutput || task;
+
+        events.emit('task.routed', { task: stageInput, agentNames: [stage.agentName] });
+
+        const stageResult = await runAgent(stageInput, stage.agentName, pool);
+        allStageResults.push(stageResult);
+
+        if (stageResult.error) {
+          events.emit('synthesis.started', { task, results: allStageResults });
+          const synthesisResult = await synthesis(allStageResults);
+          events.emit('synthesis.completed', { task, synthesis: synthesisResult });
+          return { task, agentResults: allStageResults, synthesis: synthesisResult };
+        }
+
+        previousOutput = stageResult.result?.content ?? '';
+      }
+
+      events.emit('synthesis.started', { task, results: allStageResults });
+      const finalContent = previousOutput;
+      events.emit('synthesis.completed', { task, synthesis: finalContent });
+
+      return { task, agentResults: allStageResults, synthesis: finalContent };
     },
 
     addEventListener: events.addEventListener.bind(events),

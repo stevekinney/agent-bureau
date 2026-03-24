@@ -133,6 +133,29 @@ export function createScratchpad(options?: CreateScratchpadOptions): Scratchpad 
   };
 }
 
+export interface TypedScratchpad<T extends Record<string, unknown>> extends Omit<
+  Scratchpad,
+  'get' | 'set'
+> {
+  get<K extends keyof T & string>(key: K): T[K] | undefined;
+  set<K extends keyof T & string>(key: K, value: T[K]): void;
+}
+
+export function createTypedScratchpad<T extends Record<string, unknown>>(
+  options?: CreateScratchpadOptions,
+): TypedScratchpad<T> {
+  const scratchpad = createScratchpad(options);
+  return {
+    ...scratchpad,
+    get<K extends keyof T & string>(key: K): T[K] | undefined {
+      return scratchpad.get(key) as T[K] | undefined;
+    },
+    set<K extends keyof T & string>(key: K, value: T[K]): void {
+      scratchpad.set(key, value);
+    },
+  };
+}
+
 export function createScratchpadReadTool(scratchpad: Scratchpad) {
   return createTool({
     name: 'read-scratchpad',

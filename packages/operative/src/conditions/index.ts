@@ -1,3 +1,6 @@
+import type { CostBudgetOptions } from '../cost-budget-monitor';
+import { createCostBudgetMonitor } from '../cost-budget-monitor';
+import type { StopCondition } from '../types';
 import {
   contentMatches,
   every,
@@ -30,6 +33,16 @@ export {
 } from './predicates';
 
 /**
+ * Creates a stop condition that halts the loop when the accumulated
+ * dollar cost reaches the given budget. Threshold and exceeded callbacks
+ * are forwarded to the underlying `CostBudgetMonitor`.
+ */
+function costBudget(options: CostBudgetOptions): StopCondition {
+  const monitor = createCostBudgetMonitor(options);
+  return monitor.stopCondition;
+}
+
+/**
  * Composable stop condition factories.
  */
 export const stopWhen = {
@@ -45,4 +58,5 @@ export const stopWhen = {
   repeatingToolCalls,
   tokenBudget,
   wallClockTimeout,
+  costBudget,
 } as const;

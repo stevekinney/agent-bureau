@@ -15,7 +15,9 @@ export {
   type ToolPredicate,
 } from '../core/query-predicates';
 export {
+  awaitToolEmbeddings,
   type Embedder,
+  type EmbeddingEntry,
   type EmbeddingVector,
   type MetadataFilter,
   type MetadataPrimitive,
@@ -24,6 +26,7 @@ export {
   type QueryResult,
   type QuerySelectionResult,
   queryTools,
+  registerToolEmbeddings,
   reindexSearchIndex,
   type RiskFilter,
   type SchemaFilter,

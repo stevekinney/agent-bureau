@@ -219,6 +219,46 @@ function vectorMagnitude(vector: EmbeddingVector): number {
   return Math.sqrt(sum);
 }
 
+/**
+ * Register pre-computed embedding vectors for a tool.
+ * The `embeddings` keys are field names matching TextQueryField: 'name', 'description', 'tags', 'schemaKeys', 'metadataKeys'.
+ */
+export function registerToolEmbeddings(
+  tool: ToolDefinition,
+  embeddings: Record<string, EmbeddingVector>,
+): void {
+  const entries: EmbeddingEntry[] = [];
+  for (const [field, vector] of Object.entries(embeddings)) {
+    if (!isVector(vector)) {
+      continue;
+    }
+    entries.push({
+      field: field as TextQueryField,
+      text: '',
+      vector,
+      magnitude: vectorMagnitude(vector),
+    });
+  }
+  toolEmbeddings.set(tool, entries);
+}
+
+/**
+ * Wait for any pending embedding computation to complete for a tool.
+ * Returns the resolved embeddings, or undefined if none exist.
+ */
+export async function awaitToolEmbeddings(
+  tool: ToolDefinition,
+): Promise<EmbeddingEntry[] | undefined> {
+  const cached = toolEmbeddings.get(tool);
+  if (cached === undefined) {
+    return undefined;
+  }
+  if (Array.isArray(cached)) {
+    return cached;
+  }
+  return cached;
+}
+
 function isPromise<T>(value: unknown): value is PromiseLike<T> {
   return (
     typeof value === 'object' &&

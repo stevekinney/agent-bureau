@@ -25,6 +25,7 @@ import { normalizeTags } from '../tag-utilities';
 import type { AnyToolDefinition as ToolDefinition } from '../tool-definition';
 import {
   type Embedder,
+  type EmbeddingEntry,
   type EmbeddingInfo,
   type EmbeddingVector,
   getQueryEmbeddingInfo,
@@ -33,6 +34,7 @@ import {
   warmToolEmbeddings,
 } from './embeddings';
 
+export { awaitToolEmbeddings, registerToolEmbeddings } from './embeddings';
 export type {
   RegisterOptions,
   RegistryOptions,
@@ -295,7 +297,7 @@ export type ToolQueryInput<TTool extends ToolDefinition = ToolDefinition> =
   | Iterable<TTool>
   | readonly TTool[];
 
-export type { Embedder, EmbeddingVector };
+export type { Embedder, EmbeddingEntry, EmbeddingVector };
 
 export type QueryEvent<TTool extends ToolDefinition = ToolDefinition> = {
   criteria?: ToolQuery<TTool>;
@@ -1702,7 +1704,7 @@ function buildPredicates(
   }
 
   if (criteria.deprecated !== undefined) {
-    predicates.push((tool) => (tool.lifecycle?.deprecated === true) === criteria.deprecated);
+    predicates.push((tool) => !!tool.lifecycle?.deprecated === criteria.deprecated);
   }
 
   if (criteria.risk) {

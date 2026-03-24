@@ -263,3 +263,39 @@ export function createTruncationMiddleware(options?: ToolResultTruncationOptions
     return { ...configuration, execute: wrappedExecute };
   };
 }
+
+/**
+ * Creates middleware that calls a warning function when a deprecated tool is executed.
+ *
+ * Non-deprecated tools pass through unchanged. Deprecated tools have their execute
+ * function wrapped so that `onWarning` is invoked before each execution.
+ *
+ * @param onWarning - Callback invoked with the tool configuration on each execution.
+ * @returns A middleware function.
+ */
+export function createDeprecationWarningMiddleware(
+  onWarning: (configuration: ToolConfiguration) => void,
+) {
+  return (configuration: ToolConfiguration): ToolConfiguration => {
+    if (!configuration.lifecycle?.deprecated) {
+      return configuration;
+    }
+
+    const originalExecute = configuration.execute;
+
+    const wrappedExecute = async (params: unknown, context: unknown) => {
+      onWarning(configuration);
+
+      let executeFn: (params: unknown, context: unknown) => Promise<unknown>;
+      if (typeof originalExecute === 'function') {
+        executeFn = originalExecute;
+      } else {
+        executeFn = await originalExecute;
+      }
+
+      return executeFn(params, context);
+    };
+
+    return { ...configuration, execute: wrappedExecute };
+  };
+}

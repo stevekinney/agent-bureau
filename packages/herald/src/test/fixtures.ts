@@ -333,3 +333,253 @@ export const geminiStreamFunctionCallChunks: GeminiGenerateContentResult['respon
     usageMetadata: { promptTokenCount: 15, candidatesTokenCount: 20, totalTokenCount: 35 },
   },
 ];
+
+// ── Anthropic Mixed Text + Tool Streaming Fixtures ─────────────────
+
+export const anthropicStreamMixedEvents: AnthropicStreamEvent[] = [
+  {
+    type: 'message_start',
+    message: { usage: { input_tokens: 20, output_tokens: 0 } },
+  },
+  {
+    type: 'content_block_start',
+    index: 0,
+    content_block: { type: 'text', text: '' },
+  },
+  {
+    type: 'content_block_delta',
+    index: 0,
+    delta: { type: 'text_delta', text: 'Let me check.' },
+  },
+  { type: 'content_block_stop', index: 0 },
+  {
+    type: 'content_block_start',
+    index: 1,
+    content_block: { type: 'tool_use', id: 'toolu_mixed_01', name: 'get_weather' },
+  },
+  {
+    type: 'content_block_delta',
+    index: 1,
+    delta: { type: 'input_json_delta', partial_json: '{"location":"New York"}' },
+  },
+  { type: 'content_block_stop', index: 1 },
+  {
+    type: 'message_delta',
+    delta: { stop_reason: 'tool_use' },
+    usage: { output_tokens: 25 },
+  },
+  { type: 'message_stop' },
+];
+
+// ── OpenAI Mixed Text + Tool Streaming Fixtures ────────────────────
+
+export const openAIStreamMixedChunks: OpenAIChatCompletionChunk[] = [
+  { choices: [{ delta: { content: 'Checking ' }, finish_reason: null }], usage: null },
+  { choices: [{ delta: { content: 'weather.' }, finish_reason: null }], usage: null },
+  {
+    choices: [
+      {
+        delta: {
+          tool_calls: [
+            {
+              index: 0,
+              id: 'call_mixed_01',
+              type: 'function',
+              function: { name: 'get_weather', arguments: '{"location":' },
+            },
+          ],
+        },
+        finish_reason: null,
+      },
+    ],
+    usage: null,
+  },
+  {
+    choices: [
+      {
+        delta: {
+          tool_calls: [{ index: 0, function: { arguments: '"NYC"}' } }],
+        },
+        finish_reason: null,
+      },
+    ],
+    usage: null,
+  },
+  {
+    choices: [{ delta: {}, finish_reason: 'stop' }],
+    usage: { prompt_tokens: 10, completion_tokens: 8, total_tokens: 18 },
+  },
+];
+
+// ── Gemini Mixed Text + Function Call Streaming Fixtures ───────────
+
+export const geminiStreamMixedChunks: GeminiGenerateContentResult['response'][] = [
+  {
+    candidates: [
+      {
+        content: {
+          parts: [
+            { text: 'Checking weather...' },
+            { functionCall: { name: 'get_weather', args: { location: 'Tokyo' } } },
+          ],
+        },
+      },
+    ],
+    usageMetadata: { promptTokenCount: 12, candidatesTokenCount: 8, totalTokenCount: 20 },
+  },
+];
+
+// ── Anthropic Empty Stream Fixtures ────────────────────────────────
+
+export const anthropicStreamEmptyEvents: AnthropicStreamEvent[] = [
+  {
+    type: 'message_start',
+    message: { usage: { input_tokens: 5, output_tokens: 0 } },
+  },
+  {
+    type: 'message_delta',
+    delta: { stop_reason: 'end_turn' },
+    usage: { output_tokens: 0 },
+  },
+  { type: 'message_stop' },
+];
+
+// ── OpenAI Empty Stream Fixtures ───────────────────────────────────
+
+export const openAIStreamEmptyChunks: OpenAIChatCompletionChunk[] = [
+  {
+    choices: [{ delta: {}, finish_reason: 'stop' }],
+    usage: { prompt_tokens: 5, completion_tokens: 0, total_tokens: 5 },
+  },
+];
+
+// ── Gemini Empty Stream Fixtures ───────────────────────────────────
+
+export const geminiStreamEmptyChunks: GeminiGenerateContentResult['response'][] = [
+  {
+    candidates: [],
+    usageMetadata: { promptTokenCount: 5, candidatesTokenCount: 0, totalTokenCount: 5 },
+  },
+];
+
+// ── Anthropic Multi-Tool-Call Streaming Fixtures ───────────────────
+
+export const anthropicStreamMultiToolEvents: AnthropicStreamEvent[] = [
+  {
+    type: 'message_start',
+    message: { usage: { input_tokens: 25, output_tokens: 0 } },
+  },
+  {
+    type: 'content_block_start',
+    index: 0,
+    content_block: { type: 'tool_use', id: 'toolu_multi_01', name: 'get_weather' },
+  },
+  {
+    type: 'content_block_delta',
+    index: 0,
+    delta: { type: 'input_json_delta', partial_json: '{"location":"Paris"}' },
+  },
+  { type: 'content_block_stop', index: 0 },
+  {
+    type: 'content_block_start',
+    index: 1,
+    content_block: { type: 'tool_use', id: 'toolu_multi_02', name: 'get_weather' },
+  },
+  {
+    type: 'content_block_delta',
+    index: 1,
+    delta: { type: 'input_json_delta', partial_json: '{"location":"London"}' },
+  },
+  { type: 'content_block_stop', index: 1 },
+  {
+    type: 'message_delta',
+    delta: { stop_reason: 'tool_use' },
+    usage: { output_tokens: 30 },
+  },
+  { type: 'message_stop' },
+];
+
+// ── OpenAI Multi-Tool-Call Streaming Fixtures ──────────────────────
+
+export const openAIStreamMultiToolChunks: OpenAIChatCompletionChunk[] = [
+  {
+    choices: [
+      {
+        delta: {
+          tool_calls: [
+            {
+              index: 0,
+              id: 'call_multi_01',
+              type: 'function',
+              function: { name: 'get_weather', arguments: '' },
+            },
+          ],
+        },
+        finish_reason: null,
+      },
+    ],
+    usage: null,
+  },
+  {
+    choices: [
+      {
+        delta: {
+          tool_calls: [{ index: 0, function: { arguments: '{"location":"Paris"}' } }],
+        },
+        finish_reason: null,
+      },
+    ],
+    usage: null,
+  },
+  {
+    choices: [
+      {
+        delta: {
+          tool_calls: [
+            {
+              index: 1,
+              id: 'call_multi_02',
+              type: 'function',
+              function: { name: 'get_weather', arguments: '' },
+            },
+          ],
+        },
+        finish_reason: null,
+      },
+    ],
+    usage: null,
+  },
+  {
+    choices: [
+      {
+        delta: {
+          tool_calls: [{ index: 1, function: { arguments: '{"location":"London"}' } }],
+        },
+        finish_reason: null,
+      },
+    ],
+    usage: null,
+  },
+  {
+    choices: [{ delta: {}, finish_reason: 'tool_calls' }],
+    usage: { prompt_tokens: 25, completion_tokens: 30, total_tokens: 55 },
+  },
+];
+
+// ── Gemini Multi-Function-Call Streaming Fixtures ──────────────────
+
+export const geminiStreamMultiFunctionCallChunks: GeminiGenerateContentResult['response'][] = [
+  {
+    candidates: [
+      {
+        content: {
+          parts: [
+            { functionCall: { name: 'get_weather', args: { location: 'Paris' } } },
+            { functionCall: { name: 'get_weather', args: { location: 'London' } } },
+          ],
+        },
+      },
+    ],
+    usageMetadata: { promptTokenCount: 25, candidatesTokenCount: 30, totalTokenCount: 55 },
+  },
+];
