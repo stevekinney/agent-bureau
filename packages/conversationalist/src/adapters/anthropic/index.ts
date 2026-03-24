@@ -263,7 +263,7 @@ export function toAnthropicMessages(conversation: Conversation): AnthropicConver
     }
 
     let targetRole: 'user' | 'assistant';
-    let blocks: AnthropicContentBlock[] = [];
+    let blocks: AnthropicContentBlock[];
 
     if (message.role === 'user') {
       targetRole = 'user';

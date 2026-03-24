@@ -300,7 +300,7 @@ export function truncateToTokenLimit(
   const streamingTokens = streamingBlocks.reduce((sum, block) => sum + block.tokenCount, 0);
   const availableTokens = maxTokens - systemTokens - protectedTokens - streamingTokens;
 
-  let selectedBlocks: MessageBlock[] = [];
+  let selectedBlocks: MessageBlock[];
   if (availableTokens <= 0) {
     selectedBlocks = [...systemBlocks, ...protectedBlocks, ...streamingBlocks];
   } else {

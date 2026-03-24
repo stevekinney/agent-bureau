@@ -50,7 +50,7 @@
     "check-types": "tsc --noEmit",
     "clean": "rm -rf dist coverage tsconfig.tsbuildinfo",
     "ci": "bun run validate && bun run build",
-    "coverage:check": "bun run scripts/check-coverage.ts",
+    "coverage:check": "bun run ../../scripts/check-coverage.ts",
     "dev": "bun --watch run src/index.ts",
     "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md}\"",
     "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,json,md}\"",
@@ -64,6 +64,7 @@
     "validate": "bun run format:check && bun run lint && bun run check-types && bun run test"
   },
   "dependencies": {
+    "conversationalist": "workspace:*",
     "operative": "workspace:*"
   },
   "devDependencies": {
@@ -73,7 +74,6 @@
     "@typescript-eslint/eslint-plugin": "^8.55.0",
     "@typescript-eslint/parser": "^8.55.0",
     "armorer": "workspace:*",
-    "conversationalist": "workspace:*",
     "eslint": "^10.0.0",
     "eslint-config-prettier": "^10.1.8",
     "eslint-import-resolver-typescript": "^4.4.4",

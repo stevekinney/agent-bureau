@@ -1,18 +1,12 @@
 {
   "$schema": "https://turborepo.dev/schema.json",
   "ui": "tui",
-  "globalDependencies": [
-    ".prettierrc.json",
-    "bunfig.toml"
-  ],
+  "globalDependencies": [".prettierrc.json", "bunfig.toml"],
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
       "outputs": ["dist/**"],
       "outputLogs": "new-only"
-    },
-    "transit": {
-      "dependsOn": ["^transit"]
     },
     "check-types": {
       "dependsOn": ["^build"],

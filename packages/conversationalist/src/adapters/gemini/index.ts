@@ -311,7 +311,7 @@ export function toGeminiMessages(conversation: Conversation): GeminiConversation
     }
 
     let targetRole: 'user' | 'model';
-    let parts: GeminiPart[] = [];
+    let parts: GeminiPart[];
 
     if (message.role === 'user') {
       targetRole = 'user';
