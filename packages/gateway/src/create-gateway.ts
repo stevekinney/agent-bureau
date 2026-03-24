@@ -55,9 +55,11 @@ export function createGateway(options: GatewayOptions = {}): Gateway {
         if (url.pathname === '/ws') {
           if (options.authToken) {
             const authHeader = request.headers.get('authorization') ?? '';
-            const token = authHeader.toLowerCase().startsWith('bearer ')
+            const headerToken = authHeader.toLowerCase().startsWith('bearer ')
               ? authHeader.slice(7).trim()
               : undefined;
+            const queryToken = url.searchParams.get('token') ?? undefined;
+            const token = headerToken ?? queryToken;
 
             if (!token || token !== options.authToken) {
               return new Response('Unauthorized', { status: 401 });

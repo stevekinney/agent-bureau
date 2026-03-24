@@ -10,7 +10,7 @@ let cachedManifest: AssetManifest | undefined;
 async function loadManifest(): Promise<AssetManifest> {
   if (cachedManifest) return cachedManifest;
   try {
-    const manifestPath = resolve(import.meta.dir, '../../manifest.json');
+    const manifestPath = resolve(import.meta.dir, 'manifest.json');
     const file = Bun.file(manifestPath);
     cachedManifest = (await file.json()) as AssetManifest;
   } catch {

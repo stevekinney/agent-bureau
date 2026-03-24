@@ -23,6 +23,8 @@ const serverResult = await Bun.build({
     'herald',
     'armorer',
     'conversationalist',
+    'event-emission',
+    'event-emission/*',
   ],
 });
 

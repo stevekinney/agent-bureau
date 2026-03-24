@@ -6,6 +6,7 @@ export type ConnectionStatus = 'connecting' | 'connected' | 'disconnected';
 
 export interface UseWebSocketOptions {
   url: string;
+  authToken?: string;
   onMessage?: (frame: ServerFrame) => void;
   reconnectInterval?: number;
 }
@@ -19,6 +20,7 @@ export interface UseWebSocketResult {
 
 export function useWebSocket({
   url,
+  authToken,
   onMessage,
   reconnectInterval = 3000,
 }: UseWebSocketOptions): UseWebSocketResult {
@@ -37,7 +39,10 @@ export function useWebSocket({
       if (!mountedRef.current) return;
 
       setStatus('connecting');
-      const ws = new WebSocket(url);
+      const connectionUrl = authToken
+        ? `${url}${url.includes('?') ? '&' : '?'}token=${encodeURIComponent(authToken)}`
+        : url;
+      const ws = new WebSocket(connectionUrl);
       wsRef.current = ws;
 
       ws.addEventListener('open', () => {
@@ -75,7 +80,7 @@ export function useWebSocket({
         wsRef.current = null;
       }
     };
-  }, [url, reconnectInterval]);
+  }, [url, authToken, reconnectInterval]);
 
   const send = useCallback((frame: ClientFrame) => {
     const ws = wsRef.current;
