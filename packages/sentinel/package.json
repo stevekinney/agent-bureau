@@ -65,6 +65,7 @@
   },
   "dependencies": {
     "conversationalist": "workspace:*",
+    "event-emission": "0.3.0",
     "operative": "workspace:*"
   },
   "devDependencies": {

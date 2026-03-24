@@ -22,6 +22,7 @@
   "dependencies": {
     "armorer": "workspace:*",
     "conversationalist": "workspace:*",
+    "event-emission": "0.3.0",
     "herald": "workspace:*",
     "hono": "^4.7.10",
     "operative": "workspace:*",

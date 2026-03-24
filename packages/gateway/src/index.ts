@@ -5,6 +5,8 @@ export { serializeRunState } from './serialization';
 export type {
   ApiErrorResponse,
   Bureau,
+  BureauEvents,
+  BureauEventType,
   BureauOptions,
   ClientFrame,
   ConfigurationResponse,

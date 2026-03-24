@@ -4,10 +4,16 @@ import type {
   SessionInfo,
   SessionPersistenceAdapter,
 } from 'conversationalist';
+import type {
+  AddEventListenerOptionsLike,
+  AsyncIteratorOptions,
+  EmissionEvent,
+} from 'event-emission';
+import type { ObservableLike, Observer, Subscription } from 'event-emission/types';
 import type { ProviderName } from 'herald';
 import type { Hono } from 'hono';
 import type { GenerateFunction, StopCondition } from 'operative';
-import type { Store } from 'sentinel';
+import type { Action, Store } from 'sentinel';
 
 // ── Provider Configuration ───────────────────────────────────────────
 
@@ -33,6 +39,15 @@ export interface BureauOptions {
   systemPrompt?: string;
 }
 
+export interface BureauEvents {
+  action: Action;
+  'run.registered': { runId: string };
+  'run.removed': { runId: string };
+  'bureau.disposed': Record<string, never>;
+}
+
+export type BureauEventType = keyof BureauEvents;
+
 export interface Bureau {
   readonly store: Store;
   readonly ready: boolean;
@@ -49,6 +64,42 @@ export interface Bureau {
 
   getConfiguration(): ConfigurationResponse;
   getTools(): ToolSummary[];
+
+  addEventListener<K extends BureauEventType>(
+    type: K,
+    listener: (event: EmissionEvent<BureauEvents[K], K>) => void | Promise<void>,
+    options?: AddEventListenerOptionsLike,
+  ): () => void;
+
+  on<K extends BureauEventType>(
+    type: K,
+    options?: AddEventListenerOptionsLike | boolean,
+  ): ObservableLike<EmissionEvent<BureauEvents[K], K>>;
+
+  once<K extends BureauEventType>(
+    type: K,
+    listener: (event: EmissionEvent<BureauEvents[K], K>) => void | Promise<void>,
+    options?: Omit<AddEventListenerOptionsLike, 'once'>,
+  ): () => void;
+
+  subscribe<K extends BureauEventType>(
+    type: K,
+    observerOrNext?:
+      | Observer<EmissionEvent<BureauEvents[K], K>>
+      | ((value: EmissionEvent<BureauEvents[K], K>) => void),
+    error?: (err: unknown) => void,
+    complete?: () => void,
+  ): Subscription;
+
+  toObservable(): ObservableLike<EmissionEvent<BureauEvents[keyof BureauEvents]>>;
+
+  events<K extends BureauEventType>(
+    type: K,
+    options?: AsyncIteratorOptions,
+  ): AsyncIterableIterator<EmissionEvent<BureauEvents[K], K>>;
+
+  complete(): void;
+  readonly completed: boolean;
 
   dispose(): void;
 }

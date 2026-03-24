@@ -1,5 +1,6 @@
 import type { ConversationHistory, SessionInfo } from 'conversationalist';
 import { Conversation } from 'conversationalist';
+import { createEventTarget } from 'event-emission';
 import type { RunOptions, Toolbox } from 'operative';
 import { createRun } from 'operative';
 import type { Store } from 'sentinel';
@@ -9,6 +10,7 @@ import { resolveGenerate } from './configuration';
 import { serializeRunState } from './serialization';
 import type {
   Bureau,
+  BureauEvents,
   BureauOptions,
   ConfigurationResponse,
   CreateRunRequest,
@@ -31,7 +33,14 @@ export { BureauError };
 
 export function createBureau(options: BureauOptions = {}): Bureau {
   const store: Store = options.store ?? createStore();
+  const emitter = createEventTarget<BureauEvents>();
   const maximumSteps = options.maximumSteps ?? DEFAULT_MAXIMUM_STEPS;
+
+  // Forward all store events to the bureau emitter
+  const storeSubscription = store.toObservable().subscribe((event) => {
+    const type = event.type as keyof BureauEvents;
+    emitter.emit(type, event.detail as BureauEvents[typeof type]);
+  });
 
   const generate =
     options.generate ?? (options.provider ? resolveGenerate(options.provider) : undefined);
@@ -183,6 +192,9 @@ export function createBureau(options: BureauOptions = {}): Bureau {
   // ── Lifecycle ───────────────────────────────────────────────────
 
   function dispose(): void {
+    emitter.emit('bureau.disposed', {} as Record<string, never>);
+    storeSubscription.unsubscribe();
+    emitter.complete();
     store.dispose();
   }
 
@@ -201,6 +213,16 @@ export function createBureau(options: BureauOptions = {}): Bureau {
     deleteConversation,
     getConfiguration,
     getTools: getToolSummaries,
+    addEventListener: emitter.addEventListener,
+    on: emitter.on,
+    once: emitter.once,
+    subscribe: emitter.subscribe,
+    toObservable: emitter.toObservable,
+    events: emitter.events,
+    complete: emitter.complete,
+    get completed() {
+      return emitter.completed;
+    },
     dispose,
   };
 }

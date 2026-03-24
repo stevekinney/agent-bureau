@@ -325,4 +325,161 @@ describe('createBureau', () => {
       expect(error.message).toBe('test');
     });
   });
+
+  describe('event emission', () => {
+    function createReadyBureau() {
+      return createBureau({
+        generate: createMockGenerate(),
+        toolbox: createEmptyToolbox(),
+      });
+    }
+
+    it('addEventListener("action", listener) receives actions from runs', async () => {
+      const bureau = createReadyBureau();
+      const received: unknown[] = [];
+
+      bureau.addEventListener('action', (event) => {
+        received.push(event.detail);
+      });
+
+      await bureau.createRun({ message: 'Hello' });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      expect(received.length).toBeGreaterThan(0);
+      bureau.dispose();
+    });
+
+    it('toObservable() emits events', async () => {
+      const bureau = createReadyBureau();
+      const types: string[] = [];
+
+      const subscription = bureau.toObservable().subscribe((event) => {
+        types.push(event.type);
+      });
+
+      await bureau.createRun({ message: 'Hello' });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      expect(types.length).toBeGreaterThan(0);
+      subscription.unsubscribe();
+      bureau.dispose();
+    });
+
+    it('on("action") returns Observable', async () => {
+      const bureau = createReadyBureau();
+      const received: unknown[] = [];
+
+      const subscription = bureau.on('action').subscribe((event) => {
+        received.push(event.detail);
+      });
+
+      await bureau.createRun({ message: 'Hello' });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      expect(received.length).toBeGreaterThan(0);
+      subscription.unsubscribe();
+      bureau.dispose();
+    });
+
+    it('once("action", listener) fires once', async () => {
+      const bureau = createReadyBureau();
+      const received: unknown[] = [];
+
+      bureau.once('action', (event) => {
+        received.push(event.detail);
+      });
+
+      await bureau.createRun({ message: 'Hello' });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      expect(received.length).toBe(1);
+      bureau.dispose();
+    });
+
+    it('subscribe("action", observer) returns Subscription', async () => {
+      const bureau = createReadyBureau();
+      const received: unknown[] = [];
+
+      const subscription = bureau.subscribe('action', (event) => {
+        received.push(event.detail);
+      });
+
+      expect(typeof subscription.unsubscribe).toBe('function');
+
+      await bureau.createRun({ message: 'Hello' });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      expect(received.length).toBeGreaterThan(0);
+      subscription.unsubscribe();
+      bureau.dispose();
+    });
+
+    it('events("action") returns async iterator', async () => {
+      const bureau = createReadyBureau();
+      const received: unknown[] = [];
+
+      const iterator = bureau.events('action');
+
+      await bureau.createRun({ message: 'Hello' });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      bureau.complete();
+
+      for await (const event of iterator) {
+        received.push(event.detail);
+      }
+
+      expect(received.length).toBeGreaterThan(0);
+    });
+
+    it('"run.registered" fires from createRun()', async () => {
+      const bureau = createReadyBureau();
+      const registered: string[] = [];
+
+      bureau.addEventListener('run.registered', (event) => {
+        registered.push(event.detail.runId);
+      });
+
+      const summary = await bureau.createRun({ message: 'Hello' });
+
+      expect(registered).toContain(summary.id);
+      bureau.dispose();
+    });
+
+    it('"run.removed" fires from deleteRun()', async () => {
+      const bureau = createReadyBureau();
+      const removed: string[] = [];
+
+      bureau.addEventListener('run.removed', (event) => {
+        removed.push(event.detail.runId);
+      });
+
+      const { id } = await bureau.createRun({ message: 'Hello' });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      bureau.deleteRun(id);
+
+      expect(removed).toContain(id);
+      bureau.dispose();
+    });
+
+    it('"bureau.disposed" fires from dispose()', () => {
+      const bureau = createReadyBureau();
+      let disposed = false;
+
+      bureau.addEventListener('bureau.disposed', () => {
+        disposed = true;
+      });
+
+      bureau.dispose();
+      expect(disposed).toBe(true);
+    });
+
+    it('complete() / completed work correctly', () => {
+      const bureau = createReadyBureau();
+      expect(bureau.completed).toBe(false);
+      bureau.complete();
+      expect(bureau.completed).toBe(true);
+    });
+  });
 });
