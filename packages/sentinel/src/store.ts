@@ -1,9 +1,14 @@
+import type { EmissionEvent } from 'event-emission';
+import { createEventTarget } from 'event-emission';
+import type { Observer, Subscription } from 'event-emission/types';
 import type { RunResult, StepResult, TokenUsage } from 'operative';
 
 import type {
   Action,
   RunState,
   Store,
+  StoreEvents,
+  StoreEventType,
   StoreListener,
   StoreOptions,
   StoreState,
@@ -23,8 +28,8 @@ export function createStore(options: StoreOptions = {}): Store {
   const { maxActions, maxSnapshots } = options;
   const runs = new Map<string, RunState>();
   const actions: Action[] = [];
-  const listeners = new Set<StoreListener>();
-  const subscriptions = new Map<string, { unsubscribe: () => void }>();
+  const emitter = createEventTarget<StoreEvents>();
+  const runSubscriptions = new Map<string, { unsubscribe: () => void }>();
   let sequenceCounter = 0;
   let idCounter = 0;
 
@@ -34,13 +39,6 @@ export function createStore(options: StoreOptions = {}): Store {
 
   function getRun(id: string): RunState | undefined {
     return runs.get(id);
-  }
-
-  function notify(action: Action): void {
-    const state = getState();
-    for (const listener of listeners) {
-      listener(state, action);
-    }
   }
 
   function appendAction(runId: string, type: string, detail: unknown, timestamp: number): Action {
@@ -151,39 +149,61 @@ export function createStore(options: StoreOptions = {}): Store {
         }
 
         runs.set(runId, updated);
-        notify(action);
+        emitter.emit('action', action);
       },
     });
 
-    subscriptions.set(runId, subscription);
+    runSubscriptions.set(runId, subscription);
+    emitter.emit('run.registered', { runId });
     return runId;
   }
 
-  function subscribe(listener: StoreListener): Unsubscribe {
-    listeners.add(listener);
-    return () => {
-      listeners.delete(listener);
-    };
+  type StoreEventObserverOrNext<K extends StoreEventType> =
+    | Observer<EmissionEvent<StoreEvents[K], K>>
+    | ((value: EmissionEvent<StoreEvents[K], K>) => void);
+
+  function subscribe(listener: StoreListener): Unsubscribe;
+  function subscribe<K extends StoreEventType>(
+    type: K,
+    observerOrNext?: StoreEventObserverOrNext<K>,
+    error?: (err: unknown) => void,
+    complete?: () => void,
+  ): Subscription;
+  function subscribe(
+    listenerOrType: StoreListener | StoreEventType,
+    observerOrNext?: StoreEventObserverOrNext<StoreEventType>,
+    error?: (err: unknown) => void,
+    complete?: () => void,
+  ): Unsubscribe | Subscription {
+    if (typeof listenerOrType === 'function') {
+      const unsubscribe = emitter.addEventListener('action', (event) => {
+        listenerOrType(getState(), event.detail);
+      });
+      return unsubscribe;
+    }
+    return emitter.subscribe(listenerOrType, observerOrNext, error, complete);
   }
 
   function removeRun(id: string): void {
+    if (!runs.has(id)) return;
+    emitter.emit('run.removed', { runId: id });
     deregister(id);
     runs.delete(id);
   }
 
   function deregister(id: string): void {
-    const subscription = subscriptions.get(id);
+    const subscription = runSubscriptions.get(id);
     if (subscription) {
       subscription.unsubscribe();
-      subscriptions.delete(id);
+      runSubscriptions.delete(id);
     }
   }
 
   function dispose(): void {
-    for (const [id] of subscriptions) {
+    for (const [id] of runSubscriptions) {
       deregister(id);
     }
-    listeners.clear();
+    emitter.complete();
   }
 
   return {
@@ -191,6 +211,15 @@ export function createStore(options: StoreOptions = {}): Store {
     getState,
     getRun,
     subscribe,
+    addEventListener: emitter.addEventListener,
+    on: emitter.on,
+    once: emitter.once,
+    toObservable: emitter.toObservable,
+    events: emitter.events,
+    complete: emitter.complete,
+    get completed() {
+      return emitter.completed;
+    },
     removeRun,
     deregister,
     dispose,

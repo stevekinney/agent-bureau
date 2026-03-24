@@ -1,0 +1,8 @@
+.page-run-detail section {
+  margin-top: 1.5rem;
+}
+
+.page-run-detail .error {
+  color: var(--color-error);
+  font-family: var(--font-mono);
+}

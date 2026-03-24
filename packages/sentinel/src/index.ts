@@ -4,6 +4,8 @@ export type {
   RunState,
   RunStatus,
   Store,
+  StoreEvents,
+  StoreEventType,
   StoreListener,
   StoreOptions,
   StoreState,
