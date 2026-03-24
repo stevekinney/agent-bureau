@@ -7,6 +7,7 @@ import type {
 import { createEventTarget } from 'event-emission';
 import type { ObservableLike, Observer, Subscription } from 'event-emission/types';
 
+import { bindEmitter } from './bind-emitter';
 import type {
   CombinedOperativeEvents,
   CombinedOperativeEventType,
@@ -106,9 +107,9 @@ export function createRun(options: RunOptions): ActiveRun {
   // Defer the loop start to the next microtask so callers can attach listeners first.
   // Cast the emitter: the loop only emits native OperativeEvents; the wider
   // CombinedOperativeEvents type is used for forwarded events outside the loop.
-  const result = Promise.resolve().then(() =>
-    executeLoop(loopOptions, emitter as unknown as LoopEmitter),
-  );
+  const result = Promise.resolve()
+    .then(() => executeLoop(loopOptions, emitter as unknown as LoopEmitter))
+    .finally(complete);
 
   function abort(reason?: string): void {
     abortController.abort(reason);
@@ -122,12 +123,8 @@ export function createRun(options: RunOptions): ActiveRun {
   return {
     result,
     abort,
-    addEventListener: emitter.addEventListener.bind(emitter) as ActiveRun['addEventListener'],
-    on: emitter.on.bind(emitter) as ActiveRun['on'],
-    once: emitter.once.bind(emitter) as ActiveRun['once'],
-    subscribe: emitter.subscribe.bind(emitter) as ActiveRun['subscribe'],
+    ...bindEmitter<CombinedOperativeEvents>(emitter),
     events: emitter.events.bind(emitter) as ActiveRun['events'],
-    toObservable: emitter.toObservable.bind(emitter) as ActiveRun['toObservable'],
     complete,
     [Symbol.dispose](): void {
       abort();

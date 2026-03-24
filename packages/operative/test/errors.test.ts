@@ -1,10 +1,11 @@
-import { createTool } from 'armorer';
+import { createTool, createToolbox } from 'armorer';
 import { createTestToolbox } from 'armorer/test';
 import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
 import { z } from 'zod';
 
 import { noToolCalls } from '../src/conditions/predicates';
+import { createRun } from '../src/create-run';
 import { run } from '../src/run';
 import { createMockGenerate } from '../src/test/index';
 import type { GenerateResponse } from '../src/types';
@@ -136,5 +137,37 @@ describe('error handling', () => {
     expect((result.error as Error).message).toBe('Hook crashed');
     // The step where the hook threw is still partially recorded
     expect(result.steps).toHaveLength(0);
+  });
+
+  it('emits both run.error and run.completed for generic errors via createRun', async () => {
+    const generate = async () => {
+      throw new Error('Generic network error');
+    };
+
+    const toolbox = createToolbox([]);
+    const conversation = new Conversation();
+
+    const activeRun = createRun({
+      generate,
+      toolbox,
+      conversation,
+      stopWhen: noToolCalls(),
+    });
+
+    const receivedEvents: string[] = [];
+
+    activeRun.addEventListener('run.error', () => {
+      receivedEvents.push('run.error');
+    });
+
+    activeRun.addEventListener('run.completed', () => {
+      receivedEvents.push('run.completed');
+    });
+
+    const result = await activeRun.result;
+
+    expect(result.finishReason).toBe('error');
+    expect(receivedEvents).toContain('run.error');
+    expect(receivedEvents).toContain('run.completed');
   });
 });

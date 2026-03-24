@@ -2,6 +2,7 @@ import type { AddEventListenerOptionsLike, EmissionEvent } from 'event-emission'
 import { createEventTarget } from 'event-emission';
 import type { ObservableLike, Observer, Subscription } from 'event-emission/types';
 
+import { bindEmitter } from './bind-emitter';
 import type { AgentRegistry, AgentRegistryEntry } from './create-agent-registry';
 import type { Scratchpad } from './create-scratchpad';
 import { createScratchpadReadTool, createScratchpadWriteTool } from './create-scratchpad';
@@ -157,6 +158,7 @@ export function createSupervisor(options: CreateSupervisorOptions): Supervisor {
           toolbox: extendedToolbox,
           conversation,
           signal,
+          stopWhen: definitionStopWhen,
         });
         events.emit('task.completed', { task, agentName, result });
         return { task, agentName, result };
@@ -255,11 +257,7 @@ export function createSupervisor(options: CreateSupervisorOptions): Supervisor {
       return { task, agentResults: allStageResults, synthesis: finalContent };
     },
 
-    addEventListener: events.addEventListener.bind(events),
-    on: events.on.bind(events) as Supervisor['on'],
-    once: events.once.bind(events),
-    subscribe: events.subscribe.bind(events),
-    toObservable: events.toObservable.bind(events),
+    ...bindEmitter<SupervisorEvents>(events),
   };
 }
 

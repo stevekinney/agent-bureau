@@ -172,7 +172,10 @@ export function instrument(
           'operative.usage.completion_tokens': result.usage.completion,
           'operative.usage.total_tokens': result.usage.total,
         });
-        runSpan.setStatus({ code: SpanStatusCode.OK });
+        // Only set OK if run.error did not already set ERROR status
+        if (!result.error) {
+          runSpan.setStatus({ code: SpanStatusCode.OK });
+        }
         runSpan.end();
       }
     }),

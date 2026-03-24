@@ -197,4 +197,70 @@ describe('createRun', () => {
     expect(collected).toContain('step.completed');
     expect(collected).toContain('run.completed');
   });
+
+  it('completes the emitter when result resolves without explicit complete()', async () => {
+    const generate = createMockGenerate([textResponse('auto-complete')]);
+    const toolbox = createToolbox([]);
+    const conversation = new Conversation();
+
+    const activeRun = createRun({
+      generate,
+      toolbox,
+      conversation,
+      stopWhen: noToolCalls(),
+    });
+
+    let observableCompleted = false;
+
+    activeRun.toObservable().subscribe({
+      complete() {
+        observableCompleted = true;
+      },
+    });
+
+    await activeRun.result;
+
+    // Allow microtask for .finally to run
+    await Promise.resolve();
+
+    expect(observableCompleted).toBe(true);
+  });
+
+  it('calling complete() after auto-complete is a harmless no-op', async () => {
+    const generate = createMockGenerate([textResponse('double-complete')]);
+    const toolbox = createToolbox([]);
+    const conversation = new Conversation();
+
+    const activeRun = createRun({
+      generate,
+      toolbox,
+      conversation,
+      stopWhen: noToolCalls(),
+    });
+
+    await activeRun.result;
+    await Promise.resolve();
+
+    // Should not throw
+    expect(() => activeRun.complete()).not.toThrow();
+  });
+
+  it('Symbol.dispose after auto-complete is a harmless no-op', async () => {
+    const generate = createMockGenerate([textResponse('dispose-after-complete')]);
+    const toolbox = createToolbox([]);
+    const conversation = new Conversation();
+
+    const activeRun = createRun({
+      generate,
+      toolbox,
+      conversation,
+      stopWhen: noToolCalls(),
+    });
+
+    await activeRun.result;
+    await Promise.resolve();
+
+    // Should not throw
+    expect(() => activeRun[Symbol.dispose]()).not.toThrow();
+  });
 });

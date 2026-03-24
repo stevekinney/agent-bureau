@@ -80,14 +80,14 @@ function buildRunOptions(options: DefineAgentOptions, input: string | AgentRunOp
   } = normalizeInput(input, resolveInstructions(options.instructions));
 
   const {
-    name: _,
-    instructions: __,
+    name: _name,
+    instructions: _instructions,
     stopWhen: definitionStopWhen,
-    persistence: ___,
-    sessionId: ____,
-    onSessionSave: _____,
-    onSessionLoad: ______,
-    autoSave: _______,
+    persistence: _persistence,
+    sessionId: _sessionId,
+    onSessionSave: _onSessionSave,
+    onSessionLoad: _onSessionLoad,
+    autoSave: _autoSave,
     ...rest
   } = options;
 

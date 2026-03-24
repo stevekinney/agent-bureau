@@ -4,6 +4,7 @@ import { createEventTarget } from 'event-emission';
 import type { ObservableLike, Observer, Subscription } from 'event-emission/types';
 import { z } from 'zod';
 
+import { bindEmitter } from './bind-emitter';
 import type { AgentDefinition } from './types';
 
 export interface AgentRegistryEntry {
@@ -145,11 +146,7 @@ export function createAgentRegistry(): AgentRegistry {
       return results;
     },
 
-    addEventListener: events.addEventListener.bind(events),
-    on: events.on.bind(events) as AgentRegistry['on'],
-    once: events.once.bind(events),
-    subscribe: events.subscribe.bind(events),
-    toObservable: events.toObservable.bind(events),
+    ...bindEmitter<AgentRegistryEvents>(events),
   };
 
   return registry;

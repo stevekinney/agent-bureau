@@ -5,6 +5,8 @@ import type { ObservableLike, Observer, Subscription } from 'event-emission/type
 import type { ZodType } from 'zod';
 import { z } from 'zod';
 
+import { bindEmitter } from './bind-emitter';
+
 export interface ScratchpadEvents {
   'entry.set': { key: string; value: unknown; previousValue?: unknown };
   'entry.deleted': { key: string; previousValue: unknown };
@@ -125,11 +127,7 @@ export function createScratchpad(options?: CreateScratchpadOptions): Scratchpad 
       events.emit('scratchpad.cleared', { previousEntries });
     },
 
-    addEventListener: events.addEventListener.bind(events),
-    on: events.on.bind(events) as Scratchpad['on'],
-    once: events.once.bind(events),
-    subscribe: events.subscribe.bind(events),
-    toObservable: events.toObservable.bind(events),
+    ...bindEmitter<ScratchpadEvents>(events),
   };
 }
 

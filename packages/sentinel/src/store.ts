@@ -118,9 +118,9 @@ export function createStore(options: StoreOptions = {}): Store {
             const snapshot = runResult.conversation.snapshot();
             updated = {
               ...updated,
-              status: 'completed',
+              status: updated.status === 'error' ? 'error' : 'completed',
               finishReason: runResult.finishReason,
-              error: runResult.error,
+              error: updated.error ?? runResult.error,
               snapshots: [...updated.snapshots, snapshot],
             };
             break;

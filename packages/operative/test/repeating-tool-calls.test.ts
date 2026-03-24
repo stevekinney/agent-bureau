@@ -210,6 +210,36 @@ describe('repeatingToolCalls', () => {
     expect(result.steps).toHaveLength(3);
   });
 
+  it('keeps bounded memory with 100+ steps', () => {
+    const condition = repeatingToolCalls({ windowSize: 3 });
+
+    // Feed 100 distinct steps to grow history
+    for (let i = 0; i < 100; i++) {
+      condition(
+        makeStepResult({
+          toolCalls: [{ id: `c${i}`, name: 'get_weather', arguments: { location: `City${i}` } }],
+        }),
+      );
+    }
+
+    // Now feed 3 identical steps
+    for (let i = 0; i < 2; i++) {
+      const result = condition(
+        makeStepResult({
+          toolCalls: [{ id: `r${i}`, name: 'get_weather', arguments: { location: 'Denver' } }],
+        }),
+      );
+      expect(result).toBe(false);
+    }
+
+    const final = condition(
+      makeStepResult({
+        toolCalls: [{ id: 'r2', name: 'get_weather', arguments: { location: 'Denver' } }],
+      }),
+    );
+    expect(final).toBe(true);
+  });
+
   it('allows the loop to continue when tool calls vary', async () => {
     const generate = createMockGenerate([
       toolCallResponse([weatherToolCall('Denver')]),

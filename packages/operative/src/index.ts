@@ -8,6 +8,8 @@ export type {
   TokenBucketOptions,
 } from './backpressure';
 export { createAdaptiveBackoff, createSlidingWindow, createTokenBucket } from './backpressure';
+export type { BoundEmitter } from './bind-emitter';
+export { bindEmitter } from './bind-emitter';
 export type { RepeatingToolCallsOptions, TokenBudgetOptions } from './conditions/index';
 export { stopWhen } from './conditions/index';
 export type {

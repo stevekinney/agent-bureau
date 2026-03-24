@@ -182,7 +182,7 @@ export async function executeLoop(options: RunOptions, emitter?: EventEmitter): 
       emitter?.emit('run.completed', result);
       return result;
     }
-    return {
+    const result: RunResult = {
       conversation,
       steps,
       content: lastContent,
@@ -190,6 +190,8 @@ export async function executeLoop(options: RunOptions, emitter?: EventEmitter): 
       finishReason: 'error',
       error,
     };
+    emitter?.emit('run.completed', result);
+    return result;
   };
 
   emitter?.emit('run.started', { conversation });

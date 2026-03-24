@@ -397,6 +397,44 @@ describe('supervisor with scratchpad (extended toolbox path)', () => {
   });
 });
 
+describe('supervisor with scratchpad respects stopWhen', () => {
+  it('respects agent stopWhen (noToolCalls) when scratchpad is provided', async () => {
+    const scratchpad = createScratchpad();
+    let generateCallCount = 0;
+
+    const agent = defineAgent({
+      name: 'bounded-worker',
+      instructions: 'Do work.',
+      generate: async () => {
+        generateCallCount++;
+        return textResponse(`Response ${generateCallCount}`);
+      },
+      toolbox: createTestToolbox([]),
+      stopWhen: noToolCalls(),
+      maximumSteps: 10,
+    });
+
+    const entry: AgentRegistryEntry = {
+      agent,
+      description: 'Worker with stop condition',
+      capabilities: [],
+    };
+
+    const supervisor = createSupervisor({
+      agents: [entry],
+      routing: () => 'bounded-worker',
+      scratchpad,
+    });
+
+    const result = await supervisor.delegate('Task');
+
+    // With noToolCalls(), the run should stop after the first step (text-only response).
+    // Without the fix, stopWhen is dropped and the loop runs to maximumSteps.
+    expect(result.agentResults[0]!.result?.finishReason).toBe('stop-condition');
+    expect(result.agentResults[0]!.result?.steps.length).toBe(1);
+  });
+});
+
 describe('supervisor with scratchpad (shared state)', () => {
   it('scratchpad is shared across delegated tasks', async () => {
     const scratchpad = createScratchpad();

@@ -128,12 +128,18 @@ export function repeatingToolCalls(options?: RepeatingToolCallsOptions): StopCon
   const windowSize = options?.windowSize ?? 3;
   const fingerprintFunction = options?.fingerprint;
   const includeResults = options?.includeResults ?? false;
-  const history: string[] = [];
+
+  // Fixed-size circular buffer: only the last `windowSize` entries are retained.
+  const buffer: string[] = new Array<string>(windowSize);
+  let writeIndex = 0;
+  let filled = 0;
   let sentinel = 0;
 
   return (context: StepResult) => {
     if (context.toolCalls.length === 0) {
-      history.push(`__no_tools_${sentinel++}__`);
+      buffer[writeIndex] = `__no_tools_${sentinel++}__`;
+      writeIndex = (writeIndex + 1) % windowSize;
+      if (filled < windowSize) filled++;
       return false;
     }
 
@@ -141,12 +147,18 @@ export function repeatingToolCalls(options?: RepeatingToolCallsOptions): StopCon
       ? fingerprintFunction(context.toolCalls, context.results)
       : defaultFingerprint(context.toolCalls, context.results, includeResults);
 
-    history.push(fp);
+    buffer[writeIndex] = fp;
+    writeIndex = (writeIndex + 1) % windowSize;
+    if (filled < windowSize) filled++;
 
-    if (history.length < windowSize) return false;
+    if (filled < windowSize) return false;
 
-    const recent = history.slice(-windowSize);
-    return recent.every((entry) => entry === recent[0]);
+    // Check if all entries in the buffer are identical
+    const reference = buffer[0]!;
+    for (let i = 1; i < windowSize; i++) {
+      if (buffer[i] !== reference) return false;
+    }
+    return true;
   };
 }
 
