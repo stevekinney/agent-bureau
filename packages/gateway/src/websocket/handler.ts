@@ -1,6 +1,7 @@
 import type { ServerWebSocket } from 'bun';
 import type { Store } from 'sentinel';
 
+import { serializeActionDetail } from '../serialization';
 import type { ServerFrame } from '../types';
 import { parseClientFrame, SubscriptionManager } from './protocol';
 
@@ -24,7 +25,7 @@ export function createWebSocketHandler(options: WebSocketHandlerOptions): WebSoc
       type: 'event',
       runId: action.runId,
       event: action.type,
-      detail: action.detail,
+      detail: serializeActionDetail(action.type, action.detail),
       timestamp: action.timestamp,
     };
     subscriptions.broadcast(action.runId, frame);

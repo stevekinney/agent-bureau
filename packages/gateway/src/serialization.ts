@@ -3,11 +3,34 @@ import type { RunState } from 'sentinel';
 import type { RunSummary } from './types';
 
 function safeStringify(value: unknown): string {
+  if (typeof value === 'string') return value;
   try {
     return JSON.stringify(value);
   } catch {
     return String(value);
   }
+}
+
+/**
+ * Strips non-serializable properties (e.g. Conversation instances) from
+ * action detail objects before they are sent over WebSocket.
+ */
+export function serializeActionDetail(eventType: string, detail: unknown): unknown {
+  if (!detail || typeof detail !== 'object') return detail;
+
+  const record = detail as Record<string, unknown>;
+
+  if (
+    (eventType === 'step.completed' || eventType === 'run.completed') &&
+    'conversation' in record
+  ) {
+    const { conversation: _, ...rest } = record;
+    // StepResult also nests conversation in results[].conversation — but
+    // ToolExecutionResult doesn't have one, so a shallow strip is sufficient.
+    return rest;
+  }
+
+  return detail;
 }
 
 /**

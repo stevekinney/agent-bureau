@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test';
 import type { ActiveRun } from 'operative';
 import type { RunState } from 'sentinel';
 
-import { serializeRunState } from './serialization';
+import { serializeActionDetail, serializeRunState } from './serialization';
 
 describe('serializeRunState', () => {
   it('maps RunState to a JSON-safe RunSummary', () => {
@@ -66,5 +66,67 @@ describe('serializeRunState', () => {
     const json = JSON.stringify(summary);
     const parsed = JSON.parse(json);
     expect(parsed.id).toBe('run-3');
+  });
+
+  it('does not double-quote string errors', () => {
+    const runState: RunState = {
+      id: 'run-4',
+      status: 'error',
+      steps: [],
+      usage: { prompt: 0, completion: 0, total: 0 },
+      finishReason: 'error',
+      error: 'Connection timeout',
+      snapshots: [],
+      actions: [],
+      activeRun: {} as ActiveRun,
+    };
+
+    const summary = serializeRunState(runState);
+    expect(summary.error).toBe('Connection timeout');
+  });
+});
+
+describe('serializeActionDetail', () => {
+  it('strips conversation from step.completed details', () => {
+    const detail = {
+      step: 1,
+      conversation: { snapshot: () => ({}) },
+      content: 'hello',
+      toolCalls: [],
+      results: [],
+      final: false,
+    };
+
+    const result = serializeActionDetail('step.completed', detail) as Record<string, unknown>;
+    expect(result).not.toHaveProperty('conversation');
+    expect(result['content']).toBe('hello');
+    expect(result['step']).toBe(1);
+  });
+
+  it('strips conversation from run.completed details', () => {
+    const detail = {
+      conversation: { snapshot: () => ({}) },
+      steps: [],
+      content: 'done',
+      usage: { prompt: 1, completion: 2, total: 3 },
+      finishReason: 'stop-condition',
+    };
+
+    const result = serializeActionDetail('run.completed', detail) as Record<string, unknown>;
+    expect(result).not.toHaveProperty('conversation');
+    expect(result['content']).toBe('done');
+    expect(result['finishReason']).toBe('stop-condition');
+  });
+
+  it('passes through other event types unchanged', () => {
+    const detail = { some: 'data' };
+    const result = serializeActionDetail('run.started', detail);
+    expect(result).toBe(detail);
+  });
+
+  it('passes through primitives unchanged', () => {
+    expect(serializeActionDetail('run.error', 'oops')).toBe('oops');
+    expect(serializeActionDetail('run.error', null)).toBeNull();
+    expect(serializeActionDetail('run.error', 42)).toBe(42);
   });
 });
