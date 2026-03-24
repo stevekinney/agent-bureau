@@ -25,12 +25,13 @@ export function createGateway(options: GatewayOptions = {}): Gateway {
   app.route('/', createRoutes(bureau));
 
   // Mount SSR pages
+  const configuration = bureau.getConfiguration();
   app.route(
     '/',
     createPages({
       store: bureau.store,
-      provider: options.provider,
-      maximumSteps: bureau.getConfiguration().maximumSteps,
+      provider: configuration.provider,
+      maximumSteps: configuration.maximumSteps,
       systemPrompt: options.systemPrompt,
     }),
   );

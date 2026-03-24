@@ -58,10 +58,15 @@ for (const output of clientResult.outputs) {
 
 await Bun.write('./dist/manifest.json', JSON.stringify(manifest, null, 2));
 
-// Copy CSS files to public directory
-const cssFiles = new Bun.Glob('src/ui/styles/*.css');
+// Copy CSS files to public directory (sorted for deterministic output)
+const cssGlob = new Bun.Glob('src/ui/styles/*.css');
+const cssPaths: string[] = [];
+for await (const path of cssGlob.scan('.')) {
+  cssPaths.push(path);
+}
+cssPaths.sort();
 let cssBundle = '';
-for await (const path of cssFiles.scan('.')) {
+for (const path of cssPaths) {
   cssBundle += await Bun.file(path).text();
   cssBundle += '\n';
 }

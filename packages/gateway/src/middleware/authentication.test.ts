@@ -56,4 +56,25 @@ describe('authentication', () => {
     const body = await response.json();
     expect(body.ok).toBe(true);
   });
+
+  it('accepts case-insensitive bearer scheme', async () => {
+    const app = createApp('secret-token');
+    const response = await app.request('/protected', {
+      headers: { authorization: 'bearer secret-token' },
+    });
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.ok).toBe(true);
+  });
+
+  it('preserves tokens containing spaces', async () => {
+    const token = 'token with spaces';
+    const app = createApp(token);
+    const response = await app.request('/protected', {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.ok).toBe(true);
+  });
 });

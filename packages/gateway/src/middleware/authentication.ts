@@ -18,8 +18,12 @@ export function createAuthentication(authToken: string | undefined) {
       throw new HTTPException(401, { message: 'Missing authorization header' });
     }
 
-    const [scheme, token] = header.split(' ');
-    if (scheme !== 'Bearer' || token !== authToken) {
+    if (!header.toLowerCase().startsWith('bearer ')) {
+      throw new HTTPException(401, { message: 'Invalid authorization token' });
+    }
+
+    const token = header.slice(7).trim();
+    if (token !== authToken) {
       throw new HTTPException(401, { message: 'Invalid authorization token' });
     }
 

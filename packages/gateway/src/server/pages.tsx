@@ -7,7 +7,7 @@ import { renderPage } from './render';
 
 interface PageDependencies {
   store: Store;
-  provider: ProviderConfiguration | undefined;
+  provider: Omit<ProviderConfiguration, 'apiKey'> | undefined;
   maximumSteps: number;
   systemPrompt: string | undefined;
 }
@@ -128,12 +128,8 @@ export function createPages(dependencies: PageDependencies) {
   });
 
   app.get('/configuration', async () => {
-    const { apiKey: _apiKey, ...safeProvider } = dependencies.provider ?? {};
-    const redactedProvider = dependencies.provider
-      ? (safeProvider as Omit<typeof dependencies.provider, 'apiKey'>)
-      : undefined;
     const data = {
-      provider: redactedProvider,
+      provider: dependencies.provider,
       maximumSteps: dependencies.maximumSteps,
       systemPrompt: dependencies.systemPrompt,
     };
@@ -143,7 +139,7 @@ export function createPages(dependencies: PageDependencies) {
       data,
       content: (
         <Configuration
-          provider={redactedProvider}
+          provider={dependencies.provider}
           maximumSteps={dependencies.maximumSteps}
           systemPrompt={dependencies.systemPrompt}
         />
