@@ -2746,6 +2746,22 @@ describe('createToolbox', () => {
       expect(warnings).toHaveLength(0);
     });
 
+    it('uses default thresholds when loopDetection is set to true (boolean)', async () => {
+      const toolbox = createToolbox([makeConfiguration()], {
+        loopDetection: true,
+      });
+
+      const warnings: unknown[] = [];
+      toolbox.addEventListener('loop-warning', (e) => warnings.push(e.detail));
+
+      // Default warningThreshold is 10, so 11 identical calls should trigger a warning
+      for (let i = 0; i < 11; i++) {
+        await toolbox.execute({ id: `bool-${i}`, name: 'sum', arguments: { a: 1, b: 2 } });
+      }
+
+      expect(warnings.length).toBeGreaterThan(0);
+    });
+
     it('emits loop-blocked event', async () => {
       const toolbox = createToolbox([makeConfiguration()], {
         loopDetection: { warningThreshold: 2, blockThreshold: 4, windowSize: 30 },

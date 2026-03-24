@@ -478,6 +478,33 @@ describe('createDeprecationWarningMiddleware', () => {
     expect(deprecationMessage).toBe('Migrate to new-tool v2');
   });
 
+  it('handles deprecated tool whose execute is a Promise resolving to a function', async () => {
+    const warnings: ToolConfiguration[] = [];
+    const middleware = createDeprecationWarningMiddleware((configuration) => {
+      warnings.push(configuration);
+    });
+
+    const toolbox = createToolbox(
+      [
+        makeConfiguration({
+          name: 'lazy-deprecated',
+          description: 'Lazy deprecated tool',
+          lifecycle: { deprecated: true },
+          execute: Promise.resolve(async (params: unknown) => {
+            return 'lazy-result';
+          }),
+        }),
+      ],
+      { middleware: [middleware] },
+    );
+
+    const result = await toolbox.execute({ name: 'lazy-deprecated', arguments: {} });
+
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]?.name).toBe('lazy-deprecated');
+    expect(result.result).toBe('lazy-result');
+  });
+
   it('invokes onWarning on every execution of a deprecated tool', async () => {
     const callCount = mock(() => {});
     const middleware = createDeprecationWarningMiddleware(callCount);

@@ -209,3 +209,7 @@ function isSchemaRecord(value: unknown): value is SchemaRecord {
 function hasDefaultValue(value: unknown): boolean {
   return isSchemaRecord(value) && 'default' in value && value['default'] !== undefined;
 }
+
+export const internalJsonSchemaTestUtilities = {
+  enumToZod,
+};

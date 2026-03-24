@@ -30,6 +30,8 @@ async function build() {
     { entry: './src/persistence/jsonl-adapter.ts', outdir: 'dist/persistence' },
     { entry: './src/persistence/in-memory-adapter.ts', outdir: 'dist/persistence' },
     { entry: './src/persistence/sqlite-adapter.ts', outdir: 'dist/persistence' },
+    { entry: './src/persistence/redis-adapter.ts', outdir: 'dist/persistence' },
+    { entry: './src/persistence/postgresql-adapter.ts', outdir: 'dist/persistence' },
     { entry: './src/composition/index.ts', outdir: 'dist/composition' },
     // Internal modules referenced by index.d.ts (needed for Bun resolution)
     { entry: './src/errors.ts', outdir: 'dist' },
@@ -46,7 +48,7 @@ async function build() {
   for (const { entry, outdir } of entryPoints) {
     console.log(`  Building ${entry}...`);
     const buildResult =
-      await $`bun build --target=node --outdir=${outdir} --sourcemap=linked --external=zod ${entry}`.quiet();
+      await $`bun build --target=node --outdir=${outdir} --sourcemap=linked --external=zod --external=bun ${entry}`.quiet();
 
     if (buildResult.exitCode !== 0) {
       console.error(`JavaScript build failed for ${entry}`);

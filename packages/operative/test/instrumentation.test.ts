@@ -547,6 +547,43 @@ describe('instrument', () => {
     expect(tracer.spans).toHaveLength(0);
   });
 
+  it('endAllOpenSpans sweeps a generate span still in progress on unsubscribe', async () => {
+    const tracer = createMockTracer();
+    const toolbox = createTestToolbox([]);
+    let resolveGenerate!: (value: GenerateResponse) => void;
+    const generateStarted = Promise.withResolvers<void>();
+
+    const activeRun = createRun({
+      generate: async () => {
+        generateStarted.resolve();
+        return new Promise<GenerateResponse>((resolve) => {
+          resolveGenerate = resolve;
+        });
+      },
+      toolbox,
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+    });
+
+    const unsubscribe = instrument(activeRun, { tracer });
+
+    // Wait until generate.started has fired and the span is in the map
+    await generateStarted.promise;
+    await Bun.sleep(1);
+
+    // Unsubscribe while the generate span is still open
+    unsubscribe();
+
+    const generateSpan = findSpan(tracer, 'operative.generate')!;
+    expect(generateSpan).toBeDefined();
+    expect(generateSpan.ended).toBe(true);
+
+    // Let generate complete so the run finishes cleanly
+    resolveGenerate(textResponse('Hello'));
+    await activeRun.result;
+    activeRun.complete();
+  });
+
   it('does not throw when called without a tracer option', async () => {
     const toolbox = createTestToolbox([]);
 

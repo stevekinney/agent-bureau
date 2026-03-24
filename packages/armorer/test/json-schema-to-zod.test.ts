@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'bun:test';
 
-import { importToolSchema, jsonSchemaToZod } from '../src/utilities/json-schema-to-zod';
+import {
+  importToolSchema,
+  internalJsonSchemaTestUtilities,
+  jsonSchemaToZod,
+} from '../src/utilities/json-schema-to-zod';
+
+const { enumToZod } = internalJsonSchemaTestUtilities;
 
 describe('jsonSchemaToZod', () => {
   it('returns undefined for non-object input', () => {
@@ -154,5 +160,14 @@ describe('importToolSchema', () => {
     const schema = importToolSchema({ type: 'string' });
     expect(schema.safeParse('hello').success).toBe(true);
     expect(schema.safeParse(42).success).toBe(false);
+  });
+});
+
+describe('enumToZod', () => {
+  it('returns z.never() for an empty values array', () => {
+    const schema = enumToZod([]);
+    expect(schema).toBeDefined();
+    expect(schema!.safeParse('anything').success).toBe(false);
+    expect(schema!.safeParse(undefined).success).toBe(false);
   });
 });
