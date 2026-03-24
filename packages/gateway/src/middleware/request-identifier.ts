@@ -7,6 +7,9 @@ import { createMiddleware } from 'hono/factory';
 export const requestIdentifier = createMiddleware(async (context, next) => {
   const id = context.req.header('x-request-id') ?? crypto.randomUUID();
   context.set('requestId', id);
-  await next();
-  context.header('x-request-id', id);
+  try {
+    await next();
+  } finally {
+    context.header('x-request-id', id);
+  }
 });

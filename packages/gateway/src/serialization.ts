@@ -2,6 +2,14 @@ import type { RunState } from 'sentinel';
 
 import type { RunSummary } from './types';
 
+function safeStringify(value: unknown): string {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
 /**
  * Maps a live RunState (which may contain non-serializable objects like
  * ActiveRun and Conversation) to a JSON-safe RunSummary DTO.
@@ -21,7 +29,7 @@ export function serializeRunState(runState: RunState): RunSummary {
       runState.error instanceof Error
         ? runState.error.message
         : runState.error !== undefined
-          ? JSON.stringify(runState.error)
+          ? safeStringify(runState.error)
           : undefined,
     actionCount: runState.actions.length,
   };

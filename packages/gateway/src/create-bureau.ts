@@ -54,7 +54,15 @@ export function createBureau(options: BureauOptions = {}): Bureau {
 
   const emptyToolbox = {
     tools: () => [],
-    execute: () => Promise.resolve([]),
+    execute: (toolCalls: unknown[]) => {
+      if (Array.isArray(toolCalls) && toolCalls.length > 0) {
+        throw new BureauError(
+          'No toolbox configured but tool calls were received',
+          'NOT_CONFIGURED',
+        );
+      }
+      return Promise.resolve([]);
+    },
     toObservable: () => ({ subscribe: () => ({ unsubscribe: () => {} }) }),
   } as unknown as Toolbox;
 
@@ -67,6 +75,24 @@ export function createBureau(options: BureauOptions = {}): Bureau {
 
     if (!request.message || typeof request.message !== 'string') {
       throw new BureauError('Request must include a "message" string', 'BAD_REQUEST');
+    }
+
+    if (request.conversationId !== undefined && typeof request.conversationId !== 'string') {
+      throw new BureauError('"conversationId" must be a string', 'BAD_REQUEST');
+    }
+
+    if (request.systemPrompt !== undefined && typeof request.systemPrompt !== 'string') {
+      throw new BureauError('"systemPrompt" must be a string', 'BAD_REQUEST');
+    }
+
+    if (request.maximumSteps !== undefined) {
+      if (
+        typeof request.maximumSteps !== 'number' ||
+        !Number.isInteger(request.maximumSteps) ||
+        request.maximumSteps <= 0
+      ) {
+        throw new BureauError('"maximumSteps" must be a positive integer', 'BAD_REQUEST');
+      }
     }
 
     let conversation: InstanceType<typeof Conversation>;
