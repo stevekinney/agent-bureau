@@ -329,13 +329,23 @@ export class Conversation {
 
   /**
    * Registers a listener for a conversation event type.
+   *
+   * The listener is automatically removed when the conversation is disposed
+   * (i.e. when {@link complete} is called), unless the caller already
+   * provided their own `signal`.
    */
   addEventListener<K extends keyof ConversationEventMap & string>(
     type: K,
     callback: ((event: ConversationEventMap[K]) => void) | null,
     options?: boolean | AddEventListenerOptions,
   ): void {
-    this.emitter.addEventListener(type, callback, options);
+    const resolved: AddEventListenerOptions =
+      typeof options === 'boolean' ? { capture: options } : { ...options };
+
+    // Bind to the completion signal so listeners are removed on disposal.
+    resolved.signal ??= this.emitter.signal;
+
+    this.emitter.addEventListener(type, callback, resolved);
   }
 
   /**
@@ -368,7 +378,7 @@ export class Conversation {
       run(event.conversation);
     };
 
-    this.emitter.addEventListener('change', handler);
+    this.emitter.addEventListener('change', handler, { signal: this.emitter.signal });
     return () => {
       this.emitter.removeEventListener('change', handler);
     };
