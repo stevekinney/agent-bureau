@@ -12,6 +12,7 @@ async function build() {
   // Entry points to build
   const entryPoints = [
     { entry: './src/index.ts', outdir: 'dist' },
+    { entry: './src/events.ts', outdir: 'dist' },
     { entry: './src/conversation/index.ts', outdir: 'dist/conversation' },
     { entry: './src/context.ts', outdir: 'dist' },
     { entry: './src/streaming.ts', outdir: 'dist' },

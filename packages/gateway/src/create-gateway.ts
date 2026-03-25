@@ -10,8 +10,14 @@ import type { Gateway, GatewayOptions } from './types';
 import { DEFAULT_PORT } from './types';
 import { createWebSocketHandler } from './websocket';
 
-export function createGateway(options: GatewayOptions = {}): Gateway {
-  const bureau = createBureau(options);
+/**
+ * Creates a new Gateway instance with the given options.
+ *
+ * This function is async because it initializes storage backends
+ * (e.g. vector database adapters) that may require asynchronous setup.
+ */
+export async function createGateway(options: GatewayOptions = {}): Promise<Gateway> {
+  const bureau = await createBureau(options);
   const port = options.port ?? DEFAULT_PORT;
 
   const app = new Hono();

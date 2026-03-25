@@ -6,11 +6,13 @@ import type {
   TokenUsage,
 } from 'conversationalist';
 import type { JSONValue, ToolCall, ToolCallInput } from 'interoperability';
+import type { HookRegistry } from 'lifecycle';
 import type { ZodType } from 'zod';
 
 import type { AgentSession } from './agent-session';
 import type { BackpressureStrategy } from './backpressure';
 import type { ActiveRun } from './create-run';
+import type { OperativeHookMap } from './hooks';
 
 export type { Toolbox, ToolExecuteOptions, ToolExecutionResult } from 'armorer';
 export type { TokenUsage } from 'conversationalist';
@@ -219,6 +221,11 @@ export interface RunOptions {
    */
   selectTools?: SelectToolsHook | SelectToolsHook[];
   onElicitation?: OnElicitation;
+  /**
+   * A typed HookRegistry for structured hook registration with priority
+   * ordering. Runs in addition to any old-style hook arrays.
+   */
+  hooks?: HookRegistry<OperativeHookMap>;
   contextManagement?: ContextManagementOptions;
   responseSchema?: ZodType;
   schemaRetries?: number;
@@ -291,6 +298,7 @@ export interface DefineAgentOptions {
   validateToolResult?: RunOptions['validateToolResult'];
   selectTools?: RunOptions['selectTools'];
   onElicitation?: RunOptions['onElicitation'];
+  hooks?: RunOptions['hooks'];
   contextManagement?: ContextManagementOptions;
   responseSchema?: RunOptions['responseSchema'];
   schemaRetries?: RunOptions['schemaRetries'];
@@ -314,6 +322,7 @@ export interface AgentRunOptions {
   signal?: AbortSignal;
   stopWhen?: StopCondition | StopCondition[];
   parentContext?: unknown;
+  hooks?: HookRegistry<OperativeHookMap>;
 }
 
 /**

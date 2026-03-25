@@ -110,11 +110,12 @@ describe('createScratchpad', () => {
       const pad = createScratchpad();
       const events: unknown[] = [];
       pad.addEventListener('entry.set', (event) => {
-        events.push(event.detail);
+        events.push(event);
       });
 
       pad.set('key', 'value');
-      expect(events).toEqual([{ key: 'key', value: 'value', previousValue: undefined }]);
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ key: 'key', value: 'value', previousValue: undefined });
     });
 
     it('emits entry.set with previous value on overwrite', () => {
@@ -122,11 +123,12 @@ describe('createScratchpad', () => {
       const events: unknown[] = [];
       pad.set('key', 'old');
       pad.addEventListener('entry.set', (event) => {
-        events.push(event.detail);
+        events.push(event);
       });
 
       pad.set('key', 'new');
-      expect(events).toEqual([{ key: 'key', value: 'new', previousValue: 'old' }]);
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ key: 'key', value: 'new', previousValue: 'old' });
     });
 
     it('emits entry.deleted with correct payload', () => {
@@ -134,18 +136,19 @@ describe('createScratchpad', () => {
       pad.set('key', 42);
       const events: unknown[] = [];
       pad.addEventListener('entry.deleted', (event) => {
-        events.push(event.detail);
+        events.push(event);
       });
 
       pad.delete('key');
-      expect(events).toEqual([{ key: 'key', previousValue: 42 }]);
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ key: 'key', previousValue: 42 });
     });
 
     it('does not emit entry.deleted for missing key', () => {
       const pad = createScratchpad();
       const events: unknown[] = [];
       pad.addEventListener('entry.deleted', (event) => {
-        events.push(event.detail);
+        events.push(event);
       });
 
       pad.delete('missing');
@@ -156,11 +159,12 @@ describe('createScratchpad', () => {
       const pad = createScratchpad({ initialValues: { a: 1, b: 2 } });
       const events: unknown[] = [];
       pad.addEventListener('scratchpad.cleared', (event) => {
-        events.push(event.detail);
+        events.push(event);
       });
 
       pad.clear();
-      expect(events).toEqual([{ previousEntries: { a: 1, b: 2 } }]);
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ previousEntries: { a: 1, b: 2 } });
     });
   });
 
@@ -288,10 +292,11 @@ describe('createTypedScratchpad', () => {
     const pad = createTypedScratchpad<TestSchema>();
     const events: unknown[] = [];
     pad.addEventListener('entry.set', (event) => {
-      events.push(event.detail);
+      events.push(event);
     });
 
     pad.set('name', 'Charlie');
-    expect(events).toEqual([{ key: 'name', value: 'Charlie', previousValue: undefined }]);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ key: 'name', value: 'Charlie', previousValue: undefined });
   });
 });

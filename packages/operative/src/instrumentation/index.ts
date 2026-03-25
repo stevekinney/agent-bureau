@@ -43,7 +43,8 @@ export function instrument(
   const generateSpans = new Map<number, Span>();
   const toolsSpans = new Map<number, Span>();
 
-  const subscriptions: (() => void)[] = [];
+  const controller = new AbortController();
+  const signal = controller.signal;
 
   function setUsageAttributes(span: Span, usage: TokenUsage): void {
     span.setAttributes({
@@ -73,35 +74,42 @@ export function instrument(
     if (runSpan?.isRecording()) runSpan.end();
   }
 
-  subscriptions.push(
-    activeRun.addEventListener('run.started', () => {
+  activeRun.addEventListener(
+    'run.started',
+    () => {
       runSpan = tracer.startSpan('operative.run');
       runContext = trace.setSpan(context.active(), runSpan);
-    }),
+    },
+    { signal },
   );
 
-  subscriptions.push(
-    activeRun.addEventListener('step.started', (event) => {
-      const { step } = event.detail;
+  activeRun.addEventListener(
+    'step.started',
+    (event) => {
+      const { step } = event;
       const stepSpan = tracer.startSpan(`operative.step.${step}`, {}, runContext);
       stepSpans.set(step, stepSpan);
       const stepContext = trace.setSpan(context.active(), stepSpan);
       stepContexts.set(step, stepContext);
-    }),
+    },
+    { signal },
   );
 
-  subscriptions.push(
-    activeRun.addEventListener('generate.started', (event) => {
-      const { step } = event.detail;
+  activeRun.addEventListener(
+    'generate.started',
+    (event) => {
+      const { step } = event;
       const stepContext = stepContexts.get(step);
       const generateSpan = tracer.startSpan('operative.generate', {}, stepContext);
       generateSpans.set(step, generateSpan);
-    }),
+    },
+    { signal },
   );
 
-  subscriptions.push(
-    activeRun.addEventListener('generate.completed', (event) => {
-      const { step, response, durationMilliseconds } = event.detail;
+  activeRun.addEventListener(
+    'generate.completed',
+    (event) => {
+      const { step, response, durationMilliseconds } = event;
       const generateSpan = generateSpans.get(step);
       if (generateSpan?.isRecording()) {
         if (response.usage) {
@@ -111,12 +119,14 @@ export function instrument(
         generateSpan.end();
       }
       generateSpans.delete(step);
-    }),
+    },
+    { signal },
   );
 
-  subscriptions.push(
-    activeRun.addEventListener('generate.error', (event) => {
-      const { step, error, durationMilliseconds } = event.detail;
+  activeRun.addEventListener(
+    'generate.error',
+    (event) => {
+      const { step, error, durationMilliseconds } = event;
       const generateSpan = generateSpans.get(step);
       if (generateSpan?.isRecording()) {
         generateSpan.setStatus({
@@ -130,12 +140,14 @@ export function instrument(
         generateSpan.end();
       }
       generateSpans.delete(step);
-    }),
+    },
+    { signal },
   );
 
-  subscriptions.push(
-    activeRun.addEventListener('tools.executing', (event) => {
-      const { step, toolCalls } = event.detail;
+  activeRun.addEventListener(
+    'tools.executing',
+    (event) => {
+      const { step, toolCalls } = event;
       const stepContext = stepContexts.get(step);
       const toolsSpan = tracer.startSpan(
         'operative.tools',
@@ -148,56 +160,63 @@ export function instrument(
         stepContext,
       );
       toolsSpans.set(step, toolsSpan);
-    }),
+    },
+    { signal },
   );
 
-  subscriptions.push(
-    activeRun.addEventListener('tools.executed', (event) => {
-      const { step, results } = event.detail;
+  activeRun.addEventListener(
+    'tools.executed',
+    (event) => {
+      const { step, results } = event;
       const toolsSpan = toolsSpans.get(step);
       if (toolsSpan) {
         toolsSpan.setAttribute('operative.tools.results_count', results.length);
         toolsSpan.end();
         toolsSpans.delete(step);
       }
-    }),
+    },
+    { signal },
   );
 
-  subscriptions.push(
-    activeRun.addEventListener('step.completed', (event) => {
-      const { step } = event.detail;
+  activeRun.addEventListener(
+    'step.completed',
+    (event) => {
+      const { step } = event;
       const stepSpan = stepSpans.get(step);
       if (stepSpan?.isRecording()) {
         stepSpan.end();
       }
       stepSpans.delete(step);
       stepContexts.delete(step);
-    }),
+    },
+    { signal },
   );
 
-  subscriptions.push(
-    activeRun.addEventListener('run.completed', (event) => {
-      const result = event.detail;
+  activeRun.addEventListener(
+    'run.completed',
+    (event) => {
       if (runSpan) {
         runSpan.setAttributes({
-          'operative.finish_reason': result.finishReason,
-          'operative.total_steps': result.steps.length,
-          'operative.usage.prompt_tokens': result.usage.prompt,
-          'operative.usage.completion_tokens': result.usage.completion,
-          'operative.usage.total_tokens': result.usage.total,
+          'operative.finish_reason': event.finishReason,
+          'operative.total_steps': event.steps.length,
+          'operative.usage.prompt_tokens': event.usage.prompt,
+          'operative.usage.completion_tokens': event.usage.completion,
+          'operative.usage.total_tokens': event.usage.total,
         });
         // Only set OK if run.error did not already set ERROR status
-        if (!result.error) {
+        if (!event.error) {
           runSpan.setStatus({ code: SpanStatusCode.OK });
         }
         runSpan.end();
       }
-    }),
+    },
+    { signal },
   );
 
-  subscriptions.push(
-    activeRun.addEventListener('run.error', (event) => {
-      const { error } = event.detail;
+  activeRun.addEventListener(
+    'run.error',
+    (event) => {
+      const { error } = event;
       if (runSpan) {
         runSpan.setStatus({
           code: SpanStatusCode.ERROR,
@@ -208,34 +227,37 @@ export function instrument(
         }
       }
       endAllOpenSpans();
-    }),
+    },
+    { signal },
   );
 
-  subscriptions.push(
-    activeRun.addEventListener('run.aborted', (event) => {
-      const { reason } = event.detail;
+  activeRun.addEventListener(
+    'run.aborted',
+    (event) => {
+      const { reason } = event;
       if (runSpan) {
         runSpan.setAttribute('operative.abort_reason', reason ?? 'unknown');
         runSpan.setStatus({ code: SpanStatusCode.OK, message: 'Aborted' });
       }
       endAllOpenSpans();
-    }),
+    },
+    { signal },
   );
 
-  subscriptions.push(
-    activeRun.addEventListener('generate.retry', (event) => {
-      const { step, attempt } = event.detail;
+  activeRun.addEventListener(
+    'generate.retry',
+    (event) => {
+      const { step, attempt } = event;
       const generateSpan = generateSpans.get(step);
       if (generateSpan) {
         generateSpan.addEvent('generate.retry', { 'retry.attempt': attempt });
       }
-    }),
+    },
+    { signal },
   );
 
   return () => {
-    for (const unsubscribe of subscriptions) {
-      unsubscribe();
-    }
+    controller.abort();
     endAllOpenSpans();
   };
 }

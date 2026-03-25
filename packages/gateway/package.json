@@ -22,13 +22,15 @@
   "dependencies": {
     "armorer": "workspace:*",
     "conversationalist": "workspace:*",
-    "event-emission": "0.3.0",
+    "lifecycle": "workspace:*",
     "herald": "workspace:*",
     "hono": "^4.7.10",
+    "memory": "workspace:*",
     "operative": "workspace:*",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "sentinel": "workspace:*",
+    "vector-frankl": "workspace:*",
     "zod": "^4.3.6"
   },
   "devDependencies": {

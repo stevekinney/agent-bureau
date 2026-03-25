@@ -1,5 +1,4 @@
 import { createTestToolbox } from 'armorer/test';
-import type { EmissionEvent } from 'event-emission';
 
 import {
   type AgentRegistry,
@@ -8,12 +7,7 @@ import {
 } from '../create-agent-registry';
 import type { ActiveRun } from '../create-run';
 import { createScratchpad, type Scratchpad } from '../create-scratchpad';
-import type {
-  CombinedOperativeEvents,
-  CombinedOperativeEventType,
-  OperativeEvents,
-  OperativeEventType,
-} from '../events';
+import type { OperativeEventMap, OperativeEventType } from '../events';
 import type { AgentDefinition, GenerateFunction, GenerateResponse, StepResult } from '../types';
 
 /**
@@ -63,11 +57,17 @@ export function createMockGenerateOnce(response: GenerateResponse): GenerateFunc
 
 /**
  * Records all events from an ActiveRun for test assertions.
+ *
+ * After migration to EventTarget, events are Event subclasses with
+ * named properties (not EmissionEvent with .detail). The recorder
+ * captures them as `{ type, detail }` where `detail` is the event
+ * itself — so tests that accessed `event.detail.foo` now access
+ * `event.foo` on the event object directly.
  */
 export interface RunRecorder {
   events: Array<{
-    type: CombinedOperativeEventType;
-    detail: CombinedOperativeEvents[CombinedOperativeEventType];
+    type: OperativeEventType;
+    detail: OperativeEventMap[OperativeEventType];
   }>;
   steps: StepResult[];
   clear: () => void;
@@ -143,15 +143,12 @@ export function createRunRecorder(activeRun: ActiveRun): RunRecorder {
   ];
 
   for (const type of eventTypes) {
-    activeRun.addEventListener(
-      type,
-      (event: EmissionEvent<OperativeEvents[typeof type], typeof type>) => {
-        events.push({ type, detail: event.detail });
-        if (type === 'step.completed') {
-          steps.push(event.detail as StepResult);
-        }
-      },
-    );
+    activeRun.addEventListener(type, (event: Event) => {
+      events.push({ type, detail: event });
+      if (type === 'step.completed') {
+        steps.push(event as unknown as StepResult);
+      }
+    });
   }
 
   return {

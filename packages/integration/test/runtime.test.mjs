@@ -171,7 +171,7 @@ describe('event parity', () => {
         conversationRecorder.events.some(
           (event) =>
             event.type === 'change' &&
-            event.detail.action === 'messages.appended',
+            event.action === 'messages.appended',
         ),
       );
       assert.ok(toolboxRecorder.events.some((event) => event.type === 'call'));

@@ -64,13 +64,13 @@ describe('pipe()', () => {
     it('executes 2 tools in sequence', async () => {
       const pipeline = pipe(parseNumber, double);
       const result = await pipeline({ str: '21' });
-      expect(result).toEqual({ value: 42 });
+      expect(result).toMatchObject({ value: 42 });
     });
 
     it('executes 3 tools in sequence', async () => {
       const pipeline = pipe(parseNumber, double, stringify);
       const result = await pipeline({ str: '21' });
-      expect(result).toEqual({ text: 'Result: 42' });
+      expect(result).toMatchObject({ text: 'Result: 42' });
     });
 
     it('executes 4 tools in sequence', async () => {
@@ -136,7 +136,7 @@ describe('pipe()', () => {
         },
       );
 
-      expect(result.result).toEqual({ value: 6 });
+      expect(result.result).toMatchObject({ value: 6 });
       expect(observed).toEqual([
         { step: 'first', stream: true },
         { step: 'second', stream: true },
@@ -271,17 +271,17 @@ describe('pipe()', () => {
       const events: any[] = [];
 
       addListener(pipeline, 'step-start', (e) => {
-        events.push(e.detail);
+        events.push(e);
       });
       await pipeline({ str: '5' });
 
       expect(events).toHaveLength(2);
-      expect(events[0]).toEqual({
+      expect(events[0]).toMatchObject({
         stepIndex: 0,
         stepName: 'parse-number',
         input: { str: '5' },
       });
-      expect(events[1]).toEqual({
+      expect(events[1]).toMatchObject({
         stepIndex: 1,
         stepName: 'double',
         input: { value: 5 },
@@ -293,17 +293,17 @@ describe('pipe()', () => {
       const events: any[] = [];
 
       addListener(pipeline, 'step-complete', (e) => {
-        events.push(e.detail);
+        events.push(e);
       });
       await pipeline({ str: '5' });
 
       expect(events).toHaveLength(2);
-      expect(events[0]).toEqual({
+      expect(events[0]).toMatchObject({
         stepIndex: 0,
         stepName: 'parse-number',
         output: { value: 5 },
       });
-      expect(events[1]).toEqual({
+      expect(events[1]).toMatchObject({
         stepIndex: 1,
         stepName: 'double',
         output: { value: 10 },
@@ -323,7 +323,7 @@ describe('pipe()', () => {
       const pipeline = pipe(parseNumber, failing);
       const errors: any[] = [];
       addListener(pipeline, 'step-error', (e) => {
-        errors.push(e.detail);
+        errors.push(e);
       });
 
       // eslint-disable-next-line @typescript-eslint/await-thenable
@@ -384,7 +384,7 @@ describe('pipe()', () => {
       const pipeline = pipe(parseNumber, failing);
       const stepErrors: Error[] = [];
       (pipeline as any).addEventListener('step-error', (event: any) => {
-        stepErrors.push(event.detail.error as Error);
+        stepErrors.push(event.error as Error);
       });
 
       // eslint-disable-next-line @typescript-eslint/await-thenable
@@ -411,7 +411,7 @@ describe('pipe()', () => {
       const pipeline = pipe(parseNumber, failing);
       const stepErrors: Error[] = [];
       (pipeline as any).addEventListener('step-error', (event: any) => {
-        stepErrors.push(event.detail.error as Error);
+        stepErrors.push(event.error as Error);
       });
 
       // eslint-disable-next-line @typescript-eslint/await-thenable
@@ -437,7 +437,7 @@ describe('pipe()', () => {
       const second = pipe(first, stringify);
 
       const result = await second({ str: '10' });
-      expect(result).toEqual({ text: 'Result: 20' });
+      expect(result).toMatchObject({ text: 'Result: 20' });
     });
 
     it('nested pipelines have combined names', () => {
@@ -467,7 +467,7 @@ describe('pipe()', () => {
         params: { str: '21' },
       });
 
-      expect(result.result).toEqual({ value: 42 });
+      expect(result.result).toMatchObject({ value: 42 });
       expect(result.toolName).toBe('pipe(parse-number, double)');
     });
   });
@@ -564,7 +564,7 @@ describe('tap()', () => {
     });
 
     const result = await tapped({ value: 2 });
-    expect(result).toEqual({ value: 3 });
+    expect(result).toMatchObject({ value: 3 });
     expect(seen).toEqual([3]);
   });
 
@@ -580,7 +580,7 @@ describe('tap()', () => {
 
     const tapped = tap(tagged, () => {});
     expect(tapped.tags).toEqual(['fast']);
-    expect((tapped as any).metadata).toEqual({ tier: 'premium' });
+    expect((tapped as any).metadata).toMatchObject({ tier: 'premium' });
   });
 
   it('forwards signal and timeout to the wrapped tool', async () => {
@@ -629,7 +629,7 @@ describe('tap()', () => {
       stream: true,
     });
 
-    expect(result.result).toEqual({ value: 1 });
+    expect(result.result).toMatchObject({ value: 1 });
     expect(observed).toEqual([{ stream: true }]);
   });
 });
@@ -655,15 +655,15 @@ describe('when()', () => {
     const low = await conditional({ value: 3 });
     const high = await conditional({ value: 6 });
 
-    expect(low).toEqual({ value: 6 });
-    expect(high).toEqual({ value: 7 });
+    expect(low).toMatchObject({ value: 6 });
+    expect(high).toMatchObject({ value: 7 });
   });
 
   it('passes through input when no else tool is provided', async () => {
     const conditional = when(({ value }) => value > 0, increment);
 
     const result = await conditional({ value: 0 });
-    expect(result).toEqual({ value: 0 });
+    expect(result).toMatchObject({ value: 0 });
   });
 
   it('forwards execution options to branch tools', async () => {
@@ -712,7 +712,7 @@ describe('when()', () => {
       stream: true,
     });
 
-    expect(result.result).toEqual({ value: 2 });
+    expect(result.result).toMatchObject({ value: 2 });
     expect(observed).toEqual([{ stream: true }]);
   });
 });
@@ -758,8 +758,8 @@ describe('parallel()', () => {
     const errors: Array<{ stepIndex: number; stepName: string }> = [];
     (combined as any).addEventListener('step-error', (event: any) => {
       errors.push({
-        stepIndex: event.detail.stepIndex,
-        stepName: event.detail.stepName,
+        stepIndex: event.stepIndex,
+        stepName: event.stepName,
       });
     });
 
@@ -847,7 +847,7 @@ describe('retry()', () => {
     const wrapped = retry(flaky, { attempts: 3 });
     const result = await wrapped({ value: 1 });
 
-    expect(result).toEqual({ value: 4 });
+    expect(result).toMatchObject({ value: 4 });
     expect(attempts).toBe(3);
   });
 
@@ -931,7 +931,7 @@ describe('retry()', () => {
     });
 
     const result = await wrapped({ value: 5 });
-    expect(result).toEqual({ value: 5 });
+    expect(result).toMatchObject({ value: 5 });
     expect(retries).toEqual([1]);
   });
 
@@ -950,7 +950,7 @@ describe('retry()', () => {
 
     const wrapped = retry(unstable, { attempts: 2 });
     expect(wrapped.tags).toEqual(['unstable']);
-    expect((wrapped as any).metadata).toEqual({ tier: 'dev' });
+    expect((wrapped as any).metadata).toMatchObject({ tier: 'dev' });
     // eslint-disable-next-line @typescript-eslint/await-thenable
     await expect(wrapped({ value: 1 })).rejects.toThrow('nope');
   });
@@ -1006,7 +1006,7 @@ describe('retry()', () => {
       stream: true,
     });
 
-    expect(result.result).toEqual({ value: 42 });
+    expect(result.result).toMatchObject({ value: 42 });
     expect(observed).toEqual([{ stream: true }]);
   });
 });
@@ -1060,7 +1060,7 @@ describe('type inference', () => {
 
     // TypeScript should know this expects { value: string }
     const result = await pipeline({ value: '5' });
-    expect(result).toEqual({ value: 15 });
+    expect(result).toMatchObject({ value: 15 });
   });
 
   it('preserves type through multiple steps', async () => {

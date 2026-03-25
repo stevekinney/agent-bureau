@@ -4,7 +4,7 @@ import { createTestGateway } from '../test';
 
 describe('SSR pages', () => {
   it('GET / redirects to /dashboard', async () => {
-    const gateway = createTestGateway();
+    const gateway = await createTestGateway();
     const response = await gateway.app.request('/');
 
     expect(response.status).toBe(302);
@@ -12,7 +12,7 @@ describe('SSR pages', () => {
   });
 
   it('GET /dashboard returns 200 with HTML content-type', async () => {
-    const gateway = createTestGateway();
+    const gateway = await createTestGateway();
     const response = await gateway.app.request('/dashboard');
 
     expect(response.status).toBe(200);
@@ -24,14 +24,14 @@ describe('SSR pages', () => {
   });
 
   it('GET /runs/:id returns 404 for missing run', async () => {
-    const gateway = createTestGateway();
+    const gateway = await createTestGateway();
     const response = await gateway.app.request('/runs/nonexistent');
 
     expect(response.status).toBe(404);
   });
 
   it('GET /configuration returns 200 with HTML content-type', async () => {
-    const gateway = createTestGateway({
+    const gateway = await createTestGateway({
       provider: { provider: 'anthropic', model: 'claude-sonnet-4-20250514' },
       maximumSteps: 5,
       systemPrompt: 'Be helpful.',
@@ -47,7 +47,7 @@ describe('SSR pages', () => {
   });
 
   it('GET /chat returns 200 with HTML content-type', async () => {
-    const gateway = createTestGateway();
+    const gateway = await createTestGateway();
     const response = await gateway.app.request('/chat');
 
     expect(response.status).toBe(200);

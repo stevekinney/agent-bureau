@@ -1,11 +1,8 @@
 import type { ConversationSnapshot } from 'conversationalist';
-import type {
-  AddEventListenerOptionsLike,
-  AsyncIteratorOptions,
-  EmissionEvent,
-} from 'event-emission';
-import type { ObservableLike, Observer, Subscription } from 'event-emission/types';
+import type { ObservableLike, Subscription } from 'lifecycle';
 import type { ActiveRun, FinishReason, StepResult, TokenUsage } from 'operative';
+
+import type { StoreEventMap } from './events';
 
 export type RunStatus = 'running' | 'completed' | 'error' | 'aborted';
 
@@ -42,54 +39,51 @@ export interface StoreOptions {
 export type StoreListener = (state: StoreState, action: Action) => void;
 export type Unsubscribe = () => void;
 
-export interface StoreEvents {
-  action: Action;
-  'run.registered': { runId: string };
-  'run.removed': { runId: string };
-}
-
-export type StoreEventType = keyof StoreEvents;
+export type StoreEventType = keyof StoreEventMap & string;
 
 export interface Store {
   register(activeRun: ActiveRun, id?: string): string;
   getState(): StoreState;
   getRun(id: string): RunState | undefined;
 
-  // Legacy subscribe overload
+  /** Convenience subscribe overload: listener receives (state, action) on every action. */
   subscribe(listener: StoreListener): Unsubscribe;
-  // Event-emission subscribe overload
-  subscribe<K extends StoreEventType>(
+  /** EventTarget-style subscribe for a single event type. */
+  subscribe<K extends keyof StoreEventMap & string>(
     type: K,
     observerOrNext?:
-      | Observer<EmissionEvent<StoreEvents[K], K>>
-      | ((value: EmissionEvent<StoreEvents[K], K>) => void),
+      | {
+          next?: (value: StoreEventMap[K]) => void;
+          error?: (err: unknown) => void;
+          complete?: () => void;
+        }
+      | ((value: StoreEventMap[K]) => void),
     error?: (err: unknown) => void,
     complete?: () => void,
   ): Subscription;
 
-  addEventListener<K extends StoreEventType>(
+  addEventListener<K extends keyof StoreEventMap & string>(
     type: K,
-    listener: (event: EmissionEvent<StoreEvents[K], K>) => void | Promise<void>,
-    options?: AddEventListenerOptionsLike,
-  ): () => void;
+    listener: ((event: StoreEventMap[K]) => void) | null,
+    options?: boolean | AddEventListenerOptions,
+  ): void;
 
-  on<K extends StoreEventType>(
+  removeEventListener<K extends keyof StoreEventMap & string>(
     type: K,
-    options?: AddEventListenerOptionsLike | boolean,
-  ): ObservableLike<EmissionEvent<StoreEvents[K], K>>;
+    listener: ((event: StoreEventMap[K]) => void) | null,
+    options?: boolean | EventListenerOptions,
+  ): void;
 
-  once<K extends StoreEventType>(
+  on<K extends keyof StoreEventMap & string>(type: K): ObservableLike<StoreEventMap[K]>;
+
+  once<K extends keyof StoreEventMap & string>(
     type: K,
-    listener: (event: EmissionEvent<StoreEvents[K], K>) => void | Promise<void>,
-    options?: Omit<AddEventListenerOptionsLike, 'once'>,
-  ): () => void;
+    listener: (event: StoreEventMap[K]) => void,
+  ): void;
 
-  toObservable(): ObservableLike<EmissionEvent<StoreEvents[keyof StoreEvents]>>;
+  toObservable(): ObservableLike<StoreEventMap[keyof StoreEventMap & string]>;
 
-  events<K extends StoreEventType>(
-    type: K,
-    options?: AsyncIteratorOptions,
-  ): AsyncIterableIterator<EmissionEvent<StoreEvents[K], K>>;
+  events<K extends keyof StoreEventMap & string>(type: K): AsyncIterableIterator<StoreEventMap[K]>;
 
   complete(): void;
   readonly completed: boolean;

@@ -1,13 +1,8 @@
-import type { EmissionEvent } from 'event-emission';
 import { z } from 'zod';
 
 import { createTool } from '../create-tool';
-import {
-  createToolbox,
-  type Toolbox,
-  type ToolboxEntries,
-  type ToolboxEvents,
-} from '../create-toolbox';
+import { createToolbox, type Toolbox, type ToolboxEntries } from '../create-toolbox';
+import type { ToolboxEventMap } from '../events';
 import type { Tool, ToolCallWithArguments } from '../is-tool';
 import type { ToolExecutionResult } from '../types';
 
@@ -82,7 +77,7 @@ export type TestRegistry = AnyToolbox & {
 };
 
 export type ToolboxRecorder = {
-  events: Array<EmissionEvent<ToolboxEvents[keyof ToolboxEvents]>>;
+  events: Array<ToolboxEventMap[keyof ToolboxEventMap]>;
   clear: () => void;
 };
 
@@ -96,7 +91,7 @@ export function createTestToolbox(entries: ToolboxEntries = []): TestRegistry {
 
   // Listen to finished events to record history.
   toolbox.addEventListener('tool.finished', (event) => {
-    const { toolCall, result, error, status } = event.detail;
+    const { toolCall, result, error, status } = event;
 
     history.push({
       call: toolCall,

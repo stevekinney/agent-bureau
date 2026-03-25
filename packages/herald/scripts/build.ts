@@ -7,6 +7,11 @@ const entrypoints = [
   './src/anthropic.ts',
   './src/openai.ts',
   './src/gemini.ts',
+  './src/embeddings/index.ts',
+  './src/embeddings/openai.ts',
+  './src/embeddings/gemini.ts',
+  './src/embeddings/voyage.ts',
+  './src/embeddings/ollama.ts',
   './src/instrumentation/index.ts',
   './src/test/index.ts',
 ];

@@ -1,7 +1,7 @@
 import { createTool } from 'armorer';
 import { createTestToolbox } from 'armorer/test';
 import { describe, expect, it } from 'bun:test';
-import { Conversation } from 'conversationalist';
+import { Conversation, SessionForkedEvent } from 'conversationalist';
 import { z } from 'zod';
 
 import { forked, noToolCalls, some } from '../src/conditions/predicates';
@@ -58,11 +58,13 @@ describe('forked', () => {
 
     condition(makeStepResult({ conversation }));
 
-    (conversation.emit as any)('session.forked', {
-      action: 'session.forked',
-      conversation: conversation.current,
-      previousConversation: conversation.current,
-    });
+    conversation.dispatchEvent(
+      new SessionForkedEvent({
+        action: 'session.forked',
+        conversation: conversation.current,
+        previousConversation: conversation.current,
+      }),
+    );
 
     const result = condition(makeStepResult({ conversation }));
     expect(result).toBe(true);
@@ -76,11 +78,13 @@ describe('forked', () => {
     condition(makeStepResult({ conversation }));
     condition(makeStepResult({ conversation }));
 
-    (conversation.emit as any)('session.forked', {
-      action: 'session.forked',
-      conversation: conversation.current,
-      previousConversation: conversation.current,
-    });
+    conversation.dispatchEvent(
+      new SessionForkedEvent({
+        action: 'session.forked',
+        conversation: conversation.current,
+        previousConversation: conversation.current,
+      }),
+    );
 
     const result = condition(makeStepResult({ conversation }));
     expect(result).toBe(true);
@@ -92,11 +96,13 @@ describe('forked', () => {
 
     condition(makeStepResult({ conversation }));
 
-    (conversation.emit as any)('session.forked', {
-      action: 'session.forked',
-      conversation: conversation.current,
-      previousConversation: conversation.current,
-    });
+    conversation.dispatchEvent(
+      new SessionForkedEvent({
+        action: 'session.forked',
+        conversation: conversation.current,
+        previousConversation: conversation.current,
+      }),
+    );
 
     expect(condition(makeStepResult({ conversation }))).toBe(true);
     expect(condition(makeStepResult({ conversation }))).toBe(true);
@@ -119,11 +125,13 @@ describe('forked', () => {
       maximumSteps: 10,
       onStep: async (stepResult) => {
         if (stepResult.step === 1) {
-          (conversation.emit as any)('session.forked', {
-            action: 'session.forked',
-            conversation: conversation.current,
-            previousConversation: conversation.current,
-          });
+          conversation.dispatchEvent(
+            new SessionForkedEvent({
+              action: 'session.forked',
+              conversation: conversation.current,
+              previousConversation: conversation.current,
+            }),
+          );
         }
       },
     });
@@ -153,11 +161,13 @@ describe('forked', () => {
     );
     expect(firstResult).toBe(false);
 
-    (conversation.emit as any)('session.forked', {
-      action: 'session.forked',
-      conversation: conversation.current,
-      previousConversation: conversation.current,
-    });
+    conversation.dispatchEvent(
+      new SessionForkedEvent({
+        action: 'session.forked',
+        conversation: conversation.current,
+        previousConversation: conversation.current,
+      }),
+    );
 
     const secondResult = await condition(
       makeStepResult({
@@ -185,11 +195,13 @@ describe('forked', () => {
       maximumSteps: 10,
       onStep: async (stepResult) => {
         if (stepResult.step === 0) {
-          (conversation.emit as any)('session.forked', {
-            action: 'session.forked',
-            conversation: conversation.current,
-            previousConversation: conversation.current,
-          });
+          conversation.dispatchEvent(
+            new SessionForkedEvent({
+              action: 'session.forked',
+              conversation: conversation.current,
+              previousConversation: conversation.current,
+            }),
+          );
         }
       },
     });

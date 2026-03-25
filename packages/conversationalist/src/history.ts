@@ -1,12 +1,10 @@
-import type {
-  AddEventListenerOptionsLike,
-  AsyncIteratorOptions,
-  EmissionEvent,
-  EventListenerLike,
-  EventListenerOptionsLike,
-} from 'event-emission';
-import { createEventTarget } from 'event-emission';
-import type { ObservableLike, Observer, Subscription } from 'event-emission/types';
+import {
+  CompletableEventTarget,
+  type EventIteratorOptions,
+  type ObservableLike,
+  type Observer,
+  type Subscription,
+} from 'lifecycle';
 
 import type { AnthropicConversation } from './adapters/anthropic';
 import type { GeminiConversation } from './adapters/gemini';
@@ -57,6 +55,17 @@ import {
 } from './conversation/index';
 import { ensureConversationSafe } from './conversation/validation';
 import { type ConversationEnvironment, resolveConversationEnvironment } from './environment';
+import type {
+  ConversationActionType,
+  ConversationEventDetail,
+  ConversationEventMap,
+  ConversationEventType,
+} from './events';
+import {
+  ConversationChangeEvent,
+  conversationEventConstructors,
+  PersistenceErrorEvent,
+} from './events';
 import {
   appendStreamingMessage,
   cancelStreamingMessage,
@@ -77,70 +86,20 @@ import type {
   TokenUsage,
 } from './types';
 
+export type {
+  ConversationActionType,
+  ConversationEvent,
+  ConversationEventDetail,
+  ConversationEventMap,
+  ConversationEventType,
+} from './events';
+
 /**
- * Event detail for conversation changes.
+ * Re-export the old ConversationEvents name as an alias for the event map.
+ * Downstream code (e.g. operative) imports `ConversationEvents` from the
+ * public barrel, so keep a single definition here.
  */
-export interface ConversationEventDetail {
-  action: ConversationActionType;
-  conversation: ConversationHistory;
-  previousConversation: ConversationHistory;
-  messageIds?: readonly string[];
-  toolCallIds?: readonly string[];
-}
-
-export type ConversationEvent = EmissionEvent<
-  ConversationEventDetail | PersistenceErrorDetail,
-  ConversationEventType
->;
-
-export type ConversationActionType =
-  | 'push'
-  | 'undo'
-  | 'redo'
-  | 'switch'
-  | 'messages.appended'
-  | 'messages.updated'
-  | 'messages.removed'
-  | 'tool-calls.appended'
-  | 'tool-results.appended'
-  | 'stream.started'
-  | 'stream.updated'
-  | 'stream.finalized'
-  | 'stream.cancelled'
-  | 'compaction.started'
-  | 'compaction.completed'
-  | 'session.forked'
-  | 'session.tagged'
-  | 'session.renamed';
-
-export interface PersistenceErrorDetail {
-  error: unknown;
-}
-
-export interface ConversationEvents {
-  change: ConversationEventDetail;
-  push: ConversationEventDetail;
-  undo: ConversationEventDetail;
-  redo: ConversationEventDetail;
-  switch: ConversationEventDetail;
-  'messages.appended': ConversationEventDetail;
-  'messages.updated': ConversationEventDetail;
-  'messages.removed': ConversationEventDetail;
-  'tool-calls.appended': ConversationEventDetail;
-  'tool-results.appended': ConversationEventDetail;
-  'stream.started': ConversationEventDetail;
-  'stream.updated': ConversationEventDetail;
-  'stream.finalized': ConversationEventDetail;
-  'stream.cancelled': ConversationEventDetail;
-  'compaction.started': ConversationEventDetail;
-  'compaction.completed': ConversationEventDetail;
-  'session.forked': ConversationEventDetail;
-  'session.tagged': ConversationEventDetail;
-  'session.renamed': ConversationEventDetail;
-  'persistence.error': PersistenceErrorDetail;
-}
-
-export type ConversationEventType = Extract<keyof ConversationEvents, string>;
+export type { ConversationEventMap as ConversationEvents } from './events';
 
 interface HistoryNode {
   conversation: ConversationHistory;
@@ -243,7 +202,7 @@ async function loadConversationAdapter(
 export class Conversation {
   private currentNode: HistoryNode;
   private environment: ConversationEnvironment;
-  private readonly emitter = createEventTarget<ConversationEvents>();
+  private readonly emitter = new CompletableEventTarget<ConversationEventMap>();
 
   constructor(
     initial: ConversationHistory = createConversationHistory(),
@@ -264,7 +223,7 @@ export class Conversation {
         if (debounceTimer !== undefined) clearTimeout(debounceTimer);
         debounceTimer = setTimeout(() => {
           persistence.save(this.current).catch((error: unknown) => {
-            this.emitter.emit('persistence.error', { error });
+            this.emitter.dispatchEvent(new PersistenceErrorEvent(error));
           });
         }, 100);
       });
@@ -289,11 +248,11 @@ export class Conversation {
     };
   }
 
-  private emitConversationEvent(
-    type: ConversationEventType,
-    detail: ConversationEventDetail,
-  ): void {
-    this.emitter.emit(type, detail);
+  private emitConversationEvent(type: string, detail: ConversationEventDetail): void {
+    const EventConstructor = conversationEventConstructors[type];
+    if (EventConstructor) {
+      this.emitter.dispatchEvent(new EventConstructor(detail));
+    }
   }
 
   private commit(
@@ -369,41 +328,42 @@ export class Conversation {
   }
 
   /**
-   * Registers a listener and optionally returns an unsubscribe function.
+   * Registers a listener for a conversation event type.
+   *
+   * The listener is automatically removed when the conversation is disposed
+   * (i.e. when {@link complete} is called), unless the caller already
+   * provided their own `signal`.
    */
-  addEventListener(
-    type: ConversationEventType,
-    callback: EventListenerLike<ConversationEvent>,
-    options?: AddEventListenerOptionsLike | boolean,
-  ): void | (() => void) {
-    return this.emitter.addEventListener(type, callback, options);
+  addEventListener<K extends keyof ConversationEventMap & string>(
+    type: K,
+    callback: ((event: ConversationEventMap[K]) => void) | null,
+    options?: boolean | AddEventListenerOptions,
+  ): void {
+    const resolved: AddEventListenerOptions =
+      typeof options === 'boolean' ? { capture: options } : { ...options };
+
+    // Bind to the completion signal so listeners are removed on disposal.
+    resolved.signal ??= this.emitter.signal;
+
+    this.emitter.addEventListener(type, callback, resolved);
   }
 
   /**
    * Removes a listener registered with addEventListener.
    */
-  removeEventListener(
-    type: ConversationEventType,
-    callback: EventListenerLike<ConversationEvent>,
-    options?: EventListenerOptionsLike | boolean,
+  removeEventListener<K extends keyof ConversationEventMap & string>(
+    type: K,
+    callback: ((event: ConversationEventMap[K]) => void) | null,
+    options?: boolean | EventListenerOptions,
   ): void {
     this.emitter.removeEventListener(type, callback, options);
   }
 
   /**
-   * Dispatches an event through the event-emission target.
+   * Dispatches an event through the event target.
    */
-  dispatchEvent(
-    event: EmissionEvent<ConversationEvents[ConversationEventType], ConversationEventType>,
-  ): boolean {
+  dispatchEvent(event: Event): boolean {
     return this.emitter.dispatchEvent(event);
-  }
-
-  /**
-   * Emits a typed event through the event hub.
-   */
-  emit<K extends ConversationEventType>(type: K, detail: ConversationEvents[K]): boolean {
-    return this.emitter.emit(type, detail);
   }
 
   /**
@@ -414,52 +374,46 @@ export class Conversation {
   watch(run: (value: ConversationHistory) => void): () => void {
     run(this.current);
 
-    const handler = (event: ConversationEvent) => {
-      if (event?.detail && 'conversation' in event.detail) {
-        run(event.detail.conversation);
-      }
+    const handler = (event: ConversationChangeEvent) => {
+      run(event.conversation);
     };
 
-    const unsubscribe = this.addEventListener('change', handler);
-    return unsubscribe || (() => {});
+    this.emitter.addEventListener('change', handler, { signal: this.emitter.signal });
+    return () => {
+      this.emitter.removeEventListener('change', handler);
+    };
   }
 
-  on<K extends ConversationEventType>(
+  on<K extends keyof ConversationEventMap & string>(
     type: K,
-    options?: AddEventListenerOptionsLike | boolean,
-  ): ObservableLike<EmissionEvent<ConversationEvents[K], K>> {
-    return this.emitter.on(type, options);
+  ): ObservableLike<ConversationEventMap[K]> {
+    return this.emitter.on(type);
   }
 
-  once<K extends ConversationEventType>(
+  once<K extends keyof ConversationEventMap & string>(
     type: K,
-    listener: (event: EmissionEvent<ConversationEvents[K], K>) => void | Promise<void>,
-    options?: Omit<AddEventListenerOptionsLike, 'once'>,
-  ): () => void {
-    return this.emitter.once(type, listener, options);
+    listener: (event: ConversationEventMap[K]) => void,
+  ): void {
+    this.emitter.once(type, listener);
   }
 
-  subscribe<K extends ConversationEventType>(
+  subscribe<K extends keyof ConversationEventMap & string>(
     type: K,
-    observerOrNext?:
-      | Observer<EmissionEvent<ConversationEvents[K], K>>
-      | ((value: EmissionEvent<ConversationEvents[K], K>) => void),
+    observerOrNext?: Observer<ConversationEventMap[K]> | ((value: ConversationEventMap[K]) => void),
     error?: (err: unknown) => void,
     complete?: () => void,
   ): Subscription {
     return this.emitter.subscribe(type, observerOrNext, error, complete);
   }
 
-  toObservable(): ObservableLike<
-    EmissionEvent<ConversationEvents[ConversationEventType], ConversationEventType>
-  > {
+  toObservable(): ObservableLike<ConversationEventMap[keyof ConversationEventMap & string]> {
     return this.emitter.toObservable();
   }
 
-  events<K extends ConversationEventType>(
+  events<K extends keyof ConversationEventMap & string>(
     type: K,
-    options?: AsyncIteratorOptions,
-  ): AsyncIterableIterator<EmissionEvent<ConversationEvents[K], K>> {
+    options?: EventIteratorOptions,
+  ): AsyncIterableIterator<ConversationEventMap[K]> {
     return this.emitter.events(type, options);
   }
 
@@ -1384,7 +1338,8 @@ export class Conversation {
     };
 
     if (root) clearNode(root);
-    this.emitter.clear();
+    // CompletableEventTarget does not have a clear() method;
+    // complete() has already been called above.
   }
 }
 

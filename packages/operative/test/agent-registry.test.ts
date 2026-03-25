@@ -181,7 +181,7 @@ describe('createAgentRegistry', () => {
       const registry = createAgentRegistry();
       const events: unknown[] = [];
       registry.addEventListener('agent.registered', (event) => {
-        events.push(event.detail);
+        events.push(event);
       });
 
       const entry = createEntry('test', 'Test', []);
@@ -196,7 +196,7 @@ describe('createAgentRegistry', () => {
       const events: unknown[] = [];
       registry.register(createEntry('test', 'Test', []));
       registry.addEventListener('agent.unregistered', (event) => {
-        events.push(event.detail);
+        events.push(event);
       });
 
       registry.unregister('test');
@@ -210,7 +210,7 @@ describe('createAgentRegistry', () => {
       registry.register(createEntry('test', 'Test', []));
       const events: unknown[] = [];
       registry.addEventListener('agent.queried', (event) => {
-        events.push(event.detail);
+        events.push(event);
       });
 
       registry.query({ text: 'test' });

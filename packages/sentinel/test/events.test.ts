@@ -2,13 +2,13 @@ import { createTool } from 'armorer';
 import { createTestToolbox } from 'armorer/test';
 import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
-import type { EmissionEvent } from 'event-emission';
 import { createRun, type GenerateResponse, stopWhen } from 'operative';
 import { createMockGenerate } from 'operative/test';
 import { z } from 'zod';
 
+import type { StoreActionEvent } from '../src/events';
 import { createStore } from '../src/store';
-import type { Action, StoreEvents } from '../src/types';
+import type { Action } from '../src/types';
 
 function textResponse(content: string): GenerateResponse {
   return { content, toolCalls: [] };
@@ -29,13 +29,13 @@ function createActiveRun(responses: GenerateResponse[] = [textResponse('response
   return createRun({ generate, toolbox, conversation, stopWhen: stopWhen.noToolCalls() });
 }
 
-describe('Store event emission', () => {
+describe('Store events (EventTarget)', () => {
   it('addEventListener("action", listener) receives Actions from runs', async () => {
     const store = createStore();
     const received: Action[] = [];
 
     store.addEventListener('action', (event) => {
-      received.push(event.detail);
+      received.push(event.action);
     });
 
     const activeRun = createActiveRun();
@@ -52,13 +52,13 @@ describe('Store event emission', () => {
     store.dispose();
   });
 
-  it('on("action") returns Observable that emits Actions', async () => {
+  it('on("action") returns Observable that emits StoreActionEvents', async () => {
     const store = createStore();
     const received: Action[] = [];
 
     const observable = store.on('action');
     const subscription = observable.subscribe((event) => {
-      received.push(event.detail);
+      received.push(event.action);
     });
 
     const activeRun = createActiveRun();
@@ -75,7 +75,7 @@ describe('Store event emission', () => {
     const received: Action[] = [];
 
     store.once('action', (event) => {
-      received.push(event.detail);
+      received.push(event.action);
     });
 
     const activeRun = createActiveRun();
@@ -120,7 +120,7 @@ describe('Store event emission', () => {
     store.complete();
 
     for await (const event of iterator) {
-      received.push(event.detail);
+      received.push(event.action);
     }
 
     expect(received.length).toBeGreaterThan(0);
@@ -134,7 +134,7 @@ describe('Store event emission', () => {
     const received: Action[] = [];
 
     const subscription = store.subscribe('action', (event) => {
-      received.push(event.detail);
+      received.push(event.action);
     });
 
     expect(subscription).toHaveProperty('unsubscribe');
@@ -162,7 +162,7 @@ describe('Store event emission', () => {
     const registered: string[] = [];
 
     store.addEventListener('run.registered', (event) => {
-      registered.push(event.detail.runId);
+      registered.push(event.runId);
     });
 
     const activeRun = createActiveRun();
@@ -179,7 +179,7 @@ describe('Store event emission', () => {
     const removed: string[] = [];
 
     store.addEventListener('run.removed', (event) => {
-      removed.push(event.detail.runId);
+      removed.push(event.runId);
     });
 
     const activeRun = createActiveRun();
@@ -200,17 +200,17 @@ describe('Store event emission', () => {
     expect(store.completed).toBe(true);
   });
 
-  it('legacy subscribe(listener) still works alongside event-emission subscribers', async () => {
+  it('legacy subscribe(listener) still works alongside EventTarget subscribers', async () => {
     const store = createStore();
     const legacyActions: Action[] = [];
-    const emissionActions: Action[] = [];
+    const eventTargetActions: Action[] = [];
 
     store.subscribe((_state, action) => {
       legacyActions.push(action);
     });
 
     store.addEventListener('action', (event) => {
-      emissionActions.push(event.detail);
+      eventTargetActions.push(event.action);
     });
 
     const activeRun = createActiveRun();
@@ -218,19 +218,19 @@ describe('Store event emission', () => {
     await activeRun.result;
 
     expect(legacyActions.length).toBeGreaterThan(0);
-    expect(emissionActions.length).toBe(legacyActions.length);
+    expect(eventTargetActions.length).toBe(legacyActions.length);
 
     for (let i = 0; i < legacyActions.length; i++) {
-      expect(legacyActions[i].type).toBe(emissionActions[i].type);
-      expect(legacyActions[i].sequence).toBe(emissionActions[i].sequence);
+      expect(legacyActions[i].type).toBe(eventTargetActions[i].type);
+      expect(legacyActions[i].sequence).toBe(eventTargetActions[i].sequence);
     }
 
     store.dispose();
   });
 
-  it('multiple concurrent runs interleave correctly through event-emission', async () => {
+  it('multiple concurrent runs interleave correctly through EventTarget', async () => {
     const store = createStore();
-    const events: Array<EmissionEvent<StoreEvents['action']>> = [];
+    const events: StoreActionEvent[] = [];
 
     store.addEventListener('action', (event) => {
       events.push(event);
@@ -244,8 +244,8 @@ describe('Store event emission', () => {
 
     await Promise.all([activeRunA.result, activeRunB.result]);
 
-    const runAEvents = events.filter((e) => e.detail.runId === idA);
-    const runBEvents = events.filter((e) => e.detail.runId === idB);
+    const runAEvents = events.filter((e) => e.action.runId === idA);
+    const runBEvents = events.filter((e) => e.action.runId === idB);
 
     expect(runAEvents.length).toBeGreaterThan(0);
     expect(runBEvents.length).toBeGreaterThan(0);

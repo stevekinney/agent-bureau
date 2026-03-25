@@ -17,6 +17,7 @@ const entrypoints = [
   './src/adapters/anthropic/index.ts',
   './src/adapters/gemini/index.ts',
   // Internal modules referenced by index.d.ts (needed for Bun resolution)
+  './src/events.ts',
   './src/combine-toolboxes.ts',
   './src/core/errors.ts',
   './src/core/registry/embeddings.ts',

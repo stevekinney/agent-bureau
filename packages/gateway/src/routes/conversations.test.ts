@@ -5,7 +5,7 @@ import { createTestGateway, requestJSON } from '../test';
 
 describe('conversations routes', () => {
   it('returns 501 when no persistence adapter is configured', async () => {
-    const gateway = createTestGateway();
+    const gateway = await createTestGateway();
     const response = await requestJSON(gateway, '/api/v1/conversations');
     expect(response.status).toBe(501);
     const body = await response.json();
@@ -18,7 +18,7 @@ describe('conversations routes', () => {
     conversation.appendUserMessage('Hello');
     await persistence.save(conversation.current);
 
-    const gateway = createTestGateway({ persistence });
+    const gateway = await createTestGateway({ persistence });
     const response = await requestJSON(gateway, '/api/v1/conversations');
     expect(response.status).toBe(200);
 
@@ -33,14 +33,14 @@ describe('conversations routes', () => {
     conversation.appendUserMessage('Hello');
     await persistence.save(conversation.current);
 
-    const gateway = createTestGateway({ persistence });
+    const gateway = await createTestGateway({ persistence });
     const response = await requestJSON(gateway, `/api/v1/conversations/${conversation.current.id}`);
     expect(response.status).toBe(200);
   });
 
   it('GET /api/v1/conversations/:id returns 404 for missing session', async () => {
     const persistence = createInMemoryPersistenceAdapter();
-    const gateway = createTestGateway({ persistence });
+    const gateway = await createTestGateway({ persistence });
     const response = await requestJSON(gateway, '/api/v1/conversations/missing');
     expect(response.status).toBe(404);
   });
@@ -52,7 +52,7 @@ describe('conversations routes', () => {
     await persistence.save(conversation.current);
     const sessionId = conversation.current.id;
 
-    const gateway = createTestGateway({ persistence });
+    const gateway = await createTestGateway({ persistence });
     const deleteResponse = await requestJSON(gateway, `/api/v1/conversations/${sessionId}`, {
       method: 'DELETE',
     });

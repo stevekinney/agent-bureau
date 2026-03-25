@@ -5,7 +5,7 @@ import type { Gateway, GatewayOptions } from '../types';
  * Creates a gateway for testing. Uses app.request() for HTTP assertions
  * without starting a real server.
  */
-export function createTestGateway(options: GatewayOptions = {}): Gateway {
+export async function createTestGateway(options: GatewayOptions = {}): Promise<Gateway> {
   return createGateway(options);
 }
 

@@ -59,6 +59,41 @@
       "default": "./dist/instrumentation/index.js",
       "types": "./dist/instrumentation/index.d.ts"
     },
+    "./embeddings": {
+      "import": "./dist/embeddings/index.js",
+      "bun": "./dist/embeddings/index.js",
+      "require": "./dist/embeddings/index.cjs",
+      "default": "./dist/embeddings/index.js",
+      "types": "./dist/embeddings/index.d.ts"
+    },
+    "./embeddings/openai": {
+      "import": "./dist/embeddings/openai.js",
+      "bun": "./dist/embeddings/openai.js",
+      "require": "./dist/embeddings/openai.cjs",
+      "default": "./dist/embeddings/openai.js",
+      "types": "./dist/embeddings/openai.d.ts"
+    },
+    "./embeddings/gemini": {
+      "import": "./dist/embeddings/gemini.js",
+      "bun": "./dist/embeddings/gemini.js",
+      "require": "./dist/embeddings/gemini.cjs",
+      "default": "./dist/embeddings/gemini.js",
+      "types": "./dist/embeddings/gemini.d.ts"
+    },
+    "./embeddings/voyage": {
+      "import": "./dist/embeddings/voyage.js",
+      "bun": "./dist/embeddings/voyage.js",
+      "require": "./dist/embeddings/voyage.cjs",
+      "default": "./dist/embeddings/voyage.js",
+      "types": "./dist/embeddings/voyage.d.ts"
+    },
+    "./embeddings/ollama": {
+      "import": "./dist/embeddings/ollama.js",
+      "bun": "./dist/embeddings/ollama.js",
+      "require": "./dist/embeddings/ollama.cjs",
+      "default": "./dist/embeddings/ollama.js",
+      "types": "./dist/embeddings/ollama.d.ts"
+    },
     "./test": {
       "import": "./dist/test/index.js",
       "bun": "./dist/test/index.js",

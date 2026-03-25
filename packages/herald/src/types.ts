@@ -12,7 +12,7 @@ export type {
 /**
  * Provider names supported by herald.
  */
-export type ProviderName = 'anthropic' | 'openai' | 'gemini';
+export type ProviderName = 'anthropic' | 'openai' | 'gemini' | 'voyage' | 'ollama';
 
 /**
  * Base options shared across all provider factories.

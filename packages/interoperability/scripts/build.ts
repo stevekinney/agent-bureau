@@ -9,7 +9,7 @@ async function build() {
 
   console.log('Building JavaScript...');
   const buildResult =
-    await $`bun build --target=node --outdir=dist --sourcemap=linked ./src/index.ts`.quiet();
+    await $`bun build --target=node --outdir=dist --sourcemap=linked ./src/index.ts ./src/embeddings.ts`.quiet();
 
   if (buildResult.exitCode !== 0) {
     console.error('JavaScript build failed');

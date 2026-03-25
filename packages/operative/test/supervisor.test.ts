@@ -87,7 +87,7 @@ describe('createSupervisor', () => {
     });
 
     const routed: unknown[] = [];
-    supervisor.addEventListener('task.routed', (event) => routed.push(event.detail));
+    supervisor.addEventListener('task.routed', (event) => routed.push(event));
 
     const results = await supervisor.delegateAll(['Task 1', 'Task 2', 'Task 3'], {
       parallel: true,
@@ -280,7 +280,7 @@ describe('supervisor event emission', () => {
 
     const events: unknown[] = [];
     supervisor.addEventListener('task.routed', (event) => {
-      events.push(event.detail);
+      events.push(event);
     });
 
     await supervisor.delegate('Do this');
@@ -297,7 +297,7 @@ describe('supervisor event emission', () => {
 
     const events: unknown[] = [];
     supervisor.addEventListener('task.completed', (event) => {
-      events.push(event.detail);
+      events.push(event);
     });
 
     await supervisor.delegate('Do this');
@@ -314,7 +314,7 @@ describe('supervisor event emission', () => {
 
     const events: unknown[] = [];
     supervisor.addEventListener('task.failed', (event) => {
-      events.push(event.detail);
+      events.push(event);
     });
 
     await supervisor.delegate('Do this');
@@ -331,10 +331,10 @@ describe('supervisor event emission', () => {
     const started: unknown[] = [];
     const completed: unknown[] = [];
     supervisor.addEventListener('synthesis.started', (event) => {
-      started.push(event.detail);
+      started.push(event);
     });
     supervisor.addEventListener('synthesis.completed', (event) => {
-      completed.push(event.detail);
+      completed.push(event);
     });
 
     await supervisor.delegate('Do this');
@@ -688,14 +688,10 @@ describe('supervisor pipeline', () => {
     const synthesisStarted: unknown[] = [];
     const synthesisCompleted: unknown[] = [];
 
-    supervisor.addEventListener('task.routed', (event) => routed.push(event.detail));
-    supervisor.addEventListener('task.completed', (event) => completed.push(event.detail));
-    supervisor.addEventListener('synthesis.started', (event) =>
-      synthesisStarted.push(event.detail),
-    );
-    supervisor.addEventListener('synthesis.completed', (event) =>
-      synthesisCompleted.push(event.detail),
-    );
+    supervisor.addEventListener('task.routed', (event) => routed.push(event));
+    supervisor.addEventListener('task.completed', (event) => completed.push(event));
+    supervisor.addEventListener('synthesis.started', (event) => synthesisStarted.push(event));
+    supervisor.addEventListener('synthesis.completed', (event) => synthesisCompleted.push(event));
 
     await supervisor.pipeline('go', [{ agentName: 'one' }, { agentName: 'two' }]);
 

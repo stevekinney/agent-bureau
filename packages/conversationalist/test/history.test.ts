@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 
 import { estimateConversationTokens, truncateToTokenLimit } from '../src/context';
+import { ConversationChangeEvent } from '../src/events';
 import { Conversation as ConversationHistory } from '../src/history';
 import {
   appendUserMessage,
@@ -364,23 +365,28 @@ describe('Conversation', () => {
       let lastType = '';
       const actionEvents: Array<{ type: string; detailType: string }> = [];
 
-      const unsubscribe = history.addEventListener('change', (e: any) => {
+      const changeHandler = (e: any) => {
         changeCount++;
         expect(e.type).toBe('change');
-        lastType = e.detail.action;
-      }) as () => void;
-      const unsubPush = history.addEventListener('push', (e: any) => {
-        actionEvents.push({ type: e.type, detailType: e.detail.action });
-      }) as () => void;
-      const unsubUndo = history.addEventListener('undo', (e: any) => {
-        actionEvents.push({ type: e.type, detailType: e.detail.action });
-      }) as () => void;
-      const unsubRedo = history.addEventListener('redo', (e: any) => {
-        actionEvents.push({ type: e.type, detailType: e.detail.action });
-      }) as () => void;
-      const unsubSwitch = history.addEventListener('switch', (e: any) => {
-        actionEvents.push({ type: e.type, detailType: e.detail.action });
-      }) as () => void;
+        lastType = e.action;
+      };
+      const pushHandler = (e: any) => {
+        actionEvents.push({ type: e.type, detailType: e.action });
+      };
+      const undoHandler = (e: any) => {
+        actionEvents.push({ type: e.type, detailType: e.action });
+      };
+      const redoHandler = (e: any) => {
+        actionEvents.push({ type: e.type, detailType: e.action });
+      };
+      const switchHandler = (e: any) => {
+        actionEvents.push({ type: e.type, detailType: e.action });
+      };
+      history.addEventListener('change', changeHandler);
+      history.addEventListener('push', pushHandler);
+      history.addEventListener('undo', undoHandler);
+      history.addEventListener('redo', redoHandler);
+      history.addEventListener('switch', switchHandler);
 
       history.appendUserMessage('test');
       expect(changeCount).toBe(1);
@@ -400,11 +406,11 @@ describe('Conversation', () => {
       expect(changeCount).toBe(6); // push, undo, redo, undo, push, switch
       expect(lastType).toBe('switch');
 
-      unsubscribe();
-      unsubPush();
-      unsubUndo();
-      unsubRedo();
-      unsubSwitch();
+      history.removeEventListener('change', changeHandler);
+      history.removeEventListener('push', pushHandler);
+      history.removeEventListener('undo', undoHandler);
+      history.removeEventListener('redo', redoHandler);
+      history.removeEventListener('switch', switchHandler);
       history.appendUserMessage('after unsubscribe');
       expect(changeCount).toBe(6); // no increase
 
@@ -483,6 +489,7 @@ describe('Conversation', () => {
 
     it('removes event listeners with options', () => {
       const history = new ConversationHistory(createConversation());
+      // ConversationChangeEvent imported at top of file
       let calls = 0;
       const handler = () => {
         calls += 1;
@@ -491,14 +498,13 @@ describe('Conversation', () => {
       history.addEventListener('change', handler, { capture: true });
       history.removeEventListener('change', handler, { capture: true });
 
-      history.dispatchEvent({
-        type: 'change',
-        detail: {
+      history.dispatchEvent(
+        new ConversationChangeEvent({
           action: 'push',
           conversation: history.current,
           previousConversation: history.current,
-        },
-      } as any);
+        }),
+      );
 
       expect(calls).toBe(0);
     });
@@ -506,80 +512,86 @@ describe('Conversation', () => {
     it('dispatches events through the internal target', () => {
       const history = new ConversationHistory(createConversation());
       let seen = false;
-      history.addEventListener('change', (event) => {
-        if (event.detail.action === 'push') {
+      history.addEventListener('change', (event: any) => {
+        if (event.action === 'push') {
           seen = true;
         }
       });
 
-      history.dispatchEvent({
-        type: 'change',
-        detail: {
+      // ConversationChangeEvent imported at top of file
+      history.dispatchEvent(
+        new ConversationChangeEvent({
           action: 'push',
           conversation: history.current,
           previousConversation: history.current,
-        },
-      } as any);
+        }),
+      );
 
       expect(seen).toBe(true);
     });
 
     it('supports boolean listener options overloads', () => {
       const history = new ConversationHistory(createConversation());
+      // ConversationChangeEvent imported at top of file
       let calls = 0;
       const handler = () => {
         calls += 1;
       };
 
       history.addEventListener('change', handler, false);
-      history.dispatchEvent({
-        type: 'change',
-        detail: {
+      history.dispatchEvent(
+        new ConversationChangeEvent({
           action: 'push',
           conversation: history.current,
           previousConversation: history.current,
-        },
-      } as any);
+        }),
+      );
       expect(calls).toBe(1);
 
       history.removeEventListener('change', handler, false);
-      history.dispatchEvent({
-        type: 'change',
-        detail: {
+      history.dispatchEvent(
+        new ConversationChangeEvent({
           action: 'push',
           conversation: history.current,
           previousConversation: history.current,
-        },
-      } as any);
+        }),
+      );
       expect(calls).toBe(1);
     });
 
-    it('falls back to a no-op unsubscribe when watch cannot get one from addEventListener', () => {
+    it('watch returns an unsubscribe function that removes the listener', () => {
       const history = new ConversationHistory(createConversation());
-      const originalAddEventListener = history.addEventListener.bind(history);
-
-      history.addEventListener = (() => undefined) as typeof history.addEventListener;
-
-      const unsubscribe = history.watch(() => {});
+      let calls = 0;
+      const unsubscribe = history.watch(() => {
+        calls++;
+      });
 
       expect(typeof unsubscribe).toBe('function');
-      expect(() => unsubscribe()).not.toThrow();
+      expect(calls).toBe(1); // initial call
 
-      history.addEventListener = originalAddEventListener;
+      history.appendUserMessage('msg');
+      expect(calls).toBe(2);
+
+      unsubscribe();
+      history.appendUserMessage('msg2');
+      expect(calls).toBe(2); // no further calls
     });
 
-    it('supports emit() for typed event emission', () => {
+    it('supports dispatchEvent() for typed event emission', () => {
       const history = new ConversationHistory(createConversation());
       let received = false;
       history.addEventListener('change', () => {
         received = true;
       });
 
-      history.emit('change', {
-        action: 'push',
-        conversation: history.current,
-        previousConversation: history.current,
-      });
+      // ConversationChangeEvent imported at top of file
+      history.dispatchEvent(
+        new ConversationChangeEvent({
+          action: 'push',
+          conversation: history.current,
+          previousConversation: history.current,
+        }),
+      );
 
       expect(received).toBe(true);
     });
@@ -808,7 +820,7 @@ describe('Conversation', () => {
 
       let emittedError: unknown = undefined;
       history.addEventListener('persistence.error' as any, (event: any) => {
-        emittedError = event?.detail?.error;
+        emittedError = event?.error;
       });
 
       history.appendUserMessage('trigger save');

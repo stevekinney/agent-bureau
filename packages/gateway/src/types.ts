@@ -4,16 +4,21 @@ import type {
   SessionInfo,
   SessionPersistenceAdapter,
 } from 'conversationalist';
-import type {
-  AddEventListenerOptionsLike,
-  AsyncIteratorOptions,
-  EmissionEvent,
-} from 'event-emission';
-import type { ObservableLike, Observer, Subscription } from 'event-emission/types';
 import type { ProviderName } from 'herald';
 import type { Hono } from 'hono';
+import type {
+  EventIteratorOptions,
+  EventObservableOptions,
+  ObservableLike,
+  Observer,
+  Subscription,
+} from 'lifecycle';
+import type { CreateMemoryOptions, Memory } from 'memory';
 import type { GenerateFunction, StopCondition } from 'operative';
-import type { Action, Store } from 'sentinel';
+import type { Store } from 'sentinel';
+
+import type { BureauEventMap } from './events';
+import type { StorageBackendConfiguration } from './storage';
 
 // ── Provider Configuration ───────────────────────────────────────────
 
@@ -34,22 +39,18 @@ export interface BureauOptions {
   toolbox?: Toolbox<any>;
   store?: Store;
   persistence?: SessionPersistenceAdapter;
+  storage?: StorageBackendConfiguration;
+  memory?: CreateMemoryOptions | Memory;
   stopWhen?: StopCondition | StopCondition[];
   maximumSteps?: number;
   systemPrompt?: string;
 }
 
-export interface BureauEvents {
-  action: Action;
-  'run.registered': { runId: string };
-  'run.removed': { runId: string };
-  'bureau.disposed': Record<string, never>;
-}
-
-export type BureauEventType = keyof BureauEvents;
+export type BureauEventType = keyof BureauEventMap & string;
 
 export interface Bureau {
   readonly store: Store;
+  readonly memory: Memory | undefined;
   readonly ready: boolean;
 
   createRun(request: CreateRunRequest): Promise<RunSummary>;
@@ -65,41 +66,45 @@ export interface Bureau {
   getConfiguration(): ConfigurationResponse;
   getTools(): ToolSummary[];
 
-  addEventListener<K extends BureauEventType>(
+  addEventListener<K extends keyof BureauEventMap & string>(
     type: K,
-    listener: (event: EmissionEvent<BureauEvents[K], K>) => void | Promise<void>,
-    options?: AddEventListenerOptionsLike,
-  ): () => void;
+    listener: (event: BureauEventMap[K]) => void,
+    options?: boolean | AddEventListenerOptions,
+  ): void;
 
-  on<K extends BureauEventType>(
+  removeEventListener<K extends keyof BureauEventMap & string>(
     type: K,
-    options?: AddEventListenerOptionsLike | boolean,
-  ): ObservableLike<EmissionEvent<BureauEvents[K], K>>;
+    listener: (event: BureauEventMap[K]) => void,
+    options?: boolean | EventListenerOptions,
+  ): void;
 
-  once<K extends BureauEventType>(
+  on<K extends keyof BureauEventMap & string>(
     type: K,
-    listener: (event: EmissionEvent<BureauEvents[K], K>) => void | Promise<void>,
-    options?: Omit<AddEventListenerOptionsLike, 'once'>,
-  ): () => void;
+    options?: EventObservableOptions,
+  ): ObservableLike<BureauEventMap[K]>;
 
-  subscribe<K extends BureauEventType>(
+  once<K extends keyof BureauEventMap & string>(
     type: K,
-    observerOrNext?:
-      | Observer<EmissionEvent<BureauEvents[K], K>>
-      | ((value: EmissionEvent<BureauEvents[K], K>) => void),
+    listener: (event: BureauEventMap[K]) => void,
+  ): void;
+
+  subscribe<K extends keyof BureauEventMap & string>(
+    type: K,
+    observerOrNext?: Observer<BureauEventMap[K]> | ((value: BureauEventMap[K]) => void),
     error?: (err: unknown) => void,
     complete?: () => void,
   ): Subscription;
 
-  toObservable(): ObservableLike<EmissionEvent<BureauEvents[keyof BureauEvents]>>;
+  toObservable(): ObservableLike<BureauEventMap[keyof BureauEventMap]>;
 
-  events<K extends BureauEventType>(
+  events<K extends keyof BureauEventMap & string>(
     type: K,
-    options?: AsyncIteratorOptions,
-  ): AsyncIterableIterator<EmissionEvent<BureauEvents[K], K>>;
+    options?: EventIteratorOptions,
+  ): AsyncIterableIterator<BureauEventMap[K]>;
 
   complete(): void;
   readonly completed: boolean;
+  readonly signal: AbortSignal;
 
   dispose(): void;
 }

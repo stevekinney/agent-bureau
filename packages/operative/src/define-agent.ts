@@ -1,9 +1,11 @@
 import { Conversation, isConversation } from 'conversationalist';
+import { mergeHookRegistries } from 'lifecycle';
 
 import type { AgentSession } from './agent-session';
 import { createAgentSession, loadAgentSession, saveAgentSession } from './agent-session';
 import type { ActiveRun } from './create-run';
 import { createRun } from './create-run';
+import type { OperativeHookMap } from './hooks';
 import { run } from './run';
 import type {
   AgentDefinition,
@@ -28,6 +30,7 @@ function normalizeInput(
   signal?: AbortSignal;
   stopWhen?: StopCondition | StopCondition[];
   parentContext?: unknown;
+  hooks?: AgentRunOptions['hooks'];
 } {
   if (typeof input === 'string') {
     const conversation = new Conversation();
@@ -38,7 +41,7 @@ function normalizeInput(
     return { conversation };
   }
 
-  const { signal, stopWhen, parentContext } = input;
+  const { signal, stopWhen, parentContext, hooks } = input;
   let conversation: Conversation;
 
   if (typeof input.conversation === 'string') {
@@ -58,7 +61,7 @@ function normalizeInput(
     }
   }
 
-  return { conversation, signal, stopWhen, parentContext };
+  return { conversation, signal, stopWhen, parentContext, hooks };
 }
 
 function mergeStopConditions(
@@ -77,6 +80,7 @@ function buildRunOptions(options: DefineAgentOptions, input: string | AgentRunOp
     signal,
     stopWhen: runtimeStopWhen,
     parentContext,
+    hooks: runtimeHooks,
   } = normalizeInput(input, resolveInstructions(options.instructions));
 
   const {
@@ -88,8 +92,15 @@ function buildRunOptions(options: DefineAgentOptions, input: string | AgentRunOp
     onSessionSave: _onSessionSave,
     onSessionLoad: _onSessionLoad,
     autoSave: _autoSave,
+    hooks: definitionHooks,
     ...rest
   } = options;
+
+  // Merge agent-level and run-level hook registries when both exist
+  const mergedHooks =
+    definitionHooks && runtimeHooks
+      ? mergeHookRegistries<OperativeHookMap>(definitionHooks, runtimeHooks)
+      : (runtimeHooks ?? definitionHooks);
 
   return {
     ...rest,
@@ -97,6 +108,7 @@ function buildRunOptions(options: DefineAgentOptions, input: string | AgentRunOp
     signal,
     stopWhen: mergeStopConditions(definitionStopWhen, runtimeStopWhen),
     ...(parentContext !== undefined && { parentContext }),
+    ...(mergedHooks !== undefined && { hooks: mergedHooks }),
   };
 }
 

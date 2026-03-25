@@ -1,25 +1,10 @@
 import { Conversation, isConversation } from 'conversationalist';
-import type {
-  AddEventListenerOptionsLike,
-  AsyncIteratorOptions,
-  EmissionEvent,
-} from 'event-emission';
-import { createEventTarget } from 'event-emission';
-import type { ObservableLike, Observer, Subscription } from 'event-emission/types';
+import type { ForwardableSource, ObservableLike, Observer, Subscription } from 'lifecycle';
+import { CompletableEventTarget, forwardEvents } from 'lifecycle';
 
-import { bindEmitter } from './bind-emitter';
-import type {
-  CombinedOperativeEvents,
-  CombinedOperativeEventType,
-  OperativeEvents,
-  OperativeEventType,
-} from './events';
+import type { CombinedOperativeEventMap, CombinedOperativeEventType } from './events';
 import { executeLoop } from './loop';
 import type { RunOptions, RunResult } from './types';
-
-type LoopEmitter = {
-  emit: <K extends OperativeEventType>(type: K, detail: OperativeEvents[K]) => boolean;
-};
 
 /**
  * An active, event-emitting agent loop run.
@@ -29,33 +14,34 @@ export interface ActiveRun {
   abort: (reason?: string) => void;
   addEventListener: <K extends CombinedOperativeEventType>(
     type: K,
-    listener: (event: EmissionEvent<CombinedOperativeEvents[K], K>) => void | Promise<void>,
-    options?: AddEventListenerOptionsLike,
-  ) => () => void;
+    listener: (event: CombinedOperativeEventMap[K]) => void,
+    options?: boolean | AddEventListenerOptions,
+  ) => void;
+  removeEventListener: <K extends CombinedOperativeEventType>(
+    type: K,
+    listener: (event: CombinedOperativeEventMap[K]) => void,
+    options?: boolean | EventListenerOptions,
+  ) => void;
   on: <K extends CombinedOperativeEventType>(
     type: K,
-    options?: AddEventListenerOptionsLike | boolean,
-  ) => ObservableLike<EmissionEvent<CombinedOperativeEvents[K], K>>;
+  ) => ObservableLike<CombinedOperativeEventMap[K]>;
   once: <K extends CombinedOperativeEventType>(
     type: K,
-    listener: (event: EmissionEvent<CombinedOperativeEvents[K], K>) => void | Promise<void>,
-    options?: Omit<AddEventListenerOptionsLike, 'once'>,
-  ) => () => void;
+    listener: (event: CombinedOperativeEventMap[K]) => void,
+  ) => void;
   subscribe: <K extends CombinedOperativeEventType>(
     type: K,
     observerOrNext?:
-      | Observer<EmissionEvent<CombinedOperativeEvents[K], K>>
-      | ((value: EmissionEvent<CombinedOperativeEvents[K], K>) => void),
+      | Observer<CombinedOperativeEventMap[K]>
+      | ((value: CombinedOperativeEventMap[K]) => void),
     error?: (err: unknown) => void,
     complete?: () => void,
   ) => Subscription;
   events: <K extends CombinedOperativeEventType>(
     type: K,
-    options?: AsyncIteratorOptions,
-  ) => AsyncIterableIterator<EmissionEvent<CombinedOperativeEvents[K], K>>;
-  toObservable: () => ObservableLike<
-    EmissionEvent<CombinedOperativeEvents[CombinedOperativeEventType], CombinedOperativeEventType>
-  >;
+    options?: { signal?: AbortSignal; bufferSize?: number },
+  ) => AsyncIterableIterator<CombinedOperativeEventMap[K]>;
+  toObservable: () => ObservableLike<CombinedOperativeEventMap[CombinedOperativeEventType]>;
   complete: () => void;
   [Symbol.dispose]: () => void;
 }
@@ -64,7 +50,7 @@ export interface ActiveRun {
  * Creates an event-emitting agent loop run.
  */
 export function createRun(options: RunOptions): ActiveRun {
-  const emitter = createEventTarget<CombinedOperativeEvents>();
+  const emitter = new CompletableEventTarget<CombinedOperativeEventMap>();
   const abortController = new AbortController();
 
   const combinedSignal = options.signal
@@ -84,31 +70,23 @@ export function createRun(options: RunOptions): ActiveRun {
   // Subscribe to toolbox and conversation events, re-emitting with prefixes.
   const cleanups: (() => void)[] = [];
 
-  const toolboxSubscription = options.toolbox.toObservable().subscribe({
-    next(event) {
-      emitter.emit(
-        `toolbox.${event.type}` as CombinedOperativeEventType,
-        (event as { detail: CombinedOperativeEvents[CombinedOperativeEventType] }).detail,
-      );
-    },
-  });
-  cleanups.push(() => toolboxSubscription.unsubscribe());
+  const toolboxForward = forwardEvents(
+    options.toolbox as unknown as ForwardableSource,
+    emitter,
+    'toolbox',
+  );
+  cleanups.push(() => toolboxForward.stop());
 
-  const conversationSubscription = conversation.toObservable().subscribe({
-    next(event) {
-      emitter.emit(
-        `conversation.${event.type}` as CombinedOperativeEventType,
-        (event as { detail: CombinedOperativeEvents[CombinedOperativeEventType] }).detail,
-      );
-    },
-  });
-  cleanups.push(() => conversationSubscription.unsubscribe());
+  const conversationForward = forwardEvents(
+    conversation as unknown as ForwardableSource,
+    emitter,
+    'conversation',
+  );
+  cleanups.push(() => conversationForward.stop());
 
   // Defer the loop start to the next microtask so callers can attach listeners first.
-  // Cast the emitter: the loop only emits native OperativeEvents; the wider
-  // CombinedOperativeEvents type is used for forwarded events outside the loop.
   const result = Promise.resolve()
-    .then(() => executeLoop(loopOptions, emitter as unknown as LoopEmitter))
+    .then(() => executeLoop(loopOptions, emitter))
     .finally(complete);
 
   function abort(reason?: string): void {
@@ -123,8 +101,15 @@ export function createRun(options: RunOptions): ActiveRun {
   return {
     result,
     abort,
-    ...bindEmitter<CombinedOperativeEvents>(emitter),
+    addEventListener: emitter.addEventListener.bind(emitter) as ActiveRun['addEventListener'],
+    removeEventListener: emitter.removeEventListener.bind(
+      emitter,
+    ) as ActiveRun['removeEventListener'],
+    on: emitter.on.bind(emitter) as ActiveRun['on'],
+    once: emitter.once.bind(emitter) as ActiveRun['once'],
+    subscribe: emitter.subscribe.bind(emitter) as ActiveRun['subscribe'],
     events: emitter.events.bind(emitter) as ActiveRun['events'],
+    toObservable: emitter.toObservable.bind(emitter) as ActiveRun['toObservable'],
     complete,
     [Symbol.dispose](): void {
       abort();

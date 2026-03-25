@@ -153,12 +153,18 @@ export function pipe(...tools: AnyTool[]): AnyTool {
   const first = tools[0]!;
   const toolNames = tools.map((t) => t.identity.name);
 
-  // Helper to emit events with proper typing (event-emission accepts partial events at runtime)
+  // Helper to emit events: creates a plain Event and assigns detail properties.
   const emit = (
     dispatch: ToolContext<DefaultToolEvents>['dispatch'],
     type: string,
     detail: unknown,
-  ) => dispatch({ type, detail } as Parameters<typeof dispatch>[0]);
+  ) => {
+    const event = new Event(type);
+    if (detail && typeof detail === 'object') {
+      Object.assign(event, detail);
+    }
+    return dispatch(event);
+  };
 
   const runPipeline = async (input: unknown, context: ToolContext<DefaultToolEvents>) => {
     let result: unknown = input;

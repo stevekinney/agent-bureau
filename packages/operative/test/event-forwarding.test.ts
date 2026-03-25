@@ -217,15 +217,17 @@ describe('event forwarding', () => {
       stopWhen: noToolCalls(),
     });
 
-    const callDetails: unknown[] = [];
+    const callEvents: unknown[] = [];
     activeRun.addEventListener('toolbox.call', (event) => {
-      callDetails.push(event.detail);
+      callEvents.push(event);
     });
 
     await activeRun.result;
 
-    expect(callDetails).toHaveLength(1);
-    expect(callDetails[0]).toHaveProperty('tool');
-    expect(callDetails[0]).toHaveProperty('call');
+    expect(callEvents).toHaveLength(1);
+    // Forwarded events wrap the original; properties are directly on the original event
+    const forwarded = callEvents[0] as { originalEvent: Event };
+    expect(forwarded.originalEvent).toHaveProperty('tool');
+    expect(forwarded.originalEvent).toHaveProperty('call');
   });
 });
