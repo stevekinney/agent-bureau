@@ -81,8 +81,10 @@ export interface CreateMemoryOptions {
   textSearchProvider?: import('./text-search-provider').TextSearchProvider;
   /**
    * When true, `remember()` throws if no namespace is provided in metadata
-   * and no default namespace was configured. Prevents orphaned entries that
-   * exist in storage but are invisible to namespace-scoped queries.
+   * and the effective namespace (either the configured `namespace` option or
+   * its default) resolves to the built-in `"default"` namespace. This helps
+   * prevent orphaned entries that exist in storage but are invisible to
+   * namespace-scoped queries.
    */
   requireNamespace?: boolean;
   /**

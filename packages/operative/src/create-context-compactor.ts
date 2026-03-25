@@ -12,8 +12,10 @@ export interface CreateContextCompactorOptions {
    */
   summarize: (messages: ReadonlyArray<Message>) => Promise<string>;
   /**
-   * Number of recent user/assistant turn pairs to keep verbatim after the
-   * summary. Default: `4`.
+   * Number of recent messages to keep verbatim after the summary. This value
+   * is forwarded to `Conversation.compact({ preserveRecentCount })` and is
+   * therefore a message-count setting, not a user/assistant turn-pair count.
+   * Default: `4`.
    */
   retainRecentTurns?: number;
   /**

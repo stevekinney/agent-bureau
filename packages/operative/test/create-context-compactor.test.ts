@@ -57,7 +57,7 @@ describe('createContextCompactor', () => {
     const context = createStubContext(conversation);
     await compactor(conversation, context);
 
-    // After compaction, should have: system (summary) + 2 recent turns (4 messages)
+    // After compaction, should have: system (summary) + 2 recent messages
     const messages = conversation.getMessages();
     const nonSystem = messages.filter((m) => m.role !== 'system');
     expect(nonSystem.length).toBe(2);

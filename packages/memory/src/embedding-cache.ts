@@ -63,10 +63,17 @@ export function withEmbeddingCache(
     keys.add(key);
   }
 
+  function removeFromNamespaceIndex(key: string): void {
+    for (const keys of namespaceKeys.values()) {
+      if (keys.delete(key)) break; // each key belongs to at most one namespace
+    }
+  }
+
   function evictIfNeeded(): void {
     while (cache.size > maximumEntries) {
       const oldest = cache.keys().next().value as string;
       cache.delete(oldest);
+      removeFromNamespaceIndex(oldest);
     }
   }
 

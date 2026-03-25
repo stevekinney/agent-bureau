@@ -136,12 +136,35 @@ export function createMemoryBridge(options: CreateMemoryBridgeOptions): {
         // Skip the recalled memories key — no need to re-persist what was recalled.
         if (key === scratchpadKey) continue;
 
-        const content = typeof value === 'string' ? value : JSON.stringify(value);
-        await memory.remember(content, {
-          source: 'auto-capture',
-          namespace,
-          _scratchpadKey: key,
-        });
+        try {
+          let content: string;
+
+          if (typeof value === 'string') {
+            content = value;
+          } else {
+            try {
+              const json = JSON.stringify(value);
+              if (typeof json === 'string') {
+                content = json;
+              } else {
+                // Fallback for cases where JSON.stringify returns undefined.
+                content = String(value);
+              }
+            } catch {
+              // Fallback for unserializable values (e.g., circular structures).
+              content = String(value);
+            }
+          }
+
+          await memory.remember(content, {
+            source: 'auto-capture',
+            namespace,
+            _scratchpadKey: key,
+          });
+        } catch {
+          // Degrade gracefully per entry — skip this entry and continue.
+          continue;
+        }
       }
     } catch {
       // Degrade gracefully — do not crash the agent loop.
