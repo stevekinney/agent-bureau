@@ -65,7 +65,7 @@ export async function compressVector(
   vector: Float32Array,
   config?: CompressionConfig,
 ): Promise<CompressedVector> {
-  const { CompressionManager } = await import('./compression-manager');
+  const { CompressionManager } = await import('./compression-manager.ts');
   const manager = new CompressionManager({
     defaultStrategy: 'scalar',
     autoSelect: true,
@@ -81,7 +81,7 @@ export async function compressVector(
  * Convenience function to decompress a vector
  */
 export async function decompressVector(compressed: CompressedVector): Promise<Float32Array> {
-  const { CompressionManager } = await import('./compression-manager');
+  const { CompressionManager } = await import('./compression-manager.ts');
   const manager = new CompressionManager();
   return manager.decompress(compressed);
 }
@@ -92,7 +92,7 @@ export async function decompressVector(compressed: CompressedVector): Promise<Fl
 export async function getCompressionRecommendation(
   vector: Float32Array,
 ): Promise<CompressionRecommendation> {
-  const { CompressionManager } = await import('./compression-manager');
+  const { CompressionManager } = await import('./compression-manager.ts');
   const manager = new CompressionManager();
   return manager.getRecommendation(vector);
 }
@@ -101,7 +101,7 @@ export async function getCompressionRecommendation(
  * Compare compression strategies for a vector
  */
 export async function compareCompressionStrategies(vector: Float32Array) {
-  const { CompressionManager } = await import('./compression-manager');
+  const { CompressionManager } = await import('./compression-manager.ts');
   const manager = new CompressionManager();
   return manager.compareStrategies(vector);
 }

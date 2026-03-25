@@ -45,10 +45,10 @@ export class HookRegistry<M extends HookMap> {
   async run<K extends keyof M & string>(
     hookName: K,
     ...args: Parameters<M[K]>
-  ): Promise<ReturnType<M[K]>> {
+  ): Promise<ReturnType<M[K]> | undefined> {
     const list = this.handlers.get(hookName);
     if (!list || list.length === 0) {
-      return undefined as ReturnType<M[K]>;
+      return undefined;
     }
 
     const sorted = [...list].sort((a, b) => b.priority - a.priority);
@@ -61,7 +61,7 @@ export class HookRegistry<M extends HookMap> {
         const result = await (entry.handler as unknown as (...args: unknown[]) => unknown)(
           ...currentArgs,
         );
-        if (result !== undefined && result !== null && typeof result !== 'undefined') {
+        if (result !== undefined) {
           currentArgs[0] = result;
         }
       } catch (error: unknown) {

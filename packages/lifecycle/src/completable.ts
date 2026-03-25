@@ -119,6 +119,7 @@ export class CompletableEventTarget<M extends EventMap> extends TypedEventTarget
             if (closed) return;
             closed = true;
             this.#allEventListeners.delete(onEvent);
+            this.signal.removeEventListener('abort', onAbort);
             observer.complete?.();
           },
           get closed() {

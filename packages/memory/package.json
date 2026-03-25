@@ -66,6 +66,7 @@
   },
   "dependencies": {
     "armorer": "workspace:*",
+    "interoperability": "workspace:*",
     "vector-frankl": "workspace:*",
     "zod": "^4.3.6"
   },

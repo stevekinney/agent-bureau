@@ -31,20 +31,21 @@ export function cosineSimilarity(a: number[], b: number[]): number {
  *
  * MMR(d) = lambda * relevance - (1 - lambda) * max_similarity_to_selected
  *
+ * Relevance is taken from each candidate's `score` field (typically a pre-computed
+ * similarity score from the search backend). The diversity term uses cosine
+ * similarity between candidate vectors and already-selected vectors.
+ *
  * Items without vectors fall back to score-only ordering (sorted descending by score).
  */
 export function applyMaximalMarginalRelevance<T extends { score: number; vector?: number[] }>(
   results: T[],
-  queryVector: number[],
   limit: number,
   options: MaximalMarginalRelevanceOptions,
 ): T[] {
   if (results.length === 0) return [];
 
   // If no items have vectors, fall back to score-only ordering
-  const hasAnyVectors = results.some(
-    (r) => r.vector !== undefined && r.vector.length === queryVector.length,
-  );
+  const hasAnyVectors = results.some((r) => r.vector !== undefined);
   if (!hasAnyVectors) {
     return [...results].sort((a, b) => b.score - a.score).slice(0, limit);
   }

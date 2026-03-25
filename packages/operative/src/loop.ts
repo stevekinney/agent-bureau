@@ -335,7 +335,7 @@ export async function executeLoop(
     if (hooks?.has('selectTools')) {
       const selectContext = { conversation, step, signal: stepSignal, abortStep, elicit };
       const registryToolbox = await hooks.run('selectTools', selectContext);
-      if (!isRegistryPassthrough(registryToolbox, selectContext)) {
+      if (registryToolbox !== undefined && !isRegistryPassthrough(registryToolbox, selectContext)) {
         stepToolbox = registryToolbox;
       }
     }
@@ -426,11 +426,9 @@ export async function executeLoop(
           abortStep,
           elicit,
         });
-        if (!isRegistryPassthrough(validated, response)) {
-          emitter?.dispatch(
-            new ResponseValidatedEvent(step, originalResponse, validated as GenerateResponse),
-          );
-          response = validated as GenerateResponse;
+        if (validated !== undefined && !isRegistryPassthrough(validated, response)) {
+          emitter?.dispatch(new ResponseValidatedEvent(step, originalResponse, validated));
+          response = validated;
         }
       } catch (error) {
         emitter?.dispatch(new RunErrorEvent(step, error));
@@ -498,7 +496,10 @@ export async function executeLoop(
             elicit,
           };
           const registryResult = await hooks.run('beforeToolExecution', beforeContext);
-          if (!isRegistryPassthrough(registryResult, beforeContext)) {
+          if (
+            registryResult !== undefined &&
+            !isRegistryPassthrough(registryResult, beforeContext)
+          ) {
             callsToExecute = registryResult;
           }
         } catch (error) {
@@ -555,11 +556,9 @@ export async function executeLoop(
                   results,
                   elicit,
                 });
-                if (!isRegistryPassthrough(validated, currentResult)) {
-                  emitter?.dispatch(
-                    new ToolResultValidatedEvent(step, snapshot, validated as ToolExecutionResult),
-                  );
-                  currentResult = validated as ToolExecutionResult;
+                if (validated !== undefined && !isRegistryPassthrough(validated, currentResult)) {
+                  emitter?.dispatch(new ToolResultValidatedEvent(step, snapshot, validated));
+                  currentResult = validated;
                 }
               }
               validatedResults.push(currentResult);

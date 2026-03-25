@@ -1,6 +1,6 @@
-// Local type aliases — will be replaced with imports from 'interoperability' when available
-export type EmbeddingVector = number[];
-export type Embedder = (texts: string[]) => EmbeddingVector[] | Promise<EmbeddingVector[]>;
+import type { Embedder, EmbeddingVector } from 'interoperability';
+
+export type { Embedder, EmbeddingVector };
 
 export interface MemoryEntry {
   id: string;
@@ -52,7 +52,7 @@ export interface Memory {
 }
 
 export interface CreateMemoryOptions {
-  embedder: (texts: string[]) => number[][] | Promise<number[][]>;
+  embedder: Embedder;
   storage: import('vector-frankl').StorageAdapter;
   namespace?: string;
   dimension?: number;

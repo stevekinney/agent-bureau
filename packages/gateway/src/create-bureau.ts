@@ -22,7 +22,7 @@ import {
   RunRemovedEvent,
 } from './events';
 import { serializeRunState } from './serialization';
-import { resolveStorageBackend } from './storage';
+import { resolvePersistenceAdapter } from './storage';
 import type {
   Bureau,
   BureauOptions,
@@ -72,8 +72,10 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
   });
 
   // ── Storage Backend ──────────────────────────────────────────────
-  const resolvedStorage = options.storage
-    ? await resolveStorageBackend(options.storage)
+  // Only resolve persistence from the storage backend; vector adapters
+  // are not constructed here to avoid eagerly opening files/handles.
+  const resolvedPersistence = options.storage
+    ? await resolvePersistenceAdapter(options.storage)
     : undefined;
 
   // ── Memory ───────────────────────────────────────────────────────
@@ -90,7 +92,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
   const generate =
     options.generate ?? (options.provider ? resolveGenerate(options.provider) : undefined);
   const toolbox = options.toolbox as Toolbox | undefined;
-  const persistence = options.persistence ?? resolvedStorage?.persistence;
+  const persistence = options.persistence ?? resolvedPersistence;
   const stopWhen = options.stopWhen;
   const systemPrompt = options.systemPrompt;
   const provider = options.provider;
@@ -278,7 +280,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
 
   function dispose(): void {
     if (memory) {
-      void memory.close();
+      void memory.close().catch(() => {});
     }
     emitter.dispatch(new BureauDisposedEvent());
     storeSubscription.unsubscribe();

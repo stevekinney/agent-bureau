@@ -36,3 +36,24 @@ export async function resolveStorageBackend(
     }
   }
 }
+
+/**
+ * Resolves only the persistence adapter from a storage backend configuration.
+ *
+ * Use this when only session persistence is needed and vector storage
+ * should not be eagerly constructed (avoids opening files/handles).
+ */
+export async function resolvePersistenceAdapter(
+  configuration: StorageBackendConfiguration,
+): Promise<SessionPersistenceAdapter> {
+  switch (configuration.type) {
+    case 'memory': {
+      const { createInMemoryPersistenceAdapter } = await import('conversationalist');
+      return createInMemoryPersistenceAdapter();
+    }
+    case 'sqlite': {
+      const { createSQLitePersistenceAdapter } = await import('conversationalist');
+      return createSQLitePersistenceAdapter({ path: configuration.path });
+    }
+  }
+}

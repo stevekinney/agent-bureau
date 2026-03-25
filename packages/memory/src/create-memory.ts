@@ -254,7 +254,7 @@ export function createMemory(options: CreateMemoryOptions): Memory {
 
       // Apply MMR for diversity if configured
       if (mergedOptions.diversify) {
-        results = applyMaximalMarginalRelevance(results, queryVector, limit, {
+        results = applyMaximalMarginalRelevance(results, limit, {
           lambda: mergedOptions.diversify.lambda,
         });
       }
