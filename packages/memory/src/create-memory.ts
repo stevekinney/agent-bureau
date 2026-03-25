@@ -422,7 +422,9 @@ export function createMemory(options: CreateMemoryOptions): Memory {
       // Cascade: clear embedding cache entries for this namespace if the
       // embedder supports namespace-scoped eviction.
       if ('clearNamespace' in embedder && typeof embedder.clearNamespace === 'function') {
-        (embedder as { clearNamespace: (ns: string) => void }).clearNamespace(targetNamespace);
+        await (embedder as { clearNamespace: (ns: string) => void | Promise<void> }).clearNamespace(
+          targetNamespace,
+        );
       }
     },
 
