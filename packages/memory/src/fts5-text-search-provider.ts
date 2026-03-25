@@ -34,8 +34,8 @@ function bm25RankToScore(rank: number): number {
 /**
  * Builds an FTS5 MATCH query from raw text.
  *
- * Extracts keywords and joins them with OR. Falls back to the original
- * query (quoted) if no keywords are extracted.
+ * Extracts keywords and joins them with OR. Falls back to individual
+ * term matching (OR) if no keywords are extracted.
  */
 function buildFtsQuery(raw: string): string | null {
   const trimmed = raw.trim();
@@ -47,8 +47,13 @@ function buildFtsQuery(raw: string): string | null {
     return keywords.map((k) => `"${k}"`).join(' OR ');
   }
 
-  // Fall back to a quoted phrase match.
-  return `"${trimmed}"`;
+  // Fall back to individual term matching (OR) to align with the in-memory
+  // BM25 fallback, which tokenizes the raw query and matches any term.
+  const terms = trimmed
+    .split(/\s+/)
+    .filter((t) => t.length > 0)
+    .map((t) => `"${t}"`);
+  return terms.length > 0 ? terms.join(' OR ') : `"${trimmed}"`;
 }
 
 /**
