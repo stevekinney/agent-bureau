@@ -55,18 +55,18 @@ const DEFAULT_SYSTEM_PROMPT = [
 export function withHyDE(memory: Memory, options: HyDEOptions): Memory {
   const { generateHypothetical, augmentTextSearch = true } = options;
 
-  return {
-    ...memory,
+  const wrapped: Memory = Object.create(memory) as Memory;
 
-    async recall(
-      query: string,
-      searchOptions?: MemorySearchOptions,
-    ): Promise<MemorySearchResult[]> {
-      const hypothetical = await generateHypothetical(query);
-      const searchQuery = augmentTextSearch ? `${hypothetical}\n${query}` : hypothetical;
-      return memory.recall(searchQuery, searchOptions);
-    },
+  wrapped.recall = async (
+    query: string,
+    searchOptions?: MemorySearchOptions,
+  ): Promise<MemorySearchResult[]> => {
+    const hypothetical = await generateHypothetical(query);
+    const searchQuery = augmentTextSearch ? `${hypothetical}\n${query}` : hypothetical;
+    return memory.recall(searchQuery, searchOptions);
   };
+
+  return wrapped;
 }
 
 /**

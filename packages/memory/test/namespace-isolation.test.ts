@@ -155,7 +155,7 @@ describe('withNamespaceIsolation', () => {
       await baseMemory.remember('Entry B', { namespace: 'tenant-b' });
 
       // Pass a different namespace — should be ignored
-      await tenantA.forgetAll('tenant-b' as unknown as undefined);
+      await tenantA.forgetAll('tenant-b');
 
       // tenant-a should be cleared, tenant-b untouched
       const countA = await baseMemory.count('tenant-a');
@@ -185,7 +185,7 @@ describe('withNamespaceIsolation', () => {
       const tenantA = withNamespaceIsolation(baseMemory, { namespace: 'tenant-a' });
 
       // Pass a different namespace — should be ignored
-      const count = await tenantA.count('tenant-b' as unknown as undefined);
+      const count = await tenantA.count('tenant-b');
       expect(count).toBe(1);
     });
   });
