@@ -910,9 +910,13 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
               eventProps[key] = (toolEvent as unknown as Record<string, unknown>)[key];
             }
           }
-          // Bubble up the event with tool and call context
+          // Bubble up the event with tool and call context.
+          // Include callId and name so that remapped events (e.g. status-update → status:update)
+          // carry the identity fields that the toolbox-level Event class expects.
           const bubbledDetail = {
             ...eventProps,
+            callId: toolCall.id,
+            name: toolCall.name,
             tool,
             call: toolCall,
           };
