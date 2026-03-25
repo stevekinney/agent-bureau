@@ -5,6 +5,8 @@ export type { CreateSQLiteMemoryOptions } from './create-sqlite-memory';
 export { createSQLiteMemory, SQLiteStorageAdapter } from './create-sqlite-memory';
 export type { CachedEmbedder, EmbeddingCacheOptions } from './embedding-cache';
 export { withEmbeddingCache } from './embedding-cache';
+export type { RunCaptureHookOptions, StepResultLike } from './experiential';
+export { createRunCaptureHook, summarizeRun } from './experiential';
 export type {
   FileSynchronizer,
   FileSynchronizerOptions,
@@ -22,11 +24,16 @@ export type {
   VectorSearchResult,
 } from './hybrid-search';
 export { mergeHybridResults } from './hybrid-search';
+export type { CreateHyDEGeneratorOptions, HyDEOptions, HypotheticalAnswerGenerator } from './hyde';
+export { createHyDEGenerator, withHyDE } from './hyde';
 export type { IngestOptions, IngestResult } from './ingest';
 export { CHUNK_INDEX_KEY, ingest, SOURCE_DOCUMENT_KEY } from './ingest';
 export type { MaximalMarginalRelevanceOptions } from './maximal-marginal-relevance';
 export { applyMaximalMarginalRelevance, cosineSimilarity } from './maximal-marginal-relevance';
+export { withNamespaceIsolation } from './namespace-isolation';
 export { extractKeywords, isStopWord } from './query-expansion';
+export type { CreateReflectionHookOptions } from './reflection';
+export { createReflectionHook } from './reflection';
 export type { MemoryStatus } from './status';
 export { getMemoryStatus } from './status';
 export type { TemporalDecayOptions } from './temporal-decay';
@@ -36,6 +43,7 @@ export { computeBM25Scores, tokenize } from './text-search';
 export type { TextSearchProvider } from './text-search-provider';
 export { createMemoryForgetTool, createMemoryRecallTool, createMemoryStoreTool } from './tools';
 export type {
+  ConflictDetectionOptions,
   CreateMemoryOptions,
   Embedder,
   EmbeddingVector,
@@ -44,4 +52,6 @@ export type {
   MemoryMetadata,
   MemorySearchOptions,
   MemorySearchResult,
+  NamespaceIsolationOptions,
+  OnConflictHandler,
 } from './types';

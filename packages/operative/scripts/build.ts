@@ -21,6 +21,8 @@ const entrypoints = [
   './src/cost-budget-monitor.ts',
   './src/agent-session.ts',
   './src/backpressure.ts',
+  './src/create-context-compactor.ts',
+  './src/create-memory-bridge.ts',
   './src/conditions/index.ts',
   './src/conditions/predicates.ts',
   './src/instrumentation/index.ts',

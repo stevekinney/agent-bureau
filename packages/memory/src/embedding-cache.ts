@@ -7,6 +7,12 @@ export interface EmbeddingCacheOptions {
   maximumEntries?: number;
   /** Custom hash function. Default: SHA-256 hex via Web Crypto. */
   hash?: (text: string) => string | Promise<string>;
+  /**
+   * When set, all cache keys are prefixed with this namespace.
+   * This provides true tenant isolation — the same text in different
+   * namespaces produces different cache keys.
+   */
+  namespace?: string;
 }
 
 export type CachedEmbedder = Embedder & {
@@ -14,6 +20,11 @@ export type CachedEmbedder = Embedder & {
   cache: ReadonlyMap<string, EmbeddingVector>;
   /** Clear all cached entries. */
   clearCache(): void;
+  /**
+   * Evict all cache entries associated with a specific namespace.
+   * Only meaningful when cache entries were created with a namespace prefix.
+   */
+  clearNamespace(namespace: string): void;
 };
 
 const DEFAULT_MAXIMUM_ENTRIES = 10_000;
@@ -23,6 +34,10 @@ const DEFAULT_MAXIMUM_ENTRIES = 10_000;
  *
  * Cached entries are looked up before calling the wrapped embedder, and only
  * cache misses are forwarded. Results are reassembled in the original order.
+ *
+ * When `namespace` is set in options, cache keys include the namespace prefix
+ * for tenant isolation. Use `clearNamespace()` to evict entries for a
+ * specific namespace without affecting others.
  */
 export function withEmbeddingCache(
   embedder: Embedder,
@@ -30,9 +45,23 @@ export function withEmbeddingCache(
 ): CachedEmbedder {
   const maximumEntries = options?.maximumEntries ?? DEFAULT_MAXIMUM_ENTRIES;
   const hashFunction = options?.hash ?? sha256Hex;
+  const defaultNamespace = options?.namespace;
 
   // Map preserves insertion order — we use this for LRU eviction.
   const cache = new Map<string, EmbeddingVector>();
+
+  // Secondary index: namespace → set of cache keys, for O(1) namespace eviction.
+  const namespaceKeys = new Map<string, Set<string>>();
+
+  function trackNamespaceKey(namespace: string | undefined, key: string): void {
+    if (namespace === undefined) return;
+    let keys = namespaceKeys.get(namespace);
+    if (!keys) {
+      keys = new Set();
+      namespaceKeys.set(namespace, keys);
+    }
+    keys.add(key);
+  }
 
   function evictIfNeeded(): void {
     while (cache.size > maximumEntries) {
@@ -47,12 +76,19 @@ export function withEmbeddingCache(
     cache.set(key, value);
   }
 
+  async function computeKey(text: string): Promise<string> {
+    if (defaultNamespace !== undefined) {
+      return hashFunction(`${defaultNamespace}:${text}`);
+    }
+    return hashFunction(text);
+  }
+
   const cachedEmbedder: CachedEmbedder = Object.assign(
     async (texts: string[]): Promise<EmbeddingVector[]> => {
       if (texts.length === 0) return [];
 
       // Hash all inputs.
-      const hashes = await Promise.all(texts.map(async (text) => hashFunction(text)));
+      const hashes = await Promise.all(texts.map(async (text) => computeKey(text)));
 
       // Partition into hits and misses, tracking original indices.
       const results: (EmbeddingVector | undefined)[] = new Array<EmbeddingVector | undefined>(
@@ -81,6 +117,7 @@ export function withEmbeddingCache(
           const vector = freshVectors[j]!;
           const hash = hashes[originalIndex]!;
           cache.set(hash, vector);
+          trackNamespaceKey(defaultNamespace, hash);
           results[originalIndex] = vector;
         }
         evictIfNeeded();
@@ -90,8 +127,19 @@ export function withEmbeddingCache(
     },
     {
       cache: cache as ReadonlyMap<string, EmbeddingVector>,
+
       clearCache(): void {
         cache.clear();
+        namespaceKeys.clear();
+      },
+
+      clearNamespace(namespace: string): void {
+        const keys = namespaceKeys.get(namespace);
+        if (!keys) return;
+        for (const key of keys) {
+          cache.delete(key);
+        }
+        namespaceKeys.delete(namespace);
       },
     },
   );

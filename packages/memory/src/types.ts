@@ -13,7 +13,7 @@ export interface MemoryEntry {
 
 export interface MemoryMetadata {
   namespace: string;
-  source: 'auto-capture' | 'tool' | 'manual';
+  source: 'auto-capture' | 'tool' | 'manual' | 'experiential';
   conversationId?: string;
   agentId?: string;
   importance?: number;
@@ -51,6 +51,25 @@ export interface Memory {
   close(): Promise<void>;
 }
 
+/**
+ * Handler called when a conflicting entry is detected during `remember()`.
+ * Returns an instruction for how to handle the conflict.
+ */
+export type OnConflictHandler = (
+  incoming: { content: string; metadata: Partial<MemoryMetadata> },
+  existing: { id: string; content: string; metadata: MemoryMetadata; similarity: number },
+) => Promise<'keep-both' | 'replace' | 'skip'> | 'keep-both' | 'replace' | 'skip';
+
+/**
+ * Options for conflict detection during `remember()`. When `conflictThreshold`
+ * is set, entries with cosine similarity between `conflictThreshold` and
+ * `deduplicationThreshold` are treated as topical conflicts.
+ */
+export interface ConflictDetectionOptions {
+  conflictThreshold?: number;
+  onConflict?: OnConflictHandler;
+}
+
 export interface CreateMemoryOptions {
   embedder: Embedder;
   storage: import('vector-frankl').StorageAdapter;
@@ -60,4 +79,35 @@ export interface CreateMemoryOptions {
   deduplicationThreshold?: number;
   /** Optional text search provider for database-level keyword search (e.g., FTS5). */
   textSearchProvider?: import('./text-search-provider').TextSearchProvider;
+  /**
+   * When true, `remember()` throws if no namespace is provided in metadata
+   * and no default namespace was configured. Prevents orphaned entries that
+   * exist in storage but are invisible to namespace-scoped queries.
+   */
+  requireNamespace?: boolean;
+  /**
+   * Cosine similarity threshold for conflict detection. Entries with similarity
+   * between `conflictThreshold` and `deduplicationThreshold` are treated as
+   * topical conflicts. When undefined, conflict detection is disabled.
+   */
+  conflictThreshold?: number;
+  /**
+   * Handler called when a conflicting entry is detected. If not provided,
+   * conflicting entries default to `'keep-both'`.
+   */
+  onConflict?: OnConflictHandler;
+}
+
+/**
+ * Options for the `withNamespaceIsolation` wrapper that enforces strict
+ * tenant boundaries on a Memory instance.
+ */
+export interface NamespaceIsolationOptions {
+  /** The tenant's namespace — all operations are locked to this value. */
+  namespace: string;
+  /**
+   * Behavior when `forget()` targets an entry not known to belong to this
+   * namespace. Default: `'throw'`.
+   */
+  onUnauthorized?: 'throw' | 'ignore';
 }

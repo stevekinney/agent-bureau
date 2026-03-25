@@ -44,6 +44,7 @@ bun run clean             # Clean build artifacts (dist/, coverage/)
 - `src/run.ts` — `run()` fire-and-forget entry point (no events)
 - `src/create-run.ts` — `createRun()` with event emission + abort()
 - `src/streaming.ts` — `withStreaming()` helper
+- `src/create-context-compactor.ts` — Reusable `onCompact` factory for context window management
 - `src/conditions/` — Composable stop condition predicates
 - `src/test/` — Test utilities (createMockGenerate, createRunRecorder)
 
