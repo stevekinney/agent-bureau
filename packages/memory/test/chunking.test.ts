@@ -107,6 +107,23 @@ describe('chunkMarkdown', () => {
     }
   });
 
+  it('does not infinite-loop when maximumTokens is zero', () => {
+    const content = 'Hello world\nSecond line';
+    const chunks = chunkMarkdown(content, { maximumTokens: 0 });
+
+    // maximumTokens is clamped to 1, so chunking should still terminate and produce output.
+    expect(chunks.length).toBeGreaterThan(0);
+    const reassembled = chunks.map((c) => c.text).join('');
+    expect(reassembled).toContain('Hello');
+  });
+
+  it('does not infinite-loop when maximumTokens is negative', () => {
+    const content = 'Some content here';
+    const chunks = chunkMarkdown(content, { maximumTokens: -5 });
+
+    expect(chunks.length).toBeGreaterThan(0);
+  });
+
   it('produces a single chunk when content fits within the limit', () => {
     const content = 'Short content\nwith a few lines\nthat fits easily.';
     const chunks = chunkMarkdown(content);
