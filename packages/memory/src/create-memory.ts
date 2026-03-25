@@ -297,18 +297,24 @@ export function createMemory(options: CreateMemoryOptions): Memory {
       }
 
       // Deduplicate chunks from the same source document, keeping the highest score.
-      const seenSources = new Map<string, number>();
+      // After temporal decay and MMR, results may not be sorted by score, so we
+      // compare scores explicitly rather than assuming first-seen is best.
+      const seenSources = new Map<string, { index: number; score: number }>();
+      for (let i = 0; i < results.length; i++) {
+        const result = results[i]!;
+        const sourceDocument = result.metadata[SOURCE_DOCUMENT_KEY] as string | undefined;
+        if (!sourceDocument) continue;
+
+        const existing = seenSources.get(sourceDocument);
+        if (existing === undefined || result.score > existing.score) {
+          seenSources.set(sourceDocument, { index: i, score: result.score });
+        }
+      }
+      const keptIndices = new Set(Array.from(seenSources.values()).map((entry) => entry.index));
       results = results.filter((result, index) => {
         const sourceDocument = result.metadata[SOURCE_DOCUMENT_KEY] as string | undefined;
         if (!sourceDocument) return true;
-
-        const existingIndex = seenSources.get(sourceDocument);
-        if (existingIndex === undefined) {
-          seenSources.set(sourceDocument, index);
-          return true;
-        }
-        // Keep the one with the higher score (earlier in the already-sorted array).
-        return false;
+        return keptIndices.has(index);
       });
 
       // Final limit and strip vectors from output

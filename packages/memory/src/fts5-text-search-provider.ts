@@ -62,10 +62,25 @@ function buildFtsQuery(raw: string): string | null {
  * Opens its own `bun:sqlite` connection to the given database file.
  * This is safe with WAL mode when sharing a file with SQLiteStorageAdapter.
  */
+/**
+ * Validates that a SQLite identifier contains only safe characters
+ * (alphanumeric and underscores) to prevent SQL injection when
+ * interpolating table names into queries.
+ */
+function validateSQLiteIdentifier(name: string): string {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+    throw new Error(
+      `Invalid SQLite identifier "${name}": must start with a letter or underscore and contain only alphanumeric characters and underscores.`,
+    );
+  }
+  return name;
+}
+
 export function createFts5TextSearchProvider(
   options: Fts5TextSearchProviderOptions,
 ): TextSearchProvider {
-  const { filename, tableName = 'memory_fts' } = options;
+  const { filename, tableName: rawTableName = 'memory_fts' } = options;
+  const tableName = validateSQLiteIdentifier(rawTableName);
   let database: BunSQLiteDatabase | null = null;
 
   return {
