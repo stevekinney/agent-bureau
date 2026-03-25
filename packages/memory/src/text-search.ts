@@ -87,7 +87,7 @@ export function tokenize(text: string): string[] {
 /**
  * Pushes character unigrams and overlapping bigrams for a CJK run.
  */
-function expandCJKUnigrams(run: string, tokens: string[]): void {
+export function expandCJKUnigrams(run: string, tokens: string[]): void {
   for (let i = 0; i < run.length; i++) {
     tokens.push(run[i]!);
   }
