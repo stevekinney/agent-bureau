@@ -2,7 +2,9 @@ import type { VectorData } from 'vector-frankl';
 
 import type { HybridSearchCandidate, VectorSearchResult } from './hybrid-search';
 import { mergeHybridResults } from './hybrid-search';
+import { SOURCE_DOCUMENT_KEY } from './ingest';
 import { applyMaximalMarginalRelevance, cosineSimilarity } from './maximal-marginal-relevance';
+import { extractKeywords } from './query-expansion';
 import { applyTemporalDecay } from './temporal-decay';
 import { computeBM25Scores } from './text-search';
 import type {
@@ -35,7 +37,12 @@ function parseMemoryMetadata(
   raw: Record<string, unknown>,
   fallbackNamespace: string,
 ): MemoryMetadata {
+  // Preserve arbitrary extension keys (like __sourceDocument, __chunkIndex)
+  // while extracting known fields with proper types.
+  const { [METADATA_CONTENT_KEY]: _content, [METADATA_NAMESPACE_KEY]: _ns, ...rest } = raw;
+
   return {
+    ...rest,
     namespace: (raw[METADATA_NAMESPACE_KEY] as string) ?? fallbackNamespace,
     source: (raw['source'] as MemoryMetadata['source']) ?? 'manual',
     conversationId: raw['conversationId'] as string | undefined,
@@ -73,6 +80,7 @@ export function createMemory(options: CreateMemoryOptions): Memory {
     namespace: defaultNamespace = DEFAULT_NAMESPACE,
     defaultSearchOptions,
     deduplicationThreshold = DEFAULT_DEDUPLICATION_THRESHOLD,
+    textSearchProvider,
   } = options;
 
   async function embed(text: string): Promise<number[]> {
@@ -143,6 +151,10 @@ export function createMemory(options: CreateMemoryOptions): Memory {
           updateTimestamp: true,
         });
 
+        if (textSearchProvider) {
+          await textSearchProvider.index(duplicate.id, content, namespace);
+        }
+
         return {
           id: duplicate.id,
           content,
@@ -173,6 +185,10 @@ export function createMemory(options: CreateMemoryOptions): Memory {
       };
 
       await storage.put(vectorData);
+
+      if (textSearchProvider) {
+        await textSearchProvider.index(id, content, namespace);
+      }
 
       return {
         id,
@@ -217,9 +233,23 @@ export function createMemory(options: CreateMemoryOptions): Memory {
       const vectorResultLimit = limit * candidateMultiplier;
       const vectorResults = await vectorSearch(queryVector, namespace, vectorResultLimit);
 
-      // BM25 text search
-      const documents = candidates.map((candidate) => candidate.content);
-      const textScores = computeBM25Scores(query, documents);
+      // Text search — use provider if available, otherwise in-memory BM25.
+      let textScores: Map<number, number>;
+      if (textSearchProvider) {
+        const idScores = await textSearchProvider.search(query, namespace);
+        textScores = new Map<number, number>();
+        for (let i = 0; i < candidates.length; i++) {
+          const score = idScores.get(candidates[i]!.id);
+          if (score !== undefined) {
+            textScores.set(i, score);
+          }
+        }
+      } else {
+        const keywords = extractKeywords(query);
+        const bm25Query = keywords.length > 0 ? keywords.join(' ') : query;
+        const documents = candidates.map((candidate) => candidate.content);
+        textScores = computeBM25Scores(bm25Query, documents);
+      }
 
       // Merge hybrid results
       const hybridResults = mergeHybridResults(vectorResults, textScores, candidates, {
@@ -259,12 +289,30 @@ export function createMemory(options: CreateMemoryOptions): Memory {
         });
       }
 
+      // Deduplicate chunks from the same source document, keeping the highest score.
+      const seenSources = new Map<string, number>();
+      results = results.filter((result, index) => {
+        const sourceDocument = result.metadata[SOURCE_DOCUMENT_KEY] as string | undefined;
+        if (!sourceDocument) return true;
+
+        const existingIndex = seenSources.get(sourceDocument);
+        if (existingIndex === undefined) {
+          seenSources.set(sourceDocument, index);
+          return true;
+        }
+        // Keep the one with the higher score (earlier in the already-sorted array).
+        return false;
+      });
+
       // Final limit and strip vectors from output
       return results.slice(0, limit).map(({ vector: _vector, ...rest }) => rest);
     },
 
     async forget(id: string): Promise<void> {
       await storage.delete(id);
+      if (textSearchProvider) {
+        await textSearchProvider.remove(id);
+      }
     },
 
     async forgetAll(namespace?: string): Promise<void> {
@@ -273,6 +321,9 @@ export function createMemory(options: CreateMemoryOptions): Memory {
       const ids = entries.map((entry) => entry.id);
       if (ids.length > 0) {
         await storage.deleteMany(ids);
+      }
+      if (textSearchProvider) {
+        await textSearchProvider.clear(targetNamespace);
       }
     },
 
@@ -284,10 +335,16 @@ export function createMemory(options: CreateMemoryOptions): Memory {
 
     async init(): Promise<void> {
       await storage.init();
+      if (textSearchProvider) {
+        await textSearchProvider.init();
+      }
     },
 
     async close(): Promise<void> {
       await storage.close();
+      if (textSearchProvider) {
+        await textSearchProvider.close();
+      }
     },
   };
 

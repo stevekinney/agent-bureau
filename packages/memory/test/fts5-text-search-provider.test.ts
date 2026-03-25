@@ -1,0 +1,124 @@
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+
+import { createFts5TextSearchProvider } from '../src/fts5-text-search-provider';
+import type { TextSearchProvider } from '../src/text-search-provider';
+
+describe('createFts5TextSearchProvider', () => {
+  let provider: TextSearchProvider;
+
+  beforeEach(async () => {
+    provider = createFts5TextSearchProvider({ filename: ':memory:' });
+    await provider.init();
+  });
+
+  afterEach(async () => {
+    await provider.close();
+  });
+
+  it('indexes and searches for matching content', async () => {
+    await provider.index('1', 'database connection pooling', 'default');
+    await provider.index('2', 'authentication middleware setup', 'default');
+    await provider.index('3', 'database migration scripts', 'default');
+
+    const results = await provider.search('database', 'default');
+
+    expect(results.size).toBe(2);
+    expect(results.has('1')).toBe(true);
+    expect(results.has('3')).toBe(true);
+    expect(results.has('2')).toBe(false);
+  });
+
+  it('returns scores > 0 for matching content', async () => {
+    await provider.index('1', 'database connection pooling', 'default');
+
+    const results = await provider.search('database', 'default');
+
+    expect(results.get('1')).toBeGreaterThan(0);
+  });
+
+  it('returns empty results for non-matching queries', async () => {
+    await provider.index('1', 'database connection pooling', 'default');
+
+    const results = await provider.search('authentication', 'default');
+
+    expect(results.size).toBe(0);
+  });
+
+  it('scopes search results by namespace', async () => {
+    await provider.index('1', 'database pooling', 'ns-a');
+    await provider.index('2', 'database migration', 'ns-b');
+
+    const resultsA = await provider.search('database', 'ns-a');
+    const resultsB = await provider.search('database', 'ns-b');
+
+    expect(resultsA.size).toBe(1);
+    expect(resultsA.has('1')).toBe(true);
+
+    expect(resultsB.size).toBe(1);
+    expect(resultsB.has('2')).toBe(true);
+  });
+
+  it('removes an entry so it no longer appears in search', async () => {
+    await provider.index('1', 'database pooling', 'default');
+    await provider.index('2', 'database migration', 'default');
+
+    await provider.remove('1');
+
+    const results = await provider.search('database', 'default');
+    expect(results.size).toBe(1);
+    expect(results.has('2')).toBe(true);
+  });
+
+  it('clears all entries in a namespace', async () => {
+    await provider.index('1', 'database pooling', 'ns-a');
+    await provider.index('2', 'database migration', 'ns-a');
+    await provider.index('3', 'database sharding', 'ns-b');
+
+    await provider.clear('ns-a');
+
+    const resultsA = await provider.search('database', 'ns-a');
+    const resultsB = await provider.search('database', 'ns-b');
+
+    expect(resultsA.size).toBe(0);
+    expect(resultsB.size).toBe(1);
+  });
+
+  it('clears all entries when no namespace is specified', async () => {
+    await provider.index('1', 'database pooling', 'ns-a');
+    await provider.index('2', 'database migration', 'ns-b');
+
+    await provider.clear();
+
+    const resultsA = await provider.search('database', 'ns-a');
+    const resultsB = await provider.search('database', 'ns-b');
+    expect(resultsA.size).toBe(0);
+    expect(resultsB.size).toBe(0);
+  });
+
+  it('updates indexed content when index is called again with the same id', async () => {
+    await provider.index('1', 'old content about cats', 'default');
+    await provider.index('1', 'new content about database pooling', 'default');
+
+    const catResults = await provider.search('cats', 'default');
+    const dbResults = await provider.search('database', 'default');
+
+    expect(catResults.size).toBe(0);
+    expect(dbResults.size).toBe(1);
+  });
+
+  it('returns empty map for empty query', async () => {
+    await provider.index('1', 'database pooling', 'default');
+
+    const results = await provider.search('', 'default');
+    expect(results.size).toBe(0);
+  });
+
+  it('is idempotent on init', async () => {
+    // Calling init again should not throw or corrupt state.
+    await provider.init();
+
+    await provider.index('1', 'test content', 'default');
+    const results = await provider.search('test', 'default');
+    expect(results.size).toBe(1);
+  });
+});

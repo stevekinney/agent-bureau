@@ -58,4 +58,6 @@ export interface CreateMemoryOptions {
   dimension?: number;
   defaultSearchOptions?: Partial<MemorySearchOptions>;
   deduplicationThreshold?: number;
+  /** Optional text search provider for database-level keyword search (e.g., FTS5). */
+  textSearchProvider?: import('./text-search-provider').TextSearchProvider;
 }
