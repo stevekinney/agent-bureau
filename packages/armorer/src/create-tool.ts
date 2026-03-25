@@ -455,7 +455,11 @@ export function createTool<
     // For custom / unknown event types, dispatch a plain Event so listeners
     // that registered for arbitrary type strings still fire.
     const event = new Event(type);
-    Object.assign(event, detail);
+    if (detail !== null && detail !== undefined && typeof detail === 'object') {
+      Object.assign(event, detail);
+    } else if (detail !== undefined) {
+      Object.defineProperty(event, 'detail', { value: detail, enumerable: true });
+    }
     return emitter.dispatchEvent(event);
   };
 

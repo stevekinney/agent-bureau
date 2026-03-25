@@ -23,8 +23,12 @@ const serverResult = await Bun.build({
     'herald',
     'armorer',
     'conversationalist',
-    'event-emission',
-    'event-emission/*',
+    'lifecycle',
+    'lifecycle/*',
+    'memory',
+    'memory/*',
+    'vector-frankl',
+    'vector-frankl/*',
   ],
 });
 
