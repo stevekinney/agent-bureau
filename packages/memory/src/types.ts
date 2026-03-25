@@ -60,16 +60,6 @@ export type OnConflictHandler = (
   existing: { id: string; content: string; metadata: MemoryMetadata; similarity: number },
 ) => Promise<'keep-both' | 'replace' | 'skip'> | 'keep-both' | 'replace' | 'skip';
 
-/**
- * Options for conflict detection during `remember()`. When `conflictThreshold`
- * is set, entries with cosine similarity between `conflictThreshold` and
- * `deduplicationThreshold` are treated as topical conflicts.
- */
-export interface ConflictDetectionOptions {
-  conflictThreshold?: number;
-  onConflict?: OnConflictHandler;
-}
-
 export interface CreateMemoryOptions {
   embedder: Embedder;
   storage: import('vector-frankl').StorageAdapter;

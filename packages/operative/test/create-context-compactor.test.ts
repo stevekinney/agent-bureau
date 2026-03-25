@@ -45,7 +45,7 @@ describe('createContextCompactor', () => {
 
   it('retains the specified number of recent turns', async () => {
     const summarize = mock(async () => 'Summary');
-    const compactor = createContextCompactor({ summarize, retainRecentTurns: 2 });
+    const compactor = createContextCompactor({ summarize, retainRecentMessages: 2 });
 
     const conversation = buildConversation(
       ['Turn 1 user', 'Turn 1 assistant'],
@@ -63,7 +63,7 @@ describe('createContextCompactor', () => {
     expect(nonSystem.length).toBe(2);
   });
 
-  it('uses the default retainRecentTurns of 4', async () => {
+  it('uses the default retainRecentMessages value of 4', async () => {
     const summarize = mock(async () => 'Summary');
     const compactor = createContextCompactor({ summarize });
 
@@ -141,9 +141,9 @@ describe('createContextCompactor', () => {
     expect(summaryMessage).toBeDefined();
   });
 
-  it('is a no-op when conversation has fewer messages than retainRecentTurns', async () => {
+  it('is a no-op when conversation has fewer messages than retainRecentMessages', async () => {
     const summarize = mock(async () => 'Summary');
-    const compactor = createContextCompactor({ summarize, retainRecentTurns: 10 });
+    const compactor = createContextCompactor({ summarize, retainRecentMessages: 10 });
 
     const conversation = buildConversation(
       ['Short turn', 'Short response'],

@@ -8,22 +8,24 @@ import type {
 } from './types';
 
 /**
- * Wraps a Memory instance with strict namespace isolation.
+ * Wraps a Memory instance with namespace-scoped access.
  *
- * The returned Memory locks all operations to a single configured namespace.
- * This is the wrapper you hand to a specific tenant's agent — it cannot
- * escape its namespace.
+ * The returned Memory locks all write/search operations to a single configured
+ * namespace when going through this wrapper.
  *
  * - `remember()` forces the namespace, ignoring the caller's metadata.
  * - `recall()` forces the namespace, ignoring search options.
- * - `forget()` verifies the entry belongs to this namespace before deleting.
+ * - `forget()` only allows deleting entries whose IDs were previously seen
+ *   via this wrapper (through `remember()` or `recall()`); it does not
+ *   independently re-verify the underlying namespace before deletion.
  * - `forgetAll()` and `count()` are scoped to the configured namespace.
  */
 export function withNamespaceIsolation(memory: Memory, options: NamespaceIsolationOptions): Memory {
   const { namespace, onUnauthorized = 'throw' } = options;
 
-  // Track IDs known to belong to this namespace, populated from remember()
-  // and recall() results. Used by forget() to verify ownership.
+  // Track IDs seen via this wrapper (from remember() and recall() results).
+  // Used by forget() to ensure it only deletes entries previously observed
+  // through this namespace-isolated view.
   const knownIds = new Set<string>();
 
   return {

@@ -43,7 +43,6 @@ export { computeBM25Scores, tokenize } from './text-search';
 export type { TextSearchProvider } from './text-search-provider';
 export { createMemoryForgetTool, createMemoryRecallTool, createMemoryStoreTool } from './tools';
 export type {
-  ConflictDetectionOptions,
   CreateMemoryOptions,
   Embedder,
   EmbeddingVector,

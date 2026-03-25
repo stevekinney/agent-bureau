@@ -17,7 +17,7 @@ export interface CreateContextCompactorOptions {
    * therefore a message-count setting, not a user/assistant turn-pair count.
    * Default: `4`.
    */
-  retainRecentTurns?: number;
+  retainRecentMessages?: number;
   /**
    * Text prepended to the summary when injected as a system message.
    * Default: `'Previous conversation summary:'`.
@@ -36,7 +36,7 @@ export interface CreateContextCompactorOptions {
  * ```ts
  * const compactor = createContextCompactor({
  *   summarize: async (messages) => callLLM(messages),
- *   retainRecentTurns: 6,
+ *   retainRecentMessages: 6,
  * });
  *
  * await run({
@@ -52,7 +52,7 @@ export function createContextCompactor(
 ): (conversation: Conversation, context: StepContext) => Promise<void> {
   const {
     summarize,
-    retainRecentTurns = 4,
+    retainRecentMessages = 4,
     summaryPrefix = 'Previous conversation summary:',
   } = options;
 
@@ -65,7 +65,7 @@ export function createContextCompactor(
 
   return async (conversation: Conversation, _context: StepContext): Promise<void> => {
     await conversation.compact(summarizer, {
-      preserveRecentCount: retainRecentTurns,
+      preserveRecentCount: retainRecentMessages,
     });
   };
 }

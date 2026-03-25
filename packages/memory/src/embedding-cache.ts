@@ -52,6 +52,8 @@ export function withEmbeddingCache(
 
   // Secondary index: namespace → set of cache keys, for O(1) namespace eviction.
   const namespaceKeys = new Map<string, Set<string>>();
+  // Reverse index: cache key → namespace, for O(1) eviction cleanup.
+  const keyToNamespace = new Map<string, string>();
 
   function trackNamespaceKey(namespace: string | undefined, key: string): void {
     if (namespace === undefined) return;
@@ -61,11 +63,19 @@ export function withEmbeddingCache(
       namespaceKeys.set(namespace, keys);
     }
     keys.add(key);
+    keyToNamespace.set(key, namespace);
   }
 
   function removeFromNamespaceIndex(key: string): void {
-    for (const keys of namespaceKeys.values()) {
-      if (keys.delete(key)) break; // each key belongs to at most one namespace
+    const namespace = keyToNamespace.get(key);
+    if (namespace === undefined) return;
+    keyToNamespace.delete(key);
+    const keys = namespaceKeys.get(namespace);
+    if (keys) {
+      keys.delete(key);
+      if (keys.size === 0) {
+        namespaceKeys.delete(namespace);
+      }
     }
   }
 
@@ -85,7 +95,8 @@ export function withEmbeddingCache(
 
   async function computeKey(text: string): Promise<string> {
     if (defaultNamespace !== undefined) {
-      return hashFunction(`${defaultNamespace}:${text}`);
+      // Use unambiguous structured encoding to avoid collisions when namespace or text contain ':'.
+      return hashFunction(JSON.stringify([defaultNamespace, text]));
     }
     return hashFunction(text);
   }
@@ -138,6 +149,7 @@ export function withEmbeddingCache(
       clearCache(): void {
         cache.clear();
         namespaceKeys.clear();
+        keyToNamespace.clear();
       },
 
       clearNamespace(namespace: string): void {
@@ -145,6 +157,7 @@ export function withEmbeddingCache(
         if (!keys) return;
         for (const key of keys) {
           cache.delete(key);
+          keyToNamespace.delete(key);
         }
         namespaceKeys.delete(namespace);
       },
