@@ -88,10 +88,14 @@ export function chunkMarkdown(content: string, options?: ChunkingOptions): Conte
         const segment = line.slice(offset, offset + maximumCharacters);
         chunkStartLine = lineIndex;
         currentLines = [segment];
-        currentCharacters = segment.length;
         flushChunk(lineIndex);
         offset += maximumCharacters;
       }
+
+      // Clear residual overlap so the final flush does not re-emit the last segment.
+      currentLines = [];
+      currentCharacters = 0;
+      chunkStartLine = lineIndex + 1;
       continue;
     }
 

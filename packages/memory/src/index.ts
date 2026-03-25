@@ -1,6 +1,6 @@
 export type { ChunkingOptions, ContentChunk } from './chunking';
 export { chunkMarkdown } from './chunking';
-export { createMemory } from './create-memory';
+export { createMemory, METADATA_NAMESPACE_KEY } from './create-memory';
 export type { CreateSQLiteMemoryOptions } from './create-sqlite-memory';
 export { createSQLiteMemory, SQLiteStorageAdapter } from './create-sqlite-memory';
 export type { CachedEmbedder, EmbeddingCacheOptions } from './embedding-cache';

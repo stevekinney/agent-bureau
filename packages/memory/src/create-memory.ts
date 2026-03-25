@@ -19,7 +19,7 @@ import type {
 const DEFAULT_DEDUPLICATION_THRESHOLD = 0.95;
 const DEFAULT_NAMESPACE = 'default';
 const METADATA_CONTENT_KEY = '__memory_content';
-const METADATA_NAMESPACE_KEY = '__memory_namespace';
+export const METADATA_NAMESPACE_KEY = '__memory_namespace';
 
 function generateId(): string {
   return crypto.randomUUID();

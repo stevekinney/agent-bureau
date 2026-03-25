@@ -1,5 +1,6 @@
 import type { StorageAdapter } from 'vector-frankl';
 
+import { METADATA_NAMESPACE_KEY } from './create-memory';
 import type { CachedEmbedder } from './embedding-cache';
 
 export interface MemoryStatus {
@@ -8,8 +9,6 @@ export interface MemoryStatus {
   storageType: string;
   embeddingCacheSize?: number;
 }
-
-const METADATA_NAMESPACE_KEY = '__memory_namespace';
 
 /**
  * Gathers status information about a memory instance.
