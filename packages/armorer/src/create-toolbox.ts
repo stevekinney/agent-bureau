@@ -893,6 +893,14 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
         'cancelled',
         'status-update',
       ];
+
+      // Tool events and toolbox events use different naming conventions in some cases.
+      // Map tool-level event types to toolbox-level event types where they differ.
+      const toolToToolboxEventType: Partial<Record<keyof DefaultToolEvents, keyof ToolboxEvents>> =
+        {
+          'status-update': 'status:update',
+        };
+
       for (const eventType of toolEventTypes) {
         const unsubscribe = tool.addEventListener(eventType, (toolEvent: Event) => {
           // Extract event properties (excluding standard Event fields)
@@ -908,9 +916,11 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
             tool,
             call: toolCall,
           };
+          // Resolve the toolbox-level event type (may differ from the tool-level name)
+          const toolboxEventType = toolToToolboxEventType[eventType] ?? eventType;
           // Use emit helper which handles the type conversion
           emit(
-            eventType as keyof ToolboxEvents,
+            toolboxEventType as keyof ToolboxEvents,
             bubbledDetail as ToolboxEvents[keyof ToolboxEvents],
           );
         });
