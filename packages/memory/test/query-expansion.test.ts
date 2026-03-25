@@ -46,14 +46,19 @@ describe('extractKeywords', () => {
     expect(keywords).not.toContain('the');
   });
 
-  it('removes short English words (< 3 characters)', () => {
+  it('removes single-character English tokens but preserves 2-character abbreviations', () => {
     const keywords = extractKeywords('go to db for an ok fix');
 
-    expect(keywords).not.toContain('go');
+    // 2-character tokens like "go", "db", "ok" are preserved because they
+    // may represent meaningful technical abbreviations (e.g., "db", "AI", "UI").
+    expect(keywords).toContain('go');
+    expect(keywords).toContain('db');
+    expect(keywords).toContain('ok');
+    expect(keywords).toContain('fix');
+    // "to", "an", and "for" are still removed as stop words.
     expect(keywords).not.toContain('to');
     expect(keywords).not.toContain('an');
-    expect(keywords).not.toContain('ok');
-    expect(keywords).toContain('fix');
+    expect(keywords).not.toContain('for');
   });
 
   it('removes pure numbers', () => {

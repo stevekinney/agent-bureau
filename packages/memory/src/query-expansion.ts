@@ -551,8 +551,10 @@ export function isStopWord(token: string): boolean {
 
 function isValidKeyword(token: string): boolean {
   if (!token || token.length === 0) return false;
-  // Short English-only words are likely stop words or fragments.
-  if (/^[a-zA-Z]+$/.test(token) && token.length < 3) return false;
+  // Single-character English tokens are likely stop words or fragments.
+  // Two-character tokens (e.g., "db", "AI", "UI", "ML", "OS") are preserved
+  // because they often represent meaningful technical abbreviations.
+  if (/^[a-zA-Z]+$/.test(token) && token.length < 2) return false;
   // Pure numbers are not useful for semantic search.
   if (/^\d+$/.test(token)) return false;
   // All-punctuation tokens are not useful.
