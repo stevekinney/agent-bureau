@@ -113,6 +113,39 @@ describe('createFts5TextSearchProvider', () => {
     expect(results.size).toBe(0);
   });
 
+  it('handles queries containing double quotes without error', async () => {
+    await provider.index('1', 'database connection pooling', 'default');
+
+    // A query like `is "the"` where all tokens are stop words triggers the
+    // fallback path. Previously, the embedded double quotes produced malformed
+    // FTS5 MATCH syntax (e.g. `""the""`).
+    const results = await provider.search('is "the"', 'default');
+
+    // Should not throw — returns either matches or an empty map.
+    expect(results).toBeInstanceOf(Map);
+  });
+
+  it('returns results for fallback query terms after stripping quotes', async () => {
+    await provider.index('1', 'database connection pooling', 'default');
+    await provider.index('2', 'authentication middleware', 'default');
+
+    // The word "database" is inside quotes in the raw query. After stripping
+    // quotes and falling back to term matching, it should still match.
+    const results = await provider.search('"database"', 'default');
+
+    expect(results.size).toBeGreaterThanOrEqual(1);
+    expect(results.has('1')).toBe(true);
+  });
+
+  it('returns empty map for a query that is only double quotes', async () => {
+    await provider.index('1', 'database connection pooling', 'default');
+
+    const results = await provider.search('"""', 'default');
+
+    expect(results).toBeInstanceOf(Map);
+    expect(results.size).toBe(0);
+  });
+
   it('is idempotent on init', async () => {
     // Calling init again should not throw or corrupt state.
     await provider.init();

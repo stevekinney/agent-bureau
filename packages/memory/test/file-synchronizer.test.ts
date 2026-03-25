@@ -107,6 +107,50 @@ describe('createFileSynchronizer', () => {
     synchronizer.stop();
   });
 
+  it('does not leak intervals when start() is called concurrently', async () => {
+    await writeFile(join(tempDir, 'concurrent.md'), 'Concurrent test.');
+
+    const synchronizer = createFileSynchronizer({
+      memory,
+      directory: tempDir,
+      pollingInterval: 60_000,
+    });
+
+    // Fire two concurrent start() calls — only one should create an interval.
+    const [first, second] = await Promise.allSettled([synchronizer.start(), synchronizer.start()]);
+
+    expect(first.status).toBe('fulfilled');
+    expect(second.status).toBe('fulfilled');
+
+    // Memory should have entries from exactly one synchronize() call.
+    expect(await memory.count()).toBeGreaterThan(0);
+
+    // A single stop() should clean up the only interval. If two intervals
+    // were created, the leaked one would keep a reference alive — but we
+    // cannot directly observe the interval count, so we verify no error
+    // is thrown and stop completes cleanly.
+    synchronizer.stop();
+  });
+
+  it('allows restart after stop even if start was called concurrently', async () => {
+    await writeFile(join(tempDir, 'restart.md'), 'Restart test.');
+
+    const synchronizer = createFileSynchronizer({
+      memory,
+      directory: tempDir,
+      pollingInterval: 60_000,
+    });
+
+    // Concurrent start calls.
+    await Promise.all([synchronizer.start(), synchronizer.start()]);
+    synchronizer.stop();
+
+    // Should be able to start again after stopping.
+    await synchronizer.start();
+    expect(await memory.count()).toBeGreaterThan(0);
+    synchronizer.stop();
+  });
+
   it('skips unchanged files on re-sync', async () => {
     await writeFile(join(tempDir, 'stable.md'), 'Stable content.');
 

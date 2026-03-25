@@ -49,11 +49,18 @@ function buildFtsQuery(raw: string): string | null {
 
   // Fall back to individual term matching (OR) to align with the in-memory
   // BM25 fallback, which tokenizes the raw query and matches any term.
+  // Strip double quotes to avoid producing malformed FTS5 MATCH syntax
+  // (e.g. a raw query `is "the"` would otherwise produce `""the""`).
   const terms = trimmed
     .split(/\s+/)
+    .map((t) => t.replace(/"/g, ''))
     .filter((t) => t.length > 0)
     .map((t) => `"${t}"`);
-  return terms.length > 0 ? terms.join(' OR ') : `"${trimmed}"`;
+  if (terms.length > 0) return terms.join(' OR ');
+
+  // Last resort: strip quotes from the entire input and wrap it.
+  const sanitized = trimmed.replace(/"/g, '');
+  return sanitized.length > 0 ? `"${sanitized}"` : null;
 }
 
 /**
