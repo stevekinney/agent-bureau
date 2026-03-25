@@ -465,7 +465,7 @@ const KO_TRAILING_PARTICLES = [
   '과',
   '도',
   '만',
-].toSorted((a, b) => b.length - a.length);
+].sort((a, b) => b.length - a.length);
 
 const STOP_WORDS_JA = new Set([
   'これ',
@@ -579,11 +579,18 @@ function tokenizeForKeywords(text: string): string[] {
         }
       }
     } else if (/[\u4e00-\u9fff]/.test(segment)) {
-      // Chinese — character unigrams + bigrams.
-      const characters = Array.from(segment).filter((c) => /[\u4e00-\u9fff]/.test(c));
-      tokens.push(...characters);
-      for (let i = 0; i < characters.length - 1; i++) {
-        tokens.push(characters[i]! + characters[i + 1]!);
+      // Chinese — split into Latin and CJK runs; generate CJK unigrams + bigrams.
+      const parts = segment.match(/[a-z0-9_]+|[\u4e00-\u9fff]+/g) ?? [];
+      for (const part of parts) {
+        if (/^[\u4e00-\u9fff]+$/.test(part)) {
+          const characters = Array.from(part);
+          tokens.push(...characters);
+          for (let i = 0; i < characters.length - 1; i++) {
+            tokens.push(characters[i]! + characters[i + 1]!);
+          }
+        } else {
+          tokens.push(part);
+        }
       }
     } else if (/[\uac00-\ud7af\u3131-\u3163]/.test(segment)) {
       // Korean — keep word, strip trailing particles.

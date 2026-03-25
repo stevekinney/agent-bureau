@@ -37,9 +37,39 @@ export function tokenize(text: string): string[] {
         }
       }
     } else if (/[\u4e00-\u9fff]/.test(word)) {
-      // Chinese: character unigrams + bigrams.
-      const characters = Array.from(word).filter((c) => /[\u4e00-\u9fff]/.test(c));
-      expandCJKUnigrams(characters.join(''), tokens);
+      // Chinese or mixed CJK with Latin: preserve Latin chunks and expand
+      // contiguous CJK runs into character unigrams + bigrams.
+      let cjkRun = '';
+      let latinRun = '';
+      const flushLatin = () => {
+        if (latinRun) {
+          tokens.push(latinRun);
+          latinRun = '';
+        }
+      };
+      const flushCJK = () => {
+        if (cjkRun) {
+          expandCJKUnigrams(cjkRun, tokens);
+          cjkRun = '';
+        }
+      };
+      for (const ch of Array.from(word)) {
+        if (/[\u4e00-\u9fff]/.test(ch)) {
+          // Part of a CJK run.
+          flushLatin();
+          cjkRun += ch;
+        } else if (/[a-z0-9_]/.test(ch)) {
+          // Part of a Latin/number run.
+          flushCJK();
+          latinRun += ch;
+        } else {
+          // Delimiter or other script: end any current runs.
+          flushLatin();
+          flushCJK();
+        }
+      }
+      flushLatin();
+      flushCJK();
     } else {
       tokens.push(word);
     }
