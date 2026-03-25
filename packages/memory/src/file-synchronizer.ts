@@ -84,6 +84,7 @@ export function createFileSynchronizer(options: FileSynchronizerOptions): FileSy
   const entryIdsBySource = new Map<string, string[]>();
 
   let intervalId: ReturnType<typeof setInterval> | null = null;
+  let synchronizing = false;
 
   async function synchronize(): Promise<SynchronizeResult> {
     const result: SynchronizeResult = { added: 0, updated: 0, removed: 0 };
@@ -166,9 +167,15 @@ export function createFileSynchronizer(options: FileSynchronizerOptions): FileSy
       if (intervalId) return;
       await synchronize();
       intervalId = setInterval(() => {
-        synchronize().catch(() => {
-          // Swallow errors during polling — will retry next interval.
-        });
+        if (synchronizing) return;
+        synchronizing = true;
+        void synchronize()
+          .catch(() => {
+            // Swallow errors during polling — will retry next interval.
+          })
+          .finally(() => {
+            synchronizing = false;
+          });
       }, pollingInterval);
     },
 
