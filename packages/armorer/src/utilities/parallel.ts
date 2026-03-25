@@ -203,7 +203,13 @@ export function parallel(...tools: AnyTool[]): AnyTool {
     dispatch: ToolContext<DefaultToolEvents>['dispatch'],
     type: string,
     detail: unknown,
-  ) => dispatch({ type, detail } as Parameters<typeof dispatch>[0]);
+  ) => {
+    const event = new Event(type);
+    if (detail && typeof detail === 'object') {
+      Object.assign(event, detail);
+    }
+    return dispatch(event);
+  };
 
   const runParallel = async (input: unknown, context: ToolContext<DefaultToolEvents>) => {
     const executeOptions =

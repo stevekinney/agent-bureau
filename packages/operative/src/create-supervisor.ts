@@ -1,8 +1,6 @@
-import type { AddEventListenerOptionsLike, EmissionEvent } from 'event-emission';
-import { createEventTarget } from 'event-emission';
-import type { ObservableLike, Observer, Subscription } from 'event-emission/types';
+import type { EventMap, ObservableLike, Observer, Subscription } from 'lifecycle';
+import { CompletableEventTarget } from 'lifecycle';
 
-import { bindEmitter } from './bind-emitter';
 import type { AgentRegistry, AgentRegistryEntry } from './create-agent-registry';
 import type { Scratchpad } from './create-scratchpad';
 import { createScratchpadReadTool, createScratchpadWriteTool } from './create-scratchpad';
@@ -25,15 +23,80 @@ export type RoutingStrategy = (task: string, agents: AgentRegistryEntry[]) => st
 
 export type SynthesisStrategy = (results: SupervisorTaskResult[]) => string | Promise<string>;
 
-export interface SupervisorEvents {
-  'task.routed': { task: string; agentNames: string[] };
-  'task.completed': { task: string; agentName: string; result: RunResult };
-  'task.failed': { task: string; agentName: string; error: unknown };
-  'synthesis.started': { task: string; results: SupervisorTaskResult[] };
-  'synthesis.completed': { task: string; synthesis: string };
+// ---------------------------------------------------------------------------
+// Supervisor event classes
+// ---------------------------------------------------------------------------
+
+export class TaskRoutedEvent extends Event {
+  static readonly type = 'task.routed' as const;
+  readonly task: string;
+  readonly agentNames: string[];
+  constructor(task: string, agentNames: string[]) {
+    super(TaskRoutedEvent.type);
+    this.task = task;
+    this.agentNames = agentNames;
+  }
 }
 
-export type SupervisorEventType = keyof SupervisorEvents;
+export class TaskCompletedEvent extends Event {
+  static readonly type = 'task.completed' as const;
+  readonly task: string;
+  readonly agentName: string;
+  readonly result: RunResult;
+  constructor(task: string, agentName: string, result: RunResult) {
+    super(TaskCompletedEvent.type);
+    this.task = task;
+    this.agentName = agentName;
+    this.result = result;
+  }
+}
+
+export class TaskFailedEvent extends Event {
+  static readonly type = 'task.failed' as const;
+  readonly task: string;
+  readonly agentName: string;
+  readonly error: unknown;
+  constructor(task: string, agentName: string, error: unknown) {
+    super(TaskFailedEvent.type);
+    this.task = task;
+    this.agentName = agentName;
+    this.error = error;
+  }
+}
+
+export class SynthesisStartedEvent extends Event {
+  static readonly type = 'synthesis.started' as const;
+  readonly task: string;
+  readonly results: SupervisorTaskResult[];
+  constructor(task: string, results: SupervisorTaskResult[]) {
+    super(SynthesisStartedEvent.type);
+    this.task = task;
+    this.results = results;
+  }
+}
+
+export class SynthesisCompletedEvent extends Event {
+  static readonly type = 'synthesis.completed' as const;
+  readonly task: string;
+  readonly synthesis: string;
+  constructor(task: string, synthesis: string) {
+    super(SynthesisCompletedEvent.type);
+    this.task = task;
+    this.synthesis = synthesis;
+  }
+}
+
+export interface SupervisorEventMap extends EventMap {
+  [TaskRoutedEvent.type]: TaskRoutedEvent;
+  [TaskCompletedEvent.type]: TaskCompletedEvent;
+  [TaskFailedEvent.type]: TaskFailedEvent;
+  [SynthesisStartedEvent.type]: SynthesisStartedEvent;
+  [SynthesisCompletedEvent.type]: SynthesisCompletedEvent;
+}
+
+export type SupervisorEvents = SupervisorEventMap;
+
+export type SupervisorEventType = keyof SupervisorEventMap;
 
 export interface CreateSupervisorOptions {
   agents: AgentRegistryEntry[] | AgentRegistry;
@@ -55,29 +118,26 @@ export interface Supervisor {
   pipeline(task: string, stages: PipelineStage[]): Promise<SupervisorResult>;
   addEventListener: <K extends SupervisorEventType>(
     type: K,
-    listener: (event: EmissionEvent<SupervisorEvents[K], K>) => void | Promise<void>,
-    options?: AddEventListenerOptionsLike,
-  ) => () => void;
-  on: <K extends SupervisorEventType>(
+    listener: (event: SupervisorEventMap[K]) => void,
+    options?: boolean | AddEventListenerOptions,
+  ) => void;
+  removeEventListener: <K extends SupervisorEventType>(
     type: K,
-    listener: (event: EmissionEvent<SupervisorEvents[K], K>) => void | Promise<void>,
-  ) => () => void;
+    listener: (event: SupervisorEventMap[K]) => void,
+    options?: boolean | EventListenerOptions,
+  ) => void;
+  on: <K extends SupervisorEventType>(type: K) => ObservableLike<SupervisorEventMap[K]>;
   once: <K extends SupervisorEventType>(
     type: K,
-    listener: (event: EmissionEvent<SupervisorEvents[K], K>) => void | Promise<void>,
-    options?: Omit<AddEventListenerOptionsLike, 'once'>,
-  ) => () => void;
+    listener: (event: SupervisorEventMap[K]) => void,
+  ) => void;
   subscribe: <K extends SupervisorEventType>(
     type: K,
-    observerOrNext?:
-      | Observer<EmissionEvent<SupervisorEvents[K], K>>
-      | ((value: EmissionEvent<SupervisorEvents[K], K>) => void),
+    observerOrNext?: Observer<SupervisorEventMap[K]> | ((value: SupervisorEventMap[K]) => void),
     error?: (err: unknown) => void,
     complete?: () => void,
   ) => Subscription;
-  toObservable: () => ObservableLike<
-    EmissionEvent<SupervisorEvents[SupervisorEventType], SupervisorEventType>
-  >;
+  toObservable: () => ObservableLike<SupervisorEventMap[SupervisorEventType]>;
 }
 
 function defaultSynthesis(results: SupervisorTaskResult[]): string {
@@ -110,7 +170,7 @@ export function createSupervisor(options: CreateSupervisorOptions): Supervisor {
     signal,
   } = options;
 
-  const events = createEventTarget<SupervisorEvents>();
+  const events = new CompletableEventTarget<SupervisorEventMap>();
   let delegationCount = 0;
 
   async function runAgent(
@@ -121,7 +181,7 @@ export function createSupervisor(options: CreateSupervisorOptions): Supervisor {
     const entry = pool.find((e) => e.agent.name === agentName);
     if (!entry) {
       const error = new Error(`Agent "${agentName}" not found in pool`);
-      events.emit('task.failed', { task, agentName, error });
+      events.dispatch(new TaskFailedEvent(task, agentName, error));
       return { task, agentName, error };
     }
 
@@ -160,15 +220,15 @@ export function createSupervisor(options: CreateSupervisorOptions): Supervisor {
           signal,
           stopWhen: definitionStopWhen,
         });
-        events.emit('task.completed', { task, agentName, result });
+        events.dispatch(new TaskCompletedEvent(task, agentName, result));
         return { task, agentName, result };
       }
 
       const result = await entry.agent.run(agentRunOptions);
-      events.emit('task.completed', { task, agentName, result });
+      events.dispatch(new TaskCompletedEvent(task, agentName, result));
       return { task, agentName, result };
     } catch (error) {
-      events.emit('task.failed', { task, agentName, error });
+      events.dispatch(new TaskFailedEvent(task, agentName, error));
       return { task, agentName, error };
     }
   }
@@ -190,7 +250,7 @@ export function createSupervisor(options: CreateSupervisorOptions): Supervisor {
       throw new Error(`Maximum delegations (${maximumDelegations}) exceeded`);
     }
 
-    events.emit('task.routed', { task, agentNames });
+    events.dispatch(new TaskRoutedEvent(task, agentNames));
 
     let agentResults: SupervisorTaskResult[];
 
@@ -201,9 +261,9 @@ export function createSupervisor(options: CreateSupervisorOptions): Supervisor {
       agentResults = await Promise.all(agentNames.map((name) => runAgent(task, name, pool)));
     }
 
-    events.emit('synthesis.started', { task, results: agentResults });
+    events.dispatch(new SynthesisStartedEvent(task, agentResults));
     const synthesisResult = await synthesis(agentResults);
-    events.emit('synthesis.completed', { task, synthesis: synthesisResult });
+    events.dispatch(new SynthesisCompletedEvent(task, synthesisResult));
 
     return { task, agentResults, synthesis: synthesisResult };
   }
@@ -241,29 +301,36 @@ export function createSupervisor(options: CreateSupervisorOptions): Supervisor {
           ? stage.mapInput(previousOutput, task)
           : previousOutput || task;
 
-        events.emit('task.routed', { task: stageInput, agentNames: [stage.agentName] });
+        events.dispatch(new TaskRoutedEvent(stageInput, [stage.agentName]));
 
         const stageResult = await runAgent(stageInput, stage.agentName, pool);
         allStageResults.push(stageResult);
 
         if (stageResult.error) {
-          events.emit('synthesis.started', { task, results: allStageResults });
+          events.dispatch(new SynthesisStartedEvent(task, allStageResults));
           const synthesisResult = await synthesis(allStageResults);
-          events.emit('synthesis.completed', { task, synthesis: synthesisResult });
+          events.dispatch(new SynthesisCompletedEvent(task, synthesisResult));
           return { task, agentResults: allStageResults, synthesis: synthesisResult };
         }
 
         previousOutput = stageResult.result?.content ?? '';
       }
 
-      events.emit('synthesis.started', { task, results: allStageResults });
+      events.dispatch(new SynthesisStartedEvent(task, allStageResults));
       const finalContent = previousOutput;
-      events.emit('synthesis.completed', { task, synthesis: finalContent });
+      events.dispatch(new SynthesisCompletedEvent(task, finalContent));
 
       return { task, agentResults: allStageResults, synthesis: finalContent };
     },
 
-    ...bindEmitter<SupervisorEvents>(events),
+    addEventListener: events.addEventListener.bind(events) as Supervisor['addEventListener'],
+    removeEventListener: events.removeEventListener.bind(
+      events,
+    ) as Supervisor['removeEventListener'],
+    on: events.on.bind(events) as Supervisor['on'],
+    once: events.once.bind(events) as Supervisor['once'],
+    subscribe: events.subscribe.bind(events) as Supervisor['subscribe'],
+    toObservable: events.toObservable.bind(events) as Supervisor['toObservable'],
   };
 }
 

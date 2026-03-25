@@ -355,10 +355,10 @@ describe('resolveName', () => {
 
     let eventEmitted = false;
     const mockDispatchEvent = (event: any) => {
-      if (event.type === 'toolResolved') {
-        expect(event.detail.resolved).toBe('read-file');
-        expect(event.detail.tier).toBe('exact');
-        expect(event.detail.input).toBe('read-file');
+      if (event.type === 'name-resolved') {
+        expect(event.resolvedName).toBe('read-file');
+        expect(event.tier).toBe('exact');
+        expect(event.originalName).toBe('read-file');
         eventEmitted = true;
       }
       return true;

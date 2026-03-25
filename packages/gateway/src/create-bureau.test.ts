@@ -17,33 +17,33 @@ function createEmptyToolbox(): Toolbox {
 
 describe('createBureau', () => {
   describe('ready', () => {
-    it('is false when no generate function is configured', () => {
-      const bureau = createBureau();
+    it('is false when no generate function is configured', async () => {
+      const bureau = await createBureau();
       expect(bureau.ready).toBe(false);
     });
 
-    it('is true when generate function is provided', () => {
-      const bureau = createBureau({ generate: createMockGenerate() });
+    it('is true when generate function is provided', async () => {
+      const bureau = await createBureau({ generate: createMockGenerate() });
       expect(bureau.ready).toBe(true);
     });
   });
 
   describe('store', () => {
-    it('creates a default store when none is provided', () => {
-      const bureau = createBureau();
+    it('creates a default store when none is provided', async () => {
+      const bureau = await createBureau();
       expect(bureau.store).toBeDefined();
     });
 
-    it('uses a provided store', () => {
+    it('uses a provided store', async () => {
       const store = createStore();
-      const bureau = createBureau({ store });
+      const bureau = await createBureau({ store });
       expect(bureau.store).toBe(store);
     });
   });
 
   describe('createRun', () => {
     it('throws NOT_CONFIGURED when no generate function exists', async () => {
-      const bureau = createBureau();
+      const bureau = await createBureau();
       try {
         await bureau.createRun({ message: 'Hello' });
         expect.unreachable('should have thrown');
@@ -54,7 +54,7 @@ describe('createBureau', () => {
     });
 
     it('throws BAD_REQUEST when message is missing', async () => {
-      const bureau = createBureau({ generate: createMockGenerate() });
+      const bureau = await createBureau({ generate: createMockGenerate() });
       try {
         await bureau.createRun({ message: '' });
         expect.unreachable('should have thrown');
@@ -65,7 +65,7 @@ describe('createBureau', () => {
     });
 
     it('creates a run and returns a summary', async () => {
-      const bureau = createBureau({
+      const bureau = await createBureau({
         generate: createMockGenerate(),
         toolbox: createEmptyToolbox(),
       });
@@ -77,7 +77,7 @@ describe('createBureau', () => {
     });
 
     it('registers the run in the store', async () => {
-      const bureau = createBureau({
+      const bureau = await createBureau({
         generate: createMockGenerate(),
         toolbox: createEmptyToolbox(),
       });
@@ -93,7 +93,7 @@ describe('createBureau', () => {
       conversation.appendUserMessage('Previous message');
       await persistence.save(conversation.current);
 
-      const bureau = createBureau({
+      const bureau = await createBureau({
         generate: createMockGenerate(),
         toolbox: createEmptyToolbox(),
         persistence,
@@ -108,7 +108,7 @@ describe('createBureau', () => {
     });
 
     it('applies system prompt', async () => {
-      const bureau = createBureau({
+      const bureau = await createBureau({
         generate: createMockGenerate(),
         toolbox: createEmptyToolbox(),
         systemPrompt: 'You are helpful.',
@@ -119,7 +119,7 @@ describe('createBureau', () => {
     });
 
     it('uses request-level maximumSteps override', async () => {
-      const bureau = createBureau({
+      const bureau = await createBureau({
         generate: createMockGenerate(),
         toolbox: createEmptyToolbox(),
         maximumSteps: 5,
@@ -131,13 +131,13 @@ describe('createBureau', () => {
   });
 
   describe('listRuns', () => {
-    it('returns empty array when no runs exist', () => {
-      const bureau = createBureau();
+    it('returns empty array when no runs exist', async () => {
+      const bureau = await createBureau();
       expect(bureau.listRuns()).toEqual([]);
     });
 
     it('returns all runs', async () => {
-      const bureau = createBureau({
+      const bureau = await createBureau({
         generate: createMockGenerate(),
         toolbox: createEmptyToolbox(),
       });
@@ -148,7 +148,7 @@ describe('createBureau', () => {
     });
 
     it('filters by status', async () => {
-      const bureau = createBureau({
+      const bureau = await createBureau({
         generate: createMockGenerate(),
         toolbox: createEmptyToolbox(),
       });
@@ -161,13 +161,13 @@ describe('createBureau', () => {
   });
 
   describe('getRun', () => {
-    it('returns undefined for unknown run', () => {
-      const bureau = createBureau();
+    it('returns undefined for unknown run', async () => {
+      const bureau = await createBureau();
       expect(bureau.getRun('nonexistent')).toBeUndefined();
     });
 
     it('returns a run summary', async () => {
-      const bureau = createBureau({
+      const bureau = await createBureau({
         generate: createMockGenerate(),
         toolbox: createEmptyToolbox(),
       });
@@ -180,13 +180,13 @@ describe('createBureau', () => {
   });
 
   describe('abortRun', () => {
-    it('throws NOT_FOUND for unknown run', () => {
-      const bureau = createBureau();
+    it('throws NOT_FOUND for unknown run', async () => {
+      const bureau = await createBureau();
       expect(() => bureau.abortRun('nonexistent')).toThrow(BureauError);
     });
 
     it('throws CONFLICT for non-running run', async () => {
-      const bureau = createBureau({
+      const bureau = await createBureau({
         generate: createMockGenerate(),
         toolbox: createEmptyToolbox(),
       });
@@ -206,7 +206,7 @@ describe('createBureau', () => {
 
     it('aborts a running run', async () => {
       const generate: GenerateFunction = () => new Promise(() => {});
-      const bureau = createBureau({ generate, toolbox: createEmptyToolbox() });
+      const bureau = await createBureau({ generate, toolbox: createEmptyToolbox() });
 
       const { id } = await bureau.createRun({ message: 'Hello' });
       await new Promise((resolve) => setTimeout(resolve, 10));
@@ -217,14 +217,14 @@ describe('createBureau', () => {
   });
 
   describe('deleteRun', () => {
-    it('throws NOT_FOUND for unknown run', () => {
-      const bureau = createBureau();
+    it('throws NOT_FOUND for unknown run', async () => {
+      const bureau = await createBureau();
       expect(() => bureau.deleteRun('nonexistent')).toThrow(BureauError);
     });
 
     it('throws CONFLICT for running run', async () => {
       const generate: GenerateFunction = () => new Promise(() => {});
-      const bureau = createBureau({ generate, toolbox: createEmptyToolbox() });
+      const bureau = await createBureau({ generate, toolbox: createEmptyToolbox() });
 
       const { id } = await bureau.createRun({ message: 'Hello' });
       await new Promise((resolve) => setTimeout(resolve, 10));
@@ -234,8 +234,8 @@ describe('createBureau', () => {
   });
 
   describe('conversations', () => {
-    it('throws NOT_IMPLEMENTED when no persistence is configured', () => {
-      const bureau = createBureau();
+    it('throws NOT_IMPLEMENTED when no persistence is configured', async () => {
+      const bureau = await createBureau();
       expect(() => bureau.listConversations()).toThrow(BureauError);
     });
 
@@ -245,7 +245,7 @@ describe('createBureau', () => {
       conversation.appendUserMessage('Hello');
       await persistence.save(conversation.current);
 
-      const bureau = createBureau({ persistence });
+      const bureau = await createBureau({ persistence });
       const sessions = await bureau.listConversations();
       expect(sessions).toHaveLength(1);
     });
@@ -256,14 +256,14 @@ describe('createBureau', () => {
       conversation.appendUserMessage('Hello');
       await persistence.save(conversation.current);
 
-      const bureau = createBureau({ persistence });
+      const bureau = await createBureau({ persistence });
       const loaded = await bureau.getConversation(conversation.current.id);
       expect(loaded).toBeDefined();
     });
 
     it('returns undefined for missing conversation', async () => {
       const persistence = createInMemoryPersistenceAdapter();
-      const bureau = createBureau({ persistence });
+      const bureau = await createBureau({ persistence });
       const loaded = await bureau.getConversation('missing');
       expect(loaded).toBeUndefined();
     });
@@ -275,7 +275,7 @@ describe('createBureau', () => {
       await persistence.save(conversation.current);
       const sessionId = conversation.current.id;
 
-      const bureau = createBureau({ persistence });
+      const bureau = await createBureau({ persistence });
       await bureau.deleteConversation(sessionId);
       const loaded = await bureau.getConversation(sessionId);
       expect(loaded).toBeUndefined();
@@ -283,16 +283,16 @@ describe('createBureau', () => {
   });
 
   describe('getConfiguration', () => {
-    it('returns configuration with defaults', () => {
-      const bureau = createBureau();
+    it('returns configuration with defaults', async () => {
+      const bureau = await createBureau();
       const config = bureau.getConfiguration();
       expect(config.maximumSteps).toBe(DEFAULT_MAXIMUM_STEPS);
       expect(config.tools).toEqual([]);
       expect(config.provider).toBeUndefined();
     });
 
-    it('returns provider configuration', () => {
-      const bureau = createBureau({
+    it('returns provider configuration', async () => {
+      const bureau = await createBureau({
         provider: { provider: 'anthropic', model: 'claude-sonnet-4-20250514' },
       });
       const config = bureau.getConfiguration();
@@ -302,15 +302,15 @@ describe('createBureau', () => {
   });
 
   describe('getTools', () => {
-    it('returns empty array when no toolbox', () => {
-      const bureau = createBureau();
+    it('returns empty array when no toolbox', async () => {
+      const bureau = await createBureau();
       expect(bureau.getTools()).toEqual([]);
     });
   });
 
   describe('dispose', () => {
-    it('disposes the store', () => {
-      const bureau = createBureau();
+    it('disposes the store', async () => {
+      const bureau = await createBureau();
       bureau.dispose();
       // Should not throw on repeated dispose
       bureau.dispose();
@@ -327,7 +327,7 @@ describe('createBureau', () => {
   });
 
   describe('event emission', () => {
-    function createReadyBureau() {
+    async function createReadyBureau() {
       return createBureau({
         generate: createMockGenerate(),
         toolbox: createEmptyToolbox(),
@@ -335,11 +335,11 @@ describe('createBureau', () => {
     }
 
     it('addEventListener("action", listener) receives actions from runs', async () => {
-      const bureau = createReadyBureau();
+      const bureau = await createReadyBureau();
       const received: unknown[] = [];
 
       bureau.addEventListener('action', (event) => {
-        received.push(event.detail);
+        received.push(event.action);
       });
 
       await bureau.createRun({ message: 'Hello' });
@@ -350,7 +350,7 @@ describe('createBureau', () => {
     });
 
     it('toObservable() emits events', async () => {
-      const bureau = createReadyBureau();
+      const bureau = await createReadyBureau();
       const types: string[] = [];
 
       const subscription = bureau.toObservable().subscribe((event) => {
@@ -366,11 +366,11 @@ describe('createBureau', () => {
     });
 
     it('on("action") returns Observable', async () => {
-      const bureau = createReadyBureau();
+      const bureau = await createReadyBureau();
       const received: unknown[] = [];
 
       const subscription = bureau.on('action').subscribe((event) => {
-        received.push(event.detail);
+        received.push(event.action);
       });
 
       await bureau.createRun({ message: 'Hello' });
@@ -382,11 +382,11 @@ describe('createBureau', () => {
     });
 
     it('once("action", listener) fires once', async () => {
-      const bureau = createReadyBureau();
+      const bureau = await createReadyBureau();
       const received: unknown[] = [];
 
       bureau.once('action', (event) => {
-        received.push(event.detail);
+        received.push(event.action);
       });
 
       await bureau.createRun({ message: 'Hello' });
@@ -397,11 +397,11 @@ describe('createBureau', () => {
     });
 
     it('subscribe("action", observer) returns Subscription', async () => {
-      const bureau = createReadyBureau();
+      const bureau = await createReadyBureau();
       const received: unknown[] = [];
 
       const subscription = bureau.subscribe('action', (event) => {
-        received.push(event.detail);
+        received.push(event.action);
       });
 
       expect(typeof subscription.unsubscribe).toBe('function');
@@ -415,7 +415,7 @@ describe('createBureau', () => {
     });
 
     it('events("action") returns async iterator', async () => {
-      const bureau = createReadyBureau();
+      const bureau = await createReadyBureau();
       const received: unknown[] = [];
 
       const iterator = bureau.events('action');
@@ -426,18 +426,18 @@ describe('createBureau', () => {
       bureau.complete();
 
       for await (const event of iterator) {
-        received.push(event.detail);
+        received.push(event.action);
       }
 
       expect(received.length).toBeGreaterThan(0);
     });
 
     it('"run.registered" fires from createRun()', async () => {
-      const bureau = createReadyBureau();
+      const bureau = await createReadyBureau();
       const registered: string[] = [];
 
       bureau.addEventListener('run.registered', (event) => {
-        registered.push(event.detail.runId);
+        registered.push(event.runId);
       });
 
       const summary = await bureau.createRun({ message: 'Hello' });
@@ -447,11 +447,11 @@ describe('createBureau', () => {
     });
 
     it('"run.removed" fires from deleteRun()', async () => {
-      const bureau = createReadyBureau();
+      const bureau = await createReadyBureau();
       const removed: string[] = [];
 
       bureau.addEventListener('run.removed', (event) => {
-        removed.push(event.detail.runId);
+        removed.push(event.runId);
       });
 
       const { id } = await bureau.createRun({ message: 'Hello' });
@@ -463,8 +463,8 @@ describe('createBureau', () => {
       bureau.dispose();
     });
 
-    it('"bureau.disposed" fires from dispose()', () => {
-      const bureau = createReadyBureau();
+    it('"bureau.disposed" fires from dispose()', async () => {
+      const bureau = await createReadyBureau();
       let disposed = false;
 
       bureau.addEventListener('bureau.disposed', () => {
@@ -475,8 +475,8 @@ describe('createBureau', () => {
       expect(disposed).toBe(true);
     });
 
-    it('complete() / completed work correctly', () => {
-      const bureau = createReadyBureau();
+    it('complete() / completed work correctly', async () => {
+      const bureau = await createReadyBureau();
       expect(bureau.completed).toBe(false);
       bureau.complete();
       expect(bureau.completed).toBe(true);

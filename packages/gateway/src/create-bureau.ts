@@ -1,16 +1,30 @@
 import type { ConversationHistory, SessionInfo } from 'conversationalist';
 import { Conversation } from 'conversationalist';
-import { createEventTarget } from 'event-emission';
+import { CompletableEventTarget } from 'lifecycle';
+import type { CreateMemoryOptions, Memory } from 'memory';
+import { createMemory } from 'memory';
 import type { RunOptions, Toolbox } from 'operative';
 import { createRun } from 'operative';
-import type { Store } from 'sentinel';
+import type {
+  RunRegisteredEvent as StoreRunRegisteredEvent,
+  RunRemovedEvent as StoreRunRemovedEvent,
+  Store,
+  StoreActionEvent,
+} from 'sentinel';
 import { createStore } from 'sentinel';
 
 import { resolveGenerate } from './configuration';
+import {
+  ActionEvent,
+  BureauDisposedEvent,
+  type BureauEventMap,
+  RunRegisteredEvent,
+  RunRemovedEvent,
+} from './events';
 import { serializeRunState } from './serialization';
+import { resolveStorageBackend } from './storage';
 import type {
   Bureau,
-  BureauEvents,
   BureauOptions,
   ConfigurationResponse,
   CreateRunRequest,
@@ -32,22 +46,51 @@ class BureauError extends Error {
 
 export { BureauError };
 
-export function createBureau(options: BureauOptions = {}): Bureau {
+function isMemoryInstance(value: CreateMemoryOptions | Memory): value is Memory {
+  return typeof (value as Memory).remember === 'function';
+}
+
+export async function createBureau(options: BureauOptions = {}): Promise<Bureau> {
   const ownsStore = !options.store;
   const store: Store = options.store ?? createStore();
-  const emitter = createEventTarget<BureauEvents>();
+  const emitter = new CompletableEventTarget<BureauEventMap>();
   const maximumSteps = options.maximumSteps ?? DEFAULT_MAXIMUM_STEPS;
 
   // Forward all store events to the bureau emitter
   const storeSubscription = store.toObservable().subscribe((event) => {
-    const type = event.type as keyof BureauEvents;
-    emitter.emit(type, event.detail as BureauEvents[typeof type]);
+    switch (event.type) {
+      case 'action':
+        emitter.dispatch(new ActionEvent((event as StoreActionEvent).action));
+        break;
+      case 'run.registered':
+        emitter.dispatch(new RunRegisteredEvent((event as StoreRunRegisteredEvent).runId));
+        break;
+      case 'run.removed':
+        emitter.dispatch(new RunRemovedEvent((event as StoreRunRemovedEvent).runId));
+        break;
+    }
   });
+
+  // ── Storage Backend ──────────────────────────────────────────────
+  const resolvedStorage = options.storage
+    ? await resolveStorageBackend(options.storage)
+    : undefined;
+
+  // ── Memory ───────────────────────────────────────────────────────
+  let memory: Memory | undefined;
+
+  if (options.memory) {
+    memory = isMemoryInstance(options.memory) ? options.memory : createMemory(options.memory);
+  }
+
+  if (memory) {
+    await memory.init();
+  }
 
   const generate =
     options.generate ?? (options.provider ? resolveGenerate(options.provider) : undefined);
   const toolbox = options.toolbox as Toolbox | undefined;
-  const persistence = options.persistence;
+  const persistence = options.persistence ?? resolvedStorage?.persistence;
   const stopWhen = options.stopWhen;
   const systemPrompt = options.systemPrompt;
   const provider = options.provider;
@@ -234,7 +277,10 @@ export function createBureau(options: BureauOptions = {}): Bureau {
   // ── Lifecycle ───────────────────────────────────────────────────
 
   function dispose(): void {
-    emitter.emit('bureau.disposed', {} as Record<string, never>);
+    if (memory) {
+      void memory.close();
+    }
+    emitter.dispatch(new BureauDisposedEvent());
     storeSubscription.unsubscribe();
     emitter.complete();
     if (ownsStore) {
@@ -244,6 +290,7 @@ export function createBureau(options: BureauOptions = {}): Bureau {
 
   return {
     store,
+    memory,
     get ready() {
       return generate !== undefined;
     },
@@ -257,16 +304,23 @@ export function createBureau(options: BureauOptions = {}): Bureau {
     deleteConversation,
     getConfiguration,
     getTools: getToolSummaries,
-    addEventListener: emitter.addEventListener,
-    on: emitter.on,
-    once: emitter.once,
-    subscribe: emitter.subscribe,
-    toObservable: emitter.toObservable,
-    events: emitter.events,
-    complete: emitter.complete,
+    addEventListener: (type, listener, options) =>
+      emitter.addEventListener(type, listener, options),
+    removeEventListener: (type, listener, options) =>
+      emitter.removeEventListener(type, listener, options),
+    on: (type, options) => emitter.on(type, options),
+    once: (type, listener) => emitter.once(type, listener),
+    subscribe: (type, observerOrNext, error, complete) =>
+      emitter.subscribe(type, observerOrNext, error, complete),
+    toObservable: () => emitter.toObservable(),
+    events: (type, options) => emitter.events(type, options),
+    complete: () => emitter.complete(),
     get completed() {
       return emitter.completed;
     },
+    get signal() {
+      return emitter.signal;
+    },
     dispose,
-  };
+  } satisfies Bureau;
 }

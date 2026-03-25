@@ -1,5 +1,4 @@
-import type { EmissionEvent } from 'event-emission';
-
+import { ToolboxNameResolvedEvent } from '../../events';
 import type { ToolRegistry } from './registry';
 
 /**
@@ -109,7 +108,7 @@ export function resolveName(
   input: string,
   registry: ToolRegistry,
   options?: ResolveNameOptions,
-  dispatchEvent?: (event: EmissionEvent<unknown>) => boolean,
+  dispatchEvent?: (event: Event) => boolean,
 ): ResolutionResult {
   const allowDeprecated = options?.allowDeprecated ?? false;
   const restrictedTiers = options?.restrictTo;
@@ -134,14 +133,13 @@ export function resolveName(
     if (filtered.length === 1) {
       const resolved = filtered[0]!;
       if (dispatchEvent) {
-        dispatchEvent({
-          type: 'toolResolved',
-          detail: {
-            resolved,
+        dispatchEvent(
+          new ToolboxNameResolvedEvent({
+            originalName: input,
+            resolvedName: resolved,
             tier,
-            input,
-          },
-        } as unknown as EmissionEvent<unknown>);
+          }),
+        );
       }
       return { resolved, tier };
     }

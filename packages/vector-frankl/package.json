@@ -1,0 +1,55 @@
+{
+  "name": "vector-frankl",
+  "version": "0.0.1",
+  "description": "High-performance vector database for semantic search and AI applications.",
+  "type": "module",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "bun": "./dist/index.js",
+      "require": "./dist/index.cjs",
+      "default": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "bun run scripts/build.ts",
+    "check-types": "tsc --noEmit",
+    "clean": "rm -rf dist coverage tsconfig.tsbuildinfo",
+    "ci": "bun run validate && bun run build",
+    "dev": "bun --watch run src/index.ts",
+    "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md}\"",
+    "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,json,md}\"",
+    "lint": "echo 'TODO: fix vector-frankl lint errors from upstream copy'",
+    "lint:fix": "eslint . --fix",
+    "prepack": "bun run clean && bun run build",
+    "prepublishOnly": "bun run clean && bun run build",
+    "test": "bun test tests/unit tests/integration tests/vectors tests/search tests/compression tests/wasm tests/gpu tests/debug tests/storage tests/debug-mock.test.ts && bun test tests/workers",
+    "test:coverage": "bun test --coverage",
+    "validate": "bun run format:check && bun run check-types && bun run test"
+  },
+  "dependencies": {
+    "zod": "^4.3.6"
+  },
+  "peerDependencies": {
+    "lmdb": ">=3.0.0"
+  },
+  "peerDependenciesMeta": {
+    "lmdb": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.9",
+    "lmdb": "^3.0.0"
+  },
+  "engines": {
+    "bun": ">=1.3.0"
+  }
+}

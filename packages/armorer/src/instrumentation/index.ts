@@ -51,7 +51,7 @@ export function instrument(
 
   subscriptions.push(
     toolbox.addEventListener('call', (event) => {
-      const { tool, call } = event.detail;
+      const { tool, call } = event;
       const span = tracer.startSpan(`tool ${tool.identity.name}`, {
         kind: SpanKind.CLIENT,
         attributes: {
@@ -67,7 +67,7 @@ export function instrument(
 
   subscriptions.push(
     toolbox.addEventListener('tool.started', (event) => {
-      const { toolCall, params } = event.detail;
+      const { toolCall, params } = event;
       const span = activeSpans.get(toolCall.id);
       if (span) {
         span.addEvent('tool.started', {
@@ -79,8 +79,7 @@ export function instrument(
 
   subscriptions.push(
     toolbox.addEventListener('tool.finished', (event) => {
-      const { toolCall, status, result, error, durationMs, inputDigest, outputDigest } =
-        event.detail;
+      const { toolCall, status, result, error, durationMs, inputDigest, outputDigest } = event;
       const span = activeSpans.get(toolCall.id);
       if (span) {
         const attributes: Attributes = {
@@ -140,7 +139,7 @@ export function instrument(
   // Fallback for 'complete' event if tool.finished didn't fire (should be redundant but safe)
   subscriptions.push(
     toolbox.addEventListener('complete', (event) => {
-      const { result } = event.detail;
+      const { result } = event;
       const span = activeSpans.get(result.callId);
       if (span && result.outcome === 'success') {
         span.end();
@@ -152,7 +151,7 @@ export function instrument(
   // Fallback for 'error' event
   subscriptions.push(
     toolbox.addEventListener('error', (event) => {
-      const { result } = event.detail;
+      const { result } = event;
       const span = activeSpans.get(result.callId);
       if (span) {
         if (!span.isRecording()) {

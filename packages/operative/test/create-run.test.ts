@@ -56,7 +56,7 @@ describe('createRun', () => {
 
     activeRun.on('step.started').subscribe({
       next(event) {
-        steps.push((event.detail as { step: number }).step);
+        steps.push((event as unknown as { step: number }).step);
       },
     });
 

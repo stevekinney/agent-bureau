@@ -196,10 +196,13 @@ export function forked(): StopCondition {
 
   return (context: StepResult) => {
     if (!listening) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-call
-      (context.conversation.once as any)('session.forked', () => {
-        detected = true;
-      });
+      context.conversation.addEventListener(
+        'session.forked',
+        () => {
+          detected = true;
+        },
+        { once: true },
+      );
       listening = true;
     }
     return detected;

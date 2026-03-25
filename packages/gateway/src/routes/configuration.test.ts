@@ -7,7 +7,7 @@ import { DEFAULT_MAXIMUM_STEPS } from '../types';
 
 describe('configuration routes', () => {
   it('GET /api/v1/configuration returns current config', async () => {
-    const gateway = createTestGateway({
+    const gateway = await createTestGateway({
       provider: { provider: 'anthropic', model: 'claude-sonnet-4-20250514' },
       systemPrompt: 'You are helpful.',
     });
@@ -32,7 +32,7 @@ describe('configuration routes', () => {
     });
     const toolbox = createToolbox([tool]);
 
-    const gateway = createTestGateway({ toolbox });
+    const gateway = await createTestGateway({ toolbox });
     const response = await requestJSON(gateway, '/api/v1/configuration/tools');
     expect(response.status).toBe(200);
 
@@ -43,7 +43,7 @@ describe('configuration routes', () => {
   });
 
   it('GET /api/v1/configuration/tools returns empty when no toolbox', async () => {
-    const gateway = createTestGateway();
+    const gateway = await createTestGateway();
     const response = await requestJSON(gateway, '/api/v1/configuration/tools');
     expect(response.status).toBe(200);
     const body = await response.json();

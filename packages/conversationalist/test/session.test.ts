@@ -80,10 +80,10 @@ describe('Conversation.fork', () => {
 
     const events: string[] = [];
     conversation.addEventListener('session.forked', (event: ConversationEvent) => {
-      events.push(event.detail.action);
+      events.push(event.action);
     });
     conversation.addEventListener('change', (event: ConversationEvent) => {
-      events.push(`change:${event.detail.action}`);
+      events.push(`change:${event.action}`);
     });
 
     conversation.fork();
@@ -154,11 +154,11 @@ describe('Conversation.tag', () => {
     const events: string[] = [];
 
     conversation.addEventListener('session.tagged', (event: ConversationEvent) => {
-      events.push(event.detail.action);
+      events.push(event.action);
     });
     conversation.addEventListener('change', (event: ConversationEvent) => {
-      if (event.detail.action === 'session.tagged') {
-        events.push(`change:${event.detail.action}`);
+      if (event.action === 'session.tagged') {
+        events.push(`change:${event.action}`);
       }
     });
 
@@ -226,11 +226,11 @@ describe('Conversation.rename', () => {
     const events: string[] = [];
 
     conversation.addEventListener('session.renamed', (event: ConversationEvent) => {
-      events.push(event.detail.action);
+      events.push(event.action);
     });
     conversation.addEventListener('change', (event: ConversationEvent) => {
-      if (event.detail.action === 'session.renamed') {
-        events.push(`change:${event.detail.action}`);
+      if (event.action === 'session.renamed') {
+        events.push(`change:${event.action}`);
       }
     });
 

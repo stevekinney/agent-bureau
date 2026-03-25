@@ -1,6 +1,6 @@
-import type { EmissionEvent } from 'event-emission';
 import type { z } from 'zod';
 
+import { ToolboxQueryEvent, ToolboxSearchEvent } from '../../events';
 import type { ToolIdentity } from '../identity';
 import {
   buildTextSearchIndex,
@@ -288,7 +288,7 @@ export type ToolMatch<T = ToolDefinition> = {
 
 export type ToolRegistryLike<TTool extends ToolDefinition = ToolDefinition> = {
   tools: () => readonly TTool[];
-  dispatchEvent?: (event: EmissionEvent<unknown>) => boolean;
+  dispatchEvent?: (event: Event) => boolean;
 };
 
 export type ToolQueryInput<TTool extends ToolDefinition = ToolDefinition> =
@@ -2213,10 +2213,7 @@ function emitQuery(
   results: QuerySelectionResult,
 ): void {
   if (!dispatch) return;
-  dispatch({
-    type: 'query',
-    detail: { criteria, results },
-  } as EmissionEvent<QueryEvent>);
+  dispatch(new ToolboxQueryEvent({ criteria, results }));
 }
 
 function emitSearch(
@@ -2225,10 +2222,7 @@ function emitSearch(
   results: ToolMatch<unknown>[],
 ): void {
   if (!dispatch) return;
-  dispatch({
-    type: 'search',
-    detail: { options, results },
-  } as EmissionEvent<SearchEvent>);
+  dispatch(new ToolboxSearchEvent({ options, results }));
 }
 
 function collectTagMatches(tool: ToolDefinition, tagSet: Set<string>): string[] {

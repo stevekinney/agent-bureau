@@ -1,10 +1,8 @@
 import { createTool } from 'armorer';
-import type { AddEventListenerOptionsLike, EmissionEvent } from 'event-emission';
-import { createEventTarget } from 'event-emission';
-import type { ObservableLike, Observer, Subscription } from 'event-emission/types';
+import type { EventMap, ObservableLike, Observer, Subscription } from 'lifecycle';
+import { CompletableEventTarget } from 'lifecycle';
 import { z } from 'zod';
 
-import { bindEmitter } from './bind-emitter';
 import type { AgentDefinition } from './types';
 
 export interface AgentRegistryEntry {
@@ -24,13 +22,50 @@ export interface AgentRegistryQuery {
   limit?: number;
 }
 
-export interface AgentRegistryEvents {
-  'agent.registered': { name: string; entry: AgentRegistryEntry };
-  'agent.unregistered': { name: string };
-  'agent.queried': { query: AgentRegistryQuery; results: AgentRegistryEntry[] };
+// ---------------------------------------------------------------------------
+// Registry event classes
+// ---------------------------------------------------------------------------
+
+export class AgentRegisteredEvent extends Event {
+  static readonly type = 'agent.registered' as const;
+  readonly name: string;
+  readonly entry: AgentRegistryEntry;
+  constructor(name: string, entry: AgentRegistryEntry) {
+    super(AgentRegisteredEvent.type);
+    this.name = name;
+    this.entry = entry;
+  }
 }
 
-export type AgentRegistryEventType = keyof AgentRegistryEvents;
+export class AgentUnregisteredEvent extends Event {
+  static readonly type = 'agent.unregistered' as const;
+  readonly name: string;
+  constructor(name: string) {
+    super(AgentUnregisteredEvent.type);
+    this.name = name;
+  }
+}
+
+export class AgentQueriedEvent extends Event {
+  static readonly type = 'agent.queried' as const;
+  readonly query: AgentRegistryQuery;
+  readonly results: AgentRegistryEntry[];
+  constructor(query: AgentRegistryQuery, results: AgentRegistryEntry[]) {
+    super(AgentQueriedEvent.type);
+    this.query = query;
+    this.results = results;
+  }
+}
+
+export interface AgentRegistryEventMap extends EventMap {
+  [AgentRegisteredEvent.type]: AgentRegisteredEvent;
+  [AgentUnregisteredEvent.type]: AgentUnregisteredEvent;
+  [AgentQueriedEvent.type]: AgentQueriedEvent;
+}
+
+export type AgentRegistryEvents = AgentRegistryEventMap;
+
+export type AgentRegistryEventType = keyof AgentRegistryEventMap;
 
 export interface AgentRegistry {
   register(entry: AgentRegistryEntry): void;
@@ -41,34 +76,33 @@ export interface AgentRegistry {
   query(query: AgentRegistryQuery): AgentRegistryEntry[];
   addEventListener: <K extends AgentRegistryEventType>(
     type: K,
-    listener: (event: EmissionEvent<AgentRegistryEvents[K], K>) => void | Promise<void>,
-    options?: AddEventListenerOptionsLike,
-  ) => () => void;
-  on: <K extends AgentRegistryEventType>(
+    listener: (event: AgentRegistryEventMap[K]) => void,
+    options?: boolean | AddEventListenerOptions,
+  ) => void;
+  removeEventListener: <K extends AgentRegistryEventType>(
     type: K,
-    listener: (event: EmissionEvent<AgentRegistryEvents[K], K>) => void | Promise<void>,
-  ) => () => void;
+    listener: (event: AgentRegistryEventMap[K]) => void,
+    options?: boolean | EventListenerOptions,
+  ) => void;
+  on: <K extends AgentRegistryEventType>(type: K) => ObservableLike<AgentRegistryEventMap[K]>;
   once: <K extends AgentRegistryEventType>(
     type: K,
-    listener: (event: EmissionEvent<AgentRegistryEvents[K], K>) => void | Promise<void>,
-    options?: Omit<AddEventListenerOptionsLike, 'once'>,
-  ) => () => void;
+    listener: (event: AgentRegistryEventMap[K]) => void,
+  ) => void;
   subscribe: <K extends AgentRegistryEventType>(
     type: K,
     observerOrNext?:
-      | Observer<EmissionEvent<AgentRegistryEvents[K], K>>
-      | ((value: EmissionEvent<AgentRegistryEvents[K], K>) => void),
+      | Observer<AgentRegistryEventMap[K]>
+      | ((value: AgentRegistryEventMap[K]) => void),
     error?: (err: unknown) => void,
     complete?: () => void,
   ) => Subscription;
-  toObservable: () => ObservableLike<
-    EmissionEvent<AgentRegistryEvents[AgentRegistryEventType], AgentRegistryEventType>
-  >;
+  toObservable: () => ObservableLike<AgentRegistryEventMap[AgentRegistryEventType]>;
 }
 
 export function createAgentRegistry(): AgentRegistry {
   const store = new Map<string, AgentRegistryEntry>();
-  const events = createEventTarget<AgentRegistryEvents>();
+  const events = new CompletableEventTarget<AgentRegistryEventMap>();
 
   const registry: AgentRegistry = {
     register(entry: AgentRegistryEntry): void {
@@ -77,12 +111,12 @@ export function createAgentRegistry(): AgentRegistry {
         throw new Error(`Agent "${name}" is already registered`);
       }
       store.set(name, entry);
-      events.emit('agent.registered', { name, entry });
+      events.dispatch(new AgentRegisteredEvent(name, entry));
     },
 
     unregister(name: string): void {
       store.delete(name);
-      events.emit('agent.unregistered', { name });
+      events.dispatch(new AgentUnregisteredEvent(name));
     },
 
     get(name: string): AgentRegistryEntry | undefined {
@@ -141,12 +175,19 @@ export function createAgentRegistry(): AgentRegistry {
         results = results.slice(0, query.limit);
       }
 
-      events.emit('agent.queried', { query, results });
+      events.dispatch(new AgentQueriedEvent(query, results));
 
       return results;
     },
 
-    ...bindEmitter<AgentRegistryEvents>(events),
+    addEventListener: events.addEventListener.bind(events) as AgentRegistry['addEventListener'],
+    removeEventListener: events.removeEventListener.bind(
+      events,
+    ) as AgentRegistry['removeEventListener'],
+    on: events.on.bind(events) as AgentRegistry['on'],
+    once: events.once.bind(events) as AgentRegistry['once'],
+    subscribe: events.subscribe.bind(events) as AgentRegistry['subscribe'],
+    toObservable: events.toObservable.bind(events) as AgentRegistry['toObservable'],
   };
 
   return registry;

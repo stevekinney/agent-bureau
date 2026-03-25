@@ -161,7 +161,7 @@
   },
   "dependencies": {
     "change-case": "^5.4.4",
-    "event-emission": "0.3.0",
+    "lifecycle": "workspace:*",
     "gray-matter": "^4.0.3",
     "interoperability": "workspace:*"
   },

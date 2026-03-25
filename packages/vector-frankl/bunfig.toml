@@ -1,0 +1,3 @@
+[test]
+parallel = true
+timeout = 30000

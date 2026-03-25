@@ -1,19 +1,55 @@
 import { createTool } from 'armorer';
-import type { AddEventListenerOptionsLike, EmissionEvent } from 'event-emission';
-import { createEventTarget } from 'event-emission';
-import type { ObservableLike, Observer, Subscription } from 'event-emission/types';
+import type { EventMap, ObservableLike, Observer, Subscription } from 'lifecycle';
+import { CompletableEventTarget } from 'lifecycle';
 import type { ZodType } from 'zod';
 import { z } from 'zod';
 
-import { bindEmitter } from './bind-emitter';
+// ---------------------------------------------------------------------------
+// Scratchpad event classes
+// ---------------------------------------------------------------------------
 
-export interface ScratchpadEvents {
-  'entry.set': { key: string; value: unknown; previousValue?: unknown };
-  'entry.deleted': { key: string; previousValue: unknown };
-  'scratchpad.cleared': { previousEntries: Record<string, unknown> };
+export class EntrySetEvent extends Event {
+  static readonly type = 'entry.set' as const;
+  readonly key: string;
+  readonly value: unknown;
+  readonly previousValue?: unknown;
+  constructor(key: string, value: unknown, previousValue?: unknown) {
+    super(EntrySetEvent.type);
+    this.key = key;
+    this.value = value;
+    this.previousValue = previousValue;
+  }
 }
 
-export type ScratchpadEventType = keyof ScratchpadEvents;
+export class EntryDeletedEvent extends Event {
+  static readonly type = 'entry.deleted' as const;
+  readonly key: string;
+  readonly previousValue: unknown;
+  constructor(key: string, previousValue: unknown) {
+    super(EntryDeletedEvent.type);
+    this.key = key;
+    this.previousValue = previousValue;
+  }
+}
+
+export class ScratchpadClearedEvent extends Event {
+  static readonly type = 'scratchpad.cleared' as const;
+  readonly previousEntries: Record<string, unknown>;
+  constructor(previousEntries: Record<string, unknown>) {
+    super(ScratchpadClearedEvent.type);
+    this.previousEntries = previousEntries;
+  }
+}
+
+export interface ScratchpadEventMap extends EventMap {
+  [EntrySetEvent.type]: EntrySetEvent;
+  [EntryDeletedEvent.type]: EntryDeletedEvent;
+  [ScratchpadClearedEvent.type]: ScratchpadClearedEvent;
+}
+
+export type ScratchpadEvents = ScratchpadEventMap;
+
+export type ScratchpadEventType = keyof ScratchpadEventMap;
 
 export interface CreateScratchpadOptions {
   schema?: ZodType;
@@ -31,29 +67,26 @@ export interface Scratchpad {
   clear(): void;
   addEventListener: <K extends ScratchpadEventType>(
     type: K,
-    listener: (event: EmissionEvent<ScratchpadEvents[K], K>) => void | Promise<void>,
-    options?: AddEventListenerOptionsLike,
-  ) => () => void;
-  on: <K extends ScratchpadEventType>(
+    listener: (event: ScratchpadEventMap[K]) => void,
+    options?: boolean | AddEventListenerOptions,
+  ) => void;
+  removeEventListener: <K extends ScratchpadEventType>(
     type: K,
-    listener: (event: EmissionEvent<ScratchpadEvents[K], K>) => void | Promise<void>,
-  ) => () => void;
+    listener: (event: ScratchpadEventMap[K]) => void,
+    options?: boolean | EventListenerOptions,
+  ) => void;
+  on: <K extends ScratchpadEventType>(type: K) => ObservableLike<ScratchpadEventMap[K]>;
   once: <K extends ScratchpadEventType>(
     type: K,
-    listener: (event: EmissionEvent<ScratchpadEvents[K], K>) => void | Promise<void>,
-    options?: Omit<AddEventListenerOptionsLike, 'once'>,
-  ) => () => void;
+    listener: (event: ScratchpadEventMap[K]) => void,
+  ) => void;
   subscribe: <K extends ScratchpadEventType>(
     type: K,
-    observerOrNext?:
-      | Observer<EmissionEvent<ScratchpadEvents[K], K>>
-      | ((value: EmissionEvent<ScratchpadEvents[K], K>) => void),
+    observerOrNext?: Observer<ScratchpadEventMap[K]> | ((value: ScratchpadEventMap[K]) => void),
     error?: (err: unknown) => void,
     complete?: () => void,
   ) => Subscription;
-  toObservable: () => ObservableLike<
-    EmissionEvent<ScratchpadEvents[ScratchpadEventType], ScratchpadEventType>
-  >;
+  toObservable: () => ObservableLike<ScratchpadEventMap[ScratchpadEventType]>;
 }
 
 export function createScratchpad(options?: CreateScratchpadOptions): Scratchpad {
@@ -61,7 +94,7 @@ export function createScratchpad(options?: CreateScratchpadOptions): Scratchpad 
     options?.initialValues ? Object.entries(options.initialValues) : [],
   );
   const schema = options?.schema;
-  const events = createEventTarget<ScratchpadEvents>();
+  const events = new CompletableEventTarget<ScratchpadEventMap>();
 
   function validateKey(key: string): void {
     if (schema) {
@@ -94,14 +127,14 @@ export function createScratchpad(options?: CreateScratchpadOptions): Scratchpad 
       validateValue(key, value);
       const previousValue = store.get(key);
       store.set(key, value);
-      events.emit('entry.set', { key, value, previousValue });
+      events.dispatch(new EntrySetEvent(key, value, previousValue));
     },
 
     delete(key: string): boolean {
       if (!store.has(key)) return false;
       const previousValue = store.get(key);
       store.delete(key);
-      events.emit('entry.deleted', { key, previousValue });
+      events.dispatch(new EntryDeletedEvent(key, previousValue));
       return true;
     },
 
@@ -124,10 +157,17 @@ export function createScratchpad(options?: CreateScratchpadOptions): Scratchpad 
     clear(): void {
       const previousEntries = Object.fromEntries(store);
       store.clear();
-      events.emit('scratchpad.cleared', { previousEntries });
+      events.dispatch(new ScratchpadClearedEvent(previousEntries));
     },
 
-    ...bindEmitter<ScratchpadEvents>(events),
+    addEventListener: events.addEventListener.bind(events) as Scratchpad['addEventListener'],
+    removeEventListener: events.removeEventListener.bind(
+      events,
+    ) as Scratchpad['removeEventListener'],
+    on: events.on.bind(events) as Scratchpad['on'],
+    once: events.once.bind(events) as Scratchpad['once'],
+    subscribe: events.subscribe.bind(events) as Scratchpad['subscribe'],
+    toObservable: events.toObservable.bind(events) as Scratchpad['toObservable'],
   };
 }
 

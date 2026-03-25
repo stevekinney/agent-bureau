@@ -23,7 +23,7 @@ export function createSubagentTool(options: CreateSubagentToolOptions) {
     input,
     execute: async (params: unknown, context: ToolContext) => {
       const agentInput = mapInput(params);
-      const signal = context.signal as AbortSignal | undefined;
+      const signal = context.signal;
       const parentContext = context.traceContext;
       const agentRunOptions =
         typeof agentInput === 'string'

@@ -1,23 +1,21 @@
-import type {
-  AddEventListenerOptionsLike,
-  AsyncIteratorOptions,
-  EmissionEvent,
-  MinimalAbortSignal as EventMinimalAbortSignal,
-} from 'event-emission';
-import type { ObservableLike, Observer, Subscription } from 'event-emission/types';
+import type { EventIteratorOptions, ObservableLike, Observer, Subscription } from 'lifecycle';
 import { z } from 'zod';
 
 import type { ToolContext as CoreToolContext } from './core/context';
 import type { ToolErrorCategory } from './core/errors';
 import type { JsonObject } from './core/serialization/json';
 import type { ToolDefinition } from './core/tool-definition';
+import type { ToolEventMap } from './events';
 import type { ToolCall, ToolExecutionResult } from './types';
 
 export type ToolParametersSchema = z.ZodTypeAny;
-export type { AddEventListenerOptionsLike, AsyncIteratorOptions } from 'event-emission';
-export type { ObservableLike, Observer, Subscription } from 'event-emission/types';
+/** @deprecated Use standard AddEventListenerOptions instead. */
+export type AddEventListenerOptionsLike = AddEventListenerOptions;
+/** @deprecated Use EventIteratorOptions from lifecycle instead. */
+export type AsyncIteratorOptions = EventIteratorOptions;
+export type { ObservableLike, Observer, Subscription } from 'lifecycle';
 
-export type MinimalAbortSignal = EventMinimalAbortSignal | AbortSignal;
+export type MinimalAbortSignal = AbortSignal;
 
 /**
  * Unified tool configuration type.
@@ -189,15 +187,18 @@ export type DefaultToolEvents = {
 
 export type MergeEvents<Custom extends ToolEventsMap> = DefaultToolEvents & Custom;
 
-export type ToolCustomEvent<Detail> = EmissionEvent<Detail>;
+/**
+ * Event type used by tool event listeners.
+ * With lifecycle, events are native Event subclasses with named properties.
+ * The Detail type parameter is kept for backward compatibility but maps to Event.
+ */
+export type ToolCustomEvent<Detail = unknown> = Event & Detail;
 
 /**
  * Context passed to tool execute functions.
  */
-export interface RuntimeToolContext<
-  E extends ToolEventsMap = DefaultToolEvents,
-> extends CoreToolContext {
-  dispatch: <K extends keyof E & string>(event: ToolCustomEvent<E[K]>) => boolean;
+export interface RuntimeToolContext extends CoreToolContext {
+  dispatch: (event: Event) => boolean;
   meta?: { toolName: string; callId?: string };
   toolCall: ToolCallWithArguments;
   configuration: ToolConfiguration;
@@ -207,7 +208,7 @@ export interface RuntimeToolContext<
   stream?: boolean;
 }
 
-export type ToolContext<E extends ToolEventsMap = DefaultToolEvents> = RuntimeToolContext<E>;
+export type ToolContext<_E extends ToolEventsMap = DefaultToolEvents> = RuntimeToolContext;
 
 export interface ToolExecuteOptions {
   signal?: MinimalAbortSignal;
@@ -289,37 +290,40 @@ export type Tool<
   run: (params: unknown, context: ToolContext<E>) => Promise<R>;
 
   // Event listener methods
-  addEventListener: <K extends keyof E & string>(
+  addEventListener: <K extends keyof (E & ToolEventMap) & string>(
     type: K,
-    listener: (event: ToolCustomEvent<E[K]>) => void | Promise<void>,
-    options?: AddEventListenerOptionsLike,
+    listener: (
+      event: K extends keyof ToolEventMap ? ToolEventMap[K] : Event,
+    ) => void | Promise<void>,
+    options?: AddEventListenerOptions,
   ) => () => void;
-  dispatchEvent: <K extends keyof E & string>(event: ToolCustomEvent<E[K]>) => boolean;
+  dispatchEvent: (event: Event) => boolean;
   emit: <K extends keyof E & string>(type: K, detail: E[K]) => boolean;
 
-  // Observable-based event methods (new in event-emission 0.3.0)
-  on: <K extends keyof E & string>(
+  // Observable-based event methods
+  on: <K extends keyof (E & ToolEventMap) & string>(
     type: K,
-    options?: AddEventListenerOptionsLike | boolean,
-  ) => ObservableLike<ToolCustomEvent<E[K]>>;
-  once: <K extends keyof E & string>(
+    options?: { signal?: AbortSignal },
+  ) => ObservableLike<K extends keyof ToolEventMap ? ToolEventMap[K] : Event>;
+  once: <K extends keyof (E & ToolEventMap) & string>(
     type: K,
-    listener: (event: ToolCustomEvent<E[K]>) => void | Promise<void>,
-    options?: Omit<AddEventListenerOptionsLike, 'once'>,
-  ) => () => void;
-  subscribe: <K extends keyof E & string>(
+    listener: (event: K extends keyof ToolEventMap ? ToolEventMap[K] : Event) => void,
+  ) => void;
+  subscribe: <K extends keyof (E & ToolEventMap) & string>(
     type: K,
-    observerOrNext?: Observer<ToolCustomEvent<E[K]>> | ((value: ToolCustomEvent<E[K]>) => void),
+    observerOrNext?:
+      | Observer<K extends keyof ToolEventMap ? ToolEventMap[K] : Event>
+      | ((value: K extends keyof ToolEventMap ? ToolEventMap[K] : Event) => void),
     error?: (err: unknown) => void,
     complete?: () => void,
   ) => Subscription;
-  toObservable: () => ObservableLike<ToolCustomEvent<E[keyof E]>>;
+  toObservable: () => ObservableLike<Event>;
 
-  // Async iteration (new in event-emission 0.3.0)
-  events: <K extends keyof E & string>(
+  // Async iteration
+  events: <K extends keyof (E & ToolEventMap) & string>(
     type: K,
-    options?: AsyncIteratorOptions,
-  ) => AsyncIterableIterator<ToolCustomEvent<E[K]>>;
+    options?: EventIteratorOptions,
+  ) => AsyncIterableIterator<K extends keyof ToolEventMap ? ToolEventMap[K] : Event>;
 
   // Lifecycle methods
   complete: () => void;

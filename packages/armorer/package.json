@@ -176,7 +176,7 @@
     "validate": "bun run format:check && bun run lint && bun run check-types && bun run test"
   },
   "dependencies": {
-    "event-emission": "0.3.0",
+    "lifecycle": "workspace:*",
     "interoperability": "workspace:*"
   },
   "devDependencies": {

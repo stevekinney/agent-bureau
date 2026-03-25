@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 
-import { createEventTarget } from 'event-emission';
+import { CompletableEventTarget } from 'lifecycle';
 import { z } from 'zod';
 
 import type { ToolError, ToolErrorCategory } from './core/errors';
@@ -11,6 +11,28 @@ import { assertKebabCaseTag, type NormalizeTagsOption, uniqTags } from './core/t
 import type { AnyToolDefinition, ToolLifecycle } from './core/tool-definition';
 import { defineTool } from './core/tool-definition';
 import { errorString, normalizeError } from './errors';
+import {
+  ToolCancelledEvent,
+  type ToolEventMap,
+  ToolExecuteErrorEvent,
+  ToolExecuteStartEvent,
+  ToolExecuteSuccessEvent,
+  ToolFinishedEvent,
+  ToolLogEvent,
+  ToolOutputChunkEvent,
+  ToolPolicyActionRequiredEvent,
+  ToolPolicyDeniedEvent,
+  ToolProgressEvent,
+  ToolSettledEvent,
+  ToolStartedEvent,
+  ToolStatusUpdateEvent,
+  ToolStreamChunkEvent,
+  ToolStreamEndEvent,
+  ToolStreamErrorEvent,
+  ToolStreamStartEvent,
+  ToolValidateErrorEvent,
+  ToolValidateSuccessEvent,
+} from './events';
 import type {
   DefaultToolEvents,
   MinimalAbortSignal,
@@ -37,6 +59,31 @@ import type { ToolCall, ToolExecutionResult } from './types';
 import { createConcurrencyLimiter, normalizeConcurrency } from './utilities/concurrency';
 import { normalizeSchema } from './utilities/schema-normalization';
 import { isAsyncIterable, isPromise, isTestRuntime } from './utilities/type-guards';
+
+// Map from event type strings to their Event subclass constructors.
+// Used by the `emit(type, detail)` helper to construct the correct Event.
+
+const toolEventClassMap: Record<string, new (detail: any) => Event> = {
+  [ToolStatusUpdateEvent.type]: ToolStatusUpdateEvent,
+  [ToolExecuteStartEvent.type]: ToolExecuteStartEvent,
+  [ToolValidateSuccessEvent.type]: ToolValidateSuccessEvent,
+  [ToolValidateErrorEvent.type]: ToolValidateErrorEvent,
+  [ToolExecuteSuccessEvent.type]: ToolExecuteSuccessEvent,
+  [ToolExecuteErrorEvent.type]: ToolExecuteErrorEvent,
+  [ToolSettledEvent.type]: ToolSettledEvent,
+  [ToolPolicyDeniedEvent.type]: ToolPolicyDeniedEvent,
+  [ToolPolicyActionRequiredEvent.type]: ToolPolicyActionRequiredEvent,
+  [ToolStartedEvent.type]: ToolStartedEvent,
+  [ToolFinishedEvent.type]: ToolFinishedEvent,
+  [ToolProgressEvent.type]: ToolProgressEvent,
+  [ToolStreamStartEvent.type]: ToolStreamStartEvent,
+  [ToolStreamChunkEvent.type]: ToolStreamChunkEvent,
+  [ToolStreamEndEvent.type]: ToolStreamEndEvent,
+  [ToolStreamErrorEvent.type]: ToolStreamErrorEvent,
+  [ToolOutputChunkEvent.type]: ToolOutputChunkEvent,
+  [ToolLogEvent.type]: ToolLogEvent,
+  [ToolCancelledEvent.type]: ToolCancelledEvent,
+};
 
 /**
  * Options for creating a tool.
@@ -393,15 +440,24 @@ export function createTool<
   const customMetadata = resolvedMetadata ?? (undefined as M);
   const normalizedInput = normalizeSchema(toolInput);
 
-  const emitter = createEventTarget<E>();
-  const { addEventListener, dispatchEvent, on, once, subscribe, toObservable, events, complete } =
-    emitter;
+  const emitter = new CompletableEventTarget<ToolEventMap>();
 
-  // Typed wrapper: emitter.emit is generic over E, but within this generic
-  // function TypeScript can't verify literal event payloads satisfy E[K].
-  // Cast is safe because DefaultToolEvents defines all event shapes used below.
-  const emit = (type: string, detail: unknown) =>
-    emitter.emit(type as keyof E & string, detail as E[keyof E & string]);
+  // Convenience wrapper to dispatch a pre-constructed Event.
+  const dispatch = (event: Event) => emitter.dispatchEvent(event);
+
+  // Legacy emit helper: constructs the correct Event subclass from a type
+  // string and detail bag.  Used by legacy callsites and user-space dispatch.
+  const emit = (type: string, detail: unknown) => {
+    const cls = toolEventClassMap[type];
+    if (cls) {
+      return emitter.dispatchEvent(new (cls as unknown as new (d: unknown) => Event)(detail));
+    }
+    // For custom / unknown event types, dispatch a plain Event so listeners
+    // that registered for arbitrary type strings still fire.
+    const event = new Event(type);
+    Object.assign(event, detail);
+    return emitter.dispatchEvent(event);
+  };
 
   const metadataValue = customMetadata ?? (undefined as M);
   const resolvedRisk = mergeRisk(metadataValue, risk);
@@ -715,7 +771,7 @@ export function createTool<
         return handleCancellation(options.signal.reason);
       }
       const toolContext: ToolContext<E> = {
-        dispatch: dispatchEvent,
+        dispatch,
         meta,
         toolCall: typedToolCall,
         configuration,
@@ -1088,19 +1144,33 @@ export function createTool<
       return resolved(params as TInput, context);
     },
     configuration,
-    // Event listener methods
-    addEventListener,
-    dispatchEvent,
+    // Event listener methods — return an unsubscribe function for compat.
+    addEventListener: (
+      type: string,
+      listener: EventListener,
+      options?: AddEventListenerOptions,
+    ) => {
+      // Merge the emitter's signal so listeners auto-cleanup on complete().
+      const mergedOptions: AddEventListenerOptions = {
+        ...options,
+        signal: options?.signal
+          ? AbortSignal.any([options.signal, emitter.signal])
+          : emitter.signal,
+      };
+      emitter.addEventListener(type, listener, mergedOptions);
+      return () => emitter.removeEventListener(type, listener, options);
+    },
+    dispatchEvent: (event: Event) => emitter.dispatchEvent(event),
     emit,
-    // Observable-based event methods (event-emission 0.3.0)
-    on,
-    once,
-    subscribe,
-    toObservable,
-    // Async iteration (event-emission 0.3.0)
-    events,
+    // Observable-based event methods
+    on: emitter.on.bind(emitter),
+    once: emitter.once.bind(emitter),
+    subscribe: emitter.subscribe.bind(emitter),
+    toObservable: emitter.toObservable.bind(emitter),
+    // Async iteration
+    events: emitter.events.bind(emitter),
     // Lifecycle methods
-    complete,
+    complete: emitter.complete.bind(emitter),
     get completed() {
       return emitter.completed;
     },
@@ -1141,7 +1211,7 @@ export function createTool<
 
   // Provide [Symbol.dispose] to complete the event target (clears listeners and marks complete)
   bag[Symbol.dispose] = () => {
-    complete();
+    emitter.complete();
   };
 
   bag['executeWith'] = (options: ToolExecuteWithOptions) => {

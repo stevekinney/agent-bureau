@@ -1,3 +1,4 @@
+export type { Embedder, EmbeddingVector } from './embeddings';
 export {
   materializeToolCall,
   materializeToolCalls,

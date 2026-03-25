@@ -51,17 +51,19 @@ export type ConversationRecorder = {
 
 export function createConversationRecorder(conversation: Conversation): ConversationRecorder {
   const events: ConversationEvent[] = [];
-  const subscriptions = [
-    conversation.addEventListener('change', (event: ConversationEvent) => {
-      events.push(event);
-    }),
-    conversation.addEventListener('push', (event: ConversationEvent) => {
-      events.push(event);
-    }),
-    conversation.addEventListener('undo', (event: ConversationEvent) => {
-      events.push(event);
-    }),
-  ];
+  const changeHandler = (event: ConversationEvent) => {
+    events.push(event);
+  };
+  const pushHandler = (event: ConversationEvent) => {
+    events.push(event);
+  };
+  const undoHandler = (event: ConversationEvent) => {
+    events.push(event);
+  };
+
+  conversation.addEventListener('change', changeHandler as any);
+  conversation.addEventListener('push', pushHandler as any);
+  conversation.addEventListener('undo', undoHandler as any);
 
   return {
     events,
@@ -69,7 +71,9 @@ export function createConversationRecorder(conversation: Conversation): Conversa
       events.length = 0;
     },
     [Symbol.dispose]: () => {
-      subscriptions.forEach((unsubscribe) => unsubscribe?.());
+      conversation.removeEventListener('change', changeHandler as any);
+      conversation.removeEventListener('push', pushHandler as any);
+      conversation.removeEventListener('undo', undoHandler as any);
     },
   } as ConversationRecorder;
 }

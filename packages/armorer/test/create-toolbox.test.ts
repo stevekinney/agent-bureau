@@ -485,8 +485,8 @@ describe('createToolbox', () => {
 
     const tool = toolbox.getTool('diagnostic-tool')!;
     let captured: any;
-    tool.addEventListener('validate-error', (event) => {
-      captured = event.detail;
+    tool.addEventListener('validate-error', (event: any) => {
+      captured = event;
     });
 
     const result = await tool.execute(createToolCall('diagnostic-tool', { value: 123 } as any));
@@ -1318,8 +1318,8 @@ describe('createToolbox', () => {
       context: { tabId: 42 },
     });
 
-    toolbox.addEventListener('status:update', (event) => {
-      statusUpdates.push(event.detail);
+    toolbox.addEventListener('status:update', (event: any) => {
+      statusUpdates.push(event);
     });
 
     toolbox.register({
@@ -1328,15 +1328,14 @@ describe('createToolbox', () => {
       input: z.object({ steps: z.number() }),
       async execute({ steps }, context) {
         for (let i = 1; i <= steps; i++) {
-          context.dispatchEvent({
-            type: 'status:update',
-            detail: {
-              callId: context.toolCall.id,
-              name: 'long-task',
-              status: `Step ${i} of ${steps}`,
-              percent: Math.round((i / steps) * 100),
-            },
+          const event = new Event('status:update');
+          Object.assign(event, {
+            callId: context.toolCall.id,
+            name: 'long-task',
+            status: `Step ${i} of ${steps}`,
+            percent: Math.round((i / steps) * 100),
           });
+          context.dispatchEvent(event);
         }
         return { completed: steps };
       },
@@ -1350,18 +1349,14 @@ describe('createToolbox', () => {
 
     expect(result.result).toEqual({ completed: 3 });
     expect(statusUpdates).toHaveLength(3);
-    expect(statusUpdates[0]).toEqual({
-      callId: 'task-1',
-      name: 'long-task',
-      status: 'Step 1 of 3',
-      percent: 33,
-    });
-    expect(statusUpdates[2]).toEqual({
-      callId: 'task-1',
-      name: 'long-task',
-      status: 'Step 3 of 3',
-      percent: 100,
-    });
+    expect(statusUpdates[0].callId).toBe('task-1');
+    expect(statusUpdates[0].name).toBe('long-task');
+    expect(statusUpdates[0].status).toBe('Step 1 of 3');
+    expect(statusUpdates[0].percent).toBe(33);
+    expect(statusUpdates[2].callId).toBe('task-1');
+    expect(statusUpdates[2].name).toBe('long-task');
+    expect(statusUpdates[2].status).toBe('Step 3 of 3');
+    expect(statusUpdates[2].percent).toBe(100);
   });
 
   it('bubbles stream lifecycle events and forwards stream execute options', async () => {
@@ -1369,13 +1364,13 @@ describe('createToolbox', () => {
     const events: string[] = [];
 
     toolbox.addEventListener('stream-start', (event) => {
-      events.push(`start:${event.detail.mode}`);
+      events.push(`start:${(event as any).mode}`);
     });
     toolbox.addEventListener('stream-chunk', (event) => {
-      events.push(`chunk:${event.detail.index}:${event.detail.chunk as string}`);
+      events.push(`chunk:${(event as any).index}:${(event as any).chunk as string}`);
     });
     toolbox.addEventListener('stream-end', (event) => {
-      events.push(`end:${event.detail.chunks}:${event.detail.completed}`);
+      events.push(`end:${(event as any).chunks}:${(event as any).completed}`);
     });
 
     toolbox.register({
@@ -1449,13 +1444,13 @@ describe('createToolbox', () => {
 
     const events: string[] = [];
     toolbox.addEventListener('stream-start', (event) => {
-      events.push(`start:${event.detail.mode}`);
+      events.push(`start:${(event as any).mode}`);
     });
     toolbox.addEventListener('stream-chunk', (event) => {
-      events.push(`chunk:${event.detail.index}:${event.detail.chunk as string}`);
+      events.push(`chunk:${(event as any).index}:${(event as any).chunk as string}`);
     });
     toolbox.addEventListener('stream-end', (event) => {
-      events.push(`end:${event.detail.chunks}:${event.detail.completed}`);
+      events.push(`end:${(event as any).chunks}:${(event as any).completed}`);
     });
 
     toolbox.register({
@@ -2689,7 +2684,7 @@ describe('createToolbox', () => {
 
       const events: Array<{ originalName: string; resolvedName: string; tier: string }> = [];
       toolbox.addEventListener('name-resolved', (e) => {
-        events.push(e.detail);
+        events.push(e);
       });
 
       await toolbox.execute({ id: 'r3', name: 'read.file', arguments: { a: 1, b: 2 } });
@@ -2708,7 +2703,7 @@ describe('createToolbox', () => {
       });
 
       const warnings: unknown[] = [];
-      toolbox.addEventListener('loop-warning', (e) => warnings.push(e.detail));
+      toolbox.addEventListener('loop-warning', (e) => warnings.push(e));
 
       for (let i = 0; i < 4; i++) {
         await toolbox.execute({ id: `lw-${i}`, name: 'sum', arguments: { a: 1, b: 2 } });
@@ -2737,7 +2732,7 @@ describe('createToolbox', () => {
       const toolbox = createToolbox([makeConfiguration()]);
 
       const warnings: unknown[] = [];
-      toolbox.addEventListener('loop-warning', (e) => warnings.push(e.detail));
+      toolbox.addEventListener('loop-warning', (e) => warnings.push(e));
 
       for (let i = 0; i < 5; i++) {
         await toolbox.execute({ id: `nd-${i}`, name: 'sum', arguments: { a: 1, b: 2 } });
@@ -2752,7 +2747,7 @@ describe('createToolbox', () => {
       });
 
       const warnings: unknown[] = [];
-      toolbox.addEventListener('loop-warning', (e) => warnings.push(e.detail));
+      toolbox.addEventListener('loop-warning', (e) => warnings.push(e));
 
       // Default warningThreshold is 10, so 11 identical calls should trigger a warning
       for (let i = 0; i < 11; i++) {
@@ -2768,7 +2763,7 @@ describe('createToolbox', () => {
       });
 
       const blocked: unknown[] = [];
-      toolbox.addEventListener('loop-blocked', (e) => blocked.push(e.detail));
+      toolbox.addEventListener('loop-blocked', (e) => blocked.push(e));
 
       for (let i = 0; i < 5; i++) {
         await toolbox.execute({ id: `bl-${i}`, name: 'sum', arguments: { a: 1, b: 2 } });

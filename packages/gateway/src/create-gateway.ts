@@ -10,8 +10,8 @@ import type { Gateway, GatewayOptions } from './types';
 import { DEFAULT_PORT } from './types';
 import { createWebSocketHandler } from './websocket';
 
-export function createGateway(options: GatewayOptions = {}): Gateway {
-  const bureau = createBureau(options);
+export async function createGateway(options: GatewayOptions = {}): Promise<Gateway> {
+  const bureau = await createBureau(options);
   const port = options.port ?? DEFAULT_PORT;
 
   const app = new Hono();

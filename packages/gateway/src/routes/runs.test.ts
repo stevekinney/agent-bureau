@@ -14,7 +14,7 @@ function createEmptyToolbox(): Toolbox {
 
 describe('runs routes', () => {
   it('POST /api/v1/runs returns 503 when no generate is configured', async () => {
-    const gateway = createTestGateway();
+    const gateway = await createTestGateway();
     const response = await requestJSON(gateway, '/api/v1/runs', {
       method: 'POST',
       body: JSON.stringify({ message: 'Hello' }),
@@ -23,7 +23,7 @@ describe('runs routes', () => {
   });
 
   it('POST /api/v1/runs returns 400 when message is missing', async () => {
-    const gateway = createTestGateway({ generate: createMockGenerate() });
+    const gateway = await createTestGateway({ generate: createMockGenerate() });
     const response = await requestJSON(gateway, '/api/v1/runs', {
       method: 'POST',
       body: JSON.stringify({}),
@@ -32,7 +32,7 @@ describe('runs routes', () => {
   });
 
   it('POST /api/v1/runs creates a run and returns 201', async () => {
-    const gateway = createTestGateway({
+    const gateway = await createTestGateway({
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
     });
@@ -49,7 +49,7 @@ describe('runs routes', () => {
   });
 
   it('GET /api/v1/runs lists all runs', async () => {
-    const gateway = createTestGateway({
+    const gateway = await createTestGateway({
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
     });
@@ -68,7 +68,7 @@ describe('runs routes', () => {
   });
 
   it('GET /api/v1/runs/:id returns a specific run', async () => {
-    const gateway = createTestGateway({
+    const gateway = await createTestGateway({
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
     });
@@ -87,13 +87,13 @@ describe('runs routes', () => {
   });
 
   it('GET /api/v1/runs/:id returns 404 for missing run', async () => {
-    const gateway = createTestGateway({ generate: createMockGenerate() });
+    const gateway = await createTestGateway({ generate: createMockGenerate() });
     const response = await requestJSON(gateway, '/api/v1/runs/nonexistent');
     expect(response.status).toBe(404);
   });
 
   it('POST /api/v1/runs/:id/abort returns 404 for missing run', async () => {
-    const gateway = createTestGateway({ generate: createMockGenerate() });
+    const gateway = await createTestGateway({ generate: createMockGenerate() });
     const response = await requestJSON(gateway, '/api/v1/runs/nonexistent/abort', {
       method: 'POST',
     });
@@ -101,7 +101,7 @@ describe('runs routes', () => {
   });
 
   it('DELETE /api/v1/runs/:id returns 404 for missing run', async () => {
-    const gateway = createTestGateway({ generate: createMockGenerate() });
+    const gateway = await createTestGateway({ generate: createMockGenerate() });
     const response = await requestJSON(gateway, '/api/v1/runs/nonexistent', {
       method: 'DELETE',
     });
@@ -111,7 +111,7 @@ describe('runs routes', () => {
   it('DELETE /api/v1/runs/:id returns 409 for running run', async () => {
     // Use a generate that never resolves so run stays in running state
     const generate: GenerateFunction = () => new Promise(() => {});
-    const gateway = createTestGateway({ generate, toolbox: createEmptyToolbox() });
+    const gateway = await createTestGateway({ generate, toolbox: createEmptyToolbox() });
 
     const createResponse = await requestJSON(gateway, '/api/v1/runs', {
       method: 'POST',
@@ -129,7 +129,7 @@ describe('runs routes', () => {
   });
 
   it('GET /api/v1/runs?status= filters by status', async () => {
-    const gateway = createTestGateway({
+    const gateway = await createTestGateway({
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
     });

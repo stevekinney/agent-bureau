@@ -87,6 +87,29 @@ export {
   createSerializationError,
   createValidationError,
 } from './errors';
+export type { ConversationEventMap } from './events';
+export {
+  CompactionCompletedEvent,
+  CompactionStartedEvent,
+  ConversationChangeEvent,
+  ConversationPushEvent,
+  ConversationRedoEvent,
+  ConversationSwitchEvent,
+  ConversationUndoEvent,
+  MessagesAppendedEvent,
+  MessagesRemovedEvent,
+  MessagesUpdatedEvent,
+  PersistenceErrorEvent,
+  SessionForkedEvent,
+  SessionRenamedEvent,
+  SessionTaggedEvent,
+  StreamCancelledEvent,
+  StreamFinalizedEvent,
+  StreamStartedEvent,
+  StreamUpdatedEvent,
+  ToolCallsAppendedEvent,
+  ToolResultsAppendedEvent,
+} from './events';
 export {
   isConversation,
   isConversationHistory,

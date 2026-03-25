@@ -1,13 +1,16 @@
-import type { EmissionEvent } from 'event-emission';
-import { createEventTarget } from 'event-emission';
-import type { Observer, Subscription } from 'event-emission/types';
+import { CompletableEventTarget, type Observer, type Subscription } from 'lifecycle';
 import type { RunResult, StepResult, TokenUsage } from 'operative';
 
+import {
+  RunRegisteredEvent,
+  RunRemovedEvent,
+  StoreActionEvent,
+  type StoreEventMap,
+} from './events';
 import type {
   Action,
   RunState,
   Store,
-  StoreEvents,
   StoreEventType,
   StoreListener,
   StoreOptions,
@@ -28,7 +31,7 @@ export function createStore(options: StoreOptions = {}): Store {
   const { maxActions, maxSnapshots } = options;
   const runs = new Map<string, RunState>();
   const actions: Action[] = [];
-  const emitter = createEventTarget<StoreEvents>();
+  const emitter = new CompletableEventTarget<StoreEventMap>();
   const runSubscriptions = new Map<string, { unsubscribe: () => void }>();
   let sequenceCounter = 0;
   let idCounter = 0;
@@ -83,52 +86,56 @@ export function createStore(options: StoreOptions = {}): Store {
     const observable = activeRun.toObservable();
     const subscription = observable.subscribe({
       next(event) {
-        const eventType = event.type as string;
-        const eventDetail = event.detail;
+        const eventType = event.type;
         const timestamp = event.timeStamp;
+        // Extract custom properties from native Event subclasses (skip inherited Event props)
+        const eventProps: Record<string, unknown> = {};
+        for (const key of Object.keys(event)) {
+          eventProps[key] = (event as unknown as Record<string, unknown>)[key];
+        }
 
-        const action = appendAction(runId, eventType, eventDetail, timestamp);
+        const action = appendAction(runId, eventType, eventProps, timestamp);
         // Re-read after appendAction updated the run's actions list
         let updated = runs.get(runId);
         if (!updated) return;
 
         switch (eventType) {
           case 'step.generated': {
-            const stepDetail = eventDetail as { usage?: TokenUsage };
+            const stepEvent = event as Event & { usage?: TokenUsage };
             updated = {
               ...updated,
-              usage: addUsage(updated.usage, stepDetail.usage),
+              usage: addUsage(updated.usage, stepEvent.usage),
             };
             break;
           }
           case 'step.completed': {
-            const stepResult = eventDetail as StepResult;
-            const snapshot = stepResult.conversation.snapshot();
+            const stepEvent = event as Event & StepResult;
+            const snapshot = stepEvent.conversation.snapshot();
             updated = {
               ...updated,
-              steps: [...updated.steps, stepResult],
+              steps: [...updated.steps, stepEvent as unknown as StepResult],
               snapshots: [...updated.snapshots, snapshot],
             };
             break;
           }
           case 'run.completed': {
-            const runResult = eventDetail as RunResult;
-            const snapshot = runResult.conversation.snapshot();
+            const runEvent = event as Event & RunResult;
+            const snapshot = runEvent.conversation.snapshot();
             updated = {
               ...updated,
               status: updated.status === 'error' ? 'error' : 'completed',
-              finishReason: runResult.finishReason,
-              error: updated.error ?? runResult.error,
+              finishReason: runEvent.finishReason,
+              error: updated.error ?? runEvent.error,
               snapshots: [...updated.snapshots, snapshot],
             };
             break;
           }
           case 'run.error': {
-            const errorDetail = eventDetail as { error: unknown };
+            const errorEvent = event as Event & { error: unknown };
             updated = {
               ...updated,
               status: 'error',
-              error: errorDetail.error,
+              error: errorEvent.error,
             };
             break;
           }
@@ -149,18 +156,18 @@ export function createStore(options: StoreOptions = {}): Store {
         }
 
         runs.set(runId, updated);
-        emitter.emit('action', action);
+        emitter.dispatch(new StoreActionEvent(action));
       },
     });
 
     runSubscriptions.set(runId, subscription);
-    emitter.emit('run.registered', { runId });
+    emitter.dispatch(new RunRegisteredEvent(runId));
     return runId;
   }
 
   type StoreEventObserverOrNext<K extends StoreEventType> =
-    | Observer<EmissionEvent<StoreEvents[K], K>>
-    | ((value: EmissionEvent<StoreEvents[K], K>) => void);
+    | Observer<StoreEventMap[K]>
+    | ((value: StoreEventMap[K]) => void);
 
   function subscribe(listener: StoreListener): Unsubscribe;
   function subscribe<K extends StoreEventType>(
@@ -176,17 +183,21 @@ export function createStore(options: StoreOptions = {}): Store {
     complete?: () => void,
   ): Unsubscribe | Subscription {
     if (typeof listenerOrType === 'function') {
-      const unsubscribe = emitter.addEventListener('action', (event) => {
-        listenerOrType(getState(), event.detail);
-      });
-      return unsubscribe;
+      const listener = listenerOrType;
+      const handler = (event: StoreActionEvent) => {
+        listener(getState(), event.action);
+      };
+      emitter.addEventListener('action', handler, { signal: emitter.signal });
+      return () => {
+        emitter.removeEventListener('action', handler);
+      };
     }
     return emitter.subscribe(listenerOrType, observerOrNext, error, complete);
   }
 
   function removeRun(id: string): void {
     if (!runs.has(id)) return;
-    emitter.emit('run.removed', { runId: id });
+    emitter.dispatch(new RunRemovedEvent(id));
     deregister(id);
     runs.delete(id);
   }
@@ -211,12 +222,13 @@ export function createStore(options: StoreOptions = {}): Store {
     getState,
     getRun,
     subscribe,
-    addEventListener: emitter.addEventListener,
-    on: emitter.on,
-    once: emitter.once,
-    toObservable: emitter.toObservable,
-    events: emitter.events,
-    complete: emitter.complete,
+    addEventListener: emitter.addEventListener.bind(emitter),
+    removeEventListener: emitter.removeEventListener.bind(emitter),
+    on: emitter.on.bind(emitter),
+    once: emitter.once.bind(emitter),
+    toObservable: emitter.toObservable.bind(emitter),
+    events: emitter.events.bind(emitter),
+    complete: emitter.complete.bind(emitter),
     get completed() {
       return emitter.completed;
     },

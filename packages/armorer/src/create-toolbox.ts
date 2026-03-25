@@ -1,10 +1,5 @@
-import {
-  type AddEventListenerOptionsLike,
-  type AsyncIteratorOptions,
-  createEventTarget,
-  type EmissionEvent,
-} from 'event-emission';
-import type { ObservableLike, Observer, Subscription } from 'event-emission/types';
+import type { EventIteratorOptions, ObservableLike, Observer, Subscription } from 'lifecycle';
+import { CompletableEventTarget } from 'lifecycle';
 import { z } from 'zod';
 
 import type { AnthropicTool } from './adapters/anthropic/types';
@@ -40,6 +35,37 @@ import {
   createToolCall,
   type CreateToolOptions,
 } from './create-tool';
+import {
+  ToolboxBudgetExceededEvent,
+  ToolboxCallEvent,
+  ToolboxCancelledEvent,
+  ToolboxCompleteEvent,
+  ToolboxErrorEvent,
+  type ToolboxEventMap,
+  ToolboxExecuteErrorEvent,
+  ToolboxExecuteStartEvent,
+  ToolboxExecuteSuccessEvent,
+  ToolboxLogEvent,
+  ToolboxLoopBlockedEvent,
+  ToolboxLoopWarningEvent,
+  ToolboxNameResolvedEvent,
+  ToolboxNotFoundEvent,
+  ToolboxOutputChunkEvent,
+  ToolboxPolicyDeniedEvent,
+  ToolboxProgressEvent,
+  ToolboxQueryEvent,
+  ToolboxSearchEvent,
+  ToolboxSettledEvent,
+  ToolboxStatusUpdateEvent,
+  ToolboxStreamChunkEvent,
+  ToolboxStreamEndEvent,
+  ToolboxStreamErrorEvent,
+  ToolboxStreamStartEvent,
+  ToolboxToolFinishedEvent,
+  ToolboxToolStartedEvent,
+  ToolboxValidateErrorEvent,
+  ToolboxValidateSuccessEvent,
+} from './events';
 import type {
   DefaultToolEvents,
   MinimalAbortSignal,
@@ -278,9 +304,7 @@ export interface ToolboxEvents {
 
 type ToolboxEventType = Extract<keyof ToolboxEvents, string>;
 
-export type ToolboxEventDispatcher = (
-  event: EmissionEvent<ToolboxEvents[ToolboxEventType]>,
-) => boolean;
+export type ToolboxEventDispatcher = (event: Event) => boolean;
 
 export interface ToolboxExecuteOptions extends ToolExecuteOptions {
   concurrency?: number;
@@ -403,39 +427,36 @@ export interface Toolbox<TTools extends readonly Tool[] = readonly Tool[]> {
     (options: { format: 'configuration' }): SerializedToolbox;
     (options: { format: 'json-schema' }): SerializedToolboxJSONSchema;
   };
-  addEventListener: <K extends ToolboxEventType>(
+  addEventListener: <K extends keyof ToolboxEventMap & string>(
     type: K,
-    listener: (event: EmissionEvent<ToolboxEvents[K]>) => void | Promise<void>,
-    options?: AddEventListenerOptionsLike,
+    listener: (event: ToolboxEventMap[K]) => void | Promise<void>,
+    options?: AddEventListenerOptions,
   ) => () => void;
   dispatchEvent: ToolboxEventDispatcher;
   emit: <K extends ToolboxEventType>(type: K, detail: ToolboxEvents[K]) => boolean;
 
-  // Observable-based event methods (event-emission 0.3.0)
-  on: <K extends ToolboxEventType>(
+  // Observable-based event methods
+  on: <K extends keyof ToolboxEventMap & string>(
     type: K,
-    options?: AddEventListenerOptionsLike | boolean,
-  ) => ObservableLike<EmissionEvent<ToolboxEvents[K]>>;
-  once: <K extends ToolboxEventType>(
+    options?: { signal?: AbortSignal },
+  ) => ObservableLike<ToolboxEventMap[K]>;
+  once: <K extends keyof ToolboxEventMap & string>(
     type: K,
-    listener: (event: EmissionEvent<ToolboxEvents[K]>) => void | Promise<void>,
-    options?: Omit<AddEventListenerOptionsLike, 'once'>,
-  ) => () => void;
-  subscribe: <K extends ToolboxEventType>(
+    listener: (event: ToolboxEventMap[K]) => void,
+  ) => void;
+  subscribe: <K extends keyof ToolboxEventMap & string>(
     type: K,
-    observerOrNext?:
-      | Observer<EmissionEvent<ToolboxEvents[K]>>
-      | ((value: EmissionEvent<ToolboxEvents[K]>) => void),
+    observerOrNext?: Observer<ToolboxEventMap[K]> | ((value: ToolboxEventMap[K]) => void),
     error?: (err: unknown) => void,
     complete?: () => void,
   ) => Subscription;
-  toObservable: () => ObservableLike<EmissionEvent<ToolboxEvents[keyof ToolboxEvents]>>;
+  toObservable: () => ObservableLike<Event>;
 
-  // Async iteration (event-emission 0.3.0)
-  events: <K extends ToolboxEventType>(
+  // Async iteration
+  events: <K extends keyof ToolboxEventMap & string>(
     type: K,
-    options?: AsyncIteratorOptions,
-  ) => AsyncIterableIterator<EmissionEvent<ToolboxEvents[K]>>;
+    options?: EventIteratorOptions,
+  ) => AsyncIterableIterator<ToolboxEventMap[K]>;
 
   // Lifecycle methods
   complete: () => void;
@@ -574,23 +595,69 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
   // const registry = new Map<string, Tool>();
 
   const storedConfigurations = new Map<string, ToolConfiguration>();
-  const emitter = createEventTarget<ToolboxEvents>();
-  const {
-    addEventListener,
-    dispatchEvent,
-    emit,
-    clear,
-    on,
-    once,
-    subscribe,
-    toObservable,
-    events,
-    complete: emitterComplete,
-  } = emitter;
+  const emitter = new CompletableEventTarget<ToolboxEventMap>();
+
+  const toolboxEventClassMap: Record<string, new (detail: any) => Event> = {
+    [ToolboxCallEvent.type]: ToolboxCallEvent,
+    [ToolboxCompleteEvent.type]: ToolboxCompleteEvent,
+    [ToolboxErrorEvent.type]: ToolboxErrorEvent,
+    [ToolboxNotFoundEvent.type]: ToolboxNotFoundEvent,
+    [ToolboxQueryEvent.type]: ToolboxQueryEvent,
+    [ToolboxSearchEvent.type]: ToolboxSearchEvent,
+    [ToolboxStatusUpdateEvent.type]: ToolboxStatusUpdateEvent,
+    [ToolboxExecuteStartEvent.type]: ToolboxExecuteStartEvent,
+    [ToolboxValidateSuccessEvent.type]: ToolboxValidateSuccessEvent,
+    [ToolboxValidateErrorEvent.type]: ToolboxValidateErrorEvent,
+    [ToolboxExecuteSuccessEvent.type]: ToolboxExecuteSuccessEvent,
+    [ToolboxExecuteErrorEvent.type]: ToolboxExecuteErrorEvent,
+    [ToolboxSettledEvent.type]: ToolboxSettledEvent,
+    [ToolboxPolicyDeniedEvent.type]: ToolboxPolicyDeniedEvent,
+    [ToolboxToolStartedEvent.type]: ToolboxToolStartedEvent,
+    [ToolboxToolFinishedEvent.type]: ToolboxToolFinishedEvent,
+    [ToolboxBudgetExceededEvent.type]: ToolboxBudgetExceededEvent,
+    [ToolboxProgressEvent.type]: ToolboxProgressEvent,
+    [ToolboxStreamStartEvent.type]: ToolboxStreamStartEvent,
+    [ToolboxStreamChunkEvent.type]: ToolboxStreamChunkEvent,
+    [ToolboxStreamEndEvent.type]: ToolboxStreamEndEvent,
+    [ToolboxStreamErrorEvent.type]: ToolboxStreamErrorEvent,
+    [ToolboxOutputChunkEvent.type]: ToolboxOutputChunkEvent,
+    [ToolboxLogEvent.type]: ToolboxLogEvent,
+    [ToolboxCancelledEvent.type]: ToolboxCancelledEvent,
+    [ToolboxNameResolvedEvent.type]: ToolboxNameResolvedEvent,
+    [ToolboxLoopWarningEvent.type]: ToolboxLoopWarningEvent,
+    [ToolboxLoopBlockedEvent.type]: ToolboxLoopBlockedEvent,
+  };
+
+  const dispatchEvent: ToolboxEventDispatcher = (event: Event) => emitter.dispatchEvent(event);
+
+  // Legacy emit helper: constructs the correct Event from a type string + detail.
+  const emit = <K extends ToolboxEventType>(type: K, detail: ToolboxEvents[K]) => {
+    const cls = toolboxEventClassMap[type];
+    if (cls) {
+      return emitter.dispatchEvent(new cls(detail));
+    }
+    const event = new Event(type);
+    Object.assign(event, detail);
+    return emitter.dispatchEvent(event);
+  };
+
+  const addEventListener = <K extends keyof ToolboxEventMap & string>(
+    type: K,
+    listener: (event: ToolboxEventMap[K]) => void | Promise<void>,
+    options?: AddEventListenerOptions,
+  ): (() => void) => {
+    // Merge the emitter's signal so listeners auto-cleanup on complete().
+    const mergedOptions: AddEventListenerOptions = {
+      ...options,
+      signal: options?.signal ? AbortSignal.any([options.signal, emitter.signal]) : emitter.signal,
+    };
+    emitter.addEventListener(type, listener as EventListener, mergedOptions);
+    return () => emitter.removeEventListener(type, listener as EventListener, options);
+  };
 
   function complete() {
     loopDetectors.clear();
-    emitterComplete();
+    emitter.complete();
   }
   const baseContext = options.context ? { ...options.context } : {};
   const readOnly = options.readOnly ?? false;
@@ -634,11 +701,11 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
   if (options.signal) {
     const signal = options.signal;
     const onAbort = () => {
-      clear();
+      complete();
       signal.removeEventListener('abort', onAbort);
     };
     if (signal.aborted) {
-      clear();
+      complete();
     } else {
       signal.addEventListener('abort', onAbort);
     }
@@ -827,10 +894,17 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
         'status-update',
       ];
       for (const eventType of toolEventTypes) {
-        const unsubscribe = tool.addEventListener(eventType, (toolEvent) => {
+        const unsubscribe = tool.addEventListener(eventType, (toolEvent: Event) => {
+          // Extract event properties (excluding standard Event fields)
+          const eventProps: Record<string, unknown> = {};
+          for (const key of Object.getOwnPropertyNames(toolEvent)) {
+            if (key !== 'type' && key !== 'isTrusted') {
+              eventProps[key] = (toolEvent as unknown as Record<string, unknown>)[key];
+            }
+          }
           // Bubble up the event with tool and call context
           const bubbledDetail = {
-            ...toolEvent.detail,
+            ...eventProps,
             tool,
             call: toolCall,
           };
@@ -1084,13 +1158,13 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
     addEventListener,
     dispatchEvent,
     emit,
-    // Observable-based event methods (event-emission 0.3.0)
-    on,
-    once,
-    subscribe,
-    toObservable,
-    // Async iteration (event-emission 0.3.0)
-    events,
+    // Observable-based event methods
+    on: emitter.on.bind(emitter),
+    once: emitter.once.bind(emitter),
+    subscribe: emitter.subscribe.bind(emitter),
+    toObservable: emitter.toObservable.bind(emitter),
+    // Async iteration
+    events: emitter.events.bind(emitter),
     // Lifecycle methods
     complete,
     get completed() {
