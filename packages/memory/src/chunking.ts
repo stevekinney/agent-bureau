@@ -27,7 +27,9 @@ export function chunkMarkdown(content: string, options?: ChunkingOptions): Conte
   if (!content || content.trim().length === 0) return [];
 
   const maximumTokens = options?.maximumTokens ?? DEFAULT_MAXIMUM_TOKENS;
-  const overlapTokens = options?.overlapTokens ?? DEFAULT_OVERLAP_TOKENS;
+  const rawOverlapTokens = options?.overlapTokens ?? DEFAULT_OVERLAP_TOKENS;
+  // Clamp overlap to less than the chunk size to prevent duplicate chunks.
+  const overlapTokens = Math.min(rawOverlapTokens, Math.max(0, maximumTokens - 1));
 
   const maximumCharacters = maximumTokens * CHARACTERS_PER_TOKEN;
   const overlapCharacters = overlapTokens * CHARACTERS_PER_TOKEN;

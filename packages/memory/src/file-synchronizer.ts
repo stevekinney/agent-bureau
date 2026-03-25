@@ -169,8 +169,9 @@ export function createFileSynchronizer(options: FileSynchronizerOptions): FileSy
       starting = true;
       try {
         await synchronize();
-      } finally {
-        // Only schedule the interval if no concurrent caller already did.
+        // Only schedule the interval after a successful initial sync.
+        // If synchronize() throws, no interval is created — preventing a
+        // leaked timer that the caller cannot clean up.
         if (!intervalId) {
           intervalId = setInterval(() => {
             if (synchronizing) return;
@@ -184,6 +185,7 @@ export function createFileSynchronizer(options: FileSynchronizerOptions): FileSy
               });
           }, pollingInterval);
         }
+      } finally {
         starting = false;
       }
     },
