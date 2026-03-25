@@ -87,7 +87,7 @@ export function createStore(options: StoreOptions = {}): Store {
     const subscription = observable.subscribe({
       next(event) {
         const eventType = event.type;
-        const timestamp = event.timeStamp;
+        const timestamp = Date.now();
         // Extract custom properties from native Event subclasses (skip inherited Event props)
         const eventProps: Record<string, unknown> = {};
         for (const key of Object.keys(event)) {

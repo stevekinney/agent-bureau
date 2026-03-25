@@ -76,8 +76,9 @@ export function eventObservable<E extends Event>(
 
       target.addEventListener(type, onEvent, { signal: combinedSignal });
 
-      // When the combined signal fires (from external abort),
-      // mark as closed and call complete
+      // When the external signal fires, mark as closed and call complete.
+      // The listener is tied to the subscription's own controller so it is
+      // cleaned up when unsubscribe() aborts that controller.
       if (options?.signal) {
         options.signal.addEventListener(
           'abort',
@@ -87,7 +88,7 @@ export function eventObservable<E extends Event>(
               observer.complete?.();
             }
           },
-          { once: true },
+          { once: true, signal: controller.signal },
         );
       }
 
@@ -157,7 +158,7 @@ export function allEventsObservable<E extends Event>(
               observer.complete?.();
             }
           },
-          { once: true },
+          { once: true, signal: controller.signal },
         );
       }
 

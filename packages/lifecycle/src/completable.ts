@@ -58,9 +58,11 @@ export class CompletableEventTarget<M extends EventMap> extends TypedEventTarget
 
   /**
    * Registers a one-shot listener using the native { once: true } option.
+   * The listener is tied to this target's completion signal so that calling
+   * complete() removes the listener if the event never fires.
    */
   once<K extends keyof M & string>(type: K, listener: (event: M[K]) => void): void {
-    this.addEventListener(type, listener, { once: true });
+    this.addEventListener(type, listener, { once: true, signal: this.signal });
   }
 
   /**
