@@ -41,17 +41,17 @@ export function forwardEvents(
     },
   });
 
-  options?.signal?.addEventListener(
-    'abort',
-    () => {
-      subscription.unsubscribe();
-    },
-    { once: true },
-  );
+  const signal = options?.signal;
+  const abortHandler = () => {
+    subscription.unsubscribe();
+  };
+
+  signal?.addEventListener('abort', abortHandler, { once: true });
 
   return {
     stop() {
       subscription.unsubscribe();
+      signal?.removeEventListener('abort', abortHandler);
     },
   };
 }

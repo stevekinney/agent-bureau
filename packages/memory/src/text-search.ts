@@ -52,26 +52,38 @@ export function computeBM25Scores(
   const totalLength = tokenizedDocuments.reduce((sum, tokens) => sum + tokens.length, 0);
   const averageDocumentLength = totalLength / numberOfDocuments;
 
-  // Build document frequency for each query term
+  // Precompute per-document term frequencies and term sets for efficient DF/TF lookups
+  const documentTermFrequencies: Map<string, number>[] = [];
+  const documentTermSets: Set<string>[] = [];
+  for (const tokens of tokenizedDocuments) {
+    const frequencies = new Map<string, number>();
+    for (const token of tokens) {
+      frequencies.set(token, (frequencies.get(token) ?? 0) + 1);
+    }
+    documentTermFrequencies.push(frequencies);
+    documentTermSets.push(new Set(frequencies.keys()));
+  }
+
+  // Build document frequency for each query term using precomputed term sets
   const documentFrequency = new Map<string, number>();
   for (const term of queryTerms) {
     if (documentFrequency.has(term)) continue;
     let count = 0;
-    for (const tokens of tokenizedDocuments) {
-      if (tokens.includes(term)) count++;
+    for (const termSet of documentTermSets) {
+      if (termSet.has(term)) count++;
     }
     documentFrequency.set(term, count);
   }
 
-  // Score each document
+  // Score each document using precomputed term frequencies
   for (let documentIndex = 0; documentIndex < numberOfDocuments; documentIndex++) {
-    const tokens = tokenizedDocuments[documentIndex]!;
-    const documentLength = tokens.length;
+    const termFrequencies = documentTermFrequencies[documentIndex]!;
+    const documentLength = tokenizedDocuments[documentIndex]!.length;
     let score = 0;
 
     for (const term of queryTerms) {
       const df = documentFrequency.get(term) ?? 0;
-      const termFrequency = tokens.filter((t) => t === term).length;
+      const termFrequency = termFrequencies.get(term) ?? 0;
 
       if (termFrequency === 0) continue;
 

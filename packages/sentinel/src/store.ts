@@ -91,7 +91,35 @@ export function createStore(options: StoreOptions = {}): Store {
         // Extract custom properties from native Event subclasses (skip inherited Event props)
         const eventProps: Record<string, unknown> = {};
         for (const key of Object.keys(event)) {
-          eventProps[key] = (event as unknown as Record<string, unknown>)[key];
+          const value = (event as unknown as Record<string, unknown>)[key];
+          if (key === 'originalEvent') {
+            // Avoid retaining large/non-serializable originalEvent graphs in the action log.
+            // Flatten to a shallow, serializable summary instead.
+            if (value && typeof value === 'object') {
+              const original = value as { type?: unknown; [prop: string]: unknown };
+              const flattened: Record<string, unknown> = {};
+              if (original['type'] !== undefined) {
+                flattened['type'] = original['type'];
+              }
+              for (const prop of Object.keys(original)) {
+                if (prop === 'type') continue;
+                const propValue = original[prop];
+                if (
+                  propValue === null ||
+                  typeof propValue === 'string' ||
+                  typeof propValue === 'number' ||
+                  typeof propValue === 'boolean'
+                ) {
+                  flattened[prop] = propValue;
+                }
+              }
+              eventProps[key] = flattened;
+            } else {
+              eventProps[key] = value;
+            }
+          } else {
+            eventProps[key] = value;
+          }
         }
 
         const action = appendAction(runId, eventType, eventProps, timestamp);

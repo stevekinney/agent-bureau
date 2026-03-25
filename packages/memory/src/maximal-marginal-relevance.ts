@@ -8,6 +8,12 @@ export interface MaximalMarginalRelevanceOptions {
  * Returns 0 if either vector has zero magnitude.
  */
 export function cosineSimilarity(a: number[], b: number[]): number {
+  if (a.length !== b.length) {
+    throw new Error(
+      `Vector length mismatch: expected equal lengths but got ${a.length} and ${b.length}`,
+    );
+  }
+
   let dotProduct = 0;
   let magnitudeA = 0;
   let magnitudeB = 0;

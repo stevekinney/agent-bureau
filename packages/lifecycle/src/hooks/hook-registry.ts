@@ -54,6 +54,7 @@ export class HookRegistry<M extends HookMap> {
     const sorted = [...list].sort((a, b) => b.priority - a.priority);
 
     const currentArgs = [...args] as unknown[];
+    let hasReturnedValue = false;
 
     for (let i = 0; i < sorted.length; i++) {
       const entry = sorted[i]!;
@@ -63,6 +64,7 @@ export class HookRegistry<M extends HookMap> {
         );
         if (result !== undefined) {
           currentArgs[0] = result;
+          hasReturnedValue = true;
         }
       } catch (error: unknown) {
         const errorHandler = entry.options.onError ?? this.registryOptions.onError;
@@ -77,7 +79,7 @@ export class HookRegistry<M extends HookMap> {
       }
     }
 
-    return currentArgs[0] as ReturnType<M[K]>;
+    return (hasReturnedValue ? currentArgs[0] : undefined) as ReturnType<M[K]>;
   }
 
   has<K extends keyof M & string>(hookName: K): boolean {
