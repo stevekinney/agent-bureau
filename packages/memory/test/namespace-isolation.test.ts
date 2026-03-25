@@ -179,14 +179,15 @@ describe('withNamespaceIsolation', () => {
     });
 
     it('ignores the namespace argument passed to it', async () => {
-      await baseMemory.remember('Entry A', { namespace: 'tenant-a' });
+      await baseMemory.remember('Entry A1', { namespace: 'tenant-a' });
+      await baseMemory.remember('Entry A2', { namespace: 'tenant-a' });
       await baseMemory.remember('Entry B', { namespace: 'tenant-b' });
 
       const tenantA = withNamespaceIsolation(baseMemory, { namespace: 'tenant-a' });
 
-      // Pass a different namespace — should be ignored
+      // Pass tenant-b (which has 1 entry) — should be ignored, returning tenant-a's count (2)
       const count = await tenantA.count('tenant-b');
-      expect(count).toBe(1);
+      expect(count).toBe(2);
     });
   });
 

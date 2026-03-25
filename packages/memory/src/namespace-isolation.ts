@@ -66,12 +66,12 @@ export function withNamespaceIsolation(memory: Memory, options: NamespaceIsolati
       knownIds.delete(id);
     },
 
-    async forgetAll(): Promise<void> {
+    async forgetAll(_namespace?: string): Promise<void> {
       await memory.forgetAll(namespace);
       knownIds.clear();
     },
 
-    async count(): Promise<number> {
+    async count(_namespace?: string): Promise<number> {
       return memory.count(namespace);
     },
 
