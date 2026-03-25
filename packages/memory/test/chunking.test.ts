@@ -107,6 +107,22 @@ describe('chunkMarkdown', () => {
     }
   });
 
+  it('produces no overlap when overlapTokens is explicitly zero', () => {
+    const lines = Array.from({ length: 20 }, (_, i) => `Line ${i}: ${'content '.repeat(10)}`);
+    const content = lines.join('\n');
+
+    const chunks = chunkMarkdown(content, { maximumTokens: 50, overlapTokens: 0 });
+
+    expect(chunks.length).toBeGreaterThan(1);
+
+    for (let i = 1; i < chunks.length; i++) {
+      const previousLines = chunks[i - 1]!.text.split('\n');
+      const currentLines = chunks[i]!.text.split('\n');
+      const overlap = previousLines.filter((line) => currentLines.includes(line));
+      expect(overlap).toHaveLength(0);
+    }
+  });
+
   it('does not infinite-loop when maximumTokens is zero', () => {
     const content = 'Hello world\nSecond line';
     const chunks = chunkMarkdown(content, { maximumTokens: 0 });

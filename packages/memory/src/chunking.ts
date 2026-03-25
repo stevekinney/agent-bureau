@@ -59,18 +59,24 @@ export function chunkMarkdown(content: string, options?: ChunkingOptions): Conte
     });
 
     // Carry forward overlap from the trailing lines.
-    const overlapLines: string[] = [];
-    let overlapSize = 0;
-    for (let i = currentLines.length - 1; i >= 0; i--) {
-      const lineSize = currentLines[i]!.length + 1; // +1 for newline
-      if (overlapSize + lineSize > overlapCharacters && overlapLines.length > 0) break;
-      overlapLines.unshift(currentLines[i]!);
-      overlapSize += lineSize;
-    }
+    if (overlapCharacters === 0) {
+      currentLines = [];
+      currentCharacters = 0;
+      chunkStartLine = endLine + 1;
+    } else {
+      const overlapLines: string[] = [];
+      let overlapSize = 0;
+      for (let i = currentLines.length - 1; i >= 0; i--) {
+        const lineSize = currentLines[i]!.length + 1; // +1 for newline
+        if (overlapSize + lineSize > overlapCharacters && overlapLines.length > 0) break;
+        overlapLines.unshift(currentLines[i]!);
+        overlapSize += lineSize;
+      }
 
-    currentLines = overlapLines;
-    currentCharacters = overlapSize;
-    chunkStartLine = endLine - overlapLines.length + 1;
+      currentLines = overlapLines;
+      currentCharacters = overlapSize;
+      chunkStartLine = endLine - overlapLines.length + 1;
+    }
   }
 
   for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
