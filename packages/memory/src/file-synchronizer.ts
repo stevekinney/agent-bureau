@@ -2,7 +2,8 @@ import { readdir, readFile } from 'node:fs/promises';
 import { extname, join, relative } from 'node:path';
 
 import type { ChunkingOptions } from './chunking';
-import { ingest, SOURCE_DOCUMENT_KEY } from './ingest';
+import { sha256Hex } from './hash';
+import { ingest } from './ingest';
 import type { Memory, MemoryMetadata } from './types';
 
 export interface FileSynchronizerOptions {
@@ -32,17 +33,6 @@ export interface FileSynchronizer {
   stop(): void;
   /** Synchronize all files once (no watching). */
   synchronize(): Promise<SynchronizeResult>;
-}
-
-async function sha256Hex(content: string): Promise<string> {
-  const data = new TextEncoder().encode(content);
-  const buffer = await crypto.subtle.digest('SHA-256', data);
-  const bytes = new Uint8Array(buffer);
-  let hex = '';
-  for (let i = 0; i < bytes.length; i++) {
-    hex += bytes[i]!.toString(16).padStart(2, '0');
-  }
-  return hex;
 }
 
 async function walkDirectory(directory: string, extensions: string[]): Promise<string[]> {
@@ -88,6 +78,10 @@ export function createFileSynchronizer(options: FileSynchronizerOptions): FileSy
   const knownFiles = new Map<string, string>();
   // Tracks which source identifiers belong to which file.
   const sourceByPath = new Map<string, string>();
+  // Tracks the memory entry IDs for each source identifier so we can
+  // delete them directly without relying on recall() (which applies
+  // semantic search and source-document deduplication).
+  const entryIdsBySource = new Map<string, string[]>();
 
   let intervalId: ReturnType<typeof setInterval> | null = null;
 
@@ -122,11 +116,16 @@ export function createFileSynchronizer(options: FileSynchronizerOptions): FileSy
         await forgetBySource(existingSource);
       }
 
-      await ingest(memory, content, {
+      const ingestResult = await ingest(memory, content, {
         ...chunking,
         sourceIdentifier,
         metadata: { ...metadata, __filePath: relativePath },
       });
+
+      entryIdsBySource.set(
+        sourceIdentifier,
+        ingestResult.entries.map((entry) => entry.id),
+      );
 
       knownFiles.set(relativePath, hash);
       sourceByPath.set(relativePath, sourceIdentifier);
@@ -152,14 +151,14 @@ export function createFileSynchronizer(options: FileSynchronizerOptions): FileSy
   }
 
   async function forgetBySource(sourceIdentifier: string): Promise<void> {
-    // Recall all entries with this source document to get their IDs.
-    // Use a high limit to get all chunks.
-    const results = await memory.recall(sourceIdentifier, { limit: 1000 });
-    for (const result of results) {
-      if (result.metadata[SOURCE_DOCUMENT_KEY] === sourceIdentifier) {
-        await memory.forget(result.id);
-      }
+    const ids = entryIdsBySource.get(sourceIdentifier);
+    if (!ids) return;
+
+    for (const id of ids) {
+      await memory.forget(id);
     }
+
+    entryIdsBySource.delete(sourceIdentifier);
   }
 
   return {

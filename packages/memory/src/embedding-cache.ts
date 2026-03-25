@@ -1,5 +1,7 @@
 import type { Embedder, EmbeddingVector } from 'interoperability';
 
+import { sha256Hex } from './hash';
+
 export interface EmbeddingCacheOptions {
   /** Maximum number of entries to retain. Default: 10_000 */
   maximumEntries?: number;
@@ -15,17 +17,6 @@ export type CachedEmbedder = Embedder & {
 };
 
 const DEFAULT_MAXIMUM_ENTRIES = 10_000;
-
-async function sha256Hex(text: string): Promise<string> {
-  const data = new TextEncoder().encode(text);
-  const buffer = await crypto.subtle.digest('SHA-256', data);
-  const bytes = new Uint8Array(buffer);
-  let hex = '';
-  for (let i = 0; i < bytes.length; i++) {
-    hex += bytes[i]!.toString(16).padStart(2, '0');
-  }
-  return hex;
-}
 
 /**
  * Wraps an Embedder with an in-memory LRU cache keyed by content hash.
