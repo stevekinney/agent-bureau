@@ -246,9 +246,13 @@ export function createMemory(options: CreateMemoryOptions): Memory {
         }
       } else {
         const keywords = extractKeywords(query);
-        const bm25Query = keywords.length > 0 ? keywords.join(' ') : query;
         const documents = candidates.map((candidate) => candidate.content);
-        const rawScores = computeBM25Scores(bm25Query, documents);
+        // Pass pre-extracted keywords as queryTerms to avoid double CJK
+        // expansion (extractKeywords already produces unigrams + bigrams).
+        const rawScores =
+          keywords.length > 0
+            ? computeBM25Scores(query, documents, { queryTerms: keywords })
+            : computeBM25Scores(query, documents);
 
         // Normalize raw BM25 scores to [0, 1) so they are on the same scale
         // as vector similarity scores and FTS5 normalized scores.

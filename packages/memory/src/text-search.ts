@@ -3,6 +3,12 @@ export interface BM25Options {
   k1?: number;
   /** Length normalization parameter. Default: 0.75 */
   b?: number;
+  /**
+   * Pre-tokenized query terms. When provided, `tokenize()` is skipped for
+   * the query string, avoiding double expansion of CJK unigrams/bigrams
+   * when the caller has already performed keyword extraction.
+   */
+  queryTerms?: string[];
 }
 
 /**
@@ -116,7 +122,7 @@ export function computeBM25Scores(
   const k1 = options?.k1 ?? 1.2;
   const b = options?.b ?? 0.75;
 
-  const queryTerms = tokenize(query);
+  const queryTerms = options?.queryTerms ?? tokenize(query);
   const tokenizedDocuments = documents.map(tokenize);
   const numberOfDocuments = documents.length;
 
