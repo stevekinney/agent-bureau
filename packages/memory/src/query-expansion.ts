@@ -570,9 +570,10 @@ function tokenizeForKeywords(text: string): string[] {
         segment.match(/[a-z0-9_]+|[\u30a0-\u30ffー]+|[\u4e00-\u9fff]+|[\u3040-\u309f]{2,}/g) ?? [];
       for (const part of parts) {
         if (/^[\u4e00-\u9fff]+$/.test(part)) {
-          tokens.push(part);
-          for (let i = 0; i < part.length - 1; i++) {
-            tokens.push(part[i]! + part[i + 1]!);
+          const characters = Array.from(part);
+          tokens.push(...characters);
+          for (let i = 0; i < characters.length - 1; i++) {
+            tokens.push(characters[i]! + characters[i + 1]!);
           }
         } else {
           tokens.push(part);
