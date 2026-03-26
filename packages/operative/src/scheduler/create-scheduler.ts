@@ -191,14 +191,22 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
     const taskId = generateTaskId();
     const runOptions = createRunFactory();
 
+    // Create an AbortController that the scheduler can use to abort the run
+    // (e.g., during stop() or preemption). Pass its signal into createRun so
+    // that aborting this controller actually stops the underlying run.
+    const abortController = new AbortController();
+    const combinedSignal = runOptions.signal
+      ? AbortSignal.any([runOptions.signal, abortController.signal])
+      : abortController.signal;
+
     const activeRun = createRun({
       ...runOptions,
       generate: runOptions.generate ?? generate,
       toolbox: runOptions.toolbox ?? toolbox,
+      signal: combinedSignal,
     });
 
     // Register in the running map so getState() reflects this task
-    const abortController = new AbortController();
     const task: SchedulerTask = {
       id: taskId,
       priority: 'immediate',
@@ -216,18 +224,21 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
 
     emitEvent(new TaskDispatchedEvent(taskId, 'immediate'));
 
-    // Clean up when the run completes
+    // Clean up when the run completes and wake the scheduler loop so it can
+    // dispatch the next queued task without waiting for the idle delay timeout.
     const result = activeRun.result.then(
       (runResult) => {
         running.delete(taskId);
         completedCount++;
         lastTaskCompletedAt = performance.now();
         emitEvent(new TaskCompletedEvent(taskId, runResult));
+        wakeLoop();
         return runResult;
       },
       (error) => {
         running.delete(taskId);
         emitEvent(new TaskFailedEvent(taskId, error));
+        wakeLoop();
         throw error;
       },
     );
