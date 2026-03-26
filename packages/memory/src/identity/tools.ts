@@ -214,11 +214,13 @@ export function createPersonaUpdateTool(provider: IdentityProvider) {
       }
 
       const updatedDescriptor = params.descriptor
-        ? { ...existing.descriptor, ...params.descriptor }
+        ? existing.descriptor
+          ? { ...existing.descriptor, ...params.descriptor }
+          : undefined
         : existing.descriptor;
 
       await provider.savePersona(params.agentId, {
-        descriptor: updatedDescriptor as PersonaDescriptor | undefined,
+        descriptor: updatedDescriptor,
         text: params.text ?? existing.text,
       });
 
