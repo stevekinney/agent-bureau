@@ -46,6 +46,14 @@ bun run clean             # Clean build artifacts (dist/, coverage/)
 - `src/streaming.ts` — `withStreaming()` helper
 - `src/create-context-compactor.ts` — Reusable `onCompact` factory for context window management
 - `src/conditions/` — Composable stop condition predicates
+- `src/scheduler/` — Priority-aware background process scheduler
+  - `create-scheduler.ts` — `createScheduler()` factory with preemption, budget gating, idle detection
+  - `create-heartbeat.ts` — `createHeartbeat()` sleep-loop for periodic proactive tasks
+  - `create-chunked-task.ts` — `createChunkedTask()` for breaking background work into preemption-friendly chunks
+  - `priority-queue.ts` — Array-backed priority queue with 4 lanes (immediate, scheduled, background, ambient)
+  - `sleep.ts` — Portable async sleep (Bun.sleep → setTimeout fallback)
+  - `types.ts` — `SchedulerPriority`, `SchedulerTask`, `SchedulerState`
+  - `events.ts` — Scheduler lifecycle events (TaskQueued, TaskDispatched, TaskCompleted, TaskPreempted, etc.)
 - `src/test/` — Test utilities (createMockGenerate, createRunRecorder)
 
 ### Workspace Relationships

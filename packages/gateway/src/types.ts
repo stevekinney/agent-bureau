@@ -14,7 +14,7 @@ import type {
   Subscription,
 } from 'lifecycle';
 import type { CreateMemoryOptions, Memory } from 'memory';
-import type { GenerateFunction, StopCondition } from 'operative';
+import type { GenerateFunction, Scheduler, StopCondition } from 'operative';
 import type { Store } from 'sentinel';
 
 import type { BureauEventMap } from './events';
@@ -51,6 +51,7 @@ export type BureauEventType = keyof BureauEventMap & string;
 export interface Bureau {
   readonly store: Store;
   readonly memory: Memory | undefined;
+  readonly scheduler: Scheduler | undefined;
   readonly ready: boolean;
 
   createRun(request: CreateRunRequest): Promise<RunSummary>;
@@ -176,7 +177,9 @@ export type ServerFrame =
   | { type: 'subscribed'; runId: string }
   | { type: 'unsubscribed'; runId: string }
   | { type: 'error'; code: string; message: string }
-  | { type: 'pong' };
+  | { type: 'pong' }
+  | { type: 'scheduler.state'; state: unknown }
+  | { type: 'scheduler.task.preempted'; taskId: string; reason: string };
 
 // ── Health Types ────────────────────────────────────────────────────
 

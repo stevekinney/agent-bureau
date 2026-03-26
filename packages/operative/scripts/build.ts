@@ -26,6 +26,14 @@ const entrypoints = [
   './src/conditions/index.ts',
   './src/conditions/predicates.ts',
   './src/instrumentation/index.ts',
+  './src/scheduler/index.ts',
+  './src/scheduler/types.ts',
+  './src/scheduler/priority-queue.ts',
+  './src/scheduler/sleep.ts',
+  './src/scheduler/events.ts',
+  './src/scheduler/create-scheduler.ts',
+  './src/scheduler/create-heartbeat.ts',
+  './src/scheduler/create-chunked-task.ts',
   './src/test/index.ts',
 ];
 

@@ -3,8 +3,8 @@ import { Conversation } from 'conversationalist';
 import { CompletableEventTarget } from 'lifecycle';
 import type { CreateMemoryOptions, Memory } from 'memory';
 import { createMemory } from 'memory';
-import type { RunOptions, Toolbox } from 'operative';
-import { createRun } from 'operative';
+import type { RunOptions, Scheduler, Toolbox } from 'operative';
+import { createRun, createScheduler } from 'operative';
 import type {
   RunRegisteredEvent as StoreRunRegisteredEvent,
   RunRemovedEvent as StoreRunRemovedEvent,
@@ -96,6 +96,18 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
   const stopWhen = options.stopWhen;
   const systemPrompt = options.systemPrompt;
   const provider = options.provider;
+
+  // ── Scheduler ──────────────────────────────────────────────────
+  let scheduler: Scheduler | undefined;
+
+  if (generate && toolbox) {
+    scheduler = createScheduler({
+      generate,
+      toolbox,
+      idleDelay: 1000,
+    });
+    scheduler.start();
+  }
 
   const emptyToolbox = {
     tools: () => [],
@@ -279,6 +291,9 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
   // ── Lifecycle ───────────────────────────────────────────────────
 
   function dispose(): void {
+    if (scheduler) {
+      void scheduler.stop().catch(() => {});
+    }
     if (memory) {
       void memory.close().catch(() => {});
     }
@@ -293,6 +308,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
   return {
     store,
     memory,
+    scheduler,
     get ready() {
       return generate !== undefined;
     },
