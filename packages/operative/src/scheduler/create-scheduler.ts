@@ -33,8 +33,6 @@ export interface CreateSchedulerOptions {
   toolbox: Toolbox;
   /** Maximum concurrent runs. Default: 1. */
   concurrency?: number;
-  /** Fraction of budget reserved for immediate-priority tasks (0-1). Default: 0.5. */
-  immediateBudgetReserve?: number;
   /** How long to wait after a run completes before dispatching the next non-immediate task (ms). Default: 1000. */
   idleDelay?: number;
   /** AbortSignal to shut down the entire scheduler. */

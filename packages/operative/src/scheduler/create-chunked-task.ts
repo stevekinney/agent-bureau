@@ -20,6 +20,9 @@ export interface CreateChunkedTaskOptions<TState> {
   onComplete?: (finalState: TState) => void | Promise<void>;
   /** Called on error. */
   onError?: (error: unknown, state: TState) => void | Promise<void>;
+  /** Maximum number of times a single chunk can be retried after permanent
+   *  preemption (submit returned null) before giving up. Default: 5. */
+  maxPreemptionRetries?: number;
 }
 
 let chunkedTaskIdCounter = 0;
@@ -44,10 +47,12 @@ export function createChunkedTask<TState>(
     processChunk,
     onComplete,
     onError,
+    maxPreemptionRetries = 5,
   } = options;
 
   return async function submitChunkedWork(scheduler: Scheduler): Promise<TState> {
     let currentState = initialState;
+    let preemptionRetries = 0;
 
     while (true) {
       const stateForChunk = currentState;
@@ -90,6 +95,14 @@ export function createChunkedTask<TState>(
 
       // Task was permanently preempted (exceeded maxRequeues) — retry with same state
       if (result === null) {
+        preemptionRetries++;
+        if (preemptionRetries > maxPreemptionRetries) {
+          const error = new Error(
+            `Chunked task "${name}": exceeded ${maxPreemptionRetries} preemption retries`,
+          );
+          void onError?.(error, stateForChunk);
+          throw error;
+        }
         continue;
       }
 
@@ -102,7 +115,14 @@ export function createChunkedTask<TState>(
 
       // Check if the run was aborted (preempted mid-step)
       if (result.finishReason === 'aborted' && !chunkResult) {
-        // Preempted during execution — retry with same state
+        preemptionRetries++;
+        if (preemptionRetries > maxPreemptionRetries) {
+          const error = new Error(
+            `Chunked task "${name}": exceeded ${maxPreemptionRetries} preemption retries`,
+          );
+          void onError?.(error, stateForChunk);
+          throw error;
+        }
         continue;
       }
 
@@ -113,6 +133,7 @@ export function createChunkedTask<TState>(
       }
 
       currentState = chunkResult.state;
+      preemptionRetries = 0; // Reset retry budget for the next chunk
 
       if (chunkResult.done) {
         void onComplete?.(currentState);
