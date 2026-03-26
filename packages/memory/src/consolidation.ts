@@ -148,6 +148,10 @@ export function createConsolidationTask(
         return { state, done: false };
       }
 
+      // Get total entry count once per chunk for similarity queries.
+      // This ensures computeSimilarity always searches the full memory.
+      const entryCount = await memory.count(namespace);
+
       let { distilled, deduplicated, conflictsResolved, pruned, scanned } = state;
 
       // ── Stage 1: Distill ────────────────────────────────────────
@@ -161,7 +165,12 @@ export function createConsolidationTask(
           if (mergedIds.has(entryA.id) || mergedIds.has(entryB.id)) continue;
 
           // Check pairwise similarity
-          const similarity = await computeSimilarity(memory, entryA.content, entryB.content);
+          const similarity = await computeSimilarity(
+            memory,
+            entryA.content,
+            entryB.content,
+            entryCount,
+          );
 
           if (similarity >= mergeThreshold && similarity < deduplicationThreshold) {
             const mergedContent = await merge(entryA.content, entryB.content);
@@ -205,7 +214,12 @@ export function createConsolidationTask(
             continue;
           }
 
-          const similarity = await computeSimilarity(memory, entryA.content, entryB.content);
+          const similarity = await computeSimilarity(
+            memory,
+            entryA.content,
+            entryB.content,
+            entryCount,
+          );
 
           if (similarity >= deduplicationThreshold) {
             // Keep the most recent, remove the older one
@@ -239,7 +253,12 @@ export function createConsolidationTask(
               continue;
             }
 
-            const similarity = await computeSimilarity(memory, entryA.content, entryB.content);
+            const similarity = await computeSimilarity(
+              memory,
+              entryA.content,
+              entryB.content,
+              entryCount,
+            );
 
             if (similarity >= conflictMin && similarity < conflictMax) {
               const reconciled = await resolveConflict(entryA.content, entryB.content);
@@ -320,13 +339,17 @@ function getConfidence(entry: MemorySearchResult): number {
 /**
  * Compute similarity between two content strings by recalling one
  * and checking the score of the other in the results.
+ *
+ * @param entryCount - Total number of entries in memory, used as the recall
+ *   limit to ensure the target entry is always found regardless of memory size.
  */
 async function computeSimilarity(
   memory: Memory,
   contentA: string,
   contentB: string,
+  entryCount: number,
 ): Promise<number> {
-  const results = await memory.recall(contentA, { limit: 50, threshold: 0.0 });
+  const results = await memory.recall(contentA, { limit: entryCount, threshold: 0.0 });
   const match = results.find((r) => r.content === contentB);
   return match?.score ?? 0;
 }

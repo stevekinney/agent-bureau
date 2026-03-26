@@ -46,8 +46,9 @@ export interface Scheduler {
   /** Convenience: submit an immediate-priority task. Resolves with the run result. */
   submitImmediate(createRunFactory: () => RunOptions | Promise<RunOptions>): Promise<RunResult>;
   /** Eagerly creates an ActiveRun for immediate-priority tasks. Returns both the
-   *  ActiveRun handle (for store registration / event forwarding) and the result promise. */
-  dispatch(createRunFactory: () => RunOptions | Promise<RunOptions>): {
+   *  ActiveRun handle (for store registration / event forwarding) and the result promise.
+   *  The factory must be synchronous — use submit() for async factories. */
+  dispatch(createRunFactory: () => RunOptions): {
     activeRun: ActiveRun;
     result: Promise<RunResult>;
   };
@@ -183,14 +184,11 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
     return submit(task) as Promise<RunResult>;
   }
 
-  function dispatchMethod(createRunFactory: () => RunOptions | Promise<RunOptions>): {
+  function dispatchMethod(createRunFactory: () => RunOptions): {
     activeRun: ActiveRun;
     result: Promise<RunResult>;
   } {
     const runOptions = createRunFactory();
-    if (runOptions instanceof Promise) {
-      throw new Error('dispatch() requires a synchronous createRun factory');
-    }
 
     const activeRun = createRun({
       ...runOptions,
