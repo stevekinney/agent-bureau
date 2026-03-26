@@ -25,6 +25,12 @@ These compiler options are enabled across all packages:
 - `noImplicitReturns` — all code paths must return
 - `noPropertyAccessFromIndexSignature` — use bracket notation for index signatures
 
+## Type Safety
+
+- **`any` is forbidden** outside of test files. Use `unknown` and narrow with type guards.
+- **`as` casts are suspect.** Prefer type guards (Zod schemas, `typeof`, `in`, discriminated unions, custom type predicates) over casting. If a cast is truly necessary, explain why in a comment.
+- **`as unknown as` is a red flag.** This is almost always cutting corners. If it is genuinely justified, the justification must be obvious and documented. If it is not justified, find the real type-level solution.
+
 ## Imports
 
 Order enforced by `simple-import-sort`:
@@ -47,6 +53,15 @@ Order enforced by `simple-import-sort`:
 | Environment   | `Bun.env.VAR`                             | `process.env.VAR`                 |
 
 When Bun has no equivalent, use the `node:` prefix for clarity.
+
+## No Duplicated Code
+
+Before writing a new utility, type, or helper, search for existing implementations across all packages. The monorepo already has shared packages for common concerns:
+
+- **`interoperability`** — shared tool-call/tool-result types and materializers
+- **`lifecycle`** — event targets, async iterators, observables, hook registry
+
+If the same logic exists in two or more packages, extract it to the appropriate shared package rather than duplicating it. Within a package, check for existing helpers before introducing new ones — especially in `src/utilities/` or `src/test/` directories.
 
 ## Module Organization
 

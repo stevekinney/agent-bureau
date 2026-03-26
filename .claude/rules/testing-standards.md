@@ -1,6 +1,6 @@
 ---
 description: Testing patterns, conventions, and tooling for all packages
-globs: "**/*.test.ts,**/test/**"
+globs: "**/*.ts"
 ---
 
 # Testing Standards
