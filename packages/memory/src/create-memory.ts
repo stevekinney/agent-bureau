@@ -81,7 +81,16 @@ export function createMemory(options: CreateMemoryOptions): Memory {
     defaultSearchOptions,
     deduplicationThreshold = DEFAULT_DEDUPLICATION_THRESHOLD,
     textSearchProvider,
+    requireNamespace = false,
+    conflictThreshold,
+    onConflict,
   } = options;
+
+  if (conflictThreshold !== undefined && conflictThreshold >= deduplicationThreshold) {
+    throw new Error(
+      `conflictThreshold (${conflictThreshold}) must be less than deduplicationThreshold (${deduplicationThreshold}).`,
+    );
+  }
 
   async function embed(text: string): Promise<number[]> {
     const vectors = await embedder([text]);
@@ -93,19 +102,40 @@ export function createMemory(options: CreateMemoryOptions): Memory {
     return all.filter((entry) => entry.metadata?.[METADATA_NAMESPACE_KEY] === namespace);
   }
 
-  async function findDuplicate(
+  interface DuplicateCheckResult {
+    duplicate: VectorData | undefined;
+    conflict: { entry: VectorData; similarity: number } | undefined;
+  }
+
+  async function checkDuplicatesAndConflicts(
     vector: number[],
     namespace: string,
-  ): Promise<VectorData | undefined> {
+  ): Promise<DuplicateCheckResult> {
     const entries = await getAllInNamespace(namespace);
+    let duplicate: VectorData | undefined;
+    let conflict: { entry: VectorData; similarity: number } | undefined;
+
     for (const entry of entries) {
       const existingVector = Array.from(entry.vector);
       const similarity = cosineSimilarity(vector, existingVector);
+
       if (similarity >= deduplicationThreshold) {
-        return entry;
+        duplicate = entry;
+        break; // Exact duplicate takes priority
+      }
+
+      if (
+        conflictThreshold !== undefined &&
+        similarity >= conflictThreshold &&
+        similarity < deduplicationThreshold
+      ) {
+        if (!conflict || similarity > conflict.similarity) {
+          conflict = { entry, similarity };
+        }
       }
     }
-    return undefined;
+
+    return { duplicate, conflict };
   }
 
   async function vectorSearch(
@@ -128,35 +158,42 @@ export function createMemory(options: CreateMemoryOptions): Memory {
 
   const memory: Memory = {
     async remember(content: string, metadata?: Partial<MemoryMetadata>): Promise<MemoryEntry> {
+      if (requireNamespace && !metadata?.namespace && defaultNamespace === DEFAULT_NAMESPACE) {
+        throw new Error(
+          'Namespace is required: provide a namespace in metadata or configure a default namespace.',
+        );
+      }
+
       const namespace = metadata?.namespace ?? defaultNamespace;
       const vector = await embed(content);
       const float32Vector = new Float32Array(vector);
 
-      // Check for deduplication
-      const duplicate = await findDuplicate(vector, namespace);
+      // Check for deduplication and conflicts
+      const { duplicate, conflict } = await checkDuplicatesAndConflicts(vector, namespace);
 
-      if (duplicate) {
+      // Helper to update an existing entry in place (used for dedup and 'replace' conflict)
+      async function replaceExisting(existingEntry: VectorData): Promise<MemoryEntry> {
         const now = Date.now();
         const updatedMetadata = buildStorageMetadata(content, namespace, {
           source: 'manual',
           ...metadata,
         });
 
-        await storage.updateMetadata(duplicate.id, updatedMetadata, {
+        await storage.updateMetadata(existingEntry.id, updatedMetadata, {
           merge: false,
           updateTimestamp: true,
         });
-        await storage.updateVector(duplicate.id, float32Vector, {
+        await storage.updateVector(existingEntry.id, float32Vector, {
           updateMagnitude: true,
           updateTimestamp: true,
         });
 
         if (textSearchProvider) {
-          await textSearchProvider.index(duplicate.id, content, namespace);
+          await textSearchProvider.index(existingEntry.id, content, namespace);
         }
 
         return {
-          id: duplicate.id,
+          id: existingEntry.id,
           content,
           vector,
           metadata: {
@@ -164,9 +201,49 @@ export function createMemory(options: CreateMemoryOptions): Memory {
             source: 'manual',
             ...metadata,
           } as MemoryMetadata,
-          createdAt: duplicate.timestamp,
+          createdAt: existingEntry.timestamp,
           updatedAt: now,
         };
+      }
+
+      // Deduplication: near-identical entries are updated in place
+      if (duplicate) {
+        return replaceExisting(duplicate);
+      }
+
+      // Conflict detection: topically similar but potentially contradictory
+      if (conflict) {
+        const existingContent = (conflict.entry.metadata?.[METADATA_CONTENT_KEY] as string) ?? '';
+        const existingMeta = parseMemoryMetadata(conflict.entry.metadata ?? {}, namespace);
+
+        const resolution = onConflict
+          ? await onConflict(
+              { content, metadata: metadata ?? {} },
+              {
+                id: conflict.entry.id,
+                content: existingContent,
+                metadata: existingMeta,
+                similarity: conflict.similarity,
+              },
+            )
+          : 'keep-both';
+
+        if (resolution === 'replace') {
+          return replaceExisting(conflict.entry);
+        }
+
+        if (resolution === 'skip') {
+          return {
+            id: conflict.entry.id,
+            content: existingContent,
+            vector: Array.from(conflict.entry.vector),
+            metadata: existingMeta,
+            createdAt: conflict.entry.timestamp,
+            updatedAt: conflict.entry.timestamp,
+          };
+        }
+
+        // 'keep-both' — fall through to normal insert
       }
 
       const id = generateId();
@@ -341,6 +418,13 @@ export function createMemory(options: CreateMemoryOptions): Memory {
       }
       if (textSearchProvider) {
         await textSearchProvider.clear(targetNamespace);
+      }
+      // Cascade: clear embedding cache entries for this namespace if the
+      // embedder supports namespace-scoped eviction.
+      if ('clearNamespace' in embedder && typeof embedder.clearNamespace === 'function') {
+        await (embedder as { clearNamespace: (ns: string) => void | Promise<void> }).clearNamespace(
+          targetNamespace,
+        );
       }
     },
 
