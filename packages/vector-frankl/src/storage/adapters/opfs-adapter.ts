@@ -67,6 +67,13 @@ export class OPFSStorageAdapter implements StorageAdapter {
   private rootHandle: FileSystemDirectoryHandle | undefined;
   private vectorsHandle: FileSystemDirectoryHandle | undefined;
 
+  static isAvailable(): boolean {
+    return (
+      typeof globalThis.navigator !== 'undefined' &&
+      typeof navigator.storage?.getDirectory === 'function'
+    );
+  }
+
   constructor(options: OPFSStorageAdapterOptions) {
     this.directory = options.directory;
     this.format = options.format ?? 'json';

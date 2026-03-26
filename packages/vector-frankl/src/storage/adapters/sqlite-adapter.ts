@@ -101,6 +101,10 @@ export class SQLiteStorageAdapter implements StorageAdapter {
   private readonly filename: string;
   private database: BunSQLiteDatabase | null = null;
 
+  static isAvailable(): boolean {
+    return typeof globalThis.Bun !== 'undefined';
+  }
+
   constructor(options: SQLiteStorageAdapterOptions) {
     if (typeof Bun === 'undefined') {
       throw new Error('SQLiteStorageAdapter requires the Bun runtime');

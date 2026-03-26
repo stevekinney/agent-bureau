@@ -33,6 +33,7 @@ async function build() {
     { entry: './src/persistence/sqlite-adapter.ts', outdir: 'dist/persistence' },
     { entry: './src/persistence/redis-adapter.ts', outdir: 'dist/persistence' },
     { entry: './src/persistence/postgresql-adapter.ts', outdir: 'dist/persistence' },
+    { entry: './src/persistence/resolve-persistence-adapter.ts', outdir: 'dist/persistence' },
     { entry: './src/composition/index.ts', outdir: 'dist/composition' },
     // Internal modules referenced by index.d.ts (needed for Bun resolution)
     { entry: './src/errors.ts', outdir: 'dist' },

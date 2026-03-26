@@ -17,6 +17,10 @@ export class IndexedDatabaseStorageAdapter implements StorageAdapter {
   private database: VectorDatabase | null = null;
   private storage: VectorStorage | null = null;
 
+  static isAvailable(): boolean {
+    return typeof globalThis.indexedDB !== 'undefined';
+  }
+
   constructor(options: IndexedDatabaseAdapterOptions) {
     this.options = options;
   }

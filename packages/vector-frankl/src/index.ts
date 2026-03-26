@@ -101,10 +101,19 @@ export {
 export { SearchEngine } from './search/search-engine.ts';
 
 // Storage adapters (universally usable)
+export { ChromeStorageAdapter } from './storage/adapters/chrome-storage-adapter.ts';
 export { IndexedDatabaseStorageAdapter } from './storage/adapters/indexed-database-adapter.ts';
 export { MemoryStorageAdapter } from './storage/adapters/memory-adapter.ts';
 export { OPFSStorageAdapter } from './storage/adapters/opfs-adapter.ts';
 export { SQLiteStorageAdapter } from './storage/adapters/sqlite-adapter.ts';
+
+// Storage adapter resolution
+export type {
+  ResolvedStorageAdapter,
+  StorageAdapterPreference,
+  StorageResolutionOptions,
+} from './storage/resolve-storage-adapter.ts';
+export { resolveStorageAdapter } from './storage/resolve-storage-adapter.ts';
 
 // Storage management utilities
 export {

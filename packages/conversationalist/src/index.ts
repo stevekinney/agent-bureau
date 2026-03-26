@@ -136,6 +136,12 @@ export type { InMemoryPersistenceAdapterOptions } from './persistence/in-memory-
 export { createInMemoryPersistenceAdapter } from './persistence/in-memory-adapter';
 export { JsonlSessionPersistenceAdapter } from './persistence/jsonl-adapter';
 export type {
+  PersistenceAdapterPreference,
+  PersistenceResolutionOptions,
+  ResolvedPersistenceAdapter,
+} from './persistence/resolve-persistence-adapter';
+export { resolvePersistenceAdapter } from './persistence/resolve-persistence-adapter';
+export type {
   SQLitePersistenceAdapter,
   SQLitePersistenceAdapterOptions,
 } from './persistence/sqlite-adapter';
