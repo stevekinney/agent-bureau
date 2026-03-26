@@ -5,8 +5,8 @@ import type {
   MemoryLike,
   StepContextLike,
   StepResultLike,
-} from '../src/create-skill-memory';
-import { createSkillMemoryHooks } from '../src/create-skill-memory-hooks';
+} from '../src/skill-memory';
+import { createSkillMemoryHooks } from '../src/skill-memory';
 
 function createMockMemory() {
   const entries: Array<{ content: string; metadata?: Record<string, unknown> }> = [];

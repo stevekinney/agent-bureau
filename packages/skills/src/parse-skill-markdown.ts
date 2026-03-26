@@ -17,6 +17,19 @@ export class SkillParseError extends Error {
 }
 
 /**
+ * Pattern for valid skill names: kebab-case identifiers starting with a
+ * lowercase letter, e.g. "code-review", "deploy", "my-skill-2".
+ */
+export const SKILL_NAME_PATTERN = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
+
+/**
+ * Returns true when `name` is a valid kebab-case skill name.
+ */
+export function isValidSkillName(name: string): boolean {
+  return SKILL_NAME_PATTERN.test(name);
+}
+
+/**
  * Attempts to parse YAML frontmatter from a markdown string.
  * If strict parsing fails (e.g., unquoted colons), retries with a lenient
  * strategy that wraps problematic values in quotes.
@@ -82,6 +95,12 @@ export function parseSkillMarkdown(content: string): SkillContent {
 
   if (!name) {
     throw new SkillParseError('SKILL.md is missing a required "name" field in frontmatter.');
+  }
+
+  if (!isValidSkillName(name)) {
+    throw new SkillParseError(
+      `Skill name "${name}" is not valid kebab-case. Names must match ${SKILL_NAME_PATTERN.source}`,
+    );
   }
 
   if (!description) {

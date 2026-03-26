@@ -56,6 +56,25 @@ describe('createSkillTools', () => {
       expect(session.isActive('nonexistent')).toBe(false);
     });
 
+    it('passes the skill toolPolicy to session.activate', async () => {
+      const skillWithPolicy: SkillContent = {
+        metadata: {
+          name: 'restricted-skill',
+          description: 'A skill with a tool policy',
+          toolPolicy: { allowList: ['read', 'grep'] },
+        },
+        body: 'Instructions for restricted skill',
+      };
+      const provider = createMockSkillProvider([skillWithPolicy]);
+      const session = createSkillSession();
+      const toolbox = createSkillToolbox({ provider, session });
+
+      await toolbox.activateSkill.execute({ name: 'restricted-skill' });
+
+      const policy = session.getActiveToolPolicy();
+      expect(policy).toEqual({ allowList: ['read', 'grep'] });
+    });
+
     it('omits skill_resources block when there are no resources', async () => {
       const provider = createMockSkillProvider([
         makeSkill('code-review', 'Reviews code', 'Review carefully.'),

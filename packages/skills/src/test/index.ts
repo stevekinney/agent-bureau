@@ -73,11 +73,6 @@ export function createMockSkillProvider(
       enabled.delete(name);
     },
 
-    async hasSkill(name: string): Promise<boolean> {
-      calls.push({ method: 'hasSkill', args: [name] });
-      return skills.has(name);
-    },
-
     async listResources(name: string): Promise<string[]> {
       calls.push({ method: 'listResources', args: [name] });
       const prefix = `${name}:`;

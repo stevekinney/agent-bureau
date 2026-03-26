@@ -207,6 +207,61 @@ describe('proposals', () => {
       expect(result.accepted).toBe(false);
       expect(result.error).toBeDefined();
     });
+
+    it('returns an error for a soul proposal without identityProvider', async () => {
+      const storage = createMockStorageAdapter();
+      const skillProvider = createMockSkillProvider();
+      const proposal = makeProposal({
+        id: 'soul-no-identity',
+        type: 'soul',
+        content: JSON.stringify([{ id: 'item-1', content: 'Be helpful' }]),
+        agentId: 'agent-x',
+      });
+      await saveProposal(storage, proposal);
+
+      const result = await acceptProposal(storage, 'soul-no-identity', { skillProvider });
+
+      expect(result.accepted).toBe(false);
+      expect(result.error).toBe('Identity provider required for soul proposals.');
+    });
+
+    it('returns an error for a persona proposal without identityProvider', async () => {
+      const storage = createMockStorageAdapter();
+      const skillProvider = createMockSkillProvider();
+      const proposal = makeProposal({
+        id: 'persona-no-identity',
+        type: 'persona',
+        content: 'You are a helpful assistant.',
+        agentId: 'agent-y',
+      });
+      await saveProposal(storage, proposal);
+
+      const result = await acceptProposal(storage, 'persona-no-identity', { skillProvider });
+
+      expect(result.accepted).toBe(false);
+      expect(result.error).toBe('Identity provider required for persona proposals.');
+    });
+
+    it('returns an error for a persona proposal without agentId', async () => {
+      const storage = createMockStorageAdapter();
+      const skillProvider = createMockSkillProvider();
+      const identityProvider = createMockIdentityProvider();
+      const proposal = makeProposal({
+        id: 'persona-no-agent',
+        type: 'persona',
+        content: 'You are a helpful assistant.',
+        // no agentId
+      });
+      await saveProposal(storage, proposal);
+
+      const result = await acceptProposal(storage, 'persona-no-agent', {
+        skillProvider,
+        identityProvider,
+      });
+
+      expect(result.accepted).toBe(false);
+      expect(result.error).toBe('Persona proposals require an agentId.');
+    });
   });
 
   describe('rejectProposal', () => {

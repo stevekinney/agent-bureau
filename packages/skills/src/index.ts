@@ -4,18 +4,19 @@ export { createStorageSkillProvider } from './create-storage-skill-provider';
 
 // ── Parser ────────────────────────────────────────────────────────────
 export {
+  isValidSkillName,
   parseSkillMarkdown,
   serializeSkillMarkdown,
+  SKILL_NAME_PATTERN,
   SkillParseError,
 } from './parse-skill-markdown';
 
 // ── Ingestion ─────────────────────────────────────────────────────────
 export { fetchFromRegistry } from './ingestion/fetch-from-registry';
-export { scanDirectory, watchDirectory } from './ingestion/scan-directory';
+export { scanDirectory } from './ingestion/scan-directory';
 
 // ── Memory ────────────────────────────────────────────────────────────
-export { createSkillMemory } from './create-skill-memory';
-export { createSkillMemoryHooks } from './create-skill-memory-hooks';
+export { createSkillMemory, createSkillMemoryHooks } from './skill-memory';
 
 // ── Session ──────────────────────────────────────────────────────────
 export { createSkillSession } from './skill-session';
@@ -53,31 +54,24 @@ export {
 
 // ── Types ─────────────────────────────────────────────────────────────
 export type { CreateSkillCatalogHookOptions } from './create-skill-catalog-hook';
-export type {
-  ConversationLike,
-  MemoryLike,
-  StepContextLike,
-  StepResultLike,
-} from './create-skill-memory';
-export type { CreateSkillMemoryHooksOptions } from './create-skill-memory-hooks';
 export type { CreateSkillToolsOptions } from './create-skill-tools';
 export type { FetchFromRegistryOptions, FetchResult } from './ingestion/fetch-from-registry';
-export type {
-  ScanDirectoryOptions,
-  ScanResult,
-  WatchDirectoryOptions,
-} from './ingestion/scan-directory';
+export type { ScanDirectoryOptions, ScanResult } from './ingestion/scan-directory';
 export type { CreateProposalToolboxOptions } from './self-improvement/create-proposal-tools';
 export type {
   AcceptProposalOptions,
   IdentityProviderLike,
   ListProposalsOptions,
 } from './self-improvement/proposals';
+export type {
+  ConversationLike,
+  CreateSkillMemoryHooksOptions,
+  MemoryLike,
+  StepContextLike,
+  StepResultLike,
+} from './skill-memory';
 export type { SkillSession } from './skill-session';
 export type {
-  EnvironmentCapabilities,
-  PatternAnalysis,
-  PatternCluster,
   Proposal,
   SkillCatalogEntry,
   SkillContent,
@@ -85,6 +79,5 @@ export type {
   SkillProvider,
   SkillResource,
   StorageAdapter,
-  SweepState,
   ToolPolicy,
 } from './types';

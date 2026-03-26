@@ -1,6 +1,5 @@
-import { watch } from 'node:fs';
 import { readdir, stat } from 'node:fs/promises';
-import { basename, join } from 'node:path';
+import { join } from 'node:path';
 
 import { parseSkillMarkdown, SkillParseError } from '../parse-skill-markdown';
 import type { SkillProvider } from '../types';
@@ -154,48 +153,4 @@ export async function scanDirectory(
   }
 
   return result;
-}
-
-export interface WatchDirectoryOptions extends ScanDirectoryOptions {
-  /** Debounce interval in ms. Default: 500. */
-  debounceMs?: number;
-}
-
-/**
- * Watches a directory for changes and re-scans when SKILL.md files
- * are added, modified, or removed. Returns a cleanup function.
- */
-export function watchDirectory(
-  directoryPath: string,
-  provider: SkillProvider,
-  options?: WatchDirectoryOptions,
-): () => void {
-  const debounceMs = options?.debounceMs ?? 500;
-  let debounceTimer: ReturnType<typeof setTimeout> | undefined;
-
-  const watcher = watch(
-    directoryPath,
-    { recursive: true },
-    (_event: string, filename: string | null) => {
-      if (!filename) return;
-
-      const base = basename(filename);
-      if (base !== 'SKILL.md' && base !== 'skill.md') return;
-
-      if (debounceTimer !== undefined) {
-        clearTimeout(debounceTimer);
-      }
-
-      debounceTimer = setTimeout(() => {
-        void scanDirectory(directoryPath, provider, options);
-      }, debounceMs);
-    },
-  );
-
-  return () => {
-    if (debounceTimer !== undefined) {
-      clearTimeout(debounceTimer);
-    }
-    watcher.close();
-  };
 }

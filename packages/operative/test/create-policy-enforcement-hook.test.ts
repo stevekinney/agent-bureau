@@ -96,6 +96,16 @@ describe('createPolicyEnforcementHook', () => {
     expect(result).toEqual(allTools);
   });
 
+  it('denies a tool allowed by persona when active skill denies it', () => {
+    const filter = createPolicyEnforcementHook({
+      personaToolPolicy: { allowList: ['read', 'write', 'bash'] },
+      getActiveSkillToolPolicy: () => ({ denyList: ['bash'] }),
+    });
+    const tools = createMockTools('read', 'write', 'bash');
+    const result = filter(tools);
+    expect(result).toEqual(createMockTools('read', 'write'));
+  });
+
   it('returns only tools present in both allow lists when both policies have allow lists', () => {
     const filter = createPolicyEnforcementHook({
       personaToolPolicy: { allowList: ['read', 'write', 'execute'] },

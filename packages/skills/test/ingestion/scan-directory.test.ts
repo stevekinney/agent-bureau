@@ -193,4 +193,18 @@ describe('scanDirectory', () => {
     expect(result.loaded).toBe(0);
     expect(result.errors).toHaveLength(0);
   });
+
+  it('respects maxDirectories option', async () => {
+    // Create 5 nested directories each containing a SKILL.md
+    for (let index = 1; index <= 5; index++) {
+      const skillDirectory = join(tempDirectory, `skill-${index}`);
+      await mkdir(skillDirectory, { recursive: true });
+      await writeFile(join(skillDirectory, 'SKILL.md'), makeSkillMarkdown(`skill-${index}`));
+    }
+
+    const provider = createMockSkillProvider();
+    const result = await scanDirectory(tempDirectory, provider, { maxDirectories: 3 });
+
+    expect(result.discovered).toBeLessThanOrEqual(3);
+  });
 });

@@ -70,25 +70,6 @@ export interface SkillResource {
   content: string;
 }
 
-// ── Environment Capabilities ─────────────────────────────────────────
-
-/**
- * Environment capabilities descriptor for eligibility filtering.
- * Skills declare what they need; the runtime declares what it provides.
- */
-export interface EnvironmentCapabilities {
-  /** Whether the environment can execute scripts/commands. */
-  canExecuteScripts: boolean;
-  /** Whether the environment has filesystem access. */
-  canAccessFilesystem: boolean;
-  /** Whether the environment has network access. */
-  canAccessNetwork: boolean;
-  /** Tool names available in the current armorer toolbox. */
-  availableTools: string[];
-  /** Platform identifier. */
-  platform: 'server' | 'browser' | 'extension' | 'mobile' | 'worker';
-}
-
 // ── Skill Provider ───────────────────────────────────────────────────
 
 /**
@@ -105,8 +86,6 @@ export interface SkillProvider {
   saveSkill(name: string, content: SkillContent): Promise<void>;
   /** Delete a skill. */
   deleteSkill(name: string): Promise<void>;
-  /** Check if a skill exists. */
-  hasSkill(name: string): Promise<boolean>;
   /** List resources bundled with a skill. */
   listResources(name: string): Promise<string[]>;
   /** Load a specific resource. */
@@ -144,58 +123,6 @@ export interface Proposal {
   status: 'pending' | 'accepted' | 'rejected';
   /** If rejected, the reason. */
   rejectionReason?: string;
-}
-
-/**
- * A cluster of related experiential entries identified by the analysis stage.
- * Informed by AutoRefine's pattern extraction and SkillRL's hierarchical SkillBank.
- */
-export interface PatternCluster {
-  /** A descriptive name for the cluster. */
-  name: string;
-  /** The entries in this cluster. */
-  entries: Array<{ content: string; metadata: Record<string, unknown>; entryId: string }>;
-  /** Whether this cluster represents a strategy, recovery pattern, or optimization. */
-  type: 'strategy' | 'recovery' | 'optimization';
-  /** Suggested skill name (kebab-case). */
-  suggestedSkillName: string;
-}
-
-/**
- * Result of the pattern analysis stage.
- * Identifies clusters for skill formation, candidates for soul graduation,
- * and per-agent candidates for persona updates.
- */
-export interface PatternAnalysis {
-  /** Clusters of related experiential entries. */
-  clusters: PatternCluster[];
-  /** Entries that are high-confidence, general, and suitable for soul graduation. */
-  soulCandidates: Array<{
-    content: string;
-    confidence: number;
-    topic?: string;
-    entryId: string;
-  }>;
-  /** Per-agent entries suitable for persona updates. */
-  personaCandidates: Record<
-    string,
-    Array<{ content: string; confidence: number; entryId: string }>
-  >;
-}
-
-/**
- * State tracked across self-improvement sweep chunks.
- * Compatible with operative's CreateChunkedTaskOptions<SweepState>.
- */
-export interface SweepState {
-  /** Experiential entries collected so far. */
-  collected: number;
-  /** Clusters identified. */
-  clusters: number;
-  /** Proposal IDs generated. */
-  proposals: string[];
-  /** Current stage. */
-  stage: 'collect' | 'analyze' | 'draft' | 'filter' | 'complete';
 }
 
 // ── Storage Adapter Re-export ────────────────────────────────────────

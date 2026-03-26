@@ -1,18 +1,11 @@
-import type { StepContextLike } from './create-skill-memory';
-import type {
-  EnvironmentCapabilities,
-  SkillCatalogEntry,
-  SkillProvider,
-  ToolPolicy,
-} from './types';
+import type { StepContextLike } from './skill-memory';
+import type { SkillCatalogEntry, SkillProvider, ToolPolicy } from './types';
 
 // ── Types ────────────────────────────────────────────────────────────
 
 export interface CreateSkillCatalogHookOptions {
   /** Skill provider to read from. */
   provider: SkillProvider;
-  /** Environment capabilities for eligibility filtering. */
-  capabilities?: EnvironmentCapabilities;
   /** Persona skill policy (allow/deny list of skill names). */
   skillPolicy?: ToolPolicy;
 }

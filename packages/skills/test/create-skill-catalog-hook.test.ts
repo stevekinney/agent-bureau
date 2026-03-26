@@ -143,6 +143,22 @@ describe('createSkillCatalogHook', () => {
     expect(result).toBeUndefined();
   });
 
+  it('does not retry the provider after an error — caches the error result', async () => {
+    const provider = createMockSkillProvider([]);
+    let callCount = 0;
+    provider.listSkills = async () => {
+      callCount++;
+      throw new Error('Storage unavailable');
+    };
+
+    const hook = createSkillCatalogHook({ provider });
+
+    await hook.prepareStep(makeContext(0));
+    await hook.prepareStep(makeContext(0));
+
+    expect(callCount).toBe(1);
+  });
+
   it('formats XML with skill name attribute and description as text content', async () => {
     const provider = createMockSkillProvider([
       makeSkill('code-review', 'Reviews code for quality and correctness'),

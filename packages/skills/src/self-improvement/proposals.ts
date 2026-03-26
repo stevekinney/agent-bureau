@@ -1,3 +1,5 @@
+import { z } from 'zod';
+
 import { parseSkillMarkdown } from '../parse-skill-markdown';
 import type { Proposal, SkillProvider, StorageAdapter } from '../types';
 
@@ -5,6 +7,22 @@ import type { Proposal, SkillProvider, StorageAdapter } from '../types';
 
 const PROPOSAL_PREFIX = 'proposal:';
 const REJECTED_PATTERNS_KEY = 'proposal:rejected-patterns';
+
+// ── Zod Schemas ─────────────────────────────────────────────────────
+
+const proposalSchema = z.object({
+  id: z.string(),
+  type: z.enum(['skill', 'soul', 'persona']),
+  summary: z.string(),
+  content: z.string(),
+  agentId: z.string().optional(),
+  sourceEntryIds: z.array(z.string()),
+  createdAt: z.string(),
+  status: z.enum(['pending', 'accepted', 'rejected']),
+  rejectionReason: z.string().optional(),
+});
+
+const rejectedPatternsSchema = z.array(z.string());
 
 // ── Structural Interfaces ───────────────────────────────────────────
 
@@ -36,6 +54,18 @@ function hashContent(content: string): string {
   return new Bun.CryptoHasher('sha256').update(content).digest('hex');
 }
 
+// ── Helpers ─────────────────────────────────────────────────────────
+
+function parseProposal(raw: string): Proposal | undefined {
+  try {
+    const parsed = proposalSchema.safeParse(JSON.parse(raw));
+    if (!parsed.success) return undefined;
+    return parsed.data;
+  } catch {
+    return undefined;
+  }
+}
+
 // ── CRUD Functions ──────────────────────────────────────────────────
 
 /** Save a proposal to storage. */
@@ -50,7 +80,7 @@ export async function getProposal(
 ): Promise<Proposal | undefined> {
   const raw = await storage.get(`${PROPOSAL_PREFIX}${id}`);
   if (!raw) return undefined;
-  return JSON.parse(raw) as Proposal;
+  return parseProposal(raw);
 }
 
 /** List proposals from storage with optional filters. */
@@ -69,7 +99,8 @@ export async function listProposals(
     const raw = await storage.get(key);
     if (!raw) continue;
 
-    const proposal = JSON.parse(raw) as Proposal;
+    const proposal = parseProposal(raw);
+    if (!proposal) continue;
 
     if (proposal.status !== status) continue;
     if (options?.type && proposal.type !== options.type) continue;
@@ -114,8 +145,17 @@ export async function acceptProposal(
             error: 'Identity provider required for soul proposals.',
           };
         }
-        const soulItems = JSON.parse(proposal.content) as unknown[];
-        await options.identityProvider.savePendingSoulUpdate(soulItems, proposal.agentId);
+        const soulItemsResult = z.array(z.unknown()).safeParse(JSON.parse(proposal.content));
+        if (!soulItemsResult.success) {
+          return {
+            accepted: false,
+            error: 'Soul proposal content is not a valid JSON array.',
+          };
+        }
+        await options.identityProvider.savePendingSoulUpdate(
+          soulItemsResult.data,
+          proposal.agentId,
+        );
         break;
       }
 
@@ -173,7 +213,10 @@ export async function rejectProposal(
   // Record the content hash in rejected patterns.
   const hash = hashContent(proposal.content);
   const rawPatterns = await storage.get(REJECTED_PATTERNS_KEY);
-  const patterns: string[] = rawPatterns ? (JSON.parse(rawPatterns) as string[]) : [];
+  const patternsResult = rejectedPatternsSchema.safeParse(
+    rawPatterns ? JSON.parse(rawPatterns) : [],
+  );
+  const patterns = patternsResult.success ? patternsResult.data : [];
   if (!patterns.includes(hash)) {
     patterns.push(hash);
   }
@@ -196,8 +239,9 @@ export async function isRejectedPattern(
   const rawPatterns = await storage.get(REJECTED_PATTERNS_KEY);
   if (!rawPatterns) return false;
 
-  const patterns = JSON.parse(rawPatterns) as string[];
-  return patterns.includes(hash);
+  const patternsResult = rejectedPatternsSchema.safeParse(JSON.parse(rawPatterns));
+  if (!patternsResult.success) return false;
+  return patternsResult.data.includes(hash);
 }
 
 // ── Cleanup ─────────────────────────────────────────────────────────
@@ -218,7 +262,8 @@ export async function clearProposals(
     const raw = await storage.get(key);
     if (!raw) continue;
 
-    const proposal = JSON.parse(raw) as Proposal;
+    const proposal = parseProposal(raw);
+    if (!proposal) continue;
 
     if (options?.status && proposal.status !== options.status) continue;
 

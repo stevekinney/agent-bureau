@@ -1,3 +1,4 @@
+import { isValidSkillName, SkillParseError } from './parse-skill-markdown';
 import type { SkillCatalogEntry, SkillContent, SkillProvider } from './types';
 
 /**
@@ -30,6 +31,9 @@ export function createStaticSkillProvider(initialSkills: SkillContent[] = []): S
     },
 
     saveSkill(name: string, content: SkillContent): Promise<void> {
+      if (!isValidSkillName(name)) {
+        throw new SkillParseError(`Skill name "${name}" is not valid kebab-case.`);
+      }
       skills.set(name, content);
       return Promise.resolve();
     },
@@ -45,10 +49,6 @@ export function createStaticSkillProvider(initialSkills: SkillContent[] = []): S
         }
       }
       return Promise.resolve();
-    },
-
-    hasSkill(name: string): Promise<boolean> {
-      return Promise.resolve(skills.has(name));
     },
 
     listResources(name: string): Promise<string[]> {

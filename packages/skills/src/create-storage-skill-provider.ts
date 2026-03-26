@@ -1,10 +1,21 @@
-import type {
-  SkillCatalogEntry,
-  SkillContent,
-  SkillMetadata,
-  SkillProvider,
-  StorageAdapter,
-} from './types';
+import { z } from 'zod';
+
+import { isValidSkillName, SkillParseError } from './parse-skill-markdown';
+import type { SkillCatalogEntry, SkillContent, SkillProvider, StorageAdapter } from './types';
+
+const toolPolicySchema = z.object({
+  allowList: z.array(z.string()).optional(),
+  denyList: z.array(z.string()).optional(),
+});
+
+const skillMetadataSchema = z.object({
+  name: z.string(),
+  description: z.string(),
+  license: z.string().optional(),
+  compatibility: z.string().optional(),
+  toolPolicy: toolPolicySchema.optional(),
+  metadata: z.record(z.string(), z.string()).optional(),
+});
 
 const SKILL_PREFIX = 'skill:';
 const METADATA_SUFFIX = ':metadata';
@@ -66,8 +77,9 @@ export function createStorageSkillProvider(adapter: StorageAdapter): SkillProvid
         if (raw === null) continue;
 
         try {
-          const metadata = JSON.parse(raw) as SkillMetadata;
-          entries.push({ name: metadata.name, description: metadata.description });
+          const parsed = skillMetadataSchema.safeParse(JSON.parse(raw));
+          if (!parsed.success) continue;
+          entries.push({ name: parsed.data.name, description: parsed.data.description });
         } catch {
           // Skip entries with corrupted metadata JSON.
         }
@@ -81,15 +93,19 @@ export function createStorageSkillProvider(adapter: StorageAdapter): SkillProvid
       if (rawMetadata === null) return undefined;
 
       try {
-        const metadata = JSON.parse(rawMetadata) as SkillMetadata;
+        const parsed = skillMetadataSchema.safeParse(JSON.parse(rawMetadata));
+        if (!parsed.success) return undefined;
         const body = (await adapter.get(bodyKey(name))) ?? '';
-        return { metadata, body };
+        return { metadata: parsed.data, body };
       } catch {
         return undefined;
       }
     },
 
     async saveSkill(name: string, content: SkillContent): Promise<void> {
+      if (!isValidSkillName(name)) {
+        throw new SkillParseError(`Skill name "${name}" is not valid kebab-case.`);
+      }
       await adapter.set(metadataKey(name), JSON.stringify(content.metadata));
       await adapter.set(bodyKey(name), content.body);
     },
@@ -99,11 +115,6 @@ export function createStorageSkillProvider(adapter: StorageAdapter): SkillProvid
       for (const key of keys) {
         await adapter.delete(key);
       }
-    },
-
-    async hasSkill(name: string): Promise<boolean> {
-      const raw = await adapter.get(metadataKey(name));
-      return raw !== null;
     },
 
     async listResources(name: string): Promise<string[]> {
@@ -118,6 +129,9 @@ export function createStorageSkillProvider(adapter: StorageAdapter): SkillProvid
     },
 
     async saveResource(name: string, path: string, content: string): Promise<void> {
+      if (!isValidSkillName(name)) {
+        throw new SkillParseError(`Skill name "${name}" is not valid kebab-case.`);
+      }
       await adapter.set(resourceKey(name, path), content);
     },
 

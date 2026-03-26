@@ -45,6 +45,7 @@ export type { CreateMemoryBridgeOptions, MemoryLike } from './create-memory-brid
 export { createMemoryBridge } from './create-memory-bridge';
 export type {
   CreatePolicyEnforcementHookOptions,
+  ToolLike,
   ToolPolicyLike,
 } from './create-policy-enforcement-hook';
 export { createPolicyEnforcementHook } from './create-policy-enforcement-hook';

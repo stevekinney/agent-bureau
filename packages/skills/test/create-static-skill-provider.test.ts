@@ -31,9 +31,9 @@ describe('createStaticSkillProvider', () => {
       expect(loaded).toEqual(codeReview);
     });
 
-    it('reports initial skills via hasSkill', async () => {
-      expect(await provider.hasSkill('code-review')).toBe(true);
-      expect(await provider.hasSkill('nonexistent')).toBe(false);
+    it('reports initial skills via loadSkill', async () => {
+      expect(await provider.loadSkill('code-review')).toBeDefined();
+      expect(await provider.loadSkill('nonexistent')).toBeUndefined();
     });
   });
 
@@ -43,7 +43,6 @@ describe('createStaticSkillProvider', () => {
       const content = makeSkillContent('new-skill');
 
       await provider.saveSkill('new-skill', content);
-      expect(await provider.hasSkill('new-skill')).toBe(true);
       expect(await provider.loadSkill('new-skill')).toEqual(content);
 
       const skills = await provider.listSkills();
@@ -57,7 +56,6 @@ describe('createStaticSkillProvider', () => {
       const provider = createStaticSkillProvider([makeSkillContent('doomed')]);
 
       await provider.deleteSkill('doomed');
-      expect(await provider.hasSkill('doomed')).toBe(false);
       expect(await provider.loadSkill('doomed')).toBeUndefined();
       expect(await provider.listSkills()).toEqual([]);
     });

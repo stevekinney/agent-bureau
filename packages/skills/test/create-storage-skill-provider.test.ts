@@ -47,6 +47,15 @@ describe('createStorageSkillProvider', () => {
   });
 
   describe('listSkills', () => {
+    it('skips entries with corrupted metadata JSON', async () => {
+      await provider.saveSkill('good', makeSkillContent('good'));
+      await adapter.set('skill:bad:metadata', 'not json');
+
+      const skills = await provider.listSkills();
+      expect(skills).toHaveLength(1);
+      expect(skills[0]?.name).toBe('good');
+    });
+
     it('returns all registered skills', async () => {
       await provider.saveSkill('alpha', makeSkillContent('alpha'));
       await provider.saveSkill('beta', makeSkillContent('beta'));
@@ -80,7 +89,6 @@ describe('createStorageSkillProvider', () => {
       await provider.deleteSkill('doomed');
 
       expect(await provider.loadSkill('doomed')).toBeUndefined();
-      expect(await provider.hasSkill('doomed')).toBe(false);
       expect(await provider.listResources('doomed')).toEqual([]);
       // Verify all keys removed from storage
       const remainingKeys = await adapter.list('skill:doomed:');
@@ -88,14 +96,14 @@ describe('createStorageSkillProvider', () => {
     });
   });
 
-  describe('hasSkill', () => {
-    it('returns true for existing skills', async () => {
+  describe('skill existence', () => {
+    it('loadSkill returns content for an existing skill', async () => {
       await provider.saveSkill('exists', makeSkillContent('exists'));
-      expect(await provider.hasSkill('exists')).toBe(true);
+      expect(await provider.loadSkill('exists')).toBeDefined();
     });
 
-    it('returns false for missing skills', async () => {
-      expect(await provider.hasSkill('nonexistent')).toBe(false);
+    it('loadSkill returns undefined for a missing skill', async () => {
+      expect(await provider.loadSkill('nonexistent')).toBeUndefined();
     });
   });
 
@@ -179,6 +187,12 @@ describe('createStorageSkillProvider', () => {
       const result = await provider.loadSkill('ghost');
       expect(result).toBeUndefined();
     });
+
+    it('returns undefined for corrupted metadata JSON', async () => {
+      await adapter.set('skill:bad:metadata', 'not json');
+      const result = await provider.loadSkill('bad');
+      expect(result).toBeUndefined();
+    });
   });
 
   describe('multiple skills coexistence', () => {
@@ -203,8 +217,8 @@ describe('createStorageSkillProvider', () => {
 
       // Deleting one does not affect the other
       await provider.deleteSkill('alpha');
-      expect(await provider.hasSkill('alpha')).toBe(false);
-      expect(await provider.hasSkill('beta')).toBe(true);
+      expect(await provider.loadSkill('alpha')).toBeUndefined();
+      expect(await provider.loadSkill('beta')).toBeDefined();
       expect(await provider.loadResource('beta', 'data.json')).toBe('{"beta": true}');
     });
   });

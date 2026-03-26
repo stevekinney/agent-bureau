@@ -7,7 +7,7 @@ export interface ToolPolicyLike {
   denyList?: string[];
 }
 
-interface ToolLike {
+export interface ToolLike {
   name: string;
 }
 
@@ -27,14 +27,15 @@ export interface CreatePolicyEnforcementHookOptions {
 function applyPolicy<T extends ToolLike>(tools: T[], policy: ToolPolicyLike | undefined): T[] {
   if (!policy) return tools;
 
+  const { allowList, denyList } = policy;
   let filtered = tools;
 
-  if (policy.allowList) {
-    filtered = filtered.filter((tool) => policy.allowList!.includes(tool.name));
+  if (allowList) {
+    filtered = filtered.filter((tool) => allowList.includes(tool.name));
   }
 
-  if (policy.denyList) {
-    filtered = filtered.filter((tool) => !policy.denyList!.includes(tool.name));
+  if (denyList) {
+    filtered = filtered.filter((tool) => !denyList.includes(tool.name));
   }
 
   return filtered;

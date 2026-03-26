@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 
-import type { MemoryLike } from '../src/create-skill-memory';
-import { createSkillMemory } from '../src/create-skill-memory';
+import type { MemoryLike } from '../src/skill-memory';
+import { createSkillMemory } from '../src/skill-memory';
 
 function createMockMemory() {
   const entries: Array<{ content: string; metadata?: Record<string, unknown> }> = [];
