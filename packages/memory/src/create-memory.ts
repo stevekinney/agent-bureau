@@ -298,6 +298,9 @@ export function createMemory(options: CreateMemoryOptions): Memory {
 
       if (namespacedEntries.length === 0) return [];
 
+      // Build a lookup map for O(1) entry access by id
+      const entriesById = new Map(namespacedEntries.map((entry) => [entry.id, entry]));
+
       // Build candidates for hybrid search
       const candidates: HybridSearchCandidate[] = namespacedEntries.map((entry) => ({
         id: entry.id,
@@ -325,8 +328,8 @@ export function createMemory(options: CreateMemoryOptions): Memory {
               score,
               metadata: parseMemoryMetadata(candidate.metadata, namespace),
               createdAt: candidate.createdAt,
-              vector: namespacedEntries.find((e) => e.id === candidate.id)
-                ? Array.from(namespacedEntries.find((e) => e.id === candidate.id)!.vector)
+              vector: entriesById.has(candidate.id)
+                ? Array.from(entriesById.get(candidate.id)!.vector)
                 : undefined,
             };
           })
@@ -390,7 +393,7 @@ export function createMemory(options: CreateMemoryOptions): Memory {
 
       // Convert to MemorySearchResult with vectors for MMR
       let results: (MemorySearchResult & { vector?: number[] })[] = hybridResults.map((result) => {
-        const matchedEntry = namespacedEntries.find((entry) => entry.id === result.id);
+        const matchedEntry = entriesById.get(result.id);
         const rawMetadata = result.metadata;
 
         return {

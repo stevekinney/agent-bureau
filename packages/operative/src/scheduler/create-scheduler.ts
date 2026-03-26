@@ -163,6 +163,10 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
   // ── Task Submission ───────────────────────────────────────────────
 
   function submit(task: SchedulerTask): Promise<RunResult | null> {
+    if (stopping) {
+      return Promise.resolve(null);
+    }
+
     return new Promise<RunResult | null>((resolve, reject) => {
       taskResolvers.set(task.id, { resolve, reject });
       queue.enqueue(task);
