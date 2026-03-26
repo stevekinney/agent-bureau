@@ -45,4 +45,8 @@ yarn-error.log*
 # Misc
 .DS_Store
 *.pem
-.claude/
+# Claude Code — share commands/rules, keep local state private
+.claude/settings.local.json
+.claude/plans/
+.claude/sessions/
+.claude/worktrees/
