@@ -1,0 +1,45 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "input=$(cat); pattern=$(echo \"$input\" | grep -oE '(rm -rf|git reset --hard|git clean -fd|git checkout -- \\.|git push.*(--force|-f))' || true); if [ -n \"$pattern\" ]; then echo \"WARNING: Destructive command detected: $pattern\"; fi"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "count_file=/tmp/agent-bureau-edit-count; count=$(cat \"$count_file\" 2>/dev/null || echo 0); count=$((count + 1)); echo \"$count\" > \"$count_file\"; if [ \"$count\" -eq 5 ] || [ \"$count\" -eq 10 ] || [ \"$count\" -eq 20 ]; then echo \"You have made $count file edits. Consider running /verify quick.\"; fi"
+          }
+        ]
+      },
+      {
+        "matcher": "Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "count_file=/tmp/agent-bureau-edit-count; count=$(cat \"$count_file\" 2>/dev/null || echo 0); count=$((count + 1)); echo \"$count\" > \"$count_file\"; if [ \"$count\" -eq 5 ] || [ \"$count\" -eq 10 ] || [ \"$count\" -eq 20 ]; then echo \"You have made $count file edits. Consider running /verify quick.\"; fi"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "modified=$(git diff HEAD --name-only 2>/dev/null | grep '\\.ts$' || true); if [ -n \"$modified\" ]; then found=''; for f in $modified; do if [ -f \"$f\" ]; then matches=$(grep -n 'console\\.log' \"$f\" 2>/dev/null || true); if [ -n \"$matches\" ]; then found=\"${found}${f}:\\n${matches}\\n\"; fi; fi; done; if [ -n \"$found\" ]; then printf 'console.log found in modified files:\\n'; printf '%b\\n' \"$found\"; fi; fi"
+          }
+        ]
+      }
+    ]
+  }
+}
