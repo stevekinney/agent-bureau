@@ -8,5 +8,11 @@ export type {
 export { createPostgreSQLPersistenceAdapter } from './postgresql-adapter';
 export type { RedisPersistenceAdapter, RedisPersistenceAdapterOptions } from './redis-adapter';
 export { createRedisPersistenceAdapter } from './redis-adapter';
+export type {
+  PersistenceAdapterPreference,
+  PersistenceResolutionOptions,
+  ResolvedPersistenceAdapter,
+} from './resolve-persistence-adapter';
+export { resolvePersistenceAdapter } from './resolve-persistence-adapter';
 export type { SQLitePersistenceAdapter, SQLitePersistenceAdapterOptions } from './sqlite-adapter';
 export { createSQLitePersistenceAdapter } from './sqlite-adapter';

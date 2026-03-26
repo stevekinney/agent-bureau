@@ -35,6 +35,10 @@ export class ChromeStorageAdapter implements StorageAdapter {
   /** Promise-based mutex to serialize ID index mutations. */
   private mutexQueue: Promise<void> = Promise.resolve();
 
+  static isAvailable(): boolean {
+    return typeof chrome !== 'undefined' && typeof chrome?.storage !== 'undefined';
+  }
+
   constructor(options: ChromeStorageAdapterOptions) {
     this.prefix = options.prefix;
     this.area = options.area ?? 'local';

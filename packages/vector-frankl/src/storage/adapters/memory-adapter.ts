@@ -13,6 +13,10 @@ export class MemoryStorageAdapter implements StorageAdapter {
   private readonly cloneOnRead: boolean;
   private readonly cloneOnWrite: boolean;
 
+  static isAvailable(): boolean {
+    return true;
+  }
+
   constructor(options: MemoryStorageAdapterOptions = {}) {
     this.cloneOnRead = options.cloneOnRead ?? true;
     this.cloneOnWrite = options.cloneOnWrite ?? true;
