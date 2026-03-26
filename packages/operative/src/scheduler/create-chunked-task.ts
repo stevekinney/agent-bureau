@@ -98,32 +98,11 @@ export function createChunkedTask<TState>(
 
       const result: RunResult | null = await scheduler.submit(task);
 
-      // Task was permanently preempted (exceeded maxRequeues) — retry with same state
+      // Task was preempted or aborted — the scheduler resolves with null
+      // in both cases (preemptTask when maxRequeues exceeded, or
+      // startAndAwaitTask when finishReason is 'aborted'). Preserve any
+      // partial progress from processChunk before retrying.
       if (result === null) {
-        preemptionRetries++;
-        if (preemptionRetries > maxPreemptionRetries) {
-          const error = new Error(
-            `Chunked task "${name}": exceeded ${maxPreemptionRetries} preemption retries`,
-          );
-          void onError?.(error, stateForChunk);
-          throw error;
-        }
-        continue;
-      }
-
-      // Check if the chunk itself errored
-      if (chunkError) {
-        void onError?.(chunkError, stateForChunk);
-        if (chunkError instanceof Error) throw chunkError;
-        throw new Error('Chunk processing failed');
-      }
-
-      // Check if the run was aborted (preempted mid-step). This covers both
-      // the case where processChunk never ran (!chunkResult) and the case where
-      // processChunk detected the abort internally and returned early with
-      // { done: false }. In both cases, count toward the preemption retry budget.
-      if (result.finishReason === 'aborted') {
-        // Preserve any partial-progress state if available
         if (chunkResult) {
           currentState = chunkResult.state;
         }
@@ -136,6 +115,13 @@ export function createChunkedTask<TState>(
           throw error;
         }
         continue;
+      }
+
+      // Check if the chunk itself errored
+      if (chunkError) {
+        void onError?.(chunkError, stateForChunk);
+        if (chunkError instanceof Error) throw chunkError;
+        throw new Error('Chunk processing failed');
       }
 
       if (!chunkResult) {
