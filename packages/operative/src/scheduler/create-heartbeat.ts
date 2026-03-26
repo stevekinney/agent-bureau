@@ -67,6 +67,27 @@ export function createHeartbeat(options: CreateHeartbeatOptions): Heartbeat {
   let running = false;
   let tickCounter = 0;
   let failures = 0;
+  let sleepResolver: (() => void) | undefined;
+
+  /** Sleep that can be interrupted by stop(). Resolves immediately if stop() is called. */
+  async function cancellableSleep(milliseconds: number): Promise<void> {
+    await Promise.race([
+      sleep(milliseconds),
+      new Promise<void>((resolve) => {
+        sleepResolver = resolve;
+      }),
+    ]);
+    sleepResolver = undefined;
+  }
+
+  /** Wake the loop from a cancellableSleep call. */
+  function wakeSleep(): void {
+    if (sleepResolver) {
+      const resolver = sleepResolver;
+      sleepResolver = undefined;
+      resolver();
+    }
+  }
 
   async function tick(): Promise<RunResult | null> {
     tickCounter++;
@@ -120,7 +141,7 @@ export function createHeartbeat(options: CreateHeartbeatOptions): Heartbeat {
     }
 
     while (running && !signal?.aborted) {
-      await sleep(interval);
+      await cancellableSleep(interval);
       if (!running || signal?.aborted) break;
       await tick();
     }
@@ -134,6 +155,7 @@ export function createHeartbeat(options: CreateHeartbeatOptions): Heartbeat {
 
   function stop(): void {
     running = false;
+    wakeSleep();
   }
 
   return {

@@ -188,6 +188,7 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
     activeRun: ActiveRun;
     result: Promise<RunResult>;
   } {
+    const taskId = generateTaskId();
     const runOptions = createRunFactory();
 
     const activeRun = createRun({
@@ -196,7 +197,42 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
       toolbox: runOptions.toolbox ?? toolbox,
     });
 
-    return { activeRun, result: activeRun.result };
+    // Register in the running map so getState() reflects this task
+    const abortController = new AbortController();
+    const task: SchedulerTask = {
+      id: taskId,
+      priority: 'immediate',
+      createRun: createRunFactory,
+      requeue: false,
+    };
+
+    const runningTaskEntry: RunningTask = {
+      task,
+      abortController,
+      result: activeRun.result,
+      requeues: 0,
+    };
+    running.set(taskId, runningTaskEntry);
+
+    emitEvent(new TaskDispatchedEvent(taskId, 'immediate'));
+
+    // Clean up when the run completes
+    const result = activeRun.result.then(
+      (runResult) => {
+        running.delete(taskId);
+        completedCount++;
+        lastTaskCompletedAt = performance.now();
+        emitEvent(new TaskCompletedEvent(taskId, runResult));
+        return runResult;
+      },
+      (error) => {
+        running.delete(taskId);
+        emitEvent(new TaskFailedEvent(taskId, error));
+        throw error;
+      },
+    );
+
+    return { activeRun, result };
   }
 
   // ── Scheduling Loop ───────────────────────────────────────────────
