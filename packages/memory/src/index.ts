@@ -54,6 +54,7 @@ export type {
   EmbeddingVector,
   Memory,
   MemoryEntry,
+  MemoryListOptions,
   MemoryMetadata,
   MemorySearchOptions,
   MemorySearchResult,

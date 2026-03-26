@@ -124,12 +124,11 @@ export function createConsolidationTask(
     ): Promise<{ state: ConsolidationState; done: boolean }> {
       const alreadyProcessed = new Set(state.processedIds);
 
-      // Fetch a batch of entries. We request more than chunkSize to account
-      // for entries we've already processed, then filter down to unprocessed ones.
+      // List entries without semantic search — avoids the recall('*') problem
+      // where '*' is treated as a literal query string rather than a wildcard.
       const fetchLimit = alreadyProcessed.size + chunkSize;
-      const allResults = await memory.recall('*', {
+      const allResults = await memory.list({
         limit: fetchLimit,
-        threshold: 0.0,
         ...(namespace && { namespace }),
       });
 
@@ -354,8 +353,10 @@ function getConfidence(entry: MemorySearchResult): number {
 }
 
 /**
- * Compute similarity between two content strings by recalling one
- * and checking the score of the other in the results.
+ * Compute pure cosine similarity between two content strings.
+ *
+ * Uses `vectorOnly: true` to get cosine similarity scores without BM25 blending,
+ * ensuring thresholds (e.g., deduplicationThreshold: 0.95) behave as expected.
  *
  * @param entryCount - Total number of entries in memory, used as the recall
  *   limit to ensure the target entry is always found regardless of memory size.
@@ -366,7 +367,11 @@ async function computeSimilarity(
   contentB: string,
   entryCount: number,
 ): Promise<number> {
-  const results = await memory.recall(contentA, { limit: entryCount, threshold: 0.0 });
+  const results = await memory.recall(contentA, {
+    limit: entryCount,
+    threshold: 0.0,
+    vectorOnly: true,
+  });
   const match = results.find((r) => r.content === contentB);
   return match?.score ?? 0;
 }
