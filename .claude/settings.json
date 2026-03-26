@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "input=$(cat); pattern=$(echo \"$input\" | grep -oE '(rm -rf|git reset --hard|git clean -fd|git checkout -- \\.|git push.*--force)' || true); if [ -n \"$pattern\" ]; then echo \"WARNING: Destructive command detected: $pattern\"; fi"
+            "command": "input=$(cat); pattern=$(echo \"$input\" | grep -oE '(rm -rf|git reset --hard|git clean -fd|git checkout -- \\.|git push.*(--force|-f))' || true); if [ -n \"$pattern\" ]; then echo \"WARNING: Destructive command detected: $pattern\"; fi"
           }
         ]
       }
