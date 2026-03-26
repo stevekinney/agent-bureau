@@ -22,6 +22,7 @@ const entrypoints = [
   './src/agent-session.ts',
   './src/backpressure.ts',
   './src/create-context-compactor.ts',
+  './src/create-identity-hook.ts',
   './src/create-memory-bridge.ts',
   './src/conditions/index.ts',
   './src/conditions/predicates.ts',
