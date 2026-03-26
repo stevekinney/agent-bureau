@@ -280,8 +280,8 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
       if (nextTask.priority !== 'immediate' && lastTaskCompletedAt > 0) {
         const elapsed = performance.now() - lastTaskCompletedAt;
         if (elapsed < idleDelay) {
-          await sleep(idleDelay - elapsed);
-          // Re-check state after sleeping — a higher-priority task may have arrived
+          await waitForWake(idleDelay - elapsed);
+          // Re-check state after waking — a higher-priority task may have arrived
           if (stopping || externalSignal?.aborted) break;
           if (queue.peek() !== nextTask) continue; // Queue changed during sleep
         }

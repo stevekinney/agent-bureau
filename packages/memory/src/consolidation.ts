@@ -303,7 +303,13 @@ export function createConsolidationTask(
         }
       }
 
-      // Collect all entry IDs from this chunk into processedIds
+      // Only mark entries as processed if the chunk completed all stages without
+      // being aborted. If the signal fired mid-stage, the entire chunk must rerun
+      // from stage 1 (each stage is idempotent, so this is safe).
+      if (signal.aborted) {
+        return { state, done: false };
+      }
+
       const newProcessedIds = [...state.processedIds, ...entriesToProcess.map((entry) => entry.id)];
 
       scanned += entriesToProcess.length;
