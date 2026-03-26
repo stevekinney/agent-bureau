@@ -1,11 +1,5 @@
 import type { StorageAdapter } from '@/core/types.ts';
 
-import { ChromeStorageAdapter } from './adapters/chrome-storage-adapter.ts';
-import { IndexedDatabaseStorageAdapter } from './adapters/indexed-database-adapter.ts';
-import { MemoryStorageAdapter } from './adapters/memory-adapter.ts';
-import { OPFSStorageAdapter } from './adapters/opfs-adapter.ts';
-import { SQLiteStorageAdapter } from './adapters/sqlite-adapter.ts';
-
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -45,41 +39,30 @@ const DEFAULT_PREFERENCE: StorageAdapterPreference[] = [
 ];
 
 // ---------------------------------------------------------------------------
-// Candidate registry
+// Capability probes
+//
+// These mirror the static `isAvailable()` methods on each adapter class but
+// avoid importing the adapter modules, which may reference Node-only APIs
+// (e.g. `node:fs/promises` in SQLiteStorageAdapter) and would break in
+// browser environments.
 // ---------------------------------------------------------------------------
 
-interface StorageAdapterCandidate {
-  isAvailable: () => boolean;
-  create: (options: StorageResolutionOptions) => StorageAdapter;
-  hasOptions: (options: StorageResolutionOptions) => boolean;
-}
-
-const candidates: Record<StorageAdapterPreference, StorageAdapterCandidate> = {
-  sqlite: {
-    isAvailable: () => SQLiteStorageAdapter.isAvailable(),
-    hasOptions: (options) => options.sqlite !== undefined,
-    create: (options) => new SQLiteStorageAdapter(options.sqlite!),
+const isAvailable: Record<StorageAdapterPreference, () => boolean> = {
+  sqlite: () => typeof globalThis.Bun !== 'undefined',
+  opfs: () =>
+    typeof globalThis.navigator !== 'undefined' &&
+    typeof navigator.storage?.getDirectory === 'function',
+  chromeStorage: () => {
+    const g = globalThis as Record<string, unknown>;
+    const chrome = g['chrome'];
+    return (
+      typeof chrome === 'object' &&
+      chrome !== null &&
+      typeof (chrome as Record<string, unknown>)['storage'] !== 'undefined'
+    );
   },
-  opfs: {
-    isAvailable: () => OPFSStorageAdapter.isAvailable(),
-    hasOptions: (options) => options.opfs !== undefined,
-    create: (options) => new OPFSStorageAdapter(options.opfs!),
-  },
-  chromeStorage: {
-    isAvailable: () => ChromeStorageAdapter.isAvailable(),
-    hasOptions: (options) => options.chromeStorage !== undefined,
-    create: (options) => new ChromeStorageAdapter(options.chromeStorage!),
-  },
-  indexedDatabase: {
-    isAvailable: () => IndexedDatabaseStorageAdapter.isAvailable(),
-    hasOptions: (options) => options.indexedDatabase !== undefined,
-    create: (options) => new IndexedDatabaseStorageAdapter(options.indexedDatabase!),
-  },
-  memory: {
-    isAvailable: () => MemoryStorageAdapter.isAvailable(),
-    hasOptions: () => true, // Memory never requires explicit options.
-    create: (options) => new MemoryStorageAdapter(options.memory),
-  },
+  indexedDatabase: () => typeof globalThis.indexedDB !== 'undefined',
+  memory: () => true,
 };
 
 // ---------------------------------------------------------------------------
@@ -92,23 +75,52 @@ const candidates: Record<StorageAdapterPreference, StorageAdapterCandidate> = {
  * provided. Falls back to {@link MemoryStorageAdapter} when nothing else
  * matches.
  *
+ * This function is async because each adapter module is loaded via dynamic
+ * `import()` to avoid pulling Node-specific (or browser-specific) top-level
+ * imports into environments that cannot satisfy them.
+ *
  * The returned adapter has **not** been initialized — callers must still call
  * `adapter.init()` before use.
  */
-export function resolveStorageAdapter(
+export async function resolveStorageAdapter(
   options: StorageResolutionOptions = {},
-): ResolvedStorageAdapter {
+): Promise<ResolvedStorageAdapter> {
   const preference = options.preference ?? DEFAULT_PREFERENCE;
 
   for (const name of preference) {
-    const candidate = candidates[name];
+    if (!isAvailable[name]()) continue;
 
-    if (candidate.isAvailable() && candidate.hasOptions(options)) {
-      return { adapter: candidate.create(options), name };
+    switch (name) {
+      case 'sqlite': {
+        if (options.sqlite === undefined) continue;
+        const { SQLiteStorageAdapter } = await import('./adapters/sqlite-adapter.ts');
+        return { adapter: new SQLiteStorageAdapter(options.sqlite), name };
+      }
+      case 'opfs': {
+        if (options.opfs === undefined) continue;
+        const { OPFSStorageAdapter } = await import('./adapters/opfs-adapter.ts');
+        return { adapter: new OPFSStorageAdapter(options.opfs), name };
+      }
+      case 'chromeStorage': {
+        if (options.chromeStorage === undefined) continue;
+        const { ChromeStorageAdapter } = await import('./adapters/chrome-storage-adapter.ts');
+        return { adapter: new ChromeStorageAdapter(options.chromeStorage), name };
+      }
+      case 'indexedDatabase': {
+        if (options.indexedDatabase === undefined) continue;
+        const { IndexedDatabaseStorageAdapter } =
+          await import('./adapters/indexed-database-adapter.ts');
+        return { adapter: new IndexedDatabaseStorageAdapter(options.indexedDatabase), name };
+      }
+      case 'memory': {
+        const { MemoryStorageAdapter } = await import('./adapters/memory-adapter.ts');
+        return { adapter: new MemoryStorageAdapter(options.memory), name };
+      }
     }
   }
 
   // Unreachable when preference includes 'memory' (the default), but a
   // consumer could pass a custom list that excludes it.
+  const { MemoryStorageAdapter } = await import('./adapters/memory-adapter.ts');
   return { adapter: new MemoryStorageAdapter(options.memory), name: 'memory' };
 }

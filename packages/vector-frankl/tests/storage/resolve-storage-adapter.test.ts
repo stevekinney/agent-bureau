@@ -41,8 +41,8 @@ describe('isAvailable', () => {
 // ---------------------------------------------------------------------------
 
 describe('resolveStorageAdapter', () => {
-  it('returns SQLiteStorageAdapter when sqlite options are provided (Bun environment)', () => {
-    const { adapter, name } = resolveStorageAdapter({
+  it('returns SQLiteStorageAdapter when sqlite options are provided (Bun environment)', async () => {
+    const { adapter, name } = await resolveStorageAdapter({
       sqlite: { filename: ':memory:' },
     });
 
@@ -50,23 +50,23 @@ describe('resolveStorageAdapter', () => {
     expect(adapter).toBeInstanceOf(SQLiteStorageAdapter);
   });
 
-  it('falls back to MemoryStorageAdapter when no options are provided', () => {
-    const { adapter, name } = resolveStorageAdapter();
+  it('falls back to MemoryStorageAdapter when no options are provided', async () => {
+    const { adapter, name } = await resolveStorageAdapter();
 
     expect(name).toBe('memory');
     expect(adapter).toBeInstanceOf(MemoryStorageAdapter);
   });
 
-  it('falls back to MemoryStorageAdapter when an empty options object is provided', () => {
-    const { adapter, name } = resolveStorageAdapter({});
+  it('falls back to MemoryStorageAdapter when an empty options object is provided', async () => {
+    const { adapter, name } = await resolveStorageAdapter({});
 
     expect(name).toBe('memory');
     expect(adapter).toBeInstanceOf(MemoryStorageAdapter);
   });
 
-  it('skips an adapter when its options are not provided even if available', () => {
+  it('skips an adapter when its options are not provided even if available', async () => {
     // SQLite is available in Bun, but we only provide memory options.
-    const { adapter, name } = resolveStorageAdapter({
+    const { adapter, name } = await resolveStorageAdapter({
       memory: { cloneOnRead: false },
     });
 
@@ -74,8 +74,8 @@ describe('resolveStorageAdapter', () => {
     expect(adapter).toBeInstanceOf(MemoryStorageAdapter);
   });
 
-  it('respects a custom preference order', () => {
-    const { adapter, name } = resolveStorageAdapter({
+  it('respects a custom preference order', async () => {
+    const { adapter, name } = await resolveStorageAdapter({
       sqlite: { filename: ':memory:' },
       memory: { cloneOnRead: true },
       preference: ['memory', 'sqlite'],
@@ -85,9 +85,9 @@ describe('resolveStorageAdapter', () => {
     expect(adapter).toBeInstanceOf(MemoryStorageAdapter);
   });
 
-  it('skips unavailable adapters in a custom preference list', () => {
+  it('skips unavailable adapters in a custom preference list', async () => {
     // OPFS is not available in Bun, so it should be skipped.
-    const { adapter, name } = resolveStorageAdapter({
+    const { adapter, name } = await resolveStorageAdapter({
       opfs: { directory: 'test' },
       sqlite: { filename: ':memory:' },
       preference: ['opfs', 'sqlite'],
@@ -97,8 +97,8 @@ describe('resolveStorageAdapter', () => {
     expect(adapter).toBeInstanceOf(SQLiteStorageAdapter);
   });
 
-  it('falls back to memory when custom preference excludes all available adapters', () => {
-    const { adapter, name } = resolveStorageAdapter({
+  it('falls back to memory when custom preference excludes all available adapters', async () => {
+    const { adapter, name } = await resolveStorageAdapter({
       opfs: { directory: 'test' },
       preference: ['opfs'],
     });
@@ -107,8 +107,8 @@ describe('resolveStorageAdapter', () => {
     expect(adapter).toBeInstanceOf(MemoryStorageAdapter);
   });
 
-  it('passes options through to the resolved adapter', () => {
-    const { adapter, name } = resolveStorageAdapter({
+  it('passes options through to the resolved adapter', async () => {
+    const { adapter, name } = await resolveStorageAdapter({
       sqlite: { filename: ':memory:' },
     });
 
