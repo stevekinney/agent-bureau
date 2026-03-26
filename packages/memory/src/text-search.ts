@@ -3,19 +3,97 @@ export interface BM25Options {
   k1?: number;
   /** Length normalization parameter. Default: 0.75 */
   b?: number;
+  /**
+   * Pre-tokenized query terms. When provided, `tokenize()` is skipped for
+   * the query string, avoiding double expansion of CJK unigrams/bigrams
+   * when the caller has already performed keyword extraction.
+   */
+  queryTerms?: string[];
 }
 
 /**
  * Tokenizes text into lowercase terms with punctuation removed.
+ *
+ * CJK ideographs (U+4E00–U+9FFF) are split into character unigrams and
+ * overlapping bigrams so that queries expanded by `extractKeywords` match
+ * documents that contain continuous CJK runs (e.g., "数据库连接" →
+ * ["数", "据", "库", "连", "接", "数据", "据库", "库连", "连接"]).
+ *
+ * Japanese text that mixes kana and kanji is handled the same way: kanji
+ * sub-runs are split into unigrams + bigrams while katakana and hiragana
+ * chunks are kept as-is.
  */
 export function tokenize(text: string): string[] {
   if (!text.trim()) return [];
 
-  return text
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}\s]/gu, '')
-    .split(/\s+/)
-    .filter((token) => token.length > 0);
+  const cleaned = text.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, '');
+  const words = cleaned.split(/\s+/).filter((w) => w.length > 0);
+  const tokens: string[] = [];
+
+  for (const word of words) {
+    if (/[\u3040-\u30ff]/.test(word)) {
+      // Japanese: extract script-specific chunks.
+      const parts =
+        word.match(/[a-z0-9_]+|[\u30a0-\u30ffー]+|[\u4e00-\u9fff]+|[\u3040-\u309f]{2,}/g) ?? [];
+      for (const part of parts) {
+        if (/^[\u4e00-\u9fff]+$/.test(part)) {
+          expandCJKUnigrams(part, tokens);
+        } else {
+          tokens.push(part);
+        }
+      }
+    } else if (/[\u4e00-\u9fff]/.test(word)) {
+      // Chinese or mixed CJK with Latin: preserve Latin chunks and expand
+      // contiguous CJK runs into character unigrams + bigrams.
+      let cjkRun = '';
+      let latinRun = '';
+      const flushLatin = () => {
+        if (latinRun) {
+          tokens.push(latinRun);
+          latinRun = '';
+        }
+      };
+      const flushCJK = () => {
+        if (cjkRun) {
+          expandCJKUnigrams(cjkRun, tokens);
+          cjkRun = '';
+        }
+      };
+      for (const ch of Array.from(word)) {
+        if (/[\u4e00-\u9fff]/.test(ch)) {
+          // Part of a CJK run.
+          flushLatin();
+          cjkRun += ch;
+        } else if (/[a-z0-9_]/.test(ch)) {
+          // Part of a Latin/number run.
+          flushCJK();
+          latinRun += ch;
+        } else {
+          // Delimiter or other script: end any current runs.
+          flushLatin();
+          flushCJK();
+        }
+      }
+      flushLatin();
+      flushCJK();
+    } else {
+      tokens.push(word);
+    }
+  }
+
+  return tokens;
+}
+
+/**
+ * Pushes character unigrams and overlapping bigrams for a CJK run.
+ */
+export function expandCJKUnigrams(run: string, tokens: string[]): void {
+  for (let i = 0; i < run.length; i++) {
+    tokens.push(run[i]!);
+  }
+  for (let i = 0; i < run.length - 1; i++) {
+    tokens.push(run[i]! + run[i + 1]!);
+  }
 }
 
 /**
@@ -44,7 +122,7 @@ export function computeBM25Scores(
   const k1 = options?.k1 ?? 1.2;
   const b = options?.b ?? 0.75;
 
-  const queryTerms = tokenize(query);
+  const queryTerms = options?.queryTerms ?? tokenize(query);
   const tokenizedDocuments = documents.map(tokenize);
   const numberOfDocuments = documents.length;
 

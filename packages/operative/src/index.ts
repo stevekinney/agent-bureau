@@ -33,10 +33,14 @@ export {
   createAgentDiscoveryTool,
   createAgentRegistry,
 } from './create-agent-registry';
+export type { CreateContextCompactorOptions } from './create-context-compactor';
+export { createContextCompactor } from './create-context-compactor';
 export type { EarlyStoppingHandlerOptions } from './create-early-stopping-handler';
 export { createEarlyStoppingHandler } from './create-early-stopping-handler';
 export type { CreateHandoffToolOptions } from './create-handoff-tool';
 export { createHandoffTool, extractHandoffTarget, HANDOFF_MARKER } from './create-handoff-tool';
+export type { CreateMemoryBridgeOptions, MemoryLike } from './create-memory-bridge';
+export { createMemoryBridge } from './create-memory-bridge';
 export type { ActiveRun } from './create-run';
 export { createRun } from './create-run';
 export type {

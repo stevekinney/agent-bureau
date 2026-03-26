@@ -2,7 +2,9 @@ import type { VectorData } from 'vector-frankl';
 
 import type { HybridSearchCandidate, VectorSearchResult } from './hybrid-search';
 import { mergeHybridResults } from './hybrid-search';
+import { SOURCE_DOCUMENT_KEY } from './ingest';
 import { applyMaximalMarginalRelevance, cosineSimilarity } from './maximal-marginal-relevance';
+import { extractKeywords } from './query-expansion';
 import { applyTemporalDecay } from './temporal-decay';
 import { computeBM25Scores } from './text-search';
 import type {
@@ -17,7 +19,7 @@ import type {
 const DEFAULT_DEDUPLICATION_THRESHOLD = 0.95;
 const DEFAULT_NAMESPACE = 'default';
 const METADATA_CONTENT_KEY = '__memory_content';
-const METADATA_NAMESPACE_KEY = '__memory_namespace';
+export const METADATA_NAMESPACE_KEY = '__memory_namespace';
 
 function generateId(): string {
   return crypto.randomUUID();
@@ -35,7 +37,12 @@ function parseMemoryMetadata(
   raw: Record<string, unknown>,
   fallbackNamespace: string,
 ): MemoryMetadata {
+  // Preserve arbitrary extension keys (like __sourceDocument, __chunkIndex)
+  // while extracting known fields with proper types.
+  const { [METADATA_CONTENT_KEY]: _content, [METADATA_NAMESPACE_KEY]: _ns, ...rest } = raw;
+
   return {
+    ...rest,
     namespace: (raw[METADATA_NAMESPACE_KEY] as string) ?? fallbackNamespace,
     source: (raw['source'] as MemoryMetadata['source']) ?? 'manual',
     conversationId: raw['conversationId'] as string | undefined,
@@ -73,7 +80,17 @@ export function createMemory(options: CreateMemoryOptions): Memory {
     namespace: defaultNamespace = DEFAULT_NAMESPACE,
     defaultSearchOptions,
     deduplicationThreshold = DEFAULT_DEDUPLICATION_THRESHOLD,
+    textSearchProvider,
+    requireNamespace = false,
+    conflictThreshold,
+    onConflict,
   } = options;
+
+  if (conflictThreshold !== undefined && conflictThreshold >= deduplicationThreshold) {
+    throw new Error(
+      `conflictThreshold (${conflictThreshold}) must be less than deduplicationThreshold (${deduplicationThreshold}).`,
+    );
+  }
 
   async function embed(text: string): Promise<number[]> {
     const vectors = await embedder([text]);
@@ -85,19 +102,40 @@ export function createMemory(options: CreateMemoryOptions): Memory {
     return all.filter((entry) => entry.metadata?.[METADATA_NAMESPACE_KEY] === namespace);
   }
 
-  async function findDuplicate(
+  interface DuplicateCheckResult {
+    duplicate: VectorData | undefined;
+    conflict: { entry: VectorData; similarity: number } | undefined;
+  }
+
+  async function checkDuplicatesAndConflicts(
     vector: number[],
     namespace: string,
-  ): Promise<VectorData | undefined> {
+  ): Promise<DuplicateCheckResult> {
     const entries = await getAllInNamespace(namespace);
+    let duplicate: VectorData | undefined;
+    let conflict: { entry: VectorData; similarity: number } | undefined;
+
     for (const entry of entries) {
       const existingVector = Array.from(entry.vector);
       const similarity = cosineSimilarity(vector, existingVector);
+
       if (similarity >= deduplicationThreshold) {
-        return entry;
+        duplicate = entry;
+        break; // Exact duplicate takes priority
+      }
+
+      if (
+        conflictThreshold !== undefined &&
+        similarity >= conflictThreshold &&
+        similarity < deduplicationThreshold
+      ) {
+        if (!conflict || similarity > conflict.similarity) {
+          conflict = { entry, similarity };
+        }
       }
     }
-    return undefined;
+
+    return { duplicate, conflict };
   }
 
   async function vectorSearch(
@@ -120,31 +158,42 @@ export function createMemory(options: CreateMemoryOptions): Memory {
 
   const memory: Memory = {
     async remember(content: string, metadata?: Partial<MemoryMetadata>): Promise<MemoryEntry> {
+      if (requireNamespace && !metadata?.namespace && defaultNamespace === DEFAULT_NAMESPACE) {
+        throw new Error(
+          'Namespace is required: provide a namespace in metadata or configure a default namespace.',
+        );
+      }
+
       const namespace = metadata?.namespace ?? defaultNamespace;
       const vector = await embed(content);
       const float32Vector = new Float32Array(vector);
 
-      // Check for deduplication
-      const duplicate = await findDuplicate(vector, namespace);
+      // Check for deduplication and conflicts
+      const { duplicate, conflict } = await checkDuplicatesAndConflicts(vector, namespace);
 
-      if (duplicate) {
+      // Helper to update an existing entry in place (used for dedup and 'replace' conflict)
+      async function replaceExisting(existingEntry: VectorData): Promise<MemoryEntry> {
         const now = Date.now();
         const updatedMetadata = buildStorageMetadata(content, namespace, {
           source: 'manual',
           ...metadata,
         });
 
-        await storage.updateMetadata(duplicate.id, updatedMetadata, {
+        await storage.updateMetadata(existingEntry.id, updatedMetadata, {
           merge: false,
           updateTimestamp: true,
         });
-        await storage.updateVector(duplicate.id, float32Vector, {
+        await storage.updateVector(existingEntry.id, float32Vector, {
           updateMagnitude: true,
           updateTimestamp: true,
         });
 
+        if (textSearchProvider) {
+          await textSearchProvider.index(existingEntry.id, content, namespace);
+        }
+
         return {
-          id: duplicate.id,
+          id: existingEntry.id,
           content,
           vector,
           metadata: {
@@ -152,9 +201,49 @@ export function createMemory(options: CreateMemoryOptions): Memory {
             source: 'manual',
             ...metadata,
           } as MemoryMetadata,
-          createdAt: duplicate.timestamp,
+          createdAt: existingEntry.timestamp,
           updatedAt: now,
         };
+      }
+
+      // Deduplication: near-identical entries are updated in place
+      if (duplicate) {
+        return replaceExisting(duplicate);
+      }
+
+      // Conflict detection: topically similar but potentially contradictory
+      if (conflict) {
+        const existingContent = (conflict.entry.metadata?.[METADATA_CONTENT_KEY] as string) ?? '';
+        const existingMeta = parseMemoryMetadata(conflict.entry.metadata ?? {}, namespace);
+
+        const resolution = onConflict
+          ? await onConflict(
+              { content, metadata: metadata ?? {} },
+              {
+                id: conflict.entry.id,
+                content: existingContent,
+                metadata: existingMeta,
+                similarity: conflict.similarity,
+              },
+            )
+          : 'keep-both';
+
+        if (resolution === 'replace') {
+          return replaceExisting(conflict.entry);
+        }
+
+        if (resolution === 'skip') {
+          return {
+            id: conflict.entry.id,
+            content: existingContent,
+            vector: Array.from(conflict.entry.vector),
+            metadata: existingMeta,
+            createdAt: conflict.entry.timestamp,
+            updatedAt: conflict.entry.timestamp,
+          };
+        }
+
+        // 'keep-both' — fall through to normal insert
       }
 
       const id = generateId();
@@ -173,6 +262,10 @@ export function createMemory(options: CreateMemoryOptions): Memory {
       };
 
       await storage.put(vectorData);
+
+      if (textSearchProvider) {
+        await textSearchProvider.index(id, content, namespace);
+      }
 
       return {
         id,
@@ -217,9 +310,34 @@ export function createMemory(options: CreateMemoryOptions): Memory {
       const vectorResultLimit = limit * candidateMultiplier;
       const vectorResults = await vectorSearch(queryVector, namespace, vectorResultLimit);
 
-      // BM25 text search
-      const documents = candidates.map((candidate) => candidate.content);
-      const textScores = computeBM25Scores(query, documents);
+      // Text search — use provider if available, otherwise in-memory BM25.
+      let textScores: Map<number, number>;
+      if (textSearchProvider) {
+        const idScores = await textSearchProvider.search(query, namespace);
+        textScores = new Map<number, number>();
+        for (let i = 0; i < candidates.length; i++) {
+          const score = idScores.get(candidates[i]!.id);
+          if (score !== undefined) {
+            textScores.set(i, score);
+          }
+        }
+      } else {
+        const keywords = extractKeywords(query);
+        const documents = candidates.map((candidate) => candidate.content);
+        // Pass pre-extracted keywords as queryTerms to avoid double CJK
+        // expansion (extractKeywords already produces unigrams + bigrams).
+        const rawScores =
+          keywords.length > 0
+            ? computeBM25Scores(query, documents, { queryTerms: keywords })
+            : computeBM25Scores(query, documents);
+
+        // Normalize raw BM25 scores to [0, 1) so they are on the same scale
+        // as vector similarity scores and FTS5 normalized scores.
+        textScores = new Map<number, number>();
+        for (const [index, score] of rawScores) {
+          textScores.set(index, score / (1 + score));
+        }
+      }
 
       // Merge hybrid results
       const hybridResults = mergeHybridResults(vectorResults, textScores, candidates, {
@@ -259,12 +377,36 @@ export function createMemory(options: CreateMemoryOptions): Memory {
         });
       }
 
+      // Deduplicate chunks from the same source document, keeping the highest score.
+      // After temporal decay and MMR, results may not be sorted by score, so we
+      // compare scores explicitly rather than assuming first-seen is best.
+      const seenSources = new Map<string, { index: number; score: number }>();
+      for (let i = 0; i < results.length; i++) {
+        const result = results[i]!;
+        const sourceDocument = result.metadata[SOURCE_DOCUMENT_KEY] as string | undefined;
+        if (!sourceDocument) continue;
+
+        const existing = seenSources.get(sourceDocument);
+        if (existing === undefined || result.score > existing.score) {
+          seenSources.set(sourceDocument, { index: i, score: result.score });
+        }
+      }
+      const keptIndices = new Set(Array.from(seenSources.values()).map((entry) => entry.index));
+      results = results.filter((result, index) => {
+        const sourceDocument = result.metadata[SOURCE_DOCUMENT_KEY] as string | undefined;
+        if (!sourceDocument) return true;
+        return keptIndices.has(index);
+      });
+
       // Final limit and strip vectors from output
       return results.slice(0, limit).map(({ vector: _vector, ...rest }) => rest);
     },
 
     async forget(id: string): Promise<void> {
       await storage.delete(id);
+      if (textSearchProvider) {
+        await textSearchProvider.remove(id);
+      }
     },
 
     async forgetAll(namespace?: string): Promise<void> {
@@ -273,6 +415,16 @@ export function createMemory(options: CreateMemoryOptions): Memory {
       const ids = entries.map((entry) => entry.id);
       if (ids.length > 0) {
         await storage.deleteMany(ids);
+      }
+      if (textSearchProvider) {
+        await textSearchProvider.clear(targetNamespace);
+      }
+      // Cascade: clear embedding cache entries for this namespace if the
+      // embedder supports namespace-scoped eviction.
+      if ('clearNamespace' in embedder && typeof embedder.clearNamespace === 'function') {
+        await (embedder as { clearNamespace: (ns: string) => void | Promise<void> }).clearNamespace(
+          targetNamespace,
+        );
       }
     },
 
@@ -284,10 +436,16 @@ export function createMemory(options: CreateMemoryOptions): Memory {
 
     async init(): Promise<void> {
       await storage.init();
+      if (textSearchProvider) {
+        await textSearchProvider.init();
+      }
     },
 
     async close(): Promise<void> {
       await storage.close();
+      if (textSearchProvider) {
+        await textSearchProvider.close();
+      }
     },
   };
 
