@@ -67,6 +67,11 @@ export function createChunkedTask<TState>(
         requeue: true,
         maxRequeues: 10, // High limit — chunks are designed for preemption
         createRun: () => {
+          // Reset closure state on each invocation so requeued runs don't
+          // carry stale results/errors from a previous preempted dispatch.
+          chunkResult = undefined;
+          chunkError = undefined;
+
           // We don't actually run an LLM loop for chunks — we use the
           // createRun factory to execute our processChunk function and
           // return a minimal RunResult. The scheduler calls executeLoop
