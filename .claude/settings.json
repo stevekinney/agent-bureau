@@ -27,7 +27,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "modified=$(git diff --name-only 2>/dev/null | grep '\\.ts$' || true); if [ -n \"$modified\" ]; then found=''; for f in $modified; do if [ -f \"$f\" ]; then matches=$(grep -n 'console\\.log' \"$f\" 2>/dev/null || true); if [ -n \"$matches\" ]; then found=\"${found}${f}:\\n${matches}\\n\"; fi; fi; done; if [ -n \"$found\" ]; then printf 'console.log found in modified files:\\n'; printf '%b\\n' \"$found\"; fi; fi"
+            "command": "modified=$(git diff HEAD --name-only 2>/dev/null | grep '\\.ts$' || true); if [ -n \"$modified\" ]; then found=''; for f in $modified; do if [ -f \"$f\" ]; then matches=$(grep -n 'console\\.log' \"$f\" 2>/dev/null || true); if [ -n \"$matches\" ]; then found=\"${found}${f}:\\n${matches}\\n\"; fi; fi; done; if [ -n \"$found\" ]; then printf 'console.log found in modified files:\\n'; printf '%b\\n' \"$found\"; fi; fi"
           }
         ]
       }
