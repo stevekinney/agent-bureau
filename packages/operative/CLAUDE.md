@@ -55,6 +55,7 @@ bun run clean             # Clean build artifacts (dist/, coverage/)
   - `types.ts` — `SchedulerPriority`, `SchedulerTask`, `SchedulerState`
   - `events.ts` — Scheduler lifecycle events (TaskQueued, TaskDispatched, TaskCompleted, TaskPreempted, etc.)
 - `src/test/` — Test utilities (createMockGenerate, createRunRecorder)
+- `src/create-identity-hook.ts` — `createIdentityHook()` PrepareStepHook that injects a resolved agent identity (soul, persona, user context) as a system message on step 0. Accepts a pre-bound `resolve: () => Promise<string>` function — operative never imports from the memory package. Degrades gracefully on errors.
 
 ### Workspace Relationships
 

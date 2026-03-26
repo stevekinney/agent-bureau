@@ -7,6 +7,7 @@ const entrypoints = [
   './src/namespace-isolation.ts',
   './src/experiential.ts',
   './src/reflection.ts',
+  './src/identity/index.ts',
   './src/test/index.ts',
 ];
 

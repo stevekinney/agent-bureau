@@ -61,3 +61,43 @@ export type {
   NamespaceIsolationOptions,
   OnConflictHandler,
 } from './types';
+
+// ── Identity ───────────────────────────────────────────────────────
+export type {
+  AgentIdentity,
+  CreateSoulDistillationOptions,
+  CreateSoulSeedOptions,
+  IdentityProvider,
+  IdentityStorageAdapter,
+  PersonaDescriptor,
+  SoulBudget,
+  SoulDiff,
+  SoulDiffEntry,
+  SoulDistillationChunkedTaskOptions,
+  SoulDistillationState,
+  SoulHistoryEntry,
+  SoulItem,
+} from './identity';
+export {
+  acceptSoulUpdate,
+  createIdentityToolbox,
+  createPersonaCreateTool,
+  createPersonaDeleteTool,
+  createPersonaListTool,
+  createPersonaUpdateTool,
+  createPersonaViewTool,
+  createSoulAcceptTool,
+  createSoulDiffTool,
+  createSoulDistillationTask,
+  createSoulPinTool,
+  createSoulRejectTool,
+  createSoulSeed,
+  createSoulViewTool,
+  createStaticIdentityProvider,
+  createStorageIdentityProvider,
+  getSoulDiff,
+  pinSoulItem,
+  rejectSoulUpdate,
+  resolveIdentity,
+  unpinSoulItem,
+} from './identity';
