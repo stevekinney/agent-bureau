@@ -169,6 +169,7 @@ export function createConsolidationTask(
             entryA.content,
             entryB.content,
             entryCount,
+            namespace,
           );
 
           if (similarity >= mergeThreshold && similarity < deduplicationThreshold) {
@@ -218,6 +219,7 @@ export function createConsolidationTask(
             entryA.content,
             entryB.content,
             entryCount,
+            namespace,
           );
 
           if (similarity >= deduplicationThreshold) {
@@ -360,17 +362,20 @@ function getConfidence(entry: MemorySearchResult): number {
  *
  * @param entryCount - Total number of entries in memory, used as the recall
  *   limit to ensure the target entry is always found regardless of memory size.
+ * @param namespace - Namespace to search within, matching the consolidation scope.
  */
 async function computeSimilarity(
   memory: Memory,
   contentA: string,
   contentB: string,
   entryCount: number,
+  namespace?: string,
 ): Promise<number> {
   const results = await memory.recall(contentA, {
     limit: entryCount,
     threshold: 0.0,
     vectorOnly: true,
+    ...(namespace && { namespace }),
   });
   const match = results.find((r) => r.content === contentB);
   return match?.score ?? 0;
