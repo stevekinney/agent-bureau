@@ -1,6 +1,5 @@
 ---
 description: Monorepo structure, Turborepo pipeline, and cross-package workflow
-globs: *
 ---
 
 # Monorepo Workflow
