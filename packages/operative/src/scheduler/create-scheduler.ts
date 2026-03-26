@@ -377,6 +377,14 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
             resolver.resolve(runResult);
           }
           void task.onComplete?.(runResult);
+        } else {
+          // Task was aborted (e.g., via external signal) without going through preemptTask.
+          // Resolve the submit() promise with null so it doesn't hang forever.
+          const resolver = taskResolvers.get(task.id);
+          if (resolver) {
+            taskResolvers.delete(task.id);
+            resolver.resolve(null);
+          }
         }
       } catch (error) {
         emitEvent(new TaskFailedEvent(task.id, error));

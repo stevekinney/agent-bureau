@@ -44,13 +44,13 @@ export interface CreateConsolidationOptions {
 }
 
 /**
- * State tracked across consolidation chunks. The cursor is the only
- * checkpoint boundary — if a chunk is preempted mid-stage, the entire
- * chunk reruns from stage 1 (safe because each stage is idempotent).
+ * State tracked across consolidation chunks. processedIds is the checkpoint
+ * boundary — if a chunk is preempted mid-stage, the entire chunk reruns
+ * from stage 1 (safe because each stage is idempotent).
  */
 export interface ConsolidationState {
-  /** Offset into the entry list for the next chunk. */
-  cursor: number;
+  /** IDs of entries already processed or removed in prior chunks. */
+  processedIds: string[];
   /** Number of entries distilled (merged) across all chunks. */
   distilled: number;
   /** Number of near-duplicate entries removed across all chunks. */
@@ -110,7 +110,7 @@ export function createConsolidationTask(
     name: 'memory-consolidation',
     priority: 'background',
     initialState: {
-      cursor: 0,
+      processedIds: [],
       distilled: 0,
       deduplicated: 0,
       conflictsResolved: 0,
@@ -122,26 +122,25 @@ export function createConsolidationTask(
       state: ConsolidationState,
       signal: AbortSignal,
     ): Promise<{ state: ConsolidationState; done: boolean }> {
-      // Fetch entries for this chunk using a broad recall query
-      const searchOptions = {
-        limit: chunkSize,
-        threshold: 0.0, // Fetch all
-        ...(namespace && { namespace }),
-      };
+      const alreadyProcessed = new Set(state.processedIds);
 
-      // Use a generic query to get entries starting at the cursor offset.
-      // We recall with an empty-ish query and rely on the limit + offset behavior.
-      // Since memory.recall doesn't support offset, we fetch more and skip.
+      // Fetch a batch of entries. We request more than chunkSize to account
+      // for entries we've already processed, then filter down to unprocessed ones.
+      const fetchLimit = alreadyProcessed.size + chunkSize;
       const allResults = await memory.recall('*', {
-        ...searchOptions,
-        limit: state.cursor + chunkSize,
+        limit: fetchLimit,
+        threshold: 0.0,
+        ...(namespace && { namespace }),
       });
 
-      // Take only the entries in our chunk range
-      const chunkEntries = allResults.slice(state.cursor, state.cursor + chunkSize);
+      // Filter to only entries we haven't processed yet
+      const chunkEntries = allResults.filter((entry) => !alreadyProcessed.has(entry.id));
 
-      if (chunkEntries.length === 0) {
-        // No more entries — consolidation is complete
+      // Take at most chunkSize entries
+      const entriesToProcess = chunkEntries.slice(0, chunkSize);
+
+      if (entriesToProcess.length === 0) {
+        // No more unprocessed entries — consolidation is complete
         return { state, done: true };
       }
 
@@ -150,7 +149,6 @@ export function createConsolidationTask(
       }
 
       let { distilled, deduplicated, conflictsResolved, pruned, scanned } = state;
-      const entriesToProcess = [...chunkEntries];
 
       // ── Stage 1: Distill ────────────────────────────────────────
       const mergedIds = new Set<string>();
@@ -220,6 +218,8 @@ export function createConsolidationTask(
       }
 
       // ── Stage 3: Update ─────────────────────────────────────────
+      const resolvedIds = new Set<string>();
+
       if (resolveConflict) {
         const [conflictMin, conflictMax] = conflictRange;
 
@@ -232,7 +232,9 @@ export function createConsolidationTask(
               mergedIds.has(entryA.id) ||
               mergedIds.has(entryB.id) ||
               deduplicatedIds.has(entryA.id) ||
-              deduplicatedIds.has(entryB.id)
+              deduplicatedIds.has(entryB.id) ||
+              resolvedIds.has(entryA.id) ||
+              resolvedIds.has(entryB.id)
             ) {
               continue;
             }
@@ -246,6 +248,8 @@ export function createConsolidationTask(
                 await memory.remember(reconciled, { ...(namespace && { namespace }) });
                 await memory.forget(entryA.id);
                 await memory.forget(entryB.id);
+                resolvedIds.add(entryA.id);
+                resolvedIds.add(entryB.id);
                 conflictsResolved++;
               }
             }
@@ -257,7 +261,11 @@ export function createConsolidationTask(
       if (evaluateImportance) {
         for (const entry of entriesToProcess) {
           if (signal.aborted) break;
-          if (mergedIds.has(entry.id) || deduplicatedIds.has(entry.id)) {
+          if (
+            mergedIds.has(entry.id) ||
+            deduplicatedIds.has(entry.id) ||
+            resolvedIds.has(entry.id)
+          ) {
             continue;
           }
 
@@ -276,10 +284,13 @@ export function createConsolidationTask(
         }
       }
 
-      scanned += chunkEntries.length;
+      // Collect all entry IDs from this chunk into processedIds
+      const newProcessedIds = [...state.processedIds, ...entriesToProcess.map((entry) => entry.id)];
+
+      scanned += entriesToProcess.length;
 
       const nextState: ConsolidationState = {
-        cursor: state.cursor + chunkSize,
+        processedIds: newProcessedIds,
         distilled,
         deduplicated,
         conflictsResolved,
@@ -287,8 +298,8 @@ export function createConsolidationTask(
         scanned,
       };
 
-      // Check if we've processed all entries
-      const done = chunkEntries.length < chunkSize;
+      // Done when this chunk returned fewer entries than chunkSize
+      const done = entriesToProcess.length < chunkSize;
 
       return { state: nextState, done };
     },

@@ -46,7 +46,7 @@ describe('createConsolidationTask', () => {
 
     expect(task.name).toBe('memory-consolidation');
     expect(task.priority).toBe('background');
-    expect(task.initialState.cursor).toBe(0);
+    expect(task.initialState.processedIds).toEqual([]);
     expect(task.initialState.distilled).toBe(0);
     expect(task.initialState.deduplicated).toBe(0);
     expect(task.initialState.conflictsResolved).toBe(0);
@@ -90,7 +90,7 @@ describe('createConsolidationTask', () => {
     const finalState = await processAllChunks(task.processChunk, task.initialState);
 
     expect(finalState.scanned).toBeGreaterThan(0);
-    expect(finalState.cursor).toBeGreaterThanOrEqual(3); // At least one full chunk
+    expect(finalState.processedIds.length).toBeGreaterThanOrEqual(3); // At least one full chunk
 
     await memory.close();
   });
@@ -148,7 +148,7 @@ describe('createConsolidationTask', () => {
     await memory.close();
   });
 
-  it('cursor advances correctly across chunks', async () => {
+  it('processedIds grows correctly across chunks', async () => {
     const memory = createTestMemory();
     await memory.init();
 
@@ -166,12 +166,12 @@ describe('createConsolidationTask', () => {
 
     // Process first chunk
     const result1 = await task.processChunk(task.initialState, controller.signal);
-    expect(result1.state.cursor).toBe(2);
+    expect(result1.state.processedIds.length).toBe(2);
     expect(result1.done).toBe(false);
 
     // Process second chunk
     const result2 = await task.processChunk(result1.state, controller.signal);
-    expect(result2.state.cursor).toBe(4);
+    expect(result2.state.processedIds.length).toBe(4);
 
     await memory.close();
   });
@@ -199,7 +199,7 @@ describe('createConsolidationTask', () => {
     task.onComplete?.(finalState);
 
     expect(completedState).toBeDefined();
-    expect(completedState!.cursor).toBe(finalState.cursor);
+    expect(completedState!.processedIds).toEqual(finalState.processedIds);
 
     await memory.close();
   });
