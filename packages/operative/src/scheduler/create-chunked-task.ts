@@ -25,8 +25,6 @@ export interface CreateChunkedTaskOptions<TState> {
   maxPreemptionRetries?: number;
 }
 
-let chunkedTaskIdCounter = 0;
-
 /**
  * Creates a chunked task utility that breaks a large background job into
  * small, preemption-friendly chunks submitted to the scheduler one at a time.
@@ -40,6 +38,8 @@ let chunkedTaskIdCounter = 0;
 export function createChunkedTask<TState>(
   options: CreateChunkedTaskOptions<TState>,
 ): (scheduler: Scheduler) => Promise<TState> {
+  let chunkedTaskIdCounter = 0;
+
   const {
     name,
     priority = 'background',
@@ -64,14 +64,8 @@ export function createChunkedTask<TState>(
       const task: SchedulerTask = {
         id: taskId,
         priority,
-        requeue: true,
-        maxRequeues: 10, // High limit — chunks are designed for preemption
+        requeue: false,
         createRun: () => {
-          // Reset closure state on each invocation so requeued runs don't
-          // carry stale results/errors from a previous preempted dispatch.
-          chunkResult = undefined;
-          chunkError = undefined;
-
           // We don't actually run an LLM loop for chunks — we use the
           // createRun factory to execute our processChunk function and
           // return a minimal RunResult. The scheduler calls executeLoop
@@ -99,9 +93,10 @@ export function createChunkedTask<TState>(
       const result: RunResult | null = await scheduler.submit(task);
 
       // Task was preempted or aborted — the scheduler resolves with null
-      // in both cases (preemptTask when maxRequeues exceeded, or
-      // startAndAwaitTask when finishReason is 'aborted'). Preserve any
-      // partial progress from processChunk before retrying.
+      // when the task is not requeued or when finishReason is 'aborted'.
+      // We intentionally disable scheduler-level requeuing (requeue: false)
+      // so that preemption is always handled here, where we can correctly
+      // preserve partial progress from processChunk before retrying.
       if (result === null) {
         if (chunkResult) {
           currentState = chunkResult.state;

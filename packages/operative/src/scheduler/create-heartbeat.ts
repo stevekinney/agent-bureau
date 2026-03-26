@@ -45,13 +45,12 @@ export interface Heartbeat {
   readonly consecutiveFailures: number;
 }
 
-let heartbeatIdCounter = 0;
-
 /**
  * Creates a heartbeat that periodically submits tasks to the scheduler.
  * Uses a sleep-loop (not setInterval) to prevent tick stacking.
  */
 export function createHeartbeat(options: CreateHeartbeatOptions): Heartbeat {
+  let heartbeatIdCounter = 0;
   const {
     scheduler,
     interval = 60_000,

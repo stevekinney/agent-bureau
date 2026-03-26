@@ -78,12 +78,6 @@ interface RunningTask {
   requeues: number;
 }
 
-let taskIdCounter = 0;
-
-function generateTaskId(): string {
-  return `task-${++taskIdCounter}-${Date.now().toString(36)}`;
-}
-
 function taskSummary(task: SchedulerTask): SchedulerTaskSummary {
   return { id: task.id, priority: task.priority, metadata: task.metadata };
 }
@@ -94,6 +88,12 @@ function taskSummary(task: SchedulerTask): SchedulerTaskSummary {
  */
 export function createScheduler(options: CreateSchedulerOptions): Scheduler {
   const { generate, toolbox, idleDelay = 1000, signal: externalSignal } = options;
+
+  let taskIdCounter = 0;
+
+  function generateTaskId(): string {
+    return `task-${++taskIdCounter}-${Date.now().toString(36)}`;
+  }
 
   const emitter = new EventTarget();
   const queue = createPriorityQueue<SchedulerTask & { __requeues?: number }>();
