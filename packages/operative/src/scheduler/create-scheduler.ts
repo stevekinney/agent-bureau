@@ -43,8 +43,10 @@ export interface CreateSchedulerOptions {
 export interface Scheduler {
   /** Submit a task to the scheduler. Resolves when the task completes, or null if permanently preempted. */
   submit(task: SchedulerTask): Promise<RunResult | null>;
-  /** Convenience: submit an immediate-priority task. Resolves with the run result. */
-  submitImmediate(createRunFactory: () => RunOptions | Promise<RunOptions>): Promise<RunResult>;
+  /** Convenience: submit an immediate-priority task. Resolves with the run result, or null if the scheduler is stopping. */
+  submitImmediate(
+    createRunFactory: () => RunOptions | Promise<RunOptions>,
+  ): Promise<RunResult | null>;
   /** Eagerly creates an ActiveRun for immediate-priority tasks. Returns both the
    *  ActiveRun handle (for store registration / event forwarding) and the result promise.
    *  The factory must be synchronous — use submit() for async factories. */
@@ -177,7 +179,7 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
 
   function submitImmediate(
     createRunFactory: () => RunOptions | Promise<RunOptions>,
-  ): Promise<RunResult> {
+  ): Promise<RunResult | null> {
     const taskId = generateTaskId();
     const task: SchedulerTask = {
       id: taskId,
@@ -185,7 +187,7 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
       createRun: createRunFactory,
       requeue: false,
     };
-    return submit(task) as Promise<RunResult>;
+    return submit(task);
   }
 
   function dispatchMethod(createRunFactory: () => RunOptions): {
