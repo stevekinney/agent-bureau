@@ -16,11 +16,9 @@ export interface CreateSoulSeedOptions {
   additional?: string;
 }
 
-let seedCounter = 0;
-
 function createSeedItem(content: string, topic?: string): SoulItem {
   return {
-    id: `seed-${++seedCounter}`,
+    id: `seed-${crypto.randomUUID()}`,
     content,
     source: 'seed',
     pinned: true,

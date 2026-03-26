@@ -43,7 +43,13 @@ export function createStorageIdentityProvider(adapter: IdentityStorageAdapter): 
   async function loadJson<T>(key: string): Promise<T | undefined> {
     const raw = await adapter.get(key);
     if (raw === null) return undefined;
-    return JSON.parse(raw) as T;
+    try {
+      return JSON.parse(raw) as T;
+    } catch {
+      // If stored data is not valid JSON (e.g., from corruption or migration),
+      // treat it as missing instead of throwing.
+      return undefined;
+    }
   }
 
   async function saveJson(key: string, value: unknown): Promise<void> {
@@ -62,8 +68,14 @@ export function createStorageIdentityProvider(adapter: IdentityStorageAdapter): 
       const current = await loadJson<SoulItem[]>(key);
       if (current && current.length > 0) {
         const agentKey = agentId ?? ORCHESTRATOR_KEY;
-        const historyKeys = await adapter.list(`${HISTORY_PREFIX}${agentKey}:`);
-        const nextVersion = historyKeys.length + 1;
+        const prefix = `${HISTORY_PREFIX}${agentKey}:`;
+        const historyKeys = await adapter.list(prefix);
+        const maxVersion = historyKeys.reduce((max, key) => {
+          const versionString = key.slice(prefix.length);
+          const version = parseInt(versionString, 10);
+          return Number.isFinite(version) && version > max ? version : max;
+        }, 0);
+        const nextVersion = maxVersion + 1;
         const entry: SoulHistoryEntry = {
           version: nextVersion,
           items: current,

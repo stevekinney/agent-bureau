@@ -50,7 +50,13 @@ export interface SoulDistillationState {
   /** Memory entries scanned so far. */
   scanned: number;
   /** Candidates identified for graduation. */
-  candidates: Array<{ content: string; confidence: number; topic?: string; entryId: string }>;
+  candidates: Array<{
+    content: string;
+    confidence: number;
+    reinforcementCount: number;
+    topic?: string;
+    entryId: string;
+  }>;
   /** Items proposed for demotion. */
   demotions: string[];
   /** Whether the proposal has been generated and stored. */
@@ -136,27 +142,27 @@ export function createSoulDistillationTask(
         return { state, done: true };
       }
 
-      const scannedIds = new Set(state.candidates.map((c) => c.entryId));
-
       // ── Stage 1: Scan for graduation candidates ──────────────────
-      const allEntries = await memory.list({
-        limit: state.scanned + chunkSize,
+      const entriesToProcess = await memory.list({
+        limit: chunkSize,
+        offset: state.scanned,
         ...(namespace && { namespace }),
       });
-
-      // Skip entries we've already processed
-      const unscanned = allEntries.filter((entry) => !scannedIds.has(entry.id));
-      const entriesToProcess = unscanned.slice(0, chunkSize);
 
       if (entriesToProcess.length === 0 && state.candidates.length === 0) {
         // No entries at all — nothing to distill
         return { state, done: true };
       }
 
+      const scannedIds = new Set(state.candidates.map((c) => c.entryId));
+
       const newCandidates = [...state.candidates];
 
       for (const entry of entriesToProcess) {
         if (signal.aborted) break;
+
+        // Skip entries already identified as candidates in a previous chunk
+        if (scannedIds.has(entry.id)) continue;
 
         const confidence = getConfidence(entry);
         const reinforcement = getReinforcementCount(entry);
@@ -165,6 +171,7 @@ export function createSoulDistillationTask(
           newCandidates.push({
             content: entry.content,
             confidence,
+            reinforcementCount: reinforcement,
             topic: getTopic(entry),
             entryId: entry.id,
           });
@@ -304,7 +311,7 @@ export function createSoulDistillationTask(
           sourceEntryIds: safeCandidates.map((c) => c.entryId),
           pinned: false,
           updatedAt: new Date().toISOString(),
-          reinforcementCount: Math.max(...safeCandidates.map((c) => c.confidence)),
+          reinforcementCount: Math.max(...safeCandidates.map((c) => c.reinforcementCount)),
         }));
 
       // Merge with surviving current items (exclude demoted)

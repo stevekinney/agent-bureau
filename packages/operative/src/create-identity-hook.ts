@@ -10,45 +10,52 @@ export interface CreateIdentityHookOptions {
    * resolveIdentity function — operative never imports from memory.
    */
   resolve: () => Promise<string>;
+
+  /**
+   * Optional logger for warnings. Defaults to `console.warn`.
+   */
+  warn?: (message: string) => void;
 }
 
 /**
  * Creates a PrepareStepHook that loads and injects the resolved identity
  * into the conversation at the start of a run.
  *
- * The hook fires on step 0 only. The resolved identity is cached for
- * the duration of the run — it is not reloaded on every step.
+ * The hook fires on step 0 only. It checks the conversation's existing
+ * messages for `_identityInjected` metadata to ensure idempotency across
+ * multiple `run()` calls that reuse the same hook instance.
  *
  * If the resolve function throws (storage unavailable, network error),
  * the hook logs a warning and proceeds without identity injection.
  * The run should not fail because identity could not be loaded.
  */
 export function createIdentityHook(options: CreateIdentityHookOptions): PrepareStepHook {
-  const { resolve } = options;
-
-  let cachedIdentity: string | undefined;
-  let injected = false;
+  const { resolve, warn = console.warn } = options;
 
   return async (context) => {
     // Only inject on step 0
     if (context.step !== 0) return;
-    if (injected) return;
+
+    // Check if identity was already injected into this conversation
+    // (handles reuse of the same hook across multiple run() calls)
+    const messages = context.conversation.getMessages();
+    const alreadyInjected = messages.some(
+      (message) => message.metadata && '_identityInjected' in message.metadata,
+    );
+    if (alreadyInjected) return;
 
     try {
-      if (cachedIdentity === undefined) {
-        cachedIdentity = await resolve();
-      }
+      const identity = await resolve();
 
-      if (cachedIdentity && cachedIdentity.length > 0) {
-        context.conversation.appendSystemMessage(cachedIdentity, {
+      if (identity && identity.length > 0) {
+        context.conversation.appendSystemMessage(identity, {
           _identityInjected: true,
         });
       }
-
-      injected = true;
-    } catch {
+    } catch (error) {
       // Degrade gracefully — do not crash the agent loop.
       // The identity system is not essential for the run to proceed.
+      warn(`Identity resolution failed, proceeding without identity: ${String(error)}`);
     }
   };
 }

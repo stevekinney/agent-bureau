@@ -1,6 +1,21 @@
 import type { IdentityProvider, SoulItem } from './types';
 
 /**
+ * Compare two soul items to determine whether the proposed version
+ * differs from the current one. Checks all fields that distillation
+ * or user edits can change, not just `content`.
+ */
+function hasSoulItemChanged(current: SoulItem, proposed: SoulItem): boolean {
+  return (
+    current.content !== proposed.content ||
+    current.pinned !== proposed.pinned ||
+    current.topic !== proposed.topic ||
+    current.reinforcementCount !== proposed.reinforcementCount ||
+    JSON.stringify(current.sourceEntryIds ?? []) !== JSON.stringify(proposed.sourceEntryIds ?? [])
+  );
+}
+
+/**
  * A single entry in a soul diff.
  */
 export interface SoulDiffEntry {
@@ -46,7 +61,7 @@ export async function getSoulDiff(provider: IdentityProvider, agentId?: string):
     const currentItem = currentMap.get(id);
     if (!currentItem) {
       additions.push({ type: 'addition', proposed: proposedItem });
-    } else if (currentItem.content !== proposedItem.content) {
+    } else if (hasSoulItemChanged(currentItem, proposedItem)) {
       modifications.push({ type: 'modification', current: currentItem, proposed: proposedItem });
     }
   }
@@ -106,12 +121,16 @@ export async function pinSoulItem(
   agentId?: string,
 ): Promise<boolean> {
   const soul = await provider.loadSoul(agentId);
-  const item = soul.find((i) => i.id === itemId);
-  if (!item) return false;
+  const index = soul.findIndex((i) => i.id === itemId);
+  if (index === -1) return false;
 
-  item.pinned = true;
-  item.updatedAt = new Date().toISOString();
-  await provider.saveSoul(soul, agentId);
+  // Clone the array and the target item to avoid mutating the provider's
+  // internal state before saveSoul archives the current version in history.
+  const updatedSoul = soul.map((item, i) =>
+    i === index ? { ...item, pinned: true, updatedAt: new Date().toISOString() } : item,
+  );
+
+  await provider.saveSoul(updatedSoul, agentId);
   return true;
 }
 
@@ -124,11 +143,15 @@ export async function unpinSoulItem(
   agentId?: string,
 ): Promise<boolean> {
   const soul = await provider.loadSoul(agentId);
-  const item = soul.find((i) => i.id === itemId);
-  if (!item) return false;
+  const index = soul.findIndex((i) => i.id === itemId);
+  if (index === -1) return false;
 
-  item.pinned = false;
-  item.updatedAt = new Date().toISOString();
-  await provider.saveSoul(soul, agentId);
+  // Clone the array and the target item to avoid mutating the provider's
+  // internal state before saveSoul archives the current version in history.
+  const updatedSoul = soul.map((item, i) =>
+    i === index ? { ...item, pinned: false, updatedAt: new Date().toISOString() } : item,
+  );
+
+  await provider.saveSoul(updatedSoul, agentId);
   return true;
 }

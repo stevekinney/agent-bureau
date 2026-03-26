@@ -2,7 +2,13 @@ import { createTool } from 'armorer';
 import { z } from 'zod';
 
 import { resolveIdentity } from './resolve-identity';
-import { acceptSoulUpdate, getSoulDiff, pinSoulItem, rejectSoulUpdate } from './soul-approval';
+import {
+  acceptSoulUpdate,
+  getSoulDiff,
+  pinSoulItem,
+  rejectSoulUpdate,
+  unpinSoulItem,
+} from './soul-approval';
 import type { IdentityProvider, PersonaDescriptor } from './types';
 
 // ── Soul Tools ─────────────────────────────────────────────────────
@@ -77,9 +83,7 @@ export function createSoulPinTool(provider: IdentityProvider) {
     async execute(params) {
       const result = params.pinned
         ? await pinSoulItem(provider, params.itemId, params.agentId)
-        : await import('./soul-approval').then((m) =>
-            m.unpinSoulItem(provider, params.itemId, params.agentId),
-          );
+        : await unpinSoulItem(provider, params.itemId, params.agentId);
       if (!result) {
         return { success: false, reason: `Soul item "${params.itemId}" not found.` };
       }
