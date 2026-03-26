@@ -265,7 +265,14 @@ export async function clearProposals(
     const proposal = parseProposal(raw);
     if (!proposal) continue;
 
-    if (options?.status && proposal.status !== options.status) continue;
+    // When no status filter is given, only clear non-pending proposals.
+    // Without this guard, pending (unreviewed) proposals would be silently deleted.
+    const targetStatus = options?.status;
+    if (targetStatus) {
+      if (proposal.status !== targetStatus) continue;
+    } else if (proposal.status === 'pending') {
+      continue;
+    }
 
     if (options?.olderThanMs) {
       const age = Date.now() - new Date(proposal.createdAt).getTime();

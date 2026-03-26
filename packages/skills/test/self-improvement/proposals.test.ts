@@ -335,6 +335,21 @@ describe('proposals', () => {
       expect(await getProposal(storage, 'p3')).toBeDefined();
     });
 
+    it('preserves pending proposals when no status filter is given', async () => {
+      const storage = createMockStorageAdapter();
+
+      await saveProposal(storage, makeProposal({ id: 'p1', status: 'pending' }));
+      await saveProposal(storage, makeProposal({ id: 'p2', status: 'accepted' }));
+      await saveProposal(storage, makeProposal({ id: 'p3', status: 'rejected' }));
+
+      const removed = await clearProposals(storage);
+
+      expect(removed).toBe(2);
+      expect(await getProposal(storage, 'p1')).toBeDefined();
+      expect(await getProposal(storage, 'p2')).toBeUndefined();
+      expect(await getProposal(storage, 'p3')).toBeUndefined();
+    });
+
     it('removes old proposals when olderThanMs is specified', async () => {
       const storage = createMockStorageAdapter();
 

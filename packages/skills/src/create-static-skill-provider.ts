@@ -32,7 +32,9 @@ export function createStaticSkillProvider(initialSkills: SkillContent[] = []): S
 
     saveSkill(name: string, content: SkillContent): Promise<void> {
       if (!isValidSkillName(name)) {
-        throw new SkillParseError(`Skill name "${name}" is not valid kebab-case.`);
+        return Promise.reject(
+          new SkillParseError(`Skill name "${name}" is not valid kebab-case.`),
+        );
       }
       skills.set(name, content);
       return Promise.resolve();

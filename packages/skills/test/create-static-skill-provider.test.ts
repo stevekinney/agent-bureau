@@ -38,6 +38,14 @@ describe('createStaticSkillProvider', () => {
   });
 
   describe('saveSkill', () => {
+    it('rejects invalid skill names with a catchable promise rejection', async () => {
+      const provider = createStaticSkillProvider();
+
+      await expect(provider.saveSkill('NOT VALID', makeSkillContent('NOT VALID'))).rejects.toThrow(
+        'not valid kebab-case',
+      );
+    });
+
     it('adds new skills', async () => {
       const provider = createStaticSkillProvider();
       const content = makeSkillContent('new-skill');
