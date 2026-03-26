@@ -1,6 +1,7 @@
 import type {
   Memory,
   MemoryEntry,
+  MemoryListOptions,
   MemoryMetadata,
   MemorySearchOptions,
   MemorySearchResult,
@@ -44,6 +45,17 @@ export function withNamespaceIsolation(memory: Memory, options: NamespaceIsolati
     ): Promise<MemorySearchResult[]> {
       const results = await memory.recall(query, {
         ...searchOptions,
+        namespace,
+      });
+      for (const result of results) {
+        knownIds.add(result.id);
+      }
+      return results;
+    },
+
+    async list(listOptions?: MemoryListOptions): Promise<MemorySearchResult[]> {
+      const results = await memory.list({
+        ...listOptions,
         namespace,
       });
       for (const result of results) {

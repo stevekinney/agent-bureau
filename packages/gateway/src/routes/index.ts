@@ -5,6 +5,7 @@ import { createConfigurationRoutes } from './configuration';
 import { createConversationsRoutes } from './conversations';
 import { createHealthRoutes } from './health';
 import { createRunsRoutes } from './runs';
+import { createSchedulerRoutes } from './scheduler';
 
 export function createRoutes(bureau: Bureau) {
   const app = new Hono();
@@ -13,6 +14,7 @@ export function createRoutes(bureau: Bureau) {
   app.route('/api/v1/runs', createRunsRoutes(bureau));
   app.route('/api/v1/conversations', createConversationsRoutes(bureau));
   app.route('/api/v1/configuration', createConfigurationRoutes(bureau));
+  app.route('/api/v1/scheduler', createSchedulerRoutes(bureau.scheduler));
 
   return app;
 }

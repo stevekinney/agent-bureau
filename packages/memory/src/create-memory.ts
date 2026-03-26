@@ -11,6 +11,7 @@ import type {
   CreateMemoryOptions,
   Memory,
   MemoryEntry,
+  MemoryListOptions,
   MemoryMetadata,
   MemorySearchOptions,
   MemorySearchResult,
@@ -297,6 +298,9 @@ export function createMemory(options: CreateMemoryOptions): Memory {
 
       if (namespacedEntries.length === 0) return [];
 
+      // Build a lookup map for O(1) entry access by id
+      const entriesById = new Map(namespacedEntries.map((entry) => [entry.id, entry]));
+
       // Build candidates for hybrid search
       const candidates: HybridSearchCandidate[] = namespacedEntries.map((entry) => ({
         id: entry.id,
@@ -309,6 +313,46 @@ export function createMemory(options: CreateMemoryOptions): Memory {
       const candidateMultiplier = 3;
       const vectorResultLimit = limit * candidateMultiplier;
       const vectorResults = await vectorSearch(queryVector, namespace, vectorResultLimit);
+
+      // When vectorOnly is set, skip BM25 and return pure cosine similarity scores.
+      if (mergedOptions.vectorOnly) {
+        const vectorScoreById = new Map(vectorResults.map((r) => [r.id, r.score]));
+
+        let results: (MemorySearchResult & { vector?: number[] })[] = candidates
+          .map((candidate) => {
+            const score = vectorScoreById.get(candidate.id) ?? 0;
+            if (score < threshold) return undefined;
+            return {
+              id: candidate.id,
+              content: candidate.content,
+              score,
+              metadata: parseMemoryMetadata(candidate.metadata, namespace),
+              createdAt: candidate.createdAt,
+              vector: entriesById.has(candidate.id)
+                ? Array.from(entriesById.get(candidate.id)!.vector)
+                : undefined,
+            };
+          })
+          .filter((r): r is NonNullable<typeof r> => r !== undefined)
+          .sort((a, b) => b.score - a.score);
+
+        // Apply temporal decay if configured
+        if (mergedOptions.temporalDecay) {
+          results = applyTemporalDecay(results, {
+            halfLifeMilliseconds: mergedOptions.temporalDecay.halfLifeMilliseconds,
+            evergreenExempt: mergedOptions.temporalDecay.evergreenExempt ?? true,
+          });
+        }
+
+        // Apply MMR for diversity if configured
+        if (mergedOptions.diversify) {
+          results = applyMaximalMarginalRelevance(results, limit, {
+            lambda: mergedOptions.diversify.lambda,
+          });
+        }
+
+        return results.slice(0, limit).map(({ vector: _vector, ...rest }) => rest);
+      }
 
       // Text search — use provider if available, otherwise in-memory BM25.
       let textScores: Map<number, number>;
@@ -349,7 +393,7 @@ export function createMemory(options: CreateMemoryOptions): Memory {
 
       // Convert to MemorySearchResult with vectors for MMR
       let results: (MemorySearchResult & { vector?: number[] })[] = hybridResults.map((result) => {
-        const matchedEntry = namespacedEntries.find((entry) => entry.id === result.id);
+        const matchedEntry = entriesById.get(result.id);
         const rawMetadata = result.metadata;
 
         return {
@@ -400,6 +444,25 @@ export function createMemory(options: CreateMemoryOptions): Memory {
 
       // Final limit and strip vectors from output
       return results.slice(0, limit).map(({ vector: _vector, ...rest }) => rest);
+    },
+
+    async list(listOptions?: MemoryListOptions): Promise<MemorySearchResult[]> {
+      const namespace = listOptions?.namespace ?? defaultNamespace;
+      const limit = listOptions?.limit ?? 100;
+      const offset = listOptions?.offset ?? 0;
+
+      const entries = await getAllInNamespace(namespace);
+
+      // Sort by creation time, newest first
+      entries.sort((a, b) => b.timestamp - a.timestamp);
+
+      return entries.slice(offset, offset + limit).map((entry) => ({
+        id: entry.id,
+        content: (entry.metadata?.[METADATA_CONTENT_KEY] as string) ?? '',
+        score: 1, // No semantic scoring for list
+        metadata: parseMemoryMetadata(entry.metadata ?? {}, namespace),
+        createdAt: entry.timestamp,
+      }));
     },
 
     async forget(id: string): Promise<void> {

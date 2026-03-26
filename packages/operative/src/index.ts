@@ -126,6 +126,39 @@ export {
 export { composeGenerate, createFallbackGenerate } from './generate-middleware';
 export type { OperativeHookMap } from './hooks';
 export { run } from './run';
+export type {
+  CreateChunkedTaskOptions,
+  CreateHeartbeatOptions,
+  CreateSchedulerOptions,
+  Heartbeat,
+  Scheduler,
+} from './scheduler/index';
+export type {
+  PriorityQueue,
+  SchedulerEventMap,
+  SchedulerEventType,
+  SchedulerPriority,
+  SchedulerState,
+  SchedulerTask,
+  SchedulerTaskSummary,
+} from './scheduler/index';
+export {
+  createChunkedTask,
+  createHeartbeat,
+  createPriorityQueue,
+  createScheduler,
+  isHigherPriority,
+  PRIORITY_WEIGHT,
+  SchedulerIdleEvent,
+  SchedulerStartedEvent,
+  SchedulerStoppedEvent,
+  TaskCompletedEvent as SchedulerTaskCompletedEvent,
+  TaskFailedEvent as SchedulerTaskFailedEvent,
+  sleep,
+  TaskDispatchedEvent,
+  TaskPreemptedEvent,
+  TaskQueuedEvent,
+} from './scheduler/index';
 export { withStreaming } from './streaming';
 export type {
   AfterToolExecutionHook,

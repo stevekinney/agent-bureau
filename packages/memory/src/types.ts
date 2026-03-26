@@ -31,6 +31,23 @@ export interface MemorySearchOptions {
   textWeight?: number;
   temporalDecay?: { halfLifeMilliseconds: number; evergreenExempt?: boolean };
   diversify?: { lambda: number };
+  /**
+   * When true, skip text/BM25 search and return pure cosine similarity scores.
+   * Useful when thresholds assume cosine semantics (e.g., deduplication at 0.95).
+   */
+  vectorOnly?: boolean;
+}
+
+/**
+ * Options for listing entries without semantic search.
+ */
+export interface MemoryListOptions {
+  /** Maximum number of entries to return. Default: 100. */
+  limit?: number;
+  /** Number of entries to skip. Default: 0. */
+  offset?: number;
+  /** Namespace to list entries from. */
+  namespace?: string;
 }
 
 export interface MemorySearchResult {
@@ -44,6 +61,8 @@ export interface MemorySearchResult {
 export interface Memory {
   remember(content: string, metadata?: Partial<MemoryMetadata>): Promise<MemoryEntry>;
   recall(query: string, options?: MemorySearchOptions): Promise<MemorySearchResult[]>;
+  /** List entries without semantic search. Returns entries sorted by creation time (newest first). */
+  list(options?: MemoryListOptions): Promise<MemorySearchResult[]>;
   forget(id: string): Promise<void>;
   forgetAll(namespace?: string): Promise<void>;
   count(namespace?: string): Promise<number>;
