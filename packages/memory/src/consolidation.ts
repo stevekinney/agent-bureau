@@ -303,11 +303,22 @@ export function createConsolidationTask(
         }
       }
 
-      // Only mark entries as processed if the chunk completed all stages without
-      // being aborted. If the signal fired mid-stage, the entire chunk must rerun
-      // from stage 1 (each stage is idempotent, so this is safe).
+      // If aborted mid-stage, preserve the updated stats counters (because
+      // memory mutations like forget/remember are already committed) but do
+      // NOT add entries to processedIds — the chunk will rerun from stage 1
+      // on the next attempt (each stage is idempotent, so this is safe).
       if (signal.aborted) {
-        return { state, done: false };
+        return {
+          state: {
+            processedIds: state.processedIds,
+            distilled,
+            deduplicated,
+            conflictsResolved,
+            pruned,
+            scanned: state.scanned,
+          },
+          done: false,
+        };
       }
 
       const newProcessedIds = [...state.processedIds, ...entriesToProcess.map((entry) => entry.id)];

@@ -118,14 +118,21 @@ export function createChunkedTask<TState>(
         throw new Error('Chunk processing failed');
       }
 
-      // Check if the run was aborted (preempted mid-step)
-      if (result.finishReason === 'aborted' && !chunkResult) {
+      // Check if the run was aborted (preempted mid-step). This covers both
+      // the case where processChunk never ran (!chunkResult) and the case where
+      // processChunk detected the abort internally and returned early with
+      // { done: false }. In both cases, count toward the preemption retry budget.
+      if (result.finishReason === 'aborted') {
+        // Preserve any partial-progress state if available
+        if (chunkResult) {
+          currentState = chunkResult.state;
+        }
         preemptionRetries++;
         if (preemptionRetries > maxPreemptionRetries) {
           const error = new Error(
             `Chunked task "${name}": exceeded ${maxPreemptionRetries} preemption retries`,
           );
-          void onError?.(error, stateForChunk);
+          void onError?.(error, currentState);
           throw error;
         }
         continue;
