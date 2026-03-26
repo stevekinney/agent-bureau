@@ -24,6 +24,7 @@ const entrypoints = [
   './src/create-context-compactor.ts',
   './src/create-identity-hook.ts',
   './src/create-memory-bridge.ts',
+  './src/create-policy-enforcement-hook.ts',
   './src/conditions/index.ts',
   './src/conditions/predicates.ts',
   './src/instrumentation/index.ts',
