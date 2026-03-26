@@ -31,8 +31,6 @@ export interface CreateSchedulerOptions {
   generate: GenerateFunction;
   /** Default toolbox (tasks can override via their RunOptions). */
   toolbox: Toolbox;
-  /** Maximum concurrent runs. Default: 1. */
-  concurrency?: number;
   /** How long to wait after a run completes before dispatching the next non-immediate task (ms). Default: 1000. */
   idleDelay?: number;
   /** AbortSignal to shut down the entire scheduler. */
@@ -94,7 +92,7 @@ function taskSummary(task: SchedulerTask): SchedulerTaskSummary {
  * and handles preemption between operative steps.
  */
 export function createScheduler(options: CreateSchedulerOptions): Scheduler {
-  const { generate, toolbox, concurrency = 1, idleDelay = 1000, signal: externalSignal } = options;
+  const { generate, toolbox, idleDelay = 1000, signal: externalSignal } = options;
 
   const emitter = new EventTarget();
   const queue = createPriorityQueue<SchedulerTask & { __requeues?: number }>();
@@ -220,14 +218,14 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
 
       const nextTask = queue.peek()!;
 
-      // At capacity — check if we should preempt
-      if (running.size >= concurrency) {
-        const lowest = findLowestPriorityRunning();
-        if (lowest && isHigherPriority(nextTask.priority, lowest.task.priority)) {
-          await preemptTask(lowest);
+      // A task is already running — check if we should preempt
+      if (running.size > 0) {
+        const activeTask = [...running.values()][0]!;
+        if (isHigherPriority(nextTask.priority, activeTask.task.priority)) {
+          await preemptTask(activeTask);
           // Now have capacity — fall through to dispatch
         } else {
-          // Can't dispatch — wait for a slot
+          // Can't dispatch — wait for the running task to finish
           await waitForWake(idleDelay);
           continue;
         }
@@ -250,16 +248,6 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
     }
 
     emitEvent(new SchedulerStoppedEvent());
-  }
-
-  function findLowestPriorityRunning(): RunningTask | undefined {
-    let lowest: RunningTask | undefined;
-    for (const runningTask of running.values()) {
-      if (!lowest || isHigherPriority(lowest.task.priority, runningTask.task.priority)) {
-        lowest = runningTask;
-      }
-    }
-    return lowest;
   }
 
   async function preemptTask(runningTask: RunningTask): Promise<void> {
@@ -297,10 +285,9 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
   }
 
   /**
-   * Starts a task and waits for it to complete. This makes the loop serial
-   * for concurrency=1 and allows preemption: if a higher-priority task is
-   * submitted while we're waiting, wakeLoop() fires but we're blocked on
-   * the result — the next loop iteration will preempt.
+   * Starts a task and waits for it to complete. The loop is serial —
+   * one task at a time — and allows preemption: if a higher-priority task
+   * is submitted while we're waiting, wakeLoop() fires.
    *
    * For preemption to work, we race the task result against a wake signal.
    * When woken by a new submission, we check if preemption is needed.
@@ -341,7 +328,12 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
     };
     running.set(task.id, runningTaskEntry);
 
-    // Wait for the task to complete, checking for preemption opportunities
+    // Wait for the task to complete, checking for preemption opportunities.
+    // Track whether the result has settled to avoid preempting a completed task
+    // when the wake and result resolve in the same microtask batch.
+    let resultSettled = false;
+    result.then(() => (resultSettled = true)).catch(() => (resultSettled = true));
+
     while (running.has(task.id)) {
       const completed = await Promise.race([
         result.then(() => true).catch(() => true),
@@ -353,7 +345,11 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
 
       if (completed) break;
 
-      // Woken by new submission — check if preemption is needed
+      // Woken by new submission — check if preemption is needed.
+      // Guard against the race where the result settled in the same microtask
+      // as the wake: if the result is already settled, treat it as completed.
+      if (resultSettled) break;
+
       if (queue.hasHigherPriority(task.priority)) {
         await preemptTask(runningTaskEntry);
         return; // The loop will dispatch the higher-priority task
