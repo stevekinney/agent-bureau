@@ -10,7 +10,7 @@ import {
   rejectProposal,
   saveProposal,
 } from '../../src/self-improvement/proposals';
-import { createMockSkillProvider, createMockStorageAdapter } from '../../src/test';
+import { createMockKeyValueStore, createMockSkillProvider } from '../../src/test';
 import type { Proposal } from '../../src/types';
 
 function makeProposal(overrides: Partial<Proposal> = {}): Proposal {
@@ -44,7 +44,7 @@ function createMockIdentityProvider(): IdentityProviderLike & {
 describe('proposals', () => {
   describe('saveProposal and getProposal', () => {
     it('round-trips a proposal through storage', async () => {
-      const storage = createMockStorageAdapter();
+      const storage = createMockKeyValueStore();
       const proposal = makeProposal({ id: 'proposal-1' });
 
       await saveProposal(storage, proposal);
@@ -54,7 +54,7 @@ describe('proposals', () => {
     });
 
     it('returns undefined for a non-existent proposal', async () => {
-      const storage = createMockStorageAdapter();
+      const storage = createMockKeyValueStore();
       const result = await getProposal(storage, 'does-not-exist');
 
       expect(result).toBeUndefined();
@@ -63,7 +63,7 @@ describe('proposals', () => {
 
   describe('listProposals', () => {
     it('returns all pending proposals by default', async () => {
-      const storage = createMockStorageAdapter();
+      const storage = createMockKeyValueStore();
 
       await saveProposal(storage, makeProposal({ id: 'p1', status: 'pending' }));
       await saveProposal(storage, makeProposal({ id: 'p2', status: 'pending' }));
@@ -76,7 +76,7 @@ describe('proposals', () => {
     });
 
     it('filters by type', async () => {
-      const storage = createMockStorageAdapter();
+      const storage = createMockKeyValueStore();
 
       await saveProposal(storage, makeProposal({ id: 'skill-1', type: 'skill' }));
       await saveProposal(storage, makeProposal({ id: 'soul-1', type: 'soul' }));
@@ -89,7 +89,7 @@ describe('proposals', () => {
     });
 
     it('filters by agentId', async () => {
-      const storage = createMockStorageAdapter();
+      const storage = createMockKeyValueStore();
 
       await saveProposal(storage, makeProposal({ id: 'p1', agentId: 'agent-a' }));
       await saveProposal(storage, makeProposal({ id: 'p2', agentId: 'agent-b' }));
@@ -102,7 +102,7 @@ describe('proposals', () => {
     });
 
     it('filters by status', async () => {
-      const storage = createMockStorageAdapter();
+      const storage = createMockKeyValueStore();
 
       await saveProposal(storage, makeProposal({ id: 'p1', status: 'pending' }));
       await saveProposal(storage, makeProposal({ id: 'p2', status: 'accepted' }));
@@ -117,7 +117,7 @@ describe('proposals', () => {
 
   describe('acceptProposal', () => {
     it('accepts a skill proposal and writes to skill provider', async () => {
-      const storage = createMockStorageAdapter();
+      const storage = createMockKeyValueStore();
       const skillProvider = createMockSkillProvider();
       const proposal = makeProposal({
         id: 'skill-proposal',
@@ -136,7 +136,7 @@ describe('proposals', () => {
     });
 
     it('sets the proposal status to accepted', async () => {
-      const storage = createMockStorageAdapter();
+      const storage = createMockKeyValueStore();
       const skillProvider = createMockSkillProvider();
       const proposal = makeProposal({ id: 'accept-me', type: 'skill' });
       await saveProposal(storage, proposal);
@@ -148,7 +148,7 @@ describe('proposals', () => {
     });
 
     it('accepts a soul proposal and calls savePendingSoulUpdate', async () => {
-      const storage = createMockStorageAdapter();
+      const storage = createMockKeyValueStore();
       const skillProvider = createMockSkillProvider();
       const identityProvider = createMockIdentityProvider();
       const soulItems = [{ id: 'item-1', content: 'Be helpful' }];
@@ -174,7 +174,7 @@ describe('proposals', () => {
     });
 
     it('accepts a persona proposal and calls savePersona', async () => {
-      const storage = createMockStorageAdapter();
+      const storage = createMockKeyValueStore();
       const skillProvider = createMockSkillProvider();
       const identityProvider = createMockIdentityProvider();
       const proposal = makeProposal({
@@ -199,7 +199,7 @@ describe('proposals', () => {
     });
 
     it('returns an error for a non-existent proposal', async () => {
-      const storage = createMockStorageAdapter();
+      const storage = createMockKeyValueStore();
       const skillProvider = createMockSkillProvider();
 
       const result = await acceptProposal(storage, 'nope', { skillProvider });
@@ -209,7 +209,7 @@ describe('proposals', () => {
     });
 
     it('returns an error for a soul proposal without identityProvider', async () => {
-      const storage = createMockStorageAdapter();
+      const storage = createMockKeyValueStore();
       const skillProvider = createMockSkillProvider();
       const proposal = makeProposal({
         id: 'soul-no-identity',
@@ -226,7 +226,7 @@ describe('proposals', () => {
     });
 
     it('returns an error for a persona proposal without identityProvider', async () => {
-      const storage = createMockStorageAdapter();
+      const storage = createMockKeyValueStore();
       const skillProvider = createMockSkillProvider();
       const proposal = makeProposal({
         id: 'persona-no-identity',
@@ -243,7 +243,7 @@ describe('proposals', () => {
     });
 
     it('returns an error for a persona proposal without agentId', async () => {
-      const storage = createMockStorageAdapter();
+      const storage = createMockKeyValueStore();
       const skillProvider = createMockSkillProvider();
       const identityProvider = createMockIdentityProvider();
       const proposal = makeProposal({
@@ -266,7 +266,7 @@ describe('proposals', () => {
 
   describe('rejectProposal', () => {
     it('sets the proposal status to rejected and records reason', async () => {
-      const storage = createMockStorageAdapter();
+      const storage = createMockKeyValueStore();
       const proposal = makeProposal({ id: 'reject-me' });
       await saveProposal(storage, proposal);
 
@@ -280,7 +280,7 @@ describe('proposals', () => {
     });
 
     it('hashes content and stores in rejected patterns', async () => {
-      const storage = createMockStorageAdapter();
+      const storage = createMockKeyValueStore();
       const proposal = makeProposal({ id: 'reject-hash', content: 'unique-content-to-reject' });
       await saveProposal(storage, proposal);
 
@@ -291,7 +291,7 @@ describe('proposals', () => {
     });
 
     it('returns an error for a non-existent proposal', async () => {
-      const storage = createMockStorageAdapter();
+      const storage = createMockKeyValueStore();
 
       const result = await rejectProposal(storage, 'does-not-exist');
 
@@ -302,7 +302,7 @@ describe('proposals', () => {
 
   describe('isRejectedPattern', () => {
     it('returns true for previously rejected content', async () => {
-      const storage = createMockStorageAdapter();
+      const storage = createMockKeyValueStore();
       const proposal = makeProposal({ id: 'r1', content: 'content-to-reject' });
       await saveProposal(storage, proposal);
       await rejectProposal(storage, 'r1');
@@ -312,7 +312,7 @@ describe('proposals', () => {
     });
 
     it('returns false for new content', async () => {
-      const storage = createMockStorageAdapter();
+      const storage = createMockKeyValueStore();
 
       const result = await isRejectedPattern(storage, 'brand-new-content');
       expect(result).toBe(false);
@@ -321,7 +321,7 @@ describe('proposals', () => {
 
   describe('clearProposals', () => {
     it('removes proposals matching the given status', async () => {
-      const storage = createMockStorageAdapter();
+      const storage = createMockKeyValueStore();
 
       await saveProposal(storage, makeProposal({ id: 'p1', status: 'accepted' }));
       await saveProposal(storage, makeProposal({ id: 'p2', status: 'rejected' }));
@@ -336,7 +336,7 @@ describe('proposals', () => {
     });
 
     it('preserves pending proposals when no status filter is given', async () => {
-      const storage = createMockStorageAdapter();
+      const storage = createMockKeyValueStore();
 
       await saveProposal(storage, makeProposal({ id: 'p1', status: 'pending' }));
       await saveProposal(storage, makeProposal({ id: 'p2', status: 'accepted' }));
@@ -351,7 +351,7 @@ describe('proposals', () => {
     });
 
     it('removes old proposals when olderThanMs is specified', async () => {
-      const storage = createMockStorageAdapter();
+      const storage = createMockKeyValueStore();
 
       const oldDate = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
       const recentDate = new Date().toISOString();

@@ -1,3 +1,5 @@
+import type { KeyValueStore } from 'storage';
+
 import type { ConversationHistory, Message, MessagePlugin, TokenEstimator } from './types';
 import { messageText } from './utilities';
 
@@ -10,11 +12,18 @@ export interface SessionInfo {
   messageCount: number;
 }
 
-export interface SessionPersistenceAdapter {
-  save(conversation: ConversationHistory): Promise<void>;
-  load(id: string): Promise<ConversationHistory | undefined>;
-  list(): Promise<SessionInfo[]>;
-  delete(id: string): Promise<void>;
+/**
+ * Extracts a lightweight SessionInfo summary from a ConversationHistory.
+ */
+export function toSessionInfo(conversation: ConversationHistory): SessionInfo {
+  return {
+    id: conversation.id,
+    ...(conversation.title !== undefined ? { title: conversation.title } : {}),
+    tags: (conversation.metadata['_tags'] as string[] | undefined) ?? [],
+    createdAt: conversation.createdAt,
+    updatedAt: conversation.updatedAt,
+    messageCount: conversation.ids.length,
+  };
 }
 
 /**
@@ -26,7 +35,7 @@ export interface ConversationEnvironment {
   randomId: () => string;
   estimateTokens: TokenEstimator;
   plugins: MessagePlugin[];
-  persistence?: SessionPersistenceAdapter;
+  persistence?: KeyValueStore;
   /** Maximum depth of the undo/redo history tree. When exceeded, the oldest ancestor is pruned. */
   maxHistoryDepth?: number;
 }

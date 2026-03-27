@@ -1,6 +1,7 @@
 import { createTestToolbox } from 'armorer/test';
 import { describe, expect, it } from 'bun:test';
-import { createConversationHistory, createInMemoryPersistenceAdapter } from 'conversationalist';
+import { createConversationHistory } from 'conversationalist';
+import { createMockKeyValueStore } from 'storage/test';
 
 import type { AgentSession } from '../src/agent-session';
 import { createAgentSession, saveAgentSession } from '../src/agent-session';
@@ -14,7 +15,7 @@ function textResponse(content: string): GenerateResponse {
 
 describe('session lifecycle via defineAgent', () => {
   it('onSessionLoad fires when session is loaded', async () => {
-    const adapter = createInMemoryPersistenceAdapter();
+    const store = createMockKeyValueStore();
     const history = createConversationHistory({ id: 'session-1' });
     const session = createAgentSession({
       agentName: 'test-agent',
@@ -22,7 +23,7 @@ describe('session lifecycle via defineAgent', () => {
       id: 'session-1',
       metadata: { loaded: true },
     });
-    await saveAgentSession(adapter, session);
+    await saveAgentSession(store, session);
 
     const loadedSessions: AgentSession[] = [];
 
@@ -31,7 +32,7 @@ describe('session lifecycle via defineAgent', () => {
       generate: async () => textResponse('done'),
       toolbox: createTestToolbox([]),
       stopWhen: noToolCalls(),
-      persistence: adapter,
+      persistence: store,
       sessionId: 'session-1',
       onSessionLoad: (loaded) => {
         loadedSessions.push(loaded);
@@ -41,12 +42,12 @@ describe('session lifecycle via defineAgent', () => {
     await agent.run('Hello');
 
     expect(loadedSessions).toHaveLength(1);
-    expect(loadedSessions[0].id).toBe('session-1');
-    expect(loadedSessions[0].agentName).toBe('test-agent');
+    expect(loadedSessions[0]!.id).toBe('session-1');
+    expect(loadedSessions[0]!.agentName).toBe('test-agent');
   });
 
   it('onSessionSave fires on completion', async () => {
-    const adapter = createInMemoryPersistenceAdapter();
+    const store = createMockKeyValueStore();
     const savedSessions: AgentSession[] = [];
 
     const agent = defineAgent({
@@ -54,7 +55,7 @@ describe('session lifecycle via defineAgent', () => {
       generate: async () => textResponse('done'),
       toolbox: createTestToolbox([]),
       stopWhen: noToolCalls(),
-      persistence: adapter,
+      persistence: store,
       onSessionSave: (saved) => {
         savedSessions.push(saved);
       },
@@ -63,48 +64,48 @@ describe('session lifecycle via defineAgent', () => {
     await agent.run('Hello');
 
     expect(savedSessions).toHaveLength(1);
-    expect(savedSessions[0].agentName).toBe('save-agent');
+    expect(savedSessions[0]!.agentName).toBe('save-agent');
   });
 
   it('autoSave: completion saves after run', async () => {
-    const adapter = createInMemoryPersistenceAdapter();
+    const store = createMockKeyValueStore();
 
     const agent = defineAgent({
       name: 'completion-agent',
       generate: async () => textResponse('done'),
       toolbox: createTestToolbox([]),
       stopWhen: noToolCalls(),
-      persistence: adapter,
+      persistence: store,
       sessionId: 'completion-session',
       autoSave: 'completion',
     });
 
     await agent.run('Hello');
 
-    const sessions = await adapter.list();
-    expect(sessions.length).toBeGreaterThan(0);
+    const keys = await store.list('agent-session:');
+    expect(keys.length).toBeGreaterThan(0);
   });
 
   it('autoSave: false does not save', async () => {
-    const adapter = createInMemoryPersistenceAdapter();
+    const store = createMockKeyValueStore();
 
     const agent = defineAgent({
       name: 'no-save-agent',
       generate: async () => textResponse('done'),
       toolbox: createTestToolbox([]),
       stopWhen: noToolCalls(),
-      persistence: adapter,
+      persistence: store,
       autoSave: false,
     });
 
     await agent.run('Hello');
 
-    const sessions = await adapter.list();
-    expect(sessions).toHaveLength(0);
+    const keys = await store.list('agent-session:');
+    expect(keys).toHaveLength(0);
   });
 
   it('autoSave: step saves after each step', async () => {
-    const adapter = createInMemoryPersistenceAdapter();
+    const store = createMockKeyValueStore();
     const savedSessions: AgentSession[] = [];
     let callCount = 0;
 
@@ -130,7 +131,7 @@ describe('session lifecycle via defineAgent', () => {
         },
       ]),
       stopWhen: noToolCalls(),
-      persistence: adapter,
+      persistence: store,
       autoSave: 'step',
       onSessionSave: (saved) => {
         savedSessions.push(saved);
@@ -144,14 +145,14 @@ describe('session lifecycle via defineAgent', () => {
   });
 
   it('session.loaded and session.saved events are emitted via createRun result', async () => {
-    const adapter = createInMemoryPersistenceAdapter();
+    const store = createMockKeyValueStore();
     const history = createConversationHistory({ id: 'event-session' });
     const session = createAgentSession({
       agentName: 'event-agent',
       conversationHistory: history,
       id: 'event-session',
     });
-    await saveAgentSession(adapter, session);
+    await saveAgentSession(store, session);
 
     const loadedSessions: AgentSession[] = [];
     const savedSessions: AgentSession[] = [];
@@ -161,7 +162,7 @@ describe('session lifecycle via defineAgent', () => {
       generate: async () => textResponse('done'),
       toolbox: createTestToolbox([]),
       stopWhen: noToolCalls(),
-      persistence: adapter,
+      persistence: store,
       sessionId: 'event-session',
       onSessionLoad: (loaded) => {
         loadedSessions.push(loaded);
@@ -179,21 +180,21 @@ describe('session lifecycle via defineAgent', () => {
   });
 
   it('error propagation from lifecycle hooks', async () => {
-    const adapter = createInMemoryPersistenceAdapter();
+    const store = createMockKeyValueStore();
     const history = createConversationHistory({ id: 'error-session' });
     const session = createAgentSession({
       agentName: 'error-agent',
       conversationHistory: history,
       id: 'error-session',
     });
-    await saveAgentSession(adapter, session);
+    await saveAgentSession(store, session);
 
     const agent = defineAgent({
       name: 'error-agent',
       generate: async () => textResponse('done'),
       toolbox: createTestToolbox([]),
       stopWhen: noToolCalls(),
-      persistence: adapter,
+      persistence: store,
       sessionId: 'error-session',
       onSessionLoad: () => {
         throw new Error('Load hook error');
@@ -204,7 +205,7 @@ describe('session lifecycle via defineAgent', () => {
   });
 
   it('createRun without sessionId still saves on completion when persistence is provided', async () => {
-    const adapter = createInMemoryPersistenceAdapter();
+    const store = createMockKeyValueStore();
     const savedSessions: AgentSession[] = [];
 
     const agent = defineAgent({
@@ -212,7 +213,7 @@ describe('session lifecycle via defineAgent', () => {
       generate: async () => textResponse('done'),
       toolbox: createTestToolbox([]),
       stopWhen: noToolCalls(),
-      persistence: adapter,
+      persistence: store,
       onSessionSave: (saved) => {
         savedSessions.push(saved);
       },
@@ -222,11 +223,11 @@ describe('session lifecycle via defineAgent', () => {
     await activeRun.result;
 
     expect(savedSessions).toHaveLength(1);
-    expect(savedSessions[0].agentName).toBe('no-id-agent');
+    expect(savedSessions[0]!.agentName).toBe('no-id-agent');
   });
 
   it('run loads existing session and uses its conversation history', async () => {
-    const adapter = createInMemoryPersistenceAdapter();
+    const store = createMockKeyValueStore();
     const history = createConversationHistory({ id: 'reuse-session' });
 
     const session = createAgentSession({
@@ -235,7 +236,7 @@ describe('session lifecycle via defineAgent', () => {
       id: 'reuse-session',
       metadata: { resuming: true },
     });
-    await saveAgentSession(adapter, session);
+    await saveAgentSession(store, session);
 
     let loadedSession: AgentSession | undefined;
     const agent = defineAgent({
@@ -243,7 +244,7 @@ describe('session lifecycle via defineAgent', () => {
       generate: async () => textResponse('resumed'),
       toolbox: createTestToolbox([]),
       stopWhen: noToolCalls(),
-      persistence: adapter,
+      persistence: store,
       sessionId: 'reuse-session',
       onSessionLoad: (loaded) => {
         loadedSession = loaded;
@@ -258,14 +259,14 @@ describe('session lifecycle via defineAgent', () => {
   });
 
   it('error propagation from onSessionSave hook', async () => {
-    const adapter = createInMemoryPersistenceAdapter();
+    const store = createMockKeyValueStore();
 
     const agent = defineAgent({
       name: 'save-error-agent',
       generate: async () => textResponse('done'),
       toolbox: createTestToolbox([]),
       stopWhen: noToolCalls(),
-      persistence: adapter,
+      persistence: store,
       onSessionSave: () => {
         throw new Error('Save hook error');
       },
@@ -275,14 +276,14 @@ describe('session lifecycle via defineAgent', () => {
   });
 
   it('createRun error propagation from onSessionSave hook', async () => {
-    const adapter = createInMemoryPersistenceAdapter();
+    const store = createMockKeyValueStore();
 
     const agent = defineAgent({
       name: 'save-error-agent',
       generate: async () => textResponse('done'),
       toolbox: createTestToolbox([]),
       stopWhen: noToolCalls(),
-      persistence: adapter,
+      persistence: store,
       onSessionSave: () => {
         throw new Error('Save hook error in createRun');
       },
@@ -293,21 +294,21 @@ describe('session lifecycle via defineAgent', () => {
   });
 
   it('createRun error propagation from onSessionLoad hook', async () => {
-    const adapter = createInMemoryPersistenceAdapter();
+    const store = createMockKeyValueStore();
     const history = createConversationHistory({ id: 'load-error-session' });
     const session = createAgentSession({
       agentName: 'load-error-agent',
       conversationHistory: history,
       id: 'load-error-session',
     });
-    await saveAgentSession(adapter, session);
+    await saveAgentSession(store, session);
 
     const agent = defineAgent({
       name: 'load-error-agent',
       generate: async () => textResponse('done'),
       toolbox: createTestToolbox([]),
       stopWhen: noToolCalls(),
-      persistence: adapter,
+      persistence: store,
       sessionId: 'load-error-session',
       onSessionLoad: () => {
         throw new Error('Load hook error in createRun');
@@ -319,7 +320,7 @@ describe('session lifecycle via defineAgent', () => {
   });
 
   it('autoSave defaults to completion when not specified', async () => {
-    const adapter = createInMemoryPersistenceAdapter();
+    const store = createMockKeyValueStore();
     const savedSessions: AgentSession[] = [];
 
     const agent = defineAgent({
@@ -327,7 +328,7 @@ describe('session lifecycle via defineAgent', () => {
       generate: async () => textResponse('done'),
       toolbox: createTestToolbox([]),
       stopWhen: noToolCalls(),
-      persistence: adapter,
+      persistence: store,
       onSessionSave: (saved) => {
         savedSessions.push(saved);
       },
@@ -339,7 +340,7 @@ describe('session lifecycle via defineAgent', () => {
   });
 
   it('autoSave: step via createRun saves after each step', async () => {
-    const adapter = createInMemoryPersistenceAdapter();
+    const store = createMockKeyValueStore();
     const savedSessions: AgentSession[] = [];
     let callCount = 0;
 
@@ -365,7 +366,7 @@ describe('session lifecycle via defineAgent', () => {
         },
       ]),
       stopWhen: noToolCalls(),
-      persistence: adapter,
+      persistence: store,
       autoSave: 'step',
       onSessionSave: (saved) => {
         savedSessions.push(saved);
@@ -379,14 +380,14 @@ describe('session lifecycle via defineAgent', () => {
   });
 
   it('createRun with sessionId and autoSave: false does not save', async () => {
-    const adapter = createInMemoryPersistenceAdapter();
+    const store = createMockKeyValueStore();
     const history = createConversationHistory({ id: 'no-save-cr' });
     const session = createAgentSession({
       agentName: 'no-save-cr-agent',
       conversationHistory: history,
       id: 'no-save-cr',
     });
-    await saveAgentSession(adapter, session);
+    await saveAgentSession(store, session);
 
     const savedSessions: AgentSession[] = [];
     const loadedSessions: AgentSession[] = [];
@@ -396,7 +397,7 @@ describe('session lifecycle via defineAgent', () => {
       generate: async () => textResponse('done'),
       toolbox: createTestToolbox([]),
       stopWhen: noToolCalls(),
-      persistence: adapter,
+      persistence: store,
       sessionId: 'no-save-cr',
       autoSave: false,
       onSessionLoad: (loaded) => {
@@ -416,7 +417,7 @@ describe('session lifecycle via defineAgent', () => {
   });
 
   it('autoSave: step preserves existing onStep hook in run()', async () => {
-    const adapter = createInMemoryPersistenceAdapter();
+    const store = createMockKeyValueStore();
     const stepLog: number[] = [];
     let callCount = 0;
 
@@ -442,7 +443,7 @@ describe('session lifecycle via defineAgent', () => {
         },
       ]),
       stopWhen: noToolCalls(),
-      persistence: adapter,
+      persistence: store,
       autoSave: 'step',
       onStep: async (stepResult) => {
         stepLog.push(stepResult.step);
@@ -455,7 +456,7 @@ describe('session lifecycle via defineAgent', () => {
   });
 
   it('autoSave: step preserves existing onStep hook in createRun()', async () => {
-    const adapter = createInMemoryPersistenceAdapter();
+    const store = createMockKeyValueStore();
     const stepLog: number[] = [];
     let callCount = 0;
 
@@ -481,7 +482,7 @@ describe('session lifecycle via defineAgent', () => {
         },
       ]),
       stopWhen: noToolCalls(),
-      persistence: adapter,
+      persistence: store,
       autoSave: 'step',
       onStep: async (stepResult) => {
         stepLog.push(stepResult.step);
@@ -495,7 +496,7 @@ describe('session lifecycle via defineAgent', () => {
   });
 
   it('createRun with sessionId but no existing session creates a new session on completion', async () => {
-    const adapter = createInMemoryPersistenceAdapter();
+    const store = createMockKeyValueStore();
     const savedSessions: AgentSession[] = [];
 
     const agent = defineAgent({
@@ -503,7 +504,7 @@ describe('session lifecycle via defineAgent', () => {
       generate: async () => textResponse('done'),
       toolbox: createTestToolbox([]),
       stopWhen: noToolCalls(),
-      persistence: adapter,
+      persistence: store,
       sessionId: 'new-session-id',
       onSessionSave: (saved) => {
         savedSessions.push(saved);
@@ -514,6 +515,6 @@ describe('session lifecycle via defineAgent', () => {
     await activeRun.result;
 
     expect(savedSessions).toHaveLength(1);
-    expect(savedSessions[0].agentName).toBe('new-session-agent');
+    expect(savedSessions[0]!.agentName).toBe('new-session-agent');
   });
 });

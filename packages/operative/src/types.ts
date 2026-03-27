@@ -1,12 +1,8 @@
 import type { Toolbox, ToolExecuteOptions, ToolExecutionResult } from 'armorer';
-import type {
-  Conversation,
-  ConversationHistory,
-  SessionPersistenceAdapter,
-  TokenUsage,
-} from 'conversationalist';
+import type { Conversation, ConversationHistory, TokenUsage } from 'conversationalist';
 import type { JSONValue, ToolCall, ToolCallInput } from 'interoperability';
 import type { HookRegistry } from 'lifecycle';
+import type { KeyValueStore } from 'storage';
 import type { ZodType } from 'zod';
 
 import type { AgentSession } from './agent-session';
@@ -307,7 +303,7 @@ export interface DefineAgentOptions {
   executeOptions?: OperativeExecuteOptions;
   collectAsync?: boolean;
   withTraceContext?: RunOptions['withTraceContext'];
-  persistence?: SessionPersistenceAdapter;
+  persistence?: KeyValueStore;
   sessionId?: string;
   onSessionSave?: (session: AgentSession) => Promise<void> | void;
   onSessionLoad?: (session: AgentSession) => Promise<void> | void;

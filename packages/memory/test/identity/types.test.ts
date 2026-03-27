@@ -3,7 +3,7 @@ import { describe, expect, it } from 'bun:test';
 import type {
   AgentIdentity,
   IdentityProvider,
-  IdentityStorageAdapter,
+  KeyValueStore,
   PersonaDescriptor,
   SoulBudget,
   SoulItem,
@@ -114,8 +114,8 @@ describe('Identity Types', () => {
     expect(budget.maxItemsPerTopic).toBe(5);
   });
 
-  it('IdentityStorageAdapter has the expected shape', () => {
-    const adapter: IdentityStorageAdapter = {
+  it('KeyValueStore has the expected shape', () => {
+    const adapter: KeyValueStore = {
       get: async () => null,
       set: async () => {},
       delete: async () => {},

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'bun:test';
-import { createConversationHistory, createInMemoryPersistenceAdapter } from 'conversationalist';
+import { createConversationHistory } from 'conversationalist';
+import { createMockKeyValueStore } from 'storage/test';
 
 import { createAgentSession, loadAgentSession, saveAgentSession } from '../src/agent-session';
 
@@ -87,8 +88,8 @@ describe('createAgentSession', () => {
 });
 
 describe('saveAgentSession', () => {
-  it('stores _agentSession in history metadata', async () => {
-    const adapter = createInMemoryPersistenceAdapter();
+  it('stores agent session data in the key-value store', async () => {
+    const store = createMockKeyValueStore();
     const history = createConversationHistory({ id: 'conv-1' });
     const session = createAgentSession({
       agentName: 'test-agent',
@@ -97,23 +98,22 @@ describe('saveAgentSession', () => {
       metadata: { role: 'assistant' },
     });
 
-    await saveAgentSession(adapter, session);
+    await saveAgentSession(store, session);
 
-    const loaded = await adapter.load('conv-1');
-    expect(loaded).toBeDefined();
-    const agentSessionData = loaded!.metadata['_agentSession'] as Record<string, unknown>;
-    expect(agentSessionData).toBeDefined();
-    expect(agentSessionData['id']).toBe('conv-1');
-    expect(agentSessionData['agentName']).toBe('test-agent');
-    expect(agentSessionData['metadata']).toEqual({ role: 'assistant' });
-    expect(agentSessionData['createdAt']).toBe(session.createdAt);
-    expect(typeof agentSessionData['updatedAt']).toBe('string');
+    const raw = await store.get('agent-session:conv-1');
+    expect(raw).toBeDefined();
+    const parsed = JSON.parse(raw!) as Record<string, unknown>;
+    expect(parsed['id']).toBe('conv-1');
+    expect(parsed['agentName']).toBe('test-agent');
+    expect(parsed['metadata']).toEqual({ role: 'assistant' });
+    expect(parsed['createdAt']).toBe(session.createdAt);
+    expect(typeof parsed['updatedAt']).toBe('string');
   });
 });
 
 describe('loadAgentSession', () => {
   it('reconstructs session from stored data', async () => {
-    const adapter = createInMemoryPersistenceAdapter();
+    const store = createMockKeyValueStore();
     const history = createConversationHistory({ id: 'conv-1' });
     const session = createAgentSession({
       agentName: 'test-agent',
@@ -122,9 +122,9 @@ describe('loadAgentSession', () => {
       metadata: { role: 'assistant' },
     });
 
-    await saveAgentSession(adapter, session);
+    await saveAgentSession(store, session);
 
-    const loaded = await loadAgentSession(adapter, 'conv-1');
+    const loaded = await loadAgentSession(store, 'conv-1');
     expect(loaded).toBeDefined();
     expect(loaded!.id).toBe('conv-1');
     expect(loaded!.agentName).toBe('test-agent');
@@ -135,23 +135,14 @@ describe('loadAgentSession', () => {
   });
 
   it('returns undefined for a nonexistent id', async () => {
-    const adapter = createInMemoryPersistenceAdapter();
+    const store = createMockKeyValueStore();
 
-    const loaded = await loadAgentSession(adapter, 'nonexistent');
-    expect(loaded).toBeUndefined();
-  });
-
-  it('returns undefined when no _agentSession metadata exists', async () => {
-    const adapter = createInMemoryPersistenceAdapter();
-    const history = createConversationHistory({ id: 'conv-no-meta' });
-    await adapter.save(history);
-
-    const loaded = await loadAgentSession(adapter, 'conv-no-meta');
+    const loaded = await loadAgentSession(store, 'nonexistent');
     expect(loaded).toBeUndefined();
   });
 
   it('preserves all fields in a save/load round-trip', async () => {
-    const adapter = createInMemoryPersistenceAdapter();
+    const store = createMockKeyValueStore();
     const history = createConversationHistory({ id: 'round-trip' });
     const session = createAgentSession({
       agentName: 'round-trip-agent',
@@ -160,8 +151,8 @@ describe('loadAgentSession', () => {
       metadata: { nested: { deep: true }, list: [1, 2, 3] },
     });
 
-    await saveAgentSession(adapter, session);
-    const loaded = await loadAgentSession(adapter, 'round-trip');
+    await saveAgentSession(store, session);
+    const loaded = await loadAgentSession(store, 'round-trip');
 
     expect(loaded).toBeDefined();
     expect(loaded!.id).toBe(session.id);

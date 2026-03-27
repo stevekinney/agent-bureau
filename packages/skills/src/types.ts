@@ -1,5 +1,3 @@
-import type { IdentityStorageAdapter } from 'memory';
-
 // ── Reusable Policy ──────────────────────────────────────────────────
 
 /**
@@ -124,11 +122,3 @@ export interface Proposal {
   /** If rejected, the reason. */
   rejectionReason?: string;
 }
-
-// ── Storage Adapter Re-export ────────────────────────────────────────
-
-/**
- * Re-exported from memory for convenience. The skills package uses the
- * same key-value storage adapter as the identity system.
- */
-export type { IdentityStorageAdapter as StorageAdapter };

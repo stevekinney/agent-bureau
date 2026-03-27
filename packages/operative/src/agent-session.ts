@@ -1,18 +1,11 @@
-import type { ConversationHistory, SessionPersistenceAdapter } from 'conversationalist';
+import type { ConversationHistory } from 'conversationalist';
 import type { JSONValue } from 'interoperability';
+import type { KeyValueStore } from 'storage';
 
 export interface AgentSession {
   id: string;
   agentName: string;
   conversationHistory: ConversationHistory;
-  metadata: Record<string, JSONValue>;
-  createdAt: string;
-  updatedAt: string;
-}
-
-interface AgentSessionData {
-  id: string;
-  agentName: string;
   metadata: Record<string, JSONValue>;
   createdAt: string;
   updatedAt: string;
@@ -40,51 +33,39 @@ export function createAgentSession(options: {
 }
 
 /**
- * Saves an agent session by embedding session data into the conversation
- * history's metadata under the `_agentSession` key, then persisting via
- * the adapter.
+ * Saves an agent session by serializing it directly to the key-value store.
  */
-export async function saveAgentSession(
-  adapter: SessionPersistenceAdapter,
-  session: AgentSession,
-): Promise<void> {
-  const historyToSave: ConversationHistory = {
-    ...session.conversationHistory,
-    metadata: {
-      ...session.conversationHistory.metadata,
-      _agentSession: {
-        id: session.id,
-        agentName: session.agentName,
-        metadata: session.metadata,
-        createdAt: session.createdAt,
-        updatedAt: new Date().toISOString(),
-      } as unknown as JSONValue,
-    },
+export async function saveAgentSession(store: KeyValueStore, session: AgentSession): Promise<void> {
+  const data = {
+    ...session,
+    updatedAt: new Date().toISOString(),
   };
-  await adapter.save(historyToSave);
+  await store.set(`agent-session:${session.id}`, JSON.stringify(data));
 }
 
 /**
- * Loads an agent session from a persistence adapter by id. Returns
- * undefined if no conversation is found or if the stored conversation
- * does not contain `_agentSession` metadata.
+ * Loads an agent session from a key-value store by id. Returns
+ * undefined if no session is found.
  */
 export async function loadAgentSession(
-  adapter: SessionPersistenceAdapter,
+  store: KeyValueStore,
   id: string,
 ): Promise<AgentSession | undefined> {
-  const history = await adapter.load(id);
-  if (!history) return undefined;
-
-  const sessionData = history.metadata['_agentSession'] as AgentSessionData | undefined;
-  if (!sessionData) return undefined;
-
-  return {
-    id: sessionData.id,
-    agentName: sessionData.agentName,
-    conversationHistory: history,
-    metadata: sessionData.metadata,
-    createdAt: sessionData.createdAt,
-    updatedAt: sessionData.updatedAt,
-  };
+  const raw = await store.get(`agent-session:${id}`);
+  if (!raw) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (
+      typeof parsed === 'object' &&
+      parsed !== null &&
+      'id' in parsed &&
+      'agentName' in parsed &&
+      'conversationHistory' in parsed
+    ) {
+      return parsed as AgentSession;
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  }
 }

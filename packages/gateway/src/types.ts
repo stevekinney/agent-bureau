@@ -1,9 +1,5 @@
 import type { Toolbox } from 'armorer';
-import type {
-  ConversationHistory,
-  SessionInfo,
-  SessionPersistenceAdapter,
-} from 'conversationalist';
+import type { ConversationHistory, SessionInfo } from 'conversationalist';
 import type { ProviderName } from 'herald';
 import type { Hono } from 'hono';
 import type {
@@ -16,6 +12,7 @@ import type {
 import type { CreateMemoryOptions, Memory } from 'memory';
 import type { GenerateFunction, Scheduler, StopCondition } from 'operative';
 import type { Store } from 'sentinel';
+import type { KeyValueStore } from 'storage';
 
 import type { BureauEventMap } from './events';
 import type { StorageBackendConfiguration } from './storage';
@@ -38,7 +35,7 @@ export interface BureauOptions {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   toolbox?: Toolbox<any>;
   store?: Store;
-  persistence?: SessionPersistenceAdapter;
+  persistence?: KeyValueStore;
   storage?: StorageBackendConfiguration;
   memory?: CreateMemoryOptions | Memory;
   stopWhen?: StopCondition | StopCondition[];

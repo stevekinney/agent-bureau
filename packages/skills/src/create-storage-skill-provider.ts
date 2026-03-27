@@ -1,7 +1,8 @@
+import type { KeyValueStore } from 'storage';
 import { z } from 'zod';
 
 import { isValidSkillName, SkillParseError } from './parse-skill-markdown';
-import type { SkillCatalogEntry, SkillContent, SkillProvider, StorageAdapter } from './types';
+import type { SkillCatalogEntry, SkillContent, SkillProvider } from './types';
 
 const toolPolicySchema = z.object({
   allowList: z.array(z.string()).optional(),
@@ -56,7 +57,7 @@ function skillPrefix(name: string): string {
  * - `skill:{name}:resource:{path}` — bundled resource content
  * - `skill:{name}:enabled` — "true" | "false"
  */
-export function createStorageSkillProvider(adapter: StorageAdapter): SkillProvider {
+export function createStorageSkillProvider(adapter: KeyValueStore): SkillProvider {
   return {
     async listSkills(): Promise<SkillCatalogEntry[]> {
       const keys = await adapter.list(SKILL_PREFIX);

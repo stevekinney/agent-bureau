@@ -1,8 +1,9 @@
 import { createToolbox } from 'armorer';
 import { describe, expect, it } from 'bun:test';
-import { Conversation, createInMemoryPersistenceAdapter } from 'conversationalist';
+import { Conversation, toSessionInfo } from 'conversationalist';
 import type { GenerateFunction, Toolbox } from 'operative';
 import { createStore } from 'sentinel';
+import { createMemoryKeyValueStore } from 'storage';
 
 import { BureauError, createBureau } from './create-bureau';
 import { DEFAULT_MAXIMUM_STEPS } from './types';
@@ -88,15 +89,15 @@ describe('createBureau', () => {
     });
 
     it('loads conversation from persistence when conversationId is provided', async () => {
-      const persistence = createInMemoryPersistenceAdapter();
+      const kv = createMemoryKeyValueStore();
       const conversation = new Conversation();
       conversation.appendUserMessage('Previous message');
-      await persistence.save(conversation.current);
+      await kv.set(`session:${conversation.current.id}`, JSON.stringify(conversation.current));
 
       const bureau = await createBureau({
         generate: createMockGenerate(),
         toolbox: createEmptyToolbox(),
-        persistence,
+        persistence: kv,
       });
 
       const summary = await bureau.createRun({
@@ -236,46 +237,60 @@ describe('createBureau', () => {
   describe('conversations', () => {
     it('throws NOT_IMPLEMENTED when no persistence is configured', async () => {
       const bureau = await createBureau();
-      expect(() => bureau.listConversations()).toThrow(BureauError);
+      try {
+        await bureau.listConversations();
+        expect.unreachable('should have thrown');
+      } catch (error) {
+        expect(error).toBeInstanceOf(BureauError);
+        expect((error as BureauError).code).toBe('NOT_IMPLEMENTED');
+      }
     });
 
     it('lists conversations from persistence', async () => {
-      const persistence = createInMemoryPersistenceAdapter();
+      const kv = createMemoryKeyValueStore();
       const conversation = new Conversation();
       conversation.appendUserMessage('Hello');
-      await persistence.save(conversation.current);
+      await kv.set(`session:${conversation.current.id}`, JSON.stringify(conversation.current));
+      await kv.set(
+        `session-info:${conversation.current.id}`,
+        JSON.stringify(toSessionInfo(conversation.current)),
+      );
 
-      const bureau = await createBureau({ persistence });
+      const bureau = await createBureau({ persistence: kv });
       const sessions = await bureau.listConversations();
       expect(sessions).toHaveLength(1);
     });
 
     it('loads a conversation by ID', async () => {
-      const persistence = createInMemoryPersistenceAdapter();
+      const kv = createMemoryKeyValueStore();
       const conversation = new Conversation();
       conversation.appendUserMessage('Hello');
-      await persistence.save(conversation.current);
+      await kv.set(`session:${conversation.current.id}`, JSON.stringify(conversation.current));
 
-      const bureau = await createBureau({ persistence });
+      const bureau = await createBureau({ persistence: kv });
       const loaded = await bureau.getConversation(conversation.current.id);
       expect(loaded).toBeDefined();
     });
 
     it('returns undefined for missing conversation', async () => {
-      const persistence = createInMemoryPersistenceAdapter();
-      const bureau = await createBureau({ persistence });
+      const kv = createMemoryKeyValueStore();
+      const bureau = await createBureau({ persistence: kv });
       const loaded = await bureau.getConversation('missing');
       expect(loaded).toBeUndefined();
     });
 
     it('deletes a conversation', async () => {
-      const persistence = createInMemoryPersistenceAdapter();
+      const kv = createMemoryKeyValueStore();
       const conversation = new Conversation();
       conversation.appendUserMessage('Hello');
-      await persistence.save(conversation.current);
+      await kv.set(`session:${conversation.current.id}`, JSON.stringify(conversation.current));
+      await kv.set(
+        `session-info:${conversation.current.id}`,
+        JSON.stringify(toSessionInfo(conversation.current)),
+      );
       const sessionId = conversation.current.id;
 
-      const bureau = await createBureau({ persistence });
+      const bureau = await createBureau({ persistence: kv });
       await bureau.deleteConversation(sessionId);
       const loaded = await bureau.getConversation(sessionId);
       expect(loaded).toBeUndefined();

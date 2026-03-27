@@ -78,6 +78,5 @@ export type {
   SkillMetadata,
   SkillProvider,
   SkillResource,
-  StorageAdapter,
   ToolPolicy,
 } from './types';

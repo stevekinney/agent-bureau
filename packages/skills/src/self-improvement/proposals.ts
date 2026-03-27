@@ -1,7 +1,8 @@
+import type { KeyValueStore } from 'storage';
 import { z } from 'zod';
 
 import { parseSkillMarkdown } from '../parse-skill-markdown';
-import type { Proposal, SkillProvider, StorageAdapter } from '../types';
+import type { Proposal, SkillProvider } from '../types';
 
 // ── Key Namespace ───────────────────────────────────────────────────
 
@@ -78,13 +79,13 @@ function parseProposal(raw: string): Proposal | undefined {
 // ── CRUD Functions ──────────────────────────────────────────────────
 
 /** Save a proposal to storage. */
-export async function saveProposal(storage: StorageAdapter, proposal: Proposal): Promise<void> {
+export async function saveProposal(storage: KeyValueStore, proposal: Proposal): Promise<void> {
   await storage.set(`${PROPOSAL_PREFIX}${proposal.id}`, JSON.stringify(proposal));
 }
 
 /** Get a specific proposal by ID. */
 export async function getProposal(
-  storage: StorageAdapter,
+  storage: KeyValueStore,
   id: string,
 ): Promise<Proposal | undefined> {
   const raw = await storage.get(`${PROPOSAL_PREFIX}${id}`);
@@ -94,7 +95,7 @@ export async function getProposal(
 
 /** List proposals from storage with optional filters. */
 export async function listProposals(
-  storage: StorageAdapter,
+  storage: KeyValueStore,
   options?: ListProposalsOptions,
 ): Promise<Proposal[]> {
   const status = options?.status ?? 'pending';
@@ -130,7 +131,7 @@ export async function listProposals(
  * - 'persona': Update the persona text via identity provider.
  */
 export async function acceptProposal(
-  storage: StorageAdapter,
+  storage: KeyValueStore,
   id: string,
   options: AcceptProposalOptions,
 ): Promise<{ accepted: boolean; error?: string }> {
@@ -203,7 +204,7 @@ export async function acceptProposal(
  * to prevent re-proposal of similar content.
  */
 export async function rejectProposal(
-  storage: StorageAdapter,
+  storage: KeyValueStore,
   id: string,
   reason?: string,
 ): Promise<{ rejected: boolean; error?: string }> {
@@ -238,10 +239,7 @@ export async function rejectProposal(
  * Check if content is similar to a previously rejected proposal.
  * Uses simple string hashing for comparison.
  */
-export async function isRejectedPattern(
-  storage: StorageAdapter,
-  content: string,
-): Promise<boolean> {
+export async function isRejectedPattern(storage: KeyValueStore, content: string): Promise<boolean> {
   const hash = hashContent(content);
   const rawPatterns = await storage.get(REJECTED_PATTERNS_KEY);
   if (!rawPatterns) return false;
@@ -257,7 +255,7 @@ export async function isRejectedPattern(
  * Clear old accepted/rejected proposals.
  */
 export async function clearProposals(
-  storage: StorageAdapter,
+  storage: KeyValueStore,
   options?: { status?: 'accepted' | 'rejected'; olderThanMs?: number },
 ): Promise<number> {
   const keys = await storage.list(PROPOSAL_PREFIX);

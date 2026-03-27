@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from 'bun:test';
 
 import { createStorageSkillProvider } from '../src/create-storage-skill-provider';
-import { createMockStorageAdapter } from '../src/test/index';
+import { createMockKeyValueStore } from '../src/test/index';
 import type { SkillContent, SkillProvider } from '../src/types';
 
 function makeSkillContent(name: string, description = `Description for ${name}`): SkillContent {
@@ -12,11 +12,11 @@ function makeSkillContent(name: string, description = `Description for ${name}`)
 }
 
 describe('createStorageSkillProvider', () => {
-  let adapter: ReturnType<typeof createMockStorageAdapter>;
+  let adapter: ReturnType<typeof createMockKeyValueStore>;
   let provider: SkillProvider;
 
   beforeEach(() => {
-    adapter = createMockStorageAdapter();
+    adapter = createMockKeyValueStore();
     provider = createStorageSkillProvider(adapter);
   });
 

@@ -1,7 +1,8 @@
 import { createTool } from 'armorer';
+import type { KeyValueStore } from 'storage';
 import { z } from 'zod';
 
-import type { SkillProvider, StorageAdapter } from '../types';
+import type { SkillProvider } from '../types';
 import {
   acceptProposal,
   type AcceptProposalOptions,
@@ -14,7 +15,7 @@ import {
 // ── Options ─────────────────────────────────────────────────────────
 
 export interface CreateProposalToolboxOptions {
-  storage: StorageAdapter;
+  storage: KeyValueStore;
   skillProvider: SkillProvider;
   identityProvider?: IdentityProviderLike;
 }
