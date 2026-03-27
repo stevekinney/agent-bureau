@@ -78,6 +78,28 @@ function extractFrontmatter(content: string): { data: Record<string, unknown>; b
 }
 
 /**
+ * Parses a tool list from YAML frontmatter. Handles both comma-separated
+ * strings ("Read, Grep, Glob") and YAML arrays (["Read", "Grep", "Glob"]).
+ */
+function parseToolList(value: unknown): string[] {
+  if (typeof value === 'string' && value.trim()) {
+    return value
+      .split(',')
+      .map((tool) => tool.trim())
+      .filter(Boolean);
+  }
+
+  if (Array.isArray(value)) {
+    return value
+      .filter((item): item is string => typeof item === 'string')
+      .map((tool) => tool.trim())
+      .filter(Boolean);
+  }
+
+  return [];
+}
+
+/**
  * Parses a SKILL.md string into structured `SkillContent`.
  *
  * Extracts YAML frontmatter for metadata and the markdown body for instructions.
@@ -117,28 +139,16 @@ export function parseSkillMarkdown(content: string): SkillContent {
     metadata.compatibility = data['compatibility'].trim();
   }
 
-  const allowedTools = data['allowed-tools'];
-  const deniedTools = data['denied-tools'];
+  const allowedTools = parseToolList(data['allowed-tools']);
+  const deniedTools = parseToolList(data['denied-tools']);
   const toolPolicy: ToolPolicy = {};
 
-  if (typeof allowedTools === 'string' && allowedTools.trim()) {
-    const parsed = allowedTools
-      .split(',')
-      .map((tool) => tool.trim())
-      .filter(Boolean);
-    if (parsed.length > 0) {
-      toolPolicy.allowList = parsed;
-    }
+  if (allowedTools.length > 0) {
+    toolPolicy.allowList = allowedTools;
   }
 
-  if (typeof deniedTools === 'string' && deniedTools.trim()) {
-    const parsed = deniedTools
-      .split(',')
-      .map((tool) => tool.trim())
-      .filter(Boolean);
-    if (parsed.length > 0) {
-      toolPolicy.denyList = parsed;
-    }
+  if (deniedTools.length > 0) {
+    toolPolicy.denyList = deniedTools;
   }
 
   if (toolPolicy.allowList || toolPolicy.denyList) {
