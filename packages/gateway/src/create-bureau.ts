@@ -174,8 +174,6 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       } else {
         conversation = new Conversation(createConversationHistory(), { persistence: kv });
       }
-    } else if (kv) {
-      conversation = new Conversation(createConversationHistory(), { persistence: kv });
     } else {
       conversation = new Conversation();
     }
