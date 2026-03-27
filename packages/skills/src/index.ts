@@ -22,7 +22,7 @@ export { createSkillMemory, createSkillMemoryHooks } from './skill-memory';
 export { createSkillSession } from './skill-session';
 
 // ── Catalog Hook ─────────────────────────────────────────────────────
-export { createSkillCatalogHook } from './create-skill-catalog-hook';
+export { createSkillCatalogHook, escapeXml } from './create-skill-catalog-hook';
 
 // ── Tools ────────────────────────────────────────────────────────────
 export {

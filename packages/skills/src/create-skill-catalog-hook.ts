@@ -94,7 +94,7 @@ function applySkillPolicy(entries: SkillCatalogEntry[], policy: ToolPolicy): Ski
   return filtered;
 }
 
-function escapeXml(value: string): string {
+export function escapeXml(value: string): string {
   return value.replace(/[&<>"']/g, (ch) => {
     switch (ch) {
       case '&':

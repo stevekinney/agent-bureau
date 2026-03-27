@@ -1,6 +1,7 @@
 import { createTool } from 'armorer';
 import { z } from 'zod';
 
+import { escapeXml } from './create-skill-catalog-hook';
 import type { SkillSession } from './skill-session';
 import type { SkillProvider } from './types';
 
@@ -47,26 +48,13 @@ export function createActivateSkillTool(options: CreateSkillToolsOptions) {
       const resources = await provider.listResources(params.name);
       session.activate(params.name, skill.metadata.toolPolicy);
 
-      const escapedName = params.name.replace(/[&<>"']/g, (ch) => {
-        switch (ch) {
-          case '&':
-            return '&amp;';
-          case '<':
-            return '&lt;';
-          case '>':
-            return '&gt;';
-          case '"':
-            return '&quot;';
-          case "'":
-            return '&apos;';
-          default:
-            return ch;
-        }
-      });
+      const escapedName = escapeXml(params.name);
       let xml = `<skill_content name="${escapedName}">\n${skill.body}`;
 
       if (resources.length > 0) {
-        const resourceElements = resources.map((path) => `  <file>${path}</file>`).join('\n');
+        const resourceElements = resources
+          .map((path) => `  <file>${escapeXml(path)}</file>`)
+          .join('\n');
         xml += `\n\nSkill resources:\n<skill_resources>\n${resourceElements}\n</skill_resources>`;
       }
 
