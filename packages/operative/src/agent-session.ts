@@ -38,7 +38,6 @@ export function createAgentSession(options: {
 export async function saveAgentSession(store: KeyValueStore, session: AgentSession): Promise<void> {
   const data = {
     ...session,
-    conversationHistory: session.conversationHistory,
     updatedAt: new Date().toISOString(),
   };
   await store.set(`agent-session:${session.id}`, JSON.stringify(data));
