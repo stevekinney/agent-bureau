@@ -1,28 +1,6 @@
 import type { SkillCatalogEntry, SkillContent, SkillProvider } from '../types';
 
-/**
- * Creates a mock storage adapter backed by an in-memory Map.
- * Follows the same interface as IdentityStorageAdapter from memory.
- */
-export function createMockStorageAdapter() {
-  const store = new Map<string, string>();
-
-  return {
-    store,
-    async get(key: string): Promise<string | null> {
-      return store.get(key) ?? null;
-    },
-    async set(key: string, value: string): Promise<void> {
-      store.set(key, value);
-    },
-    async delete(key: string): Promise<void> {
-      store.delete(key);
-    },
-    async list(prefix: string): Promise<string[]> {
-      return [...store.keys()].filter((key) => key.startsWith(prefix));
-    },
-  };
-}
+export { createMockKeyValueStore } from 'storage/test';
 
 /**
  * Creates a mock skill provider that tracks all calls for assertion.

@@ -1,5 +1,5 @@
 import type { ConversationHistory, SessionInfo } from 'conversationalist';
-import { Conversation } from 'conversationalist';
+import { Conversation, createConversationHistory } from 'conversationalist';
 import { CompletableEventTarget } from 'lifecycle';
 import type { CreateMemoryOptions, Memory } from 'memory';
 import { createMemory } from 'memory';
@@ -22,7 +22,7 @@ import {
   RunRemovedEvent,
 } from './events';
 import { serializeRunState } from './serialization';
-import { resolvePersistenceAdapter } from './storage';
+import { resolveStorageBackend } from './storage';
 import type {
   Bureau,
   BureauOptions,
@@ -72,11 +72,12 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
   });
 
   // ── Storage Backend ──────────────────────────────────────────────
-  // Only resolve persistence from the storage backend; vector adapters
-  // are not constructed here to avoid eagerly opening files/handles.
-  const resolvedPersistence = options.storage
-    ? await resolvePersistenceAdapter(options.storage)
+  // Only the KV store is used here for conversation persistence; the
+  // vector adapter is wired separately when memory is configured.
+  const resolvedStorage = options.storage
+    ? await resolveStorageBackend(options.storage)
     : undefined;
+  const resolvedKv = resolvedStorage?.kv;
 
   // ── Memory ───────────────────────────────────────────────────────
   let memory: Memory | undefined;
@@ -92,7 +93,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
   const generate =
     options.generate ?? (options.provider ? resolveGenerate(options.provider) : undefined);
   const toolbox = options.toolbox as Toolbox | undefined;
-  const persistence = options.persistence ?? resolvedPersistence;
+  const kv = options.persistence ?? resolvedKv;
   const stopWhen = options.stopWhen;
   const systemPrompt = options.systemPrompt;
   const provider = options.provider;
@@ -155,14 +156,18 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     let conversation: InstanceType<typeof Conversation>;
     let isExistingConversation = false;
 
-    if (request.conversationId && persistence) {
-      const history = await persistence.load(request.conversationId);
-      if (history) {
-        conversation = new Conversation(history);
+    if (request.conversationId && kv) {
+      const raw = await kv.get(`session:${request.conversationId}`);
+      if (raw) {
+        conversation = new Conversation(JSON.parse(raw) as ConversationHistory, {
+          persistence: kv,
+        });
         isExistingConversation = true;
       } else {
-        conversation = new Conversation();
+        conversation = new Conversation(createConversationHistory(), { persistence: kv });
       }
+    } else if (kv) {
+      conversation = new Conversation(createConversationHistory(), { persistence: kv });
     } else {
       conversation = new Conversation();
     }
@@ -241,26 +246,33 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
 
   // ── Conversations ───────────────────────────────────────────────
 
-  function requirePersistence() {
-    if (!persistence) {
+  function requireKv() {
+    if (!kv) {
       throw new BureauError('No persistence adapter configured', 'NOT_IMPLEMENTED');
     }
-    return persistence;
+    return kv;
   }
 
-  function listConversations(): Promise<SessionInfo[]> {
-    const adapter = requirePersistence();
-    return adapter.list();
+  async function listConversations(): Promise<SessionInfo[]> {
+    const store = requireKv();
+    const keys = await store.list('session-info:');
+    const results: SessionInfo[] = [];
+    for (const key of keys) {
+      const raw = await store.get(key);
+      if (raw) results.push(JSON.parse(raw) as SessionInfo);
+    }
+    return results;
   }
 
-  function getConversation(id: string): Promise<ConversationHistory | undefined> {
-    const adapter = requirePersistence();
-    return adapter.load(id);
+  async function getConversation(id: string): Promise<ConversationHistory | undefined> {
+    const store = requireKv();
+    const raw = await store.get(`session:${id}`);
+    return raw ? (JSON.parse(raw) as ConversationHistory) : undefined;
   }
 
-  function deleteConversation(id: string): Promise<void> {
-    const adapter = requirePersistence();
-    return adapter.delete(id);
+  async function deleteConversation(id: string): Promise<void> {
+    const store = requireKv();
+    await Promise.all([store.delete(`session:${id}`), store.delete(`session-info:${id}`)]);
   }
 
   // ── Configuration ───────────────────────────────────────────────

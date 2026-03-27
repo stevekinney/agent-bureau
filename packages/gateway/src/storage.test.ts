@@ -6,15 +6,15 @@ import type { StorageBackendConfiguration } from './storage';
 import { resolveStorageBackend } from './storage';
 
 describe('resolveStorageBackend', () => {
-  it('resolves memory backend with in-memory persistence and vector adapters', async () => {
+  it('resolves memory backend with KV store and vector adapter', async () => {
     const configuration: StorageBackendConfiguration = { type: 'memory' };
     const backend = await resolveStorageBackend(configuration);
 
-    expect(backend.persistence).toBeDefined();
-    expect(typeof backend.persistence.save).toBe('function');
-    expect(typeof backend.persistence.load).toBe('function');
-    expect(typeof backend.persistence.list).toBe('function');
-    expect(typeof backend.persistence.delete).toBe('function');
+    expect(backend.kv).toBeDefined();
+    expect(typeof backend.kv.get).toBe('function');
+    expect(typeof backend.kv.set).toBe('function');
+    expect(typeof backend.kv.list).toBe('function');
+    expect(typeof backend.kv.delete).toBe('function');
 
     expect(backend.vector).toBeDefined();
     expect(backend.vector).toBeInstanceOf(MemoryStorageAdapter);
@@ -33,16 +33,16 @@ describe('createBureau with storage', () => {
     bureau.dispose();
   });
 
-  it('explicit persistence takes priority over storage backend', async () => {
-    const { createInMemoryPersistenceAdapter } = await import('conversationalist');
-    const explicitPersistence = createInMemoryPersistenceAdapter();
+  it('explicit KeyValueStore takes priority over storage backend', async () => {
+    const { createMemoryKeyValueStore } = await import('storage');
+    const explicitKv = createMemoryKeyValueStore();
 
     const bureau = await createBureau({
       storage: { type: 'memory' },
-      persistence: explicitPersistence,
+      persistence: explicitKv,
     });
 
-    // Should use the explicit persistence, not the one from storage
+    // Should use the explicit KV store, not the one from storage
     const sessions = await bureau.listConversations();
     expect(sessions).toEqual([]);
     bureau.dispose();

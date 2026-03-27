@@ -807,15 +807,15 @@ describe('Conversation', () => {
   describe('persistence error handling', () => {
     it('emits persistence.error when adapter save throws', async () => {
       const saveError = new Error('disk full');
-      const brokenAdapter = {
-        save: () => Promise.reject(saveError),
-        load: () => Promise.resolve(undefined),
-        list: () => Promise.resolve([]),
+      const brokenStore = {
+        get: () => Promise.resolve(null),
+        set: () => Promise.reject(saveError),
         delete: () => Promise.resolve(),
+        list: () => Promise.resolve([]),
       };
 
       const history = new ConversationHistory(createConversation(), {
-        persistence: brokenAdapter,
+        persistence: brokenStore,
       });
 
       let emittedError: unknown = undefined;

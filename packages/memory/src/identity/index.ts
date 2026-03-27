@@ -33,7 +33,7 @@ export {
 export type {
   AgentIdentity,
   IdentityProvider,
-  IdentityStorageAdapter,
+  KeyValueStore,
   PersonaDescriptor,
   SoulBudget,
   SoulHistoryEntry,

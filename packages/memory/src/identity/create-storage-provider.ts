@@ -1,10 +1,6 @@
-import type {
-  IdentityProvider,
-  IdentityStorageAdapter,
-  PersonaDescriptor,
-  SoulHistoryEntry,
-  SoulItem,
-} from './types';
+import type { KeyValueStore } from 'storage';
+
+import type { IdentityProvider, PersonaDescriptor, SoulHistoryEntry, SoulItem } from './types';
 
 const ORCHESTRATOR_KEY = 'orchestrator';
 
@@ -39,7 +35,7 @@ const USER_CONTEXT_KEY = 'identity:user-context';
  * - `identity:pending:{agentId}` — pending soul update
  * - `identity:history:{agentId}:{version}` — soul version history
  */
-export function createStorageIdentityProvider(adapter: IdentityStorageAdapter): IdentityProvider {
+export function createStorageIdentityProvider(adapter: KeyValueStore): IdentityProvider {
   async function loadJson<T>(key: string): Promise<T | undefined> {
     const raw = await adapter.get(key);
     if (raw === null) return undefined;

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'bun:test';
-import { Conversation, createInMemoryPersistenceAdapter } from 'conversationalist';
+import { Conversation, toSessionInfo } from 'conversationalist';
+import { createMemoryKeyValueStore } from 'storage';
 
 import { createTestGateway, requestJSON } from '../test';
 
@@ -13,12 +14,16 @@ describe('conversations routes', () => {
   });
 
   it('GET /api/v1/conversations returns session list', async () => {
-    const persistence = createInMemoryPersistenceAdapter();
+    const kv = createMemoryKeyValueStore();
     const conversation = new Conversation();
     conversation.appendUserMessage('Hello');
-    await persistence.save(conversation.current);
+    await kv.set(`session:${conversation.current.id}`, JSON.stringify(conversation.current));
+    await kv.set(
+      `session-info:${conversation.current.id}`,
+      JSON.stringify(toSessionInfo(conversation.current)),
+    );
 
-    const gateway = await createTestGateway({ persistence });
+    const gateway = await createTestGateway({ persistence: kv });
     const response = await requestJSON(gateway, '/api/v1/conversations');
     expect(response.status).toBe(200);
 
@@ -28,31 +33,35 @@ describe('conversations routes', () => {
   });
 
   it('GET /api/v1/conversations/:id returns a session', async () => {
-    const persistence = createInMemoryPersistenceAdapter();
+    const kv = createMemoryKeyValueStore();
     const conversation = new Conversation();
     conversation.appendUserMessage('Hello');
-    await persistence.save(conversation.current);
+    await kv.set(`session:${conversation.current.id}`, JSON.stringify(conversation.current));
 
-    const gateway = await createTestGateway({ persistence });
+    const gateway = await createTestGateway({ persistence: kv });
     const response = await requestJSON(gateway, `/api/v1/conversations/${conversation.current.id}`);
     expect(response.status).toBe(200);
   });
 
   it('GET /api/v1/conversations/:id returns 404 for missing session', async () => {
-    const persistence = createInMemoryPersistenceAdapter();
-    const gateway = await createTestGateway({ persistence });
+    const kv = createMemoryKeyValueStore();
+    const gateway = await createTestGateway({ persistence: kv });
     const response = await requestJSON(gateway, '/api/v1/conversations/missing');
     expect(response.status).toBe(404);
   });
 
   it('DELETE /api/v1/conversations/:id removes a session', async () => {
-    const persistence = createInMemoryPersistenceAdapter();
+    const kv = createMemoryKeyValueStore();
     const conversation = new Conversation();
     conversation.appendUserMessage('Hello');
-    await persistence.save(conversation.current);
+    await kv.set(`session:${conversation.current.id}`, JSON.stringify(conversation.current));
+    await kv.set(
+      `session-info:${conversation.current.id}`,
+      JSON.stringify(toSessionInfo(conversation.current)),
+    );
     const sessionId = conversation.current.id;
 
-    const gateway = await createTestGateway({ persistence });
+    const gateway = await createTestGateway({ persistence: kv });
     const deleteResponse = await requestJSON(gateway, `/api/v1/conversations/${sessionId}`, {
       method: 'DELETE',
     });

@@ -63,21 +63,7 @@ export interface SoulBudget {
   maxItemsPerTopic: number;
 }
 
-/**
- * Simple key-value storage adapter for identity persistence.
- * Distinct from vector-frankl's StorageAdapter, which is optimized for
- * vector data. Identity stores structured JSON documents.
- */
-export interface IdentityStorageAdapter {
-  /** Get a value by key. Returns null if not found. */
-  get(key: string): Promise<string | null>;
-  /** Set a value by key. */
-  set(key: string, value: string): Promise<void>;
-  /** Delete a value by key. */
-  delete(key: string): Promise<void>;
-  /** List all keys matching a prefix. */
-  list(prefix: string): Promise<string[]>;
-}
+export type { KeyValueStore } from 'storage';
 
 /**
  * The interface platform adapters implement for identity persistence.

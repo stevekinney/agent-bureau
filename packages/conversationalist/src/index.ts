@@ -74,7 +74,8 @@ export {
   toChatMessages,
   validateConversationHistoryIntegrity,
 } from './conversation/index';
-export type { SessionInfo, SessionPersistenceAdapter } from './environment';
+export type { SessionInfo } from './environment';
+export { toSessionInfo } from './environment';
 export type { ConversationalistErrorCode } from './errors';
 export {
   ConversationalistError,
@@ -132,20 +133,6 @@ export type {
 } from './history';
 export { Conversation } from './history';
 export type { ImageContent, MultiModalContent, TextContent } from './multi-modal';
-export type { InMemoryPersistenceAdapterOptions } from './persistence/in-memory-adapter';
-export { createInMemoryPersistenceAdapter } from './persistence/in-memory-adapter';
-export { JsonlSessionPersistenceAdapter } from './persistence/jsonl-adapter';
-export type {
-  PersistenceAdapterPreference,
-  PersistenceResolutionOptions,
-  ResolvedPersistenceAdapter,
-} from './persistence/resolve-persistence-adapter';
-export { resolvePersistenceAdapter } from './persistence/resolve-persistence-adapter';
-export type {
-  SQLitePersistenceAdapter,
-  SQLitePersistenceAdapterOptions,
-} from './persistence/sqlite-adapter';
-export { createSQLitePersistenceAdapter } from './persistence/sqlite-adapter';
 export type {
   AppendableToolAction,
   AppendableToolCallInput,
@@ -175,3 +162,4 @@ export type {
 export type { ConversationNodeSnapshot, ConversationSnapshot } from './types';
 export type { ConversationHistoryDraft } from './with-conversation';
 export { pipeConversationHistory, withConversationHistory } from './with-conversation';
+export type { KeyValueStore } from 'storage';

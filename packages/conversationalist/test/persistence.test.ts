@@ -1,108 +1,83 @@
-import { existsSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-
-import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import { describe, expect, it } from 'bun:test';
+import { createMockKeyValueStore } from 'storage/test';
 
 import { createConversationHistory } from '../src/conversation/index';
-import type { SessionPersistenceAdapter } from '../src/environment';
+import type { SessionInfo } from '../src/environment';
+import { toSessionInfo } from '../src/environment';
 import { Conversation } from '../src/history';
-import { JsonlSessionPersistenceAdapter } from '../src/persistence/index';
 import { createTestConversationEnvironment } from '../src/test/index';
+import type { ConversationHistory } from '../src/types';
 
-describe('SessionPersistenceAdapter interface', () => {
-  it('has a conformant in-memory implementation', async () => {
-    const store = new Map<string, string>();
-    const adapter: SessionPersistenceAdapter = {
-      async save(conversation) {
-        store.set(conversation.id, JSON.stringify(conversation));
-      },
-      async load(id) {
-        const data = store.get(id);
-        return data ? JSON.parse(data) : undefined;
-      },
-      async list() {
-        return [...store.values()].map((raw) => {
-          const conversation = JSON.parse(raw);
-          return {
-            id: conversation.id,
-            title: conversation.title,
-            tags: (conversation.metadata?._tags as string[]) ?? [],
-            createdAt: conversation.createdAt,
-            updatedAt: conversation.updatedAt,
-            messageCount: conversation.ids?.length ?? 0,
-          };
-        });
-      },
-      async delete(id) {
-        store.delete(id);
-      },
-    };
+async function saveConversation(
+  store: ReturnType<typeof createMockKeyValueStore>,
+  conversation: ConversationHistory,
+): Promise<void> {
+  await store.set(`session:${conversation.id}`, JSON.stringify(conversation));
+  await store.set(`session-info:${conversation.id}`, JSON.stringify(toSessionInfo(conversation)));
+}
 
+async function loadConversation(
+  store: ReturnType<typeof createMockKeyValueStore>,
+  id: string,
+): Promise<ConversationHistory | undefined> {
+  const raw = await store.get(`session:${id}`);
+  if (!raw) return undefined;
+  return JSON.parse(raw) as ConversationHistory;
+}
+
+async function listSessionInfos(
+  store: ReturnType<typeof createMockKeyValueStore>,
+): Promise<SessionInfo[]> {
+  const keys = await store.list('session-info:');
+  const infos: SessionInfo[] = [];
+  for (const key of keys) {
+    const raw = await store.get(key);
+    if (raw) {
+      infos.push(JSON.parse(raw) as SessionInfo);
+    }
+  }
+  return infos;
+}
+
+async function deleteConversation(
+  store: ReturnType<typeof createMockKeyValueStore>,
+  id: string,
+): Promise<void> {
+  await store.delete(`session:${id}`);
+  await store.delete(`session-info:${id}`);
+}
+
+describe('KeyValueStore-based conversation persistence', () => {
+  it('saves and loads a conversation round-trip', async () => {
+    const store = createMockKeyValueStore();
     const environment = createTestConversationEnvironment();
     const conversation = createConversationHistory({ title: 'Test' }, environment);
 
-    await adapter.save(conversation);
-    const loaded = await adapter.load(conversation.id);
+    await saveConversation(store, conversation);
+    const loaded = await loadConversation(store, conversation.id);
+
     expect(loaded).toBeDefined();
     expect(loaded!.id).toBe(conversation.id);
     expect(loaded!.title).toBe('Test');
-
-    const sessions = await adapter.list();
-    expect(sessions).toHaveLength(1);
-    expect(sessions[0].id).toBe(conversation.id);
-    expect(sessions[0].title).toBe('Test');
-    expect(sessions[0].messageCount).toBe(0);
-
-    await adapter.delete(conversation.id);
-    const afterDelete = await adapter.load(conversation.id);
-    expect(afterDelete).toBeUndefined();
-  });
-});
-
-describe('JsonlSessionPersistenceAdapter', () => {
-  let directory: string;
-  let adapter: JsonlSessionPersistenceAdapter;
-
-  beforeEach(() => {
-    directory = join(tmpdir(), `conversationalist-test-${crypto.randomUUID()}`);
-    adapter = new JsonlSessionPersistenceAdapter(directory);
-  });
-
-  afterEach(() => {
-    if (existsSync(directory)) {
-      rmSync(directory, { recursive: true, force: true });
-    }
-  });
-
-  it('saves and loads a conversation', async () => {
-    const environment = createTestConversationEnvironment();
-    const conversation = createConversationHistory({ id: 'session-1', title: 'Test' }, environment);
-
-    await adapter.save(conversation);
-    const loaded = await adapter.load('session-1');
-
-    expect(loaded).toBeDefined();
-    expect(loaded!.id).toBe('session-1');
-    expect(loaded!.title).toBe('Test');
-    expect(loaded!.schemaVersion).toBe(conversation.schemaVersion);
   });
 
   it('returns undefined for a nonexistent session', async () => {
-    const loaded = await adapter.load('nonexistent');
+    const store = createMockKeyValueStore();
+    const loaded = await loadConversation(store, 'nonexistent');
     expect(loaded).toBeUndefined();
   });
 
-  it('lists all saved sessions', async () => {
+  it('lists SessionInfo for all saved conversations', async () => {
+    const store = createMockKeyValueStore();
     const environment = createTestConversationEnvironment();
 
     const first = createConversationHistory({ id: 'session-1', title: 'First' }, environment);
     const second = createConversationHistory({ id: 'session-2', title: 'Second' }, environment);
 
-    await adapter.save(first);
-    await adapter.save(second);
+    await saveConversation(store, first);
+    await saveConversation(store, second);
 
-    const sessions = await adapter.list();
+    const sessions = await listSessionInfos(store);
     expect(sessions).toHaveLength(2);
 
     const ids = sessions.map((session) => session.id);
@@ -110,39 +85,36 @@ describe('JsonlSessionPersistenceAdapter', () => {
     expect(ids).toContain('session-2');
   });
 
-  it('returns an empty list when no sessions exist', async () => {
-    const sessions = await adapter.list();
-    expect(sessions).toHaveLength(0);
-  });
-
-  it('deletes a session', async () => {
+  it('deletes both session and session-info keys', async () => {
+    const store = createMockKeyValueStore();
     const environment = createTestConversationEnvironment();
     const conversation = createConversationHistory({ id: 'to-delete' }, environment);
 
-    await adapter.save(conversation);
-    expect(await adapter.load('to-delete')).toBeDefined();
+    await saveConversation(store, conversation);
+    expect(await loadConversation(store, 'to-delete')).toBeDefined();
 
-    await adapter.delete('to-delete');
-    expect(await adapter.load('to-delete')).toBeUndefined();
-  });
+    await deleteConversation(store, 'to-delete');
+    expect(await loadConversation(store, 'to-delete')).toBeUndefined();
 
-  it('does not throw when deleting a nonexistent session', async () => {
-    await expect(adapter.delete('nonexistent')).resolves.toBeUndefined();
+    const sessions = await listSessionInfos(store);
+    expect(sessions).toHaveLength(0);
   });
 
   it('overwrites an existing session on save', async () => {
+    const store = createMockKeyValueStore();
     const environment = createTestConversationEnvironment();
     const original = createConversationHistory({ id: 'overwrite', title: 'Original' }, environment);
     const updated = { ...original, title: 'Updated', updatedAt: '2024-06-01T00:00:00.000Z' };
 
-    await adapter.save(original);
-    await adapter.save(updated);
+    await saveConversation(store, original);
+    await saveConversation(store, updated);
 
-    const loaded = await adapter.load('overwrite');
+    const loaded = await loadConversation(store, 'overwrite');
     expect(loaded!.title).toBe('Updated');
   });
 
   it('populates SessionInfo fields correctly including tags and messageCount', async () => {
+    const store = createMockKeyValueStore();
     const environment = createTestConversationEnvironment();
     const conversation = new Conversation(
       createConversationHistory({ id: 'info-test', title: 'Info Test' }, environment),
@@ -152,12 +124,12 @@ describe('JsonlSessionPersistenceAdapter', () => {
     conversation.appendAssistantMessage('Hi');
     conversation.tag('important');
 
-    await adapter.save(conversation.current);
+    await saveConversation(store, conversation.current);
 
-    const sessions = await adapter.list();
+    const sessions = await listSessionInfos(store);
     expect(sessions).toHaveLength(1);
 
-    const session = sessions[0];
+    const session = sessions[0]!;
     expect(session.id).toBe('info-test');
     expect(session.title).toBe('Info Test');
     expect(session.tags).toEqual(['important']);
@@ -165,77 +137,39 @@ describe('JsonlSessionPersistenceAdapter', () => {
     expect(session.createdAt).toBeDefined();
     expect(session.updatedAt).toBeDefined();
   });
-
-  it('returns undefined when the stored data is corrupted JSON', async () => {
-    const environment = createTestConversationEnvironment();
-    const conversation = createConversationHistory({ id: 'corrupt-test' }, environment);
-    await adapter.save(conversation);
-
-    // Overwrite with corrupted data
-    const filePath = join(directory, 'corrupt-test.jsonl');
-    await Bun.write(filePath, '{"not-a-conversation": true}\n');
-
-    const loaded = await adapter.load('corrupt-test');
-    expect(loaded).toBeUndefined();
-  });
-
-  it('creates the directory if it does not exist', async () => {
-    const nested = join(directory, 'deeply', 'nested', 'path');
-    const nestedAdapter = new JsonlSessionPersistenceAdapter(nested);
-    const environment = createTestConversationEnvironment();
-    const conversation = createConversationHistory({ id: 'nested-test' }, environment);
-
-    await nestedAdapter.save(conversation);
-
-    expect(existsSync(nested)).toBe(true);
-    const loaded = await nestedAdapter.load('nested-test');
-    expect(loaded).toBeDefined();
-  });
 });
 
-describe('Conversation auto-persistence', () => {
-  let directory: string;
-
-  beforeEach(() => {
-    directory = join(tmpdir(), `conversationalist-test-${crypto.randomUUID()}`);
-  });
-
-  afterEach(() => {
-    if (existsSync(directory)) {
-      rmSync(directory, { recursive: true, force: true });
-    }
-  });
-
+describe('Conversation auto-persistence via KeyValueStore', () => {
   it('auto-saves when persistence is configured and a change event fires', async () => {
-    const adapter = new JsonlSessionPersistenceAdapter(directory);
+    const store = createMockKeyValueStore();
     const environment = createTestConversationEnvironment();
     const conversation = new Conversation(
       createConversationHistory({ id: 'auto-save' }, environment),
-      { ...environment, persistence: adapter },
+      { ...environment, persistence: store },
     );
 
     conversation.appendUserMessage('Auto-saved message');
 
     await Bun.sleep(250);
 
-    const loaded = await adapter.load('auto-save');
+    const loaded = await loadConversation(store, 'auto-save');
     expect(loaded).toBeDefined();
     expect(loaded!.ids).toHaveLength(1);
   });
 
   it('auto-saves on tag changes', async () => {
-    const adapter = new JsonlSessionPersistenceAdapter(directory);
+    const store = createMockKeyValueStore();
     const environment = createTestConversationEnvironment();
     const conversation = new Conversation(
       createConversationHistory({ id: 'auto-tag' }, environment),
-      { ...environment, persistence: adapter },
+      { ...environment, persistence: store },
     );
 
     conversation.tag('auto-tagged');
 
     await Bun.sleep(250);
 
-    const loaded = await adapter.load('auto-tag');
+    const loaded = await loadConversation(store, 'auto-tag');
     expect(loaded).toBeDefined();
     const tags = loaded!.metadata['_tags'] as string[];
     expect(tags).toEqual(['auto-tagged']);

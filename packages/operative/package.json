@@ -81,7 +81,8 @@
     "armorer": "workspace:*",
     "conversationalist": "workspace:*",
     "interoperability": "workspace:*",
-    "lifecycle": "workspace:*"
+    "lifecycle": "workspace:*",
+    "storage": "workspace:*"
   },
   "devDependencies": {
     "@eslint/compat": "^2.0.2",

@@ -54,7 +54,11 @@ import {
   toChatMessages,
 } from './conversation/index';
 import { ensureConversationSafe } from './conversation/validation';
-import { type ConversationEnvironment, resolveConversationEnvironment } from './environment';
+import {
+  type ConversationEnvironment,
+  resolveConversationEnvironment,
+  toSessionInfo,
+} from './environment';
 import type {
   ConversationActionType,
   ConversationEventDetail,
@@ -217,12 +221,19 @@ export class Conversation {
     };
 
     if (this.environment.persistence) {
-      const persistence = this.environment.persistence;
+      const store = this.environment.persistence;
       let debounceTimer: ReturnType<typeof setTimeout> | undefined;
       this.addEventListener('change', () => {
         if (debounceTimer !== undefined) clearTimeout(debounceTimer);
         debounceTimer = setTimeout(() => {
-          persistence.save(this.current).catch((error: unknown) => {
+          const conversation = this.current;
+          Promise.all([
+            store.set(`session:${conversation.id}`, JSON.stringify(conversation)),
+            store.set(
+              `session-info:${conversation.id}`,
+              JSON.stringify(toSessionInfo(conversation)),
+            ),
+          ]).catch((error: unknown) => {
             this.emitter.dispatchEvent(new PersistenceErrorEvent(error));
           });
         }, 100);

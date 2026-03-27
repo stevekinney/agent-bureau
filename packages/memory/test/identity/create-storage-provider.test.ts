@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'bun:test';
+import { createMockKeyValueStore } from 'storage/test';
 
 import { createStorageIdentityProvider } from '../../src/identity/create-storage-provider';
-import type { IdentityStorageAdapter, SoulItem } from '../../src/identity/types';
+import type { SoulItem } from '../../src/identity/types';
 
 function makeSoulItem(id: string, content: string): SoulItem {
   return {
@@ -14,41 +15,16 @@ function makeSoulItem(id: string, content: string): SoulItem {
   };
 }
 
-/**
- * Creates a mock in-memory storage adapter for testing.
- */
-function createMockStorageAdapter(): IdentityStorageAdapter & {
-  store: Map<string, string>;
-} {
-  const store = new Map<string, string>();
-
-  return {
-    store,
-    async get(key: string): Promise<string | null> {
-      return store.get(key) ?? null;
-    },
-    async set(key: string, value: string): Promise<void> {
-      store.set(key, value);
-    },
-    async delete(key: string): Promise<void> {
-      store.delete(key);
-    },
-    async list(prefix: string): Promise<string[]> {
-      return [...store.keys()].filter((key) => key.startsWith(prefix));
-    },
-  };
-}
-
 describe('createStorageIdentityProvider', () => {
   it('loads empty soul for unknown agent', async () => {
-    const adapter = createMockStorageAdapter();
+    const adapter = createMockKeyValueStore();
     const provider = createStorageIdentityProvider(adapter);
     const soul = await provider.loadSoul();
     expect(soul).toEqual([]);
   });
 
   it('soul items round-trip through JSON serialization', async () => {
-    const adapter = createMockStorageAdapter();
+    const adapter = createMockKeyValueStore();
     const provider = createStorageIdentityProvider(adapter);
 
     const items = [
@@ -74,7 +50,7 @@ describe('createStorageIdentityProvider', () => {
   });
 
   it('uses correct key namespace convention', async () => {
-    const adapter = createMockStorageAdapter();
+    const adapter = createMockKeyValueStore();
     const provider = createStorageIdentityProvider(adapter);
 
     await provider.saveSoul([makeSoulItem('1', 'Soul')]);
@@ -94,7 +70,7 @@ describe('createStorageIdentityProvider', () => {
   });
 
   it('missing keys return appropriate defaults', async () => {
-    const adapter = createMockStorageAdapter();
+    const adapter = createMockKeyValueStore();
     const provider = createStorageIdentityProvider(adapter);
 
     expect(await provider.loadSoul()).toEqual([]);
@@ -105,7 +81,7 @@ describe('createStorageIdentityProvider', () => {
   });
 
   it('listPersonas uses prefix to discover persona keys', async () => {
-    const adapter = createMockStorageAdapter();
+    const adapter = createMockKeyValueStore();
     const provider = createStorageIdentityProvider(adapter);
 
     await provider.savePersona('research', { descriptor: { name: 'Atlas', role: 'researcher' } });
@@ -120,14 +96,14 @@ describe('createStorageIdentityProvider', () => {
   });
 
   it('listPersonas returns empty array when no persona keys exist', async () => {
-    const adapter = createMockStorageAdapter();
+    const adapter = createMockKeyValueStore();
     const provider = createStorageIdentityProvider(adapter);
     const personas = await provider.listPersonas();
     expect(personas).toEqual([]);
   });
 
   it('deletePersona removes the persona key from storage', async () => {
-    const adapter = createMockStorageAdapter();
+    const adapter = createMockKeyValueStore();
     const provider = createStorageIdentityProvider(adapter);
 
     await provider.savePersona('research', { descriptor: { name: 'Atlas', role: 'researcher' } });
@@ -141,7 +117,7 @@ describe('createStorageIdentityProvider', () => {
   });
 
   it('deletePersona on non-existent ID is a no-op', async () => {
-    const adapter = createMockStorageAdapter();
+    const adapter = createMockKeyValueStore();
     const provider = createStorageIdentityProvider(adapter);
     await provider.deletePersona('nonexistent');
     // Should not throw, store unchanged
@@ -149,7 +125,7 @@ describe('createStorageIdentityProvider', () => {
   });
 
   it('version history accumulates on each save', async () => {
-    const adapter = createMockStorageAdapter();
+    const adapter = createMockKeyValueStore();
     const provider = createStorageIdentityProvider(adapter);
 
     await provider.saveSoul([makeSoulItem('1', 'Version 1')]);
@@ -170,7 +146,7 @@ describe('createStorageIdentityProvider', () => {
   });
 
   it('pending update lifecycle', async () => {
-    const adapter = createMockStorageAdapter();
+    const adapter = createMockKeyValueStore();
     const provider = createStorageIdentityProvider(adapter);
 
     expect(await provider.loadPendingSoulUpdate()).toBeUndefined();
@@ -187,7 +163,7 @@ describe('createStorageIdentityProvider', () => {
   });
 
   it('user context CRUD', async () => {
-    const adapter = createMockStorageAdapter();
+    const adapter = createMockKeyValueStore();
     const provider = createStorageIdentityProvider(adapter);
 
     expect(await provider.loadUserContext()).toBeUndefined();
@@ -197,7 +173,7 @@ describe('createStorageIdentityProvider', () => {
   });
 
   it('agent-specific souls are isolated', async () => {
-    const adapter = createMockStorageAdapter();
+    const adapter = createMockKeyValueStore();
     const provider = createStorageIdentityProvider(adapter);
 
     await provider.saveSoul([makeSoulItem('o1', 'Orchestrator')]);
@@ -210,7 +186,7 @@ describe('createStorageIdentityProvider', () => {
   });
 
   it('persona data round-trips through JSON', async () => {
-    const adapter = createMockStorageAdapter();
+    const adapter = createMockKeyValueStore();
     const provider = createStorageIdentityProvider(adapter);
 
     await provider.savePersona('research', {

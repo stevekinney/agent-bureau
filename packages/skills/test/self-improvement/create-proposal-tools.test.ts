@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test';
 
 import { createProposalToolbox } from '../../src/self-improvement/create-proposal-tools';
 import { saveProposal } from '../../src/self-improvement/proposals';
-import { createMockSkillProvider, createMockStorageAdapter } from '../../src/test';
+import { createMockKeyValueStore, createMockSkillProvider } from '../../src/test';
 import type { Proposal } from '../../src/types';
 
 function makeProposal(overrides: Partial<Proposal> = {}): Proposal {
@@ -20,7 +20,7 @@ function makeProposal(overrides: Partial<Proposal> = {}): Proposal {
 
 describe('createProposalToolbox', () => {
   function setup() {
-    const storage = createMockStorageAdapter();
+    const storage = createMockKeyValueStore();
     const skillProvider = createMockSkillProvider();
     const toolbox = createProposalToolbox({ storage, skillProvider });
     return { storage, skillProvider, toolbox };

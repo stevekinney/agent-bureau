@@ -163,7 +163,8 @@
     "change-case": "^5.4.4",
     "lifecycle": "workspace:*",
     "gray-matter": "^4.0.3",
-    "interoperability": "workspace:*"
+    "interoperability": "workspace:*",
+    "storage": "workspace:*"
   },
   "devDependencies": {
     "@anthropic-ai/sdk": "^0.71.2",

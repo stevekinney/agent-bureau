@@ -64,8 +64,8 @@
   },
   "dependencies": {
     "armorer": "workspace:*",
-    "memory": "workspace:*",
     "gray-matter": "^4.0.3",
+    "storage": "workspace:*",
     "zod": "^4.3.6"
   },
   "devDependencies": {
