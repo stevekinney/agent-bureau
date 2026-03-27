@@ -1,5 +1,5 @@
 import type { ConversationHistory, SessionInfo } from 'conversationalist';
-import { Conversation } from 'conversationalist';
+import { Conversation, createConversationHistory } from 'conversationalist';
 import { CompletableEventTarget } from 'lifecycle';
 import type { CreateMemoryOptions, Memory } from 'memory';
 import { createMemory } from 'memory';
@@ -157,25 +157,27 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     let conversation: InstanceType<typeof Conversation>;
     let isExistingConversation = false;
 
+    const environment = kv ? { persistence: kv } : undefined;
+
     if (request.conversationId && kv) {
       const raw = await kv.get(`session:${request.conversationId}`);
       if (raw) {
         try {
           const parsed: unknown = JSON.parse(raw);
           if (typeof parsed === 'object' && parsed !== null && 'id' in parsed && 'ids' in parsed) {
-            conversation = new Conversation(parsed as ConversationHistory, { persistence: kv });
+            conversation = new Conversation(parsed as ConversationHistory, environment);
             isExistingConversation = true;
           } else {
-            conversation = new Conversation();
+            conversation = new Conversation(createConversationHistory(), environment);
           }
         } catch {
-          conversation = new Conversation();
+          conversation = new Conversation(createConversationHistory(), environment);
         }
       } else {
-        conversation = new Conversation();
+        conversation = new Conversation(createConversationHistory(), environment);
       }
     } else {
-      conversation = new Conversation();
+      conversation = new Conversation(createConversationHistory(), environment);
     }
 
     if (!isExistingConversation) {
