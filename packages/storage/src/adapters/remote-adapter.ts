@@ -119,7 +119,11 @@ export function createRemoteKeyValueStore(options: RemoteKeyValueStoreOptions): 
 
       await assertAcceptableStatus(response, 200);
       const text = await response.text();
-      return Number(text);
+      const count = Number(text);
+      if (!Number.isFinite(count)) {
+        throw new RemoteStoreError(200, 'Expected numeric count from deletePrefix endpoint');
+      }
+      return count;
     },
 
     close(): Promise<void> {

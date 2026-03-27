@@ -22,7 +22,6 @@ import {
   RunRemovedEvent,
 } from './events';
 import { serializeRunState } from './serialization';
-import { resolveStorageBackend } from './storage';
 import type {
   Bureau,
   BureauOptions,
@@ -72,12 +71,14 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
   });
 
   // ── Storage Backend ──────────────────────────────────────────────
-  // Only the KV store is used here for conversation persistence; the
-  // vector adapter is wired separately when memory is configured.
-  const resolvedStorage = options.storage
-    ? await resolveStorageBackend(options.storage)
-    : undefined;
-  const resolvedKv = resolvedStorage?.kv;
+  // Only the KV store is needed here for conversation persistence.
+  // The vector adapter is wired separately when memory is configured,
+  // so we resolve KV directly to avoid creating an unused vector adapter.
+  let resolvedKv: import('storage').KeyValueStore | undefined;
+  if (options.storage) {
+    const { resolveKeyValueStore } = await import('storage');
+    resolvedKv = await resolveKeyValueStore(options.storage);
+  }
 
   // ── Memory ───────────────────────────────────────────────────────
   let memory: Memory | undefined;
@@ -255,17 +256,20 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
 
   function requireKv() {
     if (!kv) {
-      throw new BureauError('No persistence adapter configured', 'NOT_IMPLEMENTED');
+      throw new BureauError(
+        'No KeyValueStore configured (set options.persistence or options.storage)',
+        'NOT_IMPLEMENTED',
+      );
     }
     return kv;
   }
 
   async function listConversations(): Promise<SessionInfo[]> {
-    const store = requireKv();
-    const keys = await store.list('session-info:');
+    const kvStore = requireKv();
+    const keys = await kvStore.list('session-info:');
+    const rawValues = await Promise.all(keys.map((key) => kvStore.get(key)));
     const results: SessionInfo[] = [];
-    for (const key of keys) {
-      const raw = await store.get(key);
+    for (const raw of rawValues) {
       if (!raw) continue;
       try {
         results.push(JSON.parse(raw) as SessionInfo);
@@ -277,8 +281,8 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
   }
 
   async function getConversation(id: string): Promise<ConversationHistory | undefined> {
-    const store = requireKv();
-    const raw = await store.get(`session:${id}`);
+    const kvStore = requireKv();
+    const raw = await kvStore.get(`session:${id}`);
     if (!raw) return undefined;
     try {
       const parsed: unknown = JSON.parse(raw);
@@ -292,8 +296,8 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
   }
 
   async function deleteConversation(id: string): Promise<void> {
-    const store = requireKv();
-    await Promise.all([store.delete(`session:${id}`), store.delete(`session-info:${id}`)]);
+    const kvStore = requireKv();
+    await Promise.all([kvStore.delete(`session:${id}`), kvStore.delete(`session-info:${id}`)]);
   }
 
   // ── Configuration ───────────────────────────────────────────────

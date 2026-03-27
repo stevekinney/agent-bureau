@@ -7,8 +7,9 @@ import type { KeyValueStore } from './types';
  * and stripped on read. This is the single source of truth for namespace
  * logic — adapters do not implement their own.
  *
- * Namespaces can be nested: wrapping a namespaced store with another
- * namespace produces `outer:inner:key`.
+ * Namespaces can be nested: `withNamespace(withNamespace(store, 'a'), 'b')`
+ * produces keys prefixed `b:a:`. The `list()` method strips its own
+ * prefix from returned keys; `get()` and other methods do not strip.
  */
 export function withNamespace(store: KeyValueStore, namespace: string): KeyValueStore {
   const prefix = `${namespace}:`;

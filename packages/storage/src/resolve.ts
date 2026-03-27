@@ -39,6 +39,16 @@ export async function resolveKeyValueStore(
         const { createSQLiteKeyValueStore } = await import('./adapters/sqlite-adapter');
         return createSQLiteKeyValueStore({ filename: ':memory:' });
       }
+      const { isChromeStorageAvailable } = await import('./adapters/chrome-storage-adapter');
+      if (isChromeStorageAvailable()) {
+        const { createChromeKeyValueStore } = await import('./adapters/chrome-storage-adapter');
+        return createChromeKeyValueStore();
+      }
+      const { isIndexedDBAvailable } = await import('./adapters/indexeddb-adapter');
+      if (isIndexedDBAvailable()) {
+        const { createIndexedDBKeyValueStore } = await import('./adapters/indexeddb-adapter');
+        return createIndexedDBKeyValueStore();
+      }
       const { createMemoryKeyValueStore } = await import('./adapters/memory-adapter');
       return createMemoryKeyValueStore();
     }
