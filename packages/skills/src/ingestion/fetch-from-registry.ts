@@ -49,7 +49,7 @@ export async function fetchFromRegistry(options: FetchFromRegistryOptions): Prom
       const parsed = parseSkillMarkdown(text);
 
       await provider.saveSkill(parsed.metadata.name, parsed);
-      result.loaded.push(name);
+      result.loaded.push(parsed.metadata.name);
     } catch (error) {
       const message =
         error instanceof SkillParseError

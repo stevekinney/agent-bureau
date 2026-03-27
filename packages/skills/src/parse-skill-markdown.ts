@@ -118,16 +118,31 @@ export function parseSkillMarkdown(content: string): SkillContent {
   }
 
   const allowedTools = data['allowed-tools'];
+  const deniedTools = data['denied-tools'];
+  const toolPolicy: ToolPolicy = {};
+
   if (typeof allowedTools === 'string' && allowedTools.trim()) {
-    const toolPolicy: ToolPolicy = {
-      allowList: allowedTools
-        .split(',')
-        .map((tool) => tool.trim())
-        .filter(Boolean),
-    };
-    if (toolPolicy.allowList && toolPolicy.allowList.length > 0) {
-      metadata.toolPolicy = toolPolicy;
+    const parsed = allowedTools
+      .split(',')
+      .map((tool) => tool.trim())
+      .filter(Boolean);
+    if (parsed.length > 0) {
+      toolPolicy.allowList = parsed;
     }
+  }
+
+  if (typeof deniedTools === 'string' && deniedTools.trim()) {
+    const parsed = deniedTools
+      .split(',')
+      .map((tool) => tool.trim())
+      .filter(Boolean);
+    if (parsed.length > 0) {
+      toolPolicy.denyList = parsed;
+    }
+  }
+
+  if (toolPolicy.allowList || toolPolicy.denyList) {
+    metadata.toolPolicy = toolPolicy;
   }
 
   const rawMetadata = data['metadata'];
@@ -175,6 +190,10 @@ export function serializeSkillMarkdown(content: SkillContent): string {
 
   if (metadata.toolPolicy?.allowList && metadata.toolPolicy.allowList.length > 0) {
     frontmatterData['allowed-tools'] = metadata.toolPolicy.allowList.join(', ');
+  }
+
+  if (metadata.toolPolicy?.denyList && metadata.toolPolicy.denyList.length > 0) {
+    frontmatterData['denied-tools'] = metadata.toolPolicy.denyList.join(', ');
   }
 
   if (metadata.metadata && Object.keys(metadata.metadata).length > 0) {
