@@ -1,7 +1,8 @@
 import { createTool } from 'armorer';
+import type { KeyValueStore } from 'storage';
 import { z } from 'zod';
 
-import type { KeyValueStore, SkillProvider } from '../types';
+import type { SkillProvider } from '../types';
 import {
   acceptProposal,
   type AcceptProposalOptions,

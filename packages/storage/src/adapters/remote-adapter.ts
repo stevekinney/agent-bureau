@@ -92,7 +92,11 @@ export function createRemoteKeyValueStore(options: RemoteKeyValueStoreOptions): 
       });
 
       await assertAcceptableStatus(response, 200);
-      return response.json() as Promise<string[]>;
+      const body: unknown = await response.json();
+      if (!Array.isArray(body) || !body.every((item): item is string => typeof item === 'string')) {
+        throw new RemoteStoreError(200, 'Expected string array from list endpoint');
+      }
+      return body;
     },
 
     async has(key: string): Promise<boolean> {

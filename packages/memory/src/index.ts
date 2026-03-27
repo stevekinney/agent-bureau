@@ -68,7 +68,6 @@ export type {
   CreateSoulDistillationOptions,
   CreateSoulSeedOptions,
   IdentityProvider,
-  KeyValueStore,
   PersonaDescriptor,
   SoulBudget,
   SoulDiff,

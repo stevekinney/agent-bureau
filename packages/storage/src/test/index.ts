@@ -4,7 +4,8 @@ import type { KeyValueStore } from '../types';
  * Creates a mock KeyValueStore backed by a Map for testing.
  *
  * Exposes the underlying `store` Map for direct assertions in tests.
- * Replaces the hand-rolled mocks in memory and skills test directories.
+ * Implements all seven interface methods (4 required + 3 optional) so
+ * consumer tests exercise realistic code paths.
  */
 export function createMockKeyValueStore(): KeyValueStore & { store: Map<string, string> } {
   const store = new Map<string, string>();
@@ -27,7 +28,26 @@ export function createMockKeyValueStore(): KeyValueStore & { store: Map<string, 
     },
 
     list(prefix: string): Promise<string[]> {
-      return Promise.resolve([...store.keys()].filter((key) => key.startsWith(prefix)));
+      return Promise.resolve([...store.keys()].filter((key) => key.startsWith(prefix)).sort());
+    },
+
+    has(key: string): Promise<boolean> {
+      return Promise.resolve(store.has(key));
+    },
+
+    deletePrefix(prefix: string): Promise<number> {
+      let count = 0;
+      for (const key of [...store.keys()]) {
+        if (key.startsWith(prefix)) {
+          store.delete(key);
+          count++;
+        }
+      }
+      return Promise.resolve(count);
+    },
+
+    close(): Promise<void> {
+      return Promise.resolve();
     },
   };
 }

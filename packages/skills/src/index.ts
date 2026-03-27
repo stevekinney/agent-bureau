@@ -72,7 +72,6 @@ export type {
 } from './skill-memory';
 export type { SkillSession } from './skill-session';
 export type {
-  KeyValueStore,
   Proposal,
   SkillCatalogEntry,
   SkillContent,

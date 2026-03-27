@@ -33,21 +33,18 @@ export function withNamespace(store: KeyValueStore, namespace: string): KeyValue
   };
 
   if (store.has) {
-    namespaced.has = (key: string): Promise<boolean> => {
-      return store.has!(`${prefix}${key}`);
-    };
+    const has = store.has.bind(store);
+    namespaced.has = (key: string): Promise<boolean> => has(`${prefix}${key}`);
   }
 
   if (store.deletePrefix) {
-    namespaced.deletePrefix = (deletePrefix: string): Promise<number> => {
-      return store.deletePrefix!(`${prefix}${deletePrefix}`);
-    };
+    const deletePrefix = store.deletePrefix.bind(store);
+    namespaced.deletePrefix = (dp: string): Promise<number> => deletePrefix(`${prefix}${dp}`);
   }
 
   if (store.close) {
-    namespaced.close = (): Promise<void> => {
-      return store.close!();
-    };
+    const close = store.close.bind(store);
+    namespaced.close = (): Promise<void> => close();
   }
 
   return namespaced;

@@ -1,5 +1,3 @@
-import { createMemoryKeyValueStore } from './adapters/memory-adapter';
-import { createSQLiteKeyValueStore, isSQLiteAvailable } from './adapters/sqlite-adapter';
 import type { KeyValueStore, KeyValueStoreConfiguration } from './types';
 
 /**
@@ -13,26 +11,36 @@ export async function resolveKeyValueStore(
 ): Promise<KeyValueStore> {
   switch (configuration.type) {
     case 'memory': {
-      console.log('[storage] resolved adapter: memory');
+      const { createMemoryKeyValueStore } = await import('./adapters/memory-adapter');
       return createMemoryKeyValueStore();
     }
     case 'sqlite': {
-      console.log('[storage] resolved adapter: sqlite');
+      const { createSQLiteKeyValueStore } = await import('./adapters/sqlite-adapter');
       return createSQLiteKeyValueStore({ filename: configuration.path });
     }
+    case 'indexeddb': {
+      const { createIndexedDBKeyValueStore } = await import('./adapters/indexeddb-adapter');
+      return createIndexedDBKeyValueStore({ databaseName: configuration.databaseName });
+    }
+    case 'chrome-storage': {
+      const { createChromeKeyValueStore } = await import('./adapters/chrome-storage-adapter');
+      return createChromeKeyValueStore({ area: configuration.area });
+    }
+    case 'remote': {
+      const { createRemoteKeyValueStore } = await import('./adapters/remote-adapter');
+      return createRemoteKeyValueStore({
+        baseUrl: configuration.baseUrl,
+        headers: configuration.headers,
+      });
+    }
     case 'auto': {
+      const { isSQLiteAvailable } = await import('./adapters/sqlite-adapter');
       if (isSQLiteAvailable()) {
-        console.log('[storage] resolved adapter: sqlite (auto-detected)');
+        const { createSQLiteKeyValueStore } = await import('./adapters/sqlite-adapter');
         return createSQLiteKeyValueStore({ filename: ':memory:' });
       }
-      console.log('[storage] resolved adapter: memory (auto-detected)');
+      const { createMemoryKeyValueStore } = await import('./adapters/memory-adapter');
       return createMemoryKeyValueStore();
     }
-    case 'indexeddb':
-      throw new Error('IndexedDB adapter is not yet implemented');
-    case 'chrome-storage':
-      throw new Error('Chrome storage adapter is not yet implemented');
-    case 'remote':
-      throw new Error('Remote adapter is not yet implemented');
   }
 }

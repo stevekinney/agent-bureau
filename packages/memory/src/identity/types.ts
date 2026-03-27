@@ -63,8 +63,6 @@ export interface SoulBudget {
   maxItemsPerTopic: number;
 }
 
-export type { KeyValueStore } from 'storage';
-
 /**
  * The interface platform adapters implement for identity persistence.
  * Abstracts storage so the identity system runs on any platform

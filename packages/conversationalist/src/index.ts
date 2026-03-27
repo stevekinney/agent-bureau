@@ -162,4 +162,3 @@ export type {
 export type { ConversationNodeSnapshot, ConversationSnapshot } from './types';
 export type { ConversationHistoryDraft } from './with-conversation';
 export { pipeConversationHistory, withConversationHistory } from './with-conversation';
-export type { KeyValueStore } from 'storage';

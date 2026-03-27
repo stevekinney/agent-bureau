@@ -159,10 +159,17 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     if (request.conversationId && kv) {
       const raw = await kv.get(`session:${request.conversationId}`);
       if (raw) {
-        conversation = new Conversation(JSON.parse(raw) as ConversationHistory, {
-          persistence: kv,
-        });
-        isExistingConversation = true;
+        try {
+          const parsed: unknown = JSON.parse(raw);
+          if (typeof parsed === 'object' && parsed !== null && 'id' in parsed && 'ids' in parsed) {
+            conversation = new Conversation(parsed as ConversationHistory, { persistence: kv });
+            isExistingConversation = true;
+          } else {
+            conversation = new Conversation(createConversationHistory(), { persistence: kv });
+          }
+        } catch {
+          conversation = new Conversation(createConversationHistory(), { persistence: kv });
+        }
       } else {
         conversation = new Conversation(createConversationHistory(), { persistence: kv });
       }
@@ -259,7 +266,12 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     const results: SessionInfo[] = [];
     for (const key of keys) {
       const raw = await store.get(key);
-      if (raw) results.push(JSON.parse(raw) as SessionInfo);
+      if (!raw) continue;
+      try {
+        results.push(JSON.parse(raw) as SessionInfo);
+      } catch {
+        // Skip malformed entries
+      }
     }
     return results;
   }
@@ -267,7 +279,16 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
   async function getConversation(id: string): Promise<ConversationHistory | undefined> {
     const store = requireKv();
     const raw = await store.get(`session:${id}`);
-    return raw ? (JSON.parse(raw) as ConversationHistory) : undefined;
+    if (!raw) return undefined;
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      if (typeof parsed === 'object' && parsed !== null && 'id' in parsed && 'ids' in parsed) {
+        return parsed as ConversationHistory;
+      }
+      return undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   async function deleteConversation(id: string): Promise<void> {

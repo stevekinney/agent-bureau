@@ -122,7 +122,3 @@ export interface Proposal {
   /** If rejected, the reason. */
   rejectionReason?: string;
 }
-
-// ── Storage ─────────────────────────────────────────────────────────
-
-export type { KeyValueStore } from 'storage';

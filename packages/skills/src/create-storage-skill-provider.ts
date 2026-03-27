@@ -1,7 +1,8 @@
+import type { KeyValueStore } from 'storage';
 import { z } from 'zod';
 
 import { isValidSkillName, SkillParseError } from './parse-skill-markdown';
-import type { KeyValueStore, SkillCatalogEntry, SkillContent, SkillProvider } from './types';
+import type { SkillCatalogEntry, SkillContent, SkillProvider } from './types';
 
 const toolPolicySchema = z.object({
   allowList: z.array(z.string()).optional(),

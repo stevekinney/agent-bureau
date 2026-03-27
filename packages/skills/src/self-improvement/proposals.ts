@@ -1,7 +1,8 @@
+import type { KeyValueStore } from 'storage';
 import { z } from 'zod';
 
 import { parseSkillMarkdown } from '../parse-skill-markdown';
-import type { KeyValueStore, Proposal, SkillProvider } from '../types';
+import type { Proposal, SkillProvider } from '../types';
 
 // ── Key Namespace ───────────────────────────────────────────────────
 

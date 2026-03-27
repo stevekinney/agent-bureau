@@ -54,5 +54,19 @@ export async function loadAgentSession(
 ): Promise<AgentSession | undefined> {
   const raw = await store.get(`agent-session:${id}`);
   if (!raw) return undefined;
-  return JSON.parse(raw) as AgentSession;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (
+      typeof parsed === 'object' &&
+      parsed !== null &&
+      'id' in parsed &&
+      'agentName' in parsed &&
+      'conversationHistory' in parsed
+    ) {
+      return parsed as AgentSession;
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  }
 }
