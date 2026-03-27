@@ -43,6 +43,12 @@ export type { CreateIdentityHookOptions } from './create-identity-hook';
 export { createIdentityHook } from './create-identity-hook';
 export type { CreateMemoryBridgeOptions, MemoryLike } from './create-memory-bridge';
 export { createMemoryBridge } from './create-memory-bridge';
+export type {
+  CreatePolicyEnforcementHookOptions,
+  ToolLike,
+  ToolPolicyLike,
+} from './create-policy-enforcement-hook';
+export { createPolicyEnforcementHook } from './create-policy-enforcement-hook';
 export type { ActiveRun } from './create-run';
 export { createRun } from './create-run';
 export type {
