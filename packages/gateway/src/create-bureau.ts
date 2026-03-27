@@ -1,5 +1,5 @@
 import type { ConversationHistory, SessionInfo } from 'conversationalist';
-import { Conversation, createConversationHistory } from 'conversationalist';
+import { Conversation } from 'conversationalist';
 import { CompletableEventTarget } from 'lifecycle';
 import type { CreateMemoryOptions, Memory } from 'memory';
 import { createMemory } from 'memory';
@@ -166,13 +166,13 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
             conversation = new Conversation(parsed as ConversationHistory, { persistence: kv });
             isExistingConversation = true;
           } else {
-            conversation = new Conversation(createConversationHistory(), { persistence: kv });
+            conversation = new Conversation();
           }
         } catch {
-          conversation = new Conversation(createConversationHistory(), { persistence: kv });
+          conversation = new Conversation();
         }
       } else {
-        conversation = new Conversation(createConversationHistory(), { persistence: kv });
+        conversation = new Conversation();
       }
     } else {
       conversation = new Conversation();
