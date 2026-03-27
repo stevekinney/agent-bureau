@@ -98,6 +98,7 @@ function extractLastUserMessage(conversation: ConversationLike): string | undefi
  *
  * - `prepareStep` fires on step 0 only. Recalls relevant skill-specific
  *   memories using either the last user message or a provided `recallQuery`.
+ *   Returns a formatted string of recalled memories, or undefined if none.
  * - `onStep` fires on the final step only (`result.final === true`). Stores
  *   the assistant's response as a skill learning with `source: 'experiential'`
  *   and `tags: ['skill-learning']`.
@@ -105,13 +106,13 @@ function extractLastUserMessage(conversation: ConversationLike): string | undefi
  * Both hooks degrade gracefully — memory failures do not crash the agent loop.
  */
 export function createSkillMemoryHooks(options: CreateSkillMemoryHooksOptions): {
-  prepareStep: (context: StepContextLike) => Promise<void>;
+  prepareStep: (context: StepContextLike) => Promise<string | undefined>;
   onStep: (result: StepResultLike) => Promise<void>;
 } {
   const { memory, recallQuery, recallLimit = 5 } = options;
 
-  const prepareStep = async (context: StepContextLike): Promise<void> => {
-    if (context.step !== 0) return;
+  const prepareStep = async (context: StepContextLike): Promise<string | undefined> => {
+    if (context.step !== 0) return undefined;
 
     try {
       let query: string | undefined;
@@ -124,11 +125,15 @@ export function createSkillMemoryHooks(options: CreateSkillMemoryHooksOptions): 
         query = extractLastUserMessage(context.conversation);
       }
 
-      if (!query) return;
+      if (!query) return undefined;
 
-      await memory.recall(query, { limit: recallLimit });
+      const entries = await memory.recall(query, { limit: recallLimit });
+      if (entries.length === 0) return undefined;
+
+      return entries.map((entry) => entry.content).join('\n\n');
     } catch {
       // Degrade gracefully — do not crash the agent loop.
+      return undefined;
     }
   };
 

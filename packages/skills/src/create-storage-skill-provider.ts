@@ -106,6 +106,11 @@ export function createStorageSkillProvider(adapter: StorageAdapter): SkillProvid
       if (!isValidSkillName(name)) {
         throw new SkillParseError(`Skill name "${name}" is not valid kebab-case.`);
       }
+      if (content.metadata.name !== name) {
+        throw new SkillParseError(
+          `Skill name mismatch: parameter "${name}" does not match content metadata name "${content.metadata.name}".`,
+        );
+      }
       await adapter.set(metadataKey(name), JSON.stringify(content.metadata));
       await adapter.set(bodyKey(name), content.body);
     },

@@ -1,5 +1,5 @@
 import { readdir, stat } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 import { parseSkillMarkdown, SkillParseError } from '../parse-skill-markdown';
 import type { SkillProvider } from '../types';
@@ -129,7 +129,7 @@ export async function scanDirectory(
       const content = await Bun.file(skillPath).text();
       const parsed = parseSkillMarkdown(content);
       const skillName = parsed.metadata.name;
-      const skillDirectory = join(skillPath, '..');
+      const skillDirectory = dirname(skillPath);
 
       await provider.saveSkill(skillName, parsed);
 

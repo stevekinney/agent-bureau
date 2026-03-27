@@ -47,7 +47,7 @@
   "scripts": {
     "build": "bun run scripts/build.ts",
     "check-types": "tsc --noEmit",
-    "clean": "rm -rf dist coverage tsconfig.tsbuildinfo",
+    "clean": "rm -rf dist coverage tsconfig.tsbuildinfo node_modules/.cache/tsconfig.tsbuildinfo",
     "ci": "bun run validate && bun run build",
     "coverage:check": "bun run ../../scripts/check-coverage.ts",
     "dev": "bun --watch run src/index.ts",

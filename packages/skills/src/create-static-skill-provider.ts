@@ -32,8 +32,13 @@ export function createStaticSkillProvider(initialSkills: SkillContent[] = []): S
 
     saveSkill(name: string, content: SkillContent): Promise<void> {
       if (!isValidSkillName(name)) {
+        return Promise.reject(new SkillParseError(`Skill name "${name}" is not valid kebab-case.`));
+      }
+      if (content.metadata.name !== name) {
         return Promise.reject(
-          new SkillParseError(`Skill name "${name}" is not valid kebab-case.`),
+          new SkillParseError(
+            `Skill name mismatch: parameter "${name}" does not match content metadata name "${content.metadata.name}".`,
+          ),
         );
       }
       skills.set(name, content);

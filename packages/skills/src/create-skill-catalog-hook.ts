@@ -94,9 +94,30 @@ function applySkillPolicy(entries: SkillCatalogEntry[], policy: ToolPolicy): Ski
   return filtered;
 }
 
+function escapeXml(value: string): string {
+  return value.replace(/[&<>"']/g, (ch) => {
+    switch (ch) {
+      case '&':
+        return '&amp;';
+      case '<':
+        return '&lt;';
+      case '>':
+        return '&gt;';
+      case '"':
+        return '&quot;';
+      case "'":
+        return '&apos;';
+      default:
+        return ch;
+    }
+  });
+}
+
 function formatCatalogXml(entries: SkillCatalogEntry[]): string {
   const skillElements = entries
-    .map((entry) => `<skill name="${entry.name}">${entry.description}</skill>`)
+    .map(
+      (entry) => `<skill name="${escapeXml(entry.name)}">${escapeXml(entry.description)}</skill>`,
+    )
     .join('\n');
 
   return `<available_skills>

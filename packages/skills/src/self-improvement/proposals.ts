@@ -56,6 +56,15 @@ function hashContent(content: string): string {
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
+/** Parse JSON without throwing — returns undefined on malformed input. */
+function safeJsonParse(raw: string): unknown {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+}
+
 function parseProposal(raw: string): Proposal | undefined {
   try {
     const parsed = proposalSchema.safeParse(JSON.parse(raw));
@@ -213,9 +222,7 @@ export async function rejectProposal(
   // Record the content hash in rejected patterns.
   const hash = hashContent(proposal.content);
   const rawPatterns = await storage.get(REJECTED_PATTERNS_KEY);
-  const patternsResult = rejectedPatternsSchema.safeParse(
-    rawPatterns ? JSON.parse(rawPatterns) : [],
-  );
+  const patternsResult = rejectedPatternsSchema.safeParse(safeJsonParse(rawPatterns ?? '[]'));
   const patterns = patternsResult.success ? patternsResult.data : [];
   if (!patterns.includes(hash)) {
     patterns.push(hash);
@@ -239,7 +246,7 @@ export async function isRejectedPattern(
   const rawPatterns = await storage.get(REJECTED_PATTERNS_KEY);
   if (!rawPatterns) return false;
 
-  const patternsResult = rejectedPatternsSchema.safeParse(JSON.parse(rawPatterns));
+  const patternsResult = rejectedPatternsSchema.safeParse(safeJsonParse(rawPatterns));
   if (!patternsResult.success) return false;
   return patternsResult.data.includes(hash);
 }

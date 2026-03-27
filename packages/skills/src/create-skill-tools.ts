@@ -34,6 +34,11 @@ export function createActivateSkillTool(options: CreateSkillToolsOptions) {
         return { alreadyActive: true, name: params.name };
       }
 
+      const enabled = await provider.isEnabled(params.name);
+      if (!enabled) {
+        return { error: 'Skill is disabled', name: params.name };
+      }
+
       const skill = await provider.loadSkill(params.name);
       if (!skill) {
         return { error: 'Skill not found', name: params.name };
@@ -42,7 +47,23 @@ export function createActivateSkillTool(options: CreateSkillToolsOptions) {
       const resources = await provider.listResources(params.name);
       session.activate(params.name, skill.metadata.toolPolicy);
 
-      let xml = `<skill_content name="${params.name}">\n${skill.body}`;
+      const escapedName = params.name.replace(/[&<>"']/g, (ch) => {
+        switch (ch) {
+          case '&':
+            return '&amp;';
+          case '<':
+            return '&lt;';
+          case '>':
+            return '&gt;';
+          case '"':
+            return '&quot;';
+          case "'":
+            return '&apos;';
+          default:
+            return ch;
+        }
+      });
+      let xml = `<skill_content name="${escapedName}">\n${skill.body}`;
 
       if (resources.length > 0) {
         const resourceElements = resources.map((path) => `  <file>${path}</file>`).join('\n');
