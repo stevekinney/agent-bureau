@@ -40,6 +40,7 @@ const entrypoints = [
   './src/session/types.ts',
   './src/session/create-session-store.ts',
   './src/session/session-resume.ts',
+  './src/structured-output/index.ts',
   './src/test/index.ts',
   './src/context/index.ts',
   './src/context/token-budget.ts',

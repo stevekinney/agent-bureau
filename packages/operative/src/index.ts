@@ -208,6 +208,8 @@ export type {
 } from './session/index';
 export { createSessionStore, resumeSession } from './session/index';
 export { withStreaming } from './streaming';
+export type { ResponseFormat, ToolChoice } from './structured-output/index';
+export { zodToJsonSchema } from './structured-output/index';
 export type {
   AfterToolExecutionHook,
   AgentDefinition,

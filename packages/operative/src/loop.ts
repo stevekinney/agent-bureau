@@ -30,7 +30,10 @@ import {
   ToolsExecutingEvent,
   UsageAccumulatedEvent,
 } from './events';
+import type { ToolChoice } from './structured-output/types';
+import { zodToJsonSchema } from './structured-output/zod-to-json-schema';
 import type {
+  GenerateContext,
   GenerateResponse,
   OnElicitation,
   RetryOptions,
@@ -88,7 +91,7 @@ function resolveDelay(delay: RetryOptions['delay'], attempt: number): number {
 
 async function callGenerateWithRetry(
   generate: RunOptions['generate'],
-  context: { conversation: Conversation; step: number; signal?: AbortSignal; toolbox: Toolbox },
+  context: GenerateContext,
   retry: RetryOptions | undefined,
   emitter: EventDispatcher | undefined,
 ): Promise<GenerateResponse> {
@@ -175,6 +178,7 @@ export async function executeLoop(
     onMaximumSteps,
     parentContext,
     withTraceContext,
+    toolChoice: defaultToolChoice,
   } = options;
 
   const prepareStepHooks = normalizeToArray(options.prepareStep);
@@ -193,6 +197,15 @@ export async function executeLoop(
   const conversation = isConversation(options.conversation)
     ? options.conversation
     : new Conversation(options.conversation);
+
+  // Bridge responseSchema → responseFormat for providers that support native structured output
+  const responseFormat = responseSchema
+    ? ({
+        type: 'json_schema' as const,
+        schema: zodToJsonSchema(responseSchema),
+        name: 'response',
+      } as const)
+    : undefined;
 
   const stopConditions = normalizeStopConditions(options.stopWhen);
   const steps: StepResult[] = [];
@@ -408,6 +421,16 @@ export async function executeLoop(
       }
     }
 
+    // Resolve per-step tool choice: hook override → RunOptions default → undefined
+    let stepToolChoice: ToolChoice | undefined = defaultToolChoice;
+    if (hooks?.has('selectToolChoice')) {
+      const selectToolChoiceContext = { conversation, step, signal: stepSignal, abortStep, elicit };
+      const hookResult = await hooks.run('selectToolChoice', selectToolChoiceContext);
+      if (hookResult !== undefined && !isRegistryPassthrough(hookResult, selectToolChoiceContext)) {
+        stepToolChoice = hookResult;
+      }
+    }
+
     let response: GenerateResponse;
     try {
       let prepareResult: GenerateResponse | void = undefined;
@@ -432,7 +455,14 @@ export async function executeLoop(
           const doGenerate = () =>
             callGenerateWithRetry(
               generate,
-              { conversation, step, signal: stepSignal, toolbox: stepToolbox },
+              {
+                conversation,
+                step,
+                signal: stepSignal,
+                toolbox: stepToolbox,
+                toolChoice: stepToolChoice,
+                responseFormat,
+              },
               retry,
               emitter,
             );

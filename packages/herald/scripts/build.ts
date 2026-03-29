@@ -14,6 +14,7 @@ const entrypoints = [
   './src/embeddings/ollama.ts',
   './src/instrumentation/index.ts',
   './src/fallover/index.ts',
+  './src/structured-output/index.ts',
   './src/test/index.ts',
 ];
 

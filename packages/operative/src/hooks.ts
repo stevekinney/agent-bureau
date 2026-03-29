@@ -5,6 +5,7 @@ import type { HookMap } from 'lifecycle';
 
 import type { AgentSession } from './agent-session';
 import type { BudgetReport, TokenBudget } from './context/index';
+import type { ToolChoice } from './structured-output/types';
 import type {
   GenerateResponse,
   StepContext,
@@ -69,4 +70,5 @@ export interface OperativeHookMap extends HookMap {
   beforeCompaction: (context: BeforeCompactionHookContext) => Promise<boolean | void>;
   /** Runs after compaction with stats about what was removed. */
   afterCompaction: (context: AfterCompactionHookContext) => Promise<void>;
+  selectToolChoice: (context: StepContext) => Promise<ToolChoice | void>;
 }
