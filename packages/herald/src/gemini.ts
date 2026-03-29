@@ -62,7 +62,8 @@ export function createGeminiGenerate(options: GeminiProviderOptions): GenerateFu
 
     if (systemInstruction !== undefined) params['systemInstruction'] = systemInstruction;
     if (hasTools) params['tools'] = tools;
-    if (options.toolChoice) params['tool_config'] = toGeminiToolChoice(options.toolChoice);
+    if (hasTools && options.toolChoice)
+      params['tool_config'] = toGeminiToolChoice(options.toolChoice);
 
     const generationConfig: Record<string, unknown> = {};
     if (common.maximumTokens !== undefined)
@@ -170,7 +171,8 @@ export function createGeminiGenerateStream(
 
     if (systemInstruction !== undefined) params['systemInstruction'] = systemInstruction;
     if (hasTools) params['tools'] = tools;
-    if (options.toolChoice) params['tool_config'] = toGeminiToolChoice(options.toolChoice);
+    if (hasTools && options.toolChoice)
+      params['tool_config'] = toGeminiToolChoice(options.toolChoice);
 
     const generationConfig: Record<string, unknown> = {};
     if (common.maximumTokens !== undefined)

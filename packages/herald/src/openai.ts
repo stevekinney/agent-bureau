@@ -56,7 +56,8 @@ export function createOpenAIGenerate(options: OpenAIProviderOptions): GenerateFu
 
     if (common.maximumTokens !== undefined) params['max_tokens'] = common.maximumTokens;
     if (hasTools) params['tools'] = Array.isArray(tools) ? tools : [tools];
-    if (options.toolChoice) params['tool_choice'] = toOpenAIToolChoice(options.toolChoice);
+    if (hasTools && options.toolChoice)
+      params['tool_choice'] = toOpenAIToolChoice(options.toolChoice);
     if (options.responseFormat) {
       const adapted = toOpenAIResponseFormat(options.responseFormat);
       if (adapted !== undefined) params['response_format'] = adapted;
@@ -144,7 +145,8 @@ export function createOpenAIGenerateStream(
 
     if (common.maximumTokens !== undefined) params['max_tokens'] = common.maximumTokens;
     if (hasTools) params['tools'] = Array.isArray(tools) ? tools : [tools];
-    if (options.toolChoice) params['tool_choice'] = toOpenAIToolChoice(options.toolChoice);
+    if (hasTools && options.toolChoice)
+      params['tool_choice'] = toOpenAIToolChoice(options.toolChoice);
     if (options.responseFormat) {
       const adapted = toOpenAIResponseFormat(options.responseFormat);
       if (adapted !== undefined) params['response_format'] = adapted;
