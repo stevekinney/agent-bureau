@@ -140,6 +140,7 @@ export function createRunRecorder(activeRun: ActiveRun): RunRecorder {
     'usage.accumulated',
     'session.saved',
     'session.loaded',
+    'context.budget-warning',
   ];
 
   for (const type of eventTypes) {

@@ -7,6 +7,7 @@ import { BudgetExceededError, ElicitationDeniedError } from './errors';
 import {
   BackpressureAppliedEvent,
   BackpressureReleasedEvent,
+  ContextBudgetWarningEvent,
   ContextCompactedEvent,
   ElicitationRequestedEvent,
   ElicitationResolvedEvent,
@@ -307,20 +308,87 @@ export async function executeLoop(
       const estimator =
         contextManagement.tokenEstimator ?? ((c: Conversation) => c.estimateTokens());
       const tokensBefore = estimator(conversation);
-      if (tokensBefore > contextManagement.maxTokens) {
-        try {
-          await contextManagement.onCompact(conversation, {
-            conversation,
-            step,
-            signal: stepSignal,
-            abortStep,
-            elicit,
-          });
-          const tokensAfter = estimator(conversation);
-          emitter?.dispatch(new ContextCompactedEvent(step, tokensBefore, tokensAfter));
-        } catch (error) {
-          emitter?.dispatch(new RunErrorEvent(step, error));
-          return makeErrorResult(error);
+
+      // Emit budget warning when remaining tokens fall below warningThreshold
+      const warningThreshold =
+        contextManagement.warningThreshold ?? Math.floor(contextManagement.maxTokens * 0.2);
+      const remaining = contextManagement.maxTokens - tokensBefore;
+      if (remaining <= warningThreshold) {
+        emitter?.dispatch(
+          new ContextBudgetWarningEvent(step, tokensBefore, remaining, contextManagement.maxTokens),
+        );
+      }
+
+      // Determine compaction threshold (new field or legacy maxTokens)
+      const compactionThreshold =
+        contextManagement.compactionThreshold ?? contextManagement.maxTokens;
+      if (tokensBefore > compactionThreshold) {
+        // Run beforeCompaction hook if registered
+        let shouldCompact = true;
+        if (hooks?.has('beforeCompaction')) {
+          try {
+            const hookResult = await hooks.run('beforeCompaction', {
+              conversation,
+              step,
+              budget: {
+                maxTokens: contextManagement.maxTokens,
+                minimumResponseTokens: contextManagement.minimumResponseTokens ?? 1500,
+                warningThreshold,
+                compactionThreshold,
+                used: tokensBefore,
+                remaining,
+                exceeds: true,
+                warning: remaining <= warningThreshold,
+                update() {},
+                allocate() {
+                  return 0;
+                },
+                estimate(text: string) {
+                  return Math.ceil(text.length / 4);
+                },
+              },
+            });
+            if (hookResult === false) {
+              shouldCompact = false;
+            }
+          } catch (error) {
+            emitter?.dispatch(new RunErrorEvent(step, error));
+            return makeErrorResult(error);
+          }
+        }
+
+        if (shouldCompact) {
+          try {
+            const messagesBefore = conversation.getMessages().length;
+            await contextManagement.onCompact(conversation, {
+              conversation,
+              step,
+              signal: stepSignal,
+              abortStep,
+              elicit,
+            });
+            const tokensAfter = estimator(conversation);
+            const messagesAfter = conversation.getMessages().length;
+            emitter?.dispatch(new ContextCompactedEvent(step, tokensBefore, tokensAfter));
+
+            // Run afterCompaction hook if registered
+            if (hooks?.has('afterCompaction')) {
+              try {
+                await hooks.run('afterCompaction', {
+                  conversation,
+                  step,
+                  messagesRemoved: messagesBefore - messagesAfter,
+                  tokensFreed: tokensBefore - tokensAfter,
+                });
+              } catch (error) {
+                emitter?.dispatch(new RunErrorEvent(step, error));
+                return makeErrorResult(error);
+              }
+            }
+          } catch (error) {
+            emitter?.dispatch(new RunErrorEvent(step, error));
+            return makeErrorResult(error);
+          }
         }
       }
     }

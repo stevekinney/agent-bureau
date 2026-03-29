@@ -50,6 +50,14 @@ export interface ContextManagementOptions {
   maxTokens: number;
   onCompact: (conversation: Conversation, context: StepContext) => Promise<void>;
   tokenEstimator?: (conversation: Conversation) => number;
+  /** Compaction strategy to apply. Default: `'sliding-window'`. */
+  strategy?: 'summarization' | 'sliding-window' | 'selective-pruning' | 'hybrid';
+  /** Minimum tokens reserved for the model response. Default: `1500`. */
+  minimumResponseTokens?: number;
+  /** Warning when remaining tokens drop to this level. Default: 20% of `maxTokens`. */
+  warningThreshold?: number;
+  /** Compaction triggered when used tokens reach this level. Default: 80% of `maxTokens`. */
+  compactionThreshold?: number;
 }
 
 /**
