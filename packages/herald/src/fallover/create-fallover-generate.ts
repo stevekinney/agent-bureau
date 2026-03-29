@@ -46,8 +46,12 @@ export function createFalloverGenerate(options: FalloverOptions): GenerateFuncti
     for (let providerIndex = 0; providerIndex < providers.length; providerIndex++) {
       const provider = providers[providerIndex]!;
 
-      // Skip providers on cooldown
+      // Skip providers on cooldown, but record the skip for diagnostics
       if (!tracker.isAvailable(provider.name)) {
+        collectedErrors.push({
+          provider: provider.name,
+          error: new Error(`Provider ${provider.name} is on cooldown`),
+        });
         continue;
       }
 

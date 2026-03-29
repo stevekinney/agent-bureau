@@ -1,5 +1,5 @@
 const KEY_PREFIX = 'ab_live_';
-const KEY_ID_LENGTH = 8;
+const KEY_ID_LENGTH = 16;
 
 /**
  * Generates a new API key in `ab_live_<64 hex chars>` format (32 random bytes).
@@ -47,8 +47,8 @@ export async function verifyApiKey(plaintext: string, hash: string): Promise<boo
 }
 
 /**
- * Extracts the key ID from a plaintext API key. The ID is the first 8 hex
- * characters after the `ab_live_` prefix.
+ * Extracts the key ID from a plaintext API key. The ID is the first 16 hex
+ * characters (8 bytes) after the `ab_live_` prefix.
  */
 export function extractKeyId(key: string): string {
   return key.slice(KEY_PREFIX.length, KEY_PREFIX.length + KEY_ID_LENGTH);

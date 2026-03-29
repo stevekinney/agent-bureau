@@ -57,9 +57,9 @@ describe('verifyApiKey', () => {
 });
 
 describe('extractKeyId', () => {
-  it('extracts the first 8 hex chars after the prefix', () => {
-    const key = 'ab_live_deadbeef1234567890abcdef1234567890abcdef1234567890abcdef12';
-    expect(extractKeyId(key)).toBe('deadbeef');
+  it('extracts the first 16 hex chars after the prefix', () => {
+    const key = 'ab_live_deadbeef12345678aaaa567890abcdef1234567890abcdef1234567890abcdef12';
+    expect(extractKeyId(key)).toBe('deadbeef12345678');
   });
 
   it('returns a consistent id for the same key', () => {
@@ -67,8 +67,8 @@ describe('extractKeyId', () => {
     expect(extractKeyId(key)).toBe(extractKeyId(key));
   });
 
-  it('returns an 8-character string', () => {
+  it('returns a 16-character string', () => {
     const key = generateApiKey();
-    expect(extractKeyId(key)).toHaveLength(8);
+    expect(extractKeyId(key)).toHaveLength(16);
   });
 });

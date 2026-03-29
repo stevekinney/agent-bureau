@@ -41,6 +41,13 @@ export function createApiKeyStore(kv: KeyValueStore): ApiKeyStore {
   async function create(options: CreateApiKeyOptions): Promise<{ key: ApiKey; plaintext: string }> {
     const plaintext = generateApiKey();
     const id = extractKeyId(plaintext);
+
+    // Guard against ID collision (extremely unlikely with 16 hex chars)
+    const existing = await kv.get(`${KEY_PREFIX}${id}`);
+    if (existing) {
+      throw new Error(`API key ID collision detected for id: ${id}. Retry key creation.`);
+    }
+
     const keyHash = await hashApiKey(plaintext);
 
     const key: ApiKey = {
