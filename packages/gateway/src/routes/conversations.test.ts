@@ -9,8 +9,10 @@ const authHeaders = { authorization: `Bearer ${AUTH_TOKEN}` };
 
 describe('conversations routes', () => {
   it('returns 501 when no persistence adapter is configured', async () => {
-    const gateway = await createTestGateway();
-    const response = await requestJSON(gateway, '/api/v1/conversations');
+    const gateway = await createTestGateway({ authToken: AUTH_TOKEN });
+    const response = await requestJSON(gateway, '/api/v1/conversations', {
+      headers: authHeaders,
+    });
     expect(response.status).toBe(501);
     const body = await response.json();
     expect(body.error.code).toBe('NOT_IMPLEMENTED');

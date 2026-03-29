@@ -70,12 +70,18 @@ export function createRateLimiter(options?: RateLimitOptions) {
         Math.ceil(((entry.timestamps[0] ?? now) + windowMs - now) / 1000),
       );
 
-      context.header('x-ratelimit-limit', String(limit));
-      context.header('x-ratelimit-remaining', '0');
-      context.header('x-ratelimit-reset', String(resetAt));
-      context.header('retry-after', String(retryAfter));
-
-      throw new HTTPException(429, { message: 'Rate limit exceeded' });
+      throw new HTTPException(429, {
+        res: new Response(JSON.stringify({ error: { message: 'Rate limit exceeded' } }), {
+          status: 429,
+          headers: new Headers({
+            'content-type': 'application/json',
+            'x-ratelimit-limit': String(limit),
+            'x-ratelimit-remaining': '0',
+            'x-ratelimit-reset': String(resetAt),
+            'retry-after': String(retryAfter),
+          }),
+        }),
+      });
     }
 
     entry.timestamps.push(now);

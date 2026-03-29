@@ -86,7 +86,7 @@ export function createApiKeyStore(kv: KeyValueStore): ApiKeyStore {
     key.lastUsedAt = new Date().toISOString();
     await kv.set(`${KEY_PREFIX}${id}`, JSON.stringify(key));
 
-    return key;
+    return { ...key, keyHash: '' };
   }
 
   async function revoke(id: string): Promise<void> {

@@ -79,11 +79,14 @@ export function createContextAssembler(): ContextAssembler {
       };
     }
 
-    // Calculate per-slice budgets
+    // Calculate per-slice budgets. Clamp the total ratio to 1.0 to prevent
+    // over-allocation when user-supplied ratios exceed the available budget.
+    const totalRatio = systemBudgetRatio + historyBudgetRatio + retrievedBudgetRatio;
+    const scale = totalRatio > 1 ? 1 / totalRatio : 1;
     const allocatable = budget.allocate();
-    const systemBudget = Math.floor(allocatable * systemBudgetRatio);
-    const historyBudget = Math.floor(allocatable * historyBudgetRatio);
-    const retrievedBudget = Math.floor(allocatable * retrievedBudgetRatio);
+    const systemBudget = Math.floor(allocatable * systemBudgetRatio * scale);
+    const historyBudget = Math.floor(allocatable * historyBudgetRatio * scale);
+    const retrievedBudget = Math.floor(allocatable * retrievedBudgetRatio * scale);
 
     // Partition messages
     const systemMessages = visibleMessages.filter((m) => m.role === 'system');
