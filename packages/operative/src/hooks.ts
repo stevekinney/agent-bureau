@@ -2,6 +2,7 @@ import type { Toolbox, ToolExecutionResult } from 'armorer';
 import type { ToolCall } from 'interoperability';
 import type { HookMap } from 'lifecycle';
 
+import type { AgentSession } from './agent-session';
 import type {
   GenerateResponse,
   StepContext,
@@ -24,4 +25,8 @@ export interface OperativeHookMap extends HookMap {
     result: ToolExecutionResult,
     context: ToolExecutionResultContext,
   ) => Promise<ToolExecutionResult | void>;
+  onSessionCreate: (session: AgentSession) => Promise<void>;
+  onSessionSave: (session: AgentSession) => Promise<void>;
+  onSessionLoad: (session: AgentSession) => Promise<void>;
+  onSessionDelete: (id: string) => Promise<void>;
 }

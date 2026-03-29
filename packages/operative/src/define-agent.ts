@@ -155,8 +155,12 @@ async function runWithSessionLifecycle(
               conversationHistory: stepResult.conversation.current,
               id: sessionId,
             });
-        await saveAgentSession(persistence, session);
-        await onSessionSave?.(session);
+        try {
+          await saveAgentSession(persistence, session);
+          await onSessionSave?.(session);
+        } catch {
+          // Auto-save errors must not crash the run
+        }
       },
     };
   }
@@ -177,8 +181,12 @@ async function runWithSessionLifecycle(
             conversationHistory: result.conversation.current,
             id: sessionId,
           });
-      await saveAgentSession(persistence, session);
-      await onSessionSave?.(session);
+      try {
+        await saveAgentSession(persistence, session);
+        await onSessionSave?.(session);
+      } catch {
+        // Auto-save errors must not crash the run
+      }
     }
   }
 
@@ -216,8 +224,12 @@ function createRunWithSessionLifecycle(
             conversationHistory: stepResult.conversation.current,
             id: sessionId,
           });
-      await saveAgentSession(persistence, session);
-      await onSessionSave?.(session);
+      try {
+        await saveAgentSession(persistence, session);
+        await onSessionSave?.(session);
+      } catch {
+        // Auto-save errors must not crash the run
+      }
     };
   }
 
@@ -246,8 +258,12 @@ function createRunWithSessionLifecycle(
               conversationHistory: result.conversation.current,
               id: sessionId,
             });
-        await saveAgentSession(persistence, session);
-        await onSessionSave?.(session);
+        try {
+          await saveAgentSession(persistence, session);
+          await onSessionSave?.(session);
+        } catch {
+          // Auto-save errors must not crash the run
+        }
       }
 
       return result;
@@ -265,8 +281,12 @@ function createRunWithSessionLifecycle(
         conversationHistory: result.conversation.current,
         id: sessionId,
       });
-      await saveAgentSession(persistence, session);
-      await onSessionSave?.(session);
+      try {
+        await saveAgentSession(persistence, session);
+        await onSessionSave?.(session);
+      } catch {
+        // Auto-save errors must not crash the run
+      }
       return result;
     })();
 

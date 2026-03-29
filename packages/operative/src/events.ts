@@ -362,6 +362,26 @@ export class SessionLoadedEvent extends Event {
   }
 }
 
+export class SessionCreatedEvent extends Event {
+  static readonly type = 'session.created' as const;
+  readonly sessionId: string;
+  readonly agentName: string;
+  constructor(sessionId: string, agentName: string) {
+    super(SessionCreatedEvent.type);
+    this.sessionId = sessionId;
+    this.agentName = agentName;
+  }
+}
+
+export class SessionDeletedEvent extends Event {
+  static readonly type = 'session.deleted' as const;
+  readonly sessionId: string;
+  constructor(sessionId: string) {
+    super(SessionDeletedEvent.type);
+    this.sessionId = sessionId;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Event map: maps event type string to the Event subclass instance
 // ---------------------------------------------------------------------------
@@ -394,6 +414,8 @@ export interface OperativeEventMap extends EventMap {
   [BudgetExceededEvent.type]: BudgetExceededEvent;
   [SessionSavedEvent.type]: SessionSavedEvent;
   [SessionLoadedEvent.type]: SessionLoadedEvent;
+  [SessionCreatedEvent.type]: SessionCreatedEvent;
+  [SessionDeletedEvent.type]: SessionDeletedEvent;
 }
 
 export type OperativeEventType = keyof OperativeEventMap;
