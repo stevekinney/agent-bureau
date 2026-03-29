@@ -1,3 +1,4 @@
+import { sha256HexSync } from 'interoperability';
 import type { KeyValueStore } from 'storage';
 import { z } from 'zod';
 
@@ -52,7 +53,7 @@ export interface AcceptProposalOptions {
 // ── Hashing ─────────────────────────────────────────────────────────
 
 function hashContent(content: string): string {
-  return new Bun.CryptoHasher('sha256').update(content).digest('hex');
+  return sha256HexSync(content);
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────

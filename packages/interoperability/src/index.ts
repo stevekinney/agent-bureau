@@ -21,3 +21,5 @@ export type {
   ToolResult,
   ToolResultInput,
 } from './types';
+export type { IncrementalHash } from './hash';
+export { createIncrementalHash, sha256Hex, sha256HexSync } from './hash';

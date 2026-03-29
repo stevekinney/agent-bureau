@@ -7,6 +7,7 @@ import { BudgetExceededError, ElicitationDeniedError } from './errors';
 import {
   BackpressureAppliedEvent,
   BackpressureReleasedEvent,
+  ContextBudgetWarningEvent,
   ContextCompactedEvent,
   ElicitationRequestedEvent,
   ElicitationResolvedEvent,
@@ -29,7 +30,10 @@ import {
   ToolsExecutingEvent,
   UsageAccumulatedEvent,
 } from './events';
+import type { ToolChoice } from './structured-output/types';
+import { zodToJsonSchema } from './structured-output/zod-to-json-schema';
 import type {
+  GenerateContext,
   GenerateResponse,
   OnElicitation,
   RetryOptions,
@@ -87,7 +91,7 @@ function resolveDelay(delay: RetryOptions['delay'], attempt: number): number {
 
 async function callGenerateWithRetry(
   generate: RunOptions['generate'],
-  context: { conversation: Conversation; step: number; signal?: AbortSignal; toolbox: Toolbox },
+  context: GenerateContext,
   retry: RetryOptions | undefined,
   emitter: EventDispatcher | undefined,
 ): Promise<GenerateResponse> {
@@ -174,6 +178,7 @@ export async function executeLoop(
     onMaximumSteps,
     parentContext,
     withTraceContext,
+    toolChoice: defaultToolChoice,
   } = options;
 
   const prepareStepHooks = normalizeToArray(options.prepareStep);
@@ -192,6 +197,15 @@ export async function executeLoop(
   const conversation = isConversation(options.conversation)
     ? options.conversation
     : new Conversation(options.conversation);
+
+  // Bridge responseSchema → responseFormat for providers that support native structured output
+  const responseFormat = responseSchema
+    ? ({
+        type: 'json_schema' as const,
+        schema: zodToJsonSchema(responseSchema),
+        name: 'response',
+      } as const)
+    : undefined;
 
   const stopConditions = normalizeStopConditions(options.stopWhen);
   const steps: StepResult[] = [];
@@ -307,20 +321,87 @@ export async function executeLoop(
       const estimator =
         contextManagement.tokenEstimator ?? ((c: Conversation) => c.estimateTokens());
       const tokensBefore = estimator(conversation);
-      if (tokensBefore > contextManagement.maxTokens) {
-        try {
-          await contextManagement.onCompact(conversation, {
-            conversation,
-            step,
-            signal: stepSignal,
-            abortStep,
-            elicit,
-          });
-          const tokensAfter = estimator(conversation);
-          emitter?.dispatch(new ContextCompactedEvent(step, tokensBefore, tokensAfter));
-        } catch (error) {
-          emitter?.dispatch(new RunErrorEvent(step, error));
-          return makeErrorResult(error);
+
+      // Emit budget warning when remaining tokens fall below warningThreshold
+      const warningThreshold =
+        contextManagement.warningThreshold ?? Math.floor(contextManagement.maxTokens * 0.2);
+      const remaining = contextManagement.maxTokens - tokensBefore;
+      if (remaining <= warningThreshold) {
+        emitter?.dispatch(
+          new ContextBudgetWarningEvent(step, tokensBefore, remaining, contextManagement.maxTokens),
+        );
+      }
+
+      // Determine compaction threshold (new field or legacy maxTokens)
+      const compactionThreshold =
+        contextManagement.compactionThreshold ?? contextManagement.maxTokens;
+      if (tokensBefore > compactionThreshold) {
+        // Run beforeCompaction hook if registered
+        let shouldCompact = true;
+        if (hooks?.has('beforeCompaction')) {
+          try {
+            const hookResult = await hooks.run('beforeCompaction', {
+              conversation,
+              step,
+              budget: {
+                maxTokens: contextManagement.maxTokens,
+                minimumResponseTokens: contextManagement.minimumResponseTokens ?? 1500,
+                warningThreshold,
+                compactionThreshold,
+                used: tokensBefore,
+                remaining,
+                exceeds: true,
+                warning: remaining <= warningThreshold,
+                update() {},
+                allocate() {
+                  return 0;
+                },
+                estimate(text: string) {
+                  return Math.ceil(text.length / 4);
+                },
+              },
+            });
+            if (hookResult === false) {
+              shouldCompact = false;
+            }
+          } catch (error) {
+            emitter?.dispatch(new RunErrorEvent(step, error));
+            return makeErrorResult(error);
+          }
+        }
+
+        if (shouldCompact) {
+          try {
+            const messagesBefore = conversation.getMessages().length;
+            await contextManagement.onCompact(conversation, {
+              conversation,
+              step,
+              signal: stepSignal,
+              abortStep,
+              elicit,
+            });
+            const tokensAfter = estimator(conversation);
+            const messagesAfter = conversation.getMessages().length;
+            emitter?.dispatch(new ContextCompactedEvent(step, tokensBefore, tokensAfter));
+
+            // Run afterCompaction hook if registered
+            if (hooks?.has('afterCompaction')) {
+              try {
+                await hooks.run('afterCompaction', {
+                  conversation,
+                  step,
+                  messagesRemoved: messagesBefore - messagesAfter,
+                  tokensFreed: tokensBefore - tokensAfter,
+                });
+              } catch (error) {
+                emitter?.dispatch(new RunErrorEvent(step, error));
+                return makeErrorResult(error);
+              }
+            }
+          } catch (error) {
+            emitter?.dispatch(new RunErrorEvent(step, error));
+            return makeErrorResult(error);
+          }
         }
       }
     }
@@ -337,6 +418,16 @@ export async function executeLoop(
       const registryToolbox = await hooks.run('selectTools', selectContext);
       if (registryToolbox !== undefined && !isRegistryPassthrough(registryToolbox, selectContext)) {
         stepToolbox = registryToolbox;
+      }
+    }
+
+    // Resolve per-step tool choice: hook override → RunOptions default → undefined
+    let stepToolChoice: ToolChoice | undefined = defaultToolChoice;
+    if (hooks?.has('selectToolChoice')) {
+      const selectToolChoiceContext = { conversation, step, signal: stepSignal, abortStep, elicit };
+      const hookResult = await hooks.run('selectToolChoice', selectToolChoiceContext);
+      if (hookResult !== undefined && !isRegistryPassthrough(hookResult, selectToolChoiceContext)) {
+        stepToolChoice = hookResult;
       }
     }
 
@@ -364,7 +455,14 @@ export async function executeLoop(
           const doGenerate = () =>
             callGenerateWithRetry(
               generate,
-              { conversation, step, signal: stepSignal, toolbox: stepToolbox },
+              {
+                conversation,
+                step,
+                signal: stepSignal,
+                toolbox: stepToolbox,
+                toolChoice: stepToolChoice,
+                responseFormat,
+              },
               retry,
               emitter,
             );

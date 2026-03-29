@@ -10,6 +10,12 @@ export function errorHandler(error: Error, context: Context): Response {
   const requestId = context.get('requestId') as string | undefined;
 
   if (error instanceof HTTPException) {
+    // If the exception carries a custom response (e.g., rate limiter with headers),
+    // use it directly to preserve headers like retry-after.
+    if (error.res) {
+      return error.res;
+    }
+
     const body: ApiErrorResponse = {
       error: {
         code: statusToCode(error.status),
@@ -42,6 +48,8 @@ function statusToCode(status: number): string {
       return 'NOT_FOUND';
     case 409:
       return 'CONFLICT';
+    case 429:
+      return 'RATE_LIMITED';
     case 501:
       return 'NOT_IMPLEMENTED';
     default:

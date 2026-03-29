@@ -4,6 +4,8 @@ import { toGeminiMessages } from 'conversationalist/adapters/gemini';
 
 import { HeraldError } from './errors.ts';
 import { resolveCommonParameters } from './resolve-common-parameters.ts';
+import { toGeminiResponseFormat } from './structured-output/response-format-adapters.ts';
+import { toGeminiToolChoice } from './structured-output/tool-choice-adapters.ts';
 import type {
   GeminiGenerativeModel,
   GeminiProviderOptions,
@@ -59,7 +61,9 @@ export function createGeminiGenerate(options: GeminiProviderOptions): GenerateFu
     };
 
     if (systemInstruction !== undefined) params['systemInstruction'] = systemInstruction;
-    if (hasTools) params['tools'] = tools;
+    if (hasTools && options.toolChoice !== 'none') params['tools'] = tools;
+    if (hasTools && options.toolChoice && options.toolChoice !== 'none')
+      params['toolConfig'] = toGeminiToolChoice(options.toolChoice);
 
     const generationConfig: Record<string, unknown> = {};
     if (common.maximumTokens !== undefined)
@@ -67,6 +71,10 @@ export function createGeminiGenerate(options: GeminiProviderOptions): GenerateFu
     if (common.temperature !== undefined) generationConfig['temperature'] = common.temperature;
     if (common.topP !== undefined) generationConfig['topP'] = common.topP;
     if (common.stopSequences) generationConfig['stopSequences'] = common.stopSequences;
+    if (options.responseFormat) {
+      const adapted = toGeminiResponseFormat(options.responseFormat);
+      if (adapted !== undefined) Object.assign(generationConfig, adapted);
+    }
 
     if (Object.keys(generationConfig).length > 0) {
       params['generationConfig'] = generationConfig;
@@ -162,7 +170,9 @@ export function createGeminiGenerateStream(
     };
 
     if (systemInstruction !== undefined) params['systemInstruction'] = systemInstruction;
-    if (hasTools) params['tools'] = tools;
+    if (hasTools && options.toolChoice !== 'none') params['tools'] = tools;
+    if (hasTools && options.toolChoice && options.toolChoice !== 'none')
+      params['toolConfig'] = toGeminiToolChoice(options.toolChoice);
 
     const generationConfig: Record<string, unknown> = {};
     if (common.maximumTokens !== undefined)
@@ -170,6 +180,10 @@ export function createGeminiGenerateStream(
     if (common.temperature !== undefined) generationConfig['temperature'] = common.temperature;
     if (common.topP !== undefined) generationConfig['topP'] = common.topP;
     if (common.stopSequences) generationConfig['stopSequences'] = common.stopSequences;
+    if (options.responseFormat) {
+      const adapted = toGeminiResponseFormat(options.responseFormat);
+      if (adapted !== undefined) Object.assign(generationConfig, adapted);
+    }
 
     if (Object.keys(generationConfig).length > 0) {
       params['generationConfig'] = generationConfig;

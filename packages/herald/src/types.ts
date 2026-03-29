@@ -1,5 +1,7 @@
 import type { GenerateFunction } from 'operative';
 
+import type { ResponseFormat, ToolChoice } from './structured-output/types.ts';
+
 export type {
   GenerateContext,
   GenerateFunction,
@@ -23,6 +25,8 @@ export interface BaseProviderOptions {
   temperature?: number;
   topP?: number;
   stopSequences?: string[];
+  toolChoice?: ToolChoice;
+  responseFormat?: ResponseFormat;
 }
 
 /**
