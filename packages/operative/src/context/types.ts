@@ -47,8 +47,6 @@ export type ContextAssembler = (options: AssemblyOptions) => AssemblyResult;
 
 /** Options controlling how compaction strategies operate. */
 export interface CompactionOptions {
-  /** Which strategy to apply. Default: `'sliding-window'`. */
-  strategy?: 'summarization' | 'sliding-window' | 'selective-pruning' | 'hybrid';
   /** Number of recent messages to always retain. Default: `4`. */
   retainRecentMessages?: number;
   /** Summarizer function for strategies that need it. */
@@ -77,6 +75,4 @@ export interface ContextEngineOptions {
   tokenEstimator?: (text: string) => number;
   /** Override the context assembler. */
   assembler?: ContextAssembler;
-  /** Default compaction strategy. Default: `'sliding-window'`. */
-  compactionStrategy?: CompactionOptions['strategy'];
 }
