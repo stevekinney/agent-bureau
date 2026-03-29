@@ -11,9 +11,15 @@ import type {
 
 const KEY_PREFIX = 'agent-session:';
 
+/** Returns true if the value is a string that parses to a valid Date. */
+function isValidDate(value: unknown): boolean {
+  return typeof value === 'string' && !isNaN(new Date(value).getTime());
+}
+
 /**
  * Parses a stored JSON string into an AgentSession, returning undefined
- * when the data is missing or malformed.
+ * when the data is missing or malformed. Validates that `createdAt` and
+ * `updatedAt` are valid ISO date strings to prevent silent sort failures.
  */
 function parseSession(raw: string | null): AgentSession | undefined {
   if (!raw) return undefined;
@@ -26,7 +32,9 @@ function parseSession(raw: string | null): AgentSession | undefined {
       'agentName' in parsed &&
       'conversationHistory' in parsed &&
       'createdAt' in parsed &&
-      'updatedAt' in parsed
+      'updatedAt' in parsed &&
+      isValidDate((parsed as Record<string, unknown>)['createdAt']) &&
+      isValidDate((parsed as Record<string, unknown>)['updatedAt'])
     ) {
       return parsed as AgentSession;
     }

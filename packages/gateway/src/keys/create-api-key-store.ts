@@ -5,6 +5,11 @@ import type { ApiKey, ApiKeyStore, CreateApiKeyOptions } from './types';
 
 const KEY_PREFIX = 'api-key:';
 
+/** Returns true if the value is a string that parses to a valid Date. */
+function isValidDate(value: unknown): boolean {
+  return typeof value === 'string' && !isNaN(new Date(value).getTime());
+}
+
 /** Safely parse a stored JSON string into an ApiKey, returning undefined on corruption. */
 function parseApiKey(raw: string): ApiKey | undefined {
   try {
@@ -16,7 +21,8 @@ function parseApiKey(raw: string): ApiKey | undefined {
       'name' in parsed &&
       'keyHash' in parsed &&
       'active' in parsed &&
-      'createdAt' in parsed
+      'createdAt' in parsed &&
+      isValidDate((parsed as Record<string, unknown>)['createdAt'])
     ) {
       return parsed as ApiKey;
     }

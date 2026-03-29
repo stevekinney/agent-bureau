@@ -94,7 +94,8 @@ export function createTokenBudget(options: TokenBudgetOptions): TokenBudget {
     allocate(ratio?: number): number {
       const allocatable = Math.max(0, maxTokens - used - minimumResponseTokens);
       if (ratio !== undefined) {
-        return Math.floor(allocatable * ratio);
+        const clamped = Math.max(0, Math.min(1, ratio));
+        return Math.floor(allocatable * clamped);
       }
       return allocatable;
     },
