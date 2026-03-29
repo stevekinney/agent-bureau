@@ -11,6 +11,28 @@ export { createAdaptiveBackoff, createSlidingWindow, createTokenBucket } from '.
 export type { RepeatingToolCallsOptions, TokenBudgetOptions } from './conditions/index';
 export { stopWhen } from './conditions/index';
 export type {
+  AssemblyOptions,
+  AssemblyResult,
+  BudgetReport,
+  CompactionOptions,
+  CompactionStrategy,
+  ContextAssembler,
+  ContextEngineOptions,
+  TokenBudgetOptions as ContextTokenBudgetOptions,
+  MergeSubagentResultOptions,
+  PrepareSubagentContextOptions,
+  TokenBudget,
+} from './context/index';
+export {
+  createContextAssembler,
+  createHybridStrategy,
+  createSelectivePruningStrategy,
+  createSlidingWindowStrategy,
+  createTokenBudget,
+  mergeSubagentResult,
+  prepareSubagentContext,
+} from './context/index';
+export type {
   CostBudgetExceededEvent,
   CostBudgetMonitor,
   CostBudgetOptions,
@@ -133,8 +155,15 @@ export {
   ToolsExecutingEvent,
   UsageAccumulatedEvent,
 } from './events';
+export { ContextBudgetWarningEvent } from './events';
 export { composeGenerate, createFallbackGenerate } from './generate-middleware';
 export type { OperativeHookMap } from './hooks';
+export type {
+  AfterCompactionHookContext,
+  AfterContextAssemblyHookContext,
+  BeforeCompactionHookContext,
+  ContextAssemblyHookContext,
+} from './hooks';
 export { run } from './run';
 export type {
   CreateChunkedTaskOptions,

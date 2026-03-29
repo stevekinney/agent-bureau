@@ -41,6 +41,12 @@ const entrypoints = [
   './src/session/create-session-store.ts',
   './src/session/session-resume.ts',
   './src/test/index.ts',
+  './src/context/index.ts',
+  './src/context/token-budget.ts',
+  './src/context/assembly.ts',
+  './src/context/compaction-strategies.ts',
+  './src/context/subagent-context.ts',
+  './src/context/types.ts',
 ];
 
 const root = './src';
