@@ -9,6 +9,7 @@ import type { AgentSession } from './agent-session';
 import type { BackpressureStrategy } from './backpressure';
 import type { ActiveRun } from './create-run';
 import type { OperativeHookMap } from './hooks';
+import type { ResponseFormat, ToolChoice } from './structured-output/types';
 
 export type { Toolbox, ToolExecuteOptions, ToolExecutionResult } from 'armorer';
 export type { TokenUsage } from 'conversationalist';
@@ -71,6 +72,8 @@ export interface GenerateContext {
   step: number;
   signal?: AbortSignal;
   toolbox: Toolbox;
+  toolChoice?: ToolChoice;
+  responseFormat?: ResponseFormat;
 }
 
 /**
@@ -254,6 +257,11 @@ export interface RunOptions {
    * This keeps operative free of any `@opentelemetry/api` dependency.
    */
   withTraceContext?: <T>(parentContext: unknown, fn: () => Promise<T>) => Promise<T>;
+  /**
+   * Default tool choice constraint applied to every step unless overridden
+   * by the `selectToolChoice` hook.
+   */
+  toolChoice?: ToolChoice;
 }
 
 /**

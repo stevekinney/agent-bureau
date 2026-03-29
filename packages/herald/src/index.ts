@@ -17,6 +17,14 @@ export {
 export { HeraldError, shouldRetryHeraldError } from './errors.ts';
 export { createGeminiGenerate, createGeminiGenerateStream } from './gemini.ts';
 export { createOpenAIGenerate, createOpenAIGenerateStream } from './openai.ts';
+export type { ResponseFormat, ToolChoice } from './structured-output/index.ts';
+export {
+  toAnthropicToolChoice,
+  toGeminiResponseFormat,
+  toGeminiToolChoice,
+  toOpenAIResponseFormat,
+  toOpenAIToolChoice,
+} from './structured-output/index.ts';
 export type {
   AnthropicClient,
   AnthropicMessageResponse,

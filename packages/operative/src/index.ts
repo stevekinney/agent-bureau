@@ -168,6 +168,8 @@ export {
   TaskQueuedEvent,
 } from './scheduler/index';
 export { withStreaming } from './streaming';
+export type { ResponseFormat, ToolChoice } from './structured-output/index';
+export { zodToJsonSchema } from './structured-output/index';
 export type {
   AfterToolExecutionHook,
   AgentDefinition,

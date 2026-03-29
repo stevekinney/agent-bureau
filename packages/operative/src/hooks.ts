@@ -2,6 +2,7 @@ import type { Toolbox, ToolExecutionResult } from 'armorer';
 import type { ToolCall } from 'interoperability';
 import type { HookMap } from 'lifecycle';
 
+import type { ToolChoice } from './structured-output/types';
 import type {
   GenerateResponse,
   StepContext,
@@ -24,4 +25,5 @@ export interface OperativeHookMap extends HookMap {
     result: ToolExecutionResult,
     context: ToolExecutionResultContext,
   ) => Promise<ToolExecutionResult | void>;
+  selectToolChoice: (context: StepContext) => Promise<ToolChoice | void>;
 }

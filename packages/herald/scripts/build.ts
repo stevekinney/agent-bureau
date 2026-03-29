@@ -13,6 +13,7 @@ const entrypoints = [
   './src/embeddings/voyage.ts',
   './src/embeddings/ollama.ts',
   './src/instrumentation/index.ts',
+  './src/structured-output/index.ts',
   './src/test/index.ts',
 ];
 

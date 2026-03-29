@@ -36,6 +36,7 @@ const entrypoints = [
   './src/scheduler/create-scheduler.ts',
   './src/scheduler/create-heartbeat.ts',
   './src/scheduler/create-chunked-task.ts',
+  './src/structured-output/index.ts',
   './src/test/index.ts',
 ];
 
