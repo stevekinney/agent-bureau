@@ -12,10 +12,10 @@ type OpenAIResponseFormat =
   | undefined;
 
 /**
- * Gemini generation config fields for response format.
+ * Gemini generationConfig fields for response format (camelCase per @google/generative-ai SDK).
  */
 type GeminiResponseFormat =
-  | { response_mime_type: 'application/json'; response_schema?: Record<string, unknown> }
+  | { responseMimeType: 'application/json'; responseSchema?: Record<string, unknown> }
   | undefined;
 
 /**
@@ -43,9 +43,9 @@ export function toOpenAIResponseFormat(format: ResponseFormat): OpenAIResponseFo
  */
 export function toGeminiResponseFormat(format: ResponseFormat): GeminiResponseFormat {
   if (format.type === 'text') return undefined;
-  if (format.type === 'json') return { response_mime_type: 'application/json' };
+  if (format.type === 'json') return { responseMimeType: 'application/json' };
   return {
-    response_mime_type: 'application/json',
-    response_schema: format.schema,
+    responseMimeType: 'application/json',
+    responseSchema: format.schema,
   };
 }

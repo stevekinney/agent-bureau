@@ -224,7 +224,7 @@ describe('OpenAI provider integration', () => {
 });
 
 describe('Gemini provider integration', () => {
-  it('passes tool_config when toolChoice is set', async () => {
+  it('passes toolConfig when toolChoice is set', async () => {
     const client = createMockGeminiModel([simpleGeminiResponse]);
     const generate = createGeminiGenerate({
       model: 'gemini-pro',
@@ -236,8 +236,8 @@ describe('Gemini provider integration', () => {
     await generate(context);
 
     const call = client._calls[0]!;
-    expect(call['tool_config']).toEqual({
-      function_calling_config: { mode: 'ANY' },
+    expect(call['toolConfig']).toEqual({
+      functionCallingConfig: { mode: 'ANY' },
     });
   });
 
@@ -256,8 +256,8 @@ describe('Gemini provider integration', () => {
     const call = client._calls[0]!;
     const generationConfig = call['generationConfig'] as Record<string, unknown>;
     expect(generationConfig).toBeDefined();
-    expect(generationConfig['response_mime_type']).toBe('application/json');
-    expect(generationConfig['response_schema']).toEqual(schema);
+    expect(generationConfig['responseMimeType']).toBe('application/json');
+    expect(generationConfig['responseSchema']).toEqual(schema);
   });
 
   it('passes json mime type for plain json format', async () => {
@@ -274,11 +274,11 @@ describe('Gemini provider integration', () => {
     const call = client._calls[0]!;
     const generationConfig = call['generationConfig'] as Record<string, unknown>;
     expect(generationConfig).toBeDefined();
-    expect(generationConfig['response_mime_type']).toBe('application/json');
-    expect(generationConfig).not.toHaveProperty('response_schema');
+    expect(generationConfig['responseMimeType']).toBe('application/json');
+    expect(generationConfig).not.toHaveProperty('responseSchema');
   });
 
-  it('passes specific tool choice with allowed_function_names', async () => {
+  it('passes specific tool choice with allowedFunctionNames', async () => {
     const client = createMockGeminiModel([simpleGeminiResponse]);
     const generate = createGeminiGenerate({
       model: 'gemini-pro',
@@ -290,12 +290,12 @@ describe('Gemini provider integration', () => {
     await generate(context);
 
     const call = client._calls[0]!;
-    expect(call['tool_config']).toEqual({
-      function_calling_config: { mode: 'ANY', allowed_function_names: ['get_weather'] },
+    expect(call['toolConfig']).toEqual({
+      functionCallingConfig: { mode: 'ANY', allowedFunctionNames: ['get_weather'] },
     });
   });
 
-  it('does not set tool_config or response format when not provided', async () => {
+  it('does not set toolConfig or response format when not provided', async () => {
     const client = createMockGeminiModel([simpleGeminiResponse]);
     const generate = createGeminiGenerate({
       model: 'gemini-pro',
@@ -306,7 +306,7 @@ describe('Gemini provider integration', () => {
     await generate(context);
 
     const call = client._calls[0]!;
-    expect(call).not.toHaveProperty('tool_config');
+    expect(call).not.toHaveProperty('toolConfig');
     expect(call).not.toHaveProperty('generationConfig');
   });
 });

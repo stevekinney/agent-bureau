@@ -51,26 +51,26 @@ describe('toOpenAIToolChoice', () => {
 describe('toGeminiToolChoice', () => {
   it('maps auto to AUTO mode', () => {
     expect(toGeminiToolChoice('auto')).toEqual({
-      function_calling_config: { mode: 'AUTO' },
+      functionCallingConfig: { mode: 'AUTO' },
     });
   });
 
   it('maps required to ANY mode', () => {
     expect(toGeminiToolChoice('required')).toEqual({
-      function_calling_config: { mode: 'ANY' },
+      functionCallingConfig: { mode: 'ANY' },
     });
   });
 
   it('maps none to NONE mode', () => {
     expect(toGeminiToolChoice('none')).toEqual({
-      function_calling_config: { mode: 'NONE' },
+      functionCallingConfig: { mode: 'NONE' },
     });
   });
 
-  it('maps a specific tool to ANY mode with allowed_function_names', () => {
+  it('maps a specific tool to ANY mode with allowedFunctionNames', () => {
     const choice: ToolChoice = { tool: 'get_weather' };
     expect(toGeminiToolChoice(choice)).toEqual({
-      function_calling_config: { mode: 'ANY', allowed_function_names: ['get_weather'] },
+      functionCallingConfig: { mode: 'ANY', allowedFunctionNames: ['get_weather'] },
     });
   });
 });

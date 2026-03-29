@@ -19,12 +19,12 @@ type OpenAIToolChoice =
   | { type: 'function'; function: { name: string } };
 
 /**
- * Gemini tool_config parameter shape.
+ * Gemini toolConfig parameter shape (camelCase per @google/generative-ai SDK).
  */
 type GeminiToolConfig = {
-  function_calling_config: {
+  functionCallingConfig: {
     mode: 'AUTO' | 'ANY' | 'NONE';
-    allowed_function_names?: string[];
+    allowedFunctionNames?: string[];
   };
 };
 
@@ -55,10 +55,10 @@ export function toOpenAIToolChoice(choice: ToolChoice): OpenAIToolChoice {
  * Converts a ToolChoice to the Gemini API's tool_config format.
  */
 export function toGeminiToolChoice(choice: ToolChoice): GeminiToolConfig {
-  if (choice === 'auto') return { function_calling_config: { mode: 'AUTO' } };
-  if (choice === 'required') return { function_calling_config: { mode: 'ANY' } };
-  if (choice === 'none') return { function_calling_config: { mode: 'NONE' } };
+  if (choice === 'auto') return { functionCallingConfig: { mode: 'AUTO' } };
+  if (choice === 'required') return { functionCallingConfig: { mode: 'ANY' } };
+  if (choice === 'none') return { functionCallingConfig: { mode: 'NONE' } };
   return {
-    function_calling_config: { mode: 'ANY', allowed_function_names: [choice.tool] },
+    functionCallingConfig: { mode: 'ANY', allowedFunctionNames: [choice.tool] },
   };
 }

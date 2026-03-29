@@ -46,16 +46,16 @@ describe('toGeminiResponseFormat', () => {
   it('maps json to application/json mime type', () => {
     const format: ResponseFormat = { type: 'json' };
     expect(toGeminiResponseFormat(format)).toEqual({
-      response_mime_type: 'application/json',
+      responseMimeType: 'application/json',
     });
   });
 
-  it('maps json_schema to mime type with response_schema', () => {
+  it('maps json_schema to mime type with responseSchema', () => {
     const schema = { type: 'object', properties: { name: { type: 'string' } } };
     const format: ResponseFormat = { type: 'json_schema', schema };
     expect(toGeminiResponseFormat(format)).toEqual({
-      response_mime_type: 'application/json',
-      response_schema: schema,
+      responseMimeType: 'application/json',
+      responseSchema: schema,
     });
   });
 });
