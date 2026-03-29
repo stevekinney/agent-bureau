@@ -10,7 +10,7 @@ import type {
   Subscription,
 } from 'lifecycle';
 import type { CreateMemoryOptions, Memory } from 'memory';
-import type { GenerateFunction, Scheduler, StopCondition } from 'operative';
+import type { GenerateFunction, Scheduler, SessionStore, StopCondition } from 'operative';
 import type { Store } from 'sentinel';
 import type { KeyValueStore } from 'storage';
 
@@ -105,6 +105,8 @@ export interface Bureau {
   readonly signal: AbortSignal;
 
   dispose(): void;
+
+  readonly sessionStore: SessionStore | undefined;
 }
 
 // ── Gateway (HTTP layer wrapping Bureau) ────────────────────────────

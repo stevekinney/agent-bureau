@@ -120,6 +120,8 @@ export {
   RunCompletedEvent,
   RunErrorEvent,
   RunStartedEvent,
+  SessionCreatedEvent,
+  SessionDeletedEvent,
   SessionLoadedEvent,
   SessionSavedEvent,
   StepAbortedEvent,
@@ -167,6 +169,15 @@ export {
   TaskPreemptedEvent,
   TaskQueuedEvent,
 } from './scheduler/index';
+export type {
+  ResumeSessionOptions,
+  ResumeSessionResult,
+  SessionCleanupOptions,
+  SessionListOptions,
+  SessionStore,
+  SessionSummary,
+} from './session/index';
+export { createSessionStore, resumeSession } from './session/index';
 export { withStreaming } from './streaming';
 export type {
   AfterToolExecutionHook,

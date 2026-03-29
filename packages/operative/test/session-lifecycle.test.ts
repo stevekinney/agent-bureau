@@ -258,7 +258,7 @@ describe('session lifecycle via defineAgent', () => {
     expect(result.content).toBe('resumed');
   });
 
-  it('error propagation from onSessionSave hook', async () => {
+  it('auto-save errors do not crash the run', async () => {
     const store = createMockKeyValueStore();
 
     const agent = defineAgent({
@@ -272,10 +272,11 @@ describe('session lifecycle via defineAgent', () => {
       },
     });
 
-    await expect(agent.run('Hello')).rejects.toThrow('Save hook error');
+    const result = await agent.run('Hello');
+    expect(result.finishReason).toBe('stop-condition');
   });
 
-  it('createRun error propagation from onSessionSave hook', async () => {
+  it('createRun auto-save errors do not crash the run', async () => {
     const store = createMockKeyValueStore();
 
     const agent = defineAgent({
@@ -290,7 +291,8 @@ describe('session lifecycle via defineAgent', () => {
     });
 
     const activeRun = agent.createRun('Hello');
-    await expect(activeRun.result).rejects.toThrow('Save hook error in createRun');
+    const result = await activeRun.result;
+    expect(result.finishReason).toBe('stop-condition');
   });
 
   it('createRun error propagation from onSessionLoad hook', async () => {
