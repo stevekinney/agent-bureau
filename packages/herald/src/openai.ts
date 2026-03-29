@@ -55,8 +55,9 @@ export function createOpenAIGenerate(options: OpenAIProviderOptions): GenerateFu
     };
 
     if (common.maximumTokens !== undefined) params['max_tokens'] = common.maximumTokens;
-    if (hasTools) params['tools'] = Array.isArray(tools) ? tools : [tools];
-    if (hasTools && options.toolChoice)
+    if (hasTools && options.toolChoice !== 'none')
+      params['tools'] = Array.isArray(tools) ? tools : [tools];
+    if (hasTools && options.toolChoice && options.toolChoice !== 'none')
       params['tool_choice'] = toOpenAIToolChoice(options.toolChoice);
     if (options.responseFormat) {
       const adapted = toOpenAIResponseFormat(options.responseFormat);
@@ -144,8 +145,9 @@ export function createOpenAIGenerateStream(
     };
 
     if (common.maximumTokens !== undefined) params['max_tokens'] = common.maximumTokens;
-    if (hasTools) params['tools'] = Array.isArray(tools) ? tools : [tools];
-    if (hasTools && options.toolChoice)
+    if (hasTools && options.toolChoice !== 'none')
+      params['tools'] = Array.isArray(tools) ? tools : [tools];
+    if (hasTools && options.toolChoice && options.toolChoice !== 'none')
       params['tool_choice'] = toOpenAIToolChoice(options.toolChoice);
     if (options.responseFormat) {
       const adapted = toOpenAIResponseFormat(options.responseFormat);
