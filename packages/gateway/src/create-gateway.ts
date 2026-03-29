@@ -3,9 +3,17 @@ import { serveStatic } from 'hono/bun';
 import { cors } from 'hono/cors';
 
 import { createBureau } from './create-bureau';
-import { createAuthentication, errorHandler, requestIdentifier } from './middleware';
+import { bootstrapApiKey, createApiKeyStore } from './keys';
+import type { ApiKeyStore } from './keys/types';
+import {
+  createAuthentication,
+  createRateLimiter,
+  errorHandler,
+  requestIdentifier,
+} from './middleware';
 import { createRoutes } from './routes';
 import { createPages } from './server/pages';
+import { resolveStorageBackend } from './storage';
 import type { Gateway, GatewayOptions } from './types';
 import { DEFAULT_PORT } from './types';
 import { createWebSocketHandler } from './websocket';
@@ -20,15 +28,25 @@ export async function createGateway(options: GatewayOptions = {}): Promise<Gatew
   const bureau = await createBureau(options);
   const port = options.port ?? DEFAULT_PORT;
 
+  // ── API Key Store ───────────────────────────────────────────────
+  let apiKeyStore: ApiKeyStore | undefined;
+
+  if (options.storage) {
+    const backend = await resolveStorageBackend(options.storage);
+    apiKeyStore = createApiKeyStore(backend.kv);
+    await bootstrapApiKey(apiKeyStore);
+  }
+
   const app = new Hono();
 
   // Global middleware
   app.use('*', cors());
   app.use('*', requestIdentifier);
-  app.use('*', createAuthentication(options.authToken));
+  app.use('*', createAuthentication(options.authToken, apiKeyStore));
+  app.use('*', createRateLimiter());
 
   // Mount API routes
-  app.route('/', createRoutes(bureau));
+  app.route('/', createRoutes({ bureau, apiKeyStore }));
 
   // Mount SSR pages
   const configuration = bureau.getConfiguration();
