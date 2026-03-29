@@ -42,6 +42,8 @@ function statusToCode(status: number): string {
       return 'NOT_FOUND';
     case 409:
       return 'CONFLICT';
+    case 429:
+      return 'RATE_LIMITED';
     case 501:
       return 'NOT_IMPLEMENTED';
     default:

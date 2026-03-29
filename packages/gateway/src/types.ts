@@ -188,3 +188,17 @@ export interface HealthResponse {
 
 export const DEFAULT_PORT = 5555;
 export const DEFAULT_MAXIMUM_STEPS = 10;
+
+// ── API Key Scopes ─────────────────────────────────────────────────
+
+/** Scope definitions for route-level authorization. */
+export const SCOPE = {
+  RUNS_READ: 'runs:read',
+  RUNS_WRITE: 'runs:write',
+  CONVERSATIONS_READ: 'conversations:read',
+  CONVERSATIONS_WRITE: 'conversations:write',
+  CONFIG_READ: 'config:read',
+  KEYS_MANAGE: 'keys:manage',
+} as const;
+
+export type Scope = (typeof SCOPE)[keyof typeof SCOPE];
