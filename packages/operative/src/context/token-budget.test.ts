@@ -65,18 +65,17 @@ describe('createTokenBudget', () => {
     expect(budget.warning).toBe(true);
   });
 
-  it('allocate returns proportional budget for named slices', () => {
+  it('allocate returns the full allocatable budget without a ratio', () => {
     const budget = createTokenBudget({ maxTokens: 10000, minimumResponseTokens: 1500 });
     // Allocatable = 10000 - 1500 = 8500
-    const allocated = budget.allocate('system');
-    // Without a ratio, allocate returns the full allocatable budget
+    const allocated = budget.allocate();
     expect(allocated).toBe(8500);
   });
 
   it('allocate returns proportional budget with a ratio', () => {
     const budget = createTokenBudget({ maxTokens: 10000, minimumResponseTokens: 1500 });
     // Allocatable = 10000 - 1500 = 8500
-    const allocated = budget.allocate('system', 0.25);
+    const allocated = budget.allocate(0.25);
     expect(allocated).toBe(Math.floor(8500 * 0.25));
   });
 
@@ -85,13 +84,13 @@ describe('createTokenBudget', () => {
     budget.update(9000);
     // Only 1000 remaining, but minimumResponseTokens is 1500
     // Allocatable = max(0, remaining - minimumResponseTokens) = max(0, 1000 - 1500) = 0
-    const allocated = budget.allocate('anything');
+    const allocated = budget.allocate();
     expect(allocated).toBe(0);
   });
 
   it('defaults minimumResponseTokens to 1500', () => {
     const budget = createTokenBudget({ maxTokens: 10000 });
-    const allocated = budget.allocate('system');
+    const allocated = budget.allocate();
     expect(allocated).toBe(8500);
   });
 

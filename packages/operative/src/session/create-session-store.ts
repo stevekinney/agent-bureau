@@ -24,7 +24,9 @@ function parseSession(raw: string | null): AgentSession | undefined {
       parsed !== null &&
       'id' in parsed &&
       'agentName' in parsed &&
-      'conversationHistory' in parsed
+      'conversationHistory' in parsed &&
+      'createdAt' in parsed &&
+      'updatedAt' in parsed
     ) {
       return parsed as AgentSession;
     }

@@ -7,34 +7,9 @@
 
 import type { Conversation, Message } from 'conversationalist';
 
+import { getPendingToolCallIds } from './pending-tool-calls';
 import type { TokenBudget } from './token-budget';
 import type { CompactionOptions, CompactionStrategy } from './types';
-
-/**
- * Identifies messages that are part of pending (incomplete) tool interactions.
- * A pending tool call has no corresponding tool result.
- */
-function getPendingToolCallIds(messages: ReadonlyArray<Message>): Set<string> {
-  const completedCallIds = new Set<string>();
-  const allCallIds = new Set<string>();
-
-  for (const message of messages) {
-    if (message.role === 'tool-call' && message.toolCall) {
-      allCallIds.add(message.toolCall.id);
-    }
-    if (message.role === 'tool-result' && message.toolResult) {
-      completedCallIds.add(message.toolResult.callId);
-    }
-  }
-
-  const pending = new Set<string>();
-  for (const id of allCallIds) {
-    if (!completedCallIds.has(id)) {
-      pending.add(id);
-    }
-  }
-  return pending;
-}
 
 /**
  * Returns the set of message IDs that must be preserved because they belong

@@ -5,6 +5,27 @@ import type { ApiKey, ApiKeyStore, CreateApiKeyOptions } from './types';
 
 const KEY_PREFIX = 'api-key:';
 
+/** Safely parse a stored JSON string into an ApiKey, returning undefined on corruption. */
+function parseApiKey(raw: string): ApiKey | undefined {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (
+      typeof parsed === 'object' &&
+      parsed !== null &&
+      'id' in parsed &&
+      'name' in parsed &&
+      'keyHash' in parsed &&
+      'active' in parsed &&
+      'createdAt' in parsed
+    ) {
+      return parsed as ApiKey;
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Creates an API key store backed by a `KeyValueStore`. Keys are stored under
  * the `api-key:<id>` prefix. Plaintext keys are never persisted; only their
@@ -36,12 +57,8 @@ export function createApiKeyStore(kv: KeyValueStore): ApiKeyStore {
     const raw = await kv.get(`${KEY_PREFIX}${id}`);
     if (!raw) return null;
 
-    let key: ApiKey;
-    try {
-      key = JSON.parse(raw) as ApiKey;
-    } catch {
-      return null;
-    }
+    const key = parseApiKey(raw);
+    if (!key) return null;
 
     if (!key.active) return null;
 
@@ -63,7 +80,8 @@ export function createApiKeyStore(kv: KeyValueStore): ApiKeyStore {
     const raw = await kv.get(`${KEY_PREFIX}${id}`);
     if (!raw) return;
 
-    const key = JSON.parse(raw) as ApiKey;
+    const key = parseApiKey(raw);
+    if (!key) return;
     key.active = false;
     await kv.set(`${KEY_PREFIX}${id}`, JSON.stringify(key));
   }
@@ -76,13 +94,10 @@ export function createApiKeyStore(kv: KeyValueStore): ApiKeyStore {
       const raw = await kv.get(storageKey);
       if (!raw) continue;
 
-      try {
-        const key = JSON.parse(raw) as ApiKey;
-        // Strip the hash before returning
-        results.push({ ...key, keyHash: '' });
-      } catch {
-        // Skip malformed entries
-      }
+      const key = parseApiKey(raw);
+      if (!key) continue;
+      // Strip the hash before returning
+      results.push({ ...key, keyHash: '' });
     }
 
     return results;
@@ -94,7 +109,10 @@ export function createApiKeyStore(kv: KeyValueStore): ApiKeyStore {
       throw new Error(`API key not found: ${id}`);
     }
 
-    const oldKey = JSON.parse(raw) as ApiKey;
+    const oldKey = parseApiKey(raw);
+    if (!oldKey) {
+      throw new Error(`API key data corrupted: ${id}`);
+    }
 
     // Revoke the old key
     await revoke(id);

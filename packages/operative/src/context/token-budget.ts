@@ -20,7 +20,7 @@ export interface TokenBudget {
   /** Adds `tokens` to the running usage total. */
   update(tokens: number): void;
   /**
-   * Returns the number of tokens allocatable for a named slice.
+   * Returns the number of allocatable tokens.
    *
    * When `ratio` is provided, the allocation is `floor(allocatable * ratio)`.
    * Without a ratio the full allocatable budget is returned.
@@ -28,7 +28,7 @@ export interface TokenBudget {
    * Allocatable tokens are `max(0, remaining - minimumResponseTokens)` so
    * the model always has room to respond.
    */
-  allocate(slice: string, ratio?: number): number;
+  allocate(ratio?: number): number;
   /** Estimates the number of tokens in `text` using the configured estimator. */
   estimate(text: string): number;
 }
@@ -91,7 +91,7 @@ export function createTokenBudget(options: TokenBudgetOptions): TokenBudget {
     update(tokens: number): void {
       used += tokens;
     },
-    allocate(_slice: string, ratio?: number): number {
+    allocate(ratio?: number): number {
       const allocatable = Math.max(0, maxTokens - used - minimumResponseTokens);
       if (ratio !== undefined) {
         return Math.floor(allocatable * ratio);

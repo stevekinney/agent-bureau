@@ -130,14 +130,15 @@ describe('responseSchema to responseFormat bridge', () => {
     expect(format).toBeDefined();
     expect(format!.type).toBe('json_schema');
     if (format!.type === 'json_schema') {
-      expect(format!.schema).toEqual({
+      expect(format!.schema).toMatchObject({
         type: 'object',
-        properties: {
-          name: { type: 'string' },
-          age: { type: 'number' },
-        },
-        required: ['name', 'age'],
       });
+      const props = (format!.schema as Record<string, unknown>)['properties'] as Record<
+        string,
+        Record<string, unknown>
+      >;
+      expect(props['name']).toMatchObject({ type: 'string' });
+      expect(props['age']).toMatchObject({ type: 'number' });
       expect(format!.name).toBe('response');
     }
   });

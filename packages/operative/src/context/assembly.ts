@@ -7,6 +7,7 @@
 
 import type { Message } from 'conversationalist';
 
+import { getPendingToolCallIds } from './pending-tool-calls';
 import type { AssemblyOptions, AssemblyResult, BudgetReport, ContextAssembler } from './types';
 
 /** Default token estimator: roughly 4 characters per token. */
@@ -33,31 +34,6 @@ function estimateMessageTokens(message: Message, estimator: (text: string) => nu
   }
 
   return tokens;
-}
-
-/**
- * Returns the set of tool-call IDs that have no corresponding result.
- */
-function getPendingToolCallIds(messages: ReadonlyArray<Message>): Set<string> {
-  const completedIds = new Set<string>();
-  const allCallIds = new Set<string>();
-
-  for (const message of messages) {
-    if (message.role === 'tool-call' && message.toolCall) {
-      allCallIds.add(message.toolCall.id);
-    }
-    if (message.role === 'tool-result' && message.toolResult) {
-      completedIds.add(message.toolResult.callId);
-    }
-  }
-
-  const pending = new Set<string>();
-  for (const id of allCallIds) {
-    if (!completedIds.has(id)) {
-      pending.add(id);
-    }
-  }
-  return pending;
 }
 
 /**
@@ -104,7 +80,7 @@ export function createContextAssembler(): ContextAssembler {
     }
 
     // Calculate per-slice budgets
-    const allocatable = budget.allocate('total');
+    const allocatable = budget.allocate();
     const systemBudget = Math.floor(allocatable * systemBudgetRatio);
     const historyBudget = Math.floor(allocatable * historyBudgetRatio);
     const retrievedBudget = Math.floor(allocatable * retrievedBudgetRatio);

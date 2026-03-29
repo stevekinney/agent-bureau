@@ -136,6 +136,12 @@ describe('rotate', () => {
   });
 
   it('throws when rotating a non-existent key', async () => {
-    expect(store.rotate('nonexistent')).rejects.toThrow();
+    let threw = false;
+    try {
+      await store.rotate('nonexistent');
+    } catch {
+      threw = true;
+    }
+    expect(threw).toBe(true);
   });
 });
