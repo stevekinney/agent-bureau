@@ -350,6 +350,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     memory,
     scheduler,
     sessionStore,
+    kv,
     get ready() {
       return generate !== undefined;
     },

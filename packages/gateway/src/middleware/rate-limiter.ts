@@ -26,12 +26,25 @@ const DEFAULT_WINDOW_MS = 60_000;
  *
  * Rate limit state is stored in memory and resets on process restart.
  */
+const CLEANUP_INTERVAL = 1000; // Sweep stale entries every N requests
+
 export function createRateLimiter(options?: RateLimitOptions) {
   const limit = options?.limit ?? DEFAULT_LIMIT;
   const windowMs = options?.windowMs ?? DEFAULT_WINDOW_MS;
   const windows = new Map<string, WindowEntry>();
+  let requestCount = 0;
 
   return createMiddleware(async (context, next) => {
+    // Periodically sweep stale entries to prevent unbounded map growth
+    if (++requestCount % CLEANUP_INTERVAL === 0) {
+      const cutoff = Date.now() - windowMs;
+      for (const [key, entry] of windows) {
+        if (entry.timestamps.every((t) => t <= cutoff)) {
+          windows.delete(key);
+        }
+      }
+    }
+
     const keyId = context.req.header('x-api-key-id');
     if (!keyId) {
       await next();

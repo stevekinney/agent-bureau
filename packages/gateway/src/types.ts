@@ -107,6 +107,7 @@ export interface Bureau {
   dispose(): void;
 
   readonly sessionStore: SessionStore | undefined;
+  readonly kv: KeyValueStore | undefined;
 }
 
 // ── Gateway (HTTP layer wrapping Bureau) ────────────────────────────

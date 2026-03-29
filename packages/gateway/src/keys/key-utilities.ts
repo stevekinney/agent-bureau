@@ -32,14 +32,14 @@ export async function hashApiKey(key: string): Promise<string> {
 export async function verifyApiKey(plaintext: string, hash: string): Promise<boolean> {
   const candidateHash = await hashApiKey(plaintext);
 
-  // Constant-time comparison: compare every byte regardless of early mismatch
+  // Constant-time comparison: always compare every byte regardless of length
+  // mismatch or early differences to avoid leaking timing information.
   const a = new TextEncoder().encode(candidateHash);
   const b = new TextEncoder().encode(hash);
+  const maxLen = Math.max(a.length, b.length);
 
-  if (a.length !== b.length) return false;
-
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) {
+  let diff = a.length ^ b.length; // non-zero if lengths differ
+  for (let i = 0; i < maxLen; i++) {
     diff |= (a[i] ?? 0) ^ (b[i] ?? 0);
   }
 

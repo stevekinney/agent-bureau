@@ -18,6 +18,23 @@ import type { ApiKeyStore } from '../keys/types';
  */
 export function createAuthentication(authToken: string | undefined, apiKeyStore?: ApiKeyStore) {
   return createMiddleware(async (context, next) => {
+    // Strip any client-injected scope/key headers to prevent spoofing.
+    // These headers are set exclusively by this middleware after verification.
+    const raw = context.req.raw;
+    if (raw.headers.has('x-api-key-id') || raw.headers.has('x-api-key-scopes')) {
+      const sanitized = new Headers(raw.headers);
+      sanitized.delete('x-api-key-id');
+      sanitized.delete('x-api-key-scopes');
+      const sanitizedRequest = new Request(raw.url, {
+        method: raw.method,
+        headers: sanitized,
+        body: raw.body,
+        // @ts-expect-error — duplex is needed for streaming bodies in some runtimes
+        duplex: raw.body ? 'half' : undefined,
+      });
+      Object.defineProperty(context.req, 'raw', { value: sanitizedRequest, writable: true });
+    }
+
     // When no auth is configured at all, pass through
     if (!authToken && !apiKeyStore) {
       await next();

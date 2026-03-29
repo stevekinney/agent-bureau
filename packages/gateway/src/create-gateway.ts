@@ -13,7 +13,6 @@ import {
 } from './middleware';
 import { createRoutes } from './routes';
 import { createPages } from './server/pages';
-import { resolveStorageBackend } from './storage';
 import type { Gateway, GatewayOptions } from './types';
 import { DEFAULT_PORT } from './types';
 import { createWebSocketHandler } from './websocket';
@@ -29,11 +28,11 @@ export async function createGateway(options: GatewayOptions = {}): Promise<Gatew
   const port = options.port ?? DEFAULT_PORT;
 
   // ── API Key Store ───────────────────────────────────────────────
+  // Reuse the bureau's KV store to avoid creating a duplicate backend.
   let apiKeyStore: ApiKeyStore | undefined;
 
-  if (options.storage) {
-    const backend = await resolveStorageBackend(options.storage);
-    apiKeyStore = createApiKeyStore(backend.kv);
+  if (bureau.kv) {
+    apiKeyStore = createApiKeyStore(bureau.kv);
     await bootstrapApiKey(apiKeyStore);
   }
 
