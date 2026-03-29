@@ -15,6 +15,19 @@ export {
   createVoyageEmbedder,
 } from './embeddings/index.ts';
 export { HeraldError, shouldRetryHeraldError } from './errors.ts';
+export type {
+  ErrorClassification,
+  FalloverEvent,
+  FalloverOptions,
+  FalloverProvider,
+  ProviderHealth,
+} from './fallover/index.ts';
+export {
+  classifyProviderError,
+  createFalloverGenerate,
+  createProviderHealthTracker,
+  FalloverExhaustedError,
+} from './fallover/index.ts';
 export { createGeminiGenerate, createGeminiGenerateStream } from './gemini.ts';
 export { createOpenAIGenerate, createOpenAIGenerateStream } from './openai.ts';
 export type {
