@@ -99,8 +99,9 @@ export function withEnhancedStreaming(
 
       // Process tool calls from the response
       if (response.toolCalls.length > 0) {
-        for (const toolCall of response.toolCalls) {
-          const toolBlockId = `tool-${toolCall.name}-${messageId}`;
+        for (let i = 0; i < response.toolCalls.length; i++) {
+          const toolCall = response.toolCalls[i]!;
+          const toolBlockId = `tool-${toolCall.name}-${i}-${messageId}`;
           const toolName = toolCall.name;
 
           stateMachine.process({

@@ -236,7 +236,7 @@ describe('normalizeAnthropicStream', () => {
     }
   });
 
-  it('handles thinking blocks', async () => {
+  it('handles thinking blocks with the thinking delta field', async () => {
     const events: AnthropicStreamEvent[] = [
       { type: 'message_start' },
       {
@@ -247,7 +247,7 @@ describe('normalizeAnthropicStream', () => {
       {
         type: 'content_block_delta',
         index: 0,
-        delta: { type: 'thinking_delta', text: 'Let me think...' },
+        delta: { type: 'thinking_delta', thinking: 'Let me think...' },
       },
       { type: 'content_block_stop', index: 0 },
       { type: 'message_stop' },
@@ -259,6 +259,12 @@ describe('normalizeAnthropicStream', () => {
     expect(blockStart).toBeDefined();
     if (blockStart?.type === 'stream:block-start') {
       expect(blockStart.block.type).toBe('thinking');
+    }
+
+    const blockDelta = result.find((e) => e.type === 'stream:block-delta');
+    expect(blockDelta).toBeDefined();
+    if (blockDelta?.type === 'stream:block-delta') {
+      expect(blockDelta.delta).toBe('Let me think...');
     }
   });
 });

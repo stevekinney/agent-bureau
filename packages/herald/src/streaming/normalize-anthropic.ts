@@ -146,14 +146,17 @@ export async function* normalizeAnthropicStream(
             toolName,
             partialArguments: accumulated,
           };
-        } else if (deltaType === 'thinking_delta' && textDelta) {
-          block.content += textDelta;
+        } else if (deltaType === 'thinking_delta') {
+          const thinkingDelta = event.delta?.thinking ?? event.delta?.text ?? '';
+          if (thinkingDelta) {
+            block.content += thinkingDelta;
 
-          yield {
-            type: 'stream:block-delta',
-            block: { ...block },
-            delta: textDelta,
-          };
+            yield {
+              type: 'stream:block-delta',
+              block: { ...block },
+              delta: thinkingDelta,
+            };
+          }
         }
         break;
       }
