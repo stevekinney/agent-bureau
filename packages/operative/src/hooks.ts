@@ -5,8 +5,21 @@ import type { HookMap } from 'lifecycle';
 
 import type { AgentSession } from './agent-session';
 import type { BudgetReport, TokenBudget } from './context/index';
+import type {
+  AfterGenerateContext,
+  BeforeGenerateContext,
+  ErrorContext,
+  ErrorRecoveryAction,
+  LLMInputContext,
+  LLMOutputContext,
+  RunAbortContext,
+  RunCompleteContext,
+  RunErrorContext,
+  RunStartContext,
+} from './hooks/types';
 import type { ToolChoice } from './structured-output/types';
 import type {
+  GenerateContext,
   GenerateResponse,
   StepContext,
   StepResult,
@@ -71,4 +84,22 @@ export interface OperativeHookMap extends HookMap {
   /** Runs after compaction with stats about what was removed. */
   afterCompaction: (context: AfterCompactionHookContext) => Promise<void>;
   selectToolChoice: (context: StepContext) => Promise<ToolChoice | void>;
+  /** Called before the generate call. Can modify the generate context (waterfall). */
+  beforeGenerate: (context: BeforeGenerateContext) => Promise<GenerateContext | void>;
+  /** Called after the generate call. Can modify the response (waterfall). */
+  afterGenerate: (context: AfterGenerateContext) => Promise<GenerateResponse | void>;
+  /** Read-only monitoring hook for LLM input. Runs in parallel, non-blocking. */
+  onLLMInput: (context: LLMInputContext) => Promise<void>;
+  /** Read-only monitoring hook for LLM output. Runs in parallel, non-blocking. */
+  onLLMOutput: (context: LLMOutputContext) => Promise<void>;
+  /** Called when a run starts, before the first step. */
+  onRunStart: (context: RunStartContext) => Promise<void>;
+  /** Called when a run completes successfully. */
+  onRunComplete: (context: RunCompleteContext) => Promise<void>;
+  /** Called when a run errors, with the error and partial results. */
+  onRunError: (context: RunErrorContext) => Promise<void>;
+  /** Called when a run is aborted. */
+  onRunAbort: (context: RunAbortContext) => Promise<void>;
+  /** Error recovery hook. Return 'retry', 'skip', or 'abort' to control behavior. */
+  onError: (context: ErrorContext) => Promise<ErrorRecoveryAction | void>;
 }

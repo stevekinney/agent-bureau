@@ -30,6 +30,7 @@ import {
   ToolsExecutingEvent,
   UsageAccumulatedEvent,
 } from './events';
+import type { ErrorRecoveryAction } from './hooks/types';
 import type { ToolChoice } from './structured-output/types';
 import { zodToJsonSchema } from './structured-output/zod-to-json-schema';
 import type {
@@ -66,6 +67,33 @@ function normalizeToArray<T>(value: T | T[] | undefined): T[] {
  */
 function isRegistryPassthrough(result: unknown, firstArg: unknown): boolean {
   return result === firstArg;
+}
+
+/**
+ * Runs a hook via the registry in a fire-and-forget fashion.
+ * All handlers execute via Promise.allSettled so individual failures
+ * never block the caller. The returned promise is intentionally not
+ * awaited — callers should use `void runHookSilently(...)`.
+ */
+function runHookSilently<K extends string>(
+  hooks:
+    | {
+        has(name: K): boolean;
+        getHandlers(name: K): ReadonlyArray<{ handler: (...args: never[]) => unknown }>;
+      }
+    | undefined,
+  hookName: K,
+  ...args: unknown[]
+): void {
+  if (!hooks?.has(hookName)) return;
+  const handlers = hooks.getHandlers(hookName);
+  void Promise.allSettled(
+    handlers.map((entry) =>
+      Promise.resolve((entry.handler as (...a: unknown[]) => unknown)(...args)),
+    ),
+  ).catch(() => {
+    // Intentionally ignore errors in silent hooks.
+  });
 }
 
 function normalizeStopConditions(conditions: RunOptions['stopWhen']): StopCondition[] {
@@ -213,7 +241,20 @@ export async function executeLoop(
   let lastContent = '';
   let schemaAttempts = 0;
 
+  const makeAbortResult = (step: number, reason?: string): RunResult => {
+    emitter?.dispatch(new RunAbortedEvent(step, reason));
+    runHookSilently(hooks, 'onRunAbort', { reason, partialSteps: [...steps], conversation });
+    return {
+      conversation,
+      steps,
+      content: lastContent,
+      usage: totalUsage,
+      finishReason: 'aborted',
+    };
+  };
+
   const makeErrorResult = (error: unknown): RunResult => {
+    runHookSilently(hooks, 'onRunError', { error, partialSteps: [...steps], conversation });
     if (error instanceof ElicitationDeniedError) {
       const result: RunResult = {
         conversation,
@@ -252,16 +293,24 @@ export async function executeLoop(
 
   emitter?.dispatch(new RunStartedEvent(conversation));
 
+  const runStartTime = performance.now();
+
+  // onRunStart: sequential, error aborts run
+  if (hooks?.has('onRunStart')) {
+    try {
+      await hooks.run('onRunStart', { conversation, toolbox, maximumSteps });
+    } catch (error) {
+      emitter?.dispatch(new RunErrorEvent(0, error));
+      return makeErrorResult(error);
+    }
+  }
+
+  /** Maximum number of retries the onError hook can request per step. */
+  const maxErrorRetries = 3;
+
   for (let step = 0; step < maximumSteps; step++) {
     if (signal?.aborted) {
-      emitter?.dispatch(new RunAbortedEvent(step, signal.reason as string | undefined));
-      return {
-        conversation,
-        steps,
-        content: lastContent,
-        usage: totalUsage,
-        finishReason: 'aborted',
-      };
+      return makeAbortResult(step, signal.reason as string | undefined);
     }
 
     // Backpressure: wait before proceeding if the strategy requires it
@@ -270,14 +319,7 @@ export async function executeLoop(
       if (backpressureDelay > 0) {
         emitter?.dispatch(new BackpressureAppliedEvent(step, backpressureDelay));
         if (signal?.aborted) {
-          emitter?.dispatch(new RunAbortedEvent(step, signal.reason as string | undefined));
-          return {
-            conversation,
-            steps,
-            content: lastContent,
-            usage: totalUsage,
-            finishReason: 'aborted',
-          };
+          return makeAbortResult(step, signal.reason as string | undefined);
         }
         await new Promise<void>((resolve) => {
           const timer = setTimeout(resolve, backpressureDelay);
@@ -290,14 +332,7 @@ export async function executeLoop(
           }
         });
         if (signal?.aborted) {
-          emitter?.dispatch(new RunAbortedEvent(step, signal.reason as string | undefined));
-          return {
-            conversation,
-            steps,
-            content: lastContent,
-            usage: totalUsage,
-            finishReason: 'aborted',
-          };
+          return makeAbortResult(step, signal.reason as string | undefined);
         }
         emitter?.dispatch(new BackpressureReleasedEvent(step));
       }
@@ -431,66 +466,190 @@ export async function executeLoop(
       }
     }
 
-    let response: GenerateResponse;
-    try {
-      let prepareResult: GenerateResponse | void = undefined;
-      for (const hook of prepareStepHooks) {
-        prepareResult = await hook({ conversation, step, signal: stepSignal, abortStep, elicit });
-        if (prepareResult) break;
-      }
-      if (!prepareResult && hooks?.has('prepareStep')) {
-        const prepareContext = { conversation, step, signal: stepSignal, abortStep, elicit };
-        const registryResult = await hooks.run('prepareStep', prepareContext);
-        if (!isRegistryPassthrough(registryResult, prepareContext)) {
-          prepareResult = registryResult as GenerateResponse;
+    let response: GenerateResponse = undefined!;
+    let stepRetryCount = 0;
+    let shouldRetryStep: boolean;
+    let stepSkipped = false;
+    do {
+      shouldRetryStep = false;
+      try {
+        let prepareResult: GenerateResponse | void = undefined;
+        for (const hook of prepareStepHooks) {
+          prepareResult = await hook({ conversation, step, signal: stepSignal, abortStep, elicit });
+          if (prepareResult) break;
         }
-      }
+        if (!prepareResult && hooks?.has('prepareStep')) {
+          const prepareContext = { conversation, step, signal: stepSignal, abortStep, elicit };
+          const registryResult = await hooks.run('prepareStep', prepareContext);
+          if (!isRegistryPassthrough(registryResult, prepareContext)) {
+            prepareResult = registryResult as GenerateResponse;
+          }
+        }
 
-      if (prepareResult) {
-        response = prepareResult;
-      } else {
-        emitter?.dispatch(new GenerateStartedEvent(step));
-        const generateStart = performance.now();
-        try {
-          const doGenerate = () =>
-            callGenerateWithRetry(
-              generate,
-              {
+        if (prepareResult) {
+          response = prepareResult;
+        } else {
+          // beforeGenerate: waterfall that can modify the generate context
+          let generateContext: GenerateContext = {
+            conversation,
+            step,
+            signal: stepSignal,
+            toolbox: stepToolbox,
+            toolChoice: stepToolChoice,
+            responseFormat,
+          };
+
+          if (hooks?.has('beforeGenerate')) {
+            const beforeGenContext = {
+              conversation,
+              step,
+              toolbox: stepToolbox,
+              toolChoice: stepToolChoice,
+              responseFormat,
+              signal: stepSignal,
+            };
+            const beforeGenResult = await hooks.run('beforeGenerate', beforeGenContext);
+            if (
+              beforeGenResult !== undefined &&
+              !isRegistryPassthrough(beforeGenResult, beforeGenContext)
+            ) {
+              generateContext = beforeGenResult;
+            }
+          }
+
+          // onLLMInput: parallel allSettled, read-only, non-blocking
+          runHookSilently(hooks, 'onLLMInput', {
+            conversation: generateContext.conversation,
+            step: generateContext.step,
+            messageCount: generateContext.conversation.getMessages().length,
+          });
+
+          emitter?.dispatch(new GenerateStartedEvent(step));
+          const generateStart = performance.now();
+          let durationMilliseconds: number;
+          try {
+            const doGenerate = () =>
+              callGenerateWithRetry(generate, generateContext, retry, emitter);
+            response = wrapWithTrace ? await wrapWithTrace(doGenerate) : await doGenerate();
+            durationMilliseconds = performance.now() - generateStart;
+          } catch (generateError) {
+            durationMilliseconds = performance.now() - generateStart;
+            emitter?.dispatch(new GenerateErrorEvent(step, generateError, durationMilliseconds));
+            throw generateError;
+          }
+
+          // onLLMOutput: parallel allSettled, read-only, non-blocking
+          // Use generateContext (which may have been modified by beforeGenerate)
+          // for consistency with onLLMInput — both hooks should report the same
+          // conversation and step values for a given LLM call.
+          runHookSilently(hooks, 'onLLMOutput', {
+            conversation: generateContext.conversation,
+            step: generateContext.step,
+            response: Object.freeze({ ...response }),
+            duration: durationMilliseconds,
+            usage: response.usage,
+          });
+
+          // afterGenerate: waterfall that can modify the response.
+          // This runs outside the generate try/catch so that hook errors are not
+          // misreported as generate errors (the LLM call already succeeded).
+          // We iterate handlers manually instead of using hooks.run() because the
+          // waterfall pattern in HookRegistry replaces the first argument with the
+          // return value. For afterGenerate, the input is AfterGenerateContext but
+          // the return is GenerateResponse — using hooks.run() would feed a
+          // GenerateResponse where the next handler expects AfterGenerateContext.
+          if (hooks?.has('afterGenerate')) {
+            const handlers = hooks.getHandlers('afterGenerate');
+            for (const entry of handlers) {
+              const afterGenContext = {
                 conversation,
                 step,
-                signal: stepSignal,
-                toolbox: stepToolbox,
-                toolChoice: stepToolChoice,
-                responseFormat,
-              },
-              retry,
-              emitter,
-            );
-          response = wrapWithTrace ? await wrapWithTrace(doGenerate) : await doGenerate();
-          const durationMilliseconds = performance.now() - generateStart;
+                response,
+                duration: durationMilliseconds,
+              };
+              const handlerResult = await (
+                entry.handler as (
+                  context: typeof afterGenContext,
+                ) => Promise<GenerateResponse | void>
+              )(afterGenContext);
+              if (handlerResult !== undefined) {
+                response = handlerResult;
+              }
+            }
+          }
+
           emitter?.dispatch(new GenerateCompletedEvent(step, response, durationMilliseconds));
-        } catch (generateError) {
-          const durationMilliseconds = performance.now() - generateStart;
-          emitter?.dispatch(new GenerateErrorEvent(step, generateError, durationMilliseconds));
-          throw generateError;
         }
+        backpressure?.onSuccess();
+      } catch (error) {
+        // onError recovery: sequential, first non-void return wins.
+        // We always invoke the hook regardless of retry count so it can
+        // return 'skip' or 'abort' even after retries are exhausted.
+        // We iterate handlers manually instead of using hooks.run() because
+        // the waterfall pattern replaces the first argument with the return
+        // value. For onError, the input is ErrorContext but the return is
+        // ErrorRecoveryAction (a string) — using hooks.run() would feed a
+        // string where the next handler expects ErrorContext.
+        // The hook invocation is wrapped in try/catch so that a throwing
+        // onError handler doesn't bypass the error result path — if the
+        // hook itself fails, we fall through to normal error propagation
+        // using the original error.
+        if (hooks?.has('onError')) {
+          try {
+            const errorContext = {
+              error,
+              step,
+              phase: 'generate' as const,
+              conversation,
+              retryCount: stepRetryCount,
+              maxRetries: maxErrorRetries,
+            };
+            let errorAction: ErrorRecoveryAction | undefined;
+            const handlers = hooks.getHandlers('onError');
+            for (const entry of handlers) {
+              const result = await (
+                entry.handler as (
+                  context: typeof errorContext,
+                ) => Promise<ErrorRecoveryAction | void>
+              )(errorContext);
+              if (result !== undefined) {
+                errorAction = result;
+                break; // first non-void return wins
+              }
+            }
+
+            if (errorAction === 'retry' && stepRetryCount < maxErrorRetries) {
+              stepRetryCount++;
+              shouldRetryStep = true;
+              continue;
+            }
+
+            if (errorAction === 'skip') {
+              // Skip this step entirely and continue to the next one
+              stepSkipped = true;
+              backpressure?.onSuccess();
+              break;
+            }
+
+            // 'abort' or void — let error propagate normally
+          } catch {
+            // The onError hook itself threw — fall through to normal error
+            // propagation using the original error so that makeErrorResult,
+            // onRunError, and RunErrorEvent all fire as expected.
+          }
+        }
+
+        backpressure?.onError(error);
+        if (signal?.aborted) {
+          return makeAbortResult(step, signal.reason as string | undefined);
+        }
+        emitter?.dispatch(new RunErrorEvent(step, error));
+        return makeErrorResult(error);
       }
-      backpressure?.onSuccess();
-    } catch (error) {
-      backpressure?.onError(error);
-      if (signal?.aborted) {
-        emitter?.dispatch(new RunAbortedEvent(step, signal.reason as string | undefined));
-        return {
-          conversation,
-          steps,
-          content: lastContent,
-          usage: totalUsage,
-          finishReason: 'aborted',
-        };
-      }
-      emitter?.dispatch(new RunErrorEvent(step, error));
-      return makeErrorResult(error);
-    }
+    } while (shouldRetryStep);
+
+    // If the step was skipped via onError recovery, move to the next step
+    if (stepSkipped) continue;
 
     // Validate response guardrail
     if (validateResponseHooks.length > 0) {
@@ -535,14 +694,7 @@ export async function executeLoop(
     }
 
     if (signal?.aborted) {
-      emitter?.dispatch(new RunAbortedEvent(step, signal.reason as string | undefined));
-      return {
-        conversation,
-        steps,
-        content: lastContent,
-        usage: totalUsage,
-        finishReason: 'aborted',
-      };
+      return makeAbortResult(step, signal.reason as string | undefined);
     }
 
     if (stepSignal.aborted && !signal?.aborted) {
@@ -621,8 +773,61 @@ export async function executeLoop(
 
           results = Array.isArray(executeResult) ? executeResult : [executeResult];
         } catch (error) {
-          emitter?.dispatch(new RunErrorEvent(step, error));
-          return makeErrorResult(error);
+          // onError recovery for tool execution phase.
+          // Iterate handlers manually to avoid waterfall type mismatch.
+          // Wrapped in try/catch so a throwing onError handler doesn't
+          // bypass the error result path — if the hook itself fails, we
+          // fall through to normal error propagation using the original error.
+          let recovered = false;
+          if (hooks?.has('onError')) {
+            try {
+              const toolErrorContext = {
+                error,
+                step,
+                phase: 'tool-execution' as const,
+                conversation,
+                retryCount: 0,
+                maxRetries: 0,
+              };
+              let errorAction: ErrorRecoveryAction | undefined;
+              const toolErrorHandlers = hooks.getHandlers('onError');
+              for (const entry of toolErrorHandlers) {
+                const result = await (
+                  entry.handler as (
+                    context: typeof toolErrorContext,
+                  ) => Promise<ErrorRecoveryAction | void>
+                )(toolErrorContext);
+                if (result !== undefined) {
+                  errorAction = result;
+                  break;
+                }
+              }
+
+              if (errorAction === 'skip') {
+                // Append error results for each dangling tool call so the
+                // conversation stays valid (tool calls without corresponding
+                // tool results break most LLM APIs on the next generate call).
+                results = callsToExecute.map((tc) => ({
+                  callId: tc.id,
+                  toolCallId: tc.id,
+                  toolName: tc.name,
+                  outcome: 'error' as const,
+                  content: 'Tool execution skipped by onError hook',
+                  result: 'Tool execution skipped by onError hook',
+                }));
+                recovered = true;
+              }
+              // 'retry' and 'abort' both propagate for tool execution
+            } catch {
+              // The onError hook itself threw — fall through to normal error
+              // propagation using the original error so that makeErrorResult,
+              // onRunError, and RunErrorEvent all fire as expected.
+            }
+          }
+          if (!recovered) {
+            emitter?.dispatch(new RunErrorEvent(step, error));
+            return makeErrorResult(error);
+          }
         }
 
         // Validate tool results guardrail
@@ -783,6 +988,10 @@ export async function executeLoop(
           schemaValidation: { success: true },
         };
         emitter?.dispatch(new RunCompletedEvent(runResult));
+        runHookSilently(hooks, 'onRunComplete', {
+          result: runResult,
+          totalDuration: performance.now() - runStartTime,
+        });
         return runResult;
       } catch (validationError) {
         schemaAttempts++;
@@ -815,6 +1024,10 @@ export async function executeLoop(
           schemaValidation: { success: false, error: validationError },
         };
         emitter?.dispatch(new RunCompletedEvent(runResult));
+        runHookSilently(hooks, 'onRunComplete', {
+          result: runResult,
+          totalDuration: performance.now() - runStartTime,
+        });
         return runResult;
       }
     }
@@ -828,6 +1041,10 @@ export async function executeLoop(
         finishReason: 'stop-condition',
       };
       emitter?.dispatch(new RunCompletedEvent(runResult));
+      runHookSilently(hooks, 'onRunComplete', {
+        result: runResult,
+        totalDuration: performance.now() - runStartTime,
+      });
       return runResult;
     }
   }
@@ -853,5 +1070,9 @@ export async function executeLoop(
     finishReason: 'maximum-steps',
   };
   emitter?.dispatch(new RunCompletedEvent(runResult));
+  runHookSilently(hooks, 'onRunComplete', {
+    result: runResult,
+    totalDuration: performance.now() - runStartTime,
+  });
   return runResult;
 }
