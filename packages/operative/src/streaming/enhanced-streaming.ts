@@ -91,10 +91,19 @@ export function withEnhancedStreaming(
 
       // Complete the text block if one was started
       if (previousContent.length > 0) {
+        const textBlockId = `text-${messageId}`;
         stateMachine.process({
           type: 'block-complete',
-          id: `text-${messageId}`,
+          id: textBlockId,
         });
+
+        const completedTextBlock = stateMachine.getState().blocks.find((b) => b.id === textBlockId);
+        if (completedTextBlock) {
+          emitEvent(eventTarget, 'stream:block-complete', {
+            type: 'stream:block-complete',
+            block: { ...completedTextBlock },
+          });
+        }
       }
 
       // Process tool calls from the response
@@ -143,6 +152,16 @@ export function withEnhancedStreaming(
             type: 'block-complete',
             id: toolBlockId,
           });
+
+          const completedToolBlock = stateMachine
+            .getState()
+            .blocks.find((b) => b.id === toolBlockId);
+          if (completedToolBlock) {
+            emitEvent(eventTarget, 'stream:block-complete', {
+              type: 'stream:block-complete',
+              block: { ...completedToolBlock },
+            });
+          }
 
           emitEvent(eventTarget, 'stream:tool-call-complete', {
             type: 'stream:tool-call-complete',
