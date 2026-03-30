@@ -1,6 +1,8 @@
 import type { StreamBlock, StreamEvent, StreamState } from 'operative';
 
 import type { AnthropicStreamEvent } from '../types';
+import type { NormalizerState } from './stream-helpers';
+import { buildState, findBlock } from './stream-helpers';
 
 /**
  * Normalizes an Anthropic Messages API streaming response into a
@@ -13,7 +15,13 @@ import type { AnthropicStreamEvent } from '../types';
 export async function* normalizeAnthropicStream(
   stream: AsyncIterable<AnthropicStreamEvent>,
 ): AsyncIterable<StreamEvent> {
-  const blocks: StreamBlock[] = [];
+  const state: NormalizerState = {
+    blocks: [],
+    hasUsageData: false,
+    promptTokens: undefined,
+    completionTokens: undefined,
+  };
+  const { blocks } = state;
   /** Map from Anthropic index → our block id */
   const indexToBlockId = new Map<number, string>();
   /** Map from block id → tool name for tool-call blocks */
@@ -23,48 +31,19 @@ export async function* normalizeAnthropicStream(
   /** Accumulated partial args per block */
   const blockPartialArgs = new Map<string, string>();
 
-  let promptTokens: number | undefined;
-  let completionTokens: number | undefined;
-  /** Whether any usage data has been received from the API. */
-  let hasUsageData = false;
-
-  function findBlock(id: string): StreamBlock | undefined {
-    return blocks.find((b) => b.id === id);
-  }
-
-  function buildState(): StreamState {
-    return {
-      blocks: [...blocks],
-      activeBlock: [...blocks].reverse().find((b) => !b.complete),
-      textContent: blocks
-        .filter((b) => b.type === 'text')
-        .map((b) => b.content)
-        .join(''),
-      toolCalls: blocks.filter((b) => b.type === 'tool-call'),
-      complete: false,
-      usage: hasUsageData
-        ? {
-            prompt: promptTokens ?? 0,
-            completion: completionTokens ?? 0,
-            total: (promptTokens ?? 0) + (completionTokens ?? 0),
-          }
-        : undefined,
-    };
-  }
-
   for await (const event of stream) {
     switch (event.type) {
       case 'message_start': {
         if (event.message?.usage) {
-          hasUsageData = true;
-          promptTokens = event.message.usage.input_tokens ?? 0;
-          completionTokens = event.message.usage.output_tokens ?? 0;
+          state.hasUsageData = true;
+          state.promptTokens = event.message.usage.input_tokens ?? 0;
+          state.completionTokens = event.message.usage.output_tokens ?? 0;
           yield {
             type: 'stream:usage',
             usage: {
-              prompt: promptTokens,
-              completion: completionTokens,
-              total: promptTokens + completionTokens,
+              prompt: state.promptTokens,
+              completion: state.completionTokens,
+              total: state.promptTokens + state.completionTokens,
             },
           };
         }
@@ -111,7 +90,7 @@ export async function* normalizeAnthropicStream(
         const blockId = indexToBlockId.get(index);
         if (!blockId) break;
 
-        const block = findBlock(blockId);
+        const block = findBlock(blocks, blockId);
         if (!block) break;
 
         const deltaType = event.delta?.type;
@@ -171,7 +150,7 @@ export async function* normalizeAnthropicStream(
         const blockId = indexToBlockId.get(index);
         if (!blockId) break;
 
-        const block = findBlock(blockId);
+        const block = findBlock(blocks, blockId);
         if (!block) break;
 
         block.complete = true;
@@ -198,14 +177,14 @@ export async function* normalizeAnthropicStream(
 
       case 'message_delta': {
         if (event.usage?.output_tokens !== undefined) {
-          hasUsageData = true;
-          completionTokens = event.usage.output_tokens;
+          state.hasUsageData = true;
+          state.completionTokens = event.usage.output_tokens;
           yield {
             type: 'stream:usage',
             usage: {
-              prompt: promptTokens ?? 0,
-              completion: completionTokens,
-              total: (promptTokens ?? 0) + completionTokens,
+              prompt: state.promptTokens ?? 0,
+              completion: state.completionTokens,
+              total: (state.promptTokens ?? 0) + state.completionTokens,
             },
           };
         }
@@ -214,7 +193,7 @@ export async function* normalizeAnthropicStream(
 
       case 'message_stop': {
         const finalState: StreamState = {
-          ...buildState(),
+          ...buildState(state),
           complete: true,
         };
         yield { type: 'stream:complete', state: finalState };

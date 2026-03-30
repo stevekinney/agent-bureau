@@ -50,7 +50,20 @@ export function createBackpressureBuffer(options: BackpressureBufferOptions): Ba
     return event.type === 'stream:text-delta' || event.type === 'stream:block-delta';
   }
 
-  /** Coalesce consecutive text-delta events in the buffer. */
+  function isBlockDelta(
+    event: StreamEvent,
+  ): event is Extract<StreamEvent, { type: 'stream:block-delta' }> {
+    return event.type === 'stream:block-delta';
+  }
+
+  /**
+   * Coalesce runs of text-delta and block-delta events in the buffer.
+   *
+   * Normalizers emit a stream:block-delta immediately after each
+   * stream:text-delta, so we treat both types as part of a coalesceble
+   * run. Within a run, text-deltas are merged into one and block-deltas
+   * are merged into one (keeping the last block snapshot).
+   */
   function coalesceBuffer(): number {
     if (!coalesceDeltas) return 0;
 
@@ -60,29 +73,48 @@ export function createBackpressureBuffer(options: BackpressureBufferOptions): Ba
     for (let i = 0; i < buffer.length; i++) {
       const event = buffer[i]!;
 
-      if (isTextDelta(event)) {
-        // Look ahead for consecutive text deltas
-        let combinedContent = event.content;
-        let lastAccumulated = event.accumulated;
+      if (isTextDelta(event) || isBlockDelta(event)) {
+        // Collect a run of text-delta and block-delta events
+        let combinedContent = isTextDelta(event) ? event.content : '';
+        let lastAccumulated = isTextDelta(event) ? event.accumulated : '';
+        let lastBlockDelta: Extract<StreamEvent, { type: 'stream:block-delta' }> | undefined =
+          isBlockDelta(event) ? event : undefined;
+        let hasTextDelta = isTextDelta(event);
+        let combinedBlockDeltaContent = isBlockDelta(event) ? event.delta : '';
         let j = i + 1;
 
-        while (j < buffer.length && isTextDelta(buffer[j]!)) {
+        while (j < buffer.length && (isTextDelta(buffer[j]!) || isBlockDelta(buffer[j]!))) {
           const next = buffer[j]!;
-          if (next.type === 'stream:text-delta') {
+          if (isTextDelta(next)) {
             combinedContent += next.content;
             lastAccumulated = next.accumulated;
+            hasTextDelta = true;
+            droppedCount++;
+          } else if (isBlockDelta(next)) {
+            lastBlockDelta = next;
+            combinedBlockDeltaContent += next.delta;
             droppedCount++;
           }
           j++;
         }
 
-        coalesced.push({
-          type: 'stream:text-delta',
-          content: combinedContent,
-          accumulated: lastAccumulated,
-        });
+        if (hasTextDelta) {
+          coalesced.push({
+            type: 'stream:text-delta',
+            content: combinedContent,
+            accumulated: lastAccumulated,
+          });
+        }
 
-        // Skip the consecutive text deltas we just merged
+        if (lastBlockDelta) {
+          coalesced.push({
+            type: 'stream:block-delta',
+            block: lastBlockDelta.block,
+            delta: combinedBlockDeltaContent,
+          });
+        }
+
+        // Skip the events we just merged
         i = j - 1;
       } else {
         coalesced.push(event);

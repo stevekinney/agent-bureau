@@ -1,6 +1,8 @@
 import type { StreamBlock, StreamEvent, StreamState } from 'operative';
 
 import type { OpenAIChatCompletionChunk } from '../types';
+import type { NormalizerState } from './stream-helpers';
+import { buildState, findBlock } from './stream-helpers';
 
 /** Tracked state for an in-progress OpenAI tool call. */
 type ToolCallTracker = {
@@ -19,55 +21,33 @@ type ToolCallTracker = {
 export async function* normalizeOpenAIStream(
   stream: AsyncIterable<OpenAIChatCompletionChunk>,
 ): AsyncIterable<StreamEvent> {
-  const blocks: StreamBlock[] = [];
+  const state: NormalizerState = {
+    blocks: [],
+    hasUsageData: false,
+    promptTokens: undefined,
+    completionTokens: undefined,
+  };
+  const { blocks } = state;
   /** Map from OpenAI tool call index → our tracker */
   const toolTrackers = new Map<number, ToolCallTracker>();
 
   let accumulatedText = '';
   let textBlockId: string | undefined;
-  let promptTokens: number | undefined;
-  let completionTokens: number | undefined;
-  /** Whether any usage data has been received from the API. */
-  let hasUsageData = false;
-
-  function findBlock(id: string): StreamBlock | undefined {
-    return blocks.find((b) => b.id === id);
-  }
-
-  function buildState(): StreamState {
-    return {
-      blocks: [...blocks],
-      activeBlock: [...blocks].reverse().find((b) => !b.complete),
-      textContent: blocks
-        .filter((b) => b.type === 'text')
-        .map((b) => b.content)
-        .join(''),
-      toolCalls: blocks.filter((b) => b.type === 'tool-call'),
-      complete: false,
-      usage: hasUsageData
-        ? {
-            prompt: promptTokens ?? 0,
-            completion: completionTokens ?? 0,
-            total: (promptTokens ?? 0) + (completionTokens ?? 0),
-          }
-        : undefined,
-    };
-  }
 
   for await (const chunk of stream) {
     // Handle usage before checking for choices — OpenAI sends a final
     // usage-only chunk with choices: [] when stream_options.include_usage
     // is enabled.
     if (chunk.usage) {
-      hasUsageData = true;
-      promptTokens = chunk.usage.prompt_tokens ?? 0;
-      completionTokens = chunk.usage.completion_tokens ?? 0;
+      state.hasUsageData = true;
+      state.promptTokens = chunk.usage.prompt_tokens ?? 0;
+      state.completionTokens = chunk.usage.completion_tokens ?? 0;
       yield {
         type: 'stream:usage',
         usage: {
-          prompt: promptTokens,
-          completion: completionTokens,
-          total: chunk.usage.total_tokens ?? promptTokens + completionTokens,
+          prompt: state.promptTokens,
+          completion: state.completionTokens,
+          total: chunk.usage.total_tokens ?? state.promptTokens + state.completionTokens,
         },
       };
     }
@@ -93,7 +73,7 @@ export async function* normalizeOpenAIStream(
         yield { type: 'stream:block-start', block: { ...block } };
       }
 
-      const block = findBlock(textBlockId);
+      const block = findBlock(blocks, textBlockId);
       if (block) {
         block.content += delta.content;
         accumulatedText += delta.content;
@@ -144,7 +124,7 @@ export async function* normalizeOpenAIStream(
           const args = toolCall.function.arguments;
           tracker.arguments += args;
 
-          const block = findBlock(tracker.blockId);
+          const block = findBlock(blocks, tracker.blockId);
           if (block) {
             block.content += args;
             block.partialArguments = tracker.arguments;
@@ -180,7 +160,7 @@ export async function* normalizeOpenAIStream(
     if (finish_reason) {
       // Complete the text block if one exists
       if (textBlockId) {
-        const textBlock = findBlock(textBlockId);
+        const textBlock = findBlock(blocks, textBlockId);
         if (textBlock) {
           textBlock.complete = true;
           yield { type: 'stream:block-complete', block: { ...textBlock } };
@@ -189,7 +169,7 @@ export async function* normalizeOpenAIStream(
 
       // Complete all tool call blocks
       for (const [, tracker] of toolTrackers) {
-        const block = findBlock(tracker.blockId);
+        const block = findBlock(blocks, tracker.blockId);
         if (block) {
           block.complete = true;
           yield { type: 'stream:block-complete', block: { ...block } };
@@ -213,7 +193,7 @@ export async function* normalizeOpenAIStream(
   // Emit stream:complete after the loop so any trailing usage-only chunk
   // has been processed and buildState() includes the final usage data.
   const finalState: StreamState = {
-    ...buildState(),
+    ...buildState(state),
     complete: true,
   };
   yield { type: 'stream:complete', state: finalState };
