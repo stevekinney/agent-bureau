@@ -889,6 +889,89 @@ describe('onError waterfall with multiple hooks', () => {
   });
 });
 
+describe('onError skip during tool-execution appends error results for dangling tool calls', () => {
+  it('produces tool results matching each pending tool call when skip is returned', async () => {
+    const hooks = new HookRegistry<OperativeHookMap>();
+
+    hooks.on('onError', async (context: ErrorContext) => {
+      if (context.phase === 'tool-execution') {
+        return 'skip';
+      }
+      return undefined;
+    });
+
+    const failingTool = createTool({
+      name: 'get_weather',
+      description: 'Get weather',
+      input: z.object({ location: z.string() }),
+      execute: async () => {
+        throw new Error('tool execution failure');
+      },
+    });
+
+    const generate = createMockGenerate([
+      toolCallResponse([weatherToolCall('Denver')]),
+      textResponse('After skip'),
+    ]);
+
+    const result = await run({
+      generate,
+      toolbox: createTestToolbox([failingTool]),
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+      hooks,
+    });
+
+    expect(result.finishReason).toBe('stop-condition');
+    expect(result.content).toBe('After skip');
+
+    // The conversation should contain tool result messages for the dangling tool calls.
+    // Verify by checking that the conversation has messages (tool call + tool result)
+    // and the run completed successfully without an invalid conversation state.
+    const messages = result.conversation.getMessages();
+    const toolResultMessages = messages.filter((m: { role: string }) => m.role === 'tool-result');
+    // There should be at least one tool result message for the skipped tool call
+    expect(toolResultMessages.length).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe('onLLMInput and onLLMOutput use consistent context after beforeGenerate', () => {
+  it('both hooks see the same step value when beforeGenerate modifies it', async () => {
+    const hooks = new HookRegistry<OperativeHookMap>();
+    const inputSteps: number[] = [];
+    const outputSteps: number[] = [];
+
+    hooks.on('beforeGenerate', async (context) => {
+      // Modify the step to a different value
+      return { ...context, step: 99 } as GenerateContext;
+    });
+
+    hooks.on('onLLMInput', async (context) => {
+      inputSteps.push(context.step);
+    });
+
+    hooks.on('onLLMOutput', async (context) => {
+      outputSteps.push(context.step);
+    });
+
+    const generate = createMockGenerate([textResponse('Hello')]);
+
+    await run({
+      generate,
+      toolbox: createTestToolbox([tool]),
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+      hooks,
+    });
+
+    expect(inputSteps).toHaveLength(1);
+    expect(outputSteps).toHaveLength(1);
+    // Both hooks should see the same modified step value
+    expect(inputSteps[0]).toBe(99);
+    expect(outputSteps[0]).toBe(99);
+  });
+});
+
 describe('onError hook called after retry limit exhausted', () => {
   it('allows skip after retries are exhausted', async () => {
     const hooks = new HookRegistry<OperativeHookMap>();

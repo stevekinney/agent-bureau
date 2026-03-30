@@ -533,9 +533,12 @@ export async function executeLoop(
             const durationMilliseconds = performance.now() - generateStart;
 
             // onLLMOutput: parallel allSettled, read-only, non-blocking
+            // Use generateContext (which may have been modified by beforeGenerate)
+            // for consistency with onLLMInput — both hooks should report the same
+            // conversation and step values for a given LLM call.
             runHookSilently(hooks, 'onLLMOutput', {
-              conversation,
-              step,
+              conversation: generateContext.conversation,
+              step: generateContext.step,
               response: Object.freeze({ ...response }),
               duration: durationMilliseconds,
               usage: response.usage,
@@ -782,8 +785,17 @@ export async function executeLoop(
             }
 
             if (errorAction === 'skip') {
-              // Continue with empty results — treat as if no tools executed
-              results = [];
+              // Append error results for each dangling tool call so the
+              // conversation stays valid (tool calls without corresponding
+              // tool results break most LLM APIs on the next generate call).
+              results = callsToExecute.map((tc) => ({
+                callId: tc.id,
+                toolCallId: tc.id,
+                toolName: tc.name,
+                outcome: 'error' as const,
+                content: 'Tool execution skipped by onError hook',
+                result: 'Tool execution skipped by onError hook',
+              }));
               recovered = true;
             }
             // 'retry' and 'abort' both propagate for tool execution
