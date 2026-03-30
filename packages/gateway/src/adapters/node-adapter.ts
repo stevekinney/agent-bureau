@@ -34,14 +34,14 @@ export function createNodeAdapter(): ServerAdapter {
             'Real-time event streaming over WebSocket requires the Bun runtime. ' +
             'The HTTP API remains fully functional.',
         );
-      }
 
-      if (authToken) {
-        console.warn(
-          '[gateway] WebSocket auth-token protection is not available with the Node.js adapter. ' +
-            'HTTP route authentication still applies, but WebSocket upgrade ' +
-            "requests cannot be validated without Bun's native server.",
-        );
+        if (authToken) {
+          console.warn(
+            '[gateway] WebSocket auth-token protection is not available with the Node.js adapter. ' +
+              'HTTP route authentication still applies, but WebSocket upgrade ' +
+              "requests cannot be validated without Bun's native server.",
+          );
+        }
       }
 
       const modulePath = '@hono/node-server';
