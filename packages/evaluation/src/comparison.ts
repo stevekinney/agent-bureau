@@ -89,7 +89,7 @@ export function compareEvaluationReports(
         metric: 'costIncrease',
         baseline: baselineTotalCost,
         current: currentTotalCost,
-        delta: costIncreaseRatio,
+        delta: currentTotalCost - baselineTotalCost,
       });
     }
   }

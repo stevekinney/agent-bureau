@@ -212,6 +212,9 @@ describe('compareEvaluationReports', () => {
       (r) => r.caseName === 'summary' && r.metric === 'costIncrease',
     );
     expect(costRegression).toBeDefined();
+    expect(costRegression!.baseline).toBe(100);
+    expect(costRegression!.current).toBe(150);
+    expect(costRegression!.delta).toBe(50);
   });
 
   it('does not flag cost increase below threshold', () => {
