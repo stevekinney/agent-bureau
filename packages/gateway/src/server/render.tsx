@@ -1,3 +1,4 @@
+import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 
 import type { ReactNode } from 'react';
@@ -11,8 +12,8 @@ async function loadManifest(): Promise<AssetManifest> {
   if (cachedManifest) return cachedManifest;
   try {
     const manifestPath = resolve(import.meta.dir, 'manifest.json');
-    const file = Bun.file(manifestPath);
-    cachedManifest = (await file.json()) as AssetManifest;
+    const raw = await readFile(manifestPath, 'utf-8');
+    cachedManifest = JSON.parse(raw) as AssetManifest;
   } catch {
     cachedManifest = {};
   }

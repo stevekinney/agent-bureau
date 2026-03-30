@@ -15,6 +15,8 @@ const serverResult = await Bun.build({
   external: [
     'hono',
     'hono/*',
+    '@hono/node-server',
+    '@hono/node-server/*',
     'react',
     'react-dom',
     'react-dom/*',
@@ -27,8 +29,10 @@ const serverResult = await Bun.build({
     'lifecycle/*',
     'memory',
     'memory/*',
+    'storage',
     'vector-frankl',
     'vector-frankl/*',
+    'zod',
   ],
 });
 

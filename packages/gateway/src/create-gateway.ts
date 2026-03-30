@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
-import { serveStatic } from 'hono/bun';
 import { cors } from 'hono/cors';
 
+import type { ServerAdapter } from './adapters/types';
 import { createBureau } from './create-bureau';
 import { bootstrapApiKey, createApiKeyStore } from './keys';
 import type { ApiKeyStore } from './keys/types';
@@ -18,6 +18,28 @@ import { DEFAULT_PORT } from './types';
 import { createWebSocketHandler } from './websocket';
 
 /**
+ * Detects the current server runtime. Returns `'bun'` when running
+ * inside the Bun runtime, `'node'` otherwise.
+ */
+function detectRuntime(): 'bun' | 'node' {
+  return typeof Bun !== 'undefined' ? 'bun' : 'node';
+}
+
+/**
+ * Resolves a ServerAdapter for the given runtime string.
+ * Uses dynamic imports so that the unused adapter is never
+ * pulled into the bundle.
+ */
+async function resolveAdapter(runtime: 'bun' | 'node'): Promise<ServerAdapter> {
+  if (runtime === 'bun') {
+    const { createBunAdapter } = await import('./adapters/bun-adapter');
+    return createBunAdapter();
+  }
+  const { createNodeAdapter } = await import('./adapters/node-adapter');
+  return createNodeAdapter();
+}
+
+/**
  * Creates a new Gateway instance with the given options.
  *
  * This function is async because it initializes storage backends
@@ -26,6 +48,8 @@ import { createWebSocketHandler } from './websocket';
 export async function createGateway(options: GatewayOptions = {}): Promise<Gateway> {
   const bureau = await createBureau(options);
   const port = options.port ?? DEFAULT_PORT;
+  const runtime = options.runtime ?? detectRuntime();
+  const adapter = await resolveAdapter(runtime);
 
   // ── API Key Store ───────────────────────────────────────────────
   // Reuse the bureau's KV store to avoid creating a duplicate backend.
@@ -60,7 +84,7 @@ export async function createGateway(options: GatewayOptions = {}): Promise<Gatew
   );
 
   // Serve static files
-  app.use('/public/*', serveStatic({ root: 'dist/' }));
+  adapter.mountStaticFiles(app, '/public/', 'dist/');
 
   // Global error handler
   app.onError(errorHandler);
@@ -68,43 +92,16 @@ export async function createGateway(options: GatewayOptions = {}): Promise<Gatew
   function start() {
     const wsHandler = createWebSocketHandler({ store: bureau.store });
 
-    const server = Bun.serve({
+    const handle = adapter.serve(app, {
       port,
       hostname: options.hostname,
-      fetch(request, server) {
-        const url = new URL(request.url);
-
-        // WebSocket upgrade
-        if (url.pathname === '/ws') {
-          if (options.authToken) {
-            const authHeader = request.headers.get('authorization') ?? '';
-            const headerToken = authHeader.toLowerCase().startsWith('bearer ')
-              ? authHeader.slice(7).trim()
-              : undefined;
-            const queryToken = url.searchParams.get('token') ?? undefined;
-            const token = headerToken ?? queryToken;
-
-            if (!token || token !== options.authToken) {
-              return new Response('Unauthorized', { status: 401 });
-            }
-          }
-
-          const upgraded = server.upgrade(request, { data: undefined });
-          if (upgraded) return undefined as unknown as Response;
-          return new Response('WebSocket upgrade failed', { status: 400 });
-        }
-        return app.fetch(request);
-      },
-      websocket: {
-        open: (ws) => wsHandler.open(ws),
-        message: (ws, data) => wsHandler.message(ws, data),
-        close: (ws) => wsHandler.close(ws),
-      },
+      wsHandler,
+      authToken: options.authToken,
     });
 
     return {
       stop() {
-        void server.stop();
+        handle.stop();
         wsHandler.dispose();
         bureau.dispose();
       },

@@ -1,9 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 
-import {
-  createFts5TextSearchProvider,
-  isFts5Available,
-} from '../src/fts5-text-search-provider';
+import { createFts5TextSearchProvider, isFts5Available } from '../src/fts5-text-search-provider';
 import type { TextSearchProvider } from '../src/text-search-provider';
 
 describe('isFts5Available', () => {
