@@ -66,21 +66,27 @@ export function compareEvaluationReports(
     // being misclassified as unchanged.
   }
 
-  const passRateDelta = current.summary.passRate - baseline.summary.passRate;
-  if (passRateDelta < 0 && Math.abs(passRateDelta) > passRateDropThreshold) {
-    regressions.push({
-      caseName: 'summary',
-      metric: 'passRate',
-      baseline: baseline.summary.passRate,
-      current: current.summary.passRate,
-      delta: passRateDelta,
-    });
-  }
-
-  // Detect total cost increase exceeding threshold.
   // Only compare cases present in both reports — new or removed cases should
-  // not inflate the totals and trigger spurious regressions.
+  // not skew the pass rate or cost and trigger spurious regressions.
   const matchedCaseNames = [...baselineCases.keys()].filter((name) => currentCases.has(name));
+
+  const matchedCount = matchedCaseNames.length;
+  if (matchedCount > 0) {
+    const baselinePassRate =
+      matchedCaseNames.filter((name) => baselineCases.get(name)!.pass).length / matchedCount;
+    const currentPassRate =
+      matchedCaseNames.filter((name) => currentCases.get(name)!.pass).length / matchedCount;
+    const passRateDelta = currentPassRate - baselinePassRate;
+    if (passRateDelta < 0 && Math.abs(passRateDelta) > passRateDropThreshold) {
+      regressions.push({
+        caseName: 'summary',
+        metric: 'passRate',
+        baseline: baselinePassRate,
+        current: currentPassRate,
+        delta: passRateDelta,
+      });
+    }
+  }
   const baselineTotalCost = matchedCaseNames.reduce(
     (sum, name) => sum + baselineCases.get(name)!.metrics.totalTokens,
     0,

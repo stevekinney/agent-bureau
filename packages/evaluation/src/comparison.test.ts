@@ -266,6 +266,36 @@ describe('compareEvaluationReports', () => {
     expect(comparison.unchanged).toContain('case-1');
   });
 
+  it('does not flag pass rate regression when new failing cases are added', () => {
+    const baseline = createReport([createCaseResult({ name: 'case-1', pass: true })]);
+    const current = createReport([
+      createCaseResult({ name: 'case-1', pass: true }),
+      createCaseResult({ name: 'case-2', pass: false, score: 0 }),
+    ]);
+
+    const comparison = compareEvaluationReports(baseline, current);
+
+    const passRateRegression = comparison.regressions.find(
+      (r) => r.caseName === 'summary' && r.metric === 'passRate',
+    );
+    expect(passRateRegression).toBeUndefined();
+  });
+
+  it('does not flag pass rate regression when removed passing cases deflate baseline', () => {
+    const baseline = createReport([
+      createCaseResult({ name: 'case-1', pass: true }),
+      createCaseResult({ name: 'case-2', pass: true }),
+    ]);
+    const current = createReport([createCaseResult({ name: 'case-1', pass: true })]);
+
+    const comparison = compareEvaluationReports(baseline, current);
+
+    const passRateRegression = comparison.regressions.find(
+      (r) => r.caseName === 'summary' && r.metric === 'passRate',
+    );
+    expect(passRateRegression).toBeUndefined();
+  });
+
   it('does not flag cost regression when new cases inflate total tokens', () => {
     const baseline = createReport([
       createCaseResult({
