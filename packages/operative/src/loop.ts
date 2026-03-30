@@ -526,56 +526,59 @@ export async function executeLoop(
 
           emitter?.dispatch(new GenerateStartedEvent(step));
           const generateStart = performance.now();
+          let durationMilliseconds: number;
           try {
             const doGenerate = () =>
               callGenerateWithRetry(generate, generateContext, retry, emitter);
             response = wrapWithTrace ? await wrapWithTrace(doGenerate) : await doGenerate();
-            const durationMilliseconds = performance.now() - generateStart;
-
-            // onLLMOutput: parallel allSettled, read-only, non-blocking
-            // Use generateContext (which may have been modified by beforeGenerate)
-            // for consistency with onLLMInput — both hooks should report the same
-            // conversation and step values for a given LLM call.
-            runHookSilently(hooks, 'onLLMOutput', {
-              conversation: generateContext.conversation,
-              step: generateContext.step,
-              response: Object.freeze({ ...response }),
-              duration: durationMilliseconds,
-              usage: response.usage,
-            });
-
-            // afterGenerate: waterfall that can modify the response.
-            // We iterate handlers manually instead of using hooks.run() because the
-            // waterfall pattern in HookRegistry replaces the first argument with the
-            // return value. For afterGenerate, the input is AfterGenerateContext but
-            // the return is GenerateResponse — using hooks.run() would feed a
-            // GenerateResponse where the next handler expects AfterGenerateContext.
-            if (hooks?.has('afterGenerate')) {
-              const handlers = hooks.getHandlers('afterGenerate');
-              for (const entry of handlers) {
-                const afterGenContext = {
-                  conversation,
-                  step,
-                  response,
-                  duration: durationMilliseconds,
-                };
-                const handlerResult = await (
-                  entry.handler as (
-                    context: typeof afterGenContext,
-                  ) => Promise<GenerateResponse | void>
-                )(afterGenContext);
-                if (handlerResult !== undefined) {
-                  response = handlerResult;
-                }
-              }
-            }
-
-            emitter?.dispatch(new GenerateCompletedEvent(step, response, durationMilliseconds));
+            durationMilliseconds = performance.now() - generateStart;
           } catch (generateError) {
-            const durationMilliseconds = performance.now() - generateStart;
+            durationMilliseconds = performance.now() - generateStart;
             emitter?.dispatch(new GenerateErrorEvent(step, generateError, durationMilliseconds));
             throw generateError;
           }
+
+          // onLLMOutput: parallel allSettled, read-only, non-blocking
+          // Use generateContext (which may have been modified by beforeGenerate)
+          // for consistency with onLLMInput — both hooks should report the same
+          // conversation and step values for a given LLM call.
+          runHookSilently(hooks, 'onLLMOutput', {
+            conversation: generateContext.conversation,
+            step: generateContext.step,
+            response: Object.freeze({ ...response }),
+            duration: durationMilliseconds,
+            usage: response.usage,
+          });
+
+          // afterGenerate: waterfall that can modify the response.
+          // This runs outside the generate try/catch so that hook errors are not
+          // misreported as generate errors (the LLM call already succeeded).
+          // We iterate handlers manually instead of using hooks.run() because the
+          // waterfall pattern in HookRegistry replaces the first argument with the
+          // return value. For afterGenerate, the input is AfterGenerateContext but
+          // the return is GenerateResponse — using hooks.run() would feed a
+          // GenerateResponse where the next handler expects AfterGenerateContext.
+          if (hooks?.has('afterGenerate')) {
+            const handlers = hooks.getHandlers('afterGenerate');
+            for (const entry of handlers) {
+              const afterGenContext = {
+                conversation,
+                step,
+                response,
+                duration: durationMilliseconds,
+              };
+              const handlerResult = await (
+                entry.handler as (
+                  context: typeof afterGenContext,
+                ) => Promise<GenerateResponse | void>
+              )(afterGenContext);
+              if (handlerResult !== undefined) {
+                response = handlerResult;
+              }
+            }
+          }
+
+          emitter?.dispatch(new GenerateCompletedEvent(step, response, durationMilliseconds));
         }
         backpressure?.onSuccess();
       } catch (error) {
@@ -587,41 +590,53 @@ export async function executeLoop(
         // value. For onError, the input is ErrorContext but the return is
         // ErrorRecoveryAction (a string) — using hooks.run() would feed a
         // string where the next handler expects ErrorContext.
+        // The hook invocation is wrapped in try/catch so that a throwing
+        // onError handler doesn't bypass the error result path — if the
+        // hook itself fails, we fall through to normal error propagation
+        // using the original error.
         if (hooks?.has('onError')) {
-          const errorContext = {
-            error,
-            step,
-            phase: 'generate' as const,
-            conversation,
-            retryCount: stepRetryCount,
-            maxRetries: maxErrorRetries,
-          };
-          let errorAction: ErrorRecoveryAction | undefined;
-          const handlers = hooks.getHandlers('onError');
-          for (const entry of handlers) {
-            const result = await (
-              entry.handler as (context: typeof errorContext) => Promise<ErrorRecoveryAction | void>
-            )(errorContext);
-            if (result !== undefined) {
-              errorAction = result;
-              break; // first non-void return wins
+          try {
+            const errorContext = {
+              error,
+              step,
+              phase: 'generate' as const,
+              conversation,
+              retryCount: stepRetryCount,
+              maxRetries: maxErrorRetries,
+            };
+            let errorAction: ErrorRecoveryAction | undefined;
+            const handlers = hooks.getHandlers('onError');
+            for (const entry of handlers) {
+              const result = await (
+                entry.handler as (
+                  context: typeof errorContext,
+                ) => Promise<ErrorRecoveryAction | void>
+              )(errorContext);
+              if (result !== undefined) {
+                errorAction = result;
+                break; // first non-void return wins
+              }
             }
-          }
 
-          if (errorAction === 'retry' && stepRetryCount < maxErrorRetries) {
-            stepRetryCount++;
-            shouldRetryStep = true;
-            continue;
-          }
+            if (errorAction === 'retry' && stepRetryCount < maxErrorRetries) {
+              stepRetryCount++;
+              shouldRetryStep = true;
+              continue;
+            }
 
-          if (errorAction === 'skip') {
-            // Skip this step entirely and continue to the next one
-            stepSkipped = true;
-            backpressure?.onSuccess();
-            break;
-          }
+            if (errorAction === 'skip') {
+              // Skip this step entirely and continue to the next one
+              stepSkipped = true;
+              backpressure?.onSuccess();
+              break;
+            }
 
-          // 'abort' or void — let error propagate normally
+            // 'abort' or void — let error propagate normally
+          } catch {
+            // The onError hook itself threw — fall through to normal error
+            // propagation using the original error so that makeErrorResult,
+            // onRunError, and RunErrorEvent all fire as expected.
+          }
         }
 
         backpressure?.onError(error);
@@ -760,45 +775,54 @@ export async function executeLoop(
         } catch (error) {
           // onError recovery for tool execution phase.
           // Iterate handlers manually to avoid waterfall type mismatch.
+          // Wrapped in try/catch so a throwing onError handler doesn't
+          // bypass the error result path — if the hook itself fails, we
+          // fall through to normal error propagation using the original error.
           let recovered = false;
           if (hooks?.has('onError')) {
-            const toolErrorContext = {
-              error,
-              step,
-              phase: 'tool-execution' as const,
-              conversation,
-              retryCount: 0,
-              maxRetries: 0,
-            };
-            let errorAction: ErrorRecoveryAction | undefined;
-            const toolErrorHandlers = hooks.getHandlers('onError');
-            for (const entry of toolErrorHandlers) {
-              const result = await (
-                entry.handler as (
-                  context: typeof toolErrorContext,
-                ) => Promise<ErrorRecoveryAction | void>
-              )(toolErrorContext);
-              if (result !== undefined) {
-                errorAction = result;
-                break;
+            try {
+              const toolErrorContext = {
+                error,
+                step,
+                phase: 'tool-execution' as const,
+                conversation,
+                retryCount: 0,
+                maxRetries: 0,
+              };
+              let errorAction: ErrorRecoveryAction | undefined;
+              const toolErrorHandlers = hooks.getHandlers('onError');
+              for (const entry of toolErrorHandlers) {
+                const result = await (
+                  entry.handler as (
+                    context: typeof toolErrorContext,
+                  ) => Promise<ErrorRecoveryAction | void>
+                )(toolErrorContext);
+                if (result !== undefined) {
+                  errorAction = result;
+                  break;
+                }
               }
-            }
 
-            if (errorAction === 'skip') {
-              // Append error results for each dangling tool call so the
-              // conversation stays valid (tool calls without corresponding
-              // tool results break most LLM APIs on the next generate call).
-              results = callsToExecute.map((tc) => ({
-                callId: tc.id,
-                toolCallId: tc.id,
-                toolName: tc.name,
-                outcome: 'error' as const,
-                content: 'Tool execution skipped by onError hook',
-                result: 'Tool execution skipped by onError hook',
-              }));
-              recovered = true;
+              if (errorAction === 'skip') {
+                // Append error results for each dangling tool call so the
+                // conversation stays valid (tool calls without corresponding
+                // tool results break most LLM APIs on the next generate call).
+                results = callsToExecute.map((tc) => ({
+                  callId: tc.id,
+                  toolCallId: tc.id,
+                  toolName: tc.name,
+                  outcome: 'error' as const,
+                  content: 'Tool execution skipped by onError hook',
+                  result: 'Tool execution skipped by onError hook',
+                }));
+                recovered = true;
+              }
+              // 'retry' and 'abort' both propagate for tool execution
+            } catch {
+              // The onError hook itself threw — fall through to normal error
+              // propagation using the original error so that makeErrorResult,
+              // onRunError, and RunErrorEvent all fire as expected.
             }
-            // 'retry' and 'abort' both propagate for tool execution
           }
           if (!recovered) {
             emitter?.dispatch(new RunErrorEvent(step, error));

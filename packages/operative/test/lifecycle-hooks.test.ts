@@ -1010,3 +1010,130 @@ describe('onError hook called after retry limit exhausted', () => {
     expect(errorContexts[3].maxRetries).toBe(3);
   });
 });
+
+describe('onError hook exception does not bypass error result path', () => {
+  it('returns error result when onError hook itself throws during generate phase', async () => {
+    const hooks = new HookRegistry<OperativeHookMap>();
+    const runErrors: RunErrorContext[] = [];
+
+    hooks.on('onRunError', async (context) => {
+      runErrors.push(context);
+    });
+
+    hooks.on('onError', async () => {
+      throw new Error('hook itself exploded');
+    });
+
+    const generate = async () => {
+      throw new Error('original generate error');
+    };
+
+    const result = await run({
+      generate,
+      toolbox: createTestToolbox([]),
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+      hooks,
+    });
+
+    // The run should produce a graceful error result, not a rejected promise
+    expect(result.finishReason).toBe('error');
+    expect(result.error).toBeInstanceOf(Error);
+    expect((result.error as Error).message).toBe('original generate error');
+    // onRunError should have fired
+    expect(runErrors).toHaveLength(1);
+  });
+
+  it('returns error result when onError hook itself throws during tool-execution phase', async () => {
+    const hooks = new HookRegistry<OperativeHookMap>();
+    const runErrors: RunErrorContext[] = [];
+
+    hooks.on('onRunError', async (context) => {
+      runErrors.push(context);
+    });
+
+    hooks.on('onError', async (context: ErrorContext) => {
+      if (context.phase === 'tool-execution') {
+        throw new Error('hook itself exploded during tool phase');
+      }
+      return undefined;
+    });
+
+    // Create a toolbox whose execute method throws outright (simulating a
+    // catastrophic failure that reaches the loop's catch block, as opposed
+    // to individual tool errors which the toolbox catches internally).
+    const throwingToolbox = createTestToolbox([tool]);
+    const originalExecute = throwingToolbox.execute.bind(throwingToolbox);
+    throwingToolbox.execute = (async (...args: unknown[]) => {
+      // Call original for the first time, but then throw
+      const _ = await (originalExecute as (...a: unknown[]) => Promise<unknown>)(...args);
+      // The toolbox catches individual tool errors, so we throw here
+      // to simulate a catastrophic toolbox failure.
+      throw new Error('catastrophic toolbox failure');
+    }) as typeof throwingToolbox.execute;
+
+    const generate = createMockGenerate([
+      toolCallResponse([weatherToolCall('Denver')]),
+      textResponse('Should not reach'),
+    ]);
+
+    const result = await run({
+      generate,
+      toolbox: throwingToolbox,
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+      hooks,
+    });
+
+    // The run should produce a graceful error result, not a rejected promise
+    expect(result.finishReason).toBe('error');
+    expect(result.error).toBeInstanceOf(Error);
+    expect((result.error as Error).message).toBe('catastrophic toolbox failure');
+    // onRunError should have fired
+    expect(runErrors).toHaveLength(1);
+  });
+});
+
+describe('afterGenerate errors are not misreported as generate errors', () => {
+  it('does not dispatch GenerateErrorEvent when afterGenerate hook throws', async () => {
+    const hooks = new HookRegistry<OperativeHookMap>();
+    const events: string[] = [];
+
+    hooks.on('afterGenerate', async () => {
+      throw new Error('afterGenerate hook failure');
+    });
+
+    // Use a custom emitter to track which events are dispatched
+    const emitter = {
+      dispatch(event: Event) {
+        events.push(event.type);
+        return true;
+      },
+    };
+
+    // We need to call executeLoop directly to pass the custom emitter
+    const { executeLoop } = await import('../src/loop');
+
+    const generate = createMockGenerate([textResponse('Hello')]);
+
+    const result = await executeLoop(
+      {
+        generate,
+        toolbox: createTestToolbox([]),
+        conversation: new Conversation(),
+        stopWhen: noToolCalls(),
+        hooks,
+      },
+      emitter,
+    );
+
+    // The afterGenerate error should propagate as a run error, not a generate error
+    expect(result.finishReason).toBe('error');
+    expect(result.error).toBeInstanceOf(Error);
+    expect((result.error as Error).message).toBe('afterGenerate hook failure');
+    // GenerateStartedEvent should be there (the LLM call succeeded)
+    expect(events).toContain('generate.started');
+    // GenerateErrorEvent should NOT be there (the LLM call did not fail)
+    expect(events).not.toContain('generate.error');
+  });
+});
