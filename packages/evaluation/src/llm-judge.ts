@@ -43,24 +43,31 @@ function buildJudgeUserMessage(input: string, output: string, reference?: string
  * Parses the judge's response, extracting score and reasoning from JSON.
  */
 function parseJudgeResponse(content: string, scale: { min: number; max: number }): LLMJudgeResult {
-  // Try to extract a JSON object from the response, handling cases where the
-  // judge wraps it in markdown code fences or adds extra text. Uses lazy
-  // quantifiers (`*?`) to avoid over-matching when the LLM adds commentary
-  // after the JSON that contains braces. The regex is order-agnostic — it
-  // matches any object containing both keys regardless of which appears first.
-  const jsonMatch = content.match(
-    /\{[\s\S]*?(?:"score"[\s\S]*?"reasoning"|"reasoning"[\s\S]*?"score")[\s\S]*?\}/,
-  );
-  const jsonString = jsonMatch ? jsonMatch[0] : content;
-
+  // Try JSON.parse on the raw content first — this handles the common case
+  // where the LLM returns clean JSON without wrapping. Only fall back to
+  // regex extraction when direct parsing fails (e.g., markdown code fences
+  // or extra commentary surrounding the JSON).
   let parsed: unknown;
   try {
-    parsed = JSON.parse(jsonString);
+    parsed = JSON.parse(content);
   } catch {
-    return {
-      score: 0,
-      reasoning: `Failed to parse judge response as JSON: ${content}`,
-    };
+    const jsonMatch = content.match(
+      /\{[\s\S]*?(?:"score"[\s\S]*?"reasoning"|"reasoning"[\s\S]*?"score")[\s\S]*?\}/,
+    );
+    if (!jsonMatch) {
+      return {
+        score: 0,
+        reasoning: `Failed to parse judge response as JSON: ${content}`,
+      };
+    }
+    try {
+      parsed = JSON.parse(jsonMatch[0]);
+    } catch {
+      return {
+        score: 0,
+        reasoning: `Failed to parse judge response as JSON: ${content}`,
+      };
+    }
   }
 
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
