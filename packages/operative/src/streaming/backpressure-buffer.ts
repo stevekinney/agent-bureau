@@ -88,12 +88,14 @@ export function createBackpressureBuffer(options: BackpressureBufferOptions): Ba
           if (isTextDelta(next)) {
             combinedContent += next.content;
             lastAccumulated = next.accumulated;
+            // Only count as dropped if we already had a text-delta (the first one produces output)
+            if (hasTextDelta) droppedCount++;
             hasTextDelta = true;
-            droppedCount++;
           } else if (isBlockDelta(next)) {
-            lastBlockDelta = next;
             combinedBlockDeltaContent += next.delta;
-            droppedCount++;
+            // Only count as dropped if we already had a block-delta (the first one produces output)
+            if (lastBlockDelta) droppedCount++;
+            lastBlockDelta = next;
           }
           j++;
         }

@@ -99,7 +99,7 @@ export async function* normalizeOpenAIStream(
 
         if (!tracker && toolCall.id && toolCall.function?.name) {
           // New tool call
-          const blockId = toolCall.id ?? `tool-${index}`;
+          const blockId = toolCall.id;
           const toolName = toolCall.function.name;
 
           tracker = { blockId, toolName, arguments: '' };
