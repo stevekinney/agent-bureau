@@ -25,8 +25,10 @@ export async function* normalizeOpenAIStream(
 
   let accumulatedText = '';
   let textBlockId: string | undefined;
-  let promptTokens = 0;
-  let completionTokens = 0;
+  let promptTokens: number | undefined;
+  let completionTokens: number | undefined;
+  /** Whether any usage data has been received from the API. */
+  let hasUsageData = false;
 
   function findBlock(id: string): StreamBlock | undefined {
     return blocks.find((b) => b.id === id);
@@ -42,11 +44,13 @@ export async function* normalizeOpenAIStream(
         .join(''),
       toolCalls: blocks.filter((b) => b.type === 'tool-call'),
       complete: false,
-      usage: {
-        prompt: promptTokens,
-        completion: completionTokens,
-        total: promptTokens + completionTokens,
-      },
+      usage: hasUsageData
+        ? {
+            prompt: promptTokens ?? 0,
+            completion: completionTokens ?? 0,
+            total: (promptTokens ?? 0) + (completionTokens ?? 0),
+          }
+        : undefined,
     };
   }
 
@@ -155,6 +159,7 @@ export async function* normalizeOpenAIStream(
 
     // Handle usage
     if (chunk.usage) {
+      hasUsageData = true;
       promptTokens = chunk.usage.prompt_tokens ?? 0;
       completionTokens = chunk.usage.completion_tokens ?? 0;
       yield {

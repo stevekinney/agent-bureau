@@ -1,4 +1,3 @@
-import type { Conversation } from 'conversationalist';
 import type { TypedEventTarget } from 'lifecycle';
 
 import type {
@@ -8,6 +7,7 @@ import type {
   StreamingGenerateFunction,
   StreamingHandle,
 } from '../types';
+import { cancelStreamingIfActive } from './cancel-streaming';
 import { createStreamStateMachine } from './stream-state-machine';
 import type { EnhancedStreamingOptions, StreamEvent, StreamEventMap } from './types';
 import { StreamCustomEvent } from './types';
@@ -182,13 +182,6 @@ export function withEnhancedStreaming(
       throw error;
     }
   };
-}
-
-function cancelStreamingIfActive(conversation: Conversation, messageId: string): void {
-  const message = conversation.getStreamingMessage();
-  if (message && message.id === messageId) {
-    conversation.cancelStreamingMessage(messageId);
-  }
 }
 
 function emitEvent<K extends StreamEvent['type']>(

@@ -23,8 +23,10 @@ export async function* normalizeAnthropicStream(
   /** Accumulated partial args per block */
   const blockPartialArgs = new Map<string, string>();
 
-  let promptTokens = 0;
-  let completionTokens = 0;
+  let promptTokens: number | undefined;
+  let completionTokens: number | undefined;
+  /** Whether any usage data has been received from the API. */
+  let hasUsageData = false;
 
   function findBlock(id: string): StreamBlock | undefined {
     return blocks.find((b) => b.id === id);
@@ -40,11 +42,13 @@ export async function* normalizeAnthropicStream(
         .join(''),
       toolCalls: blocks.filter((b) => b.type === 'tool-call'),
       complete: false,
-      usage: {
-        prompt: promptTokens,
-        completion: completionTokens,
-        total: promptTokens + completionTokens,
-      },
+      usage: hasUsageData
+        ? {
+            prompt: promptTokens ?? 0,
+            completion: completionTokens ?? 0,
+            total: (promptTokens ?? 0) + (completionTokens ?? 0),
+          }
+        : undefined,
     };
   }
 
@@ -52,6 +56,7 @@ export async function* normalizeAnthropicStream(
     switch (event.type) {
       case 'message_start': {
         if (event.message?.usage) {
+          hasUsageData = true;
           promptTokens = event.message.usage.input_tokens ?? 0;
           completionTokens = event.message.usage.output_tokens ?? 0;
           yield {
@@ -193,13 +198,14 @@ export async function* normalizeAnthropicStream(
 
       case 'message_delta': {
         if (event.usage?.output_tokens !== undefined) {
+          hasUsageData = true;
           completionTokens = event.usage.output_tokens;
           yield {
             type: 'stream:usage',
             usage: {
-              prompt: promptTokens,
+              prompt: promptTokens ?? 0,
               completion: completionTokens,
-              total: promptTokens + completionTokens,
+              total: (promptTokens ?? 0) + completionTokens,
             },
           };
         }
