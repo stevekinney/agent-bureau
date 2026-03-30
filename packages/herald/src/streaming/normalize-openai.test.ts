@@ -275,6 +275,27 @@ describe('normalizeOpenAIStream', () => {
     expect(toolCompletes).toHaveLength(2);
   });
 
+  it('processes usage from a usage-only chunk with empty choices', async () => {
+    const chunks: OpenAIChatCompletionChunk[] = [
+      { choices: [{ delta: { content: 'Hi' }, finish_reason: null }] },
+      { choices: [{ delta: {}, finish_reason: 'stop' }] },
+      {
+        choices: [],
+        usage: { prompt_tokens: 20, completion_tokens: 10, total_tokens: 30 },
+      },
+    ];
+
+    const result = await collect(normalizeOpenAIStream(toAsync(chunks)));
+    const usageEvents = result.filter((e) => e.type === 'stream:usage');
+
+    expect(usageEvents).toHaveLength(1);
+    if (usageEvents[0]?.type === 'stream:usage') {
+      expect(usageEvents[0].usage.prompt).toBe(20);
+      expect(usageEvents[0].usage.completion).toBe(10);
+      expect(usageEvents[0].usage.total).toBe(30);
+    }
+  });
+
   it('ignores chunks with null content', async () => {
     const chunks: OpenAIChatCompletionChunk[] = [
       { choices: [{ delta: { content: null }, finish_reason: null }] },

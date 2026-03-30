@@ -55,6 +55,23 @@ export async function* normalizeOpenAIStream(
   }
 
   for await (const chunk of stream) {
+    // Handle usage before checking for choices — OpenAI sends a final
+    // usage-only chunk with choices: [] when stream_options.include_usage
+    // is enabled.
+    if (chunk.usage) {
+      hasUsageData = true;
+      promptTokens = chunk.usage.prompt_tokens ?? 0;
+      completionTokens = chunk.usage.completion_tokens ?? 0;
+      yield {
+        type: 'stream:usage',
+        usage: {
+          prompt: promptTokens,
+          completion: completionTokens,
+          total: chunk.usage.total_tokens ?? promptTokens + completionTokens,
+        },
+      };
+    }
+
     const choice = chunk.choices[0];
     if (!choice) continue;
 
@@ -155,21 +172,6 @@ export async function* normalizeOpenAIStream(
           };
         }
       }
-    }
-
-    // Handle usage
-    if (chunk.usage) {
-      hasUsageData = true;
-      promptTokens = chunk.usage.prompt_tokens ?? 0;
-      completionTokens = chunk.usage.completion_tokens ?? 0;
-      yield {
-        type: 'stream:usage',
-        usage: {
-          prompt: promptTokens,
-          completion: completionTokens,
-          total: chunk.usage.total_tokens ?? promptTokens + completionTokens,
-        },
-      };
     }
 
     // Handle finish
