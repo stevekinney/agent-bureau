@@ -43,9 +43,13 @@ function buildJudgeUserMessage(input: string, output: string, reference?: string
  * Parses the judge's response, extracting score and reasoning from JSON.
  */
 function parseJudgeResponse(content: string, scale: { min: number; max: number }): LLMJudgeResult {
-  // Try to extract JSON from the response, handling cases where the judge
-  // wraps it in markdown code fences or adds extra text.
-  const jsonMatch = content.match(/\{[\s\S]*"score"[\s\S]*"reasoning"[\s\S]*\}/);
+  // Try to extract a JSON object from the response, handling cases where the
+  // judge wraps it in markdown code fences or adds extra text. The regex is
+  // order-agnostic — it matches any object containing both keys regardless of
+  // which appears first.
+  const jsonMatch = content.match(
+    /\{[\s\S]*(?:"score"[\s\S]*"reasoning"|"reasoning"[\s\S]*"score")[\s\S]*\}/,
+  );
   const jsonString = jsonMatch ? jsonMatch[0] : content;
 
   let parsed: unknown;

@@ -98,16 +98,21 @@ export async function runEvaluationSuite(
 
   const report = await evaluation.run();
 
+  // Load the baseline *before* writing the output so that a same-path
+  // configuration (output === baseline) doesn't overwrite the baseline
+  // with the current report, which would make the comparison a no-op.
+  let comparison: ReturnType<typeof compareEvaluationReports> | undefined;
+  if (options.baseline) {
+    const baselineReport = await loadBaselineReport(options.baseline);
+    comparison = compareEvaluationReports(baselineReport, report, options.thresholds);
+  }
+
   // Write report to output path if specified
   if (options.output) {
     await Bun.write(options.output, JSON.stringify(report, null, 2));
   }
 
-  // Compare against baseline if provided
-  if (options.baseline) {
-    const baselineReport = await loadBaselineReport(options.baseline);
-    const comparison = compareEvaluationReports(baselineReport, report, options.thresholds);
-
+  if (comparison) {
     const hasRegressions = comparison.regressions.length > 0;
 
     return {
