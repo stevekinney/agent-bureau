@@ -24,6 +24,18 @@ async function loadCasesFromDatasets(datasets: string | string[]): Promise<Evalu
   return allCases;
 }
 
+/** Type guard that validates the minimal shape of a baseline report. */
+function isEvaluationReport(value: unknown): value is EvaluationReport {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return (
+    typeof record['timestamp'] === 'string' &&
+    Array.isArray(record['cases']) &&
+    typeof record['summary'] === 'object' &&
+    record['summary'] !== null
+  );
+}
+
 /**
  * Loads a baseline evaluation report from a JSON file.
  */
@@ -36,7 +48,15 @@ async function loadBaselineReport(path: string): Promise<EvaluationReport> {
   }
 
   const content = await file.text();
-  return JSON.parse(content) as EvaluationReport;
+  const parsed: unknown = JSON.parse(content);
+
+  if (!isEvaluationReport(parsed)) {
+    throw new Error(
+      `Baseline file "${path}" does not contain a valid EvaluationReport (missing timestamp, cases, or summary)`,
+    );
+  }
+
+  return parsed;
 }
 
 /**

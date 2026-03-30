@@ -261,4 +261,23 @@ describe('runEvaluationSuite', () => {
     expect(result.report.cases).toHaveLength(2);
     expect(result.exitCode).toBe(0);
   });
+
+  it('throws when the baseline file contains invalid data', async () => {
+    const generate = createMockGenerate([singleResponse('Hello!'), singleResponse('Goodbye!')]);
+    const toolbox = createTestToolbox([]);
+    const invalidBaselinePath = fixturePath('invalid-baseline.json');
+    await Bun.write(invalidBaselinePath, JSON.stringify({ not: 'a report' }));
+
+    try {
+      await runEvaluationSuite({
+        datasets: fixturePath('suite-cases.json'),
+        agent: { generate, toolbox },
+        baseline: invalidBaselinePath,
+      });
+      expect.unreachable('Expected runEvaluationSuite to throw');
+    } catch (error: unknown) {
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toMatch(/valid.*EvaluationReport/i);
+    }
+  });
 });
