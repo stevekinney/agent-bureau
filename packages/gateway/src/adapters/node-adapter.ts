@@ -9,6 +9,11 @@ import type { ServerAdapter, ServerAdapterOptions, ServerHandle } from './types'
  * The @hono/node-server package is an optional peer dependency —
  * this adapter dynamically imports it at runtime so bundlers that
  * target Bun never pull it in.
+ *
+ * WebSocket support requires Bun's native upgrade mechanism, so
+ * the Node adapter logs a warning when a wsHandler is provided.
+ * Auth token protection for WebSocket connections is similarly
+ * unavailable outside Bun.
  */
 export function createNodeAdapter(): ServerAdapter {
   return {
@@ -21,7 +26,23 @@ export function createNodeAdapter(): ServerAdapter {
     },
 
     async serve(app: Hono, options: ServerAdapterOptions): Promise<ServerHandle> {
-      const { port, hostname } = options;
+      const { port, hostname, wsHandler, authToken } = options;
+
+      if (wsHandler) {
+        console.warn(
+          '[gateway] WebSocket support is not available with the Node.js adapter. ' +
+            'Real-time event streaming over WebSocket requires the Bun runtime. ' +
+            'The HTTP API remains fully functional.',
+        );
+      }
+
+      if (authToken) {
+        console.warn(
+          '[gateway] WebSocket auth-token protection is not available with the Node.js adapter. ' +
+            'HTTP route authentication still applies, but WebSocket upgrade ' +
+            "requests cannot be validated without Bun's native server.",
+        );
+      }
 
       const modulePath = '@hono/node-server';
       const mod = (await import(/* webpackIgnore: true */ modulePath)) as {
