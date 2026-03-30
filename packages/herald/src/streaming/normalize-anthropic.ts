@@ -28,6 +28,8 @@ export async function* normalizeAnthropicStream(
   const blockToolNames = new Map<string, string>();
   /** Accumulated text for stream:text-delta events */
   let accumulatedText = '';
+  /** Whether stream:complete has already been emitted via message_stop */
+  let completionEmitted = false;
 
   for await (const event of stream) {
     switch (event.type) {
@@ -187,6 +189,7 @@ export async function* normalizeAnthropicStream(
       }
 
       case 'message_stop': {
+        completionEmitted = true;
         const finalState: StreamState = {
           ...buildState(state),
           complete: true,
@@ -195,5 +198,15 @@ export async function* normalizeAnthropicStream(
         break;
       }
     }
+  }
+
+  // Guarantee stream:complete is always emitted, even if the stream was
+  // truncated without a message_stop event (e.g., clean network close).
+  if (!completionEmitted) {
+    const finalState: StreamState = {
+      ...buildState(state),
+      complete: true,
+    };
+    yield { type: 'stream:complete', state: finalState };
   }
 }
