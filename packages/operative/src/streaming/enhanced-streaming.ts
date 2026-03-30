@@ -57,7 +57,7 @@ export function withEnhancedStreaming(
 
             emitEvent(eventTarget, 'stream:block-start', {
               type: 'stream:block-start',
-              block: stateMachine.getState().activeBlock!,
+              block: { ...stateMachine.getState().activeBlock! },
             });
           }
 
@@ -79,7 +79,7 @@ export function withEnhancedStreaming(
 
           emitEvent(eventTarget, 'stream:block-delta', {
             type: 'stream:block-delta',
-            block: stateMachine.getState().activeBlock!,
+            block: { ...stateMachine.getState().activeBlock! },
             delta,
           });
         }
