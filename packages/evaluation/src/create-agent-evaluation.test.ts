@@ -330,4 +330,33 @@ describe('createAgentEvaluation', () => {
 
     expect(report.cases[0]!.metrics.toolCallMatch).toBe(true);
   });
+
+  it('works with AgentDefinition input', async () => {
+    const generate = createMockGenerate([singleResponse('Hello from agent!')]);
+    const toolbox = createTestToolbox([]);
+
+    // Simulate an AgentDefinition-shaped object with a `run` method and `options`
+    const agentDefinition = {
+      name: 'test-agent',
+      options: { name: 'test-agent', generate, toolbox },
+      run: async () => ({
+        conversation: {} as RunResult['conversation'],
+        steps: [],
+        content: 'Hello from agent!',
+        usage: { prompt: 0, completion: 0, total: 0 },
+        finishReason: 'stop-condition' as const,
+      }),
+      createRun: () => ({}) as never,
+    };
+
+    const evaluation = createAgentEvaluation({
+      cases: [{ name: 'agent-def', input: 'test', expectedOutput: 'Hello from agent!' }],
+      agent: agentDefinition,
+    });
+
+    const report = await evaluation.run();
+
+    expect(report.cases[0]!.pass).toBe(true);
+    expect(report.cases[0]!.score).toBe(1);
+  });
 });

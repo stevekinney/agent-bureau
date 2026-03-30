@@ -38,15 +38,13 @@ export function computeCost(usage: TokenUsage, model?: string): number {
 /**
  * Flattens all tool calls across all steps into a single ordered array.
  */
-function flattenToolCalls(
-  result: RunResult,
-): Array<{ name: string; arguments: Record<string, unknown> }> {
-  const calls: Array<{ name: string; arguments: Record<string, unknown> }> = [];
+function flattenToolCalls(result: RunResult): Array<{ name: string; arguments: unknown }> {
+  const calls: Array<{ name: string; arguments: unknown }> = [];
   for (const step of result.steps) {
     for (const tc of step.toolCalls) {
       calls.push({
         name: tc.name,
-        arguments: (tc.arguments ?? {}) as Record<string, unknown>,
+        arguments: tc.arguments ?? {},
       });
     }
   }
