@@ -74,7 +74,7 @@ async function runCase(
     const usage = extractTokenUsage(runResult);
     const steps = extractStepCount(runResult);
 
-    if (runResult.finishReason === 'error' && runResult.error !== undefined) {
+    if (runResult.finishReason === 'error') {
       const rawError = runResult.error;
       const errorMessage =
         rawError instanceof Error

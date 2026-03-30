@@ -379,6 +379,28 @@ describe('createAgentEvaluation', () => {
     expect(report.cases[0]!.score).toBe(0);
   });
 
+  it('fails when finishReason is error even if error is undefined', async () => {
+    // Simulate a generate function that throws undefined, which causes
+    // the operative loop to return { finishReason: 'error', error: undefined }.
+    const generate = async () => {
+      // eslint-disable-next-line @typescript-eslint/only-throw-error
+      throw undefined;
+    };
+    const toolbox = createTestToolbox([]);
+
+    const evaluation = createAgentEvaluation({
+      cases: [{ name: 'error-undefined', input: 'test' }],
+      agent: { generate, toolbox },
+    });
+
+    const report = await evaluation.run();
+
+    expect(report.cases[0]!.pass).toBe(false);
+    expect(report.cases[0]!.score).toBe(0);
+    expect(report.cases[0]!.metrics.finishReason).toBe('error');
+    expect(report.cases[0]!.error).toBe('Unknown error');
+  });
+
   it('works with AgentDefinition input', async () => {
     const generate = createMockGenerate([singleResponse('Hello from agent!')]);
     const toolbox = createTestToolbox([]);
