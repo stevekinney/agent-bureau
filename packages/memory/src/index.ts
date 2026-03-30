@@ -20,7 +20,7 @@ export type {
 } from './file-synchronizer';
 export { createFileSynchronizer } from './file-synchronizer';
 export type { Fts5TextSearchProviderOptions } from './fts5-text-search-provider';
-export { createFts5TextSearchProvider } from './fts5-text-search-provider';
+export { createFts5TextSearchProvider, isFts5Available } from './fts5-text-search-provider';
 export type { MemoryHookOptions } from './hooks';
 export { createMemoryHooks } from './hooks';
 export type {

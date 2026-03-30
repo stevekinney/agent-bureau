@@ -1,6 +1,15 @@
 import { extractKeywords } from './query-expansion';
 import type { TextSearchProvider } from './text-search-provider';
 
+/**
+ * Checks whether the FTS5 text search provider can run in the current
+ * environment. FTS5 relies on `bun:sqlite`, which is only available
+ * in the Bun runtime.
+ */
+export function isFts5Available(): boolean {
+  return typeof globalThis.Bun !== 'undefined';
+}
+
 export interface Fts5TextSearchProviderOptions {
   /** Path to the SQLite database file, or ':memory:' for in-memory. */
   filename: string;
@@ -93,6 +102,14 @@ export function createFts5TextSearchProvider(
   return {
     async init(): Promise<void> {
       if (database) return;
+
+      if (!isFts5Available()) {
+        throw new Error(
+          'FTS5 text search requires the Bun runtime (bun:sqlite). ' +
+            'In non-Bun environments, use createSQLiteMemory({ disableFts5: true }) ' +
+            'to fall back to the pure-TypeScript BM25 text search provider.',
+        );
+      }
 
       const moduleName = 'bun:sqlite';
       const { Database } = (await import(/* webpackIgnore: true */ moduleName)) as {

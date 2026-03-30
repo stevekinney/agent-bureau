@@ -1,7 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 
-import { createFts5TextSearchProvider } from '../src/fts5-text-search-provider';
+import {
+  createFts5TextSearchProvider,
+  isFts5Available,
+} from '../src/fts5-text-search-provider';
 import type { TextSearchProvider } from '../src/text-search-provider';
+
+describe('isFts5Available', () => {
+  it('returns true in the Bun runtime', () => {
+    expect(isFts5Available()).toBe(true);
+  });
+});
 
 describe('createFts5TextSearchProvider', () => {
   let provider: TextSearchProvider;
