@@ -81,6 +81,9 @@ function matchToolCallsOrdered(result: RunResult, expected: ExpectedToolCall[]):
   for (const exp of expected) {
     if (exp.index === undefined) continue;
 
+    // Each actual call can only satisfy one expected call
+    if (consumed.has(exp.index)) return false;
+
     const actual = actualCalls[exp.index];
     if (!actual) return false;
     if (actual.name !== exp.name) return false;

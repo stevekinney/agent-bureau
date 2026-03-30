@@ -152,6 +152,18 @@ describe('matchToolCalls', () => {
     expect(matchToolCalls(result, expected)).toBe(true);
   });
 
+  it('returns false when two expected calls share the same index', () => {
+    const steps = [createMockStep([{ name: 'search' }, { name: 'search' }])];
+    // Both expected calls point to index 0 — the second one should fail
+    // because the actual call at index 0 was already consumed by the first
+    const expected: ExpectedToolCall[] = [
+      { name: 'search', index: 0 },
+      { name: 'search', index: 0 },
+    ];
+    const result = createMockRunResult({ steps });
+    expect(matchToolCalls(result, expected)).toBe(false);
+  });
+
   it('returns false when unindexed call cannot be found at any position', () => {
     const steps = [createMockStep([{ name: 'search' }, { name: 'summarize' }])];
     const expected: ExpectedToolCall[] = [{ name: 'search', index: 0 }, { name: 'missing-tool' }];
