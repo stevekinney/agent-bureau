@@ -1,0 +1,18 @@
+[
+  {
+    "name": "simple-greeting",
+    "input": "Say hello to the user",
+    "expectedOutput": "Hello!"
+  },
+  {
+    "name": "math-answer",
+    "input": "What is 2 + 2?",
+    "tags": ["math", "simple"]
+  },
+  {
+    "name": "tool-call-search",
+    "input": "Search for information about TypeScript",
+    "expectedToolCalls": [{ "name": "search" }],
+    "tags": ["tool-use"]
+  }
+]
