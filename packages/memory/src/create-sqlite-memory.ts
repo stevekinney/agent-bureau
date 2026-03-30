@@ -4,7 +4,7 @@ import { SQLiteStorageAdapter } from 'vector-frankl';
 import { createMemory } from './create-memory';
 import type { EmbeddingCacheOptions } from './embedding-cache';
 import { withEmbeddingCache } from './embedding-cache';
-import { createFts5TextSearchProvider } from './fts5-text-search-provider';
+import { createFts5TextSearchProvider, isFts5Available } from './fts5-text-search-provider';
 import type { CreateMemoryOptions, Memory, MemorySearchOptions } from './types';
 
 export { SQLiteStorageAdapter } from 'vector-frankl';
@@ -19,7 +19,7 @@ export interface CreateSQLiteMemoryOptions {
   deduplicationThreshold?: number;
   /** Enable embedding cache. Pass `true` for defaults or an options object. */
   embeddingCache?: EmbeddingCacheOptions | boolean;
-  /** Disable FTS5 text search integration. Default: false (FTS5 is enabled). */
+  /** Disable FTS5 text search integration. Default: false (FTS5 is enabled when available, i.e. Bun runtime). */
   disableFts5?: boolean;
 }
 
@@ -47,7 +47,7 @@ export function createSQLiteMemory(options: CreateSQLiteMemoryOptions): Memory {
     ...rest,
   };
 
-  if (!disableFts5) {
+  if (!disableFts5 && isFts5Available()) {
     memoryOptions.textSearchProvider = createFts5TextSearchProvider({ filename });
   }
 

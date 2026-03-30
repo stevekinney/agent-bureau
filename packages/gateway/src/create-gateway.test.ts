@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 import { createStore } from 'sentinel';
 
+import { createBunAdapter } from './adapters/bun-adapter';
 import { createGateway } from './create-gateway';
 import { DEFAULT_PORT } from './types';
 
@@ -30,5 +31,18 @@ describe('createGateway', () => {
   it('exposes a start function', async () => {
     const gateway = await createGateway();
     expect(typeof gateway.start).toBe('function');
+  });
+
+  it('accepts runtime option', async () => {
+    const gateway = await createGateway({ runtime: 'bun' });
+    expect(gateway.app).toBeDefined();
+  });
+});
+
+describe('createBunAdapter', () => {
+  it('returns an adapter with serve and mountStaticFiles', () => {
+    const adapter = createBunAdapter();
+    expect(typeof adapter.serve).toBe('function');
+    expect(typeof adapter.mountStaticFiles).toBe('function');
   });
 });

@@ -591,7 +591,7 @@ describe('coverage edges', () => {
     internalMcpTestUtilities.setModuleLoader(() => {
       throw new Error('mcp missing');
     });
-    expect(() => createMCP(createToolbox())).toThrow(
+    await expect(createMCP(createToolbox())).rejects.toThrow(
       'Missing peer dependency "@modelcontextprotocol/sdk". Install it to use armorer/mcp.',
     );
     internalMcpTestUtilities.resetModuleState();

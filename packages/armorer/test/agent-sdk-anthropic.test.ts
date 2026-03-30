@@ -25,7 +25,7 @@ describe('Anthropic Agent SDK MCP integration', () => {
       toolbox,
     );
 
-    const mcp = createMCP(toolbox, {
+    const mcp = await createMCP(toolbox, {
       serverInfo: { name: 'toolbox-tools', version: '0.1.0' },
     });
 
@@ -69,7 +69,7 @@ describe('Anthropic Agent SDK MCP integration', () => {
       toolbox,
     );
 
-    const mcp = createMCP(toolbox, {
+    const mcp = await createMCP(toolbox, {
       serverInfo: { name: 'toolbox-tools', version: '0.1.0' },
     });
 

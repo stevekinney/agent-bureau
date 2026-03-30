@@ -1,4 +1,6 @@
-import { resolve } from 'node:path';
+import { readFile } from 'node:fs/promises';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import type { ReactNode } from 'react';
 import { renderToReadableStream } from 'react-dom/server';
@@ -10,9 +12,10 @@ let cachedManifest: AssetManifest | undefined;
 async function loadManifest(): Promise<AssetManifest> {
   if (cachedManifest) return cachedManifest;
   try {
-    const manifestPath = resolve(import.meta.dir, 'manifest.json');
-    const file = Bun.file(manifestPath);
-    cachedManifest = (await file.json()) as AssetManifest;
+    const currentDir = dirname(fileURLToPath(import.meta.url));
+    const manifestPath = resolve(currentDir, 'manifest.json');
+    const raw = await readFile(manifestPath, 'utf-8');
+    cachedManifest = JSON.parse(raw) as AssetManifest;
   } catch {
     cachedManifest = {};
   }

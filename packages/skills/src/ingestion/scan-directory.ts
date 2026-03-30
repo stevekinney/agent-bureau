@@ -1,4 +1,4 @@
-import { readdir, stat } from 'node:fs/promises';
+import { readdir, readFile, stat } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
 import { parseSkillMarkdown, SkillParseError } from '../parse-skill-markdown';
@@ -18,6 +18,19 @@ export interface ScanResult {
   loaded: number;
   /** Parse/read errors encountered. */
   errors: Array<{ path: string; error: string }>;
+}
+
+/**
+ * Throws if the current environment is neither Bun nor Node.js.
+ * `scanDirectory` relies on the filesystem and cannot run in
+ * browser, service worker, or Chrome extension contexts.
+ */
+function assertServerRuntime(): void {
+  if (typeof globalThis.Bun === 'undefined' && typeof globalThis.process === 'undefined') {
+    throw new Error(
+      'scanDirectory() requires Bun or Node.js. It cannot run in browser environments.',
+    );
+  }
 }
 
 const IGNORED_DIRECTORIES = new Set(['node_modules', '.git']);
@@ -113,6 +126,8 @@ export async function scanDirectory(
   provider: SkillProvider,
   options?: ScanDirectoryOptions,
 ): Promise<ScanResult> {
+  assertServerRuntime();
+
   const maxDepth = options?.maxDepth ?? 4;
   const maxDirectories = options?.maxDirectories ?? 2000;
 
@@ -126,7 +141,7 @@ export async function scanDirectory(
 
   for (const skillPath of skillPaths) {
     try {
-      const content = await Bun.file(skillPath).text();
+      const content = await readFile(skillPath, 'utf-8');
       const parsed = parseSkillMarkdown(content);
       const skillName = parsed.metadata.name;
       const skillDirectory = dirname(skillPath);
@@ -136,7 +151,7 @@ export async function scanDirectory(
       const resourceFiles = await collectResourceFiles(skillDirectory);
       for (const resourceFile of resourceFiles) {
         const resourcePath = join(skillDirectory, resourceFile);
-        const resourceContent = await Bun.file(resourcePath).text();
+        const resourceContent = await readFile(resourcePath, 'utf-8');
         await provider.saveResource(skillName, resourceFile, resourceContent);
       }
 

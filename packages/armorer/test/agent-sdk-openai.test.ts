@@ -44,7 +44,7 @@ describe('OpenAI Agents SDK MCP integration', () => {
     });
     const toolbox = createToolbox([sum]);
 
-    const mcp = createMCP(toolbox, {
+    const mcp = await createMCP(toolbox, {
       serverInfo: { name: 'toolbox-tools', version: '0.1.0' },
     });
     const transport = new WebStandardStreamableHTTPServerTransport({

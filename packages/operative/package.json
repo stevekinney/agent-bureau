@@ -24,29 +24,33 @@
   "type": "module",
   "exports": {
     ".": {
-      "import": "./dist/index.js",
       "bun": "./dist/index.js",
+      "browser": "./dist/index.js",
+      "import": "./dist/index.js",
       "require": "./dist/index.cjs",
       "default": "./dist/index.js",
       "types": "./dist/index.d.ts"
     },
     "./conditions": {
-      "import": "./dist/conditions/index.js",
       "bun": "./dist/conditions/index.js",
+      "browser": "./dist/conditions/index.js",
+      "import": "./dist/conditions/index.js",
       "require": "./dist/conditions/index.cjs",
       "default": "./dist/conditions/index.js",
       "types": "./dist/conditions/index.d.ts"
     },
     "./instrumentation": {
-      "import": "./dist/instrumentation/index.js",
       "bun": "./dist/instrumentation/index.js",
+      "browser": "./dist/instrumentation/index.js",
+      "import": "./dist/instrumentation/index.js",
       "require": "./dist/instrumentation/index.cjs",
       "default": "./dist/instrumentation/index.js",
       "types": "./dist/instrumentation/index.d.ts"
     },
     "./test": {
-      "import": "./dist/test/index.js",
       "bun": "./dist/test/index.js",
+      "browser": "./dist/test/index.js",
+      "import": "./dist/test/index.js",
       "require": "./dist/test/index.cjs",
       "default": "./dist/test/index.js",
       "types": "./dist/test/index.d.ts"

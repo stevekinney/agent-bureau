@@ -1,5 +1,3 @@
-import { createRequire } from 'node:module';
-
 import type { ServerOptions } from '@modelcontextprotocol/sdk/server/index.js';
 import type { McpServer, RegisteredTool } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { AnySchema } from '@modelcontextprotocol/sdk/server/zod-compat.js';
@@ -86,10 +84,13 @@ const DEFAULT_SERVER_INFO: Implementation = {
   version: '0.0.0',
 };
 
-export function createMCP(toolbox: ToolboxLike, options: CreateMCPOptions = {}): McpServer {
+export async function createMCP(
+  toolbox: ToolboxLike,
+  options: CreateMCPOptions = {},
+): Promise<McpServer> {
   const { serverInfo, toolConfiguration, formatResult, resources, prompts, ...serverOptions } =
     options;
-  const { McpServer: McpServerClass } = requireMcp();
+  const { McpServer: McpServerClass } = await requireMcp();
   const server = new McpServerClass(serverInfo ?? DEFAULT_SERVER_INFO, serverOptions);
   const registered = new Map<string, RegisteredTool>();
 
@@ -502,16 +503,17 @@ function isString(value: unknown): value is string {
 type McpSdk = typeof import('@modelcontextprotocol/sdk/server/mcp.js');
 
 let cachedMcpSdk: McpSdk | undefined;
-const defaultMcpLoader = (): McpSdk => {
+const defaultMcpLoader = async (): Promise<McpSdk> => {
+  const { createRequire } = await import('node:module');
   const require = createRequire(import.meta.url);
   return require('@modelcontextprotocol/sdk/server/mcp.js') as McpSdk;
 };
-let mcpLoader = defaultMcpLoader;
+let mcpLoader: () => McpSdk | Promise<McpSdk> = defaultMcpLoader;
 
-function requireMcp(): McpSdk {
+async function requireMcp(): Promise<McpSdk> {
   if (cachedMcpSdk) return cachedMcpSdk;
   try {
-    cachedMcpSdk = mcpLoader();
+    cachedMcpSdk = await mcpLoader();
     return cachedMcpSdk;
   } catch (error) {
     const hint =
@@ -527,7 +529,7 @@ export const internalMcpTestUtilities = {
     cachedMcpSdk = undefined;
     mcpLoader = defaultMcpLoader;
   },
-  setModuleLoader(loader: (() => McpSdk) | undefined) {
+  setModuleLoader(loader: (() => McpSdk | Promise<McpSdk>) | undefined) {
     cachedMcpSdk = undefined;
     mcpLoader = loader ?? defaultMcpLoader;
   },

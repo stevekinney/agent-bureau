@@ -116,6 +116,8 @@ export interface GatewayOptions extends BureauOptions {
   port?: number;
   hostname?: string;
   authToken?: string;
+  /** Server runtime. Default: auto-detected (`'bun'` when `typeof Bun !== 'undefined'`, `'node'` otherwise). */
+  runtime?: 'bun' | 'node';
 }
 
 export interface Gateway {
@@ -123,7 +125,7 @@ export interface Gateway {
   readonly bureau: Bureau;
   readonly store: Store;
   readonly port: number;
-  start(): { stop(): void };
+  start(): Promise<{ stop(): void }>;
 }
 
 // ── API Response Types ──────────────────────────────────────────────
