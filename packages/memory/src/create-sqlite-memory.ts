@@ -19,7 +19,7 @@ export interface CreateSQLiteMemoryOptions {
   deduplicationThreshold?: number;
   /** Enable embedding cache. Pass `true` for defaults or an options object. */
   embeddingCache?: EmbeddingCacheOptions | boolean;
-  /** Disable FTS5 text search integration. Default: false (FTS5 is enabled). */
+  /** Disable FTS5 text search integration. Default: false (FTS5 is enabled when available, i.e. Bun runtime). */
   disableFts5?: boolean;
 }
 
