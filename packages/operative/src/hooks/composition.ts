@@ -16,18 +16,29 @@ export function onlyOnStep<H extends (...args: any[]) => any>(step: number, hook
 }
 
 /**
- * Creates a hook that runs at most once per run.
- * Subsequent calls return undefined.
+ * Creates a hook that runs at most once.
+ * Subsequent calls return undefined until `reset()` is called.
+ *
+ * The returned function exposes a `reset()` method that clears the
+ * "already called" flag, allowing the hook to fire again. Call
+ * `reset()` between runs when the same hook instance is reused
+ * across multiple `run()` invocations on a persistent `HookRegistry`.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export function runOnce<H extends (...args: any[]) => any>(hook: H): H {
+export function runOnce<H extends (...args: any[]) => any>(hook: H): H & { reset(): void } {
   let called = false;
-  return ((...args: unknown[]) => {
+  const wrapped = ((...args: unknown[]) => {
     if (called) return undefined;
     called = true;
     // eslint-disable-next-line @typescript-eslint/no-unsafe-return
     return hook(...args);
-  }) as unknown as H;
+  }) as unknown as H & { reset(): void };
+
+  wrapped.reset = () => {
+    called = false;
+  };
+
+  return wrapped;
 }
 
 /**

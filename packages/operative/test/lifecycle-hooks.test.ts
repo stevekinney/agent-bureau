@@ -784,3 +784,146 @@ describe('existing hooks still work unchanged (regression)', () => {
     expect(result.finishReason).toBe('stop-condition');
   });
 });
+
+describe('afterGenerate waterfall with multiple hooks', () => {
+  it('each hook receives correct AfterGenerateContext, not the previous return value', async () => {
+    const hooks = new HookRegistry<OperativeHookMap>();
+    const receivedContexts: AfterGenerateContext[] = [];
+
+    hooks.on(
+      'afterGenerate',
+      async (context) => {
+        receivedContexts.push(context);
+        return { ...context.response, content: context.response.content + ' [first]' };
+      },
+      { priority: 10 },
+    );
+
+    hooks.on(
+      'afterGenerate',
+      async (context) => {
+        receivedContexts.push(context);
+        // The second hook should still receive a full AfterGenerateContext
+        // with conversation, step, response (modified by first hook), and duration.
+        return { ...context.response, content: context.response.content + ' [second]' };
+      },
+      { priority: 5 },
+    );
+
+    const generate = createMockGenerate([textResponse('Original')]);
+
+    const result = await run({
+      generate,
+      toolbox: createTestToolbox([]),
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+      hooks,
+    });
+
+    expect(result.content).toBe('Original [first] [second]');
+    // Both hooks must have received a proper AfterGenerateContext
+    expect(receivedContexts).toHaveLength(2);
+    expect(receivedContexts[0].conversation).toBeInstanceOf(Conversation);
+    expect(receivedContexts[0].step).toBe(0);
+    expect(typeof receivedContexts[0].duration).toBe('number');
+    expect(receivedContexts[0].response.content).toBe('Original');
+    // Second hook should see the modified response from the first
+    expect(receivedContexts[1].conversation).toBeInstanceOf(Conversation);
+    expect(receivedContexts[1].step).toBe(0);
+    expect(typeof receivedContexts[1].duration).toBe('number');
+    expect(receivedContexts[1].response.content).toBe('Original [first]');
+  });
+});
+
+describe('onError waterfall with multiple hooks', () => {
+  it('each hook receives correct ErrorContext, not the previous return value', async () => {
+    const hooks = new HookRegistry<OperativeHookMap>();
+    const receivedContexts: ErrorContext[] = [];
+
+    hooks.on(
+      'onError',
+      async (context: ErrorContext) => {
+        receivedContexts.push({ ...context });
+        // Return void so the next hook runs
+        return undefined;
+      },
+      { priority: 10 },
+    );
+
+    hooks.on(
+      'onError',
+      async (context: ErrorContext) => {
+        receivedContexts.push({ ...context });
+        return 'skip';
+      },
+      { priority: 5 },
+    );
+
+    let callCount = 0;
+    const generate = async () => {
+      callCount++;
+      if (callCount === 1) throw new Error('test error');
+      return textResponse('Recovered');
+    };
+
+    const result = await run({
+      generate,
+      toolbox: createTestToolbox([]),
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+      hooks,
+    });
+
+    expect(result.finishReason).toBe('stop-condition');
+    // Both hooks should have received a proper ErrorContext
+    expect(receivedContexts).toHaveLength(2);
+    expect(receivedContexts[0].error).toBeInstanceOf(Error);
+    expect(receivedContexts[0].step).toBe(0);
+    expect(receivedContexts[0].phase).toBe('generate');
+    expect(receivedContexts[0].conversation).toBeInstanceOf(Conversation);
+    // Second hook should also receive a proper ErrorContext, not a string
+    expect(receivedContexts[1].error).toBeInstanceOf(Error);
+    expect(receivedContexts[1].step).toBe(0);
+    expect(receivedContexts[1].phase).toBe('generate');
+    expect(receivedContexts[1].conversation).toBeInstanceOf(Conversation);
+  });
+});
+
+describe('onError hook called after retry limit exhausted', () => {
+  it('allows skip after retries are exhausted', async () => {
+    const hooks = new HookRegistry<OperativeHookMap>();
+    const errorContexts: ErrorContext[] = [];
+
+    hooks.on('onError', async (context: ErrorContext) => {
+      errorContexts.push({ ...context });
+      if (context.retryCount < context.maxRetries) {
+        return 'retry';
+      }
+      // After retries exhausted, skip instead of propagating error
+      return 'skip';
+    });
+
+    let callCount = 0;
+    const generate = async () => {
+      callCount++;
+      if (callCount <= 4) throw new Error('persistent failure');
+      return textResponse('After skip');
+    };
+
+    const result = await run({
+      generate,
+      toolbox: createTestToolbox([]),
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+      hooks,
+    });
+
+    // Should skip instead of erroring because hook returns 'skip' after retries exhausted
+    expect(result.finishReason).toBe('stop-condition');
+    expect(result.content).toBe('After skip');
+    // Hook should be called 4 times: 3 retries + 1 final call where it returns 'skip'
+    expect(errorContexts).toHaveLength(4);
+    expect(errorContexts[3].retryCount).toBe(3);
+    expect(errorContexts[3].maxRetries).toBe(3);
+  });
+});

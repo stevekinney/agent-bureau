@@ -81,6 +81,35 @@ describe('runOnce', () => {
     expect(third).toBeUndefined();
     expect(calls).toEqual([0]);
   });
+
+  it('reset() allows the hook to fire again', async () => {
+    const calls: number[] = [];
+    const hook = runOnce(async (context: { step: number }) => {
+      calls.push(context.step);
+      return 'result';
+    });
+
+    // First invocation fires
+    const first = await hook({ step: 0 });
+    expect(first).toBe('result');
+    expect(calls).toEqual([0]);
+
+    // Blocked before reset
+    const blocked = await hook({ step: 1 });
+    expect(blocked).toBeUndefined();
+    expect(calls).toEqual([0]);
+
+    // Reset and fire again
+    hook.reset();
+    const afterReset = await hook({ step: 2 });
+    expect(afterReset).toBe('result');
+    expect(calls).toEqual([0, 2]);
+
+    // Blocked again after second fire
+    const blockedAgain = await hook({ step: 3 });
+    expect(blockedAgain).toBeUndefined();
+    expect(calls).toEqual([0, 2]);
+  });
 });
 
 describe('everyNSteps', () => {

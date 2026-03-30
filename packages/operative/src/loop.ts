@@ -538,20 +538,29 @@ export async function executeLoop(
               usage: response.usage,
             });
 
-            // afterGenerate: waterfall that can modify the response
+            // afterGenerate: waterfall that can modify the response.
+            // We iterate handlers manually instead of using hooks.run() because the
+            // waterfall pattern in HookRegistry replaces the first argument with the
+            // return value. For afterGenerate, the input is AfterGenerateContext but
+            // the return is GenerateResponse — using hooks.run() would feed a
+            // GenerateResponse where the next handler expects AfterGenerateContext.
             if (hooks?.has('afterGenerate')) {
-              const afterGenContext = {
-                conversation,
-                step,
-                response,
-                duration: durationMilliseconds,
-              };
-              const afterGenResult = await hooks.run('afterGenerate', afterGenContext);
-              if (
-                afterGenResult !== undefined &&
-                !isRegistryPassthrough(afterGenResult, afterGenContext)
-              ) {
-                response = afterGenResult;
+              const handlers = hooks.getHandlers('afterGenerate');
+              for (const entry of handlers) {
+                const afterGenContext = {
+                  conversation,
+                  step,
+                  response,
+                  duration: durationMilliseconds,
+                };
+                const handlerResult = await (
+                  entry.handler as (
+                    context: typeof afterGenContext,
+                  ) => Promise<GenerateResponse | void>
+                )(afterGenContext);
+                if (handlerResult !== undefined) {
+                  response = handlerResult;
+                }
               }
             }
 
@@ -564,18 +573,36 @@ export async function executeLoop(
         }
         backpressure?.onSuccess();
       } catch (error) {
-        // onError recovery: sequential, first non-void return wins
-        if (hooks?.has('onError') && stepRetryCount < maxErrorRetries) {
-          const errorAction = (await hooks.run('onError', {
+        // onError recovery: sequential, first non-void return wins.
+        // We always invoke the hook regardless of retry count so it can
+        // return 'skip' or 'abort' even after retries are exhausted.
+        // We iterate handlers manually instead of using hooks.run() because
+        // the waterfall pattern replaces the first argument with the return
+        // value. For onError, the input is ErrorContext but the return is
+        // ErrorRecoveryAction (a string) — using hooks.run() would feed a
+        // string where the next handler expects ErrorContext.
+        if (hooks?.has('onError')) {
+          const errorContext = {
             error,
             step,
             phase: 'generate' as const,
             conversation,
             retryCount: stepRetryCount,
             maxRetries: maxErrorRetries,
-          })) as ErrorRecoveryAction | undefined;
+          };
+          let errorAction: ErrorRecoveryAction | undefined;
+          const handlers = hooks.getHandlers('onError');
+          for (const entry of handlers) {
+            const result = await (
+              entry.handler as (context: typeof errorContext) => Promise<ErrorRecoveryAction | void>
+            )(errorContext);
+            if (result !== undefined) {
+              errorAction = result;
+              break; // first non-void return wins
+            }
+          }
 
-          if (errorAction === 'retry') {
+          if (errorAction === 'retry' && stepRetryCount < maxErrorRetries) {
             stepRetryCount++;
             shouldRetryStep = true;
             continue;
@@ -725,17 +752,31 @@ export async function executeLoop(
 
           results = Array.isArray(executeResult) ? executeResult : [executeResult];
         } catch (error) {
-          // onError recovery for tool execution phase
+          // onError recovery for tool execution phase.
+          // Iterate handlers manually to avoid waterfall type mismatch.
           let recovered = false;
           if (hooks?.has('onError')) {
-            const errorAction = (await hooks.run('onError', {
+            const toolErrorContext = {
               error,
               step,
               phase: 'tool-execution' as const,
               conversation,
               retryCount: 0,
               maxRetries: 0,
-            })) as ErrorRecoveryAction | undefined;
+            };
+            let errorAction: ErrorRecoveryAction | undefined;
+            const toolErrorHandlers = hooks.getHandlers('onError');
+            for (const entry of toolErrorHandlers) {
+              const result = await (
+                entry.handler as (
+                  context: typeof toolErrorContext,
+                ) => Promise<ErrorRecoveryAction | void>
+              )(toolErrorContext);
+              if (result !== undefined) {
+                errorAction = result;
+                break;
+              }
+            }
 
             if (errorAction === 'skip') {
               // Continue with empty results — treat as if no tools executed
