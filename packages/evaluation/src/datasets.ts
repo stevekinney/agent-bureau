@@ -93,7 +93,9 @@ export async function loadDatasets(pattern: string): Promise<EvaluationCase[]> {
   // Bun.Glob.scan needs a cwd — use the directory portion of the pattern
   // when the pattern is absolute, or '.' for relative patterns.
   const cwd = pattern.startsWith('/') ? dirname(pattern) : '.';
-  const scanPattern = pattern.startsWith('/') ? pattern.slice(cwd.length + 1) : pattern;
+  const scanPattern = pattern.startsWith('/')
+    ? pattern.slice(cwd === '/' ? 1 : cwd.length + 1)
+    : pattern;
 
   const glob = new Bun.Glob(scanPattern);
   for await (const match of glob.scan({ cwd, absolute: true })) {

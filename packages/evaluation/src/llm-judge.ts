@@ -66,11 +66,18 @@ function parseJudgeResponse(content: string, scale: { min: number; max: number }
   }
 
   const record = parsed as Record<string, unknown>;
-  const rawScore = typeof record['score'] === 'number' ? record['score'] : 0;
+
+  if (typeof record['score'] !== 'number') {
+    return {
+      score: 0,
+      reasoning: `Judge response missing a numeric "score" field: ${content}`,
+    };
+  }
+
   const reasoning = typeof record['reasoning'] === 'string' ? record['reasoning'] : '';
 
   // Clamp score to the configured scale
-  const clampedScore = Math.max(scale.min, Math.min(scale.max, rawScore));
+  const clampedScore = Math.max(scale.min, Math.min(scale.max, record['score']));
 
   return { score: clampedScore, reasoning };
 }

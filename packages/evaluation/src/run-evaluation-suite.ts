@@ -1,6 +1,6 @@
 import { compareEvaluationReports } from './comparison';
 import { createAgentEvaluation } from './create-agent-evaluation';
-import { loadDataset } from './datasets';
+import { loadDataset, loadDatasets } from './datasets';
 import type {
   EvaluationCase,
   EvaluationReport,
@@ -8,16 +8,21 @@ import type {
   EvaluationSuiteResult,
 } from './types';
 
+/** Returns true when a path contains glob metacharacters (`*`, `?`, `{`, `[`). */
+function isGlobPattern(path: string): boolean {
+  return /[*?{[]/.test(path);
+}
+
 /**
- * Loads evaluation cases from one or more dataset file paths.
- * Accepts either a single path string or an array of paths.
+ * Loads evaluation cases from one or more dataset file paths or glob patterns.
+ * Literal file paths are loaded directly; glob patterns are expanded via `loadDatasets`.
  */
 async function loadCasesFromDatasets(datasets: string | string[]): Promise<EvaluationCase[]> {
   const paths = Array.isArray(datasets) ? datasets : [datasets];
   const allCases: EvaluationCase[] = [];
 
   for (const path of paths) {
-    const cases = await loadDataset(path);
+    const cases = isGlobPattern(path) ? await loadDatasets(path) : await loadDataset(path);
     allCases.push(...cases);
   }
 
