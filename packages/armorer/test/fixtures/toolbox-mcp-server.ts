@@ -16,7 +16,7 @@ const sum = createTool({
 
 const toolbox = createToolbox([sum]);
 
-const mcp = createMCP(toolbox, {
+const mcp = await createMCP(toolbox, {
   serverInfo: { name: 'toolbox-tools', version: '0.1.0' },
 });
 await mcp.connect(new StdioServerTransport());

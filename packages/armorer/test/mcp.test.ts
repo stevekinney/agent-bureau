@@ -76,7 +76,7 @@ class LoopbackTransport {
 }
 
 const connect = async (toolbox: ReturnType<typeof createToolbox>, options = {}) => {
-  const server = createMCP(toolbox, options);
+  const server = await createMCP(toolbox, options);
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: 'toolbox-test-client', version: '0.0.0' });
   await server.connect(serverTransport);
@@ -571,7 +571,7 @@ describe('createMCP', () => {
       toolbox,
     );
 
-    const server = createMCP(toolbox);
+    const server = await createMCP(toolbox);
     const client = new Client({ name: 'toolbox-test-client', version: '0.0.0' });
 
     const clientToServer = new PassThrough();
