@@ -29,120 +29,137 @@
   "type": "module",
   "exports": {
     ".": {
-      "import": "./dist/index.js",
       "bun": "./dist/index.js",
+      "browser": "./dist/index.js",
+      "import": "./dist/index.js",
       "require": "./dist/index.cjs",
       "default": "./dist/index.js",
       "types": "./dist/index.d.ts"
     },
     "./core": {
-      "import": "./dist/core/index.js",
       "bun": "./dist/core/index.js",
+      "browser": "./dist/core/index.js",
+      "import": "./dist/core/index.js",
       "require": "./dist/core/index.cjs",
       "default": "./dist/core/index.js",
       "types": "./dist/core/index.d.ts"
     },
     "./query": {
-      "import": "./dist/query/index.js",
       "bun": "./dist/query/index.js",
+      "browser": "./dist/query/index.js",
+      "import": "./dist/query/index.js",
       "require": "./dist/query/index.cjs",
       "default": "./dist/query/index.js",
       "types": "./dist/query/index.d.ts"
     },
     "./inspect": {
-      "import": "./dist/inspect/index.js",
       "bun": "./dist/inspect/index.js",
+      "browser": "./dist/inspect/index.js",
+      "import": "./dist/inspect/index.js",
       "require": "./dist/inspect/index.cjs",
       "default": "./dist/inspect/index.js",
       "types": "./dist/inspect/index.d.ts"
     },
     "./adapters/openai": {
-      "import": "./dist/adapters/openai/index.js",
       "bun": "./dist/adapters/openai/index.js",
+      "browser": "./dist/adapters/openai/index.js",
+      "import": "./dist/adapters/openai/index.js",
       "require": "./dist/adapters/openai/index.cjs",
       "default": "./dist/adapters/openai/index.js",
       "types": "./dist/adapters/openai/index.d.ts"
     },
     "./adapters/anthropic": {
-      "import": "./dist/adapters/anthropic/index.js",
       "bun": "./dist/adapters/anthropic/index.js",
+      "browser": "./dist/adapters/anthropic/index.js",
+      "import": "./dist/adapters/anthropic/index.js",
       "require": "./dist/adapters/anthropic/index.cjs",
       "default": "./dist/adapters/anthropic/index.js",
       "types": "./dist/adapters/anthropic/index.d.ts"
     },
     "./adapters/gemini": {
-      "import": "./dist/adapters/gemini/index.js",
       "bun": "./dist/adapters/gemini/index.js",
+      "browser": "./dist/adapters/gemini/index.js",
+      "import": "./dist/adapters/gemini/index.js",
       "require": "./dist/adapters/gemini/index.cjs",
       "default": "./dist/adapters/gemini/index.js",
       "types": "./dist/adapters/gemini/index.d.ts"
     },
     "./utilities": {
-      "import": "./dist/utilities/index.js",
       "bun": "./dist/utilities/index.js",
+      "browser": "./dist/utilities/index.js",
+      "import": "./dist/utilities/index.js",
       "require": "./dist/utilities/index.cjs",
       "default": "./dist/utilities/index.js",
       "types": "./dist/utilities/index.d.ts"
     },
     "./lazy": {
-      "import": "./dist/create-tool.js",
       "bun": "./dist/create-tool.js",
+      "browser": "./dist/create-tool.js",
+      "import": "./dist/create-tool.js",
       "require": "./dist/create-tool.cjs",
       "default": "./dist/create-tool.js",
       "types": "./dist/create-tool.d.ts"
     },
     "./registry": {
-      "import": "./dist/core/registry/index.js",
       "bun": "./dist/core/registry/index.js",
+      "browser": "./dist/core/registry/index.js",
+      "import": "./dist/core/registry/index.js",
       "require": "./dist/core/registry/index.cjs",
       "default": "./dist/core/registry/index.js",
       "types": "./dist/core/registry/index.d.ts"
     },
     "./mcp": {
-      "import": "./dist/integrations/mcp/index.js",
       "bun": "./dist/integrations/mcp/index.js",
+      "browser": "./dist/integrations/mcp/index.js",
+      "import": "./dist/integrations/mcp/index.js",
       "require": "./dist/integrations/mcp/index.cjs",
       "default": "./dist/integrations/mcp/index.js",
       "types": "./dist/integrations/mcp/index.d.ts"
     },
     "./adapters/open-ai/agents": {
-      "import": "./dist/adapters/open-ai/agents/index.js",
       "bun": "./dist/adapters/open-ai/agents/index.js",
+      "browser": "./dist/adapters/open-ai/agents/index.js",
+      "import": "./dist/adapters/open-ai/agents/index.js",
       "require": "./dist/adapters/open-ai/agents/index.cjs",
       "default": "./dist/adapters/open-ai/agents/index.js",
       "types": "./dist/adapters/open-ai/agents/index.d.ts"
     },
     "./tools": {
-      "import": "./dist/tools/index.js",
       "bun": "./dist/tools/index.js",
+      "browser": "./dist/tools/index.js",
+      "import": "./dist/tools/index.js",
       "require": "./dist/tools/index.cjs",
       "default": "./dist/tools/index.js",
       "types": "./dist/tools/index.d.ts"
     },
     "./instrumentation": {
-      "import": "./dist/instrumentation/index.js",
       "bun": "./dist/instrumentation/index.js",
+      "browser": "./dist/instrumentation/index.js",
+      "import": "./dist/instrumentation/index.js",
       "require": "./dist/instrumentation/index.cjs",
       "default": "./dist/instrumentation/index.js",
       "types": "./dist/instrumentation/index.d.ts"
     },
     "./middleware": {
-      "import": "./dist/middleware/index.js",
       "bun": "./dist/middleware/index.js",
+      "browser": "./dist/middleware/index.js",
+      "import": "./dist/middleware/index.js",
       "require": "./dist/middleware/index.cjs",
       "default": "./dist/middleware/index.js",
       "types": "./dist/middleware/index.d.ts"
     },
     "./test": {
-      "import": "./dist/test/index.js",
       "bun": "./dist/test/index.js",
+      "browser": "./dist/test/index.js",
+      "import": "./dist/test/index.js",
       "require": "./dist/test/index.cjs",
       "default": "./dist/test/index.js",
       "types": "./dist/test/index.d.ts"
     },
     "./truncation": {
-      "import": "./dist/truncation/index.js",
       "bun": "./dist/truncation/index.js",
+      "browser": "./dist/truncation/index.js",
+      "import": "./dist/truncation/index.js",
       "require": "./dist/truncation/index.cjs",
       "default": "./dist/truncation/index.js",
       "types": "./dist/truncation/index.d.ts"
