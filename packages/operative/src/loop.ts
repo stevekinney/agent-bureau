@@ -501,6 +501,8 @@ export async function executeLoop(
               conversation,
               step,
               toolbox: stepToolbox,
+              toolChoice: stepToolChoice,
+              responseFormat,
               signal: stepSignal,
             };
             const beforeGenResult = await hooks.run('beforeGenerate', beforeGenContext);
@@ -538,15 +540,16 @@ export async function executeLoop(
 
             // afterGenerate: waterfall that can modify the response
             if (hooks?.has('afterGenerate')) {
-              const afterGenResult = await hooks.run('afterGenerate', {
+              const afterGenContext = {
                 conversation,
                 step,
                 response,
                 duration: durationMilliseconds,
-              });
+              };
+              const afterGenResult = await hooks.run('afterGenerate', afterGenContext);
               if (
                 afterGenResult !== undefined &&
-                !isRegistryPassthrough(afterGenResult, response)
+                !isRegistryPassthrough(afterGenResult, afterGenContext)
               ) {
                 response = afterGenResult;
               }

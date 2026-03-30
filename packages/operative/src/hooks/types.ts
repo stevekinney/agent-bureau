@@ -1,6 +1,7 @@
 import type { Toolbox } from 'armorer';
 import type { Conversation } from 'conversationalist';
 
+import type { ResponseFormat, ToolChoice } from '../structured-output/types';
 import type { GenerateResponse, RunResult, StepResult, TokenUsage } from '../types';
 
 /** Context passed to beforeGenerate hooks. */
@@ -8,6 +9,8 @@ export interface BeforeGenerateContext {
   conversation: Conversation;
   step: number;
   toolbox: Toolbox;
+  toolChoice?: ToolChoice;
+  responseFormat?: ResponseFormat;
   signal?: AbortSignal;
 }
 
