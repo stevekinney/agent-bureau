@@ -1,13 +1,11 @@
 import type {
+  EvaluationChange,
   EvaluationComparison,
-  EvaluationImprovement,
-  EvaluationRegression,
   EvaluationReport,
   RegressionThresholds,
 } from './types';
 
 const DEFAULT_PASS_RATE_DROP = 0.05;
-const DEFAULT_COST_INCREASE = 0.2;
 
 /**
  * Compares two evaluation reports and detects regressions, improvements,
@@ -25,18 +23,15 @@ export function compareEvaluationReports(
   thresholds?: RegressionThresholds,
 ): EvaluationComparison {
   const passRateDropThreshold = thresholds?.passRateDrop ?? DEFAULT_PASS_RATE_DROP;
-  const costIncreaseThreshold = thresholds?.costIncrease ?? DEFAULT_COST_INCREASE;
   const failPreviouslyPassing = thresholds?.failPreviouslyPassing ?? true;
 
-  const regressions: EvaluationRegression[] = [];
-  const improvements: EvaluationImprovement[] = [];
+  const regressions: EvaluationChange[] = [];
+  const improvements: EvaluationChange[] = [];
   const unchanged: string[] = [];
 
-  // Build lookup maps by case name
   const baselineCases = new Map(baseline.cases.map((c) => [c.name, c]));
   const currentCases = new Map(current.cases.map((c) => [c.name, c]));
 
-  // Compare individual cases that exist in both reports
   for (const [name, baselineCase] of baselineCases) {
     const currentCase = currentCases.get(name);
     if (!currentCase) continue;
@@ -65,7 +60,6 @@ export function compareEvaluationReports(
     }
   }
 
-  // Summary-level pass rate regression
   const passRateDelta = current.summary.passRate - baseline.summary.passRate;
   if (passRateDelta < 0 && Math.abs(passRateDelta) > passRateDropThreshold) {
     regressions.push({
@@ -75,21 +69,6 @@ export function compareEvaluationReports(
       current: current.summary.passRate,
       delta: passRateDelta,
     });
-  }
-
-  // Summary-level cost regression
-  if (baseline.summary.totalCost > 0) {
-    const costIncrease =
-      (current.summary.totalCost - baseline.summary.totalCost) / baseline.summary.totalCost;
-    if (costIncrease > costIncreaseThreshold) {
-      regressions.push({
-        caseName: 'summary',
-        metric: 'totalCost',
-        baseline: baseline.summary.totalCost,
-        current: current.summary.totalCost,
-        delta: current.summary.totalCost - baseline.summary.totalCost,
-      });
-    }
   }
 
   return {

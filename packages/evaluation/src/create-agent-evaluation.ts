@@ -43,7 +43,6 @@ async function runCase(
     };
 
     if ('run' in options.agent) {
-      // AgentDefinition path — extract generate and toolbox from options
       const agentDef = options.agent;
       runOptions = {
         ...baseOptions,
@@ -69,7 +68,6 @@ async function runCase(
     const usage = extractTokenUsage(runResult);
     const steps = extractStepCount(runResult);
 
-    // If the run itself errored, mark the case as failed immediately
     if (runResult.finishReason === 'error' && runResult.error !== undefined) {
       const rawError = runResult.error;
       const errorMessage =
@@ -88,7 +86,6 @@ async function runCase(
           toolCallMatch: false,
           steps,
           totalTokens: usage.total,
-          cost: 0,
           duration,
           finishReason: runResult.finishReason,
         },
@@ -112,7 +109,6 @@ async function runCase(
         toolCallMatch,
         steps,
         totalTokens: usage.total,
-        cost: 0,
         duration,
         finishReason: runResult.finishReason,
       },
@@ -131,7 +127,6 @@ async function runCase(
         toolCallMatch: false,
         steps: 0,
         totalTokens: 0,
-        cost: 0,
         duration,
         finishReason: 'error',
       },
@@ -141,22 +136,23 @@ async function runCase(
 }
 
 /**
- * Runs a batch of evaluation cases with the given concurrency limit.
+ * Runs a batch of evaluation cases with the given concurrency limit,
+ * preserving the input order of cases in the results array.
  */
 async function runCasesWithConcurrency(
   cases: EvaluationCase[],
   options: CreateAgentEvaluationOptions,
   concurrency: number,
 ): Promise<EvaluationCaseResult[]> {
-  const results: EvaluationCaseResult[] = [];
-  const queue = [...cases];
+  const results = new Array<EvaluationCaseResult>(cases.length);
+  let nextIndex = 0;
 
   async function worker(): Promise<void> {
-    while (queue.length > 0) {
-      const evaluationCase = queue.shift();
+    while (nextIndex < cases.length) {
+      const index = nextIndex++;
+      const evaluationCase = cases[index];
       if (!evaluationCase) break;
-      const result = await runCase(evaluationCase, options);
-      results.push(result);
+      results[index] = await runCase(evaluationCase, options);
     }
   }
 
@@ -179,10 +175,8 @@ function computeSummary(cases: EvaluationCaseResult[]): EvaluationReport['summar
   const averageSteps = total > 0 ? cases.reduce((sum, c) => sum + c.metrics.steps, 0) / total : 0;
   const averageTokens =
     total > 0 ? cases.reduce((sum, c) => sum + c.metrics.totalTokens, 0) / total : 0;
-  const averageCost = total > 0 ? cases.reduce((sum, c) => sum + c.metrics.cost, 0) / total : 0;
   const averageDuration =
     total > 0 ? cases.reduce((sum, c) => sum + c.metrics.duration, 0) / total : 0;
-  const totalCost = cases.reduce((sum, c) => sum + c.metrics.cost, 0);
 
   return {
     total,
@@ -192,9 +186,7 @@ function computeSummary(cases: EvaluationCaseResult[]): EvaluationReport['summar
     averageScore,
     averageSteps,
     averageTokens,
-    averageCost,
     averageDuration,
-    totalCost,
   };
 }
 

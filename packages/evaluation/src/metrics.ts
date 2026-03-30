@@ -1,5 +1,4 @@
 import type { RunResult, TokenUsage } from 'operative';
-import { estimateCost, getModelPricing } from 'operative';
 
 import type { ExpectedToolCall } from './types';
 
@@ -18,24 +17,6 @@ export function extractTokenUsage(result: RunResult): TokenUsage {
 }
 
 /**
- * Computes the estimated cost in USD for the given token usage and model.
- * Returns 0 when no model is provided or the model has no known pricing.
- */
-export function computeCost(usage: TokenUsage, model?: string): number {
-  if (!model) return 0;
-
-  const pricing = getModelPricing(model);
-  if (!pricing) return 0;
-
-  try {
-    const estimate = estimateCost(usage, model);
-    return estimate.totalCost;
-  } catch {
-    return 0;
-  }
-}
-
-/**
  * Flattens all tool calls across all steps into a single ordered array.
  */
 function flattenToolCalls(result: RunResult): Array<{ name: string; arguments: unknown }> {
@@ -49,6 +30,11 @@ function flattenToolCalls(result: RunResult): Array<{ name: string; arguments: u
     }
   }
   return calls;
+}
+
+/** Type guard that narrows an unknown value to a plain object record. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 /**
@@ -65,22 +51,21 @@ function deepEqual(a: unknown, b: unknown): boolean {
     return a.every((value, index) => deepEqual(value, b[index]));
   }
 
-  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  if (isRecord(a) && isRecord(b)) {
+    const keysA = Object.keys(a);
+    const keysB = Object.keys(b);
+    if (keysA.length !== keysB.length) return false;
+    return keysA.every((key) => deepEqual(a[key], b[key]));
+  }
 
-  const keysA = Object.keys(a as Record<string, unknown>);
-  const keysB = Object.keys(b as Record<string, unknown>);
-  if (keysA.length !== keysB.length) return false;
-
-  return keysA.every((key) =>
-    deepEqual((a as Record<string, unknown>)[key], (b as Record<string, unknown>)[key]),
-  );
+  return false;
 }
 
 /**
  * Checks whether actual tool calls match expected tool calls in exact order
  * (using the `index` property of each expected call).
  */
-export function matchToolCallsOrdered(result: RunResult, expected: ExpectedToolCall[]): boolean {
+function matchToolCallsOrdered(result: RunResult, expected: ExpectedToolCall[]): boolean {
   if (expected.length === 0) return true;
 
   const actualCalls = flattenToolCalls(result);
@@ -102,21 +87,24 @@ export function matchToolCallsOrdered(result: RunResult, expected: ExpectedToolC
 
 /**
  * Checks whether all expected tool calls appear somewhere in the actual calls
- * (unordered set membership).
+ * (unordered set membership). Each actual call can only satisfy one expected call.
  */
-export function matchToolCallsUnordered(result: RunResult, expected: ExpectedToolCall[]): boolean {
+function matchToolCallsUnordered(result: RunResult, expected: ExpectedToolCall[]): boolean {
   if (expected.length === 0) return true;
 
   const actualCalls = flattenToolCalls(result);
+  const consumed = new Set<number>();
 
   for (const exp of expected) {
-    const found = actualCalls.some((actual) => {
+    const foundIndex = actualCalls.findIndex((actual, index) => {
+      if (consumed.has(index)) return false;
       if (actual.name !== exp.name) return false;
       if (exp.arguments && !deepEqual(actual.arguments, exp.arguments)) return false;
       return true;
     });
 
-    if (!found) return false;
+    if (foundIndex === -1) return false;
+    consumed.add(foundIndex);
   }
 
   return true;
@@ -137,11 +125,4 @@ export function matchToolCalls(
   return hasIndexed
     ? matchToolCallsOrdered(result, expected)
     : matchToolCallsUnordered(result, expected);
-}
-
-/**
- * Returns the provided duration value, or 0 for undefined/missing duration.
- */
-export function extractDuration(duration: number | undefined): number {
-  return duration ?? 0;
 }

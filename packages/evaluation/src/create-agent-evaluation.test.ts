@@ -262,7 +262,6 @@ describe('createAgentEvaluation', () => {
   });
 
   it('supports concurrency control', async () => {
-    // Run 3 cases with concurrency 2
     const generate = createMockGenerate([
       singleResponse('a'),
       singleResponse('b'),
@@ -285,6 +284,31 @@ describe('createAgentEvaluation', () => {
     const report = await evaluation.run();
 
     expect(report.cases).toHaveLength(3);
+  });
+
+  it('preserves case order in results regardless of concurrency', async () => {
+    const generate = createMockGenerate([
+      singleResponse('a'),
+      singleResponse('b'),
+      singleResponse('c'),
+    ]);
+    const toolbox = createTestToolbox([]);
+
+    const cases: EvaluationCase[] = [
+      { name: 'case-1', input: 'test', expectedOutput: 'a' },
+      { name: 'case-2', input: 'test', expectedOutput: 'b' },
+      { name: 'case-3', input: 'test', expectedOutput: 'c' },
+    ];
+
+    const evaluation = createAgentEvaluation({
+      cases,
+      agent: { generate, toolbox },
+      concurrency: 3,
+    });
+
+    const report = await evaluation.run();
+
+    expect(report.cases.map((c) => c.name)).toEqual(['case-1', 'case-2', 'case-3']);
   });
 
   it('computes averageDuration in summary', async () => {

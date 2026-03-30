@@ -15,7 +15,6 @@ function createCaseResult(
       toolCallMatch: true,
       steps: 1,
       totalTokens: 100,
-      cost: 0.01,
       duration: 500,
       finishReason: 'stop-condition',
     },
@@ -35,9 +34,8 @@ function createReport(
   const averageSteps = total > 0 ? cases.reduce((s, c) => s + c.metrics.steps, 0) / total : 0;
   const averageTokens =
     total > 0 ? cases.reduce((s, c) => s + c.metrics.totalTokens, 0) / total : 0;
-  const averageCost = total > 0 ? cases.reduce((s, c) => s + c.metrics.cost, 0) / total : 0;
-  const averageDuration = total > 0 ? cases.reduce((s, c) => s + c.metrics.duration, 0) / total : 0;
-  const totalCost = cases.reduce((s, c) => s + c.metrics.cost, 0);
+  const averageDuration =
+    total > 0 ? cases.reduce((s, c) => s + c.metrics.duration, 0) / total : 0;
 
   return {
     timestamp: new Date().toISOString(),
@@ -50,9 +48,7 @@ function createReport(
       averageScore,
       averageSteps,
       averageTokens,
-      averageCost,
       averageDuration,
-      totalCost,
       ...summaryOverrides,
     },
   };
@@ -125,7 +121,6 @@ describe('compareEvaluationReports', () => {
     const baseline = createReport(
       Array.from({ length: 100 }, (_, i) => createCaseResult({ name: `case-${i}`, pass: true })),
     );
-    // Fail just 1 out of 100 (1% drop, below 5% default threshold)
     const currentCases = Array.from({ length: 100 }, (_, i) =>
       createCaseResult({ name: `case-${i}`, pass: i !== 99, score: i !== 99 ? 1 : 0 }),
     );
@@ -139,50 +134,11 @@ describe('compareEvaluationReports', () => {
     expect(passRateRegression).toBeUndefined();
   });
 
-  it('detects cost increase exceeding threshold as regression', () => {
-    const baseline = createReport([
-      createCaseResult({
-        name: 'case-1',
-        metrics: {
-          outputMatch: true,
-          toolCallMatch: true,
-          steps: 1,
-          totalTokens: 100,
-          cost: 1.0,
-          duration: 500,
-          finishReason: 'stop-condition',
-        },
-      }),
-    ]);
-    const current = createReport([
-      createCaseResult({
-        name: 'case-1',
-        metrics: {
-          outputMatch: true,
-          toolCallMatch: true,
-          steps: 1,
-          totalTokens: 100,
-          cost: 1.5,
-          duration: 500,
-          finishReason: 'stop-condition',
-        },
-      }),
-    ]);
-
-    const comparison = compareEvaluationReports(baseline, current);
-
-    const costRegression = comparison.regressions.find(
-      (r) => r.caseName === 'summary' && r.metric === 'totalCost',
-    );
-    expect(costRegression).toBeDefined();
-  });
-
   it('uses custom thresholds when provided', () => {
     const baseline = createReport([
       createCaseResult({ name: 'case-1', pass: true }),
       createCaseResult({ name: 'case-2', pass: true }),
     ]);
-    // 50% drop — under the custom 60% threshold
     const current = createReport([
       createCaseResult({ name: 'case-1', pass: true }),
       createCaseResult({ name: 'case-2', pass: false, score: 0 }),
@@ -219,7 +175,6 @@ describe('compareEvaluationReports', () => {
 
     const comparison = compareEvaluationReports(baseline, current);
 
-    // New cases should not appear as regressions
     expect(comparison.regressions.find((r) => r.caseName === 'case-2')).toBeUndefined();
     expect(comparison.unchanged).toContain('case-1');
   });
@@ -233,7 +188,6 @@ describe('compareEvaluationReports', () => {
 
     const comparison = compareEvaluationReports(baseline, current);
 
-    // Removed cases should not cause issues
     expect(comparison.unchanged).toContain('case-1');
   });
 

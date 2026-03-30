@@ -8,15 +8,7 @@ export {
   matchSemantic,
   matchSubstring,
 } from './matchers';
-export {
-  computeCost,
-  extractDuration,
-  extractStepCount,
-  extractTokenUsage,
-  matchToolCalls,
-  matchToolCallsOrdered,
-  matchToolCallsUnordered,
-} from './metrics';
+export { extractStepCount, extractTokenUsage, matchToolCalls } from './metrics';
 export type {
   CreateAgentEvaluationOptions,
   EmbedderFunction,
@@ -24,16 +16,11 @@ export type {
   EvaluationAssertion,
   EvaluationCase,
   EvaluationCaseResult,
+  EvaluationChange,
   EvaluationComparison,
-  EvaluationImprovement,
-  EvaluationRegression,
   EvaluationReport,
   ExpectedToolCall,
-  FinishReason,
   MatchResult,
   RegressionThresholds,
-  RunResult,
   SemanticMatcher,
-  TokenUsage,
-  Toolbox,
 } from './types';
