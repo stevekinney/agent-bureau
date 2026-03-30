@@ -1,5 +1,4 @@
-import { createHash } from 'node:crypto';
-
+import { createIncrementalHash, sha256HexSync } from 'interoperability';
 import { CompletableEventTarget } from 'lifecycle';
 import { z } from 'zod';
 
@@ -811,7 +810,7 @@ export function createTool<
         chunks: [] as unknown[],
         index: 0,
         completed: false,
-        digest: digestOptions.output ? createHash(digestOptions.algorithm) : undefined,
+        digest: digestOptions.output ? createIncrementalHash(digestOptions.algorithm) : undefined,
       });
 
       const processStreamingChunk = (
@@ -833,7 +832,7 @@ export function createTool<
         collected: unknown[];
         outputDigest?: string;
       } => {
-        const finalizedDigest = accumulator.digest?.digest('hex');
+        const finalizedDigest = accumulator.digest?.digest();
         return {
           collected: accumulator.chunks,
           ...(finalizedDigest !== undefined ? { outputDigest: finalizedDigest } : {}),
@@ -1499,9 +1498,9 @@ function normalizeDigestOptions(input?: ToolDigestOptions): {
   };
 }
 
-function computeDigest(value: unknown, algorithm: 'sha256'): string {
+function computeDigest(value: unknown, _algorithm: 'sha256'): string {
   const serialized = stableStringify(value);
-  return createHash(algorithm).update(serialized).digest('hex');
+  return sha256HexSync(serialized);
 }
 
 function normalizeToolContent(value: unknown): JsonValue {

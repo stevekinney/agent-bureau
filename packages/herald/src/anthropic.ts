@@ -5,6 +5,7 @@ import type { ToolCallInput } from 'interoperability';
 
 import { HeraldError } from './errors.ts';
 import { resolveCommonParameters } from './resolve-common-parameters.ts';
+import { toAnthropicToolChoice } from './structured-output/tool-choice-adapters.ts';
 import type {
   AnthropicClient,
   AnthropicProviderOptions,
@@ -51,7 +52,20 @@ export function createAnthropicGenerate(options: AnthropicProviderOptions): Gene
     };
 
     if (system !== undefined) params['system'] = system;
-    if (hasTools) params['tools'] = Array.isArray(tools) ? tools : [tools];
+
+    // Tool choice: when 'none', omit tools entirely; otherwise set tool_choice
+    if (options.toolChoice === 'none') {
+      // Anthropic has no tool_choice 'none' — omit tools to prevent calls
+    } else if (hasTools) {
+      params['tools'] = Array.isArray(tools) ? tools : [tools];
+      if (options.toolChoice) {
+        const adapted = toAnthropicToolChoice(options.toolChoice);
+        if (adapted !== undefined) {
+          params['tool_choice'] = adapted;
+        }
+      }
+    }
+
     if (common.temperature !== undefined) params['temperature'] = common.temperature;
     if (common.topP !== undefined) params['top_p'] = common.topP;
     if (common.stopSequences) params['stop_sequences'] = common.stopSequences;
@@ -135,7 +149,20 @@ export function createAnthropicGenerateStream(
     };
 
     if (system !== undefined) params['system'] = system;
-    if (hasTools) params['tools'] = Array.isArray(tools) ? tools : [tools];
+
+    // Tool choice: when 'none', omit tools entirely; otherwise set tool_choice
+    if (options.toolChoice === 'none') {
+      // Anthropic has no tool_choice 'none' — omit tools to prevent calls
+    } else if (hasTools) {
+      params['tools'] = Array.isArray(tools) ? tools : [tools];
+      if (options.toolChoice) {
+        const adapted = toAnthropicToolChoice(options.toolChoice);
+        if (adapted !== undefined) {
+          params['tool_choice'] = adapted;
+        }
+      }
+    }
+
     if (common.temperature !== undefined) params['temperature'] = common.temperature;
     if (common.topP !== undefined) params['top_p'] = common.topP;
     if (common.stopSequences) params['stop_sequences'] = common.stopSequences;

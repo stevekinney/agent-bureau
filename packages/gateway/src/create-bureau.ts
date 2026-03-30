@@ -3,8 +3,8 @@ import { Conversation, createConversationHistory } from 'conversationalist';
 import { CompletableEventTarget } from 'lifecycle';
 import type { CreateMemoryOptions, Memory } from 'memory';
 import { createMemory } from 'memory';
-import type { RunOptions, Scheduler, Toolbox } from 'operative';
-import { createRun, createScheduler } from 'operative';
+import type { RunOptions, Scheduler, SessionStore, Toolbox } from 'operative';
+import { createRun, createScheduler, createSessionStore } from 'operative';
 import type {
   RunRegisteredEvent as StoreRunRegisteredEvent,
   RunRemovedEvent as StoreRunRemovedEvent,
@@ -96,6 +96,9 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
   const toolbox = options.toolbox as Toolbox | undefined;
   const kv = options.persistence ?? resolvedKv;
   const stopWhen = options.stopWhen;
+
+  // ── Session Store ──────────────────────────────────────────────
+  const sessionStore: SessionStore | undefined = kv ? createSessionStore(kv) : undefined;
   const systemPrompt = options.systemPrompt;
   const provider = options.provider;
 
@@ -346,6 +349,8 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     store,
     memory,
     scheduler,
+    sessionStore,
+    kv,
     get ready() {
       return generate !== undefined;
     },

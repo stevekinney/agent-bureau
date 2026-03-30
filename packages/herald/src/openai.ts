@@ -4,6 +4,8 @@ import type { ToolCallInput } from 'interoperability';
 
 import { HeraldError } from './errors.ts';
 import { resolveCommonParameters } from './resolve-common-parameters.ts';
+import { toOpenAIResponseFormat } from './structured-output/response-format-adapters.ts';
+import { toOpenAIToolChoice } from './structured-output/tool-choice-adapters.ts';
 import type {
   GenerateContext,
   GenerateFunction,
@@ -53,7 +55,14 @@ export function createOpenAIGenerate(options: OpenAIProviderOptions): GenerateFu
     };
 
     if (common.maximumTokens !== undefined) params['max_tokens'] = common.maximumTokens;
-    if (hasTools) params['tools'] = Array.isArray(tools) ? tools : [tools];
+    if (hasTools && options.toolChoice !== 'none')
+      params['tools'] = Array.isArray(tools) ? tools : [tools];
+    if (hasTools && options.toolChoice && options.toolChoice !== 'none')
+      params['tool_choice'] = toOpenAIToolChoice(options.toolChoice);
+    if (options.responseFormat) {
+      const adapted = toOpenAIResponseFormat(options.responseFormat);
+      if (adapted !== undefined) params['response_format'] = adapted;
+    }
     if (common.temperature !== undefined) params['temperature'] = common.temperature;
     if (common.topP !== undefined) params['top_p'] = common.topP;
     if (common.stopSequences) params['stop'] = common.stopSequences;
@@ -136,7 +145,14 @@ export function createOpenAIGenerateStream(
     };
 
     if (common.maximumTokens !== undefined) params['max_tokens'] = common.maximumTokens;
-    if (hasTools) params['tools'] = Array.isArray(tools) ? tools : [tools];
+    if (hasTools && options.toolChoice !== 'none')
+      params['tools'] = Array.isArray(tools) ? tools : [tools];
+    if (hasTools && options.toolChoice && options.toolChoice !== 'none')
+      params['tool_choice'] = toOpenAIToolChoice(options.toolChoice);
+    if (options.responseFormat) {
+      const adapted = toOpenAIResponseFormat(options.responseFormat);
+      if (adapted !== undefined) params['response_format'] = adapted;
+    }
     if (common.temperature !== undefined) params['temperature'] = common.temperature;
     if (common.topP !== undefined) params['top_p'] = common.topP;
     if (common.stopSequences) params['stop'] = common.stopSequences;

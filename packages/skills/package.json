@@ -65,6 +65,7 @@
   "dependencies": {
     "armorer": "workspace:*",
     "gray-matter": "^4.0.3",
+    "interoperability": "workspace:*",
     "storage": "workspace:*",
     "zod": "^4.3.6"
   },

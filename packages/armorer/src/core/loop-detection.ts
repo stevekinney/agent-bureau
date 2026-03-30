@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { sha256HexSync } from 'interoperability';
 
 export interface LoopDetectionOptions {
   /** Number of consecutive alternating calls to consider a ping-pong loop. Default: 10 */
@@ -99,7 +99,7 @@ export class LoopDetector {
   private defaultHashFunction = (toolName: string, args: unknown): string => {
     const stringified = stableStringify(args);
     const combined = `${toolName}:${stringified}`;
-    return createHash('sha256').update(combined).digest('hex');
+    return sha256HexSync(combined);
   };
 
   /**
