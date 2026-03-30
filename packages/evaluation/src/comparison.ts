@@ -77,9 +77,18 @@ export function compareEvaluationReports(
     });
   }
 
-  // Detect total cost increase exceeding threshold
-  const baselineTotalCost = baseline.cases.reduce((sum, c) => sum + c.metrics.totalTokens, 0);
-  const currentTotalCost = current.cases.reduce((sum, c) => sum + c.metrics.totalTokens, 0);
+  // Detect total cost increase exceeding threshold.
+  // Only compare cases present in both reports — new or removed cases should
+  // not inflate the totals and trigger spurious regressions.
+  const matchedCaseNames = [...baselineCases.keys()].filter((name) => currentCases.has(name));
+  const baselineTotalCost = matchedCaseNames.reduce(
+    (sum, name) => sum + baselineCases.get(name)!.metrics.totalTokens,
+    0,
+  );
+  const currentTotalCost = matchedCaseNames.reduce(
+    (sum, name) => sum + currentCases.get(name)!.metrics.totalTokens,
+    0,
+  );
 
   if (baselineTotalCost > 0) {
     const costIncreaseRatio = (currentTotalCost - baselineTotalCost) / baselineTotalCost;

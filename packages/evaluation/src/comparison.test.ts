@@ -266,6 +266,100 @@ describe('compareEvaluationReports', () => {
     expect(comparison.unchanged).toContain('case-1');
   });
 
+  it('does not flag cost regression when new cases inflate total tokens', () => {
+    const baseline = createReport([
+      createCaseResult({
+        name: 'case-1',
+        metrics: {
+          outputMatch: true,
+          toolCallMatch: true,
+          steps: 1,
+          totalTokens: 100,
+          duration: 500,
+          finishReason: 'stop-condition',
+        },
+      }),
+    ]);
+    const current = createReport([
+      createCaseResult({
+        name: 'case-1',
+        metrics: {
+          outputMatch: true,
+          toolCallMatch: true,
+          steps: 1,
+          totalTokens: 100,
+          duration: 500,
+          finishReason: 'stop-condition',
+        },
+      }),
+      createCaseResult({
+        name: 'case-2',
+        metrics: {
+          outputMatch: true,
+          toolCallMatch: true,
+          steps: 3,
+          totalTokens: 5000,
+          duration: 2000,
+          finishReason: 'stop-condition',
+        },
+      }),
+    ]);
+
+    const comparison = compareEvaluationReports(baseline, current, { costIncrease: 0.2 });
+
+    const costRegression = comparison.regressions.find(
+      (r) => r.caseName === 'summary' && r.metric === 'costIncrease',
+    );
+    expect(costRegression).toBeUndefined();
+  });
+
+  it('does not flag cost regression when removed cases deflate baseline tokens', () => {
+    const baseline = createReport([
+      createCaseResult({
+        name: 'case-1',
+        metrics: {
+          outputMatch: true,
+          toolCallMatch: true,
+          steps: 1,
+          totalTokens: 100,
+          duration: 500,
+          finishReason: 'stop-condition',
+        },
+      }),
+      createCaseResult({
+        name: 'case-2',
+        metrics: {
+          outputMatch: true,
+          toolCallMatch: true,
+          steps: 3,
+          totalTokens: 5000,
+          duration: 2000,
+          finishReason: 'stop-condition',
+        },
+      }),
+    ]);
+    const current = createReport([
+      createCaseResult({
+        name: 'case-1',
+        metrics: {
+          outputMatch: true,
+          toolCallMatch: true,
+          steps: 1,
+          totalTokens: 100,
+          duration: 500,
+          finishReason: 'stop-condition',
+        },
+      }),
+    ]);
+
+    const comparison = compareEvaluationReports(baseline, current, { costIncrease: 0.2 });
+
+    const costRegression = comparison.regressions.find(
+      (r) => r.caseName === 'summary' && r.metric === 'costIncrease',
+    );
+    expect(costRegression).toBeUndefined();
+  });
+
   it('handles removed cases in current report', () => {
     const baseline = createReport([
       createCaseResult({ name: 'case-1' }),
