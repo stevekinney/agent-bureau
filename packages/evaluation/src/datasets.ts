@@ -1,6 +1,26 @@
-import { dirname } from 'node:path';
+import type { EvaluationCase, SemanticMatcher } from './types';
 
-import type { EvaluationCase } from './types';
+/** Type guard for SemanticMatcher objects loaded from JSON datasets. */
+function isSemanticMatcher(value: unknown): value is SemanticMatcher {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return (
+    record['type'] === 'semantic' &&
+    typeof record['reference'] === 'string' &&
+    typeof record['threshold'] === 'number'
+  );
+}
+
+/**
+ * Parses the `expectedOutput` field from a JSON dataset entry. Accepts
+ * either a plain string or a SemanticMatcher object (`{ type, reference, threshold }`).
+ * RegExp matchers cannot be represented in JSON and must be added programmatically.
+ */
+function parseExpectedOutput(value: unknown): string | SemanticMatcher | undefined {
+  if (typeof value === 'string') return value;
+  if (isSemanticMatcher(value)) return value;
+  return undefined;
+}
 
 /**
  * Zod-like shape validation for evaluation case objects loaded from JSON.
@@ -30,8 +50,7 @@ function validateEvaluationCase(value: unknown, index: number): EvaluationCase {
     name: record['name'],
     input: record['input'],
     systemPrompt: typeof record['systemPrompt'] === 'string' ? record['systemPrompt'] : undefined,
-    expectedOutput:
-      typeof record['expectedOutput'] === 'string' ? record['expectedOutput'] : undefined,
+    expectedOutput: parseExpectedOutput(record['expectedOutput']),
     expectedToolCalls: Array.isArray(record['expectedToolCalls'])
       ? (record['expectedToolCalls'] as EvaluationCase['expectedToolCalls'])
       : undefined,
@@ -90,12 +109,28 @@ export async function loadDataset(path: string): Promise<EvaluationCase[]> {
 export async function loadDatasets(pattern: string): Promise<EvaluationCase[]> {
   const matchedPaths: string[] = [];
 
-  // Bun.Glob.scan needs a cwd — use the directory portion of the pattern
-  // when the pattern is absolute, or '.' for relative patterns.
-  const cwd = pattern.startsWith('/') ? dirname(pattern) : '.';
-  const scanPattern = pattern.startsWith('/')
-    ? pattern.slice(cwd === '/' ? 1 : cwd.length + 1)
-    : pattern;
+  // Bun.Glob.scan needs a cwd. For absolute patterns, extract the longest
+  // directory prefix that contains no glob metacharacters so that wildcards
+  // in directory components (e.g. `/data/*/cases.json`) work correctly.
+  // Only directory segments (not the final filename segment) are candidates.
+  let cwd = '.';
+  let scanPattern = pattern;
+
+  if (pattern.startsWith('/')) {
+    const segments = pattern.split('/');
+    const directorySegments: string[] = [];
+
+    // segments[0] is '' (leading slash), segments[1..n-1] are directories,
+    // segments[n] is the filename/glob. Only consider directory segments.
+    for (let i = 1; i < segments.length - 1; i++) {
+      const segment = segments[i];
+      if (segment !== undefined && /[*?{[]/.test(segment)) break;
+      if (segment !== undefined) directorySegments.push(segment);
+    }
+
+    cwd = directorySegments.length > 0 ? '/' + directorySegments.join('/') : '/';
+    scanPattern = pattern.slice(cwd === '/' ? 1 : cwd.length + 1);
+  }
 
   const glob = new Bun.Glob(scanPattern);
   for await (const match of glob.scan({ cwd, absolute: true })) {
