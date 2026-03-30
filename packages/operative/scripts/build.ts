@@ -51,6 +51,11 @@ const entrypoints = [
   './src/hooks/index.ts',
   './src/hooks/types.ts',
   './src/hooks/composition.ts',
+  './src/streaming/index.ts',
+  './src/streaming/types.ts',
+  './src/streaming/stream-state-machine.ts',
+  './src/streaming/enhanced-streaming.ts',
+  './src/streaming/backpressure-buffer.ts',
 ];
 
 const root = './src';

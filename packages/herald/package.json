@@ -104,6 +104,14 @@
       "default": "./dist/embeddings/ollama.js",
       "types": "./dist/embeddings/ollama.d.ts"
     },
+    "./streaming": {
+      "bun": "./dist/streaming/index.js",
+      "browser": "./dist/streaming/index.js",
+      "import": "./dist/streaming/index.js",
+      "require": "./dist/streaming/index.cjs",
+      "default": "./dist/streaming/index.js",
+      "types": "./dist/streaming/index.d.ts"
+    },
     "./test": {
       "bun": "./dist/test/index.js",
       "browser": "./dist/test/index.js",
