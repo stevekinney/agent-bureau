@@ -225,7 +225,6 @@ export type { BackpressureBuffer, BackpressureBufferOptions } from './streaming/
 export type {
   BlockType,
   EnhancedStreamingOptions,
-  BackpressureOptions as StreamBackpressureOptions,
   StreamBlock,
   StreamCommand,
   StreamEvent,

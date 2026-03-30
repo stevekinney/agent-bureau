@@ -58,16 +58,6 @@ export type StreamEventMap = {
   [K in StreamEvent['type']]: StreamCustomEvent<K>;
 };
 
-/** Options for backpressure buffering of stream events. */
-export type BackpressureOptions = {
-  /** Maximum number of events to buffer before coalescing. Default: 100. */
-  maxBufferSize?: number;
-  /** Whether to coalesce consecutive text deltas when the buffer is full. Default: true. */
-  coalesceDeltas?: boolean;
-  /** Called when events are dropped due to buffer overflow. */
-  onOverflow?: (droppedCount: number) => void;
-};
-
 /** Options for the enhanced streaming wrapper. */
 export type EnhancedStreamingOptions = {
   /** Event target to emit structured stream events on. */

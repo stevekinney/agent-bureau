@@ -28,8 +28,6 @@ export async function* normalizeAnthropicStream(
   const blockToolNames = new Map<string, string>();
   /** Accumulated text for stream:text-delta events */
   let accumulatedText = '';
-  /** Accumulated partial args per block */
-  const blockPartialArgs = new Map<string, string>();
 
   for await (const event of stream) {
     switch (event.type) {
@@ -115,9 +113,6 @@ export async function* normalizeAnthropicStream(
           block.content += jsonDelta;
           block.partialArguments = (block.partialArguments ?? '') + jsonDelta;
 
-          const accumulated = (blockPartialArgs.get(blockId) ?? '') + jsonDelta;
-          blockPartialArgs.set(blockId, accumulated);
-
           const toolName = blockToolNames.get(blockId) ?? '';
 
           yield {
@@ -128,7 +123,7 @@ export async function* normalizeAnthropicStream(
           yield {
             type: 'stream:tool-call-delta',
             toolName,
-            partialArguments: accumulated,
+            partialArguments: block.partialArguments,
           };
         } else if (deltaType === 'thinking_delta') {
           const thinkingDelta = event.delta?.thinking ?? event.delta?.text ?? '';
@@ -159,7 +154,7 @@ export async function* normalizeAnthropicStream(
 
         if (block.type === 'tool-call') {
           const toolName = blockToolNames.get(blockId) ?? '';
-          const args = blockPartialArgs.get(blockId) ?? '';
+          const args = block.partialArguments ?? '';
           let parsedArgs: unknown = args;
           try {
             parsedArgs = JSON.parse(args);
