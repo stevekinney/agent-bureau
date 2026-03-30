@@ -45,14 +45,23 @@ export function runOnce<H extends (...args: any[]) => any>(hook: H): H & { reset
  * Creates a hook that runs every N steps (0, N, 2N, 3N...).
  * Uses the `step` property from the hook's context argument.
  * Returns undefined when the step does not match.
+ *
+ * @throws {Error} if `n` is not a positive integer.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function everyNSteps<H extends (...args: any[]) => any>(n: number, hook: H): H {
+  if (!Number.isInteger(n) || n <= 0) {
+    throw new Error('everyNSteps: n must be a positive integer');
+  }
+
   return ((...args: unknown[]) => {
     const context = args[0] as { step?: number } | undefined;
-    if (context && typeof context === 'object' && 'step' in context && context.step! % n === 0) {
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-return
-      return hook(...args);
+    if (context && typeof context === 'object' && 'step' in context) {
+      const step = (context as { step?: number }).step;
+      if (typeof step === 'number' && Number.isFinite(step) && step % n === 0) {
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-return
+        return hook(...args);
+      }
     }
     return undefined;
   }) as unknown as H;

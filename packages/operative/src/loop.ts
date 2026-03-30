@@ -72,9 +72,10 @@ function isRegistryPassthrough(result: unknown, firstArg: unknown): boolean {
 /**
  * Runs a hook via the registry in a fire-and-forget fashion.
  * All handlers execute via Promise.allSettled so individual failures
- * never block the caller.
+ * never block the caller. The returned promise is intentionally not
+ * awaited — callers should use `void runHookSilently(...)`.
  */
-async function runHookSilently<K extends string>(
+function runHookSilently<K extends string>(
   hooks:
     | {
         has(name: K): boolean;
@@ -83,14 +84,16 @@ async function runHookSilently<K extends string>(
     | undefined,
   hookName: K,
   ...args: unknown[]
-): Promise<void> {
+): void {
   if (!hooks?.has(hookName)) return;
   const handlers = hooks.getHandlers(hookName);
-  await Promise.allSettled(
+  void Promise.allSettled(
     handlers.map((entry) =>
       Promise.resolve((entry.handler as (...a: unknown[]) => unknown)(...args)),
     ),
-  );
+  ).catch(() => {
+    // Intentionally ignore errors in silent hooks.
+  });
 }
 
 function normalizeStopConditions(conditions: RunOptions['stopWhen']): StopCondition[] {
@@ -238,9 +241,9 @@ export async function executeLoop(
   let lastContent = '';
   let schemaAttempts = 0;
 
-  const makeAbortResult = async (step: number, reason?: string): Promise<RunResult> => {
+  const makeAbortResult = (step: number, reason?: string): RunResult => {
     emitter?.dispatch(new RunAbortedEvent(step, reason));
-    await runHookSilently(hooks, 'onRunAbort', { reason, partialSteps: [...steps], conversation });
+    runHookSilently(hooks, 'onRunAbort', { reason, partialSteps: [...steps], conversation });
     return {
       conversation,
       steps,
@@ -250,8 +253,8 @@ export async function executeLoop(
     };
   };
 
-  const makeErrorResult = async (error: unknown): Promise<RunResult> => {
-    await runHookSilently(hooks, 'onRunError', { error, partialSteps: [...steps], conversation });
+  const makeErrorResult = (error: unknown): RunResult => {
+    runHookSilently(hooks, 'onRunError', { error, partialSteps: [...steps], conversation });
     if (error instanceof ElicitationDeniedError) {
       const result: RunResult = {
         conversation,
@@ -298,7 +301,7 @@ export async function executeLoop(
       await hooks.run('onRunStart', { conversation, toolbox, maximumSteps });
     } catch (error) {
       emitter?.dispatch(new RunErrorEvent(0, error));
-      return await makeErrorResult(error);
+      return makeErrorResult(error);
     }
   }
 
@@ -307,7 +310,7 @@ export async function executeLoop(
 
   for (let step = 0; step < maximumSteps; step++) {
     if (signal?.aborted) {
-      return await makeAbortResult(step, signal.reason as string | undefined);
+      return makeAbortResult(step, signal.reason as string | undefined);
     }
 
     // Backpressure: wait before proceeding if the strategy requires it
@@ -316,7 +319,7 @@ export async function executeLoop(
       if (backpressureDelay > 0) {
         emitter?.dispatch(new BackpressureAppliedEvent(step, backpressureDelay));
         if (signal?.aborted) {
-          return await makeAbortResult(step, signal.reason as string | undefined);
+          return makeAbortResult(step, signal.reason as string | undefined);
         }
         await new Promise<void>((resolve) => {
           const timer = setTimeout(resolve, backpressureDelay);
@@ -329,7 +332,7 @@ export async function executeLoop(
           }
         });
         if (signal?.aborted) {
-          return await makeAbortResult(step, signal.reason as string | undefined);
+          return makeAbortResult(step, signal.reason as string | undefined);
         }
         emitter?.dispatch(new BackpressureReleasedEvent(step));
       }
@@ -398,7 +401,7 @@ export async function executeLoop(
             }
           } catch (error) {
             emitter?.dispatch(new RunErrorEvent(step, error));
-            return await makeErrorResult(error);
+            return makeErrorResult(error);
           }
         }
 
@@ -427,12 +430,12 @@ export async function executeLoop(
                 });
               } catch (error) {
                 emitter?.dispatch(new RunErrorEvent(step, error));
-                return await makeErrorResult(error);
+                return makeErrorResult(error);
               }
             }
           } catch (error) {
             emitter?.dispatch(new RunErrorEvent(step, error));
-            return await makeErrorResult(error);
+            return makeErrorResult(error);
           }
         }
       }
@@ -515,7 +518,7 @@ export async function executeLoop(
           }
 
           // onLLMInput: parallel allSettled, read-only, non-blocking
-          await runHookSilently(hooks, 'onLLMInput', {
+          runHookSilently(hooks, 'onLLMInput', {
             conversation: generateContext.conversation,
             step: generateContext.step,
             messageCount: generateContext.conversation.getMessages().length,
@@ -530,7 +533,7 @@ export async function executeLoop(
             const durationMilliseconds = performance.now() - generateStart;
 
             // onLLMOutput: parallel allSettled, read-only, non-blocking
-            await runHookSilently(hooks, 'onLLMOutput', {
+            runHookSilently(hooks, 'onLLMOutput', {
               conversation,
               step,
               response: Object.freeze({ ...response }),
@@ -620,10 +623,10 @@ export async function executeLoop(
 
         backpressure?.onError(error);
         if (signal?.aborted) {
-          return await makeAbortResult(step, signal.reason as string | undefined);
+          return makeAbortResult(step, signal.reason as string | undefined);
         }
         emitter?.dispatch(new RunErrorEvent(step, error));
-        return await makeErrorResult(error);
+        return makeErrorResult(error);
       }
     } while (shouldRetryStep);
 
@@ -649,7 +652,7 @@ export async function executeLoop(
         }
       } catch (error) {
         emitter?.dispatch(new RunErrorEvent(step, error));
-        return await makeErrorResult(error);
+        return makeErrorResult(error);
       }
     }
     if (hooks?.has('validateResponse')) {
@@ -668,12 +671,12 @@ export async function executeLoop(
         }
       } catch (error) {
         emitter?.dispatch(new RunErrorEvent(step, error));
-        return await makeErrorResult(error);
+        return makeErrorResult(error);
       }
     }
 
     if (signal?.aborted) {
-      return await makeAbortResult(step, signal.reason as string | undefined);
+      return makeAbortResult(step, signal.reason as string | undefined);
     }
 
     if (stepSignal.aborted && !signal?.aborted) {
@@ -713,7 +716,7 @@ export async function executeLoop(
           }
         } catch (error) {
           emitter?.dispatch(new RunErrorEvent(step, error));
-          return await makeErrorResult(error);
+          return makeErrorResult(error);
         }
       }
       if (hooks?.has('beforeToolExecution')) {
@@ -733,7 +736,7 @@ export async function executeLoop(
           }
         } catch (error) {
           emitter?.dispatch(new RunErrorEvent(step, error));
-          return await makeErrorResult(error);
+          return makeErrorResult(error);
         }
       }
 
@@ -787,7 +790,7 @@ export async function executeLoop(
           }
           if (!recovered) {
             emitter?.dispatch(new RunErrorEvent(step, error));
-            return await makeErrorResult(error);
+            return makeErrorResult(error);
           }
         }
 
@@ -830,7 +833,7 @@ export async function executeLoop(
             results = validatedResults;
           } catch (error) {
             emitter?.dispatch(new RunErrorEvent(step, error));
-            return await makeErrorResult(error);
+            return makeErrorResult(error);
           }
         }
 
@@ -862,7 +865,7 @@ export async function executeLoop(
             }
           } catch (error) {
             emitter?.dispatch(new RunErrorEvent(step, error));
-            return await makeErrorResult(error);
+            return makeErrorResult(error);
           }
         }
         if (hooks?.has('afterToolExecution')) {
@@ -876,7 +879,7 @@ export async function executeLoop(
             });
           } catch (error) {
             emitter?.dispatch(new RunErrorEvent(step, error));
-            return await makeErrorResult(error);
+            return makeErrorResult(error);
           }
         }
       }
@@ -914,7 +917,7 @@ export async function executeLoop(
         }
       } catch (error) {
         emitter?.dispatch(new RunErrorEvent(step, error));
-        return await makeErrorResult(error);
+        return makeErrorResult(error);
       }
     }
     if (hooks?.has('onStep')) {
@@ -922,7 +925,7 @@ export async function executeLoop(
         await hooks.run('onStep', stepResult);
       } catch (error) {
         emitter?.dispatch(new RunErrorEvent(step, error));
-        return await makeErrorResult(error);
+        return makeErrorResult(error);
       }
     }
 
@@ -949,7 +952,7 @@ export async function executeLoop(
           schemaValidation: { success: true },
         };
         emitter?.dispatch(new RunCompletedEvent(runResult));
-        await runHookSilently(hooks, 'onRunComplete', {
+        runHookSilently(hooks, 'onRunComplete', {
           result: runResult,
           totalDuration: performance.now() - runStartTime,
         });
@@ -985,7 +988,7 @@ export async function executeLoop(
           schemaValidation: { success: false, error: validationError },
         };
         emitter?.dispatch(new RunCompletedEvent(runResult));
-        await runHookSilently(hooks, 'onRunComplete', {
+        runHookSilently(hooks, 'onRunComplete', {
           result: runResult,
           totalDuration: performance.now() - runStartTime,
         });
@@ -1002,7 +1005,7 @@ export async function executeLoop(
         finishReason: 'stop-condition',
       };
       emitter?.dispatch(new RunCompletedEvent(runResult));
-      await runHookSilently(hooks, 'onRunComplete', {
+      runHookSilently(hooks, 'onRunComplete', {
         result: runResult,
         totalDuration: performance.now() - runStartTime,
       });
@@ -1019,7 +1022,7 @@ export async function executeLoop(
       }
     } catch (error) {
       emitter?.dispatch(new RunErrorEvent(steps.length, error));
-      return await makeErrorResult(error);
+      return makeErrorResult(error);
     }
   }
 
@@ -1031,7 +1034,7 @@ export async function executeLoop(
     finishReason: 'maximum-steps',
   };
   emitter?.dispatch(new RunCompletedEvent(runResult));
-  await runHookSilently(hooks, 'onRunComplete', {
+  runHookSilently(hooks, 'onRunComplete', {
     result: runResult,
     totalDuration: performance.now() - runStartTime,
   });
