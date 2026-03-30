@@ -298,7 +298,6 @@ export async function executeLoop(
       await hooks.run('onRunStart', { conversation, toolbox, maximumSteps });
     } catch (error) {
       emitter?.dispatch(new RunErrorEvent(0, error));
-      await runHookSilently(hooks, 'onRunError', { error, partialSteps: steps, conversation });
       return await makeErrorResult(error);
     }
   }
@@ -498,16 +497,16 @@ export async function executeLoop(
           };
 
           if (hooks?.has('beforeGenerate')) {
-            const beforeGenResult = await hooks.run('beforeGenerate', {
+            const beforeGenContext = {
               conversation,
               step,
               toolbox: stepToolbox,
               signal: stepSignal,
-            });
+            };
+            const beforeGenResult = await hooks.run('beforeGenerate', beforeGenContext);
             if (
               beforeGenResult !== undefined &&
-              typeof beforeGenResult === 'object' &&
-              'conversation' in beforeGenResult
+              !isRegistryPassthrough(beforeGenResult, beforeGenContext)
             ) {
               generateContext = beforeGenResult;
             }
@@ -723,8 +722,29 @@ export async function executeLoop(
 
           results = Array.isArray(executeResult) ? executeResult : [executeResult];
         } catch (error) {
-          emitter?.dispatch(new RunErrorEvent(step, error));
-          return await makeErrorResult(error);
+          // onError recovery for tool execution phase
+          let recovered = false;
+          if (hooks?.has('onError')) {
+            const errorAction = (await hooks.run('onError', {
+              error,
+              step,
+              phase: 'tool-execution' as const,
+              conversation,
+              retryCount: 0,
+              maxRetries: 0,
+            })) as ErrorRecoveryAction | undefined;
+
+            if (errorAction === 'skip') {
+              // Continue with empty results — treat as if no tools executed
+              results = [];
+              recovered = true;
+            }
+            // 'retry' and 'abort' both propagate for tool execution
+          }
+          if (!recovered) {
+            emitter?.dispatch(new RunErrorEvent(step, error));
+            return await makeErrorResult(error);
+          }
         }
 
         // Validate tool results guardrail
