@@ -26,6 +26,12 @@ async function runCase(
     const conversation = new Conversation();
     if (evaluationCase.systemPrompt) {
       conversation.appendSystemMessage(evaluationCase.systemPrompt);
+    } else if ('run' in options.agent && options.agent.options.instructions) {
+      const instructions =
+        typeof options.agent.options.instructions === 'string'
+          ? options.agent.options.instructions
+          : options.agent.options.instructions.render();
+      conversation.appendSystemMessage(instructions);
     }
     conversation.appendUserMessage(evaluationCase.input);
 
@@ -208,7 +214,7 @@ export function createAgentEvaluation(options: CreateAgentEvaluationOptions): {
   /** Runs all evaluation cases and returns the report. */
   run: () => Promise<EvaluationReport>;
 } {
-  const concurrency = options.concurrency ?? 1;
+  const concurrency = Math.max(1, options.concurrency ?? 1);
 
   return {
     async run(): Promise<EvaluationReport> {

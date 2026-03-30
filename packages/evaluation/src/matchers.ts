@@ -26,6 +26,7 @@ export function matchExact(actual: string, expected: string): MatchResult {
  * Checks whether the actual output matches the given regular expression.
  */
 export function matchRegex(actual: string, pattern: RegExp): MatchResult {
+  pattern.lastIndex = 0;
   const pass = pattern.test(actual);
   return {
     pass,
@@ -117,7 +118,8 @@ export function matchCustomAssertion(
 ): MatchResult {
   try {
     const assertion = assertFn(runResult);
-    const score = assertion.score ?? (assertion.pass ? 1 : 0);
+    const rawScore = assertion.score ?? (assertion.pass ? 1 : 0);
+    const score = Math.max(0, Math.min(1, rawScore));
     return {
       pass: assertion.pass,
       score,
