@@ -135,4 +135,27 @@ describe('matchToolCalls', () => {
     const result = createMockRunResult({ steps });
     expect(matchToolCalls(result, expected)).toBe(true);
   });
+
+  it('matches expected calls without index at any position in ordered mode', () => {
+    const steps = [createMockStep([{ name: 'search' }, { name: 'summarize' }, { name: 'save' }])];
+    // One call pinned to index 0, another has no index (should match anywhere)
+    const expected: ExpectedToolCall[] = [{ name: 'search', index: 0 }, { name: 'save' }];
+    const result = createMockRunResult({ steps });
+    expect(matchToolCalls(result, expected)).toBe(true);
+  });
+
+  it('does not pin unindexed calls to position 0 in ordered mode', () => {
+    const steps = [createMockStep([{ name: 'search' }, { name: 'summarize' }])];
+    // Two unindexed calls in ordered mode (triggered because at least one has an index)
+    const expected: ExpectedToolCall[] = [{ name: 'summarize', index: 1 }, { name: 'search' }];
+    const result = createMockRunResult({ steps });
+    expect(matchToolCalls(result, expected)).toBe(true);
+  });
+
+  it('returns false when unindexed call cannot be found at any position', () => {
+    const steps = [createMockStep([{ name: 'search' }, { name: 'summarize' }])];
+    const expected: ExpectedToolCall[] = [{ name: 'search', index: 0 }, { name: 'missing-tool' }];
+    const result = createMockRunResult({ steps });
+    expect(matchToolCalls(result, expected)).toBe(false);
+  });
 });

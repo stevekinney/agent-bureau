@@ -63,23 +63,41 @@ function deepEqual(a: unknown, b: unknown): boolean {
 
 /**
  * Checks whether actual tool calls match expected tool calls in exact order
- * (using the `index` property of each expected call).
+ * (using the `index` property of each expected call). Expected calls without
+ * an explicit `index` are matched at any position (unordered), consistent with
+ * the `ExpectedToolCall` documentation that "undefined means any position."
  */
 function matchToolCallsOrdered(result: RunResult, expected: ExpectedToolCall[]): boolean {
   if (expected.length === 0) return true;
 
   const actualCalls = flattenToolCalls(result);
+  const consumed = new Set<number>();
 
+  // First pass: match expected calls that have an explicit index
   for (const exp of expected) {
-    const index = exp.index ?? 0;
-    const actual = actualCalls[index];
+    if (exp.index === undefined) continue;
 
+    const actual = actualCalls[exp.index];
     if (!actual) return false;
     if (actual.name !== exp.name) return false;
+    if (exp.arguments && !deepEqual(actual.arguments, exp.arguments)) return false;
 
-    if (exp.arguments && !deepEqual(actual.arguments, exp.arguments)) {
-      return false;
-    }
+    consumed.add(exp.index);
+  }
+
+  // Second pass: match expected calls without an index at any unconsumed position
+  for (const exp of expected) {
+    if (exp.index !== undefined) continue;
+
+    const foundIndex = actualCalls.findIndex((actual, i) => {
+      if (consumed.has(i)) return false;
+      if (actual.name !== exp.name) return false;
+      if (exp.arguments && !deepEqual(actual.arguments, exp.arguments)) return false;
+      return true;
+    });
+
+    if (foundIndex === -1) return false;
+    consumed.add(foundIndex);
   }
 
   return true;

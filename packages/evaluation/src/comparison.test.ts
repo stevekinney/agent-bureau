@@ -34,8 +34,7 @@ function createReport(
   const averageSteps = total > 0 ? cases.reduce((s, c) => s + c.metrics.steps, 0) / total : 0;
   const averageTokens =
     total > 0 ? cases.reduce((s, c) => s + c.metrics.totalTokens, 0) / total : 0;
-  const averageDuration =
-    total > 0 ? cases.reduce((s, c) => s + c.metrics.duration, 0) / total : 0;
+  const averageDuration = total > 0 ? cases.reduce((s, c) => s + c.metrics.duration, 0) / total : 0;
 
   return {
     timestamp: new Date().toISOString(),
@@ -164,6 +163,91 @@ describe('compareEvaluationReports', () => {
       (r) => r.caseName === 'case-1' && r.metric === 'pass',
     );
     expect(caseRegression).toBeUndefined();
+  });
+
+  it('does not misclassify suppressed regressions as unchanged', () => {
+    const baseline = createReport([createCaseResult({ name: 'case-1', pass: true })]);
+    const current = createReport([createCaseResult({ name: 'case-1', pass: false, score: 0 })]);
+
+    const comparison = compareEvaluationReports(baseline, current, {
+      failPreviouslyPassing: false,
+    });
+
+    // The case changed from pass to fail but was suppressed — it should NOT
+    // appear in unchanged since its status actually changed.
+    expect(comparison.unchanged).not.toContain('case-1');
+  });
+
+  it('detects cost increase exceeding threshold as regression', () => {
+    const baseline = createReport([
+      createCaseResult({
+        name: 'case-1',
+        metrics: {
+          outputMatch: true,
+          toolCallMatch: true,
+          steps: 1,
+          totalTokens: 100,
+          duration: 500,
+          finishReason: 'stop-condition',
+        },
+      }),
+    ]);
+    const current = createReport([
+      createCaseResult({
+        name: 'case-1',
+        metrics: {
+          outputMatch: true,
+          toolCallMatch: true,
+          steps: 1,
+          totalTokens: 150,
+          duration: 500,
+          finishReason: 'stop-condition',
+        },
+      }),
+    ]);
+
+    const comparison = compareEvaluationReports(baseline, current, { costIncrease: 0.2 });
+
+    const costRegression = comparison.regressions.find(
+      (r) => r.caseName === 'summary' && r.metric === 'costIncrease',
+    );
+    expect(costRegression).toBeDefined();
+  });
+
+  it('does not flag cost increase below threshold', () => {
+    const baseline = createReport([
+      createCaseResult({
+        name: 'case-1',
+        metrics: {
+          outputMatch: true,
+          toolCallMatch: true,
+          steps: 1,
+          totalTokens: 100,
+          duration: 500,
+          finishReason: 'stop-condition',
+        },
+      }),
+    ]);
+    const current = createReport([
+      createCaseResult({
+        name: 'case-1',
+        metrics: {
+          outputMatch: true,
+          toolCallMatch: true,
+          steps: 1,
+          totalTokens: 110,
+          duration: 500,
+          finishReason: 'stop-condition',
+        },
+      }),
+    ]);
+
+    const comparison = compareEvaluationReports(baseline, current, { costIncrease: 0.2 });
+
+    const costRegression = comparison.regressions.find(
+      (r) => r.caseName === 'summary' && r.metric === 'costIncrease',
+    );
+    expect(costRegression).toBeUndefined();
   });
 
   it('handles new cases in current report', () => {

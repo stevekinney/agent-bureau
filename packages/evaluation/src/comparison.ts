@@ -6,6 +6,7 @@ import type {
 } from './types';
 
 const DEFAULT_PASS_RATE_DROP = 0.05;
+const DEFAULT_COST_INCREASE = 0.2;
 
 /**
  * Compares two evaluation reports and detects regressions, improvements,
@@ -23,6 +24,7 @@ export function compareEvaluationReports(
   thresholds?: RegressionThresholds,
 ): EvaluationComparison {
   const passRateDropThreshold = thresholds?.passRateDrop ?? DEFAULT_PASS_RATE_DROP;
+  const costIncreaseThreshold = thresholds?.costIncrease ?? DEFAULT_COST_INCREASE;
   const failPreviouslyPassing = thresholds?.failPreviouslyPassing ?? true;
 
   const regressions: EvaluationChange[] = [];
@@ -55,9 +57,13 @@ export function compareEvaluationReports(
         current: currentPass,
         delta: currentPass - baselinePass,
       });
-    } else {
+    } else if (baselinePass === currentPass) {
       unchanged.push(name);
     }
+    // When baselinePass !== currentPass but the change wasn't captured above
+    // (e.g., failPreviouslyPassing is false for a pass→fail transition),
+    // the case is intentionally omitted from all three lists rather than
+    // being misclassified as unchanged.
   }
 
   const passRateDelta = current.summary.passRate - baseline.summary.passRate;
@@ -69,6 +75,23 @@ export function compareEvaluationReports(
       current: current.summary.passRate,
       delta: passRateDelta,
     });
+  }
+
+  // Detect total cost increase exceeding threshold
+  const baselineTotalCost = baseline.cases.reduce((sum, c) => sum + c.metrics.totalTokens, 0);
+  const currentTotalCost = current.cases.reduce((sum, c) => sum + c.metrics.totalTokens, 0);
+
+  if (baselineTotalCost > 0) {
+    const costIncreaseRatio = (currentTotalCost - baselineTotalCost) / baselineTotalCost;
+    if (costIncreaseRatio > costIncreaseThreshold) {
+      regressions.push({
+        caseName: 'summary',
+        metric: 'costIncrease',
+        baseline: baselineTotalCost,
+        current: currentTotalCost,
+        delta: costIncreaseRatio,
+      });
+    }
   }
 
   return {
