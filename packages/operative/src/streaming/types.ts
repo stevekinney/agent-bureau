@@ -32,7 +32,6 @@ export type StreamState = {
  * Each variant is keyed by its `type` field.
  */
 export type StreamEvent =
-  | { type: 'stream:start'; messageId: string }
   | { type: 'stream:block-start'; block: StreamBlock }
   | { type: 'stream:block-delta'; block: StreamBlock; delta: string }
   | { type: 'stream:block-complete'; block: StreamBlock }

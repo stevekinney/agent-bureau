@@ -174,7 +174,9 @@ export async function* normalizeOpenAIStream(
       }
     }
 
-    // Handle finish
+    // Handle finish — complete blocks immediately but defer the
+    // stream:complete event until after the loop so that a trailing
+    // usage-only chunk (OpenAI's stream_options.include_usage) is captured.
     if (finish_reason) {
       // Complete the text block if one exists
       if (textBlockId) {
@@ -205,12 +207,14 @@ export async function* normalizeOpenAIStream(
           arguments: parsedArgs,
         };
       }
-
-      const finalState: StreamState = {
-        ...buildState(),
-        complete: true,
-      };
-      yield { type: 'stream:complete', state: finalState };
     }
   }
+
+  // Emit stream:complete after the loop so any trailing usage-only chunk
+  // has been processed and buildState() includes the final usage data.
+  const finalState: StreamState = {
+    ...buildState(),
+    complete: true,
+  };
+  yield { type: 'stream:complete', state: finalState };
 }
