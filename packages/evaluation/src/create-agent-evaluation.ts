@@ -100,7 +100,7 @@ async function runCase(
     const toolCallMatch = matchToolCalls(runResult, evaluationCase.expectedToolCalls);
 
     const pass = outputMatchResult.pass && toolCallMatch;
-    const score = outputMatchResult.score;
+    const score = toolCallMatch ? outputMatchResult.score : 0;
 
     return {
       name: evaluationCase.name,
