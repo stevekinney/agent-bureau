@@ -1,5 +1,7 @@
 export { compareEvaluationReports } from './comparison';
 export { createAgentEvaluation } from './create-agent-evaluation';
+export { loadDataset, loadDatasets } from './datasets';
+export { createLLMJudge } from './llm-judge';
 export {
   matchCustomAssertion,
   matchExact,
@@ -9,6 +11,7 @@ export {
   matchSubstring,
 } from './matchers';
 export { extractStepCount, extractTokenUsage, matchToolCalls } from './metrics';
+export { runEvaluationSuite } from './run-evaluation-suite';
 export type {
   CreateAgentEvaluationOptions,
   EmbedderFunction,
@@ -19,7 +22,11 @@ export type {
   EvaluationChange,
   EvaluationComparison,
   EvaluationReport,
+  EvaluationSuiteOptions,
+  EvaluationSuiteResult,
   ExpectedToolCall,
+  LLMJudgeOptions,
+  LLMJudgeResult,
   MatchResult,
   RegressionThresholds,
   SemanticMatcher,

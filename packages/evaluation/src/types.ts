@@ -196,3 +196,60 @@ export type CreateAgentEvaluationOptions = {
   /** Embedder function for semantic matching. */
   embedder?: EmbedderFunction;
 };
+
+/**
+ * Configuration for an LLM-as-judge scorer that evaluates output quality
+ * using a generate function and a rubric.
+ */
+export type LLMJudgeOptions = {
+  /** Generate function used for judging (can be a cheaper model). */
+  judge: GenerateFunction;
+  /** Rubric describing what constitutes a good response. */
+  rubric: string;
+  /** Score scale. Default: { min: 1, max: 5 }. */
+  scale?: { min: number; max: number };
+};
+
+/**
+ * The result of an LLM judge evaluation.
+ */
+export type LLMJudgeResult = {
+  /** The score assigned by the judge, within the configured scale. */
+  score: number;
+  /** The judge's reasoning for the assigned score. */
+  reasoning: string;
+};
+
+/**
+ * Options for running a full evaluation suite with dataset loading,
+ * baseline comparison, and report output.
+ */
+export type EvaluationSuiteOptions = {
+  /** Dataset file paths or glob patterns to load. */
+  datasets: string | string[];
+  /** The agent or generate+toolbox pair to evaluate. */
+  agent: EvaluationAgentConfiguration;
+  /** Path to a baseline report JSON file for regression comparison. */
+  baseline?: string;
+  /** Path to write the current report JSON. */
+  output?: string;
+  /** Regression detection thresholds. */
+  thresholds?: RegressionThresholds;
+  /** Maximum number of cases to run in parallel. Default: 1. */
+  concurrency?: number;
+  /** Embedder function for semantic matching. */
+  embedder?: EmbedderFunction;
+};
+
+/**
+ * The result of running a full evaluation suite, including the report,
+ * optional comparison against a baseline, and a CI-compatible exit code.
+ */
+export type EvaluationSuiteResult = {
+  /** The evaluation report for this run. */
+  report: EvaluationReport;
+  /** Comparison against the baseline, if a baseline was provided. */
+  comparison?: EvaluationComparison;
+  /** Exit code: 0 when all checks pass, 1 when a regression is detected. */
+  exitCode: 0 | 1;
+};
