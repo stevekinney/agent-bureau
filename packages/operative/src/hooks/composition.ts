@@ -1,0 +1,110 @@
+/**
+ * Creates a hook that only runs on a specific step number.
+ * Uses the `step` property from the hook's context argument.
+ * Returns undefined when the step does not match.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function onlyOnStep<H extends (...args: any[]) => any>(step: number, hook: H): H {
+  return ((...args: unknown[]) => {
+    const context = args[0] as { step?: number } | undefined;
+    if (context && typeof context === 'object' && 'step' in context && context.step === step) {
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-return
+      return hook(...args);
+    }
+    return undefined;
+  }) as unknown as H;
+}
+
+/**
+ * Creates a hook that runs at most once per run.
+ * Subsequent calls return undefined.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function runOnce<H extends (...args: any[]) => any>(hook: H): H {
+  let called = false;
+  return ((...args: unknown[]) => {
+    if (called) return undefined;
+    called = true;
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-return
+    return hook(...args);
+  }) as unknown as H;
+}
+
+/**
+ * Creates a hook that runs every N steps (0, N, 2N, 3N...).
+ * Uses the `step` property from the hook's context argument.
+ * Returns undefined when the step does not match.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function everyNSteps<H extends (...args: any[]) => any>(n: number, hook: H): H {
+  return ((...args: unknown[]) => {
+    const context = args[0] as { step?: number } | undefined;
+    if (context && typeof context === 'object' && 'step' in context && context.step! % n === 0) {
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-return
+      return hook(...args);
+    }
+    return undefined;
+  }) as unknown as H;
+}
+
+/**
+ * Creates a hook with a timeout. If the hook doesn't resolve within
+ * the timeout, behavior depends on onTimeout: 'ignore' returns undefined,
+ * 'error' throws a TimeoutError.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function withTimeout<H extends (...args: any[]) => any>(
+  ms: number,
+  hook: H,
+  onTimeout: 'ignore' | 'error' = 'ignore',
+): H {
+  return ((...args: unknown[]) => {
+    return new Promise<unknown>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        if (onTimeout === 'error') {
+          reject(new Error(`Hook timed out after ${ms}ms`));
+        } else {
+          resolve(undefined);
+        }
+      }, ms);
+
+      const hookResult: Promise<unknown> = Promise.resolve(hook(...args));
+      void hookResult.then(
+        (result: unknown) => {
+          clearTimeout(timer);
+          resolve(result);
+        },
+        (error: unknown) => {
+          clearTimeout(timer);
+          reject(error instanceof Error ? error : new Error(String(error)));
+        },
+      );
+    });
+  }) as unknown as H;
+}
+
+/**
+ * Composes multiple hooks of the same type into a single hook.
+ * Hooks are executed sequentially. If a hook returns a non-void value,
+ * it replaces the first argument for subsequent hooks (waterfall).
+ * If all hooks return void, the composed hook returns void.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function composeHooks<H extends (...args: any[]) => any>(...hooks: H[]): H {
+  return (async (...args: unknown[]) => {
+    const currentArgs = [...args];
+    let lastResult: unknown;
+    let hasResult = false;
+
+    for (const hook of hooks) {
+      const result: unknown = await hook(...currentArgs);
+      if (result !== undefined) {
+        currentArgs[0] = result;
+        lastResult = result;
+        hasResult = true;
+      }
+    }
+
+    return hasResult ? lastResult : undefined;
+  }) as unknown as H;
+}

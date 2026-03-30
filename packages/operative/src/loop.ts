@@ -30,6 +30,7 @@ import {
   ToolsExecutingEvent,
   UsageAccumulatedEvent,
 } from './events';
+import type { ErrorRecoveryAction } from './hooks/types';
 import type { ToolChoice } from './structured-output/types';
 import { zodToJsonSchema } from './structured-output/zod-to-json-schema';
 import type {
@@ -66,6 +67,30 @@ function normalizeToArray<T>(value: T | T[] | undefined): T[] {
  */
 function isRegistryPassthrough(result: unknown, firstArg: unknown): boolean {
   return result === firstArg;
+}
+
+/**
+ * Runs a hook via the registry in a fire-and-forget fashion.
+ * All handlers execute via Promise.allSettled so individual failures
+ * never block the caller.
+ */
+async function runHookSilently<K extends string>(
+  hooks:
+    | {
+        has(name: K): boolean;
+        getHandlers(name: K): ReadonlyArray<{ handler: (...args: never[]) => unknown }>;
+      }
+    | undefined,
+  hookName: K,
+  ...args: unknown[]
+): Promise<void> {
+  if (!hooks?.has(hookName)) return;
+  const handlers = hooks.getHandlers(hookName);
+  await Promise.allSettled(
+    handlers.map((entry) =>
+      Promise.resolve((entry.handler as (...a: unknown[]) => unknown)(...args)),
+    ),
+  );
 }
 
 function normalizeStopConditions(conditions: RunOptions['stopWhen']): StopCondition[] {
@@ -213,7 +238,20 @@ export async function executeLoop(
   let lastContent = '';
   let schemaAttempts = 0;
 
-  const makeErrorResult = (error: unknown): RunResult => {
+  const makeAbortResult = async (step: number, reason?: string): Promise<RunResult> => {
+    emitter?.dispatch(new RunAbortedEvent(step, reason));
+    await runHookSilently(hooks, 'onRunAbort', { reason, partialSteps: [...steps], conversation });
+    return {
+      conversation,
+      steps,
+      content: lastContent,
+      usage: totalUsage,
+      finishReason: 'aborted',
+    };
+  };
+
+  const makeErrorResult = async (error: unknown): Promise<RunResult> => {
+    await runHookSilently(hooks, 'onRunError', { error, partialSteps: [...steps], conversation });
     if (error instanceof ElicitationDeniedError) {
       const result: RunResult = {
         conversation,
@@ -252,16 +290,25 @@ export async function executeLoop(
 
   emitter?.dispatch(new RunStartedEvent(conversation));
 
+  const runStartTime = performance.now();
+
+  // onRunStart: sequential, error aborts run
+  if (hooks?.has('onRunStart')) {
+    try {
+      await hooks.run('onRunStart', { conversation, toolbox, maximumSteps });
+    } catch (error) {
+      emitter?.dispatch(new RunErrorEvent(0, error));
+      await runHookSilently(hooks, 'onRunError', { error, partialSteps: steps, conversation });
+      return await makeErrorResult(error);
+    }
+  }
+
+  /** Maximum number of retries the onError hook can request per step. */
+  const maxErrorRetries = 3;
+
   for (let step = 0; step < maximumSteps; step++) {
     if (signal?.aborted) {
-      emitter?.dispatch(new RunAbortedEvent(step, signal.reason as string | undefined));
-      return {
-        conversation,
-        steps,
-        content: lastContent,
-        usage: totalUsage,
-        finishReason: 'aborted',
-      };
+      return await makeAbortResult(step, signal.reason as string | undefined);
     }
 
     // Backpressure: wait before proceeding if the strategy requires it
@@ -270,14 +317,7 @@ export async function executeLoop(
       if (backpressureDelay > 0) {
         emitter?.dispatch(new BackpressureAppliedEvent(step, backpressureDelay));
         if (signal?.aborted) {
-          emitter?.dispatch(new RunAbortedEvent(step, signal.reason as string | undefined));
-          return {
-            conversation,
-            steps,
-            content: lastContent,
-            usage: totalUsage,
-            finishReason: 'aborted',
-          };
+          return await makeAbortResult(step, signal.reason as string | undefined);
         }
         await new Promise<void>((resolve) => {
           const timer = setTimeout(resolve, backpressureDelay);
@@ -290,14 +330,7 @@ export async function executeLoop(
           }
         });
         if (signal?.aborted) {
-          emitter?.dispatch(new RunAbortedEvent(step, signal.reason as string | undefined));
-          return {
-            conversation,
-            steps,
-            content: lastContent,
-            usage: totalUsage,
-            finishReason: 'aborted',
-          };
+          return await makeAbortResult(step, signal.reason as string | undefined);
         }
         emitter?.dispatch(new BackpressureReleasedEvent(step));
       }
@@ -366,7 +399,7 @@ export async function executeLoop(
             }
           } catch (error) {
             emitter?.dispatch(new RunErrorEvent(step, error));
-            return makeErrorResult(error);
+            return await makeErrorResult(error);
           }
         }
 
@@ -395,12 +428,12 @@ export async function executeLoop(
                 });
               } catch (error) {
                 emitter?.dispatch(new RunErrorEvent(step, error));
-                return makeErrorResult(error);
+                return await makeErrorResult(error);
               }
             }
           } catch (error) {
             emitter?.dispatch(new RunErrorEvent(step, error));
-            return makeErrorResult(error);
+            return await makeErrorResult(error);
           }
         }
       }
@@ -431,66 +464,142 @@ export async function executeLoop(
       }
     }
 
-    let response: GenerateResponse;
-    try {
-      let prepareResult: GenerateResponse | void = undefined;
-      for (const hook of prepareStepHooks) {
-        prepareResult = await hook({ conversation, step, signal: stepSignal, abortStep, elicit });
-        if (prepareResult) break;
-      }
-      if (!prepareResult && hooks?.has('prepareStep')) {
-        const prepareContext = { conversation, step, signal: stepSignal, abortStep, elicit };
-        const registryResult = await hooks.run('prepareStep', prepareContext);
-        if (!isRegistryPassthrough(registryResult, prepareContext)) {
-          prepareResult = registryResult as GenerateResponse;
+    let response: GenerateResponse = undefined!;
+    let stepRetryCount = 0;
+    let shouldRetryStep: boolean;
+    let stepSkipped = false;
+    do {
+      shouldRetryStep = false;
+      try {
+        let prepareResult: GenerateResponse | void = undefined;
+        for (const hook of prepareStepHooks) {
+          prepareResult = await hook({ conversation, step, signal: stepSignal, abortStep, elicit });
+          if (prepareResult) break;
         }
-      }
+        if (!prepareResult && hooks?.has('prepareStep')) {
+          const prepareContext = { conversation, step, signal: stepSignal, abortStep, elicit };
+          const registryResult = await hooks.run('prepareStep', prepareContext);
+          if (!isRegistryPassthrough(registryResult, prepareContext)) {
+            prepareResult = registryResult as GenerateResponse;
+          }
+        }
 
-      if (prepareResult) {
-        response = prepareResult;
-      } else {
-        emitter?.dispatch(new GenerateStartedEvent(step));
-        const generateStart = performance.now();
-        try {
-          const doGenerate = () =>
-            callGenerateWithRetry(
-              generate,
-              {
+        if (prepareResult) {
+          response = prepareResult;
+        } else {
+          // beforeGenerate: waterfall that can modify the generate context
+          let generateContext: GenerateContext = {
+            conversation,
+            step,
+            signal: stepSignal,
+            toolbox: stepToolbox,
+            toolChoice: stepToolChoice,
+            responseFormat,
+          };
+
+          if (hooks?.has('beforeGenerate')) {
+            const beforeGenResult = await hooks.run('beforeGenerate', {
+              conversation,
+              step,
+              toolbox: stepToolbox,
+              signal: stepSignal,
+            });
+            if (
+              beforeGenResult !== undefined &&
+              typeof beforeGenResult === 'object' &&
+              'conversation' in beforeGenResult
+            ) {
+              generateContext = beforeGenResult;
+            }
+          }
+
+          // onLLMInput: parallel allSettled, read-only, non-blocking
+          await runHookSilently(hooks, 'onLLMInput', {
+            conversation: generateContext.conversation,
+            step: generateContext.step,
+            messageCount: generateContext.conversation.getMessages().length,
+          });
+
+          emitter?.dispatch(new GenerateStartedEvent(step));
+          const generateStart = performance.now();
+          try {
+            const doGenerate = () =>
+              callGenerateWithRetry(generate, generateContext, retry, emitter);
+            response = wrapWithTrace ? await wrapWithTrace(doGenerate) : await doGenerate();
+            const durationMilliseconds = performance.now() - generateStart;
+
+            // onLLMOutput: parallel allSettled, read-only, non-blocking
+            await runHookSilently(hooks, 'onLLMOutput', {
+              conversation,
+              step,
+              response: Object.freeze({ ...response }),
+              duration: durationMilliseconds,
+              usage: response.usage,
+            });
+
+            // afterGenerate: waterfall that can modify the response
+            if (hooks?.has('afterGenerate')) {
+              const afterGenResult = await hooks.run('afterGenerate', {
                 conversation,
                 step,
-                signal: stepSignal,
-                toolbox: stepToolbox,
-                toolChoice: stepToolChoice,
-                responseFormat,
-              },
-              retry,
-              emitter,
-            );
-          response = wrapWithTrace ? await wrapWithTrace(doGenerate) : await doGenerate();
-          const durationMilliseconds = performance.now() - generateStart;
-          emitter?.dispatch(new GenerateCompletedEvent(step, response, durationMilliseconds));
-        } catch (generateError) {
-          const durationMilliseconds = performance.now() - generateStart;
-          emitter?.dispatch(new GenerateErrorEvent(step, generateError, durationMilliseconds));
-          throw generateError;
+                response,
+                duration: durationMilliseconds,
+              });
+              if (
+                afterGenResult !== undefined &&
+                !isRegistryPassthrough(afterGenResult, response)
+              ) {
+                response = afterGenResult;
+              }
+            }
+
+            emitter?.dispatch(new GenerateCompletedEvent(step, response, durationMilliseconds));
+          } catch (generateError) {
+            const durationMilliseconds = performance.now() - generateStart;
+            emitter?.dispatch(new GenerateErrorEvent(step, generateError, durationMilliseconds));
+            throw generateError;
+          }
         }
+        backpressure?.onSuccess();
+      } catch (error) {
+        // onError recovery: sequential, first non-void return wins
+        if (hooks?.has('onError') && stepRetryCount < maxErrorRetries) {
+          const errorAction = (await hooks.run('onError', {
+            error,
+            step,
+            phase: 'generate' as const,
+            conversation,
+            retryCount: stepRetryCount,
+            maxRetries: maxErrorRetries,
+          })) as ErrorRecoveryAction | undefined;
+
+          if (errorAction === 'retry') {
+            stepRetryCount++;
+            shouldRetryStep = true;
+            continue;
+          }
+
+          if (errorAction === 'skip') {
+            // Skip this step entirely and continue to the next one
+            stepSkipped = true;
+            backpressure?.onSuccess();
+            break;
+          }
+
+          // 'abort' or void — let error propagate normally
+        }
+
+        backpressure?.onError(error);
+        if (signal?.aborted) {
+          return await makeAbortResult(step, signal.reason as string | undefined);
+        }
+        emitter?.dispatch(new RunErrorEvent(step, error));
+        return await makeErrorResult(error);
       }
-      backpressure?.onSuccess();
-    } catch (error) {
-      backpressure?.onError(error);
-      if (signal?.aborted) {
-        emitter?.dispatch(new RunAbortedEvent(step, signal.reason as string | undefined));
-        return {
-          conversation,
-          steps,
-          content: lastContent,
-          usage: totalUsage,
-          finishReason: 'aborted',
-        };
-      }
-      emitter?.dispatch(new RunErrorEvent(step, error));
-      return makeErrorResult(error);
-    }
+    } while (shouldRetryStep);
+
+    // If the step was skipped via onError recovery, move to the next step
+    if (stepSkipped) continue;
 
     // Validate response guardrail
     if (validateResponseHooks.length > 0) {
@@ -511,7 +620,7 @@ export async function executeLoop(
         }
       } catch (error) {
         emitter?.dispatch(new RunErrorEvent(step, error));
-        return makeErrorResult(error);
+        return await makeErrorResult(error);
       }
     }
     if (hooks?.has('validateResponse')) {
@@ -530,19 +639,12 @@ export async function executeLoop(
         }
       } catch (error) {
         emitter?.dispatch(new RunErrorEvent(step, error));
-        return makeErrorResult(error);
+        return await makeErrorResult(error);
       }
     }
 
     if (signal?.aborted) {
-      emitter?.dispatch(new RunAbortedEvent(step, signal.reason as string | undefined));
-      return {
-        conversation,
-        steps,
-        content: lastContent,
-        usage: totalUsage,
-        finishReason: 'aborted',
-      };
+      return await makeAbortResult(step, signal.reason as string | undefined);
     }
 
     if (stepSignal.aborted && !signal?.aborted) {
@@ -582,7 +684,7 @@ export async function executeLoop(
           }
         } catch (error) {
           emitter?.dispatch(new RunErrorEvent(step, error));
-          return makeErrorResult(error);
+          return await makeErrorResult(error);
         }
       }
       if (hooks?.has('beforeToolExecution')) {
@@ -602,7 +704,7 @@ export async function executeLoop(
           }
         } catch (error) {
           emitter?.dispatch(new RunErrorEvent(step, error));
-          return makeErrorResult(error);
+          return await makeErrorResult(error);
         }
       }
 
@@ -622,7 +724,7 @@ export async function executeLoop(
           results = Array.isArray(executeResult) ? executeResult : [executeResult];
         } catch (error) {
           emitter?.dispatch(new RunErrorEvent(step, error));
-          return makeErrorResult(error);
+          return await makeErrorResult(error);
         }
 
         // Validate tool results guardrail
@@ -664,7 +766,7 @@ export async function executeLoop(
             results = validatedResults;
           } catch (error) {
             emitter?.dispatch(new RunErrorEvent(step, error));
-            return makeErrorResult(error);
+            return await makeErrorResult(error);
           }
         }
 
@@ -696,7 +798,7 @@ export async function executeLoop(
             }
           } catch (error) {
             emitter?.dispatch(new RunErrorEvent(step, error));
-            return makeErrorResult(error);
+            return await makeErrorResult(error);
           }
         }
         if (hooks?.has('afterToolExecution')) {
@@ -710,7 +812,7 @@ export async function executeLoop(
             });
           } catch (error) {
             emitter?.dispatch(new RunErrorEvent(step, error));
-            return makeErrorResult(error);
+            return await makeErrorResult(error);
           }
         }
       }
@@ -748,7 +850,7 @@ export async function executeLoop(
         }
       } catch (error) {
         emitter?.dispatch(new RunErrorEvent(step, error));
-        return makeErrorResult(error);
+        return await makeErrorResult(error);
       }
     }
     if (hooks?.has('onStep')) {
@@ -756,7 +858,7 @@ export async function executeLoop(
         await hooks.run('onStep', stepResult);
       } catch (error) {
         emitter?.dispatch(new RunErrorEvent(step, error));
-        return makeErrorResult(error);
+        return await makeErrorResult(error);
       }
     }
 
@@ -783,6 +885,10 @@ export async function executeLoop(
           schemaValidation: { success: true },
         };
         emitter?.dispatch(new RunCompletedEvent(runResult));
+        await runHookSilently(hooks, 'onRunComplete', {
+          result: runResult,
+          totalDuration: performance.now() - runStartTime,
+        });
         return runResult;
       } catch (validationError) {
         schemaAttempts++;
@@ -815,6 +921,10 @@ export async function executeLoop(
           schemaValidation: { success: false, error: validationError },
         };
         emitter?.dispatch(new RunCompletedEvent(runResult));
+        await runHookSilently(hooks, 'onRunComplete', {
+          result: runResult,
+          totalDuration: performance.now() - runStartTime,
+        });
         return runResult;
       }
     }
@@ -828,6 +938,10 @@ export async function executeLoop(
         finishReason: 'stop-condition',
       };
       emitter?.dispatch(new RunCompletedEvent(runResult));
+      await runHookSilently(hooks, 'onRunComplete', {
+        result: runResult,
+        totalDuration: performance.now() - runStartTime,
+      });
       return runResult;
     }
   }
@@ -841,7 +955,7 @@ export async function executeLoop(
       }
     } catch (error) {
       emitter?.dispatch(new RunErrorEvent(steps.length, error));
-      return makeErrorResult(error);
+      return await makeErrorResult(error);
     }
   }
 
@@ -853,5 +967,9 @@ export async function executeLoop(
     finishReason: 'maximum-steps',
   };
   emitter?.dispatch(new RunCompletedEvent(runResult));
+  await runHookSilently(hooks, 'onRunComplete', {
+    result: runResult,
+    totalDuration: performance.now() - runStartTime,
+  });
   return runResult;
 }

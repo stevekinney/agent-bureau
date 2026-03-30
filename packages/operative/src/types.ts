@@ -171,6 +171,25 @@ export type ValidateToolResultHook = (
   context: ToolExecutionResultContext,
 ) => Promise<ToolExecutionResult | void>;
 
+/** Hook called before the LLM generate call. Can modify the generate context. */
+export type BeforeGenerateHook = OperativeHookMap['beforeGenerate'];
+/** Hook called after the LLM generate call. Can modify the response. */
+export type AfterGenerateHook = OperativeHookMap['afterGenerate'];
+/** Read-only monitoring hook for LLM input. */
+export type OnLLMInputHook = OperativeHookMap['onLLMInput'];
+/** Read-only monitoring hook for LLM output. */
+export type OnLLMOutputHook = OperativeHookMap['onLLMOutput'];
+/** Hook called when a run starts. */
+export type OnRunStartHook = OperativeHookMap['onRunStart'];
+/** Hook called when a run completes successfully. */
+export type OnRunCompleteHook = OperativeHookMap['onRunComplete'];
+/** Hook called when a run errors. */
+export type OnRunErrorHook = OperativeHookMap['onRunError'];
+/** Hook called when a run is aborted. */
+export type OnRunAbortHook = OperativeHookMap['onRunAbort'];
+/** Error recovery hook. Returns an action to control recovery behavior. */
+export type OnErrorHook = OperativeHookMap['onError'];
+
 /**
  * A predicate that determines whether the loop should stop.
  */

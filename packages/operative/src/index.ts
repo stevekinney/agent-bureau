@@ -164,6 +164,19 @@ export type {
   BeforeCompactionHookContext,
   ContextAssemblyHookContext,
 } from './hooks';
+export type {
+  AfterGenerateContext,
+  BeforeGenerateContext,
+  ErrorContext,
+  ErrorRecoveryAction,
+  LLMInputContext,
+  LLMOutputContext,
+  RunAbortContext,
+  RunCompleteContext,
+  RunErrorContext,
+  RunStartContext,
+} from './hooks/index';
+export { composeHooks, everyNSteps, onlyOnStep, runOnce, withTimeout } from './hooks/index';
 export { run } from './run';
 export type {
   CreateChunkedTaskOptions,
@@ -211,9 +224,11 @@ export { withStreaming } from './streaming';
 export type { ResponseFormat, ToolChoice } from './structured-output/index';
 export { zodToJsonSchema } from './structured-output/index';
 export type {
+  AfterGenerateHook,
   AfterToolExecutionHook,
   AgentDefinition,
   AgentRunOptions,
+  BeforeGenerateHook,
   BeforeToolExecutionHook,
   ContextManagementOptions,
   Conversation,
@@ -229,6 +244,13 @@ export type {
   GenerateResponse,
   JSONValue,
   OnElicitation,
+  OnErrorHook,
+  OnLLMInputHook,
+  OnLLMOutputHook,
+  OnRunAbortHook,
+  OnRunCompleteHook,
+  OnRunErrorHook,
+  OnRunStartHook,
   OnStepHook,
   OperativeExecuteOptions,
   PrepareStepHook,

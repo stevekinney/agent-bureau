@@ -48,6 +48,9 @@ const entrypoints = [
   './src/context/compaction-strategies.ts',
   './src/context/subagent-context.ts',
   './src/context/types.ts',
+  './src/hooks/index.ts',
+  './src/hooks/types.ts',
+  './src/hooks/composition.ts',
 ];
 
 const root = './src';
