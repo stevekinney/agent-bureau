@@ -53,7 +53,13 @@ async function loadBaselineReport(path: string): Promise<EvaluationReport> {
   }
 
   const content = await file.text();
-  const parsed: unknown = JSON.parse(content);
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    throw new Error(`Invalid JSON in baseline file "${path}": failed to parse`);
+  }
 
   if (!isEvaluationReport(parsed)) {
     throw new Error(

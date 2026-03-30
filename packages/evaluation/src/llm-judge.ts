@@ -44,11 +44,12 @@ function buildJudgeUserMessage(input: string, output: string, reference?: string
  */
 function parseJudgeResponse(content: string, scale: { min: number; max: number }): LLMJudgeResult {
   // Try to extract a JSON object from the response, handling cases where the
-  // judge wraps it in markdown code fences or adds extra text. The regex is
-  // order-agnostic — it matches any object containing both keys regardless of
-  // which appears first.
+  // judge wraps it in markdown code fences or adds extra text. Uses lazy
+  // quantifiers (`*?`) to avoid over-matching when the LLM adds commentary
+  // after the JSON that contains braces. The regex is order-agnostic — it
+  // matches any object containing both keys regardless of which appears first.
   const jsonMatch = content.match(
-    /\{[\s\S]*(?:"score"[\s\S]*"reasoning"|"reasoning"[\s\S]*"score")[\s\S]*\}/,
+    /\{[\s\S]*?(?:"score"[\s\S]*?"reasoning"|"reasoning"[\s\S]*?"score")[\s\S]*?\}/,
   );
   const jsonString = jsonMatch ? jsonMatch[0] : content;
 
