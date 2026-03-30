@@ -331,6 +331,30 @@ describe('createAgentEvaluation', () => {
     expect(report.cases[0]!.metrics.toolCallMatch).toBe(true);
   });
 
+  it('zeros score when output matches but tool calls do not', async () => {
+    const generate = createMockGenerate([singleResponse('correct output')]);
+    const toolbox = createTestToolbox([]);
+
+    const evaluation = createAgentEvaluation({
+      cases: [
+        {
+          name: 'output-pass-tools-fail',
+          input: 'test',
+          expectedOutput: 'correct output',
+          expectedToolCalls: [{ name: 'nonexistent-tool' }],
+        },
+      ],
+      agent: { generate, toolbox },
+    });
+
+    const report = await evaluation.run();
+
+    expect(report.cases[0]!.pass).toBe(false);
+    expect(report.cases[0]!.metrics.outputMatch).toBe(true);
+    expect(report.cases[0]!.metrics.toolCallMatch).toBe(false);
+    expect(report.cases[0]!.score).toBe(0);
+  });
+
   it('works with AgentDefinition input', async () => {
     const generate = createMockGenerate([singleResponse('Hello from agent!')]);
     const toolbox = createTestToolbox([]);
