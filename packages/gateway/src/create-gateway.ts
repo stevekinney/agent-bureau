@@ -84,15 +84,15 @@ export async function createGateway(options: GatewayOptions = {}): Promise<Gatew
   );
 
   // Serve static files
-  adapter.mountStaticFiles(app, '/public/', 'dist/');
+  await adapter.mountStaticFiles(app, '/public/', 'dist/');
 
   // Global error handler
   app.onError(errorHandler);
 
-  function start() {
+  async function start() {
     const wsHandler = createWebSocketHandler({ store: bureau.store });
 
-    const handle = adapter.serve(app, {
+    const handle = await adapter.serve(app, {
       port,
       hostname: options.hostname,
       wsHandler,

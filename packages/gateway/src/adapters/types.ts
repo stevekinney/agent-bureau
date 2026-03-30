@@ -22,7 +22,7 @@ export type ServerHandle = {
  */
 export type ServerAdapter = {
   /** Mount static file serving middleware on the Hono app. */
-  mountStaticFiles(app: Hono, path: string, root: string): void;
+  mountStaticFiles(app: Hono, path: string, root: string): void | Promise<void>;
   /** Start an HTTP server for the given Hono app. */
-  serve(app: Hono, options: ServerAdapterOptions): ServerHandle;
+  serve(app: Hono, options: ServerAdapterOptions): ServerHandle | Promise<ServerHandle>;
 };
