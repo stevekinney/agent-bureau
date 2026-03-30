@@ -148,6 +148,7 @@ export async function* normalizeOpenAIStream(
           yield {
             type: 'stream:tool-call-delta',
             toolName: tracker.toolName,
+            blockId: tracker.blockId,
             partialArguments: tracker.arguments,
           };
         }
@@ -184,6 +185,7 @@ export async function* normalizeOpenAIStream(
         yield {
           type: 'stream:tool-call-complete',
           toolName: tracker.toolName,
+          blockId: tracker.blockId,
           arguments: parsedArgs,
         };
       }

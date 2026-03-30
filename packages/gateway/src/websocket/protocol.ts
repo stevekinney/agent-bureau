@@ -151,6 +151,7 @@ export function streamEventToFrame(runId: string, event: StreamEvent): ServerFra
         type: 'stream:tool-call-start',
         runId,
         toolName: event.toolName,
+        blockId: event.blockId,
       };
 
     case 'stream:tool-call-delta':
@@ -158,6 +159,7 @@ export function streamEventToFrame(runId: string, event: StreamEvent): ServerFra
         type: 'stream:tool-call-delta',
         runId,
         toolName: event.toolName,
+        blockId: event.blockId,
         partialArgs: event.partialArguments,
       };
 
@@ -166,6 +168,7 @@ export function streamEventToFrame(runId: string, event: StreamEvent): ServerFra
         type: 'stream:tool-call-complete',
         runId,
         toolName: event.toolName,
+        blockId: event.blockId,
         arguments: event.arguments,
       };
 

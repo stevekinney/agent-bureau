@@ -135,6 +135,7 @@ export function withEnhancedStreaming(
           emitEvent(eventTarget, 'stream:tool-call-delta', {
             type: 'stream:tool-call-delta',
             toolName,
+            blockId: toolBlockId,
             partialArguments: argsString,
           });
 
@@ -146,6 +147,7 @@ export function withEnhancedStreaming(
           emitEvent(eventTarget, 'stream:tool-call-complete', {
             type: 'stream:tool-call-complete',
             toolName,
+            blockId: toolBlockId,
             arguments: toolCall.arguments,
           });
         }

@@ -125,6 +125,7 @@ export async function* normalizeAnthropicStream(
           yield {
             type: 'stream:tool-call-delta',
             toolName,
+            blockId,
             partialArguments: block.partialArguments,
           };
         } else if (deltaType === 'thinking_delta') {
@@ -166,6 +167,7 @@ export async function* normalizeAnthropicStream(
           yield {
             type: 'stream:tool-call-complete',
             toolName,
+            blockId,
             arguments: parsedArgs,
           };
         }

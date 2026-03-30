@@ -37,8 +37,8 @@ export type StreamEvent =
   | { type: 'stream:block-complete'; block: StreamBlock }
   | { type: 'stream:text-delta'; content: string; accumulated: string }
   | { type: 'stream:tool-call-start'; toolName: string; blockId: string }
-  | { type: 'stream:tool-call-delta'; toolName: string; partialArguments: string }
-  | { type: 'stream:tool-call-complete'; toolName: string; arguments: unknown }
+  | { type: 'stream:tool-call-delta'; toolName: string; blockId: string; partialArguments: string }
+  | { type: 'stream:tool-call-complete'; toolName: string; blockId: string; arguments: unknown }
   | { type: 'stream:usage'; usage: TokenUsage }
   | { type: 'stream:complete'; state: StreamState }
   | { type: 'stream:error'; error: unknown };
