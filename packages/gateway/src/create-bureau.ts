@@ -52,8 +52,14 @@ function validateCreateRunRequest(request: CreateRunRequest): void {
     toBadRequest('Request must include a "message" string');
   }
 
-  if (request.sessionId !== undefined && typeof request.sessionId !== 'string') {
-    toBadRequest('"sessionId" must be a string');
+  if (request.sessionId !== undefined) {
+    if (typeof request.sessionId !== 'string') {
+      toBadRequest('"sessionId" must be a string');
+    }
+
+    if (request.sessionId.trim().length === 0) {
+      toBadRequest('"sessionId" must be a non-empty string');
+    }
   }
 
   if (request.systemPrompt !== undefined && typeof request.systemPrompt !== 'string') {
@@ -222,7 +228,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       throw new BureauError('No generate function configured', 'NOT_CONFIGURED');
     }
 
-    const sessionId = request.sessionId ?? crypto.randomUUID();
+    const sessionId = request.sessionId?.trim() ?? crypto.randomUUID();
     const { session, conversation } = await loadConversation(sessionId);
 
     if (!session) {

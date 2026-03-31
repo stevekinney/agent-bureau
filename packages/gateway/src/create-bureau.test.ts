@@ -62,6 +62,19 @@ describe('createBureau', () => {
     });
   });
 
+  it('throws BAD_REQUEST when createRun is called with a blank session identifier', async () => {
+    const bureau = await createBureau({ generate: createMockGenerate() });
+
+    const error = await bureau.createRun({ message: 'Hello', sessionId: '   ' }).then(
+      () => undefined,
+      (rejection) => rejection,
+    );
+
+    expect(error).toMatchObject({
+      code: 'BAD_REQUEST',
+    });
+  });
+
   it('creates runs with a session identifier and registers them in the store', async () => {
     const bureau = await createBureau({
       generate: createMockGenerate(),
@@ -198,6 +211,31 @@ describe('createBureau', () => {
     expect(configuration.maximumSteps).toBe(DEFAULT_MAXIMUM_STEPS);
     expect(configuration.provider?.provider).toBe('anthropic');
     expect(configuration.providers).toHaveLength(1);
+  });
+
+  it('configures a scheduler for routed multi-provider runtimes', async () => {
+    const bureau = await createBureau({
+      providers: [
+        {
+          name: 'fast',
+          provider: { provider: 'openai', model: 'gpt-4.1-mini' },
+        },
+        {
+          name: 'deep',
+          provider: { provider: 'anthropic', model: 'claude-sonnet-4-20250514' },
+        },
+      ],
+      routing: {
+        type: 'step-based',
+        first: 'fast',
+        middle: 'deep',
+      },
+      scheduler: { enabled: true, idleDelay: 1 },
+      toolbox: createEmptyToolbox(),
+    });
+
+    expect(bureau.scheduler).toBeDefined();
+    bureau.dispose();
   });
 
   it('returns tool summaries', async () => {

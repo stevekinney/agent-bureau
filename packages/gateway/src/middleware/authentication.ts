@@ -3,6 +3,8 @@ import { HTTPException } from 'hono/http-exception';
 
 import type { ApiKeyStore } from '../keys/types';
 
+const QUERY_TOKEN_PATH_ALLOW_LIST = new Set(['/api/v1/events']);
+
 /**
  * Bearer token authentication middleware with managed API key support.
  *
@@ -49,7 +51,18 @@ export function createAuthentication(authToken: string | undefined, apiKeyStore?
     }
 
     const authHeader = context.req.header('authorization');
-    const queryToken = new URL(raw.url).searchParams.get('token');
+    const url = new URL(raw.url);
+    const allowsQueryToken =
+      raw.method.toUpperCase() === 'GET' && QUERY_TOKEN_PATH_ALLOW_LIST.has(url.pathname);
+    const queryToken = allowsQueryToken ? url.searchParams.get('token') : null;
+    const hasDisallowedQueryToken = !allowsQueryToken && url.searchParams.has('token');
+
+    if (!authHeader && hasDisallowedQueryToken) {
+      throw new HTTPException(401, {
+        message: 'Query-string tokens are only supported for GET /api/v1/events',
+      });
+    }
+
     if (!authHeader && !queryToken) {
       throw new HTTPException(401, { message: 'Missing authorization header' });
     }

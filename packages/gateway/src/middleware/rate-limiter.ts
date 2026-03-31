@@ -16,6 +16,18 @@ type WindowEntry = {
   timestamps: number[];
 };
 
+type RateLimitDecision =
+  | {
+      remaining: number;
+      resetAt: number;
+      status: 'allowed';
+    }
+  | {
+      resetAt: number;
+      retryAfter: number;
+      status: 'limited';
+    };
+
 const DEFAULT_LIMIT = 60;
 const DEFAULT_WINDOW_MS = 60_000;
 
@@ -64,6 +76,34 @@ function createStoreBackedWindowStore(store: KeyValueStore) {
   };
 }
 
+function createPrincipalMutex() {
+  const pending = new Map<string, Promise<void>>();
+
+  return async function withPrincipalLock<T>(
+    principal: string,
+    callback: () => Promise<T>,
+  ): Promise<T> {
+    const previous = pending.get(principal) ?? Promise.resolve();
+    let releaseCurrent: (() => void) | undefined;
+    const current = new Promise<void>((resolve) => {
+      releaseCurrent = resolve;
+    });
+    const currentChain = previous.then(() => current);
+    pending.set(principal, currentChain);
+
+    await previous;
+
+    try {
+      return await callback();
+    } finally {
+      releaseCurrent?.();
+      if (pending.get(principal) === currentChain) {
+        pending.delete(principal);
+      }
+    }
+  };
+}
+
 /**
  * Creates a per-principal sliding-window rate limiter middleware.
  */
@@ -73,6 +113,7 @@ export function createRateLimiter(options?: RateLimitOptions) {
   const windowStore = options?.store
     ? createStoreBackedWindowStore(options.store)
     : createMemoryWindowStore(windowMs);
+  const withPrincipalLock = createPrincipalMutex();
 
   return createMiddleware(async (context, next) => {
     const principal = context.req.header('x-auth-principal') ?? context.req.header('x-api-key-id');
@@ -81,41 +122,51 @@ export function createRateLimiter(options?: RateLimitOptions) {
       return;
     }
 
-    const now = Date.now();
-    const windowStart = now - windowMs;
     const storageKey = `gateway:rate-limit:${principal}`;
-    const entry = await windowStore.load(storageKey);
-    entry.timestamps = entry.timestamps.filter((timestamp) => timestamp > windowStart);
+    const decision = await withPrincipalLock(storageKey, async () => {
+      const now = Date.now();
+      const windowStart = now - windowMs;
+      const entry = await windowStore.load(storageKey);
+      entry.timestamps = entry.timestamps.filter((timestamp) => timestamp > windowStart);
 
-    if (entry.timestamps.length >= limit) {
-      const oldestTimestamp = entry.timestamps[0] ?? now;
-      const resetAt = Math.ceil((oldestTimestamp + windowMs) / 1000);
-      const retryAfter = Math.max(1, Math.ceil((oldestTimestamp + windowMs - now) / 1000));
+      if (entry.timestamps.length >= limit) {
+        const oldestTimestamp = entry.timestamps[0] ?? now;
+        return {
+          retryAfter: Math.max(1, Math.ceil((oldestTimestamp + windowMs - now) / 1000)),
+          resetAt: Math.ceil((oldestTimestamp + windowMs) / 1000),
+          status: 'limited',
+        } satisfies RateLimitDecision;
+      }
 
+      entry.timestamps.push(now);
+      await windowStore.save(storageKey, entry);
+
+      return {
+        remaining: Math.max(0, limit - entry.timestamps.length),
+        resetAt: Math.ceil(((entry.timestamps[0] ?? now) + windowMs) / 1000),
+        status: 'allowed',
+      } satisfies RateLimitDecision;
+    });
+
+    if (decision.status === 'limited') {
       throw new HTTPException(429, {
         res: new Response(JSON.stringify({ error: { message: 'Rate limit exceeded' } }), {
           status: 429,
           headers: new Headers({
             'content-type': 'application/json',
-            'retry-after': String(retryAfter),
+            'retry-after': String(decision.retryAfter),
             'x-ratelimit-limit': String(limit),
             'x-ratelimit-remaining': '0',
-            'x-ratelimit-reset': String(resetAt),
+            'x-ratelimit-reset': String(decision.resetAt),
           }),
         }),
       });
     }
 
-    entry.timestamps.push(now);
-    await windowStore.save(storageKey, entry);
-
-    const remaining = Math.max(0, limit - entry.timestamps.length);
-    const resetAt = Math.ceil(((entry.timestamps[0] ?? now) + windowMs) / 1000);
-
     await next();
 
     context.header('x-ratelimit-limit', String(limit));
-    context.header('x-ratelimit-remaining', String(remaining));
-    context.header('x-ratelimit-reset', String(resetAt));
+    context.header('x-ratelimit-remaining', String(decision.remaining));
+    context.header('x-ratelimit-reset', String(decision.resetAt));
   });
 }

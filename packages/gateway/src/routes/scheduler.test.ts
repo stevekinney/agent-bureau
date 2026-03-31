@@ -1,7 +1,7 @@
 import { createTestToolbox } from 'armorer/test';
 import { describe, expect, it } from 'bun:test';
 import { Hono } from 'hono';
-import type { GenerateResponse } from 'operative';
+import type { GenerateResponse, Scheduler } from 'operative';
 import { createScheduler } from 'operative';
 import { createMockGenerate } from 'operative/test';
 
@@ -9,6 +9,10 @@ import { createSchedulerRoutes } from './scheduler';
 
 function textResponse(content: string): GenerateResponse {
   return { content, toolCalls: [] };
+}
+
+async function waitForSchedulerTick() {
+  await new Promise((resolve) => setTimeout(resolve, 25));
 }
 
 describe('scheduler routes', () => {
@@ -100,5 +104,98 @@ describe('scheduler routes', () => {
     ).toBe(true);
 
     await scheduler.stop();
+  });
+
+  it('POST /api/v1/scheduler/tasks returns BAD_REQUEST for invalid JSON', async () => {
+    const scheduler = createScheduler({
+      generate: createMockGenerate([textResponse('ok')]),
+      toolbox: createTestToolbox([]),
+      idleDelay: 1,
+    });
+
+    const app = new Hono();
+    app.route('/api/v1/scheduler', createSchedulerRoutes(scheduler));
+
+    const response = await app.request('/api/v1/scheduler/tasks', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{',
+    });
+
+    expect(response.status).toBe(400);
+    const body = await response.json();
+    expect(body.error.code).toBe('BAD_REQUEST');
+
+    await scheduler.stop();
+  });
+
+  it('records failed tasks once in scheduler history', async () => {
+    const events = new EventTarget();
+    const scheduler = {
+      getState() {
+        return {
+          activeTask: undefined,
+          completedCount: 0,
+          idle: true,
+          preemptedCount: 0,
+          queued: {
+            ambient: [],
+            background: [],
+            immediate: [],
+            scheduled: [],
+          },
+        };
+      },
+      submit(task: Parameters<Scheduler['submit']>[0]) {
+        queueMicrotask(() => {
+          const failedEvent = new Event('task.failed') as Event & {
+            error: Error;
+            taskId: string;
+          };
+          failedEvent.taskId = task.id;
+          failedEvent.error = new Error('boom');
+          events.dispatchEvent(failedEvent);
+        });
+        return Promise.reject(new Error('boom'));
+      },
+      cancel() {
+        return false;
+      },
+      addEventListener(
+        type: string,
+        listener: EventListenerOrEventListenerObject,
+        options?: boolean | AddEventListenerOptions,
+      ) {
+        events.addEventListener(type, listener, options);
+      },
+      removeEventListener(
+        type: string,
+        listener: EventListenerOrEventListenerObject,
+        options?: boolean | EventListenerOptions,
+      ) {
+        events.removeEventListener(type, listener, options);
+      },
+    } as unknown as Scheduler;
+
+    const app = new Hono();
+    app.route('/api/v1/scheduler', createSchedulerRoutes(scheduler));
+
+    const submitResponse = await app.request('/api/v1/scheduler/tasks', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ message: 'Explode' }),
+    });
+    expect(submitResponse.status).toBe(202);
+
+    await waitForSchedulerTick();
+
+    const historyResponse = await app.request('/api/v1/scheduler/history');
+    expect(historyResponse.status).toBe(200);
+    const historyBody = await historyResponse.json();
+    const failureEntries = historyBody.entries.filter(
+      (entry: { event: string }) => entry.event === 'task.failed',
+    );
+
+    expect(failureEntries).toHaveLength(1);
   });
 });

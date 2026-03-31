@@ -1,16 +1,13 @@
 import { describe, expect, it } from 'bun:test';
 import { Hono } from 'hono';
+import type { KeyValueStore } from 'storage';
 import { createMemoryKeyValueStore } from 'storage';
 
 import { errorHandler } from './error-handler';
 import { createRateLimiter } from './rate-limiter';
 import { requestIdentifier } from './request-identifier';
 
-function createApp(options?: {
-  limit?: number;
-  store?: ReturnType<typeof createMemoryKeyValueStore>;
-  windowMs?: number;
-}) {
+function createApp(options?: { limit?: number; store?: KeyValueStore; windowMs?: number }) {
   const app = new Hono();
   app.use('*', requestIdentifier);
   app.use('*', createRateLimiter(options));
@@ -114,5 +111,39 @@ describe('rate limiter', () => {
     const secondApp = createApp({ limit: 1, store, windowMs: 60_000 });
     const secondResponse = await secondApp.request('/test', { headers });
     expect(secondResponse.status).toBe(429);
+  });
+
+  it('serializes concurrent store-backed updates for the same principal', async () => {
+    const backingStore = createMemoryKeyValueStore();
+    const delay = () => new Promise((resolve) => setTimeout(resolve, 10));
+    const store: KeyValueStore = {
+      async get(key) {
+        await delay();
+        return backingStore.get(key);
+      },
+      async set(key, value) {
+        await delay();
+        await backingStore.set(key, value);
+      },
+      async delete(key) {
+        await backingStore.delete(key);
+      },
+      async list(prefix) {
+        return backingStore.list(prefix);
+      },
+    };
+
+    const app = createApp({ limit: 1, store, windowMs: 60_000 });
+    const headers = { 'x-auth-principal': 'api-key:concurrent-key' };
+
+    const responses = await Promise.all([
+      app.request('/test', { headers }),
+      app.request('/test', { headers }),
+    ]);
+    const statuses = responses
+      .map((response) => response.status)
+      .sort((left, right) => left - right);
+
+    expect(statuses).toEqual([200, 429]);
   });
 });

@@ -125,7 +125,14 @@ export function createSchedulerRoutes(scheduler: Scheduler | undefined) {
       );
     }
 
-    const parsedBody = SubmitSchedulerTaskRequestSchema.safeParse(await context.req.json());
+    let requestBody: unknown;
+    try {
+      requestBody = await context.req.json();
+    } catch {
+      return context.json({ error: { code: 'BAD_REQUEST', message: 'Invalid JSON body' } }, 400);
+    }
+
+    const parsedBody = SubmitSchedulerTaskRequestSchema.safeParse(requestBody);
     if (!parsedBody.success) {
       const fieldErrors = parsedBody.error.flatten().fieldErrors;
       const message = Object.entries(fieldErrors)
@@ -159,14 +166,7 @@ export function createSchedulerRoutes(scheduler: Scheduler | undefined) {
       },
     };
 
-    scheduler.submit(task).catch((error: unknown) => {
-      appendHistory({
-        event: 'task.failed',
-        taskId,
-        metadata: { error: error instanceof Error ? error.message : String(error) },
-        timestamp: Date.now(),
-      });
-    });
+    void scheduler.submit(task).catch(() => {});
 
     return context.json({ taskId, priority, status: 'queued' }, 202);
   });

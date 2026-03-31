@@ -500,40 +500,17 @@ export async function createRuntimeComposition(
     ];
   }
 
-  const schedulerGenerate =
-    options.generate ??
-    (baseProviders.length === 1 && !options.routing
-      ? applyCache(
-          resolveProviderGenerate(baseProviders[0]!.provider, undefined, options.streaming),
-          options.cache,
-          kv,
-        )
-      : undefined);
-
-  const scheduler =
-    schedulerGenerate && options.scheduler?.enabled !== false
-      ? createScheduler({
-          generate: schedulerGenerate,
-          // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment -- Toolbox<any> variance; see baseToolbox annotation
-          toolbox: baseToolbox,
-          idleDelay: options.scheduler?.idleDelay ?? 1000,
-        })
-      : undefined;
-
-  if (scheduler) {
-    scheduler.start();
-  }
-
-  function createRunRuntime(request: CreateRunRequest & { sessionId: string }) {
-    const streamEventTarget =
-      options.streaming?.enabled === false ? undefined : new TypedEventTarget<StreamEventMap>();
-
+  function createConfiguredGenerate(
+    streamEventTarget: TypedEventTarget<StreamEventMap> | undefined,
+  ): GenerateFunction | undefined {
     let generate: GenerateFunction | undefined = options.generate;
 
     if (!generate) {
       if (baseProviders.length === 0) {
-        generate = undefined;
-      } else if (options.routing && baseProviders.length > 1) {
+        return undefined;
+      }
+
+      if (options.routing && baseProviders.length > 1) {
         const routingConfiguration = createRoutingStrategy(options.routing);
         const routes = baseProviders.map((route) => ({
           name: route.name,
@@ -566,11 +543,33 @@ export async function createRuntimeComposition(
       }
     }
 
+    return applyCache(generate, options.cache, kv);
+  }
+
+  const schedulerGenerate = createConfiguredGenerate(undefined);
+
+  const scheduler =
+    schedulerGenerate && options.scheduler?.enabled !== false
+      ? createScheduler({
+          generate: schedulerGenerate,
+          // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment -- Toolbox<any> variance; see baseToolbox annotation
+          toolbox: baseToolbox,
+          idleDelay: options.scheduler?.idleDelay ?? 1000,
+        })
+      : undefined;
+
+  if (scheduler) {
+    scheduler.start();
+  }
+
+  function createRunRuntime(request: CreateRunRequest & { sessionId: string }) {
+    const streamEventTarget =
+      options.streaming?.enabled === false ? undefined : new TypedEventTarget<StreamEventMap>();
+    const generate = createConfiguredGenerate(streamEventTarget);
+
     if (!generate) {
       throw new Error('No generate function configured');
     }
-
-    generate = applyCache(generate, options.cache, kv);
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Toolbox generic variance; gateway never inspects the type parameter
     let toolbox: Toolbox<any> = baseToolbox;

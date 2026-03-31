@@ -587,6 +587,36 @@ describe('createScheduler', () => {
     await scheduler.stop();
   });
 
+  it('does not emit task.completed for aborted dispatch runs', async () => {
+    const controller = new AbortController();
+    const blocking = createBlockingGenerate();
+    const scheduler = createMinimalScheduler({ idleDelay: 1 });
+    const completedTaskIds: string[] = [];
+
+    scheduler.addEventListener('task.completed', (event) => {
+      completedTaskIds.push(event.taskId);
+    });
+
+    const { result } = scheduler.dispatch(() => ({
+      generate: blocking.generate,
+      toolbox: createTestToolbox([]),
+      conversation: new Conversation(),
+      maximumSteps: 1,
+      signal: controller.signal,
+    }));
+
+    await sleep(10);
+    controller.abort('dispatch-aborted');
+
+    const runResult = await result;
+    expect(runResult.finishReason).toBe('aborted');
+    expect(completedTaskIds).toEqual([]);
+    expect(scheduler.getState().completedCount).toBe(0);
+
+    blocking.resolve(textResponse('unused'));
+    await scheduler.stop();
+  });
+
   it('rejects submitted tasks when executeLoop rejects before producing a result', async () => {
     const scheduler = createMinimalScheduler({ idleDelay: 1 });
     const failures: string[] = [];

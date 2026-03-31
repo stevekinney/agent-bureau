@@ -13,6 +13,7 @@ function createApp(authToken: string | undefined, apiKeyStore?: ApiKeyStore) {
   app.use('*', requestIdentifier);
   app.use('*', createAuthentication(authToken, apiKeyStore));
   app.get('/protected', (c) => c.json({ ok: true }));
+  app.get('/api/v1/events', (c) => c.json({ ok: true }));
   app.onError(errorHandler);
   return app;
 }
@@ -79,6 +80,22 @@ describe('authentication', () => {
     expect(response.status).toBe(200);
     const body = await response.json();
     expect(body.ok).toBe(true);
+  });
+
+  it('accepts query-string tokens for the SSE events endpoint', async () => {
+    const app = createApp('secret-token');
+    const response = await app.request('/api/v1/events?token=secret-token');
+    expect(response.status).toBe(200);
+  });
+
+  it('rejects query-string tokens for non-SSE endpoints', async () => {
+    const app = createApp('secret-token');
+    const response = await app.request('/protected?token=secret-token');
+    expect(response.status).toBe(401);
+    const body = await response.json();
+    expect(body.error.message).toBe(
+      'Query-string tokens are only supported for GET /api/v1/events',
+    );
   });
 });
 

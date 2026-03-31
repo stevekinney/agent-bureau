@@ -50,7 +50,12 @@ export function createRoutes({ bureau, broker, apiKeyStore }: CreateRoutesOption
   eventsRouter.route('/', createEventsRoutes(bureau, broker));
   app.route('/api/v1/events', eventsRouter);
 
-  app.route('/api/v1/scheduler', createSchedulerRoutes(bureau.scheduler));
+  const schedulerRouter = new Hono();
+  schedulerRouter.get('*', createScopeGuard([SCOPE.RUNS_READ]));
+  schedulerRouter.post('*', createScopeGuard([SCOPE.RUNS_WRITE]));
+  schedulerRouter.delete('*', createScopeGuard([SCOPE.RUNS_WRITE]));
+  schedulerRouter.route('/', createSchedulerRoutes(bureau.scheduler));
+  app.route('/api/v1/scheduler', schedulerRouter);
 
   // Key management routes (only when key store is available)
   if (apiKeyStore) {

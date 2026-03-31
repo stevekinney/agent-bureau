@@ -153,12 +153,12 @@ export function useChat({ onRunCreated, subscribe, unsubscribe }: UseChatOptions
         break;
       case 'stream:tool-call-delta':
         setToolActivity((previous) => {
-          const next = [...previous];
-          next[next.length - 1] =
-            next[next.length - 1] ?? `Calling ${frame.toolName}: ${frame.partialArgs}`;
-          if (next.length > 0) {
-            next[next.length - 1] = `${frame.toolName}: ${frame.partialArgs}`;
+          if (previous.length === 0) {
+            return [`${frame.toolName}: ${frame.partialArgs}`];
           }
+
+          const next = [...previous];
+          next[next.length - 1] = `${frame.toolName}: ${frame.partialArgs}`;
           return next;
         });
         break;

@@ -238,9 +238,11 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
     const result = activeRun.result.then(
       (runResult) => {
         running.delete(taskId);
-        completedCount++;
-        lastTaskCompletedAt = performance.now();
-        emitEvent(new TaskCompletedEvent(taskId, runResult));
+        if (runResult.finishReason !== 'aborted') {
+          completedCount++;
+          lastTaskCompletedAt = performance.now();
+          emitEvent(new TaskCompletedEvent(taskId, runResult));
+        }
         wakeLoop();
         return runResult;
       },

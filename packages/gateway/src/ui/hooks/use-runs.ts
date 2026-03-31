@@ -10,14 +10,21 @@ export interface UseRunsResult {
 }
 
 export function useRuns(initialRuns: RunSummary[]): UseRunsResult {
-  const [runs, setRuns] = useState<RunSummary[]>(initialRuns);
+  const [runs, setRunsState] = useState<RunSummary[]>(initialRuns);
+  const runsRef = useRef<RunSummary[]>(initialRuns);
   const refreshRef = useRef<(() => Promise<void>) | undefined>(undefined);
+
+  const setRuns = useCallback((value: RunSummary[] | ((current: RunSummary[]) => RunSummary[])) => {
+    const nextRuns = typeof value === 'function' ? value(runsRef.current) : value;
+    runsRef.current = nextRuns;
+    setRunsState(nextRuns);
+  }, []);
 
   const refresh = useCallback(async () => {
     const response = await fetch('/api/v1/runs');
     const data = (await response.json()) as RunSummary[];
     setRuns(data);
-  }, []);
+  }, [setRuns]);
   refreshRef.current = refresh;
 
   const upsertRun = useCallback((run: RunSummary) => {
@@ -33,69 +40,71 @@ export function useRuns(initialRuns: RunSummary[]): UseRunsResult {
     });
   }, []);
 
-  const handleMessage = useCallback((frame: ServerFrame) => {
-    if (frame.type !== 'event') return;
+  const handleMessage = useCallback(
+    (frame: ServerFrame) => {
+      if (frame.type !== 'event') return;
 
-    let matchedExistingRun = false;
+      const matchedExistingRun = runsRef.current.some((run) => run.id === frame.runId);
 
-    setRuns((previous) =>
-      previous.map((run) => {
-        if (run.id !== frame.runId) {
-          return run;
-        }
+      setRuns((previous) =>
+        previous.map((run) => {
+          if (run.id !== frame.runId) {
+            return run;
+          }
 
-        matchedExistingRun = true;
-        const detail = (frame.detail ?? {}) as {
-          error?: string;
-          finishReason?: string;
-          step?: number;
-          usage?: { completion: number; prompt: number; total: number };
-        };
+          const detail = (frame.detail ?? {}) as {
+            error?: string;
+            finishReason?: string;
+            step?: number;
+            usage?: { completion: number; prompt: number; total: number };
+          };
 
-        return {
-          ...run,
-          actionCount: run.actionCount + 1,
-          steps:
-            frame.event === 'step.completed'
-              ? Math.max(
-                  run.steps,
-                  typeof detail.step === 'number' ? detail.step + 1 : run.steps + 1,
-                )
-              : run.steps,
-          usage:
-            frame.event === 'step.completed' && detail.usage
-              ? {
-                  prompt: run.usage.prompt + detail.usage.prompt,
-                  completion: run.usage.completion + detail.usage.completion,
-                  total: run.usage.total + detail.usage.total,
-                }
-              : run.usage,
-          finishReason:
-            frame.event === 'run.completed'
-              ? (detail.finishReason ?? run.finishReason)
-              : run.finishReason,
-          error:
-            frame.event === 'run.error'
-              ? (detail.error ?? run.error)
-              : frame.event === 'run.completed'
+          return {
+            ...run,
+            actionCount: run.actionCount + 1,
+            steps:
+              frame.event === 'step.completed'
+                ? Math.max(
+                    run.steps,
+                    typeof detail.step === 'number' ? detail.step + 1 : run.steps + 1,
+                  )
+                : run.steps,
+            usage:
+              frame.event === 'step.completed' && detail.usage
+                ? {
+                    prompt: run.usage.prompt + detail.usage.prompt,
+                    completion: run.usage.completion + detail.usage.completion,
+                    total: run.usage.total + detail.usage.total,
+                  }
+                : run.usage,
+            finishReason:
+              frame.event === 'run.completed'
+                ? (detail.finishReason ?? run.finishReason)
+                : run.finishReason,
+            error:
+              frame.event === 'run.error'
                 ? (detail.error ?? run.error)
-                : run.error,
-          status:
-            frame.event === 'run.completed'
-              ? 'completed'
-              : frame.event === 'run.error'
-                ? 'error'
-                : frame.event === 'run.aborted'
-                  ? 'aborted'
-                  : run.status,
-        };
-      }),
-    );
+                : frame.event === 'run.completed'
+                  ? (detail.error ?? run.error)
+                  : run.error,
+            status:
+              frame.event === 'run.completed'
+                ? 'completed'
+                : frame.event === 'run.error'
+                  ? 'error'
+                  : frame.event === 'run.aborted'
+                    ? 'aborted'
+                    : run.status,
+          };
+        }),
+      );
 
-    if (!matchedExistingRun && frame.event === 'run.started') {
-      void refreshRef.current?.();
-    }
-  }, []);
+      if (!matchedExistingRun && frame.event === 'run.started') {
+        void refreshRef.current?.();
+      }
+    },
+    [setRuns],
+  );
 
   return { runs, handleMessage, refresh, upsertRun };
 }
