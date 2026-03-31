@@ -162,8 +162,22 @@ describe('createInputGuardrail', () => {
 
   describe('multiple detectors', () => {
     it('triggers on the first detected violation in sequential mode', async () => {
-      const first = createMockDetector('first', triggeredResult);
-      const second = createMockDetector('second', safeResult);
+      const firstCalls: number[] = [];
+      const secondCalls: number[] = [];
+      const first: InputDetector = {
+        name: 'first',
+        detect: async () => {
+          firstCalls.push(1);
+          return triggeredResult;
+        },
+      };
+      const second: InputDetector = {
+        name: 'second',
+        detect: async () => {
+          secondCalls.push(1);
+          return safeResult;
+        },
+      };
       const hook = createInputGuardrail({
         detectors: [first, second],
         mode: 'sequential',
@@ -172,6 +186,8 @@ describe('createInputGuardrail', () => {
       const context = createMockStepContext();
       const result = await hook(context);
       expect(result).toBeDefined();
+      expect(firstCalls).toHaveLength(1);
+      expect(secondCalls).toHaveLength(0);
     });
 
     it('runs all detectors in parallel mode (default)', async () => {
@@ -188,6 +204,32 @@ describe('createInputGuardrail', () => {
 
       // In parallel mode, onTriggered is called for the highest-confidence result
       expect(onTriggered).toHaveBeenCalledTimes(1);
+    });
+
+    it('continues sequential evaluation after a detector throws', async () => {
+      const broken: InputDetector = {
+        name: 'broken',
+        detect: async () => {
+          throw new Error('broken detector');
+        },
+      };
+      const fallbackCalls: number[] = [];
+      const fallback: InputDetector = {
+        name: 'fallback',
+        detect: async () => {
+          fallbackCalls.push(1);
+          return triggeredResult;
+        },
+      };
+      const hook = createInputGuardrail({
+        detectors: [broken, fallback],
+        mode: 'sequential',
+      });
+
+      const result = await hook(createMockStepContext());
+
+      expect(result).toBeDefined();
+      expect(fallbackCalls).toHaveLength(1);
     });
   });
 
@@ -245,6 +287,31 @@ describe('createInputGuardrail', () => {
       expect(input).toBe('second');
       expect(ctx.step).toBe(3);
       expect(ctx.conversationLength).toBe(3);
+    });
+
+    it('sanitize mode is a no-op when there is no user message to redact', async () => {
+      const detector: InputDetector = {
+        name: 'sanitizer',
+        detect: async () => ({
+          triggered: true,
+          confidence: 0.8,
+          category: 'sanitize-test',
+          sanitized: 'cleaned input',
+        }),
+      };
+      const hook = createInputGuardrail({
+        detectors: [detector],
+        action: 'sanitize',
+      });
+
+      const conversation = new Conversation();
+      conversation.appendAssistantMessage('No user message here');
+
+      const result = await hook({ conversation, step: 1 });
+
+      expect(result).toBeUndefined();
+      expect(conversation.getMessages()).toHaveLength(1);
+      expect(conversation.getMessages()[0]?.content).toBe('No user message here');
     });
   });
 });

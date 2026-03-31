@@ -235,6 +235,22 @@ describe('withCache', () => {
     expect(entry.hits).toBe(2);
   });
 
+  it('deletes corrupt cached entries and regenerates the response', async () => {
+    const generate = createTrackingGenerate();
+    const cached = withCache(generate, { store });
+
+    await cached(makeContext('corrupt-entry'));
+
+    const [key] = await store.list('llm-cache:');
+    await store.set(key!, '{not-valid-json');
+
+    const result = await cached(makeContext('corrupt-entry'));
+
+    expect(result.content).toBe('response');
+    expect(generate.calls).toHaveLength(2);
+    expect(await store.get(key!)).toContain('"response"');
+  });
+
   it('evicts oldest entries when maxEntries is exceeded', async () => {
     const generate = createTrackingGenerate();
     const cached = withCache(generate, { store, maxEntries: 2 });
@@ -245,6 +261,34 @@ describe('withCache', () => {
 
     const keys = await store.list('llm-cache:');
     expect(keys).toHaveLength(2);
+  });
+
+  it('removes corrupt entries while evicting the oldest cached entry', async () => {
+    const generate = createTrackingGenerate();
+    const cached = withCache(generate, { store, maxEntries: 1 });
+
+    await store.set(
+      'llm-cache:stale',
+      JSON.stringify({
+        response: {
+          content: 'stale',
+          toolCalls: [],
+          usage: { prompt: 1, completion: 1, total: 2 },
+        },
+        createdAt: 1,
+        ttl: 3600,
+        hits: 0,
+        keyStrategy: 'conversation-hash',
+      } satisfies CacheEntry),
+    );
+    await store.set('llm-cache:corrupt', '{broken');
+
+    await cached(makeContext('fresh-entry'));
+
+    const keys = await store.list('llm-cache:');
+    expect(keys).toHaveLength(1);
+    expect(await store.get('llm-cache:stale')).toBeNull();
+    expect(await store.get('llm-cache:corrupt')).toBeNull();
   });
 
   it('defaults TTL to 3600 seconds', async () => {

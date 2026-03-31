@@ -20,6 +20,10 @@ export class CompletableEventTarget<M extends EventMap> extends TypedEventTarget
   readonly #controller = new AbortController();
   readonly #allEventListeners = new Set<(event: Event) => void>();
 
+  constructor() {
+    super();
+  }
+
   get completed(): boolean {
     return this.#controller.signal.aborted;
   }

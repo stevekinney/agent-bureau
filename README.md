@@ -22,6 +22,8 @@ This workspace contains the public packages that power the tool and conversation
 bun run build
 bun run test
 bun run integration
+bun run coverage:check
 ```
 
 The workspace uses Bun and Turbo. Package-level validation should be run from the package directory when you want the strict package-local gates.
+Use `bun run coverage:check` from the repository root to run the strict 100% package-local coverage gate for the scoped public packages.

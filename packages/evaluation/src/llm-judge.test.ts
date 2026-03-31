@@ -143,6 +143,74 @@ describe('createLLMJudge', () => {
     expect(result.reasoning).toContain('parse');
   });
 
+  it('extracts JSON from wrapped judge output', async () => {
+    const wrappedOutputGenerate: GenerateFunction = async () => ({
+      content: 'Here is the score:\n```json\n{"score": 4, "reasoning": "Wrapped JSON"}\n```',
+      toolCalls: [],
+    });
+
+    const judge = createLLMJudge({
+      judge: wrappedOutputGenerate,
+      rubric: 'Rate quality',
+    });
+
+    const result = await judge('question', 'answer');
+
+    expect(result.score).toBe(4);
+    expect(result.reasoning).toBe('Wrapped JSON');
+  });
+
+  it('returns score 0 when wrapped JSON cannot be parsed', async () => {
+    const invalidWrappedOutputGenerate: GenerateFunction = async () => ({
+      content: 'Judge output: {"score": 3, "reasoning": "missing closing quote}',
+      toolCalls: [],
+    });
+
+    const judge = createLLMJudge({
+      judge: invalidWrappedOutputGenerate,
+      rubric: 'Rate quality',
+    });
+
+    const result = await judge('question', 'answer');
+
+    expect(result.score).toBe(0);
+    expect(result.reasoning).toContain('parse');
+  });
+
+  it('returns score 0 when the parsed judge response is not an object', async () => {
+    const arrayOutputGenerate: GenerateFunction = async () => ({
+      content: JSON.stringify(['not-an-object']),
+      toolCalls: [],
+    });
+
+    const judge = createLLMJudge({
+      judge: arrayOutputGenerate,
+      rubric: 'Rate quality',
+    });
+
+    const result = await judge('question', 'answer');
+
+    expect(result.score).toBe(0);
+    expect(result.reasoning).toContain('not a JSON object');
+  });
+
+  it('returns score 0 when the judge response omits a numeric score', async () => {
+    const missingScoreGenerate: GenerateFunction = async () => ({
+      content: JSON.stringify({ reasoning: 'no score present' }),
+      toolCalls: [],
+    });
+
+    const judge = createLLMJudge({
+      judge: missingScoreGenerate,
+      rubric: 'Rate quality',
+    });
+
+    const result = await judge('question', 'answer');
+
+    expect(result.score).toBe(0);
+    expect(result.reasoning).toContain('numeric "score"');
+  });
+
   it('clamps scores that exceed the scale maximum', async () => {
     const judge = createLLMJudge({
       judge: createMockJudgeGenerate(10, 'Overscored'),

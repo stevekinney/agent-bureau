@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { scanDirectory } from '../../src/ingestion/scan-directory';
 import { createMockSkillProvider } from '../../src/test/index';
 
+const runtimeOverrideSymbol = Symbol.for('agent-bureau.skills.scan-directory.runtime');
 const VALID_SKILL_MD = `---
 name: test-skill
 description: A test skill for scanning
@@ -48,6 +49,11 @@ describe('scanDirectory', () => {
   });
 
   afterEach(async () => {
+    delete (
+      globalThis as typeof globalThis & {
+        [runtimeOverrideSymbol]?: { Bun?: unknown; process?: unknown };
+      }
+    )[runtimeOverrideSymbol];
     await rm(tempDirectory, { recursive: true, force: true });
   });
 
@@ -192,6 +198,71 @@ describe('scanDirectory', () => {
     expect(result.discovered).toBe(0);
     expect(result.loaded).toBe(0);
     expect(result.errors).toHaveLength(0);
+  });
+
+  it('returns zero counts when the root directory cannot be read', async () => {
+    const provider = createMockSkillProvider();
+    const result = await scanDirectory(join(tempDirectory, 'missing-directory'), provider);
+
+    expect(result.discovered).toBe(0);
+    expect(result.loaded).toBe(0);
+    expect(result.errors).toEqual([]);
+  });
+
+  it('returns an empty resource list when a skill directory disappears after parsing', async () => {
+    const skillDirectory = join(tempDirectory, 'disappearing-skill');
+    await mkdir(skillDirectory, { recursive: true });
+    await writeFile(join(skillDirectory, 'SKILL.md'), VALID_SKILL_MD);
+    await writeFile(join(skillDirectory, 'helper.sh'), '#!/bin/bash\necho hello');
+
+    const provider = createMockSkillProvider();
+    const originalSaveSkill = provider.saveSkill.bind(provider);
+    provider.saveSkill = async (name, content) => {
+      await originalSaveSkill(name, content);
+      await rm(skillDirectory, { recursive: true, force: true });
+    };
+
+    const result = await scanDirectory(tempDirectory, provider);
+
+    expect(result.discovered).toBe(1);
+    expect(result.loaded).toBe(1);
+    expect(result.errors).toEqual([]);
+    expect(provider.calls.filter((call) => call.method === 'saveResource')).toHaveLength(0);
+  });
+
+  it('records generic provider errors without crashing the scan', async () => {
+    const skillDirectory = join(tempDirectory, 'broken-skill');
+    await mkdir(skillDirectory, { recursive: true });
+    await writeFile(join(skillDirectory, 'SKILL.md'), VALID_SKILL_MD);
+
+    const provider = createMockSkillProvider();
+    provider.saveSkill = async () => {
+      throw new Error('storage write failed');
+    };
+
+    const result = await scanDirectory(tempDirectory, provider);
+
+    expect(result.loaded).toBe(0);
+    expect(result.errors).toEqual([
+      {
+        path: join(skillDirectory, 'SKILL.md'),
+        error: 'storage write failed',
+      },
+    ]);
+  });
+
+  it('rejects browser-like runtimes that do not expose Bun or process', async () => {
+    (
+      globalThis as typeof globalThis & {
+        [runtimeOverrideSymbol]?: { Bun?: unknown; process?: unknown };
+      }
+    )[runtimeOverrideSymbol] = {};
+
+    const provider = createMockSkillProvider();
+
+    await expect(scanDirectory(tempDirectory, provider)).rejects.toThrow(
+      'scanDirectory() requires Bun or Node.js',
+    );
   });
 
   it('respects maxDirectories option', async () => {

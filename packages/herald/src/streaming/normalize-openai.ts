@@ -130,21 +130,13 @@ export async function* normalizeOpenAIStream(
             block.partialArguments = tracker.arguments;
           }
 
-          yield {
-            type: 'stream:block-delta',
-            block: block
-              ? { ...block }
-              : {
-                  id: tracker.blockId,
-                  type: 'tool-call',
-                  index: 0,
-                  content: tracker.arguments,
-                  complete: false,
-                  toolName: tracker.toolName,
-                  partialArguments: tracker.arguments,
-                },
-            delta: args,
-          };
+          if (block) {
+            yield {
+              type: 'stream:block-delta',
+              block: { ...block },
+              delta: args,
+            };
+          }
           yield {
             type: 'stream:tool-call-delta',
             toolName: tracker.toolName,

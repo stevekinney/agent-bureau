@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 
-import { createSkillCatalogHook } from '../src/create-skill-catalog-hook';
+import { createSkillCatalogHook, escapeXml } from '../src/create-skill-catalog-hook';
 import { createMockSkillProvider } from '../src/test/index';
 import type { SkillContent } from '../src/types';
 
@@ -171,5 +171,18 @@ describe('createSkillCatalogHook', () => {
       '<skill name="code-review">Reviews code for quality and correctness</skill>',
     );
     expect(result).toContain('Use the activate_skill tool to load');
+  });
+
+  it('escapes XML special characters in names and descriptions', async () => {
+    const skillName = "quote'-skill";
+    const description = `Use <fast> & "safe" 'modes'`;
+    const provider = createMockSkillProvider([makeSkill(skillName, description)]);
+
+    const hook = createSkillCatalogHook({ provider });
+    const result = await hook.prepareStep(makeContext(0));
+
+    expect(result).toContain(
+      `<skill name="${escapeXml(skillName)}">${escapeXml(description)}</skill>`,
+    );
   });
 });

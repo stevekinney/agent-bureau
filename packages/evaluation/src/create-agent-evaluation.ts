@@ -11,6 +11,15 @@ import type {
   EvaluationReport,
 } from './types';
 
+function getFailureMessage(runResult: RunResult): string {
+  const rawError = runResult.error;
+  if (rawError instanceof Error) return rawError.message;
+  if (typeof rawError === 'string') return rawError;
+  return runResult.finishReason === 'error'
+    ? 'Unknown error'
+    : `Run ended with finish reason: ${runResult.finishReason}`;
+}
+
 /**
  * Runs a single evaluation case against the configured agent, producing a case result
  * with pass/fail status, score, and collected metrics.
@@ -74,14 +83,7 @@ async function runCase(
     const usage = extractTokenUsage(runResult);
     const steps = extractStepCount(runResult);
 
-    if (runResult.finishReason === 'error') {
-      const rawError = runResult.error;
-      const errorMessage =
-        rawError instanceof Error
-          ? rawError.message
-          : typeof rawError === 'string'
-            ? rawError
-            : 'Unknown error';
+    if (runResult.finishReason !== 'stop-condition') {
       return {
         name: evaluationCase.name,
         tags,
@@ -95,7 +97,7 @@ async function runCase(
           duration,
           finishReason: runResult.finishReason,
         },
-        error: errorMessage,
+        error: getFailureMessage(runResult),
       };
     }
 

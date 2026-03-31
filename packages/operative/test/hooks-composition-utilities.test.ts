@@ -155,6 +155,12 @@ describe('everyNSteps', () => {
     const result = await hook({ step: 6 });
     expect(result).toBe('result');
   });
+
+  it('throws when n is not a positive integer', () => {
+    expect(() => everyNSteps(0, async (_context: { step: number }) => undefined)).toThrow(
+      'everyNSteps: n must be a positive integer',
+    );
+  });
 });
 
 describe('withTimeout', () => {
@@ -207,6 +213,18 @@ describe('withTimeout', () => {
 
     const result = await hook({ step: 0 });
     expect(result).toBe('fast result');
+  });
+
+  it('wraps non-Error rejections as Error instances', async () => {
+    const hook = withTimeout(
+      200,
+      async () => {
+        throw 'plain failure';
+      },
+      'error',
+    );
+
+    await expect(hook({ step: 0 })).rejects.toThrow('plain failure');
   });
 });
 

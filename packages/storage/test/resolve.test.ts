@@ -1,15 +1,85 @@
+import 'fake-indexeddb/auto';
+
 import { afterEach, describe, expect, it } from 'bun:test';
 
 import type { KeyValueStore } from '../src/types';
 
 describe('resolveKeyValueStore', () => {
+  const resolveAdapterOverrideSymbol = Symbol.for('agent-bureau.storage.resolve.adapters');
   let store: KeyValueStore | undefined;
+  const originalChrome: unknown = (globalThis as Record<string, unknown>).chrome;
+  const originalFetch: typeof fetch | undefined = globalThis.fetch;
+
+  function createMockChromeStorageArea() {
+    const data = new Map<string, unknown>();
+
+    return {
+      get(keys: string | null): Promise<Record<string, unknown>> {
+        if (keys === null) {
+          const result: Record<string, unknown> = {};
+          for (const [key, value] of data) {
+            result[key] = value;
+          }
+          return Promise.resolve(result);
+        }
+
+        const result: Record<string, unknown> = {};
+        const value = data.get(keys);
+        if (value !== undefined) {
+          result[keys] = value;
+        }
+        return Promise.resolve(result);
+      },
+
+      set(items: Record<string, unknown>): Promise<void> {
+        for (const [key, value] of Object.entries(items)) {
+          data.set(key, value);
+        }
+        return Promise.resolve();
+      },
+
+      remove(keys: string | string[]): Promise<void> {
+        const keyList = Array.isArray(keys) ? keys : [keys];
+        for (const key of keyList) {
+          data.delete(key);
+        }
+        return Promise.resolve();
+      },
+    };
+  }
+
+  function installMockChrome() {
+    const local = createMockChromeStorageArea();
+    const session = createMockChromeStorageArea();
+    (globalThis as Record<string, unknown>).chrome = {
+      storage: { local, session },
+    };
+  }
+
+  function removeMockChrome() {
+    if (originalChrome === undefined) {
+      delete (globalThis as Record<string, unknown>).chrome;
+      return;
+    }
+
+    (globalThis as Record<string, unknown>).chrome = originalChrome;
+  }
+
+  function installResolveAdapterOverride(resolveAdapterOverride: Record<string, unknown>): void {
+    (globalThis as Record<PropertyKey, unknown>)[resolveAdapterOverrideSymbol] =
+      resolveAdapterOverride;
+  }
 
   afterEach(async () => {
     if (store?.close) {
       await store.close();
     }
     store = undefined;
+    delete (globalThis as Record<PropertyKey, unknown>)[resolveAdapterOverrideSymbol];
+    removeMockChrome();
+    if (originalFetch) {
+      globalThis.fetch = originalFetch;
+    }
   });
 
   describe('explicit configuration', () => {
@@ -65,6 +135,63 @@ describe('resolveKeyValueStore', () => {
       await store.delete('agent:name');
       expect(await store.get('agent:name')).toBeNull();
     });
+
+    it('returns a working IndexedDB adapter for indexeddb configuration', async () => {
+      const { resolveKeyValueStore } = await import('../src/resolve');
+      store = await resolveKeyValueStore({
+        type: 'indexeddb',
+        databaseName: `resolve-indexeddb-${crypto.randomUUID()}`,
+      });
+
+      await store.set('probe', 'indexeddb');
+      expect(await store.get('probe')).toBe('indexeddb');
+    });
+
+    it('returns a working chrome storage adapter for chrome-storage configuration', async () => {
+      installMockChrome();
+      const { resolveKeyValueStore } = await import('../src/resolve');
+      store = await resolveKeyValueStore({ type: 'chrome-storage', area: 'session' });
+
+      await store.set('probe', 'chrome');
+      expect(await store.get('probe')).toBe('chrome');
+    });
+
+    it('returns a working remote adapter for remote configuration', async () => {
+      globalThis.fetch = async (input, init) => {
+        const url = String(input);
+        if (url.endsWith('/kv/probe') && init?.method === 'PUT') {
+          return new Response('', { status: 200 });
+        }
+        if (url.endsWith('/kv/probe') && init?.method === 'GET') {
+          return new Response('remote', { status: 200 });
+        }
+        throw new Error(`Unexpected fetch ${url} ${init?.method}`);
+      };
+
+      const { resolveKeyValueStore } = await import('../src/resolve');
+      store = await resolveKeyValueStore({ type: 'remote', baseUrl: 'https://example.test' });
+
+      await store.set('probe', 'remote');
+      expect(await store.get('probe')).toBe('remote');
+    });
+
+    it('uses the remote override when one is installed', async () => {
+      const remoteStore = {
+        get: async (key: string) => (key === 'probe' ? 'override-remote' : null),
+        set: async () => undefined,
+        delete: async () => undefined,
+        list: async () => [] as string[],
+      } satisfies KeyValueStore;
+
+      installResolveAdapterOverride({
+        createRemoteKeyValueStore: () => remoteStore,
+      });
+
+      const { resolveKeyValueStore } = await import('../src/resolve');
+      store = await resolveKeyValueStore({ type: 'remote', baseUrl: 'https://example.test' });
+
+      expect(await store.get('probe')).toBe('override-remote');
+    });
   });
 
   describe('auto-detection', () => {
@@ -88,6 +215,68 @@ describe('resolveKeyValueStore', () => {
 
       await store.delete('auto:test');
       expect(await store.get('auto:test')).toBeNull();
+    });
+
+    it('falls back to chrome storage when SQLite is unavailable', async () => {
+      const chromeStore = {
+        get: async (key: string) => (key === 'probe' ? 'chrome' : null),
+        set: async () => undefined,
+        delete: async () => undefined,
+        list: async () => [] as string[],
+      } satisfies KeyValueStore;
+
+      installResolveAdapterOverride({
+        isSQLiteAvailable: () => false,
+        isChromeStorageAvailable: () => true,
+        createChromeKeyValueStore: () => chromeStore,
+      });
+
+      const { resolveKeyValueStore } = await import('../src/resolve');
+      store = await resolveKeyValueStore({ type: 'auto' });
+
+      expect(await store.get('probe')).toBe('chrome');
+    });
+
+    it('falls back to IndexedDB when SQLite and chrome storage are unavailable', async () => {
+      const indexedDBStore = {
+        get: async (key: string) => (key === 'probe' ? 'indexeddb' : null),
+        set: async () => undefined,
+        delete: async () => undefined,
+        list: async () => [] as string[],
+      } satisfies KeyValueStore;
+
+      installResolveAdapterOverride({
+        isSQLiteAvailable: () => false,
+        isChromeStorageAvailable: () => false,
+        isIndexedDBAvailable: () => true,
+        createIndexedDBKeyValueStore: () => indexedDBStore,
+      });
+
+      const { resolveKeyValueStore } = await import('../src/resolve');
+      store = await resolveKeyValueStore({ type: 'auto' });
+
+      expect(await store.get('probe')).toBe('indexeddb');
+    });
+
+    it('falls back to memory when no platform adapter is available', async () => {
+      const memoryStore = {
+        get: async (key: string) => (key === 'probe' ? 'memory' : null),
+        set: async () => undefined,
+        delete: async () => undefined,
+        list: async () => [] as string[],
+      } satisfies KeyValueStore;
+
+      installResolveAdapterOverride({
+        isSQLiteAvailable: () => false,
+        isChromeStorageAvailable: () => false,
+        isIndexedDBAvailable: () => false,
+        createMemoryKeyValueStore: () => memoryStore,
+      });
+
+      const { resolveKeyValueStore } = await import('../src/resolve');
+      store = await resolveKeyValueStore({ type: 'auto' });
+
+      expect(await store.get('probe')).toBe('memory');
     });
   });
 });

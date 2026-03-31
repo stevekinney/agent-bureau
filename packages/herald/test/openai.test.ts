@@ -542,6 +542,18 @@ describe('createOpenAIGenerateStream', () => {
       const call = client._calls[0];
       expect(call['stop']).toEqual(['END', 'STOP']);
     });
+
+    it('forwards responseFormat when set', async () => {
+      const { client, generate } = setup(openAIStreamTextChunks, {
+        responseFormat: { type: 'json' },
+      });
+      const { updates, ...context } = createStreamingContext();
+
+      await generate(context);
+
+      const call = client._calls[0];
+      expect(call['response_format']).toEqual({ type: 'json_object' });
+    });
   });
 
   describe('stream_options', () => {

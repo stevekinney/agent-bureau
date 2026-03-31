@@ -148,4 +148,35 @@ describe('createIdentityHook', () => {
 
     expect(identityMessages).toHaveLength(0);
   });
+
+  it('does not resolve identity again when it was already injected earlier', async () => {
+    const conversation = new Conversation();
+    let resolveCallCount = 0;
+
+    conversation.appendSystemMessage('Existing identity', {
+      _identityInjected: true,
+    });
+
+    const hook = createIdentityHook({
+      resolve: async () => {
+        resolveCallCount++;
+        return 'Should not be used';
+      },
+    });
+
+    await run({
+      generate: createMockGenerate([textResponse('Done')]),
+      toolbox: createTestToolbox([]),
+      conversation,
+      stopWhen: noToolCalls(),
+      prepareStep: hook,
+    });
+
+    expect(resolveCallCount).toBe(0);
+    expect(
+      conversation
+        .getMessages({ includeHidden: true })
+        .filter((message) => message.metadata?.['_identityInjected'] === true),
+    ).toHaveLength(1);
+  });
 });

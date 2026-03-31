@@ -116,4 +116,24 @@ describe('embedding cache with namespaces', () => {
     cache.clearCache();
     expect(cache.cache.size).toBe(0);
   });
+
+  it('cleans up namespace indexes when eviction removes the last key', async () => {
+    let callCount = 0;
+    const baseEmbedder = async (texts: string[]) => {
+      callCount++;
+      return createMockEmbedder(DIMENSION)(texts);
+    };
+    const cache = withEmbeddingCache(baseEmbedder, {
+      namespace: 'tenant-a',
+      maximumEntries: 0,
+    });
+
+    await cache(['text 1']);
+    expect(cache.cache.size).toBe(0);
+
+    await cache.clearNamespace('tenant-a');
+    await cache(['text 1']);
+
+    expect(callCount).toBe(2);
+  });
 });

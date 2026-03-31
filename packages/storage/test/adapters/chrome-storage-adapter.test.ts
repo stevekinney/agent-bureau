@@ -205,6 +205,15 @@ describe('createChromeKeyValueStore', () => {
     });
   });
 
+  describe('environment validation', () => {
+    it('throws when chrome.storage is unavailable', () => {
+      removeMockChrome();
+      expect(() => createChromeKeyValueStore()).toThrow(
+        'Chrome Storage API is not available in this environment',
+      );
+    });
+  });
+
   describe('namespace support', () => {
     it('isolates keys with namespace', async () => {
       const storeA = createChromeKeyValueStore({ namespace: 'alpha' });

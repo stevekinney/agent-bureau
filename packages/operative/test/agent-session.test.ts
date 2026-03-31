@@ -141,6 +141,30 @@ describe('loadAgentSession', () => {
     expect(loaded).toBeUndefined();
   });
 
+  it('returns undefined when the stored session JSON is invalid', async () => {
+    const store = createMockKeyValueStore();
+
+    await store.set('agent-session:broken', '{not valid json');
+
+    const loaded = await loadAgentSession(store, 'broken');
+    expect(loaded).toBeUndefined();
+  });
+
+  it('returns undefined when the stored session shape is incomplete', async () => {
+    const store = createMockKeyValueStore();
+
+    await store.set(
+      'agent-session:broken-shape',
+      JSON.stringify({
+        id: 'broken-shape',
+        agentName: 'test-agent',
+      }),
+    );
+
+    const loaded = await loadAgentSession(store, 'broken-shape');
+    expect(loaded).toBeUndefined();
+  });
+
   it('preserves all fields in a save/load round-trip', async () => {
     const store = createMockKeyValueStore();
     const history = createConversationHistory({ id: 'round-trip' });

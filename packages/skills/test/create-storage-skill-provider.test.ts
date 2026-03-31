@@ -44,6 +44,18 @@ describe('createStorageSkillProvider', () => {
       const loaded = await provider.loadSkill('full-metadata');
       expect(loaded).toEqual(content);
     });
+
+    it('rejects invalid skill names', async () => {
+      await expect(provider.saveSkill('NOT VALID', makeSkillContent('NOT VALID'))).rejects.toThrow(
+        'not valid kebab-case',
+      );
+    });
+
+    it('rejects skill name mismatches between the parameter and metadata', async () => {
+      await expect(
+        provider.saveSkill('parameter-name', makeSkillContent('metadata-name')),
+      ).rejects.toThrow('Skill name mismatch');
+    });
   });
 
   describe('listSkills', () => {
@@ -112,6 +124,12 @@ describe('createStorageSkillProvider', () => {
       await provider.saveResource('my-skill', 'scripts/extract.py', 'print("extract")');
       const content = await provider.loadResource('my-skill', 'scripts/extract.py');
       expect(content).toBe('print("extract")');
+    });
+
+    it('rejects invalid skill names when saving resources', async () => {
+      await expect(
+        provider.saveResource('NOT VALID', 'scripts/extract.py', 'print("extract")'),
+      ).rejects.toThrow('not valid kebab-case');
     });
 
     it('lists resources for a skill', async () => {

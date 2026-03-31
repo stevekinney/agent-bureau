@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import { createConversationHistory } from 'conversationalist';
-import { createMemoryKeyValueStore } from 'storage';
+import { createMemoryKeyValueStore, type KeyValueStore } from 'storage';
 
 import { createAgentSession } from '../agent-session';
 import { createSessionStore } from './create-session-store';
@@ -23,6 +23,16 @@ function makeSession(overrides: {
   return session;
 }
 
+function createStoreWithoutHas(): KeyValueStore {
+  const store = createMemoryKeyValueStore();
+  return {
+    get: store.get.bind(store),
+    set: store.set.bind(store),
+    delete: store.delete.bind(store),
+    list: store.list.bind(store),
+  };
+}
+
 describe('createSessionStore', () => {
   it('save/load round trip preserves session data', async () => {
     const store = createSessionStore(createMemoryKeyValueStore());
@@ -41,6 +51,26 @@ describe('createSessionStore', () => {
     const store = createSessionStore(createMemoryKeyValueStore());
     const loaded = await store.load('does-not-exist');
     expect(loaded).toBeUndefined();
+  });
+
+  it('load returns undefined for malformed stored session data', async () => {
+    const rawStore = createMemoryKeyValueStore();
+    const store = createSessionStore(rawStore);
+
+    await rawStore.set('agent-session:broken', '{not valid json');
+    expect(await store.load('broken')).toBeUndefined();
+
+    await rawStore.set(
+      'agent-session:broken',
+      JSON.stringify({
+        id: 'broken',
+        agentName: 'test-agent',
+        conversationHistory: createConversationHistory(),
+        createdAt: 'not-a-date',
+        updatedAt: 'also-not-a-date',
+      }),
+    );
+    expect(await store.load('broken')).toBeUndefined();
   });
 
   it('delete removes a session', async () => {
@@ -70,6 +100,17 @@ describe('createSessionStore', () => {
 
   it('exists returns false for missing sessions', async () => {
     const store = createSessionStore(createMemoryKeyValueStore());
+    expect(await store.exists('missing')).toBe(false);
+  });
+
+  it('falls back to get() when the underlying store does not implement has()', async () => {
+    const rawStore = createStoreWithoutHas();
+    const store = createSessionStore(rawStore);
+    const session = makeSession({ id: 'fallback-has' });
+
+    await store.save(session);
+
+    expect(await store.exists('fallback-has')).toBe(true);
     expect(await store.exists('missing')).toBe(false);
   });
 

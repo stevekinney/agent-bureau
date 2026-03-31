@@ -42,6 +42,15 @@ describe('createFileSynchronizer', () => {
     expect(await memory.count()).toBeGreaterThan(0);
   });
 
+  it('treats a missing directory as an empty synchronization result', async () => {
+    const missingDirectory = join(tempDir, 'missing');
+    const synchronizer = createFileSynchronizer({ memory, directory: missingDirectory });
+
+    const result = await synchronizer.synchronize();
+
+    expect(result).toEqual({ added: 0, updated: 0, removed: 0 });
+  });
+
   it('detects updated files on re-sync', async () => {
     await writeFile(join(tempDir, 'notes.md'), 'Original content.');
 
@@ -65,6 +74,21 @@ describe('createFileSynchronizer', () => {
     const result = await synchronizer.synchronize();
 
     expect(result.removed).toBe(1);
+  });
+
+  it('skips files that become unreadable between scans', async () => {
+    const unreadableFile = join(tempDir, 'private.md');
+    await writeFile(unreadableFile, 'Secret content.');
+    await Bun.$`chmod 000 ${unreadableFile}`;
+
+    try {
+      const synchronizer = createFileSynchronizer({ memory, directory: tempDir });
+      const result = await synchronizer.synchronize();
+
+      expect(result).toEqual({ added: 0, updated: 0, removed: 0 });
+    } finally {
+      await Bun.$`chmod 644 ${unreadableFile}`;
+    }
   });
 
   it('only includes files with matching extensions', async () => {
@@ -105,6 +129,40 @@ describe('createFileSynchronizer', () => {
     expect(await memory.count()).toBeGreaterThan(0);
 
     synchronizer.stop();
+  });
+
+  it('swallows polling errors and releases the synchronizing lock for future ticks', async () => {
+    const filePath = join(tempDir, 'polling.md');
+    await writeFile(filePath, 'Initial content.');
+
+    const synchronizer = createFileSynchronizer({
+      memory,
+      directory: tempDir,
+      pollingInterval: 20,
+    });
+
+    await synchronizer.start();
+
+    const originalRemember = memory.remember.bind(memory);
+    let failing = true;
+    Object.assign(memory, {
+      remember: async (...args: Parameters<Memory['remember']>) => {
+        if (failing) {
+          throw new Error('poll failure');
+        }
+        return originalRemember(...args);
+      },
+    });
+
+    await writeFile(filePath, 'Updated once.');
+    await Bun.sleep(50);
+
+    failing = false;
+    await writeFile(filePath, 'Updated twice.');
+    await Bun.sleep(50);
+
+    synchronizer.stop();
+    expect(await memory.count()).toBeGreaterThan(0);
   });
 
   it('does not leak intervals when start() is called concurrently', async () => {

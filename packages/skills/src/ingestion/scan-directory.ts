@@ -25,8 +25,26 @@ export interface ScanResult {
  * `scanDirectory` relies on the filesystem and cannot run in
  * browser, service worker, or Chrome extension contexts.
  */
+const runtimeOverrideSymbol = Symbol.for('agent-bureau.skills.scan-directory.runtime');
+
+type RuntimeLike = {
+  Bun?: unknown;
+  process?: unknown;
+};
+
+function getRuntime(): RuntimeLike {
+  const runtimeOverride = (
+    globalThis as typeof globalThis & {
+      [runtimeOverrideSymbol]?: RuntimeLike;
+    }
+  )[runtimeOverrideSymbol];
+
+  return runtimeOverride ?? globalThis;
+}
+
 function assertServerRuntime(): void {
-  if (typeof globalThis.Bun === 'undefined' && typeof globalThis.process === 'undefined') {
+  const runtime = getRuntime();
+  if (typeof runtime.Bun === 'undefined' && typeof runtime.process === 'undefined') {
     throw new Error(
       'scanDirectory() requires Bun or Node.js. It cannot run in browser environments.',
     );

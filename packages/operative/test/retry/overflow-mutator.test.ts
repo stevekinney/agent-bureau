@@ -123,4 +123,53 @@ describe('createOverflowMutator', () => {
     // Original conversation should be unchanged
     expect(context.conversation.getMessages().length).toBe(originalMessageCount);
   });
+
+  it('preserves system and assistant roles while re-adding other retained messages as user input', async () => {
+    const mutator = createOverflowMutator({
+      summarize: async () => 'summary',
+      retainRecentMessages: 4,
+    });
+    const conversation = new Conversation();
+
+    conversation.appendUserMessage('Older 1');
+    conversation.appendAssistantMessage('Older 2');
+    conversation.appendSystemMessage('Recent system');
+    conversation.appendAssistantMessage('Recent assistant');
+    conversation.appendToolCalls([{ id: 'tool-1', name: 'search', arguments: '{}' }]);
+    conversation.appendToolResults([
+      {
+        callId: 'tool-1',
+        outcome: 'success',
+        content: 'tool output',
+      },
+    ]);
+
+    const toolResultMessage = conversation.getMessages().at(-1);
+    if (toolResultMessage) {
+      toolResultMessage.content = [
+        { type: 'text', text: 'structured tool output' },
+        { type: 'image', url: 'https://example.com/tool-output.png' },
+      ] as never;
+    }
+
+    const result = await mutator(
+      {
+        conversation,
+        step: 0,
+        toolbox: createTestToolbox([]),
+      },
+      new Error('context_length_exceeded'),
+      1,
+    );
+
+    expect(result).toBeDefined();
+    expect(result!.conversation.getMessages().map((message) => message.role)).toEqual([
+      'system',
+      'system',
+      'assistant',
+      'user',
+      'user',
+    ]);
+    expect(result!.conversation.getMessages()[4]?.content).toBe('structured tool output');
+  });
 });

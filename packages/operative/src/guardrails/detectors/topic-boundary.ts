@@ -26,15 +26,16 @@ export function createTopicBoundaryDetector(options: TopicBoundaryDetectorOption
       const lowerInput = input.toLowerCase();
 
       // Blocked keywords always win
-      for (const keyword of blockedKeywords) {
-        if (lowerInput.includes(keyword.toLowerCase())) {
-          return Promise.resolve({
-            triggered: true,
-            confidence: 1.0,
-            category: 'topic-boundary',
-            detail: `Blocked keyword detected: "${keyword}"`,
-          });
-        }
+      const blockedKeyword = blockedKeywords.find((keyword) =>
+        lowerInput.includes(keyword.toLowerCase()),
+      );
+      if (blockedKeyword) {
+        return Promise.resolve({
+          triggered: true,
+          confidence: 1.0,
+          category: 'topic-boundary',
+          detail: `Blocked keyword detected: "${blockedKeyword}"`,
+        });
       }
 
       // Check if input matches at least one allowed topic

@@ -54,6 +54,25 @@ beforeEach(async () => {
       },
     ]),
   );
+
+  await Bun.write(
+    fixturePath('with-semantic-matcher.json'),
+    JSON.stringify([
+      {
+        name: 'semantic-case',
+        input: 'judge this',
+        expectedOutput: {
+          type: 'semantic',
+          reference: 'ideal answer',
+          threshold: 0.9,
+        },
+      },
+    ]),
+  );
+
+  await Bun.write(fixturePath('invalid-entry-type.json'), JSON.stringify(['not-an-object']));
+
+  await Bun.write(fixturePath('json-object.json'), JSON.stringify({ name: 'not-an-array' }));
 });
 
 afterEach(() => {
@@ -93,6 +112,17 @@ describe('loadDataset', () => {
     expect(cases).toHaveLength(0);
   });
 
+  it('preserves semantic expectedOutput matchers from JSON datasets', async () => {
+    const cases = await loadDataset(fixturePath('with-semantic-matcher.json'));
+
+    expect(cases).toHaveLength(1);
+    expect(cases[0]!.expectedOutput).toEqual({
+      type: 'semantic',
+      reference: 'ideal answer',
+      threshold: 0.9,
+    });
+  });
+
   it('throws a descriptive error for invalid JSON', async () => {
     try {
       await loadDataset(fixturePath('invalid.json'));
@@ -130,6 +160,42 @@ describe('loadDataset', () => {
     } catch (error: unknown) {
       expect(error).toBeInstanceOf(Error);
       expect((error as Error).message).toMatch(/input/i);
+    }
+  });
+
+  it('throws when a dataset entry is not an object', async () => {
+    try {
+      await loadDataset(fixturePath('invalid-entry-type.json'));
+      expect.unreachable('Expected loadDataset to throw');
+    } catch (error: unknown) {
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toMatch(/not an object/i);
+    }
+  });
+
+  it('throws when a dataset file contains a JSON object instead of an array', async () => {
+    try {
+      await loadDataset(fixturePath('json-object.json'));
+      expect.unreachable('Expected loadDataset to throw');
+    } catch (error: unknown) {
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toMatch(/json array/i);
+    }
+  });
+
+  it('wraps filesystem read errors with the dataset path', async () => {
+    const unreadablePath = fixturePath('unreadable.json');
+    await Bun.write(unreadablePath, JSON.stringify([{ name: 'case', input: 'test' }]));
+    await Bun.$`chmod 000 ${unreadablePath}`;
+
+    try {
+      await loadDataset(unreadablePath);
+      expect.unreachable('Expected loadDataset to throw');
+    } catch (error: unknown) {
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toMatch(/failed to read dataset file/i);
+    } finally {
+      await Bun.$`chmod 644 ${unreadablePath}`;
     }
   });
 });

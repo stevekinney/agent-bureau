@@ -198,6 +198,24 @@ describe('HookRegistry integration', () => {
     expect(result.content).toBe('Original [validated]');
   });
 
+  it('validateResponse registry hook errors terminate the run', async () => {
+    const hooks = new HookRegistry<OperativeHookMap>();
+
+    hooks.on('validateResponse', async () => {
+      throw new Error('registry validateResponse failed');
+    });
+
+    const result = await run({
+      generate: createMockGenerate([textResponse('Original')]),
+      toolbox: createTestToolbox([]),
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+      hooks,
+    });
+
+    expect(result.finishReason).toBe('error');
+  });
+
   it('selectTools hook can replace the toolbox', async () => {
     const hooks = new HookRegistry<OperativeHookMap>();
     const emptyToolbox = createTestToolbox([]);
@@ -217,6 +235,45 @@ describe('HookRegistry integration', () => {
     });
 
     expect(result.finishReason).toBe('stop-condition');
+  });
+
+  it('beforeToolExecution registry hook errors terminate the run', async () => {
+    const hooks = new HookRegistry<OperativeHookMap>();
+
+    hooks.on('beforeToolExecution', async () => {
+      throw new Error('registry beforeToolExecution failed');
+    });
+
+    const result = await run({
+      generate: createMockGenerate([toolCallResponse([weatherToolCall('Denver')])]),
+      toolbox: createTestToolbox([tool]),
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+      hooks,
+    });
+
+    expect(result.finishReason).toBe('error');
+  });
+
+  it('afterToolExecution registry hook errors terminate the run', async () => {
+    const hooks = new HookRegistry<OperativeHookMap>();
+
+    hooks.on('afterToolExecution', async () => {
+      throw new Error('registry afterToolExecution failed');
+    });
+
+    const result = await run({
+      generate: createMockGenerate([
+        toolCallResponse([weatherToolCall('Denver')]),
+        textResponse('Done'),
+      ]),
+      toolbox: createTestToolbox([tool]),
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+      hooks,
+    });
+
+    expect(result.finishReason).toBe('error');
   });
 
   describe('backward compatibility with old-style hook arrays', () => {
