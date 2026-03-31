@@ -233,6 +233,7 @@ describe('streamEventToFrame', () => {
   it('converts stream:tool-call-delta to a ServerFrame', () => {
     const event: StreamEvent = {
       type: 'stream:tool-call-delta',
+      blockId: 'block-2',
       toolName: 'search',
       blockId: 'block-1',
       partialArguments: '{"query":',
@@ -249,6 +250,7 @@ describe('streamEventToFrame', () => {
   it('converts stream:tool-call-complete to a ServerFrame', () => {
     const event: StreamEvent = {
       type: 'stream:tool-call-complete',
+      blockId: 'block-3',
       toolName: 'search',
       blockId: 'block-2',
       arguments: { query: 'test' },

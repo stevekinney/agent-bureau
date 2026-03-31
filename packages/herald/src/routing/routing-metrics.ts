@@ -1,0 +1,90 @@
+import type { GenerateContext, GenerateFunction, GenerateResponse } from '../types.ts';
+import { createRoutingGenerate } from './create-routing-generate.ts';
+import type { RoutingMetrics, RoutingMetricsResult, RoutingOptions } from './types.ts';
+
+/**
+ * Wraps a routing generate function with metrics tracking.
+ *
+ * Intercepts each generate call to record:
+ * - **routeCounts**: how many times each route was selected (successful calls only)
+ * - **routeCosts**: accumulated token costs per route (using `costPerMillionTokens`)
+ * - **routeLatencies**: duration in ms for each call per route (recorded even on failure)
+ *
+ * Returns both the wrapped generate function and a metrics handle with a `reset()` method.
+ */
+export function withRoutingMetrics(options: RoutingOptions): RoutingMetricsResult {
+  const routeCounts = new Map<string, number>();
+  const routeCosts = new Map<string, number>();
+  const routeLatencies = new Map<string, number[]>();
+
+  const costLookup = new Map(
+    options.routes
+      .filter((r) => r.costPerMillionTokens !== undefined)
+      .map((r) => [r.name, r.costPerMillionTokens!]),
+  );
+
+  // Track which route was selected on the most recent call
+  let lastSelectedRoute = '';
+
+  const innerGenerate = createRoutingGenerate({
+    ...options,
+    onRoute: (event) => {
+      lastSelectedRoute = event.selectedRoute;
+      options.onRoute?.(event);
+    },
+  });
+
+  const wrappedGenerate: GenerateFunction = async (
+    context: GenerateContext,
+  ): Promise<GenerateResponse> => {
+    lastSelectedRoute = '';
+    const start = performance.now();
+
+    try {
+      const response = await innerGenerate(context);
+      const elapsed = performance.now() - start;
+
+      const route = lastSelectedRoute;
+
+      // Record count
+      routeCounts.set(route, (routeCounts.get(route) ?? 0) + 1);
+
+      // Record cost
+      const totalTokens = response.usage?.total ?? 0;
+      const costPerMillion = costLookup.get(route) ?? 0;
+      const cost = (totalTokens * costPerMillion) / 1_000_000;
+      routeCosts.set(route, (routeCosts.get(route) ?? 0) + cost);
+
+      // Record latency
+      const latencies = routeLatencies.get(route) ?? [];
+      latencies.push(elapsed);
+      routeLatencies.set(route, latencies);
+
+      return response;
+    } catch (error) {
+      const elapsed = performance.now() - start;
+
+      // Record latency even on failure
+      if (lastSelectedRoute) {
+        const latencies = routeLatencies.get(lastSelectedRoute) ?? [];
+        latencies.push(elapsed);
+        routeLatencies.set(lastSelectedRoute, latencies);
+      }
+
+      throw error;
+    }
+  };
+
+  const metrics: RoutingMetrics = {
+    routeCounts,
+    routeCosts,
+    routeLatencies,
+    reset() {
+      routeCounts.clear();
+      routeCosts.clear();
+      routeLatencies.clear();
+    },
+  };
+
+  return { generate: wrappedGenerate, metrics };
+}
