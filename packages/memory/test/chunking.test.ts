@@ -149,4 +149,13 @@ describe('chunkMarkdown', () => {
     expect(chunks[0]!.startLine).toBe(0);
     expect(chunks[0]!.endLine).toBe(2);
   });
+
+  it('drops whitespace-only chunks created during intermediate flushes', () => {
+    const content = ['   ', '   ', 'Important content'].join('\n');
+
+    const chunks = chunkMarkdown(content, { maximumTokens: 1, overlapTokens: 0 });
+
+    expect(chunks.some((chunk) => chunk.text.trim().length === 0)).toBe(false);
+    expect(chunks.map((chunk) => chunk.text).join('')).toContain('Important');
+  });
 });

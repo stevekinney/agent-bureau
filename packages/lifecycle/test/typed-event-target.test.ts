@@ -209,4 +209,22 @@ describe('TypedEventTarget', () => {
 
     expect(received).toEqual([10]);
   });
+
+  it('supports EventListenerObject listeners', () => {
+    const target = new TypedEventTarget<TestEventMap>();
+    const received: number[] = [];
+
+    const listener = {
+      handleEvent(event: Event) {
+        received.push((event as TestEvent).value);
+      },
+    };
+
+    target.addEventListener('test', listener);
+    target.dispatch(new TestEvent(11));
+    target.removeEventListener('test', listener);
+    target.dispatch(new TestEvent(12));
+
+    expect(received).toEqual([11]);
+  });
 });

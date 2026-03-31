@@ -21,7 +21,6 @@ import type {
   SchedulerTask,
   SchedulerTaskSummary,
 } from './types';
-import { isHigherPriority } from './types';
 
 /**
  * Options for creating a scheduler instance.
@@ -269,17 +268,12 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
 
       const nextTask = queue.peek()!;
 
-      // A task is already running — check if we should preempt
+      // A task is already running. This only happens when dispatch() has created
+      // an immediate run outside the queue-driven loop, so no queued task can
+      // legitimately outrank it.
       if (running.size > 0) {
-        const activeTask = [...running.values()][0]!;
-        if (isHigherPriority(nextTask.priority, activeTask.task.priority)) {
-          await preemptTask(activeTask);
-          // Now have capacity — fall through to dispatch
-        } else {
-          // Can't dispatch — wait for the running task to finish
-          await waitForWake(idleDelay);
-          continue;
-        }
+        await waitForWake(idleDelay);
+        continue;
       }
 
       // Apply idle delay for non-immediate tasks
@@ -475,8 +469,7 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
     wakeLoop();
 
     // Wait for all running tasks to settle
-    const runningResults = [...running.values()].map((r) => r.result.catch(() => {}));
-    await Promise.all(runningResults);
+    await Promise.allSettled([...running.values()].map((runningTask) => runningTask.result));
 
     // Resolve any remaining task resolvers (e.g., for aborted tasks)
     for (const [taskId, resolver] of taskResolvers) {

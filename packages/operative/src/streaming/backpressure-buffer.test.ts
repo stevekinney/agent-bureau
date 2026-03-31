@@ -24,6 +24,20 @@ function streamComplete(): StreamEvent {
   };
 }
 
+function blockDelta(delta: string): StreamEvent {
+  return {
+    type: 'stream:block-delta',
+    delta,
+    block: {
+      id: 'block-1',
+      type: 'text',
+      index: 0,
+      content: delta,
+      complete: false,
+    },
+  };
+}
+
 describe('createBackpressureBuffer', () => {
   it('passes events through when buffer is not full', () => {
     const emitted: StreamEvent[] = [];
@@ -204,6 +218,45 @@ describe('createBackpressureBuffer', () => {
 
     const completeEvents = emitted.filter((e) => e.type === 'stream:complete');
     expect(completeEvents).toHaveLength(1);
+  });
+
+  it('coalesces consecutive block deltas into a single block snapshot', () => {
+    const emitted: StreamEvent[] = [];
+    const buffer = createBackpressureBuffer({
+      maxBufferSize: 2,
+      coalesceDeltas: true,
+      onEmit: (event) => emitted.push(event),
+    });
+
+    buffer.pause();
+    buffer.push(blockDelta('A'));
+    buffer.push(blockDelta('B'));
+    buffer.push(blockDelta('C'));
+    buffer.resume();
+
+    const blockEvents = emitted.filter((event) => event.type === 'stream:block-delta');
+    expect(blockEvents).toHaveLength(1);
+    expect((blockEvents[0] as Extract<StreamEvent, { type: 'stream:block-delta' }>).delta).toBe(
+      'ABC',
+    );
+  });
+
+  it('drops droppable overflow events once the buffer remains above capacity', () => {
+    const emitted: StreamEvent[] = [];
+    const buffer = createBackpressureBuffer({
+      maxBufferSize: 2,
+      coalesceDeltas: true,
+      onEmit: (event) => emitted.push(event),
+    });
+
+    buffer.pause();
+    buffer.push(toolCallStart('search'));
+    buffer.push(toolCallStart('weather'));
+    buffer.push(textDelta('overflow', 'overflow'));
+    buffer.resume();
+
+    expect(emitted.filter((event) => event.type === 'stream:tool-call-start')).toHaveLength(2);
+    expect(emitted.filter((event) => event.type === 'stream:text-delta')).toHaveLength(0);
   });
 
   it('handles push after dispose gracefully', () => {

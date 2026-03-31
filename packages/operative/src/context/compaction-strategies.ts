@@ -27,13 +27,6 @@ function getProtectedMessageIds(messages: ReadonlyArray<Message>): Set<string> {
     ) {
       protectedIds.add(message.id);
     }
-    if (
-      message.role === 'tool-result' &&
-      message.toolResult &&
-      pendingCallIds.has(message.toolResult.callId)
-    ) {
-      protectedIds.add(message.id);
-    }
   }
   return protectedIds;
 }

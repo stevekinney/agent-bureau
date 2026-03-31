@@ -265,6 +265,26 @@ describe('Persona Tools', () => {
 
       expect(result.updated).toBe(false);
     });
+
+    it('preserves an undefined descriptor when updating a text-only persona', async () => {
+      const provider = createStaticIdentityProvider();
+      await provider.savePersona('scheduler', {
+        text: 'Keep responses concise.',
+      });
+
+      const tool = createPersonaUpdateTool(provider);
+      const result = (await tool({
+        agentId: 'scheduler',
+        descriptor: { expertise: 'scheduling' },
+        text: 'Keep responses concise and timezone-aware.',
+      })) as { updated: boolean };
+
+      expect(result.updated).toBe(true);
+
+      const persona = await provider.loadPersona('scheduler');
+      expect(persona?.descriptor).toBeUndefined();
+      expect(persona?.text).toBe('Keep responses concise and timezone-aware.');
+    });
   });
 
   describe('persona_delete', () => {

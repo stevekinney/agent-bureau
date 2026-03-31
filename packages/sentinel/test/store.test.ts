@@ -28,6 +28,15 @@ function createActiveRun(responses: GenerateResponse[] = [textResponse('response
   return createRun({ generate, toolbox, conversation, stopWhen: stopWhen.noToolCalls() });
 }
 
+class PrimitiveOriginalEvent extends Event {
+  originalEvent: string;
+
+  constructor() {
+    super('custom.event');
+    this.originalEvent = 'primitive-original-event';
+  }
+}
+
 describe('createStore', () => {
   it('returns a store with empty state', () => {
     const store = createStore();
@@ -279,6 +288,32 @@ describe('createStore', () => {
     for (let i = 1; i < allActions.length; i++) {
       expect(allActions[i].sequence).toBeGreaterThan(allActions[i - 1].sequence);
     }
+
+    store.dispose();
+  });
+
+  it('stores primitive originalEvent values without attempting to flatten them', () => {
+    const store = createStore();
+
+    const activeRun = {
+      toObservable() {
+        return {
+          subscribe(observer: { next?: (event: Event) => void }) {
+            observer.next?.(new PrimitiveOriginalEvent());
+            return { unsubscribe() {} };
+          },
+        };
+      },
+    } as Parameters<typeof store.register>[0];
+
+    const id = store.register(activeRun, 'primitive-original-event-run');
+    const runActions = store.getRun(id)?.actions ?? [];
+    const customEvent = runActions.find((action) => action.type === 'custom.event');
+
+    expect(customEvent).toBeDefined();
+    expect(customEvent?.detail).toMatchObject({
+      originalEvent: 'primitive-original-event',
+    });
 
     store.dispose();
   });

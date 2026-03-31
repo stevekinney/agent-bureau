@@ -420,6 +420,103 @@ describe('createScheduler', () => {
     await scheduler.stop();
   });
 
+  it('getState() reports active and queued tasks while work is in flight', async () => {
+    const blocking = createBlockingGenerate();
+    const scheduler = createMinimalScheduler({ idleDelay: 1 });
+
+    scheduler.start();
+
+    const firstResult = scheduler.submit(
+      makeTask({
+        priority: 'background',
+        id: 'active-task',
+        createRun: () => ({
+          generate: blocking.generate,
+          toolbox: createTestToolbox([]),
+          conversation: new Conversation(),
+          maximumSteps: 1,
+        }),
+      }),
+    );
+
+    await sleep(10);
+
+    const secondResult = scheduler.submit(
+      makeTask({
+        priority: 'background',
+        id: 'queued-task',
+      }),
+    );
+
+    await sleep(10);
+
+    const state = scheduler.getState();
+    expect(state.activeTask?.id).toBe('active-task');
+    expect(state.queued.background.map((task) => task.id)).toContain('queued-task');
+
+    blocking.resolve(textResponse('released'));
+    await firstResult;
+    await secondResult;
+    await scheduler.stop();
+  });
+
+  it('waits for an active dispatched immediate run before starting lower-priority queued work', async () => {
+    const blocking = createBlockingGenerate();
+    const scheduler = createMinimalScheduler({ idleDelay: 1 });
+    const executionOrder: string[] = [];
+
+    scheduler.start();
+
+    const { result: immediateResult } = scheduler.dispatch(() => ({
+      generate: blocking.generate,
+      toolbox: createTestToolbox([]),
+      conversation: new Conversation(),
+      maximumSteps: 1,
+    }));
+
+    await sleep(10);
+
+    const backgroundResult = scheduler.submit(
+      makeTask({
+        priority: 'background',
+        id: 'queued-behind-dispatch',
+        createRun: () => {
+          executionOrder.push('background');
+          return {
+            generate: createMockGenerate([textResponse('background-done')]),
+            toolbox: createTestToolbox([]),
+            conversation: new Conversation(),
+            maximumSteps: 1,
+          };
+        },
+      }),
+    );
+
+    await sleep(10);
+    expect(executionOrder).toEqual([]);
+
+    blocking.resolve(textResponse('immediate-done'));
+
+    const immediateRunResult = await immediateResult;
+    const backgroundRunResult = await backgroundResult;
+
+    expect(immediateRunResult.content).toBe('immediate-done');
+    expect(backgroundRunResult?.content).toBe('background-done');
+    expect(executionOrder).toEqual(['background']);
+
+    await scheduler.stop();
+  });
+
+  it('returns null when submitting after the scheduler has stopped', async () => {
+    const scheduler = createMinimalScheduler({ idleDelay: 1 });
+    scheduler.start();
+    await scheduler.stop();
+
+    const result = await scheduler.submit(makeTask({ priority: 'background', id: 'late-task' }));
+
+    expect(result).toBeNull();
+  });
+
   it('dispatch() returns an ActiveRun for immediate tasks', async () => {
     const scheduler = createMinimalScheduler({ idleDelay: 1 });
 
@@ -436,6 +533,86 @@ describe('createScheduler', () => {
 
     const runResult = await result;
     expect(runResult.content).toBe('dispatched');
+  });
+
+  it('dispatch() propagates rejected immediate runs and emits task.failed', async () => {
+    const scheduler = createMinimalScheduler({ idleDelay: 1 });
+    const failedTaskIds: string[] = [];
+
+    scheduler.addEventListener('task.failed', (event) => {
+      failedTaskIds.push(event.taskId);
+    });
+
+    const { result } = scheduler.dispatch(() => ({
+      generate: createMockGenerate([textResponse('unused')]),
+      toolbox: createTestToolbox([]),
+      conversation: new Conversation(),
+      maximumSteps: 1,
+      responseSchema: {} as never,
+    }));
+
+    await expect(result).rejects.toThrow();
+    expect(failedTaskIds).toHaveLength(1);
+  });
+
+  it('resolves submitted tasks with null when the scheduler signal aborts the run', async () => {
+    const controller = new AbortController();
+    const blocking = createBlockingGenerate();
+    const scheduler = createMinimalScheduler({
+      idleDelay: 1,
+      signal: controller.signal,
+    });
+
+    scheduler.start();
+
+    const resultPromise = scheduler.submit(
+      makeTask({
+        priority: 'background',
+        id: 'aborted-task',
+        createRun: () => ({
+          generate: blocking.generate,
+          toolbox: createTestToolbox([]),
+          conversation: new Conversation(),
+          maximumSteps: 1,
+        }),
+      }),
+    );
+
+    await sleep(10);
+    controller.abort('task-aborted');
+
+    const result = await resultPromise;
+    expect(result).toBeNull();
+    blocking.resolve(textResponse('unused'));
+    await scheduler.stop();
+  });
+
+  it('rejects submitted tasks when executeLoop rejects before producing a result', async () => {
+    const scheduler = createMinimalScheduler({ idleDelay: 1 });
+    const failures: string[] = [];
+
+    scheduler.addEventListener('task.failed', (event) => {
+      failures.push(event.taskId);
+    });
+
+    scheduler.start();
+
+    const resultPromise = scheduler.submit(
+      makeTask({
+        priority: 'background',
+        id: 'rejecting-task',
+        createRun: () => ({
+          generate: createMockGenerate([textResponse('never')]),
+          toolbox: createTestToolbox([]),
+          conversation: { ids: 42 } as never,
+          maximumSteps: 1,
+        }),
+      }),
+    );
+
+    await expect(resultPromise).rejects.toThrow();
+    expect(failures).toContain('rejecting-task');
+    await scheduler.stop();
   });
 
   it('idleDelay is respected between task completions', async () => {
@@ -473,6 +650,61 @@ describe('createScheduler', () => {
     // The idle delay should enforce a gap of at least ~30ms between dispatches
     expect(gap).toBeGreaterThanOrEqual(20);
 
+    await scheduler.stop();
+  });
+
+  it('stop() resolves queued tasks with null before they are started', async () => {
+    const blocking = createBlockingGenerate();
+    const scheduler = createMinimalScheduler({ idleDelay: 1 });
+
+    scheduler.start();
+
+    const activeResult = scheduler.submit(
+      makeTask({
+        priority: 'background',
+        id: 'active-stop-task',
+        createRun: () => ({
+          generate: blocking.generate,
+          toolbox: createTestToolbox([]),
+          conversation: new Conversation(),
+          maximumSteps: 1,
+        }),
+      }),
+    );
+
+    await sleep(10);
+
+    const queuedResult = scheduler.submit(
+      makeTask({
+        priority: 'background',
+        id: 'queued-stop-task',
+      }),
+    );
+
+    await sleep(10);
+    await scheduler.stop();
+
+    expect(await queuedResult).toBeNull();
+    expect(await activeResult).toBeNull();
+    blocking.resolve(textResponse('unused'));
+  });
+
+  it('removeEventListener stops delivering events to that listener', async () => {
+    const scheduler = createMinimalScheduler({ idleDelay: 1 });
+    const taskQueuedListener = () => {
+      throw new Error('removed listener should not fire');
+    };
+
+    scheduler.addEventListener('task.queued', taskQueuedListener);
+    scheduler.removeEventListener('task.queued', taskQueuedListener);
+
+    scheduler.start();
+    await scheduler.submitImmediate(() => ({
+      generate: createMockGenerate([textResponse('safe')]),
+      toolbox: createTestToolbox([]),
+      conversation: new Conversation(),
+      maximumSteps: 1,
+    }));
     await scheduler.stop();
   });
 });

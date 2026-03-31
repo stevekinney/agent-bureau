@@ -237,4 +237,16 @@ describe('matchOutput', () => {
     expect(result.pass).toBe(true);
     expect(result.score).toBe(1);
   });
+
+  it('falls back to the default pass result for unrecognized object matchers', async () => {
+    const evaluationCase = {
+      name: 'test',
+      input: 'test',
+      expectedOutput: { type: 'unsupported' },
+    } as unknown as EvaluationCase;
+    const runResult = createMockRunResult('anything');
+    const result = await matchOutput(runResult, evaluationCase);
+    expect(result.pass).toBe(true);
+    expect(result.message).toContain('No output expectation defined');
+  });
 });

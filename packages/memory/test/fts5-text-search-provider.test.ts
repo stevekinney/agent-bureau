@@ -3,9 +3,21 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { createFts5TextSearchProvider, isFts5Available } from '../src/fts5-text-search-provider';
 import type { TextSearchProvider } from '../src/text-search-provider';
 
+const runtimeOverrideSymbol = Symbol.for('agent-bureau.memory.fts5.runtime');
+
 describe('isFts5Available', () => {
   it('returns true in the Bun runtime', () => {
     expect(isFts5Available()).toBe(true);
+  });
+
+  it('returns false when the hidden runtime override disables Bun', () => {
+    (globalThis as Record<PropertyKey, unknown>)[runtimeOverrideSymbol] = { Bun: undefined };
+
+    try {
+      expect(isFts5Available()).toBe(false);
+    } finally {
+      delete (globalThis as Record<PropertyKey, unknown>)[runtimeOverrideSymbol];
+    }
   });
 });
 
@@ -159,5 +171,57 @@ describe('createFts5TextSearchProvider', () => {
     await provider.index('1', 'test content', 'default');
     const results = await provider.search('test', 'default');
     expect(results.size).toBe(1);
+  });
+
+  it('rejects invalid SQLite table identifiers', () => {
+    expect(() =>
+      createFts5TextSearchProvider({
+        filename: ':memory:',
+        tableName: 'memory-fts;drop_table',
+      }),
+    ).toThrow('Invalid SQLite identifier');
+  });
+
+  it('throws a clear error when FTS5 is initialized outside Bun', async () => {
+    (globalThis as Record<PropertyKey, unknown>)[runtimeOverrideSymbol] = { Bun: undefined };
+    const nonBunProvider = createFts5TextSearchProvider({ filename: ':memory:' });
+
+    try {
+      await expect(nonBunProvider.init()).rejects.toThrow(
+        'FTS5 text search requires the Bun runtime',
+      );
+    } finally {
+      delete (globalThis as Record<PropertyKey, unknown>)[runtimeOverrideSymbol];
+    }
+  });
+
+  it('returns an empty map when the FTS5 query execution throws', async () => {
+    (globalThis as Record<PropertyKey, unknown>)[runtimeOverrideSymbol] = {
+      Bun,
+      createDatabase: () => ({
+        exec() {},
+        run() {
+          return { changes: 1 };
+        },
+        query() {
+          return {
+            all() {
+              throw new Error('malformed MATCH query');
+            },
+          };
+        },
+        close() {},
+      }),
+    };
+    const failingProvider = createFts5TextSearchProvider({ filename: ':memory:' });
+
+    try {
+      await failingProvider.init();
+      const results = await failingProvider.search('database', 'default');
+      expect(results).toEqual(new Map());
+    } finally {
+      await failingProvider.close();
+      delete (globalThis as Record<PropertyKey, unknown>)[runtimeOverrideSymbol];
+    }
   });
 });

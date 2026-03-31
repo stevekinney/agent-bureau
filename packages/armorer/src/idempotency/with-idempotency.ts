@@ -13,9 +13,7 @@ function isToolCall(value: unknown): value is ToolCallWithArguments {
   if (value === null || typeof value !== 'object') return false;
   const record = value as Record<string, unknown>;
   return (
-    typeof record['name'] === 'string' &&
-    typeof record['id'] === 'string' &&
-    'arguments' in record
+    typeof record['name'] === 'string' && typeof record['id'] === 'string' && 'arguments' in record
   );
 }
 

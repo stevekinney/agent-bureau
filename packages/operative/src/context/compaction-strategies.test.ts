@@ -236,6 +236,44 @@ describe('createSelectivePruningStrategy', () => {
     const toolCalls = messages.filter((m) => m.role === 'tool-call');
     expect(toolCalls.length).toBe(1);
   });
+
+  it('redacts old tool results when they exceed the configured age', async () => {
+    const conversation = buildConversation([
+      { role: 'system', content: 'System' },
+      { role: 'user', content: 'Question' },
+      { role: 'assistant', content: 'Working on it' },
+      {
+        role: 'tool-call',
+        content: '',
+        toolCall: { id: 'call-1', name: 'search', arguments: '{}' },
+      },
+      {
+        role: 'tool-result',
+        content: 'Large search result payload',
+        toolResult: {
+          callId: 'call-1',
+          content: 'Large search result payload',
+          outcome: 'success',
+        },
+      },
+      { role: 'assistant', content: 'Interpreting results' },
+      { role: 'user', content: 'Follow-up 1' },
+      { role: 'assistant', content: 'Follow-up 2' },
+      { role: 'user', content: 'Follow-up 3' },
+      { role: 'assistant', content: 'Follow-up 4' },
+    ]);
+
+    const strategy = createSelectivePruningStrategy();
+    const budget = createTokenBudget({ maxTokens: 10000 });
+
+    await strategy(conversation, budget, {
+      retainRecentMessages: 2,
+      maxToolResultAge: 2,
+    });
+
+    const toolResult = conversation.getMessages().find((message) => message.role === 'tool-result');
+    expect(toolResult?.toolResult?.content).toBe('[pruned tool result]');
+  });
 });
 
 describe('createHybridStrategy', () => {

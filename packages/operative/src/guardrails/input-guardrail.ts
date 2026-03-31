@@ -39,8 +39,13 @@ function createBlockResponse(): GenerateResponse {
  * from crashing the agent loop.
  */
 export function createInputGuardrail(options: InputGuardrailOptions): PrepareStepHook {
-  const { detectors, action = 'block', onTriggered, mode = 'parallel', getSessionTainted } =
-    options;
+  const {
+    detectors,
+    action = 'block',
+    onTriggered,
+    mode = 'parallel',
+    getSessionTainted,
+  } = options;
 
   return async (context: StepContext): Promise<void | GenerateResponse> => {
     const input = getLastUserMessageText(context);
@@ -108,17 +113,14 @@ export function createInputGuardrail(options: InputGuardrailOptions): PrepareSte
       // the sanitized text as the placeholder) rather than appending a new message.
       const allMessages = context.conversation.getMessages();
       let lastUserPosition = -1;
-      for (let i = allMessages.length - 1; i >= 0; i--) {
-        if (allMessages[i]?.role === 'user') {
-          lastUserPosition = i;
-          break;
-        }
+      for (let index = allMessages.length - 1; index >= 0; index--) {
+        const message = allMessages[index];
+        if (message?.role !== 'user') continue;
+        lastUserPosition = index;
+        break;
       }
       if (lastUserPosition >= 0) {
-        context.conversation.redactMessageAtPosition(
-          lastUserPosition,
-          topResult.result.sanitized,
-        );
+        context.conversation.redactMessageAtPosition(lastUserPosition, topResult.result.sanitized);
       }
       return;
     }

@@ -80,6 +80,14 @@ describe('createStorageIdentityProvider', () => {
     expect(await provider.loadSoulHistory()).toEqual([]);
   });
 
+  it('treats invalid JSON as missing data instead of throwing', async () => {
+    const adapter = createMockKeyValueStore();
+    adapter.store.set('identity:soul:orchestrator', '{not-valid-json');
+    const provider = createStorageIdentityProvider(adapter);
+
+    expect(await provider.loadSoul()).toEqual([]);
+  });
+
   it('listPersonas uses prefix to discover persona keys', async () => {
     const adapter = createMockKeyValueStore();
     const provider = createStorageIdentityProvider(adapter);

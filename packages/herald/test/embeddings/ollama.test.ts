@@ -181,4 +181,27 @@ describe('createOllamaEmbedder', () => {
       expect(heraldError.provider).toBe('ollama');
     }
   });
+
+  it('handles failures while reading an error response body', async () => {
+    globalThis.fetch = mock(() => {
+      return Promise.resolve({
+        ok: false,
+        status: 500,
+        json: () => Promise.resolve({ error: 'Internal server error' }),
+        text: () => Promise.reject(new Error('stream closed')),
+      } as Response);
+    }) as typeof globalThis.fetch;
+
+    const embedder = createOllamaEmbedder();
+
+    try {
+      await embedder(['test']);
+      expect.unreachable('Expected embedder to throw');
+    } catch (error) {
+      expect(error).toBeInstanceOf(HeraldError);
+      const heraldError = error as HeraldError;
+      expect(heraldError.provider).toBe('ollama');
+      expect(heraldError.statusCode).toBe(500);
+    }
+  });
 });

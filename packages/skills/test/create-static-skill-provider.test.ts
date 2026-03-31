@@ -57,6 +57,14 @@ describe('createStaticSkillProvider', () => {
       expect(skills).toHaveLength(1);
       expect(skills[0]?.name).toBe('new-skill');
     });
+
+    it('rejects skill name mismatches between the parameter and metadata', async () => {
+      const provider = createStaticSkillProvider();
+
+      await expect(
+        provider.saveSkill('parameter-name', makeSkillContent('metadata-name')),
+      ).rejects.toThrow('Skill name mismatch');
+    });
   });
 
   describe('deleteSkill', () => {

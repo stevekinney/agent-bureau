@@ -164,6 +164,27 @@ describe('createSkillMemoryHooks', () => {
 
       expect(mock.recalls).toHaveLength(0);
     });
+
+    it('returns recalled memories joined by blank lines', async () => {
+      const memory: MemoryLike = {
+        async remember() {
+          return {};
+        },
+        async recall() {
+          return [
+            { content: 'Remember to favor table-driven tests.', score: 0.9 },
+            { content: 'Keep assertions close to behavior.', score: 0.8 },
+          ];
+        },
+      };
+
+      const { prepareStep } = createSkillMemoryHooks({ memory });
+      const result = await prepareStep(createStepContext({ step: 0 }));
+
+      expect(result).toBe(
+        'Remember to favor table-driven tests.\n\nKeep assertions close to behavior.',
+      );
+    });
   });
 
   describe('onStep', () => {

@@ -120,6 +120,18 @@ describe('createStaticIdentityProvider', () => {
     expect(await provider.loadUserContext()).toBe('Steve, UTC');
   });
 
+  it('initializes the orchestrator persona from initial persona data', async () => {
+    const provider = createStaticIdentityProvider({
+      persona: { name: 'Atlas', role: 'researcher' },
+      personaText: 'Always cite sources.',
+    });
+
+    const persona = await provider.loadPersona('orchestrator');
+
+    expect(persona?.descriptor?.name).toBe('Atlas');
+    expect(persona?.text).toBe('Always cite sources.');
+  });
+
   it('pending update lifecycle: save, load, clear', async () => {
     const provider = createStaticIdentityProvider();
 

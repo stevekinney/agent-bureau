@@ -1,13 +1,49 @@
 import { extractKeywords } from './query-expansion';
 import type { TextSearchProvider } from './text-search-provider';
 
+type Fts5RuntimeOverride = {
+  Bun?: typeof Bun | undefined;
+  createDatabase?: ((filename: string) => BunSQLiteDatabase) | undefined;
+};
+
+const runtimeOverrideSymbol = Symbol.for('agent-bureau.memory.fts5.runtime');
+
+function getFts5RuntimeOverride(): Fts5RuntimeOverride | undefined {
+  return (globalThis as Record<PropertyKey, unknown>)[runtimeOverrideSymbol] as
+    | Fts5RuntimeOverride
+    | undefined;
+}
+
+function getBunRuntime(): typeof Bun | undefined {
+  const runtimeOverride = getFts5RuntimeOverride();
+  if (runtimeOverride && 'Bun' in runtimeOverride) {
+    return runtimeOverride.Bun;
+  }
+
+  return typeof Bun !== 'undefined' ? Bun : undefined;
+}
+
+async function createDatabaseConnection(filename: string): Promise<BunSQLiteDatabase> {
+  const runtimeOverride = getFts5RuntimeOverride();
+  if (runtimeOverride?.createDatabase) {
+    return runtimeOverride.createDatabase(filename);
+  }
+
+  const moduleName = 'bun:sqlite';
+  const { Database } = (await import(/* webpackIgnore: true */ moduleName)) as {
+    Database: new (filename: string) => BunSQLiteDatabase;
+  };
+
+  return new Database(filename);
+}
+
 /**
  * Checks whether the FTS5 text search provider can run in the current
  * environment. FTS5 relies on `bun:sqlite`, which is only available
  * in the Bun runtime.
  */
 export function isFts5Available(): boolean {
-  return typeof globalThis.Bun !== 'undefined';
+  return getBunRuntime() !== undefined;
 }
 
 export interface Fts5TextSearchProviderOptions {
@@ -111,12 +147,7 @@ export function createFts5TextSearchProvider(
         );
       }
 
-      const moduleName = 'bun:sqlite';
-      const { Database } = (await import(/* webpackIgnore: true */ moduleName)) as {
-        Database: new (filename: string) => BunSQLiteDatabase;
-      };
-
-      database = new Database(filename);
+      database = await createDatabaseConnection(filename);
       database.exec('PRAGMA journal_mode=WAL');
       database.exec(`
         CREATE VIRTUAL TABLE IF NOT EXISTS ${tableName}

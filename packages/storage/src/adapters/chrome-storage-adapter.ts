@@ -40,7 +40,7 @@ interface ChromeKeyValueStoreOptions extends KeyValueStoreOptions {
  * selects between `chrome.storage.local` and `chrome.storage.session`.
  */
 export function createChromeKeyValueStore(options?: ChromeKeyValueStoreOptions): KeyValueStore {
-  if (!chrome?.storage) {
+  if (typeof chrome === 'undefined' || !chrome.storage) {
     throw new Error('Chrome Storage API is not available in this environment');
   }
 

@@ -21,6 +21,10 @@
       "outputs": [],
       "passThroughEnv": ["CI", "NODE_ENV"]
     },
+    "coverage:check": {
+      "dependsOn": ["^build"],
+      "outputs": []
+    },
     "format:check": {
       "outputs": []
     },

@@ -101,6 +101,38 @@ describe('matchToolCalls', () => {
     expect(matchToolCalls(result, expected)).toBe(false);
   });
 
+  it('matches deeply nested ordered arguments', () => {
+    const steps = [
+      createMockStep([
+        {
+          name: 'search',
+          arguments: {
+            query: 'test',
+            filters: {
+              tags: ['alpha', 'beta'],
+              range: { minimum: 1, maximum: 3 },
+            },
+          },
+        },
+      ]),
+    ];
+    const expected: ExpectedToolCall[] = [
+      {
+        name: 'search',
+        index: 0,
+        arguments: {
+          query: 'test',
+          filters: {
+            tags: ['alpha', 'beta'],
+            range: { minimum: 1, maximum: 3 },
+          },
+        },
+      },
+    ];
+    const result = createMockRunResult({ steps });
+    expect(matchToolCalls(result, expected)).toBe(true);
+  });
+
   it('uses unordered matching when no expected call has an index', () => {
     const steps = [createMockStep([{ name: 'summarize' }, { name: 'search' }])];
     const expected: ExpectedToolCall[] = [{ name: 'search' }, { name: 'summarize' }];
@@ -120,6 +152,31 @@ describe('matchToolCalls', () => {
     const expected: ExpectedToolCall[] = [{ name: 'search', arguments: { query: 'hello' } }];
     const result = createMockRunResult({ steps });
     expect(matchToolCalls(result, expected)).toBe(true);
+  });
+
+  it('returns false when nested unordered arguments differ', () => {
+    const steps = [
+      createMockStep([
+        {
+          name: 'search',
+          arguments: {
+            query: 'hello',
+            filters: { tags: ['alpha', 'beta'] },
+          },
+        },
+      ]),
+    ];
+    const expected: ExpectedToolCall[] = [
+      {
+        name: 'search',
+        arguments: {
+          query: 'hello',
+          filters: { tags: ['alpha', 'gamma'] },
+        },
+      },
+    ];
+    const result = createMockRunResult({ steps });
+    expect(matchToolCalls(result, expected)).toBe(false);
   });
 
   it('does not allow one actual call to satisfy multiple expected calls', () => {

@@ -1,7 +1,8 @@
-import { createTestToolbox } from 'armorer/test';
+import { createMockTool, createTestToolbox } from 'armorer/test';
 import { describe, expect, it } from 'bun:test';
-import type { GenerateResponse, RunResult } from 'operative';
+import type { AgentDefinition, GenerateFunction, GenerateResponse, RunResult } from 'operative';
 import { createMockGenerate } from 'operative/test';
+import { z } from 'zod';
 
 import { createAgentEvaluation } from './create-agent-evaluation';
 import type { EvaluationCase } from './types';
@@ -11,6 +12,27 @@ function singleResponse(
   toolCalls: GenerateResponse['toolCalls'] = [],
 ): GenerateResponse {
   return { content, toolCalls, usage: { prompt: 10, completion: 5, total: 15 } };
+}
+
+function createAgentDefinition(
+  generate: GenerateFunction,
+  instructions?: string | { render(): string },
+): AgentDefinition {
+  return {
+    name: 'evaluation-agent',
+    options: {
+      name: 'evaluation-agent',
+      generate,
+      toolbox: createTestToolbox([]),
+      instructions,
+    },
+    async run() {
+      throw new Error('Not used by createAgentEvaluation tests');
+    },
+    createRun() {
+      throw new Error('Not used by createAgentEvaluation tests');
+    },
+  };
 }
 
 describe('createAgentEvaluation', () => {
@@ -240,6 +262,128 @@ describe('createAgentEvaluation', () => {
     expect(report.cases[0]!.metrics.finishReason).toBeDefined();
   });
 
+  it('uses a case-specific system prompt when provided', async () => {
+    let capturedSystemMessage = '';
+    const generate: GenerateFunction = async ({ conversation }) => {
+      const systemMessage = conversation.getMessages().find((message) => message.role === 'system');
+      capturedSystemMessage =
+        typeof systemMessage?.content === 'string' ? systemMessage.content : '';
+      return singleResponse('ok');
+    };
+
+    const evaluation = createAgentEvaluation({
+      cases: [{ name: 'system-prompt', input: 'test', systemPrompt: 'Case system prompt' }],
+      agent: { generate, toolbox: createTestToolbox([]) },
+    });
+
+    await evaluation.run();
+
+    expect(capturedSystemMessage).toBe('Case system prompt');
+  });
+
+  it('uses string instructions from an agent definition when no case system prompt is provided', async () => {
+    let capturedSystemMessage = '';
+    const generate: GenerateFunction = async ({ conversation }) => {
+      const systemMessage = conversation.getMessages().find((message) => message.role === 'system');
+      capturedSystemMessage =
+        typeof systemMessage?.content === 'string' ? systemMessage.content : '';
+      return singleResponse('ok');
+    };
+
+    const evaluation = createAgentEvaluation({
+      cases: [{ name: 'agent-definition-string', input: 'test' }],
+      agent: createAgentDefinition(generate, 'Agent instructions'),
+    });
+
+    await evaluation.run();
+
+    expect(capturedSystemMessage).toBe('Agent instructions');
+  });
+
+  it('renders non-string instructions from an agent definition', async () => {
+    let capturedSystemMessage = '';
+    const generate: GenerateFunction = async ({ conversation }) => {
+      const systemMessage = conversation.getMessages().find((message) => message.role === 'system');
+      capturedSystemMessage =
+        typeof systemMessage?.content === 'string' ? systemMessage.content : '';
+      return singleResponse('ok');
+    };
+
+    const evaluation = createAgentEvaluation({
+      cases: [{ name: 'agent-definition-renderable', input: 'test' }],
+      agent: createAgentDefinition(generate, {
+        render: () => 'Rendered instructions',
+      }),
+    });
+
+    await evaluation.run();
+
+    expect(capturedSystemMessage).toBe('Rendered instructions');
+  });
+
+  it('returns a failed case when semantic matching throws during evaluation', async () => {
+    const generate = createMockGenerate([singleResponse('ok')]);
+    const toolbox = createTestToolbox([]);
+
+    const evaluation = createAgentEvaluation({
+      cases: [
+        {
+          name: 'semantic-error',
+          input: 'test',
+          expectedOutput: {
+            type: 'semantic',
+            reference: 'reference',
+            threshold: 0.8,
+          },
+        },
+      ],
+      agent: { generate, toolbox },
+      embedder: async () => {
+        throw new Error('embedding service unavailable');
+      },
+    });
+
+    const report = await evaluation.run();
+
+    expect(report.cases[0]!.pass).toBe(false);
+    expect(report.cases[0]!.error).toContain('embedding service unavailable');
+    expect(report.cases[0]!.metrics.finishReason).toBe('error');
+    expect(report.cases[0]!.metrics.totalTokens).toBe(0);
+  });
+
+  it('aborts a case when its timeout elapses', async () => {
+    const generate: GenerateFunction = async ({ signal }) =>
+      await new Promise<GenerateResponse>((_resolve, reject) => {
+        if (!signal) {
+          reject(new Error('missing abort signal'));
+          return;
+        }
+        if (signal.aborted) {
+          reject(new Error('generation aborted'));
+          return;
+        }
+        signal.addEventListener(
+          'abort',
+          () => {
+            reject(new Error('generation aborted'));
+          },
+          { once: true },
+        );
+      });
+    const toolbox = createTestToolbox([]);
+
+    const evaluation = createAgentEvaluation({
+      cases: [{ name: 'timeout', input: 'test', timeout: 0 }],
+      agent: { generate, toolbox },
+    });
+
+    const report = await evaluation.run();
+
+    expect(report.cases[0]!.pass).toBe(false);
+    expect(report.cases[0]!.error).toContain('aborted');
+    expect(report.cases[0]!.metrics.finishReason).toBe('aborted');
+  });
+
   it('handles regex expectedOutput', async () => {
     const generate = createMockGenerate([singleResponse('The answer is 42')]);
     const toolbox = createTestToolbox([]);
@@ -399,6 +543,39 @@ describe('createAgentEvaluation', () => {
     expect(report.cases[0]!.score).toBe(0);
     expect(report.cases[0]!.metrics.finishReason).toBe('error');
     expect(report.cases[0]!.error).toBe('Unknown error');
+  });
+
+  it('still evaluates output matching for non-error finish reasons', async () => {
+    const generate = createMockGenerate([
+      singleResponse('partial success', [{ id: 'call-1', name: 'noop', arguments: {} }]),
+    ]);
+    const toolbox = createTestToolbox([
+      createMockTool({
+        name: 'noop',
+        input: z.object({}),
+        impl: async () => 'done',
+      }),
+    ]);
+
+    const evaluation = createAgentEvaluation({
+      cases: [
+        {
+          name: 'maximum-steps-still-matches',
+          input: 'test',
+          expectedOutput: 'partial success',
+          maxSteps: 1,
+        },
+      ],
+      agent: { generate, toolbox },
+    });
+
+    const report = await evaluation.run();
+
+    expect(report.cases[0]!.pass).toBe(true);
+    expect(report.cases[0]!.score).toBe(1);
+    expect(report.cases[0]!.metrics.outputMatch).toBe(true);
+    expect(report.cases[0]!.metrics.finishReason).toBe('maximum-steps');
+    expect(report.cases[0]!.error).toBeUndefined();
   });
 
   it('works with AgentDefinition input', async () => {

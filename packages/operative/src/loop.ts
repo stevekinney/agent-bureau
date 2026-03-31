@@ -50,24 +50,9 @@ type EventDispatcher = {
   dispatch(event: Event): boolean;
 };
 
-function accumulateUsage(accumulated: TokenUsage, step?: TokenUsage): void {
-  if (!step) return;
-  accumulated.prompt += step.prompt;
-  accumulated.completion += step.completion;
-  accumulated.total += step.total;
-}
-
 function normalizeToArray<T>(value: T | T[] | undefined): T[] {
   if (!value) return [];
   return Array.isArray(value) ? value : [value];
-}
-
-/**
- * Checks whether a HookRegistry.run() result is actually a new value or just
- * the first argument passed through (which happens when every handler returns void).
- */
-function isRegistryPassthrough(result: unknown, firstArg: unknown): boolean {
-  return result === firstArg;
 }
 
 /**
@@ -92,14 +77,7 @@ function runHookSilently<K extends string>(
     handlers.map((entry) =>
       Promise.resolve((entry.handler as (...a: unknown[]) => unknown)(...args)),
     ),
-  ).catch(() => {
-    // Intentionally ignore errors in silent hooks.
-  });
-}
-
-function normalizeStopConditions(conditions: RunOptions['stopWhen']): StopCondition[] {
-  if (!conditions) return [];
-  return Array.isArray(conditions) ? conditions : [conditions];
+  );
 }
 
 async function evaluateStopConditions(
@@ -111,11 +89,6 @@ async function evaluateStopConditions(
     if (result) return true;
   }
   return false;
-}
-
-function resolveDelay(delay: RetryOptions['delay'], attempt: number): number {
-  if (typeof delay === 'function') return delay(attempt);
-  return delay ?? 0;
 }
 
 async function callGenerateWithRetry(
@@ -159,7 +132,8 @@ async function callGenerateWithRetry(
         new GenerateRetryEvent(currentContext.step, attempt, error, mutated, mutationDescription),
       );
 
-      const rawDelay = resolveDelay(retry.delay, attempt);
+      const rawDelay =
+        typeof retry.delay === 'function' ? retry.delay(attempt) : (retry.delay ?? 0);
       const delayMs = retry.jitter ? addJitter(rawDelay, { maxJitter: retry.maxJitter }) : rawDelay;
 
       if (delayMs > 0) {
@@ -235,11 +209,6 @@ export async function executeLoop(
   const validateResponseHooks = normalizeToArray(options.validateResponse);
   const validateToolResultHooks = normalizeToArray(options.validateToolResult);
 
-  const wrapWithTrace =
-    parentContext !== undefined && withTraceContext !== undefined
-      ? <T>(fn: () => Promise<T>) => withTraceContext(parentContext, fn)
-      : undefined;
-
   const conversation = isConversation(options.conversation)
     ? options.conversation
     : new Conversation(options.conversation);
@@ -253,7 +222,11 @@ export async function executeLoop(
       } as const)
     : undefined;
 
-  const stopConditions = normalizeStopConditions(options.stopWhen);
+  const stopConditions = !options.stopWhen
+    ? []
+    : Array.isArray(options.stopWhen)
+      ? options.stopWhen
+      : [options.stopWhen];
   const steps: StepResult[] = [];
   const totalUsage: TokenUsage = { prompt: 0, completion: 0, total: 0 };
   let lastContent = '';
@@ -361,9 +334,9 @@ export async function executeLoop(
       ? AbortSignal.any([signal, stepAbortController.signal])
       : stepAbortController.signal;
 
-    const abortStep = (reason?: string) => {
-      stepAbortController.abort(reason);
-    };
+    const abortStep = stepAbortController.abort.bind(stepAbortController) as (
+      reason?: string,
+    ) => void;
 
     const elicit = onElicitation
       ? createElicit(step, onElicitation, conversation, stepSignal, emitter)
@@ -371,9 +344,9 @@ export async function executeLoop(
 
     // Context management: compact if over token threshold
     if (contextManagement) {
-      const estimator =
-        contextManagement.tokenEstimator ?? ((c: Conversation) => c.estimateTokens());
-      const tokensBefore = estimator(conversation);
+      const tokensBefore = contextManagement.tokenEstimator
+        ? contextManagement.tokenEstimator(conversation)
+        : conversation.estimateTokens();
 
       // Emit budget warning when remaining tokens fall below warningThreshold
       const warningThreshold =
@@ -433,7 +406,9 @@ export async function executeLoop(
               abortStep,
               elicit,
             });
-            const tokensAfter = estimator(conversation);
+            const tokensAfter = contextManagement.tokenEstimator
+              ? contextManagement.tokenEstimator(conversation)
+              : conversation.estimateTokens();
             const messagesAfter = conversation.getMessages().length;
             emitter?.dispatch(new ContextCompactedEvent(step, tokensBefore, tokensAfter));
 
@@ -469,7 +444,7 @@ export async function executeLoop(
     if (hooks?.has('selectTools')) {
       const selectContext = { conversation, step, signal: stepSignal, abortStep, elicit };
       const registryToolbox = await hooks.run('selectTools', selectContext);
-      if (registryToolbox !== undefined && !isRegistryPassthrough(registryToolbox, selectContext)) {
+      if (registryToolbox !== undefined) {
         stepToolbox = registryToolbox;
       }
     }
@@ -479,7 +454,7 @@ export async function executeLoop(
     if (hooks?.has('selectToolChoice')) {
       const selectToolChoiceContext = { conversation, step, signal: stepSignal, abortStep, elicit };
       const hookResult = await hooks.run('selectToolChoice', selectToolChoiceContext);
-      if (hookResult !== undefined && !isRegistryPassthrough(hookResult, selectToolChoiceContext)) {
+      if (hookResult !== undefined) {
         stepToolChoice = hookResult;
       }
     }
@@ -499,8 +474,8 @@ export async function executeLoop(
         if (!prepareResult && hooks?.has('prepareStep')) {
           const prepareContext = { conversation, step, signal: stepSignal, abortStep, elicit };
           const registryResult = await hooks.run('prepareStep', prepareContext);
-          if (!isRegistryPassthrough(registryResult, prepareContext)) {
-            prepareResult = registryResult as GenerateResponse;
+          if (registryResult !== undefined) {
+            prepareResult = registryResult;
           }
         }
 
@@ -527,10 +502,7 @@ export async function executeLoop(
               signal: stepSignal,
             };
             const beforeGenResult = await hooks.run('beforeGenerate', beforeGenContext);
-            if (
-              beforeGenResult !== undefined &&
-              !isRegistryPassthrough(beforeGenResult, beforeGenContext)
-            ) {
+            if (beforeGenResult !== undefined && beforeGenResult !== beforeGenContext) {
               generateContext = beforeGenResult;
             }
           }
@@ -546,9 +518,12 @@ export async function executeLoop(
           const generateStart = performance.now();
           let durationMilliseconds: number;
           try {
-            const doGenerate = () =>
-              callGenerateWithRetry(generate, generateContext, retry, emitter);
-            response = wrapWithTrace ? await wrapWithTrace(doGenerate) : await doGenerate();
+            response =
+              parentContext !== undefined && withTraceContext !== undefined
+                ? await withTraceContext(parentContext, () =>
+                    callGenerateWithRetry(generate, generateContext, retry, emitter),
+                  )
+                : await callGenerateWithRetry(generate, generateContext, retry, emitter);
             durationMilliseconds = performance.now() - generateStart;
           } catch (generateError) {
             durationMilliseconds = performance.now() - generateStart;
@@ -701,7 +676,7 @@ export async function executeLoop(
           abortStep,
           elicit,
         });
-        if (validated !== undefined && !isRegistryPassthrough(validated, response)) {
+        if (validated !== undefined && validated !== response) {
           emitter?.dispatch(new ResponseValidatedEvent(step, originalResponse, validated));
           response = validated;
         }
@@ -724,7 +699,11 @@ export async function executeLoop(
 
     const { content, toolCalls: toolCallInputs, usage, metadata } = response;
     lastContent = content;
-    accumulateUsage(totalUsage, usage);
+    if (usage) {
+      totalUsage.prompt += usage.prompt;
+      totalUsage.completion += usage.completion;
+      totalUsage.total += usage.total;
+    }
     emitter?.dispatch(new UsageAccumulatedEvent(step, { ...totalUsage }, usage));
 
     if (content && !response.messageAppended) {
@@ -764,10 +743,7 @@ export async function executeLoop(
             elicit,
           };
           const registryResult = await hooks.run('beforeToolExecution', beforeContext);
-          if (
-            registryResult !== undefined &&
-            !isRegistryPassthrough(registryResult, beforeContext)
-          ) {
+          if (registryResult !== undefined) {
             callsToExecute = registryResult;
           }
         } catch (error) {
@@ -780,14 +756,22 @@ export async function executeLoop(
         emitter?.dispatch(new ToolsExecutingEvent(step, callsToExecute));
 
         try {
-          const doExecute = () =>
-            stepToolbox.execute(
-              callsToExecute as Parameters<typeof stepToolbox.execute>[0],
-              { ...executeOptions, signal: stepSignal } as Parameters<
-                typeof stepToolbox.execute
-              >[1],
-            );
-          const executeResult = wrapWithTrace ? await wrapWithTrace(doExecute) : await doExecute();
+          const executeResult =
+            parentContext !== undefined && withTraceContext !== undefined
+              ? await withTraceContext(parentContext, () =>
+                  stepToolbox.execute(
+                    callsToExecute as Parameters<typeof stepToolbox.execute>[0],
+                    { ...executeOptions, signal: stepSignal } as Parameters<
+                      typeof stepToolbox.execute
+                    >[1],
+                  ),
+                )
+              : await stepToolbox.execute(
+                  callsToExecute as Parameters<typeof stepToolbox.execute>[0],
+                  { ...executeOptions, signal: stepSignal } as Parameters<
+                    typeof stepToolbox.execute
+                  >[1],
+                );
 
           results = Array.isArray(executeResult) ? executeResult : [executeResult];
         } catch (error) {
@@ -815,10 +799,9 @@ export async function executeLoop(
                     context: typeof toolErrorContext,
                   ) => Promise<ErrorRecoveryAction | void>
                 )(toolErrorContext);
-                if (result !== undefined) {
-                  errorAction = result;
-                  break;
-                }
+                if (result === undefined) continue;
+                errorAction = result;
+                break;
               }
 
               if (errorAction === 'skip') {
@@ -877,7 +860,7 @@ export async function executeLoop(
                   results,
                   elicit,
                 });
-                if (validated !== undefined && !isRegistryPassthrough(validated, currentResult)) {
+                if (validated !== undefined && validated !== currentResult) {
                   emitter?.dispatch(new ToolResultValidatedEvent(step, snapshot, validated));
                   currentResult = validated;
                 }

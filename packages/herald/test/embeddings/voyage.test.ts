@@ -163,4 +163,27 @@ describe('createVoyageEmbedder', () => {
 
     expect(calls[0].url).toBe('https://custom.api.com/embed');
   });
+
+  it('handles failures while reading an error response body', async () => {
+    globalThis.fetch = mock(() => {
+      return Promise.resolve({
+        ok: false,
+        status: 429,
+        json: () => Promise.resolve({ error: 'Rate limited' }),
+        text: () => Promise.reject(new Error('stream closed')),
+      } as Response);
+    }) as typeof globalThis.fetch;
+
+    const embedder = createVoyageEmbedder({ apiKey: 'test-key' });
+
+    try {
+      await embedder(['test']);
+      expect.unreachable('Expected embedder to throw');
+    } catch (error) {
+      expect(error).toBeInstanceOf(HeraldError);
+      const heraldError = error as HeraldError;
+      expect(heraldError.provider).toBe('voyage');
+      expect(heraldError.statusCode).toBe(429);
+    }
+  });
 });

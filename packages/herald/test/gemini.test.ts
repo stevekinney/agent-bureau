@@ -575,6 +575,25 @@ describe('createGeminiGenerateStream', () => {
       const call = model._calls[0] as Record<string, unknown>;
       expect(call).not.toHaveProperty('generationConfig');
     });
+
+    it('forwards response format fields in generationConfig', async () => {
+      const model = createMockGeminiStreamingModel([geminiStreamTextChunks]);
+      const schema = { type: 'object', properties: { city: { type: 'string' } } };
+      const generate: StreamingGenerateFunction = createGeminiGenerateStream({
+        model: 'gemini-pro',
+        client: model,
+        responseFormat: { type: 'json_schema', schema },
+      });
+      const context = createStreamingContext();
+
+      await generate(context);
+
+      const call = model._calls[0] as Record<string, unknown>;
+      const generationConfig = call['generationConfig'] as Record<string, unknown>;
+      expect(generationConfig).toBeDefined();
+      expect(generationConfig['responseMimeType']).toBe('application/json');
+      expect(generationConfig['responseSchema']).toEqual(schema);
+    });
   });
 
   describe('missing API key', () => {

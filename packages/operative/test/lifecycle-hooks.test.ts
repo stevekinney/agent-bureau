@@ -933,6 +933,45 @@ describe('onError skip during tool-execution appends error results for dangling 
     // There should be at least one tool result message for the skipped tool call
     expect(toolResultMessages.length).toBeGreaterThanOrEqual(1);
   });
+
+  it('creates synthetic tool error results when toolbox execution throws and onError returns skip', async () => {
+    const hooks = new HookRegistry<OperativeHookMap>();
+
+    hooks.on('onError', async (context: ErrorContext) => {
+      if (context.phase === 'tool-execution') {
+        return 'skip';
+      }
+      return undefined;
+    });
+
+    const throwingToolbox = {
+      tools: () => [],
+      execute: async () => {
+        throw new Error('toolbox execute failed');
+      },
+      toObservable: () => ({ subscribe: () => ({ unsubscribe: () => {} }) }),
+    };
+
+    const result = await run({
+      generate: createMockGenerate([
+        toolCallResponse([weatherToolCall('Denver')], 'Calling tool'),
+        textResponse('Recovered'),
+      ]),
+      toolbox: throwingToolbox as never,
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+      hooks,
+    });
+
+    expect(result.finishReason).toBe('stop-condition');
+    expect(result.steps[0]?.results).toEqual([
+      expect.objectContaining({
+        toolName: 'get_weather',
+        outcome: 'error',
+        content: 'Tool execution skipped by onError hook',
+      }),
+    ]);
+  });
 });
 
 describe('onLLMInput and onLLMOutput use consistent context after beforeGenerate', () => {

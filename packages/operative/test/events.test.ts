@@ -5,7 +5,15 @@ import { z } from 'zod';
 
 import { noToolCalls } from '../src/conditions/predicates';
 import { createRun } from '../src/create-run';
-import type { OperativeEventType } from '../src/events';
+import {
+  BudgetExceededEvent,
+  BudgetThresholdEvent,
+  type OperativeEventType,
+  SessionCreatedEvent,
+  SessionDeletedEvent,
+  SessionLoadedEvent,
+  SessionSavedEvent,
+} from '../src/events';
 import { createMockGenerate, createRunRecorder } from '../src/test/index';
 import type { GenerateResponse } from '../src/types';
 
@@ -213,5 +221,32 @@ describe('events', () => {
     expect(runCompleted).toBeDefined();
     expect((runCompleted!.detail as { finishReason: string }).finishReason).toBe('stop-condition');
     expect((runCompleted!.detail as { steps: readonly unknown[] }).steps).toHaveLength(2);
+  });
+
+  it('constructs budget and session events with the expected payload', () => {
+    const threshold = new BudgetThresholdEvent({
+      threshold: 0.8,
+      currentCost: 0.81,
+      budget: 1,
+      model: 'gpt-test',
+    });
+    const exceeded = new BudgetExceededEvent({
+      currentCost: 1.2,
+      budget: 1,
+      model: 'gpt-test',
+    });
+    const saved = new SessionSavedEvent('session-1', 'agent-a');
+    const loaded = new SessionLoadedEvent('session-1', 'agent-a');
+    const created = new SessionCreatedEvent('session-1', 'agent-a');
+    const deleted = new SessionDeletedEvent('session-1');
+
+    expect(threshold.type).toBe('budget.threshold');
+    expect(threshold.threshold).toBe(0.8);
+    expect(exceeded.type).toBe('budget.exceeded');
+    expect(exceeded.currentCost).toBe(1.2);
+    expect(saved.agentName).toBe('agent-a');
+    expect(loaded.sessionId).toBe('session-1');
+    expect(created.type).toBe('session.created');
+    expect(deleted.type).toBe('session.deleted');
   });
 });

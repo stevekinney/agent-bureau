@@ -11,6 +11,11 @@ type ToolCallTracker = {
   arguments: string;
 };
 
+type NormalizeOpenAIStreamDependencies = {
+  buildState: typeof buildState;
+  findBlock: typeof findBlock;
+};
+
 /**
  * Normalizes an OpenAI Chat Completions streaming response into a
  * provider-agnostic AsyncIterable of StreamEvents.
@@ -20,7 +25,12 @@ type ToolCallTracker = {
  */
 export async function* normalizeOpenAIStream(
   stream: AsyncIterable<OpenAIChatCompletionChunk>,
+  dependencies: NormalizeOpenAIStreamDependencies = {
+    buildState,
+    findBlock,
+  },
 ): AsyncIterable<StreamEvent> {
+  const { buildState, findBlock } = dependencies;
   const state: NormalizerState = {
     blocks: [],
     hasUsageData: false,

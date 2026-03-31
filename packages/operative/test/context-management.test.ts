@@ -1,9 +1,11 @@
 import { createTestToolbox } from 'armorer/test';
 import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
+import { HookRegistry } from 'lifecycle';
 
 import { noToolCalls } from '../src/conditions/predicates';
 import { createRun } from '../src/create-run';
+import type { OperativeHookMap } from '../src/hooks';
 import { run } from '../src/run';
 import { createMockGenerate, createRunRecorder } from '../src/test/index';
 import type { GenerateResponse } from '../src/types';
@@ -146,5 +148,109 @@ describe('context window management', () => {
     });
 
     expect(result.finishReason).toBe('error');
+  });
+
+  it('beforeCompaction can skip compaction and receives a budget helper', async () => {
+    const conversation = new Conversation();
+    conversation.appendUserMessage('A'.repeat(400));
+
+    const hooks = new HookRegistry<OperativeHookMap>();
+    let onCompactCalled = false;
+    const budgetSnapshots: Array<{
+      allocateValue: number;
+      estimateValue: number;
+      exceeds: boolean;
+      warning: boolean;
+    }> = [];
+
+    hooks.on('beforeCompaction', async ({ budget }) => {
+      budget.update(5);
+      budgetSnapshots.push({
+        allocateValue: budget.allocate(),
+        estimateValue: budget.estimate('abcd'),
+        exceeds: budget.exceeds,
+        warning: budget.warning,
+      });
+      return false;
+    });
+
+    const result = await run({
+      generate: createMockGenerate([textResponse('Done')]),
+      toolbox: createTestToolbox([]),
+      conversation,
+      stopWhen: noToolCalls(),
+      hooks,
+      contextManagement: {
+        maxTokens: 10,
+        onCompact: async () => {
+          onCompactCalled = true;
+        },
+      },
+    });
+
+    expect(result.finishReason).toBe('stop-condition');
+    expect(onCompactCalled).toBe(false);
+    expect(budgetSnapshots).toEqual([
+      {
+        allocateValue: 0,
+        estimateValue: 1,
+        exceeds: true,
+        warning: true,
+      },
+    ]);
+  });
+
+  it('returns an error result when afterCompaction throws', async () => {
+    const conversation = new Conversation();
+    conversation.appendUserMessage('A'.repeat(400));
+
+    const hooks = new HookRegistry<OperativeHookMap>();
+    hooks.on('afterCompaction', async () => {
+      throw new Error('afterCompaction failed');
+    });
+
+    const result = await run({
+      generate: createMockGenerate([textResponse('Done')]),
+      toolbox: createTestToolbox([]),
+      conversation,
+      stopWhen: noToolCalls(),
+      hooks,
+      contextManagement: {
+        maxTokens: 10,
+        onCompact: async () => {
+          conversation.appendSystemMessage('Compacted');
+        },
+      },
+    });
+
+    expect(result.finishReason).toBe('error');
+    expect(result.error).toBeInstanceOf(Error);
+  });
+
+  it('returns an error result when beforeCompaction throws', async () => {
+    const conversation = new Conversation();
+    conversation.appendUserMessage('A'.repeat(400));
+
+    const hooks = new HookRegistry<OperativeHookMap>();
+    hooks.on('beforeCompaction', async () => {
+      throw new Error('beforeCompaction failed');
+    });
+
+    const result = await run({
+      generate: createMockGenerate([textResponse('Done')]),
+      toolbox: createTestToolbox([]),
+      conversation,
+      stopWhen: noToolCalls(),
+      hooks,
+      contextManagement: {
+        maxTokens: 10,
+        onCompact: async () => {
+          throw new Error('should not run');
+        },
+      },
+    });
+
+    expect(result.finishReason).toBe('error');
+    expect(result.error).toBeInstanceOf(Error);
   });
 });

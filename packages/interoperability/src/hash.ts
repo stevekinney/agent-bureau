@@ -14,6 +14,38 @@ export type IncrementalHash = {
   digest(): string;
 };
 
+type HashRuntimeOverride = {
+  Bun?: Pick<typeof Bun, 'CryptoHasher'> | undefined;
+  require?: ((specifier: string) => unknown) | undefined;
+};
+
+const runtimeOverrideSymbol = Symbol.for('agent-bureau.interoperability.hash.runtime');
+
+function getHashRuntimeOverride(): HashRuntimeOverride | undefined {
+  return (globalThis as Record<PropertyKey, unknown>)[runtimeOverrideSymbol] as
+    | HashRuntimeOverride
+    | undefined;
+}
+
+function getBunRuntime(): Pick<typeof Bun, 'CryptoHasher'> | undefined {
+  const runtimeOverride = getHashRuntimeOverride();
+  if (runtimeOverride && 'Bun' in runtimeOverride) {
+    return runtimeOverride.Bun;
+  }
+
+  return typeof Bun !== 'undefined' ? Bun : undefined;
+}
+
+function requireNodeCrypto(): typeof import('node:crypto') {
+  const runtimeOverride = getHashRuntimeOverride();
+  if (runtimeOverride?.require) {
+    return runtimeOverride.require('node:crypto') as typeof import('node:crypto');
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  return require('node:crypto') as typeof import('node:crypto');
+}
+
 /**
  * Computes the SHA-256 hex digest of a string using the Web Crypto API.
  * Works in all environments: browsers, Node.js, Bun, Deno.
@@ -35,15 +67,14 @@ export async function sha256Hex(text: string): Promise<string> {
  * Throws in browser environments where no synchronous crypto API is available.
  */
 export function sha256HexSync(text: string): string {
-  // Bun runtime
-  if (typeof Bun !== 'undefined') {
-    return new Bun.CryptoHasher('sha256').update(text).digest('hex');
+  const bunRuntime = getBunRuntime();
+  if (bunRuntime) {
+    return new bunRuntime.CryptoHasher('sha256').update(text).digest('hex');
   }
 
   // Node.js runtime (lazy require to avoid bundler issues)
   try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { createHash } = require('node:crypto') as typeof import('node:crypto');
+    const { createHash } = requireNodeCrypto();
     return createHash('sha256').update(text).digest('hex');
   } catch {
     throw new Error(
@@ -60,9 +91,9 @@ export function sha256HexSync(text: string): string {
  * @param algorithm - Hash algorithm to use. Default: `'sha256'`.
  */
 export function createIncrementalHash(algorithm: string = 'sha256'): IncrementalHash {
-  // Bun runtime
-  if (typeof Bun !== 'undefined') {
-    const hasher = new Bun.CryptoHasher(algorithm as 'sha256');
+  const bunRuntime = getBunRuntime();
+  if (bunRuntime) {
+    const hasher = new bunRuntime.CryptoHasher(algorithm as 'sha256');
     return {
       update(data: string) {
         hasher.update(data);
@@ -75,8 +106,7 @@ export function createIncrementalHash(algorithm: string = 'sha256'): Incremental
 
   // Node.js runtime
   try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { createHash } = require('node:crypto') as typeof import('node:crypto');
+    const { createHash } = requireNodeCrypto();
     const hash = createHash(algorithm);
     return {
       update(data: string) {
