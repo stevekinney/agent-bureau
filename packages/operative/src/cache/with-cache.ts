@@ -31,14 +31,15 @@ function resolveKeyStrategy(strategy: CacheOptions['keyStrategy']): {
 
 /**
  * Evicts the oldest cache entries until the count is within the limit.
+ * Returns the number of entries removed so the caller can adjust its counter.
  */
 async function evictOldest(
   store: KeyValueStore,
   namespace: string,
   maxEntries: number,
-): Promise<void> {
+): Promise<number> {
   const keys = await store.list(namespace);
-  if (keys.length <= maxEntries) return;
+  if (keys.length <= maxEntries) return 0;
 
   // Collect entries with their creation timestamps
   const entries: Array<{ key: string; createdAt: number }> = [];
@@ -62,6 +63,7 @@ async function evictOldest(
   for (let i = 0; i < toRemove; i++) {
     await store.delete(entries[i]!.key);
   }
+  return Math.max(0, toRemove);
 }
 
 /**
@@ -84,7 +86,18 @@ export function withCache(generate: GenerateFunction, options: CacheOptions): Ge
 
   const { keyFn, label } = resolveKeyStrategy(keyStrategy);
 
+  // Track approximate entry count to avoid O(n) store.list() on every miss.
+  // Initialized lazily on first call; incremented on set, decremented on delete/evict.
+  let entryCount = -1;
+  let countInitialized = false;
+
   return async (context: GenerateContext) => {
+    // Lazily initialize the entry count from the store on first call
+    if (!countInitialized) {
+      const keys = await store.list(namespace);
+      entryCount = keys.length;
+      countInitialized = true;
+    }
     const rawKey = keyFn(context);
     const key = `${namespace}${rawKey}`;
 
@@ -105,8 +118,14 @@ export function withCache(generate: GenerateFunction, options: CacheOptions): Ge
           onHit?.({ key, age: Date.now() - entry.createdAt });
           return entry.response;
         }
+
+        // Expired — delete the stale entry before falling through to miss
+        await store.delete(key);
+        entryCount--;
       } catch {
-        // Corrupt entry — fall through to miss
+        // Corrupt entry — delete it and fall through to miss
+        await store.delete(key);
+        entryCount--;
       }
     }
 
@@ -135,9 +154,13 @@ export function withCache(generate: GenerateFunction, options: CacheOptions): Ge
       keyStrategy: label,
     };
     await store.set(key, JSON.stringify(entry));
+    entryCount++;
 
-    // Evict oldest entries if we've exceeded the limit
-    await evictOldest(store, namespace, maxEntries);
+    // Only run eviction when the approximate count exceeds the limit
+    if (entryCount > maxEntries) {
+      const removed = await evictOldest(store, namespace, maxEntries);
+      entryCount -= removed;
+    }
 
     onMiss?.({ key, duration });
     return response;

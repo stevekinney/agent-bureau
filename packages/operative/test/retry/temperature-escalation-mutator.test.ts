@@ -17,7 +17,7 @@ function makeContext(): GenerateContext {
 }
 
 describe('createTemperatureEscalationMutator', () => {
-  it('increases temperature on each retry attempt', async () => {
+  it('applies temperature proportional to the attempt number', async () => {
     const mutator = createTemperatureEscalationMutator();
     const context = makeContext();
 

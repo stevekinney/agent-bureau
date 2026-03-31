@@ -23,13 +23,14 @@ export function withRoutingMetrics(options: RoutingOptions): RoutingMetricsResul
       .map((r) => [r.name, r.costPerMillionTokens!]),
   );
 
-  // Track which route was selected on the most recent call
-  let lastSelectedRoute = '';
+  // Per-call route capture using a WeakMap keyed by context object.
+  // Each concurrent call writes to its own context key, avoiding shared mutable state.
+  const routeByContext = new WeakMap<GenerateContext, string>();
 
   const innerGenerate = createRoutingGenerate({
     ...options,
     onRoute: (event) => {
-      lastSelectedRoute = event.selectedRoute;
+      routeByContext.set(event.context, event.selectedRoute);
       options.onRoute?.(event);
     },
   });
@@ -37,14 +38,13 @@ export function withRoutingMetrics(options: RoutingOptions): RoutingMetricsResul
   const wrappedGenerate: GenerateFunction = async (
     context: GenerateContext,
   ): Promise<GenerateResponse> => {
-    lastSelectedRoute = '';
     const start = performance.now();
 
     try {
       const response = await innerGenerate(context);
       const elapsed = performance.now() - start;
 
-      const route = lastSelectedRoute;
+      const route = routeByContext.get(context) ?? '';
 
       // Record count
       routeCounts.set(route, (routeCounts.get(route) ?? 0) + 1);
@@ -65,10 +65,11 @@ export function withRoutingMetrics(options: RoutingOptions): RoutingMetricsResul
       const elapsed = performance.now() - start;
 
       // Record latency even on failure
-      if (lastSelectedRoute) {
-        const latencies = routeLatencies.get(lastSelectedRoute) ?? [];
+      const failedRoute = routeByContext.get(context);
+      if (failedRoute) {
+        const latencies = routeLatencies.get(failedRoute) ?? [];
         latencies.push(elapsed);
-        routeLatencies.set(lastSelectedRoute, latencies);
+        routeLatencies.set(failedRoute, latencies);
       }
 
       throw error;

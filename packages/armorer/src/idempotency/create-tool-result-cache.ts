@@ -31,7 +31,7 @@ export type CreateToolResultCacheOptions = {
  * cleaned up lazily.
  */
 export function createToolResultCache(options: CreateToolResultCacheOptions): ToolResultCache {
-  const { store, namespace } = options;
+  const { store, defaultTTL, namespace } = options;
 
   const prefix = namespace ? `${namespace}:` : '';
 
@@ -39,7 +39,9 @@ export function createToolResultCache(options: CreateToolResultCacheOptions): To
     return `${prefix}${key}`;
   }
 
+  /** TTL of 0 means "never expire." */
   function isExpired(entry: CachedToolResult): boolean {
+    if (entry.ttl === 0) return false;
     return Date.now() > entry.executedAt + entry.ttl;
   }
 
@@ -61,8 +63,11 @@ export function createToolResultCache(options: CreateToolResultCacheOptions): To
       return entry;
     },
 
-    async set(key: string, result: CachedToolResult, _ttl?: number): Promise<void> {
-      await store.set(resolveKey(key), JSON.stringify(result));
+    async set(key: string, result: CachedToolResult, ttl?: number): Promise<void> {
+      // Priority: explicit ttl param > entry's own ttl (including 0 = never expire) > defaultTTL
+      const effectiveTTL = ttl ?? (result.ttl !== undefined ? result.ttl : defaultTTL);
+      const entry = effectiveTTL !== undefined ? { ...result, ttl: effectiveTTL } : result;
+      await store.set(resolveKey(key), JSON.stringify(entry));
     },
 
     async delete(key: string): Promise<void> {

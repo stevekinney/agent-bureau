@@ -98,12 +98,12 @@ describe('withCache', () => {
 
   it('respects TTL and treats expired entries as misses', async () => {
     const generate = createTrackingGenerate();
-    const cached = withCache(generate, { store, ttl: 0.001 }); // 1ms TTL
+    const cached = withCache(generate, { store, ttl: 0.01 }); // 10ms TTL
 
     await cached(makeContext());
 
-    // Wait for the entry to expire
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    // Wait well beyond the TTL for the entry to expire
+    await new Promise((resolve) => setTimeout(resolve, 100));
 
     await cached(makeContext());
 

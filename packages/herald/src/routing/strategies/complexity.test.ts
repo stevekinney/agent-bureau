@@ -1,55 +1,8 @@
 import { describe, expect, it } from 'bun:test';
 
 import type { GenerateContext } from '../../types.ts';
-import type { ModelRoute } from '../types.ts';
 import { createComplexityStrategy, extractComplexitySignals } from './complexity.ts';
-
-function makeContext(overrides?: Partial<GenerateContext>): GenerateContext {
-  return {
-    conversation: {
-      current: { ids: [], messages: {} },
-    } as unknown as GenerateContext['conversation'],
-    step: 0,
-    toolbox: { tools: () => [] } as unknown as GenerateContext['toolbox'],
-    ...overrides,
-  };
-}
-
-function makeRoutes(): ModelRoute[] {
-  return [
-    { name: 'fast', generate: async () => ({ content: '', toolCalls: [] }) },
-    { name: 'smart', generate: async () => ({ content: '', toolCalls: [] }) },
-    { name: 'frontier', generate: async () => ({ content: '', toolCalls: [] }) },
-  ];
-}
-
-function makeContextWithMessages(
-  messages: Array<{ role: string; content: string }>,
-  overrides?: Partial<GenerateContext>,
-): GenerateContext {
-  const ids = messages.map((_, i) => `msg-${i}`);
-  const messagesRecord: Record<string, unknown> = {};
-  for (let i = 0; i < messages.length; i++) {
-    messagesRecord[`msg-${i}`] = {
-      id: `msg-${i}`,
-      role: messages[i]!.role,
-      content: messages[i]!.content,
-      position: i,
-      createdAt: new Date().toISOString(),
-      metadata: {},
-      hidden: false,
-    };
-  }
-
-  return {
-    conversation: {
-      current: { ids, messages: messagesRecord },
-    } as unknown as GenerateContext['conversation'],
-    step: overrides?.step ?? 0,
-    toolbox: overrides?.toolbox ?? ({ tools: () => [] } as unknown as GenerateContext['toolbox']),
-    ...overrides,
-  };
-}
+import { makeContext, makeContextWithMessages, makeRoutes } from './test-helpers.ts';
 
 describe('extractComplexitySignals', () => {
   it('returns zero-valued signals for empty context', () => {
