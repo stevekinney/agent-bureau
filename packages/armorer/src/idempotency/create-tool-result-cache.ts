@@ -64,8 +64,8 @@ export function createToolResultCache(options: CreateToolResultCacheOptions): To
     },
 
     async set(key: string, result: CachedToolResult, ttl?: number): Promise<void> {
-      // Priority: explicit ttl param > entry's own ttl > defaultTTL
-      const effectiveTTL = ttl ?? (result.ttl > 0 ? result.ttl : defaultTTL);
+      // Priority: explicit ttl param > entry's own ttl (including 0 = never expire) > defaultTTL
+      const effectiveTTL = ttl ?? (result.ttl !== undefined ? result.ttl : defaultTTL);
       const entry = effectiveTTL !== undefined ? { ...result, ttl: effectiveTTL } : result;
       await store.set(resolveKey(key), JSON.stringify(entry));
     },

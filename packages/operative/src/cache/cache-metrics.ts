@@ -6,8 +6,9 @@
  */
 
 import { estimateCost } from '../cost-estimation';
-import type { GenerateFunction } from '../types';
-import type { CacheMetrics, CacheOptions } from './types';
+import type { GenerateContext, GenerateFunction } from '../types';
+import { conversationHashKey } from './cache-keys';
+import type { CacheKeyFunction, CacheMetrics, CacheOptions } from './types';
 import { withCache } from './with-cache';
 
 /** Options for `withCacheMetrics`, extending `CacheOptions` with an optional model for cost estimation. */
@@ -15,6 +16,14 @@ export type CacheMetricsOptions = CacheOptions & {
   /** Model identifier used for cost estimation. When omitted, `estimatedSavedCost` stays at 0. */
   model?: string;
 };
+
+/** Resolves the key strategy option to a concrete key function. */
+function resolveKeyStrategy(strategy: CacheOptions['keyStrategy']): CacheKeyFunction {
+  if (typeof strategy === 'function') return strategy;
+  // 'last-message' and 'conversation-hash' both use conversationHashKey as a safe default
+  // since we only need key identity (same key = same call), not the exact strategy
+  return conversationHashKey;
+}
 
 /**
  * Wraps a `GenerateFunction` with caching and accumulates performance metrics.
@@ -33,10 +42,18 @@ export function withCacheMetrics(
   let totalSavedTokens = 0;
   let estimatedSavedCost = 0;
 
+  // Track which cache keys had hits. When onHit fires, we record the key.
+  // After the await resolves, we check if this call's key is in the set.
+  // Keys are unique per-context, so concurrent calls with different contexts
+  // won't interfere with each other.
+  const pendingHitKeys = new Set<string>();
+  const keyFn = resolveKeyStrategy(options.keyStrategy);
+
   const cachedGenerate = withCache(generate, {
     ...rest,
     onHit: (event) => {
       hits++;
+      pendingHitKeys.add(event.key);
       onHit?.(event);
     },
     onMiss: (event) => {
@@ -46,10 +63,10 @@ export function withCacheMetrics(
   });
 
   // Wrap to intercept responses for token/cost tracking on hits
-  const trackedGenerate: GenerateFunction = async (context) => {
-    const hitsBefore = hits;
+  const trackedGenerate: GenerateFunction = async (context: GenerateContext) => {
     const response = await cachedGenerate(context);
-    const wasHit = hits > hitsBefore;
+    const myKey = `${options.namespace ?? 'llm-cache:'}${keyFn(context)}`;
+    const wasHit = pendingHitKeys.delete(myKey);
 
     if (wasHit && response.usage) {
       const saved = response.usage.prompt + response.usage.completion;
