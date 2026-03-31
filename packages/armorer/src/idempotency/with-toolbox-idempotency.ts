@@ -1,0 +1,133 @@
+import type { Toolbox } from '../create-toolbox';
+import type { ToolCallInput, ToolExecutionResult } from '../types';
+import { fullInputKey } from './key-generators';
+import type { CachedToolResult, ToolResultCache } from './types';
+
+const DEFAULT_TTL = 300_000;
+
+/**
+ * Options for wrapping a toolbox with idempotency.
+ */
+export type WithToolboxIdempotencyOptions = {
+  /** The result cache shared across all tools in the toolbox. */
+  cache: ToolResultCache;
+  /** Default TTL in milliseconds for cached results. */
+  defaultTTL?: number;
+  /**
+   * When true (default), only tools with an explicit `idempotencyKey` are wrapped.
+   * When false, tools without an `idempotencyKey` are wrapped using `fullInputKey` as the default.
+   */
+  requireExplicitKey?: boolean;
+};
+
+/**
+ * Wraps a toolbox so that tool executions are deduplicated via an idempotency
+ * cache. Returns a new toolbox object — the original is not mutated.
+ *
+ * By default only tools that defined an `idempotencyKey` in their options
+ * are wrapped. Set `requireExplicitKey: false` to auto-wrap all tools
+ * using `fullInputKey` as the default key generator.
+ */
+export function withToolboxIdempotency(
+  toolbox: Toolbox,
+  options: WithToolboxIdempotencyOptions,
+): Toolbox {
+  const { cache, defaultTTL = DEFAULT_TTL, requireExplicitKey = true } = options;
+
+  function getKeyFn(toolName: string): ((input: unknown) => string) | undefined {
+    const tool = toolbox.getTool(toolName);
+    if (!tool) return undefined;
+
+    const explicitKey = (tool as unknown as Record<string, unknown>)['idempotencyKey'] as
+      | ((input: unknown) => string)
+      | undefined;
+
+    if (explicitKey) return explicitKey;
+    if (!requireExplicitKey) return fullInputKey;
+    return undefined;
+  }
+
+  function extractCallFields(call: ToolCallInput): {
+    name: string;
+    id: string;
+    arguments: unknown;
+  } {
+    const asRecord = call as unknown as Record<string, unknown>;
+    return {
+      name: asRecord['name'] as string,
+      id: (asRecord['id'] as string) ?? '',
+      arguments: asRecord['arguments'],
+    };
+  }
+
+  async function executeWithCache(
+    call: ToolCallInput,
+    originalExecute: (call: ToolCallInput, options?: unknown) => Promise<ToolExecutionResult>,
+    executeOptions?: unknown,
+  ): Promise<ToolExecutionResult> {
+    const fields = extractCallFields(call);
+    if (!fields.name) {
+      return originalExecute(call, executeOptions);
+    }
+
+    const keyFn = getKeyFn(fields.name);
+    if (!keyFn) {
+      return originalExecute(call, executeOptions);
+    }
+
+    const cacheKey = `${fields.name}:${keyFn(fields.arguments)}`;
+    const cached = await cache.get(cacheKey);
+
+    if (cached) {
+      return {
+        callId: fields.id,
+        outcome: 'success',
+        content: typeof cached.result === 'string' ? cached.result : JSON.stringify(cached.result),
+        toolCallId: fields.id,
+        toolName: cached.toolName,
+        result: cached.result,
+      } as ToolExecutionResult;
+    }
+
+    const result = await originalExecute(call, executeOptions);
+
+    // Only cache successful results
+    if (result.outcome === 'success' && !result.error) {
+      const entry: CachedToolResult = {
+        result: result.result,
+        toolName: result.toolName,
+        executedAt: Date.now(),
+        ttl: defaultTTL,
+      };
+      await cache.set(cacheKey, entry, defaultTTL);
+    }
+
+    return result;
+  }
+
+  // Proxy the toolbox to intercept execute calls
+  return new Proxy(toolbox, {
+    get(target, prop, receiver) {
+      if (prop === 'execute') {
+        return async (
+          input: ToolCallInput | ToolCallInput[],
+          executeOptions?: unknown,
+        ): Promise<ToolExecutionResult | ToolExecutionResult[]> => {
+          const originalExecute = target.execute.bind(target) as (
+            call: ToolCallInput,
+            options?: unknown,
+          ) => Promise<ToolExecutionResult>;
+
+          if (Array.isArray(input)) {
+            return Promise.all(
+              input.map((call) => executeWithCache(call, originalExecute, executeOptions)),
+            );
+          }
+
+          return executeWithCache(input, originalExecute, executeOptions);
+        };
+      }
+      return Reflect.get(target as object, prop, receiver as object) as unknown;
+    },
+  });
+}

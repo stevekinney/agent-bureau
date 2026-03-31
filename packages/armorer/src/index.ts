@@ -23,6 +23,22 @@ export type {
   ToolStatusUpdate,
 } from './create-toolbox';
 export { createMiddleware, createToolbox, isToolbox } from './create-toolbox';
+export type {
+  CachedToolResult,
+  CreateToolResultCacheOptions,
+  IdempotencyOptions,
+  ToolResultCache,
+  WithToolboxIdempotencyOptions,
+} from './idempotency';
+export {
+  compositeKey,
+  createToolResultCache,
+  fieldKey,
+  fullInputKey,
+  namespacedKey,
+  withIdempotency,
+  withToolboxIdempotency,
+} from './idempotency';
 
 // Event classes and event maps
 export {

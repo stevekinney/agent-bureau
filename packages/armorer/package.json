@@ -163,6 +163,14 @@
       "require": "./dist/truncation/index.cjs",
       "default": "./dist/truncation/index.js",
       "types": "./dist/truncation/index.d.ts"
+    },
+    "./idempotency": {
+      "bun": "./dist/idempotency/index.js",
+      "browser": "./dist/idempotency/index.js",
+      "import": "./dist/idempotency/index.js",
+      "require": "./dist/idempotency/index.cjs",
+      "default": "./dist/idempotency/index.js",
+      "types": "./dist/idempotency/index.d.ts"
     }
   },
   "main": "./dist/index.js",

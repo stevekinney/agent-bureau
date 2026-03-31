@@ -123,6 +123,11 @@ export interface CreateToolOptions<
   concurrency?: number;
   telemetry?: boolean;
   diagnostics?: ToolDiagnostics;
+  /**
+   * Generates an idempotency key from the tool input. When set, the tool
+   * can be wrapped with `withIdempotency()` to deduplicate executions.
+   */
+  idempotencyKey?: (input: unknown) => string;
 }
 
 export type SyncToolMetadataInput<M extends ToolMetadata | undefined> = M | (() => M);
@@ -434,6 +439,7 @@ export function createTool<
     concurrency,
     telemetry,
     diagnostics,
+    idempotencyKey,
   } = options as CreateToolOptions<TInput, TOutput, E, Tags, M, TContext, TReturn>;
 
   const customMetadata = resolvedMetadata ?? (undefined as M);
@@ -1119,6 +1125,9 @@ export function createTool<
   if (concurrencyLimit !== undefined) {
     configuration.concurrency = concurrencyLimit;
   }
+  if (idempotencyKey !== undefined) {
+    (configuration as Record<string, unknown>)['idempotencyKey'] = idempotencyKey;
+  }
 
   const toJSON = (() => {
     const serializableConfiguration = {
@@ -1182,6 +1191,7 @@ export function createTool<
     [Symbol.toPrimitive]: () => configuration.identity.name,
     tags: configuration.tags,
     metadata: configuration.metadata,
+    ...(idempotencyKey !== undefined ? { idempotencyKey } : {}),
   };
 
   const tool = new Proxy(callable as unknown as Tool<z.ZodType<TInput>, E, TReturn, M>, {

@@ -1333,6 +1333,12 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
     if (configuration.diagnostics) {
       options.diagnostics = configuration.diagnostics;
     }
+    const configIdempotencyKey = (configuration as Record<string, unknown>)['idempotencyKey'] as
+      | ((input: unknown) => string)
+      | undefined;
+    if (configIdempotencyKey) {
+      options.idempotencyKey = configIdempotencyKey;
+    }
     return createToolFactory<
       object,
       unknown,
@@ -1411,6 +1417,10 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
     }
     if (configuration.diagnostics) {
       result.diagnostics = configuration.diagnostics;
+    }
+    const configIdempotencyKey = (configuration as Record<string, unknown>)['idempotencyKey'];
+    if (configIdempotencyKey !== undefined) {
+      (result as Record<string, unknown>)['idempotencyKey'] = configIdempotencyKey;
     }
     return result;
   }

@@ -16,6 +16,7 @@ const entrypoints = [
   './src/adapters/openai/index.ts',
   './src/adapters/anthropic/index.ts',
   './src/adapters/gemini/index.ts',
+  './src/idempotency/index.ts',
   // Internal modules referenced by index.d.ts (needed for Bun resolution)
   './src/events.ts',
   './src/combine-toolboxes.ts',
@@ -30,6 +31,11 @@ const entrypoints = [
   './src/is-tool.ts',
   './src/tool-materialization.ts',
   './src/types.ts',
+  './src/idempotency/types.ts',
+  './src/idempotency/key-generators.ts',
+  './src/idempotency/create-tool-result-cache.ts',
+  './src/idempotency/with-idempotency.ts',
+  './src/idempotency/with-toolbox-idempotency.ts',
 ];
 
 const root = './src';
