@@ -112,7 +112,13 @@ export function createInputGuardrail(options: InputGuardrailOptions): PrepareSte
       // redactMessageAtPosition replaces the message content in-place (using
       // the sanitized text as the placeholder) rather than appending a new message.
       const allMessages = context.conversation.getMessages();
-      const lastUserPosition = allMessages.findLastIndex((message) => message.role === 'user');
+      let lastUserPosition = -1;
+      for (let index = allMessages.length - 1; index >= 0; index--) {
+        const message = allMessages[index];
+        if (message?.role !== 'user') continue;
+        lastUserPosition = index;
+        break;
+      }
       if (lastUserPosition >= 0) {
         context.conversation.redactMessageAtPosition(lastUserPosition, topResult.result.sanitized);
       }

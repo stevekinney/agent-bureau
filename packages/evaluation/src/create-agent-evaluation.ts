@@ -83,7 +83,7 @@ async function runCase(
     const usage = extractTokenUsage(runResult);
     const steps = extractStepCount(runResult);
 
-    if (runResult.finishReason !== 'stop-condition') {
+    if (runResult.finishReason === 'error' || runResult.finishReason === 'aborted') {
       return {
         name: evaluationCase.name,
         tags,

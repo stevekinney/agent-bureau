@@ -1,7 +1,8 @@
-import { createTestToolbox } from 'armorer/test';
+import { createMockTool, createTestToolbox } from 'armorer/test';
 import { describe, expect, it } from 'bun:test';
 import type { AgentDefinition, GenerateFunction, GenerateResponse, RunResult } from 'operative';
 import { createMockGenerate } from 'operative/test';
+import { z } from 'zod';
 
 import { createAgentEvaluation } from './create-agent-evaluation';
 import type { EvaluationCase } from './types';
@@ -542,6 +543,39 @@ describe('createAgentEvaluation', () => {
     expect(report.cases[0]!.score).toBe(0);
     expect(report.cases[0]!.metrics.finishReason).toBe('error');
     expect(report.cases[0]!.error).toBe('Unknown error');
+  });
+
+  it('still evaluates output matching for non-error finish reasons', async () => {
+    const generate = createMockGenerate([
+      singleResponse('partial success', [{ id: 'call-1', name: 'noop', arguments: {} }]),
+    ]);
+    const toolbox = createTestToolbox([
+      createMockTool({
+        name: 'noop',
+        input: z.object({}),
+        impl: async () => 'done',
+      }),
+    ]);
+
+    const evaluation = createAgentEvaluation({
+      cases: [
+        {
+          name: 'maximum-steps-still-matches',
+          input: 'test',
+          expectedOutput: 'partial success',
+          maxSteps: 1,
+        },
+      ],
+      agent: { generate, toolbox },
+    });
+
+    const report = await evaluation.run();
+
+    expect(report.cases[0]!.pass).toBe(true);
+    expect(report.cases[0]!.score).toBe(1);
+    expect(report.cases[0]!.metrics.outputMatch).toBe(true);
+    expect(report.cases[0]!.metrics.finishReason).toBe('maximum-steps');
+    expect(report.cases[0]!.error).toBeUndefined();
   });
 
   it('works with AgentDefinition input', async () => {

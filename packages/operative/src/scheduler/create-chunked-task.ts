@@ -79,9 +79,11 @@ export function createChunkedTask<TState>(
               }
               return { content: '', toolCalls: [] };
             },
-            // No tool calls are ever emitted for chunk tasks, so the loop does not
-            // interact with the toolbox surface here.
-            toolbox: {} as never,
+            toolbox: {
+              tools: () => [],
+              execute: () => Promise.resolve([]),
+              toObservable: () => ({ subscribe: () => ({ unsubscribe: () => {} }) }),
+            } as never,
             conversation: new Conversation(),
             maximumSteps: 1,
           };

@@ -47,6 +47,7 @@ describe('createIndexedDBKeyValueStore', () => {
   }
 
   function installMockIndexedDBForFailure(options: {
+    openFails?: boolean;
     openError?: Error;
     operation?: 'get' | 'put' | 'delete' | 'getAllKeys' | 'openCursor' | 'getKey';
     objectStoreExists?: boolean;
@@ -111,7 +112,7 @@ describe('createIndexedDBKeyValueStore', () => {
         } as unknown as IDBOpenDBRequest;
 
         queueMicrotask(() => {
-          if (options.openError) {
+          if (options.openFails || options.openError) {
             request.onerror?.(new Event('error'));
             return;
           }
@@ -326,13 +327,11 @@ describe('createIndexedDBKeyValueStore', () => {
 
   describe('error handling', () => {
     it('rejects when opening the database fails without an IndexedDB error object', async () => {
-      installMockIndexedDBForFailure({ openError: undefined });
-      const openError = new Error('open failed');
-      installMockIndexedDBForFailure({ openError });
+      installMockIndexedDBForFailure({ openFails: true });
 
       await expect(
         createIndexedDBKeyValueStore({ databaseName: `error-open-${crypto.randomUUID()}` }),
-      ).rejects.toThrow('open failed');
+      ).rejects.toThrow('Unknown IndexedDB error');
     });
 
     it('rejects get when the request fails without an IndexedDB error object', async () => {

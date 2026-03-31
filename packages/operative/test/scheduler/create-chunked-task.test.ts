@@ -250,6 +250,31 @@ describe('createChunkedTask', () => {
     expect(failures[0]?.error).toBe('plain failure');
   });
 
+  it('provides a safe stub toolbox surface during chunk execution', async () => {
+    const scheduler = {
+      async submit(task) {
+        const run = task.createRun();
+        expect(run.toolbox.tools()).toEqual([]);
+        await expect(run.toolbox.execute([])).resolves.toEqual([]);
+        const subscription = run.toolbox.toObservable().subscribe();
+        subscription.unsubscribe();
+        await run.generate({ signal: new AbortController().signal } as never);
+        return { finishReason: 'stop-condition' } as never;
+      },
+    } as Scheduler;
+
+    const submitChunked = createChunkedTask<{ count: number }>({
+      name: 'safe-toolbox-surface',
+      initialState: { count: 0 },
+      processChunk: async () => ({
+        state: { count: 1 },
+        done: true,
+      }),
+    });
+
+    await expect(submitChunked(scheduler)).resolves.toEqual({ count: 1 });
+  });
+
   it('throws when processChunk never produces a result', async () => {
     const failures: Array<{ error: unknown; state: { count: number } }> = [];
     const scheduler = {

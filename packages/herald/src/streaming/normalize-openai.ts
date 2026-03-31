@@ -11,6 +11,11 @@ type ToolCallTracker = {
   arguments: string;
 };
 
+type NormalizeOpenAIStreamDependencies = {
+  buildState: typeof buildState;
+  findBlock: typeof findBlock;
+};
+
 /**
  * Normalizes an OpenAI Chat Completions streaming response into a
  * provider-agnostic AsyncIterable of StreamEvents.
@@ -20,7 +25,12 @@ type ToolCallTracker = {
  */
 export async function* normalizeOpenAIStream(
   stream: AsyncIterable<OpenAIChatCompletionChunk>,
+  dependencies: NormalizeOpenAIStreamDependencies = {
+    buildState,
+    findBlock,
+  },
 ): AsyncIterable<StreamEvent> {
+  const { buildState, findBlock } = dependencies;
   const state: NormalizerState = {
     blocks: [],
     hasUsageData: false,
@@ -130,13 +140,21 @@ export async function* normalizeOpenAIStream(
             block.partialArguments = tracker.arguments;
           }
 
-          if (block) {
-            yield {
-              type: 'stream:block-delta',
-              block: { ...block },
-              delta: args,
-            };
-          }
+          yield {
+            type: 'stream:block-delta',
+            block: block
+              ? { ...block }
+              : {
+                  id: tracker.blockId,
+                  type: 'tool-call',
+                  index: 0,
+                  content: tracker.arguments,
+                  complete: false,
+                  toolName: tracker.toolName,
+                  partialArguments: tracker.arguments,
+                },
+            delta: args,
+          };
           yield {
             type: 'stream:tool-call-delta',
             toolName: tracker.toolName,
