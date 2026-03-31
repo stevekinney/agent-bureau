@@ -56,6 +56,14 @@ const entrypoints = [
   './src/streaming/stream-state-machine.ts',
   './src/streaming/enhanced-streaming.ts',
   './src/streaming/backpressure-buffer.ts',
+  './src/retry/index.ts',
+  './src/retry/types.ts',
+  './src/retry/jitter.ts',
+  './src/retry/overflow-mutator.ts',
+  './src/retry/tool-removal-mutator.ts',
+  './src/retry/temperature-escalation-mutator.ts',
+  './src/retry/schema-error-mutator.ts',
+  './src/retry/compose-mutators.ts',
 ];
 
 const root = './src';

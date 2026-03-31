@@ -234,6 +234,7 @@ describe('streamEventToFrame', () => {
     const event: StreamEvent = {
       type: 'stream:tool-call-delta',
       toolName: 'search',
+      blockId: 'block-1',
       partialArguments: '{"query":',
     };
 
@@ -249,6 +250,7 @@ describe('streamEventToFrame', () => {
     const event: StreamEvent = {
       type: 'stream:tool-call-complete',
       toolName: 'search',
+      blockId: 'block-2',
       arguments: { query: 'test' },
     };
 

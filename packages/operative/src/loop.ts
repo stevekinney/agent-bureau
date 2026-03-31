@@ -31,6 +31,7 @@ import {
   UsageAccumulatedEvent,
 } from './events';
 import type { ErrorRecoveryAction } from './hooks/types';
+import { addJitter } from './retry/jitter';
 import type { ToolChoice } from './structured-output/types';
 import { zodToJsonSchema } from './structured-output/zod-to-json-schema';
 import type {
@@ -127,10 +128,11 @@ async function callGenerateWithRetry(
     return generate(context);
   }
 
+  let currentContext = context;
   let lastError: unknown;
   for (let attempt = 1; attempt <= retry.attempts; attempt++) {
     try {
-      return await generate(context);
+      return await generate(currentContext);
     } catch (error) {
       lastError = error;
 
@@ -141,22 +143,38 @@ async function callGenerateWithRetry(
         if (!shouldContinue) break;
       }
 
-      emitter?.dispatch(new GenerateRetryEvent(context.step, attempt, error));
+      // Apply retry mutator if provided
+      let mutated = false;
+      let mutationDescription: string | undefined;
+      if (retry.mutate) {
+        const mutatedContext = await retry.mutate(currentContext, error, attempt);
+        if (mutatedContext !== undefined) {
+          currentContext = mutatedContext;
+          mutated = true;
+          mutationDescription = `Context mutated on attempt ${attempt}`;
+        }
+      }
 
-      const delayMs = resolveDelay(retry.delay, attempt);
+      emitter?.dispatch(
+        new GenerateRetryEvent(currentContext.step, attempt, error, mutated, mutationDescription),
+      );
+
+      const rawDelay = resolveDelay(retry.delay, attempt);
+      const delayMs = retry.jitter ? addJitter(rawDelay, { maxJitter: retry.maxJitter }) : rawDelay;
+
       if (delayMs > 0) {
-        if (context.signal?.aborted) break;
+        if (currentContext.signal?.aborted) break;
         await new Promise<void>((resolve) => {
           const timer = setTimeout(resolve, delayMs);
-          if (context.signal) {
+          if (currentContext.signal) {
             const onAbort = () => {
               clearTimeout(timer);
               resolve();
             };
-            context.signal.addEventListener('abort', onAbort, { once: true });
+            currentContext.signal.addEventListener('abort', onAbort, { once: true });
           }
         });
-        if (context.signal?.aborted) break;
+        if (currentContext.signal?.aborted) break;
       }
     }
   }

@@ -177,6 +177,21 @@ export type {
   RunStartContext,
 } from './hooks/index';
 export { composeHooks, everyNSteps, onlyOnStep, runOnce, withTimeout } from './hooks/index';
+export type {
+  JitterOptions,
+  OverflowMutatorOptions,
+  RetryMutator,
+  TemperatureEscalationOptions,
+} from './retry/index';
+export {
+  addJitter,
+  composeMutators,
+  createOverflowMutator,
+  createSchemaErrorMutator,
+  createTemperatureEscalationMutator,
+  createToolRemovalMutator,
+  RETRY_TEMPERATURE_KEY,
+} from './retry/index';
 export { run } from './run';
 export type {
   CreateChunkedTaskOptions,

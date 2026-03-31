@@ -195,11 +195,23 @@ export class GenerateRetryEvent extends Event {
   readonly step: number;
   readonly attempt: number;
   readonly error: unknown;
-  constructor(step: number, attempt: number, error: unknown) {
+  /** Whether the retry context was mutated by a RetryMutator. */
+  readonly mutated: boolean;
+  /** Human-readable description of the mutation, if any. */
+  readonly mutationDescription?: string;
+  constructor(
+    step: number,
+    attempt: number,
+    error: unknown,
+    mutated = false,
+    mutationDescription?: string,
+  ) {
     super(GenerateRetryEvent.type);
     this.step = step;
     this.attempt = attempt;
     this.error = error;
+    this.mutated = mutated;
+    this.mutationDescription = mutationDescription;
   }
 }
 
