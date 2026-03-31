@@ -157,6 +157,40 @@ export {
 } from './events';
 export { ContextBudgetWarningEvent } from './events';
 export { composeGenerate, createFallbackGenerate } from './generate-middleware';
+export type {
+  CodeSafetyValidatorOptions,
+  DetectionResult,
+  DetectorContext,
+  GroundingValidatorOptions,
+  GuardrailHooks,
+  GuardrailsOptions,
+  GuardrailTriggeredEvent,
+  InputDetector,
+  InputGuardrailOptions,
+  InputLengthDetectorOptions,
+  OutputGuardrailOptions,
+  OutputGuardrailTriggeredEvent,
+  OutputValidator,
+  PromptInjectionDetectorOptions,
+  SessionTaintedEvent,
+  SessionTaintOptions,
+  SessionTaintTracker,
+  TopicBoundaryDetectorOptions,
+  ValidationResult,
+  ValidatorContext,
+} from './guardrails/index';
+export {
+  createCodeSafetyValidator,
+  createGroundingValidator,
+  createGuardrails,
+  createInputGuardrail,
+  createInputLengthDetector,
+  createOutputGuardrail,
+  createOutputPIIValidator,
+  createPromptInjectionDetector,
+  createSessionTaintTracker,
+  createTopicBoundaryDetector,
+} from './guardrails/index';
 export type { OperativeHookMap } from './hooks';
 export type {
   AfterCompactionHookContext,
