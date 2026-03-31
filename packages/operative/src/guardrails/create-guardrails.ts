@@ -33,6 +33,7 @@ export function createGuardrails(options: GuardrailsOptions): GuardrailHooks {
     const hook = createInputGuardrail({
       ...input,
       detectors: activeDetectors,
+      getSessionTainted: () => taintTracker.isTainted(),
       onTriggered: (event) => {
         // Wire taint: if confidence exceeds threshold, taint the session
         if (event.confidence >= taintThreshold) {

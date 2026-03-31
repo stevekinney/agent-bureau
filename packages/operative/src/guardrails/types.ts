@@ -38,6 +38,8 @@ export interface InputGuardrailOptions {
   action?: 'block' | 'warn' | 'sanitize';
   onTriggered?: (event: GuardrailTriggeredEvent) => void;
   mode?: 'parallel' | 'sequential';
+  /** Getter that returns the current session taint state. When provided, detectors receive the live value. */
+  getSessionTainted?: () => boolean;
 }
 
 /** Context provided to output validators. */

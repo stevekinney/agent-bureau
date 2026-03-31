@@ -39,7 +39,8 @@ function createBlockResponse(): GenerateResponse {
  * from crashing the agent loop.
  */
 export function createInputGuardrail(options: InputGuardrailOptions): PrepareStepHook {
-  const { detectors, action = 'block', onTriggered, mode = 'parallel' } = options;
+  const { detectors, action = 'block', onTriggered, mode = 'parallel', getSessionTainted } =
+    options;
 
   return async (context: StepContext): Promise<void | GenerateResponse> => {
     const input = getLastUserMessageText(context);
@@ -49,7 +50,7 @@ export function createInputGuardrail(options: InputGuardrailOptions): PrepareSte
     const detectorContext: DetectorContext = {
       step: context.step,
       conversationLength: messages.length,
-      sessionTainted: false,
+      sessionTainted: getSessionTainted?.() ?? false,
     };
 
     let topResult: { result: DetectionResult; detectorName: string } | undefined;
@@ -102,8 +103,23 @@ export function createInputGuardrail(options: InputGuardrailOptions): PrepareSte
     }
 
     if (action === 'sanitize' && topResult.result.sanitized) {
-      // Replace the last user message with the sanitized version
-      context.conversation.appendUserMessage(topResult.result.sanitized);
+      // Replace the last user message content with the sanitized version.
+      // redactMessageAtPosition replaces the message content in-place (using
+      // the sanitized text as the placeholder) rather than appending a new message.
+      const allMessages = context.conversation.getMessages();
+      let lastUserPosition = -1;
+      for (let i = allMessages.length - 1; i >= 0; i--) {
+        if (allMessages[i]?.role === 'user') {
+          lastUserPosition = i;
+          break;
+        }
+      }
+      if (lastUserPosition >= 0) {
+        context.conversation.redactMessageAtPosition(
+          lastUserPosition,
+          topResult.result.sanitized,
+        );
+      }
       return;
     }
 
