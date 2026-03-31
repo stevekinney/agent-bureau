@@ -17,7 +17,12 @@ import {
   RunRemovedEvent,
 } from './events';
 import { createRuntimeComposition } from './runtime-composition';
-import { serializeActionDetail, serializeRunDetail, serializeRunState } from './serialization';
+import {
+  serializeActionDetail,
+  serializeRunDetail,
+  serializeRunState,
+  serializeUnknownError,
+} from './serialization';
 import type {
   Bureau,
   BureauOptions,
@@ -221,6 +226,13 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     void task.catch(() => {});
   }
 
+  function disposeRegisteredStreamListeners(listeners: Array<() => void>): void {
+    while (listeners.length > 0) {
+      const disposeListener = listeners.pop();
+      disposeListener?.();
+    }
+  }
+
   async function createRunFromRequest(request: CreateRunRequest): Promise<RunSummary> {
     validateCreateRunRequest(request);
 
@@ -275,6 +287,12 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       }
     }
 
+    await saveSession(sessionId, conversation, {
+      lastRunId: runId,
+      lastRunStatus: 'running',
+      lastUserMessage: request.message,
+    });
+
     const activeRun = createRun({
       generate: runRuntime.generate,
       toolbox: runRuntime.toolbox,
@@ -286,33 +304,25 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       validateResponse: runRuntime.validateResponse,
     });
 
-    store.register(activeRun, runId);
-    runToSessionId.set(runId, sessionId);
-
-    await saveSession(sessionId, conversation, {
-      lastRunId: runId,
-      lastRunStatus: 'running',
-      lastUserMessage: request.message,
-    });
-
     activeRun.once('run.completed', (event) => {
-      for (const disposeListener of disposeStreamListeners) {
-        disposeListener();
-      }
+      disposeRegisteredStreamListeners(disposeStreamListeners);
+
+      const lastRunStatus = event.finishReason === 'error' ? 'error' : 'completed';
 
       persistSessionUpdate(
         saveSession(sessionId, event.conversation, {
           lastRunId: runId,
-          lastRunStatus: 'completed',
+          lastRunStatus,
           lastFinishReason: event.finishReason,
+          ...(event.finishReason === 'error'
+            ? { lastError: serializeUnknownError(event.error) }
+            : {}),
         }),
       );
     });
 
     activeRun.once('run.aborted', () => {
-      for (const disposeListener of disposeStreamListeners) {
-        disposeListener();
-      }
+      disposeRegisteredStreamListeners(disposeStreamListeners);
 
       persistSessionUpdate(
         saveSession(sessionId, conversation, {
@@ -323,21 +333,19 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     });
 
     activeRun.once('run.error', (event) => {
-      for (const disposeListener of disposeStreamListeners) {
-        disposeListener();
-      }
+      disposeRegisteredStreamListeners(disposeStreamListeners);
 
       persistSessionUpdate(
         saveSession(sessionId, conversation, {
           lastRunId: runId,
           lastRunStatus: 'error',
-          lastError:
-            event.error instanceof Error
-              ? event.error.message
-              : JSON.stringify(event.error ?? null),
+          lastError: serializeUnknownError(event.error),
         }),
       );
     });
+
+    store.register(activeRun, runId);
+    runToSessionId.set(runId, sessionId);
 
     return serializeRunState(store.getRun(runId)!, sessionId);
   }

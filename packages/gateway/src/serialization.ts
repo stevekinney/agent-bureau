@@ -56,6 +56,22 @@ function toJsonSafe(value: unknown, seen = new WeakSet<object>()): unknown {
   return safeStringify(value);
 }
 
+export function serializeUnknownError(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  if (typeof error === 'string') {
+    return error;
+  }
+
+  if (error === null || error === undefined) {
+    return 'null';
+  }
+
+  return safeStringify(toJsonSafe(error));
+}
+
 /**
  * Removes the `conversation` property from a record, returning a shallow copy
  * without it. Returns the original record when no `conversation` key is present.
@@ -77,14 +93,7 @@ function serializeError(record: Record<string, unknown>): Record<string, unknown
 
   const { error, ...rest } = record;
 
-  const serialized =
-    error instanceof Error
-      ? error.message
-      : typeof error === 'string'
-        ? error
-        : error !== undefined
-          ? safeStringify(error)
-          : undefined;
+  const serialized = error !== undefined ? serializeUnknownError(error) : undefined;
 
   return { ...rest, error: serialized };
 }
@@ -150,12 +159,7 @@ export function serializeRunState(runState: RunState, sessionId?: string): RunSu
       total: runState.usage.total,
     },
     finishReason: runState.finishReason,
-    error:
-      runState.error instanceof Error
-        ? runState.error.message
-        : runState.error !== undefined
-          ? safeStringify(runState.error)
-          : undefined,
+    error: runState.error !== undefined ? serializeUnknownError(runState.error) : undefined,
     actionCount: runState.actions.length,
   };
 }

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test';
 import type { ActiveRun } from 'operative';
 import type { RunState } from 'sentinel';
 
-import { serializeActionDetail, serializeRunState } from './serialization';
+import { serializeActionDetail, serializeRunState, serializeUnknownError } from './serialization';
 
 describe('serializeRunState', () => {
   it('maps RunState to a JSON-safe RunSummary', () => {
@@ -210,5 +210,18 @@ describe('serializeActionDetail', () => {
     const result = serializeActionDetail('generate.retry', detail) as Record<string, unknown>;
     expect(result['error']).toBe('Timeout');
     expect(result['attempt']).toBe(3);
+  });
+});
+
+describe('serializeUnknownError', () => {
+  it('serializes circular objects without throwing', () => {
+    const error: Record<string, unknown> = {};
+    error['self'] = error;
+
+    expect(serializeUnknownError(error)).toBe('{"self":"[Circular]"}');
+  });
+
+  it('serializes bigint-containing objects without throwing', () => {
+    expect(serializeUnknownError({ value: 42n })).toBe('{"value":"42"}');
   });
 });

@@ -2,7 +2,7 @@ import { createToolbox } from 'armorer';
 import { describe, expect, it } from 'bun:test';
 import type { GenerateFunction, Toolbox } from 'operative';
 import { createStore } from 'sentinel';
-import { createMemoryKeyValueStore } from 'storage';
+import { createMemoryKeyValueStore, type KeyValueStore } from 'storage';
 
 import { BureauError, createBureau } from './create-bureau';
 import { DEFAULT_MAXIMUM_STEPS } from './types';
@@ -110,6 +110,78 @@ describe('createBureau', () => {
     const session = await bureau.getSession(firstRun.sessionId);
     expect(session).toBeDefined();
     expect(session?.conversationHistory.ids.length).toBeGreaterThanOrEqual(4);
+  });
+
+  it('persists completed session metadata for fast runs', async () => {
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      persistence: createMemoryKeyValueStore(),
+    });
+
+    const run = await bureau.createRun({ message: 'Fast completion' });
+    await waitForRunCompletion();
+
+    const session = await bureau.getSession(run.sessionId);
+    expect(session?.metadata['lastRunId']).toBe(run.id);
+    expect(session?.metadata['lastRunStatus']).toBe('completed');
+  });
+
+  it('does not register a run when initial session persistence fails', async () => {
+    const backingStore = createMemoryKeyValueStore();
+    const failingStore: KeyValueStore = {
+      async get(key) {
+        return backingStore.get(key);
+      },
+      async set(key, value) {
+        if (key.startsWith('agent-session:')) {
+          throw new Error('persistence failed');
+        }
+
+        await backingStore.set(key, value);
+      },
+      async delete(key) {
+        await backingStore.delete(key);
+      },
+      async list(prefix) {
+        return backingStore.list(prefix);
+      },
+    };
+
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      persistence: failingStore,
+    });
+
+    const error = await bureau.createRun({ message: 'Ghost run?' }).then(
+      () => undefined,
+      (rejection) => rejection,
+    );
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe('persistence failed');
+    expect(bureau.listRuns()).toHaveLength(0);
+  });
+
+  it('persists error session metadata when runs finish with an error', async () => {
+    const generate: GenerateFunction = async () => {
+      throw new Error('Explode');
+    };
+
+    const bureau = await createBureau({
+      generate,
+      toolbox: createEmptyToolbox(),
+      persistence: createMemoryKeyValueStore(),
+    });
+
+    const run = await bureau.createRun({ message: 'Explode' });
+    await waitForRunCompletion();
+
+    const session = await bureau.getSession(run.sessionId);
+    expect(session?.metadata['lastRunId']).toBe(run.id);
+    expect(session?.metadata['lastRunStatus']).toBe('error');
+    expect(session?.metadata['lastError']).toBe('Explode');
   });
 
   it('lists runs and filters them by status', async () => {
