@@ -8,6 +8,23 @@ export type {
   TokenBucketOptions,
 } from './backpressure';
 export { createAdaptiveBackoff, createSlidingWindow, createTokenBucket } from './backpressure';
+export type {
+  CacheEntry,
+  CacheHitEvent,
+  CacheKeyFunction,
+  CacheMetrics,
+  CacheMetricsOptions,
+  CacheMissEvent,
+  CacheOptions,
+} from './cache/index';
+export {
+  clearCache,
+  conversationHashKey,
+  invalidateCache,
+  lastMessageKey,
+  withCache,
+  withCacheMetrics,
+} from './cache/index';
 export type { RepeatingToolCallsOptions, TokenBudgetOptions } from './conditions/index';
 export { stopWhen } from './conditions/index';
 export type {
