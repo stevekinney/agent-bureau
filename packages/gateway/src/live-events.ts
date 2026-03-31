@@ -78,7 +78,9 @@ export class LiveFrameBroker {
   }
 
   broadcast(frame: ServerFrame): void {
-    for (const subscriber of this.subscribers.values()) {
+    const failedSubscribers: object[] = [];
+
+    for (const [key, subscriber] of this.subscribers.entries()) {
       if (isSchedulerFrame(frame)) {
         if (!subscriber.includeScheduler) {
           continue;
@@ -94,7 +96,15 @@ export class LiveFrameBroker {
         }
       }
 
-      subscriber.sendFrame(frame);
+      try {
+        subscriber.sendFrame(frame);
+      } catch {
+        failedSubscribers.push(key);
+      }
+    }
+
+    for (const key of failedSubscribers) {
+      this.removeSubscriber(key);
     }
   }
 

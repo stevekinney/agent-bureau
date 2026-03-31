@@ -1,6 +1,7 @@
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useReducer, useRef, useState } from 'react';
 
 import type { RunDetail, ServerFrame } from '../../types';
+import { INITIAL_TOOL_ACTIVITY_STATE, reduceToolActivity } from './tool-activity';
 
 type TimelineEvent = {
   event: string;
@@ -31,7 +32,10 @@ export function useRunDetail(initialRun: RunDetail): UseRunDetailResult {
   const [run, setRun] = useState<RunDetail>(initialRun);
   const [events, setEvents] = useState<TimelineEvent[]>(timelineFromRun(initialRun));
   const [streamingAssistantContent, setStreamingAssistantContent] = useState('');
-  const [toolActivity, setToolActivity] = useState<string[]>([]);
+  const [toolActivityState, dispatchToolActivity] = useReducer(
+    reduceToolActivity,
+    INITIAL_TOOL_ACTIVITY_STATE,
+  );
   const runIdRef = useRef(initialRun.id);
 
   const refresh = useCallback(async () => {
@@ -81,7 +85,11 @@ export function useRunDetail(initialRun: RunDetail): UseRunDetailResult {
           setStreamingAssistantContent(frame.accumulated);
           break;
         case 'stream:tool-call-start':
-          setToolActivity((previous) => [...previous, `Calling ${frame.toolName}`]);
+          dispatchToolActivity({
+            type: 'start',
+            blockId: frame.blockId,
+            message: `Calling ${frame.toolName}`,
+          });
           setEvents((previous) => [
             ...previous,
             {
@@ -92,24 +100,27 @@ export function useRunDetail(initialRun: RunDetail): UseRunDetailResult {
           ]);
           break;
         case 'stream:tool-call-delta':
-          setToolActivity((previous) => {
-            const next = [...previous];
-            if (next.length === 0) {
-              next.push(`${frame.toolName}: ${frame.partialArgs}`);
-            } else {
-              next[next.length - 1] = `${frame.toolName}: ${frame.partialArgs}`;
-            }
-            return next;
+          dispatchToolActivity({
+            type: 'update',
+            blockId: frame.blockId,
+            message: `${frame.toolName}: ${frame.partialArgs}`,
           });
           break;
         case 'stream:tool-call-complete':
-          setToolActivity((previous) => [...previous, `${frame.toolName} completed`]);
+          dispatchToolActivity({
+            type: 'complete',
+            blockId: frame.blockId,
+            message: `${frame.toolName} completed`,
+          });
           break;
         case 'stream:complete':
           setStreamingAssistantContent('');
           break;
         case 'stream:error':
-          setToolActivity((previous) => [...previous, `Streaming error: ${frame.error}`]);
+          dispatchToolActivity({
+            type: 'append',
+            message: `Streaming error: ${frame.error}`,
+          });
           break;
       }
     },
@@ -120,7 +131,7 @@ export function useRunDetail(initialRun: RunDetail): UseRunDetailResult {
     run,
     events,
     streamingAssistantContent,
-    toolActivity,
+    toolActivity: [...toolActivityState.entries],
     handleMessage,
     refresh,
   };

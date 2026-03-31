@@ -184,6 +184,22 @@ describe('createBureau', () => {
     expect(session?.metadata['lastError']).toBe('Explode');
   });
 
+  it('fails runs when the model emits tool calls without a configured toolbox', async () => {
+    const generate: GenerateFunction = async () => ({
+      content: '',
+      toolCalls: [{ name: 'missing_tool', arguments: {} }],
+    });
+
+    const bureau = await createBureau({ generate });
+
+    const run = await bureau.createRun({ message: 'Need a tool' });
+    await waitForRunCompletion();
+
+    const detail = bureau.getRun(run.id);
+    expect(detail?.status).toBe('error');
+    expect(detail?.error).toContain('No toolbox configured but tool calls were received');
+  });
+
   it('lists runs and filters them by status', async () => {
     const bureau = await createBureau({
       generate: createMockGenerate(),

@@ -1,6 +1,7 @@
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useReducer, useRef, useState } from 'react';
 
 import type { RunSummary, ServerFrame } from '../../types';
+import { INITIAL_TOOL_ACTIVITY_STATE, reduceToolActivity } from './tool-activity';
 
 export interface ChatMessage {
   role: 'user' | 'assistant' | 'tool';
@@ -64,7 +65,10 @@ export function useChat({ onRunCreated, subscribe, unsubscribe }: UseChatOptions
   const [error, setError] = useState<string | undefined>(undefined);
   const [streamingAssistantContent, setStreamingAssistantContent] = useState('');
   const streamingContentRef = useRef('');
-  const [toolActivity, setToolActivity] = useState<string[]>([]);
+  const [toolActivityState, dispatchToolActivity] = useReducer(
+    reduceToolActivity,
+    INITIAL_TOOL_ACTIVITY_STATE,
+  );
 
   const send = useCallback(
     async (message: string) => {
@@ -72,7 +76,7 @@ export function useChat({ onRunCreated, subscribe, unsubscribe }: UseChatOptions
       setError(undefined);
       setStreamingAssistantContent('');
       streamingContentRef.current = '';
-      setToolActivity([]);
+      dispatchToolActivity({ type: 'reset' });
       setMessages((previous) => [...previous, { role: 'user', content: message }]);
 
       try {
@@ -149,24 +153,25 @@ export function useChat({ onRunCreated, subscribe, unsubscribe }: UseChatOptions
         setStreamingAssistantContent(frame.accumulated);
         break;
       case 'stream:tool-call-start':
-        setToolActivity((previous) => [...previous, `Calling ${frame.toolName}`]);
+        dispatchToolActivity({
+          type: 'start',
+          blockId: frame.blockId,
+          message: `Calling ${frame.toolName}`,
+        });
         break;
       case 'stream:tool-call-delta':
-        setToolActivity((previous) => {
-          if (previous.length === 0) {
-            return [`${frame.toolName}: ${frame.partialArgs}`];
-          }
-
-          const next = [...previous];
-          next[next.length - 1] = `${frame.toolName}: ${frame.partialArgs}`;
-          return next;
+        dispatchToolActivity({
+          type: 'update',
+          blockId: frame.blockId,
+          message: `${frame.toolName}: ${frame.partialArgs}`,
         });
         break;
       case 'stream:tool-call-complete':
-        setToolActivity((previous) => [
-          ...previous,
-          `${frame.toolName} completed ${summarizeToolArguments(frame.arguments)}`.trim(),
-        ]);
+        dispatchToolActivity({
+          type: 'complete',
+          blockId: frame.blockId,
+          message: `${frame.toolName} completed ${summarizeToolArguments(frame.arguments)}`.trim(),
+        });
         break;
       case 'subscribed':
       case 'unsubscribed':
@@ -183,7 +188,7 @@ export function useChat({ onRunCreated, subscribe, unsubscribe }: UseChatOptions
     error,
     sessionId,
     streamingAssistantContent,
-    toolActivity,
+    toolActivity: [...toolActivityState.entries],
     send,
     handleMessage,
   };

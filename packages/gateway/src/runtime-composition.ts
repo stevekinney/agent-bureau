@@ -1,4 +1,10 @@
-import { combineToolboxes, createTool, createToolbox, type Toolbox } from 'armorer';
+import {
+  combineToolboxes,
+  createTool,
+  createToolbox,
+  type Toolbox,
+  type ToolCallInput,
+} from 'armorer';
 import {
   createAnthropicGenerate,
   createAnthropicGenerateStream,
@@ -48,6 +54,9 @@ import type {
   ToolPolicy,
   ToolSummary,
 } from './types';
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- Toolbox generic variance; gateway never inspects the type parameter
+type GatewayToolbox = Toolbox<any>;
 
 function isMemoryInstance(value: CreateMemoryOptions | Memory): value is Memory {
   return typeof (value as Memory).remember === 'function';
@@ -411,6 +420,26 @@ function createSkillManagementToolbox(
   ]);
 }
 
+function createUnavailableToolbox(): GatewayToolbox {
+  const emptyToolbox = createToolbox([], { context: {} });
+  const execute = ((
+    toolCalls: ToolCallInput | ToolCallInput[],
+    executionOptions?: Parameters<GatewayToolbox['execute']>[1],
+  ) => {
+    const normalizedToolCalls = Array.isArray(toolCalls) ? toolCalls : [toolCalls];
+    if (normalizedToolCalls.length > 0) {
+      throw new Error('No toolbox configured but tool calls were received');
+    }
+
+    return emptyToolbox.execute([], executionOptions);
+  }) as unknown as GatewayToolbox['execute'];
+
+  return {
+    ...emptyToolbox,
+    execute,
+  };
+}
+
 export interface RuntimeComposition {
   kv: KeyValueStore | undefined;
   memory: Memory | undefined;
@@ -450,8 +479,10 @@ export async function createRuntimeComposition(
   }
 
   const sessionStore = kv ? createSessionStore(kv) : undefined;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Toolbox generic variance; gateway never inspects the type parameter
-  const baseToolbox: Toolbox<any> = options.toolbox ?? createToolbox([], { context: {} });
+  const baseToolbox: GatewayToolbox = options.toolbox ?? createToolbox([], { context: {} });
+  const hasSkillTools = options.skills !== undefined && options.skills.includeTools !== false;
+  const fallbackToolbox: GatewayToolbox =
+    options.toolbox !== undefined || hasSkillTools ? baseToolbox : createUnavailableToolbox();
 
   const baseProviders =
     options.providers ??
@@ -552,8 +583,8 @@ export async function createRuntimeComposition(
     schedulerGenerate && options.scheduler?.enabled !== false
       ? createScheduler({
           generate: schedulerGenerate,
-          // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment -- Toolbox<any> variance; see baseToolbox annotation
-          toolbox: baseToolbox,
+          // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment -- GatewayToolbox variance; scheduler does not inspect tool tuple types
+          toolbox: fallbackToolbox,
           idleDelay: options.scheduler?.idleDelay ?? 1000,
         })
       : undefined;
@@ -572,7 +603,7 @@ export async function createRuntimeComposition(
     }
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Toolbox generic variance; gateway never inspects the type parameter
-    let toolbox: Toolbox<any> = baseToolbox;
+    let toolbox: Toolbox<any> = fallbackToolbox;
     const prepareStep: PrepareStepHook[] = [];
     const onStep: OnStepHook[] = [];
     const validateResponse: ValidateResponseHook[] = [];
