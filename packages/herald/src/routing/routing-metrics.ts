@@ -23,27 +23,28 @@ export function withRoutingMetrics(options: RoutingOptions): RoutingMetricsResul
       .map((r) => [r.name, r.costPerMillionTokens!]),
   );
 
+  // Per-call route capture using a WeakMap keyed by context object.
+  // Each concurrent call writes to its own context key, avoiding shared mutable state.
+  const routeByContext = new WeakMap<GenerateContext, string>();
+
+  const innerGenerate = createRoutingGenerate({
+    ...options,
+    onRoute: (event) => {
+      routeByContext.set(event.context, event.selectedRoute);
+      options.onRoute?.(event);
+    },
+  });
+
   const wrappedGenerate: GenerateFunction = async (
     context: GenerateContext,
   ): Promise<GenerateResponse> => {
-    // Per-call variable to avoid race conditions under concurrent invocations
-    let selectedRoute = '';
-
-    const innerGenerate = createRoutingGenerate({
-      ...options,
-      onRoute: (event) => {
-        selectedRoute = event.selectedRoute;
-        options.onRoute?.(event);
-      },
-    });
-
     const start = performance.now();
 
     try {
       const response = await innerGenerate(context);
       const elapsed = performance.now() - start;
 
-      const route = selectedRoute;
+      const route = routeByContext.get(context) ?? '';
 
       // Record count
       routeCounts.set(route, (routeCounts.get(route) ?? 0) + 1);
@@ -64,10 +65,11 @@ export function withRoutingMetrics(options: RoutingOptions): RoutingMetricsResul
       const elapsed = performance.now() - start;
 
       // Record latency even on failure
-      if (selectedRoute) {
-        const latencies = routeLatencies.get(selectedRoute) ?? [];
+      const failedRoute = routeByContext.get(context);
+      if (failedRoute) {
+        const latencies = routeLatencies.get(failedRoute) ?? [];
         latencies.push(elapsed);
-        routeLatencies.set(selectedRoute, latencies);
+        routeLatencies.set(failedRoute, latencies);
       }
 
       throw error;

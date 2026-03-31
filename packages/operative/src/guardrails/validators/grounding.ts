@@ -2,7 +2,10 @@ import type { OutputValidator, ValidationResult, ValidatorContext } from '../typ
 
 /** Options for configuring the grounding validator. */
 export interface GroundingValidatorOptions {
-  conversationText?: string;
+  /** Conversation text to ground claims against. Accepts a string or a getter
+   *  function that returns the current conversation text on each validation call,
+   *  which is necessary for live agent sessions where the conversation grows. */
+  conversationText?: string | (() => string);
   groundingThreshold?: number;
 }
 
@@ -70,7 +73,9 @@ function isGrounded(claim: string, conversationText: string): boolean {
  * ratio of grounded claims falls below the threshold, the output is flagged as ungrounded.
  */
 export function createGroundingValidator(options: GroundingValidatorOptions = {}): OutputValidator {
-  const { conversationText = '', groundingThreshold = 0.8 } = options;
+  const { conversationText: rawConversationText = '', groundingThreshold = 0.8 } = options;
+  const resolveConversationText =
+    typeof rawConversationText === 'function' ? rawConversationText : () => rawConversationText;
 
   return {
     name: 'grounding',
@@ -81,7 +86,8 @@ export function createGroundingValidator(options: GroundingValidatorOptions = {}
         return Promise.resolve({ valid: true, confidence: 0, category: 'grounding' });
       }
 
-      const groundedCount = claims.filter((claim) => isGrounded(claim, conversationText)).length;
+      const currentText = resolveConversationText();
+      const groundedCount = claims.filter((claim) => isGrounded(claim, currentText)).length;
       const ratio = groundedCount / claims.length;
 
       if (ratio >= groundingThreshold) {
