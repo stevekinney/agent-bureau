@@ -127,6 +127,14 @@
       "require": "./dist/fallover/index.cjs",
       "default": "./dist/fallover/index.js",
       "types": "./dist/fallover/index.d.ts"
+    },
+    "./routing": {
+      "bun": "./dist/routing/index.js",
+      "browser": "./dist/routing/index.js",
+      "import": "./dist/routing/index.js",
+      "require": "./dist/routing/index.cjs",
+      "default": "./dist/routing/index.js",
+      "types": "./dist/routing/index.d.ts"
     }
   },
   "main": "./dist/index.js",

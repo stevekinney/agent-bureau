@@ -9,6 +9,7 @@ import type { AgentSession } from './agent-session';
 import type { BackpressureStrategy } from './backpressure';
 import type { ActiveRun } from './create-run';
 import type { OperativeHookMap } from './hooks';
+import type { RetryMutator } from './retry/types';
 import type { ResponseFormat, ToolChoice } from './structured-output/types';
 
 export type { Toolbox, ToolExecuteOptions, ToolExecutionResult } from 'armorer';
@@ -42,6 +43,12 @@ export interface RetryOptions {
   attempts: number;
   delay?: number | ((attempt: number) => number);
   shouldRetry?: (error: unknown, attempt: number) => boolean | Promise<boolean>;
+  /** Transforms the generate context before a retry attempt. */
+  mutate?: RetryMutator;
+  /** Whether to add random jitter to the retry delay. Defaults to false. */
+  jitter?: boolean;
+  /** Maximum jitter offset in milliseconds. Defaults to half the delay. */
+  maxJitter?: number;
 }
 
 /**

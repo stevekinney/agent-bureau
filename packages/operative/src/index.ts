@@ -8,6 +8,23 @@ export type {
   TokenBucketOptions,
 } from './backpressure';
 export { createAdaptiveBackoff, createSlidingWindow, createTokenBucket } from './backpressure';
+export type {
+  CacheEntry,
+  CacheHitEvent,
+  CacheKeyFunction,
+  CacheMetrics,
+  CacheMetricsOptions,
+  CacheMissEvent,
+  CacheOptions,
+} from './cache/index';
+export {
+  clearCache,
+  conversationHashKey,
+  invalidateCache,
+  lastMessageKey,
+  withCache,
+  withCacheMetrics,
+} from './cache/index';
 export type { RepeatingToolCallsOptions, TokenBudgetOptions } from './conditions/index';
 export { stopWhen } from './conditions/index';
 export type {
@@ -157,6 +174,40 @@ export {
 } from './events';
 export { ContextBudgetWarningEvent } from './events';
 export { composeGenerate, createFallbackGenerate } from './generate-middleware';
+export type {
+  CodeSafetyValidatorOptions,
+  DetectionResult,
+  DetectorContext,
+  GroundingValidatorOptions,
+  GuardrailHooks,
+  GuardrailsOptions,
+  GuardrailTriggeredEvent,
+  InputDetector,
+  InputGuardrailOptions,
+  InputLengthDetectorOptions,
+  OutputGuardrailOptions,
+  OutputGuardrailTriggeredEvent,
+  OutputValidator,
+  PromptInjectionDetectorOptions,
+  SessionTaintedEvent,
+  SessionTaintOptions,
+  SessionTaintTracker,
+  TopicBoundaryDetectorOptions,
+  ValidationResult,
+  ValidatorContext,
+} from './guardrails/index';
+export {
+  createCodeSafetyValidator,
+  createGroundingValidator,
+  createGuardrails,
+  createInputGuardrail,
+  createInputLengthDetector,
+  createOutputGuardrail,
+  createOutputPIIValidator,
+  createPromptInjectionDetector,
+  createSessionTaintTracker,
+  createTopicBoundaryDetector,
+} from './guardrails/index';
 export type { OperativeHookMap } from './hooks';
 export type {
   AfterCompactionHookContext,
@@ -177,6 +228,21 @@ export type {
   RunStartContext,
 } from './hooks/index';
 export { composeHooks, everyNSteps, onlyOnStep, runOnce, withTimeout } from './hooks/index';
+export type {
+  JitterOptions,
+  OverflowMutatorOptions,
+  RetryMutator,
+  TemperatureEscalationOptions,
+} from './retry/index';
+export {
+  addJitter,
+  composeMutators,
+  createOverflowMutator,
+  createSchemaErrorMutator,
+  createTemperatureEscalationMutator,
+  createToolRemovalMutator,
+  RETRY_TEMPERATURE_KEY,
+} from './retry/index';
 export { run } from './run';
 export type {
   CreateChunkedTaskOptions,
