@@ -143,37 +143,52 @@ function resolveProviderGenerate(
   }
 }
 
-function createRoutingStrategy(configuration: RoutingConfiguration) {
+type RoutingResult =
+  | { kind: 'direct'; strategy: ReturnType<typeof createStepBasedStrategy> }
+  | {
+      kind: 'cost-aware';
+      strategy: ReturnType<typeof createCostAwareStrategy>;
+      onUsage: (usage: { total: number } | undefined) => void;
+    };
+
+function createRoutingStrategy(configuration: RoutingConfiguration): RoutingResult {
   switch (configuration.type) {
     case 'step-based':
-      return createStepBasedStrategy({
-        first: configuration.first,
-        middle: configuration.middle,
-        last: configuration.last,
-        middleAfterStep: configuration.middleAfterStep,
-      });
+      return {
+        kind: 'direct',
+        strategy: createStepBasedStrategy({
+          first: configuration.first,
+          middle: configuration.middle,
+          last: configuration.last,
+          middleAfterStep: configuration.middleAfterStep,
+        }),
+      };
     case 'complexity':
-      return createComplexityStrategy({
-        simple: configuration.simple,
-        complex: configuration.complex,
-        frontier: configuration.frontier,
-        scorer(signals) {
-          if (signals.toolCount <= (configuration.simpleMaxTools ?? 2)) {
-            if (signals.lastMessageLength <= (configuration.simpleMaxLength ?? 500)) {
-              return 'simple';
+      return {
+        kind: 'direct',
+        strategy: createComplexityStrategy({
+          simple: configuration.simple,
+          complex: configuration.complex,
+          frontier: configuration.frontier,
+          scorer(signals) {
+            if (signals.toolCount <= (configuration.simpleMaxTools ?? 2)) {
+              if (signals.lastMessageLength <= (configuration.simpleMaxLength ?? 500)) {
+                return 'simple';
+              }
             }
-          }
 
-          if (configuration.frontier && signals.conversationDepth > 20) {
-            return 'frontier';
-          }
+            if (configuration.frontier && signals.conversationDepth > 20) {
+              return 'frontier';
+            }
 
-          return 'complex';
-        },
-      });
+            return 'complex';
+          },
+        }),
+      };
     case 'cost-aware': {
       let spent = 0;
       return {
+        kind: 'cost-aware',
         strategy: createCostAwareStrategy({
           cheap: configuration.cheap,
           expensive: configuration.expensive,
@@ -295,7 +310,11 @@ ${skillElements}
 </available_skills>`;
 }
 
-function createSkillManagementToolbox(provider: SkillProvider, session: SkillSession): Toolbox {
+function createSkillManagementToolbox(
+  provider: SkillProvider,
+  session: SkillSession,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Toolbox generic variance; gateway never inspects the type parameter
+): Toolbox<any> {
   return createToolbox([
     createTool({
       name: 'activate_skill',
@@ -389,7 +408,7 @@ function createSkillManagementToolbox(provider: SkillProvider, session: SkillSes
         };
       },
     }),
-  ]) as unknown as Toolbox;
+  ]);
 }
 
 export interface RuntimeComposition {
@@ -431,11 +450,8 @@ export async function createRuntimeComposition(
   }
 
   const sessionStore = kv ? createSessionStore(kv) : undefined;
-  const baseToolbox =
-    options.toolbox ??
-    (createToolbox([], {
-      context: {},
-    }) as unknown as Toolbox);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Toolbox generic variance; gateway never inspects the type parameter
+  const baseToolbox: Toolbox<any> = options.toolbox ?? createToolbox([], { context: {} });
 
   const baseProviders =
     options.providers ??
@@ -498,6 +514,7 @@ export async function createRuntimeComposition(
     schedulerGenerate && options.scheduler?.enabled !== false
       ? createScheduler({
           generate: schedulerGenerate,
+          // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment -- Toolbox<any> variance; see baseToolbox annotation
           toolbox: baseToolbox,
           idleDelay: options.scheduler?.idleDelay ?? 1000,
         })
@@ -526,15 +543,12 @@ export async function createRuntimeComposition(
         const routingGenerate = createRoutingGenerate({
           routes,
           fallback: routes[0]!.name,
-          strategy:
-            'strategy' in routingConfiguration
-              ? routingConfiguration.strategy
-              : routingConfiguration,
+          strategy: routingConfiguration.strategy,
         });
 
         generate =
-          'onUsage' in routingConfiguration
-            ? withUsageTracking(routingGenerate, (usage) => routingConfiguration.onUsage(usage))
+          routingConfiguration.kind === 'cost-aware'
+            ? withUsageTracking(routingGenerate, routingConfiguration.onUsage)
             : routingGenerate;
       } else if (baseProviders.length > 1) {
         generate = createFalloverGenerate({
@@ -558,7 +572,8 @@ export async function createRuntimeComposition(
 
     generate = applyCache(generate, options.cache, kv);
 
-    let toolbox = baseToolbox;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Toolbox generic variance; gateway never inspects the type parameter
+    let toolbox: Toolbox<any> = baseToolbox;
     const prepareStep: PrepareStepHook[] = [];
     const onStep: OnStepHook[] = [];
     const validateResponse: ValidateResponseHook[] = [];
@@ -593,7 +608,7 @@ export async function createRuntimeComposition(
 
       if (options.skills.includeTools !== false) {
         const skillToolbox = createSkillManagementToolbox(options.skills.provider, skillSession);
-        toolbox = combineToolboxes(toolbox, skillToolbox) as unknown as Toolbox;
+        toolbox = combineToolboxes(toolbox, skillToolbox);
       }
     }
 

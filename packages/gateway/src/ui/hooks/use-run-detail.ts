@@ -79,14 +79,6 @@ export function useRunDetail(initialRun: RunDetail): UseRunDetailResult {
           break;
         case 'stream:text-delta':
           setStreamingAssistantContent(frame.accumulated);
-          setEvents((previous) => [
-            ...previous,
-            {
-              event: frame.type,
-              detail: { content: frame.content },
-              timestamp: Date.now(),
-            },
-          ]);
           break;
         case 'stream:tool-call-start':
           setToolActivity((previous) => [...previous, `Calling ${frame.toolName}`]);

@@ -55,21 +55,6 @@ export class LiveFrameBroker {
     });
   }
 
-  updateSubscriber(key: object, options: LiveFrameSubscriberOptions): void {
-    const subscriber = this.subscribers.get(key);
-    if (!subscriber) {
-      return;
-    }
-
-    if (options.runIds) {
-      subscriber.runIds = new Set(options.runIds);
-    }
-
-    if (options.includeScheduler !== undefined) {
-      subscriber.includeScheduler = options.includeScheduler;
-    }
-  }
-
   subscribe(key: object, runId: string): void {
     const subscriber = this.subscribers.get(key);
     if (!subscriber) {

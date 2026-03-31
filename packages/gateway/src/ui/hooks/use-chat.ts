@@ -63,6 +63,7 @@ export function useChat({ onRunCreated, subscribe, unsubscribe }: UseChatOptions
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | undefined>(undefined);
   const [streamingAssistantContent, setStreamingAssistantContent] = useState('');
+  const streamingContentRef = useRef('');
   const [toolActivity, setToolActivity] = useState<string[]>([]);
 
   const send = useCallback(
@@ -70,6 +71,7 @@ export function useChat({ onRunCreated, subscribe, unsubscribe }: UseChatOptions
       setSending(true);
       setError(undefined);
       setStreamingAssistantContent('');
+      streamingContentRef.current = '';
       setToolActivity([]);
       setMessages((previous) => [...previous, { role: 'user', content: message }]);
 
@@ -110,68 +112,69 @@ export function useChat({ onRunCreated, subscribe, unsubscribe }: UseChatOptions
     [onRunCreated, subscribe, unsubscribe],
   );
 
-  const handleMessage = useCallback(
-    (frame: ServerFrame) => {
-      if (!('runId' in frame) || frame.runId !== runIdRef.current) return;
+  const handleMessage = useCallback((frame: ServerFrame) => {
+    if (!('runId' in frame) || frame.runId !== runIdRef.current) return;
 
-      switch (frame.type) {
-        case 'event': {
-          if (frame.event === 'run.completed') {
-            const detail = frame.detail as { content?: string };
-            const assistantContent = streamingAssistantContent || detail.content;
-            if (assistantContent) {
-              setMessages((previous) => [
-                ...previous,
-                { role: 'assistant', content: assistantContent },
-              ]);
-            }
-            setStreamingAssistantContent('');
+    switch (frame.type) {
+      case 'event': {
+        if (frame.event === 'run.completed') {
+          const detail = frame.detail as { content?: string };
+          const assistantContent = streamingContentRef.current || detail.content;
+          if (assistantContent) {
+            setMessages((previous) => [
+              ...previous,
+              { role: 'assistant', content: assistantContent },
+            ]);
           }
-
-          if (frame.event === 'run.error') {
-            const detail = frame.detail as { error?: string };
-            setError(detail.error ?? 'Run failed');
-            setStreamingAssistantContent('');
-          }
-
-          if (frame.event === 'run.aborted') {
-            setStreamingAssistantContent('');
-          }
-
-          break;
+          streamingContentRef.current = '';
+          setStreamingAssistantContent('');
         }
-        case 'stream:text-delta':
-          setStreamingAssistantContent(frame.accumulated);
-          break;
-        case 'stream:tool-call-start':
-          setToolActivity((previous) => [...previous, `Calling ${frame.toolName}`]);
-          break;
-        case 'stream:tool-call-delta':
-          setToolActivity((previous) => {
-            const next = [...previous];
-            next[next.length - 1] =
-              next[next.length - 1] ?? `Calling ${frame.toolName}: ${frame.partialArgs}`;
-            if (next.length > 0) {
-              next[next.length - 1] = `${frame.toolName}: ${frame.partialArgs}`;
-            }
-            return next;
-          });
-          break;
-        case 'stream:tool-call-complete':
-          setToolActivity((previous) => [
-            ...previous,
-            `${frame.toolName} completed ${summarizeToolArguments(frame.arguments)}`.trim(),
-          ]);
-          break;
-        case 'subscribed':
-        case 'unsubscribed':
-        case 'stream:complete':
-        case 'stream:error':
-          break;
+
+        if (frame.event === 'run.error') {
+          const detail = frame.detail as { error?: string };
+          setError(detail.error ?? 'Run failed');
+          streamingContentRef.current = '';
+          setStreamingAssistantContent('');
+        }
+
+        if (frame.event === 'run.aborted') {
+          streamingContentRef.current = '';
+          setStreamingAssistantContent('');
+        }
+
+        break;
       }
-    },
-    [streamingAssistantContent],
-  );
+      case 'stream:text-delta':
+        streamingContentRef.current = frame.accumulated;
+        setStreamingAssistantContent(frame.accumulated);
+        break;
+      case 'stream:tool-call-start':
+        setToolActivity((previous) => [...previous, `Calling ${frame.toolName}`]);
+        break;
+      case 'stream:tool-call-delta':
+        setToolActivity((previous) => {
+          const next = [...previous];
+          next[next.length - 1] =
+            next[next.length - 1] ?? `Calling ${frame.toolName}: ${frame.partialArgs}`;
+          if (next.length > 0) {
+            next[next.length - 1] = `${frame.toolName}: ${frame.partialArgs}`;
+          }
+          return next;
+        });
+        break;
+      case 'stream:tool-call-complete':
+        setToolActivity((previous) => [
+          ...previous,
+          `${frame.toolName} completed ${summarizeToolArguments(frame.arguments)}`.trim(),
+        ]);
+        break;
+      case 'subscribed':
+      case 'unsubscribed':
+      case 'stream:complete':
+      case 'stream:error':
+        break;
+    }
+  }, []);
 
   return {
     messages,
