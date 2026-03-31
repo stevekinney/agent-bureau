@@ -108,6 +108,24 @@ describe('serializeActionDetail', () => {
     expect(result['step']).toBe(1);
   });
 
+  it('keeps step.completed details JSON-safe after stripping conversation', () => {
+    const detail = {
+      step: 1,
+      conversation: { snapshot: () => ({}) },
+      completedAt: new Date('2026-03-31T21:15:48.000Z'),
+      values: new Set(['gateway', 'live']),
+      stats: new Map([['attempts', 2n]]),
+      final: false,
+    };
+
+    const result = serializeActionDetail('step.completed', detail) as Record<string, unknown>;
+    expect(result).not.toHaveProperty('conversation');
+    expect(result['completedAt']).toBe('2026-03-31T21:15:48.000Z');
+    expect(result['values']).toEqual(['gateway', 'live']);
+    expect(result['stats']).toEqual([['attempts', '2']]);
+    expect(() => JSON.stringify(result)).not.toThrow();
+  });
+
   it('strips conversation from run.completed details', () => {
     const detail = {
       conversation: { snapshot: () => ({}) },
@@ -159,6 +177,50 @@ describe('serializeActionDetail', () => {
     }
     expect(steps[0]!['content']).toBe('a');
     expect(steps[1]!['content']).toBe('b');
+  });
+
+  it('keeps run.completed details JSON-safe after stripping conversations', () => {
+    const detail = {
+      conversation: { snapshot: () => ({}) },
+      finishedAt: new Date('2026-03-31T21:15:48.000Z'),
+      usage: { prompt: 1, completion: 2, total: 3 },
+      totalCost: 42n,
+      steps: [
+        {
+          step: 1,
+          conversation: { snapshot: () => ({}) },
+          content: 'done',
+          toolCalls: [
+            {
+              name: 'inspect',
+              metadata: new Map([['labels', new Set(['gateway'])]]),
+            },
+          ],
+          results: [
+            {
+              value: new Set(['ok']),
+            },
+          ],
+          final: true,
+        },
+      ],
+    };
+
+    const result = serializeActionDetail('run.completed', detail) as Record<string, unknown>;
+    expect(result).not.toHaveProperty('conversation');
+    expect(result['finishedAt']).toBe('2026-03-31T21:15:48.000Z');
+    expect(result['totalCost']).toBe('42');
+
+    const steps = result['steps'] as Record<string, unknown>[];
+    expect(steps[0]).not.toHaveProperty('conversation');
+    expect(steps[0]?.['toolCalls']).toEqual([
+      {
+        name: 'inspect',
+        metadata: [['labels', ['gateway']]],
+      },
+    ]);
+    expect(steps[0]?.['results']).toEqual([{ value: ['ok'] }]);
+    expect(() => JSON.stringify(result)).not.toThrow();
   });
 
   it('passes through other event types unchanged', () => {

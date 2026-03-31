@@ -154,20 +154,20 @@ export function serializeActionDetail(eventType: string, detail: unknown): unkno
   const record = detail as Record<string, unknown>;
 
   if (eventType === 'step.completed') {
-    return stripConversation(record);
+    return toJsonSafe(stripConversation(record));
   }
 
   if (eventType === 'run.completed') {
     const stripped = stripConversation(record);
 
     if (Array.isArray(stripped['steps'])) {
-      return {
+      return toJsonSafe({
         ...stripped,
         steps: (stripped['steps'] as Record<string, unknown>[]).map(stripConversation),
-      };
+      });
     }
 
-    return stripped;
+    return toJsonSafe(stripped);
   }
 
   if (

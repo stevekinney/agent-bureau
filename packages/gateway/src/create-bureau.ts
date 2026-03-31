@@ -1,13 +1,13 @@
 import { Conversation, createConversationHistory } from 'conversationalist';
 import { CompletableEventTarget } from 'lifecycle';
-import { createAgentSession, createRun, type JSONValue } from 'operative';
-import type {
+import { type ActiveRun, createAgentSession, createRun, type JSONValue } from 'operative';
+import {
+  createStore,
   RunRegisteredEvent as StoreRunRegisteredEvent,
   RunRemovedEvent as StoreRunRemovedEvent,
-  Store,
+  type Store,
   StoreActionEvent,
 } from 'sentinel';
-import { createStore } from 'sentinel';
 
 import {
   ActionEvent,
@@ -87,8 +87,12 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
   const store: Store = options.store ?? createStore();
   const emitter = new CompletableEventTarget<BureauEventMap>();
   const runtime = await createRuntimeComposition(options);
-  const runToSessionId = new Map<string, string>();
+  const runSessionIdentifiers = new WeakMap<ActiveRun, string>();
   const liveFrameListeners = new Set<(frame: ServerFrame) => void>();
+
+  function getRunSessionIdentifier(runState: { activeRun: ActiveRun }): string {
+    return runSessionIdentifiers.get(runState.activeRun) ?? '';
+  }
 
   function emitLiveFrame(frame: ServerFrame): void {
     for (const listener of liveFrameListeners) {
@@ -337,7 +341,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     });
 
     store.register(activeRun, runId);
-    runToSessionId.set(runId, sessionId);
+    runSessionIdentifiers.set(activeRun, sessionId);
 
     return serializeRunState(store.getRun(runId)!, sessionId);
   }
@@ -351,7 +355,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         continue;
       }
 
-      const sessionId = runToSessionId.get(runState.id) ?? '';
+      const sessionId = getRunSessionIdentifier(runState);
       summaries.push(serializeRunState(runState, sessionId));
     }
 
@@ -364,7 +368,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       return undefined;
     }
 
-    return serializeRunDetail(runState, runToSessionId.get(id) ?? '');
+    return serializeRunDetail(runState, getRunSessionIdentifier(runState));
   }
 
   function abortRun(id: string): RunSummary {
@@ -379,7 +383,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
 
     runState.activeRun.abort('Aborted via API');
     return {
-      ...serializeRunState(runState, runToSessionId.get(id) ?? ''),
+      ...serializeRunState(runState, getRunSessionIdentifier(runState)),
       status: 'aborted',
     };
   }
@@ -394,7 +398,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       throw new BureauError('Cannot delete a running run', 'CONFLICT');
     }
 
-    runToSessionId.delete(id);
+    runSessionIdentifiers.delete(runState.activeRun);
     store.removeRun(id);
   }
 

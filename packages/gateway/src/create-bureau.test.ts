@@ -255,6 +255,22 @@ describe('createBureau', () => {
     expect(Array.isArray(completedRuns)).toBe(true);
   });
 
+  it('retains session identifiers for completed run summaries and details', async () => {
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+    });
+
+    const run = await bureau.createRun({ message: 'Hello' });
+    await waitForRunCompletion();
+
+    const summary = bureau.listRuns().find((entry) => entry.id === run.id);
+    const detail = bureau.getRun(run.id);
+
+    expect(summary?.sessionId).toBe(run.sessionId);
+    expect(detail?.sessionId).toBe(run.sessionId);
+  });
+
   it('returns a run detail payload with events and step details', async () => {
     const bureau = await createBureau({
       generate: createMockGenerate('Detailed response'),
