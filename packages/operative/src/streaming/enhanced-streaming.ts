@@ -129,9 +129,11 @@ export function withEnhancedStreaming(
           });
 
           const argsString =
-            typeof toolCall.arguments === 'string'
-              ? toolCall.arguments
-              : JSON.stringify(toolCall.arguments);
+            toolCall.arguments === undefined
+              ? ''
+              : typeof toolCall.arguments === 'string'
+                ? toolCall.arguments
+                : JSON.stringify(toolCall.arguments);
 
           stateMachine.process({
             type: 'block-delta',
