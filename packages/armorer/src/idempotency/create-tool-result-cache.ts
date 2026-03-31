@@ -31,7 +31,7 @@ export type CreateToolResultCacheOptions = {
  * cleaned up lazily.
  */
 export function createToolResultCache(options: CreateToolResultCacheOptions): ToolResultCache {
-  const { store, namespace } = options;
+  const { store, defaultTTL, namespace } = options;
 
   const prefix = namespace ? `${namespace}:` : '';
 
@@ -62,7 +62,9 @@ export function createToolResultCache(options: CreateToolResultCacheOptions): To
     },
 
     async set(key: string, result: CachedToolResult, ttl?: number): Promise<void> {
-      const entry = ttl !== undefined ? { ...result, ttl } : result;
+      // Priority: explicit ttl param > entry's own ttl > defaultTTL
+      const effectiveTTL = ttl ?? (result.ttl > 0 ? result.ttl : defaultTTL);
+      const entry = effectiveTTL !== undefined ? { ...result, ttl: effectiveTTL } : result;
       await store.set(resolveKey(key), JSON.stringify(entry));
     },
 

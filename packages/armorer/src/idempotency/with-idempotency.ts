@@ -3,15 +3,19 @@ import type { CachedToolResult, IdempotencyOptions } from './types';
 
 const DEFAULT_TTL = 300_000;
 
-/** Checks whether a value looks like a ToolCall (has `name` and `id` string properties). */
+/**
+ * Checks whether a value is a ToolCall rather than raw tool input params.
+ * A ToolCall has `id` (string), `name` (string), and `arguments` (the parsed input).
+ * Requiring all three fields avoids false positives from tool inputs that happen
+ * to have `name` and `id` string fields (e.g., a "create user" tool).
+ */
 function isToolCall(value: unknown): value is ToolCallWithArguments {
+  if (value === null || typeof value !== 'object') return false;
+  const record = value as Record<string, unknown>;
   return (
-    value !== null &&
-    typeof value === 'object' &&
-    'name' in value &&
-    typeof (value as Record<string, unknown>)['name'] === 'string' &&
-    'id' in value &&
-    typeof (value as Record<string, unknown>)['id'] === 'string'
+    typeof record['name'] === 'string' &&
+    typeof record['id'] === 'string' &&
+    'arguments' in record
   );
 }
 
