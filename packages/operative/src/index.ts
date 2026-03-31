@@ -221,6 +221,23 @@ export type {
 } from './session/index';
 export { createSessionStore, resumeSession } from './session/index';
 export { withStreaming } from './streaming';
+export type { BackpressureBuffer, BackpressureBufferOptions } from './streaming/index';
+export type {
+  BlockType,
+  EnhancedStreamingOptions,
+  StreamBlock,
+  StreamCommand,
+  StreamEvent,
+  StreamEventMap,
+  StreamState,
+  StreamStateMachine,
+} from './streaming/index';
+export {
+  createBackpressureBuffer,
+  createStreamStateMachine,
+  StreamCustomEvent,
+  withEnhancedStreaming,
+} from './streaming/index';
 export type { ResponseFormat, ToolChoice } from './structured-output/index';
 export { zodToJsonSchema } from './structured-output/index';
 export type {

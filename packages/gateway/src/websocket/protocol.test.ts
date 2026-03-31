@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'bun:test';
+import type { StreamEvent } from 'operative';
 
-import { parseClientFrame, SubscriptionManager } from './protocol';
+import { parseClientFrame, streamEventToFrame, SubscriptionManager } from './protocol';
 
 describe('parseClientFrame', () => {
   it('parses a subscribe frame', () => {
@@ -150,5 +151,173 @@ describe('SubscriptionManager', () => {
     const manager = new SubscriptionManager();
     const { ws } = createMockWebSocket();
     expect(manager.getSubscriptions(ws).size).toBe(0);
+  });
+
+  it('broadcasts stream events to subscribers via broadcastStreamEvent', () => {
+    const manager = new SubscriptionManager();
+    const { ws, sent } = createMockWebSocket();
+
+    manager.subscribe(ws, 'run-1');
+
+    const event: StreamEvent = {
+      type: 'stream:text-delta',
+      content: 'Hello',
+      accumulated: 'Hello',
+    };
+
+    manager.broadcastStreamEvent('run-1', event);
+
+    expect(sent).toHaveLength(1);
+    const parsed = JSON.parse(sent[0]!) as Record<string, unknown>;
+    expect(parsed['type']).toBe('stream:text-delta');
+    expect(parsed['runId']).toBe('run-1');
+    expect(parsed['content']).toBe('Hello');
+    expect(parsed['accumulated']).toBe('Hello');
+  });
+
+  it('does not broadcast stream events to unsubscribed clients', () => {
+    const manager = new SubscriptionManager();
+    const { ws: ws1, sent: sent1 } = createMockWebSocket();
+    const { ws: ws2, sent: sent2 } = createMockWebSocket();
+
+    manager.subscribe(ws1, 'run-1');
+    manager.subscribe(ws2, 'run-2');
+
+    const event: StreamEvent = {
+      type: 'stream:tool-call-start',
+      toolName: 'get_weather',
+      blockId: 'block-1',
+    };
+
+    manager.broadcastStreamEvent('run-1', event);
+
+    expect(sent1).toHaveLength(1);
+    expect(sent2).toHaveLength(0);
+  });
+});
+
+describe('streamEventToFrame', () => {
+  it('converts stream:text-delta to a ServerFrame', () => {
+    const event: StreamEvent = {
+      type: 'stream:text-delta',
+      content: 'Hello',
+      accumulated: 'Hello',
+    };
+
+    const frame = streamEventToFrame('run-1', event);
+    expect(frame).toBeDefined();
+    expect(frame?.type).toBe('stream:text-delta');
+    if (frame?.type === 'stream:text-delta') {
+      expect(frame.runId).toBe('run-1');
+      expect(frame.content).toBe('Hello');
+      expect(frame.accumulated).toBe('Hello');
+    }
+  });
+
+  it('converts stream:tool-call-start to a ServerFrame', () => {
+    const event: StreamEvent = {
+      type: 'stream:tool-call-start',
+      toolName: 'get_weather',
+      blockId: 'block-1',
+    };
+
+    const frame = streamEventToFrame('run-2', event);
+    expect(frame).toBeDefined();
+    expect(frame?.type).toBe('stream:tool-call-start');
+    if (frame?.type === 'stream:tool-call-start') {
+      expect(frame.runId).toBe('run-2');
+      expect(frame.toolName).toBe('get_weather');
+    }
+  });
+
+  it('converts stream:tool-call-delta to a ServerFrame', () => {
+    const event: StreamEvent = {
+      type: 'stream:tool-call-delta',
+      toolName: 'search',
+      partialArguments: '{"query":',
+    };
+
+    const frame = streamEventToFrame('run-3', event);
+    expect(frame).toBeDefined();
+    if (frame?.type === 'stream:tool-call-delta') {
+      expect(frame.toolName).toBe('search');
+      expect(frame.partialArgs).toBe('{"query":');
+    }
+  });
+
+  it('converts stream:tool-call-complete to a ServerFrame', () => {
+    const event: StreamEvent = {
+      type: 'stream:tool-call-complete',
+      toolName: 'search',
+      arguments: { query: 'test' },
+    };
+
+    const frame = streamEventToFrame('run-4', event);
+    expect(frame).toBeDefined();
+    if (frame?.type === 'stream:tool-call-complete') {
+      expect(frame.toolName).toBe('search');
+      expect(frame.arguments).toEqual({ query: 'test' });
+    }
+  });
+
+  it('converts stream:complete to a ServerFrame with state', () => {
+    const event: StreamEvent = {
+      type: 'stream:complete',
+      state: {
+        blocks: [],
+        activeBlock: undefined,
+        textContent: 'Hello',
+        toolCalls: [],
+        complete: true,
+      },
+    };
+
+    const frame = streamEventToFrame('run-5', event);
+    expect(frame).toBeDefined();
+    if (frame?.type === 'stream:complete') {
+      expect(frame.runId).toBe('run-5');
+      expect(frame.state).toBeDefined();
+    }
+  });
+
+  it('converts stream:error to a ServerFrame with string error', () => {
+    const event: StreamEvent = {
+      type: 'stream:error',
+      error: new Error('Connection lost'),
+    };
+
+    const frame = streamEventToFrame('run-6', event);
+    expect(frame).toBeDefined();
+    if (frame?.type === 'stream:error') {
+      expect(frame.runId).toBe('run-6');
+      expect(frame.error).toBe('Connection lost');
+    }
+  });
+
+  it('returns undefined for internal-only events', () => {
+    const blockStart: StreamEvent = {
+      type: 'stream:block-start',
+      block: {
+        id: 'b1',
+        type: 'text',
+        index: 0,
+        content: '',
+        complete: false,
+      },
+    };
+
+    expect(streamEventToFrame('run-7', blockStart)).toBeUndefined();
+  });
+
+  it('converts non-Error stream:error to string', () => {
+    const event: StreamEvent = {
+      type: 'stream:error',
+      error: 'simple string error',
+    };
+
+    const frame = streamEventToFrame('run-8', event);
+    if (frame?.type === 'stream:error') {
+      expect(frame.error).toBe('simple string error');
+    }
   });
 });

@@ -1,5 +1,4 @@
-import type { Conversation } from 'conversationalist';
-
+import { cancelStreamingIfActive } from './streaming/cancel-streaming';
 import type {
   GenerateContext,
   GenerateFunction,
@@ -41,11 +40,4 @@ export function withStreaming(fn: StreamingGenerateFunction): GenerateFunction {
       throw error;
     }
   };
-}
-
-function cancelStreamingIfActive(conversation: Conversation, messageId: string): void {
-  const message = conversation.getStreamingMessage();
-  if (message && message.id === messageId) {
-    conversation.cancelStreamingMessage(messageId);
-  }
 }

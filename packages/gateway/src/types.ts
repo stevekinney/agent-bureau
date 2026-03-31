@@ -181,7 +181,25 @@ export type ServerFrame =
   | { type: 'error'; code: string; message: string }
   | { type: 'pong' }
   | { type: 'scheduler.state'; state: unknown }
-  | { type: 'scheduler.task.preempted'; taskId: string; reason: string };
+  | { type: 'scheduler.task.preempted'; taskId: string; reason: string }
+  | { type: 'stream:text-delta'; runId: string; content: string; accumulated: string }
+  | { type: 'stream:tool-call-start'; runId: string; toolName: string; blockId: string }
+  | {
+      type: 'stream:tool-call-delta';
+      runId: string;
+      toolName: string;
+      blockId: string;
+      partialArgs: string;
+    }
+  | {
+      type: 'stream:tool-call-complete';
+      runId: string;
+      toolName: string;
+      blockId: string;
+      arguments: unknown;
+    }
+  | { type: 'stream:complete'; runId: string; state: unknown }
+  | { type: 'stream:error'; runId: string; error: string };
 
 // ── Health Types ────────────────────────────────────────────────────
 

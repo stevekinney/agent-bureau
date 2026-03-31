@@ -157,6 +157,7 @@ export interface AnthropicStreamEvent {
   delta?: {
     type?: string;
     text?: string;
+    thinking?: string;
     partial_json?: string;
     stop_reason?: string;
     usage?: { output_tokens?: number };
