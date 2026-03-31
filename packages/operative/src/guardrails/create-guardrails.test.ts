@@ -159,11 +159,14 @@ describe('createGuardrails', () => {
         detect: escalatedDetectSpy,
       };
 
+      let primaryCallCount = 0;
       const primaryDetector: InputDetector = {
         name: 'primary',
-        detect: mock()
-          .mockResolvedValueOnce(triggeredDetection) // First call: triggers and taints
-          .mockResolvedValueOnce(safeDetection), // Second call: safe
+        detect: async () => {
+          primaryCallCount++;
+          // First call triggers and taints; subsequent calls are safe
+          return primaryCallCount === 1 ? triggeredDetection : safeDetection;
+        },
       };
 
       const { prepareStep } = createGuardrails({

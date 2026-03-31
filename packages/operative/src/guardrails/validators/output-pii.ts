@@ -1,12 +1,16 @@
 import type { OutputValidator, ValidationResult, ValidatorContext } from '../types';
 
+type PIIRule =
+  | { regex: RegExp; replace: string }
+  | { regex: RegExp; replace: (match: string, key: string) => string };
+
 /**
  * PII redaction rules duplicated from conversationalist's PII redaction plugin.
  *
  * These are intentionally duplicated rather than imported to keep the operative
  * package independent of conversationalist at runtime.
  */
-const PII_RULES = {
+const PII_RULES: Record<string, PIIRule> = {
   email: {
     regex: /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g,
     replace: '[EMAIL_REDACTED]',
@@ -20,7 +24,7 @@ const PII_RULES = {
       /(?:[a-zA-Z0-9_-]*(?:api|key|secret|token|password|auth)[a-zA-Z0-9_-]*[:=]\s*["']?)([a-zA-Z0-9._-]{16,})(?:["']?)/gi,
     replace: (match: string, key: string) => match.replace(key, '[KEY_REDACTED]'),
   },
-} as const;
+};
 
 /**
  * Checks whether any PII pattern matches in the given text.
@@ -42,8 +46,11 @@ function redactPII(text: string): string {
   let result = text;
   for (const rule of Object.values(PII_RULES)) {
     rule.regex.lastIndex = 0;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-argument
-    result = result.replace(rule.regex, rule.replace as any);
+    if (typeof rule.replace === 'string') {
+      result = result.replace(rule.regex, rule.replace);
+    } else {
+      result = result.replace(rule.regex, rule.replace);
+    }
   }
   return result;
 }

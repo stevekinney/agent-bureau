@@ -163,11 +163,32 @@ describe('createToolResultCache', () => {
   });
 
   describe('defaultTTL', () => {
-    it('uses default TTL of 300000ms when not specified', () => {
+    it('returns an entry whose TTL has not yet expired', async () => {
       const defaultCache = createToolResultCache({ store });
-      // Verify by setting an entry and checking it persists
-      // (the default 5-minute TTL is implicit)
-      expect(defaultCache).toBeDefined();
+      const result: CachedToolResult = {
+        result: 'still-valid',
+        toolName: 'tool',
+        executedAt: Date.now() - 200_000, // 200 seconds ago, within 300s default
+        ttl: 300_000,
+      };
+
+      await defaultCache.set('ttl-valid', result);
+      const retrieved = await defaultCache.get('ttl-valid');
+      expect(retrieved).toEqual(result);
+    });
+
+    it('treats an entry as expired when executedAt + ttl is in the past', async () => {
+      const defaultCache = createToolResultCache({ store });
+      const result: CachedToolResult = {
+        result: 'expired',
+        toolName: 'tool',
+        executedAt: Date.now() - 400_000, // 400 seconds ago, beyond 300s default
+        ttl: 300_000,
+      };
+
+      await defaultCache.set('ttl-expired', result);
+      const retrieved = await defaultCache.get('ttl-expired');
+      expect(retrieved).toBeUndefined();
     });
   });
 });

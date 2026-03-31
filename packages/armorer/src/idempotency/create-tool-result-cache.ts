@@ -61,8 +61,9 @@ export function createToolResultCache(options: CreateToolResultCacheOptions): To
       return entry;
     },
 
-    async set(key: string, result: CachedToolResult, _ttl?: number): Promise<void> {
-      await store.set(resolveKey(key), JSON.stringify(result));
+    async set(key: string, result: CachedToolResult, ttl?: number): Promise<void> {
+      const entry = ttl !== undefined ? { ...result, ttl } : result;
+      await store.set(resolveKey(key), JSON.stringify(entry));
     },
 
     async delete(key: string): Promise<void> {

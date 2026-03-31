@@ -1,7 +1,19 @@
-import type { Tool } from '../is-tool';
+import type { Tool, ToolCallWithArguments } from '../is-tool';
 import type { CachedToolResult, IdempotencyOptions } from './types';
 
 const DEFAULT_TTL = 300_000;
+
+/** Checks whether a value looks like a ToolCall (has `name` and `id` string properties). */
+function isToolCall(value: unknown): value is ToolCallWithArguments {
+  return (
+    value !== null &&
+    typeof value === 'object' &&
+    'name' in value &&
+    typeof (value as Record<string, unknown>)['name'] === 'string' &&
+    'id' in value &&
+    typeof (value as Record<string, unknown>)['id'] === 'string'
+  );
+}
 
 /**
  * Wraps a tool with idempotency behavior. Duplicate executions with the same
@@ -19,10 +31,12 @@ const DEFAULT_TTL = 300_000;
 export function withIdempotency<T extends Tool>(tool: T, options: IdempotencyOptions): T {
   const { cache, ttl = DEFAULT_TTL, onCacheHit } = options;
 
-  // Access the idempotencyKey from the tool (set via createTool options)
-  const idempotencyKey = (tool as unknown as Record<string, unknown>)['idempotencyKey'] as
-    | ((input: unknown) => string)
-    | undefined;
+  // Access the idempotencyKey from the tool (set via createTool options).
+  // Tools store this as an own property set by createTool when configured.
+  const idempotencyKey =
+    'idempotencyKey' in tool
+      ? (tool.idempotencyKey as ((input: unknown) => string) | undefined)
+      : undefined;
 
   if (!idempotencyKey) {
     throw new Error(
@@ -40,8 +54,8 @@ export function withIdempotency<T extends Tool>(tool: T, options: IdempotencyOpt
       return cached.result;
     }
 
-    // Execute the tool's raw execute (params → result, throws on error)
-    const result = await (tool as unknown as (params: unknown) => Promise<unknown>)(params);
+    // Execute the tool via its callable interface (params → result)
+    const result = await tool(params);
 
     const entry: CachedToolResult = {
       result,
@@ -59,10 +73,9 @@ export function withIdempotency<T extends Tool>(tool: T, options: IdempotencyOpt
   return new Proxy(tool, {
     apply(_target, _thisArg, argArray: unknown[]) {
       const input: unknown = argArray[0];
-      // If it looks like a ToolCall (has name + id properties), delegate to original
-      if (input !== null && typeof input === 'object' && 'name' in input && 'id' in input) {
-        // ToolCall-style execution goes through the original
-        return (tool as unknown as (params: unknown) => Promise<unknown>)(input);
+      // ToolCall-style execution goes through the original tool directly
+      if (isToolCall(input)) {
+        return tool(input);
       }
       return executeWithCache(input);
     },
@@ -70,13 +83,8 @@ export function withIdempotency<T extends Tool>(tool: T, options: IdempotencyOpt
       if (prop === 'execute') {
         // Return a function that handles both ToolCall and direct params
         return (input: unknown, execOptions?: unknown) => {
-          if (
-            input !== null &&
-            typeof input === 'object' &&
-            'name' in (input as Record<string, unknown>) &&
-            'id' in (input as Record<string, unknown>)
-          ) {
-            return target.execute(input as never, execOptions as never);
+          if (isToolCall(input)) {
+            return target.execute(input, execOptions as Record<string, unknown>);
           }
           return executeWithCache(input);
         };

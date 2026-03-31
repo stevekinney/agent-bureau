@@ -1,26 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 
-import type { GenerateContext } from '../../types.ts';
-import type { ModelRoute } from '../types.ts';
 import { createCostAwareStrategy } from './cost-aware.ts';
-
-function makeContext(overrides?: Partial<GenerateContext>): GenerateContext {
-  return {
-    conversation: {
-      current: { ids: [], messages: {} },
-    } as unknown as GenerateContext['conversation'],
-    step: 0,
-    toolbox: { tools: () => [] } as unknown as GenerateContext['toolbox'],
-    ...overrides,
-  };
-}
-
-function makeRoutes(): ModelRoute[] {
-  return [
-    { name: 'cheap', generate: async () => ({ content: '', toolCalls: [] }) },
-    { name: 'expensive', generate: async () => ({ content: '', toolCalls: [] }) },
-  ];
-}
+import { makeContext, makeRoutes } from './test-helpers.ts';
 
 describe('createCostAwareStrategy', () => {
   it('routes to expensive model when under budget threshold', () => {
@@ -30,7 +11,7 @@ describe('createCostAwareStrategy', () => {
       cheap: 'cheap',
       expensive: 'expensive',
     });
-    const routes = makeRoutes();
+    const routes = makeRoutes(['cheap', 'expensive']);
     const context = makeContext();
 
     const decision = strategy(context, routes);
@@ -45,7 +26,7 @@ describe('createCostAwareStrategy', () => {
       cheap: 'cheap',
       expensive: 'expensive',
     });
-    const routes = makeRoutes();
+    const routes = makeRoutes(['cheap', 'expensive']);
     const context = makeContext();
 
     const decision = strategy(context, routes);
@@ -60,7 +41,7 @@ describe('createCostAwareStrategy', () => {
       cheap: 'cheap',
       expensive: 'expensive',
     });
-    const routes = makeRoutes();
+    const routes = makeRoutes(['cheap', 'expensive']);
     const context = makeContext();
 
     const decision = strategy(context, routes);
@@ -75,7 +56,7 @@ describe('createCostAwareStrategy', () => {
       cheap: 'cheap',
       expensive: 'expensive',
     });
-    const routes = makeRoutes();
+    const routes = makeRoutes(['cheap', 'expensive']);
     const context = makeContext();
 
     // Under threshold
@@ -97,7 +78,7 @@ describe('createCostAwareStrategy', () => {
       cheap: 'cheap',
       expensive: 'expensive',
     });
-    const routes = makeRoutes();
+    const routes = makeRoutes(['cheap', 'expensive']);
     const context = makeContext();
 
     // 0/0 is NaN, which should be treated as over budget (safe default)
@@ -112,7 +93,7 @@ describe('createCostAwareStrategy', () => {
       cheap: 'cheap',
       expensive: 'expensive',
     });
-    const routes = makeRoutes();
+    const routes = makeRoutes(['cheap', 'expensive']);
     const context = makeContext();
 
     // 49.9 / 100 = 0.499 < 0.5 — should be expensive

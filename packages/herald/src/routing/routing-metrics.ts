@@ -23,28 +23,27 @@ export function withRoutingMetrics(options: RoutingOptions): RoutingMetricsResul
       .map((r) => [r.name, r.costPerMillionTokens!]),
   );
 
-  // Track which route was selected on the most recent call
-  let lastSelectedRoute = '';
-
-  const innerGenerate = createRoutingGenerate({
-    ...options,
-    onRoute: (event) => {
-      lastSelectedRoute = event.selectedRoute;
-      options.onRoute?.(event);
-    },
-  });
-
   const wrappedGenerate: GenerateFunction = async (
     context: GenerateContext,
   ): Promise<GenerateResponse> => {
-    lastSelectedRoute = '';
+    // Per-call variable to avoid race conditions under concurrent invocations
+    let selectedRoute = '';
+
+    const innerGenerate = createRoutingGenerate({
+      ...options,
+      onRoute: (event) => {
+        selectedRoute = event.selectedRoute;
+        options.onRoute?.(event);
+      },
+    });
+
     const start = performance.now();
 
     try {
       const response = await innerGenerate(context);
       const elapsed = performance.now() - start;
 
-      const route = lastSelectedRoute;
+      const route = selectedRoute;
 
       // Record count
       routeCounts.set(route, (routeCounts.get(route) ?? 0) + 1);
@@ -65,10 +64,10 @@ export function withRoutingMetrics(options: RoutingOptions): RoutingMetricsResul
       const elapsed = performance.now() - start;
 
       // Record latency even on failure
-      if (lastSelectedRoute) {
-        const latencies = routeLatencies.get(lastSelectedRoute) ?? [];
+      if (selectedRoute) {
+        const latencies = routeLatencies.get(selectedRoute) ?? [];
         latencies.push(elapsed);
-        routeLatencies.set(lastSelectedRoute, latencies);
+        routeLatencies.set(selectedRoute, latencies);
       }
 
       throw error;

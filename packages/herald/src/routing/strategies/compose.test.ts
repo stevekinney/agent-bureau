@@ -1,27 +1,8 @@
 import { describe, expect, it } from 'bun:test';
 
-import type { GenerateContext } from '../../types.ts';
-import type { ModelRoute, RoutingStrategy } from '../types.ts';
+import type { RoutingStrategy } from '../types.ts';
 import { composeStrategies } from './compose.ts';
-
-function makeContext(overrides?: Partial<GenerateContext>): GenerateContext {
-  return {
-    conversation: {
-      current: { ids: [], messages: {} },
-    } as unknown as GenerateContext['conversation'],
-    step: 0,
-    toolbox: { tools: () => [] } as unknown as GenerateContext['toolbox'],
-    ...overrides,
-  };
-}
-
-function makeRoutes(): ModelRoute[] {
-  return [
-    { name: 'fast', generate: async () => ({ content: '', toolCalls: [] }) },
-    { name: 'smart', generate: async () => ({ content: '', toolCalls: [] }) },
-    { name: 'frontier', generate: async () => ({ content: '', toolCalls: [] }) },
-  ];
-}
+import { makeContext, makeRoutes } from './test-helpers.ts';
 
 describe('composeStrategies', () => {
   it('uses the first strategy that returns a matching route', () => {

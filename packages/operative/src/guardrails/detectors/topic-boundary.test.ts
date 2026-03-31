@@ -96,7 +96,7 @@ describe('createTopicBoundaryDetector', () => {
       expect(result.triggered).toBe(false);
     });
 
-    it('triggers on empty input when there are allowed topics and input has no match', async () => {
+    it('does not trigger on empty input even when no allowed topic matches', async () => {
       // Empty input has no matching topic, but it's also not dangerous.
       // We treat empty input as a non-trigger to avoid false positives.
       const detector = createTopicBoundaryDetector({ allowedTopics: ['weather'] });

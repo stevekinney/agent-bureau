@@ -1,59 +1,12 @@
 import { describe, expect, it } from 'bun:test';
 
-import type { GenerateContext } from '../../types.ts';
-import type { ModelRoute } from '../types.ts';
 import { createStepBasedStrategy } from './step-based.ts';
-
-function makeContext(overrides?: Partial<GenerateContext>): GenerateContext {
-  return {
-    conversation: {
-      current: { ids: [], messages: {} },
-    } as unknown as GenerateContext['conversation'],
-    step: 0,
-    toolbox: { tools: () => [] } as unknown as GenerateContext['toolbox'],
-    ...overrides,
-  };
-}
-
-function makeRoutes(): ModelRoute[] {
-  return [
-    { name: 'fast', generate: async () => ({ content: '', toolCalls: [] }) },
-    { name: 'smart', generate: async () => ({ content: '', toolCalls: [] }) },
-    { name: 'summarizer', generate: async () => ({ content: '', toolCalls: [] }) },
-  ];
-}
-
-function makeContextWithMessages(
-  messages: Array<{ role: string; content: string }>,
-  step: number,
-): GenerateContext {
-  const ids = messages.map((_, i) => `msg-${i}`);
-  const messagesRecord: Record<string, unknown> = {};
-  for (let i = 0; i < messages.length; i++) {
-    messagesRecord[`msg-${i}`] = {
-      id: `msg-${i}`,
-      role: messages[i]!.role,
-      content: messages[i]!.content,
-      position: i,
-      createdAt: new Date().toISOString(),
-      metadata: {},
-      hidden: false,
-    };
-  }
-
-  return {
-    conversation: {
-      current: { ids, messages: messagesRecord },
-    } as unknown as GenerateContext['conversation'],
-    step,
-    toolbox: { tools: () => [] } as unknown as GenerateContext['toolbox'],
-  };
-}
+import { makeContext, makeContextWithMessages, makeRoutes } from './test-helpers.ts';
 
 describe('createStepBasedStrategy', () => {
   it('routes step 0 to the first model', () => {
     const strategy = createStepBasedStrategy({ first: 'fast', middle: 'smart' });
-    const routes = makeRoutes();
+    const routes = makeRoutes(['fast', 'smart', 'summarizer']);
     const context = makeContext({ step: 0 });
 
     const decision = strategy(context, routes);
@@ -63,7 +16,7 @@ describe('createStepBasedStrategy', () => {
 
   it('routes step 1 to the middle model by default', () => {
     const strategy = createStepBasedStrategy({ first: 'fast', middle: 'smart' });
-    const routes = makeRoutes();
+    const routes = makeRoutes(['fast', 'smart', 'summarizer']);
     const context = makeContext({ step: 1 });
 
     const decision = strategy(context, routes);
@@ -77,7 +30,7 @@ describe('createStepBasedStrategy', () => {
       middle: 'smart',
       middleAfterStep: 3,
     });
-    const routes = makeRoutes();
+    const routes = makeRoutes(['fast', 'smart', 'summarizer']);
 
     // Steps 1 and 2 should still be 'first' since middleAfterStep is 3
     expect(strategy(makeContext({ step: 1 }), routes).route).toBe('fast');
@@ -92,7 +45,7 @@ describe('createStepBasedStrategy', () => {
       middle: 'smart',
       last: 'summarizer',
     });
-    const routes = makeRoutes();
+    const routes = makeRoutes(['fast', 'smart', 'summarizer']);
 
     // An assistant message at the end with no tool-call messages — looks like final step
     const context = makeContextWithMessages(
@@ -100,7 +53,7 @@ describe('createStepBasedStrategy', () => {
         { role: 'user', content: 'Hello' },
         { role: 'assistant', content: 'Done!' },
       ],
-      5,
+      { step: 5 },
     );
 
     const decision = strategy(context, routes);
@@ -114,7 +67,7 @@ describe('createStepBasedStrategy', () => {
       middle: 'smart',
       last: 'summarizer',
     });
-    const routes = makeRoutes();
+    const routes = makeRoutes(['fast', 'smart', 'summarizer']);
 
     // Tool-call messages at the end indicate more work
     const context = makeContextWithMessages(
@@ -123,7 +76,7 @@ describe('createStepBasedStrategy', () => {
         { role: 'assistant', content: 'Let me check' },
         { role: 'tool-call', content: 'get_weather' },
       ],
-      5,
+      { step: 5 },
     );
 
     const decision = strategy(context, routes);
@@ -132,7 +85,7 @@ describe('createStepBasedStrategy', () => {
 
   it('uses default middleAfterStep of 1', () => {
     const strategy = createStepBasedStrategy({ first: 'fast', middle: 'smart' });
-    const routes = makeRoutes();
+    const routes = makeRoutes(['fast', 'smart', 'summarizer']);
 
     expect(strategy(makeContext({ step: 0 }), routes).route).toBe('fast');
     expect(strategy(makeContext({ step: 1 }), routes).route).toBe('smart');
@@ -144,7 +97,7 @@ describe('createStepBasedStrategy', () => {
       middle: 'smart',
       last: 'summarizer',
     });
-    const routes = makeRoutes();
+    const routes = makeRoutes(['fast', 'smart', 'summarizer']);
 
     const context = makeContext({ step: 0 });
     const decision = strategy(context, routes);

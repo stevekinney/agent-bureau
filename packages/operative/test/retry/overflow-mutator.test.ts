@@ -102,6 +102,16 @@ describe('createOverflowMutator', () => {
     expect(messages.length).toBeLessThanOrEqual(7); // less than original
   });
 
+  it('returns void when conversation has fewer messages than retainRecentMessages', async () => {
+    const mutator = createOverflowMutator({
+      summarize: async () => 'summary',
+      retainRecentMessages: 4,
+    });
+    const context = makeContext(['msg1', 'msg2', 'msg3']);
+    const result = await mutator(context, new Error('context_length_exceeded'), 1);
+    expect(result).toBeUndefined();
+  });
+
   it('does not mutate the original conversation', async () => {
     const mutator = createOverflowMutator({
       summarize: async () => 'summary',
