@@ -689,6 +689,67 @@ describe('createScheduler', () => {
     blocking.resolve(textResponse('unused'));
   });
 
+  it('cancel() removes a queued task and emits task.cancelled', async () => {
+    const scheduler = createMinimalScheduler({ idleDelay: 1 });
+    const cancelledPhases: string[] = [];
+
+    scheduler.addEventListener('task.cancelled', (event) => {
+      cancelledPhases.push(event.phase);
+    });
+
+    const queuedResult = scheduler.submit(
+      makeTask({
+        priority: 'background',
+        id: 'queued-cancel-task',
+      }),
+    );
+
+    expect(scheduler.cancel('queued-cancel-task')).toBe(true);
+    expect(await queuedResult).toBeNull();
+    expect(cancelledPhases).toEqual(['queued']);
+    await scheduler.stop();
+  });
+
+  it('cancel() aborts a running task and emits task.cancelled', async () => {
+    const blocking = createBlockingGenerate();
+    const scheduler = createMinimalScheduler({ idleDelay: 1 });
+    const cancelledTaskIds: string[] = [];
+
+    scheduler.addEventListener('task.cancelled', (event) => {
+      cancelledTaskIds.push(event.taskId);
+    });
+
+    scheduler.start();
+
+    const runningResult = scheduler.submit(
+      makeTask({
+        priority: 'background',
+        id: 'running-cancel-task',
+        createRun: () => ({
+          generate: blocking.generate,
+          toolbox: createTestToolbox([]),
+          conversation: new Conversation(),
+          maximumSteps: 1,
+        }),
+      }),
+    );
+
+    await sleep(10);
+
+    expect(scheduler.cancel('running-cancel-task')).toBe(true);
+    expect(await runningResult).toBeNull();
+    expect(cancelledTaskIds).toEqual(['running-cancel-task']);
+
+    blocking.resolve(textResponse('unused'));
+    await scheduler.stop();
+  });
+
+  it('cancel() returns false for unknown tasks', async () => {
+    const scheduler = createMinimalScheduler();
+    expect(scheduler.cancel('missing-task')).toBe(false);
+    await scheduler.stop();
+  });
+
   it('removeEventListener stops delivering events to that listener', async () => {
     const scheduler = createMinimalScheduler({ idleDelay: 1 });
     const taskQueuedListener = () => {

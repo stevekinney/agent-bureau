@@ -1,12 +1,13 @@
 import type { ActiveRun } from '../create-run';
 import { createRun } from '../create-run';
 import { executeLoop } from '../loop';
-import type { GenerateFunction, RunOptions, RunResult, Toolbox } from '../types';
+import type { GenerateFunction, RunResult, Toolbox } from '../types';
 import type { SchedulerEventMap, SchedulerEventType } from './events';
 import {
   SchedulerIdleEvent,
   SchedulerStartedEvent,
   SchedulerStoppedEvent,
+  TaskCancelledEvent,
   TaskCompletedEvent,
   TaskDispatchedEvent,
   TaskFailedEvent,
@@ -17,6 +18,7 @@ import { createPriorityQueue } from './priority-queue';
 import { sleep } from './sleep';
 import type {
   SchedulerPriority,
+  SchedulerRunOptions,
   SchedulerState,
   SchedulerTask,
   SchedulerTaskSummary,
@@ -44,17 +46,19 @@ export interface Scheduler {
   submit(task: SchedulerTask): Promise<RunResult | null>;
   /** Convenience: submit an immediate-priority task. Resolves with the run result, or null if the scheduler is stopping. */
   submitImmediate(
-    createRunFactory: () => RunOptions | Promise<RunOptions>,
+    createRunFactory: () => SchedulerRunOptions | Promise<SchedulerRunOptions>,
   ): Promise<RunResult | null>;
   /** Eagerly creates an ActiveRun for immediate-priority tasks. Returns both the
    *  ActiveRun handle (for store registration / event forwarding) and the result promise.
    *  The factory must be synchronous — use submit() for async factories. */
-  dispatch(createRunFactory: () => RunOptions): {
+  dispatch(createRunFactory: () => SchedulerRunOptions): {
     activeRun: ActiveRun;
     result: Promise<RunResult>;
   };
   /** Get the current scheduler state. */
   getState(): SchedulerState;
+  /** Cancel a queued or running task by id. Returns true when a task was found. */
+  cancel(taskId: string): boolean;
   /** Start the scheduler loop. */
   start(): void;
   /** Stop the scheduler. Completes active immediate tasks, aborts active background tasks,
@@ -177,7 +181,7 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
   }
 
   function submitImmediate(
-    createRunFactory: () => RunOptions | Promise<RunOptions>,
+    createRunFactory: () => SchedulerRunOptions | Promise<SchedulerRunOptions>,
   ): Promise<RunResult | null> {
     const taskId = generateTaskId();
     const task: SchedulerTask = {
@@ -189,7 +193,7 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
     return submit(task);
   }
 
-  function dispatchMethod(createRunFactory: () => RunOptions): {
+  function dispatchMethod(createRunFactory: () => SchedulerRunOptions): {
     activeRun: ActiveRun;
     result: Promise<RunResult>;
   } {
@@ -249,6 +253,31 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
     );
 
     return { activeRun, result };
+  }
+
+  function cancel(taskId: string): boolean {
+    const queuedTask = queue.remove((task) => task.id === taskId);
+    if (queuedTask) {
+      const resolver = taskResolvers.get(taskId);
+      if (resolver) {
+        taskResolvers.delete(taskId);
+        resolver.resolve(null);
+      }
+
+      emitEvent(new TaskCancelledEvent(taskId, 'queued'));
+      wakeLoop();
+      return true;
+    }
+
+    const runningTask = running.get(taskId);
+    if (!runningTask) {
+      return false;
+    }
+
+    runningTask.abortController.abort('cancelled');
+    emitEvent(new TaskCancelledEvent(taskId, 'running'));
+    wakeLoop();
+    return true;
   }
 
   // ── Scheduling Loop ───────────────────────────────────────────────
@@ -345,7 +374,7 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
 
     emitEvent(new TaskDispatchedEvent(task.id, task.priority));
 
-    let runOptions: RunOptions;
+    let runOptions: SchedulerRunOptions;
     try {
       runOptions = await task.createRun();
     } catch (error) {
@@ -489,6 +518,7 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
     submitImmediate,
     dispatch: dispatchMethod,
     getState,
+    cancel,
     start,
     stop,
     addEventListener: ((type: string, listener: EventListenerOrEventListenerObject) => {

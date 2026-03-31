@@ -17,6 +17,8 @@ export interface PriorityQueue<T extends { priority: SchedulerPriority }> {
   hasHigherPriority(than: SchedulerPriority): boolean;
   /** Remove all items from the queue. */
   clear(): void;
+  /** Remove the first item that matches the predicate. */
+  remove(predicate: (item: T) => boolean): T | undefined;
   /** Iterate over all items in priority order (does not remove them). */
   [Symbol.iterator](): Iterator<T>;
 }
@@ -59,6 +61,15 @@ export function createPriorityQueue<T extends { priority: SchedulerPriority }>()
     items.length = 0;
   }
 
+  function remove(predicate: (item: T) => boolean): T | undefined {
+    const index = items.findIndex(predicate);
+    if (index === -1) {
+      return undefined;
+    }
+
+    return items.splice(index, 1)[0];
+  }
+
   function* iterator(): Iterator<T> {
     for (const item of items) {
       yield item;
@@ -74,6 +85,7 @@ export function createPriorityQueue<T extends { priority: SchedulerPriority }>()
     },
     hasHigherPriority,
     clear,
+    remove,
     [Symbol.iterator]: iterator,
   };
 }

@@ -7,9 +7,10 @@ import type { ApiKeyStore } from '../keys/types';
  * Bearer token authentication middleware with managed API key support.
  *
  * When an `ApiKeyStore` is provided, tokens matching the `ab_live_` prefix are
- * verified against the store first. If verification succeeds, the key's id and
- * scopes are injected as request headers (`x-api-key-id`, `x-api-key-scopes`)
- * for downstream middleware (rate limiter, scope guard) to consume.
+ * verified against the store first. If verification succeeds, the key's id,
+ * principal, and scopes are injected as request headers (`x-api-key-id`,
+ * `x-auth-principal`, `x-api-key-scopes`) for downstream middleware
+ * (rate limiter, scope guard) to consume.
  *
  * The static `authToken` is still accepted as a fallback and acts as an admin
  * key with no scope restrictions.
@@ -26,6 +27,7 @@ export function createAuthentication(authToken: string | undefined, apiKeyStore?
     const headers = new Headers(raw.headers);
     headers.delete('x-api-key-id');
     headers.delete('x-api-key-scopes');
+    headers.delete('x-auth-principal');
 
     /** Replaces context.req.raw with a new Request carrying the current headers. */
     function commitHeaders(): void {
@@ -47,15 +49,24 @@ export function createAuthentication(authToken: string | undefined, apiKeyStore?
     }
 
     const authHeader = context.req.header('authorization');
-    if (!authHeader) {
+    const queryToken = new URL(raw.url).searchParams.get('token');
+    if (!authHeader && !queryToken) {
       throw new HTTPException(401, { message: 'Missing authorization header' });
     }
 
-    if (!authHeader.toLowerCase().startsWith('bearer ')) {
-      throw new HTTPException(401, { message: 'Invalid authorization token' });
+    const token = authHeader
+      ? authHeader.toLowerCase().startsWith('bearer ')
+        ? authHeader.slice(7).trim()
+        : undefined
+      : (queryToken ?? undefined);
+
+    if (!token) {
+      throw new HTTPException(401, { message: 'Missing authorization token' });
     }
 
-    const token = authHeader.slice(7).trim();
+    if (!queryToken && authHeader && !authHeader.toLowerCase().startsWith('bearer ')) {
+      throw new HTTPException(401, { message: 'Invalid authorization token' });
+    }
 
     // Try managed API key verification first
     if (apiKeyStore && token.startsWith('ab_live_')) {
@@ -63,6 +74,7 @@ export function createAuthentication(authToken: string | undefined, apiKeyStore?
       if (key) {
         // Inject key metadata as headers for downstream middleware
         headers.set('x-api-key-id', key.id);
+        headers.set('x-auth-principal', `api-key:${key.id}`);
         headers.set('x-api-key-scopes', key.scopes.join(','));
         commitHeaders();
         await next();
@@ -72,6 +84,7 @@ export function createAuthentication(authToken: string | undefined, apiKeyStore?
 
     // Fall back to static token comparison
     if (authToken && token === authToken) {
+      headers.set('x-auth-principal', 'static-token');
       commitHeaders();
       await next();
       return;

@@ -74,6 +74,20 @@ export class TaskFailedEvent extends Event {
 }
 
 /**
+ * Emitted when a task is explicitly cancelled.
+ */
+export class TaskCancelledEvent extends Event {
+  static readonly type = 'task.cancelled' as const;
+
+  constructor(
+    readonly taskId: string,
+    readonly phase: 'queued' | 'running',
+  ) {
+    super(TaskCancelledEvent.type);
+  }
+}
+
+/**
  * Emitted when no tasks are pending or active.
  */
 export class SchedulerIdleEvent extends Event {
@@ -115,6 +129,7 @@ export interface SchedulerEventMap {
   [TaskCompletedEvent.type]: TaskCompletedEvent;
   [TaskPreemptedEvent.type]: TaskPreemptedEvent;
   [TaskFailedEvent.type]: TaskFailedEvent;
+  [TaskCancelledEvent.type]: TaskCancelledEvent;
   [SchedulerIdleEvent.type]: SchedulerIdleEvent;
   [SchedulerStartedEvent.type]: SchedulerStartedEvent;
   [SchedulerStoppedEvent.type]: SchedulerStoppedEvent;

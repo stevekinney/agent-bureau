@@ -22,6 +22,9 @@ export function isHigherPriority(a: SchedulerPriority, b: SchedulerPriority): bo
   return PRIORITY_WEIGHT[a] < PRIORITY_WEIGHT[b];
 }
 
+export type SchedulerRunOptions = Omit<RunOptions, 'generate' | 'toolbox'> &
+  Partial<Pick<RunOptions, 'generate' | 'toolbox'>>;
+
 /**
  * A task descriptor submitted to the scheduler.
  */
@@ -31,7 +34,7 @@ export interface SchedulerTask {
   /** Priority lane for scheduling. */
   readonly priority: SchedulerPriority;
   /** Factory that creates RunOptions when the task is dispatched. */
-  readonly createRun: () => RunOptions | Promise<RunOptions>;
+  readonly createRun: () => SchedulerRunOptions | Promise<SchedulerRunOptions>;
   /** Called when the task completes successfully. */
   readonly onComplete?: (result: RunResult) => void | Promise<void>;
   /** Called when the task is preempted before completion. */

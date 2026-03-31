@@ -18,6 +18,7 @@ export type {
   GatewayOptions,
   HealthResponse,
   ProviderConfiguration,
+  RunDetail,
   RunSummary,
   ServerFrame,
   ToolSummary,

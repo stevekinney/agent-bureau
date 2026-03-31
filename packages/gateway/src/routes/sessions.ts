@@ -4,12 +4,12 @@ import { HTTPException } from 'hono/http-exception';
 import { BureauError } from '../create-bureau';
 import type { Bureau } from '../types';
 
-export function createConversationsRoutes(bureau: Bureau) {
+export function createSessionsRoutes(bureau: Bureau) {
   const app = new Hono();
 
   app.get('/', async (context) => {
     try {
-      const sessions = await bureau.listConversations();
+      const sessions = await bureau.listSessions();
       return context.json(sessions, 200);
     } catch (error) {
       if (error instanceof BureauError && error.code === 'NOT_IMPLEMENTED') {
@@ -21,8 +21,8 @@ export function createConversationsRoutes(bureau: Bureau) {
 
   app.get('/:id', async (context) => {
     try {
-      const session = await bureau.getConversation(context.req.param('id'));
-      if (!session) throw new HTTPException(404, { message: 'Conversation not found' });
+      const session = await bureau.getSession(context.req.param('id'));
+      if (!session) throw new HTTPException(404, { message: 'Session not found' });
       return context.json(session, 200);
     } catch (error) {
       if (error instanceof BureauError && error.code === 'NOT_IMPLEMENTED') {
@@ -34,7 +34,7 @@ export function createConversationsRoutes(bureau: Bureau) {
 
   app.delete('/:id', async (context) => {
     try {
-      await bureau.deleteConversation(context.req.param('id'));
+      await bureau.deleteSession(context.req.param('id'));
       return context.body(null, 204);
     } catch (error) {
       if (error instanceof BureauError && error.code === 'NOT_IMPLEMENTED') {

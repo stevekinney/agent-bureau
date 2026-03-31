@@ -27,8 +27,8 @@ describe('createBureau with storage', () => {
       storage: { type: 'memory' },
     });
 
-    // Persistence is wired — listing conversations should not throw
-    const sessions = await bureau.listConversations();
+    // Persistence is wired — listing sessions should not throw
+    const sessions = await bureau.listSessions();
     expect(sessions).toEqual([]);
     bureau.dispose();
   });
@@ -43,7 +43,7 @@ describe('createBureau with storage', () => {
     });
 
     // Should use the explicit KV store, not the one from storage
-    const sessions = await bureau.listConversations();
+    const sessions = await bureau.listSessions();
     expect(sessions).toEqual([]);
     bureau.dispose();
   });

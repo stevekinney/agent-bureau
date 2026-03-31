@@ -1,6 +1,6 @@
 import type { RunState } from 'sentinel';
 
-import type { RunSummary } from './types';
+import type { RunDetail, RunSummary } from './types';
 
 function safeStringify(value: unknown): string {
   if (typeof value === 'string') return value;
@@ -9,6 +9,51 @@ function safeStringify(value: unknown): string {
   } catch {
     return String(value);
   }
+}
+
+function toJsonSafe(value: unknown, seen = new WeakSet<object>()): unknown {
+  if (
+    value === null ||
+    value === undefined ||
+    typeof value === 'string' ||
+    typeof value === 'number' ||
+    typeof value === 'boolean'
+  ) {
+    return value;
+  }
+
+  if (typeof value === 'bigint') {
+    return value.toString();
+  }
+
+  if (typeof value === 'function') {
+    return `[Function ${value.name || 'anonymous'}]`;
+  }
+
+  if (value instanceof Error) {
+    return value.message;
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((entry) => toJsonSafe(entry, seen));
+  }
+
+  if (typeof value === 'object') {
+    if (seen.has(value)) {
+      return '[Circular]';
+    }
+
+    seen.add(value);
+
+    const record = value as Record<string, unknown>;
+    const result: Record<string, unknown> = {};
+    for (const [key, entry] of Object.entries(record)) {
+      result[key] = toJsonSafe(entry, seen);
+    }
+    return result;
+  }
+
+  return safeStringify(value);
 }
 
 /**
@@ -83,19 +128,20 @@ export function serializeActionDetail(eventType: string, detail: unknown): unkno
     eventType === 'generate.error' ||
     eventType === 'generate.retry'
   ) {
-    return serializeError(record);
+    return toJsonSafe(serializeError(record));
   }
 
-  return detail;
+  return toJsonSafe(detail);
 }
 
 /**
  * Maps a live RunState (which may contain non-serializable objects like
  * ActiveRun and Conversation) to a JSON-safe RunSummary DTO.
  */
-export function serializeRunState(runState: RunState): RunSummary {
+export function serializeRunState(runState: RunState, sessionId?: string): RunSummary {
   return {
     id: runState.id,
+    sessionId: sessionId ?? '',
     status: runState.status,
     steps: runState.steps.length,
     usage: {
@@ -111,5 +157,38 @@ export function serializeRunState(runState: RunState): RunSummary {
           ? safeStringify(runState.error)
           : undefined,
     actionCount: runState.actions.length,
+  };
+}
+
+export function serializeRunDetail(runState: RunState, sessionId?: string): RunDetail {
+  return {
+    ...serializeRunState(runState, sessionId),
+    events: runState.actions.map((action) => ({
+      sequence: action.sequence,
+      runId: action.runId,
+      event: action.type,
+      detail: serializeActionDetail(action.type, action.detail),
+      timestamp: action.timestamp,
+    })),
+    stepDetails: runState.steps.map((step) => ({
+      step: step.step,
+      content: step.content,
+      final: step.final,
+      usage: step.usage,
+      toolCalls: step.toolCalls.map((toolCall) => ({
+        id: toolCall.id,
+        name: toolCall.name,
+        arguments: toJsonSafe(toolCall.arguments),
+      })),
+      results: step.results.map((result) => ({
+        toolName: result.toolName,
+        result: toJsonSafe(result.result),
+        error:
+          result.error?.message ??
+          result.errorMessage ??
+          (typeof result.error === 'string' ? result.error : undefined),
+      })),
+    })),
+    latestSnapshot: runState.snapshots.at(-1),
   };
 }

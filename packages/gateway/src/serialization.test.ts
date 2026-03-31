@@ -21,7 +21,7 @@ describe('serializeRunState', () => {
       activeRun: {} as ActiveRun,
     };
 
-    const summary = serializeRunState(runState);
+    const summary = serializeRunState(runState, '');
 
     expect(summary.id).toBe('run-1');
     expect(summary.status).toBe('completed');
@@ -45,7 +45,7 @@ describe('serializeRunState', () => {
       activeRun: {} as ActiveRun,
     };
 
-    const summary = serializeRunState(runState);
+    const summary = serializeRunState(runState, '');
     expect(summary.error).toBe('Something broke');
   });
 
@@ -62,7 +62,7 @@ describe('serializeRunState', () => {
       activeRun: {} as ActiveRun,
     };
 
-    const summary = serializeRunState(runState);
+    const summary = serializeRunState(runState, '');
     const json = JSON.stringify(summary);
     const parsed = JSON.parse(json);
     expect(parsed.id).toBe('run-3');
@@ -81,7 +81,7 @@ describe('serializeRunState', () => {
       activeRun: {} as ActiveRun,
     };
 
-    const summary = serializeRunState(runState);
+    const summary = serializeRunState(runState, '');
     expect(summary.error).toBe('Connection timeout');
   });
 });
@@ -159,7 +159,7 @@ describe('serializeActionDetail', () => {
   it('passes through other event types unchanged', () => {
     const detail = { some: 'data' };
     const result = serializeActionDetail('run.started', detail);
-    expect(result).toBe(detail);
+    expect(result).toEqual(detail);
   });
 
   it('passes through primitives unchanged', () => {

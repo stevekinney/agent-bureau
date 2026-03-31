@@ -9,6 +9,7 @@ export {
   SchedulerIdleEvent,
   SchedulerStartedEvent,
   SchedulerStoppedEvent,
+  TaskCancelledEvent,
   TaskCompletedEvent,
   TaskDispatchedEvent,
   TaskFailedEvent,
@@ -20,6 +21,7 @@ export { createPriorityQueue } from './priority-queue';
 export { sleep } from './sleep';
 export type {
   SchedulerPriority,
+  SchedulerRunOptions,
   SchedulerState,
   SchedulerTask,
   SchedulerTaskSummary,

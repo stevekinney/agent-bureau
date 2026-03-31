@@ -1,5 +1,5 @@
 import type { Toolbox } from 'armorer';
-import type { ConversationHistory, SessionInfo } from 'conversationalist';
+import type { ConversationSnapshot } from 'conversationalist';
 import type { ProviderName } from 'herald';
 import type { Hono } from 'hono';
 import type {
@@ -10,12 +10,23 @@ import type {
   Subscription,
 } from 'lifecycle';
 import type { CreateMemoryOptions, Memory } from 'memory';
-import type { GenerateFunction, Scheduler, SessionStore, StopCondition } from 'operative';
+import type {
+  AgentSession,
+  CacheOptions,
+  EnhancedStreamingOptions,
+  GenerateFunction,
+  GuardrailsOptions,
+  Scheduler,
+  SchedulerState,
+  SessionStore,
+  SessionSummary,
+  StopCondition,
+  TokenUsage,
+} from 'operative';
 import type { Store } from 'sentinel';
-import type { KeyValueStore } from 'storage';
+import type { KeyValueStore, KeyValueStoreConfiguration } from 'storage';
 
 import type { BureauEventMap } from './events';
-import type { StorageBackendConfiguration } from './storage';
 
 // ── Provider Configuration ───────────────────────────────────────────
 
@@ -27,17 +38,109 @@ export interface ProviderConfiguration {
   apiKey?: string;
 }
 
+export interface ProviderRouteConfiguration {
+  name: string;
+  provider: ProviderConfiguration;
+  budgetRatio?: number;
+}
+
+export type RoutingConfiguration =
+  | {
+      type: 'step-based';
+      first: string;
+      middle: string;
+      last?: string;
+      middleAfterStep?: number;
+    }
+  | {
+      type: 'complexity';
+      simple: string;
+      complex: string;
+      frontier?: string;
+      simpleMaxTools?: number;
+      simpleMaxLength?: number;
+    }
+  | {
+      type: 'cost-aware';
+      cheap: string;
+      expensive: string;
+      budget: number;
+      thresholdRatio?: number;
+    };
+
+export interface IdentityConfiguration {
+  resolve: () => Promise<string>;
+  warn?: (message: string) => void;
+}
+
+export interface SkillRuntimeConfiguration {
+  provider: SkillProvider;
+  includeTools?: boolean;
+  skillPolicy?: ToolPolicy;
+}
+
+export interface ToolPolicy {
+  allowList?: string[];
+  denyList?: string[];
+}
+
+export interface SkillCatalogEntry {
+  name: string;
+  description: string;
+}
+
+export interface LoadedSkill {
+  metadata: {
+    name: string;
+    description: string;
+    toolPolicy?: ToolPolicy;
+  };
+  body: string;
+}
+
+export interface SkillProvider {
+  listSkills(): Promise<SkillCatalogEntry[]>;
+  loadSkill(name: string): Promise<LoadedSkill | undefined>;
+  saveSkill?(name: string, skill: LoadedSkill): Promise<void>;
+  deleteSkill?(name: string): Promise<void>;
+  listResources(name: string): Promise<string[]>;
+  loadResource(name: string, path: string): Promise<string | undefined>;
+  isEnabled(name: string): Promise<boolean>;
+}
+
+export interface CacheConfiguration extends Omit<CacheOptions, 'store'> {
+  enabled?: boolean;
+  store?: KeyValueStore;
+}
+
+export interface StreamingConfiguration extends Pick<EnhancedStreamingOptions, 'onTextDelta'> {
+  enabled?: boolean;
+}
+
+export interface SchedulerConfiguration {
+  enabled?: boolean;
+  idleDelay?: number;
+}
+
 // ── Bureau (headless, no HTTP) ──────────────────────────────────────
 
 export interface BureauOptions {
   generate?: GenerateFunction;
   provider?: ProviderConfiguration;
+  providers?: ProviderRouteConfiguration[];
+  routing?: RoutingConfiguration;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   toolbox?: Toolbox<any>;
   store?: Store;
   persistence?: KeyValueStore;
-  storage?: StorageBackendConfiguration;
+  storage?: KeyValueStoreConfiguration;
   memory?: CreateMemoryOptions | Memory;
+  cache?: CacheConfiguration;
+  guardrails?: GuardrailsOptions;
+  identity?: IdentityConfiguration;
+  skills?: SkillRuntimeConfiguration;
+  streaming?: StreamingConfiguration;
+  scheduler?: SchedulerConfiguration;
   stopWhen?: StopCondition | StopCondition[];
   maximumSteps?: number;
   systemPrompt?: string;
@@ -53,16 +156,17 @@ export interface Bureau {
 
   createRun(request: CreateRunRequest): Promise<RunSummary>;
   listRuns(status?: string): RunSummary[];
-  getRun(id: string): RunSummary | undefined;
+  getRun(id: string): RunDetail | undefined;
   abortRun(id: string): RunSummary;
   deleteRun(id: string): void;
 
-  listConversations(): Promise<SessionInfo[]>;
-  getConversation(id: string): Promise<ConversationHistory | undefined>;
-  deleteConversation(id: string): Promise<void>;
+  listSessions(): Promise<SessionSummary[]>;
+  getSession(id: string): Promise<AgentSession | undefined>;
+  deleteSession(id: string): Promise<void>;
 
   getConfiguration(): ConfigurationResponse;
   getTools(): ToolSummary[];
+  subscribeLiveFrames(listener: (frame: ServerFrame) => void): () => void;
 
   addEventListener<K extends keyof BureauEventMap & string>(
     type: K,
@@ -140,6 +244,7 @@ export interface ApiErrorResponse {
 
 export interface RunSummary {
   id: string;
+  sessionId: string;
   status: string;
   steps: number;
   usage: { prompt: number; completion: number; total: number };
@@ -148,15 +253,47 @@ export interface RunSummary {
   actionCount: number;
 }
 
+export interface RunStepDetail {
+  step: number;
+  content: string;
+  final: boolean;
+  usage?: TokenUsage;
+  toolCalls: readonly {
+    id?: string;
+    name: string;
+    arguments?: unknown;
+  }[];
+  results: readonly {
+    toolName: string;
+    result: unknown;
+    error?: string;
+  }[];
+}
+
+export interface RunEventRecord {
+  sequence: number;
+  runId: string;
+  event: string;
+  detail: unknown;
+  timestamp: number;
+}
+
+export interface RunDetail extends RunSummary {
+  events: RunEventRecord[];
+  stepDetails: RunStepDetail[];
+  latestSnapshot: ConversationSnapshot | undefined;
+}
+
 export interface CreateRunRequest {
   message: string;
-  conversationId?: string;
+  sessionId?: string;
   systemPrompt?: string;
   maximumSteps?: number;
 }
 
 export interface ConfigurationResponse {
   provider: Omit<ProviderConfiguration, 'apiKey'> | undefined;
+  providers: ProviderRouteConfiguration[];
   maximumSteps: number;
   systemPrompt: string | undefined;
   tools: ToolSummary[];
@@ -175,12 +312,19 @@ export type ClientFrame =
   | { type: 'ping' };
 
 export type ServerFrame =
-  | { type: 'event'; runId: string; event: string; detail: unknown; timestamp: number }
+  | {
+      type: 'event';
+      runId: string;
+      event: string;
+      detail: unknown;
+      sequence: number;
+      timestamp: number;
+    }
   | { type: 'subscribed'; runId: string }
   | { type: 'unsubscribed'; runId: string }
   | { type: 'error'; code: string; message: string }
   | { type: 'pong' }
-  | { type: 'scheduler.state'; state: unknown }
+  | { type: 'scheduler.state'; state: SchedulerState }
   | { type: 'scheduler.task.preempted'; taskId: string; reason: string }
   | { type: 'stream:text-delta'; runId: string; content: string; accumulated: string }
   | { type: 'stream:tool-call-start'; runId: string; toolName: string; blockId: string }
@@ -218,8 +362,8 @@ export const DEFAULT_MAXIMUM_STEPS = 10;
 export const SCOPE = {
   RUNS_READ: 'runs:read',
   RUNS_WRITE: 'runs:write',
-  CONVERSATIONS_READ: 'conversations:read',
-  CONVERSATIONS_WRITE: 'conversations:write',
+  SESSIONS_READ: 'sessions:read',
+  SESSIONS_WRITE: 'sessions:write',
   CONFIG_READ: 'config:read',
   KEYS_MANAGE: 'keys:manage',
 } as const;

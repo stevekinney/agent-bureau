@@ -1,16 +1,14 @@
 import type { ServerWebSocket } from 'bun';
-import type { Store } from 'sentinel';
 
-import { serializeActionDetail } from '../serialization';
+import type { LiveFrameBroker } from '../live-events';
 import type { ServerFrame } from '../types';
-import { parseClientFrame, SubscriptionManager } from './protocol';
+import { parseClientFrame } from './protocol';
 
 export interface WebSocketHandlerOptions {
-  store: Store;
+  broker: LiveFrameBroker;
 }
 
 export interface WebSocketHandler {
-  subscriptions: SubscriptionManager;
   dispose(): void;
   open(ws: ServerWebSocket<unknown>): void;
   message(ws: ServerWebSocket<unknown>, data: string | Buffer): void;
@@ -18,21 +16,10 @@ export interface WebSocketHandler {
 }
 
 export function createWebSocketHandler(options: WebSocketHandlerOptions): WebSocketHandler {
-  const subscriptions = new SubscriptionManager();
-
-  const disposeStoreSubscription = options.store.subscribe((_state, action) => {
-    const frame: ServerFrame = {
-      type: 'event',
-      runId: action.runId,
-      event: action.type,
-      detail: serializeActionDetail(action.type, action.detail),
-      timestamp: action.timestamp,
-    };
-    subscriptions.broadcast(action.runId, frame);
-  });
-
-  function open(_ws: ServerWebSocket<unknown>): void {
-    // Connection tracked on first subscribe
+  function open(ws: ServerWebSocket<unknown>): void {
+    options.broker.addSubscriber(ws, (frame) => {
+      ws.send(JSON.stringify(frame));
+    });
   }
 
   function message(ws: ServerWebSocket<unknown>, data: string | Buffer): void {
@@ -45,13 +32,13 @@ export function createWebSocketHandler(options: WebSocketHandlerOptions): WebSoc
 
     switch (frame.type) {
       case 'subscribe': {
-        subscriptions.subscribe(ws, frame.runId);
+        options.broker.subscribe(ws, frame.runId);
         const response: ServerFrame = { type: 'subscribed', runId: frame.runId };
         ws.send(JSON.stringify(response));
         break;
       }
       case 'unsubscribe': {
-        subscriptions.unsubscribe(ws, frame.runId);
+        options.broker.unsubscribe(ws, frame.runId);
         const response: ServerFrame = { type: 'unsubscribed', runId: frame.runId };
         ws.send(JSON.stringify(response));
         break;
@@ -65,12 +52,12 @@ export function createWebSocketHandler(options: WebSocketHandlerOptions): WebSoc
   }
 
   function close(ws: ServerWebSocket<unknown>): void {
-    subscriptions.removeConnection(ws);
+    options.broker.removeSubscriber(ws);
   }
 
   function dispose(): void {
-    disposeStoreSubscription();
+    // Broker lifecycle is owned by the gateway.
   }
 
-  return { subscriptions, dispose, open, message, close };
+  return { dispose, open, message, close };
 }

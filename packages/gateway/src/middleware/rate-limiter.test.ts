@@ -1,11 +1,16 @@
 import { describe, expect, it } from 'bun:test';
 import { Hono } from 'hono';
+import { createMemoryKeyValueStore } from 'storage';
 
 import { errorHandler } from './error-handler';
 import { createRateLimiter } from './rate-limiter';
 import { requestIdentifier } from './request-identifier';
 
-function createApp(options?: { limit?: number; windowMs?: number }) {
+function createApp(options?: {
+  limit?: number;
+  store?: ReturnType<typeof createMemoryKeyValueStore>;
+  windowMs?: number;
+}) {
   const app = new Hono();
   app.use('*', requestIdentifier);
   app.use('*', createRateLimiter(options));
@@ -85,5 +90,29 @@ describe('rate limiter', () => {
       headers: { 'x-api-key-id': 'default-key' },
     });
     expect(response.headers.get('x-ratelimit-limit')).toBe('60');
+  });
+
+  it('limits static-token principals via x-auth-principal', async () => {
+    const app = createApp({ limit: 1, windowMs: 60_000 });
+    const headers = { 'x-auth-principal': 'static-token' };
+
+    const firstResponse = await app.request('/test', { headers });
+    expect(firstResponse.status).toBe(200);
+
+    const secondResponse = await app.request('/test', { headers });
+    expect(secondResponse.status).toBe(429);
+  });
+
+  it('persists limits across middleware instances when a store is provided', async () => {
+    const store = createMemoryKeyValueStore();
+    const headers = { 'x-auth-principal': 'api-key:test-key' };
+
+    const firstApp = createApp({ limit: 1, store, windowMs: 60_000 });
+    const firstResponse = await firstApp.request('/test', { headers });
+    expect(firstResponse.status).toBe(200);
+
+    const secondApp = createApp({ limit: 1, store, windowMs: 60_000 });
+    const secondResponse = await secondApp.request('/test', { headers });
+    expect(secondResponse.status).toBe(429);
   });
 });
