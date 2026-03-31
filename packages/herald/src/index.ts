@@ -30,6 +30,28 @@ export {
 } from './fallover/index.ts';
 export { createGeminiGenerate, createGeminiGenerateStream } from './gemini.ts';
 export { createOpenAIGenerate, createOpenAIGenerateStream } from './openai.ts';
+export type {
+  ComplexitySignals,
+  ComplexityStrategyOptions,
+  CostAwareStrategyOptions,
+  ModelRoute,
+  RoutingDecision,
+  RoutingEvent,
+  RoutingMetrics,
+  RoutingMetricsResult,
+  RoutingOptions,
+  RoutingStrategy,
+  StepBasedStrategyOptions,
+} from './routing/index.ts';
+export {
+  composeStrategies,
+  createComplexityStrategy,
+  createCostAwareStrategy,
+  createRoutingGenerate,
+  createStepBasedStrategy,
+  extractComplexitySignals,
+  withRoutingMetrics,
+} from './routing/index.ts';
 export { normalizeAnthropicStream, normalizeOpenAIStream } from './streaming/index.ts';
 export type { ResponseFormat, ToolChoice } from './structured-output/index.ts';
 export {

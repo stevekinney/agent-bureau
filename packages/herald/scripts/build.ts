@@ -14,6 +14,7 @@ const entrypoints = [
   './src/embeddings/ollama.ts',
   './src/instrumentation/index.ts',
   './src/fallover/index.ts',
+  './src/routing/index.ts',
   './src/streaming/index.ts',
   './src/streaming/normalize-anthropic.ts',
   './src/streaming/normalize-openai.ts',
