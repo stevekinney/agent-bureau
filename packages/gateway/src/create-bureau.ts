@@ -332,16 +332,8 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       );
     });
 
-    activeRun.once('run.error', (event) => {
+    activeRun.once('run.error', (_event) => {
       disposeRegisteredStreamListeners(disposeStreamListeners);
-
-      persistSessionUpdate(
-        saveSession(sessionId, conversation, {
-          lastRunId: runId,
-          lastRunStatus: 'error',
-          lastError: serializeUnknownError(event.error),
-        }),
-      );
     });
 
     store.register(activeRun, runId);

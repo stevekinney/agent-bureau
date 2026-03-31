@@ -184,6 +184,45 @@ describe('createBureau', () => {
     expect(session?.metadata['lastError']).toBe('Explode');
   });
 
+  it('persists error session state once after the initial running save', async () => {
+    const backingStore = createMemoryKeyValueStore();
+    let sessionSaveCount = 0;
+
+    const trackingStore: KeyValueStore = {
+      async get(key) {
+        return backingStore.get(key);
+      },
+      async set(key, value) {
+        if (key.startsWith('agent-session:')) {
+          sessionSaveCount += 1;
+        }
+
+        await backingStore.set(key, value);
+      },
+      async delete(key) {
+        await backingStore.delete(key);
+      },
+      async list(prefix) {
+        return backingStore.list(prefix);
+      },
+    };
+
+    const generate: GenerateFunction = async () => {
+      throw new Error('Explode once');
+    };
+
+    const bureau = await createBureau({
+      generate,
+      toolbox: createEmptyToolbox(),
+      persistence: trackingStore,
+    });
+
+    await bureau.createRun({ message: 'Explode once' });
+    await waitForRunCompletion();
+
+    expect(sessionSaveCount).toBe(2);
+  });
+
   it('fails runs when the model emits tool calls without a configured toolbox', async () => {
     const generate: GenerateFunction = async () => ({
       content: '',

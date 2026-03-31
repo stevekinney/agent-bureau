@@ -87,11 +87,11 @@ export class LiveFrameBroker {
         }
       } else {
         const runId = getRunId(frame);
-        if (
-          runId &&
-          !subscriber.runIds.has(runId) &&
-          !subscriber.runIds.has(ALL_RUNS_SUBSCRIPTION)
-        ) {
+        if (!runId) {
+          continue;
+        }
+
+        if (!subscriber.runIds.has(runId) && !subscriber.runIds.has(ALL_RUNS_SUBSCRIPTION)) {
           continue;
         }
       }
