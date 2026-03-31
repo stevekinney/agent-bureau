@@ -67,18 +67,14 @@ export function createAuthentication(authToken: string | undefined, apiKeyStore?
       throw new HTTPException(401, { message: 'Missing authorization header' });
     }
 
-    const token = authHeader
-      ? authHeader.toLowerCase().startsWith('bearer ')
-        ? authHeader.slice(7).trim()
-        : undefined
-      : (queryToken ?? undefined);
+    if (authHeader && !authHeader.toLowerCase().startsWith('bearer ')) {
+      throw new HTTPException(401, { message: 'Invalid authorization token' });
+    }
+
+    const token = authHeader ? authHeader.slice(7).trim() : (queryToken ?? undefined);
 
     if (!token) {
       throw new HTTPException(401, { message: 'Missing authorization token' });
-    }
-
-    if (!queryToken && authHeader && !authHeader.toLowerCase().startsWith('bearer ')) {
-      throw new HTTPException(401, { message: 'Invalid authorization token' });
     }
 
     // Try managed API key verification first

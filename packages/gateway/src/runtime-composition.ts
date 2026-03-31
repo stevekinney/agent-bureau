@@ -243,6 +243,14 @@ function applyCache(
   });
 }
 
+type RuntimeCompositionDependencies = {
+  resolveProviderGenerate: typeof resolveProviderGenerate;
+};
+
+const defaultRuntimeCompositionDependencies: RuntimeCompositionDependencies = {
+  resolveProviderGenerate,
+};
+
 type SkillSession = {
   activate(name: string, toolPolicy?: ToolPolicy): void;
   deactivate(name: string): void;
@@ -463,6 +471,7 @@ export interface RuntimeComposition {
 
 export async function createRuntimeComposition(
   options: BureauOptions,
+  dependencies: RuntimeCompositionDependencies = defaultRuntimeCompositionDependencies,
 ): Promise<RuntimeComposition> {
   const maximumSteps = options.maximumSteps ?? 10;
   const systemPrompt = options.systemPrompt;
@@ -494,6 +503,10 @@ export async function createRuntimeComposition(
           },
         ]
       : []);
+  const routingStrategy =
+    options.routing && baseProviders.length > 1
+      ? createRoutingStrategy(options.routing)
+      : undefined;
 
   const skillToolSummaries: ToolSummary[] =
     options.skills?.includeTools === false
@@ -541,32 +554,39 @@ export async function createRuntimeComposition(
         return undefined;
       }
 
-      if (options.routing && baseProviders.length > 1) {
-        const routingConfiguration = createRoutingStrategy(options.routing);
+      if (routingStrategy && baseProviders.length > 1) {
         const routes = baseProviders.map((route) => ({
           name: route.name,
-          generate: resolveProviderGenerate(route.provider, streamEventTarget, options.streaming),
+          generate: dependencies.resolveProviderGenerate(
+            route.provider,
+            streamEventTarget,
+            options.streaming,
+          ),
         }));
 
         const routingGenerate = createRoutingGenerate({
           routes,
           fallback: routes[0]!.name,
-          strategy: routingConfiguration.strategy,
+          strategy: routingStrategy.strategy,
         });
 
         generate =
-          routingConfiguration.kind === 'cost-aware'
-            ? withUsageTracking(routingGenerate, routingConfiguration.onUsage)
+          routingStrategy.kind === 'cost-aware'
+            ? withUsageTracking(routingGenerate, routingStrategy.onUsage)
             : routingGenerate;
       } else if (baseProviders.length > 1) {
         generate = createFalloverGenerate({
           providers: baseProviders.map((route) => ({
             name: route.name,
-            generate: resolveProviderGenerate(route.provider, streamEventTarget, options.streaming),
+            generate: dependencies.resolveProviderGenerate(
+              route.provider,
+              streamEventTarget,
+              options.streaming,
+            ),
           })),
         });
       } else {
-        generate = resolveProviderGenerate(
+        generate = dependencies.resolveProviderGenerate(
           baseProviders[0]!.provider,
           streamEventTarget,
           options.streaming,

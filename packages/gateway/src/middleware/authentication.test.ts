@@ -49,6 +49,8 @@ describe('authentication', () => {
       headers: { authorization: 'Basic secret-token' },
     });
     expect(response.status).toBe(401);
+    const body = await response.json();
+    expect(body.error.message).toBe('Invalid authorization token');
   });
 
   it('passes requests with correct bearer token', async () => {
