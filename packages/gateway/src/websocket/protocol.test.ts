@@ -235,7 +235,6 @@ describe('streamEventToFrame', () => {
       type: 'stream:tool-call-delta',
       blockId: 'block-2',
       toolName: 'search',
-      blockId: 'block-1',
       partialArguments: '{"query":',
     };
 
@@ -252,7 +251,6 @@ describe('streamEventToFrame', () => {
       type: 'stream:tool-call-complete',
       blockId: 'block-3',
       toolName: 'search',
-      blockId: 'block-2',
       arguments: { query: 'test' },
     };
 
