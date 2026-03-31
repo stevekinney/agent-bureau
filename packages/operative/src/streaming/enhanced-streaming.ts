@@ -120,6 +120,11 @@ export function withEnhancedStreaming(
             toolName,
           });
 
+          emitEvent(eventTarget, 'stream:block-start', {
+            type: 'stream:block-start',
+            block: { ...stateMachine.getState().activeBlock! },
+          });
+
           onToolCallStart?.(toolName);
 
           emitEvent(eventTarget, 'stream:tool-call-start', {
@@ -138,6 +143,12 @@ export function withEnhancedStreaming(
           stateMachine.process({
             type: 'block-delta',
             id: toolBlockId,
+            delta: argsString,
+          });
+
+          emitEvent(eventTarget, 'stream:block-delta', {
+            type: 'stream:block-delta',
+            block: { ...stateMachine.getState().activeBlock! },
             delta: argsString,
           });
 
