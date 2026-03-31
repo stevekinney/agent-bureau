@@ -52,6 +52,9 @@ export function createPromptInjectionDetector(
       const matchedDetails: string[] = [];
 
       for (const pattern of patterns) {
+        // Reset lastIndex to avoid stateful /g or /y regexes missing matches
+        // on subsequent calls (user-provided additionalPatterns may carry flags).
+        pattern.lastIndex = 0;
         if (pattern.test(input)) {
           matchCount++;
           matchedDetails.push(pattern.source);

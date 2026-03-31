@@ -39,7 +39,9 @@ export function createToolResultCache(options: CreateToolResultCacheOptions): To
     return `${prefix}${key}`;
   }
 
+  /** TTL of 0 means "never expire." */
   function isExpired(entry: CachedToolResult): boolean {
+    if (entry.ttl === 0) return false;
     return Date.now() > entry.executedAt + entry.ttl;
   }
 

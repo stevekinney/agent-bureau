@@ -42,7 +42,7 @@ function extractField(input: unknown, fieldName: string): unknown {
  */
 export function fullInputKey(input: unknown): string {
   const sorted = stableSortKeys(input);
-  const serialized = JSON.stringify(sorted) ?? 'undefined';
+  const serialized = sorted === undefined ? 'undefined' : JSON.stringify(sorted);
   return sha256HexSync(serialized);
 }
 

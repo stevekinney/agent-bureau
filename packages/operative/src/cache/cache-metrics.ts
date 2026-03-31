@@ -7,7 +7,6 @@
 
 import { estimateCost } from '../cost-estimation';
 import type { GenerateFunction } from '../types';
-import { conversationHashKey, lastMessageKey } from './cache-keys';
 import type { CacheMetrics, CacheOptions } from './types';
 import { withCache } from './with-cache';
 
@@ -34,17 +33,10 @@ export function withCacheMetrics(
   let totalSavedTokens = 0;
   let estimatedSavedCost = 0;
 
-  // Track per-call hits using cache keys. The onHit callback records the key
-  // that was hit, and after the await resolves the caller checks whether the
-  // key for its context was recorded — immune to concurrent calls that would
-  // otherwise cause misattribution via shared counter comparison.
-  const pendingHitKeys = new Set<string>();
-
   const cachedGenerate = withCache(generate, {
     ...rest,
     onHit: (event) => {
       hits++;
-      pendingHitKeys.add(event.key);
       onHit?.(event);
     },
     onMiss: (event) => {
@@ -55,33 +47,20 @@ export function withCacheMetrics(
 
   // Wrap to intercept responses for token/cost tracking on hits
   const trackedGenerate: GenerateFunction = async (context) => {
+    const hitsBefore = hits;
     const response = await cachedGenerate(context);
+    const wasHit = hits > hitsBefore;
 
-    // Build the same key that withCache would have produced for this context,
-    // then check whether it appeared in the hit set during this call.
-    const rawKey = rest.keyStrategy
-      ? typeof rest.keyStrategy === 'function'
-        ? rest.keyStrategy(context)
-        : rest.keyStrategy === 'last-message'
-          ? lastMessageKey(context)
-          : conversationHashKey(context)
-      : conversationHashKey(context);
-    const fullKey = `${rest.namespace ?? 'llm-cache:'}${rawKey}`;
+    if (wasHit && response.usage) {
+      const saved = response.usage.prompt + response.usage.completion;
+      totalSavedTokens += saved;
 
-    if (pendingHitKeys.has(fullKey)) {
-      pendingHitKeys.delete(fullKey);
-
-      if (response.usage) {
-        const saved = response.usage.prompt + response.usage.completion;
-        totalSavedTokens += saved;
-
-        if (model) {
-          try {
-            const cost = estimateCost(response.usage, model);
-            estimatedSavedCost += cost.totalCost;
-          } catch {
-            // Unknown model — skip cost estimation
-          }
+      if (model) {
+        try {
+          const cost = estimateCost(response.usage, model);
+          estimatedSavedCost += cost.totalCost;
+        } catch {
+          // Unknown model — skip cost estimation
         }
       }
     }
