@@ -2,7 +2,12 @@ import { describe, expect, it } from 'bun:test';
 import type { ActiveRun } from 'operative';
 import type { RunState } from 'sentinel';
 
-import { serializeActionDetail, serializeRunState, serializeUnknownError } from './serialization';
+import {
+  serializeActionDetail,
+  serializeRunDetail,
+  serializeRunState,
+  serializeUnknownError,
+} from './serialization';
 
 describe('serializeRunState', () => {
   it('maps RunState to a JSON-safe RunSummary', () => {
@@ -210,6 +215,77 @@ describe('serializeActionDetail', () => {
     const result = serializeActionDetail('generate.retry', detail) as Record<string, unknown>;
     expect(result['error']).toBe('Timeout');
     expect(result['attempt']).toBe(3);
+  });
+
+  it('preserves dates, maps, and sets in serialized detail payloads', () => {
+    const detail = {
+      createdAt: new Date('2026-03-31T21:15:48.000Z'),
+      labels: new Set(['gateway', 'live']),
+      metadata: new Map<unknown, unknown>([
+        ['attempt', 2],
+        ['nested', new Map([['ok', true]])],
+      ]),
+    };
+
+    const result = serializeActionDetail('run.started', detail) as Record<string, unknown>;
+    expect(result['createdAt']).toBe('2026-03-31T21:15:48.000Z');
+    expect(result['labels']).toEqual(['gateway', 'live']);
+    expect(result['metadata']).toEqual([
+      ['attempt', 2],
+      ['nested', [['ok', true]]],
+    ]);
+  });
+});
+
+describe('serializeRunDetail', () => {
+  it('keeps non-plain tool result values JSON-safe without dropping their contents', () => {
+    const runState: RunState = {
+      id: 'run-5',
+      status: 'completed',
+      steps: [
+        {
+          step: 1,
+          content: 'done',
+          final: true,
+          usage: { prompt: 1, completion: 1, total: 2 },
+          toolCalls: [
+            {
+              id: 'tool-call-1',
+              name: 'inspect',
+              arguments: {
+                createdAt: new Date('2026-03-31T21:15:48.000Z'),
+              },
+            },
+          ],
+          results: [
+            {
+              toolName: 'inspect',
+              result: {
+                tags: new Set(['one', 'two']),
+                values: new Map([['count', 2]]),
+              },
+              error: undefined,
+              errorMessage: undefined,
+            },
+          ],
+        } as never,
+      ],
+      usage: { prompt: 1, completion: 1, total: 2 },
+      finishReason: 'stop-condition',
+      error: undefined,
+      snapshots: [],
+      actions: [],
+      activeRun: {} as ActiveRun,
+    };
+
+    const detail = serializeRunDetail(runState, 'session-1');
+    expect(detail.stepDetails[0]?.toolCalls[0]?.arguments).toEqual({
+      createdAt: '2026-03-31T21:15:48.000Z',
+    });
+    expect(detail.stepDetails[0]?.results[0]?.result).toEqual({
+      tags: ['one', 'two'],
+      values: [['count', 2]],
+    });
   });
 });
 

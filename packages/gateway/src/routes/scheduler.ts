@@ -23,78 +23,96 @@ const SubmitSchedulerTaskRequestSchema = z.object({
 type SubmitSchedulerTaskRequest = z.infer<typeof SubmitSchedulerTaskRequestSchema>;
 
 const MAX_HISTORY_ENTRIES = 100;
+const schedulerHistoryByInstance = new WeakMap<Scheduler, SchedulerHistoryEntry[]>();
+
+function createSchedulerHistoryStore(): SchedulerHistoryEntry[] {
+  return [];
+}
+
+function appendSchedulerHistory(
+  history: SchedulerHistoryEntry[],
+  entry: SchedulerHistoryEntry,
+): void {
+  history.unshift(entry);
+  if (history.length > MAX_HISTORY_ENTRIES) {
+    history.length = MAX_HISTORY_ENTRIES;
+  }
+}
+
+function getSchedulerHistory(scheduler: Scheduler): SchedulerHistoryEntry[] {
+  const existingHistory = schedulerHistoryByInstance.get(scheduler);
+  if (existingHistory) {
+    return existingHistory;
+  }
+
+  const history = createSchedulerHistoryStore();
+
+  scheduler.addEventListener('task.queued', (event) => {
+    appendSchedulerHistory(history, {
+      event: event.type,
+      taskId: event.taskId,
+      priority: event.priority,
+      metadata: event.metadata,
+      timestamp: Date.now(),
+    });
+  });
+
+  scheduler.addEventListener('task.dispatched', (event) => {
+    appendSchedulerHistory(history, {
+      event: event.type,
+      taskId: event.taskId,
+      priority: event.priority,
+      timestamp: Date.now(),
+    });
+  });
+
+  scheduler.addEventListener('task.completed', (event) => {
+    appendSchedulerHistory(history, {
+      event: event.type,
+      taskId: event.taskId,
+      timestamp: Date.now(),
+    });
+  });
+
+  scheduler.addEventListener('task.failed', (event) => {
+    appendSchedulerHistory(history, {
+      event: event.type,
+      taskId: event.taskId,
+      metadata: {
+        error: event.error instanceof Error ? event.error.message : String(event.error),
+      },
+      timestamp: Date.now(),
+    });
+  });
+
+  scheduler.addEventListener('task.preempted', (event) => {
+    appendSchedulerHistory(history, {
+      event: event.type,
+      taskId: event.taskId,
+      reason: event.reason,
+      timestamp: Date.now(),
+    });
+  });
+
+  scheduler.addEventListener('task.cancelled', (event) => {
+    appendSchedulerHistory(history, {
+      event: event.type,
+      taskId: event.taskId,
+      reason: event.phase,
+      timestamp: Date.now(),
+    });
+  });
+
+  schedulerHistoryByInstance.set(scheduler, history);
+  return history;
+}
 
 /**
  * Creates HTTP routes for scheduler inspection, submission, cancellation, and history.
  */
 export function createSchedulerRoutes(scheduler: Scheduler | undefined) {
   const app = new Hono();
-  const history: SchedulerHistoryEntry[] = [];
-
-  function appendHistory(entry: SchedulerHistoryEntry): void {
-    history.unshift(entry);
-    if (history.length > MAX_HISTORY_ENTRIES) {
-      history.length = MAX_HISTORY_ENTRIES;
-    }
-  }
-
-  if (scheduler) {
-    scheduler.addEventListener('task.queued', (event) => {
-      appendHistory({
-        event: event.type,
-        taskId: event.taskId,
-        priority: event.priority,
-        metadata: event.metadata,
-        timestamp: Date.now(),
-      });
-    });
-
-    scheduler.addEventListener('task.dispatched', (event) => {
-      appendHistory({
-        event: event.type,
-        taskId: event.taskId,
-        priority: event.priority,
-        timestamp: Date.now(),
-      });
-    });
-
-    scheduler.addEventListener('task.completed', (event) => {
-      appendHistory({
-        event: event.type,
-        taskId: event.taskId,
-        timestamp: Date.now(),
-      });
-    });
-
-    scheduler.addEventListener('task.failed', (event) => {
-      appendHistory({
-        event: event.type,
-        taskId: event.taskId,
-        metadata: {
-          error: event.error instanceof Error ? event.error.message : String(event.error),
-        },
-        timestamp: Date.now(),
-      });
-    });
-
-    scheduler.addEventListener('task.preempted', (event) => {
-      appendHistory({
-        event: event.type,
-        taskId: event.taskId,
-        reason: event.reason,
-        timestamp: Date.now(),
-      });
-    });
-
-    scheduler.addEventListener('task.cancelled', (event) => {
-      appendHistory({
-        event: event.type,
-        taskId: event.taskId,
-        reason: event.phase,
-        timestamp: Date.now(),
-      });
-    });
-  }
+  const history = scheduler ? getSchedulerHistory(scheduler) : [];
 
   app.get('/', (context) => {
     if (!scheduler) {

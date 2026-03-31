@@ -326,6 +326,16 @@ describe('createBureau', () => {
     bureau.dispose();
   });
 
+  it('does not configure a scheduler unless it is explicitly enabled', async () => {
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+    });
+
+    expect(bureau.scheduler).toBeUndefined();
+    bureau.dispose();
+  });
+
   it('returns tool summaries', async () => {
     const bureau = await createBureau({
       generate: createMockGenerate(),

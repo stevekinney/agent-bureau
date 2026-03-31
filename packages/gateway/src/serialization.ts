@@ -11,6 +11,10 @@ function safeStringify(value: unknown): string {
   }
 }
 
+function hasToJson(value: object): value is object & { toJSON(): unknown } {
+  return typeof (value as { toJSON?: unknown }).toJSON === 'function';
+}
+
 function toJsonSafe(value: unknown, seen = new WeakSet<object>()): unknown {
   if (
     value === null ||
@@ -34,7 +38,37 @@ function toJsonSafe(value: unknown, seen = new WeakSet<object>()): unknown {
     return value.message;
   }
 
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? 'Invalid Date' : value.toISOString();
+  }
+
+  if (value instanceof Map) {
+    if (seen.has(value)) {
+      return '[Circular]';
+    }
+
+    seen.add(value);
+    return Array.from(value.entries(), ([key, entry]) => [
+      toJsonSafe(key, seen),
+      toJsonSafe(entry, seen),
+    ]);
+  }
+
+  if (value instanceof Set) {
+    if (seen.has(value)) {
+      return '[Circular]';
+    }
+
+    seen.add(value);
+    return Array.from(value.values(), (entry) => toJsonSafe(entry, seen));
+  }
+
   if (Array.isArray(value)) {
+    if (seen.has(value)) {
+      return '[Circular]';
+    }
+
+    seen.add(value);
     return value.map((entry) => toJsonSafe(entry, seen));
   }
 
@@ -44,6 +78,10 @@ function toJsonSafe(value: unknown, seen = new WeakSet<object>()): unknown {
     }
 
     seen.add(value);
+
+    if (hasToJson(value)) {
+      return toJsonSafe(value.toJSON(), seen);
+    }
 
     const record = value as Record<string, unknown>;
     const result: Record<string, unknown> = {};

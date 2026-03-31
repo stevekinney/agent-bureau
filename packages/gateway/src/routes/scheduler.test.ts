@@ -1,7 +1,7 @@
 import { createTestToolbox } from 'armorer/test';
 import { describe, expect, it } from 'bun:test';
 import { Hono } from 'hono';
-import type { GenerateResponse, Scheduler } from 'operative';
+import type { GenerateResponse, Scheduler, SchedulerPriority } from 'operative';
 import { createScheduler } from 'operative';
 import { createMockGenerate } from 'operative/test';
 
@@ -197,5 +197,80 @@ describe('scheduler routes', () => {
     );
 
     expect(failureEntries).toHaveLength(1);
+  });
+
+  it('does not register duplicate scheduler listeners when routes are recreated', async () => {
+    const events = new EventTarget();
+    const scheduler = {
+      getState() {
+        return {
+          activeTask: undefined,
+          completedCount: 0,
+          idle: true,
+          preemptedCount: 0,
+          queued: {
+            ambient: [],
+            background: [],
+            immediate: [],
+            scheduled: [],
+          },
+        };
+      },
+      submit(task: Parameters<Scheduler['submit']>[0]) {
+        queueMicrotask(() => {
+          const queuedEvent = new Event('task.queued') as Event & {
+            metadata?: Record<string, unknown>;
+            priority: SchedulerPriority;
+            taskId: string;
+          };
+          queuedEvent.taskId = task.id;
+          queuedEvent.priority = task.priority;
+          queuedEvent.metadata = task.metadata;
+          events.dispatchEvent(queuedEvent);
+        });
+        return Promise.resolve();
+      },
+      cancel() {
+        return false;
+      },
+      addEventListener(
+        type: string,
+        listener: EventListenerOrEventListenerObject,
+        options?: boolean | AddEventListenerOptions,
+      ) {
+        events.addEventListener(type, listener, options);
+      },
+      removeEventListener(
+        type: string,
+        listener: EventListenerOrEventListenerObject,
+        options?: boolean | EventListenerOptions,
+      ) {
+        events.removeEventListener(type, listener, options);
+      },
+    } as unknown as Scheduler;
+
+    const firstApp = new Hono();
+    firstApp.route('/api/v1/scheduler', createSchedulerRoutes(scheduler));
+
+    const secondApp = new Hono();
+    secondApp.route('/api/v1/scheduler', createSchedulerRoutes(scheduler));
+
+    const submitResponse = await firstApp.request('/api/v1/scheduler/tasks', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ message: 'Queue once' }),
+    });
+    expect(submitResponse.status).toBe(202);
+
+    await waitForSchedulerTick();
+
+    const historyResponse = await secondApp.request('/api/v1/scheduler/history');
+    expect(historyResponse.status).toBe(200);
+
+    const historyBody = await historyResponse.json();
+    const queuedEntries = historyBody.entries.filter(
+      (entry: { event: string }) => entry.event === 'task.queued',
+    );
+    expect(queuedEntries).toHaveLength(1);
   });
 });

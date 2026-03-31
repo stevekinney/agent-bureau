@@ -580,7 +580,7 @@ export async function createRuntimeComposition(
   const schedulerGenerate = createConfiguredGenerate(undefined);
 
   const scheduler =
-    schedulerGenerate && options.scheduler?.enabled !== false
+    schedulerGenerate && options.scheduler?.enabled === true
       ? createScheduler({
           generate: schedulerGenerate,
           // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment -- GatewayToolbox variance; scheduler does not inspect tool tuple types
