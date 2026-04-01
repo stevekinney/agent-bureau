@@ -47,7 +47,8 @@ import type {
   CacheConfiguration,
   CreateRunRequest,
   ProviderConfiguration,
-  ProviderRouteConfiguration,
+  RedactedProviderConfiguration,
+  RedactedProviderRouteConfiguration,
   RoutingConfiguration,
   SkillCatalogEntry,
   SkillProvider,
@@ -62,7 +63,7 @@ function isMemoryInstance(value: CreateMemoryOptions | Memory): value is Memory 
   return typeof (value as Memory).remember === 'function';
 }
 
-function redactProvider(provider: ProviderConfiguration): Omit<ProviderConfiguration, 'apiKey'> {
+function redactProvider(provider: ProviderConfiguration): RedactedProviderConfiguration {
   const { apiKey: _apiKey, ...safeProvider } = provider;
   return safeProvider;
 }
@@ -454,8 +455,8 @@ export interface RuntimeComposition {
   sessionStore: SessionStore | undefined;
   scheduler: Scheduler | undefined;
   ready: boolean;
-  provider: Omit<ProviderConfiguration, 'apiKey'> | undefined;
-  providers: ProviderRouteConfiguration[];
+  provider: RedactedProviderConfiguration | undefined;
+  providers: RedactedProviderRouteConfiguration[];
   maximumSteps: number;
   systemPrompt: string | undefined;
   getToolSummaries(): ToolSummary[];

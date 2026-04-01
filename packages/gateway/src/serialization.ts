@@ -15,6 +15,24 @@ function hasToJson(value: object): value is object & { toJSON(): unknown } {
   return typeof (value as { toJSON?: unknown }).toJSON === 'function';
 }
 
+function serializeTrackedObject<T extends object>(
+  value: T,
+  seen: WeakSet<object>,
+  serialize: () => unknown,
+): unknown {
+  if (seen.has(value)) {
+    return '[Circular]';
+  }
+
+  seen.add(value);
+
+  try {
+    return serialize();
+  } finally {
+    seen.delete(value);
+  }
+}
+
 function toJsonSafe(value: unknown, seen = new WeakSet<object>()): unknown {
   if (
     value === null ||
@@ -43,52 +61,37 @@ function toJsonSafe(value: unknown, seen = new WeakSet<object>()): unknown {
   }
 
   if (value instanceof Map) {
-    if (seen.has(value)) {
-      return '[Circular]';
-    }
-
-    seen.add(value);
-    return Array.from(value.entries(), ([key, entry]) => [
-      toJsonSafe(key, seen),
-      toJsonSafe(entry, seen),
-    ]);
+    return serializeTrackedObject(value, seen, () =>
+      Array.from(value.entries(), ([key, entry]) => [
+        toJsonSafe(key, seen),
+        toJsonSafe(entry, seen),
+      ]),
+    );
   }
 
   if (value instanceof Set) {
-    if (seen.has(value)) {
-      return '[Circular]';
-    }
-
-    seen.add(value);
-    return Array.from(value.values(), (entry) => toJsonSafe(entry, seen));
+    return serializeTrackedObject(value, seen, () =>
+      Array.from(value.values(), (entry) => toJsonSafe(entry, seen)),
+    );
   }
 
   if (Array.isArray(value)) {
-    if (seen.has(value)) {
-      return '[Circular]';
-    }
-
-    seen.add(value);
-    return value.map((entry) => toJsonSafe(entry, seen));
+    return serializeTrackedObject(value, seen, () => value.map((entry) => toJsonSafe(entry, seen)));
   }
 
   if (typeof value === 'object') {
-    if (seen.has(value)) {
-      return '[Circular]';
-    }
+    return serializeTrackedObject(value, seen, () => {
+      if (hasToJson(value)) {
+        return toJsonSafe(value.toJSON(), seen);
+      }
 
-    seen.add(value);
-
-    if (hasToJson(value)) {
-      return toJsonSafe(value.toJSON(), seen);
-    }
-
-    const record = value as Record<string, unknown>;
-    const result: Record<string, unknown> = {};
-    for (const [key, entry] of Object.entries(record)) {
-      result[key] = toJsonSafe(entry, seen);
-    }
-    return result;
+      const record = value as Record<string, unknown>;
+      const result: Record<string, unknown> = {};
+      for (const [key, entry] of Object.entries(record)) {
+        result[key] = toJsonSafe(entry, seen);
+      }
+      return result;
+    });
   }
 
   return safeStringify(value);

@@ -44,6 +44,12 @@ export interface ProviderRouteConfiguration {
   budgetRatio?: number;
 }
 
+export type RedactedProviderConfiguration = Omit<ProviderConfiguration, 'apiKey'>;
+
+export type RedactedProviderRouteConfiguration = Omit<ProviderRouteConfiguration, 'provider'> & {
+  provider: RedactedProviderConfiguration;
+};
+
 export type RoutingConfiguration =
   | {
       type: 'step-based';
@@ -292,8 +298,8 @@ export interface CreateRunRequest {
 }
 
 export interface ConfigurationResponse {
-  provider: Omit<ProviderConfiguration, 'apiKey'> | undefined;
-  providers: ProviderRouteConfiguration[];
+  provider: RedactedProviderConfiguration | undefined;
+  providers: RedactedProviderRouteConfiguration[];
   maximumSteps: number;
   systemPrompt: string | undefined;
   tools: ToolSummary[];

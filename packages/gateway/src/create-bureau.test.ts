@@ -6,7 +6,9 @@ import { createStore } from 'sentinel';
 import { createMemoryKeyValueStore, type KeyValueStore } from 'storage';
 
 import { BureauError, createBureau } from './create-bureau';
-import { DEFAULT_MAXIMUM_STEPS, type ServerFrame } from './types';
+import { type ConfigurationResponse, DEFAULT_MAXIMUM_STEPS, type ServerFrame } from './types';
+
+type HasApiKey<T> = 'apiKey' extends keyof T ? true : false;
 
 function createMockGenerate(content = 'Done.'): GenerateFunction {
   return async () => ({ content, toolCalls: [] });
@@ -417,14 +419,28 @@ describe('createBureau', () => {
 
   it('returns configuration data with provider and tool summaries', async () => {
     const bureau = await createBureau({
-      provider: { provider: 'anthropic', model: 'claude-sonnet-4-20250514' },
+      provider: {
+        provider: 'anthropic',
+        model: 'claude-sonnet-4-20250514',
+        apiKey: 'secret-value',
+      },
     });
 
     const configuration = bureau.getConfiguration();
+    const configurationProviderHasNoApiKey: HasApiKey<
+      NonNullable<ConfigurationResponse['provider']>
+    > = false;
+    const routedConfigurationProviderHasNoApiKey: HasApiKey<
+      ConfigurationResponse['providers'][number]['provider']
+    > = false;
 
     expect(configuration.maximumSteps).toBe(DEFAULT_MAXIMUM_STEPS);
     expect(configuration.provider?.provider).toBe('anthropic');
     expect(configuration.providers).toHaveLength(1);
+    expect(configuration.provider).not.toHaveProperty('apiKey');
+    expect(configuration.providers[0]?.provider).not.toHaveProperty('apiKey');
+    expect(configurationProviderHasNoApiKey).toBeFalse();
+    expect(routedConfigurationProviderHasNoApiKey).toBeFalse();
   });
 
   it('configures a scheduler for routed multi-provider runtimes', async () => {

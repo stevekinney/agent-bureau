@@ -297,6 +297,18 @@ describe('serializeActionDetail', () => {
       ['nested', [['ok', true]]],
     ]);
   });
+
+  it('preserves shared object values that are not circular', () => {
+    const sharedUsage = { prompt: 10, completion: 5, total: 15 };
+    const detail = {
+      first: sharedUsage,
+      second: sharedUsage,
+    };
+
+    const result = serializeActionDetail('run.started', detail) as Record<string, unknown>;
+    expect(result['first']).toEqual({ prompt: 10, completion: 5, total: 15 });
+    expect(result['second']).toEqual({ prompt: 10, completion: 5, total: 15 });
+  });
 });
 
 describe('serializeRunDetail', () => {
@@ -361,5 +373,13 @@ describe('serializeUnknownError', () => {
 
   it('serializes bigint-containing objects without throwing', () => {
     expect(serializeUnknownError({ value: 42n })).toBe('{"value":"42"}');
+  });
+
+  it('serializes repeated non-circular references without dropping later values', () => {
+    const shared = { attempts: 2, ok: true };
+
+    expect(serializeUnknownError({ first: shared, second: shared })).toBe(
+      '{"first":{"attempts":2,"ok":true},"second":{"attempts":2,"ok":true}}',
+    );
   });
 });
