@@ -17,6 +17,7 @@ const SubmitSchedulerTaskRequestSchema = z.object({
   maximumSteps: z.number().int().positive().optional(),
   metadata: z.record(z.string(), z.unknown()).optional(),
   priority: z.enum(['immediate', 'scheduled', 'background', 'ambient']).optional(),
+  requeue: z.boolean().optional(),
   systemPrompt: z.string().optional(),
 });
 
@@ -170,6 +171,7 @@ export function createSchedulerRoutes(scheduler: Scheduler | undefined) {
       id: taskId,
       priority,
       metadata: body.metadata,
+      requeue: body.requeue,
       createRun() {
         const conversation = new Conversation(createConversationHistory());
         if (body.systemPrompt) {

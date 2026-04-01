@@ -75,6 +75,65 @@ describe('scheduler routes', () => {
     await scheduler.stop();
   });
 
+  it('POST /api/v1/scheduler/tasks forwards explicit requeue behavior', async () => {
+    let submittedTask: Parameters<Scheduler['submit']>[0] | undefined;
+    const events = new EventTarget();
+    const scheduler = {
+      getState() {
+        return {
+          activeTask: undefined,
+          completedCount: 0,
+          idle: true,
+          preemptedCount: 0,
+          queued: {
+            ambient: [],
+            background: [],
+            immediate: [],
+            scheduled: [],
+          },
+        };
+      },
+      submit(task: Parameters<Scheduler['submit']>[0]) {
+        submittedTask = task;
+        return Promise.resolve(null);
+      },
+      cancel() {
+        return false;
+      },
+      addEventListener(
+        type: string,
+        listener: EventListenerOrEventListenerObject,
+        options?: boolean | AddEventListenerOptions,
+      ) {
+        events.addEventListener(type, listener, options);
+      },
+      removeEventListener(
+        type: string,
+        listener: EventListenerOrEventListenerObject,
+        options?: boolean | EventListenerOptions,
+      ) {
+        events.removeEventListener(type, listener, options);
+      },
+    } as unknown as Scheduler;
+
+    const app = new Hono();
+    app.route('/api/v1/scheduler', createSchedulerRoutes(scheduler));
+
+    const response = await app.request('/api/v1/scheduler/tasks', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        message: 'Do not requeue this task',
+        priority: 'background',
+        requeue: false,
+      }),
+    });
+
+    expect(response.status).toBe(202);
+    expect(submittedTask?.priority).toBe('background');
+    expect(submittedTask?.requeue).toBe(false);
+  });
+
   it('DELETE /api/v1/scheduler/tasks/:id cancels a queued task', async () => {
     const scheduler = createScheduler({
       generate: createMockGenerate([textResponse('ok')]),
