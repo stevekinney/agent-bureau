@@ -616,7 +616,9 @@ export async function createRuntimeComposition(
 
   function createRunRuntime(request: CreateRunRequest & { sessionId: string }) {
     const streamEventTarget =
-      options.streaming?.enabled === false ? undefined : new TypedEventTarget<StreamEventMap>();
+      options.generate !== undefined || options.streaming?.enabled === false
+        ? undefined
+        : new TypedEventTarget<StreamEventMap>();
     const generate = createConfiguredGenerate(streamEventTarget);
 
     if (!generate) {

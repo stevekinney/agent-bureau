@@ -23,6 +23,20 @@ function createGenerateForProvider(provider: ProviderConfiguration): GenerateFun
 }
 
 describe('createRuntimeComposition', () => {
+  it('does not create a stream event target for custom generate functions', async () => {
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'custom', toolCalls: [] }),
+      toolbox: createToolbox([], { context: {} }),
+    });
+
+    const runRuntime = await runtime.createRunRuntime({
+      message: 'Hello',
+      sessionId: 'session-custom',
+    });
+
+    expect(runRuntime.streamEventTarget).toBeUndefined();
+  });
+
   it('reuses cost-aware routing budget across separate run runtimes', async () => {
     const runtime = await createRuntimeComposition(
       {

@@ -126,9 +126,11 @@ export class LiveFrameBroker {
     const heartbeatIntervalMs = options.heartbeatIntervalMs ?? 15_000;
     let heartbeat: ReturnType<typeof setInterval> | undefined;
     let closed = false;
-    let close = () => {
+    let controllerForClose: ReadableStreamDefaultController<Uint8Array> | undefined;
+
+    const cleanup = () => {
       if (closed) {
-        return;
+        return false;
       }
 
       closed = true;
@@ -137,28 +139,28 @@ export class LiveFrameBroker {
         heartbeat = undefined;
       }
       this.removeSubscriber(streamKey);
+      return true;
+    };
+
+    const close = () => {
+      if (!cleanup()) {
+        return;
+      }
+
+      if (!controllerForClose) {
+        return;
+      }
+
+      try {
+        controllerForClose.close();
+      } catch {
+        // Ignore double-close errors during cancellation.
+      }
     };
 
     const stream = new ReadableStream<Uint8Array>({
       start: (controller) => {
-        close = () => {
-          if (closed) {
-            return;
-          }
-
-          closed = true;
-          if (heartbeat) {
-            clearInterval(heartbeat);
-            heartbeat = undefined;
-          }
-          this.removeSubscriber(streamKey);
-
-          try {
-            controller.close();
-          } catch {
-            // Ignore double-close errors during cancellation.
-          }
-        };
+        controllerForClose = controller;
 
         const sendFrame = (frame: ServerFrame) => {
           if (closed) {
