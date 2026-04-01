@@ -35,6 +35,8 @@ import type {
 import { streamEventToFrame } from './websocket/protocol';
 
 const GATEWAY_AGENT_NAME = 'gateway';
+const SESSION_PERSISTENCE_MAXIMUM_ATTEMPTS = 3;
+const SESSION_PERSISTENCE_RETRY_DELAY_MILLISECONDS = 10;
 
 class BureauError extends Error {
   constructor(
@@ -150,7 +152,9 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
                 type: 'scheduler.task.preempted',
                 taskId: preemptedEvent.taskId,
                 reason: preemptedEvent.reason,
+                state: runtime.scheduler!.getState(),
               });
+              return;
             }
 
             emitLiveFrame({
@@ -226,8 +230,32 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     });
   }
 
-  function persistSessionUpdate(task: Promise<void>): void {
-    void task.catch(() => {});
+  function persistSessionUpdate(
+    saveSessionUpdate: () => Promise<void>,
+    context: { runId: string; sessionId: string; status: 'completed' | 'error' | 'aborted' },
+  ): void {
+    void (async () => {
+      let lastError: unknown;
+
+      for (let attempt = 1; attempt <= SESSION_PERSISTENCE_MAXIMUM_ATTEMPTS; attempt += 1) {
+        try {
+          await saveSessionUpdate();
+          return;
+        } catch (error) {
+          lastError = error;
+
+          if (attempt < SESSION_PERSISTENCE_MAXIMUM_ATTEMPTS) {
+            await new Promise((resolve) =>
+              setTimeout(resolve, SESSION_PERSISTENCE_RETRY_DELAY_MILLISECONDS),
+            );
+          }
+        }
+      }
+
+      console.warn(
+        `[bureau] Failed to persist ${context.status} session state for run ${context.runId} in session ${context.sessionId}: ${serializeUnknownError(lastError)}`,
+      );
+    })();
   }
 
   function disposeRegisteredStreamListeners(listeners: Array<() => void>): void {
@@ -314,14 +342,20 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       const lastRunStatus = event.finishReason === 'error' ? 'error' : 'completed';
 
       persistSessionUpdate(
-        saveSession(sessionId, event.conversation, {
-          lastRunId: runId,
-          lastRunStatus,
-          lastFinishReason: event.finishReason,
-          ...(event.finishReason === 'error'
-            ? { lastError: serializeUnknownError(event.error) }
-            : {}),
-        }),
+        () =>
+          saveSession(sessionId, event.conversation, {
+            lastRunId: runId,
+            lastRunStatus,
+            lastFinishReason: event.finishReason,
+            ...(event.finishReason === 'error'
+              ? { lastError: serializeUnknownError(event.error) }
+              : {}),
+          }),
+        {
+          runId,
+          sessionId,
+          status: lastRunStatus,
+        },
       );
     });
 
@@ -329,10 +363,16 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       disposeRegisteredStreamListeners(disposeStreamListeners);
 
       persistSessionUpdate(
-        saveSession(sessionId, conversation, {
-          lastRunId: runId,
-          lastRunStatus: 'aborted',
-        }),
+        () =>
+          saveSession(sessionId, conversation, {
+            lastRunId: runId,
+            lastRunStatus: 'aborted',
+          }),
+        {
+          runId,
+          sessionId,
+          status: 'aborted',
+        },
       );
     });
 

@@ -125,12 +125,23 @@ export class LiveFrameBroker {
     const encoder = new TextEncoder();
     const heartbeatIntervalMs = options.heartbeatIntervalMs ?? 15_000;
     let heartbeat: ReturnType<typeof setInterval> | undefined;
+    let closed = false;
+    let close = () => {
+      if (closed) {
+        return;
+      }
+
+      closed = true;
+      if (heartbeat) {
+        clearInterval(heartbeat);
+        heartbeat = undefined;
+      }
+      this.removeSubscriber(streamKey);
+    };
 
     const stream = new ReadableStream<Uint8Array>({
       start: (controller) => {
-        let closed = false;
-
-        const close = () => {
+        close = () => {
           if (closed) {
             return;
           }
@@ -184,10 +195,7 @@ export class LiveFrameBroker {
         request.signal.addEventListener('abort', close, { once: true });
       },
       cancel: () => {
-        this.removeSubscriber(streamKey);
-        if (heartbeat) {
-          clearInterval(heartbeat);
-        }
+        close();
       },
     });
 

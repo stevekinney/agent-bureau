@@ -1,11 +1,12 @@
 import { createToolbox } from 'armorer';
 import { describe, expect, it } from 'bun:test';
-import type { GenerateFunction, Toolbox } from 'operative';
+import { Conversation } from 'conversationalist';
+import type { GenerateFunction, GenerateResponse, Toolbox } from 'operative';
 import { createStore } from 'sentinel';
 import { createMemoryKeyValueStore, type KeyValueStore } from 'storage';
 
 import { BureauError, createBureau } from './create-bureau';
-import { DEFAULT_MAXIMUM_STEPS } from './types';
+import { DEFAULT_MAXIMUM_STEPS, type ServerFrame } from './types';
 
 function createMockGenerate(content = 'Done.'): GenerateFunction {
   return async () => ({ content, toolCalls: [] });
@@ -13,6 +14,35 @@ function createMockGenerate(content = 'Done.'): GenerateFunction {
 
 function createEmptyToolbox(): Toolbox {
   return createToolbox([]) as unknown as Toolbox;
+}
+
+function createBlockingGenerate(): {
+  generate: GenerateFunction;
+  resolve: (response: GenerateResponse) => void;
+} {
+  let resolveResponse: ((response: GenerateResponse) => void) | undefined;
+  const pendingResponse = new Promise<GenerateResponse>((resolve) => {
+    resolveResponse = resolve;
+  });
+
+  const generate: GenerateFunction = async (context) => {
+    if (context.signal?.aborted) {
+      return { content: 'aborted', toolCalls: [] };
+    }
+
+    return Promise.race([
+      pendingResponse,
+      new Promise<GenerateResponse>((resolve) => {
+        context.signal?.addEventListener(
+          'abort',
+          () => resolve({ content: 'aborted', toolCalls: [] }),
+          { once: true },
+        );
+      }),
+    ]);
+  };
+
+  return { generate, resolve: resolveResponse! };
 }
 
 async function waitForRunCompletion() {
@@ -123,6 +153,47 @@ describe('createBureau', () => {
     await waitForRunCompletion();
 
     const session = await bureau.getSession(run.sessionId);
+    expect(session?.metadata['lastRunId']).toBe(run.id);
+    expect(session?.metadata['lastRunStatus']).toBe('completed');
+  });
+
+  it('retries terminal session persistence after a transient save failure', async () => {
+    const backingStore = createMemoryKeyValueStore();
+    let sessionSaveCount = 0;
+
+    const flakyStore: KeyValueStore = {
+      async get(key) {
+        return backingStore.get(key);
+      },
+      async set(key, value) {
+        if (key.startsWith('agent-session:')) {
+          sessionSaveCount += 1;
+          if (sessionSaveCount === 2) {
+            throw new Error('temporary persistence failure');
+          }
+        }
+
+        await backingStore.set(key, value);
+      },
+      async delete(key) {
+        await backingStore.delete(key);
+      },
+      async list(prefix) {
+        return backingStore.list(prefix);
+      },
+    };
+
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      persistence: flakyStore,
+    });
+
+    const run = await bureau.createRun({ message: 'Retry completion' });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    const session = await bureau.getSession(run.sessionId);
+    expect(sessionSaveCount).toBe(3);
     expect(session?.metadata['lastRunId']).toBe(run.id);
     expect(session?.metadata['lastRunStatus']).toBe('completed');
   });
@@ -398,6 +469,66 @@ describe('createBureau', () => {
     });
 
     expect(bureau.getTools()).toEqual([]);
+  });
+
+  it('emits one scheduler preempted frame with current state', async () => {
+    const { generate: slowGenerate, resolve } = createBlockingGenerate();
+    const schedulerFrames: Extract<
+      ServerFrame,
+      { type: 'scheduler.state' | 'scheduler.task.preempted' }
+    >[] = [];
+
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      scheduler: { enabled: true, idleDelay: 1 },
+    });
+
+    const unsubscribe = bureau.subscribeLiveFrames((frame) => {
+      if (frame.type === 'scheduler.state' || frame.type === 'scheduler.task.preempted') {
+        schedulerFrames.push(frame);
+      }
+    });
+
+    const backgroundResult = bureau.scheduler!.submit({
+      id: 'background-task',
+      priority: 'background',
+      requeue: false,
+      createRun: () => ({
+        generate: slowGenerate,
+        toolbox: createEmptyToolbox(),
+        conversation: new Conversation(),
+        maximumSteps: 5,
+      }),
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    schedulerFrames.length = 0;
+
+    const immediateResult = bureau.scheduler!.submitImmediate(() => ({
+      generate: createMockGenerate('immediate-done'),
+      toolbox: createEmptyToolbox(),
+      conversation: new Conversation(),
+      maximumSteps: 1,
+    }));
+
+    resolve({ content: 'background-step', toolCalls: [] });
+
+    await immediateResult;
+    await backgroundResult;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    const preemptedFrames = schedulerFrames.filter(
+      (frame): frame is Extract<ServerFrame, { type: 'scheduler.task.preempted' }> =>
+        frame.type === 'scheduler.task.preempted',
+    );
+
+    expect(preemptedFrames).toHaveLength(1);
+    expect(preemptedFrames[0]?.taskId).toBe('background-task');
+    expect(preemptedFrames[0]?.state.preemptedCount).toBeGreaterThanOrEqual(1);
+
+    unsubscribe();
+    bureau.dispose();
   });
 
   it('emits action events from live runs', async () => {

@@ -325,7 +325,7 @@ export type ServerFrame =
   | { type: 'error'; code: string; message: string }
   | { type: 'pong' }
   | { type: 'scheduler.state'; state: SchedulerState }
-  | { type: 'scheduler.task.preempted'; taskId: string; reason: string }
+  | { type: 'scheduler.task.preempted'; taskId: string; reason: string; state: SchedulerState }
   | { type: 'stream:text-delta'; runId: string; content: string; accumulated: string }
   | { type: 'stream:tool-call-start'; runId: string; toolName: string; blockId: string }
   | {

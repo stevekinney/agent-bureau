@@ -49,4 +49,32 @@ describe('LiveFrameBroker', () => {
 
     expect(received).toHaveLength(0);
   });
+
+  it('treats stream cancellation as a full close before a later abort', async () => {
+    const broker = new LiveFrameBroker();
+    const abortController = new AbortController();
+    const request = new Request('http://example.test/api/v1/events', {
+      signal: abortController.signal,
+    });
+
+    const response = broker.createEventStreamResponse(request, {
+      runIds: ['run-1'],
+      heartbeatIntervalMs: 1,
+    });
+
+    const reader = response.body?.getReader();
+    expect(reader).toBeDefined();
+    if (!reader) {
+      return;
+    }
+
+    await reader.read();
+    expect(broker.getSubscriberCount('run-1')).toBe(1);
+
+    await reader.cancel();
+    abortController.abort();
+
+    expect(broker.getSubscriberCount('run-1')).toBe(0);
+    expect(() => broker.broadcast(createRunFrame())).not.toThrow();
+  });
 });
