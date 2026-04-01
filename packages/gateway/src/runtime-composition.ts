@@ -460,7 +460,10 @@ export interface RuntimeComposition {
   maximumSteps: number;
   systemPrompt: string | undefined;
   getToolSummaries(): ToolSummary[];
-  createRunRuntime(request: CreateRunRequest & { sessionId: string }): Promise<{
+  createRunRuntime(
+    request: CreateRunRequest & { sessionId: string },
+    options?: { liveStreaming?: boolean },
+  ): Promise<{
     generate: GenerateFunction;
     toolbox: Toolbox;
     prepareStep: PrepareStepHook[];
@@ -545,7 +548,7 @@ export async function createRuntimeComposition(
     ];
   }
 
-  function createConfiguredGenerate(
+  function composeConfiguredGenerate(
     streamEventTarget: TypedEventTarget<StreamEventMap> | undefined,
   ): GenerateFunction | undefined {
     let generate: GenerateFunction | undefined = options.generate;
@@ -598,7 +601,8 @@ export async function createRuntimeComposition(
     return applyCache(generate, options.cache, kv);
   }
 
-  const schedulerGenerate = createConfiguredGenerate(undefined);
+  const nonStreamingGenerate = composeConfiguredGenerate(undefined);
+  const schedulerGenerate = nonStreamingGenerate;
 
   const scheduler =
     schedulerGenerate && options.scheduler?.enabled === true
@@ -614,12 +618,19 @@ export async function createRuntimeComposition(
     scheduler.start();
   }
 
-  function createRunRuntime(request: CreateRunRequest & { sessionId: string }) {
+  function createRunRuntime(
+    request: CreateRunRequest & { sessionId: string },
+    runtimeOptions?: { liveStreaming?: boolean },
+  ) {
+    const liveStreaming = runtimeOptions?.liveStreaming ?? true;
     const streamEventTarget =
-      options.generate !== undefined || options.streaming?.enabled === false
+      !liveStreaming || options.generate !== undefined || options.streaming?.enabled === false
         ? undefined
         : new TypedEventTarget<StreamEventMap>();
-    const generate = createConfiguredGenerate(streamEventTarget);
+    const generate =
+      streamEventTarget === undefined
+        ? nonStreamingGenerate
+        : composeConfiguredGenerate(streamEventTarget);
 
     if (!generate) {
       throw new Error('No generate function configured');

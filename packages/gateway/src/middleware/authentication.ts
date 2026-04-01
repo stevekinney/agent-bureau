@@ -57,7 +57,7 @@ export function createAuthentication(authToken: string | undefined, apiKeyStore?
     const queryToken = allowsQueryToken ? url.searchParams.get('token') : null;
     const hasDisallowedQueryToken = !allowsQueryToken && url.searchParams.has('token');
 
-    if (!authHeader && hasDisallowedQueryToken) {
+    if (hasDisallowedQueryToken) {
       throw new HTTPException(401, {
         message: 'Query-string tokens are only supported for GET /api/v1/events',
       });

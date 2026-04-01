@@ -17,6 +17,7 @@ import type {
   GenerateFunction,
   GuardrailsOptions,
   Scheduler,
+  SchedulerPriority,
   SchedulerState,
   SessionStore,
   SessionSummary,
@@ -161,6 +162,7 @@ export interface Bureau {
   readonly ready: boolean;
 
   createRun(request: CreateRunRequest): Promise<RunSummary>;
+  submitSchedulerTask(request: SubmitSchedulerTaskRequest): Promise<SubmitSchedulerTaskResponse>;
   listRuns(status?: string): RunSummary[];
   getRun(id: string): RunDetail | undefined;
   abortRun(id: string): RunSummary;
@@ -295,6 +297,21 @@ export interface CreateRunRequest {
   sessionId?: string;
   systemPrompt?: string;
   maximumSteps?: number;
+}
+
+export interface SubmitSchedulerTaskRequest {
+  message: string;
+  maximumSteps?: number;
+  metadata?: Record<string, unknown>;
+  priority?: SchedulerPriority;
+  requeue?: boolean;
+  systemPrompt?: string;
+}
+
+export interface SubmitSchedulerTaskResponse {
+  taskId: string;
+  priority: SchedulerPriority;
+  status: 'queued';
 }
 
 export interface ConfigurationResponse {

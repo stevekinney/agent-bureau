@@ -1,7 +1,9 @@
 import { createToolbox } from 'armorer';
+import { createMockTool, createTestToolbox } from 'armorer/test';
 import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
 import type { GenerateFunction, GenerateResponse, Toolbox } from 'operative';
+import { createMockGenerate as createSequentialGenerate } from 'operative/test';
 import { createStore } from 'sentinel';
 import { createMemoryKeyValueStore, type KeyValueStore } from 'storage';
 
@@ -142,6 +144,25 @@ describe('createBureau', () => {
     const session = await bureau.getSession(firstRun.sessionId);
     expect(session).toBeDefined();
     expect(session?.conversationHistory.ids.length).toBeGreaterThanOrEqual(4);
+  });
+
+  it('aligns a new session history identifier with the requested session identifier', async () => {
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      persistence: createMemoryKeyValueStore(),
+    });
+    const sessionId = 'session-aligned';
+
+    await bureau.createRun({
+      message: 'First message',
+      sessionId,
+    });
+    await waitForRunCompletion();
+
+    const session = await bureau.getSession(sessionId);
+    expect(session?.id).toBe(sessionId);
+    expect(session?.conversationHistory.id).toBe(sessionId);
   });
 
   it('persists completed session metadata for fast runs', async () => {
@@ -475,6 +496,41 @@ describe('createBureau', () => {
     });
 
     expect(bureau.scheduler).toBeUndefined();
+    bureau.dispose();
+  });
+
+  it('submits scheduler tasks with the configured runtime toolbox', async () => {
+    const echoTool = createMockTool({
+      name: 'echo',
+      impl: () => 'echoed',
+    });
+
+    const bureau = await createBureau({
+      generate: createSequentialGenerate([
+        {
+          content: '',
+          toolCalls: [{ name: 'echo', arguments: {} }],
+        },
+        {
+          content: 'done',
+          toolCalls: [],
+        },
+      ]),
+      scheduler: { enabled: true, idleDelay: 1 },
+      toolbox: createTestToolbox([echoTool]),
+    });
+
+    const response = await bureau.submitSchedulerTask({
+      message: 'Run a scheduled tool task',
+      priority: 'background',
+    });
+
+    await waitForRunCompletion();
+
+    expect(response.status).toBe('queued');
+    expect(echoTool.calls).toHaveLength(1);
+    expect(bureau.scheduler?.getState().completedCount).toBe(1);
+
     bureau.dispose();
   });
 

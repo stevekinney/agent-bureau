@@ -99,6 +99,18 @@ describe('authentication', () => {
       'Query-string tokens are only supported for GET /api/v1/events',
     );
   });
+
+  it('rejects query-string tokens for non-SSE endpoints even with authorization header', async () => {
+    const app = createApp('secret-token');
+    const response = await app.request('/protected?token=secret-token', {
+      headers: { authorization: 'Bearer secret-token' },
+    });
+    expect(response.status).toBe(401);
+    const body = await response.json();
+    expect(body.error.message).toBe(
+      'Query-string tokens are only supported for GET /api/v1/events',
+    );
+  });
 });
 
 describe('authentication with api key store', () => {

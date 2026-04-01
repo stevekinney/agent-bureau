@@ -30,6 +30,8 @@ import type {
   CreateRunRequest,
   RunSummary,
   ServerFrame,
+  SubmitSchedulerTaskRequest,
+  SubmitSchedulerTaskResponse,
   ToolSummary,
 } from './types';
 import { streamEventToFrame } from './websocket/protocol';
@@ -183,7 +185,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     if (!sessionStore) {
       return {
         session: undefined,
-        conversation: new Conversation(createConversationHistory()),
+        conversation: new Conversation(createConversationHistory({ id: sessionId })),
       };
     }
 
@@ -191,7 +193,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     if (!session) {
       return {
         session: undefined,
-        conversation: new Conversation(createConversationHistory()),
+        conversation: new Conversation(createConversationHistory({ id: sessionId })),
       };
     }
 
@@ -386,6 +388,63 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     return serializeRunState(store.getRun(runId)!, sessionId);
   }
 
+  function submitSchedulerTask(
+    request: SubmitSchedulerTaskRequest,
+  ): Promise<SubmitSchedulerTaskResponse> {
+    validateCreateRunRequest(request);
+
+    if (!runtime.scheduler) {
+      throw new BureauError('Scheduler not configured', 'NOT_CONFIGURED');
+    }
+
+    const taskId = `scheduler-task-${crypto.randomUUID()}`;
+    const priority = request.priority ?? 'scheduled';
+
+    const task: Parameters<NonNullable<typeof runtime.scheduler>['submit']>[0] = {
+      id: taskId,
+      priority,
+      metadata: request.metadata,
+      requeue: request.requeue,
+      async createRun() {
+        const runRuntime = await runtime.createRunRuntime(
+          {
+            message: request.message,
+            maximumSteps: request.maximumSteps,
+            systemPrompt: request.systemPrompt,
+            sessionId: taskId,
+          },
+          { liveStreaming: false },
+        );
+
+        const conversation = new Conversation(createConversationHistory({ id: taskId }));
+        const systemPrompt = request.systemPrompt ?? runtime.systemPrompt;
+        if (systemPrompt) {
+          conversation.appendSystemMessage(systemPrompt);
+        }
+        conversation.appendUserMessage(request.message);
+
+        return {
+          conversation,
+          generate: runRuntime.generate,
+          toolbox: runRuntime.toolbox,
+          maximumSteps: request.maximumSteps ?? runtime.maximumSteps,
+          onStep: runRuntime.onStep,
+          prepareStep: runRuntime.prepareStep,
+          stopWhen: options.stopWhen,
+          validateResponse: runRuntime.validateResponse,
+        };
+      },
+    };
+
+    void runtime.scheduler.submit(task).catch(() => {});
+
+    return Promise.resolve({
+      taskId,
+      priority,
+      status: 'queued',
+    });
+  }
+
   function listRuns(status?: string): RunSummary[] {
     const state = store.getState();
     const summaries: RunSummary[] = [];
@@ -499,6 +558,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       return runtime.ready;
     },
     createRun: createRunFromRequest,
+    submitSchedulerTask,
     listRuns,
     getRun,
     abortRun,

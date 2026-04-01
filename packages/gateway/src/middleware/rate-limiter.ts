@@ -127,9 +127,14 @@ export function createRateLimiter(options?: RateLimitOptions) {
       const now = Date.now();
       const windowStart = now - windowMs;
       const entry = await windowStore.load(storageKey);
+      const previousTimestampCount = entry.timestamps.length;
       entry.timestamps = entry.timestamps.filter((timestamp) => timestamp > windowStart);
 
       if (entry.timestamps.length >= limit) {
+        if (entry.timestamps.length !== previousTimestampCount) {
+          await windowStore.save(storageKey, entry);
+        }
+
         const oldestTimestamp = entry.timestamps[0] ?? now;
         return {
           retryAfter: Math.max(1, Math.ceil((oldestTimestamp + windowMs - now) / 1000)),

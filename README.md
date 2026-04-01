@@ -18,7 +18,7 @@ The simplest way to use the workspace is to start with `createGateway()` and let
 import { createGateway } from 'gateway';
 
 const gateway = await createGateway({
-  storage: { type: 'auto' },
+  storage: { type: 'sqlite', path: 'agent-bureau.sqlite' },
   providers: [
     {
       name: 'fast',
@@ -50,6 +50,8 @@ That composition path gives you:
 - live event delivery through WebSocket and server-sent events
 
 If you need full control, `BureauOptions.generate` still acts as the advanced escape hatch.
+
+Use an explicit SQLite path like the example above when you want sessions to survive process restarts. The `auto` storage mode is convenient for local experiments, but it can resolve to an in-memory store.
 
 ## Workspace Packages
 

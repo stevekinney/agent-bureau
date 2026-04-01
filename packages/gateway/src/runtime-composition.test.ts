@@ -95,4 +95,43 @@ describe('createRuntimeComposition', () => {
     expect(firstResult.content).toBe('expensive-model');
     expect(secondResult.content).toBe('cheap-model');
   });
+
+  it('reuses non-streaming provider pipelines across separate run runtimes', async () => {
+    let resolveProviderGenerateCalls = 0;
+
+    const runtime = await createRuntimeComposition(
+      {
+        providers: [
+          {
+            name: 'primary',
+            provider: { provider: 'openai', model: 'cheap-model' },
+          },
+          {
+            name: 'secondary',
+            provider: { provider: 'anthropic', model: 'expensive-model' },
+          },
+        ],
+        streaming: { enabled: false },
+        toolbox: createToolbox([], { context: {} }),
+      },
+      {
+        resolveProviderGenerate(provider) {
+          resolveProviderGenerateCalls += 1;
+          return createGenerateForProvider(provider);
+        },
+      },
+    );
+
+    const firstRunRuntime = await runtime.createRunRuntime({
+      message: 'Hello',
+      sessionId: 'session-1',
+    });
+    const secondRunRuntime = await runtime.createRunRuntime({
+      message: 'Hello again',
+      sessionId: 'session-2',
+    });
+
+    expect(firstRunRuntime.generate).toBe(secondRunRuntime.generate);
+    expect(resolveProviderGenerateCalls).toBe(2);
+  });
 });

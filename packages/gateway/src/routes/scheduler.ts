@@ -1,7 +1,8 @@
-import { Conversation, createConversationHistory } from 'conversationalist';
 import { Hono } from 'hono';
 import type { Scheduler, SchedulerPriority } from 'operative';
 import { z } from 'zod';
+
+import type { SubmitSchedulerTaskRequest, SubmitSchedulerTaskResponse } from '../types';
 
 type SchedulerHistoryEntry = {
   event: string;
@@ -20,8 +21,6 @@ const SubmitSchedulerTaskRequestSchema = z.object({
   requeue: z.boolean().optional(),
   systemPrompt: z.string().optional(),
 });
-
-type SubmitSchedulerTaskRequest = z.infer<typeof SubmitSchedulerTaskRequestSchema>;
 
 const MAX_HISTORY_ENTRIES = 100;
 const schedulerHistoryByInstance = new WeakMap<Scheduler, SchedulerHistoryEntry[]>();
@@ -111,7 +110,12 @@ function getSchedulerHistory(scheduler: Scheduler): SchedulerHistoryEntry[] {
 /**
  * Creates HTTP routes for scheduler inspection, submission, cancellation, and history.
  */
-export function createSchedulerRoutes(scheduler: Scheduler | undefined) {
+export function createSchedulerRoutes(
+  scheduler: Scheduler | undefined,
+  submitSchedulerTask:
+    | ((request: SubmitSchedulerTaskRequest) => Promise<SubmitSchedulerTaskResponse>)
+    | undefined,
+) {
   const app = new Hono();
   const history = scheduler ? getSchedulerHistory(scheduler) : [];
 
@@ -137,7 +141,7 @@ export function createSchedulerRoutes(scheduler: Scheduler | undefined) {
   });
 
   app.post('/tasks', async (context) => {
-    if (!scheduler) {
+    if (!scheduler || !submitSchedulerTask) {
       return context.json(
         { error: { code: 'NOT_CONFIGURED', message: 'Scheduler not configured' } },
         501,
@@ -164,31 +168,8 @@ export function createSchedulerRoutes(scheduler: Scheduler | undefined) {
     }
 
     const body: SubmitSchedulerTaskRequest = parsedBody.data;
-    const taskId = `scheduler-task-${crypto.randomUUID()}`;
-    const priority: SchedulerPriority = body.priority ?? 'scheduled';
-
-    const task: Parameters<Scheduler['submit']>[0] = {
-      id: taskId,
-      priority,
-      metadata: body.metadata,
-      requeue: body.requeue,
-      createRun() {
-        const conversation = new Conversation(createConversationHistory());
-        if (body.systemPrompt) {
-          conversation.appendSystemMessage(body.systemPrompt);
-        }
-        conversation.appendUserMessage(body.message);
-
-        return {
-          conversation,
-          maximumSteps: body.maximumSteps,
-        };
-      },
-    };
-
-    void scheduler.submit(task).catch(() => {});
-
-    return context.json({ taskId, priority, status: 'queued' }, 202);
+    const response = await submitSchedulerTask(body);
+    return context.json(response, 202);
   });
 
   app.delete('/tasks/:id', (context) => {

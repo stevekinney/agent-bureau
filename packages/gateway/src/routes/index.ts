@@ -54,7 +54,10 @@ export function createRoutes({ bureau, broker, apiKeyStore }: CreateRoutesOption
   schedulerRouter.get('*', createScopeGuard([SCOPE.RUNS_READ]));
   schedulerRouter.post('*', createScopeGuard([SCOPE.RUNS_WRITE]));
   schedulerRouter.delete('*', createScopeGuard([SCOPE.RUNS_WRITE]));
-  schedulerRouter.route('/', createSchedulerRoutes(bureau.scheduler));
+  schedulerRouter.route(
+    '/',
+    createSchedulerRoutes(bureau.scheduler, (request) => bureau.submitSchedulerTask(request)),
+  );
   app.route('/api/v1/scheduler', schedulerRouter);
 
   // Key management routes (only when key store is available)

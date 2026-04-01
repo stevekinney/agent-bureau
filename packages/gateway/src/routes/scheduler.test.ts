@@ -1,10 +1,12 @@
 import { createTestToolbox } from 'armorer/test';
 import { describe, expect, it } from 'bun:test';
+import { Conversation, createConversationHistory } from 'conversationalist';
 import { Hono } from 'hono';
 import type { GenerateResponse, Scheduler, SchedulerPriority } from 'operative';
 import { createScheduler } from 'operative';
 import { createMockGenerate } from 'operative/test';
 
+import type { SubmitSchedulerTaskRequest, SubmitSchedulerTaskResponse } from '../types';
 import { createSchedulerRoutes } from './scheduler';
 
 function textResponse(content: string): GenerateResponse {
@@ -15,6 +17,55 @@ async function waitForSchedulerTick() {
   await new Promise((resolve) => setTimeout(resolve, 25));
 }
 
+function createSubmitSchedulerTask(
+  scheduler: Scheduler | undefined,
+): ((request: SubmitSchedulerTaskRequest) => Promise<SubmitSchedulerTaskResponse>) | undefined {
+  if (!scheduler) {
+    return undefined;
+  }
+
+  return async (request) => {
+    const taskId = `scheduler-task-${crypto.randomUUID()}`;
+    const priority = request.priority ?? 'scheduled';
+
+    const task: Parameters<Scheduler['submit']>[0] = {
+      id: taskId,
+      priority,
+      metadata: request.metadata,
+      requeue: request.requeue,
+      createRun() {
+        const conversation = new Conversation(createConversationHistory());
+        if (request.systemPrompt) {
+          conversation.appendSystemMessage(request.systemPrompt);
+        }
+        conversation.appendUserMessage(request.message);
+
+        return {
+          conversation,
+          maximumSteps: request.maximumSteps,
+        };
+      },
+    };
+
+    void scheduler.submit(task).catch(() => {});
+
+    return {
+      taskId,
+      priority,
+      status: 'queued',
+    };
+  };
+}
+
+function createSchedulerApplication(scheduler: Scheduler | undefined) {
+  const app = new Hono();
+  app.route(
+    '/api/v1/scheduler',
+    createSchedulerRoutes(scheduler, createSubmitSchedulerTask(scheduler)),
+  );
+  return app;
+}
+
 describe('scheduler routes', () => {
   it('GET /api/v1/scheduler returns state when scheduler is configured', async () => {
     const scheduler = createScheduler({
@@ -23,8 +74,7 @@ describe('scheduler routes', () => {
       idleDelay: 1,
     });
 
-    const app = new Hono();
-    app.route('/api/v1/scheduler', createSchedulerRoutes(scheduler));
+    const app = createSchedulerApplication(scheduler);
 
     const response = await app.request('/api/v1/scheduler');
     expect(response.status).toBe(200);
@@ -39,8 +89,7 @@ describe('scheduler routes', () => {
   });
 
   it('GET /api/v1/scheduler returns 501 when scheduler not configured', async () => {
-    const app = new Hono();
-    app.route('/api/v1/scheduler', createSchedulerRoutes(undefined));
+    const app = createSchedulerApplication(undefined);
 
     const response = await app.request('/api/v1/scheduler');
     expect(response.status).toBe(501);
@@ -53,8 +102,7 @@ describe('scheduler routes', () => {
       idleDelay: 1,
     });
 
-    const app = new Hono();
-    app.route('/api/v1/scheduler', createSchedulerRoutes(scheduler));
+    const app = createSchedulerApplication(scheduler);
 
     const submitResponse = await app.request('/api/v1/scheduler/tasks', {
       method: 'POST',
@@ -116,8 +164,7 @@ describe('scheduler routes', () => {
       },
     } as unknown as Scheduler;
 
-    const app = new Hono();
-    app.route('/api/v1/scheduler', createSchedulerRoutes(scheduler));
+    const app = createSchedulerApplication(scheduler);
 
     const response = await app.request('/api/v1/scheduler/tasks', {
       method: 'POST',
@@ -141,8 +188,7 @@ describe('scheduler routes', () => {
       idleDelay: 1,
     });
 
-    const app = new Hono();
-    app.route('/api/v1/scheduler', createSchedulerRoutes(scheduler));
+    const app = createSchedulerApplication(scheduler);
 
     const submitResponse = await app.request('/api/v1/scheduler/tasks', {
       method: 'POST',
@@ -172,8 +218,7 @@ describe('scheduler routes', () => {
       idleDelay: 1,
     });
 
-    const app = new Hono();
-    app.route('/api/v1/scheduler', createSchedulerRoutes(scheduler));
+    const app = createSchedulerApplication(scheduler);
 
     const response = await app.request('/api/v1/scheduler/tasks', {
       method: 'POST',
@@ -236,8 +281,7 @@ describe('scheduler routes', () => {
       },
     } as unknown as Scheduler;
 
-    const app = new Hono();
-    app.route('/api/v1/scheduler', createSchedulerRoutes(scheduler));
+    const app = createSchedulerApplication(scheduler);
 
     const submitResponse = await app.request('/api/v1/scheduler/tasks', {
       method: 'POST',
@@ -308,11 +352,9 @@ describe('scheduler routes', () => {
       },
     } as unknown as Scheduler;
 
-    const firstApp = new Hono();
-    firstApp.route('/api/v1/scheduler', createSchedulerRoutes(scheduler));
+    const firstApp = createSchedulerApplication(scheduler);
 
-    const secondApp = new Hono();
-    secondApp.route('/api/v1/scheduler', createSchedulerRoutes(scheduler));
+    const secondApp = createSchedulerApplication(scheduler);
 
     const submitResponse = await firstApp.request('/api/v1/scheduler/tasks', {
       method: 'POST',

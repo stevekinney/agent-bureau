@@ -146,4 +146,29 @@ describe('rate limiter', () => {
 
     expect(statuses).toEqual([200, 429]);
   });
+
+  it('persists pruned timestamps before returning a limited decision', async () => {
+    const store = createMemoryKeyValueStore();
+    const headers = { 'x-auth-principal': 'api-key:pruned-key' };
+    const storageKey = 'gateway:rate-limit:api-key:pruned-key';
+    const now = Date.now();
+
+    await store.set(
+      storageKey,
+      JSON.stringify({
+        timestamps: [now - 5_000, now - 100],
+      }),
+    );
+
+    const app = createApp({ limit: 1, store, windowMs: 1_000 });
+    const response = await app.request('/test', { headers });
+
+    expect(response.status).toBe(429);
+
+    const stored = JSON.parse((await store.get(storageKey)) ?? '{"timestamps":[]}') as {
+      timestamps: number[];
+    };
+    expect(stored.timestamps).toHaveLength(1);
+    expect(stored.timestamps[0]!).toBeGreaterThan(now - 1_000);
+  });
 });
