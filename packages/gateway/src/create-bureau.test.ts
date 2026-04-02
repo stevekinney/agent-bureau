@@ -534,6 +534,35 @@ describe('createBureau', () => {
     bureau.dispose();
   });
 
+  it('throws BAD_REQUEST when submitSchedulerTask receives invalid scheduler-specific fields', async () => {
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      scheduler: { enabled: true, idleDelay: 1 },
+      toolbox: createEmptyToolbox(),
+    });
+
+    const invalidRequest = {
+      message: 'Run a scheduled task',
+      priority: 'urgent',
+    } as unknown as Parameters<typeof bureau.submitSchedulerTask>[0];
+
+    const error = await Promise.resolve()
+      .then(() => bureau.submitSchedulerTask(invalidRequest))
+      .then(
+        () => undefined,
+        (rejection) => rejection,
+      );
+
+    expect(error).toMatchObject({
+      code: 'BAD_REQUEST',
+    });
+    expect((error as Error).message).toBe(
+      '"priority" must be one of: immediate, scheduled, background, ambient',
+    );
+
+    bureau.dispose();
+  });
+
   it('returns tool summaries', async () => {
     const bureau = await createBureau({
       generate: createMockGenerate(),

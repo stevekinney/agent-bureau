@@ -39,6 +39,7 @@ import { streamEventToFrame } from './websocket/protocol';
 const GATEWAY_AGENT_NAME = 'gateway';
 const SESSION_PERSISTENCE_MAXIMUM_ATTEMPTS = 3;
 const SESSION_PERSISTENCE_RETRY_DELAY_MILLISECONDS = 10;
+const SCHEDULER_PRIORITIES = ['immediate', 'scheduled', 'background', 'ambient'] as const;
 
 class BureauError extends Error {
   constructor(
@@ -56,19 +57,13 @@ function toBadRequest(message: string): never {
   throw new BureauError(message, 'BAD_REQUEST');
 }
 
-function validateCreateRunRequest(request: CreateRunRequest): void {
+function validateMessageRequest(request: {
+  message: unknown;
+  maximumSteps?: unknown;
+  systemPrompt?: unknown;
+}): void {
   if (!request.message || typeof request.message !== 'string') {
     toBadRequest('Request must include a "message" string');
-  }
-
-  if (request.sessionId !== undefined) {
-    if (typeof request.sessionId !== 'string') {
-      toBadRequest('"sessionId" must be a string');
-    }
-
-    if (request.sessionId.trim().length === 0) {
-      toBadRequest('"sessionId" must be a non-empty string');
-    }
   }
 
   if (request.systemPrompt !== undefined && typeof request.systemPrompt !== 'string') {
@@ -83,6 +78,42 @@ function validateCreateRunRequest(request: CreateRunRequest): void {
     ) {
       toBadRequest('"maximumSteps" must be a positive integer');
     }
+  }
+}
+
+function validateCreateRunRequest(request: CreateRunRequest): void {
+  validateMessageRequest(request);
+
+  if (request.sessionId !== undefined) {
+    if (typeof request.sessionId !== 'string') {
+      toBadRequest('"sessionId" must be a string');
+    }
+
+    if (request.sessionId.trim().length === 0) {
+      toBadRequest('"sessionId" must be a non-empty string');
+    }
+  }
+}
+
+function validateSubmitSchedulerTaskRequest(request: SubmitSchedulerTaskRequest): void {
+  validateMessageRequest(request);
+
+  if (request.metadata !== undefined) {
+    if (
+      typeof request.metadata !== 'object' ||
+      request.metadata === null ||
+      Array.isArray(request.metadata)
+    ) {
+      toBadRequest('"metadata" must be an object');
+    }
+  }
+
+  if (request.priority !== undefined && !SCHEDULER_PRIORITIES.includes(request.priority)) {
+    toBadRequest('"priority" must be one of: immediate, scheduled, background, ambient');
+  }
+
+  if (request.requeue !== undefined && typeof request.requeue !== 'boolean') {
+    toBadRequest('"requeue" must be a boolean');
   }
 }
 
@@ -391,7 +422,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
   function submitSchedulerTask(
     request: SubmitSchedulerTaskRequest,
   ): Promise<SubmitSchedulerTaskResponse> {
-    validateCreateRunRequest(request);
+    validateSubmitSchedulerTaskRequest(request);
 
     if (!runtime.scheduler) {
       throw new BureauError('Scheduler not configured', 'NOT_CONFIGURED');
