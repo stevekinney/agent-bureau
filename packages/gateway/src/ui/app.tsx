@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
 
-import type { ConfigurationResponse, RunSummary, ServerFrame } from '../types';
+import type { ConfigurationResponse, RunDetail, RunSummary, ServerFrame } from '../types';
 import { useChat } from './hooks/use-chat';
 import { useRunDetail } from './hooks/use-run-detail';
 import { useRuns } from './hooks/use-runs';
@@ -14,7 +14,7 @@ import { matchRoute } from './router';
 
 interface InitialData {
   runs?: RunSummary[];
-  run?: RunSummary;
+  run?: RunDetail;
   config?: ConfigurationResponse;
 }
 
@@ -22,17 +22,22 @@ export function App({ initialData, pathname }: { initialData: InitialData; pathn
   const route = matchRoute(pathname);
   const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   const wsUrl = `${wsProtocol}//${window.location.host}/ws`;
+  const eventStreamUrl = '/api/v1/events';
 
   const runsHook = useRuns(initialData.runs ?? []);
   const runDetailHook = useRunDetail(
     initialData.run ?? {
       id: '',
+      sessionId: '',
       status: 'running',
       steps: 0,
       usage: { prompt: 0, completion: 0, total: 0 },
       finishReason: undefined,
       error: undefined,
       actionCount: 0,
+      events: [],
+      stepDetails: [],
+      latestSnapshot: undefined,
     },
   );
 
@@ -46,6 +51,7 @@ export function App({ initialData, pathname }: { initialData: InitialData; pathn
     unsubscribe,
   } = useWebSocket({
     url: wsUrl,
+    eventStreamUrl,
     onMessage(frame) {
       runsHook.handleMessage(frame);
       runDetailHook.handleMessage(frame);
@@ -56,11 +62,20 @@ export function App({ initialData, pathname }: { initialData: InitialData; pathn
   // useChat now subscribes to the WebSocket synchronously on run creation,
   // eliminating the race where the run completes before the useEffect-based
   // subscription could fire.
-  const chat = useChat({ subscribe, unsubscribe });
+  const chat = useChat({ subscribe, unsubscribe, onRunCreated: runsHook.upsertRun });
   chatHandleMessageRef.current = chat.handleMessage;
 
-  // Subscribe to the run detail page's run
+  const isDashboardRoute = route?.name === 'dashboard';
   const detailRunId = route?.name === 'run-detail' ? route.params?.['id'] : undefined;
+  useEffect(() => {
+    if (isDashboardRoute) {
+      subscribe('*');
+      return () => unsubscribe('*');
+    }
+
+    return undefined;
+  }, [isDashboardRoute, subscribe, unsubscribe]);
+
   useEffect(() => {
     if (!detailRunId) return;
     subscribe(detailRunId);
@@ -72,13 +87,21 @@ export function App({ initialData, pathname }: { initialData: InitialData; pathn
       case 'dashboard':
         return <DashboardPage runs={runsHook.runs} />;
       case 'run-detail':
-        return <RunDetailPage run={runDetailHook.run} />;
+        return (
+          <RunDetailPage
+            run={runDetailHook.run}
+            events={runDetailHook.events}
+            streamingAssistantContent={runDetailHook.streamingAssistantContent}
+            toolActivity={runDetailHook.toolActivity}
+          />
+        );
       case 'configuration':
         return (
           <ConfigurationPage
             config={
               initialData.config ?? {
                 provider: undefined,
+                providers: [],
                 maximumSteps: 10,
                 systemPrompt: undefined,
                 tools: [],

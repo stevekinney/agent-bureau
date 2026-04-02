@@ -5,6 +5,7 @@ import type { ServerAdapter } from './adapters/types';
 import { createBureau } from './create-bureau';
 import { bootstrapApiKey, createApiKeyStore } from './keys';
 import type { ApiKeyStore } from './keys/types';
+import { LiveFrameBroker } from './live-events';
 import {
   createAuthentication,
   createRateLimiter,
@@ -50,6 +51,10 @@ export async function createGateway(options: GatewayOptions = {}): Promise<Gatew
   const port = options.port ?? DEFAULT_PORT;
   const runtime = options.runtime ?? detectRuntime();
   const adapter = await resolveAdapter(runtime);
+  const liveFrameBroker = new LiveFrameBroker();
+  const unsubscribeLiveFrames = bureau.subscribeLiveFrames((frame) => {
+    liveFrameBroker.broadcast(frame);
+  });
 
   // ── API Key Store ───────────────────────────────────────────────
   // Reuse the bureau's KV store to avoid creating a duplicate backend.
@@ -66,10 +71,10 @@ export async function createGateway(options: GatewayOptions = {}): Promise<Gatew
   app.use('*', cors());
   app.use('*', requestIdentifier);
   app.use('*', createAuthentication(options.authToken, apiKeyStore));
-  app.use('*', createRateLimiter());
+  app.use('*', createRateLimiter({ store: bureau.kv }));
 
   // Mount API routes
-  app.route('/', createRoutes({ bureau, apiKeyStore }));
+  app.route('/', createRoutes({ bureau, broker: liveFrameBroker, apiKeyStore }));
 
   // Mount SSR pages
   const configuration = bureau.getConfiguration();
@@ -90,7 +95,7 @@ export async function createGateway(options: GatewayOptions = {}): Promise<Gatew
   app.onError(errorHandler);
 
   async function start() {
-    const wsHandler = createWebSocketHandler({ store: bureau.store });
+    const wsHandler = createWebSocketHandler({ broker: liveFrameBroker });
 
     const handle = await adapter.serve(app, {
       port,
@@ -103,6 +108,7 @@ export async function createGateway(options: GatewayOptions = {}): Promise<Gatew
       stop() {
         handle.stop();
         wsHandler.dispose();
+        unsubscribeLiveFrames();
         bureau.dispose();
       },
     };

@@ -502,7 +502,7 @@ export async function executeLoop(
               signal: stepSignal,
             };
             const beforeGenResult = await hooks.run('beforeGenerate', beforeGenContext);
-            if (beforeGenResult !== undefined && beforeGenResult !== beforeGenContext) {
+            if (beforeGenResult !== undefined) {
               generateContext = beforeGenResult;
             }
           }

@@ -1,11 +1,123 @@
 import { Hono } from 'hono';
-import type { Scheduler } from 'operative';
+import type { Scheduler, SchedulerPriority } from 'operative';
+import { z } from 'zod';
+
+import type { SubmitSchedulerTaskRequest, SubmitSchedulerTaskResponse } from '../types';
+
+type SchedulerHistoryEntry = {
+  event: string;
+  metadata?: Record<string, unknown>;
+  priority?: SchedulerPriority;
+  reason?: string;
+  taskId: string;
+  timestamp: number;
+};
+
+const SubmitSchedulerTaskRequestSchema = z.object({
+  message: z.string().min(1),
+  maximumSteps: z.number().int().positive().optional(),
+  metadata: z.record(z.string(), z.unknown()).optional(),
+  priority: z.enum(['immediate', 'scheduled', 'background', 'ambient']).optional(),
+  requeue: z.boolean().optional(),
+  systemPrompt: z.string().optional(),
+});
+
+const MAX_HISTORY_ENTRIES = 100;
+const schedulerHistoryByInstance = new WeakMap<Scheduler, SchedulerHistoryEntry[]>();
+
+function createSchedulerHistoryStore(): SchedulerHistoryEntry[] {
+  return [];
+}
+
+function appendSchedulerHistory(
+  history: SchedulerHistoryEntry[],
+  entry: SchedulerHistoryEntry,
+): void {
+  history.unshift(entry);
+  if (history.length > MAX_HISTORY_ENTRIES) {
+    history.length = MAX_HISTORY_ENTRIES;
+  }
+}
+
+function getSchedulerHistory(scheduler: Scheduler): SchedulerHistoryEntry[] {
+  const existingHistory = schedulerHistoryByInstance.get(scheduler);
+  if (existingHistory) {
+    return existingHistory;
+  }
+
+  const history = createSchedulerHistoryStore();
+
+  scheduler.addEventListener('task.queued', (event) => {
+    appendSchedulerHistory(history, {
+      event: event.type,
+      taskId: event.taskId,
+      priority: event.priority,
+      metadata: event.metadata,
+      timestamp: Date.now(),
+    });
+  });
+
+  scheduler.addEventListener('task.dispatched', (event) => {
+    appendSchedulerHistory(history, {
+      event: event.type,
+      taskId: event.taskId,
+      priority: event.priority,
+      timestamp: Date.now(),
+    });
+  });
+
+  scheduler.addEventListener('task.completed', (event) => {
+    appendSchedulerHistory(history, {
+      event: event.type,
+      taskId: event.taskId,
+      timestamp: Date.now(),
+    });
+  });
+
+  scheduler.addEventListener('task.failed', (event) => {
+    appendSchedulerHistory(history, {
+      event: event.type,
+      taskId: event.taskId,
+      metadata: {
+        error: event.error instanceof Error ? event.error.message : String(event.error),
+      },
+      timestamp: Date.now(),
+    });
+  });
+
+  scheduler.addEventListener('task.preempted', (event) => {
+    appendSchedulerHistory(history, {
+      event: event.type,
+      taskId: event.taskId,
+      reason: event.reason,
+      timestamp: Date.now(),
+    });
+  });
+
+  scheduler.addEventListener('task.cancelled', (event) => {
+    appendSchedulerHistory(history, {
+      event: event.type,
+      taskId: event.taskId,
+      reason: event.phase,
+      timestamp: Date.now(),
+    });
+  });
+
+  schedulerHistoryByInstance.set(scheduler, history);
+  return history;
+}
 
 /**
- * Creates HTTP routes for scheduler state inspection and manual task submission.
+ * Creates HTTP routes for scheduler inspection, submission, cancellation, and history.
  */
-export function createSchedulerRoutes(scheduler: Scheduler | undefined) {
+export function createSchedulerRoutes(
+  scheduler: Scheduler | undefined,
+  submitSchedulerTask:
+    | ((request: SubmitSchedulerTaskRequest) => Promise<SubmitSchedulerTaskResponse>)
+    | undefined,
+) {
   const app = new Hono();
+  const history = scheduler ? getSchedulerHistory(scheduler) : [];
 
   app.get('/', (context) => {
     if (!scheduler) {
@@ -17,16 +129,63 @@ export function createSchedulerRoutes(scheduler: Scheduler | undefined) {
     return context.json(scheduler.getState());
   });
 
-  app.post('/heartbeat', (context) => {
+  app.get('/history', (context) => {
     if (!scheduler) {
       return context.json(
         { error: { code: 'NOT_CONFIGURED', message: 'Scheduler not configured' } },
         501,
       );
     }
-    // The heartbeat route is a no-op placeholder — the heartbeat system
-    // manages its own ticking. This route exists for future manual triggering.
-    return context.json({ message: 'Heartbeat not configured via this endpoint' }, 200);
+
+    return context.json({ entries: history }, 200);
+  });
+
+  app.post('/tasks', async (context) => {
+    if (!scheduler || !submitSchedulerTask) {
+      return context.json(
+        { error: { code: 'NOT_CONFIGURED', message: 'Scheduler not configured' } },
+        501,
+      );
+    }
+
+    let requestBody: unknown;
+    try {
+      requestBody = await context.req.json();
+    } catch {
+      return context.json({ error: { code: 'BAD_REQUEST', message: 'Invalid JSON body' } }, 400);
+    }
+
+    const parsedBody = SubmitSchedulerTaskRequestSchema.safeParse(requestBody);
+    if (!parsedBody.success) {
+      const fieldErrors = parsedBody.error.flatten().fieldErrors;
+      const message = Object.entries(fieldErrors)
+        .map(([field, errors]) => `${field}: ${errors?.join(', ') ?? 'invalid'}`)
+        .join('; ');
+      return context.json(
+        { error: { code: 'BAD_REQUEST', message: message || 'Invalid request' } },
+        400,
+      );
+    }
+
+    const body: SubmitSchedulerTaskRequest = parsedBody.data;
+    const response = await submitSchedulerTask(body);
+    return context.json(response, 202);
+  });
+
+  app.delete('/tasks/:id', (context) => {
+    if (!scheduler) {
+      return context.json(
+        { error: { code: 'NOT_CONFIGURED', message: 'Scheduler not configured' } },
+        501,
+      );
+    }
+
+    const cancelled = scheduler.cancel(context.req.param('id'));
+    if (!cancelled) {
+      return context.json({ error: { code: 'NOT_FOUND', message: 'Task not found' } }, 404);
+    }
+
+    return context.json({ status: 'cancelled' }, 202);
   });
 
   return app;

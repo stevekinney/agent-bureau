@@ -11,3 +11,7 @@
 .chat-form button {
   align-self: flex-end;
 }
+
+.chat-tool-activity {
+  margin-bottom: 1rem;
+}

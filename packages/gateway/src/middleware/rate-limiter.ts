@@ -1,10 +1,13 @@
 import { createMiddleware } from 'hono/factory';
 import { HTTPException } from 'hono/http-exception';
+import type { KeyValueStore } from 'storage';
 
 /** Configuration for the sliding-window rate limiter. */
 export type RateLimitOptions = {
   /** Maximum number of requests per window. Defaults to 60. */
   limit?: number;
+  /** Store-backed limiter state. Falls back to in-memory state when omitted. */
+  store?: KeyValueStore;
   /** Window duration in milliseconds. Defaults to 60_000 (1 minute). */
   windowMs?: number;
 };
@@ -13,85 +16,162 @@ type WindowEntry = {
   timestamps: number[];
 };
 
+type RateLimitDecision =
+  | {
+      remaining: number;
+      resetAt: number;
+      status: 'allowed';
+    }
+  | {
+      resetAt: number;
+      retryAfter: number;
+      status: 'limited';
+    };
+
 const DEFAULT_LIMIT = 60;
 const DEFAULT_WINDOW_MS = 60_000;
 
-/**
- * Creates a per-key sliding-window rate limiter middleware.
- *
- * The key is read from the `x-api-key-id` header, which is set by the
- * authentication middleware after verifying the API key. When no key id
- * is present (e.g. static token auth or unauthenticated routes), the
- * request passes through without rate limiting.
- *
- * Rate limit state is stored in memory and resets on process restart.
- */
-const CLEANUP_INTERVAL = 1000; // Sweep stale entries every N requests
-
-export function createRateLimiter(options?: RateLimitOptions) {
-  const limit = options?.limit ?? DEFAULT_LIMIT;
-  const windowMs = options?.windowMs ?? DEFAULT_WINDOW_MS;
+function createMemoryWindowStore(windowMs: number) {
   const windows = new Map<string, WindowEntry>();
   let requestCount = 0;
 
-  return createMiddleware(async (context, next) => {
-    // Periodically sweep stale entries to prevent unbounded map growth
-    if (++requestCount % CLEANUP_INTERVAL === 0) {
-      const cutoff = Date.now() - windowMs;
-      for (const [key, entry] of windows) {
-        if (entry.timestamps.every((t) => t <= cutoff)) {
-          windows.delete(key);
+  return {
+    load(key: string): WindowEntry {
+      requestCount += 1;
+      if (requestCount % 1000 === 0) {
+        const cutoff = Date.now() - windowMs;
+        for (const [candidateKey, entry] of windows) {
+          if (entry.timestamps.every((timestamp) => timestamp <= cutoff)) {
+            windows.delete(candidateKey);
+          }
         }
       }
-    }
 
-    const keyId = context.req.header('x-api-key-id');
-    if (!keyId) {
+      return windows.get(key) ?? { timestamps: [] };
+    },
+    save(key: string, entry: WindowEntry): void {
+      windows.set(key, entry);
+    },
+  };
+}
+
+function createStoreBackedWindowStore(store: KeyValueStore) {
+  return {
+    async load(key: string): Promise<WindowEntry> {
+      const value = await store.get(key);
+      if (!value) {
+        return { timestamps: [] };
+      }
+
+      try {
+        const parsed = JSON.parse(value) as WindowEntry;
+        return { timestamps: Array.isArray(parsed.timestamps) ? parsed.timestamps : [] };
+      } catch {
+        return { timestamps: [] };
+      }
+    },
+    async save(key: string, entry: WindowEntry): Promise<void> {
+      await store.set(key, JSON.stringify(entry));
+    },
+  };
+}
+
+function createPrincipalMutex() {
+  const pending = new Map<string, Promise<void>>();
+
+  return async function withPrincipalLock<T>(
+    principal: string,
+    callback: () => Promise<T>,
+  ): Promise<T> {
+    const previous = pending.get(principal) ?? Promise.resolve();
+    let releaseCurrent: (() => void) | undefined;
+    const current = new Promise<void>((resolve) => {
+      releaseCurrent = resolve;
+    });
+    const currentChain = previous.then(() => current);
+    pending.set(principal, currentChain);
+
+    await previous;
+
+    try {
+      return await callback();
+    } finally {
+      releaseCurrent?.();
+      if (pending.get(principal) === currentChain) {
+        pending.delete(principal);
+      }
+    }
+  };
+}
+
+/**
+ * Creates a per-principal sliding-window rate limiter middleware.
+ */
+export function createRateLimiter(options?: RateLimitOptions) {
+  const limit = options?.limit ?? DEFAULT_LIMIT;
+  const windowMs = options?.windowMs ?? DEFAULT_WINDOW_MS;
+  const windowStore = options?.store
+    ? createStoreBackedWindowStore(options.store)
+    : createMemoryWindowStore(windowMs);
+  const withPrincipalLock = createPrincipalMutex();
+
+  return createMiddleware(async (context, next) => {
+    const principal = context.req.header('x-auth-principal') ?? context.req.header('x-api-key-id');
+    if (!principal) {
       await next();
       return;
     }
 
-    const now = Date.now();
-    const windowStart = now - windowMs;
+    const storageKey = `gateway:rate-limit:${principal}`;
+    const decision = await withPrincipalLock(storageKey, async () => {
+      const now = Date.now();
+      const windowStart = now - windowMs;
+      const entry = await windowStore.load(storageKey);
+      const previousTimestampCount = entry.timestamps.length;
+      entry.timestamps = entry.timestamps.filter((timestamp) => timestamp > windowStart);
 
-    let entry = windows.get(keyId);
-    if (!entry) {
-      entry = { timestamps: [] };
-      windows.set(keyId, entry);
-    }
+      if (entry.timestamps.length >= limit) {
+        if (entry.timestamps.length !== previousTimestampCount) {
+          await windowStore.save(storageKey, entry);
+        }
 
-    // Prune timestamps outside the current window
-    entry.timestamps = entry.timestamps.filter((t) => t > windowStart);
+        const oldestTimestamp = entry.timestamps[0] ?? now;
+        return {
+          retryAfter: Math.max(1, Math.ceil((oldestTimestamp + windowMs - now) / 1000)),
+          resetAt: Math.ceil((oldestTimestamp + windowMs) / 1000),
+          status: 'limited',
+        } satisfies RateLimitDecision;
+      }
 
-    if (entry.timestamps.length >= limit) {
-      const resetAt = Math.ceil(((entry.timestamps[0] ?? now) + windowMs) / 1000);
-      const retryAfter = Math.max(
-        1,
-        Math.ceil(((entry.timestamps[0] ?? now) + windowMs - now) / 1000),
-      );
+      entry.timestamps.push(now);
+      await windowStore.save(storageKey, entry);
 
+      return {
+        remaining: Math.max(0, limit - entry.timestamps.length),
+        resetAt: Math.ceil(((entry.timestamps[0] ?? now) + windowMs) / 1000),
+        status: 'allowed',
+      } satisfies RateLimitDecision;
+    });
+
+    if (decision.status === 'limited') {
       throw new HTTPException(429, {
         res: new Response(JSON.stringify({ error: { message: 'Rate limit exceeded' } }), {
           status: 429,
           headers: new Headers({
             'content-type': 'application/json',
+            'retry-after': String(decision.retryAfter),
             'x-ratelimit-limit': String(limit),
             'x-ratelimit-remaining': '0',
-            'x-ratelimit-reset': String(resetAt),
-            'retry-after': String(retryAfter),
+            'x-ratelimit-reset': String(decision.resetAt),
           }),
         }),
       });
     }
 
-    entry.timestamps.push(now);
-    const remaining = limit - entry.timestamps.length;
-    const resetAt = Math.ceil((now + windowMs) / 1000);
-
     await next();
 
     context.header('x-ratelimit-limit', String(limit));
-    context.header('x-ratelimit-remaining', String(remaining));
-    context.header('x-ratelimit-reset', String(resetAt));
+    context.header('x-ratelimit-remaining', String(decision.remaining));
+    context.header('x-ratelimit-reset', String(decision.resetAt));
   });
 }
