@@ -66,6 +66,15 @@
   border: 1px solid var(--color-border);
 }
 
+.message-tool {
+  background: color-mix(in srgb, var(--color-warning) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-warning) 24%, transparent);
+}
+
+.message-streaming {
+  margin-bottom: 1rem;
+}
+
 .message strong {
   display: block;
   font-size: 0.8rem;

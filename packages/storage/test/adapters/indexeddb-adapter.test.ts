@@ -10,6 +10,121 @@ import type { KeyValueStore } from '../../src/types';
 
 describe('createIndexedDBKeyValueStore', () => {
   let store: KeyValueStore;
+  const originalIndexedDB = globalThis.indexedDB;
+  const originalIDBKeyRange = globalThis.IDBKeyRange;
+
+  function restoreIndexedDBGlobals(): void {
+    globalThis.indexedDB = originalIndexedDB;
+    globalThis.IDBKeyRange = originalIDBKeyRange;
+  }
+
+  function createMockIDBRequest<T>({
+    result,
+    error,
+    trigger = 'success',
+  }: {
+    result?: T;
+    error?: Error;
+    trigger?: 'success' | 'error';
+  }): IDBRequest<T> {
+    const request = {
+      result,
+      error: error ?? null,
+      onsuccess: null,
+      onerror: null,
+    } as unknown as IDBRequest<T>;
+
+    queueMicrotask(() => {
+      if (trigger === 'error') {
+        request.onerror?.(new Event('error'));
+        return;
+      }
+
+      request.onsuccess?.(new Event('success'));
+    });
+
+    return request;
+  }
+
+  function installMockIndexedDBForFailure(options: {
+    openFails?: boolean;
+    openError?: Error;
+    operation?: 'get' | 'put' | 'delete' | 'getAllKeys' | 'openCursor' | 'getKey';
+    objectStoreExists?: boolean;
+  }): void {
+    const database = {
+      objectStoreNames: {
+        contains: () => options.objectStoreExists ?? true,
+      },
+      createObjectStore: () => undefined,
+      transaction: () => ({
+        objectStore: () => ({
+          get: () =>
+            createMockIDBRequest<string | undefined>({
+              error: new Error('get failed'),
+              trigger: options.operation === 'get' ? 'error' : 'success',
+            }),
+          put: () =>
+            createMockIDBRequest<void>({
+              error: new Error('set failed'),
+              trigger: options.operation === 'put' ? 'error' : 'success',
+            }),
+          delete: () =>
+            createMockIDBRequest<void>({
+              error: new Error('delete failed'),
+              trigger: options.operation === 'delete' ? 'error' : 'success',
+            }),
+          getAllKeys: () =>
+            createMockIDBRequest<Array<string>>({
+              result: [],
+              error: new Error('list failed'),
+              trigger: options.operation === 'getAllKeys' ? 'error' : 'success',
+            }),
+          openCursor: () =>
+            createMockIDBRequest<IDBCursorWithValue | null>({
+              result: null,
+              error: new Error('cursor failed'),
+              trigger: options.operation === 'openCursor' ? 'error' : 'success',
+            }),
+          getKey: () =>
+            createMockIDBRequest<IDBValidKey | undefined>({
+              result: undefined,
+              error: new Error('has failed'),
+              trigger: options.operation === 'getKey' ? 'error' : 'success',
+            }),
+        }),
+      }),
+      close: () => undefined,
+    } as unknown as IDBDatabase;
+
+    globalThis.IDBKeyRange = {
+      bound: () => ({}) as IDBKeyRange,
+    } as typeof IDBKeyRange;
+
+    globalThis.indexedDB = {
+      open: () => {
+        const request = {
+          result: database,
+          error: options.openError ?? null,
+          onsuccess: null,
+          onerror: null,
+          onupgradeneeded: null,
+        } as unknown as IDBOpenDBRequest;
+
+        queueMicrotask(() => {
+          if (options.openFails || options.openError) {
+            request.onerror?.(new Event('error'));
+            return;
+          }
+
+          request.onupgradeneeded?.(new Event('upgradeneeded'));
+          request.onsuccess?.(new Event('success'));
+        });
+
+        return request;
+      },
+    } as unknown as IDBFactory;
+  }
 
   beforeEach(async () => {
     store = await createIndexedDBKeyValueStore({
@@ -19,6 +134,7 @@ describe('createIndexedDBKeyValueStore', () => {
 
   afterEach(async () => {
     await store.close?.();
+    restoreIndexedDBGlobals();
   });
 
   describe('basic CRUD', () => {
@@ -143,6 +259,47 @@ describe('createIndexedDBKeyValueStore', () => {
       expect(await defaultStore.get('key')).toBe('value');
       await defaultStore.close?.();
     });
+
+    it('creates the object store during upgrade when it does not already exist', async () => {
+      const createdStores: string[] = [];
+      const database = {
+        objectStoreNames: {
+          contains: () => false,
+        },
+        createObjectStore: (storeName: string) => {
+          createdStores.push(storeName);
+          return {} as IDBObjectStore;
+        },
+        close: () => undefined,
+      } as unknown as IDBDatabase;
+
+      globalThis.indexedDB = {
+        open: () => {
+          const request = {
+            result: database,
+            error: null,
+            onsuccess: null,
+            onerror: null,
+            onupgradeneeded: null,
+          } as unknown as IDBOpenDBRequest;
+
+          queueMicrotask(() => {
+            request.onupgradeneeded?.(new Event('upgradeneeded'));
+            request.onsuccess?.(new Event('success'));
+          });
+
+          return request;
+        },
+      } as unknown as IDBFactory;
+
+      const upgradedStore = await createIndexedDBKeyValueStore({
+        databaseName: `upgrade-${crypto.randomUUID()}`,
+        storeName: 'custom-store',
+      });
+
+      expect(createdStores).toEqual(['custom-store']);
+      await upgradedStore.close?.();
+    });
   });
 
   describe('namespace support', () => {
@@ -165,6 +322,65 @@ describe('createIndexedDBKeyValueStore', () => {
 
       await storeA.close?.();
       await storeB.close?.();
+    });
+  });
+
+  describe('error handling', () => {
+    it('rejects when opening the database fails without an IndexedDB error object', async () => {
+      installMockIndexedDBForFailure({ openFails: true });
+
+      await expect(
+        createIndexedDBKeyValueStore({ databaseName: `error-open-${crypto.randomUUID()}` }),
+      ).rejects.toThrow('Unknown IndexedDB error');
+    });
+
+    it('rejects get when the request fails without an IndexedDB error object', async () => {
+      installMockIndexedDBForFailure({ operation: 'get' });
+      const failingStore = await createIndexedDBKeyValueStore();
+      await expect(failingStore.get('key')).rejects.toThrow('get failed');
+      await failingStore.close?.();
+    });
+
+    it('rejects set when the request fails', async () => {
+      installMockIndexedDBForFailure({ operation: 'put' });
+      const failingStore = await createIndexedDBKeyValueStore();
+      await expect(failingStore.set('key', 'value')).rejects.toThrow('set failed');
+      await failingStore.close?.();
+    });
+
+    it('rejects delete when the request fails', async () => {
+      installMockIndexedDBForFailure({ operation: 'delete' });
+      const failingStore = await createIndexedDBKeyValueStore();
+      await expect(failingStore.delete('key')).rejects.toThrow('delete failed');
+      await failingStore.close?.();
+    });
+
+    it('rejects list for empty prefix when getAllKeys fails', async () => {
+      installMockIndexedDBForFailure({ operation: 'getAllKeys' });
+      const failingStore = await createIndexedDBKeyValueStore();
+      await expect(failingStore.list('')).rejects.toThrow('list failed');
+      await failingStore.close?.();
+    });
+
+    it('rejects list for prefixed queries when cursor iteration fails', async () => {
+      installMockIndexedDBForFailure({ operation: 'openCursor' });
+      const failingStore = await createIndexedDBKeyValueStore();
+      await expect(failingStore.list('skill:')).rejects.toThrow('cursor failed');
+      await failingStore.close?.();
+    });
+
+    it('rejects has when getKey fails', async () => {
+      installMockIndexedDBForFailure({ operation: 'getKey' });
+      const failingStore = await createIndexedDBKeyValueStore();
+      await expect(failingStore.has!('key')).rejects.toThrow('has failed');
+      await failingStore.close?.();
+    });
+
+    it('rejects deletePrefix when cursor iteration fails', async () => {
+      installMockIndexedDBForFailure({ operation: 'openCursor' });
+      const failingStore = await createIndexedDBKeyValueStore();
+      await expect(failingStore.deletePrefix!('skill:')).rejects.toThrow('cursor failed');
+      await failingStore.close?.();
     });
   });
 });

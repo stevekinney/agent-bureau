@@ -216,4 +216,47 @@ describe('createContextAssembler', () => {
     // All messages fit in budget so all should be included
     expect(result.messages.length).toBe(9);
   });
+
+  it('estimates non-string tool result content using its JSON representation', () => {
+    const conversation = new Conversation();
+    const estimatedTexts: string[] = [];
+
+    conversation.appendUserMessage('Use the tool');
+    conversation.appendToolCalls([{ id: 'call-1', name: 'lookup', arguments: '{}' }]);
+    conversation.appendToolResults([
+      {
+        callId: 'call-1',
+        outcome: 'success',
+        content: { answer: 42, status: 'ok' },
+      },
+    ]);
+
+    const budget = createTokenBudget({ maxTokens: 100000 });
+    const result = assembler({
+      conversation,
+      budget,
+      tokenEstimator: (text) => {
+        estimatedTexts.push(text);
+        return text.length;
+      },
+    });
+
+    expect(estimatedTexts).toContain(JSON.stringify({ answer: 42, status: 'ok' }));
+    expect(result.budgetReport.historyTokens).toBeGreaterThan(0);
+  });
+
+  it('uses the default token estimator when the budget does not provide one', () => {
+    const conversation = new Conversation();
+    conversation.appendUserMessage('abcd');
+
+    const result = assembler({
+      conversation,
+      budget: {
+        maxTokens: 100,
+        allocate: () => 100,
+      } as never,
+    });
+
+    expect(result.budgetReport.historyTokens).toBe(1);
+  });
 });

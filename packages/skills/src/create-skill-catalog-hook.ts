@@ -95,22 +95,15 @@ function applySkillPolicy(entries: SkillCatalogEntry[], policy: ToolPolicy): Ski
 }
 
 export function escapeXml(value: string): string {
-  return value.replace(/[&<>"']/g, (ch) => {
-    switch (ch) {
-      case '&':
-        return '&amp;';
-      case '<':
-        return '&lt;';
-      case '>':
-        return '&gt;';
-      case '"':
-        return '&quot;';
-      case "'":
-        return '&apos;';
-      default:
-        return ch;
-    }
-  });
+  const entities: Record<string, string> = {
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&apos;',
+  };
+
+  return value.replace(/[&<>"']/g, (character) => entities[character] ?? character);
 }
 
 function formatCatalogXml(entries: SkillCatalogEntry[]): string {

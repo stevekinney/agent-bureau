@@ -35,6 +35,24 @@ describe('tokenize', () => {
     expect(tokens).toContain('连接');
   });
 
+  it('flushes mixed CJK runs when another script appears mid-token', () => {
+    const tokens = tokenize('连接テストAPI');
+
+    expect(tokens).toContain('连');
+    expect(tokens).toContain('接');
+    expect(tokens).toContain('连接');
+    expect(tokens).toContain('api');
+  });
+
+  it('flushes mixed CJK runs when Hangul interrupts a token', () => {
+    const tokens = tokenize('连接한글API');
+
+    expect(tokens).toContain('连');
+    expect(tokens).toContain('接');
+    expect(tokens).toContain('连接');
+    expect(tokens).toContain('api');
+  });
+
   it('splits Japanese kanji into unigrams and bigrams', () => {
     // "データベース接続" = katakana "データベース" + kanji "接続"
     const tokens = tokenize('データベース接続');

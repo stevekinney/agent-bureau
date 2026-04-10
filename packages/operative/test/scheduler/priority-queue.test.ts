@@ -162,6 +162,28 @@ describe('createPriorityQueue', () => {
     });
   });
 
+  describe('remove', () => {
+    it('removes and returns the first matching item', () => {
+      const queue = createPriorityQueue<TestItem>();
+      queue.enqueue(item('imm', 'immediate'));
+      queue.enqueue(item('sched', 'scheduled'));
+      queue.enqueue(item('bg', 'background'));
+
+      const removed = queue.remove((entry) => entry.id === 'sched');
+
+      expect(removed?.id).toBe('sched');
+      expect([...queue].map((entry) => entry.id)).toEqual(['imm', 'bg']);
+    });
+
+    it('returns undefined when no item matches', () => {
+      const queue = createPriorityQueue<TestItem>();
+      queue.enqueue(item('only', 'background'));
+
+      expect(queue.remove((entry) => entry.id === 'missing')).toBeUndefined();
+      expect(queue.size).toBe(1);
+    });
+  });
+
   describe('iteration', () => {
     it('yields items in priority order', () => {
       const queue = createPriorityQueue<TestItem>();

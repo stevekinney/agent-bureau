@@ -135,6 +135,32 @@ describe('withToolboxIdempotency', () => {
     expect(addCallCount).toBe(1);
   });
 
+  it('passes unnamed calls through to the original toolbox execution', async () => {
+    const toolbox = createToolbox([createToolWithKey()]);
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
+
+    const result = await idempotentToolbox.execute({ name: '', arguments: { a: 1, b: 2 } } as any);
+
+    expect(result.outcome).toBe('error');
+    expect(result.errorMessage).toContain('Tool not found');
+    expect(addCallCount).toBe(0);
+  });
+
+  it('supports array execution when wrapping toolbox calls with idempotency', async () => {
+    const toolbox = createToolbox([createToolWithKey(), createToolWithoutKey()]);
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
+
+    const results = await idempotentToolbox.execute([
+      { id: 'call-1', name: 'add', arguments: { a: 1, b: 2 } },
+      { id: 'call-2', name: 'add', arguments: { a: 1, b: 2 } },
+    ]);
+
+    expect(results).toHaveLength(2);
+    expect(results[0]?.result).toBe(3);
+    expect(results[1]?.result).toBe(3);
+    expect(addCallCount).toBe(2);
+  });
+
   it('handles empty toolbox gracefully', () => {
     const toolbox = createToolbox([]);
     const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });

@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'bun:test';
+import type { StreamState } from 'operative';
 
 import type { OpenAIChatCompletionChunk } from '../types';
 import { normalizeOpenAIStream } from './normalize-openai';
+import type { NormalizerState } from './stream-helpers';
 
 async function collect<T>(iterable: AsyncIterable<T>): Promise<T[]> {
   const items: T[] = [];
@@ -118,6 +120,72 @@ describe('normalizeOpenAIStream', () => {
     expect(toolDeltas.length).toBeGreaterThanOrEqual(2);
     if (toolDeltas[0]?.type === 'stream:tool-call-delta') {
       expect(toolDeltas[0].toolName).toBe('search');
+    }
+  });
+
+  it('emits stream:block-delta for tracked tool calls even when the block lookup misses', async () => {
+    const chunks: OpenAIChatCompletionChunk[] = [
+      {
+        choices: [
+          {
+            delta: {
+              tool_calls: [
+                {
+                  index: 0,
+                  id: 'call_123',
+                  type: 'function',
+                  function: { name: 'search', arguments: '' },
+                },
+              ],
+            },
+            finish_reason: null,
+          },
+        ],
+      },
+      {
+        choices: [
+          {
+            delta: {
+              tool_calls: [{ index: 0, function: { arguments: '{"query":"test"}' } }],
+            },
+            finish_reason: null,
+          },
+        ],
+      },
+      { choices: [{ delta: {}, finish_reason: 'tool_calls' }] },
+    ];
+
+    const result = await collect(
+      normalizeOpenAIStream(toAsync(chunks), {
+        buildState: (state: NormalizerState): StreamState => ({
+          blocks: [...state.blocks],
+          activeBlock: undefined,
+          textContent: state.blocks
+            .filter((block) => block.type === 'text')
+            .map((block) => block.content)
+            .join(''),
+          toolCalls: state.blocks.filter((block) => block.type === 'tool-call'),
+          complete: false,
+          usage: undefined,
+        }),
+        findBlock: (blocks: NormalizerState['blocks'], id: string) =>
+          id === 'call_123' ? undefined : blocks.find((block) => block.id === id),
+      }),
+    );
+    const blockDeltas = result.filter((event) => event.type === 'stream:block-delta');
+
+    expect(blockDeltas).toHaveLength(1);
+    if (blockDeltas[0]?.type === 'stream:block-delta') {
+      expect(blockDeltas[0].delta).toBe('{"query":"test"}');
+      expect(blockDeltas[0].block).toEqual({
+        id: 'call_123',
+        type: 'tool-call',
+        index: 0,
+        content: '{"query":"test"}',
+        complete: false,
+        toolName: 'search',
+        partialArguments: '{"query":"test"}',
+      });
     }
   });
 

@@ -165,6 +165,33 @@ describe('parseSkillMarkdown', () => {
     expect(result.metadata.toolPolicy?.allowList).toEqual(['Read', 'Write', 'Bash', 'Edit']);
   });
 
+  it('parses YAML tool arrays and drops blank or non-string entries', () => {
+    const markdown = [
+      '---',
+      'name: array-tool-policy',
+      'description: Tool arrays should be normalized.',
+      'allowed-tools:',
+      '  - Read',
+      '  - " Write "',
+      '  - ""',
+      '  - 42',
+      'denied-tools:',
+      '  - Bash',
+      '  - "  "',
+      '  - Edit',
+      '---',
+      '',
+      'Instructions.',
+    ].join('\n');
+
+    const result = parseSkillMarkdown(markdown);
+
+    expect(result.metadata.toolPolicy).toEqual({
+      allowList: ['Read', 'Write'],
+      denyList: ['Bash', 'Edit'],
+    });
+  });
+
   it('produces empty string for empty body', () => {
     const markdown = [
       '---',

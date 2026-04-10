@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 
-import type { Bureau, ProviderConfiguration, RunSummary } from '../types';
+import type { Bureau, ProviderConfiguration, RunDetail, RunSummary } from '../types';
 import { renderPage } from './render';
 
 interface PageDependencies {
@@ -27,7 +27,7 @@ function Dashboard({ runs }: { runs: RunSummary[] }) {
   );
 }
 
-function RunDetail({ run }: { run: RunSummary }) {
+function RunDetail({ run }: { run: RunDetail }) {
   return (
     <main>
       <h1>Run {run.id}</h1>

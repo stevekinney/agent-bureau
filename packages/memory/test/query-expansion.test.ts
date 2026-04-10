@@ -119,6 +119,22 @@ describe('extractKeywords', () => {
     expect(keywords.length).toBeGreaterThan(0);
   });
 
+  it('keeps Korean stems that do not end with trailing particles', () => {
+    const keywords = extractKeywords('인증 시스템');
+
+    expect(keywords).toContain('인증');
+    expect(keywords).toContain('시스템');
+  });
+
+  it('extracts Japanese non-kanji chunks alongside kanji keywords', () => {
+    const keywords = extractKeywords('データベース接続');
+
+    expect(keywords).toContain('データベース');
+    expect(keywords).toContain('接');
+    expect(keywords).toContain('続');
+    expect(keywords).toContain('接続');
+  });
+
   it('preserves technical terms', () => {
     const keywords = extractKeywords('what was the solution for the authentication middleware');
 

@@ -1,6 +1,6 @@
 import type { RunState } from 'sentinel';
 
-import type { RunSummary } from './types';
+import type { RunDetail, RunSummary } from './types';
 
 function safeStringify(value: unknown): string {
   if (typeof value === 'string') return value;
@@ -9,6 +9,108 @@ function safeStringify(value: unknown): string {
   } catch {
     return String(value);
   }
+}
+
+function hasToJson(value: object): value is object & { toJSON(): unknown } {
+  return typeof (value as { toJSON?: unknown }).toJSON === 'function';
+}
+
+function serializeTrackedObject<T extends object>(
+  value: T,
+  seen: WeakSet<object>,
+  serialize: () => unknown,
+): unknown {
+  if (seen.has(value)) {
+    return '[Circular]';
+  }
+
+  seen.add(value);
+
+  try {
+    return serialize();
+  } finally {
+    seen.delete(value);
+  }
+}
+
+function toJsonSafe(value: unknown, seen = new WeakSet<object>()): unknown {
+  if (
+    value === null ||
+    value === undefined ||
+    typeof value === 'string' ||
+    typeof value === 'number' ||
+    typeof value === 'boolean'
+  ) {
+    return value;
+  }
+
+  if (typeof value === 'bigint') {
+    return value.toString();
+  }
+
+  if (typeof value === 'function') {
+    return `[Function ${value.name || 'anonymous'}]`;
+  }
+
+  if (value instanceof Error) {
+    return value.message;
+  }
+
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? 'Invalid Date' : value.toISOString();
+  }
+
+  if (value instanceof Map) {
+    return serializeTrackedObject(value, seen, () =>
+      Array.from(value.entries(), ([key, entry]) => [
+        toJsonSafe(key, seen),
+        toJsonSafe(entry, seen),
+      ]),
+    );
+  }
+
+  if (value instanceof Set) {
+    return serializeTrackedObject(value, seen, () =>
+      Array.from(value.values(), (entry) => toJsonSafe(entry, seen)),
+    );
+  }
+
+  if (Array.isArray(value)) {
+    return serializeTrackedObject(value, seen, () => value.map((entry) => toJsonSafe(entry, seen)));
+  }
+
+  if (typeof value === 'object') {
+    return serializeTrackedObject(value, seen, () => {
+      if (hasToJson(value)) {
+        return toJsonSafe(value.toJSON(), seen);
+      }
+
+      const record = value as Record<string, unknown>;
+      const result: Record<string, unknown> = {};
+      for (const [key, entry] of Object.entries(record)) {
+        result[key] = toJsonSafe(entry, seen);
+      }
+      return result;
+    });
+  }
+
+  return safeStringify(value);
+}
+
+export function serializeUnknownError(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  if (typeof error === 'string') {
+    return error;
+  }
+
+  if (error === null || error === undefined) {
+    return 'null';
+  }
+
+  return safeStringify(toJsonSafe(error));
 }
 
 /**
@@ -32,14 +134,7 @@ function serializeError(record: Record<string, unknown>): Record<string, unknown
 
   const { error, ...rest } = record;
 
-  const serialized =
-    error instanceof Error
-      ? error.message
-      : typeof error === 'string'
-        ? error
-        : error !== undefined
-          ? safeStringify(error)
-          : undefined;
+  const serialized = error !== undefined ? serializeUnknownError(error) : undefined;
 
   return { ...rest, error: serialized };
 }
@@ -62,20 +157,20 @@ export function serializeActionDetail(eventType: string, detail: unknown): unkno
   const record = detail as Record<string, unknown>;
 
   if (eventType === 'step.completed') {
-    return stripConversation(record);
+    return toJsonSafe(stripConversation(record));
   }
 
   if (eventType === 'run.completed') {
     const stripped = stripConversation(record);
 
     if (Array.isArray(stripped['steps'])) {
-      return {
+      return toJsonSafe({
         ...stripped,
         steps: (stripped['steps'] as Record<string, unknown>[]).map(stripConversation),
-      };
+      });
     }
 
-    return stripped;
+    return toJsonSafe(stripped);
   }
 
   if (
@@ -83,19 +178,20 @@ export function serializeActionDetail(eventType: string, detail: unknown): unkno
     eventType === 'generate.error' ||
     eventType === 'generate.retry'
   ) {
-    return serializeError(record);
+    return toJsonSafe(serializeError(record));
   }
 
-  return detail;
+  return toJsonSafe(detail);
 }
 
 /**
  * Maps a live RunState (which may contain non-serializable objects like
  * ActiveRun and Conversation) to a JSON-safe RunSummary DTO.
  */
-export function serializeRunState(runState: RunState): RunSummary {
+export function serializeRunState(runState: RunState, sessionId?: string): RunSummary {
   return {
     id: runState.id,
+    sessionId: sessionId ?? '',
     status: runState.status,
     steps: runState.steps.length,
     usage: {
@@ -104,12 +200,40 @@ export function serializeRunState(runState: RunState): RunSummary {
       total: runState.usage.total,
     },
     finishReason: runState.finishReason,
-    error:
-      runState.error instanceof Error
-        ? runState.error.message
-        : runState.error !== undefined
-          ? safeStringify(runState.error)
-          : undefined,
+    error: runState.error !== undefined ? serializeUnknownError(runState.error) : undefined,
     actionCount: runState.actions.length,
+  };
+}
+
+export function serializeRunDetail(runState: RunState, sessionId?: string): RunDetail {
+  return {
+    ...serializeRunState(runState, sessionId),
+    events: runState.actions.map((action) => ({
+      sequence: action.sequence,
+      runId: action.runId,
+      event: action.type,
+      detail: serializeActionDetail(action.type, action.detail),
+      timestamp: action.timestamp,
+    })),
+    stepDetails: runState.steps.map((step) => ({
+      step: step.step,
+      content: step.content,
+      final: step.final,
+      usage: step.usage,
+      toolCalls: step.toolCalls.map((toolCall) => ({
+        id: toolCall.id,
+        name: toolCall.name,
+        arguments: toJsonSafe(toolCall.arguments),
+      })),
+      results: step.results.map((result) => ({
+        toolName: result.toolName,
+        result: toJsonSafe(result.result),
+        error:
+          result.error?.message ??
+          result.errorMessage ??
+          (typeof result.error === 'string' ? result.error : undefined),
+      })),
+    })),
+    latestSnapshot: runState.snapshots.at(-1),
   };
 }

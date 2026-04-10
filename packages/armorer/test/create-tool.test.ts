@@ -1043,6 +1043,32 @@ describe('isTool', () => {
     expect(ok).toBe(true);
   });
 
+  it('emit() dispatches custom object and primitive details for unknown event types', () => {
+    const tool = createTool({
+      name: 'custom-emitter',
+      description: 'covers unknown emit branches',
+      input: z.object({ value: z.string() }),
+      async execute({ value }) {
+        return value;
+      },
+    });
+
+    const received: Event[] = [];
+    tool.addEventListener('custom-object' as any, (event) => {
+      received.push(event);
+    });
+    tool.addEventListener('custom-primitive' as any, (event) => {
+      received.push(event);
+    });
+
+    expect(tool.emit('custom-object' as any, { value: 1, label: 'ok' } as any)).toBe(true);
+    expect((received[0] as any).value).toBe(1);
+    expect((received[0] as any).label).toBe('ok');
+
+    expect(tool.emit('custom-primitive' as any, 'hello' as any)).toBe(true);
+    expect((received[1] as any).detail).toBe('hello');
+  });
+
   it('orders listeners by registration and isolates event types', async () => {
     type Events = { ping: number; pong: string } & {
       'status-update': { status: string };

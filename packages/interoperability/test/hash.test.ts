@@ -1,6 +1,35 @@
 import { describe, expect, test } from 'bun:test';
+import { createHash } from 'node:crypto';
 
 import { createIncrementalHash, sha256Hex, sha256HexSync } from '../src/hash';
+
+type HashRuntimeOverride = {
+  Bun?: { CryptoHasher: typeof Bun.CryptoHasher } | undefined;
+  require?: ((specifier: string) => unknown) | undefined;
+};
+
+const runtimeOverrideSymbol = Symbol.for('agent-bureau.interoperability.hash.runtime');
+
+async function withRuntimeOverride<T>(
+  runtimeOverride: HashRuntimeOverride,
+  callback: () => T | Promise<T>,
+): Promise<T> {
+  const globalRecord = globalThis as Record<PropertyKey, unknown>;
+  const hadExistingOverride = runtimeOverrideSymbol in globalRecord;
+  const previousOverride = globalRecord[runtimeOverrideSymbol];
+
+  globalRecord[runtimeOverrideSymbol] = runtimeOverride;
+
+  try {
+    return await callback();
+  } finally {
+    if (hadExistingOverride) {
+      globalRecord[runtimeOverrideSymbol] = previousOverride;
+    } else {
+      delete globalRecord[runtimeOverrideSymbol];
+    }
+  }
+}
 
 // ── sha256Hex (async, Web Crypto) ──────────────────────────────────
 
@@ -63,6 +92,50 @@ describe('sha256HexSync', () => {
     const result = sha256HexSync('test');
     expect(result).toMatch(/^[0-9a-f]{64}$/);
   });
+
+  test('falls back to node crypto when the Bun runtime is unavailable', async () => {
+    await withRuntimeOverride(
+      {
+        Bun: undefined,
+        require: (specifier) => {
+          expect(specifier).toBe('node:crypto');
+          return { createHash };
+        },
+      },
+      () => {
+        expect(sha256HexSync('hello')).toBe(createHash('sha256').update('hello').digest('hex'));
+      },
+    );
+  });
+
+  test('uses the default require fallback when no override is provided', async () => {
+    await withRuntimeOverride(
+      {
+        Bun: undefined,
+      },
+      () => {
+        expect(sha256HexSync('fallback')).toBe(
+          createHash('sha256').update('fallback').digest('hex'),
+        );
+      },
+    );
+  });
+
+  test('throws a helpful error when no synchronous runtime is available', async () => {
+    await withRuntimeOverride(
+      {
+        Bun: undefined,
+        require: () => {
+          throw new Error('runtime unavailable');
+        },
+      },
+      () => {
+        expect(() => sha256HexSync('hello')).toThrow(
+          'sha256HexSync is not available in this environment. Use the async sha256Hex instead, which works everywhere via Web Crypto.',
+        );
+      },
+    );
+  });
 });
 
 // ── createIncrementalHash ──────────────────────────────────────────
@@ -95,5 +168,52 @@ describe('createIncrementalHash', () => {
     const hash = createIncrementalHash();
     hash.update('test');
     expect(hash.digest()).toBe(sha256HexSync('test'));
+  });
+
+  test('falls back to node crypto when the Bun runtime is unavailable', async () => {
+    await withRuntimeOverride(
+      {
+        Bun: undefined,
+        require: (specifier) => {
+          expect(specifier).toBe('node:crypto');
+          return { createHash };
+        },
+      },
+      () => {
+        const hash = createIncrementalHash('sha256');
+        hash.update('hello');
+        hash.update(' world');
+        expect(hash.digest()).toBe(createHash('sha256').update('hello world').digest('hex'));
+      },
+    );
+  });
+
+  test('uses the default require fallback when no override is provided', async () => {
+    await withRuntimeOverride(
+      {
+        Bun: undefined,
+      },
+      () => {
+        const hash = createIncrementalHash();
+        hash.update('fallback');
+        expect(hash.digest()).toBe(createHash('sha256').update('fallback').digest('hex'));
+      },
+    );
+  });
+
+  test('throws a helpful error when no synchronous streaming runtime is available', async () => {
+    await withRuntimeOverride(
+      {
+        Bun: undefined,
+        require: () => {
+          throw new Error('runtime unavailable');
+        },
+      },
+      () => {
+        expect(() => createIncrementalHash()).toThrow(
+          'createIncrementalHash is not available in this environment. Use the async sha256Hex instead, which works everywhere via Web Crypto.',
+        );
+      },
+    );
   });
 });

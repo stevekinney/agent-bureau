@@ -1,7 +1,17 @@
 import { beforeEach, describe, expect, it } from 'bun:test';
-import { createMemoryKeyValueStore } from 'storage';
+import { createMemoryKeyValueStore, type KeyValueStore } from 'storage';
 
 import { clearCache, invalidateCache } from './cache-utilities';
+
+function createStoreWithoutDeletePrefix(): KeyValueStore {
+  const store = createMemoryKeyValueStore();
+  return {
+    get: store.get.bind(store),
+    set: store.set.bind(store),
+    delete: store.delete.bind(store),
+    list: store.list.bind(store),
+  };
+}
 
 describe('clearCache', () => {
   let store: ReturnType<typeof createMemoryKeyValueStore>;
@@ -44,6 +54,21 @@ describe('clearCache', () => {
     // The memory adapter has deletePrefix — the function should use it
     const count = await clearCache(store, 'llm-cache:');
     expect(count).toBe(2);
+  });
+
+  it('falls back to listing and deleting keys when deletePrefix is unavailable', async () => {
+    const fallbackStore = createStoreWithoutDeletePrefix();
+
+    await fallbackStore.set('llm-cache:key1', 'value1');
+    await fallbackStore.set('llm-cache:key2', 'value2');
+    await fallbackStore.set('other:key3', 'value3');
+
+    const count = await clearCache(fallbackStore, 'llm-cache:');
+
+    expect(count).toBe(2);
+    expect(await fallbackStore.get('llm-cache:key1')).toBeNull();
+    expect(await fallbackStore.get('llm-cache:key2')).toBeNull();
+    expect(await fallbackStore.get('other:key3')).toBe('value3');
   });
 });
 

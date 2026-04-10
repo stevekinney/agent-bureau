@@ -81,6 +81,23 @@ describe('withNamespaceIsolation', () => {
     });
   });
 
+  describe('list', () => {
+    it('scopes list to the configured namespace and tracks listed ids for forgetting', async () => {
+      await baseMemory.remember('Tenant A entry', { namespace: 'tenant-a' });
+      await baseMemory.remember('Tenant B entry', { namespace: 'tenant-b' });
+
+      const tenantA = withNamespaceIsolation(baseMemory, { namespace: 'tenant-a' });
+      const listed = await tenantA.list();
+
+      expect(listed).toHaveLength(1);
+      expect(listed[0]!.metadata.namespace).toBe('tenant-a');
+
+      await tenantA.forget(listed[0]!.id);
+      expect(await tenantA.count()).toBe(0);
+      expect(await baseMemory.count('tenant-b')).toBe(1);
+    });
+  });
+
   describe('forget', () => {
     it('allows forgetting entries that were remembered through the wrapper', async () => {
       const tenantA = withNamespaceIsolation(baseMemory, { namespace: 'tenant-a' });

@@ -56,6 +56,19 @@ describe('createSkillTools', () => {
       expect(session.isActive('nonexistent')).toBe(false);
     });
 
+    it('returns an error for a disabled skill', async () => {
+      const provider = createMockSkillProvider([makeSkill('code-review', 'Reviews code')]);
+      await provider.setEnabled('code-review', false);
+
+      const session = createSkillSession();
+      const toolbox = createSkillToolbox({ provider, session });
+
+      const result = await toolbox.activateSkill.execute({ name: 'code-review' });
+
+      expect(result).toEqual({ error: 'Skill is disabled', name: 'code-review' });
+      expect(session.isActive('code-review')).toBe(false);
+    });
+
     it('passes the skill toolPolicy to session.activate', async () => {
       const skillWithPolicy: SkillContent = {
         metadata: {

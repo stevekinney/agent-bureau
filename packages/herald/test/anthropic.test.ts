@@ -585,5 +585,21 @@ describe('createAnthropicGenerateStream', () => {
       expect(call['top_p']).toBe(0.9);
       expect(call['stop_sequences']).toEqual(['STOP', 'END']);
     });
+
+    it('forwards toolChoice when set', async () => {
+      const client = createMockAnthropicStreamingClient([anthropicStreamTextEvents]);
+      const generate: StreamingGenerateFunction = createAnthropicGenerateStream({
+        model: 'claude-sonnet-4-20250514',
+        client,
+        toolChoice: 'auto',
+      });
+      const { context } = createStreamingContext();
+
+      await generate(context);
+
+      const call = client._calls[0];
+      expect(call).toBeDefined();
+      expect(call['tool_choice']).toEqual({ type: 'auto' });
+    });
   });
 });

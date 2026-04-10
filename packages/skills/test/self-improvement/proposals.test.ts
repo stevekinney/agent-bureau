@@ -59,6 +59,15 @@ describe('proposals', () => {
 
       expect(result).toBeUndefined();
     });
+
+    it('returns undefined for malformed proposal JSON', async () => {
+      const storage = createMockKeyValueStore();
+      await storage.set('proposal:broken', '{not valid json');
+
+      const result = await getProposal(storage, 'broken');
+
+      expect(result).toBeUndefined();
+    });
   });
 
   describe('listProposals', () => {
@@ -112,6 +121,17 @@ describe('proposals', () => {
 
       expect(result).toHaveLength(1);
       expect(result[0]!.id).toBe('p3');
+    });
+
+    it('skips malformed proposals while listing', async () => {
+      const storage = createMockKeyValueStore();
+
+      await saveProposal(storage, makeProposal({ id: 'valid-proposal', status: 'pending' }));
+      await storage.set('proposal:broken', '{not valid json');
+
+      const result = await listProposals(storage);
+
+      expect(result.map((proposal) => proposal.id)).toEqual(['valid-proposal']);
     });
   });
 
@@ -225,6 +245,26 @@ describe('proposals', () => {
       expect(result.error).toBe('Identity provider required for soul proposals.');
     });
 
+    it('returns an error for invalid soul proposal JSON arrays', async () => {
+      const storage = createMockKeyValueStore();
+      const skillProvider = createMockSkillProvider();
+      const identityProvider = createMockIdentityProvider();
+      const proposal = makeProposal({
+        id: 'invalid-soul-json',
+        type: 'soul',
+        content: '{"not":"an-array"}',
+      });
+      await saveProposal(storage, proposal);
+
+      const result = await acceptProposal(storage, 'invalid-soul-json', {
+        skillProvider,
+        identityProvider,
+      });
+
+      expect(result.accepted).toBe(false);
+      expect(result.error).toBe('Soul proposal content is not a valid JSON array.');
+    });
+
     it('returns an error for a persona proposal without identityProvider', async () => {
       const storage = createMockKeyValueStore();
       const skillProvider = createMockSkillProvider();
@@ -262,6 +302,23 @@ describe('proposals', () => {
       expect(result.accepted).toBe(false);
       expect(result.error).toBe('Persona proposals require an agentId.');
     });
+
+    it('returns underlying provider errors when acceptance throws', async () => {
+      const storage = createMockKeyValueStore();
+      const skillProvider = createMockSkillProvider();
+      skillProvider.saveSkill = async () => {
+        throw new Error('storage write failed');
+      };
+      const proposal = makeProposal({ id: 'failing-skill-acceptance', type: 'skill' });
+      await saveProposal(storage, proposal);
+
+      const result = await acceptProposal(storage, 'failing-skill-acceptance', { skillProvider });
+
+      expect(result).toEqual({
+        accepted: false,
+        error: 'storage write failed',
+      });
+    });
   });
 
   describe('rejectProposal', () => {
@@ -288,6 +345,18 @@ describe('proposals', () => {
 
       const isRejected = await isRejectedPattern(storage, 'unique-content-to-reject');
       expect(isRejected).toBe(true);
+    });
+
+    it('recovers from malformed rejected-pattern storage when recording a new rejection', async () => {
+      const storage = createMockKeyValueStore();
+      const proposal = makeProposal({ id: 'reject-with-bad-patterns', content: 'new-rejection' });
+      await saveProposal(storage, proposal);
+      await storage.set('proposal:rejected-patterns', '{not valid json');
+
+      const result = await rejectProposal(storage, 'reject-with-bad-patterns');
+
+      expect(result.rejected).toBe(true);
+      expect(await isRejectedPattern(storage, 'new-rejection')).toBe(true);
     });
 
     it('returns an error for a non-existent proposal', async () => {

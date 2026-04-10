@@ -52,14 +52,15 @@ export interface CreateMemoryBridgeOptions {
 // ---------------------------------------------------------------------------
 
 function extractLastUserMessage(conversation: Conversation): string | undefined {
-  const messages = conversation.getMessages();
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const message = messages[i]!;
-    if (message.role === 'user' && typeof message.content === 'string') {
-      return message.content;
-    }
-  }
-  return undefined;
+  const lastUserMessage = [...conversation.getMessages()].reverse().find(
+    (
+      message,
+    ): message is typeof message & {
+      role: 'user';
+      content: string;
+    } => message.role === 'user' && typeof message.content === 'string',
+  );
+  return lastUserMessage?.content;
 }
 
 // ---------------------------------------------------------------------------

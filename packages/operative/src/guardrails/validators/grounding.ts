@@ -58,11 +58,9 @@ function isGrounded(claim: string, conversationText: string): boolean {
 
   // For numbers with units or dollar amounts, extract the numeric core
   const numericMatch = claim.match(/\$?([\d,]+(?:\.\d+)?)/);
-  if (numericMatch?.[1]) {
-    return lowerConversation.includes(numericMatch[1]);
-  }
-
-  return lowerConversation.includes(claim.toLowerCase());
+  return numericMatch?.[1]
+    ? lowerConversation.includes(numericMatch[1])
+    : lowerConversation.includes(claim.toLowerCase());
 }
 
 /**

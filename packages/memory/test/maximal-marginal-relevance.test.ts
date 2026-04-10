@@ -19,6 +19,10 @@ describe('cosineSimilarity', () => {
   it('returns 0 for zero vectors', () => {
     expect(cosineSimilarity([0, 0], [0, 0])).toBe(0);
   });
+
+  it('throws when vector lengths differ', () => {
+    expect(() => cosineSimilarity([1, 0], [1, 0, 0])).toThrow(/vector length mismatch/i);
+  });
 });
 
 describe('applyMaximalMarginalRelevance', () => {

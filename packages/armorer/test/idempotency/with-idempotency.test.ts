@@ -160,6 +160,37 @@ describe('withIdempotency', () => {
     expect(callCount).toBe(1);
   });
 
+  it('supports execute() for both raw params and ToolCall inputs', async () => {
+    const tool = createTestTool();
+    const wrapped = withIdempotency(tool, { cache });
+
+    const directResult = await wrapped.execute({ a: 1, b: 2 });
+    const cachedDirectResult = await wrapped.execute({ a: 1, b: 2 });
+    expect(directResult).toBe(3);
+    expect(cachedDirectResult).toBe(3);
+    expect(callCount).toBe(1);
+
+    const toolCall = { id: 'call-1', name: 'add', arguments: { a: 2, b: 3 } };
+    const executionResult = await wrapped.execute(toolCall);
+    expect(executionResult.result).toBe(5);
+    expect(executionResult.toolName).toBe('add');
+    expect(callCount).toBe(2);
+  });
+
+  it('passes direct ToolCall-style invocations through the original tool path', async () => {
+    const tool = createTestTool();
+    const wrapped = withIdempotency(tool, { cache });
+
+    await expect(
+      (wrapped as unknown as (input: unknown) => Promise<unknown>)({
+        id: 'call-1',
+        name: 'add',
+        arguments: { a: 1, b: 2 },
+      }),
+    ).rejects.toThrow();
+    expect(callCount).toBe(0);
+  });
+
   it('preserves the tool configuration', () => {
     const tool = createTestTool();
     const wrapped = withIdempotency(tool, { cache });

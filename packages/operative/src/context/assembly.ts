@@ -96,19 +96,12 @@ export function createContextAssembler(): ContextAssembler {
     const pendingCallIds = getPendingToolCallIds(visibleMessages);
     const mustIncludeIds = new Set<string>();
 
-    // Pending tool calls and their associated results are mandatory
+    // Pending tool calls are mandatory
     for (const message of visibleMessages) {
       if (
         message.role === 'tool-call' &&
         message.toolCall &&
         pendingCallIds.has(message.toolCall.id)
-      ) {
-        mustIncludeIds.add(message.id);
-      }
-      if (
-        message.role === 'tool-result' &&
-        message.toolResult &&
-        pendingCallIds.has(message.toolResult.callId)
       ) {
         mustIncludeIds.add(message.id);
       }

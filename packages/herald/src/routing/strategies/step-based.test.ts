@@ -103,4 +103,27 @@ describe('createStepBasedStrategy', () => {
     const decision = strategy(context, routes);
     expect(decision.route).toBe('fast');
   });
+
+  it('treats unknown trailing message roles as having no pending tool calls', () => {
+    const strategy = createStepBasedStrategy({
+      first: 'fast',
+      middle: 'smart',
+      last: 'summarizer',
+    });
+    const routes = makeRoutes(['fast', 'smart', 'summarizer']);
+    const context = makeContextWithMessages([{ role: 'system', content: 'preface' }], {
+      step: 5,
+    });
+
+    const decision = strategy(context, routes);
+    expect(decision.route).toBe('summarizer');
+  });
+
+  it('creates routes with callable generate functions', async () => {
+    const route = makeRoutes(['fast'])[0]!;
+
+    const result = await route.generate(makeContext());
+
+    expect(result).toEqual({ content: '', toolCalls: [] });
+  });
 });

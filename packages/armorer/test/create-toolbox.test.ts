@@ -1359,6 +1359,63 @@ describe('createToolbox', () => {
     expect(statusUpdates[2].percent).toBe(100);
   });
 
+  it('supports inspection, sequential execution, afterExecute hooks, and context.emit', async () => {
+    const statuses: string[] = [];
+    const afterExecuteCalls: string[] = [];
+    const toolbox = createToolbox([], {
+      policy: {
+        afterExecute(context) {
+          afterExecuteCalls.push(`registry:${context.toolName}`);
+        },
+      },
+    });
+
+    toolbox.addEventListener('status:update', (event: any) => {
+      statuses.push(`${event.callId}:${event.message as string}`);
+    });
+
+    toolbox.register({
+      name: 'sequenced-status',
+      description: 'emits toolbox status updates',
+      input: z.object({ value: z.string() }),
+      policy: {
+        afterExecute(context) {
+          afterExecuteCalls.push(`tool:${context.toolName}`);
+        },
+      },
+      async execute({ value }, context) {
+        context.emit('status:update', {
+          callId: context.toolCall.id,
+          name: context.toolCall.name,
+          status: 'running',
+          message: value,
+        });
+        return value.toUpperCase();
+      },
+    });
+
+    const inspection = toolbox.inspect('summary');
+    expect(inspection.counts.total).toBe(1);
+    expect(inspection.tools[0]?.name).toBe('sequenced-status');
+
+    const results = await toolbox.execute(
+      [
+        { id: 'sequence-1', name: 'sequenced-status', arguments: { value: 'first' } },
+        { id: 'sequence-2', name: 'sequenced-status', arguments: { value: 'second' } },
+      ],
+      { mode: 'sequential', concurrency: 2 },
+    );
+
+    expect(results.map((result) => result.result)).toEqual(['FIRST', 'SECOND']);
+    expect(statuses).toEqual(['sequence-1:first', 'sequence-2:second']);
+    expect(afterExecuteCalls).toEqual([
+      'tool:sequenced-status',
+      'registry:sequenced-status',
+      'tool:sequenced-status',
+      'registry:sequenced-status',
+    ]);
+  });
+
   it('bubbles stream lifecycle events and forwards stream execute options', async () => {
     const toolbox = createToolbox();
     const events: string[] = [];
@@ -2861,6 +2918,40 @@ describe('createToolbox', () => {
       // The old detectors should have been removed from the internal map
       // We verify by checking that the toolbox is completed
       expect(toolbox.completed).toBe(true);
+    });
+
+    it('exposes public event and context helpers on the toolbox surface', () => {
+      const toolbox = createToolbox([], {
+        context: {
+          workspace: 'agent-bureau',
+        },
+      });
+
+      const receivedStatuses: string[] = [];
+      const unsubscribe = toolbox.addEventListener('status:update', (event) => {
+        receivedStatuses.push(event.status);
+      });
+
+      const directDispatchResult = toolbox.dispatchEvent(new Event('noop'));
+      expect(directDispatchResult).toBe(true);
+
+      const emitted = toolbox.emit('status:update', {
+        callId: 'call-1',
+        name: 'sum',
+        status: 'working',
+      });
+      expect(emitted).toBe(true);
+      expect(receivedStatuses).toEqual(['working']);
+
+      unsubscribe();
+      toolbox.emit('status:update', {
+        callId: 'call-2',
+        name: 'sum',
+        status: 'done',
+      });
+      expect(receivedStatuses).toEqual(['working']);
+
+      expect(toolbox.getContext?.()).toEqual({ workspace: 'agent-bureau' });
     });
   });
 });

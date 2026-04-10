@@ -283,5 +283,70 @@ describe('createMemoryBridge', () => {
 
       expect(memory.rememberCalls.length).toBe(0);
     });
+
+    it('falls back to String(value) when JSON.stringify returns undefined', async () => {
+      const memory = createMockMemory();
+      const { onStep } = createMemoryBridge({ memory, scratchpad });
+
+      scratchpad.set('missing', undefined);
+
+      const conversation = new Conversation();
+      await onStep(createStepResult(conversation, { final: true }));
+
+      expect(memory.rememberCalls).toEqual([
+        [
+          'undefined',
+          {
+            source: 'auto-capture',
+            namespace: 'scratchpad',
+            _scratchpadKey: 'missing',
+          },
+        ],
+      ]);
+    });
+
+    it('persists JSON-serializable non-string entries as JSON text', async () => {
+      const memory = createMockMemory();
+      const { onStep } = createMemoryBridge({ memory, scratchpad });
+
+      scratchpad.set('structured', { count: 2, status: 'ok' });
+
+      const conversation = new Conversation();
+      await onStep(createStepResult(conversation, { final: true }));
+
+      expect(memory.rememberCalls).toEqual([
+        [
+          JSON.stringify({ count: 2, status: 'ok' }),
+          {
+            source: 'auto-capture',
+            namespace: 'scratchpad',
+            _scratchpadKey: 'structured',
+          },
+        ],
+      ]);
+    });
+
+    it('falls back to String(value) when JSON.stringify throws', async () => {
+      const memory = createMockMemory();
+      const { onStep } = createMemoryBridge({ memory, scratchpad });
+
+      const circular: { self?: unknown } = {};
+      circular.self = circular;
+      scratchpad.set('circular', circular);
+
+      const conversation = new Conversation();
+      await onStep(createStepResult(conversation, { final: true }));
+
+      expect(memory.rememberCalls).toEqual([
+        [
+          '[object Object]',
+          {
+            source: 'auto-capture',
+            namespace: 'scratchpad',
+            _scratchpadKey: 'circular',
+          },
+        ],
+      ]);
+    });
   });
 });

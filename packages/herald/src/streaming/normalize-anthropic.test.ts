@@ -267,4 +267,29 @@ describe('normalizeAnthropicStream', () => {
       expect(blockDelta.delta).toBe('Let me think...');
     }
   });
+
+  it('emits stream:complete when the stream ends without message_stop', async () => {
+    const events: AnthropicStreamEvent[] = [
+      { type: 'message_start' },
+      {
+        type: 'content_block_start',
+        index: 0,
+        content_block: { type: 'text', text: '' },
+      },
+      {
+        type: 'content_block_delta',
+        index: 0,
+        delta: { type: 'text_delta', text: 'Partial' },
+      },
+    ];
+
+    const result = await collect(normalizeAnthropicStream(toAsync(events)));
+    const complete = result.find((event) => event.type === 'stream:complete');
+
+    expect(complete).toBeDefined();
+    if (complete?.type === 'stream:complete') {
+      expect(complete.state.textContent).toBe('Partial');
+      expect(complete.state.complete).toBe(true);
+    }
+  });
 });

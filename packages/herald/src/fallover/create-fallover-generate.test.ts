@@ -246,6 +246,135 @@ describe('createFalloverGenerate', () => {
     }
   });
 
+  it('throws AbortError before a retry attempt when the signal aborts between attempts', async () => {
+    const controller = new AbortController();
+    let callCount = 0;
+    const primary = makeProvider('anthropic', async () => {
+      callCount++;
+      controller.abort();
+      throw new HeraldError({
+        provider: 'anthropic',
+        cause: new Error('Internal'),
+        statusCode: 500,
+      });
+    });
+
+    const generate = createFalloverGenerate({
+      providers: [primary],
+      retriesPerProvider: 1,
+      retryDelay: 0,
+    });
+
+    try {
+      await generate(makeContext({ signal: controller.signal }));
+      expect.unreachable('Expected generate() to abort');
+    } catch (error) {
+      expect(error).toMatchObject({ name: 'AbortError' });
+    }
+    expect(callCount).toBe(1);
+  });
+
+  it('rejects retry sleep immediately when the signal is already aborted', async () => {
+    const controller = new AbortController();
+    const primary = makeProvider('anthropic', async () => {
+      controller.abort();
+      throw new HeraldError({
+        provider: 'anthropic',
+        cause: new Error('Internal'),
+        statusCode: 500,
+      });
+    });
+
+    const generate = createFalloverGenerate({
+      providers: [primary],
+      retriesPerProvider: 1,
+      retryDelay: 1,
+    });
+
+    try {
+      await generate(makeContext({ signal: controller.signal }));
+      expect.unreachable('Expected generate() to abort');
+    } catch (error) {
+      expect(error).toMatchObject({ name: 'AbortError' });
+    }
+  });
+
+  it('aborts while sleeping between retries', async () => {
+    const controller = new AbortController();
+    const primary = makeProvider('anthropic', async () => {
+      setTimeout(() => controller.abort(), 5);
+      throw new HeraldError({
+        provider: 'anthropic',
+        cause: new Error('Internal'),
+        statusCode: 500,
+      });
+    });
+
+    const generate = createFalloverGenerate({
+      providers: [primary],
+      retriesPerProvider: 1,
+      retryDelay: 50,
+    });
+
+    try {
+      await generate(makeContext({ signal: controller.signal }));
+      expect.unreachable('Expected generate() to abort');
+    } catch (error) {
+      expect(error).toMatchObject({ name: 'AbortError' });
+    }
+  });
+
+  it('does not fire onFallover when no next provider is available', async () => {
+    const events: FalloverEvent[] = [];
+    const primary = makeProvider('anthropic', async () => {
+      throw new HeraldError({ provider: 'anthropic', cause: new Error('Auth'), statusCode: 401 });
+    });
+
+    const generate = createFalloverGenerate({
+      providers: [primary],
+      onFallover: (event) => events.push(event),
+    });
+
+    try {
+      await generate(makeContext());
+      expect.unreachable('Expected generate() to exhaust all providers');
+    } catch (error) {
+      expect(error).toBeInstanceOf(FalloverExhaustedError);
+    }
+    expect(events).toEqual([]);
+  });
+
+  it('skips unavailable providers when searching for the next fallback', async () => {
+    let secondaryCalls = 0;
+    const primary = makeProvider('anthropic', async () => {
+      throw new HeraldError({
+        provider: 'anthropic',
+        cause: new Error('Internal'),
+        statusCode: 500,
+      });
+    });
+    const secondary = makeProvider('openai', async () => {
+      secondaryCalls++;
+      throw new HeraldError({ provider: 'openai', cause: new Error('Auth'), statusCode: 401 });
+    });
+    const tertiary = makeProvider('gemini', async () => makeResponse('from gemini'));
+    const events: FalloverEvent[] = [];
+
+    const generate = createFalloverGenerate({
+      providers: [primary, secondary, tertiary],
+      retriesPerProvider: 0,
+      cooldownDuration: 60_000,
+      onFallover: (event) => events.push(event),
+    });
+
+    await generate(makeContext());
+    const result = await generate(makeContext());
+
+    expect(result.content).toBe('from gemini');
+    expect(secondaryCalls).toBe(1);
+    expect(events.at(-1)?.nextProvider).toBe('gemini');
+  });
+
   it('retries once for network errors then cascades', async () => {
     let callCount = 0;
     const primary = makeProvider('anthropic', async () => {

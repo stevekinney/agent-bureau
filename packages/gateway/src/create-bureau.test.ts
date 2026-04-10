@@ -1,500 +1,657 @@
 import { createToolbox } from 'armorer';
+import { createMockTool, createTestToolbox } from 'armorer/test';
 import { describe, expect, it } from 'bun:test';
-import { Conversation, toSessionInfo } from 'conversationalist';
-import type { GenerateFunction, Toolbox } from 'operative';
+import { Conversation } from 'conversationalist';
+import type { GenerateFunction, GenerateResponse, Toolbox } from 'operative';
+import { createMockGenerate as createSequentialGenerate } from 'operative/test';
 import { createStore } from 'sentinel';
-import { createMemoryKeyValueStore } from 'storage';
+import { createMemoryKeyValueStore, type KeyValueStore } from 'storage';
 
 import { BureauError, createBureau } from './create-bureau';
-import { DEFAULT_MAXIMUM_STEPS } from './types';
+import { type ConfigurationResponse, DEFAULT_MAXIMUM_STEPS, type ServerFrame } from './types';
 
-function createMockGenerate(): GenerateFunction {
-  return async () => ({ content: 'Done.', toolCalls: [] });
+type HasApiKey<T> = 'apiKey' extends keyof T ? true : false;
+
+function createMockGenerate(content = 'Done.'): GenerateFunction {
+  return async () => ({ content, toolCalls: [] });
 }
 
 function createEmptyToolbox(): Toolbox {
   return createToolbox([]) as unknown as Toolbox;
 }
 
-describe('createBureau', () => {
-  describe('ready', () => {
-    it('is false when no generate function is configured', async () => {
-      const bureau = await createBureau();
-      expect(bureau.ready).toBe(false);
-    });
-
-    it('is true when generate function is provided', async () => {
-      const bureau = await createBureau({ generate: createMockGenerate() });
-      expect(bureau.ready).toBe(true);
-    });
+function createBlockingGenerate(): {
+  generate: GenerateFunction;
+  resolve: (response: GenerateResponse) => void;
+} {
+  let resolveResponse: ((response: GenerateResponse) => void) | undefined;
+  const pendingResponse = new Promise<GenerateResponse>((resolve) => {
+    resolveResponse = resolve;
   });
 
-  describe('store', () => {
-    it('creates a default store when none is provided', async () => {
-      const bureau = await createBureau();
-      expect(bureau.store).toBeDefined();
-    });
-
-    it('uses a provided store', async () => {
-      const store = createStore();
-      const bureau = await createBureau({ store });
-      expect(bureau.store).toBe(store);
-    });
-  });
-
-  describe('createRun', () => {
-    it('throws NOT_CONFIGURED when no generate function exists', async () => {
-      const bureau = await createBureau();
-      try {
-        await bureau.createRun({ message: 'Hello' });
-        expect.unreachable('should have thrown');
-      } catch (error) {
-        expect(error).toBeInstanceOf(BureauError);
-        expect((error as BureauError).code).toBe('NOT_CONFIGURED');
-      }
-    });
-
-    it('throws BAD_REQUEST when message is missing', async () => {
-      const bureau = await createBureau({ generate: createMockGenerate() });
-      try {
-        await bureau.createRun({ message: '' });
-        expect.unreachable('should have thrown');
-      } catch (error) {
-        expect(error).toBeInstanceOf(BureauError);
-        expect((error as BureauError).code).toBe('BAD_REQUEST');
-      }
-    });
-
-    it('creates a run and returns a summary', async () => {
-      const bureau = await createBureau({
-        generate: createMockGenerate(),
-        toolbox: createEmptyToolbox(),
-      });
-
-      const summary = await bureau.createRun({ message: 'Hello' });
-      expect(summary.id).toBeString();
-      expect(summary.status).toBe('running');
-      expect(summary.steps).toBe(0);
-    });
-
-    it('registers the run in the store', async () => {
-      const bureau = await createBureau({
-        generate: createMockGenerate(),
-        toolbox: createEmptyToolbox(),
-      });
-
-      const summary = await bureau.createRun({ message: 'Hello' });
-      const stored = bureau.store.getRun(summary.id);
-      expect(stored).toBeDefined();
-    });
-
-    it('loads conversation from persistence when conversationId is provided', async () => {
-      const kv = createMemoryKeyValueStore();
-      const conversation = new Conversation();
-      conversation.appendUserMessage('Previous message');
-      await kv.set(`session:${conversation.current.id}`, JSON.stringify(conversation.current));
-
-      const bureau = await createBureau({
-        generate: createMockGenerate(),
-        toolbox: createEmptyToolbox(),
-        persistence: kv,
-      });
-
-      const summary = await bureau.createRun({
-        message: 'New message',
-        conversationId: conversation.current.id,
-      });
-
-      expect(summary.id).toBeString();
-    });
-
-    it('applies system prompt', async () => {
-      const bureau = await createBureau({
-        generate: createMockGenerate(),
-        toolbox: createEmptyToolbox(),
-        systemPrompt: 'You are helpful.',
-      });
-
-      const summary = await bureau.createRun({ message: 'Hello' });
-      expect(summary.id).toBeString();
-    });
-
-    it('uses request-level maximumSteps override', async () => {
-      const bureau = await createBureau({
-        generate: createMockGenerate(),
-        toolbox: createEmptyToolbox(),
-        maximumSteps: 5,
-      });
-
-      const summary = await bureau.createRun({ message: 'Hello', maximumSteps: 20 });
-      expect(summary.id).toBeString();
-    });
-  });
-
-  describe('listRuns', () => {
-    it('returns empty array when no runs exist', async () => {
-      const bureau = await createBureau();
-      expect(bureau.listRuns()).toEqual([]);
-    });
-
-    it('returns all runs', async () => {
-      const bureau = await createBureau({
-        generate: createMockGenerate(),
-        toolbox: createEmptyToolbox(),
-      });
-
-      await bureau.createRun({ message: 'Hello' });
-      const runs = bureau.listRuns();
-      expect(runs.length).toBeGreaterThanOrEqual(1);
-    });
-
-    it('filters by status', async () => {
-      const bureau = await createBureau({
-        generate: createMockGenerate(),
-        toolbox: createEmptyToolbox(),
-      });
-
-      await bureau.createRun({ message: 'Hello' });
-      const filtered = bureau.listRuns('completed');
-      // Run may or may not have completed yet — no error is the assertion
-      expect(Array.isArray(filtered)).toBe(true);
-    });
-  });
-
-  describe('getRun', () => {
-    it('returns undefined for unknown run', async () => {
-      const bureau = await createBureau();
-      expect(bureau.getRun('nonexistent')).toBeUndefined();
-    });
-
-    it('returns a run summary', async () => {
-      const bureau = await createBureau({
-        generate: createMockGenerate(),
-        toolbox: createEmptyToolbox(),
-      });
-
-      const created = await bureau.createRun({ message: 'Hello' });
-      const found = bureau.getRun(created.id);
-      expect(found).toBeDefined();
-      expect(found!.id).toBe(created.id);
-    });
-  });
-
-  describe('abortRun', () => {
-    it('throws NOT_FOUND for unknown run', async () => {
-      const bureau = await createBureau();
-      expect(() => bureau.abortRun('nonexistent')).toThrow(BureauError);
-    });
-
-    it('throws CONFLICT for non-running run', async () => {
-      const bureau = await createBureau({
-        generate: createMockGenerate(),
-        toolbox: createEmptyToolbox(),
-      });
-
-      const { id } = await bureau.createRun({ message: 'Hello' });
-      // Wait for run to complete
-      await new Promise((resolve) => setTimeout(resolve, 50));
-
-      try {
-        bureau.abortRun(id);
-        // If it doesn't throw, the run may still be running — that's fine
-      } catch (error) {
-        expect(error).toBeInstanceOf(BureauError);
-        expect((error as BureauError).code).toBe('CONFLICT');
-      }
-    });
-
-    it('aborts a running run', async () => {
-      const generate: GenerateFunction = () => new Promise(() => {});
-      const bureau = await createBureau({ generate, toolbox: createEmptyToolbox() });
-
-      const { id } = await bureau.createRun({ message: 'Hello' });
-      await new Promise((resolve) => setTimeout(resolve, 10));
-
-      const aborted = bureau.abortRun(id);
-      expect(aborted.status).toBe('aborted');
-    });
-  });
-
-  describe('deleteRun', () => {
-    it('throws NOT_FOUND for unknown run', async () => {
-      const bureau = await createBureau();
-      expect(() => bureau.deleteRun('nonexistent')).toThrow(BureauError);
-    });
-
-    it('throws CONFLICT for running run', async () => {
-      const generate: GenerateFunction = () => new Promise(() => {});
-      const bureau = await createBureau({ generate, toolbox: createEmptyToolbox() });
-
-      const { id } = await bureau.createRun({ message: 'Hello' });
-      await new Promise((resolve) => setTimeout(resolve, 10));
-
-      expect(() => bureau.deleteRun(id)).toThrow(BureauError);
-    });
-  });
-
-  describe('conversations', () => {
-    it('throws NOT_IMPLEMENTED when no persistence is configured', async () => {
-      const bureau = await createBureau();
-      try {
-        await bureau.listConversations();
-        expect.unreachable('should have thrown');
-      } catch (error) {
-        expect(error).toBeInstanceOf(BureauError);
-        expect((error as BureauError).code).toBe('NOT_IMPLEMENTED');
-      }
-    });
-
-    it('lists conversations from persistence', async () => {
-      const kv = createMemoryKeyValueStore();
-      const conversation = new Conversation();
-      conversation.appendUserMessage('Hello');
-      await kv.set(`session:${conversation.current.id}`, JSON.stringify(conversation.current));
-      await kv.set(
-        `session-info:${conversation.current.id}`,
-        JSON.stringify(toSessionInfo(conversation.current)),
-      );
-
-      const bureau = await createBureau({ persistence: kv });
-      const sessions = await bureau.listConversations();
-      expect(sessions).toHaveLength(1);
-    });
-
-    it('loads a conversation by ID', async () => {
-      const kv = createMemoryKeyValueStore();
-      const conversation = new Conversation();
-      conversation.appendUserMessage('Hello');
-      await kv.set(`session:${conversation.current.id}`, JSON.stringify(conversation.current));
-
-      const bureau = await createBureau({ persistence: kv });
-      const loaded = await bureau.getConversation(conversation.current.id);
-      expect(loaded).toBeDefined();
-    });
-
-    it('returns undefined for missing conversation', async () => {
-      const kv = createMemoryKeyValueStore();
-      const bureau = await createBureau({ persistence: kv });
-      const loaded = await bureau.getConversation('missing');
-      expect(loaded).toBeUndefined();
-    });
-
-    it('deletes a conversation', async () => {
-      const kv = createMemoryKeyValueStore();
-      const conversation = new Conversation();
-      conversation.appendUserMessage('Hello');
-      await kv.set(`session:${conversation.current.id}`, JSON.stringify(conversation.current));
-      await kv.set(
-        `session-info:${conversation.current.id}`,
-        JSON.stringify(toSessionInfo(conversation.current)),
-      );
-      const sessionId = conversation.current.id;
-
-      const bureau = await createBureau({ persistence: kv });
-      await bureau.deleteConversation(sessionId);
-      const loaded = await bureau.getConversation(sessionId);
-      expect(loaded).toBeUndefined();
-    });
-  });
-
-  describe('getConfiguration', () => {
-    it('returns configuration with defaults', async () => {
-      const bureau = await createBureau();
-      const config = bureau.getConfiguration();
-      expect(config.maximumSteps).toBe(DEFAULT_MAXIMUM_STEPS);
-      expect(config.tools).toEqual([]);
-      expect(config.provider).toBeUndefined();
-    });
-
-    it('returns provider configuration', async () => {
-      const bureau = await createBureau({
-        provider: { provider: 'anthropic', model: 'claude-sonnet-4-20250514' },
-      });
-      const config = bureau.getConfiguration();
-      expect(config.provider?.provider).toBe('anthropic');
-      expect(config.provider?.model).toBe('claude-sonnet-4-20250514');
-    });
-  });
-
-  describe('getTools', () => {
-    it('returns empty array when no toolbox', async () => {
-      const bureau = await createBureau();
-      expect(bureau.getTools()).toEqual([]);
-    });
-  });
-
-  describe('dispose', () => {
-    it('disposes the store', async () => {
-      const bureau = await createBureau();
-      bureau.dispose();
-      // Should not throw on repeated dispose
-      bureau.dispose();
-    });
-  });
-
-  describe('BureauError', () => {
-    it('has name and code', () => {
-      const error = new BureauError('test', 'NOT_FOUND');
-      expect(error.name).toBe('BureauError');
-      expect(error.code).toBe('NOT_FOUND');
-      expect(error.message).toBe('test');
-    });
-  });
-
-  describe('event emission', () => {
-    async function createReadyBureau() {
-      return createBureau({
-        generate: createMockGenerate(),
-        toolbox: createEmptyToolbox(),
-      });
+  const generate: GenerateFunction = async (context) => {
+    if (context.signal?.aborted) {
+      return { content: 'aborted', toolCalls: [] };
     }
 
-    it('addEventListener("action", listener) receives actions from runs', async () => {
-      const bureau = await createReadyBureau();
-      const received: unknown[] = [];
+    return Promise.race([
+      pendingResponse,
+      new Promise<GenerateResponse>((resolve) => {
+        context.signal?.addEventListener(
+          'abort',
+          () => resolve({ content: 'aborted', toolCalls: [] }),
+          { once: true },
+        );
+      }),
+    ]);
+  };
 
-      bureau.addEventListener('action', (event) => {
-        received.push(event.action);
-      });
+  return { generate, resolve: resolveResponse! };
+}
 
-      await bureau.createRun({ message: 'Hello' });
-      await new Promise((resolve) => setTimeout(resolve, 50));
+async function waitForRunCompletion() {
+  await new Promise((resolve) => setTimeout(resolve, 50));
+}
 
-      expect(received.length).toBeGreaterThan(0);
-      bureau.dispose();
+describe('createBureau', () => {
+  it('is not ready when no generate function is configured', async () => {
+    const bureau = await createBureau();
+    expect(bureau.ready).toBe(false);
+  });
+
+  it('is ready when a generate function is configured', async () => {
+    const bureau = await createBureau({ generate: createMockGenerate() });
+    expect(bureau.ready).toBe(true);
+  });
+
+  it('uses a provided store when one is supplied', async () => {
+    const store = createStore();
+    const bureau = await createBureau({ store });
+    expect(bureau.store).toBe(store);
+  });
+
+  it('throws NOT_CONFIGURED when createRun is called without a generate function', async () => {
+    const bureau = await createBureau();
+
+    const error = await bureau.createRun({ message: 'Hello' }).then(
+      () => undefined,
+      (rejection) => rejection,
+    );
+
+    expect(error).toMatchObject({
+      code: 'NOT_CONFIGURED',
+    });
+  });
+
+  it('throws BAD_REQUEST when createRun is called with an empty message', async () => {
+    const bureau = await createBureau({ generate: createMockGenerate() });
+
+    const error = await bureau.createRun({ message: '' }).then(
+      () => undefined,
+      (rejection) => rejection,
+    );
+
+    expect(error).toMatchObject({
+      code: 'BAD_REQUEST',
+    });
+  });
+
+  it('throws BAD_REQUEST when createRun is called with a blank session identifier', async () => {
+    const bureau = await createBureau({ generate: createMockGenerate() });
+
+    const error = await bureau.createRun({ message: 'Hello', sessionId: '   ' }).then(
+      () => undefined,
+      (rejection) => rejection,
+    );
+
+    expect(error).toMatchObject({
+      code: 'BAD_REQUEST',
+    });
+  });
+
+  it('creates runs with a session identifier and registers them in the store', async () => {
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
     });
 
-    it('toObservable() emits events', async () => {
-      const bureau = await createReadyBureau();
-      const types: string[] = [];
+    const summary = await bureau.createRun({ message: 'Hello' });
 
-      const subscription = bureau.toObservable().subscribe((event) => {
-        types.push(event.type);
-      });
+    expect(summary.id).toBeString();
+    expect(summary.sessionId).toBeString();
+    expect(summary.status).toBe('running');
+    expect(bureau.store.getRun(summary.id)).toBeDefined();
+  });
 
-      await bureau.createRun({ message: 'Hello' });
-      await new Promise((resolve) => setTimeout(resolve, 50));
-
-      expect(types.length).toBeGreaterThan(0);
-      subscription.unsubscribe();
-      bureau.dispose();
+  it('persists and resumes sessions through the session store', async () => {
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      persistence: createMemoryKeyValueStore(),
     });
 
-    it('on("action") returns Observable', async () => {
-      const bureau = await createReadyBureau();
-      const received: unknown[] = [];
+    const firstRun = await bureau.createRun({ message: 'First message' });
+    await waitForRunCompletion();
 
-      const subscription = bureau.on('action').subscribe((event) => {
-        received.push(event.action);
-      });
+    const secondRun = await bureau.createRun({
+      message: 'Second message',
+      sessionId: firstRun.sessionId,
+    });
+    await waitForRunCompletion();
 
-      await bureau.createRun({ message: 'Hello' });
-      await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(secondRun.sessionId).toBe(firstRun.sessionId);
 
-      expect(received.length).toBeGreaterThan(0);
-      subscription.unsubscribe();
-      bureau.dispose();
+    const session = await bureau.getSession(firstRun.sessionId);
+    expect(session).toBeDefined();
+    expect(session?.conversationHistory.ids.length).toBeGreaterThanOrEqual(4);
+  });
+
+  it('aligns a new session history identifier with the requested session identifier', async () => {
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      persistence: createMemoryKeyValueStore(),
+    });
+    const sessionId = 'session-aligned';
+
+    await bureau.createRun({
+      message: 'First message',
+      sessionId,
+    });
+    await waitForRunCompletion();
+
+    const session = await bureau.getSession(sessionId);
+    expect(session?.id).toBe(sessionId);
+    expect(session?.conversationHistory.id).toBe(sessionId);
+  });
+
+  it('persists completed session metadata for fast runs', async () => {
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      persistence: createMemoryKeyValueStore(),
     });
 
-    it('once("action", listener) fires once', async () => {
-      const bureau = await createReadyBureau();
-      const received: unknown[] = [];
+    const run = await bureau.createRun({ message: 'Fast completion' });
+    await waitForRunCompletion();
 
-      bureau.once('action', (event) => {
-        received.push(event.action);
-      });
+    const session = await bureau.getSession(run.sessionId);
+    expect(session?.metadata['lastRunId']).toBe(run.id);
+    expect(session?.metadata['lastRunStatus']).toBe('completed');
+  });
 
-      await bureau.createRun({ message: 'Hello' });
-      await new Promise((resolve) => setTimeout(resolve, 50));
+  it('retries terminal session persistence after a transient save failure', async () => {
+    const backingStore = createMemoryKeyValueStore();
+    let sessionSaveCount = 0;
 
-      expect(received.length).toBe(1);
-      bureau.dispose();
+    const flakyStore: KeyValueStore = {
+      async get(key) {
+        return backingStore.get(key);
+      },
+      async set(key, value) {
+        if (key.startsWith('agent-session:')) {
+          sessionSaveCount += 1;
+          if (sessionSaveCount === 2) {
+            throw new Error('temporary persistence failure');
+          }
+        }
+
+        await backingStore.set(key, value);
+      },
+      async delete(key) {
+        await backingStore.delete(key);
+      },
+      async list(prefix) {
+        return backingStore.list(prefix);
+      },
+    };
+
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      persistence: flakyStore,
     });
 
-    it('subscribe("action", observer) returns Subscription', async () => {
-      const bureau = await createReadyBureau();
-      const received: unknown[] = [];
+    const run = await bureau.createRun({ message: 'Retry completion' });
+    await new Promise((resolve) => setTimeout(resolve, 100));
 
-      const subscription = bureau.subscribe('action', (event) => {
-        received.push(event.action);
-      });
+    const session = await bureau.getSession(run.sessionId);
+    expect(sessionSaveCount).toBe(3);
+    expect(session?.metadata['lastRunId']).toBe(run.id);
+    expect(session?.metadata['lastRunStatus']).toBe('completed');
+  });
 
-      expect(typeof subscription.unsubscribe).toBe('function');
+  it('does not register a run when initial session persistence fails', async () => {
+    const backingStore = createMemoryKeyValueStore();
+    const failingStore: KeyValueStore = {
+      async get(key) {
+        return backingStore.get(key);
+      },
+      async set(key, value) {
+        if (key.startsWith('agent-session:')) {
+          throw new Error('persistence failed');
+        }
 
-      await bureau.createRun({ message: 'Hello' });
-      await new Promise((resolve) => setTimeout(resolve, 50));
+        await backingStore.set(key, value);
+      },
+      async delete(key) {
+        await backingStore.delete(key);
+      },
+      async list(prefix) {
+        return backingStore.list(prefix);
+      },
+    };
 
-      expect(received.length).toBeGreaterThan(0);
-      subscription.unsubscribe();
-      bureau.dispose();
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      persistence: failingStore,
     });
 
-    it('events("action") returns async iterator', async () => {
-      const bureau = await createReadyBureau();
-      const received: unknown[] = [];
+    const error = await bureau.createRun({ message: 'Ghost run?' }).then(
+      () => undefined,
+      (rejection) => rejection,
+    );
 
-      const iterator = bureau.events('action');
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe('persistence failed');
+    expect(bureau.listRuns()).toHaveLength(0);
+  });
 
-      await bureau.createRun({ message: 'Hello' });
-      await new Promise((resolve) => setTimeout(resolve, 50));
+  it('persists error session metadata when runs finish with an error', async () => {
+    const generate: GenerateFunction = async () => {
+      throw new Error('Explode');
+    };
 
-      bureau.complete();
+    const bureau = await createBureau({
+      generate,
+      toolbox: createEmptyToolbox(),
+      persistence: createMemoryKeyValueStore(),
+    });
 
-      for await (const event of iterator) {
-        received.push(event.action);
+    const run = await bureau.createRun({ message: 'Explode' });
+    await waitForRunCompletion();
+
+    const session = await bureau.getSession(run.sessionId);
+    expect(session?.metadata['lastRunId']).toBe(run.id);
+    expect(session?.metadata['lastRunStatus']).toBe('error');
+    expect(session?.metadata['lastError']).toBe('Explode');
+  });
+
+  it('persists error session state once after the initial running save', async () => {
+    const backingStore = createMemoryKeyValueStore();
+    let sessionSaveCount = 0;
+
+    const trackingStore: KeyValueStore = {
+      async get(key) {
+        return backingStore.get(key);
+      },
+      async set(key, value) {
+        if (key.startsWith('agent-session:')) {
+          sessionSaveCount += 1;
+        }
+
+        await backingStore.set(key, value);
+      },
+      async delete(key) {
+        await backingStore.delete(key);
+      },
+      async list(prefix) {
+        return backingStore.list(prefix);
+      },
+    };
+
+    const generate: GenerateFunction = async () => {
+      throw new Error('Explode once');
+    };
+
+    const bureau = await createBureau({
+      generate,
+      toolbox: createEmptyToolbox(),
+      persistence: trackingStore,
+    });
+
+    await bureau.createRun({ message: 'Explode once' });
+    await waitForRunCompletion();
+
+    expect(sessionSaveCount).toBe(2);
+  });
+
+  it('fails runs when the model emits tool calls without a configured toolbox', async () => {
+    const generate: GenerateFunction = async () => ({
+      content: '',
+      toolCalls: [{ name: 'missing_tool', arguments: {} }],
+    });
+
+    const bureau = await createBureau({ generate });
+
+    const run = await bureau.createRun({ message: 'Need a tool' });
+    await waitForRunCompletion();
+
+    const detail = bureau.getRun(run.id);
+    expect(detail?.status).toBe('error');
+    expect(detail?.error).toContain('No toolbox configured but tool calls were received');
+  });
+
+  it('lists runs and filters them by status', async () => {
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+    });
+
+    await bureau.createRun({ message: 'Hello' });
+    await waitForRunCompletion();
+
+    const allRuns = bureau.listRuns();
+    const completedRuns = bureau.listRuns('completed');
+
+    expect(allRuns.length).toBeGreaterThanOrEqual(1);
+    expect(Array.isArray(completedRuns)).toBe(true);
+  });
+
+  it('retains session identifiers for completed run summaries and details', async () => {
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+    });
+
+    const run = await bureau.createRun({ message: 'Hello' });
+    await waitForRunCompletion();
+
+    const summary = bureau.listRuns().find((entry) => entry.id === run.id);
+    const detail = bureau.getRun(run.id);
+
+    expect(summary?.sessionId).toBe(run.sessionId);
+    expect(detail?.sessionId).toBe(run.sessionId);
+  });
+
+  it('returns a run detail payload with events and step details', async () => {
+    const bureau = await createBureau({
+      generate: createMockGenerate('Detailed response'),
+      toolbox: createEmptyToolbox(),
+    });
+
+    const run = await bureau.createRun({ message: 'Hello' });
+    await waitForRunCompletion();
+
+    const detail = bureau.getRun(run.id);
+
+    expect(detail).toBeDefined();
+    expect(detail?.sessionId).toBe(run.sessionId);
+    expect(detail?.events.length).toBeGreaterThan(0);
+    expect(detail?.stepDetails.length).toBeGreaterThan(0);
+  });
+
+  it('aborts a running run', async () => {
+    const generate: GenerateFunction = () => new Promise(() => {});
+    const bureau = await createBureau({ generate, toolbox: createEmptyToolbox() });
+
+    const run = await bureau.createRun({ message: 'Hello' });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    const aborted = bureau.abortRun(run.id);
+    expect(aborted.status).toBe('aborted');
+  });
+
+  it('throws CONFLICT when deleting a running run', async () => {
+    const generate: GenerateFunction = () => new Promise(() => {});
+    const bureau = await createBureau({ generate, toolbox: createEmptyToolbox() });
+
+    const run = await bureau.createRun({ message: 'Hello' });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(() => bureau.deleteRun(run.id)).toThrow(BureauError);
+  });
+
+  it('throws NOT_IMPLEMENTED for session APIs when persistence is not configured', async () => {
+    const bureau = await createBureau();
+
+    const error = await bureau.listSessions().then(
+      () => undefined,
+      (rejection) => rejection,
+    );
+
+    expect(error).toMatchObject({
+      code: 'NOT_IMPLEMENTED',
+    });
+  });
+
+  it('lists, loads, and deletes sessions from the canonical session store', async () => {
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      persistence: createMemoryKeyValueStore(),
+    });
+
+    const run = await bureau.createRun({ message: 'Hello' });
+    await waitForRunCompletion();
+
+    const sessions = await bureau.listSessions();
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0]?.id).toBe(run.sessionId);
+
+    const session = await bureau.getSession(run.sessionId);
+    expect(session?.id).toBe(run.sessionId);
+
+    await bureau.deleteSession(run.sessionId);
+    const deleted = await bureau.getSession(run.sessionId);
+    expect(deleted).toBeUndefined();
+  });
+
+  it('returns configuration data with provider and tool summaries', async () => {
+    const bureau = await createBureau({
+      provider: {
+        provider: 'anthropic',
+        model: 'claude-sonnet-4-20250514',
+        apiKey: 'secret-value',
+      },
+    });
+
+    const configuration = bureau.getConfiguration();
+    const configurationProviderHasNoApiKey: HasApiKey<
+      NonNullable<ConfigurationResponse['provider']>
+    > = false;
+    const routedConfigurationProviderHasNoApiKey: HasApiKey<
+      ConfigurationResponse['providers'][number]['provider']
+    > = false;
+
+    expect(configuration.maximumSteps).toBe(DEFAULT_MAXIMUM_STEPS);
+    expect(configuration.provider?.provider).toBe('anthropic');
+    expect(configuration.providers).toHaveLength(1);
+    expect(configuration.provider).not.toHaveProperty('apiKey');
+    expect(configuration.providers[0]?.provider).not.toHaveProperty('apiKey');
+    expect(configurationProviderHasNoApiKey).toBeFalse();
+    expect(routedConfigurationProviderHasNoApiKey).toBeFalse();
+  });
+
+  it('configures a scheduler for routed multi-provider runtimes', async () => {
+    const bureau = await createBureau({
+      providers: [
+        {
+          name: 'fast',
+          provider: { provider: 'openai', model: 'gpt-4.1-mini' },
+        },
+        {
+          name: 'deep',
+          provider: { provider: 'anthropic', model: 'claude-sonnet-4-20250514' },
+        },
+      ],
+      routing: {
+        type: 'step-based',
+        first: 'fast',
+        middle: 'deep',
+      },
+      scheduler: { enabled: true, idleDelay: 1 },
+      toolbox: createEmptyToolbox(),
+    });
+
+    expect(bureau.scheduler).toBeDefined();
+    bureau.dispose();
+  });
+
+  it('does not configure a scheduler unless it is explicitly enabled', async () => {
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+    });
+
+    expect(bureau.scheduler).toBeUndefined();
+    bureau.dispose();
+  });
+
+  it('submits scheduler tasks with the configured runtime toolbox', async () => {
+    const echoTool = createMockTool({
+      name: 'echo',
+      impl: () => 'echoed',
+    });
+
+    const bureau = await createBureau({
+      generate: createSequentialGenerate([
+        {
+          content: '',
+          toolCalls: [{ name: 'echo', arguments: {} }],
+        },
+        {
+          content: 'done',
+          toolCalls: [],
+        },
+      ]),
+      scheduler: { enabled: true, idleDelay: 1 },
+      toolbox: createTestToolbox([echoTool]),
+    });
+
+    const response = await bureau.submitSchedulerTask({
+      message: 'Run a scheduled tool task',
+      priority: 'background',
+    });
+
+    await waitForRunCompletion();
+
+    expect(response.status).toBe('queued');
+    expect(echoTool.calls).toHaveLength(1);
+    expect(bureau.scheduler?.getState().completedCount).toBe(1);
+
+    bureau.dispose();
+  });
+
+  it('throws BAD_REQUEST when submitSchedulerTask receives invalid scheduler-specific fields', async () => {
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      scheduler: { enabled: true, idleDelay: 1 },
+      toolbox: createEmptyToolbox(),
+    });
+
+    const invalidRequest = {
+      message: 'Run a scheduled task',
+      priority: 'urgent',
+    } as unknown as Parameters<typeof bureau.submitSchedulerTask>[0];
+
+    const error = await Promise.resolve()
+      .then(() => bureau.submitSchedulerTask(invalidRequest))
+      .then(
+        () => undefined,
+        (rejection) => rejection,
+      );
+
+    expect(error).toMatchObject({
+      code: 'BAD_REQUEST',
+    });
+    expect((error as Error).message).toBe(
+      '"priority" must be one of: immediate, scheduled, background, ambient',
+    );
+
+    bureau.dispose();
+  });
+
+  it('returns tool summaries', async () => {
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+    });
+
+    expect(bureau.getTools()).toEqual([]);
+  });
+
+  it('emits one scheduler preempted frame with current state', async () => {
+    const { generate: slowGenerate, resolve } = createBlockingGenerate();
+    const schedulerFrames: Extract<
+      ServerFrame,
+      { type: 'scheduler.state' | 'scheduler.task.preempted' }
+    >[] = [];
+
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      scheduler: { enabled: true, idleDelay: 1 },
+    });
+
+    const unsubscribe = bureau.subscribeLiveFrames((frame) => {
+      if (frame.type === 'scheduler.state' || frame.type === 'scheduler.task.preempted') {
+        schedulerFrames.push(frame);
       }
-
-      expect(received.length).toBeGreaterThan(0);
     });
 
-    it('"run.registered" fires from createRun()', async () => {
-      const bureau = await createReadyBureau();
-      const registered: string[] = [];
-
-      bureau.addEventListener('run.registered', (event) => {
-        registered.push(event.runId);
-      });
-
-      const summary = await bureau.createRun({ message: 'Hello' });
-
-      expect(registered).toContain(summary.id);
-      bureau.dispose();
+    const backgroundResult = bureau.scheduler!.submit({
+      id: 'background-task',
+      priority: 'background',
+      requeue: false,
+      createRun: () => ({
+        generate: slowGenerate,
+        toolbox: createEmptyToolbox(),
+        conversation: new Conversation(),
+        maximumSteps: 5,
+      }),
     });
 
-    it('"run.removed" fires from deleteRun()', async () => {
-      const bureau = await createReadyBureau();
-      const removed: string[] = [];
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    schedulerFrames.length = 0;
 
-      bureau.addEventListener('run.removed', (event) => {
-        removed.push(event.runId);
-      });
+    const immediateResult = bureau.scheduler!.submitImmediate(() => ({
+      generate: createMockGenerate('immediate-done'),
+      toolbox: createEmptyToolbox(),
+      conversation: new Conversation(),
+      maximumSteps: 1,
+    }));
 
-      const { id } = await bureau.createRun({ message: 'Hello' });
-      await new Promise((resolve) => setTimeout(resolve, 50));
+    resolve({ content: 'background-step', toolCalls: [] });
 
-      bureau.deleteRun(id);
+    await immediateResult;
+    await backgroundResult;
+    await new Promise((resolve) => setTimeout(resolve, 20));
 
-      expect(removed).toContain(id);
-      bureau.dispose();
+    const preemptedFrames = schedulerFrames.filter(
+      (frame): frame is Extract<ServerFrame, { type: 'scheduler.task.preempted' }> =>
+        frame.type === 'scheduler.task.preempted',
+    );
+
+    expect(preemptedFrames).toHaveLength(1);
+    expect(preemptedFrames[0]?.taskId).toBe('background-task');
+    expect(preemptedFrames[0]?.state.preemptedCount).toBeGreaterThanOrEqual(1);
+
+    unsubscribe();
+    bureau.dispose();
+  });
+
+  it('emits action events from live runs', async () => {
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
     });
 
-    it('"bureau.disposed" fires from dispose()', async () => {
-      const bureau = await createReadyBureau();
-      let disposed = false;
-
-      bureau.addEventListener('bureau.disposed', () => {
-        disposed = true;
-      });
-
-      bureau.dispose();
-      expect(disposed).toBe(true);
+    const actions: string[] = [];
+    bureau.addEventListener('action', (event) => {
+      actions.push(event.action.type);
     });
 
-    it('complete() / completed work correctly', async () => {
-      const bureau = await createReadyBureau();
-      expect(bureau.completed).toBe(false);
-      bureau.complete();
-      expect(bureau.completed).toBe(true);
-    });
+    await bureau.createRun({ message: 'Hello' });
+    await waitForRunCompletion();
+
+    expect(actions.length).toBeGreaterThan(0);
+  });
+
+  it('disposes cleanly more than once', async () => {
+    const bureau = await createBureau();
+    bureau.dispose();
+    bureau.dispose();
   });
 });

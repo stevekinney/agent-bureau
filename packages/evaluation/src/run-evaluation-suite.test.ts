@@ -280,4 +280,40 @@ describe('runEvaluationSuite', () => {
       expect((error as Error).message).toMatch(/valid.*EvaluationReport/i);
     }
   });
+
+  it('throws when the baseline file does not exist', async () => {
+    const generate = createMockGenerate([singleResponse('Hello!'), singleResponse('Goodbye!')]);
+    const toolbox = createTestToolbox([]);
+
+    try {
+      await runEvaluationSuite({
+        datasets: fixturePath('suite-cases.json'),
+        agent: { generate, toolbox },
+        baseline: fixturePath('missing-baseline.json'),
+      });
+      expect.unreachable('Expected runEvaluationSuite to throw');
+    } catch (error: unknown) {
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toMatch(/baseline report file not found/i);
+    }
+  });
+
+  it('throws when the baseline file contains invalid JSON', async () => {
+    const generate = createMockGenerate([singleResponse('Hello!'), singleResponse('Goodbye!')]);
+    const toolbox = createTestToolbox([]);
+    const invalidBaselinePath = fixturePath('invalid-json-baseline.json');
+    await Bun.write(invalidBaselinePath, '{ this is not valid json }');
+
+    try {
+      await runEvaluationSuite({
+        datasets: fixturePath('suite-cases.json'),
+        agent: { generate, toolbox },
+        baseline: invalidBaselinePath,
+      });
+      expect.unreachable('Expected runEvaluationSuite to throw');
+    } catch (error: unknown) {
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toMatch(/invalid json in baseline file/i);
+    }
+  });
 });

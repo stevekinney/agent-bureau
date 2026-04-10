@@ -1,13 +1,15 @@
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useReducer, useRef, useState } from 'react';
 
 import type { RunSummary, ServerFrame } from '../../types';
+import { INITIAL_TOOL_ACTIVITY_STATE, reduceToolActivity } from './tool-activity';
 
 export interface ChatMessage {
-  role: 'user' | 'assistant';
+  role: 'user' | 'assistant' | 'tool';
   content: string;
 }
 
 export interface UseChatOptions {
+  onRunCreated?: (run: RunSummary) => void;
   subscribe: (runId: string) => void;
   unsubscribe: (runId: string) => void;
 }
@@ -17,28 +19,74 @@ export interface UseChatResult {
   runId: string | undefined;
   sending: boolean;
   error: string | undefined;
+  sessionId: string | undefined;
+  streamingAssistantContent: string;
+  toolActivity: string[];
   send: (message: string) => Promise<void>;
   handleMessage: (frame: ServerFrame) => void;
 }
 
-export function useChat({ subscribe, unsubscribe }: UseChatOptions): UseChatResult {
+function summarizeToolArguments(argumentsValue: unknown): string {
+  if (argumentsValue === undefined) {
+    return '';
+  }
+
+  if (
+    typeof argumentsValue === 'string' ||
+    typeof argumentsValue === 'number' ||
+    typeof argumentsValue === 'boolean' ||
+    typeof argumentsValue === 'bigint'
+  ) {
+    return String(argumentsValue);
+  }
+
+  if (argumentsValue instanceof Error) {
+    return argumentsValue.message;
+  }
+
+  if (typeof argumentsValue === 'symbol') {
+    return argumentsValue.description ? `Symbol(${argumentsValue.description})` : 'Symbol()';
+  }
+
+  try {
+    return JSON.stringify(argumentsValue);
+  } catch {
+    return Object.prototype.toString.call(argumentsValue);
+  }
+}
+
+export function useChat({ onRunCreated, subscribe, unsubscribe }: UseChatOptions): UseChatResult {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [runId, setRunId] = useState<string | undefined>(undefined);
   const runIdRef = useRef<string | undefined>(undefined);
+  const [sessionId, setSessionId] = useState<string | undefined>(undefined);
+  const sessionIdRef = useRef<string | undefined>(undefined);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | undefined>(undefined);
+  const [streamingAssistantContent, setStreamingAssistantContent] = useState('');
+  const streamingContentRef = useRef('');
+  const [toolActivityState, dispatchToolActivity] = useReducer(
+    reduceToolActivity,
+    INITIAL_TOOL_ACTIVITY_STATE,
+  );
 
   const send = useCallback(
     async (message: string) => {
       setSending(true);
       setError(undefined);
+      setStreamingAssistantContent('');
+      streamingContentRef.current = '';
+      dispatchToolActivity({ type: 'reset' });
       setMessages((previous) => [...previous, { role: 'user', content: message }]);
 
       try {
         const response = await fetch('/api/v1/runs', {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ message }),
+          body: JSON.stringify({
+            message,
+            sessionId: sessionIdRef.current,
+          }),
         });
 
         if (!response.ok) {
@@ -49,42 +97,99 @@ export function useChat({ subscribe, unsubscribe }: UseChatOptions): UseChatResu
 
         const data = (await response.json()) as RunSummary;
 
-        // Unsubscribe from the previous run before subscribing to the new one.
         if (runIdRef.current) {
           unsubscribe(runIdRef.current);
         }
 
-        // Subscribe immediately — before setting state — so the WebSocket
-        // subscription is active before the next microtask, eliminating the
-        // race where the run completes before the useEffect-based subscription
-        // in App could fire.
         subscribe(data.id);
-
         runIdRef.current = data.id;
+        sessionIdRef.current = data.sessionId;
         setRunId(data.id);
+        setSessionId(data.sessionId);
+        onRunCreated?.(data);
       } catch (fetchError) {
         setError(fetchError instanceof Error ? fetchError.message : 'Network error');
       } finally {
         setSending(false);
       }
     },
-    [subscribe, unsubscribe],
+    [onRunCreated, subscribe, unsubscribe],
   );
 
   const handleMessage = useCallback((frame: ServerFrame) => {
-    if (frame.type !== 'event') return;
-    if (frame.runId !== runIdRef.current) return;
+    if (!('runId' in frame) || frame.runId !== runIdRef.current) return;
 
-    if (frame.event === 'run.completed') {
-      const detail = frame.detail as { content?: string };
-      if (detail.content) {
-        setMessages((previous) => [
-          ...previous,
-          { role: 'assistant', content: detail.content as string },
-        ]);
+    switch (frame.type) {
+      case 'event': {
+        if (frame.event === 'run.completed') {
+          const detail = frame.detail as { content?: string };
+          const assistantContent = streamingContentRef.current || detail.content;
+          if (assistantContent) {
+            setMessages((previous) => [
+              ...previous,
+              { role: 'assistant', content: assistantContent },
+            ]);
+          }
+          streamingContentRef.current = '';
+          setStreamingAssistantContent('');
+        }
+
+        if (frame.event === 'run.error') {
+          const detail = frame.detail as { error?: string };
+          setError(detail.error ?? 'Run failed');
+          streamingContentRef.current = '';
+          setStreamingAssistantContent('');
+        }
+
+        if (frame.event === 'run.aborted') {
+          streamingContentRef.current = '';
+          setStreamingAssistantContent('');
+        }
+
+        break;
       }
+      case 'stream:text-delta':
+        streamingContentRef.current = frame.accumulated;
+        setStreamingAssistantContent(frame.accumulated);
+        break;
+      case 'stream:tool-call-start':
+        dispatchToolActivity({
+          type: 'start',
+          blockId: frame.blockId,
+          message: `Calling ${frame.toolName}`,
+        });
+        break;
+      case 'stream:tool-call-delta':
+        dispatchToolActivity({
+          type: 'update',
+          blockId: frame.blockId,
+          message: `${frame.toolName}: ${frame.partialArgs}`,
+        });
+        break;
+      case 'stream:tool-call-complete':
+        dispatchToolActivity({
+          type: 'complete',
+          blockId: frame.blockId,
+          message: `${frame.toolName} completed ${summarizeToolArguments(frame.arguments)}`.trim(),
+        });
+        break;
+      case 'subscribed':
+      case 'unsubscribed':
+      case 'stream:complete':
+      case 'stream:error':
+        break;
     }
   }, []);
 
-  return { messages, runId, sending, error, send, handleMessage };
+  return {
+    messages,
+    runId,
+    sending,
+    error,
+    sessionId,
+    streamingAssistantContent,
+    toolActivity: [...toolActivityState.entries],
+    send,
+    handleMessage,
+  };
 }

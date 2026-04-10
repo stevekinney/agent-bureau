@@ -99,4 +99,16 @@ describe('createOpenAIEmbedder', () => {
       expect(heraldError.retryable).toBe(true);
     }
   });
+
+  it('loads the SDK when no client is provided', async () => {
+    const embedder = createOpenAIEmbedder({ apiKey: 'sk-test-invalid' });
+
+    try {
+      await embedder(['test']);
+      expect.unreachable('Expected embedder to throw');
+    } catch (error) {
+      expect(error).toBeInstanceOf(HeraldError);
+      expect((error as HeraldError).provider).toBe('openai');
+    }
+  });
 });

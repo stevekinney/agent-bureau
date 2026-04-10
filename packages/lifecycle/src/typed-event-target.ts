@@ -10,6 +10,10 @@ export type EventMap = Record<string, Event>;
  * Does not wrap or abstract EventTarget — it IS an EventTarget.
  */
 export class TypedEventTarget<M extends EventMap> extends EventTarget {
+  constructor() {
+    super();
+  }
+
   override addEventListener<K extends keyof M & string>(
     type: K,
     listener: ((event: M[K]) => void) | null,

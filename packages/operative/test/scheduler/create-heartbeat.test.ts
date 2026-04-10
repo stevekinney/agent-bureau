@@ -3,6 +3,7 @@ import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
 
 import { createHeartbeat } from '../../src/scheduler/create-heartbeat';
+import type { Scheduler } from '../../src/scheduler/create-scheduler';
 import { createScheduler } from '../../src/scheduler/create-scheduler';
 import { sleep } from '../../src/scheduler/sleep';
 import { createMockGenerate } from '../../src/test/index';
@@ -248,5 +249,64 @@ describe('createHeartbeat', () => {
 
     heartbeat.stop();
     await scheduler.stop();
+  });
+
+  it('treats a preempted heartbeat tick as a non-failure and forwards null to onTick', async () => {
+    const ticks: Array<GenerateResponse | null> = [];
+    const scheduler = {
+      submit: async () => null,
+    } as Scheduler;
+
+    const heartbeat = createHeartbeat({
+      scheduler,
+      interval: 10,
+      createHeartbeatRun: async () => ({
+        generate: createMockGenerate([textResponse('ignored')]),
+        toolbox: createTestToolbox([]),
+        conversation: new Conversation(),
+        maximumSteps: 1,
+      }),
+      onTick: (result) => {
+        ticks.push(
+          result ? ({ content: result.content, toolCalls: [] } as GenerateResponse) : null,
+        );
+      },
+    });
+
+    const result = await heartbeat.tick();
+
+    expect(result).toBeNull();
+    expect(heartbeat.consecutiveFailures).toBe(0);
+    expect(ticks).toEqual([null]);
+  });
+
+  it('calls onFailure when scheduler submission throws and the failure budget is exhausted', async () => {
+    const failures: unknown[] = [];
+    const scheduler = {
+      submit: async () => {
+        throw new Error('submit failed');
+      },
+    } as Scheduler;
+
+    const heartbeat = createHeartbeat({
+      scheduler,
+      maxConsecutiveFailures: 1,
+      createHeartbeatRun: async () => ({
+        generate: createMockGenerate([textResponse('ignored')]),
+        toolbox: createTestToolbox([]),
+        conversation: new Conversation(),
+        maximumSteps: 1,
+      }),
+      onFailure: (error) => {
+        failures.push(error);
+      },
+    });
+
+    const result = await heartbeat.tick();
+
+    expect(result).toBeNull();
+    expect(heartbeat.consecutiveFailures).toBe(1);
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toBeInstanceOf(Error);
   });
 });
