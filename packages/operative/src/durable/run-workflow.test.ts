@@ -75,8 +75,14 @@ async function runToCompletion(
   return handle.result();
 }
 
-afterEach(() => {
+afterEach(async () => {
   resetRunDepsRegistry();
+  // Drain Weft's deferred inline launch (see runtime-composition.test.ts).
+  // Without this, a `setTimeout(0)` inline-launch macrotask left pending by one
+  // durable run can be starved under full `bun test` concurrency, making a later
+  // run that normally finishes in ~100ms blow past the 5s test timeout. Matches
+  // the drain in active-run-adapter.test.ts and create-bureau.test.ts.
+  await new Promise((resolve) => setTimeout(resolve, 0));
 });
 
 describe('durable agentRun workflow', () => {

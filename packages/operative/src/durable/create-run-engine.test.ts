@@ -27,8 +27,13 @@ function makeProbeWorkflow() {
     });
 }
 
-afterEach(() => {
+afterEach(async () => {
   resetRunDepsRegistry();
+  // Drain Weft's deferred inline launch (see runtime-composition.test.ts) so a
+  // pending `setTimeout(0)` macrotask from one engine run is not starved under
+  // full `bun test` concurrency, which would time out a later run. Matches the
+  // drain in active-run-adapter.test.ts and run-workflow.test.ts.
+  await new Promise((resolve) => setTimeout(resolve, 0));
 });
 
 describe('createRunEngine', () => {
