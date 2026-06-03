@@ -12,9 +12,14 @@
     "lint": "turbo run lint",
     "test": "turbo run test",
     "prepare": "lefthook install",
-    "validate": "turbo run format:check lint check-types test"
+    "validate": "turbo run format:check lint check-types test",
+    "changeset": "changeset",
+    "version": "changeset version",
+    "release": "bun run scripts/release.ts",
+    "check-package-shape": "bun run scripts/check-package-shape.ts armorer conversationalist"
   },
   "devDependencies": {
+    "@changesets/cli": "2.31.0",
     "@eslint/compat": "^2.0.2",
     "@eslint/js": "^10.0.1",
     "eslint": "^10.0.0",
@@ -29,6 +34,7 @@
     "globals": "^17.3.0",
     "lefthook": "^2.1.4",
     "prettier": "^3.7.4",
+    "tsdown": "^0.22.1",
     "turbo": "^2.8.17",
     "typescript": "5.9.2",
     "typescript-eslint": "^8.55.0"

@@ -4,16 +4,6 @@
     "exactOptionalPropertyTypes": true,
     "tsBuildInfoFile": "node_modules/.cache/tsconfig.tsbuildinfo",
     "baseUrl": ".",
-    "paths": {
-      "armorer": ["../armorer/dist/index.d.ts"],
-      "armorer/*": ["../armorer/dist/*"],
-      "conversationalist": ["../conversationalist/dist/index.d.ts"],
-      "conversationalist/*": ["../conversationalist/dist/*"],
-      "operative": ["../operative/dist/index.d.ts"],
-      "operative/*": ["../operative/dist/*"],
-      "sentinel": ["../sentinel/dist/index.d.ts"],
-      "sentinel/*": ["../sentinel/dist/*"]
-    },
     "typeRoots": ["node_modules/@types"],
     "types": ["bun"]
   },

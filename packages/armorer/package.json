@@ -16,13 +16,14 @@
     "anthropic",
     "agents"
   ],
-  "homepage": "https://github.com/stevekinney/armorer#readme",
+  "homepage": "https://github.com/stevekinney/agent-bureau/tree/main/packages/armorer#readme",
   "bugs": {
-    "url": "https://github.com/stevekinney/armorer/issues"
+    "url": "https://github.com/stevekinney/agent-bureau/issues"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/stevekinney/armorer.git"
+    "url": "git+https://github.com/stevekinney/agent-bureau.git",
+    "directory": "packages/armorer"
   },
   "license": "MIT",
   "author": "Steve Kinney <hello@stevekinney.net>",
@@ -178,11 +179,12 @@
   "types": "./dist/index.d.ts",
   "files": [
     "dist",
-    "src"
+    "LICENSE",
+    "README.md"
   ],
   "scripts": {
     "bench": "bun run scripts/bench.ts",
-    "build": "bun run scripts/build.ts",
+    "build": "tsdown",
     "check-types": "tsc --noEmit",
     "check:boundaries": "bun run scripts/check-boundaries.ts",
     "clean": "rm -rf dist coverage tsconfig.tsbuildinfo",
@@ -193,16 +195,10 @@
     "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,json,md}\"",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
-    "prepack": "bun run clean && bun run build",
-    "prepublishOnly": "bun run clean && bun run build",
     "start": "bun run src/index.ts",
     "test": "bun test",
     "test:coverage": "bun test --coverage",
     "validate": "bun run format:check && bun run lint && bun run check-types && bun run test"
-  },
-  "dependencies": {
-    "lifecycle": "workspace:*",
-    "interoperability": "workspace:*"
   },
   "devDependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.39",
@@ -230,6 +226,8 @@
     "eslint-plugin-unicorn": "^63.0.0",
     "eslint-plugin-unused-imports": "^4.4.1",
     "globals": "^17.3.0",
+    "interoperability": "workspace:*",
+    "lifecycle": "workspace:*",
     "remark": "^15.0.1",
     "remark-parse": "^11.0.0",
     "remark-stringify": "^11.0.0",

@@ -290,7 +290,7 @@ describe('Vector Database Integration Tests', () => {
 
       expect(results).toHaveLength(10);
       expect(results[0]!.id).toBe('indexed-0'); // Should find itself first
-    });
+    }, 30_000); // Building an HNSW index over 500 vectors exceeds Bun's default 5s timeout.
 
     it('should persist and load index', async () => {
       // Add vectors and build index

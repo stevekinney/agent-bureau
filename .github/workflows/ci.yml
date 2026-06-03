@@ -1,0 +1,41 @@
+name: CI
+
+# Pull-request checks. release.yml only runs on push to main, so this is where per-PR validation
+# happens: full build/lint/types/tests plus the publishable-package shape gate (the regression guard
+# that fails if armorer/conversationalist ever ship a foundation-package leak or undeclared external).
+
+on:
+  pull_request:
+    branches:
+      - main
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.13
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Validate (format, lint, types, test)
+        run: bun run validate
+
+      - name: Build publishable packages
+        run: bun run turbo run build --filter=armorer --filter=conversationalist
+
+      - name: Package-shape gate (no foundation leaks, no undeclared externals)
+        run: bun run check-package-shape
