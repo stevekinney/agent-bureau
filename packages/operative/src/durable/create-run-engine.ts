@@ -91,8 +91,6 @@ export async function createRunEngine(options: CreateRunEngineOptions): Promise<
     recover: options.recover ?? true,
     workflows: { agentRun: options.runWorkflow },
     activities: {
-      loadCursor: storageActivities.loadCursor,
-      loadConversation: storageActivities.loadConversation,
       saveCursor: storageActivities.saveCursor,
       saveConversation: storageActivities.saveConversation,
       recordStep: storageActivities.recordStep,

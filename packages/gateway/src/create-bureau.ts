@@ -2,6 +2,12 @@ import { Conversation, createConversationHistory } from 'conversationalist';
 import { CompletableEventTarget } from 'lifecycle';
 import { type ActiveRun, createAgentSession, createRun, type JSONValue } from 'operative';
 import {
+  clearRunDeps,
+  type DurableRunDeps,
+  registerRunDeps,
+  setRunDepsReconstructor,
+} from 'operative/durable';
+import {
   createStore,
   RunRegisteredEvent as StoreRunRegisteredEvent,
   RunRemovedEvent as StoreRunRemovedEvent,
@@ -432,6 +438,115 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     return serializeRunState(store.getRun(runId)!, sessionId);
   }
 
+  /**
+   * Rebuild a recovered run's non-serializable behavior from durable config.
+   * Given a `runId`, find the session that owns it (its `lastRunId` while still
+   * `running`) and reconstruct the run runtime from that session's persisted
+   * request — the same `createRunRuntime` a fresh run uses. Returns `null` when
+   * no such session exists (the run is not bureau-owned / not reconstructable),
+   * so the durable workflow terminates it safely instead of bricking the engine.
+   *
+   * The reconstructed `conversation` is a placeholder: a resumed run reads its
+   * transcript from the checkpoint, not from `options.conversation`.
+   */
+  async function reconstructDurableRunDeps(runId: string): Promise<DurableRunDeps | null> {
+    const sessionStore = runtime.sessionStore;
+    if (!sessionStore) return null;
+
+    const summaries = await sessionStore.list();
+    for (const summary of summaries) {
+      if (summary.metadata['lastRunId'] !== runId) continue;
+      if (summary.metadata['lastRunStatus'] !== 'running') continue;
+
+      const session = await sessionStore.load(summary.id);
+      if (!session) continue;
+
+      const message = session.metadata['lastUserMessage'];
+      const runRuntime = await runtime.createRunRuntime(
+        {
+          message: typeof message === 'string' ? message : '',
+          sessionId: session.id,
+        },
+        { liveStreaming: false },
+      );
+
+      return {
+        toolbox: runRuntime.toolbox,
+        options: {
+          generate: runRuntime.generate,
+          toolbox: runRuntime.toolbox,
+          conversation: new Conversation(session.conversationHistory),
+          maximumSteps: runtime.maximumSteps,
+          stopWhen: options.stopWhen,
+          prepareStep: runRuntime.prepareStep,
+          onStep: runRuntime.onStep,
+          validateResponse: runRuntime.validateResponse,
+        },
+      };
+    }
+    return null;
+  }
+
+  /**
+   * Boot-time recovery for durable runs (seam #5). Registers the deps
+   * reconstructor, then resumes any `agentRun` workflows a previous process left
+   * in flight via `engine.recoverAll()`. Each recovered run advances to
+   * completion through the reconstructed behavior; its terminal session status is
+   * persisted so a resumed run is not stuck `running` forever.
+   *
+   * Best-effort and fail-safe: a single unrecoverable run terminates itself
+   * (safe error result) without aborting the others or the boot.
+   *
+   * TODO(weft-integration): #5b reconstructed runs complete without an ActiveRun
+   *   adapter, so they are not individually observable via the live event surface
+   *   (their session status IS persisted). Reattaching ActiveRun + store.register
+   *   per recovered handle is the remaining visibility half.
+   */
+  async function recoverDurableRuns(): Promise<void> {
+    if (!runtime.durable) return;
+
+    const sessionStore = runtime.sessionStore;
+    if (!sessionStore) return;
+
+    // PRE-INJECT, then recoverAll. Weft replays a recovered workflow from the
+    // top, replaying cached activity results — so the in-workflow `ensureDeps`
+    // activity returns its pre-crash cached value and does NOT re-invoke the
+    // reconstructor on resume. The deps must therefore already be in the registry
+    // before recoverAll resumes the generators. We also register the reconstructor
+    // as a fallback for any run that crashed before its session recorded it.
+    setRunDepsReconstructor(reconstructDurableRunDeps);
+
+    const summaries = await sessionStore.list();
+    const inFlight = summaries.filter((summary) => summary.metadata['lastRunStatus'] === 'running');
+    const recovered = new Map<string, string>(); // runId -> sessionId
+    for (const summary of inFlight) {
+      const runId = summary.metadata['lastRunId'];
+      if (typeof runId !== 'string') continue;
+      const deps = await reconstructDurableRunDeps(runId);
+      if (deps === null) continue;
+      registerRunDeps(runId, deps);
+      recovered.set(runId, summary.id);
+    }
+
+    const handles = await runtime.durable.engine.recoverAll();
+    await Promise.allSettled(
+      handles.map(async (handle) => {
+        const summary = (await handle.result()) as { runId: string; finishReason: string };
+        const sessionId = recovered.get(summary.runId);
+        if (!sessionId) return;
+        const session = await sessionStore.load(sessionId);
+        if (!session) return;
+        const lastRunStatus = summary.finishReason === 'error' ? 'error' : 'completed';
+        await saveSession(sessionId, new Conversation(session.conversationHistory), {
+          lastRunId: summary.runId,
+          lastRunStatus,
+          lastFinishReason: summary.finishReason,
+        });
+        clearRunDeps(summary.runId);
+      }),
+    );
+  }
+
   function submitSchedulerTask(
     request: SubmitSchedulerTaskRequest,
   ): Promise<SubmitSchedulerTaskResponse> {
@@ -590,6 +705,16 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     if (ownsStore) {
       store.dispose();
     }
+  }
+
+  // Resume any durable runs a previous process left in flight. Best-effort: a
+  // recovery failure is logged but never blocks bringing the bureau up.
+  try {
+    await recoverDurableRuns();
+  } catch (error) {
+    console.error(
+      `[bureau] Durable run recovery failed during boot: ${serializeUnknownError(error)}`,
+    );
   }
 
   return {

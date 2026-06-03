@@ -5,7 +5,7 @@ import { buildStepDeps, createRunState } from '../loop';
 import { runStep } from '../run-step';
 import type { FinishReason } from '../types';
 import type { CheckpointStore } from './checkpoint-store';
-import { getRunDeps } from './deps-registry';
+import { ensureRunDeps, getRunDeps } from './deps-registry';
 import { createStorageActivities } from './storage-activities';
 import type { RunCursor, StepRecord } from './types';
 
@@ -116,8 +116,6 @@ export function createRunWorkflow(checkpointStore: CheckpointStore) {
 
   return workflow({ name: 'agentRun' })
     .activities({
-      loadCursor: storage.loadCursor,
-      loadConversation: storage.loadConversation,
       saveCursor: storage.saveCursor,
       saveConversation: storage.saveConversation,
       recordStep: storage.recordStep,
@@ -130,16 +128,43 @@ export function createRunWorkflow(checkpointStore: CheckpointStore) {
       // held as a local across a yield. `deps` holds non-serializable closures
       // (generate, toolbox, hooks, emitter); keeping it live across a checkpoint
       // would fail validateCloneable or be lost on resume. Same rule as the
-      // Conversation instance and the contaminated RunState. On cross-process
-      // recovery the deps registry must be re-injected first (seam #5).
+      // Conversation instance and the contaminated RunState.
 
-      // DURABLE LOCALS — both plain/cloneable. Resume rehydrates them from store.
-      let cursor: RunCursor = (yield* ctx.run('loadCursor', { runId })) ?? initialCursor();
-      let snapshot = yield* ctx.run('loadConversation', { runId });
+      // RECOVERY (seam #5): on a fresh-process resume the deps registry is empty.
+      // Reconstruct this run's behavior from durable config before the first step
+      // needs it. This is a PLAIN `await`, NOT a `ctx.run` activity: an activity
+      // result is checkpointed and replayed on recovery, so it would return the
+      // ORIGINAL process's cached value (`true`) and never re-reconstruct in the
+      // fresh process. A plain await re-runs on every replay, so recovery actually
+      // re-evaluates. If the behavior cannot be reconstructed (an ad-hoc closure
+      // with no durable config), terminate this run safely instead of bricking.
+      const depsReady = await ensureRunDeps(runId);
+      if (!depsReady) {
+        ctx.setAttribute('runId', runId);
+        return {
+          runId,
+          steps: 0,
+          content: '',
+          finishReason: 'error',
+          errorMessage: `Durable run "${runId}" could not be recovered: its behavior (generate/toolbox/hooks) was not reconstructable from durable configuration.`,
+        } satisfies AgentRunWorkflowResult;
+      }
 
-      // Seed a fresh run's conversation with the prompt, then persist it so a
-      // resume before step 0 completes still sees the seeded transcript.
-      if (snapshot === null) {
+      // DURABLE WORKFLOW LOCALS. These are the resume position — Weft snapshots
+      // live locals at every `yield*` and restores them on resume, so the cursor
+      // and transcript survive a crash WITHOUT being re-read through an activity.
+      // (Re-reading via a load activity is wrong: Weft caches the activity's first
+      // result and replays that stale value on resume, defeating the reload.) Both
+      // are plain/cloneable: `cursor` is `{ step, accumulators }`, `snapshot` is a
+      // structuredClone-safe `ConversationSnapshot` tree — never a `Conversation`
+      // instance. The checkpoint-store writes below exist only so the ActiveRun
+      // adapter can reconstruct the RunResult post-completion; they are not the
+      // workflow's own resume mechanism.
+      let cursor: RunCursor = initialCursor();
+
+      // Seed the conversation on the first run from the run's options + prompt,
+      // then persist it so the adapter and any external reader see the transcript.
+      const seededConversation = (() => {
         const options = getRunDeps(runId).options;
         const seeded = isConversation(options.conversation)
           ? options.conversation
@@ -147,21 +172,33 @@ export function createRunWorkflow(checkpointStore: CheckpointStore) {
         if (input.prompt !== undefined) {
           seeded.appendUserMessage(input.prompt);
         }
-        snapshot = seeded.snapshot();
-        yield* ctx.run('saveConversation', { runId, snapshot });
-      }
+        return seeded.snapshot();
+      })();
+      let snapshot = seededConversation;
+      yield* ctx.run('saveConversation', { runId, snapshot });
 
       let finishReason: FinishReason = 'maximum-steps';
       let errorMessage: string | undefined;
       let abortReason: string | undefined;
 
       while (cursor.step < maximumSteps) {
-        // === IN-MEMORY step region (no `yield*`). The deps closures, the live
-        // Conversation instance, the contaminated RunState, and the StepResult it
-        // accumulates are ALL born and die here, before the next yield — so none
-        // ever crosses a checkpoint boundary. `runStep` runs the entire step,
-        // including in-process tool execution, exactly as `executeLoop` does. ===
-        const stepResult = await (async () => {
+        // === The whole step runs inside `ctx.memo`, keyed by step index. This is
+        // what makes the in-process step durable across RECOVERY (not just the
+        // happy path): on a crash + recoverAll, Weft restarts the generator from
+        // the top and short-circuits each `ctx.memo` to its checkpointed result
+        // WITHOUT re-running the function — so every COMPLETED step's generate +
+        // tool execution is skipped, and only the in-flight (un-memoized) step
+        // re-runs. Without memo, the in-process generate would re-execute from
+        // step 0 on recovery (re-charging the LLM), because plain in-process code
+        // is re-run during replay. The memo's return value is the plain, cloneable
+        // step projection — no `Conversation` instance, no live error. ===
+        const stepIndex = cursor.step;
+        const carriedAccumulators = {
+          totalUsage: cursor.totalUsage,
+          lastContent: cursor.lastContent,
+          schemaAttempts: cursor.schemaAttempts,
+        };
+        const stepResult = yield* ctx.memo(`step-${stepIndex}`, async () => {
           const deps = getRunDeps(runId);
           const conversation = Conversation.from(snapshot);
           // Build StepDeps from the run's options (one code path with executeLoop),
@@ -174,17 +211,11 @@ export function createRunWorkflow(checkpointStore: CheckpointStore) {
           // accumulates exactly the one StepResult it produces (and nothing that
           // would otherwise need to cross a yield).
           const runState = createRunState();
-          runState.totalUsage = { ...cursor.totalUsage };
-          runState.lastContent = cursor.lastContent;
-          runState.schemaAttempts = cursor.schemaAttempts;
+          runState.totalUsage = { ...carriedAccumulators.totalUsage };
+          runState.lastContent = carriedAccumulators.lastContent;
+          runState.schemaAttempts = carriedAccumulators.schemaAttempts;
 
-          const outcome = await runStep(
-            stepDeps,
-            runState,
-            conversation,
-            cursor.step,
-            deps.emitter,
-          );
+          const outcome = await runStep(stepDeps, runState, conversation, stepIndex, deps.emitter);
 
           // Project the (at most one) pushed StepResult to a plain StepRecord —
           // dropping the live Conversation instance — and re-snapshot the
@@ -202,9 +233,8 @@ export function createRunWorkflow(checkpointStore: CheckpointStore) {
               }
             : null;
 
-          // Serialize terminal metadata here, inside the no-yield region, where
-          // the live (non-cloneable) error object still exists. Only the plain
-          // strings cross the next yield.
+          // Serialize terminal metadata here, inside the function, where the live
+          // (non-cloneable) error object still exists. Only plain data is memoized.
           return {
             outcome: { kind: outcome.kind },
             errorMessage: outcome.kind === 'error' ? serializeError(outcome.error) : undefined,
@@ -218,7 +248,7 @@ export function createRunWorkflow(checkpointStore: CheckpointStore) {
               schemaAttempts: runState.schemaAttempts,
             },
           };
-        })();
+        });
 
         snapshot = stepResult.conversationSnapshot;
 

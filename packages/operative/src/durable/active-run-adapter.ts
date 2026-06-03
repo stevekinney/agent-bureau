@@ -1,4 +1,4 @@
-import { Conversation } from 'conversationalist';
+import { Conversation, isConversation } from 'conversationalist';
 import type { ForwardableSource } from 'lifecycle';
 import { CompletableEventTarget, forwardEvents } from 'lifecycle';
 
@@ -124,10 +124,9 @@ export function createDurableActiveRun(
     ? AbortSignal.any([options.signal, abortController.signal])
     : abortController.signal;
 
-  const conversation =
-    options.conversation instanceof Conversation
-      ? options.conversation
-      : new Conversation(options.conversation);
+  const conversation = isConversation(options.conversation)
+    ? options.conversation
+    : new Conversation(options.conversation);
 
   // Forward toolbox events with the `toolbox` prefix, as createRun does. The
   // toolbox is the SAME instance `runStep` executes in-process under inline mode,

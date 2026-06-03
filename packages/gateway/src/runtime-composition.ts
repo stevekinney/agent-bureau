@@ -468,7 +468,7 @@ export async function createRuntimeComposition(
 
   // Opt-in durable execution: build the run engine on the same backend, gated on
   // the flag AND a configured (persistent) storage. Off by default so existing
-  // bureaus don't all boot an engine + run recoverAll + need disposal.
+  // bureaus don't all boot an engine + need disposal.
   let durable: { engine: AnyRunEngine; checkpointStore: CheckpointStore } | undefined;
   if (options.durableExecution && durableStorage) {
     // Build the checkpoint store over the SAME backend the engine persists to.
@@ -476,7 +476,19 @@ export async function createRuntimeComposition(
       textValueStore(durableStorage, { disposeUnderlyingStorage: false }),
     );
     const runWorkflow = createRunWorkflow(checkpointStore);
-    durable = await createRunEngine({ storage: durableStorage, runWorkflow, checkpointStore });
+    // recover: false is REQUIRED. With the default (recover: true), Engine.create
+    // runs recoverAll() during construction — but on a fresh process the deps
+    // registry is empty, so a recovered run's ensureDeps has no reconstructor yet
+    // and recoverAll would reject, and Engine.create rethrows: the bureau would
+    // fail to boot at all. The bureau owns recovery ordering instead — it
+    // registers a deps reconstructor, then calls engine.recoverAll() once the
+    // reconstructor is in place.
+    durable = await createRunEngine({
+      storage: durableStorage,
+      runWorkflow,
+      checkpointStore,
+      recover: false,
+    });
   }
 
   let memory: Memory | undefined;

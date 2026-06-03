@@ -9,7 +9,7 @@ import { noToolCalls } from '../conditions/predicates';
 import type { GenerateFunction } from '../types';
 import { createCheckpointStore } from './checkpoint-store';
 import type { DurableRunDeps } from './deps-registry';
-import { registerRunDeps, resetRunDepsRegistry } from './deps-registry';
+import { registerRunDeps, resetRunDepsRegistry, setRunDepsReconstructor } from './deps-registry';
 import { createRunWorkflow } from './run-workflow';
 import { createStorageActivities } from './storage-activities';
 
@@ -39,8 +39,6 @@ async function buildEngine(storage: Storage, recover: boolean) {
     recover,
     workflows: { agentRun: runWorkflow },
     activities: {
-      loadCursor: activities.loadCursor,
-      loadConversation: activities.loadConversation,
       saveCursor: activities.saveCursor,
       saveConversation: activities.saveConversation,
       recordStep: activities.recordStep,
@@ -153,95 +151,129 @@ describe('durable agentRun workflow', () => {
     }
   });
 
-  describe('THE PROOF: cross-process resume-from-step-N', () => {
-    // The durability mechanism under test is the application-level checkpoint
-    // store: the workflow body's loadCursor/loadConversation activities read the
-    // persisted step position on (re)start, so a fresh engine on the same backend
-    // continues from the last committed step. This is deliberately independent of
-    // Weft's native workflow-instance recovery — it survives a workflow that
-    // terminated (here, via a crash) and needs no deps re-injection trickery to
-    // resume the *position*, only to supply behavior for the remaining steps.
-    it('resumes from the last completed step on a fresh engine without re-running completed steps', async () => {
-      // A shared backend both "process" engines see; recovery uses a fresh
-      // engine on the SAME storage, the way a restarted process would.
-      const storage = new MemoryStorage();
-      const runId = 'crash-run';
+  describe('THE PROOF: cross-process resume-from-step-N via Weft recoverAll', () => {
+    // The durability mechanism under test is Weft NATIVE recovery: engine A
+    // suspends a workflow mid-run (a hanging generate), is disposed (a "crashed
+    // process"), and engine B on the SAME backend calls `recoverAll()` to resume
+    // it. Weft restarts the generator from the top and short-circuits each
+    // `ctx.memo` to its checkpointed value, so every COMPLETED step's generate is
+    // skipped and only the in-flight step re-runs — proving generate does not
+    // re-execute from step 0 on recovery. Behavior for the remaining steps comes
+    // from a reconstructor (the bureau's role), nothing hand-injected.
 
-      // === Engine A: run two steps, then "crash" by throwing inside generate
-      // on step 2. Steps 0 and 1 are durably committed before the throw. ===
-      let aCalls = 0;
-      registerDeps(runId, async ({ step }) => {
-        aCalls++;
-        if (step >= 2) {
-          throw new Error('SIMULATED CRASH at step 2');
-        }
-        return { content: `A step ${step}`, toolCalls: [{ name: 'next', arguments: {} }] };
+    /** Start a run but do NOT await — used when the run hangs mid-step. */
+    function startRun(
+      engine: Awaited<ReturnType<typeof buildEngine>>['engine'],
+      input: { runId: string; prompt?: string },
+    ) {
+      return engine.start('agentRun', input);
+    }
+
+    it('resumes a suspended run via a RECONSTRUCTOR, skipping completed steps (no re-run)', async () => {
+      // One shared MemoryStorage instance both engines see, the way two processes
+      // share a persistent backend.
+      const storage = new MemoryStorage();
+
+      // === Engine A: step 0 emits a tool call (commits), step 1's generate HANGS.
+      // Disposing while suspended leaves the Weft workflow non-terminal. ===
+      const aRunId = 'aaaaaaaa-0000-4000-8000-000000000001';
+      registerRunDeps(aRunId, {
+        toolbox: continuingToolbox(),
+        options: {
+          generate: async ({ step }: { step: number }) =>
+            step === 0
+              ? { content: 'A step 0', toolCalls: [{ name: 'next', arguments: {} }] }
+              : new Promise<never>(() => {}),
+          toolbox: continuingToolbox(),
+          conversation: createConversationHistory(),
+          stopWhen: noToolCalls(),
+        },
       });
 
       const a = await buildEngine(storage, false);
-      try {
-        await runToCompletion(a.engine, { runId, prompt: 'Start' });
-      } catch {
-        // expected: the crash propagates as a workflow failure
-      }
+      const handle = await startRun(a.engine, { runId: aRunId, prompt: 'Start' });
+      void handle.result().catch(() => {}); // never settles; keep it off the chain
+      // Let step 0 commit and step 1 reach its hanging generate.
+      await new Promise((resolve) => setTimeout(resolve, 100));
 
-      const afterCrash = await a.checkpointStore.loadCheckpoint(runId);
-      // Steps 0 and 1 survived the crash.
-      expect(afterCrash.cursor.step).toBe(2);
-      expect(afterCrash.steps).toHaveLength(2);
-      expect(afterCrash.steps.map((s) => s.content)).toEqual(['A step 0', 'A step 1']);
+      const afterCrash = await a.checkpointStore.loadCheckpoint(aRunId);
+      expect(afterCrash.steps).toHaveLength(1);
+      expect(afterCrash.steps[0]!.content).toBe('A step 0');
       a.engine[Symbol.dispose]();
 
-      // === FRESH PROCESS BOUNDARY ===
-      // Clear the deps registry so the recovered run cannot advance on stale,
-      // in-process closures. This is what makes the test prove real recovery
-      // rather than false-greening on a warm registry.
+      // === FRESH PROCESS: empty registry + a reconstructor that supplies a
+      // settling generate. recoverAll resumes the suspended workflow. ===
       resetRunDepsRegistry();
+      const recoveredSteps: number[] = [];
+      setRunDepsReconstructor(async () => ({
+        toolbox: continuingToolbox(),
+        options: {
+          generate: async ({ step }: { step: number }) => {
+            recoveredSteps.push(step);
+            return { content: `recovered step ${step}`, toolCalls: [] };
+          },
+          toolbox: continuingToolbox(),
+          conversation: createConversationHistory(),
+          stopWhen: noToolCalls(),
+        },
+      }));
 
-      // Prove the boundary is real: with an empty registry, a resumed run that
-      // reaches the generate region throws the descriptive deps-missing error.
-      // (Behavior must be re-injected before the run can advance — seam #5.)
-      const bareEngine = await buildEngine(storage, false);
-      let depsMissing: unknown;
-      try {
-        await runToCompletion(bareEngine.engine, { runId, prompt: 'Start' });
-      } catch (error) {
-        depsMissing = error;
-      }
-      expect((depsMissing as Error | undefined)?.message).toMatch(/No durable run deps registered/);
-      bareEngine.engine[Symbol.dispose]();
-
-      // === Engine B: re-inject deps with a generate that settles (no tool
-      // calls). A fresh run from step 0 would call generate at step 0; a
-      // correctly-resumed run continues at step 2. ===
-      let bCalls = 0;
-      const bSteps: number[] = [];
-      registerDeps(runId, async ({ step }) => {
-        bCalls++;
-        bSteps.push(step);
-        return { content: `B recovered step ${step}`, toolCalls: [] };
-      });
-
-      // Re-start the run on the fresh engine using the persisted cursor: the
-      // workflow's loadCursor/loadConversation activities rehydrate step 2.
       const b = await buildEngine(storage, false);
       try {
-        const result = await runToCompletion(b.engine, { runId, prompt: 'Start' });
+        const handles = await b.engine.recoverAll();
+        expect(handles.length).toBe(1);
+        const result = (await handles[0]!.result()) as { steps: number; finishReason: string };
 
-        // Resumed at step 2, did NOT restart at 0.
-        expect(bSteps).toEqual([2]);
-        expect(bCalls).toBe(1);
-        expect(result.steps).toBe(3);
+        // ctx.memo short-circuited step 0 — generate ran ONLY for step 1.
+        expect(recoveredSteps).toEqual([1]);
+        expect(result.steps).toBe(2);
         expect(result.finishReason).toBe('stop-condition');
 
-        // The recovered transcript still contains the steps A produced.
-        const checkpoint = await b.checkpointStore.loadCheckpoint(runId);
-        expect(checkpoint.steps).toHaveLength(3);
-        expect(checkpoint.steps.map((s) => s.content)).toEqual([
-          'A step 0',
-          'A step 1',
-          'B recovered step 2',
-        ]);
+        // The recovered transcript carries step 0 from engine A plus step 1.
+        const checkpoint = await b.checkpointStore.loadCheckpoint(aRunId);
+        expect(checkpoint.steps.map((s) => s.content)).toEqual(['A step 0', 'recovered step 1']);
+      } finally {
+        b.engine[Symbol.dispose]();
+      }
+    });
+
+    it('terminates an unrecoverable resumed run safely (no reconstructor) instead of bricking', async () => {
+      const storage = new MemoryStorage();
+      const runId = 'bbbbbbbb-0000-4000-8000-000000000002';
+
+      registerRunDeps(runId, {
+        toolbox: continuingToolbox(),
+        options: {
+          generate: async ({ step }: { step: number }) =>
+            step === 0
+              ? { content: 'A step 0', toolCalls: [{ name: 'next', arguments: {} }] }
+              : new Promise<never>(() => {}),
+          toolbox: continuingToolbox(),
+          conversation: createConversationHistory(),
+          stopWhen: noToolCalls(),
+        },
+      });
+
+      const a = await buildEngine(storage, false);
+      const handle = await startRun(a.engine, { runId, prompt: 'Start' });
+      void handle.result().catch(() => {});
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      a.engine[Symbol.dispose]();
+
+      // Fresh process, empty registry, NO reconstructor: the run cannot rebuild
+      // its behavior, so the workflow terminates with a safe error result rather
+      // than the engine bricking.
+      resetRunDepsRegistry();
+      const b = await buildEngine(storage, false);
+      try {
+        const handles = await b.engine.recoverAll();
+        expect(handles.length).toBe(1);
+        const result = (await handles[0]!.result()) as {
+          finishReason: string;
+          errorMessage?: string;
+        };
+        expect(result.finishReason).toBe('error');
+        expect(result.errorMessage).toMatch(/could not be recovered/);
       } finally {
         b.engine[Symbol.dispose]();
       }

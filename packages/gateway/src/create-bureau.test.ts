@@ -1,15 +1,33 @@
+import { rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
 import { MemoryStorage, type TextValueStore, textValueStore } from '@lostgradient/weft/storage';
-import { createToolbox } from 'armorer';
+import { createTool, createToolbox } from 'armorer';
 import { createMockTool, createTestToolbox } from 'armorer/test';
 import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
 import type { GenerateFunction, GenerateResponse, Toolbox } from 'operative';
 import { stopWhen } from 'operative';
+import { resetRunDepsRegistry } from 'operative/durable';
 import { createMockGenerate as createSequentialGenerate } from 'operative/test';
 import { createStore } from 'sentinel';
+import { z } from 'zod';
 
 import { BureauError, createBureau } from './create-bureau';
 import { type ConfigurationResponse, DEFAULT_MAXIMUM_STEPS, type ServerFrame } from './types';
+
+let recoveryDatabaseCounter = 0;
+
+/** A no-op `next` tool that lets a run take multiple steps. */
+function createNextTool() {
+  return createTool({
+    name: 'next',
+    description: 'continue',
+    input: z.object({}),
+    execute: async () => 'ok',
+  });
+}
 
 type HasApiKey<T> = 'apiKey' extends keyof T ? true : false;
 
@@ -229,6 +247,81 @@ describe('createBureau', () => {
     expect(sessionSaveCount).toBe(3);
     expect(session?.metadata['lastRunId']).toBe(run.id);
     expect(session?.metadata['lastRunStatus']).toBe('completed');
+  });
+
+  it('recovers an in-flight durable run across a process restart, rebuilding deps from config', async () => {
+    // THE CROSS-PROCESS PROOF (5d/5e): two bureaus share one persistent SQLite
+    // backend the way two processes would. Bureau A crashes mid-run; bureau B
+    // boots on the same file, reconstructs the run's behavior from its own config
+    // + the persisted session (NOTHING hand-injected), and resumes to completion.
+    const databasePath = join(
+      tmpdir(),
+      `bureau-recovery-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+
+    try {
+      // === Bureau A: step 0 commits a tool call, then step 1's generate HANGS.
+      // Disposing while suspended simulates a process dying mid-run: the Weft
+      // workflow is left in a non-terminal state for recoverAll to pick up. ===
+      const bureauA = await createBureau({
+        generate: async ({ step }) => {
+          if (step === 0) {
+            return { content: 'A step 0', toolCalls: [{ name: 'next', arguments: {} }] };
+          }
+          // Hang forever — the "process" dies here.
+          return new Promise<never>(() => {});
+        },
+        toolbox: createToolbox([createNextTool()]) as unknown as Toolbox,
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+        stopWhen: stopWhen.noToolCalls(),
+      });
+
+      const run = await bureauA.createRun({ message: 'Recover me' });
+      // Let step 0 checkpoint, then leave step 1 suspended in generate.
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      bureauA.dispose();
+
+      // === FRESH PROCESS: clear the module-global deps registry so the recovered
+      // run cannot ride on bureau A's in-process closures. ===
+      resetRunDepsRegistry();
+
+      // === Bureau B: same SQLite file, a generate that settles. On boot it
+      // reconstructs deps from config + the persisted session and resumes. ===
+      const bSteps: number[] = [];
+      const bureauB = await createBureau({
+        generate: async ({ step }) => {
+          bSteps.push(step);
+          return { content: `B recovered step ${step}`, toolCalls: [] };
+        },
+        toolbox: createToolbox([createNextTool()]) as unknown as Toolbox,
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+        stopWhen: stopWhen.noToolCalls(),
+      });
+
+      try {
+        // Recovery ran during boot; give the resumed run a moment to settle.
+        await new Promise((resolve) => setTimeout(resolve, 200));
+
+        // The run resumed at step 1 (not 0) — proving config-reconstructed deps,
+        // not a restart.
+        expect(bSteps).toContain(1);
+        expect(bSteps).not.toContain(0);
+
+        // The session is no longer stuck `running`: recovery persisted its terminal
+        // status.
+        const session = await bureauB.getSession(run.sessionId);
+        expect(session?.metadata['lastRunStatus']).not.toBe('running');
+      } finally {
+        bureauB.dispose();
+      }
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+      resetRunDepsRegistry();
+    }
   });
 
   it('routes runs through the durable engine end-to-end when durableExecution is on', async () => {
