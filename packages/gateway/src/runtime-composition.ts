@@ -1,4 +1,4 @@
-import type { TextValueStore } from '@lostgradient/weft/storage';
+import type { Storage, TextValueStore } from '@lostgradient/weft/storage';
 import { resolveStorage, textValueStore } from '@lostgradient/weft/storage';
 import {
   combineToolboxes,
@@ -40,6 +40,8 @@ import {
   withCache,
   withEnhancedStreaming,
 } from 'operative';
+import type { AnyRunEngine, CheckpointStore } from 'operative/durable';
+import { createCheckpointStore, createRunEngine, createRunWorkflow } from 'operative/durable';
 import type { SkillSession } from 'skills';
 import { createSkillSession, escapeXml } from 'skills';
 import { z } from 'zod';
@@ -419,6 +421,13 @@ function createUnavailableToolbox(): GatewayToolbox {
 
 export interface RuntimeComposition {
   kv: TextValueStore | undefined;
+  /**
+   * The durable run engine + checkpoint store, present only when
+   * `options.durableExecution` is set with a configured `storage`. Callers reach
+   * durable runs through the opt-in durable entry; the default run surface is
+   * unchanged.
+   */
+  durable: { engine: AnyRunEngine; checkpointStore: CheckpointStore } | undefined;
   memory: Memory | undefined;
   sessionStore: SessionStore | undefined;
   scheduler: Scheduler | undefined;
@@ -449,8 +458,25 @@ export async function createRuntimeComposition(
   const systemPrompt = options.systemPrompt;
 
   let kv: TextValueStore | undefined = options.persistence;
+  // Keep the raw Storage so the durable engine can share the exact backend with
+  // the text-value KV view (Weft requires one engine per durable store).
+  let durableStorage: Storage | undefined;
   if (!kv && options.storage) {
-    kv = textValueStore(await resolveStorage(options.storage));
+    durableStorage = await resolveStorage(options.storage);
+    kv = textValueStore(durableStorage, { disposeUnderlyingStorage: false });
+  }
+
+  // Opt-in durable execution: build the run engine on the same backend, gated on
+  // the flag AND a configured (persistent) storage. Off by default so existing
+  // bureaus don't all boot an engine + run recoverAll + need disposal.
+  let durable: { engine: AnyRunEngine; checkpointStore: CheckpointStore } | undefined;
+  if (options.durableExecution && durableStorage) {
+    // Build the checkpoint store over the SAME backend the engine persists to.
+    const checkpointStore = createCheckpointStore(
+      textValueStore(durableStorage, { disposeUnderlyingStorage: false }),
+    );
+    const runWorkflow = createRunWorkflow(checkpointStore);
+    durable = await createRunEngine({ storage: durableStorage, runWorkflow, checkpointStore });
   }
 
   let memory: Memory | undefined;
@@ -662,6 +688,7 @@ export async function createRuntimeComposition(
 
   return {
     kv,
+    durable,
     memory,
     sessionStore,
     scheduler,

@@ -1,7 +1,8 @@
 import { createToolbox } from 'armorer';
 import { describe, expect, it } from 'bun:test';
-import { Conversation } from 'conversationalist';
+import { Conversation, createConversationHistory } from 'conversationalist';
 import type { GenerateFunction } from 'operative';
+import { createDurableRun } from 'operative/durable';
 
 import { createRuntimeComposition } from './runtime-composition';
 import type { ProviderConfiguration } from './types';
@@ -133,5 +134,64 @@ describe('createRuntimeComposition', () => {
 
     expect(firstRunRuntime.generate).toBe(secondRunRuntime.generate);
     expect(resolveProviderGenerateCalls).toBe(2);
+  });
+});
+
+describe('createRuntimeComposition durable execution', () => {
+  it('does not build a durable engine by default', async () => {
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'x', toolCalls: [] }),
+      toolbox: createToolbox([], { context: {} }),
+      storage: { type: 'memory' },
+    });
+    // Off by default: no durableExecution flag → no engine.
+    expect(runtime.durable).toBeUndefined();
+  });
+
+  it('does not build a durable engine when the flag is set without storage', async () => {
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'x', toolCalls: [] }),
+      toolbox: createToolbox([], { context: {} }),
+      durableExecution: true,
+    });
+    // A durable engine needs a persistent backend; no storage → no engine.
+    expect(runtime.durable).toBeUndefined();
+  });
+
+  it('builds a durable engine through the composition path and runs an agent durably', async () => {
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'composed', toolCalls: [] }),
+      toolbox: createToolbox([], { context: {} }),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+
+    expect(runtime.durable).toBeDefined();
+
+    try {
+      // The integration gate: drive a durable run through the engine the
+      // PRODUCT'S composition built — not a hand-assembled Engine.create.
+      const result = await createDurableRun(runtime.durable!, {
+        runId: 'composition-run',
+        prompt: 'Hello',
+        options: {
+          generate: async () => ({ content: 'durable result', toolCalls: [] }),
+          toolbox: createToolbox([], { context: {} }) as never,
+          conversation: createConversationHistory(),
+        },
+      });
+
+      expect(result.runId).toBe('composition-run');
+      expect(result.steps).toBe(1);
+      expect(result.content).toBe('durable result');
+      expect(result.finishReason).toBe('stop-condition');
+
+      // The run is durably checkpointed through the composition's store.
+      const checkpoint = await runtime.durable!.checkpointStore.loadCheckpoint('composition-run');
+      expect(checkpoint.cursor.step).toBe(1);
+      expect(checkpoint.steps).toHaveLength(1);
+    } finally {
+      runtime.durable!.engine[Symbol.dispose]();
+    }
   });
 });

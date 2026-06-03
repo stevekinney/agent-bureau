@@ -39,6 +39,14 @@
       "default": "./dist/conditions/index.js",
       "types": "./dist/conditions/index.d.ts"
     },
+    "./durable": {
+      "bun": "./dist/durable/index.js",
+      "browser": "./dist/durable/index.js",
+      "import": "./dist/durable/index.js",
+      "require": "./dist/durable/index.cjs",
+      "default": "./dist/durable/index.js",
+      "types": "./dist/durable/index.d.ts"
+    },
     "./instrumentation": {
       "bun": "./dist/instrumentation/index.js",
       "browser": "./dist/instrumentation/index.js",
@@ -47,14 +55,6 @@
       "default": "./dist/instrumentation/index.js",
       "types": "./dist/instrumentation/index.d.ts"
     },
-    "./streaming": {
-      "bun": "./dist/streaming/index.js",
-      "browser": "./dist/streaming/index.js",
-      "import": "./dist/streaming/index.js",
-      "require": "./dist/streaming/index.cjs",
-      "default": "./dist/streaming/index.js",
-      "types": "./dist/streaming/index.d.ts"
-    },
     "./retry": {
       "bun": "./dist/retry/index.js",
       "browser": "./dist/retry/index.js",
@@ -62,6 +62,14 @@
       "require": "./dist/retry/index.cjs",
       "default": "./dist/retry/index.js",
       "types": "./dist/retry/index.d.ts"
+    },
+    "./streaming": {
+      "bun": "./dist/streaming/index.js",
+      "browser": "./dist/streaming/index.js",
+      "import": "./dist/streaming/index.js",
+      "require": "./dist/streaming/index.cjs",
+      "default": "./dist/streaming/index.js",
+      "types": "./dist/streaming/index.d.ts"
     },
     "./test": {
       "bun": "./dist/test/index.js",
