@@ -702,6 +702,13 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     }
     emitter.complete();
 
+    // Dispose the durable run engine if one was composed. Durable execution is
+    // ON BY DEFAULT for a persistent storage backend, so most sqlite/lmdb
+    // bureaus now own an engine that must be released on dispose — not just the
+    // rare explicit `durableExecution: true` bureau. Disposed before
+    // `store.dispose()` so engine teardown completes before the store closes.
+    runtime.durable?.engine[Symbol.dispose]?.();
+
     if (ownsStore) {
       store.dispose();
     }

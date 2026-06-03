@@ -229,7 +229,26 @@ async function driveDurableRun(
       prompt,
       maximumSteps: options.maximumSteps,
     });
-    const summary = (await handle.result()) as AgentRunWorkflowResult;
+
+    let summary: AgentRunWorkflowResult;
+    try {
+      summary = (await handle.result()) as AgentRunWorkflowResult;
+    } catch (error) {
+      // The engine was disposed while this run was still in flight — i.e. the
+      // bureau (or process) is tearing down mid-run. This is the CRASH semantic,
+      // not an abort: the run is abandoned FOR RECOVERY, so a fresh process can
+      // resume it from its last checkpoint. We MUST NOT fire a terminal lifecycle
+      // event here — `makeAbortResult`/`makeErrorResult` would drive gateway's
+      // `once('run.aborted'/'completed')`, persist a terminal session status, and
+      // the boot reconstructor (which only rebuilds sessions still marked
+      // `running`) would then skip the run and recovery would never happen. So we
+      // resolve quietly with an interrupted-shaped result and leave the session
+      // `running`. Code-matched (not `instanceof`) to survive the module boundary.
+      if (isEngineDisposedError(error)) {
+        return makeInterruptedRunResult(conversation);
+      }
+      throw error;
+    }
 
     // The authoritative conversation on the durable path is the one rehydrated
     // from the checkpoint — the workflow mutates rehydrated snapshots per step,
@@ -265,6 +284,40 @@ async function driveDurableRun(
 /** A throwaway run state for the pre-step error path (no steps completed yet). */
 function emptyRunState(): RunState {
   return createRunState();
+}
+
+/**
+ * True when `error` is Weft's `EngineDisposedError` — the engine was disposed
+ * while this run's `handle.result()` was still pending. Matched on `code` rather
+ * than `instanceof` because the error class is constructed inside the `weft`
+ * module and an `instanceof` check fails across the module boundary (same trap
+ * as `isConversation` vs `instanceof Conversation`).
+ */
+function isEngineDisposedError(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    (error as { code: unknown }).code === 'EngineDisposedError'
+  );
+}
+
+/**
+ * Build a quiet, interrupted-shaped {@link RunResult} for a run whose engine was
+ * disposed mid-flight. Deliberately fires NO terminal lifecycle event: dispose
+ * mid-run is the crash semantic (the run is abandoned for a fresh process to
+ * recover), so the session must stay `running` for the boot reconstructor to
+ * pick it up. The returned value only resolves the (typically unawaited) run
+ * promise on the tearing-down side; nothing observes its `finishReason`.
+ */
+function makeInterruptedRunResult(conversation: Conversation): RunResult {
+  return {
+    conversation,
+    steps: [],
+    content: '',
+    usage: { prompt: 0, completion: 0, total: 0 },
+    finishReason: 'aborted',
+  };
 }
 
 /** Arguments to {@link finalizeRunResult}. */
