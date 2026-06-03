@@ -631,25 +631,43 @@ export const mockNavigator = {
   storage: mockStorage,
 };
 
+const mockedGlobalValues = new Map<string, PropertyDescriptor | undefined>();
+
+function setMockedGlobalValue(name: string, value: unknown): void {
+  if (!mockedGlobalValues.has(name)) {
+    mockedGlobalValues.set(name, Object.getOwnPropertyDescriptor(globalThis, name));
+  }
+
+  Object.defineProperty(globalThis, name, {
+    configurable: true,
+    value,
+    writable: true,
+  });
+}
+
+function restoreMockedGlobalValues(): void {
+  for (const [name, descriptor] of mockedGlobalValues) {
+    if (descriptor) {
+      Object.defineProperty(globalThis, name, descriptor);
+    } else {
+      delete (globalThis as Record<string, unknown>)[name];
+    }
+  }
+  mockedGlobalValues.clear();
+}
+
 /**
  * Setup IndexedDB mocks for testing
  */
 export function setupIndexedDBMocks(): void {
-  // @ts-expect-error - Monkey patching for tests
-  global.indexedDB = mockIndexedDB;
-  // @ts-expect-error - Monkey patching for tests
-  global.IDBRequest = MockIDBRequest;
-  // @ts-expect-error - Monkey patching for tests
-  global.IDBTransaction = MockIDBTransaction;
-  // @ts-expect-error - Monkey patching for tests
-  global.IDBDatabase = MockIDBDatabase;
-  // @ts-expect-error - Monkey patching for tests
-  global.IDBObjectStore = MockIDBObjectStore;
-  // @ts-expect-error - Monkey patching for tests
-  global.IDBIndex = MockIDBIndex;
-  // @ts-expect-error - Monkey patching for tests
-  global.IDBCursor = MockIDBCursor;
-  global.navigator = mockNavigator as Navigator;
+  setMockedGlobalValue('indexedDB', mockIndexedDB);
+  setMockedGlobalValue('IDBRequest', MockIDBRequest);
+  setMockedGlobalValue('IDBTransaction', MockIDBTransaction);
+  setMockedGlobalValue('IDBDatabase', MockIDBDatabase);
+  setMockedGlobalValue('IDBObjectStore', MockIDBObjectStore);
+  setMockedGlobalValue('IDBIndex', MockIDBIndex);
+  setMockedGlobalValue('IDBCursor', MockIDBCursor);
+  setMockedGlobalValue('navigator', mockNavigator);
 }
 
 /**
@@ -657,4 +675,5 @@ export function setupIndexedDBMocks(): void {
  */
 export function cleanupIndexedDBMocks(): void {
   mockDatabases.clear();
+  restoreMockedGlobalValues();
 }

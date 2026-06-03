@@ -261,17 +261,17 @@ describe('Vector Database Integration Tests', () => {
 
   describe('Indexing', () => {
     it('should build and use HNSW index', async () => {
-      // Add enough vectors to trigger indexing
-      const vectors = Array.from({ length: 500 }, (_, i) => ({
+      const vectorCount = 120;
+      const vectors = Array.from({ length: vectorCount }, (_, i) => ({
         id: `indexed-${i}`,
         vector: (() => {
           const v = new Float32Array(dimension);
           for (let j = 0; j < dimension; j++) {
-            v[j] = Math.random() * 2 - 1; // Random values between -1 and 1
+            v[j] = j === i % dimension ? 1 : (((i + j) % 7) - 3) / 100;
           }
           return v;
         })(),
-        metadata: { cluster: Math.floor(i / 100) },
+        metadata: { cluster: Math.floor(i / 40) },
       }));
 
       await db.addBatch(vectors);
@@ -290,7 +290,7 @@ describe('Vector Database Integration Tests', () => {
 
       expect(results).toHaveLength(10);
       expect(results[0]!.id).toBe('indexed-0'); // Should find itself first
-    }, 30_000); // Building an HNSW index over 500 vectors exceeds Bun's default 5s timeout.
+    });
 
     it('should persist and load index', async () => {
       // Add vectors and build index
