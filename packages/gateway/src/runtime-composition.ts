@@ -38,6 +38,8 @@ import {
   withCache,
   withEnhancedStreaming,
 } from 'operative';
+import type { SkillSession } from 'skills';
+import { createSkillSession, escapeXml } from 'skills';
 import type { KeyValueStore } from 'storage';
 import { resolveKeyValueStore } from 'storage';
 import { z } from 'zod';
@@ -251,40 +253,6 @@ type RuntimeCompositionDependencies = {
 const defaultRuntimeCompositionDependencies: RuntimeCompositionDependencies = {
   resolveProviderGenerate,
 };
-
-type SkillSession = {
-  activate(name: string, toolPolicy?: ToolPolicy): void;
-  deactivate(name: string): void;
-  isActive(name: string): boolean;
-};
-
-function createSkillSession(): SkillSession {
-  const active = new Map<string, ToolPolicy | undefined>();
-
-  return {
-    activate(name: string, toolPolicy?: ToolPolicy) {
-      active.set(name, toolPolicy);
-    },
-    deactivate(name: string) {
-      active.delete(name);
-    },
-    isActive(name: string) {
-      return active.has(name);
-    },
-  };
-}
-
-function escapeXml(value: string): string {
-  const entities: Record<string, string> = {
-    '&': '&amp;',
-    '<': '&lt;',
-    '>': '&gt;',
-    '"': '&quot;',
-    "'": '&apos;',
-  };
-
-  return value.replace(/[&<>"']/g, (character) => entities[character] ?? character);
-}
 
 async function buildSkillCatalog(
   provider: SkillProvider,
