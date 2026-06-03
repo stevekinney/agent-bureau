@@ -74,6 +74,7 @@ export class WorkerPool {
   /**
    * Initialize the worker pool
    */
+  // eslint-disable-next-line @typescript-eslint/require-await -- returns early for already-initialized state; Worker creation is sync
   async init(): Promise<void> {
     if (this.isInitialized) return;
 
@@ -581,6 +582,7 @@ export class WorkerPool {
   /**
    * Terminate all workers and clean up
    */
+  // eslint-disable-next-line @typescript-eslint/require-await -- synchronous cleanup; Promise return type kept for public API contract
   async terminate(): Promise<void> {
     // Clear all timeouts
     for (const task of this.activeTasks.values()) {

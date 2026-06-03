@@ -81,7 +81,7 @@ abstract class BaseEvictionPolicy {
         return obj.length * 2;
       case 'object':
         if (Array.isArray(obj)) {
-          return obj.reduce((sum, item) => sum + this.estimateObjectSize(item), 24);
+          return obj.reduce<number>((sum, item) => sum + this.estimateObjectSize(item), 24);
         }
 
         {

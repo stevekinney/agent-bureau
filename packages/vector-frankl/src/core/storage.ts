@@ -79,7 +79,7 @@ export class VectorStorage implements StorageAdapter {
         const store = transaction.objectStore(VectorDatabase.STORES.VECTORS);
 
         return new Promise<VectorData>((resolve, reject) => {
-          const request = store.get(id);
+          const request = store.get(id) as IDBRequest<VectorData | undefined>;
 
           request.onsuccess = () => {
             const vector = request.result;
@@ -138,7 +138,7 @@ export class VectorStorage implements StorageAdapter {
           ids.map(
             (id) =>
               new Promise<void>((resolve) => {
-                const request = store.get(id);
+                const request = store.get(id) as IDBRequest<VectorData | undefined>;
 
                 request.onsuccess = () => {
                   const vector = request.result;
@@ -713,10 +713,10 @@ export class VectorStorage implements StorageAdapter {
    */
   private async getVectorFromStore(store: IDBObjectStore, id: string): Promise<VectorData | null> {
     return new Promise((resolve, reject) => {
-      const request = store.get(id);
+      const request = store.get(id) as IDBRequest<VectorData | undefined>;
 
       request.onsuccess = () => {
-        resolve(request.result || null);
+        resolve(request.result ?? null);
       };
 
       request.onerror = () => {

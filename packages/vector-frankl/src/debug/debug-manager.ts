@@ -295,6 +295,7 @@ export class DebugManager {
   /**
    * Export debug data
    */
+  // eslint-disable-next-line @typescript-eslint/require-await -- synchronous serialization; async kept for public API contract
   async exportData(format?: ExportFormat): Promise<string> {
     const exportFormat = format || this.config.exportFormat;
     const entries = this.getEntries();
@@ -313,7 +314,7 @@ export class DebugManager {
         return this.exportAsHTML(entries);
 
       default:
-        throw new Error(`Unsupported export format: ${exportFormat}`);
+        throw new Error(`Unsupported export format: ${String(exportFormat)}`);
     }
   }
 

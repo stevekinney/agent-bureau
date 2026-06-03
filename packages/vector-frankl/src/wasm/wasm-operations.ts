@@ -297,7 +297,7 @@ export class WASMOperations {
       switch (implementation) {
         case 'wasm': {
           // For now, implement as addition of negated vector
-          const negB = await this.scalarMultiply(vectorB, -1);
+          const negB = this.scalarMultiply(vectorB, -1);
           return await this.wasmManager.vectorAdd(vectorA, negB);
         }
 
@@ -324,7 +324,7 @@ export class WASMOperations {
   /**
    * High-performance scalar multiplication
    */
-  async scalarMultiply(vector: Float32Array, scalar: number): Promise<Float32Array> {
+  scalarMultiply(vector: Float32Array, scalar: number): Float32Array {
     const implementation = this.getBestImplementation(vector.length);
 
     try {
@@ -355,7 +355,7 @@ export class WASMOperations {
       return new Float32Array(vector.length);
     }
 
-    return await this.scalarMultiply(vector, 1 / mag);
+    return this.scalarMultiply(vector, 1 / mag);
   }
 
   /**
@@ -364,21 +364,10 @@ export class WASMOperations {
   async batchDotProduct(vectors: Float32Array[], query: Float32Array): Promise<Float32Array> {
     const results = new Float32Array(vectors.length);
 
-    // Use parallel processing for large batches
-    if (vectors.length > 10 && this.wasmManager.isAvailable()) {
-      const promises = vectors.map(async (vector, index) => {
-        const result = await this.dotProduct(vector, query);
-        results[index] = result;
-      });
-
-      await Promise.all(promises);
-    } else {
-      // Sequential processing for smaller batches
-      for (let i = 0; i < vectors.length; i++) {
-        const vector = vectors[i];
-        if (vector) {
-          results[i] = await this.dotProduct(vector, query);
-        }
+    for (let i = 0; i < vectors.length; i++) {
+      const vector = vectors[i];
+      if (vector) {
+        results[i] = await this.dotProduct(vector, query);
       }
     }
 
@@ -517,8 +506,8 @@ export class WASMOperations {
   /**
    * Cleanup resources
    */
-  async cleanup(): Promise<void> {
-    await this.wasmManager.cleanup();
+  cleanup(): void {
+    this.wasmManager.cleanup();
     this.isInitialized = false;
   }
 }

@@ -27,7 +27,11 @@ export function debugMethod(
     _propertyKey: string | symbol,
     descriptor: PropertyDescriptor,
   ): PropertyDescriptor {
-    const originalMethod = descriptor.value;
+    // PropertyDescriptor.value is typed `any`; cast to a known callable shape for type safety
+    const originalMethod = descriptor.value as (
+      this: object,
+      ...args: unknown[]
+    ) => Promise<unknown>;
 
     descriptor.value = async function (this: object, ...args: unknown[]) {
       if (!debugManager.isEnabled()) {
@@ -78,8 +82,17 @@ export function debugMethod(
           error: {
             message: error instanceof Error ? error.message : String(error),
             ...(error instanceof Error && error.stack ? { stack: error.stack } : {}),
-            ...(error instanceof Error && 'code' in error && error.code
-              ? { code: String(error.code) }
+            ...(error instanceof Error &&
+            'code' in error &&
+            (error as { code: unknown }).code !== undefined
+              ? {
+                  code: (() => {
+                    const c = (error as { code: unknown }).code;
+                    return typeof c === 'string' || typeof c === 'number'
+                      ? String(c)
+                      : JSON.stringify(c);
+                  })(),
+                }
               : {}),
           },
         });
@@ -187,8 +200,17 @@ export async function trace<T>(
       error: {
         message: error instanceof Error ? error.message : String(error),
         ...(error instanceof Error && error.stack ? { stack: error.stack } : {}),
-        ...(error instanceof Error && 'code' in error && error.code
-          ? { code: String(error.code) }
+        ...(error instanceof Error &&
+        'code' in error &&
+        (error as { code: unknown }).code !== undefined
+          ? {
+              code: (() => {
+                const c = (error as { code: unknown }).code;
+                return typeof c === 'string' || typeof c === 'number'
+                  ? String(c)
+                  : JSON.stringify(c);
+              })(),
+            }
           : {}),
       },
     });

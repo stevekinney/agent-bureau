@@ -127,6 +127,7 @@ export class LmdbStorageAdapter implements StorageAdapter {
     return data;
   }
 
+  // eslint-disable-next-line @typescript-eslint/require-await -- StorageAdapter is async; this backend is synchronous
   async exists(id: string): Promise<boolean> {
     const database = this.requireDatabase();
     return database.get(id) !== undefined;
@@ -158,6 +159,7 @@ export class LmdbStorageAdapter implements StorageAdapter {
     return results;
   }
 
+  // eslint-disable-next-line @typescript-eslint/require-await -- StorageAdapter is async; this backend is synchronous
   async getAll(): Promise<VectorData[]> {
     const database = this.requireDatabase();
     const results: VectorData[] = [];
@@ -170,6 +172,7 @@ export class LmdbStorageAdapter implements StorageAdapter {
     return results;
   }
 
+  // eslint-disable-next-line @typescript-eslint/require-await -- StorageAdapter is async; this backend is synchronous
   async count(): Promise<number> {
     const database = this.requireDatabase();
     let total = 0;

@@ -489,6 +489,7 @@ export class SharedMemoryManager {
     return quantized;
   }
 
+  // eslint-disable-next-line @typescript-eslint/require-await -- internal placeholder; no async work yet
   private async processChunkInWorkers(
     _buffer: SharedArrayBuffer,
     _layout: {

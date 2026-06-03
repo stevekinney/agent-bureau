@@ -108,7 +108,6 @@ export class MockIDBCursor<T = unknown> {
     if (this.parentRequest) {
       this.parentRequest.result = this.index < this.data.length ? this : null;
       queueMicrotask(() => {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         this.parentRequest!.onsuccess?.({ target: this.parentRequest! } as any);
       });
     }
@@ -194,7 +193,7 @@ export class MockIDBObjectStore {
     }
     const cursor = new MockIDBCursor(values);
     const request = new MockIDBRequest<MockIDBCursor | null>(cursor);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+
     cursor.setParentRequest(request as any);
     return request;
   }
@@ -258,7 +257,7 @@ export class MockIDBIndex {
     }
     const cursor = new MockIDBCursor(values);
     const request = new MockIDBRequest<MockIDBCursor | null>(cursor);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+
     cursor.setParentRequest(request as any);
     return request;
   }
@@ -477,7 +476,6 @@ export class MockIDBOpenDBRequest {
 
       // Always trigger upgrade for new databases (simulate schema creation)
       const upgradeEvent = {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         target: this as any,
         oldVersion: 0,
         newVersion: version || 1,

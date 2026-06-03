@@ -67,6 +67,7 @@ export class RedisStorageAdapter implements StorageAdapter {
 
   // ── Lifecycle ───────────────────────────────────────────────────────────
 
+  // eslint-disable-next-line @typescript-eslint/require-await -- StorageAdapter is async; this backend is synchronous
   async init(): Promise<void> {
     // Make init idempotent: if a client already exists, do nothing.
     if (this.client) {
@@ -82,6 +83,7 @@ export class RedisStorageAdapter implements StorageAdapter {
     this.client = this.url !== undefined ? new RedisClient(this.url) : new RedisClient();
   }
 
+  // eslint-disable-next-line @typescript-eslint/require-await -- StorageAdapter is async; this backend is synchronous
   async close(): Promise<void> {
     if (this.client) {
       this.client.close();

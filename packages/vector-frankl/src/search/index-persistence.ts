@@ -44,7 +44,7 @@ export class IndexPersistence {
    * Save HNSW index to IndexedDB
    */
   async saveIndex(indexId: string, index: HNSWIndex, distanceMetric: string): Promise<void> {
-    const serializedIndex = await this.serializeIndex(index, distanceMetric);
+    const serializedIndex = this.serializeIndex(index, distanceMetric);
 
     await this.database.executeTransaction(
       IndexPersistence.STORE_NAME,
@@ -91,7 +91,12 @@ export class IndexPersistence {
         >((resolve, reject) => {
           const request = store.get(indexId);
 
-          request.onsuccess = () => resolve(request.result);
+          request.onsuccess = () =>
+            resolve(
+              request.result as
+                | { id: string; data: SerializableHNSWIndex; timestamp: number }
+                | undefined,
+            );
           request.onerror = () =>
             reject(
               new TransactionError(
@@ -210,10 +215,7 @@ export class IndexPersistence {
   /**
    * Serialize HNSW index for storage
    */
-  private async serializeIndex(
-    index: HNSWIndex,
-    distanceMetric: string,
-  ): Promise<SerializableHNSWIndex> {
+  private serializeIndex(index: HNSWIndex, distanceMetric: string): SerializableHNSWIndex {
     const exported = index.exportState();
 
     const nodes: SerializableHNSWNode[] = exported.nodes.map((node) => {

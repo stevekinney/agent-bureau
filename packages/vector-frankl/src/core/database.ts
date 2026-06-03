@@ -196,7 +196,7 @@ export class VectorDatabase {
     } catch (error) {
       throw new TransactionError(
         'create transaction',
-        `Failed to create transaction for stores: ${storeNames}`,
+        `Failed to create transaction for stores: ${Array.isArray(storeNames) ? storeNames.join(', ') : storeNames}`,
         error instanceof Error ? error : undefined,
       );
     }
@@ -249,7 +249,7 @@ export class VectorDatabase {
           } catch {
             // Transaction may already be inactive/committed; safe to ignore
           }
-          reject(error);
+          reject(error instanceof Error ? error : new Error(String(error)));
         });
     });
   }
@@ -257,6 +257,7 @@ export class VectorDatabase {
   /**
    * Close the database connection
    */
+  // eslint-disable-next-line @typescript-eslint/require-await -- sync operation implementing async interface
   async close(): Promise<void> {
     if (this.database) {
       this.database.close();

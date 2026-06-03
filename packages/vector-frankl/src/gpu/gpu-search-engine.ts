@@ -133,7 +133,7 @@ export class GPUSearchEngine {
     }
 
     // Fallback to CPU search
-    const cpuResults = await this.searchWithCPU(vectors, queryVector, k, metric, options);
+    const cpuResults = this.searchWithCPU(vectors, queryVector, k, metric, options);
 
     if (this.config.enableProfiling) {
       stats.processingTime = performance.now() - startTime;
@@ -187,8 +187,8 @@ export class GPUSearchEngine {
   /**
    * Cleanup GPU resources
    */
-  async cleanup(): Promise<void> {
-    await this.webGPUManager.cleanup();
+  cleanup(): void {
+    this.webGPUManager.cleanup();
     this.isGPUAvailable = false;
     this.initializationPromise = null;
   }
@@ -370,13 +370,13 @@ export class GPUSearchEngine {
   /**
    * Fallback CPU search implementation
    */
-  private async searchWithCPU(
+  private searchWithCPU(
     vectors: VectorData[],
     queryVector: Float32Array,
     k: number,
     metric: DistanceMetric,
     options?: SearchOptions,
-  ): Promise<SearchResult[]> {
+  ): SearchResult[] {
     // Simple CPU implementation for fallback
     const results: SearchResult[] = [];
 
@@ -421,7 +421,7 @@ export class GPUSearchEngine {
         // For unsupported CPU fallback metrics, return a default distance
         return 1.0;
       default:
-        throw new Error(`Unsupported metric: ${metric}`);
+        throw new Error(`Unsupported metric: ${String(metric)}`);
     }
   }
 

@@ -334,16 +334,16 @@ export class StorageQuotaMonitor {
               })
               .catch((error) => {
                 db.close();
-                reject(error);
+                reject(error instanceof Error ? error : new Error(String(error)));
               });
           } catch (error) {
             db.close();
-            reject(error);
+            reject(error instanceof Error ? error : new Error(String(error)));
           }
         };
 
         request.onerror = () => {
-          reject(request.error);
+          reject(request.error ?? new Error('Failed to open database for size estimation'));
         };
       });
     } catch (error) {
@@ -367,7 +367,7 @@ export class StorageQuotaMonitor {
 
         if (cursor) {
           // Rough size estimation
-          const value = cursor.value;
+          const value: unknown = cursor.value;
           totalSize += this.estimateObjectSize(value);
           cursor.continue();
         } else {
@@ -376,7 +376,7 @@ export class StorageQuotaMonitor {
       };
 
       request.onerror = () => {
-        reject(request.error);
+        reject(request.error ?? new Error('Failed to open cursor for store size estimation'));
       };
     });
   }
@@ -404,7 +404,7 @@ export class StorageQuotaMonitor {
           return obj.byteLength;
         }
         if (Array.isArray(obj)) {
-          return obj.reduce((sum, item) => sum + this.estimateObjectSize(item), 0) + 24; // Array overhead
+          return obj.reduce<number>((sum, item) => sum + this.estimateObjectSize(item), 0) + 24; // Array overhead
         }
 
         // Regular object
@@ -445,7 +445,7 @@ export class StorageQuotaMonitor {
 
               countRequest.onerror = () => {
                 db.close();
-                reject(countRequest.error);
+                reject(countRequest.error ?? new Error('Failed to count vectors in store'));
               };
             } else {
               db.close();
@@ -453,12 +453,12 @@ export class StorageQuotaMonitor {
             }
           } catch (error) {
             db.close();
-            reject(error);
+            reject(error instanceof Error ? error : new Error(String(error)));
           }
         };
 
         request.onerror = () => {
-          reject(request.error);
+          reject(request.error ?? new Error('Failed to open database for vector count'));
         };
       });
     } catch (error) {

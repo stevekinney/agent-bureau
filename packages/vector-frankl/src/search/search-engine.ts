@@ -503,7 +503,7 @@ export class SearchEngine {
       const sample = candidates.slice(0, sampleSize);
 
       // Search within sample
-      const results = await this.searchInCandidates(
+      const results = this.searchInCandidates(
         queryVector,
         sample,
         Math.min(batchSize * 2, maxResults - yielded),
@@ -569,12 +569,12 @@ export class SearchEngine {
   /**
    * Search within a specific set of candidates
    */
-  private async searchInCandidates(
+  private searchInCandidates(
     queryVector: Float32Array,
     candidates: VectorData[],
     k: number,
     options?: SearchOptions,
-  ): Promise<SearchResult[]> {
+  ): SearchResult[] {
     const metric = this.distanceCalculator.getMetricInfo();
     const processedQuery = metric?.requiresNormalized
       ? VectorOperations.normalizeSync(queryVector)
@@ -929,7 +929,10 @@ export class SearchEngine {
       await this.workerPool.init();
       return await this.workerPool.sharedMemorySearch(vectors, queryVector, k, metric);
     } catch (error) {
-      throw new Error(`Shared memory search failed: ${error}`, { cause: error });
+      throw new Error(
+        `Shared memory search failed: ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error },
+      );
     }
   }
 
@@ -990,7 +993,7 @@ export class SearchEngine {
     }
 
     if (this.gpuSearchEngine) {
-      await this.gpuSearchEngine.cleanup();
+      this.gpuSearchEngine.cleanup();
       this.gpuSearchEngine = null;
     }
   }

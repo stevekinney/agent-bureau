@@ -353,7 +353,7 @@ export class VectorFormatHandler {
       case 'binary':
         return new Uint8Array(dimension);
       case 'array':
-        return new Array(dimension).fill(0);
+        return Array.from<number>({ length: dimension }).fill(0);
       default:
         throw new InvalidFormatError(format, this.SUPPORTED_FORMATS as unknown as string[]);
     }

@@ -168,7 +168,11 @@ export class NamespaceManager {
 
       await new Promise<void>((resolve, reject) => {
         databaseToDelete.onsuccess = () => resolve();
-        databaseToDelete.onerror = () => reject(databaseToDelete.error);
+        databaseToDelete.onerror = () =>
+          reject(
+            databaseToDelete.error ??
+              new Error(`Failed to delete database: ${namespaceDatabaseName}`),
+          );
         databaseToDelete.onblocked = () => {
           log.warn(`Delete blocked for namespace database: ${namespaceDatabaseName}`);
         };

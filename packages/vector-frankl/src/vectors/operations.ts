@@ -309,11 +309,12 @@ export class VectorOperations {
   /**
    * Scale a vector by a scalar
    */
+  // eslint-disable-next-line @typescript-eslint/require-await -- public API: Promise return is intentional; the WASM-accelerated path can be async, the synchronous fallback is not
   static async scale(vector: Float32Array, scalar: number): Promise<Float32Array> {
     // Three-tier optimization: WASM → SIMD → Scalar
     if (vector.length >= this.wasmThreshold && this.isWasmInitialized) {
       try {
-        return await this.wasmOps.scalarMultiply(vector, scalar);
+        return this.wasmOps.scalarMultiply(vector, scalar);
       } catch {
         // Fall through to SIMD
       }

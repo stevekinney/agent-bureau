@@ -171,7 +171,7 @@ export class WASMManager {
 
         try {
           // Validate WASM module before compilation
-          await this.validateWASMModule(wasmCode);
+          this.validateWASMModule(wasmCode);
 
           this.wasmModule = await WebAssembly.compile(wasmCode);
           this.wasmInstance = await WebAssembly.instantiate(this.wasmModule, {
@@ -223,7 +223,7 @@ export class WASMManager {
   /**
    * Validate WASM module for security and integrity
    */
-  private async validateWASMModule(wasmCode: Uint8Array): Promise<void> {
+  private validateWASMModule(wasmCode: Uint8Array): void {
     // Basic validation checks
     if (!wasmCode || wasmCode.length === 0) {
       throw new Error('Empty WASM module');
@@ -263,13 +263,13 @@ export class WASMManager {
     }
 
     // Additional security checks for suspicious patterns
-    await this.checkForSuspiciousPatterns(wasmCode);
+    this.checkForSuspiciousPatterns(wasmCode);
   }
 
   /**
    * Check for suspicious patterns in WASM bytecode
    */
-  private async checkForSuspiciousPatterns(wasmCode: Uint8Array): Promise<void> {
+  private checkForSuspiciousPatterns(wasmCode: Uint8Array): void {
     // Check for excessive import sections (could indicate malicious behavior)
     let importSectionCount = 0;
     let currentPos = 8; // Skip magic and version
@@ -350,7 +350,10 @@ export class WASMManager {
       try {
         this.memory.grow(requiredPages - currentPages);
       } catch (error) {
-        throw new Error(`Failed to allocate WASM memory: ${error}`, { cause: error });
+        throw new Error(
+          `Failed to allocate WASM memory: ${error instanceof Error ? error.message : String(error)}`,
+          { cause: error },
+        );
       }
     }
 
@@ -387,6 +390,7 @@ export class WASMManager {
   /**
    * Compute dot product using WebAssembly
    */
+  // eslint-disable-next-line @typescript-eslint/require-await -- public API; throws must surface as rejections; WASM path may be async in production
   async dotProduct(vectorA: Float32Array, vectorB: Float32Array): Promise<number> {
     if (!this.isAvailable() || !this.wasmInstance) {
       throw new Error('WebAssembly not available');
@@ -422,13 +426,17 @@ export class WASMManager {
 
       return result;
     } catch (error) {
-      throw new Error(`WASM dot product failed: ${error}`, { cause: error });
+      throw new Error(
+        `WASM dot product failed: ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error },
+      );
     }
   }
 
   /**
    * Compute vector magnitude using WebAssembly
    */
+  // eslint-disable-next-line @typescript-eslint/require-await -- public API; throws must surface as rejections; WASM path may be async in production
   async magnitude(vector: Float32Array): Promise<number> {
     if (!this.isAvailable() || !this.wasmInstance) {
       throw new Error('WebAssembly not available');
@@ -462,13 +470,17 @@ export class WASMManager {
 
       return result;
     } catch (error) {
-      throw new Error(`WASM magnitude failed: ${error}`, { cause: error });
+      throw new Error(
+        `WASM magnitude failed: ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error },
+      );
     }
   }
 
   /**
    * Vector addition using WebAssembly
    */
+  // eslint-disable-next-line @typescript-eslint/require-await -- public API; throws must surface as rejections; WASM path may be async in production
   async vectorAdd(vectorA: Float32Array, vectorB: Float32Array): Promise<Float32Array> {
     if (!this.isAvailable() || !this.wasmInstance) {
       throw new Error('WebAssembly not available');
@@ -500,7 +512,10 @@ export class WASMManager {
 
       return result;
     } catch (error) {
-      throw new Error(`WASM vector add failed: ${error}`, { cause: error });
+      throw new Error(
+        `WASM vector add failed: ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error },
+      );
     }
   }
 
@@ -566,7 +581,7 @@ export class WASMManager {
   /**
    * Cleanup WebAssembly resources
    */
-  async cleanup(): Promise<void> {
+  cleanup(): void {
     this.wasmModule = null;
     this.wasmInstance = null;
     this.memory = null;

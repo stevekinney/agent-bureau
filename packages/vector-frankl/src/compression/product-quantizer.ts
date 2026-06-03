@@ -118,6 +118,7 @@ export class ProductQuantizer extends BaseCompressor {
   /**
    * Train the PQ codebook using k-means clustering
    */
+  // eslint-disable-next-line @typescript-eslint/require-await -- public API; throws must surface as rejections for callers using .rejects.toThrow()
   async trainCodebook(trainingVectors: Float32Array[]): Promise<void> {
     if (trainingVectors.length === 0) {
       throw new Error('Cannot train codebook with empty training set');
@@ -162,7 +163,7 @@ export class ProductQuantizer extends BaseCompressor {
       const subvectors = vectors.map((vector) => vector.slice(startDim, endDim));
 
       // Train k-means for this subspace
-      const { centroids: subspaceCentroids, stats } = await this.trainSubspaceKMeans(
+      const { centroids: subspaceCentroids, stats } = this.trainSubspaceKMeans(
         subvectors,
         this.pqConfig.centroidsPerSubspace,
         actualSubspaceDim,
@@ -222,14 +223,14 @@ export class ProductQuantizer extends BaseCompressor {
   /**
    * Train k-means clustering for a single subspace
    */
-  private async trainSubspaceKMeans(
+  private trainSubspaceKMeans(
     subvectors: Float32Array[],
     k: number,
     dimension: number,
-  ): Promise<{
+  ): {
     centroids: Float32Array[];
     stats: { iterations: number; distortion: number };
-  }> {
+  } {
     if (subvectors.length < k) {
       throw new Error(`Not enough training vectors (${subvectors.length}) for ${k} centroids`);
     }
@@ -241,7 +242,7 @@ export class ProductQuantizer extends BaseCompressor {
 
     for (let iter = 0; iter < this.pqConfig.maxIterations; iter++) {
       // Assignment step: assign each vector to nearest centroid
-      const assignments = new Array(subvectors.length);
+      const assignments: number[] = new Array<number>(subvectors.length);
       let totalDistortion = 0;
 
       for (let i = 0; i < subvectors.length; i++) {
@@ -391,7 +392,7 @@ export class ProductQuantizer extends BaseCompressor {
     dimension: number,
   ): Float32Array[] {
     const centroids: Float32Array[] = [];
-    const counts = new Array(k).fill(0);
+    const counts: number[] = new Array<number>(k).fill(0);
 
     // Initialize centroids to zero
     for (let i = 0; i < k; i++) {
@@ -402,7 +403,7 @@ export class ProductQuantizer extends BaseCompressor {
     for (let i = 0; i < vectors.length; i++) {
       const cluster = assignments[i];
       if (cluster === undefined) continue;
-      counts[cluster]++;
+      counts[cluster] = (counts[cluster] ?? 0) + 1;
 
       const vector = vectors[i];
       if (!vector) continue;
@@ -577,8 +578,8 @@ export class ProductQuantizer extends BaseCompressor {
     };
   }
 
-  async decompress(compressed: CompressedVector): Promise<Float32Array> {
-    return this.decompressData(compressed.data, compressed.dimension);
+  decompress(compressed: CompressedVector): Promise<Float32Array> {
+    return Promise.resolve(this.decompressData(compressed.data, compressed.dimension));
   }
 
   /**

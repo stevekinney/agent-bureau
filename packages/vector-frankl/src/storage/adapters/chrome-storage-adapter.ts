@@ -114,6 +114,7 @@ export class ChromeStorageAdapter implements StorageAdapter {
   // Lifecycle
   // ---------------------------------------------------------------------------
 
+  // eslint-disable-next-line @typescript-eslint/require-await -- StorageAdapter is async; this backend is synchronous
   async init(): Promise<void> {
     if (typeof chrome === 'undefined' || !chrome.storage) {
       throw new BrowserSupportError('chrome.storage');

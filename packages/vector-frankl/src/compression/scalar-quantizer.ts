@@ -80,7 +80,7 @@ export class ScalarQuantizer extends BaseCompressor {
     const bounds = this.calculateBounds([vector]);
 
     // Quantize the vector
-    const quantizedValues = await this.quantizeVector(vector, bounds, bits);
+    const quantizedValues = this.quantizeVector(vector, bounds, bits);
 
     // Pack into compressed buffer
     const compressedData = this.packCompressedData(quantizedValues, bounds, bits, statistics);
@@ -92,7 +92,7 @@ export class ScalarQuantizer extends BaseCompressor {
     // Validate quality if enabled
     let precisionLoss = 0;
     if (this.config.validateQuality) {
-      const decompressed = await this.decompressData(compressedData);
+      const decompressed = this.decompressData(compressedData);
       const quality = await this.validateCompressionQuality(vector, decompressed);
       precisionLoss = 1 - quality.qualityScore;
 
@@ -123,8 +123,8 @@ export class ScalarQuantizer extends BaseCompressor {
     };
   }
 
-  async decompress(compressed: CompressedVector): Promise<Float32Array> {
-    return this.decompressData(compressed.data);
+  decompress(compressed: CompressedVector): Promise<Float32Array> {
+    return Promise.resolve(this.decompressData(compressed.data));
   }
 
   /**
@@ -148,11 +148,7 @@ export class ScalarQuantizer extends BaseCompressor {
   /**
    * Quantize a vector using specified bounds and bits
    */
-  private async quantizeVector(
-    vector: Float32Array,
-    bounds: QuantizationBounds,
-    bits: number,
-  ): Promise<number[]> {
+  private quantizeVector(vector: Float32Array, bounds: QuantizationBounds, bits: number): number[] {
     const quantized: number[] = [];
 
     if (this.scalarConfig.strategy === 'per-dimension' && bounds.dimensionBounds) {
@@ -306,7 +302,7 @@ export class ScalarQuantizer extends BaseCompressor {
   /**
    * Decompress data from buffer
    */
-  private async decompressData(buffer: ArrayBuffer): Promise<Float32Array> {
+  private decompressData(buffer: ArrayBuffer): Float32Array {
     const metadataView = new DataView(buffer, 0, 128);
 
     // Read metadata
@@ -419,9 +415,9 @@ export class ScalarQuantizer extends BaseCompressor {
   /**
    * Batch compress multiple vectors with shared statistics
    */
-  async compressBatch(vectors: Float32Array[]): Promise<CompressedVector[]> {
+  compressBatch(vectors: Float32Array[]): Promise<CompressedVector[]> {
     if (vectors.length === 0) {
-      return [];
+      return Promise.resolve([]);
     }
 
     // Calculate shared bounds for better compression
@@ -437,7 +433,7 @@ export class ScalarQuantizer extends BaseCompressor {
     const results: CompressedVector[] = [];
 
     for (const vector of vectors) {
-      const quantizedValues = await this.quantizeVector(vector, bounds, bits);
+      const quantizedValues = this.quantizeVector(vector, bounds, bits);
       const statistics = calculateVectorStatistics(vector);
       const compressedData = this.packCompressedData(quantizedValues, bounds, bits, statistics);
 
@@ -459,6 +455,6 @@ export class ScalarQuantizer extends BaseCompressor {
       });
     }
 
-    return results;
+    return Promise.resolve(results);
   }
 }

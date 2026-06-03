@@ -15,8 +15,9 @@ import tseslint from 'typescript-eslint';
 const commonFiles = '**/*.{js,jsx,cjs,mjs,ts,tsx}';
 
 export const testFiles = [
-  '**/*.{test,spec}.{js,jsx,ts,tsx}',
+  '**/*.{test,spec,e2e,bench}.{js,jsx,ts,tsx}',
   '**/test/**/*.{js,jsx,ts,tsx}',
+  '**/tests/**/*.{js,jsx,ts,tsx}',
   '**/__tests__/**/*.{js,jsx,ts,tsx}',
 ];
 

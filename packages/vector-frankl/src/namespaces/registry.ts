@@ -314,7 +314,7 @@ export class NamespaceRegistry {
       cursorRequest.onsuccess = () => {
         const cursor = cursorRequest.result;
         if (cursor) {
-          callback(cursor.value);
+          callback(cursor.value as NamespaceInfo);
           cursor.continue();
         } else {
           resolve();

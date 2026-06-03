@@ -155,6 +155,7 @@ export class BenchmarkRunner {
   /**
    * Output results as JSON
    */
+  // eslint-disable-next-line @typescript-eslint/require-await -- synchronous output; async kept for future file-write extension
   private async outputJSON(summary: BenchmarkSummary, totalTime: number): Promise<void> {
     const output = {
       timestamp: new Date().toISOString(),
@@ -180,6 +181,7 @@ export class BenchmarkRunner {
   /**
    * Output results as CSV
    */
+  // eslint-disable-next-line @typescript-eslint/require-await -- synchronous output; async kept for future file-write extension
   private async outputCSV(summary: BenchmarkSummary, _totalTime: number): Promise<void> {
     const headers = [
       'testName',

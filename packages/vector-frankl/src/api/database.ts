@@ -374,36 +374,38 @@ export class VectorDB {
    * Set up quota monitoring with automatic eviction
    */
   private setupQuotaMonitoring(): void {
-    this.quotaWarningListener = async (warning: QuotaWarning) => {
-      log.warn(`Storage quota warning: ${warning.message}`);
+    this.quotaWarningListener = (warning: QuotaWarning) => {
+      void (async () => {
+        log.warn(`Storage quota warning: ${warning.message}`);
 
-      if (this.autoEviction && (warning.type === 'critical' || warning.type === 'emergency')) {
-        try {
-          // Calculate target bytes to free
-          const targetBytes =
-            warning.type === 'emergency'
-              ? Math.floor(warning.quota * 0.2) // Free 20% of quota
-              : Math.floor(warning.quota * 0.1); // Free 10% of quota
+        if (this.autoEviction && (warning.type === 'critical' || warning.type === 'emergency')) {
+          try {
+            // Calculate target bytes to free
+            const targetBytes =
+              warning.type === 'emergency'
+                ? Math.floor(warning.quota * 0.2) // Free 20% of quota
+                : Math.floor(warning.quota * 0.1); // Free 10% of quota
 
-          log.info(`Attempting automatic eviction to free ${this.formatBytes(targetBytes)}`);
+            log.info(`Attempting automatic eviction to free ${this.formatBytes(targetBytes)}`);
 
-          const suggestion = await this.evictionManager.suggestStrategy(targetBytes);
-          const result = await this.evictionManager.evict(suggestion.config);
+            const suggestion = await this.evictionManager.suggestStrategy(targetBytes);
+            const result = await this.evictionManager.evict(suggestion.config);
 
-          log.info(
-            `Automatic eviction completed: freed ${this.formatBytes(result.freedBytes)} by removing ${result.evictedCount} vectors`,
-          );
+            log.info(
+              `Automatic eviction completed: freed ${this.formatBytes(result.freedBytes)} by removing ${result.evictedCount} vectors`,
+            );
 
-          // Update search index after eviction
-          if (result.evictedCount > 0) {
-            await this.searchEngine.rebuildIndex();
+            // Update search index after eviction
+            if (result.evictedCount > 0) {
+              await this.searchEngine.rebuildIndex();
+            }
+          } catch (error) {
+            log.error('Automatic eviction failed', {
+              error: error instanceof Error ? error.message : String(error),
+            });
           }
-        } catch (error) {
-          log.error('Automatic eviction failed', {
-            error: error instanceof Error ? error.message : String(error),
-          });
         }
-      }
+      })();
     };
     this.quotaMonitor.addListener(this.quotaWarningListener);
   }

@@ -37,8 +37,8 @@ export class DebugContext {
    */
   createContext(id: string, info: Partial<ContextInfo> = {}): string {
     const context: ContextInfo = {
-      tags: new Map(Object.entries(info.tags || {})),
-      metadata: new Map(Object.entries(info.metadata || {})),
+      tags: new Map(info.tags),
+      metadata: new Map(info.metadata),
       ...(info.namespace && { namespace: info.namespace }),
       ...(info.operationType && { operationType: info.operationType }),
       ...(info.vectorDimensions !== undefined && {
@@ -97,13 +97,13 @@ export class DebugContext {
     if (updates.vectorCount !== undefined) context.vectorCount = updates.vectorCount;
 
     if (updates.tags) {
-      Object.entries(updates.tags).forEach(([key, value]) => {
+      updates.tags.forEach((value, key) => {
         context.tags.set(key, value);
       });
     }
 
     if (updates.metadata) {
-      Object.entries(updates.metadata).forEach(([key, value]) => {
+      updates.metadata.forEach((value, key) => {
         context.metadata.set(key, value);
       });
     }

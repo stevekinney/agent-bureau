@@ -144,6 +144,7 @@ export class SQLiteStorageAdapter implements StorageAdapter {
     `);
   }
 
+  // eslint-disable-next-line @typescript-eslint/require-await -- StorageAdapter is async; this backend is synchronous
   async close(): Promise<void> {
     if (this.database) {
       this.database.close();
@@ -167,6 +168,7 @@ export class SQLiteStorageAdapter implements StorageAdapter {
 
   // ── Single-item CRUD ────────────────────────────────────────────────────
 
+  // eslint-disable-next-line @typescript-eslint/require-await -- StorageAdapter is async; this backend is synchronous
   async put(vector: VectorData): Promise<void> {
     const database = this.requireDatabase();
     const now = Date.now();
@@ -190,6 +192,7 @@ export class SQLiteStorageAdapter implements StorageAdapter {
     );
   }
 
+  // eslint-disable-next-line @typescript-eslint/require-await -- StorageAdapter is async; this backend is synchronous
   async get(id: string): Promise<VectorData> {
     const database = this.requireDatabase();
     const now = Date.now();
@@ -215,12 +218,14 @@ export class SQLiteStorageAdapter implements StorageAdapter {
     return data;
   }
 
+  // eslint-disable-next-line @typescript-eslint/require-await -- StorageAdapter is async; this backend is synchronous
   async exists(id: string): Promise<boolean> {
     const database = this.requireDatabase();
     const row = database.query('SELECT 1 FROM vectors WHERE id = ? LIMIT 1').get(id);
     return row != null;
   }
 
+  // eslint-disable-next-line @typescript-eslint/require-await -- StorageAdapter is async; this backend is synchronous
   async delete(id: string): Promise<void> {
     const database = this.requireDatabase();
     database.run('DELETE FROM vectors WHERE id = ?', [id]);
@@ -228,6 +233,7 @@ export class SQLiteStorageAdapter implements StorageAdapter {
 
   // ── Multi-item reads ────────────────────────────────────────────────────
 
+  // eslint-disable-next-line @typescript-eslint/require-await -- StorageAdapter is async; this backend is synchronous
   async getMany(ids: string[]): Promise<VectorData[]> {
     if (ids.length === 0) return [];
 
@@ -262,6 +268,7 @@ export class SQLiteStorageAdapter implements StorageAdapter {
     });
   }
 
+  // eslint-disable-next-line @typescript-eslint/require-await -- StorageAdapter is async; this backend is synchronous
   async getAll(): Promise<VectorData[]> {
     const database = this.requireDatabase();
     const rows = database
@@ -273,6 +280,7 @@ export class SQLiteStorageAdapter implements StorageAdapter {
     return rows.map(rowToVectorData);
   }
 
+  // eslint-disable-next-line @typescript-eslint/require-await -- StorageAdapter is async; this backend is synchronous
   async count(): Promise<number> {
     const database = this.requireDatabase();
     const row = database.query('SELECT COUNT(*) as total FROM vectors').get() as {
@@ -283,6 +291,7 @@ export class SQLiteStorageAdapter implements StorageAdapter {
 
   // ── Multi-item writes ───────────────────────────────────────────────────
 
+  // eslint-disable-next-line @typescript-eslint/require-await -- StorageAdapter is async; this backend is synchronous
   async deleteMany(ids: string[]): Promise<number> {
     if (ids.length === 0) return 0;
 
@@ -293,11 +302,13 @@ export class SQLiteStorageAdapter implements StorageAdapter {
     return result.changes;
   }
 
+  // eslint-disable-next-line @typescript-eslint/require-await -- StorageAdapter is async; this backend is synchronous
   async clear(): Promise<void> {
     const database = this.requireDatabase();
     database.run('DELETE FROM vectors');
   }
 
+  // eslint-disable-next-line @typescript-eslint/require-await -- StorageAdapter is async; this backend is synchronous
   async putBatch(vectors: VectorData[], options?: BatchOptions): Promise<void> {
     if (vectors.length === 0) return;
 
@@ -355,6 +366,7 @@ export class SQLiteStorageAdapter implements StorageAdapter {
 
   // ── Partial updates (read-modify-write) ─────────────────────────────────
 
+  // eslint-disable-next-line @typescript-eslint/require-await -- StorageAdapter is async; this backend is synchronous
   async updateVector(
     id: string,
     vector: Float32Array,
@@ -388,6 +400,7 @@ export class SQLiteStorageAdapter implements StorageAdapter {
     database.run(sql, params);
   }
 
+  // eslint-disable-next-line @typescript-eslint/require-await -- StorageAdapter is async; this backend is synchronous
   async updateMetadata(
     id: string,
     metadata: Record<string, unknown>,
@@ -427,6 +440,7 @@ export class SQLiteStorageAdapter implements StorageAdapter {
     database.run(sql, params);
   }
 
+  // eslint-disable-next-line @typescript-eslint/require-await -- StorageAdapter is async; this backend is synchronous
   async updateBatch(
     updates: Array<{
       id: string;

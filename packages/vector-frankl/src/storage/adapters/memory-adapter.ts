@@ -41,12 +41,14 @@ export class MemoryStorageAdapter implements StorageAdapter {
 
   async close(): Promise<void> {}
 
+  // eslint-disable-next-line @typescript-eslint/require-await -- StorageAdapter is async; this backend is synchronous
   async destroy(): Promise<void> {
     this.store.clear();
   }
 
   // Single-item CRUD
 
+  // eslint-disable-next-line @typescript-eslint/require-await -- StorageAdapter is async; this backend is synchronous
   async put(vector: VectorData): Promise<void> {
     const stored = this.cloneOnWrite ? this.clone(vector) : vector;
 
@@ -58,6 +60,7 @@ export class MemoryStorageAdapter implements StorageAdapter {
     this.store.set(stored.id, stored);
   }
 
+  // eslint-disable-next-line @typescript-eslint/require-await -- StorageAdapter is async; this backend is synchronous
   async get(id: string): Promise<VectorData> {
     const entry = this.store.get(id);
 
@@ -71,16 +74,19 @@ export class MemoryStorageAdapter implements StorageAdapter {
     return this.cloneOnRead ? this.clone(entry) : entry;
   }
 
+  // eslint-disable-next-line @typescript-eslint/require-await -- StorageAdapter is async; this backend is synchronous
   async exists(id: string): Promise<boolean> {
     return this.store.has(id);
   }
 
+  // eslint-disable-next-line @typescript-eslint/require-await -- StorageAdapter is async; this backend is synchronous
   async delete(id: string): Promise<void> {
     this.store.delete(id);
   }
 
   // Multi-item reads
 
+  // eslint-disable-next-line @typescript-eslint/require-await -- StorageAdapter is async; this backend is synchronous
   async getMany(ids: string[]): Promise<VectorData[]> {
     const results: VectorData[] = [];
     const now = Date.now();
@@ -97,6 +103,7 @@ export class MemoryStorageAdapter implements StorageAdapter {
     return results;
   }
 
+  // eslint-disable-next-line @typescript-eslint/require-await -- StorageAdapter is async; this backend is synchronous
   async getAll(): Promise<VectorData[]> {
     const results: VectorData[] = [];
 
@@ -107,12 +114,14 @@ export class MemoryStorageAdapter implements StorageAdapter {
     return results;
   }
 
+  // eslint-disable-next-line @typescript-eslint/require-await -- StorageAdapter is async; this backend is synchronous
   async count(): Promise<number> {
     return this.store.size;
   }
 
   // Multi-item writes
 
+  // eslint-disable-next-line @typescript-eslint/require-await -- StorageAdapter is async; this backend is synchronous
   async deleteMany(ids: string[]): Promise<number> {
     let deleted = 0;
 
@@ -125,10 +134,12 @@ export class MemoryStorageAdapter implements StorageAdapter {
     return deleted;
   }
 
+  // eslint-disable-next-line @typescript-eslint/require-await -- StorageAdapter is async; this backend is synchronous
   async clear(): Promise<void> {
     this.store.clear();
   }
 
+  // eslint-disable-next-line @typescript-eslint/require-await -- StorageAdapter is async; this backend is synchronous
   async putBatch(vectors: VectorData[], options?: BatchOptions): Promise<void> {
     const batchSize = options?.batchSize ?? vectors.length;
     const totalBatches = Math.ceil(vectors.length / batchSize);
@@ -169,6 +180,7 @@ export class MemoryStorageAdapter implements StorageAdapter {
 
   // Partial updates (read-modify-write)
 
+  // eslint-disable-next-line @typescript-eslint/require-await -- StorageAdapter is async; this backend is synchronous
   async updateVector(
     id: string,
     vector: Float32Array,
@@ -191,6 +203,7 @@ export class MemoryStorageAdapter implements StorageAdapter {
     }
   }
 
+  // eslint-disable-next-line @typescript-eslint/require-await -- StorageAdapter is async; this backend is synchronous
   async updateMetadata(
     id: string,
     metadata: Record<string, unknown>,
@@ -215,6 +228,7 @@ export class MemoryStorageAdapter implements StorageAdapter {
     }
   }
 
+  // eslint-disable-next-line @typescript-eslint/require-await -- StorageAdapter is async; this backend is synchronous
   async updateBatch(
     updates: Array<{
       id: string;

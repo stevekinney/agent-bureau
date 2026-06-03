@@ -52,6 +52,7 @@ export class HNSWIndex {
   /**
    * Add a vector to the index
    */
+  // eslint-disable-next-line @typescript-eslint/require-await -- public API; callers await this as part of a shared async interface
   async addVector(vectorData: VectorData): Promise<void> {
     const level = this.getRandomLevel();
     const node: HNSWNode = {
@@ -134,6 +135,7 @@ export class HNSWIndex {
   /**
    * Search for k nearest neighbors
    */
+  // eslint-disable-next-line @typescript-eslint/require-await -- public API; callers await this as part of a shared async interface
   async search(
     queryVector: Float32Array,
     k: number,
@@ -169,6 +171,7 @@ export class HNSWIndex {
   /**
    * Remove a vector from the index
    */
+  // eslint-disable-next-line @typescript-eslint/require-await -- public API; callers await this as part of a shared async interface
   async removeVector(id: string): Promise<void> {
     const node = this.nodes.get(id);
     if (!node) return;

@@ -281,7 +281,7 @@ export class DistanceCalculator {
     vectors: Float32Array[],
     chunkSize = 1000,
   ): number[] {
-    const results: number[] = new Array(vectors.length);
+    const results: number[] = Array.from<number>({ length: vectors.length });
 
     for (let i = 0; i < vectors.length; i += chunkSize) {
       const chunk = vectors.slice(i, i + chunkSize);

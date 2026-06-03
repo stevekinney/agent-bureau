@@ -116,8 +116,9 @@ export class WebGPUManager {
 
       // Set up error handling
       this.uncapturedErrorHandler = (event: Event) => {
+        const gpuError = (event as GPUUncapturedErrorEvent).error;
         log.error('WebGPU uncaptured error', {
-          error: String((event as GPUUncapturedErrorEvent).error),
+          error: gpuError.message,
         });
       };
       this.device.addEventListener('uncapturederror', this.uncapturedErrorHandler);
@@ -197,7 +198,7 @@ export class WebGPUManager {
       const workgroupSize = this.calculateOptimalWorkgroupSize(vectorCount);
 
       // Create or get compute pipeline
-      const pipeline = await this.getComputePipeline(metric, workgroupSize);
+      const pipeline = this.getComputePipeline(metric, workgroupSize);
 
       // Prepare data and compute
       const result = await this.executeComputePass(
@@ -257,7 +258,7 @@ export class WebGPUManager {
   /**
    * Cleanup GPU resources
    */
-  async cleanup(): Promise<void> {
+  cleanup(): void {
     // Destroy cached pipelines
     this.shaderCache.clear();
 
@@ -308,10 +309,7 @@ export class WebGPUManager {
   /**
    * Get or create compute pipeline for a specific metric
    */
-  private async getComputePipeline(
-    metric: DistanceMetric,
-    workgroupSize: number,
-  ): Promise<GPUComputePipeline> {
+  private getComputePipeline(metric: DistanceMetric, workgroupSize: number): GPUComputePipeline {
     const cacheKey = `${metric}_${workgroupSize}`;
 
     if (this.shaderCache.has(cacheKey)) {

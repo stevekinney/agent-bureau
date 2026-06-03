@@ -184,6 +184,7 @@ export class S3StorageAdapter implements StorageAdapter {
     });
   }
 
+  // eslint-disable-next-line @typescript-eslint/require-await -- StorageAdapter is async; this backend is synchronous
   async exists(id: string): Promise<boolean> {
     return this.index.has(id);
   }
@@ -260,6 +261,7 @@ export class S3StorageAdapter implements StorageAdapter {
     return results;
   }
 
+  // eslint-disable-next-line @typescript-eslint/require-await -- StorageAdapter is async; this backend is synchronous
   async count(): Promise<number> {
     return this.index.size;
   }
