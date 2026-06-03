@@ -478,16 +478,23 @@ export async function createRuntimeComposition(
   }
 
   // Durable execution is ON BY DEFAULT whenever a PERSISTENT storage backend is
-  // configured — a normal `createRun()` that crashes resumes from its last
-  // checkpoint with no opt-in. The default follows persistence because that is
-  // the only place resume is real: `memory` storage loses its checkpoints with
-  // the process, so default-on there would be pure overhead with zero recovery.
-  // The explicit `durableExecution` flag overrides the default either way —
-  // `true` forces the engine on even for `memory` (so durable behavior is
-  // testable locally), `false` forces it off even for sqlite/lmdb.
+  // configured AND no custom `persistence` shadows it — a normal `createRun()`
+  // that crashes resumes from its last checkpoint with no opt-in. The default
+  // follows persistence because that is the only place resume is real: `memory`
+  // storage loses its checkpoints with the process, so default-on there would be
+  // pure overhead with zero recovery. The `persistence === undefined` guard keeps
+  // `wantsDurable` ⟺ buildable: a custom `persistence` shadows `storage` (the
+  // block above is skipped, so `durableStorage` is never resolved), and the
+  // engine and session store cannot then share one backend — so the honest
+  // default there is OFF, not a silently-wanted-but-unbuilt engine. The explicit
+  // `durableExecution` flag overrides the default either way — `true` forces the
+  // engine on even for `memory` (so durable behavior is testable locally),
+  // `false` forces it off even for sqlite/lmdb.
   const wantsDurable =
     options.durableExecution ??
-    (options.storage !== undefined && options.storage.type !== 'memory');
+    (options.storage !== undefined &&
+      options.storage.type !== 'memory' &&
+      options.persistence === undefined);
 
   // A custom `persistence` value shadows `storage` entirely (the
   // `if (!kv && options.storage)` block above is skipped), so no raw `Storage`

@@ -85,9 +85,20 @@ export interface AgentRunWorkflowResult {
   /**
    * The structured-output validation outcome, when the run stopped after a
    * `responseSchema` was applied. Mirrors `RunResult.schemaValidation` on the
-   * in-memory path so a durable run produces the SAME shape. The live validation
-   * error is not cloneable across a checkpoint, so only its serialized message
-   * survives; `success` is preserved exactly.
+   * in-memory path; `success` — the load-bearing bit — is preserved exactly.
+   *
+   * KNOWN SEAM (structural fidelity of `error`): the in-memory path puts the
+   * LIVE validation error in `schemaValidation.error` (typically a `ZodError`
+   * with structured `.issues`); a live error is not cloneable across a
+   * checkpoint, so the durable path serializes it to its message and the adapter
+   * rebuilds a plain `Error(message)`. A consumer reading `error.issues` /
+   * `error.name` therefore sees the structured error in-memory but a plain
+   * `Error` on the durable path. This matches the same structural-vs-identity
+   * boundary already accepted for terminal `RunResult.error` (stack/cause are
+   * likewise reduced to a message) and for conversations (snapshots, not
+   * instances). operative cannot faithfully reconstruct an arbitrary user
+   * schema library's error type; `success` is the contract, the error shape is
+   * best-effort.
    */
   schemaValidation?: { success: boolean; error?: string };
 }

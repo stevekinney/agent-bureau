@@ -225,11 +225,20 @@ async function driveDurableRun(
       return makeErrorResult(emptyRunState(), conversation, hooks, emitter, startError);
     }
 
-    const handle = await context.engine.start('agentRun', {
-      runId,
-      prompt,
-      maximumSteps: options.maximumSteps,
-    });
+    // Pin the Weft workflow id to `runId` so `handle.id === runId`. This makes
+    // the run's id its resume key (recoverAll surfaces handles keyed by it) and
+    // lets boot recovery clear deps by `handle.id` without first awaiting the
+    // result (see `settleRecoveredRun`). Each `runId` is unique per run, so the
+    // duplicate-id guard never trips on a fresh run.
+    const handle = await context.engine.start(
+      'agentRun',
+      {
+        runId,
+        prompt,
+        maximumSteps: options.maximumSteps,
+      },
+      { id: runId },
+    );
 
     let summary: AgentRunWorkflowResult;
     try {

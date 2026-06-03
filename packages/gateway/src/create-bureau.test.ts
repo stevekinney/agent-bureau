@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { MemoryStorage, type TextValueStore, textValueStore } from '@lostgradient/weft/storage';
 import { createTool, createToolbox } from 'armorer';
 import { createMockTool, createTestToolbox } from 'armorer/test';
-import { describe, expect, it } from 'bun:test';
+import { afterEach, describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
 import type { GenerateFunction, GenerateResponse, Toolbox } from 'operative';
 import { stopWhen } from 'operative';
@@ -73,6 +73,31 @@ function createBlockingGenerate(): {
 async function waitForRunCompletion() {
   await new Promise((resolve) => setTimeout(resolve, 50));
 }
+
+/**
+ * Poll `check` up to `attempts` times, yielding one macrotask between tries.
+ * Each yield also drains Weft's deferred inline-launch queue (its `setTimeout(0)`
+ * starts), so a recovered run can advance — bounded (project rule: cap at 5),
+ * not a fixed wall-clock sleep that flakes on loaded hosts. `check` may be async
+ * (e.g. re-reading the session store each iteration).
+ */
+async function pollUntil(check: () => boolean | Promise<boolean>, attempts = 5): Promise<boolean> {
+  for (let i = 0; i < attempts; i++) {
+    if (await check()) return true;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  return check();
+}
+
+// Weft's inline launch queue defers each workflow start onto a `setTimeout(0)`
+// macrotask. Under `bun test`, a prior test that leaves an unsettled async tail
+// (this file's recovery test parks bureauA's step-1 generate forever) can starve
+// that deferred launch, so a later durable run never advances and its test times
+// out. Yielding one macrotask between tests drains the timer queue so each test
+// starts clean. (Same fix as runtime-composition.test.ts / active-run-adapter.test.ts.)
+afterEach(async () => {
+  await new Promise((resolve) => setTimeout(resolve, 0));
+});
 
 describe('createBureau', () => {
   it('is not ready when no generate function is configured', async () => {
@@ -279,9 +304,18 @@ describe('createBureau', () => {
         stopWhen: stopWhen.noToolCalls(),
       });
 
+      // Anchor the "crash" to an OBSERVED step-0 tool call rather than a fixed
+      // sleep: step 0 commits a `next` tool call, so a `toolbox.*` action fires
+      // once step 0 has run its generate + tool (and thus checkpointed) — at
+      // which point step 1's generate is parked forever. Polling on that signal
+      // (bounded) is deterministic where a 150ms sleep races on a loaded host.
+      let bureauAToolFired = false;
+      bureauA.addEventListener('action', (event) => {
+        if (event.action.type.startsWith('toolbox.')) bureauAToolFired = true;
+      });
       const run = await bureauA.createRun({ message: 'Recover me' });
-      // Let step 0 checkpoint, then leave step 1 suspended in generate.
-      await new Promise((resolve) => setTimeout(resolve, 150));
+      await pollUntil(() => bureauAToolFired);
+      expect(bureauAToolFired).toBe(true); // step 0 checkpointed before the crash
       bureauA.dispose();
 
       // === FRESH PROCESS: clear the module-global deps registry so the recovered
@@ -303,16 +337,25 @@ describe('createBureau', () => {
       });
 
       try {
-        // Recovery ran during boot; give the resumed run a moment to settle.
-        await new Promise((resolve) => setTimeout(resolve, 200));
+        // Recovery ran during boot, but the detached monitor drives the resumed
+        // run to completion AFTER createBureau returns (non-blocking boot). Poll
+        // (bounded) until the resumed run has taken step 1 — each poll drains the
+        // deferred Weft launch, so this is deterministic, not a fixed sleep.
+        await pollUntil(() => bSteps.includes(1));
 
-        // The run resumed at step 1 (not 0) — proving config-reconstructed deps,
-        // not a restart.
-        expect(bSteps).toContain(1);
-        expect(bSteps).not.toContain(0);
+        // The run resumed at step 1 (not 0) and took ONLY step 1 — proving
+        // config-reconstructed deps short-circuited the completed step 0, not a
+        // restart from the top.
+        expect(bSteps).toEqual([1]);
 
-        // The session is no longer stuck `running`: recovery persisted its terminal
-        // status.
+        // The session is no longer stuck `running`: the detached monitor persisted
+        // its terminal status. Poll (re-reading the store each iteration) until
+        // that write lands — it happens after the resumed run completes, off the
+        // boot path.
+        await pollUntil(async () => {
+          const current = await bureauB.getSession(run.sessionId);
+          return current?.metadata['lastRunStatus'] !== 'running';
+        });
         const session = await bureauB.getSession(run.sessionId);
         expect(session?.metadata['lastRunStatus']).not.toBe('running');
       } finally {
@@ -871,5 +914,31 @@ describe('createBureau', () => {
     const bureau = await createBureau();
     bureau.dispose();
     bureau.dispose();
+  });
+
+  it('disposes a sqlite-backed durable bureau cleanly more than once', async () => {
+    // The idempotency guard: a persistent bureau owns an engine AND a raw SQLite
+    // handle, both released on dispose. A second dispose must NOT re-close the
+    // already-closed SQLite connection (runtime-dependent whether that throws).
+    const databasePath = join(
+      tmpdir(),
+      `dispose-twice-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    try {
+      const bureau = await createBureau({
+        generate: createMockGenerate(),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+        stopWhen: stopWhen.noToolCalls(),
+      });
+      bureau.dispose();
+      // Second dispose is a no-op (guard short-circuits before re-closing).
+      expect(() => bureau.dispose()).not.toThrow();
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+      resetRunDepsRegistry();
+    }
   });
 });

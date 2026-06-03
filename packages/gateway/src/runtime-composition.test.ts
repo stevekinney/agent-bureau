@@ -248,6 +248,21 @@ describe('createRuntimeComposition durable execution', () => {
     );
   });
 
+  it('stays OFF (no engine) for sqlite + a custom persistence when durableExecution is unset', async () => {
+    // The silent-downgrade guard: with NO explicit flag, a custom `persistence`
+    // shadows `storage`, so `wantsDurable` resolves to FALSE — the honest
+    // default-off, not a wanted-but-unbuildable engine. (A persistence override
+    // means the caller is driving their own KV layer; durable-on would need the
+    // engine and sessions on one backend, which this config does not provide.)
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'x', toolCalls: [] }),
+      toolbox: createToolbox([], { context: {} }),
+      storage: { type: 'sqlite', path: join(tmpdir(), 'unset-persistence.sqlite') },
+      persistence: textValueStore(new MemoryStorage()),
+    });
+    expect(runtime.durable).toBeUndefined();
+  });
+
   it('builds a durable engine through the composition path and runs an agent durably', async () => {
     const runtime = await createRuntimeComposition({
       generate: async () => ({ content: 'composed', toolCalls: [] }),
