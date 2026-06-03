@@ -14,15 +14,12 @@ async function run(command: string[], environment: NodeJS.ProcessEnv = process.e
   }
 }
 
-const resolvedNode = Bun.spawnSync({
-  cmd: ['/bin/zsh', '-lc', 'command -v node'],
-  cwd: import.meta.dir.replace(/\/scripts$/, ''),
-  env: process.env,
-  stdout: 'pipe',
-  stderr: 'pipe',
-});
-
-const nodeBinary = new TextDecoder().decode(resolvedNode.stdout).trim();
+// Resolve the `node` binary portably. The previous implementation spawned
+// `/bin/zsh -lc 'command -v node'`, which fails with ENOENT on CI runners
+// (ubuntu-latest has /bin/sh and /bin/bash, but no /bin/zsh). `Bun.which`
+// searches PATH directly with no shell, so it works on the dev's macOS and on
+// CI alike.
+const nodeBinary = Bun.which('node');
 if (!nodeBinary) {
   throw new Error('Unable to locate the Node.js binary for runtime integration tests.');
 }
