@@ -1,8 +1,9 @@
 import { workflow } from '@lostgradient/weft';
 import { Conversation, isConversation } from 'conversationalist';
 
+import { BudgetExceededError, ElicitationDeniedError } from '../errors';
 import { buildStepDeps, createRunState } from '../loop';
-import { runStep } from '../run-step';
+import { DEFAULT_MAXIMUM_STEPS, runStep } from '../run-step';
 import type { FinishReason } from '../types';
 import type { CheckpointStore } from './checkpoint-store';
 import { ensureRunDeps, getRunDeps } from './deps-registry';
@@ -81,6 +82,14 @@ export interface AgentRunWorkflowResult {
   errorMessage?: string;
   /** The abort reason, when `finishReason` is `aborted`. */
   abortReason?: string;
+  /**
+   * The structured-output validation outcome, when the run stopped after a
+   * `responseSchema` was applied. Mirrors `RunResult.schemaValidation` on the
+   * in-memory path so a durable run produces the SAME shape. The live validation
+   * error is not cloneable across a checkpoint, so only its serialized message
+   * survives; `success` is preserved exactly.
+   */
+  schemaValidation?: { success: boolean; error?: string };
 }
 
 /** Serialize an unknown error to a stable message string for the checkpoint. */
@@ -94,7 +103,18 @@ function serializeError(error: unknown): string {
   }
 }
 
-const DEFAULT_MAXIMUM_STEPS = 25;
+/**
+ * Classify a terminal error into a {@link FinishReason}, identically to
+ * `makeErrorResult` in run-lifecycle.ts. Called INSIDE the memo where the live
+ * error object still exists (its class identity is lost once serialized across
+ * the checkpoint), so the durable path distinguishes `elicitation-denied` and
+ * `budget-exceeded` from a plain `error` exactly as the in-memory loop does.
+ */
+function classifyErrorFinishReason(error: unknown): FinishReason {
+  if (error instanceof ElicitationDeniedError) return 'elicitation-denied';
+  if (error instanceof BudgetExceededError) return 'budget-exceeded';
+  return 'error';
+}
 
 /** The fresh cursor for a brand-new run: step 0, zeroed accumulators. */
 function initialCursor(): RunCursor {
@@ -180,6 +200,7 @@ export function createRunWorkflow(checkpointStore: CheckpointStore) {
       let finishReason: FinishReason = 'maximum-steps';
       let errorMessage: string | undefined;
       let abortReason: string | undefined;
+      let schemaValidation: { success: boolean; error?: string } | undefined;
 
       while (cursor.step < maximumSteps) {
         // === The whole step runs inside `ctx.memo`, keyed by step index. This is
@@ -234,12 +255,29 @@ export function createRunWorkflow(checkpointStore: CheckpointStore) {
             : null;
 
           // Serialize terminal metadata here, inside the function, where the live
-          // (non-cloneable) error object still exists. Only plain data is memoized.
+          // (non-cloneable) error object and validation error still exist. Only
+          // plain data is memoized. The error finish reason is CLASSIFIED here
+          // (elicitation-denied / budget-exceeded / error) because the error's
+          // class identity does not survive serialization — matching the
+          // in-memory `makeErrorResult`. The `schemaValidation` is carried so a
+          // durable run produces the SAME `RunResult.schemaValidation` shape as
+          // the in-memory loop (its live error is reduced to a message).
           return {
             outcome: { kind: outcome.kind },
             errorMessage: outcome.kind === 'error' ? serializeError(outcome.error) : undefined,
+            errorFinishReason:
+              outcome.kind === 'error' ? classifyErrorFinishReason(outcome.error) : undefined,
             abortReason: outcome.kind === 'abort' ? outcome.reason : undefined,
             stopFinishReason: outcome.kind === 'stop' ? outcome.finishReason : undefined,
+            schemaValidation:
+              outcome.kind === 'stop' && outcome.schemaValidation
+                ? {
+                    success: outcome.schemaValidation.success,
+                    ...(outcome.schemaValidation.error !== undefined
+                      ? { error: serializeError(outcome.schemaValidation.error) }
+                      : {}),
+                  }
+                : undefined,
             record,
             conversationSnapshot: conversation.snapshot(),
             nextAccumulators: {
@@ -279,6 +317,7 @@ export function createRunWorkflow(checkpointStore: CheckpointStore) {
 
         if (outcome.kind === 'stop') {
           finishReason = stepResult.stopFinishReason ?? 'stop-condition';
+          schemaValidation = stepResult.schemaValidation;
           break;
         }
         if (outcome.kind === 'abort') {
@@ -287,7 +326,11 @@ export function createRunWorkflow(checkpointStore: CheckpointStore) {
           break;
         }
         if (outcome.kind === 'error') {
-          finishReason = 'error';
+          // Use the finish reason CLASSIFIED inside the memo (where the error's
+          // class identity was still live) so a durable run distinguishes
+          // elicitation-denied / budget-exceeded from a plain error, matching
+          // the in-memory loop.
+          finishReason = stepResult.errorFinishReason ?? 'error';
           errorMessage = stepResult.errorMessage;
           break;
         }
@@ -303,6 +346,7 @@ export function createRunWorkflow(checkpointStore: CheckpointStore) {
         finishReason,
         ...(errorMessage !== undefined ? { errorMessage } : {}),
         ...(abortReason !== undefined ? { abortReason } : {}),
+        ...(schemaValidation !== undefined ? { schemaValidation } : {}),
       } satisfies AgentRunWorkflowResult;
     });
 }

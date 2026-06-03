@@ -2,9 +2,11 @@ import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
 import { createToolbox } from 'armorer';
 import { afterEach, describe, expect, it } from 'bun:test';
 import { createConversationHistory } from 'conversationalist';
+import { z } from 'zod';
 
 import { stopWhen } from '../conditions/index';
 import { createRun } from '../create-run';
+import { BudgetExceededError, ElicitationDeniedError } from '../errors';
 import type { RunOptions, RunResult } from '../types';
 import { createCheckpointStore } from './checkpoint-store';
 import { createRunEngine } from './create-run-engine';
@@ -207,6 +209,87 @@ describe('createRun with durable routing', () => {
       expect(aborted).toBe(true);
       // The real abort reason survives the workflow→adapter boundary.
       expect(abortedReason).toBe('user requested stop');
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+
+  it('classifies a BudgetExceededError as finishReason budget-exceeded (durable parity)', async () => {
+    // The durable path must classify terminal errors the SAME as the in-memory
+    // loop. The error's class identity is lost once serialized across a
+    // checkpoint, so classification happens inside the memo while it is live —
+    // a regression here would collapse this back to a plain 'error'.
+    const context = await buildContext();
+    try {
+      const activeRun = createRun(
+        {
+          generate: async () => ({ content: 'Hello', toolCalls: [] }),
+          toolbox: createToolbox([]) as unknown as RunOptions['toolbox'],
+          conversation: createConversationHistory(),
+          stopWhen: stopWhen.noToolCalls(),
+          prepareStep: async () => {
+            throw new BudgetExceededError('Token budget exceeded');
+          },
+        },
+        { ...context, runId: 'budget-run', prompt: 'Hello' },
+      );
+
+      const result = await activeRun.result;
+
+      expect(result.finishReason).toBe('budget-exceeded');
+      expect(result.error).toBeInstanceOf(BudgetExceededError);
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+
+  it('classifies an ElicitationDeniedError as finishReason elicitation-denied (durable parity)', async () => {
+    const context = await buildContext();
+    try {
+      const activeRun = createRun(
+        {
+          generate: async () => ({ content: 'Hello', toolCalls: [] }),
+          toolbox: createToolbox([]) as unknown as RunOptions['toolbox'],
+          conversation: createConversationHistory(),
+          stopWhen: stopWhen.noToolCalls(),
+          prepareStep: async () => {
+            throw new ElicitationDeniedError('User declined');
+          },
+        },
+        { ...context, runId: 'elicitation-run', prompt: 'Hello' },
+      );
+
+      const result = await activeRun.result;
+
+      expect(result.finishReason).toBe('elicitation-denied');
+      expect(result.error).toBeInstanceOf(ElicitationDeniedError);
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+
+  it('carries schemaValidation through to the durable RunResult (durable parity)', async () => {
+    // A run with a `responseSchema` produces `RunResult.schemaValidation` on the
+    // in-memory path; the durable path must surface the SAME shape. The live
+    // validation error is reduced to a message across the checkpoint.
+    const context = await buildContext();
+    try {
+      const activeRun = createRun(
+        {
+          generate: async () => ({ content: '{"answer":"42"}', toolCalls: [] }),
+          toolbox: createToolbox([]) as unknown as RunOptions['toolbox'],
+          conversation: createConversationHistory(),
+          stopWhen: stopWhen.noToolCalls(),
+          responseSchema: z.object({ answer: z.string() }),
+        },
+        { ...context, runId: 'schema-run', prompt: 'Hello' },
+      );
+
+      const result = await activeRun.result;
+
+      expect(result.finishReason).toBe('stop-condition');
+      expect(result.schemaValidation).toBeDefined();
+      expect(result.schemaValidation?.success).toBe(true);
     } finally {
       context.engine[Symbol.dispose]();
     }

@@ -9,8 +9,10 @@ import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
 import type { GenerateFunction, GenerateResponse, Toolbox } from 'operative';
 import { stopWhen } from 'operative';
-import { resetRunDepsRegistry } from 'operative/durable';
-import { createMockGenerate as createSequentialGenerate } from 'operative/test';
+import {
+  createMockGenerate as createSequentialGenerate,
+  resetRunDepsRegistry,
+} from 'operative/test';
 import { createStore } from 'sentinel';
 import { z } from 'zod';
 
@@ -328,13 +330,18 @@ describe('createBureau', () => {
     // The seam #7 closure, validated through the REAL gateway wiring: a durable
     // run must fire run.completed so store.register sees completion and the
     // session is marked completed — exactly as an in-memory run does.
+    //
+    // NOTE: no `persistence` — it would shadow `storage`, leaving `durableStorage`
+    // undefined so NO engine is built (and, with `durableExecution: true`, the
+    // composition now throws on that contradiction). `storage: memory` +
+    // `durableExecution: true` is what actually builds the in-memory durable
+    // engine, so this test genuinely exercises the durable path.
     const bureau = await createBureau({
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
       storage: { type: 'memory' },
       durableExecution: true,
       stopWhen: stopWhen.noToolCalls(),
-      persistence: textValueStore(new MemoryStorage()),
     });
 
     const run = await bureau.createRun({ message: 'Durable hello' });
@@ -389,11 +396,14 @@ describe('createBureau', () => {
       await waitForRunCompletion();
       await waitForRunCompletion();
 
-      // The observable surface fired on the durable path: `action` events flowed
-      // (run/step lifecycle + the tool call), the run is registered and observed
-      // to completion, and the session landed `completed` — full parity with the
-      // in-memory loop, with no opt-in.
+      // The observable surface fired on the durable path: `action` events flowed,
+      // the run is registered and observed to completion, and the session landed
+      // `completed` — full parity with the in-memory loop, with no opt-in.
       expect(actions.length).toBeGreaterThan(0);
+      // A `toolbox.*` action proves the toolbox-event forwarding the adapter wires
+      // (active-run-adapter.ts) actually fired on the durable path — step 0's tool
+      // call must surface, not merely the run-lifecycle events.
+      expect(actions.some((type) => type.startsWith('toolbox.'))).toBe(true);
       const detail = bureau.getRun(run.id);
       expect(detail).toBeDefined();
       expect(detail?.status).toBe('completed');

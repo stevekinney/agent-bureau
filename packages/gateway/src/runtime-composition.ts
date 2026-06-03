@@ -429,6 +429,16 @@ export interface RuntimeComposition {
    * surface is unchanged, but the run is checkpointed and resumes after a crash.
    */
   durable: { engine: AnyRunEngine; checkpointStore: CheckpointStore } | undefined;
+  /**
+   * Disposes the raw `Storage` backend this composition resolved from
+   * `options.storage`, if any. The KV/checkpoint views are created with
+   * `disposeUnderlyingStorage: false` (they share one backend), and Weft's
+   * `engine[Symbol.dispose]()` does NOT close the storage either — so the owner
+   * (the bureau) must call this on teardown to release the SQLite/LMDB handle.
+   * `undefined` when the caller supplied their own `persistence` (we did not
+   * resolve a backend and do not own its lifecycle).
+   */
+  disposeStorage: (() => void) | undefined;
   memory: Memory | undefined;
   sessionStore: SessionStore | undefined;
   scheduler: Scheduler | undefined;
@@ -478,6 +488,30 @@ export async function createRuntimeComposition(
   const wantsDurable =
     options.durableExecution ??
     (options.storage !== undefined && options.storage.type !== 'memory');
+
+  // A custom `persistence` value shadows `storage` entirely (the
+  // `if (!kv && options.storage)` block above is skipped), so no raw `Storage`
+  // is resolved and a durable engine cannot be built on the same backend the
+  // sessions live on. Durable recovery REQUIRES the checkpoint store and the
+  // session store to share one durable backend — the boot reconstructor scans
+  // the SESSION store for `running` runs, so checkpoints in a separate backend
+  // would never be resumed. Therefore `durableExecution: true` + a custom
+  // `persistence` is contradictory: honor it silently and we ship an engine
+  // that looks durable but can't recover. Fail loud at composition instead.
+  // (Flag UNSET + `persistence` is fine — it falls to the documented
+  // default-off, since there was no explicit request to honor.)
+  if (options.durableExecution === true && options.persistence !== undefined) {
+    throw new Error(
+      'durableExecution: true is incompatible with a custom `persistence` value. ' +
+        'A durable engine must share its backend with the session store, but ' +
+        '`persistence` shadows `storage` — so the engine and sessions would live ' +
+        'on different backends and a recovered run could never be found. Provide ' +
+        '`storage` (sqlite/lmdb) WITHOUT `persistence` to get durable execution, ' +
+        'or drop `durableExecution: true` to use the custom persistence layer ' +
+        'with the in-memory run loop.',
+    );
+  }
+
   let durable: { engine: AnyRunEngine; checkpointStore: CheckpointStore } | undefined;
   if (wantsDurable && durableStorage) {
     // Build the checkpoint store over the SAME backend the engine persists to.
@@ -710,6 +744,7 @@ export async function createRuntimeComposition(
   return {
     kv,
     durable,
+    disposeStorage: durableStorage ? () => durableStorage[Symbol.dispose]() : undefined,
     memory,
     sessionStore,
     scheduler,

@@ -2,7 +2,12 @@ import type { Conversation } from 'conversationalist';
 
 import { BudgetExceededError, ElicitationDeniedError } from './errors';
 import { RunAbortedEvent, RunCompletedEvent, RunErrorEvent, RunStartedEvent } from './events';
-import { type EventDispatcher, runHookSilently, type RunState } from './run-step';
+import {
+  DEFAULT_MAXIMUM_STEPS,
+  type EventDispatcher,
+  runHookSilently,
+  type RunState,
+} from './run-step';
 import type { FinishReason, RunOptions, RunResult } from './types';
 
 /**
@@ -39,7 +44,7 @@ export async function startRunLifecycle(
       await options.hooks.run('onRunStart', {
         conversation,
         toolbox: options.toolbox,
-        maximumSteps: options.maximumSteps ?? 25,
+        maximumSteps: options.maximumSteps ?? DEFAULT_MAXIMUM_STEPS,
       });
     } catch (error) {
       emitter?.dispatch(new RunErrorEvent(0, error));

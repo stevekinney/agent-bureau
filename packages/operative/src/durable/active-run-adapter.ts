@@ -3,6 +3,7 @@ import type { ForwardableSource } from 'lifecycle';
 import { CompletableEventTarget, forwardEvents } from 'lifecycle';
 
 import type { ActiveRun } from '../create-run';
+import { BudgetExceededError, ElicitationDeniedError } from '../errors';
 import type { CombinedOperativeEventMap } from '../events';
 import { createRunState } from '../loop';
 import {
@@ -275,6 +276,7 @@ async function driveDurableRun(
       runStartTime,
       errorMessage: summary.errorMessage,
       abortReason: summary.abortReason,
+      schemaValidation: summary.schemaValidation,
     });
   } finally {
     clearRunDeps(runId);
@@ -332,6 +334,12 @@ interface FinalizeArgs {
   errorMessage?: string;
   /** The abort reason (when the durable run was aborted). */
   abortReason?: string;
+  /**
+   * The structured-output validation outcome carried out of the workflow, so a
+   * completed durable run's `RunResult.schemaValidation` matches the in-memory
+   * loop. Its serialized error message is rebuilt into an `Error` for parity.
+   */
+  schemaValidation?: { success: boolean; error?: string };
 }
 
 /**
@@ -361,13 +369,18 @@ function finalizeRunResult(args: FinalizeArgs): RunResult {
   ) {
     // Rebuild an Error from the serialized message so consumers see the real
     // cause (gateway's `lastError: serializeUnknownError(event.error)`).
-    return makeErrorResult(
-      runState,
-      conversation,
-      hooks,
-      emitter,
-      new Error(args.errorMessage ?? `Durable run ${finishReason}`),
-    );
+    // Rebuild the SAME error SUBCLASS the workflow classified, so
+    // `makeErrorResult`'s `instanceof` re-classification lands on the same
+    // `finishReason` — otherwise a plain `Error` would always flatten back to
+    // `'error'` and lose the elicitation-denied / budget-exceeded distinction.
+    const message = args.errorMessage ?? `Durable run ${finishReason}`;
+    const error =
+      finishReason === 'elicitation-denied'
+        ? new ElicitationDeniedError(message)
+        : finishReason === 'budget-exceeded'
+          ? new BudgetExceededError(message)
+          : new Error(message);
+    return makeErrorResult(runState, conversation, hooks, emitter, error);
   }
   return makeCompletedResult(
     runState,
@@ -376,5 +389,13 @@ function finalizeRunResult(args: FinalizeArgs): RunResult {
     emitter,
     finishReason === 'stop-condition' ? 'stop-condition' : 'maximum-steps',
     runStartTime,
+    args.schemaValidation
+      ? {
+          success: args.schemaValidation.success,
+          ...(args.schemaValidation.error !== undefined
+            ? { error: new Error(args.schemaValidation.error) }
+            : {}),
+        }
+      : undefined,
   );
 }

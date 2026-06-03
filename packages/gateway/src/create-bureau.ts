@@ -488,11 +488,67 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
   }
 
   /**
+   * Await one recovered handle to completion, persist the owning session's
+   * terminal status, and release that run's deps. Runs detached, AFTER boot —
+   * never awaited by `recoverDurableRuns`, so one long or stuck recovered run
+   * cannot block the gateway from coming up. The run's deps are cleared in a
+   * `finally` (via the caller's bookkeeping) so the credential-bearing closure
+   * never lingers in the module-global registry, even on rejection.
+   *
+   * Returns the recovered run's `runId` once known (so the caller can mark it
+   * handled), or `undefined` if the result never yielded a usable runId.
+   */
+  async function settleRecoveredRun(
+    handle: { result(): Promise<unknown> },
+    recovered: ReadonlyMap<string, string>,
+    sessionStore: NonNullable<typeof runtime.sessionStore>,
+  ): Promise<string | undefined> {
+    let runId: string | undefined;
+    try {
+      const summary = (await handle.result()) as { runId: string; finishReason: string };
+      runId = typeof summary.runId === 'string' ? summary.runId : undefined;
+      if (runId === undefined) return undefined;
+
+      const sessionId = recovered.get(runId);
+      if (sessionId === undefined) return runId; // not bureau-owned; nothing to persist
+
+      const session = await sessionStore.load(sessionId);
+      if (!session) return runId;
+
+      const lastRunStatus = summary.finishReason === 'error' ? 'error' : 'completed';
+      await saveSession(sessionId, new Conversation(session.conversationHistory), {
+        lastRunId: runId,
+        lastRunStatus,
+        lastFinishReason: summary.finishReason,
+      });
+      return runId;
+    } catch (error) {
+      // A recovered run that errors out (incl. EngineDisposedError when the
+      // bureau is torn down before recovery settles) leaves its session
+      // `running` for a future process to retry — consistent with the
+      // dispose-mid-run crash semantic. The deps are still cleared (caller).
+      console.error(
+        `[bureau] A recovered durable run did not settle cleanly: ${serializeUnknownError(error)}`,
+      );
+      return runId;
+    } finally {
+      if (runId !== undefined) clearRunDeps(runId);
+    }
+  }
+
+  /**
    * Boot-time recovery for durable runs (seam #5). Registers the deps
-   * reconstructor, then resumes any `agentRun` workflows a previous process left
-   * in flight via `engine.recoverAll()`. Each recovered run advances to
-   * completion through the reconstructed behavior; its terminal session status is
-   * persisted so a resumed run is not stuck `running` forever.
+   * reconstructor, pre-injects deps for in-flight runs, then resumes any
+   * `agentRun` workflows a previous process left in flight via
+   * `engine.recoverAll()`. Each recovered run advances to completion through the
+   * reconstructed behavior; its terminal session status is persisted by a
+   * DETACHED monitor so a resumed run is not stuck `running` forever — without
+   * blocking boot on the run finishing.
+   *
+   * Boot returns once `recoverAll()` has STARTED the handles, not when they
+   * complete: a recovered run that resumes into a long model call or a hanging
+   * tool must not hold the whole gateway hostage. The per-handle monitors run
+   * after this function returns and clear their deps in a `finally`.
    *
    * Best-effort and fail-safe: a single unrecoverable run terminates itself
    * (safe error result) without aborting the others or the boot.
@@ -528,23 +584,37 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       recovered.set(runId, summary.id);
     }
 
-    const handles = await runtime.durable.engine.recoverAll();
-    await Promise.allSettled(
-      handles.map(async (handle) => {
-        const summary = (await handle.result()) as { runId: string; finishReason: string };
-        const sessionId = recovered.get(summary.runId);
-        if (!sessionId) return;
-        const session = await sessionStore.load(sessionId);
-        if (!session) return;
-        const lastRunStatus = summary.finishReason === 'error' ? 'error' : 'completed';
-        await saveSession(sessionId, new Conversation(session.conversationHistory), {
-          lastRunId: summary.runId,
-          lastRunStatus,
-          lastFinishReason: summary.finishReason,
-        });
-        clearRunDeps(summary.runId);
-      }),
-    );
+    let handles: Array<{ result(): Promise<unknown> }>;
+    try {
+      handles = (await runtime.durable.engine.recoverAll()) as Array<{
+        result(): Promise<unknown>;
+      }>;
+    } catch (error) {
+      // recoverAll itself failed — clear every pre-injected closure so nothing
+      // leaks, then rethrow to the boot try/catch (which logs and continues).
+      for (const runId of recovered.keys()) clearRunDeps(runId);
+      throw error;
+    }
+
+    // Detached monitors — NOT awaited, so boot proceeds the moment recoverAll
+    // has started the handles. Each monitor persists its run's terminal session
+    // status and clears that run's deps. After all settle, sweep any pre-injected
+    // run that recoverAll never returned a handle for (e.g. a stale `running`
+    // session whose workflow already completed or was pruned) so its deps don't
+    // leak forever.
+    void Promise.allSettled(
+      handles.map((handle) => settleRecoveredRun(handle, recovered, sessionStore)),
+    ).then((results) => {
+      const handled = new Set<string>();
+      for (const result of results) {
+        if (result.status === 'fulfilled' && result.value !== undefined) {
+          handled.add(result.value);
+        }
+      }
+      for (const runId of recovered.keys()) {
+        if (!handled.has(runId)) clearRunDeps(runId);
+      }
+    });
   }
 
   function submitSchedulerTask(
@@ -708,6 +778,14 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     // rare explicit `durableExecution: true` bureau. Disposed before
     // `store.dispose()` so engine teardown completes before the store closes.
     runtime.durable?.engine[Symbol.dispose]?.();
+
+    // Release the raw `Storage` backend (the SQLite/LMDB handle). The engine
+    // dispose above does NOT close it, and the KV/checkpoint views were created
+    // with `disposeUnderlyingStorage: false` — so without this, a persistent
+    // bureau leaks its file handle even when no engine was built (e.g.
+    // `durableExecution: false` with a sqlite backend). Runs after the engine so
+    // nothing is still writing checkpoints to it.
+    runtime.disposeStorage?.();
 
     if (ownsStore) {
       store.dispose();

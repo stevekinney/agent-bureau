@@ -2,12 +2,13 @@ import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
 import { createToolbox } from 'armorer';
 import { afterEach, describe, expect, it } from 'bun:test';
 import { Conversation, createConversationHistory } from 'conversationalist';
 import type { GenerateFunction } from 'operative';
 import { stopWhen } from 'operative';
-import { createDurableRun } from 'operative/durable';
+import { createDurableActiveRun } from 'operative/durable';
 
 import { createRuntimeComposition } from './runtime-composition';
 import type { ProviderConfiguration } from './types';
@@ -224,6 +225,29 @@ describe('createRuntimeComposition durable execution', () => {
     }
   });
 
+  it('throws when durableExecution: true is combined with a custom persistence value', async () => {
+    // `persistence` shadows `storage`, so no raw backend is resolved and a
+    // durable engine cannot share its backend with the session store. Honoring
+    // `durableExecution: true` silently would ship an engine that looks durable
+    // but can never recover (the boot reconstructor scans the SESSION store).
+    // The contradiction must fail loud at composition, not silently no-op.
+    const error = await createRuntimeComposition({
+      generate: async () => ({ content: 'x', toolCalls: [] }),
+      toolbox: createToolbox([], { context: {} }),
+      storage: { type: 'sqlite', path: join(tmpdir(), 'never-created.sqlite') },
+      durableExecution: true,
+      persistence: textValueStore(new MemoryStorage()),
+    }).then(
+      () => undefined,
+      (rejection: unknown) => rejection,
+    );
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toMatch(
+      /durableExecution: true is incompatible with a custom `persistence`/,
+    );
+  });
+
   it('builds a durable engine through the composition path and runs an agent durably', async () => {
     const runtime = await createRuntimeComposition({
       generate: async () => ({ content: 'composed', toolCalls: [] }),
@@ -236,8 +260,9 @@ describe('createRuntimeComposition durable execution', () => {
 
     try {
       // The integration gate: drive a durable run through the engine the
-      // PRODUCT'S composition built — not a hand-assembled Engine.create.
-      const result = await createDurableRun(runtime.durable!, {
+      // PRODUCT'S composition built — not a hand-assembled Engine.create. Uses
+      // the same `createDurableActiveRun` entry the gateway routes through.
+      const activeRun = createDurableActiveRun(runtime.durable!, {
         runId: 'composition-run',
         prompt: 'Hello',
         options: {
@@ -249,9 +274,9 @@ describe('createRuntimeComposition durable execution', () => {
           stopWhen: stopWhen.noToolCalls(),
         },
       });
+      const result = await activeRun.result;
 
-      expect(result.runId).toBe('composition-run');
-      expect(result.steps).toBe(1);
+      expect(result.steps).toHaveLength(1);
       expect(result.content).toBe('durable result');
       expect(result.finishReason).toBe('stop-condition');
 

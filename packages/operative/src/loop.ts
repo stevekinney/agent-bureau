@@ -8,6 +8,7 @@ import {
   startRunLifecycle,
 } from './run-lifecycle';
 import {
+  DEFAULT_MAXIMUM_STEPS,
   type EventDispatcher,
   normalizeToArray,
   type RunState,
@@ -94,7 +95,7 @@ export async function executeLoop(
   options: RunOptions,
   emitter?: EventDispatcher,
 ): Promise<RunResult> {
-  const { maximumSteps = 25, hooks, onMaximumSteps } = options;
+  const { maximumSteps = DEFAULT_MAXIMUM_STEPS, hooks, onMaximumSteps } = options;
 
   const conversation = isConversation(options.conversation)
     ? options.conversation

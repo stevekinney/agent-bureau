@@ -57,6 +57,14 @@ export type EventDispatcher = {
 };
 
 /**
+ * The default safety bound on step count when {@link RunOptions.maximumSteps} is
+ * not set. Shared by every driver — the in-memory `executeLoop`, the run-level
+ * lifecycle, and the durable `agentRun` workflow — so the in-memory and durable
+ * paths can never silently disagree on how many steps an unbounded run takes.
+ */
+export const DEFAULT_MAXIMUM_STEPS = 25;
+
+/**
  * The loop-invariant dependencies of a run. Every field is derived once from
  * {@link RunOptions} before the step loop begins and never mutated. Splitting
  * the run's ~20 locals into this immutable bag plus the mutable {@link RunState}
