@@ -5,24 +5,24 @@ import type { CheckpointStore } from './checkpoint-store';
 import type { RunCursor, StepRecord } from './types';
 
 /** Input carrying only a `runId` — for the read activities. */
-interface RunIdInput {
+export interface RunIdInput {
   runId: string;
 }
 
 /** Input for the cursor write activity. */
-interface SaveCursorInput {
+export interface SaveCursorInput {
   runId: string;
   cursor: RunCursor;
 }
 
 /** Input for the conversation snapshot write activity. */
-interface SaveConversationInput {
+export interface SaveConversationInput {
   runId: string;
   snapshot: ConversationSnapshot;
 }
 
 /** Input for the step-record write activity. */
-interface RecordStepInput {
+export interface RecordStepInput {
   runId: string;
   record: StepRecord;
 }
