@@ -2,6 +2,8 @@ import { VectorDatabase } from '@/core/database.ts';
 import { TransactionError } from '@/core/errors.ts';
 import type { DistanceMetric } from '@/core/types.ts';
 import { log } from '@/utilities/logger.ts';
+import type { TimeSource } from '@/utilities/time-source.ts';
+import { systemTimeSource } from '@/utilities/time-source.ts';
 
 import type { HNSWIndex } from './hnsw-index.ts';
 
@@ -37,8 +39,14 @@ interface SerializableHNSWIndex {
 export class IndexPersistence {
   private static readonly STORE_NAME = VectorDatabase.STORES.HNSW_INDICES;
   private static readonly VERSION = '1.0.0';
+  private timeSource: TimeSource;
 
-  constructor(private database: VectorDatabase) {}
+  constructor(
+    private database: VectorDatabase,
+    options: { timeSource?: TimeSource } = {},
+  ) {
+    this.timeSource = options.timeSource ?? systemTimeSource;
+  }
 
   /**
    * Save HNSW index to IndexedDB
@@ -56,7 +64,7 @@ export class IndexPersistence {
           const request = store.put({
             id: indexId,
             data: serializedIndex,
-            timestamp: Date.now(),
+            timestamp: this.timeSource.nowMilliseconds(),
           });
 
           request.onsuccess = () => resolve();
@@ -241,7 +249,7 @@ export class IndexPersistence {
       config: exported.config,
       distanceMetric,
       version: IndexPersistence.VERSION,
-      timestamp: Date.now(),
+      timestamp: this.timeSource.nowMilliseconds(),
     };
   }
 
@@ -301,9 +309,11 @@ export class IndexCache {
 
   private maxCacheSize = 5; // Maximum number of cached indices
   private persistenceManager: IndexPersistence;
+  private timeSource: TimeSource;
 
-  constructor(database: VectorDatabase) {
-    this.persistenceManager = new IndexPersistence(database);
+  constructor(database: VectorDatabase, options: { timeSource?: TimeSource } = {}) {
+    this.timeSource = options.timeSource ?? systemTimeSource;
+    this.persistenceManager = new IndexPersistence(database, { timeSource: this.timeSource });
   }
 
   /**
@@ -316,7 +326,7 @@ export class IndexCache {
     const cached = this.cache.get(indexId);
 
     if (cached) {
-      cached.lastAccess = Date.now();
+      cached.lastAccess = this.timeSource.nowMilliseconds();
       return {
         index: cached.index,
         distanceMetric: cached.distanceMetric,
@@ -345,7 +355,7 @@ export class IndexCache {
     this.cache.set(indexId, {
       index,
       distanceMetric,
-      lastAccess: Date.now(),
+      lastAccess: this.timeSource.nowMilliseconds(),
       isDirty,
     });
   }
@@ -396,7 +406,7 @@ export class IndexCache {
    */
   private evictLeastRecentlyUsed(): void {
     let oldestId = '';
-    let oldestAccess = Date.now();
+    let oldestAccess = Number.POSITIVE_INFINITY;
 
     for (const [indexId, cached] of this.cache) {
       if (cached.lastAccess < oldestAccess) {

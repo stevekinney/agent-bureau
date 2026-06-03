@@ -1,14 +1,10 @@
 import { describe, expect, it } from 'bun:test';
 import { createMemoryKeyValueStore } from 'storage';
 
-import { createTestGateway, requestJSON } from '../test';
+import { createTestGateway, requestJSON, waitForRunState } from '../test';
 
 const AUTH_TOKEN = 'test-token';
 const authHeaders = { authorization: `Bearer ${AUTH_TOKEN}` };
-
-async function waitForRunCompletion() {
-  await new Promise((resolve) => setTimeout(resolve, 50));
-}
 
 describe('sessions routes', () => {
   it('returns 501 when no persistence adapter is configured', async () => {
@@ -34,7 +30,7 @@ describe('sessions routes', () => {
       body: JSON.stringify({ message: 'Hello' }),
     });
     const createdRun = await createResponse.json();
-    await waitForRunCompletion();
+    await waitForRunState(gateway.bureau, createdRun.id);
 
     const response = await requestJSON(gateway, '/api/v1/sessions', {
       headers: authHeaders,
@@ -59,7 +55,7 @@ describe('sessions routes', () => {
       body: JSON.stringify({ message: 'Hello' }),
     });
     const createdRun = await createResponse.json();
-    await waitForRunCompletion();
+    await waitForRunState(gateway.bureau, createdRun.id);
 
     const response = await requestJSON(gateway, `/api/v1/sessions/${createdRun.sessionId}`, {
       headers: authHeaders,
@@ -92,7 +88,7 @@ describe('sessions routes', () => {
       body: JSON.stringify({ message: 'Hello' }),
     });
     const createdRun = await createResponse.json();
-    await waitForRunCompletion();
+    await waitForRunState(gateway.bureau, createdRun.id);
 
     const deleteResponse = await requestJSON(gateway, `/api/v1/sessions/${createdRun.sessionId}`, {
       method: 'DELETE',

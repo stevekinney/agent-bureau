@@ -269,8 +269,9 @@ describe('step hooks', () => {
   it('async hooks are awaited', async () => {
     const log: string[] = [];
 
-    const delay = (milliseconds: number) =>
-      new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
+    const delay = async (_milliseconds: number) => {
+      await Promise.resolve();
+    };
 
     const trackingTool = createTool({
       name: 'get_weather',

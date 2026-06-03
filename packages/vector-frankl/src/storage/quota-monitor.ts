@@ -3,6 +3,8 @@
  */
 
 import { log } from '@/utilities/logger.ts';
+import type { TimeSource } from '@/utilities/time-source.ts';
+import { systemTimeSource } from '@/utilities/time-source.ts';
 
 export interface QuotaEstimate {
   usage: number;
@@ -31,39 +33,55 @@ export interface StorageBreakdown {
   otherOriginData: number;
 }
 
+export interface StorageQuotaMonitorOptions {
+  safetyMargin?: number;
+  initialCheckInterval?: number;
+  timeSource?: TimeSource;
+}
+
 /**
  * Monitors storage quota and provides warnings/recommendations
  */
 export class StorageQuotaMonitor {
   private static instance: StorageQuotaMonitor | null = null;
 
-  private safetyMargin: number;
-  private checkInterval: number;
+  private safetyMargin = 0.15;
+  private checkInterval = 1000;
   private operationCount = 0;
   private listeners = new Set<(warning: QuotaWarning) => void>();
   private lastCheck: QuotaEstimate | null = null;
   private usageHistory: Array<{ timestamp: number; usage: number }> = [];
   private maxHistoryEntries = 100;
+  private timeSource: TimeSource = systemTimeSource;
 
-  private constructor(
-    options: {
-      safetyMargin?: number;
-      initialCheckInterval?: number;
-    } = {},
-  ) {
-    this.safetyMargin = options.safetyMargin ?? 0.15; // 15% safety buffer
-    this.checkInterval = options.initialCheckInterval ?? 1000; // Check every 1000 operations initially
+  private constructor(options: StorageQuotaMonitorOptions = {}) {
+    this.configure(options);
+  }
+
+  private configure(options: StorageQuotaMonitorOptions = {}): void {
+    if (options.safetyMargin !== undefined) {
+      this.safetyMargin = options.safetyMargin;
+    }
+    if (options.initialCheckInterval !== undefined) {
+      this.checkInterval = options.initialCheckInterval;
+    }
+    if (options.timeSource !== undefined) {
+      if (options.timeSource !== this.timeSource) {
+        this.usageHistory = [];
+        this.lastCheck = null;
+      }
+      this.timeSource = options.timeSource;
+    }
   }
 
   /**
    * Get singleton instance
    */
-  static getInstance(options?: {
-    safetyMargin?: number;
-    initialCheckInterval?: number;
-  }): StorageQuotaMonitor {
+  static getInstance(options?: StorageQuotaMonitorOptions): StorageQuotaMonitor {
     if (!StorageQuotaMonitor.instance) {
       StorageQuotaMonitor.instance = new StorageQuotaMonitor(options);
+    } else if (options) {
+      StorageQuotaMonitor.instance.configure(options);
     }
     return StorageQuotaMonitor.instance;
   }
@@ -147,7 +165,7 @@ export class StorageQuotaMonitor {
    */
   private updateUsageHistory(usage: number): void {
     this.usageHistory.push({
-      timestamp: Date.now(),
+      timestamp: this.timeSource.nowMilliseconds(),
       usage,
     });
 

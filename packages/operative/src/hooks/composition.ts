@@ -1,3 +1,7 @@
+export type TimeoutHandle = unknown;
+export type ScheduleTimeout = (callback: () => void, milliseconds?: number) => TimeoutHandle;
+export type ClearScheduledTimeout = (handle: TimeoutHandle) => void;
+
 /**
  * Creates a hook that only runs on a specific step number.
  * Uses the `step` property from the hook's context argument.
@@ -77,10 +81,20 @@ export function withTimeout<H extends (...args: any[]) => any>(
   ms: number,
   hook: H,
   onTimeout: 'ignore' | 'error' = 'ignore',
+  options: {
+    clearTimeoutFunction?: ClearScheduledTimeout;
+    setTimeoutFunction?: ScheduleTimeout;
+  } = {},
 ): H {
   return ((...args: unknown[]) => {
     return new Promise<unknown>((resolve, reject) => {
-      const timer = setTimeout(() => {
+      const setTimeoutFunction =
+        options.setTimeoutFunction ??
+        ((callback, milliseconds) => setTimeout(callback, milliseconds));
+      const clearTimeoutFunction =
+        options.clearTimeoutFunction ??
+        ((handle) => clearTimeout(handle as ReturnType<typeof setTimeout>));
+      const timer = setTimeoutFunction(() => {
         if (onTimeout === 'error') {
           reject(new Error(`Hook timed out after ${ms}ms`));
         } else {
@@ -91,11 +105,11 @@ export function withTimeout<H extends (...args: any[]) => any>(
       const hookResult: Promise<unknown> = Promise.resolve(hook(...args));
       void hookResult.then(
         (result: unknown) => {
-          clearTimeout(timer);
+          clearTimeoutFunction(timer);
           resolve(result);
         },
         (error: unknown) => {
-          clearTimeout(timer);
+          clearTimeoutFunction(timer);
           reject(error instanceof Error ? error : new Error(String(error)));
         },
       );

@@ -7,6 +7,8 @@ import type {
   StorageAdapterFactory,
 } from '@/core/types.ts';
 import { log } from '@/utilities/logger.ts';
+import type { TimeSource } from '@/utilities/time-source.ts';
+import { systemTimeSource } from '@/utilities/time-source.ts';
 
 import { AdapterNamespaceRegistry } from './adapter-registry.ts';
 import { VectorNamespace } from './namespace.ts';
@@ -37,20 +39,25 @@ export class NamespaceManager {
   private namespaces: Map<string, VectorNamespace>;
   private initialized = false;
   private storageFactory: StorageAdapterFactory | undefined;
+  private timeSource: TimeSource;
 
   constructor(
     private rootDatabaseName = 'vector-frankl-root',
     storageFactory?: StorageAdapterFactory,
+    options: { timeSource?: TimeSource } = {},
   ) {
     this.storageFactory = storageFactory;
+    this.timeSource = options.timeSource ?? systemTimeSource;
 
     if (storageFactory) {
       // Use adapter-backed registry for non-browser environments
       const registryAdapter = storageFactory(`${rootDatabaseName}-registry`);
-      this.registry = new AdapterNamespaceRegistry(registryAdapter);
+      this.registry = new AdapterNamespaceRegistry(registryAdapter, {
+        timeSource: this.timeSource,
+      });
     } else {
       // Default: IndexedDB-backed registry for browser environments
-      this.registry = new NamespaceRegistry(rootDatabaseName);
+      this.registry = new NamespaceRegistry(rootDatabaseName, { timeSource: this.timeSource });
     }
 
     this.namespaces = new Map();
@@ -128,7 +135,7 @@ export class NamespaceManager {
 
     // Update last accessed time
     await this.registry.updateStats(name, {
-      lastAccessed: Date.now(),
+      lastAccessed: this.timeSource.nowMilliseconds(),
     });
 
     return namespace;

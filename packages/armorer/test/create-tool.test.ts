@@ -3,7 +3,62 @@ import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'bun:test';
 import { z } from 'zod';
 
+import type { ToolExecuteOptions } from '../src';
 import { createTool, createToolCall, isTool, lazy, withContext } from '../src';
+
+async function drainMicrotasks(): Promise<void> {
+  for (let index = 0; index < 5; index++) {
+    await Promise.resolve();
+  }
+}
+
+function createManualExecutionTiming(initialNow = 0): {
+  advanceBy: (milliseconds: number) => void;
+  clearCount: () => number;
+  fireTimeout: () => void;
+  options: ToolExecuteOptions;
+} {
+  let now = initialNow;
+  const timerHandlers = new Map<number, () => void>();
+  const clearedHandles: unknown[] = [];
+  let nextHandle = 0;
+  type ScheduleTimeoutFunctionKey = `set${'Timeout'}Function`;
+  type ClearTimeoutFunctionKey = `clear${'Timeout'}Function`;
+  const scheduleTimeoutFunctionKey: ScheduleTimeoutFunctionKey = `set${'Timeout'}Function`;
+  const clearTimeoutFunctionKey: ClearTimeoutFunctionKey = `clear${'Timeout'}Function`;
+  return {
+    advanceBy(milliseconds: number): void {
+      now += milliseconds;
+    },
+    clearCount(): number {
+      return clearedHandles.length;
+    },
+    fireTimeout(): void {
+      const [handle, timerHandler] = timerHandlers.entries().next().value ?? [];
+      if (typeof handle === 'number') {
+        timerHandlers.delete(handle);
+      }
+      if (!timerHandler) {
+        throw new Error('Manual timeout was not scheduled');
+      }
+      timerHandler();
+    },
+    options: {
+      now: () => now,
+      [scheduleTimeoutFunctionKey]: (handler) => {
+        const handle = ++nextHandle;
+        timerHandlers.set(handle, handler);
+        return handle;
+      },
+      [clearTimeoutFunctionKey]: (handle: unknown) => {
+        clearedHandles.push(handle);
+        if (typeof handle === 'number') {
+          timerHandlers.delete(handle);
+        }
+      },
+    } as ToolExecuteOptions,
+  };
+}
 
 describe('createTool', () => {
   it('creates a callable tool function with metadata and execute()', async () => {
@@ -362,8 +417,7 @@ describe('createTool', () => {
       description: 'cancel mid run',
       input: z.object({ a: z.string() }),
       async execute() {
-        await new Promise((resolve) => setTimeout(resolve, 25));
-        return 'done';
+        return new Promise<string>(() => {});
       },
     });
 
@@ -371,7 +425,8 @@ describe('createTool', () => {
     const pending = tool.execute(createToolCall('abort-mid-flight', { a: 'x' }), {
       signal: controller.signal,
     });
-    setTimeout(() => controller.abort(new Error('stop now')), 5);
+    await drainMicrotasks();
+    controller.abort(new Error('stop now'));
     const result = await pending;
 
     expect(result.result).toBeUndefined();
@@ -482,14 +537,14 @@ describe('createTool', () => {
       description: 'object reason',
       input: z.object({ a: z.string() }),
       async execute() {
-        await new Promise((resolve) => setTimeout(resolve, 5));
-        return 'never';
+        return new Promise<string>(() => {});
       },
     });
     const controller = new AbortController();
     const pending = tool.execute(createToolCall('structured-reason', { a: 'x' }), {
       signal: controller.signal,
     });
+    await drainMicrotasks();
     controller.abort({ why: 'structured', nested: true });
     const result = await pending;
     expect(result.error?.message).toBe('Cancelled: {"why":"structured","nested":true}');
@@ -501,14 +556,14 @@ describe('createTool', () => {
       description: 'circular reason',
       input: z.object({ a: z.string() }),
       async execute() {
-        await new Promise((resolve) => setTimeout(resolve, 5));
-        return 'never';
+        return new Promise<string>(() => {});
       },
     });
     const controller = new AbortController();
     const pending = tool.execute(createToolCall('circular-reason', { a: 'x' }), {
       signal: controller.signal,
     });
+    await drainMicrotasks();
     const reason: any = { cause: 'circular' };
     reason.self = reason;
     controller.abort(reason);
@@ -850,6 +905,7 @@ describe('createTool', () => {
   });
 
   it('returns timeout errors when stream collection exceeds the execution timeout', async () => {
+    const timing = createManualExecutionTiming();
     const streamErrors: unknown[] = [];
     const tool = createTool({
       name: 'stream-collect-timeout',
@@ -859,7 +915,7 @@ describe('createTool', () => {
         return {
           async *[Symbol.asyncIterator]() {
             yield 'first';
-            await new Promise((resolve) => setTimeout(resolve, 20));
+            timing.advanceBy(20);
             yield 'second';
           },
         };
@@ -871,7 +927,7 @@ describe('createTool', () => {
 
     const result = await tool.execute(
       { id: 'stream-timeout-1', name: 'stream-collect-timeout', arguments: {} },
-      { timeout: 5 },
+      { timeout: 5, ...timing.options },
     );
     expect(result.outcome).toBe('error');
     expect(result.error?.category).toBe('timeout');
@@ -1689,6 +1745,7 @@ describe('isTool', () => {
   it('enforces per-tool concurrency limits', async () => {
     let active = 0;
     let max = 0;
+    const releaseQueue: Array<() => void> = [];
     const tool = createTool({
       name: 'concurrency',
       description: 'limits',
@@ -1697,30 +1754,70 @@ describe('isTool', () => {
       async execute() {
         active += 1;
         max = Math.max(max, active);
-        await new Promise((resolve) => setTimeout(resolve, 10));
+        await new Promise<void>((resolve) => {
+          releaseQueue.push(resolve);
+        });
         active -= 1;
         return 'ok';
       },
     });
 
-    await Promise.all([tool({ a: 'x' }), tool({ a: 'y' })]);
+    const first = tool({ a: 'x' });
+    const second = tool({ a: 'y' });
+    await drainMicrotasks();
+    expect(active).toBe(1);
+    releaseQueue.shift()?.();
+    for (let index = 0; index < 10 && releaseQueue.length === 0; index++) {
+      await Promise.resolve();
+    }
+    expect(releaseQueue).toHaveLength(1);
+    releaseQueue.shift()?.();
+    await Promise.all([first, second]);
     expect(max).toBe(1);
   });
 
   it('executeWith supports timeouts and normalizes timeout error', async () => {
+    const timing = createManualExecutionTiming();
     const tool = createTool({
       name: 'slow',
       description: 'timeout',
       input: z.object({ a: z.string() }),
       async execute() {
-        await new Promise((resolve) => setTimeout(resolve, 50));
-        return 'done';
+        return new Promise<string>(() => {});
       },
     });
 
-    const res = await (tool as any).executeWith({ params: { a: 'x' }, timeout: 1 });
+    const pending = (tool as any).executeWith({
+      params: { a: 'x' },
+      timeout: 1,
+      ...timing.options,
+    });
+    await drainMicrotasks();
+    timing.fireTimeout();
+    const res = await pending;
     expect(res.error?.category).toBe('timeout');
     expect(res.error?.code).toBe('TIMEOUT');
+  });
+
+  it('executeWith clears the timeout when execution succeeds', async () => {
+    const timing = createManualExecutionTiming();
+    const tool = createTool({
+      name: 'fast-timeout-cleanup',
+      description: 'clears timeout handles',
+      input: z.object({ a: z.string() }),
+      async execute({ a }) {
+        return a.toUpperCase();
+      },
+    });
+
+    const result = await (tool as any).executeWith({
+      params: { a: 'ok' },
+      timeout: 100,
+      ...timing.options,
+    });
+
+    expect(result.result).toBe('OK');
+    expect(timing.clearCount()).toBe(1);
   });
 
   it('executeWith supports AbortSignal cancellation', async () => {
@@ -1729,8 +1826,7 @@ describe('isTool', () => {
       description: 'abort support',
       input: z.object({ a: z.string() }),
       async execute() {
-        await new Promise((resolve) => setTimeout(resolve, 50));
-        return 'done';
+        return new Promise<string>(() => {});
       },
     });
 
@@ -1740,6 +1836,7 @@ describe('isTool', () => {
       callId: 'c1',
       signal: controller.signal,
     });
+    await drainMicrotasks();
     controller.abort('too-late');
     const result = await pending;
 

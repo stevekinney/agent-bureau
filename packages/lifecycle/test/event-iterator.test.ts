@@ -147,9 +147,6 @@ describe('eventIterator', () => {
 
     const results: number[] = [];
 
-    // Use queueMicrotask to abort after consuming
-    setTimeout(() => controller.abort(), 10);
-
     for await (const event of iterator) {
       results.push(event.value);
       if (results.length === 2) break;

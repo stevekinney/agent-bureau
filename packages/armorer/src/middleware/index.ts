@@ -1,4 +1,4 @@
-import type { ToolConfiguration } from '../is-tool';
+import type { ClearScheduledTimeout, ScheduleTimeout, ToolConfiguration } from '../is-tool';
 import {
   createTruncatingAsyncIterable,
   DEFAULT_MAX_CHARACTERS,
@@ -22,11 +22,13 @@ export function createRateLimitMiddleware(
     windowMs?: number;
     limit?: number;
     keyGenerator?: (params: unknown, context: unknown) => string;
+    now?: () => number;
   } = {},
 ) {
   const windowMs = options.windowMs ?? 60000;
   const limit = options.limit ?? 10;
   const keyGenerator = options.keyGenerator ?? (() => 'global');
+  const nowFunction = options.now ?? Date.now;
 
   // State: Map<ToolName, Map<Key, { count: number; resetTime: number }>>
   const state = new Map<string, Map<string, { count: number; resetTime: number }>>();
@@ -43,7 +45,7 @@ export function createRateLimitMiddleware(
       const toolState = state.get(configuration.name)!;
 
       // Sweep expired entries on each new invocation
-      const now = Date.now();
+      const now = nowFunction();
       for (const [entryKey, entryRecord] of toolState) {
         if (now > entryRecord.resetTime) {
           toolState.delete(entryKey);
@@ -97,10 +99,12 @@ export function createCacheMiddleware(
     ttlMs?: number;
     maxSize?: number;
     keyGenerator?: (params: unknown) => string;
+    now?: () => number;
   } = {},
 ) {
   const ttlMs = options.ttlMs ?? 60000;
   const maxSize = options.maxSize ?? 1000;
+  const nowFunction = options.now ?? Date.now;
 
   // State: Map<ToolName, Map<CacheKey, { value: unknown; expiry: number }>>
   const cache = new Map<string, Map<string, { value: unknown; expiry: number }>>();
@@ -126,7 +130,7 @@ export function createCacheMiddleware(
       }
       const toolCache = cache.get(configuration.name)!;
       const key = keyGenerator(params);
-      const now = Date.now();
+      const now = nowFunction();
       const cached = toolCache.get(key);
 
       if (cached && now < cached.expiry) {
@@ -170,9 +174,21 @@ export function createCacheMiddleware(
  * @param ms - Timeout in milliseconds.
  * @returns A middleware function.
  */
-export function createTimeoutMiddleware(ms: number) {
+export function createTimeoutMiddleware(
+  ms: number,
+  options: {
+    clearTimeoutFunction?: ClearScheduledTimeout;
+    setTimeoutFunction?: ScheduleTimeout;
+  } = {},
+) {
   return (configuration: ToolConfiguration): ToolConfiguration => {
     const originalExecute = configuration.execute;
+    const setTimeoutFunction =
+      options.setTimeoutFunction ??
+      ((callback, milliseconds) => setTimeout(callback, milliseconds));
+    const clearTimeoutFunction =
+      options.clearTimeoutFunction ??
+      ((handle) => clearTimeout(handle as ReturnType<typeof setTimeout>));
 
     const wrappedExecute = async (params: unknown, context: unknown) => {
       let executeFn: (params: unknown, context: unknown) => Promise<unknown>;
@@ -183,17 +199,17 @@ export function createTimeoutMiddleware(ms: number) {
       }
 
       return new Promise((resolve, reject) => {
-        const timer = setTimeout(() => {
+        const timer = setTimeoutFunction(() => {
           reject(new Error(`Tool "${configuration.name}" timed out after ${ms}ms`));
         }, ms);
 
         executeFn(params, context)
           .then((result) => {
-            clearTimeout(timer);
+            clearTimeoutFunction(timer);
             resolve(result);
           })
           .catch((error) => {
-            clearTimeout(timer);
+            clearTimeoutFunction(timer);
             reject(error instanceof Error ? error : new Error(String(error)));
           });
       });

@@ -6,6 +6,7 @@ import type { GenerateResponse, Scheduler, SchedulerPriority } from 'operative';
 import { createScheduler } from 'operative';
 import { createMockGenerate } from 'operative/test';
 
+import { drainMicrotasks } from '../test';
 import type { SubmitSchedulerTaskRequest, SubmitSchedulerTaskResponse } from '../types';
 import { createSchedulerRoutes } from './scheduler';
 
@@ -14,7 +15,7 @@ function textResponse(content: string): GenerateResponse {
 }
 
 async function waitForSchedulerTick() {
-  await new Promise((resolve) => setTimeout(resolve, 25));
+  await drainMicrotasks();
 }
 
 function createSubmitSchedulerTask(

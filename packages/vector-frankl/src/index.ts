@@ -79,6 +79,7 @@ export {
 } from './core/errors.ts';
 
 // Vector utilities
+export { systemTimeSource, type TimeSource } from './utilities/time-source.ts';
 export { VectorFormatHandler } from './vectors/formats.ts';
 export { VectorOperations } from './vectors/operations.ts';
 

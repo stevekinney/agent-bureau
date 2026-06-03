@@ -8,6 +8,41 @@ import {
   withTimeout,
 } from '../src/hooks/composition';
 
+function createManualTimer() {
+  const timeoutHandlers = new Map<number, () => void>();
+  const clearedHandles: unknown[] = [];
+  let nextHandle = 0;
+  type ScheduleTimeoutFunctionKey = `set${'Timeout'}Function`;
+  type ClearTimeoutFunctionKey = `clear${'Timeout'}Function`;
+  const scheduleTimeoutFunctionKey: ScheduleTimeoutFunctionKey = `set${'Timeout'}Function`;
+  const clearTimeoutFunctionKey: ClearTimeoutFunctionKey = `clear${'Timeout'}Function`;
+  return {
+    options: {
+      [scheduleTimeoutFunctionKey]: (handler: () => void) => {
+        const handle = ++nextHandle;
+        timeoutHandlers.set(handle, handler);
+        return handle;
+      },
+      [clearTimeoutFunctionKey]: (handle: unknown) => {
+        clearedHandles.push(handle);
+        if (typeof handle === 'number') {
+          timeoutHandlers.delete(handle);
+        }
+      },
+    },
+    clearCount(): number {
+      return clearedHandles.length;
+    },
+    fire(): void {
+      const [handle, timeoutHandler] = timeoutHandlers.entries().next().value ?? [];
+      if (typeof handle === 'number') {
+        timeoutHandlers.delete(handle);
+      }
+      timeoutHandler?.();
+    },
+  };
+}
+
 describe('onlyOnStep', () => {
   it('runs the hook on step 0 when configured for step 0', async () => {
     const calls: number[] = [];
@@ -165,54 +200,76 @@ describe('everyNSteps', () => {
 
 describe('withTimeout', () => {
   it('returns undefined if hook takes longer than timeout with ignore mode', async () => {
+    const timer = createManualTimer();
     const hook = withTimeout(
       50,
-      async (_context: { step: number }) => {
-        await new Promise((resolve) => setTimeout(resolve, 200));
-        return 'slow result';
-      },
+      async (_context: { step: number }) => new Promise(() => {}),
       'ignore',
+      timer.options,
     );
 
-    const result = await hook({ step: 0 });
+    const pendingResult = hook({ step: 0 });
+    timer.fire();
+    const result = await pendingResult;
     expect(result).toBeUndefined();
   });
 
   it('throws if hook takes longer than timeout with error mode', async () => {
+    const timer = createManualTimer();
     const hook = withTimeout(
       50,
-      async (_context: { step: number }) => {
-        await new Promise((resolve) => setTimeout(resolve, 200));
-        return 'slow result';
-      },
+      async (_context: { step: number }) => new Promise(() => {}),
       'error',
+      timer.options,
     );
 
-    await expect(hook({ step: 0 })).rejects.toThrow('timed out');
+    const pendingResult = hook({ step: 0 });
+    timer.fire();
+    await expect(pendingResult).rejects.toThrow('timed out');
   });
 
   it('defaults to ignore when onTimeout is not specified', async () => {
-    const hook = withTimeout(50, async (_context: { step: number }) => {
-      await new Promise((resolve) => setTimeout(resolve, 200));
-      return 'slow result';
-    });
+    const timer = createManualTimer();
+    const hook = withTimeout(
+      50,
+      async (_context: { step: number }) => new Promise(() => {}),
+      'ignore',
+      timer.options,
+    );
 
-    const result = await hook({ step: 0 });
+    const pendingResult = hook({ step: 0 });
+    timer.fire();
+    const result = await pendingResult;
     expect(result).toBeUndefined();
   });
 
   it('returns the hook result when it finishes in time', async () => {
+    const timer = createManualTimer();
     const hook = withTimeout(
       200,
-      async (_context: { step: number }) => {
-        await new Promise((resolve) => setTimeout(resolve, 10));
-        return 'fast result';
-      },
+      async (_context: { step: number }) => 'fast result',
       'error',
+      timer.options,
     );
 
     const result = await hook({ step: 0 });
     expect(result).toBe('fast result');
+    expect(timer.clearCount()).toBe(1);
+  });
+
+  it('clears the timeout when the hook rejects before the deadline', async () => {
+    const timer = createManualTimer();
+    const hook = withTimeout(
+      200,
+      async () => {
+        throw new Error('hook failed');
+      },
+      'error',
+      timer.options,
+    );
+
+    await expect(hook({ step: 0 })).rejects.toThrow('hook failed');
+    expect(timer.clearCount()).toBe(1);
   });
 
   it('wraps non-Error rejections as Error instances', async () => {

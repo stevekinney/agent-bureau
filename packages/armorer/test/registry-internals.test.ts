@@ -153,7 +153,7 @@ describe('registry internal coverage', () => {
     resolveEmbeddings?.(Array.from({ length: 5 }, () => [1, 0]));
     await Promise.resolve();
     await Promise.resolve();
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await Promise.resolve();
 
     expect(true).toBe(true);
   });
@@ -179,7 +179,7 @@ describe('registry internal coverage', () => {
     resolveEmbeddings?.(Array.from({ length: 5 }, () => [1, 0]));
     await Promise.resolve();
     await Promise.resolve();
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await Promise.resolve();
 
     expect(true).toBe(true);
   });

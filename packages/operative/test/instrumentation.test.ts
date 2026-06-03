@@ -415,10 +415,13 @@ describe('instrument', () => {
   it('sets abort reason on run span and sweeps open spans when aborted', async () => {
     const tracer = createMockTracer();
     const toolbox = createTestToolbox([]);
+    const generateStarted = Promise.withResolvers<void>();
+    const generateCanFinish = Promise.withResolvers<void>();
 
     const activeRun = createRun({
       generate: async () => {
-        await Bun.sleep(50);
+        generateStarted.resolve();
+        await generateCanFinish.promise;
         return textResponse('Should not finish');
       },
       toolbox,
@@ -428,7 +431,9 @@ describe('instrument', () => {
     });
 
     const unsubscribe = instrument(activeRun, { tracer });
-    setTimeout(() => activeRun.abort('user cancelled'), 10);
+    await generateStarted.promise;
+    activeRun.abort('user cancelled');
+    generateCanFinish.resolve();
     await activeRun.result;
     activeRun.complete();
     unsubscribe();
@@ -569,7 +574,7 @@ describe('instrument', () => {
 
     // Wait until generate.started has fired and the span is in the map
     await generateStarted.promise;
-    await Bun.sleep(1);
+    await Promise.resolve();
 
     // Unsubscribe while the generate span is still open
     unsubscribe();

@@ -119,7 +119,6 @@ describe('loop helper coverage', () => {
       generate: async () => {
         calls++;
         if (calls === 1) {
-          setTimeout(() => controller.abort('cancel retry'), 10);
           throw new Error('retry me');
         }
 
@@ -128,7 +127,13 @@ describe('loop helper coverage', () => {
       toolbox: createTestToolbox([]),
       conversation: new Conversation(),
       signal: controller.signal,
-      retry: { attempts: 3, delay: 1000 },
+      retry: {
+        attempts: 3,
+        delay: 1000,
+        sleep: async () => {
+          controller.abort('cancel retry');
+        },
+      },
     });
 
     expect(result.finishReason).toBe('aborted');
@@ -137,7 +142,6 @@ describe('loop helper coverage', () => {
 
   it('covers the backpressure abort path directly', async () => {
     const controller = new AbortController();
-    setTimeout(() => controller.abort('cancel backpressure'), 10);
 
     const result = await executeLoop({
       generate: async () => textResponse('unused'),
@@ -145,7 +149,10 @@ describe('loop helper coverage', () => {
       conversation: new Conversation(),
       signal: controller.signal,
       backpressure: {
-        beforeStep: () => ({ delay: 1000 }),
+        beforeStep: () => {
+          controller.abort('cancel backpressure');
+          return { delay: 1000 };
+        },
         onSuccess: () => {},
         onError: () => {},
       },

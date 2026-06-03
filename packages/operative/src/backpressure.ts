@@ -80,6 +80,8 @@ export interface TokenBucketOptions {
   interval: number;
   /** Maximum number of tokens the bucket can hold. Defaults to `tokensPerInterval`. */
   maximumTokens?: number;
+  /** Injectable clock for deterministic tests. Defaults to Date.now. */
+  now?: () => number;
 }
 
 /**
@@ -93,13 +95,14 @@ export interface TokenBucketOptions {
 export function createTokenBucket(options: TokenBucketOptions): BackpressureStrategy {
   const { tokensPerInterval, interval } = options;
   const maximumTokens = options.maximumTokens ?? tokensPerInterval;
+  const now = options.now ?? Date.now;
 
   let tokens = maximumTokens;
-  let lastRefill = Date.now();
+  let lastRefill = now();
 
   function refill(): void {
-    const now = Date.now();
-    const elapsed = now - lastRefill;
+    const currentTime = now();
+    const elapsed = currentTime - lastRefill;
     const newTokens = Math.floor(elapsed / interval) * tokensPerInterval;
     if (newTokens > 0) {
       tokens = Math.min(maximumTokens, tokens + newTokens);
@@ -120,7 +123,7 @@ export function createTokenBucket(options: TokenBucketOptions): BackpressureStra
       if (tokens > 0) {
         return { delay: 0 };
       }
-      const elapsed = Date.now() - lastRefill;
+      const elapsed = now() - lastRefill;
       const timeUntilNextToken = interval - elapsed;
       return { delay: Math.max(0, timeUntilNextToken) };
     },
@@ -133,7 +136,7 @@ export function createTokenBucket(options: TokenBucketOptions): BackpressureStra
     get currentDelay(): number {
       refill();
       if (tokens > 0) return 0;
-      const elapsed = Date.now() - lastRefill;
+      const elapsed = now() - lastRefill;
       return Math.max(0, interval - elapsed);
     },
     get isActive(): boolean {
@@ -151,6 +154,8 @@ export interface SlidingWindowOptions {
   windowSize: number;
   /** Maximum number of requests allowed within the window. */
   maximumRequests: number;
+  /** Injectable clock for deterministic tests. Defaults to Date.now. */
+  now?: () => number;
 }
 
 /**
@@ -162,10 +167,11 @@ export interface SlidingWindowOptions {
  */
 export function createSlidingWindow(options: SlidingWindowOptions): BackpressureStrategy {
   const { windowSize, maximumRequests } = options;
+  const now = options.now ?? Date.now;
   const timestamps: number[] = [];
 
   function pruneExpired(): void {
-    const cutoff = Date.now() - windowSize;
+    const cutoff = now() - windowSize;
     while (timestamps.length > 0 && timestamps[0]! < cutoff) {
       timestamps.shift();
     }
@@ -177,7 +183,7 @@ export function createSlidingWindow(options: SlidingWindowOptions): Backpressure
       return 0;
     }
     const oldest = timestamps[0]!;
-    return Math.max(0, oldest + windowSize - Date.now());
+    return Math.max(0, oldest + windowSize - now());
   }
 
   return {
@@ -186,11 +192,11 @@ export function createSlidingWindow(options: SlidingWindowOptions): Backpressure
     },
     onSuccess(): void {
       pruneExpired();
-      timestamps.push(Date.now());
+      timestamps.push(now());
     },
     onError(): void {
       pruneExpired();
-      timestamps.push(Date.now());
+      timestamps.push(now());
     },
     get currentDelay(): number {
       return computeDelay();

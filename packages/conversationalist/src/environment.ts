@@ -12,6 +12,13 @@ export interface SessionInfo {
   messageCount: number;
 }
 
+export type TimeoutHandle = unknown;
+export type ScheduleTimeout = (
+  callback: () => Promise<void> | void,
+  milliseconds?: number,
+) => TimeoutHandle;
+export type ClearScheduledTimeout = (handle: TimeoutHandle) => void;
+
 /**
  * Extracts a lightweight SessionInfo summary from a ConversationHistory.
  */
@@ -36,6 +43,12 @@ export interface ConversationEnvironment {
   estimateTokens: TokenEstimator;
   plugins: MessagePlugin[];
   persistence?: KeyValueStore;
+  /** Debounce duration for persistence saves. Defaults to 100ms. */
+  persistenceDebounceMilliseconds?: number;
+  /** Injectable timer for persistence debounce tests. */
+  setTimeoutFunction?: ScheduleTimeout;
+  /** Injectable timer cleanup for persistence debounce tests. */
+  clearTimeoutFunction?: ClearScheduledTimeout;
   /** Maximum depth of the undo/redo history tree. When exceeded, the oldest ancestor is pruned. */
   maxHistoryDepth?: number;
 }
@@ -72,6 +85,15 @@ export function resolveConversationEnvironment(
     estimateTokens: environment?.estimateTokens ?? defaultConversationEnvironment.estimateTokens,
     plugins: [...(environment?.plugins ?? defaultConversationEnvironment.plugins)],
     ...(environment?.persistence ? { persistence: environment.persistence } : {}),
+    ...(environment?.persistenceDebounceMilliseconds !== undefined
+      ? { persistenceDebounceMilliseconds: environment.persistenceDebounceMilliseconds }
+      : {}),
+    ...(environment?.setTimeoutFunction
+      ? { setTimeoutFunction: environment.setTimeoutFunction }
+      : {}),
+    ...(environment?.clearTimeoutFunction
+      ? { clearTimeoutFunction: environment.clearTimeoutFunction }
+      : {}),
     ...(environment?.maxHistoryDepth !== undefined
       ? { maxHistoryDepth: environment.maxHistoryDepth }
       : {}),

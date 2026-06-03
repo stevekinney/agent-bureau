@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'bun:test';
 
+import { DeterministicClock } from '../../src/test/helpers/deterministic-clock.ts';
 import { SharedMemoryManager } from '../../src/workers/shared-memory.ts';
 import { cleanupIndexedDBMocks, setupIndexedDBMocks } from '../mocks/indexeddb-mock.ts';
 
@@ -209,17 +210,20 @@ describe('SharedMemoryManager', () => {
 
   describe('Memory Cleanup', () => {
     let manager: SharedMemoryManager;
+    let clock: DeterministicClock;
 
     beforeEach(() => {
       if (typeof SharedArrayBuffer === 'undefined') {
         return;
       }
+      clock = new DeterministicClock();
       manager = new SharedMemoryManager({
         enableStats: true,
+        timeSource: clock,
       });
     });
 
-    it('should cleanup old unused blocks', async () => {
+    it('should cleanup old unused blocks', () => {
       if (typeof SharedArrayBuffer === 'undefined') {
         return;
       }
@@ -231,8 +235,7 @@ describe('SharedMemoryManager', () => {
       // Initially should have 1 block
       expect(manager.getStats().totalAllocated).toBeGreaterThan(0);
 
-      // Add a small delay to ensure timestamp difference
-      await new Promise((resolve) => setTimeout(resolve, 1));
+      clock.advanceBy(1);
 
       // Cleanup with very short max age should remove it
       manager.cleanup(0);

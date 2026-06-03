@@ -1,4 +1,6 @@
 import { log } from '@/utilities/logger.ts';
+import type { TimeSource } from '@/utilities/time-source.ts';
+import { systemTimeSource } from '@/utilities/time-source.ts';
 
 import { VectorDatabase } from './database.ts';
 import { BatchOperationError, TransactionError, VectorNotFoundError } from './errors.ts';
@@ -11,7 +13,10 @@ const DEFAULT_BATCH_SIZE = 1000;
  * Storage operations for vectors
  */
 export class VectorStorage implements StorageAdapter {
-  constructor(private database: VectorDatabase) {}
+  constructor(
+    private database: VectorDatabase,
+    private timeSource: TimeSource = systemTimeSource,
+  ) {}
 
   /**
    * Initialize the underlying database connection
@@ -45,10 +50,11 @@ export class VectorStorage implements StorageAdapter {
         const store = transaction.objectStore(VectorDatabase.STORES.VECTORS);
 
         // Update timestamp
+        const now = this.timeSource.nowMilliseconds();
         const vectorToStore = {
           ...vector,
-          timestamp: vector.timestamp || Date.now(),
-          lastAccessed: Date.now(),
+          timestamp: vector.timestamp || now,
+          lastAccessed: now,
         };
 
         return new Promise<void>((resolve, reject) => {
@@ -90,7 +96,7 @@ export class VectorStorage implements StorageAdapter {
             }
 
             // Update access metadata
-            vector.lastAccessed = Date.now();
+            vector.lastAccessed = this.timeSource.nowMilliseconds();
             vector.accessCount = (vector.accessCount || 0) + 1;
 
             // Store updated metadata
@@ -145,7 +151,7 @@ export class VectorStorage implements StorageAdapter {
 
                   if (vector) {
                     // Update access metadata
-                    vector.lastAccessed = Date.now();
+                    vector.lastAccessed = this.timeSource.nowMilliseconds();
                     vector.accessCount = (vector.accessCount || 0) + 1;
 
                     const updateRequest = store.put(vector);
@@ -478,10 +484,11 @@ export class VectorStorage implements StorageAdapter {
           vectors.map(
             (vector) =>
               new Promise<void>((resolve) => {
+                const now = this.timeSource.nowMilliseconds();
                 const vectorToStore = {
                   ...vector,
-                  timestamp: vector.timestamp || Date.now(),
-                  lastAccessed: Date.now(),
+                  timestamp: vector.timestamp || now,
+                  lastAccessed: now,
                 };
 
                 const request = store.put(vectorToStore);
@@ -548,7 +555,7 @@ export class VectorStorage implements StorageAdapter {
 
         // Update timestamp if requested (default true)
         if (options?.updateTimestamp !== false) {
-          existingVector.timestamp = Date.now();
+          existingVector.timestamp = this.timeSource.nowMilliseconds();
         }
 
         await this.putVectorInStore(store, existingVector);
@@ -590,7 +597,7 @@ export class VectorStorage implements StorageAdapter {
 
         // Update timestamp if requested (default true)
         if (options?.updateTimestamp !== false) {
-          existingVector.timestamp = Date.now();
+          existingVector.timestamp = this.timeSource.nowMilliseconds();
         }
 
         await this.putVectorInStore(store, existingVector);
@@ -669,7 +676,7 @@ export class VectorStorage implements StorageAdapter {
                 }
 
                 // Update timestamp
-                existingVector.timestamp = Date.now();
+                existingVector.timestamp = this.timeSource.nowMilliseconds();
 
                 await this.putVectorInStore(store, existingVector);
                 chunkSucceeded.push(update.id);
@@ -738,7 +745,7 @@ export class VectorStorage implements StorageAdapter {
     return new Promise((resolve, reject) => {
       const vectorToStore = {
         ...vector,
-        lastAccessed: Date.now(),
+        lastAccessed: this.timeSource.nowMilliseconds(),
       };
 
       const request = store.put(vectorToStore);

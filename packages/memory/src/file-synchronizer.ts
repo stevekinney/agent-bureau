@@ -6,6 +6,10 @@ import { sha256Hex } from './hash';
 import { ingest } from './ingest';
 import type { Memory, MemoryMetadata } from './types';
 
+export type IntervalHandle = unknown;
+export type ScheduleInterval = (callback: () => void, milliseconds?: number) => IntervalHandle;
+export type ClearScheduledInterval = (handle: IntervalHandle) => void;
+
 export interface FileSynchronizerOptions {
   memory: Memory;
   /** Root directory to watch. */
@@ -18,6 +22,10 @@ export interface FileSynchronizerOptions {
   metadata?: Partial<MemoryMetadata>;
   /** Polling interval in milliseconds. Default: 5000 */
   pollingInterval?: number;
+  /** Injectable interval function for deterministic tests. */
+  setIntervalFunction?: ScheduleInterval;
+  /** Injectable interval cleanup function for deterministic tests. */
+  clearIntervalFunction?: ClearScheduledInterval;
 }
 
 export interface SynchronizeResult {
@@ -72,6 +80,8 @@ export function createFileSynchronizer(options: FileSynchronizerOptions): FileSy
     chunking,
     metadata,
     pollingInterval = 5000,
+    setIntervalFunction = (callback, milliseconds) => setInterval(callback, milliseconds),
+    clearIntervalFunction = (handle) => clearInterval(handle as ReturnType<typeof setInterval>),
   } = options;
 
   // Tracks known files: relative path → content hash.
@@ -83,7 +93,8 @@ export function createFileSynchronizer(options: FileSynchronizerOptions): FileSy
   // semantic search and source-document deduplication).
   const entryIdsBySource = new Map<string, string[]>();
 
-  let intervalId: ReturnType<typeof setInterval> | null = null;
+  let intervalId: IntervalHandle;
+  let hasInterval = false;
   let synchronizing = false;
   let starting = false;
 
@@ -165,15 +176,15 @@ export function createFileSynchronizer(options: FileSynchronizerOptions): FileSy
 
   return {
     async start(): Promise<void> {
-      if (intervalId || starting) return;
+      if (hasInterval || starting) return;
       starting = true;
       try {
         await synchronize();
         // Only schedule the interval after a successful initial sync.
         // If synchronize() throws, no interval is created — preventing a
         // leaked timer that the caller cannot clean up.
-        if (!intervalId) {
-          intervalId = setInterval(() => {
+        if (!hasInterval) {
+          intervalId = setIntervalFunction(() => {
             if (synchronizing) return;
             synchronizing = true;
             void synchronize()
@@ -184,6 +195,7 @@ export function createFileSynchronizer(options: FileSynchronizerOptions): FileSy
                 synchronizing = false;
               });
           }, pollingInterval);
+          hasInterval = true;
         }
       } finally {
         starting = false;
@@ -191,9 +203,9 @@ export function createFileSynchronizer(options: FileSynchronizerOptions): FileSy
     },
 
     stop(): void {
-      if (intervalId) {
-        clearInterval(intervalId);
-        intervalId = null;
+      if (hasInterval) {
+        clearIntervalFunction(intervalId);
+        hasInterval = false;
       }
     },
 

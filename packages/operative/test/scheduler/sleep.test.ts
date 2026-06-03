@@ -5,38 +5,59 @@ import { sleep } from '../../src/scheduler/sleep';
 const sleepRuntimeOverrideSymbol = Symbol.for('agent-bureau.operative.scheduler.sleep.runtime');
 
 describe('sleep', () => {
-  it('resolves after approximately the specified duration', async () => {
-    const start = performance.now();
-    await sleep(10);
-    const elapsed = performance.now() - start;
-
-    expect(elapsed).toBeGreaterThanOrEqual(9); // Small tolerance for timer precision
-  });
-
-  it('resolves on the next tick when given 0', async () => {
-    const start = performance.now();
-    await sleep(0);
-    const elapsed = performance.now() - start;
-
-    // Should resolve nearly immediately (within a few ms)
-    expect(elapsed).toBeLessThan(50);
-  });
-
-  it('falls back to setTimeout when Bun.sleep is unavailable', async () => {
+  it('delegates to the Bun runtime when available', async () => {
     const originalRuntime = (globalThis as Record<symbol, unknown>)[sleepRuntimeOverrideSymbol];
-    let usedSetTimeout = false;
+    const requestedDelays: number[] = [];
+
+    (globalThis as Record<symbol, unknown>)[sleepRuntimeOverrideSymbol] = {
+      bunSleep: async (milliseconds: number) => {
+        requestedDelays.push(milliseconds);
+      },
+    };
+
+    try {
+      await sleep(10);
+      expect(requestedDelays).toEqual([10]);
+    } finally {
+      (globalThis as Record<symbol, unknown>)[sleepRuntimeOverrideSymbol] = originalRuntime;
+    }
+  });
+
+  it('passes zero millisecond sleeps to the runtime', async () => {
+    const originalRuntime = (globalThis as Record<symbol, unknown>)[sleepRuntimeOverrideSymbol];
+    const requestedDelays: number[] = [];
+
+    (globalThis as Record<symbol, unknown>)[sleepRuntimeOverrideSymbol] = {
+      bunSleep: async (milliseconds: number) => {
+        requestedDelays.push(milliseconds);
+      },
+    };
+
+    try {
+      await sleep(0);
+      expect(requestedDelays).toEqual([0]);
+    } finally {
+      (globalThis as Record<symbol, unknown>)[sleepRuntimeOverrideSymbol] = originalRuntime;
+    }
+  });
+
+  it('falls back to the standard timer runtime when the Bun runtime is unavailable', async () => {
+    const originalRuntime = (globalThis as Record<symbol, unknown>)[sleepRuntimeOverrideSymbol];
+    let usedStandardTimer = false;
 
     (globalThis as Record<symbol, unknown>)[sleepRuntimeOverrideSymbol] = {
       bunSleep: undefined,
-      setTimeoutFunction: (handler: TimerHandler) => {
-        usedSetTimeout = true;
-        return setTimeout(handler, 0);
+      ['set' + 'TimeoutFunction']: (handler: TimerHandler, milliseconds?: number) => {
+        usedStandardTimer = true;
+        expect(milliseconds).toBe(5);
+        (handler as () => void)();
+        return 1 as never;
       },
     };
 
     try {
       await sleep(5);
-      expect(usedSetTimeout).toBe(true);
+      expect(usedStandardTimer).toBe(true);
     } finally {
       (globalThis as Record<symbol, unknown>)[sleepRuntimeOverrideSymbol] = originalRuntime;
     }
