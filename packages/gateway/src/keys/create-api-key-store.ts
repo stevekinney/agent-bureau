@@ -1,4 +1,4 @@
-import type { KeyValueStore } from 'storage';
+import type { TextValueStore } from '@lostgradient/weft/storage';
 
 import { extractKeyId, generateApiKey, hashApiKey, verifyApiKey } from './key-utilities';
 import type { ApiKey, ApiKeyStore, CreateApiKeyOptions } from './types';
@@ -33,11 +33,11 @@ function parseApiKey(raw: string): ApiKey | undefined {
 }
 
 /**
- * Creates an API key store backed by a `KeyValueStore`. Keys are stored under
+ * Creates an API key store backed by a `TextValueStore`. Keys are stored under
  * the `api-key:<id>` prefix. Plaintext keys are never persisted; only their
  * SHA-256 hashes are stored.
  */
-export function createApiKeyStore(kv: KeyValueStore): ApiKeyStore {
+export function createApiKeyStore(kv: TextValueStore): ApiKeyStore {
   async function create(options: CreateApiKeyOptions): Promise<{ key: ApiKey; plaintext: string }> {
     const plaintext = generateApiKey();
     const id = extractKeyId(plaintext);

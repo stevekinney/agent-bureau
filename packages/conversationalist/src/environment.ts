@@ -1,4 +1,4 @@
-import type { KeyValueStore } from 'storage';
+import type { TextValueStore } from '@lostgradient/weft/storage';
 
 import type { ConversationHistory, Message, MessagePlugin, TokenEstimator } from './types';
 import { messageText } from './utilities';
@@ -35,7 +35,7 @@ export interface ConversationEnvironment {
   randomId: () => string;
   estimateTokens: TokenEstimator;
   plugins: MessagePlugin[];
-  persistence?: KeyValueStore;
+  persistence?: TextValueStore;
   /** Maximum depth of the undo/redo history tree. When exceeded, the oldest ancestor is pruned. */
   maxHistoryDepth?: number;
 }

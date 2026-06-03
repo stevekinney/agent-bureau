@@ -5,7 +5,7 @@
  * events, and metrics tracking.
  */
 
-import type { KeyValueStore } from 'storage';
+import type { TextValueStore } from '@lostgradient/weft/storage';
 
 import type { GenerateContext, GenerateResponse } from '../types';
 
@@ -15,7 +15,7 @@ export type CacheKeyFunction = (context: GenerateContext) => string;
 /** Options for configuring the cache middleware. */
 export type CacheOptions = {
   /** Storage backend for cached responses. */
-  store: KeyValueStore;
+  store: TextValueStore;
   /** TTL in seconds. 0 means no expiry. Default: `3600`. */
   ttl?: number;
   /** Strategy for generating cache keys. Default: `'conversation-hash'`. */

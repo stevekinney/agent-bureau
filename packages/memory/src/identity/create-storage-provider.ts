@@ -1,4 +1,4 @@
-import type { KeyValueStore } from 'storage';
+import type { TextValueStore } from '@lostgradient/weft/storage';
 
 import type { IdentityProvider, PersonaDescriptor, SoulHistoryEntry, SoulItem } from './types';
 
@@ -35,7 +35,7 @@ const USER_CONTEXT_KEY = 'identity:user-context';
  * - `identity:pending:{agentId}` — pending soul update
  * - `identity:history:{agentId}:{version}` — soul version history
  */
-export function createStorageIdentityProvider(adapter: KeyValueStore): IdentityProvider {
+export function createStorageIdentityProvider(adapter: TextValueStore): IdentityProvider {
   async function loadJson<T>(key: string): Promise<T | undefined> {
     const raw = await adapter.get(key);
     if (raw === null) return undefined;

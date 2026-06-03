@@ -8,7 +8,7 @@ Agent Bureau is a Bun-first monorepo for building, running, and operating agent 
 - **Session-first persistence**: gateway APIs and UI state use sessions as the canonical product concept, backed by `AgentSession` and `SessionStore`.
 - **Live transport**: Bun WebSocket remains the fast path, and server-sent events provide Node-compatible live updates for run state and streaming deltas.
 - **Operational controls**: the gateway exposes scheduler state, task submission, cancellation, recent history, managed API keys, and store-backed rate limiting.
-- **Evaluation and utilities**: the workspace includes evaluation tooling, state tracking, cross-platform storage, vector search, and reusable lifecycle primitives.
+- **Evaluation and utilities**: the workspace includes evaluation tooling, state tracking, Weft-backed durable key-value storage, vector search, and reusable lifecycle primitives.
 
 ## Gateway-First Flow
 
@@ -44,7 +44,7 @@ const server = await gateway.start();
 That composition path gives you:
 
 - provider resolution with single-provider, fallover, or routing behavior
-- persistent sessions through `storage` or an explicit key-value store
+- persistent sessions through Weft's durable storage or an explicit key-value store
 - memory recall and persistence hooks when memory is configured
 - skill catalog injection and skill management tools when skills are configured
 - live event delivery through WebSocket and server-sent events
@@ -67,8 +67,9 @@ Use an explicit SQLite path like the example above when you want sessions to sur
 - [`packages/operative`](packages/operative): the agent loop, sessions, scheduler, hooks, retry, guardrails, and streaming.
 - [`packages/sentinel`](packages/sentinel): run state tracking, ordered action logs, and snapshots.
 - [`packages/skills`](packages/skills): skill discovery, loading, storage, and self-improvement primitives.
-- [`packages/storage`](packages/storage): the canonical cross-platform key-value storage surface and adapters.
 - [`packages/vector-frankl`](packages/vector-frankl): vector storage and similarity search.
+
+Key-value persistence (sessions, identity, skills, proposals, rate-limit and API-key state) is backed by [Weft](https://www.npmjs.com/package/@lostgradient/weft)'s durable storage, consumed through its `textValueStore` surface.
 
 ## Quality Gates
 

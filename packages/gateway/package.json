@@ -20,18 +20,18 @@
     "validate": "bun run format:check && bun run lint && bun run check-types && bun run test"
   },
   "dependencies": {
+    "@lostgradient/weft": "^0.2.0",
     "armorer": "workspace:*",
     "conversationalist": "workspace:*",
-    "lifecycle": "workspace:*",
     "herald": "workspace:*",
     "hono": "^4.7.10",
+    "lifecycle": "workspace:*",
     "memory": "workspace:*",
     "operative": "workspace:*",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "sentinel": "workspace:*",
     "skills": "workspace:*",
-    "storage": "workspace:*",
     "vector-frankl": "workspace:*",
     "zod": "^4.3.6"
   },

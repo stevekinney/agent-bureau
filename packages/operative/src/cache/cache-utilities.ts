@@ -1,11 +1,11 @@
 /**
  * Utility functions for managing the LLM response cache.
  *
- * These operate directly on a `KeyValueStore` and are independent of
+ * These operate directly on a `TextValueStore` and are independent of
  * the middleware — useful for admin tasks like bulk invalidation.
  */
 
-import type { KeyValueStore } from 'storage';
+import type { TextValueStore } from '@lostgradient/weft/storage';
 
 /**
  * Deletes all cache entries under the given namespace prefix.
@@ -16,9 +16,12 @@ import type { KeyValueStore } from 'storage';
  * @returns The number of entries deleted.
  */
 export async function clearCache(
-  store: KeyValueStore,
+  store: TextValueStore,
   namespace: string = 'llm-cache:',
 ): Promise<number> {
+  // TODO(weft-integration): TextValueStore always provides deletePrefix; the
+  // list-and-delete fallback below is now reachable only via test doubles that
+  // omit the method.
   if (store.deletePrefix) {
     return store.deletePrefix(namespace);
   }
@@ -37,7 +40,7 @@ export async function clearCache(
  * @returns The number of entries deleted.
  */
 export async function invalidateCache(
-  store: KeyValueStore,
+  store: TextValueStore,
   namespace: string,
   pattern: string,
 ): Promise<number> {

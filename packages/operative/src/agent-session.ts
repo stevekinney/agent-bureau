@@ -1,6 +1,6 @@
+import type { TextValueStore } from '@lostgradient/weft/storage';
 import type { ConversationHistory } from 'conversationalist';
 import type { JSONValue } from 'interoperability';
-import type { KeyValueStore } from 'storage';
 
 export interface AgentSession {
   id: string;
@@ -35,7 +35,10 @@ export function createAgentSession(options: {
 /**
  * Saves an agent session by serializing it directly to the key-value store.
  */
-export async function saveAgentSession(store: KeyValueStore, session: AgentSession): Promise<void> {
+export async function saveAgentSession(
+  store: TextValueStore,
+  session: AgentSession,
+): Promise<void> {
   const data = {
     ...session,
     updatedAt: new Date().toISOString(),
@@ -48,7 +51,7 @@ export async function saveAgentSession(store: KeyValueStore, session: AgentSessi
  * undefined if no session is found.
  */
 export async function loadAgentSession(
-  store: KeyValueStore,
+  store: TextValueStore,
   id: string,
 ): Promise<AgentSession | undefined> {
   const raw = await store.get(`agent-session:${id}`);

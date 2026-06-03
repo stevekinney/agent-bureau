@@ -1,7 +1,7 @@
+import { MemoryStorage, type TextValueStore, textValueStore } from '@lostgradient/weft/storage';
 import { createTestToolbox } from 'armorer/test';
 import { beforeEach, describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
-import { createMemoryKeyValueStore } from 'storage';
 
 import type { GenerateContext, GenerateFunction, GenerateResponse } from '../types';
 import type { CacheEntry, CacheHitEvent, CacheMissEvent } from './types';
@@ -34,10 +34,10 @@ function createTrackingGenerate(
 }
 
 describe('withCache', () => {
-  let store: ReturnType<typeof createMemoryKeyValueStore>;
+  let store: TextValueStore;
 
   beforeEach(() => {
-    store = createMemoryKeyValueStore();
+    store = textValueStore(new MemoryStorage());
   });
 
   it('calls the underlying generate on a cache miss', async () => {

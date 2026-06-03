@@ -1,5 +1,5 @@
+import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
 import { beforeEach, describe, expect, it, mock } from 'bun:test';
-import { createMemoryKeyValueStore } from 'storage';
 
 import { bootstrapApiKey } from './bootstrap';
 import { createApiKeyStore } from './create-api-key-store';
@@ -8,7 +8,7 @@ import type { ApiKeyStore } from './types';
 let store: ApiKeyStore;
 
 beforeEach(() => {
-  const kv = createMemoryKeyValueStore();
+  const kv = textValueStore(new MemoryStorage());
   store = createApiKeyStore(kv);
 });
 

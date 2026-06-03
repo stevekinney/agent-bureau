@@ -1,5 +1,5 @@
+import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
 import { describe, expect, it } from 'bun:test';
-import { createMockKeyValueStore } from 'storage/test';
 
 import { createConversationHistory } from '../src/conversation/index';
 import type { SessionInfo } from '../src/environment';
@@ -7,6 +7,9 @@ import { toSessionInfo } from '../src/environment';
 import { Conversation } from '../src/history';
 import { createTestConversationEnvironment } from '../src/test/index';
 import type { ConversationHistory } from '../src/types';
+
+/** In-memory text-value store for tests, backed by Weft's MemoryStorage. */
+const createMockKeyValueStore = () => textValueStore(new MemoryStorage());
 
 async function saveConversation(
   store: ReturnType<typeof createMockKeyValueStore>,

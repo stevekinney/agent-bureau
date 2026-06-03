@@ -1,6 +1,6 @@
+import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
 import { describe, expect, it } from 'bun:test';
 import { Hono } from 'hono';
-import { createMemoryKeyValueStore } from 'storage';
 
 import { createApiKeyStore } from '../keys/create-api-key-store';
 import type { ApiKeyStore } from '../keys/types';
@@ -115,7 +115,7 @@ describe('authentication', () => {
 
 describe('authentication with api key store', () => {
   it('accepts a valid managed API key', async () => {
-    const kv = createMemoryKeyValueStore();
+    const kv = textValueStore(new MemoryStorage());
     const apiKeyStore = createApiKeyStore(kv);
     const { plaintext } = await apiKeyStore.create({ name: 'test-key' });
 
@@ -127,7 +127,7 @@ describe('authentication with api key store', () => {
   });
 
   it('rejects an invalid managed API key', async () => {
-    const kv = createMemoryKeyValueStore();
+    const kv = textValueStore(new MemoryStorage());
     const apiKeyStore = createApiKeyStore(kv);
 
     const app = createApp(undefined, apiKeyStore);
@@ -141,7 +141,7 @@ describe('authentication with api key store', () => {
   });
 
   it('sets scope and key id headers on successful api key auth', async () => {
-    const kv = createMemoryKeyValueStore();
+    const kv = textValueStore(new MemoryStorage());
     const apiKeyStore = createApiKeyStore(kv);
     const { plaintext } = await apiKeyStore.create({
       name: 'scoped-key',
@@ -169,7 +169,7 @@ describe('authentication with api key store', () => {
   });
 
   it('falls back to static token when api key verification fails', async () => {
-    const kv = createMemoryKeyValueStore();
+    const kv = textValueStore(new MemoryStorage());
     const apiKeyStore = createApiKeyStore(kv);
 
     const app = createApp('static-secret', apiKeyStore);
@@ -186,7 +186,7 @@ describe('authentication with api key store', () => {
   });
 
   it('requires auth when api key store is present even without static token', async () => {
-    const kv = createMemoryKeyValueStore();
+    const kv = textValueStore(new MemoryStorage());
     const apiKeyStore = createApiKeyStore(kv);
 
     const app = createApp(undefined, apiKeyStore);

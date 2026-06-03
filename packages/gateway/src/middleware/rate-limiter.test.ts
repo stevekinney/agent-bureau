@@ -1,13 +1,12 @@
+import { MemoryStorage, type TextValueStore, textValueStore } from '@lostgradient/weft/storage';
 import { describe, expect, it } from 'bun:test';
 import { Hono } from 'hono';
-import type { KeyValueStore } from 'storage';
-import { createMemoryKeyValueStore } from 'storage';
 
 import { errorHandler } from './error-handler';
 import { createRateLimiter } from './rate-limiter';
 import { requestIdentifier } from './request-identifier';
 
-function createApp(options?: { limit?: number; store?: KeyValueStore; windowMs?: number }) {
+function createApp(options?: { limit?: number; store?: TextValueStore; windowMs?: number }) {
   const app = new Hono();
   app.use('*', requestIdentifier);
   app.use('*', createRateLimiter(options));
@@ -101,7 +100,7 @@ describe('rate limiter', () => {
   });
 
   it('persists limits across middleware instances when a store is provided', async () => {
-    const store = createMemoryKeyValueStore();
+    const store = textValueStore(new MemoryStorage());
     const headers = { 'x-auth-principal': 'api-key:test-key' };
 
     const firstApp = createApp({ limit: 1, store, windowMs: 60_000 });
@@ -114,9 +113,9 @@ describe('rate limiter', () => {
   });
 
   it('serializes concurrent store-backed updates for the same principal', async () => {
-    const backingStore = createMemoryKeyValueStore();
+    const backingStore = textValueStore(new MemoryStorage());
     const delay = () => new Promise((resolve) => setTimeout(resolve, 10));
-    const store: KeyValueStore = {
+    const store: TextValueStore = {
       async get(key) {
         await delay();
         return backingStore.get(key);
@@ -130,6 +129,15 @@ describe('rate limiter', () => {
       },
       async list(prefix) {
         return backingStore.list(prefix);
+      },
+      has(key) {
+        return backingStore.has(key);
+      },
+      deletePrefix(prefix) {
+        return backingStore.deletePrefix(prefix);
+      },
+      close() {
+        return backingStore.close();
       },
     };
 
@@ -148,7 +156,7 @@ describe('rate limiter', () => {
   });
 
   it('persists pruned timestamps before returning a limited decision', async () => {
-    const store = createMemoryKeyValueStore();
+    const store = textValueStore(new MemoryStorage());
     const headers = { 'x-auth-principal': 'api-key:pruned-key' };
     const storageKey = 'gateway:rate-limit:api-key:pruned-key';
     const now = Date.now();

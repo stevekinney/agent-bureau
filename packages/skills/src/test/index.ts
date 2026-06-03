@@ -1,6 +1,16 @@
+import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
+
 import type { SkillCatalogEntry, SkillContent, SkillProvider } from '../types';
 
-export { createMockKeyValueStore } from 'storage/test';
+/**
+ * Creates an in-memory text-value store for tests, backed by Weft's
+ * {@link MemoryStorage}. Drop-in replacement for the prior storage-package mock:
+ * same 7-method `TextValueStore` shape, prefix-inclusive `list`, synchronous
+ * construction so call sites need no `await`.
+ */
+export function createMockKeyValueStore() {
+  return textValueStore(new MemoryStorage());
+}
 
 /**
  * Creates a mock skill provider that tracks all calls for assertion.

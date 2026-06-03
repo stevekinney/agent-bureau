@@ -1,3 +1,5 @@
+import type { TextValueStore } from '@lostgradient/weft/storage';
+import { resolveStorage, textValueStore } from '@lostgradient/weft/storage';
 import {
   combineToolboxes,
   createTool,
@@ -40,8 +42,6 @@ import {
 } from 'operative';
 import type { SkillSession } from 'skills';
 import { createSkillSession, escapeXml } from 'skills';
-import type { KeyValueStore } from 'storage';
-import { resolveKeyValueStore } from 'storage';
 import { z } from 'zod';
 
 import type {
@@ -229,7 +229,7 @@ function withUsageTracking(
 function applyCache(
   generate: GenerateFunction,
   configuration: CacheConfiguration | undefined,
-  store: KeyValueStore | undefined,
+  store: TextValueStore | undefined,
 ): GenerateFunction {
   if (!configuration) {
     return generate;
@@ -418,7 +418,7 @@ function createUnavailableToolbox(): GatewayToolbox {
 }
 
 export interface RuntimeComposition {
-  kv: KeyValueStore | undefined;
+  kv: TextValueStore | undefined;
   memory: Memory | undefined;
   sessionStore: SessionStore | undefined;
   scheduler: Scheduler | undefined;
@@ -448,9 +448,9 @@ export async function createRuntimeComposition(
   const maximumSteps = options.maximumSteps ?? 10;
   const systemPrompt = options.systemPrompt;
 
-  let kv: KeyValueStore | undefined = options.persistence;
+  let kv: TextValueStore | undefined = options.persistence;
   if (!kv && options.storage) {
-    kv = await resolveKeyValueStore(options.storage);
+    kv = textValueStore(await resolveStorage(options.storage));
   }
 
   let memory: Memory | undefined;

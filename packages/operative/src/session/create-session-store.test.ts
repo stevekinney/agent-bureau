@@ -1,6 +1,6 @@
+import { MemoryStorage, type TextValueStore, textValueStore } from '@lostgradient/weft/storage';
 import { describe, expect, it } from 'bun:test';
 import { createConversationHistory } from 'conversationalist';
-import { createMemoryKeyValueStore, type KeyValueStore } from 'storage';
 
 import { createAgentSession } from '../agent-session';
 import { createSessionStore } from './create-session-store';
@@ -23,19 +23,19 @@ function makeSession(overrides: {
   return session;
 }
 
-function createStoreWithoutHas(): KeyValueStore {
-  const store = createMemoryKeyValueStore();
+function createStoreWithoutHas(): TextValueStore {
+  const store = textValueStore(new MemoryStorage());
   return {
     get: store.get.bind(store),
     set: store.set.bind(store),
     delete: store.delete.bind(store),
     list: store.list.bind(store),
-  };
+  } as TextValueStore;
 }
 
 describe('createSessionStore', () => {
   it('save/load round trip preserves session data', async () => {
-    const store = createSessionStore(createMemoryKeyValueStore());
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
     const session = makeSession({ agentName: 'round-trip-agent' });
 
     await store.save(session);
@@ -48,13 +48,13 @@ describe('createSessionStore', () => {
   });
 
   it('load returns undefined for nonexistent session', async () => {
-    const store = createSessionStore(createMemoryKeyValueStore());
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
     const loaded = await store.load('does-not-exist');
     expect(loaded).toBeUndefined();
   });
 
   it('load returns undefined for malformed stored session data', async () => {
-    const rawStore = createMemoryKeyValueStore();
+    const rawStore = textValueStore(new MemoryStorage());
     const store = createSessionStore(rawStore);
 
     await rawStore.set('agent-session:broken', '{not valid json');
@@ -74,7 +74,7 @@ describe('createSessionStore', () => {
   });
 
   it('delete removes a session', async () => {
-    const store = createSessionStore(createMemoryKeyValueStore());
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
     const session = makeSession({});
 
     await store.save(session);
@@ -85,13 +85,13 @@ describe('createSessionStore', () => {
   });
 
   it('delete is a no-op for nonexistent session', async () => {
-    const store = createSessionStore(createMemoryKeyValueStore());
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
     // Should not throw
     await store.delete('nonexistent');
   });
 
   it('exists returns true for saved sessions', async () => {
-    const store = createSessionStore(createMemoryKeyValueStore());
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
     const session = makeSession({});
 
     await store.save(session);
@@ -99,7 +99,7 @@ describe('createSessionStore', () => {
   });
 
   it('exists returns false for missing sessions', async () => {
-    const store = createSessionStore(createMemoryKeyValueStore());
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
     expect(await store.exists('missing')).toBe(false);
   });
 
@@ -115,7 +115,7 @@ describe('createSessionStore', () => {
   });
 
   it('list returns sorted summaries by updatedAt descending by default', async () => {
-    const store = createSessionStore(createMemoryKeyValueStore());
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
 
     const s1 = makeSession({
       id: 'session-1',
@@ -150,7 +150,7 @@ describe('createSessionStore', () => {
   });
 
   it('list filters by agentName', async () => {
-    const store = createSessionStore(createMemoryKeyValueStore());
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
 
     const s1 = makeSession({ id: 'a-1', agentName: 'agent-alpha' });
     const s2 = makeSession({ id: 'b-1', agentName: 'agent-beta' });
@@ -166,7 +166,7 @@ describe('createSessionStore', () => {
   });
 
   it('list respects limit and offset', async () => {
-    const store = createSessionStore(createMemoryKeyValueStore());
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
 
     for (let i = 0; i < 5; i++) {
       const s = makeSession({
@@ -181,7 +181,7 @@ describe('createSessionStore', () => {
   });
 
   it('list sorts by createdAt ascending', async () => {
-    const store = createSessionStore(createMemoryKeyValueStore());
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
 
     const s1 = makeSession({
       id: 'first',
@@ -203,7 +203,7 @@ describe('createSessionStore', () => {
   });
 
   it('updateMetadata merges metadata without overwriting conversation', async () => {
-    const store = createSessionStore(createMemoryKeyValueStore());
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
     const session = makeSession({});
     session.metadata = { existing: 'value' };
 
@@ -218,13 +218,13 @@ describe('createSessionStore', () => {
   });
 
   it('updateMetadata is a no-op for nonexistent session', async () => {
-    const store = createSessionStore(createMemoryKeyValueStore());
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
     // Should not throw
     await store.updateMetadata('nonexistent', { key: 'value' });
   });
 
   it('cleanup deletes old sessions and returns count', async () => {
-    const store = createSessionStore(createMemoryKeyValueStore());
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
 
     const old = makeSession({
       id: 'old-session',
@@ -247,7 +247,7 @@ describe('createSessionStore', () => {
   });
 
   it('cleanup filters by agentName', async () => {
-    const store = createSessionStore(createMemoryKeyValueStore());
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
 
     const oldA = makeSession({
       id: 'old-a',
@@ -274,7 +274,7 @@ describe('createSessionStore', () => {
   });
 
   it('all keys use the agent-session: prefix in the underlying store', async () => {
-    const kv = createMemoryKeyValueStore();
+    const kv = textValueStore(new MemoryStorage());
     const store = createSessionStore(kv);
     const session = makeSession({ id: 'prefix-test' });
 
@@ -286,7 +286,7 @@ describe('createSessionStore', () => {
   });
 
   it('list returns correct messageCount from conversation history', async () => {
-    const store = createSessionStore(createMemoryKeyValueStore());
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
     const history = createConversationHistory();
     // The conversation history starts with empty messages array
     const session = createAgentSession({

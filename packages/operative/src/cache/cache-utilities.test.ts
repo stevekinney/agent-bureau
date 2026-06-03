@@ -1,23 +1,23 @@
+import { MemoryStorage, type TextValueStore, textValueStore } from '@lostgradient/weft/storage';
 import { beforeEach, describe, expect, it } from 'bun:test';
-import { createMemoryKeyValueStore, type KeyValueStore } from 'storage';
 
 import { clearCache, invalidateCache } from './cache-utilities';
 
-function createStoreWithoutDeletePrefix(): KeyValueStore {
-  const store = createMemoryKeyValueStore();
+function createStoreWithoutDeletePrefix(): TextValueStore {
+  const store = textValueStore(new MemoryStorage());
   return {
     get: store.get.bind(store),
     set: store.set.bind(store),
     delete: store.delete.bind(store),
     list: store.list.bind(store),
-  };
+  } as TextValueStore;
 }
 
 describe('clearCache', () => {
-  let store: ReturnType<typeof createMemoryKeyValueStore>;
+  let store: TextValueStore;
 
   beforeEach(() => {
-    store = createMemoryKeyValueStore();
+    store = textValueStore(new MemoryStorage());
   });
 
   it('deletes all keys with the given namespace prefix', async () => {
@@ -73,10 +73,10 @@ describe('clearCache', () => {
 });
 
 describe('invalidateCache', () => {
-  let store: ReturnType<typeof createMemoryKeyValueStore>;
+  let store: TextValueStore;
 
   beforeEach(() => {
-    store = createMemoryKeyValueStore();
+    store = textValueStore(new MemoryStorage());
   });
 
   it('deletes keys that match the pattern within the namespace', async () => {

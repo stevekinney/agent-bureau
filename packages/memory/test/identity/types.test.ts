@@ -1,9 +1,9 @@
+import type { TextValueStore } from '@lostgradient/weft/storage';
 import { describe, expect, it } from 'bun:test';
 
 import type {
   AgentIdentity,
   IdentityProvider,
-  KeyValueStore,
   PersonaDescriptor,
   SoulBudget,
   SoulItem,
@@ -114,12 +114,15 @@ describe('Identity Types', () => {
     expect(budget.maxItemsPerTopic).toBe(5);
   });
 
-  it('KeyValueStore has the expected shape', () => {
-    const adapter: KeyValueStore = {
+  it('TextValueStore has the expected shape', () => {
+    const adapter: TextValueStore = {
       get: async () => null,
       set: async () => {},
       delete: async () => {},
       list: async () => [],
+      has: async () => false,
+      deletePrefix: async () => 0,
+      close: async () => {},
     };
 
     expect(typeof adapter.get).toBe('function');

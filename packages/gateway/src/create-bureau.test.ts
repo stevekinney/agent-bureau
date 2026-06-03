@@ -1,3 +1,4 @@
+import { MemoryStorage, type TextValueStore, textValueStore } from '@lostgradient/weft/storage';
 import { createToolbox } from 'armorer';
 import { createMockTool, createTestToolbox } from 'armorer/test';
 import { describe, expect, it } from 'bun:test';
@@ -5,7 +6,6 @@ import { Conversation } from 'conversationalist';
 import type { GenerateFunction, GenerateResponse, Toolbox } from 'operative';
 import { createMockGenerate as createSequentialGenerate } from 'operative/test';
 import { createStore } from 'sentinel';
-import { createMemoryKeyValueStore, type KeyValueStore } from 'storage';
 
 import { BureauError, createBureau } from './create-bureau';
 import { type ConfigurationResponse, DEFAULT_MAXIMUM_STEPS, type ServerFrame } from './types';
@@ -127,7 +127,7 @@ describe('createBureau', () => {
     const bureau = await createBureau({
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
-      persistence: createMemoryKeyValueStore(),
+      persistence: textValueStore(new MemoryStorage()),
     });
 
     const firstRun = await bureau.createRun({ message: 'First message' });
@@ -150,7 +150,7 @@ describe('createBureau', () => {
     const bureau = await createBureau({
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
-      persistence: createMemoryKeyValueStore(),
+      persistence: textValueStore(new MemoryStorage()),
     });
     const sessionId = 'session-aligned';
 
@@ -169,7 +169,7 @@ describe('createBureau', () => {
     const bureau = await createBureau({
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
-      persistence: createMemoryKeyValueStore(),
+      persistence: textValueStore(new MemoryStorage()),
     });
 
     const run = await bureau.createRun({ message: 'Fast completion' });
@@ -181,10 +181,10 @@ describe('createBureau', () => {
   });
 
   it('retries terminal session persistence after a transient save failure', async () => {
-    const backingStore = createMemoryKeyValueStore();
+    const backingStore = textValueStore(new MemoryStorage());
     let sessionSaveCount = 0;
 
-    const flakyStore: KeyValueStore = {
+    const flakyStore: TextValueStore = {
       async get(key) {
         return backingStore.get(key);
       },
@@ -204,6 +204,15 @@ describe('createBureau', () => {
       async list(prefix) {
         return backingStore.list(prefix);
       },
+      has(key) {
+        return backingStore.has(key);
+      },
+      deletePrefix(prefix) {
+        return backingStore.deletePrefix(prefix);
+      },
+      close() {
+        return backingStore.close();
+      },
     };
 
     const bureau = await createBureau({
@@ -222,8 +231,8 @@ describe('createBureau', () => {
   });
 
   it('does not register a run when initial session persistence fails', async () => {
-    const backingStore = createMemoryKeyValueStore();
-    const failingStore: KeyValueStore = {
+    const backingStore = textValueStore(new MemoryStorage());
+    const failingStore: TextValueStore = {
       async get(key) {
         return backingStore.get(key);
       },
@@ -239,6 +248,15 @@ describe('createBureau', () => {
       },
       async list(prefix) {
         return backingStore.list(prefix);
+      },
+      has(key) {
+        return backingStore.has(key);
+      },
+      deletePrefix(prefix) {
+        return backingStore.deletePrefix(prefix);
+      },
+      close() {
+        return backingStore.close();
       },
     };
 
@@ -266,7 +284,7 @@ describe('createBureau', () => {
     const bureau = await createBureau({
       generate,
       toolbox: createEmptyToolbox(),
-      persistence: createMemoryKeyValueStore(),
+      persistence: textValueStore(new MemoryStorage()),
     });
 
     const run = await bureau.createRun({ message: 'Explode' });
@@ -279,10 +297,10 @@ describe('createBureau', () => {
   });
 
   it('persists error session state once after the initial running save', async () => {
-    const backingStore = createMemoryKeyValueStore();
+    const backingStore = textValueStore(new MemoryStorage());
     let sessionSaveCount = 0;
 
-    const trackingStore: KeyValueStore = {
+    const trackingStore: TextValueStore = {
       async get(key) {
         return backingStore.get(key);
       },
@@ -298,6 +316,15 @@ describe('createBureau', () => {
       },
       async list(prefix) {
         return backingStore.list(prefix);
+      },
+      has(key) {
+        return backingStore.has(key);
+      },
+      deletePrefix(prefix) {
+        return backingStore.deletePrefix(prefix);
+      },
+      close() {
+        return backingStore.close();
       },
     };
 
@@ -420,7 +447,7 @@ describe('createBureau', () => {
     const bureau = await createBureau({
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
-      persistence: createMemoryKeyValueStore(),
+      persistence: textValueStore(new MemoryStorage()),
     });
 
     const run = await bureau.createRun({ message: 'Hello' });

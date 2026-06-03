@@ -1,3 +1,4 @@
+import type { StorageConfiguration, TextValueStore } from '@lostgradient/weft/storage';
 import type { Toolbox } from 'armorer';
 import type { ConversationSnapshot } from 'conversationalist';
 import type { ProviderName } from 'herald';
@@ -25,7 +26,6 @@ import type {
   TokenUsage,
 } from 'operative';
 import type { Store } from 'sentinel';
-import type { KeyValueStore, KeyValueStoreConfiguration } from 'storage';
 
 import type { BureauEventMap } from './events';
 
@@ -117,7 +117,7 @@ export interface SkillProvider {
 
 export interface CacheConfiguration extends Omit<CacheOptions, 'store'> {
   enabled?: boolean;
-  store?: KeyValueStore;
+  store?: TextValueStore;
 }
 
 export interface StreamingConfiguration extends Pick<EnhancedStreamingOptions, 'onTextDelta'> {
@@ -139,8 +139,8 @@ export interface BureauOptions {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   toolbox?: Toolbox<any>;
   store?: Store;
-  persistence?: KeyValueStore;
-  storage?: KeyValueStoreConfiguration;
+  persistence?: TextValueStore;
+  storage?: StorageConfiguration;
   memory?: CreateMemoryOptions | Memory;
   cache?: CacheConfiguration;
   guardrails?: GuardrailsOptions;
@@ -219,7 +219,7 @@ export interface Bureau {
   dispose(): void;
 
   readonly sessionStore: SessionStore | undefined;
-  readonly kv: KeyValueStore | undefined;
+  readonly kv: TextValueStore | undefined;
 }
 
 // ── Gateway (HTTP layer wrapping Bureau) ────────────────────────────

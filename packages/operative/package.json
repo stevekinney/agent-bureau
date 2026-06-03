@@ -98,11 +98,11 @@
     "validate": "bun run format:check && bun run lint && bun run check-types && bun run test"
   },
   "dependencies": {
+    "@lostgradient/weft": "^0.2.0",
     "armorer": "workspace:*",
     "conversationalist": "workspace:*",
     "interoperability": "workspace:*",
-    "lifecycle": "workspace:*",
-    "storage": "workspace:*"
+    "lifecycle": "workspace:*"
   },
   "devDependencies": {
     "@eslint/compat": "^2.0.2",

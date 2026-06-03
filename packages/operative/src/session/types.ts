@@ -37,7 +37,7 @@ export interface SessionCleanupOptions {
 }
 
 /**
- * A high-level store for agent sessions, built on top of KeyValueStore.
+ * A high-level store for agent sessions, built on top of TextValueStore.
  *
  * Provides CRUD operations plus listing, filtering, metadata updates,
  * and time-based cleanup. All keys are namespaced under `agent-session:`

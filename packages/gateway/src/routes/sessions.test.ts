@@ -1,5 +1,5 @@
+import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
 import { describe, expect, it } from 'bun:test';
-import { createMemoryKeyValueStore } from 'storage';
 
 import { createTestGateway, requestJSON } from '../test';
 
@@ -24,7 +24,7 @@ describe('sessions routes', () => {
   it('GET /api/v1/sessions returns session list', async () => {
     const gateway = await createTestGateway({
       authToken: AUTH_TOKEN,
-      persistence: createMemoryKeyValueStore(),
+      persistence: textValueStore(new MemoryStorage()),
       generate: async () => ({ content: 'Done.', toolCalls: [] }),
     });
 
@@ -49,7 +49,7 @@ describe('sessions routes', () => {
   it('GET /api/v1/sessions/:id returns a session', async () => {
     const gateway = await createTestGateway({
       authToken: AUTH_TOKEN,
-      persistence: createMemoryKeyValueStore(),
+      persistence: textValueStore(new MemoryStorage()),
       generate: async () => ({ content: 'Done.', toolCalls: [] }),
     });
 
@@ -69,7 +69,7 @@ describe('sessions routes', () => {
 
   it('GET /api/v1/sessions/:id returns 404 for missing session', async () => {
     const gateway = await createTestGateway({
-      persistence: createMemoryKeyValueStore(),
+      persistence: textValueStore(new MemoryStorage()),
       authToken: AUTH_TOKEN,
     });
 
@@ -82,7 +82,7 @@ describe('sessions routes', () => {
   it('DELETE /api/v1/sessions/:id removes a session', async () => {
     const gateway = await createTestGateway({
       authToken: AUTH_TOKEN,
-      persistence: createMemoryKeyValueStore(),
+      persistence: textValueStore(new MemoryStorage()),
       generate: async () => ({ content: 'Done.', toolCalls: [] }),
     });
 

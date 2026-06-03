@@ -1,3 +1,4 @@
+import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
 import { describe, expect, it } from 'bun:test';
 import { MemoryStorageAdapter } from 'vector-frankl';
 
@@ -33,9 +34,8 @@ describe('createBureau with storage', () => {
     bureau.dispose();
   });
 
-  it('explicit KeyValueStore takes priority over storage backend', async () => {
-    const { createMemoryKeyValueStore } = await import('storage');
-    const explicitKv = createMemoryKeyValueStore();
+  it('explicit text value store takes priority over storage backend', async () => {
+    const explicitKv = textValueStore(new MemoryStorage());
 
     const bureau = await createBureau({
       storage: { type: 'memory' },
