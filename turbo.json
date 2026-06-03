@@ -1,7 +1,12 @@
 {
   "$schema": "https://turborepo.dev/schema.json",
   "ui": "tui",
-  "globalDependencies": [".prettierrc.json", "bunfig.toml"],
+  "globalDependencies": [
+    ".prettierrc.json",
+    "bunfig.toml",
+    "tsconfig.base.json",
+    "eslint.config.base.ts"
+  ],
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
@@ -23,7 +28,7 @@
     },
     "coverage:check": {
       "dependsOn": ["^build"],
-      "outputs": []
+      "outputs": ["coverage/**"]
     },
     "format:check": {
       "outputs": []
