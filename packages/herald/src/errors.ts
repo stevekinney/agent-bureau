@@ -38,7 +38,11 @@ export function shouldRetryHeraldError(error: unknown): boolean {
   return error instanceof HeraldError && error.retryable;
 }
 
-function extractStatusCode(error: unknown): number | undefined {
+/**
+ * Extracts an HTTP status code from an arbitrary SDK error shape, checking `status`, `statusCode`,
+ * and a nested `error.status` (the shape some SDKs use). Returns `undefined` when no code is found.
+ */
+export function extractStatusCode(error: unknown): number | undefined {
   if (!error || typeof error !== 'object') return undefined;
 
   if ('status' in error && typeof error.status === 'number') {

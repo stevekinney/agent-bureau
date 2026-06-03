@@ -1,5 +1,3 @@
-import type { GenerateFunction } from 'operative';
-
 import type { ResponseFormat, ToolChoice } from './structured-output/types.ts';
 
 export type {
@@ -128,13 +126,6 @@ export interface GeminiProviderOptions extends BaseProviderOptions {
   client?: GeminiGenerativeModel;
   apiKey?: string;
 }
-
-/**
- * Common return type — all factories return a GenerateFunction.
- */
-export type CreateProviderGenerate<T extends BaseProviderOptions> = (
-  options: T,
-) => GenerateFunction;
 
 // ── Streaming Types ─────────────────────────────────────────────────
 

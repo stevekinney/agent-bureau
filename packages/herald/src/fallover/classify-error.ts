@@ -1,4 +1,4 @@
-import { HeraldError } from '../errors.ts';
+import { extractStatusCode } from '../errors.ts';
 import type { ErrorClassification } from './types.ts';
 
 const AUTH_STATUS_CODES = new Set([401, 403]);
@@ -36,17 +36,6 @@ export function classifyProviderError(error: unknown): ErrorClassification {
   }
 
   return 'unknown';
-}
-
-function extractStatusCode(error: unknown): number | undefined {
-  if (error instanceof HeraldError) return error.statusCode;
-
-  if (error && typeof error === 'object') {
-    if ('statusCode' in error && typeof error.statusCode === 'number') return error.statusCode;
-    if ('status' in error && typeof error.status === 'number') return error.status;
-  }
-
-  return undefined;
 }
 
 function extractFullMessage(error: unknown): string {

@@ -1,3 +1,4 @@
+import { extractStatusCode } from '../errors.ts';
 import type { GenerateFunction } from '../types.ts';
 import { classifyProviderError } from './classify-error.ts';
 import { FalloverExhaustedError } from './errors.ts';
@@ -83,7 +84,7 @@ export function createFalloverGenerate(options: FalloverOptions): GenerateFuncti
             throw error;
           }
 
-          const errorCode = extractErrorCode(error);
+          const errorCode = extractStatusCode(error) ?? 0;
           tracker.recordFailure(provider.name, errorType, {
             code: errorCode,
             message: error instanceof Error ? error.message : String(error),
@@ -136,14 +137,6 @@ function findNextAvailable(
     }
   }
   return undefined;
-}
-
-function extractErrorCode(error: unknown): number {
-  if (error && typeof error === 'object') {
-    if ('statusCode' in error && typeof error.statusCode === 'number') return error.statusCode;
-    if ('status' in error && typeof error.status === 'number') return error.status;
-  }
-  return 0;
 }
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {

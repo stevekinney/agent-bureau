@@ -1,4 +1,4 @@
-import type { GenerateContext, GenerateFunction, GenerateResponse } from '../types.ts';
+import type { GenerateContext, GenerateFunction } from '../types.ts';
 
 /**
  * Options for configuring model routing behavior.
@@ -81,8 +81,3 @@ export type RoutingMetricsResult = {
   generate: GenerateFunction;
   metrics: RoutingMetrics;
 };
-
-/**
- * Internal type for the generate response with usage data, used by metrics tracking.
- */
-export type { GenerateContext, GenerateFunction, GenerateResponse };
