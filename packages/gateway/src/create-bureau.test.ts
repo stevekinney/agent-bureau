@@ -77,11 +77,15 @@ async function waitForRunCompletion() {
 /**
  * Poll `check` up to `attempts` times, yielding one macrotask between tries.
  * Each yield also drains Weft's deferred inline-launch queue (its `setTimeout(0)`
- * starts), so a recovered run can advance — bounded (project rule: cap at 5),
- * not a fixed wall-clock sleep that flakes on loaded hosts. `check` may be async
- * (e.g. re-reading the session store each iteration).
+ * starts), so a recovered run can advance — bounded, not a fixed wall-clock sleep
+ * that flakes on loaded hosts. `check` may be async (e.g. re-reading the session
+ * store each iteration). The cap is generous (20) because each tick is a cheap
+ * `setTimeout(0)` and a multi-step durable recovery yields several times (launch
+ * → ensureDeps → per-step memo → saveConversation/recordStep/saveCursor); a tight
+ * cap would itself flake on a loaded host. A `check` that resolves earlier returns
+ * immediately, so the generous cap costs nothing on the happy path.
  */
-async function pollUntil(check: () => boolean | Promise<boolean>, attempts = 5): Promise<boolean> {
+async function pollUntil(check: () => boolean | Promise<boolean>, attempts = 20): Promise<boolean> {
   for (let i = 0; i < attempts; i++) {
     if (await check()) return true;
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -290,11 +294,21 @@ describe('createBureau', () => {
       // === Bureau A: step 0 commits a tool call, then step 1's generate HANGS.
       // Disposing while suspended simulates a process dying mid-run: the Weft
       // workflow is left in a non-terminal state for recoverAll to pick up. ===
+      //
+      // DETERMINISTIC crash anchor: the durable workflow runs step 0's whole
+      // memo (generate + tool), then `yield* saveConversation/recordStep/
+      // saveCursor`, THEN loops into step 1's memo. The `yield*` on saveCursor
+      // cannot resolve until that checkpoint is durably written — so entering
+      // `generate({ step: 1 })` PROVES step 0 is fully checkpointed. We crash
+      // exactly there, with no timing guess. (The earlier toolbox-action anchor
+      // raced: that event fires INSIDE step 0's memo, before any checkpoint yield.)
+      let bureauAReachedStep1 = false;
       const bureauA = await createBureau({
         generate: async ({ step }) => {
           if (step === 0) {
             return { content: 'A step 0', toolCalls: [{ name: 'next', arguments: {} }] };
           }
+          bureauAReachedStep1 = true; // step 0's saveCursor has committed
           // Hang forever — the "process" dies here.
           return new Promise<never>(() => {});
         },
@@ -304,18 +318,11 @@ describe('createBureau', () => {
         stopWhen: stopWhen.noToolCalls(),
       });
 
-      // Anchor the "crash" to an OBSERVED step-0 tool call rather than a fixed
-      // sleep: step 0 commits a `next` tool call, so a `toolbox.*` action fires
-      // once step 0 has run its generate + tool (and thus checkpointed) — at
-      // which point step 1's generate is parked forever. Polling on that signal
-      // (bounded) is deterministic where a 150ms sleep races on a loaded host.
-      let bureauAToolFired = false;
-      bureauA.addEventListener('action', (event) => {
-        if (event.action.type.startsWith('toolbox.')) bureauAToolFired = true;
-      });
       const run = await bureauA.createRun({ message: 'Recover me' });
-      await pollUntil(() => bureauAToolFired);
-      expect(bureauAToolFired).toBe(true); // step 0 checkpointed before the crash
+      // Crash once step 1's generate is entered — i.e. step 0 is durably
+      // checkpointed (see the anchor rationale above).
+      await pollUntil(() => bureauAReachedStep1);
+      expect(bureauAReachedStep1).toBe(true);
       bureauA.dispose();
 
       // === FRESH PROCESS: clear the module-global deps registry so the recovered

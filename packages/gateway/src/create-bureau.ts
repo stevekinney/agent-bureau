@@ -763,44 +763,53 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     if (disposed) return;
     disposed = true;
 
-    if (runtime.scheduler) {
-      void runtime.scheduler.stop().catch(() => {});
-    }
-
-    if (runtime.memory) {
-      void runtime.memory.close().catch(() => {});
-    }
-
-    emitter.dispatch(new BureauDisposedEvent());
-    storeSubscription.unsubscribe();
-    for (const disposeListener of schedulerCleanup) {
-      disposeListener();
-    }
-    emitter.complete();
-
-    // No future recovered run should reach the (about-to-close) storage through
-    // the reconstructor closure. Clear it before tearing down the backends.
-    setRunDepsReconstructor(undefined);
-
-    // Dispose the durable run engine, then the raw Storage, then the store —
-    // each guarded so a throw in one stage does not skip the next (engine dispose
-    // is synchronous and can throw in a degraded environment; the SQLite/LMDB
-    // handle must still be released).
-    //
-    // Durable execution is ON BY DEFAULT for a persistent storage backend, so
-    // most sqlite/lmdb bureaus now own an engine. The engine dispose does NOT
-    // close the raw Storage, and the KV/checkpoint views were created with
-    // `disposeUnderlyingStorage: false` — so the explicit `disposeStorage` is
-    // what actually releases the file handle (even when no engine was built,
-    // e.g. `durableExecution: false` with sqlite).
+    // The whole body is under an OUTER try/finally so the critical backend
+    // teardown (engine → storage → store) ALWAYS runs, even if a pre-teardown
+    // step throws — e.g. a `BureauDisposedEvent` listener, a `toObservable`
+    // `complete` callback fired by `emitter.complete()`, or a scheduler-cleanup
+    // closure. Without this, a throwing listener would strand the SQLite/LMDB
+    // handle behind the now-`true` `disposed` guard (a second dispose no-ops),
+    // leaking it permanently.
     try {
-      runtime.durable?.engine[Symbol.dispose]?.();
+      if (runtime.scheduler) {
+        void runtime.scheduler.stop().catch(() => {});
+      }
+
+      if (runtime.memory) {
+        void runtime.memory.close().catch(() => {});
+      }
+
+      emitter.dispatch(new BureauDisposedEvent());
+      storeSubscription.unsubscribe();
+      for (const disposeListener of schedulerCleanup) {
+        disposeListener();
+      }
+      emitter.complete();
+
+      // No future recovered run should reach the (about-to-close) storage through
+      // the reconstructor closure. Clear it before tearing down the backends.
+      setRunDepsReconstructor(undefined);
     } finally {
+      // Dispose the durable run engine, then the raw Storage, then the store —
+      // each guarded so a throw in one stage does not skip the next (engine
+      // dispose is synchronous and can throw in a degraded environment; the
+      // SQLite/LMDB handle must still be released).
+      //
+      // Durable execution is ON BY DEFAULT for a persistent storage backend, so
+      // most sqlite/lmdb bureaus now own an engine. The engine dispose does NOT
+      // close the raw Storage, and the KV/checkpoint views were created with
+      // `disposeUnderlyingStorage: false` — so the explicit `disposeStorage` is
+      // what actually releases the file handle (even when no engine was built,
+      // e.g. `durableExecution: false` with sqlite).
       try {
-        runtime.disposeStorage?.();
+        runtime.durable?.engine[Symbol.dispose]?.();
       } finally {
-        if (ownsStore) {
-          store.dispose();
+        try {
+          runtime.disposeStorage?.();
+        } finally {
+          if (ownsStore) {
+            store.dispose();
+          }
         }
       }
     }
