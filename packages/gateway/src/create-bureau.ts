@@ -519,8 +519,22 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
 
       const finishReason =
         typeof summary.finishReason === 'string' ? summary.finishReason : 'error';
-      const lastRunStatus = finishReason === 'error' ? 'error' : 'completed';
-      await saveSession(sessionId, new Conversation(session.conversationHistory), {
+      // Match the live-run status mapping: only a plain 'error' maps to 'error';
+      // 'aborted' maps to 'aborted' (not 'completed'); all other finish reasons
+      // (stop-condition, max-steps, budget-exceeded, etc.) map to 'completed'.
+      const lastRunStatus =
+        finishReason === 'error' ? 'error' : finishReason === 'aborted' ? 'aborted' : 'completed';
+
+      // Prefer the conversation snapshot written by the durable run's final
+      // checkpoint (steps completed on the resumed process are there, not in the
+      // session store which was last written before the crash). Fall back to the
+      // session store conversation only when no checkpoint snapshot is available.
+      const checkpointSnapshot = await runtime.durable?.checkpointStore.loadConversation(runId);
+      const conversation = checkpointSnapshot
+        ? Conversation.from(checkpointSnapshot)
+        : new Conversation(session.conversationHistory);
+
+      await saveSession(sessionId, conversation, {
         lastRunId: runId,
         lastRunStatus,
         lastFinishReason: finishReason,

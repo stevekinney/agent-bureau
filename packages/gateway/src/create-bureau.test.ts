@@ -6,7 +6,7 @@ import { MemoryStorage, type TextValueStore, textValueStore } from '@lostgradien
 import { createTool, createToolbox } from 'armorer';
 import { createMockTool, createTestToolbox } from 'armorer/test';
 import { afterEach, describe, expect, it } from 'bun:test';
-import { Conversation } from 'conversationalist';
+import { Conversation, getMessages } from 'conversationalist';
 import type { GenerateFunction, GenerateResponse, Toolbox } from 'operative';
 import { stopWhen } from 'operative';
 import {
@@ -364,7 +364,18 @@ describe('createBureau', () => {
           return current?.metadata['lastRunStatus'] !== 'running';
         });
         const session = await bureauB.getSession(run.sessionId);
-        expect(session?.metadata['lastRunStatus']).not.toBe('running');
+        expect(session?.metadata['lastRunStatus']).toBe('completed');
+        // The session conversation must include step 1's content — written by the
+        // durable checkpoint on the resumed process, NOT the stale pre-crash history
+        // that was in the session store. If settleRecoveredRun fell back to the
+        // session store, 'B recovered step 1' would be absent.
+        const messages = session?.conversationHistory
+          ? getMessages(session.conversationHistory)
+          : [];
+        const hasBStep1 = messages.some(
+          (m) => typeof m.content === 'string' && m.content.includes('B recovered step 1'),
+        );
+        expect(hasBStep1).toBe(true);
       } finally {
         bureauB.dispose();
       }
