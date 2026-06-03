@@ -85,6 +85,7 @@ import type {
 } from './is-tool';
 import { isTool } from './is-tool';
 import { resolveFuzzyToolName } from './resolution/index';
+import { isAsyncIterable, isPromise, isTestRuntime } from './type-guards';
 import type {
   JSONValue,
   ToolCall,
@@ -94,7 +95,6 @@ import type {
 } from './types';
 import { createConcurrencyLimiter, normalizeConcurrency } from './utilities/concurrency';
 import { normalizeSchema as normalizeToolSchema } from './utilities/schema-normalization';
-import { isAsyncIterable, isPromise, isTestRuntime } from './utilities/type-guards';
 
 export type ToolboxContext = Record<string, unknown>;
 

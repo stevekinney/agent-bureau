@@ -54,10 +54,10 @@ import type {
   ToolRepairHint,
   ToolValidationReport,
 } from './is-tool';
+import { isAsyncIterable, isPromise, isTestRuntime } from './type-guards';
 import type { ToolCall, ToolExecutionResult } from './types';
 import { createConcurrencyLimiter, normalizeConcurrency } from './utilities/concurrency';
 import { normalizeSchema } from './utilities/schema-normalization';
-import { isAsyncIterable, isPromise, isTestRuntime } from './utilities/type-guards';
 
 // Map from event type strings to their Event subclass constructors.
 // Used by the `emit(type, detail)` helper to construct the correct Event.

@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { queryTools, type ToolQuery, type ToolQueryInput } from '../core/registry';
 import { createTool } from '../create-tool';
 import type { Tool } from '../is-tool';
-import { isTestRuntime } from '../utilities/type-guards';
+import { isTestRuntime } from '../type-guards';
 
 type SearchableToolbox = {
   tools: () => readonly Tool[];

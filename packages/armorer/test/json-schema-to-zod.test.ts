@@ -4,7 +4,7 @@ import {
   importToolSchema,
   internalJsonSchemaTestUtilities,
   jsonSchemaToZod,
-} from '../src/utilities/json-schema-to-zod';
+} from '../src/json-schema-to-zod';
 
 const { enumToZod } = internalJsonSchemaTestUtilities;
 

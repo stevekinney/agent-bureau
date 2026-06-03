@@ -1,1 +1,1 @@
-export { importToolSchema } from '../utilities/json-schema-to-zod';
+export { importToolSchema } from '../json-schema-to-zod';

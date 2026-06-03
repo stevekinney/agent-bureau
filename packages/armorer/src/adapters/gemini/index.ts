@@ -1,8 +1,8 @@
 import type { SerializedToolDefinition } from '../../core/serialization';
 import type { AnyToolDefinition } from '../../core/tool-definition';
 import type { ImportedToolConfiguration } from '../../create-toolbox';
+import { isAsyncIterable } from '../../type-guards';
 import type { ToolCallInput, ToolResultLike } from '../../types';
-import { isAsyncIterable } from '../../utilities/type-guards';
 import { importToolSchema } from '../imported-schema';
 import { normalizeToSerializedDefinitions, type ToolRegistryLike } from '../shared';
 import type {

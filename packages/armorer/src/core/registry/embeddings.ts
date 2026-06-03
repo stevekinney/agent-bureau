@@ -1,6 +1,6 @@
 import type { Embedder, EmbeddingVector } from 'interoperability';
 
-import { isPromise } from '../../utilities/type-guards';
+import { isPromise } from '../../type-guards';
 import type { TextQueryField } from '../query-predicates';
 import { getSchemaKeys } from '../schema-utilities';
 import type { AnyToolDefinition as ToolDefinition } from '../tool-definition';

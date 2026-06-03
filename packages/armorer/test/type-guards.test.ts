@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 
-import { isAsyncIterable, isPromise, isTestRuntime } from '../src/utilities/type-guards';
+import { isAsyncIterable, isPromise, isTestRuntime } from '../src/type-guards';
 
 describe('isAsyncIterable', () => {
   it('returns true for an async generator', () => {

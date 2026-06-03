@@ -5,7 +5,7 @@ import {
   type ToolResultTruncationOptions,
   truncateToolResultContent,
 } from '../truncation/index';
-import { isAsyncIterable } from '../utilities/type-guards';
+import { isAsyncIterable } from '../type-guards';
 
 /**
  * Creates a rate limiting middleware that restricts the number of tool executions

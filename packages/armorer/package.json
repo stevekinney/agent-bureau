@@ -193,7 +193,7 @@
     "dev": "bun --watch run src/index.ts",
     "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md}\"",
     "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,json,md}\"",
-    "lint": "eslint .",
+    "lint": "eslint . && bun run check:boundaries",
     "lint:fix": "eslint . --fix",
     "start": "bun run src/index.ts",
     "test": "bun test",

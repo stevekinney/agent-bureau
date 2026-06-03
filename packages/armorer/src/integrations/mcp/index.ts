@@ -17,8 +17,8 @@ import { isZodSchema } from '../../core/schema-utilities';
 import { createTool } from '../../create-tool';
 import type { Tool, ToolExecuteWithOptions } from '../../is-tool';
 import { isTool } from '../../is-tool';
+import { jsonSchemaToZod } from '../../json-schema-to-zod';
 import type { ToolResultLike } from '../../types';
-import { jsonSchemaToZod } from '../../utilities/json-schema-to-zod';
 
 type ToolboxLike = {
   tools: () => readonly Tool[];
