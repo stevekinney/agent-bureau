@@ -32,7 +32,6 @@ const entry = {
   'plugins/pii-redaction': './src/plugins/pii-redaction.ts',
   'versioning/index': './src/versioning/index.ts',
   'sort/index': './src/sort/index.ts',
-  'persistence/index': './src/persistence/index.ts',
   'composition/index': './src/composition/index.ts',
 };
 
@@ -46,5 +45,5 @@ export default defineConfig({
   tsconfig: './tsconfig.build.json',
   // Real externals: the peer dependency and the genuine runtime deps. The foundation workspace
   // packages are deliberately NOT listed, so tsdown inlines them into the JS and the declarations.
-  external: ['zod', 'change-case', 'gray-matter', /^bun(:|$)/, /^node:/],
+  external: ['zod', 'gray-matter', /^bun(:|$)/, /^node:/],
 });

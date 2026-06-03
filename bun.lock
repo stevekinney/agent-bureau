@@ -80,7 +80,6 @@
       "name": "conversationalist",
       "version": "0.0.12",
       "dependencies": {
-        "change-case": "^5.4.4",
         "gray-matter": "^4.0.3",
       },
       "devDependencies": {
