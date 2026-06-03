@@ -452,6 +452,33 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
    * The reconstructed `conversation` is a placeholder: a resumed run reads its
    * transcript from the checkpoint, not from `options.conversation`.
    */
+  async function buildRunDepsFromSession(
+    session: Awaited<ReturnType<NonNullable<typeof runtime.sessionStore>['load']>>,
+  ): Promise<DurableRunDeps | null> {
+    if (!session) return null;
+    const message = session.metadata['lastUserMessage'];
+    const runRuntime = await runtime.createRunRuntime(
+      {
+        message: typeof message === 'string' ? message : '',
+        sessionId: session.id,
+      },
+      { liveStreaming: false },
+    );
+    return {
+      toolbox: runRuntime.toolbox,
+      options: {
+        generate: runRuntime.generate,
+        toolbox: runRuntime.toolbox,
+        conversation: new Conversation(session.conversationHistory),
+        maximumSteps: runtime.maximumSteps,
+        stopWhen: options.stopWhen,
+        prepareStep: runRuntime.prepareStep,
+        onStep: runRuntime.onStep,
+        validateResponse: runRuntime.validateResponse,
+      },
+    };
+  }
+
   async function reconstructDurableRunDeps(runId: string): Promise<DurableRunDeps | null> {
     const sessionStore = runtime.sessionStore;
     if (!sessionStore) return null;
@@ -460,32 +487,8 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     for (const summary of summaries) {
       if (summary.metadata['lastRunId'] !== runId) continue;
       if (summary.metadata['lastRunStatus'] !== 'running') continue;
-
       const session = await sessionStore.load(summary.id);
-      if (!session) continue;
-
-      const message = session.metadata['lastUserMessage'];
-      const runRuntime = await runtime.createRunRuntime(
-        {
-          message: typeof message === 'string' ? message : '',
-          sessionId: session.id,
-        },
-        { liveStreaming: false },
-      );
-
-      return {
-        toolbox: runRuntime.toolbox,
-        options: {
-          generate: runRuntime.generate,
-          toolbox: runRuntime.toolbox,
-          conversation: new Conversation(session.conversationHistory),
-          maximumSteps: runtime.maximumSteps,
-          stopWhen: options.stopWhen,
-          prepareStep: runRuntime.prepareStep,
-          onStep: runRuntime.onStep,
-          validateResponse: runRuntime.validateResponse,
-        },
-      };
+      return buildRunDepsFromSession(session);
     }
     return null;
   }
@@ -510,7 +513,11 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
   ): Promise<void> {
     const runId = handle.id;
     try {
-      const summary = (await handle.result()) as { runId?: unknown; finishReason?: unknown };
+      const summary = (await handle.result()) as {
+        runId?: unknown;
+        finishReason?: unknown;
+        errorMessage?: unknown;
+      };
       const sessionId = recovered.get(runId);
       if (sessionId === undefined) return; // not bureau-owned; nothing to persist
 
@@ -534,11 +541,19 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         ? Conversation.from(checkpointSnapshot)
         : new Conversation(session.conversationHistory);
 
-      await saveSession(sessionId, conversation, {
+      // Carry errorMessage → lastError for error-class finish reasons, matching
+      // the live-run path (run.completed sets lastError when finishReason is error,
+      // budget-exceeded, or elicitation-denied — i.e. whenever errorMessage is set).
+      const metadata: Record<string, string> = {
         lastRunId: runId,
         lastRunStatus,
         lastFinishReason: finishReason,
-      });
+      };
+      if (typeof summary.errorMessage === 'string') {
+        metadata['lastError'] = summary.errorMessage;
+      }
+
+      await saveSession(sessionId, conversation, metadata);
     } catch (error) {
       console.error(
         `[bureau] Recovered durable run "${runId}" did not settle cleanly: ${serializeUnknownError(error)}`,
@@ -590,7 +605,10 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     for (const summary of inFlight) {
       const runId = summary.metadata['lastRunId'];
       if (typeof runId !== 'string') continue;
-      const deps = await reconstructDurableRunDeps(runId);
+      // Load the session directly from the summary we already have (O(1) per run)
+      // rather than calling reconstructDurableRunDeps which re-scans the full list.
+      const session = await sessionStore.load(summary.id);
+      const deps = await buildRunDepsFromSession(session);
       if (deps === null) continue;
       registerRunDeps(runId, deps);
       recovered.set(runId, summary.id);

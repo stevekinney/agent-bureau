@@ -98,9 +98,10 @@ export function getRunDeps(runId: string): DurableRunDeps {
 
 /**
  * Ensure deps exist for `runId`, reconstructing them via the registered
- * {@link RunDepsReconstructor} when absent. The durable workflow yields to this
- * (as an activity) at startup so a run recovered in a fresh process can rebuild
- * its behavior before the first step needs it.
+ * {@link RunDepsReconstructor} when absent. The durable workflow calls this as a
+ * plain `await` (NOT as a `ctx.run` activity) so it re-evaluates on every
+ * replay/recovery, picking up freshly registered deps from the new process
+ * rather than replaying a stale cached result from the checkpoint.
  *
  * @returns `true` if deps are present (already registered or just
  *   reconstructed), `false` if the run cannot be reconstructed and should be

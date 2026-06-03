@@ -58,8 +58,14 @@ describe('createRunEngine', () => {
 
     try {
       // The returned checkpoint store writes through to the shared backend.
-      await checkpointStore.saveCursor('run-x', { step: 4 });
-      expect(await checkpointStore.loadCursor('run-x')).toEqual({ step: 4 });
+      const fullCursor = {
+        step: 4,
+        totalUsage: { prompt: 0, completion: 0, total: 0 },
+        lastContent: '',
+        schemaAttempts: 0,
+      };
+      await checkpointStore.saveCursor('run-x', fullCursor);
+      expect(await checkpointStore.loadCursor('run-x')).toEqual(fullCursor);
     } finally {
       engine[Symbol.dispose]();
     }
