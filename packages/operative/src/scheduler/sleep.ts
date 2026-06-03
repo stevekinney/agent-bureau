@@ -7,7 +7,7 @@
  */
 type SleepRuntime = {
   bunSleep?: (milliseconds: number) => Promise<void>;
-  setTimeoutFunction?: typeof setTimeout;
+  setTimeoutFunction?: (callback: () => void, milliseconds?: number) => unknown;
 };
 
 const sleepRuntimeOverrideSymbol = Symbol.for('agent-bureau.operative.scheduler.sleep.runtime');
@@ -20,7 +20,7 @@ function resolveSleepRuntime(): SleepRuntime {
 
   return {
     bunSleep: typeof Bun !== 'undefined' ? Bun.sleep.bind(Bun) : undefined,
-    setTimeoutFunction: setTimeout,
+    setTimeoutFunction: (callback, milliseconds) => setTimeout(callback, milliseconds),
   };
 }
 
@@ -30,6 +30,7 @@ export async function sleep(milliseconds: number): Promise<void> {
   if (runtime.bunSleep) {
     return runtime.bunSleep(milliseconds);
   }
-  const setTimeoutFunction = runtime.setTimeoutFunction ?? setTimeout;
+  const setTimeoutFunction =
+    runtime.setTimeoutFunction ?? ((callback, delay) => setTimeout(callback, delay));
   return new Promise((resolve) => setTimeoutFunction(resolve, milliseconds));
 }

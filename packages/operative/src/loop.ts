@@ -138,16 +138,20 @@ async function callGenerateWithRetry(
 
       if (delayMs > 0) {
         if (currentContext.signal?.aborted) break;
-        await new Promise<void>((resolve) => {
-          const timer = setTimeout(resolve, delayMs);
-          if (currentContext.signal) {
-            const onAbort = () => {
-              clearTimeout(timer);
-              resolve();
-            };
-            currentContext.signal.addEventListener('abort', onAbort, { once: true });
-          }
-        });
+        await (
+          retry.sleep ??
+          ((milliseconds: number, signal?: AbortSignal) =>
+            new Promise<void>((resolve) => {
+              const timer = setTimeout(resolve, milliseconds);
+              if (signal) {
+                const onAbort = () => {
+                  clearTimeout(timer);
+                  resolve();
+                };
+                signal.addEventListener('abort', onAbort, { once: true });
+              }
+            }))
+        )(delayMs, currentContext.signal);
         if (currentContext.signal?.aborted) break;
       }
     }

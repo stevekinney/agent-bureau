@@ -592,7 +592,8 @@ export function createTool<
     options: ToolExecuteOptions = {},
   ): Promise<ToolExecutionResult> => {
     const baseDetail = { toolCall, configuration };
-    const startedAt = telemetryEnabled ? Date.now() : 0;
+    const nowFunction = options.now ?? Date.now;
+    const startedAt = telemetryEnabled ? nowFunction() : 0;
     const inputDigest = digestOptions.input
       ? computeDigest(toolCall.arguments, digestOptions.algorithm)
       : undefined;
@@ -609,7 +610,7 @@ export function createTool<
       } = {},
     ) => {
       if (!telemetryEnabled) return;
-      const finishedAt = Date.now();
+      const finishedAt = nowFunction();
       emit('tool.finished', {
         ...baseDetail,
         status,
@@ -796,18 +797,20 @@ export function createTool<
       const runner = resolvedExecute(parsed, toolContext as unknown as TContext);
 
       const timed =
-        typeof options.timeout === 'number' ? withTimeout(runner, options.timeout) : runner;
+        typeof options.timeout === 'number'
+          ? withTimeout(runner, options.timeout, options)
+          : runner;
 
       let value: unknown = await raceWithSignal(timed, options.signal);
       let outputDigest: string | undefined;
       const streamDeadline =
-        typeof options.timeout === 'number' ? Date.now() + options.timeout : undefined;
+        typeof options.timeout === 'number' ? nowFunction() + options.timeout : undefined;
 
       const assertStreamingWindow = () => {
         if (options.signal?.aborted) {
           throw createAbortRejection(options.signal.reason);
         }
-        if (streamDeadline !== undefined && Date.now() > streamDeadline) {
+        if (streamDeadline !== undefined && nowFunction() > streamDeadline) {
           throw new Error('TIMEOUT');
         }
       };
@@ -1262,16 +1265,26 @@ export function createTool<
     return new Error(errorString(normalizeError(error)));
   }
 
-  function withTimeout<TP>(promise: Promise<TP>, timeout: number): Promise<TP> {
+  function withTimeout<TP>(
+    promise: Promise<TP>,
+    timeout: number,
+    options: ToolExecuteOptions,
+  ): Promise<TP> {
     return new Promise<TP>((resolve, reject) => {
-      const id = setTimeout(() => reject(new Error('TIMEOUT')), timeout);
+      const setTimeoutFunction =
+        options.setTimeoutFunction ??
+        ((callback, milliseconds) => setTimeout(callback, milliseconds));
+      const clearTimeoutFunction =
+        options.clearTimeoutFunction ??
+        ((handle) => clearTimeout(handle as ReturnType<typeof setTimeout>));
+      const id = setTimeoutFunction(() => reject(new Error('TIMEOUT')), timeout);
       void promise.then(
         (v) => {
-          clearTimeout(id);
+          clearTimeoutFunction(id);
           resolve(v);
         },
         (e) => {
-          clearTimeout(id);
+          clearTimeoutFunction(id);
           reject(asError(e));
         },
       );

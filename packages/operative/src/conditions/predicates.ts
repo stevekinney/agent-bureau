@@ -76,9 +76,13 @@ export function not(condition: StopCondition): StopCondition {
  * Unlike `AbortSignal.timeout()`, this lets the current step finish and
  * produces `finishReason: 'stop-condition'` instead of `'aborted'`.
  */
-export function wallClockTimeout(milliseconds: number): StopCondition {
-  const start = Date.now();
-  return () => Date.now() - start >= milliseconds;
+export function wallClockTimeout(
+  milliseconds: number,
+  options: { now?: () => number } = {},
+): StopCondition {
+  const now = options.now ?? Date.now;
+  const start = now();
+  return () => now() - start >= milliseconds;
 }
 
 /**

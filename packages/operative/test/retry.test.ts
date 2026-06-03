@@ -112,8 +112,6 @@ describe('retry on generate failure', () => {
     const generate = async () => {
       callCount++;
       if (callCount === 1) {
-        // Abort during the retry delay
-        setTimeout(() => controller.abort('cancel'), 5);
         throw new Error('retry me');
       }
       return textResponse('Should not reach');
@@ -125,7 +123,13 @@ describe('retry on generate failure', () => {
       conversation: new Conversation(),
       stopWhen: noToolCalls(),
       signal: controller.signal,
-      retry: { attempts: 3, delay: 1000 },
+      retry: {
+        attempts: 3,
+        delay: 1000,
+        sleep: async (_milliseconds) => {
+          controller.abort('cancel');
+        },
+      },
     });
 
     expect(result.finishReason).toBe('aborted');

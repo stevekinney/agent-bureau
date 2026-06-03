@@ -213,10 +213,15 @@ export class VectorDatabase {
     const transaction = await this.transaction(storeNames, mode);
 
     return new Promise((resolve, reject) => {
-      let result: T;
+      let operationPromise: Promise<T> | null = null;
 
       transaction.oncomplete = () => {
-        resolve(result);
+        if (!operationPromise) {
+          reject(new TransactionError('execute', 'Transaction completed before operation started'));
+          return;
+        }
+
+        return operationPromise.then(resolve, reject);
       };
 
       transaction.onerror = () => {
@@ -239,18 +244,15 @@ export class VectorDatabase {
       // Execute the operation.
       // IMPORTANT: The callback must not await non-IDB operations (e.g., fetch, setTimeout)
       // between IDB requests, as IDB transactions auto-commit when the event loop is yielded.
-      operation(transaction)
-        .then((res) => {
-          result = res;
-        })
-        .catch((error) => {
-          try {
-            transaction.abort();
-          } catch {
-            // Transaction may already be inactive/committed; safe to ignore
-          }
-          reject(error instanceof Error ? error : new Error(String(error)));
-        });
+      operationPromise = operation(transaction);
+      operationPromise.catch((error) => {
+        try {
+          transaction.abort();
+        } catch {
+          // Transaction may already be inactive/committed; safe to ignore
+        }
+        reject(error instanceof Error ? error : new Error(String(error)));
+      });
     });
   }
 

@@ -3,6 +3,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } fr
 import { VectorDatabase } from '@/core/database.ts';
 import { VectorNotFoundError } from '@/core/errors.ts';
 import { VectorStorage } from '@/core/storage.ts';
+import { DeterministicClock } from '@/test/helpers/deterministic-clock.ts';
 import { VectorOperations } from '@/vectors/operations.ts';
 
 import { cleanupIndexedDBMocks, setupIndexedDBMocks } from '../../mocks/indexeddb-mock.ts';
@@ -10,7 +11,9 @@ import { cleanupIndexedDBMocks, setupIndexedDBMocks } from '../../mocks/indexedd
 describe('VectorStorage', () => {
   let database: VectorDatabase;
   let storage: VectorStorage;
-  const testDbName = 'test-vector-storage-db';
+  let clock: DeterministicClock;
+  let testDbName: string;
+  let databaseCounter = 0;
 
   beforeAll(() => {
     setupIndexedDBMocks();
@@ -21,6 +24,9 @@ describe('VectorStorage', () => {
   });
 
   beforeEach(async () => {
+    clock = new DeterministicClock();
+    testDbName = `test-vector-storage-db-${databaseCounter++}`;
+
     // Clean up any existing test database
     try {
       indexedDB.deleteDatabase(testDbName);
@@ -30,7 +36,7 @@ describe('VectorStorage', () => {
 
     database = new VectorDatabase({ name: testDbName });
     await database.init();
-    storage = new VectorStorage(database);
+    storage = new VectorStorage(database, clock);
   });
 
   afterEach(async () => {
@@ -100,6 +106,7 @@ describe('VectorStorage', () => {
       expect(retrieved1.accessCount).toBe(1);
 
       // Second access
+      clock.advanceBy(1);
       const retrieved2 = await storage.get('test-vector-1');
       expect(retrieved2.accessCount).toBe(2);
       expect(retrieved2.lastAccessed).toBeGreaterThan(retrieved1.lastAccessed!);

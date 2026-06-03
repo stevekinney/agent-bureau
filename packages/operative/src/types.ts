@@ -45,6 +45,8 @@ export interface RetryOptions {
   shouldRetry?: (error: unknown, attempt: number) => boolean | Promise<boolean>;
   /** Transforms the generate context before a retry attempt. */
   mutate?: RetryMutator;
+  /** Injectable sleep used between retry attempts. Defaults to a setTimeout-backed delay. */
+  sleep?: (milliseconds: number, signal?: AbortSignal) => Promise<void>;
   /** Whether to add random jitter to the retry delay. Defaults to false. */
   jitter?: boolean;
   /** Maximum jitter offset in milliseconds. Defaults to half the delay. */

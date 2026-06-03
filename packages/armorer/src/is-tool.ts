@@ -16,6 +16,9 @@ export type AsyncIteratorOptions = EventIteratorOptions;
 export type { ObservableLike, Observer, Subscription } from 'lifecycle';
 
 export type MinimalAbortSignal = AbortSignal;
+export type TimeoutHandle = unknown;
+export type ScheduleTimeout = (callback: () => void, milliseconds?: number) => TimeoutHandle;
+export type ClearScheduledTimeout = (handle: TimeoutHandle) => void;
 
 /**
  * Unified tool configuration type.
@@ -211,7 +214,10 @@ export interface RuntimeToolContext extends CoreToolContext {
 export type ToolContext<_E extends ToolEventsMap = DefaultToolEvents> = RuntimeToolContext;
 
 export interface ToolExecuteOptions {
+  clearTimeoutFunction?: ClearScheduledTimeout;
+  now?: () => number;
   signal?: MinimalAbortSignal;
+  setTimeoutFunction?: ScheduleTimeout;
   /** Execution timeout in milliseconds. */
   timeout?: number;
   /**

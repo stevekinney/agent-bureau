@@ -149,6 +149,8 @@ export interface BureauOptions {
   streaming?: StreamingConfiguration;
   scheduler?: SchedulerConfiguration;
   stopWhen?: StopCondition | StopCondition[];
+  sessionPersistenceRetryDelayMilliseconds?: number;
+  sessionPersistenceSleep?: (milliseconds: number) => Promise<void>;
   maximumSteps?: number;
   systemPrompt?: string;
 }

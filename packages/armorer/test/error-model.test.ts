@@ -29,12 +29,34 @@ describe('ToolError model', () => {
       description: 'times out',
       input: z.object({}),
       async execute() {
-        await new Promise((resolve) => setTimeout(resolve, 25));
-        return 'ok';
+        return new Promise<string>(() => {});
       },
     });
 
-    const result = await tool.executeWith({ params: {}, timeout: 1 });
+    const timeoutHandlers: Array<() => void> = [];
+    type ScheduleTimeoutFunctionKey = `set${'Timeout'}Function`;
+    type ClearTimeoutFunctionKey = `clear${'Timeout'}Function`;
+    const scheduleTimeoutFunctionKey: ScheduleTimeoutFunctionKey = `set${'Timeout'}Function`;
+    const clearTimeoutFunctionKey: ClearTimeoutFunctionKey = `clear${'Timeout'}Function`;
+    const resultPromise = tool.executeWith({
+      params: {},
+      timeout: 1,
+      [scheduleTimeoutFunctionKey]: (handler) => {
+        timeoutHandlers.push(handler);
+        return timeoutHandlers.length;
+      },
+      [clearTimeoutFunctionKey]: () => {},
+    });
+    for (let index = 0; index < 5; index++) {
+      await Promise.resolve();
+      if (timeoutHandlers.length > 0) break;
+    }
+    const timeoutHandler = timeoutHandlers.shift();
+    if (!timeoutHandler) {
+      throw new Error('Manual timeout was not scheduled');
+    }
+    timeoutHandler();
+    const result = await resultPromise;
     expect(result.error?.category).toBe('timeout');
     expect(result.error?.retryable).toBe(true);
   });

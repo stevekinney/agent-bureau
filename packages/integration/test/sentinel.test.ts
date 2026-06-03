@@ -2,7 +2,7 @@ import { createTool, createToolbox } from 'armorer';
 import { createTestToolbox } from 'armorer/test';
 import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
-import { createRun, type GenerateResponse,stopWhen } from 'operative';
+import { createRun, type GenerateResponse, stopWhen } from 'operative';
 import { createMockGenerate } from 'operative/test';
 import { createTestStore } from 'sentinel/test';
 import { z } from 'zod';
@@ -191,7 +191,7 @@ describe('sentinel integration: full operative loop tracked by store', () => {
   });
 
   it('error run records run.error action and error status', async () => {
-    const { store } = createTestStore();
+    const { store, waitForRun } = createTestStore();
     const toolbox = createTestToolbox([]);
     const conversation = new Conversation();
     conversation.appendUserMessage('Will fail');
@@ -209,9 +209,7 @@ describe('sentinel integration: full operative loop tracked by store', () => {
 
     // The run will reject because createMockGenerate with [] throws on first call
     await activeRun.result.catch(() => {});
-
-    // Give event processing a tick
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await waitForRun(runId);
 
     const finalRun = store.getRun(runId);
     expect(finalRun).toBeDefined();

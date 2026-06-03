@@ -19,6 +19,10 @@ type RetryOptions = {
   maxDelayMs?: number;
   shouldRetry?: (detail: RetryHookDetail) => boolean | Promise<boolean>;
   onRetry?: (detail: RetryHookDetail) => void | Promise<void>;
+  sleep?: (
+    milliseconds: number,
+    signal?: ToolContext<DefaultToolEvents>['signal'],
+  ) => Promise<void>;
 };
 
 /**
@@ -99,7 +103,7 @@ export function retry<TTool extends AnyTool>(
   }
 
   const backoff = options.backoff ?? 'fixed';
-  const { shouldRetry, onRetry } = options;
+  const { shouldRetry, onRetry, sleep = wait } = options;
   const name = `retry(${tool.name})`;
   const description = `Retry tool: ${tool.description}`;
   const tags = tool.tags && tool.tags.length ? tool.tags : undefined;
@@ -158,7 +162,7 @@ export function retry<TTool extends AnyTool>(
 
         const waitMs = resolveRetryDelay(attempt, delayMs, backoff, maxDelayMs);
         if (waitMs > 0) {
-          await wait(waitMs, context.signal);
+          await sleep(waitMs, context.signal);
         }
       }
     }

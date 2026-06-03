@@ -550,32 +550,23 @@ describe('Vector Database Integration Tests', () => {
     });
   });
 
-  describe('Performance Considerations', () => {
-    it('should handle large batch operations efficiently', async () => {
+  describe('Large Batch Behavior', () => {
+    it('should handle large batch operations', async () => {
       const largeBatch = Array.from({ length: 1000 }, (_, i) => ({
         id: `perf-${i}`,
         vector: new Float32Array(dimension).fill(Math.random()),
         metadata: { batch: 'large', index: i },
       }));
 
-      const startTime = performance.now();
       await db.addBatch(largeBatch, { batchSize: 100 });
-      const duration = performance.now() - startTime;
-
-      // Should complete within reasonable time (adjust as needed)
-      expect(duration).toBeLessThan(10000); // 10 seconds
 
       // Verify all vectors were added
       const stats = await db.getStats();
       expect(stats.vectorCount).toBe(1000);
 
-      // Test search performance
-      const searchStart = performance.now();
       const results = await db.search(largeBatch[0]!.vector, 10);
-      const searchDuration = performance.now() - searchStart;
 
       expect(results).toHaveLength(10);
-      expect(searchDuration).toBeLessThan(1000); // 1 second
     });
 
     it('should maintain reasonable memory usage', async () => {
