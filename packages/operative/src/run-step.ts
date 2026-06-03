@@ -33,7 +33,6 @@ import type {
   AfterToolExecutionHook,
   BeforeToolExecutionHook,
   ContextManagementOptions,
-  FinishReason,
   GenerateContext,
   GenerateResponse,
   OnElicitation,
@@ -126,7 +125,9 @@ export type StepOutcome =
   | { kind: 'continue' }
   | {
       kind: 'stop';
-      finishReason: FinishReason;
+      // A step only ever stops the run by a stop condition firing; `maximum-steps`
+      // is decided by the driver's loop bound, not a step.
+      finishReason: 'stop-condition';
       schemaValidation?: { success: boolean; error?: unknown };
     }
   | { kind: 'abort'; reason?: string }

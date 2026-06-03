@@ -2,6 +2,8 @@ import { Conversation, isConversation } from 'conversationalist';
 import type { ForwardableSource, ObservableLike, Observer, Subscription } from 'lifecycle';
 import { CompletableEventTarget, forwardEvents } from 'lifecycle';
 
+import type { DurableActiveRunContext } from './durable/active-run-adapter';
+import { createDurableActiveRun } from './durable/active-run-adapter';
 import type { CombinedOperativeEventMap, CombinedOperativeEventType } from './events';
 import { executeLoop } from './loop';
 import type { RunOptions, RunResult } from './types';
@@ -47,9 +49,37 @@ export interface ActiveRun {
 }
 
 /**
- * Creates an event-emitting agent loop run.
+ * Routing for a durable run. When provided to {@link createRun}, the run is
+ * driven through the Weft durable engine — checkpointed and resumable — instead
+ * of the in-memory loop. The `ActiveRun` surface is identical either way.
+ *
+ * Mirrors the `executeLoop(options, emitter?)` convention: durability is an
+ * optional second argument, NOT a field on `RunOptions`, so the standalone
+ * library signature is unchanged and callers without an engine are unaffected.
  */
-export function createRun(options: RunOptions): ActiveRun {
+export interface DurableRunRouting extends DurableActiveRunContext {
+  /** Stable id for the run; also the durable workflow id (resume key). */
+  runId: string;
+  /** First user message to seed a brand-new run. */
+  prompt?: string;
+}
+
+/**
+ * Creates an event-emitting agent loop run.
+ *
+ * When `durable` is provided (an engine + checkpoint store + runId), the run is
+ * driven through the Weft durable engine so it survives a crash and resumes from
+ * its last checkpoint. The returned {@link ActiveRun} is identical in both modes.
+ * Without `durable`, the in-memory loop runs (the standalone-library default).
+ */
+export function createRun(options: RunOptions, durable?: DurableRunRouting): ActiveRun {
+  if (durable) {
+    return createDurableActiveRun(
+      { engine: durable.engine, checkpointStore: durable.checkpointStore },
+      { runId: durable.runId, options, prompt: durable.prompt },
+    );
+  }
+
   const emitter = new CompletableEventTarget<CombinedOperativeEventMap>();
   const abortController = new AbortController();
 

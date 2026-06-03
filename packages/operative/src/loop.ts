@@ -1,17 +1,21 @@
 import { Conversation, isConversation } from 'conversationalist';
 
-import { BudgetExceededError, ElicitationDeniedError } from './errors';
-import { RunAbortedEvent, RunCompletedEvent, RunErrorEvent, RunStartedEvent } from './events';
+import { RunErrorEvent } from './events';
+import {
+  makeAbortResult,
+  makeCompletedResult,
+  makeErrorResult,
+  startRunLifecycle,
+} from './run-lifecycle';
 import {
   type EventDispatcher,
   normalizeToArray,
-  runHookSilently,
   type RunState,
   runStep,
   type StepDeps,
 } from './run-step';
 import { zodToJsonSchema } from './structured-output/zod-to-json-schema';
-import type { RunOptions, RunResult, StopCondition, TokenUsage } from './types';
+import type { RunOptions, RunResult, StopCondition } from './types';
 
 export type { EventDispatcher } from './run-step';
 
@@ -79,18 +83,18 @@ export function createRunState(): RunState {
 
 /**
  * The in-memory agent loop driver. It owns the run-level concerns — the
- * `onRunStart`/`onRunComplete` lifecycle, the step `for` loop bounded by
- * `maximumSteps`, the `onMaximumSteps` tail, and the abort/error/complete result
- * construction — and delegates each step's body to {@link runStep}. The durable
- * workflow driver calls the same {@link runStep} once per checkpointed step, so
- * there is exactly one step implementation across the in-memory and durable
- * paths.
+ * `onRunStart`/`onRunComplete` lifecycle (shared with the durable path via
+ * `run-lifecycle.ts`), the step `for` loop bounded by `maximumSteps`, the
+ * `onMaximumSteps` tail, and the abort/error/complete result construction — and
+ * delegates each step's body to {@link runStep}. The durable workflow driver
+ * calls the same {@link runStep} once per checkpointed step, so there is exactly
+ * one step implementation across the in-memory and durable paths.
  */
 export async function executeLoop(
   options: RunOptions,
   emitter?: EventDispatcher,
 ): Promise<RunResult> {
-  const { maximumSteps = 25, hooks, toolbox, onMaximumSteps } = options;
+  const { maximumSteps = 25, hooks, onMaximumSteps } = options;
 
   const conversation = isConversation(options.conversation)
     ? options.conversation
@@ -98,107 +102,37 @@ export async function executeLoop(
 
   const deps = buildStepDeps(options);
   const runState = createRunState();
-  const totalUsage: TokenUsage = runState.totalUsage;
-
-  const makeAbortResult = (step: number, reason?: string): RunResult => {
-    emitter?.dispatch(new RunAbortedEvent(step, reason));
-    runHookSilently(hooks, 'onRunAbort', {
-      reason,
-      partialSteps: [...runState.steps],
-      conversation,
-    });
-    return {
-      conversation,
-      steps: runState.steps,
-      content: runState.lastContent,
-      usage: totalUsage,
-      finishReason: 'aborted',
-    };
-  };
-
-  const makeErrorResult = (error: unknown): RunResult => {
-    runHookSilently(hooks, 'onRunError', {
-      error,
-      partialSteps: [...runState.steps],
-      conversation,
-    });
-    if (error instanceof ElicitationDeniedError) {
-      const result: RunResult = {
-        conversation,
-        steps: runState.steps,
-        content: runState.lastContent,
-        usage: totalUsage,
-        finishReason: 'elicitation-denied',
-        error,
-      };
-      emitter?.dispatch(new RunCompletedEvent(result));
-      return result;
-    }
-    if (error instanceof BudgetExceededError) {
-      const result: RunResult = {
-        conversation,
-        steps: runState.steps,
-        content: runState.lastContent,
-        usage: totalUsage,
-        finishReason: 'budget-exceeded',
-        error,
-      };
-      emitter?.dispatch(new RunCompletedEvent(result));
-      return result;
-    }
-    const result: RunResult = {
-      conversation,
-      steps: runState.steps,
-      content: runState.lastContent,
-      usage: totalUsage,
-      finishReason: 'error',
-      error,
-    };
-    emitter?.dispatch(new RunCompletedEvent(result));
-    return result;
-  };
-
-  emitter?.dispatch(new RunStartedEvent(conversation));
 
   const runStartTime = performance.now();
 
-  // onRunStart: sequential, error aborts run
-  if (hooks?.has('onRunStart')) {
-    try {
-      await hooks.run('onRunStart', { conversation, toolbox, maximumSteps });
-    } catch (error) {
-      emitter?.dispatch(new RunErrorEvent(0, error));
-      return makeErrorResult(error);
-    }
+  // RunStartedEvent + onRunStart (error aborts the run). Shared with the adapter.
+  const startError = await startRunLifecycle(options, conversation, emitter);
+  if (startError !== undefined) {
+    return makeErrorResult(runState, conversation, hooks, emitter, startError);
   }
 
   for (let step = 0; step < maximumSteps; step++) {
     const outcome = await runStep(deps, runState, conversation, step, emitter);
 
     if (outcome.kind === 'abort') {
-      return makeAbortResult(step, outcome.reason);
+      return makeAbortResult(runState, conversation, hooks, emitter, step, outcome.reason);
     }
     if (outcome.kind === 'error') {
-      return makeErrorResult(outcome.error);
+      return makeErrorResult(runState, conversation, hooks, emitter, outcome.error);
     }
     if (outcome.kind === 'continue') {
       continue;
     }
     if (outcome.kind === 'stop') {
-      const runResult: RunResult = {
+      return makeCompletedResult(
+        runState,
         conversation,
-        steps: runState.steps,
-        content: runState.lastContent,
-        usage: totalUsage,
-        finishReason: outcome.finishReason,
-        ...(outcome.schemaValidation ? { schemaValidation: outcome.schemaValidation } : {}),
-      };
-      emitter?.dispatch(new RunCompletedEvent(runResult));
-      runHookSilently(hooks, 'onRunComplete', {
-        result: runResult,
-        totalDuration: performance.now() - runStartTime,
-      });
-      return runResult;
+        hooks,
+        emitter,
+        outcome.finishReason,
+        runStartTime,
+        outcome.schemaValidation,
+      );
     }
     // outcome.kind === 'next' — proceed to the next step
   }
@@ -216,21 +150,9 @@ export async function executeLoop(
       }
     } catch (error) {
       emitter?.dispatch(new RunErrorEvent(runState.steps.length, error));
-      return makeErrorResult(error);
+      return makeErrorResult(runState, conversation, hooks, emitter, error);
     }
   }
 
-  const runResult: RunResult = {
-    conversation,
-    steps: runState.steps,
-    content: runState.lastContent,
-    usage: totalUsage,
-    finishReason: 'maximum-steps',
-  };
-  emitter?.dispatch(new RunCompletedEvent(runResult));
-  runHookSilently(hooks, 'onRunComplete', {
-    result: runResult,
-    totalDuration: performance.now() - runStartTime,
-  });
-  return runResult;
+  return makeCompletedResult(runState, conversation, hooks, emitter, 'maximum-steps', runStartTime);
 }

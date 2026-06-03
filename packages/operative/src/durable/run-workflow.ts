@@ -71,6 +71,27 @@ export interface AgentRunWorkflowResult {
   steps: number;
   content: string;
   finishReason: FinishReason;
+  /**
+   * Serialized message of the error that ended the run, when `finishReason` is
+   * `error` / `elicitation-denied` / `budget-exceeded`. The live error object is
+   * not cloneable across a checkpoint, so only its message survives; the adapter
+   * rebuilds an `Error` from it so consumers (e.g. gateway's `lastError`) see the
+   * real cause rather than a synthetic placeholder.
+   */
+  errorMessage?: string;
+  /** The abort reason, when `finishReason` is `aborted`. */
+  abortReason?: string;
+}
+
+/** Serialize an unknown error to a stable message string for the checkpoint. */
+function serializeError(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === 'string') return error;
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
 }
 
 const DEFAULT_MAXIMUM_STEPS = 25;
@@ -131,6 +152,8 @@ export function createRunWorkflow(checkpointStore: CheckpointStore) {
       }
 
       let finishReason: FinishReason = 'maximum-steps';
+      let errorMessage: string | undefined;
+      let abortReason: string | undefined;
 
       while (cursor.step < maximumSteps) {
         // === IN-MEMORY step region (no `yield*`). The deps closures, the live
@@ -179,8 +202,14 @@ export function createRunWorkflow(checkpointStore: CheckpointStore) {
               }
             : null;
 
+          // Serialize terminal metadata here, inside the no-yield region, where
+          // the live (non-cloneable) error object still exists. Only the plain
+          // strings cross the next yield.
           return {
-            outcome,
+            outcome: { kind: outcome.kind },
+            errorMessage: outcome.kind === 'error' ? serializeError(outcome.error) : undefined,
+            abortReason: outcome.kind === 'abort' ? outcome.reason : undefined,
+            stopFinishReason: outcome.kind === 'stop' ? outcome.finishReason : undefined,
             record,
             conversationSnapshot: conversation.snapshot(),
             nextAccumulators: {
@@ -219,15 +248,17 @@ export function createRunWorkflow(checkpointStore: CheckpointStore) {
         yield* ctx.run('saveCursor', { runId, cursor });
 
         if (outcome.kind === 'stop') {
-          finishReason = outcome.finishReason;
+          finishReason = stepResult.stopFinishReason ?? 'stop-condition';
           break;
         }
         if (outcome.kind === 'abort') {
           finishReason = 'aborted';
+          abortReason = stepResult.abortReason;
           break;
         }
         if (outcome.kind === 'error') {
           finishReason = 'error';
+          errorMessage = stepResult.errorMessage;
           break;
         }
         // `next` / `continue` — loop to the next step.
@@ -240,6 +271,8 @@ export function createRunWorkflow(checkpointStore: CheckpointStore) {
         steps: cursor.step,
         content: cursor.lastContent,
         finishReason,
+        ...(errorMessage !== undefined ? { errorMessage } : {}),
+        ...(abortReason !== undefined ? { abortReason } : {}),
       } satisfies AgentRunWorkflowResult;
     });
 }

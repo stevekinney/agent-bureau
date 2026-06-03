@@ -4,6 +4,7 @@ import { createMockTool, createTestToolbox } from 'armorer/test';
 import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
 import type { GenerateFunction, GenerateResponse, Toolbox } from 'operative';
+import { stopWhen } from 'operative';
 import { createMockGenerate as createSequentialGenerate } from 'operative/test';
 import { createStore } from 'sentinel';
 
@@ -226,6 +227,35 @@ describe('createBureau', () => {
 
     const session = await bureau.getSession(run.sessionId);
     expect(sessionSaveCount).toBe(3);
+    expect(session?.metadata['lastRunId']).toBe(run.id);
+    expect(session?.metadata['lastRunStatus']).toBe('completed');
+  });
+
+  it('routes runs through the durable engine end-to-end when durableExecution is on', async () => {
+    // The seam #7 closure, validated through the REAL gateway wiring: a durable
+    // run must fire run.completed so store.register sees completion and the
+    // session is marked completed — exactly as an in-memory run does.
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+      stopWhen: stopWhen.noToolCalls(),
+      persistence: textValueStore(new MemoryStorage()),
+    });
+
+    const run = await bureau.createRun({ message: 'Durable hello' });
+    // Allow the deferred-microtask start + durable workflow to settle.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    // The run is registered and observed to completion through the durable path.
+    const detail = bureau.getRun(run.id);
+    expect(detail).toBeDefined();
+    expect(detail?.status).toBe('completed');
+    expect(detail?.finishReason).toBe('stop-condition');
+
+    // run.completed fired → the session was persisted as completed.
+    const session = await bureau.getSession(run.sessionId);
     expect(session?.metadata['lastRunId']).toBe(run.id);
     expect(session?.metadata['lastRunStatus']).toBe('completed');
   });

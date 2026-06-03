@@ -358,16 +358,29 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       lastUserMessage: request.message,
     });
 
-    const activeRun = createRun({
-      generate: runRuntime.generate,
-      toolbox: runRuntime.toolbox,
-      conversation,
-      maximumSteps: request.maximumSteps ?? runtime.maximumSteps,
-      stopWhen: options.stopWhen,
-      prepareStep: runRuntime.prepareStep,
-      onStep: runRuntime.onStep,
-      validateResponse: runRuntime.validateResponse,
-    });
+    const activeRun = createRun(
+      {
+        generate: runRuntime.generate,
+        toolbox: runRuntime.toolbox,
+        conversation,
+        maximumSteps: request.maximumSteps ?? runtime.maximumSteps,
+        stopWhen: options.stopWhen,
+        prepareStep: runRuntime.prepareStep,
+        onStep: runRuntime.onStep,
+        validateResponse: runRuntime.validateResponse,
+      },
+      // Route through the durable engine when one was composed (durableExecution
+      // + storage). The conversation already carries the seeded user/system
+      // messages, so no separate `prompt` is passed — the workflow snapshots it.
+      // The run is then checkpointed and resumes from its last step after a crash.
+      runtime.durable
+        ? {
+            engine: runtime.durable.engine,
+            checkpointStore: runtime.durable.checkpointStore,
+            runId,
+          }
+        : undefined,
+    );
 
     activeRun.once('run.completed', (event) => {
       disposeRegisteredStreamListeners(disposeStreamListeners);

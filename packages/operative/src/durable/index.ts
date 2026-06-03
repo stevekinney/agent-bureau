@@ -1,3 +1,5 @@
+export type { DurableActiveRunContext, DurableActiveRunOptions } from './active-run-adapter';
+export { createDurableActiveRun } from './active-run-adapter';
 export type { CheckpointStore } from './checkpoint-store';
 export { createCheckpointStore } from './checkpoint-store';
 export type { DurableRunContext, DurableRunOptions } from './create-durable-run';

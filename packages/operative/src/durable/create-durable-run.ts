@@ -23,26 +23,22 @@ export interface DurableRunContext {
 }
 
 /**
- * Start (or resume) a durable agent run and await its result.
+ * Start (or resume) a durable agent run and await only its thin summary.
  *
- * This is the single opt-in entry that drives the `agentRun` workflow on a
- * real engine. It performs the in-process half of the recovery contract:
- * register the run's non-serializable behavior in the deps registry, start the
- * durable workflow, await completion, then clear the deps. Because the run is
- * driven start-to-finish in this process, the deps live for the whole run — so
- * no cross-process re-injection is needed here (that is the deferred seam #5,
- * which only applies to runs recovered by a *different* process via
- * `engine.recoverAll`).
+ * This is the minimal headless entry: it drives the `agentRun` workflow on a
+ * real engine and returns the {@link AgentRunWorkflowResult} summary, without
+ * building an `ActiveRun` event surface. It registers the run's non-serializable
+ * behavior in the deps registry, starts the workflow, awaits completion, then
+ * clears the deps. Because the run is driven start-to-finish in this process,
+ * the deps live for the whole run — so no cross-process re-injection is needed
+ * here (that is seam #5, which only applies to runs recovered by a *different*
+ * process via `engine.recoverAll`).
  *
- * The default `run()` / `createRun()` surface is intentionally NOT routed
- * through this path: the durable workflow does not yet emit operative's event
- * stream (seam #7), so rerouting the default would silently break event
- * subscribers. This entry is for callers that opt into durability explicitly.
- *
- * @remarks
- * TODO(weft-integration): #7 surface the per-step operative event stream from
- *   the durable path so this can become the default `createRun` implementation
- *   without breaking `run.completed`/`step.completed` subscribers.
+ * For the full event surface (the path the default `createRun` now routes
+ * through when an engine is present), use {@link createDurableActiveRun} via
+ * `createRun(options, durable)` — it emits the complete operative event stream,
+ * including the run-level lifecycle, so gateway's `run.completed` /
+ * `step.completed` subscribers see a durable run exactly as an in-memory one.
  */
 export async function createDurableRun(
   context: DurableRunContext,

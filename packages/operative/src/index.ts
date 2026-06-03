@@ -88,7 +88,7 @@ export type {
   ToolPolicyLike,
 } from './create-policy-enforcement-hook';
 export { createPolicyEnforcementHook } from './create-policy-enforcement-hook';
-export type { ActiveRun } from './create-run';
+export type { ActiveRun, DurableRunRouting } from './create-run';
 export { createRun } from './create-run';
 export type {
   CreateScratchpadOptions,
