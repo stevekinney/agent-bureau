@@ -6,7 +6,9 @@
     "transit": "bun run --cwd ../armorer build && bun run --cwd ../conversationalist build && bun run --cwd ../operative build && bun run --cwd ../sentinel build",
     "test": "bun run scripts/run-tests.ts",
     "check-types": "tsc --noEmit",
-    "validate": "bun run transit && bun run test && bun run check-types",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "validate": "bun run transit && bun run test && bun run check-types && bun run lint",
     "integration": "bun run validate"
   },
   "dependencies": {

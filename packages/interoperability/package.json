@@ -23,10 +23,12 @@
   "scripts": {
     "build": "bun run scripts/build.ts",
     "check-types": "tsc --noEmit",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
     "test": "bun test",
     "test:coverage": "bun test --coverage",
     "coverage:check": "bun run ../../scripts/check-coverage.ts",
-    "validate": "bun run check-types && bun run test && bun run build"
+    "validate": "bun run check-types && bun run lint && bun run test && bun run build"
   },
   "devDependencies": {
     "@types/bun": "^1.3.9"

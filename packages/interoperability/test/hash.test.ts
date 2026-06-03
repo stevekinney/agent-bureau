@@ -1,5 +1,6 @@
-import { describe, expect, test } from 'bun:test';
 import { createHash } from 'node:crypto';
+
+import { describe, expect, test } from 'bun:test';
 
 import { createIncrementalHash, sha256Hex, sha256HexSync } from '../src/hash';
 

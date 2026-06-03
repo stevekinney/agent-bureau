@@ -128,11 +128,22 @@ function normalizeJSONValue(value: unknown): JSONValue {
   } catch {
     try {
       const serialized = JSON.stringify(value);
-      return serialized === undefined ? String(value) : (JSON.parse(serialized) as JSONValue);
+      return serialized === undefined ? stringifyNonJSON(value) : (JSON.parse(serialized) as JSONValue);
     } catch {
-      return String(value);
+      return stringifyNonJSON(value);
     }
   }
+}
+
+/**
+ * Last-resort coercion of a value that has already been proven non-JSON-serializable (it failed
+ * `assertJSONValue` and either threw or round-tripped to `undefined` through `JSON.stringify`).
+ * The `String()` default — including the `[object Object]` sentinel for plain objects — is the
+ * documented fallback that consumers (armorer, conversationalist, operative) rely on, so it is
+ * preserved deliberately.
+ */
+function stringifyNonJSON(value: unknown): string {
+  return String(value);
 }
 
 function assertJSONValue(value: unknown, path: string): asserts value is JSONValue {
@@ -170,7 +181,7 @@ function assertJSONValue(value: unknown, path: string): asserts value is JSONVal
         throw new TypeError(`Non-plain object is not valid JSON at ${currentPath}`);
       }
 
-      const record = current as Record<string, unknown>;
+      const record = current;
       if (stack.has(record)) {
         throw new TypeError(`Circular reference detected at ${currentPath}`);
       }

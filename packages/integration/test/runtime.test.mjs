@@ -20,6 +20,7 @@ import {
   materializeToolCalls,
 } from 'conversationalist/conversation';
 import { createConversationRecorder } from 'conversationalist/test';
+
 import { createIntegrationHarness, getToolCalls, getToolResults } from './runtime-helpers.mjs';
 
 async function appendProviderTurn(conversation, provider, payload, environment) {
@@ -712,13 +713,12 @@ describe('advanced cross-package interop', () => {
     assert.ok(turn.toolCalls[0]?.id);
     assert.equal(turn.results[0]?.toolCallId, turn.toolCalls[0]?.id);
 
-    const reconstructedConversation = (
-      await Conversation.fromProvider(
-        'gemini',
-        await exportProvider(turn.conversation, 'gemini', environment),
-        environment,
-      )
-    ).current;
+    const reconstructedFromGemini = await Conversation.fromProvider(
+      'gemini',
+      await exportProvider(turn.conversation, 'gemini', environment),
+      environment,
+    );
+    const reconstructedConversation = reconstructedFromGemini.current;
     const reconstructedToolCalls = getToolCalls(reconstructedConversation);
     const reconstructedToolResults = getToolResults(reconstructedConversation);
 
@@ -764,17 +764,14 @@ describe('advanced cross-package interop', () => {
       ),
     );
     openAIConversation = appendToolResults(openAIConversation, openAIResults, environment);
-    const reconstructedOpenAIResults = getToolResults(
-      (
-        await Conversation.fromProvider(
-          'openai',
-          await exportProvider(openAIConversation, 'openai', environment, {
-            groupToolCalls: true,
-          }),
-          environment,
-        )
-      ).current,
+    const reconstructedFromOpenAI = await Conversation.fromProvider(
+      'openai',
+      await exportProvider(openAIConversation, 'openai', environment, {
+        groupToolCalls: true,
+      }),
+      environment,
     );
+    const reconstructedOpenAIResults = getToolResults(reconstructedFromOpenAI.current);
     assert.equal(reconstructedOpenAIResults[0]?.callId, 'call-openai-error');
     assert.equal(reconstructedOpenAIResults[0]?.outcome, 'error');
     assert.match(reconstructedOpenAIResults[0]?.error?.message ?? '', /Denver/);
@@ -820,15 +817,12 @@ describe('advanced cross-package interop', () => {
       anthropicResults,
       environment,
     );
-    const reconstructedAnthropicResults = getToolResults(
-      (
-        await Conversation.fromProvider(
-          'anthropic',
-          await exportProvider(anthropicConversation, 'anthropic', environment),
-          environment,
-        )
-      ).current,
+    const reconstructedFromAnthropic = await Conversation.fromProvider(
+      'anthropic',
+      await exportProvider(anthropicConversation, 'anthropic', environment),
+      environment,
     );
+    const reconstructedAnthropicResults = getToolResults(reconstructedFromAnthropic.current);
     assert.equal(
       reconstructedAnthropicResults[0]?.callId,
       'call-anthropic-approval',

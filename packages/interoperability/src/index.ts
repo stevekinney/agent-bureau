@@ -1,4 +1,7 @@
 export type { Embedder, EmbeddingVector } from './embeddings';
+export type { IncrementalHash } from './hash';
+export { createIncrementalHash, sha256Hex, sha256HexSync } from './hash';
+export type { MaterializeToolCallOptions } from './materialization';
 export {
   materializeToolCall,
   materializeToolCalls,
@@ -7,7 +10,6 @@ export {
   materializeToolResults,
   materializeToolResultsAsync,
 } from './materialization';
-export type { MaterializeToolCallOptions } from './materialization';
 export type {
   JSONPrimitive,
   JSONValue,
@@ -21,5 +23,3 @@ export type {
   ToolResult,
   ToolResultInput,
 } from './types';
-export type { IncrementalHash } from './hash';
-export { createIncrementalHash, sha256Hex, sha256HexSync } from './hash';

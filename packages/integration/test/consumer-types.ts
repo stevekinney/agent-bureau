@@ -8,23 +8,23 @@ import type { AnthropicTool } from 'armorer/adapters/anthropic';
 import type { GeminiTool } from 'armorer/adapters/gemini';
 import type { OpenAITool } from 'armorer/adapters/openai';
 import {
-  type ConversationHistory,
   Conversation,
-  type ToolCall as ConversationalistToolCall,
-  type ToolError as ConversationalistToolError,
-  type ToolResult as ConversationalistToolResult,
+  type ConversationHistory,
   createConversationHistory,
   materializeToolCalls,
   materializeToolResultsAsync,
+  type ToolCall as ConversationalistToolCall,
+  type ToolError as ConversationalistToolError,
+  type ToolResult as ConversationalistToolResult,
 } from 'conversationalist';
+import type { AnthropicConversation } from 'conversationalist/adapters/anthropic';
+import type { GeminiConversation } from 'conversationalist/adapters/gemini';
+import type { OpenAIMessage } from 'conversationalist/adapters/openai';
 import {
   appendToolCalls,
   appendToolResults,
   appendToolResultsAsync,
 } from 'conversationalist/conversation';
-import type { AnthropicConversation } from 'conversationalist/adapters/anthropic';
-import type { GeminiConversation } from 'conversationalist/adapters/gemini';
-import type { OpenAIMessage } from 'conversationalist/adapters/openai';
 import type {
   GenerateFunction as OperativeGenerateFunction,
   RunResult as OperativeRunResult,
@@ -32,6 +32,13 @@ import type {
   StopCondition as OperativeStopCondition,
   ToolCall as OperativeToolCall,
 } from 'operative';
+// Sentinel type compatibility assertions
+import type {
+  Action as SentinelAction,
+  RunState as SentinelRunState,
+  Store as SentinelStore,
+  StoreState as SentinelStoreState,
+} from 'sentinel';
 
 type Assert<T extends true> = T;
 type IsAssignable<From, To> = [From] extends [To] ? true : false;
@@ -133,14 +140,6 @@ void _runResultCheck;
 void _stepResultCheck;
 void _generateFunctionCheck;
 void _stopConditionCheck;
-
-// Sentinel type compatibility assertions
-import type {
-  Action as SentinelAction,
-  RunState as SentinelRunState,
-  Store as SentinelStore,
-  StoreState as SentinelStoreState,
-} from 'sentinel';
 
 const _sentinelStoreCheck: SentinelStore = {} as SentinelStore;
 const _sentinelStoreStateCheck: SentinelStoreState = {} as SentinelStoreState;

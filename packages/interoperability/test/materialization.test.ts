@@ -4,8 +4,8 @@ import {
   materializeToolCall,
   materializeToolCalls,
   materializeToolResult,
-  materializeToolResults,
   materializeToolResultAsync,
+  materializeToolResults,
   materializeToolResultsAsync,
 } from '../src';
 

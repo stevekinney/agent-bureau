@@ -1,12 +1,11 @@
-import { describe, expect, it } from 'bun:test';
-import { z } from 'zod';
-
 import { createTool, createToolbox } from 'armorer';
 import { createTestToolbox } from 'armorer/test';
+import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
-import { createRun, stopWhen, type GenerateResponse } from 'operative';
+import { createRun, type GenerateResponse,stopWhen } from 'operative';
 import { createMockGenerate } from 'operative/test';
 import { createTestStore } from 'sentinel/test';
+import { z } from 'zod';
 
 const weatherTool = createTool({
   name: 'get_weather',
