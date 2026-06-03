@@ -68,7 +68,7 @@ export function toDurableToolResult(result: ToolExecutionResult): DurableToolRes
  * idempotency for irreversible effects.
  */
 export const executeToolActivity = activity({
-  name: 'operativeExecuteTool',
+  name: 'executeTool',
   idempotent: true,
   execute: async (input: ExecuteToolInput): Promise<DurableToolResult> => {
     const { toolbox } = getRunDeps(input.runId);

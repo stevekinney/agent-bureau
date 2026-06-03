@@ -117,7 +117,7 @@ describe('executeToolActivity', () => {
   });
 
   it('is marked idempotent and named for stable registration', () => {
-    expect(executeToolActivity.name).toBe('operativeExecuteTool');
+    expect(executeToolActivity.name).toBe('executeTool');
     expect(executeToolActivity.idempotent).toBe(true);
   });
 

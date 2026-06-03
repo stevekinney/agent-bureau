@@ -49,35 +49,35 @@ interface RecordStepInput {
 export function createStorageActivities(checkpointStore: CheckpointStore) {
   return {
     loadCursor: activity({
-      name: 'operativeLoadCursor',
+      name: 'loadCursor',
       idempotent: true,
       execute: async (input: RunIdInput): Promise<RunCursor | null> =>
         checkpointStore.loadCursor(input.runId),
     }),
 
     loadConversation: activity({
-      name: 'operativeLoadConversation',
+      name: 'loadConversation',
       idempotent: true,
       execute: async (input: RunIdInput): Promise<ConversationSnapshot | null> =>
         checkpointStore.loadConversation(input.runId),
     }),
 
     saveCursor: activity({
-      name: 'operativeSaveCursor',
+      name: 'saveCursor',
       idempotent: true,
       execute: async (input: SaveCursorInput): Promise<void> =>
         checkpointStore.saveCursor(input.runId, input.cursor),
     }),
 
     saveConversation: activity({
-      name: 'operativeSaveConversation',
+      name: 'saveConversation',
       idempotent: true,
       execute: async (input: SaveConversationInput): Promise<void> =>
         checkpointStore.saveConversation(input.runId, input.snapshot),
     }),
 
     recordStep: activity({
-      name: 'operativeRecordStep',
+      name: 'recordStep',
       idempotent: true,
       execute: async (input: RecordStepInput): Promise<void> =>
         checkpointStore.saveStep(input.runId, input.record),
