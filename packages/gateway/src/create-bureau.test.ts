@@ -1,6 +1,6 @@
 import { createToolbox } from 'armorer';
 import { createMockTool, createTestToolbox } from 'armorer/test';
-import { describe, expect, it } from 'bun:test';
+import { describe, expect, it, mock } from 'bun:test';
 import { Conversation } from 'conversationalist';
 import type { GenerateFunction, GenerateResponse, Toolbox } from 'operative';
 import { createMockGenerate as createSequentialGenerate } from 'operative/test';
@@ -231,6 +231,67 @@ describe('createBureau', () => {
     expect(sessionSaveCount).toBe(3);
     expect(session?.metadata['lastRunId']).toBe(run.id);
     expect(session?.metadata['lastRunStatus']).toBe('completed');
+  });
+
+  it('logs terminal session persistence failures when retry sleep rejects', async () => {
+    const backingStore = createMemoryKeyValueStore();
+    let sessionSaveCount = 0;
+    let retrySleepCount = 0;
+
+    const flakyStore: KeyValueStore = {
+      async get(key) {
+        return backingStore.get(key);
+      },
+      async set(key, value) {
+        if (key.startsWith('agent-session:')) {
+          sessionSaveCount += 1;
+          if (sessionSaveCount === 2) {
+            throw new Error('temporary persistence failure');
+          }
+        }
+
+        await backingStore.set(key, value);
+      },
+      async delete(key) {
+        await backingStore.delete(key);
+      },
+      async list(prefix) {
+        return backingStore.list(prefix);
+      },
+    };
+
+    const warnSpy = mock(() => {});
+    const originalWarn = console.warn;
+    console.warn = warnSpy;
+
+    try {
+      const bureau = await createBureau({
+        generate: createMockGenerate(),
+        toolbox: createEmptyToolbox(),
+        persistence: flakyStore,
+        sessionPersistenceSleep: async () => {
+          retrySleepCount += 1;
+          throw new Error('retry sleep aborted');
+        },
+      });
+
+      const run = await bureau.createRun({ message: 'Retry sleep failure' });
+      await waitForRunCompletion(bureau, run.id);
+      await waitForCondition(
+        () => warnSpy.mock.calls.length === 1,
+        'session persistence warning was not logged after retry sleep failed',
+      );
+
+      expect(sessionSaveCount).toBe(2);
+      expect(retrySleepCount).toBe(1);
+
+      const callArgs = warnSpy.mock.calls[0] as unknown[];
+      const warningMessage = String(callArgs[0]);
+      expect(warningMessage).toContain('Failed to persist completed session state');
+      expect(warningMessage).toContain('retry sleep aborted');
+    } finally {
+      console.warn = originalWarn;
+    }
   });
 
   it('does not register a run when initial session persistence fails', async () => {

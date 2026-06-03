@@ -284,7 +284,12 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
           lastError = error;
 
           if (attempt < SESSION_PERSISTENCE_MAXIMUM_ATTEMPTS) {
-            await sessionPersistenceSleep(sessionPersistenceRetryDelayMilliseconds);
+            try {
+              await sessionPersistenceSleep(sessionPersistenceRetryDelayMilliseconds);
+            } catch (sleepError) {
+              lastError = sleepError;
+              break;
+            }
           }
         }
       }
