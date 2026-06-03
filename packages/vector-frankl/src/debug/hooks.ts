@@ -10,6 +10,26 @@ import type { DebugLevel } from './types.ts';
 const context = DebugContext.getInstance();
 
 /**
+ * Extracts a stringified `code` from an arbitrary thrown value for debug logging. Returns `{}` when
+ * the value has no usable `code`, so it can be spread directly into an error-detail object. Never
+ * throws — a non-primitive code is JSON-stringified with a `String()` fallback so that a logging
+ * step can't replace the original failure with a serialization error.
+ */
+function extractErrorCode(error: unknown): { code: string } | Record<string, never> {
+  if (!(error instanceof Error) || !('code' in error)) return {};
+  const code: unknown = (error as { code: unknown }).code;
+  if (code === undefined) return {};
+  if (typeof code === 'string' || typeof code === 'number') return { code: String(code) };
+  try {
+    return { code: JSON.stringify(code) };
+  } catch {
+    // Non-JSON-serializable (circular reference, BigInt, etc.) — fall back to the type tag rather
+    // than risk another throw inside a debug-logging path.
+    return { code: Object.prototype.toString.call(code) };
+  }
+}
+
+/**
  * Debug decorator for methods
  */
 export function debugMethod(
@@ -82,18 +102,7 @@ export function debugMethod(
           error: {
             message: error instanceof Error ? error.message : String(error),
             ...(error instanceof Error && error.stack ? { stack: error.stack } : {}),
-            ...(error instanceof Error &&
-            'code' in error &&
-            (error as { code: unknown }).code !== undefined
-              ? {
-                  code: (() => {
-                    const c = (error as { code: unknown }).code;
-                    return typeof c === 'string' || typeof c === 'number'
-                      ? String(c)
-                      : JSON.stringify(c);
-                  })(),
-                }
-              : {}),
+            ...extractErrorCode(error),
           },
         });
 
@@ -200,18 +209,7 @@ export async function trace<T>(
       error: {
         message: error instanceof Error ? error.message : String(error),
         ...(error instanceof Error && error.stack ? { stack: error.stack } : {}),
-        ...(error instanceof Error &&
-        'code' in error &&
-        (error as { code: unknown }).code !== undefined
-          ? {
-              code: (() => {
-                const c = (error as { code: unknown }).code;
-                return typeof c === 'string' || typeof c === 'number'
-                  ? String(c)
-                  : JSON.stringify(c);
-              })(),
-            }
-          : {}),
+        ...extractErrorCode(error),
       },
     });
 

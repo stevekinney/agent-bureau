@@ -198,7 +198,7 @@ export class WebGPUManager {
       const workgroupSize = this.calculateOptimalWorkgroupSize(vectorCount);
 
       // Create or get compute pipeline
-      const pipeline = this.getComputePipeline(metric, workgroupSize);
+      const pipeline = await this.getComputePipeline(metric, workgroupSize);
 
       // Prepare data and compute
       const result = await this.executeComputePass(
@@ -258,7 +258,8 @@ export class WebGPUManager {
   /**
    * Cleanup GPU resources
    */
-  cleanup(): void {
+  // eslint-disable-next-line @typescript-eslint/require-await -- lifecycle cleanup: async contract intentional so callers can await teardown without a signature change
+  async cleanup(): Promise<void> {
     // Destroy cached pipelines
     this.shaderCache.clear();
 
@@ -309,7 +310,11 @@ export class WebGPUManager {
   /**
    * Get or create compute pipeline for a specific metric
    */
-  private getComputePipeline(metric: DistanceMetric, workgroupSize: number): GPUComputePipeline {
+  // eslint-disable-next-line @typescript-eslint/require-await -- GPU/WASM API: async contract is intentional forward-public surface; errors surface as rejections
+  private async getComputePipeline(
+    metric: DistanceMetric,
+    workgroupSize: number,
+  ): Promise<GPUComputePipeline> {
     const cacheKey = `${metric}_${workgroupSize}`;
 
     if (this.shaderCache.has(cacheKey)) {

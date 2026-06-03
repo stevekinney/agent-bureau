@@ -953,7 +953,7 @@ export class SearchEngine {
         this.gpuThreshold = config.gpuThreshold;
       }
     } else if (!enabled && this.gpuSearchEngine) {
-      void this.gpuSearchEngine.cleanup();
+      void this.gpuSearchEngine.cleanup(); // fire-and-forget intentional: setGPUAcceleration is sync
       this.gpuSearchEngine = null;
     }
   }
@@ -993,7 +993,7 @@ export class SearchEngine {
     }
 
     if (this.gpuSearchEngine) {
-      this.gpuSearchEngine.cleanup();
+      await this.gpuSearchEngine.cleanup();
       this.gpuSearchEngine = null;
     }
   }

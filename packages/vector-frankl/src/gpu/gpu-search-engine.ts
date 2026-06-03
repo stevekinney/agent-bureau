@@ -133,7 +133,7 @@ export class GPUSearchEngine {
     }
 
     // Fallback to CPU search
-    const cpuResults = this.searchWithCPU(vectors, queryVector, k, metric, options);
+    const cpuResults = await this.searchWithCPU(vectors, queryVector, k, metric, options);
 
     if (this.config.enableProfiling) {
       stats.processingTime = performance.now() - startTime;
@@ -187,8 +187,8 @@ export class GPUSearchEngine {
   /**
    * Cleanup GPU resources
    */
-  cleanup(): void {
-    this.webGPUManager.cleanup();
+  async cleanup(): Promise<void> {
+    await this.webGPUManager.cleanup();
     this.isGPUAvailable = false;
     this.initializationPromise = null;
   }
@@ -370,13 +370,14 @@ export class GPUSearchEngine {
   /**
    * Fallback CPU search implementation
    */
-  private searchWithCPU(
+  // eslint-disable-next-line @typescript-eslint/require-await -- GPU/WASM API: async contract is intentional forward-public surface; errors surface as rejections
+  private async searchWithCPU(
     vectors: VectorData[],
     queryVector: Float32Array,
     k: number,
     metric: DistanceMetric,
     options?: SearchOptions,
-  ): SearchResult[] {
+  ): Promise<SearchResult[]> {
     // Simple CPU implementation for fallback
     const results: SearchResult[] = [];
 

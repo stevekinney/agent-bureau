@@ -297,7 +297,7 @@ export class WASMOperations {
       switch (implementation) {
         case 'wasm': {
           // For now, implement as addition of negated vector
-          const negB = this.scalarMultiply(vectorB, -1);
+          const negB = await this.scalarMultiply(vectorB, -1);
           return await this.wasmManager.vectorAdd(vectorA, negB);
         }
 
@@ -324,7 +324,8 @@ export class WASMOperations {
   /**
    * High-performance scalar multiplication
    */
-  scalarMultiply(vector: Float32Array, scalar: number): Float32Array {
+  // eslint-disable-next-line @typescript-eslint/require-await -- public-facing op API: Promise return is intentional (SIMD/WASM-accelerated paths may be async); keeps the contract uniform with the other operations and surfaces errors as rejections
+  async scalarMultiply(vector: Float32Array, scalar: number): Promise<Float32Array> {
     const implementation = this.getBestImplementation(vector.length);
 
     try {
@@ -355,7 +356,7 @@ export class WASMOperations {
       return new Float32Array(vector.length);
     }
 
-    return this.scalarMultiply(vector, 1 / mag);
+    return await this.scalarMultiply(vector, 1 / mag);
   }
 
   /**
@@ -364,10 +365,20 @@ export class WASMOperations {
   async batchDotProduct(vectors: Float32Array[], query: Float32Array): Promise<Float32Array> {
     const results = new Float32Array(vectors.length);
 
-    for (let i = 0; i < vectors.length; i++) {
-      const vector = vectors[i];
-      if (vector) {
-        results[i] = await this.dotProduct(vector, query);
+    // Use parallel processing for large batches
+    if (vectors.length > 10 && this.wasmManager.isAvailable()) {
+      const promises = vectors.map(async (vector, index) => {
+        results[index] = await this.dotProduct(vector, query);
+      });
+
+      await Promise.all(promises);
+    } else {
+      // Sequential processing for smaller batches
+      for (let i = 0; i < vectors.length; i++) {
+        const vector = vectors[i];
+        if (vector) {
+          results[i] = await this.dotProduct(vector, query);
+        }
       }
     }
 
@@ -506,8 +517,8 @@ export class WASMOperations {
   /**
    * Cleanup resources
    */
-  cleanup(): void {
-    this.wasmManager.cleanup();
+  async cleanup(): Promise<void> {
+    await this.wasmManager.cleanup();
     this.isInitialized = false;
   }
 }

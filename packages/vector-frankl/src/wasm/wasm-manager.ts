@@ -171,7 +171,7 @@ export class WASMManager {
 
         try {
           // Validate WASM module before compilation
-          this.validateWASMModule(wasmCode);
+          await this.validateWASMModule(wasmCode);
 
           this.wasmModule = await WebAssembly.compile(wasmCode);
           this.wasmInstance = await WebAssembly.instantiate(this.wasmModule, {
@@ -223,7 +223,7 @@ export class WASMManager {
   /**
    * Validate WASM module for security and integrity
    */
-  private validateWASMModule(wasmCode: Uint8Array): void {
+  private async validateWASMModule(wasmCode: Uint8Array): Promise<void> {
     // Basic validation checks
     if (!wasmCode || wasmCode.length === 0) {
       throw new Error('Empty WASM module');
@@ -263,13 +263,14 @@ export class WASMManager {
     }
 
     // Additional security checks for suspicious patterns
-    this.checkForSuspiciousPatterns(wasmCode);
+    await this.checkForSuspiciousPatterns(wasmCode);
   }
 
   /**
    * Check for suspicious patterns in WASM bytecode
    */
-  private checkForSuspiciousPatterns(wasmCode: Uint8Array): void {
+  // eslint-disable-next-line @typescript-eslint/require-await -- WASM/GPU API: async contract is intentional forward-public surface; errors surface as rejections
+  private async checkForSuspiciousPatterns(wasmCode: Uint8Array): Promise<void> {
     // Check for excessive import sections (could indicate malicious behavior)
     let importSectionCount = 0;
     let currentPos = 8; // Skip magic and version
@@ -581,7 +582,8 @@ export class WASMManager {
   /**
    * Cleanup WebAssembly resources
    */
-  cleanup(): void {
+  // eslint-disable-next-line @typescript-eslint/require-await -- lifecycle cleanup: async contract intentional so callers can await teardown without a signature change
+  async cleanup(): Promise<void> {
     this.wasmModule = null;
     this.wasmInstance = null;
     this.memory = null;

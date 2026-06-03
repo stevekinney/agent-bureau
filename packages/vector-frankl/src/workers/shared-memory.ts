@@ -489,7 +489,9 @@ export class SharedMemoryManager {
     return quantized;
   }
 
-  // eslint-disable-next-line @typescript-eslint/require-await -- internal placeholder; no async work yet
+  // Placeholder for shared-memory worker-pool delegation: intentionally async because the real
+  // implementation will await worker round-trips. Until then it returns no results.
+  // eslint-disable-next-line @typescript-eslint/require-await -- intentional async placeholder; the worker-delegation body is not yet implemented
   private async processChunkInWorkers(
     _buffer: SharedArrayBuffer,
     _layout: {
