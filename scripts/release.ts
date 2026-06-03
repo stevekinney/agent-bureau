@@ -120,6 +120,19 @@ async function publishPackage(packageName: string): Promise<PublishOutcome> {
   return 'published';
 }
 
+// Publishing is opt-in. Until the npm trusted publishers are registered and you're ready to ship,
+// leave `RELEASE_ENABLED` unset so a merge to main lands the pipeline without attempting to publish
+// (which would otherwise fail auth and turn the run red). Set the `RELEASE_ENABLED` repository
+// variable to `true` in the release workflow's env to arm publishing.
+if (process.env['RELEASE_ENABLED'] !== 'true') {
+  console.log(
+    'Publishing is disabled (RELEASE_ENABLED is not "true"). ' +
+      'Set the RELEASE_ENABLED repository variable once the npm trusted publishers are configured. ' +
+      'Skipping publish.',
+  );
+  process.exit(0);
+}
+
 await assertNpmVersion();
 
 const outcomes: Array<{ package: string; outcome: PublishOutcome }> = [];

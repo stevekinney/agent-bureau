@@ -67,3 +67,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # No NPM_TOKEN — its presence can suppress OIDC. Trusted publishing uses the id-token above.
+          # Publishing is opt-in: scripts/release.ts no-ops unless RELEASE_ENABLED is "true". Set the
+          # `RELEASE_ENABLED` repository variable to `true` once the npm trusted publishers are
+          # registered (see RELEASING.md). Until then, merges land the pipeline without publishing.
+          RELEASE_ENABLED: ${{ vars.RELEASE_ENABLED }}

@@ -27,8 +27,19 @@ tokens are stored anywhere. Every other package in the workspace is internal and
    Packages"** PR that applies the version bumps and updates each `CHANGELOG.md`.
 5. Review and merge the **Version Packages** PR. That merge triggers the publish: each changed
    package is published to npm with provenance. Unchanged packages are skipped automatically.
+   (Publishing only happens once `RELEASE_ENABLED` is armed — see the next section.)
 
 That's it. No manual `npm publish`, no version editing by hand, no tokens.
+
+## Publishing is opt-in (the `RELEASE_ENABLED` switch)
+
+The release workflow runs on every push to `main`, but `scripts/release.ts` **does not publish**
+unless the `RELEASE_ENABLED` repository variable is `"true"`. This lets the pipeline land on `main`
+(and run green) without shipping anything until you're ready.
+
+To arm publishing once the trusted publishers are registered (below): GitHub repo → **Settings** →
+**Secrets and variables** → **Actions** → **Variables** → add `RELEASE_ENABLED` = `true`. Until that
+variable is set, merges run the workflow as a safe no-op for the publish step.
 
 ## One-time setup: register the trusted publisher (per package)
 
@@ -50,11 +61,18 @@ For each package, on [npmjs.com](https://www.npmjs.com): open the package → **
 
 ### Preflight before the first real release
 
-Before merging the **first** Version Packages PR, confirm both packages have their trusted-publisher
-entries pointing at `stevekinney/agent-bureau` + `release.yml`. If OIDC is not configured, the
-publish step fails with an authentication/provenance error (e.g. `404`/`401` from the registry or a
-provenance-generation error). Recovery is fix-forward: configure the trusted publisher, then re-run
-the release workflow — already-published versions are skipped, so re-running is safe.
+Before arming `RELEASE_ENABLED` and merging the **first** Version Packages PR, confirm both packages
+have their trusted-publisher entries pointing at `stevekinney/agent-bureau` + `release.yml`. If OIDC
+is not configured, the publish step fails with an authentication/provenance error (e.g. `404`/`401`
+from the registry or a provenance-generation error). Recovery is fix-forward: configure the trusted
+publisher, then re-run the release workflow — already-published versions are skipped, so re-running
+is safe.
+
+> [!NOTE] Order of operations for going live
+>
+> 1. Register the trusted publishers on npm (both packages). 2. Set `RELEASE_ENABLED=true`. 3. Add a
+>    changeset and merge it; merge the resulting Version Packages PR to publish. Doing step 2 before
+>    step 1 makes the first publish fail auth (harmless, fix-forward).
 
 > [!NOTE] Local versions are ahead of the registry
 > At the time this pipeline was set up, the working tree carried `armorer@0.7.1` and
