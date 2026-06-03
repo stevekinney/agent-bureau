@@ -108,10 +108,19 @@ describe('createHeartbeat', () => {
       },
     });
 
-    heartbeat.start();
-    await sleep(50);
+    // Drive ticks manually so the assertion does not depend on wall-clock
+    // throughput. The loop-based variant flaked (even without CPU starvation)
+    // because a fixed sleep budget could not guarantee both failing ticks fired
+    // before the assertion ran.
+    // First failing tick → consecutiveFailures = 1, budget not yet exhausted.
+    await heartbeat.tick();
+    expect(heartbeat.consecutiveFailures).toBe(1);
+    expect(failureError).toBeUndefined();
 
-    expect(heartbeat.isRunning).toBe(false);
+    // Second failing tick → budget exhausted → stop() + onFailure fire.
+    // onFailure fires only inside the same branch that calls stop(), so a
+    // defined failureError proves the stop path ran.
+    await heartbeat.tick();
     expect(heartbeat.consecutiveFailures).toBe(2);
     expect(failureError).toBeDefined();
 
@@ -151,13 +160,16 @@ describe('createHeartbeat', () => {
       },
     });
 
-    heartbeat.start();
-    await sleep(30);
-    heartbeat.stop();
+    // Drive ticks manually so the assertion does not depend on wall-clock
+    // throughput (the loop-based variant flaked under CPU starvation when the
+    // second, succeeding tick could not complete inside a fixed sleep budget).
+    // First tick fails → consecutiveFailures = 1
+    await heartbeat.tick();
+    expect(heartbeat.consecutiveFailures).toBe(1);
 
-    // After the first failure, subsequent successes should reset the counter
+    // Second tick succeeds → counter resets to 0
+    await heartbeat.tick();
     expect(heartbeat.consecutiveFailures).toBe(0);
-    expect(heartbeat.isRunning).toBe(false); // Stopped by us, not by max failures
 
     await scheduler.stop();
   });

@@ -71,7 +71,14 @@ describe('edge cases', () => {
 
     expect(result.finishReason).toBe('maximum-steps');
     expect(result.steps).toHaveLength(stepCount);
-  });
+    // Generous timeout: this is a correctness smoke test (the loop is iterative,
+    // not recursive — no stack overflow), but driving 200 steps grows the
+    // conversation to ~600 messages and conversationalist's immutable append is
+    // O(current length), so the run is O(n^2). It takes ~0.8s standalone but
+    // 4.4-4.6s in CI under 2-core/13-suite contention, brushing Bun's default
+    // 5000ms ceiling. The headroom keeps a correctness test from flaking on
+    // throughput; it is not masking a hang.
+  }, 30_000);
 
   it('stops at maximumSteps when generate returns the same tool calls repeatedly', async () => {
     const echoTool = createTool({

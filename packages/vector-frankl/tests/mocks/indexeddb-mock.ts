@@ -542,9 +542,41 @@ export const mockNavigator = {
 };
 
 /**
+ * The globals `setupIndexedDBMocks` overwrites. Bun runs every test file in ONE
+ * shared process, so a mock left on `global` after a suite finishes leaks into
+ * every file that runs afterward — and CI's file ordering differs from a
+ * many-core dev machine, so different tests get corrupted on each run (e.g. a
+ * leaked `navigator` with no `gpu`, or mock IDB globals shadowing a real-storage
+ * test). `cleanupIndexedDBMocks` must therefore RESTORE these, not just clear the
+ * mock database map.
+ */
+const MOCKED_GLOBAL_KEYS = [
+  'indexedDB',
+  'IDBRequest',
+  'IDBTransaction',
+  'IDBDatabase',
+  'IDBObjectStore',
+  'IDBIndex',
+  'IDBCursor',
+  'navigator',
+] as const;
+
+/** Snapshot of the pre-mock global values, captured on the first setup call. */
+let originalGlobals: Partial<Record<(typeof MOCKED_GLOBAL_KEYS)[number], unknown>> | undefined;
+
+/**
  * Setup IndexedDB mocks for testing
  */
 export function setupIndexedDBMocks(): void {
+  // Capture originals ONCE (the first setup wins) so nested/repeated setup calls
+  // don't snapshot an already-mocked value as the "original".
+  if (originalGlobals === undefined) {
+    originalGlobals = {};
+    for (const key of MOCKED_GLOBAL_KEYS) {
+      originalGlobals[key] = (global as Record<string, unknown>)[key];
+    }
+  }
+
   // @ts-expect-error - Monkey patching for tests
   global.indexedDB = mockIndexedDB;
   // @ts-expect-error - Monkey patching for tests
@@ -563,8 +595,21 @@ export function setupIndexedDBMocks(): void {
 }
 
 /**
- * Clean up IndexedDB mocks after testing
+ * Clean up IndexedDB mocks after testing. Restores every global that
+ * `setupIndexedDBMocks` overwrote so nothing leaks into later test files.
  */
 export function cleanupIndexedDBMocks(): void {
   mockDatabases.clear();
+
+  if (originalGlobals !== undefined) {
+    for (const key of MOCKED_GLOBAL_KEYS) {
+      const original = originalGlobals[key];
+      if (original === undefined) {
+        delete (global as Record<string, unknown>)[key];
+      } else {
+        (global as Record<string, unknown>)[key] = original;
+      }
+    }
+    originalGlobals = undefined;
+  }
 }

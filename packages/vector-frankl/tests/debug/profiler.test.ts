@@ -199,18 +199,35 @@ describe('Profiler', () => {
   });
 
   describe('Profile Filtering', () => {
+    // These tests exercise the duration-FILTER logic, not timing accuracy.
+    // Driving them with real `setTimeout` made the measured durations
+    // wall-clock-dependent: under CPU starvation a "fast" 5ms operation could
+    // measure >20ms and cross the `maxDuration: 20` boundary, flaking the test.
+    // Pin `performance.now()` to a controlled clock so each profiled operation
+    // gets an EXACT, well-separated duration (10ms / 30ms / 18ms) with zero
+    // dependence on real elapsed time.
+    const realPerformanceNow = performance.now.bind(performance);
+    let fakeNow = 0;
+
     beforeEach(async () => {
-      await profiler.profile('fast-operation', async () => {
-        await new Promise((resolve) => setTimeout(resolve, 5));
-      });
+      fakeNow = 0;
+      performance.now = () => fakeNow;
 
-      await profiler.profile('slow-operation', async () => {
-        await new Promise((resolve) => setTimeout(resolve, 25));
-      });
+      // Each profile advances the fake clock by a fixed amount between the
+      // startProfile() and endProfile() reads, yielding a deterministic duration.
+      const profileWithDuration = async (operation: string, durationMs: number) => {
+        await profiler.profile(operation, async () => {
+          fakeNow += durationMs;
+        });
+      };
 
-      await profiler.profile('medium-operation', async () => {
-        await new Promise((resolve) => setTimeout(resolve, 15));
-      });
+      await profileWithDuration('fast-operation', 10); // < 20
+      await profileWithDuration('slow-operation', 30); // > 20
+      await profileWithDuration('medium-operation', 18); // < 20
+    });
+
+    afterEach(() => {
+      performance.now = realPerformanceNow;
     });
 
     it('should filter by operation name', () => {
@@ -221,6 +238,7 @@ describe('Profiler', () => {
 
     it('should filter by minimum duration', () => {
       const profiles = profiler.getCompletedProfiles({ minDuration: 20 });
+      // Only slow-operation (30ms) clears the 20ms floor.
       expect(profiles.length).toBeGreaterThan(0);
       profiles.forEach((p) => {
         expect(p.duration!).toBeGreaterThanOrEqual(20);
@@ -229,6 +247,7 @@ describe('Profiler', () => {
 
     it('should filter by maximum duration', () => {
       const profiles = profiler.getCompletedProfiles({ maxDuration: 20 });
+      // fast-operation (10ms) and medium-operation (18ms) sit under the 20ms ceiling.
       expect(profiles.length).toBeGreaterThan(0);
       profiles.forEach((p) => {
         expect(p.duration!).toBeLessThanOrEqual(20);

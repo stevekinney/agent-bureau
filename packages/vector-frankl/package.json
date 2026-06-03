@@ -30,8 +30,8 @@
     "lint:fix": "eslint . --fix",
     "prepack": "bun run clean && bun run build",
     "prepublishOnly": "bun run clean && bun run build",
-    "test": "bun test",
-    "test:coverage": "bun test --coverage",
+    "test": "bun test --timeout 30000",
+    "test:coverage": "bun test --coverage --timeout 30000",
     "validate": "bun run format:check && bun run lint && bun run check-types && bun run test"
   },
   "dependencies": {

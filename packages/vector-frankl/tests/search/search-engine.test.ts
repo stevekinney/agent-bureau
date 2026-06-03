@@ -81,12 +81,34 @@ describe('SearchEngine', () => {
     });
 
     it('should not initialize GPU engine when navigator.gpu is unavailable', async () => {
-      const engine = new SearchEngine(await createMockStorage(), 4, 'cosine', {
-        useGPU: true,
-      });
-      const gpuStats = engine.getGPUStats();
-      expect(gpuStats.enabled).toBe(true);
-      expect(gpuStats.initialized).toBe(false);
+      // The GPU test suites set a mocked `navigator.gpu` on the shared global
+      // and never restore it. With `parallel = true`, those files run in the
+      // same process concurrently with this one, so the leaked global can make
+      // `'gpu' in navigator` true here and cause the GPU engine to initialize,
+      // breaking the assertion below.
+      //
+      // Pin navigator to a GPU-less stub for the synchronous duration of the
+      // constructor. Do all awaiting first, then assign and construct with no
+      // `await` in between — a concurrent GPU suite can only reassign navigator
+      // while this test is suspended at an await, so the synchronous window
+      // guarantees the `'gpu' in navigator` guard sees no GPU. We keep
+      // `hardwareConcurrency` because the worker-pool path (enabled by default)
+      // reads it during construction.
+      const storage = await createMockStorage();
+      const navigatorDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+      (globalThis as { navigator?: unknown }).navigator = { hardwareConcurrency: 4 };
+      try {
+        const engine = new SearchEngine(storage, 4, 'cosine', { useGPU: true });
+        const gpuStats = engine.getGPUStats();
+        expect(gpuStats.enabled).toBe(true);
+        expect(gpuStats.initialized).toBe(false);
+      } finally {
+        if (navigatorDescriptor) {
+          Object.defineProperty(globalThis, 'navigator', navigatorDescriptor);
+        } else {
+          delete (globalThis as { navigator?: unknown }).navigator;
+        }
+      }
     });
   });
 
