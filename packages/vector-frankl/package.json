@@ -30,7 +30,7 @@
     "lint:fix": "eslint . --fix",
     "prepack": "bun run clean && bun run build",
     "prepublishOnly": "bun run clean && bun run build",
-    "test": "bun test tests/unit tests/integration tests/vectors tests/search tests/compression tests/wasm tests/gpu tests/debug tests/storage tests/debug-mock.test.ts && bun test tests/workers",
+    "test": "bun test",
     "test:coverage": "bun test --coverage",
     "validate": "bun run format:check && bun run check-types && bun run test"
   },
