@@ -1,15 +1,9 @@
 import { $ } from 'bun';
 
-const entrypoints = [
-  './src/index.ts',
-  './src/types.ts',
-  './src/hyde.ts',
-  './src/namespace-isolation.ts',
-  './src/experiential.ts',
-  './src/reflection.ts',
-  './src/identity/index.ts',
-  './src/test/index.ts',
-];
+// Only the subpath-exported modules need their own entrypoint; the rest (types, hyde,
+// namespace-isolation, experiential, reflection, identity) are re-exported through index.ts and
+// bundled transitively. See package.json `exports` (only "." and "./test").
+const entrypoints = ['./src/index.ts', './src/test/index.ts'];
 
 const root = './src';
 
