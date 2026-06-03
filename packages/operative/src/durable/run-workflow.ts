@@ -1,43 +1,59 @@
 import { workflow } from '@lostgradient/weft';
-import type { ToolExecutionResult } from 'armorer';
-import { Conversation, isConversation, materializeToolCalls } from 'conversationalist';
+import { Conversation, isConversation } from 'conversationalist';
 
+import { buildStepDeps, createRunState } from '../loop';
+import { runStep } from '../run-step';
+import type { FinishReason } from '../types';
 import type { CheckpointStore } from './checkpoint-store';
 import { getRunDeps } from './deps-registry';
-import type { DurableToolResult } from './execute-tool-activity';
-import { executeToolActivity } from './execute-tool-activity';
 import { createStorageActivities } from './storage-activities';
-import type { StepRecord } from './types';
+import type { RunCursor, StepRecord } from './types';
 
 /**
  * The durable agent-run workflow.
  *
- * This is the **additive durable driver** (see the design doc's §5 deviation
- * note): it does NOT refactor `executeLoop`. It re-implements the core
- * generate → tools → checkpoint step cycle directly on the proven durable
- * activities, so a run can resume from the last completed step after a crash.
- * It is opt-in: a bureau wires it only when an engine is present, leaving the
- * rich in-memory `executeLoop` as the default path.
+ * This is the **single-code-path durable driver**. It does NOT reimplement the
+ * step body: it calls the exact same {@link runStep} the in-memory `executeLoop`
+ * calls, once per checkpointed step. Under inline mode the generator runs
+ * in-process, so `runStep` emits to the same event emitter, runs the same hooks,
+ * applies the same retry/schema/compaction/guardrail logic, and executes tools
+ * the same way — happy-path behavior is byte-identical to a non-durable run,
+ * because it is the same code. What the durable path adds is a checkpoint at
+ * each step boundary, so a crash resumes from the last completed step.
  *
  * @remarks
- * The load-bearing invariant: **no `Conversation` instance is ever a live
- * workflow local across a `yield*`.** Generate runs in-process (durable via
- * checkpoint-not-replay: its result is captured into the plain `snapshot` local
- * before the next yield). A fresh `Conversation.from(snapshot)` is rehydrated
- * inside each no-`yield*` region, mutated, and re-snapshotted; the instance is
- * born and dies between yields. Only plain, cloneable data (`cursor`, `snapshot`,
- * tool-call inputs, `DurableToolResult`s) crosses a checkpoint boundary.
+ * The load-bearing invariant: **no `Conversation` instance and no contaminated
+ * `RunState` is ever a live workflow local across a `yield*`.** `runStep` runs
+ * entirely inside a no-`yield*` region (a plain `await`): it rehydrates a fresh
+ * `Conversation.from(snapshot)`, mutates it, and pushes a `StepResult` (which
+ * embeds that live `Conversation`) into a freshly-built `RunState.steps`. Before
+ * the next `yield*`, that step is projected to a plain {@link StepRecord} (no
+ * `Conversation`), the transcript is re-snapshotted, and the contaminated
+ * instances go out of scope. Only plain, cloneable data — the {@link RunCursor}
+ * (step index + accumulators) and the conversation snapshot — crosses a
+ * checkpoint boundary.
  *
- * Scope (foundation): the durable path covers generate → tool execution →
- * step checkpoint and resume-from-step-N. It does NOT yet cover the full
- * `executeLoop` surface. Uncovered behavior is enumerated as TODO seams:
+ * **Durability granularity is one whole step** (generate + tools together). This
+ * is a forced consequence of the one-code-path design: `yield*` cannot cross
+ * into the plain-`async` `runStep`, so tool execution cannot be a finer-grained
+ * activity without splitting the step body (which would fork the loop). The cost
+ * is exactly what the design doc §4 documents and accepts: a crash mid-step
+ * re-runs that step, i.e. at most one re-charged LLM call per crash.
  *
- * TODO(weft-integration): #13 converge executeLoop and this driver onto one
- *   shared step implementation (the deferred loop refactor).
- * TODO(weft-integration): #1 durable retry counters (onError/schema-retry loops).
- * TODO(weft-integration): #3 context compaction as a compactContext activity.
- * TODO(weft-integration): #11 classify hooks by side-effect-ness for resume
- *   re-emit; this driver runs no per-step hooks yet.
+ * Deferred seams (these only degrade the resume window, never the happy path):
+ *
+ * TODO(weft-integration): #1 durable in-step retry counters — `runStep`'s
+ *   internal `onError` do/while and schema-retry decisions are not individually
+ *   checkpointed, so a mid-step crash re-runs the whole step's retries from the
+ *   step boundary rather than the exact retry attempt.
+ * TODO(weft-integration): #11 classify hooks by side-effect-ness for resume —
+ *   on resume a step re-runs from its boundary, so any side-effecting hook inside
+ *   the re-run step fires again. Read-only hooks are harmless; side-effecting
+ *   ones need gating.
+ * TODO(weft-integration): #4 cross-crash tool dedup — tools re-run on a mid-step
+ *   crash; 0.2.0 gives at-least-once only, so non-idempotent tools can double
+ *   execute. Tool authors must supply their own idempotency for irreversible
+ *   effects.
  */
 
 /** Input to the durable agent-run workflow. */
@@ -54,27 +70,19 @@ export interface AgentRunWorkflowResult {
   runId: string;
   steps: number;
   content: string;
-  finishReason: 'stop-condition' | 'maximum-steps';
+  finishReason: FinishReason;
 }
 
 const DEFAULT_MAXIMUM_STEPS = 25;
 
-/**
- * Convert the workflow's durable tool results back into the
- * {@link ToolExecutionResult} shape `Conversation.appendToolResults` expects.
- * The durable projection is a strict subset, so this is a widening with the
- * runtime-only fields (`result`) reconstructed from `content`.
- */
-function toToolExecutionResults(results: DurableToolResult[]): ToolExecutionResult[] {
-  return results.map((result) => ({
-    callId: result.callId,
-    toolCallId: result.toolCallId,
-    toolName: result.toolName,
-    outcome: result.outcome,
-    content: result.content,
-    result: result.content,
-    ...(result.error ? { error: result.error } : {}),
-  }));
+/** The fresh cursor for a brand-new run: step 0, zeroed accumulators. */
+function initialCursor(): RunCursor {
+  return {
+    step: 0,
+    totalUsage: { prompt: 0, completion: 0, total: 0 },
+    lastContent: '',
+    schemaAttempts: 0,
+  };
 }
 
 /**
@@ -87,7 +95,6 @@ export function createRunWorkflow(checkpointStore: CheckpointStore) {
 
   return workflow({ name: 'agentRun' })
     .activities({
-      executeTool: executeToolActivity,
       loadCursor: storage.loadCursor,
       loadConversation: storage.loadConversation,
       saveCursor: storage.saveCursor,
@@ -100,13 +107,13 @@ export function createRunWorkflow(checkpointStore: CheckpointStore) {
 
       // CRITICAL: `getRunDeps` is resolved ONLY inside no-`yield*` regions, never
       // held as a local across a yield. `deps` holds non-serializable closures
-      // (generate, toolbox); keeping it live across a checkpoint would either
-      // fail validateCloneable or be lost on resume. Same rule as Conversation:
-      // born and used between yields, never crossing one. On cross-process
+      // (generate, toolbox, hooks, emitter); keeping it live across a checkpoint
+      // would fail validateCloneable or be lost on resume. Same rule as the
+      // Conversation instance and the contaminated RunState. On cross-process
       // recovery the deps registry must be re-injected first (seam #5).
 
       // DURABLE LOCALS — both plain/cloneable. Resume rehydrates them from store.
-      let cursor = (yield* ctx.run('loadCursor', { runId })) ?? { step: 0 };
+      let cursor: RunCursor = (yield* ctx.run('loadCursor', { runId })) ?? initialCursor();
       let snapshot = yield* ctx.run('loadConversation', { runId });
 
       // Seed a fresh run's conversation with the prompt, then persist it so a
@@ -123,83 +130,107 @@ export function createRunWorkflow(checkpointStore: CheckpointStore) {
         yield* ctx.run('saveConversation', { runId, snapshot });
       }
 
-      let lastContent = '';
-      let finishReason: AgentRunWorkflowResult['finishReason'] = 'maximum-steps';
+      let finishReason: FinishReason = 'maximum-steps';
 
       while (cursor.step < maximumSteps) {
-        // === IN-MEMORY generate region (no yield*). Both the Conversation
-        // instance AND the deps closures are born and die here, before the next
-        // yield — so neither ever crosses a checkpoint boundary. ===
-        const generated = await (async () => {
+        // === IN-MEMORY step region (no `yield*`). The deps closures, the live
+        // Conversation instance, the contaminated RunState, and the StepResult it
+        // accumulates are ALL born and die here, before the next yield — so none
+        // ever crosses a checkpoint boundary. `runStep` runs the entire step,
+        // including in-process tool execution, exactly as `executeLoop` does. ===
+        const stepResult = await (async () => {
           const deps = getRunDeps(runId);
           const conversation = Conversation.from(snapshot);
-          const response = await deps.options.generate({
+          // Build StepDeps from the run's options (one code path with executeLoop),
+          // overriding only the toolbox with the registry's (variance-widened) one.
+          const stepDeps = {
+            ...buildStepDeps(deps.options),
+            toolbox: deps.toolbox,
+          };
+          // Carry the accumulators forward; start `steps` empty so this iteration
+          // accumulates exactly the one StepResult it produces (and nothing that
+          // would otherwise need to cross a yield).
+          const runState = createRunState();
+          runState.totalUsage = { ...cursor.totalUsage };
+          runState.lastContent = cursor.lastContent;
+          runState.schemaAttempts = cursor.schemaAttempts;
+
+          const outcome = await runStep(
+            stepDeps,
+            runState,
             conversation,
-            step: cursor.step,
-            // Use the typed RunOptions toolbox for the generate context; the
-            // registry's `deps.toolbox` (widened to AnyToolbox) is used only by
-            // the executeTool activity for dispatch.
-            toolbox: deps.options.toolbox,
-          });
-          lastContent = response.content;
-          if (response.content && !response.messageAppended) {
-            conversation.appendAssistantMessage(response.content, response.metadata);
-          }
-          const toolCalls = materializeToolCalls(response.toolCalls);
-          if (toolCalls.length > 0) {
-            conversation.appendToolCalls(toolCalls);
-          }
-          return { toolCalls, conversationSnapshot: conversation.snapshot() };
+            cursor.step,
+            deps.emitter,
+          );
+
+          // Project the (at most one) pushed StepResult to a plain StepRecord —
+          // dropping the live Conversation instance — and re-snapshot the
+          // transcript. Everything returned here is plain and cloneable.
+          const pushed = runState.steps[runState.steps.length - 1];
+          const record: StepRecord | null = pushed
+            ? {
+                step: pushed.step,
+                content: pushed.content,
+                toolCalls: pushed.toolCalls,
+                results: pushed.results,
+                ...(pushed.usage ? { usage: pushed.usage } : {}),
+                ...(pushed.metadata ? { metadata: pushed.metadata } : {}),
+                final: pushed.final,
+              }
+            : null;
+
+          return {
+            outcome,
+            record,
+            conversationSnapshot: conversation.snapshot(),
+            nextAccumulators: {
+              totalUsage: runState.totalUsage,
+              lastContent: runState.lastContent,
+              schemaAttempts: runState.schemaAttempts,
+            },
+          };
         })();
 
-        snapshot = generated.conversationSnapshot;
+        snapshot = stepResult.conversationSnapshot;
 
-        // === Durable commit of the assistant turn BEFORE any tool side effect.
-        // generate does not re-run on a crash after this point. ===
+        // === Durable commits — all plain data. Order: transcript, then the
+        // step record (if any), then the advanced cursor last, so a crash
+        // between commits never advances the cursor past un-persisted state. ===
         yield* ctx.run('saveConversation', { runId, snapshot });
-
-        // === Durable tool execution — the only side-effect activity. ===
-        const toolResults: DurableToolResult[] = [];
-        for (const toolCall of generated.toolCalls) {
-          const result = yield* ctx.run(
-            'executeTool',
-            { runId, toolCall },
-            {
-              idempotencyKey: toolCall.id,
-              retry: { maxAttempts: 3, initialBackoff: '1s', backoffMultiplier: 2 },
-            },
-          );
-          toolResults.push(result);
+        if (stepResult.record !== null) {
+          yield* ctx.run('recordStep', { runId, record: stepResult.record });
         }
 
-        // === IN-MEMORY tail: append tool results. Fresh instance again. ===
-        if (toolResults.length > 0) {
-          const conversation = Conversation.from(snapshot);
-          conversation.appendToolResults(toToolExecutionResults(toolResults));
-          snapshot = conversation.snapshot();
-        }
+        const { outcome } = stepResult;
 
-        // === Durable step-boundary commit. ===
-        const record: StepRecord = {
-          step: cursor.step,
-          content: lastContent,
-          toolCalls: generated.toolCalls,
-          results: toToolExecutionResults(toolResults),
-          final: generated.toolCalls.length === 0,
+        // A `stop`, `next`, or `continue` all mean the step at `cursor.step`
+        // finished its turn — the cursor advances, matching the in-memory `for`
+        // loop where both a fall-through and a `continue` run the increment (a
+        // skipped step, per-step abort, or schema-retry consumes a step index).
+        // An `abort`/`error` aborts mid-step with no completed record, so the
+        // cursor stays put: a resumed run re-attempts this same step. `steps` in
+        // the result is therefore the count of completed steps, identical to
+        // `RunResult.steps.length` in `executeLoop`.
+        const aborted = outcome.kind === 'abort' || outcome.kind === 'error';
+        cursor = {
+          step: aborted ? cursor.step : cursor.step + 1,
+          ...stepResult.nextAccumulators,
         };
-        yield* ctx.run('recordStep', { runId, record });
-        yield* ctx.run('saveConversation', { runId, snapshot });
-
-        cursor = { step: cursor.step + 1 };
         yield* ctx.run('saveCursor', { runId, cursor });
 
-        // Stop condition (foundation): no tool calls means the agent is done.
-        // TODO(weft-integration): honor the full RunOptions.stopWhen predicates
-        //   (loop.ts evaluateStopConditions) instead of only the no-tool-calls case.
-        if (generated.toolCalls.length === 0) {
-          finishReason = 'stop-condition';
+        if (outcome.kind === 'stop') {
+          finishReason = outcome.finishReason;
           break;
         }
+        if (outcome.kind === 'abort') {
+          finishReason = 'aborted';
+          break;
+        }
+        if (outcome.kind === 'error') {
+          finishReason = 'error';
+          break;
+        }
+        // `next` / `continue` — loop to the next step.
       }
 
       ctx.setAttribute('runId', runId);
@@ -207,7 +238,7 @@ export function createRunWorkflow(checkpointStore: CheckpointStore) {
       return {
         runId,
         steps: cursor.step,
-        content: lastContent,
+        content: cursor.lastContent,
         finishReason,
       } satisfies AgentRunWorkflowResult;
     });

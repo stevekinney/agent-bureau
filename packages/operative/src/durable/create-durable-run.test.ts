@@ -3,6 +3,7 @@ import { createToolbox } from 'armorer';
 import { afterEach, describe, expect, it } from 'bun:test';
 import { createConversationHistory } from 'conversationalist';
 
+import { noToolCalls } from '../conditions/predicates';
 import type { RunOptions } from '../types';
 import { createCheckpointStore } from './checkpoint-store';
 import { createDurableRun } from './create-durable-run';
@@ -25,6 +26,10 @@ function runOptions(generate: RunOptions['generate']): RunOptions {
     generate,
     toolbox: createToolbox([]) as unknown as RunOptions['toolbox'],
     conversation: createConversationHistory(),
+    // Stop on the first turn with no tool calls — the same stop condition a
+    // real caller supplies. The durable driver honors RunOptions.stopWhen
+    // exactly as the in-memory loop does (no hardcoded stop in the workflow).
+    stopWhen: noToolCalls(),
   };
 }
 
@@ -65,21 +70,19 @@ describe('createDurableRun', () => {
     }
   });
 
-  it('clears the run deps even when the run throws', async () => {
+  it('surfaces a generate error as an error result and still clears the run deps', async () => {
     const context = await buildContext();
     try {
-      let caught: unknown;
-      try {
-        await createDurableRun(context, {
-          runId: 'durable-err',
-          options: runOptions(async () => {
-            throw new Error('generate exploded');
-          }),
-        });
-      } catch (error) {
-        caught = error;
-      }
-      expect(caught).toBeInstanceOf(Error);
+      // Parity with executeLoop: a generate failure is caught and reported as an
+      // error result (finishReason 'error'), not thrown — the in-memory loop
+      // returns a RunResult with finishReason 'error' for the same case.
+      const result = await createDurableRun(context, {
+        runId: 'durable-err',
+        options: runOptions(async () => {
+          throw new Error('generate exploded');
+        }),
+      });
+      expect(result.finishReason).toBe('error');
       // The finally block must still have cleared the deps.
       expect(() => getRunDeps('durable-err')).toThrow(/No durable run deps registered/);
     } finally {

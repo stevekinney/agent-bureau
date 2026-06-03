@@ -100,7 +100,12 @@ export function createCheckpointStore(store: TextValueStore): CheckpointStore {
       ]);
       return {
         runId,
-        cursor: cursor ?? { step: 0 },
+        cursor: cursor ?? {
+          step: 0,
+          totalUsage: { prompt: 0, completion: 0, total: 0 },
+          lastContent: '',
+          schemaAttempts: 0,
+        },
         conversation,
         steps,
       };

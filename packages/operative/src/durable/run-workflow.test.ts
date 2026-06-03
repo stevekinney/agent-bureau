@@ -5,11 +5,11 @@ import { afterEach, describe, expect, it } from 'bun:test';
 import { Conversation, createConversationHistory } from 'conversationalist';
 import { z } from 'zod';
 
+import { noToolCalls } from '../conditions/predicates';
 import type { GenerateFunction } from '../types';
 import { createCheckpointStore } from './checkpoint-store';
 import type { DurableRunDeps } from './deps-registry';
 import { registerRunDeps, resetRunDepsRegistry } from './deps-registry';
-import { executeToolActivity } from './execute-tool-activity';
 import { createRunWorkflow } from './run-workflow';
 import { createStorageActivities } from './storage-activities';
 
@@ -39,7 +39,6 @@ async function buildEngine(storage: Storage, recover: boolean) {
     recover,
     workflows: { agentRun: runWorkflow },
     activities: {
-      executeTool: executeToolActivity,
       loadCursor: activities.loadCursor,
       loadConversation: activities.loadConversation,
       saveCursor: activities.saveCursor,
@@ -53,7 +52,15 @@ async function buildEngine(storage: Storage, recover: boolean) {
 function registerDeps(runId: string, generate: GenerateFunction) {
   registerRunDeps(runId, {
     toolbox: continuingToolbox(),
-    options: { generate, toolbox: continuingToolbox(), conversation: createConversationHistory() },
+    options: {
+      generate,
+      toolbox: continuingToolbox(),
+      conversation: createConversationHistory(),
+      // The durable driver inherits executeLoop's stop semantics: a run halts
+      // only when a configured stopWhen fires. `noToolCalls` is the standard
+      // "agent settled" condition a real caller supplies.
+      stopWhen: noToolCalls(),
+    },
   });
 }
 

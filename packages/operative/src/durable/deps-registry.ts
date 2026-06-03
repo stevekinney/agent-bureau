@@ -1,5 +1,6 @@
 import type { Toolbox } from 'armorer';
 
+import type { EventDispatcher } from '../run-step';
 import type { RunOptions } from '../types';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Toolbox generic variance; the durable layer never inspects the tool-tuple type parameter (matches gateway's GatewayToolbox).
@@ -7,9 +8,10 @@ type AnyToolbox = Toolbox<any>;
 
 /**
  * The non-serializable, per-run behavior a durable workflow needs but cannot
- * checkpoint: the `generate` function, the `toolbox`, the hook registry, and the
- * other closures from {@link RunOptions}. Checkpoints persist run *state* (cursor,
- * transcript, step records); this registry holds run *behavior*.
+ * checkpoint: the `generate` function, the `toolbox`, the hook registry, the
+ * event emitter, and the other closures from {@link RunOptions}. Checkpoints
+ * persist run *state* (cursor, transcript, step records); this registry holds
+ * run *behavior*.
  *
  * @remarks
  * This is the load-bearing half of the recovery story. On a fresh-process
@@ -27,6 +29,13 @@ type AnyToolbox = Toolbox<any>;
 export interface DurableRunDeps {
   options: RunOptions;
   toolbox: AnyToolbox;
+  /**
+   * The event emitter the run's steps dispatch to. Present under inline mode so
+   * the durable path emits the same `CombinedOperativeEventMap` events as the
+   * in-memory loop (hooks/events parity); `undefined` for a headless durable run
+   * with no observable surface.
+   */
+  emitter?: EventDispatcher;
 }
 
 /**

@@ -5,7 +5,6 @@ import { textValueStore } from '@lostgradient/weft/storage';
 
 import type { CheckpointStore } from './checkpoint-store';
 import { createCheckpointStore } from './checkpoint-store';
-import { executeToolActivity } from './execute-tool-activity';
 import { createStorageActivities } from './storage-activities';
 
 /**
@@ -68,8 +67,9 @@ export interface RunEngine {
 
 /**
  * Builds the durable run {@link Engine}: registers the `agentRun` workflow and
- * the run activities (`executeTool` + the storage activities), wired to a single
- * durable backend.
+ * the storage activities (load/save cursor, conversation, and step records),
+ * wired to a single durable backend. Tool execution is NOT an activity — it runs
+ * in-process inside `runStep`, the same code path the in-memory loop uses.
  *
  * @remarks
  * `recover` defaults to `true`, so on boot the engine resumes any `agentRun`
@@ -91,7 +91,6 @@ export async function createRunEngine(options: CreateRunEngineOptions): Promise<
     recover: options.recover ?? true,
     workflows: { agentRun: options.runWorkflow },
     activities: {
-      executeTool: executeToolActivity,
       loadCursor: storageActivities.loadCursor,
       loadConversation: storageActivities.loadConversation,
       saveCursor: storageActivities.saveCursor,

@@ -6,8 +6,6 @@ export type { AnyRunEngine, CreateRunEngineOptions, RunEngine } from './create-r
 export { createRunEngine } from './create-run-engine';
 export type { DurableRunDeps } from './deps-registry';
 export { clearRunDeps, getRunDeps, registerRunDeps, resetRunDepsRegistry } from './deps-registry';
-export type { DurableToolResult, ExecuteToolInput } from './execute-tool-activity';
-export { executeToolActivity, toDurableToolResult } from './execute-tool-activity';
 export type { AgentRunWorkflowInput, AgentRunWorkflowResult } from './run-workflow';
 export { createRunWorkflow } from './run-workflow';
 export { createStorageActivities } from './storage-activities';

@@ -3,17 +3,25 @@ import { describe, expect, it } from 'bun:test';
 import { Conversation, createConversationHistory } from 'conversationalist';
 
 import { createCheckpointStore } from './checkpoint-store';
-import type { StepRecord } from './types';
+import type { RunCursor, StepRecord } from './types';
 
 /** In-memory text-value store for tests, backed by Weft's MemoryStorage. */
 const createStore = () => textValueStore(new MemoryStorage());
+
+/** A full {@link RunCursor} at `step` with zeroed run-level accumulators. */
+const cursor = (step: number): RunCursor => ({
+  step,
+  totalUsage: { prompt: 0, completion: 0, total: 0 },
+  lastContent: '',
+  schemaAttempts: 0,
+});
 
 describe('createCheckpointStore', () => {
   describe('cursor', () => {
     it('round-trips a cursor', async () => {
       const store = createCheckpointStore(createStore());
-      await store.saveCursor('run-1', { step: 3 });
-      expect(await store.loadCursor('run-1')).toEqual({ step: 3 });
+      await store.saveCursor('run-1', cursor(3));
+      expect(await store.loadCursor('run-1')).toEqual(cursor(3));
     });
 
     it('returns null for a run with no cursor', async () => {
@@ -23,9 +31,9 @@ describe('createCheckpointStore', () => {
 
     it('overwrites the cursor on re-save', async () => {
       const store = createCheckpointStore(createStore());
-      await store.saveCursor('run-1', { step: 1 });
-      await store.saveCursor('run-1', { step: 5 });
-      expect(await store.loadCursor('run-1')).toEqual({ step: 5 });
+      await store.saveCursor('run-1', cursor(1));
+      await store.saveCursor('run-1', cursor(5));
+      expect(await store.loadCursor('run-1')).toEqual(cursor(5));
     });
   });
 
@@ -102,7 +110,7 @@ describe('createCheckpointStore', () => {
       const conversation = new Conversation(createConversationHistory({ id: 'conv-1' }));
       conversation.appendUserMessage('Hi');
 
-      await store.saveCursor('run-1', { step: 2 });
+      await store.saveCursor('run-1', cursor(2));
       await store.saveConversation('run-1', conversation.snapshot());
       await store.saveStep('run-1', {
         step: 0,
@@ -114,7 +122,7 @@ describe('createCheckpointStore', () => {
 
       const checkpoint = await store.loadCheckpoint('run-1');
       expect(checkpoint.runId).toBe('run-1');
-      expect(checkpoint.cursor).toEqual({ step: 2 });
+      expect(checkpoint.cursor).toEqual(cursor(2));
       expect(checkpoint.conversation).not.toBeNull();
       expect(checkpoint.steps).toHaveLength(1);
       expect(checkpoint.steps[0]!.content).toBe('first');
@@ -123,7 +131,7 @@ describe('createCheckpointStore', () => {
     it('defaults the cursor to step 0 when none is persisted', async () => {
       const store = createCheckpointStore(createStore());
       const checkpoint = await store.loadCheckpoint('fresh');
-      expect(checkpoint.cursor).toEqual({ step: 0 });
+      expect(checkpoint.cursor).toEqual(cursor(0));
       expect(checkpoint.conversation).toBeNull();
       expect(checkpoint.steps).toEqual([]);
     });
@@ -132,7 +140,7 @@ describe('createCheckpointStore', () => {
   describe('clear', () => {
     it('removes every key for a run and returns the count', async () => {
       const store = createCheckpointStore(createStore());
-      await store.saveCursor('run-1', { step: 1 });
+      await store.saveCursor('run-1', cursor(1));
       await store.saveConversation(
         'run-1',
         new Conversation(createConversationHistory()).snapshot(),
@@ -153,11 +161,11 @@ describe('createCheckpointStore', () => {
 
     it('does not touch other runs', async () => {
       const store = createCheckpointStore(createStore());
-      await store.saveCursor('run-1', { step: 1 });
-      await store.saveCursor('run-2', { step: 9 });
+      await store.saveCursor('run-1', cursor(1));
+      await store.saveCursor('run-2', cursor(9));
 
       await store.clear('run-1');
-      expect(await store.loadCursor('run-2')).toEqual({ step: 9 });
+      expect(await store.loadCursor('run-2')).toEqual(cursor(9));
     });
   });
 });

@@ -6,14 +6,28 @@ import type { JSONValue, ToolCall } from 'interoperability';
  * The durable cursor for a run. This is the minimal plain-cloneable state the
  * durable workflow generator carries across a `yield*` checkpoint boundary.
  *
- * It deliberately holds NO `Conversation` instance — only the step index. The
- * conversation transcript is persisted separately as a {@link ConversationSnapshot}
- * (a `structuredClone`-safe tree), because a `Conversation` class instance with
- * prototype methods fails Weft's `validateCloneable` check if it crosses a yield.
+ * It deliberately holds NO `Conversation` instance — only the step index plus
+ * the run-level accumulators. The conversation transcript is persisted
+ * separately as a {@link ConversationSnapshot} (a `structuredClone`-safe tree),
+ * because a `Conversation` class instance with prototype methods fails Weft's
+ * `validateCloneable` check if it crosses a yield.
+ *
+ * The accumulators (`totalUsage`, `lastContent`, `schemaAttempts`) mirror the
+ * run-scoped locals of the in-memory `executeLoop` so a resumed run continues
+ * with the same usage totals and schema-retry budget rather than silently
+ * resetting them to zero. They are exactly the plain half of `RunState` (its
+ * `steps: StepResult[]` array — which embeds live `Conversation` instances — is
+ * never carried across a yield; per-step records are persisted instead).
  */
 export interface RunCursor {
   /** Zero-based index of the next step to execute. */
   step: number;
+  /** Accumulated token usage across all completed steps. */
+  totalUsage: { prompt: number; completion: number; total: number };
+  /** Content of the most recent assistant turn. */
+  lastContent: string;
+  /** Run-scoped count of structured-output schema retries already consumed. */
+  schemaAttempts: number;
 }
 
 /**

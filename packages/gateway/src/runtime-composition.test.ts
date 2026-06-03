@@ -1,11 +1,25 @@
 import { createToolbox } from 'armorer';
-import { describe, expect, it } from 'bun:test';
+import { afterEach, describe, expect, it } from 'bun:test';
 import { Conversation, createConversationHistory } from 'conversationalist';
 import type { GenerateFunction } from 'operative';
+import { stopWhen } from 'operative';
 import { createDurableRun } from 'operative/durable';
 
 import { createRuntimeComposition } from './runtime-composition';
 import type { ProviderConfiguration } from './types';
+
+// Weft's inline launch queue defers each workflow start onto a `setTimeout(0)`
+// macrotask. Under `bun test`, a prior test that leaves an unsettled async tail
+// (the cost-aware `generate` path here) can starve that deferred launch, so a
+// later durable run's `handle.result()` never resolves and the test times out.
+// The run is correct — it completes start-to-finish in a plain `bun run`
+// process; this is purely a per-test scheduling artifact. Yielding one macrotask
+// between tests drains the timer queue so each test starts clean.
+// TODO(weft-integration): an `Engine`-level "drain pending launches on dispose"
+//   would let us drop this; tracked alongside the recovery seams.
+afterEach(async () => {
+  await new Promise((resolve) => setTimeout(resolve, 0));
+});
 
 function createGenerateForProvider(provider: ProviderConfiguration): GenerateFunction {
   return async () => {
@@ -178,6 +192,9 @@ describe('createRuntimeComposition durable execution', () => {
           generate: async () => ({ content: 'durable result', toolCalls: [] }),
           toolbox: createToolbox([], { context: {} }) as never,
           conversation: createConversationHistory(),
+          // The durable driver honors RunOptions.stopWhen exactly like the
+          // in-memory loop: settle on the first turn with no tool calls.
+          stopWhen: stopWhen.noToolCalls(),
         },
       });
 
