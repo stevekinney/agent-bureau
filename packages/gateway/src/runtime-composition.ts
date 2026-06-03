@@ -422,10 +422,11 @@ function createUnavailableToolbox(): GatewayToolbox {
 export interface RuntimeComposition {
   kv: TextValueStore | undefined;
   /**
-   * The durable run engine + checkpoint store, present only when
-   * `options.durableExecution` is set with a configured `storage`. Callers reach
-   * durable runs through the opt-in durable entry; the default run surface is
-   * unchanged.
+   * The durable run engine + checkpoint store, present whenever durable
+   * execution resolves on (by default: a persistent `storage` backend is
+   * configured and `durableExecution` is not explicitly `false`). When present,
+   * `createBureau` routes every `createRun()` through it transparently — the run
+   * surface is unchanged, but the run is checkpointed and resumes after a crash.
    */
   durable: { engine: AnyRunEngine; checkpointStore: CheckpointStore } | undefined;
   memory: Memory | undefined;
@@ -466,11 +467,19 @@ export async function createRuntimeComposition(
     kv = textValueStore(durableStorage, { disposeUnderlyingStorage: false });
   }
 
-  // Opt-in durable execution: build the run engine on the same backend, gated on
-  // the flag AND a configured (persistent) storage. Off by default so existing
-  // bureaus don't all boot an engine + need disposal.
+  // Durable execution is ON BY DEFAULT whenever a PERSISTENT storage backend is
+  // configured — a normal `createRun()` that crashes resumes from its last
+  // checkpoint with no opt-in. The default follows persistence because that is
+  // the only place resume is real: `memory` storage loses its checkpoints with
+  // the process, so default-on there would be pure overhead with zero recovery.
+  // The explicit `durableExecution` flag overrides the default either way —
+  // `true` forces the engine on even for `memory` (so durable behavior is
+  // testable locally), `false` forces it off even for sqlite/lmdb.
+  const wantsDurable =
+    options.durableExecution ??
+    (options.storage !== undefined && options.storage.type !== 'memory');
   let durable: { engine: AnyRunEngine; checkpointStore: CheckpointStore } | undefined;
-  if (options.durableExecution && durableStorage) {
+  if (wantsDurable && durableStorage) {
     // Build the checkpoint store over the SAME backend the engine persists to.
     const checkpointStore = createCheckpointStore(
       textValueStore(durableStorage, { disposeUnderlyingStorage: false }),

@@ -142,13 +142,18 @@ export interface BureauOptions {
   persistence?: TextValueStore;
   storage?: StorageConfiguration;
   /**
-   * Opt into Weft-backed durable execution. When `true` AND `storage` is
-   * configured, the runtime builds a durable run {@link Engine} on the same
-   * backend so runs can resume from their last checkpoint after a crash. This
-   * is OFF by default: the standard `run()`/`createRun()` event surface is
-   * unchanged, and durable runs are reached only via the explicit durable entry.
-   * Has no effect without `storage` (a durable engine needs a persistent
-   * backend; an in-memory store would lose checkpoints with the process).
+   * Override for Weft-backed durable execution. Durable execution is **on by
+   * default whenever a persistent `storage` backend (`sqlite`/`lmdb`) is
+   * configured** — every `createRun()` is then checkpointed on the same backend
+   * and resumes from its last completed step after a crash, with the standard
+   * `run()`/`createRun()` event surface unchanged.
+   *
+   * The default follows persistence because that is the only place resume is
+   * real: a `memory` backend loses its checkpoints with the process, so it stays
+   * OFF by default. Set this explicitly to override the default either way —
+   * `true` forces the engine on (incl. for `memory`, so durable behavior is
+   * testable locally); `false` forces it off even for a persistent backend.
+   * Has no effect without any `storage` (a durable engine needs a backend).
    */
   durableExecution?: boolean;
   memory?: CreateMemoryOptions | Memory;

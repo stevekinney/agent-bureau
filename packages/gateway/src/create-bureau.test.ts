@@ -353,6 +353,64 @@ describe('createBureau', () => {
     expect(session?.metadata['lastRunStatus']).toBe('completed');
   });
 
+  it('routes a sqlite-backed run through the durable engine BY DEFAULT at observable parity', async () => {
+    // The flip's gate: sqlite storage and NO `durableExecution` flag now routes
+    // through Weft (the default-on contract). This must be at OBSERVABLE PARITY
+    // with the in-memory loop — the rich event surface gateway depends on
+    // (`action` events, toolbox events from a tool call, `run.completed`, and the
+    // persisted session status) must all fire exactly as for an in-memory run.
+    // Asserting WITHOUT the flag is the whole point: a test that set
+    // `durableExecution: true` would retest the old opt-in path and prove nothing
+    // about the flip.
+    const databasePath = join(
+      tmpdir(),
+      `default-on-parity-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    try {
+      const bureau = await createBureau({
+        // Step 0 commits a tool call (so toolbox events must fire on the durable
+        // path); step 1 has no tool call, so `noToolCalls()` stops the run.
+        generate: async ({ step }) =>
+          step === 0
+            ? { content: 'calling tool', toolCalls: [{ name: 'next', arguments: {} }] }
+            : { content: 'done', toolCalls: [] },
+        toolbox: createToolbox([createNextTool()]) as unknown as Toolbox,
+        storage: { type: 'sqlite', path: databasePath },
+        // NOTE: no `durableExecution` — relying on the default-on flip.
+        stopWhen: stopWhen.noToolCalls(),
+      });
+
+      const actions: string[] = [];
+      bureau.addEventListener('action', (event) => {
+        actions.push(event.action.type);
+      });
+
+      const run = await bureau.createRun({ message: 'Drive the durable default' });
+      await waitForRunCompletion();
+      await waitForRunCompletion();
+
+      // The observable surface fired on the durable path: `action` events flowed
+      // (run/step lifecycle + the tool call), the run is registered and observed
+      // to completion, and the session landed `completed` — full parity with the
+      // in-memory loop, with no opt-in.
+      expect(actions.length).toBeGreaterThan(0);
+      const detail = bureau.getRun(run.id);
+      expect(detail).toBeDefined();
+      expect(detail?.status).toBe('completed');
+      expect(detail?.finishReason).toBe('stop-condition');
+
+      const session = await bureau.getSession(run.sessionId);
+      expect(session?.metadata['lastRunStatus']).toBe('completed');
+
+      bureau.dispose();
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+      resetRunDepsRegistry();
+    }
+  });
+
   it('does not register a run when initial session persistence fails', async () => {
     const backingStore = textValueStore(new MemoryStorage());
     const failingStore: TextValueStore = {

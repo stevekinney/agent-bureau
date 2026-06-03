@@ -1,3 +1,7 @@
+import { rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
 import { createToolbox } from 'armorer';
 import { afterEach, describe, expect, it } from 'bun:test';
 import { Conversation, createConversationHistory } from 'conversationalist';
@@ -151,6 +155,8 @@ describe('createRuntimeComposition', () => {
   });
 });
 
+let durableDatabaseCounter = 0;
+
 describe('createRuntimeComposition durable execution', () => {
   it('does not build a durable engine by default', async () => {
     const runtime = await createRuntimeComposition({
@@ -170,6 +176,52 @@ describe('createRuntimeComposition durable execution', () => {
     });
     // A durable engine needs a persistent backend; no storage → no engine.
     expect(runtime.durable).toBeUndefined();
+  });
+
+  it('builds a durable engine BY DEFAULT for a persistent (sqlite) backend with no flag', async () => {
+    // The default-on contract: a persistent storage backend and NO explicit
+    // `durableExecution` flag resolves to durable-on, because that is the only
+    // place a crash can actually resume. This is the headline behavior — a
+    // normal bureau with sqlite storage gets durable runs without opting in.
+    const databasePath = join(
+      tmpdir(),
+      `default-on-${process.pid}-${durableDatabaseCounter++}.sqlite`,
+    );
+    try {
+      const runtime = await createRuntimeComposition({
+        generate: async () => ({ content: 'x', toolCalls: [] }),
+        toolbox: createToolbox([], { context: {} }),
+        storage: { type: 'sqlite', path: databasePath },
+      });
+      expect(runtime.durable).toBeDefined();
+      runtime.durable?.engine[Symbol.dispose]?.();
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
+  it('stays OFF when durableExecution is explicitly false even for a persistent backend', async () => {
+    // The explicit `false` override: a persistent backend would default to
+    // durable-on, but a caller can force the in-memory loop back.
+    const databasePath = join(
+      tmpdir(),
+      `explicit-off-${process.pid}-${durableDatabaseCounter++}.sqlite`,
+    );
+    try {
+      const runtime = await createRuntimeComposition({
+        generate: async () => ({ content: 'x', toolCalls: [] }),
+        toolbox: createToolbox([], { context: {} }),
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: false,
+      });
+      expect(runtime.durable).toBeUndefined();
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
   });
 
   it('builds a durable engine through the composition path and runs an agent durably', async () => {
