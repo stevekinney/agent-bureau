@@ -948,4 +948,43 @@ describe('createBureau', () => {
       resetRunDepsRegistry();
     }
   });
+
+  it('releases backend handles even when a toObservable subscriber throws during dispose', async () => {
+    // dispose() dispatches BureauDisposedEvent through the emitter, which routes
+    // through CompletableEventTarget.dispatchEvent — an UN-guarded loop over
+    // toObservable() subscribers (lifecycle/completable.ts). A subscriber whose
+    // `next` throws therefore propagates straight into dispose()'s pre-teardown.
+    // This is a real, public path (`toObservable()` is on the Bureau surface), so
+    // pre-teardown is best-effort: dispose must swallow the throw and STILL release
+    // the SQLite handle, exactly like the already-best-effort scheduler/memory steps.
+    const databasePath = join(
+      tmpdir(),
+      `dispose-throwing-subscriber-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    try {
+      const bureau = await createBureau({
+        generate: createMockGenerate(),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+        stopWhen: stopWhen.noToolCalls(),
+      });
+      // A public-API subscriber that throws on the disposed event. With no guard
+      // in dispose(), this would propagate out of `emitter.dispatch(...)` and
+      // strand the SQLite handle behind the now-true `disposed` flag.
+      bureau.toObservable().subscribe(() => {
+        throw new Error('subscriber boom');
+      });
+
+      // dispose() must NOT propagate the subscriber throw...
+      expect(() => bureau.dispose()).not.toThrow();
+      // ...and the SQLite handle must still have been released — the second
+      // dispose is a clean no-op rather than a double-close of a live handle.
+      expect(() => bureau.dispose()).not.toThrow();
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+      resetRunDepsRegistry();
+    }
+  });
 });

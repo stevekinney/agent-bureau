@@ -763,13 +763,19 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     if (disposed) return;
     disposed = true;
 
-    // The whole body is under an OUTER try/finally so the critical backend
-    // teardown (engine → storage → store) ALWAYS runs, even if a pre-teardown
-    // step throws — e.g. a `BureauDisposedEvent` listener, a `toObservable`
-    // `complete` callback fired by `emitter.complete()`, or a scheduler-cleanup
-    // closure. Without this, a throwing listener would strand the SQLite/LMDB
-    // handle behind the now-`true` `disposed` guard (a second dispose no-ops),
-    // leaking it permanently.
+    // All pre-teardown is BEST-EFFORT, and the whole body is under an OUTER
+    // try/finally so the critical backend teardown (engine → storage → store)
+    // ALWAYS runs. The async steps (`scheduler.stop`, `memory.close`) are
+    // already `.catch`'d; the synchronous steps below are equally fallible —
+    // `emitter.dispatch`/`emitter.complete` route through
+    // `CompletableEventTarget.dispatchEvent`, which loops over `toObservable()`
+    // subscribers WITHOUT a try/catch, so a subscriber whose `next`/`complete`
+    // throws propagates straight back here. That path is reachable through the
+    // public Bureau surface (`toObservable()`), so the synchronous pre-teardown
+    // is wrapped to swallow-and-log: a throwing subscriber must not strand the
+    // SQLite/LMDB handle behind the now-`true` `disposed` guard (a second
+    // dispose no-ops), leaking it permanently. Covered by the
+    // "toObservable subscriber throws during dispose" regression test.
     try {
       if (runtime.scheduler) {
         void runtime.scheduler.stop().catch(() => {});
@@ -779,17 +785,26 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         void runtime.memory.close().catch(() => {});
       }
 
-      emitter.dispatch(new BureauDisposedEvent());
-      storeSubscription.unsubscribe();
-      for (const disposeListener of schedulerCleanup) {
-        disposeListener();
+      try {
+        emitter.dispatch(new BureauDisposedEvent());
+        storeSubscription.unsubscribe();
+        for (const disposeListener of schedulerCleanup) {
+          disposeListener();
+        }
+        emitter.complete();
+      } catch (error) {
+        console.error(
+          `[bureau] Error during dispose pre-teardown: ${serializeUnknownError(error)}`,
+        );
       }
-      emitter.complete();
-
-      // No future recovered run should reach the (about-to-close) storage through
-      // the reconstructor closure. Clear it before tearing down the backends.
-      setRunDepsReconstructor(undefined);
     } finally {
+      // No future recovered run should reach the (about-to-close) storage through
+      // the reconstructor closure. Clear it FIRST in the finally — unconditionally,
+      // before the backend teardown — so a throwing pre-teardown step above can't
+      // leave a stale reconstructor (closing over the soon-to-be-disposed session
+      // store) live.
+      setRunDepsReconstructor(undefined);
+
       // Dispose the durable run engine, then the raw Storage, then the store —
       // each guarded so a throw in one stage does not skip the next (engine
       // dispose is synchronous and can throw in a degraded environment; the
