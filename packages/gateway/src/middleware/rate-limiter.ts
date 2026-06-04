@@ -1,13 +1,13 @@
+import type { TextValueStore } from '@lostgradient/weft/storage';
 import { createMiddleware } from 'hono/factory';
 import { HTTPException } from 'hono/http-exception';
-import type { KeyValueStore } from 'storage';
 
 /** Configuration for the sliding-window rate limiter. */
 export type RateLimitOptions = {
   /** Maximum number of requests per window. Defaults to 60. */
   limit?: number;
   /** Store-backed limiter state. Falls back to in-memory state when omitted. */
-  store?: KeyValueStore;
+  store?: TextValueStore;
   /** Window duration in milliseconds. Defaults to 60_000 (1 minute). */
   windowMs?: number;
   /** Clock used by tests to make pruning and reset calculations deterministic. */
@@ -57,7 +57,7 @@ function createMemoryWindowStore(windowMs: number, now: () => number) {
   };
 }
 
-function createStoreBackedWindowStore(store: KeyValueStore) {
+function createStoreBackedWindowStore(store: TextValueStore) {
   return {
     async load(key: string): Promise<WindowEntry> {
       const value = await store.get(key);

@@ -6,7 +6,7 @@ tokens are stored anywhere. Every other package in the workspace is internal and
 
 > [!NOTE] Why only these two
 > `armorer` and `conversationalist` are the only package names owned on npm by the maintainer. Their
-> shared internal primitives (`lifecycle`, `interoperability`, `storage`) are **inlined into the two
+> shared internal primitives (`lifecycle`, `interoperability`) are **inlined into the two
 > published packages at build time** (both JavaScript and type declarations), so the published
 > artifacts are self-contained and depend on none of them. Internally, every workspace package keeps
 > depending on the others via `workspace:*`.
@@ -22,7 +22,7 @@ tokens are stored anywhere. Every other package in the workspace is internal and
    generated file in `.changeset/`.
 3. Open your PR. CI (`ci.yml`) runs `validate`, builds the two packages, and runs the package-shape
    gate. A change to an inlined foundation package that affects a product's output is captured by a
-   changeset on the **product** — there is no changeset for `lifecycle`/`interoperability`/`storage`.
+   changeset on the **product** — there is no changeset for `lifecycle`/`interoperability`.
 4. Merge to `main`. The release workflow (`release.yml`) opens — or updates — a **"Version
    Packages"** PR that applies the version bumps and updates each `CHANGELOG.md`.
 5. Review and merge the **Version Packages** PR. That merge triggers the publish: each changed
@@ -109,5 +109,5 @@ From then on it releases through the normal changeset flow.
 --ignore-scripts` from the package directory (provenance requires publishing from a directory, not
   a prebuilt tarball). On partial failure it stops without unpublishing; re-running is safe.
 - **`scripts/check-package-shape.ts`** — the fail-closed gate: asserts every `package.json` file
-  target resolves, no shipped code imports `lifecycle`/`interoperability`/`storage`, every other
+  target resolves, no shipped code imports `lifecycle`/`interoperability`, every other
   external is declared, no payload-mutating lifecycle script exists, and no source is shipped.

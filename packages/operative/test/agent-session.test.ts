@@ -1,8 +1,11 @@
+import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
 import { describe, expect, it } from 'bun:test';
 import { createConversationHistory } from 'conversationalist';
-import { createMockKeyValueStore } from 'storage/test';
 
 import { createAgentSession, loadAgentSession, saveAgentSession } from '../src/agent-session';
+
+/** In-memory text-value store for tests, backed by Weft's MemoryStorage. */
+const createMockKeyValueStore = () => textValueStore(new MemoryStorage());
 
 describe('createAgentSession', () => {
   it('generates an id when not provided', () => {

@@ -91,6 +91,19 @@ const mockWebGPU = () => {
   return { mockAdapter, mockDevice };
 };
 
+// Capture pre-mock globals so the suite restores them rather than leaking a fake
+// `navigator.gpu` (and the GPU* constants) into other concurrently-running test
+// files (see the matching note in gpu-search-engine.test.ts).
+const originalNavigator = (global as any).navigator;
+const originalGPUBufferUsage = (global as any).GPUBufferUsage;
+const originalGPUMapMode = (global as any).GPUMapMode;
+
+const restoreWebGPUGlobals = () => {
+  (global as any).navigator = originalNavigator;
+  (global as any).GPUBufferUsage = originalGPUBufferUsage;
+  (global as any).GPUMapMode = originalGPUMapMode;
+};
+
 describe('WebGPUManager', () => {
   beforeAll(() => {
     setupIndexedDBMocks();
@@ -98,6 +111,7 @@ describe('WebGPUManager', () => {
 
   afterAll(() => {
     cleanupIndexedDBMocks();
+    restoreWebGPUGlobals();
   });
 
   describe('Initialization', () => {

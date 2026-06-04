@@ -1,36 +1,31 @@
-import {
-  createMemoryKeyValueStore,
-  createSQLiteKeyValueStore,
-  type KeyValueStore,
-  type KeyValueStoreConfiguration,
-} from 'storage';
+import type { StorageConfiguration, TextValueStore } from '@lostgradient/weft/storage';
+import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
+import { SQLiteStorage } from '@lostgradient/weft/storage/sqlite';
 import type { StorageAdapter } from 'vector-frankl';
+import { SQLiteStorageAdapter } from 'vector-frankl';
 
 // ── Configuration ────────────────────────────────────────────────────
 
-export type StorageBackendConfiguration = KeyValueStoreConfiguration;
+export type StorageBackendConfiguration = StorageConfiguration;
 
 // ── Resolved Backend ─────────────────────────────────────────────────
 
 export interface ResolvedStorageBackend {
   vector: StorageAdapter;
-  kv: KeyValueStore;
+  kv: TextValueStore;
 }
 
 async function resolveAutomaticBackend(): Promise<ResolvedStorageBackend> {
-  const { isSQLiteAvailable } = await import('storage');
-
-  if (isSQLiteAvailable()) {
-    const { SQLiteStorageAdapter } = await import('vector-frankl');
+  if (SQLiteStorageAdapter.isAvailable()) {
     return {
-      kv: await createSQLiteKeyValueStore({ filename: ':memory:' }),
+      kv: textValueStore(new SQLiteStorage(':memory:')),
       vector: new SQLiteStorageAdapter({ filename: ':memory:' }),
     };
   }
 
   const { MemoryStorageAdapter } = await import('vector-frankl');
   return {
-    kv: createMemoryKeyValueStore(),
+    kv: textValueStore(new MemoryStorage()),
     vector: new MemoryStorageAdapter(),
   };
 }
@@ -44,22 +39,27 @@ export async function resolveStorageBackend(
     case 'memory': {
       const { MemoryStorageAdapter } = await import('vector-frankl');
       return {
-        kv: createMemoryKeyValueStore(),
+        kv: textValueStore(new MemoryStorage()),
         vector: new MemoryStorageAdapter(),
       };
     }
     case 'sqlite': {
-      const { SQLiteStorageAdapter } = await import('vector-frankl');
+      const filename = configuration.path ?? ':memory:';
       return {
-        kv: await createSQLiteKeyValueStore({ filename: configuration.path }),
-        vector: new SQLiteStorageAdapter({ filename: configuration.path }),
+        kv: textValueStore(new SQLiteStorage(filename)),
+        vector: new SQLiteStorageAdapter({ filename }),
       };
     }
     case 'auto':
       return resolveAutomaticBackend();
-    case 'chrome-storage':
+    // TODO(weft-integration): wire vector-frankl adapters for the remaining
+    // Weft storage backends (lmdb/turso/indexeddb/web-extension/http). The kv
+    // half is supported by resolveStorage, but the paired vector adapter is not.
+    case 'lmdb':
+    case 'turso':
     case 'indexeddb':
-    case 'remote':
+    case 'web-extension':
+    case 'http':
       throw new Error(
         `Gateway vector storage does not support the "${configuration.type}" key-value backend yet.`,
       );

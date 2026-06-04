@@ -1,4 +1,4 @@
-import type { KeyValueStore } from 'storage';
+import type { TextValueStore } from '@lostgradient/weft/storage';
 import { z } from 'zod';
 
 import { isValidSkillName, SkillParseError } from './parse-skill-markdown';
@@ -57,7 +57,7 @@ function skillPrefix(name: string): string {
  * - `skill:{name}:resource:{path}` — bundled resource content
  * - `skill:{name}:enabled` — "true" | "false"
  */
-export function createStorageSkillProvider(adapter: KeyValueStore): SkillProvider {
+export function createStorageSkillProvider(adapter: TextValueStore): SkillProvider {
   return {
     async listSkills(): Promise<SkillCatalogEntry[]> {
       const keys = await adapter.list(SKILL_PREFIX);

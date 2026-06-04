@@ -1,10 +1,32 @@
+import { rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
+import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
 import { createToolbox } from 'armorer';
-import { describe, expect, it } from 'bun:test';
-import { Conversation } from 'conversationalist';
+import { afterEach, describe, expect, it } from 'bun:test';
+import { Conversation, createConversationHistory } from 'conversationalist';
 import type { GenerateFunction } from 'operative';
+import { stopWhen } from 'operative';
+import { createDurableActiveRun } from 'operative/durable';
 
 import { createRuntimeComposition } from './runtime-composition';
 import type { ProviderConfiguration } from './types';
+
+// Weft's inline launch queue defers each workflow start onto a `setTimeout(0)`
+// macrotask. Under `bun test`, a prior test that leaves an unsettled async tail
+// (the cost-aware `generate` path here) can starve that deferred launch, so a
+// later durable run's `handle.result()` never resolves and the test times out.
+// The run is correct — it completes start-to-finish in a plain `bun run`
+// process; this is purely a per-test scheduling artifact. Yielding one macrotask
+// between tests drains the timer queue so each test starts clean. Weft 0.2.1
+// ships this drain as the official `yieldToPortableEventLoop` testing helper
+// (the same MessageChannel-macrotask + microtask drain we hand-rolled), so the
+// drain is now a supported one-liner rather than a bespoke `setTimeout(0)`.
+afterEach(async () => {
+  await yieldToPortableEventLoop();
+});
 
 function createGenerateForProvider(provider: ProviderConfiguration): GenerateFunction {
   return async () => {
@@ -133,5 +155,154 @@ describe('createRuntimeComposition', () => {
 
     expect(firstRunRuntime.generate).toBe(secondRunRuntime.generate);
     expect(resolveProviderGenerateCalls).toBe(2);
+  });
+});
+
+let durableDatabaseCounter = 0;
+
+describe('createRuntimeComposition durable execution', () => {
+  it('does not build a durable engine by default', async () => {
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'x', toolCalls: [] }),
+      toolbox: createToolbox([], { context: {} }),
+      storage: { type: 'memory' },
+    });
+    // Off by default: no durableExecution flag → no engine.
+    expect(runtime.durable).toBeUndefined();
+  });
+
+  it('does not build a durable engine when the flag is set without storage', async () => {
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'x', toolCalls: [] }),
+      toolbox: createToolbox([], { context: {} }),
+      durableExecution: true,
+    });
+    // A durable engine needs a persistent backend; no storage → no engine.
+    expect(runtime.durable).toBeUndefined();
+  });
+
+  it('builds a durable engine BY DEFAULT for a persistent (sqlite) backend with no flag', async () => {
+    // The default-on contract: a persistent storage backend and NO explicit
+    // `durableExecution` flag resolves to durable-on, because that is the only
+    // place a crash can actually resume. This is the headline behavior — a
+    // normal bureau with sqlite storage gets durable runs without opting in.
+    const databasePath = join(
+      tmpdir(),
+      `default-on-${process.pid}-${durableDatabaseCounter++}.sqlite`,
+    );
+    try {
+      const runtime = await createRuntimeComposition({
+        generate: async () => ({ content: 'x', toolCalls: [] }),
+        toolbox: createToolbox([], { context: {} }),
+        storage: { type: 'sqlite', path: databasePath },
+      });
+      expect(runtime.durable).toBeDefined();
+      runtime.durable?.engine[Symbol.dispose]?.();
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
+  it('stays OFF when durableExecution is explicitly false even for a persistent backend', async () => {
+    // The explicit `false` override: a persistent backend would default to
+    // durable-on, but a caller can force the in-memory loop back.
+    const databasePath = join(
+      tmpdir(),
+      `explicit-off-${process.pid}-${durableDatabaseCounter++}.sqlite`,
+    );
+    try {
+      const runtime = await createRuntimeComposition({
+        generate: async () => ({ content: 'x', toolCalls: [] }),
+        toolbox: createToolbox([], { context: {} }),
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: false,
+      });
+      expect(runtime.durable).toBeUndefined();
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
+  it('throws when durableExecution: true is combined with a custom persistence value', async () => {
+    // `persistence` shadows `storage`, so no raw backend is resolved and a
+    // durable engine cannot share its backend with the session store. Honoring
+    // `durableExecution: true` silently would ship an engine that looks durable
+    // but can never recover (the boot reconstructor scans the SESSION store).
+    // The contradiction must fail loud at composition, not silently no-op.
+    const error = await createRuntimeComposition({
+      generate: async () => ({ content: 'x', toolCalls: [] }),
+      toolbox: createToolbox([], { context: {} }),
+      storage: { type: 'sqlite', path: join(tmpdir(), 'never-created.sqlite') },
+      durableExecution: true,
+      persistence: textValueStore(new MemoryStorage()),
+    }).then(
+      () => undefined,
+      (rejection: unknown) => rejection,
+    );
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toMatch(
+      /durableExecution: true is incompatible with a custom `persistence`/,
+    );
+  });
+
+  it('stays OFF (no engine) for sqlite + a custom persistence when durableExecution is unset', async () => {
+    // The silent-downgrade guard: with NO explicit flag, a custom `persistence`
+    // shadows `storage`, so `wantsDurable` resolves to FALSE — the honest
+    // default-off, not a wanted-but-unbuildable engine. (A persistence override
+    // means the caller is driving their own KV layer; durable-on would need the
+    // engine and sessions on one backend, which this config does not provide.)
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'x', toolCalls: [] }),
+      toolbox: createToolbox([], { context: {} }),
+      storage: { type: 'sqlite', path: join(tmpdir(), 'unset-persistence.sqlite') },
+      persistence: textValueStore(new MemoryStorage()),
+    });
+    expect(runtime.durable).toBeUndefined();
+  });
+
+  it('builds a durable engine through the composition path and runs an agent durably', async () => {
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'composed', toolCalls: [] }),
+      toolbox: createToolbox([], { context: {} }),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+
+    expect(runtime.durable).toBeDefined();
+
+    try {
+      // The integration gate: drive a durable run through the engine the
+      // PRODUCT'S composition built — not a hand-assembled Engine.create. Uses
+      // the same `createDurableActiveRun` entry the gateway routes through.
+      const activeRun = createDurableActiveRun(runtime.durable!, {
+        runId: 'composition-run',
+        prompt: 'Hello',
+        options: {
+          generate: async () => ({ content: 'durable result', toolCalls: [] }),
+          toolbox: createToolbox([], { context: {} }) as never,
+          conversation: createConversationHistory(),
+          // The durable driver honors RunOptions.stopWhen exactly like the
+          // in-memory loop: settle on the first turn with no tool calls.
+          stopWhen: stopWhen.noToolCalls(),
+        },
+      });
+      const result = await activeRun.result;
+
+      expect(result.steps).toHaveLength(1);
+      expect(result.content).toBe('durable result');
+      expect(result.finishReason).toBe('stop-condition');
+
+      // The run is durably checkpointed through the composition's store.
+      const checkpoint = await runtime.durable!.checkpointStore.loadCheckpoint('composition-run');
+      expect(checkpoint.cursor.step).toBe(1);
+      expect(checkpoint.steps).toHaveLength(1);
+    } finally {
+      runtime.durable!.engine[Symbol.dispose]();
+    }
   });
 });

@@ -1,6 +1,6 @@
+import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
 import { describe, expect, it } from 'bun:test';
 import { Conversation, createConversationHistory } from 'conversationalist';
-import { createMemoryKeyValueStore } from 'storage';
 
 import { createAgentSession } from '../agent-session';
 import { createSessionStore } from './create-session-store';
@@ -8,7 +8,7 @@ import { resumeSession } from './session-resume';
 
 describe('resumeSession', () => {
   it('loads an existing session and returns a conversation with its history', async () => {
-    const kv = createMemoryKeyValueStore();
+    const kv = textValueStore(new MemoryStorage());
     const store = createSessionStore(kv);
 
     const conversation = new Conversation();
@@ -35,7 +35,7 @@ describe('resumeSession', () => {
   });
 
   it('creates a new session when the id is not found', async () => {
-    const kv = createMemoryKeyValueStore();
+    const kv = textValueStore(new MemoryStorage());
     const store = createSessionStore(kv);
 
     const result = await resumeSession(store, 'brand-new', {
@@ -50,7 +50,7 @@ describe('resumeSession', () => {
   });
 
   it('handles corrupted data gracefully by creating a new session', async () => {
-    const kv = createMemoryKeyValueStore();
+    const kv = textValueStore(new MemoryStorage());
     const store = createSessionStore(kv);
 
     // Write garbage directly to the underlying store
@@ -66,7 +66,7 @@ describe('resumeSession', () => {
   });
 
   it('applies provided metadata to new sessions', async () => {
-    const kv = createMemoryKeyValueStore();
+    const kv = textValueStore(new MemoryStorage());
     const store = createSessionStore(kv);
 
     const result = await resumeSession(store, 'meta-session', {
@@ -78,7 +78,7 @@ describe('resumeSession', () => {
   });
 
   it('preserves metadata from existing sessions', async () => {
-    const kv = createMemoryKeyValueStore();
+    const kv = textValueStore(new MemoryStorage());
     const store = createSessionStore(kv);
 
     const session = createAgentSession({

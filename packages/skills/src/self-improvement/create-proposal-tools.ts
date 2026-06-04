@@ -1,5 +1,5 @@
+import type { TextValueStore } from '@lostgradient/weft/storage';
 import { createTool } from 'armorer';
-import type { KeyValueStore } from 'storage';
 import { z } from 'zod';
 
 import type { SkillProvider } from '../types';
@@ -15,7 +15,7 @@ import {
 // ── Options ─────────────────────────────────────────────────────────
 
 export interface CreateProposalToolboxOptions {
-  storage: KeyValueStore;
+  storage: TextValueStore;
   skillProvider: SkillProvider;
   identityProvider?: IdentityProviderLike;
 }

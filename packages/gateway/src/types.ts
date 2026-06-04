@@ -1,3 +1,4 @@
+import type { StorageConfiguration, TextValueStore } from '@lostgradient/weft/storage';
 import type { Toolbox } from 'armorer';
 import type { ConversationSnapshot } from 'conversationalist';
 import type { ProviderName } from 'herald';
@@ -25,7 +26,6 @@ import type {
   TokenUsage,
 } from 'operative';
 import type { Store } from 'sentinel';
-import type { KeyValueStore, KeyValueStoreConfiguration } from 'storage';
 
 import type { BureauEventMap } from './events';
 
@@ -117,7 +117,7 @@ export interface SkillProvider {
 
 export interface CacheConfiguration extends Omit<CacheOptions, 'store'> {
   enabled?: boolean;
-  store?: KeyValueStore;
+  store?: TextValueStore;
 }
 
 export interface StreamingConfiguration extends Pick<EnhancedStreamingOptions, 'onTextDelta'> {
@@ -139,8 +139,34 @@ export interface BureauOptions {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   toolbox?: Toolbox<any>;
   store?: Store;
-  persistence?: KeyValueStore;
-  storage?: KeyValueStoreConfiguration;
+  persistence?: TextValueStore;
+  storage?: StorageConfiguration;
+  /**
+   * Override for Weft-backed durable execution. Durable execution is **on by
+   * default whenever a persistent `storage` backend (`sqlite`/`lmdb`) is
+   * configured** — every `createRun()` is then checkpointed on the same backend
+   * and resumes from its last completed step after a crash, with the standard
+   * `run()`/`createRun()` event surface unchanged.
+   *
+   * The default follows persistence because that is the only place resume is
+   * real: a `memory` backend loses its checkpoints with the process, so it stays
+   * OFF by default. Set this explicitly to override the default either way —
+   * `true` forces the engine on (incl. for `memory`, so durable behavior is
+   * testable locally); `false` forces it off even for a persistent backend.
+   * Has no effect without any `storage` (a durable engine needs a backend).
+   *
+   * `durableExecution: true` is rejected when combined with a custom
+   * `persistence` value: `persistence` shadows `storage`, so the engine and the
+   * session store would live on different backends and a recovered run could
+   * never be found. Provide `storage` WITHOUT `persistence` for durable runs.
+   *
+   * Known limitation (seam #5b): a run RESUMED after a process restart (via
+   * boot recovery) persists its terminal SESSION status — observable through
+   * {@link Bureau.getSession} — but is not re-registered with the run store, so
+   * {@link Bureau.getRun} and live event subscribers do not see that recovered
+   * run individually. Use `getSession` to confirm a recovered run's outcome.
+   */
+  durableExecution?: boolean;
   memory?: CreateMemoryOptions | Memory;
   cache?: CacheConfiguration;
   guardrails?: GuardrailsOptions;
@@ -221,7 +247,7 @@ export interface Bureau {
   dispose(): void;
 
   readonly sessionStore: SessionStore | undefined;
-  readonly kv: KeyValueStore | undefined;
+  readonly kv: TextValueStore | undefined;
 }
 
 // ── Gateway (HTTP layer wrapping Bureau) ────────────────────────────

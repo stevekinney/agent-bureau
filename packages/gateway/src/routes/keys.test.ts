@@ -1,6 +1,6 @@
+import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
 import { describe, expect, it } from 'bun:test';
 import { Hono } from 'hono';
-import { createMemoryKeyValueStore } from 'storage';
 
 import { createApiKeyStore } from '../keys/create-api-key-store';
 import type { ApiKeyStore } from '../keys/types';
@@ -9,7 +9,7 @@ import { requestIdentifier } from '../middleware/request-identifier';
 import { createKeysRoutes } from './keys';
 
 function createApp(apiKeyStore?: ApiKeyStore) {
-  const kv = createMemoryKeyValueStore();
+  const kv = textValueStore(new MemoryStorage());
   const store = apiKeyStore ?? createApiKeyStore(kv);
   const app = new Hono();
   app.use('*', requestIdentifier);

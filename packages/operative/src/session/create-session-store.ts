@@ -1,5 +1,5 @@
+import type { TextValueStore } from '@lostgradient/weft/storage';
 import type { JSONValue } from 'interoperability';
-import type { KeyValueStore } from 'storage';
 
 import type { AgentSession } from '../agent-session';
 import type {
@@ -63,12 +63,12 @@ function toSummary(session: AgentSession): SessionSummary {
 }
 
 /**
- * Creates a SessionStore backed by the given KeyValueStore.
+ * Creates a SessionStore backed by the given TextValueStore.
  *
  * All keys are prefixed with `agent-session:` so session data can coexist
  * with other data in the same store.
  */
-export function createSessionStore(store: KeyValueStore): SessionStore {
+export function createSessionStore(store: TextValueStore): SessionStore {
   function keyFor(id: string): string {
     return `${KEY_PREFIX}${id}`;
   }
@@ -120,11 +120,9 @@ export function createSessionStore(store: KeyValueStore): SessionStore {
     },
 
     async exists(id: string): Promise<boolean> {
-      if (store.has) {
-        return store.has(keyFor(id));
-      }
-      const raw = await store.get(keyFor(id));
-      return raw !== null;
+      // `has` is a required member of Weft's TextValueStore (0.2.1), so the
+      // existence check needs no get-based fallback.
+      return store.has(keyFor(id));
     },
 
     async updateMetadata(id: string, metadata: Record<string, JSONValue>): Promise<void> {

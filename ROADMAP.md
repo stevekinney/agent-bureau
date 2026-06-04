@@ -6,7 +6,7 @@ This roadmap reflects the current repository, not the historical backlog. The ga
 
 - **Tooling and conversation foundations**: `armorer`, `conversationalist`, `interoperability`, and `lifecycle` provide the validated tool surface, conversation model, provider-format interoperability, and event primitives the rest of the workspace builds on.
 - **Provider and loop runtime**: `herald` and `operative` ship provider factories, fallover, routing, structured output, cache wrappers, retries, hook expansion, guardrails, sessions, scheduler support, and enhanced streaming.
-- **State, skills, memory, and storage**: `sentinel`, `skills`, `memory`, `storage`, and `vector-frankl` cover run tracking, skill loading, memory ranking, key-value persistence, and vector search.
+- **State, skills, memory, and storage**: `sentinel`, `skills`, `memory`, and `vector-frankl` cover run tracking, skill loading, memory ranking, and vector search; key-value persistence is backed by Weft's durable storage (`@lostgradient/weft`).
 - **Gateway product surface**: `gateway` now exposes session-first APIs, run detail payloads, live updates over WebSocket and server-sent events, scheduler administration, managed API keys, and a browser UI wired to the same runtime.
 - **Evaluation**: `evaluation` provides runners, reports, metrics, and comparison tooling for agent behavior validation.
 
@@ -17,7 +17,7 @@ The work on this branch completed the core gateway-first productization pass.
 - **Canonical runtime composition**: `createBureau()` and `createGateway()` compose providers, fallover, routing, cache, guardrails, identity, memory, skills, sessions, and scheduler behavior from one configuration surface.
 - **Session-first persistence**: gateway request and response shapes use `sessionId`, session lifecycle is backed by `AgentSession` plus `SessionStore`, and the gateway no longer treats `Conversation` auto-persistence as the product source of truth.
 - **Live transport completion**: the runtime emits normalized live frames, Bun uses WebSocket as the preferred transport, Node uses server-sent events as the parity path, and the browser client restores desired subscriptions after reconnect.
-- **Operational hardening**: rate limiting is keyed by authenticated principal and can persist through the shared key-value store, scheduler routes support submission and cancellation, and gateway storage configuration uses the canonical storage package surface.
+- **Operational hardening**: rate limiting is keyed by authenticated principal and can persist through the shared key-value store, scheduler routes support submission and cancellation, and gateway storage configuration resolves Weft storage backends through `resolveStorage`.
 - **Documentation reset**: the root docs now describe the actual 14-package workspace and separate shipped behavior from deferred next-generation tracks.
 
 The standing quality gates for this shipped surface are:

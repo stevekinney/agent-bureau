@@ -1,11 +1,18 @@
-import { createToolbox } from 'armorer';
+import { rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+import { MemoryStorage, type TextValueStore, textValueStore } from '@lostgradient/weft/storage';
+import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
+import { createTool, createToolbox } from 'armorer';
 import { createMockTool, createTestToolbox } from 'armorer/test';
-import { describe, expect, it, mock } from 'bun:test';
-import { Conversation } from 'conversationalist';
+import { afterEach, describe, expect, it, mock } from 'bun:test';
+import { Conversation, getMessages } from 'conversationalist';
 import type { GenerateFunction, GenerateResponse, Toolbox } from 'operative';
+import { stopWhen } from 'operative';
 import { createMockGenerate as createSequentialGenerate } from 'operative/test';
 import { createStore } from 'sentinel';
-import { createMemoryKeyValueStore, type KeyValueStore } from 'storage';
+import { z } from 'zod';
 
 import { BureauError, createBureau } from './create-bureau';
 import { drainMicrotasks, waitForCondition, waitForRunState } from './test';
@@ -15,6 +22,18 @@ import {
   DEFAULT_MAXIMUM_STEPS,
   type ServerFrame,
 } from './types';
+
+let recoveryDatabaseCounter = 0;
+
+/** A no-op `next` tool that lets a run take multiple steps. */
+function createNextTool() {
+  return createTool({
+    name: 'next',
+    description: 'continue',
+    input: z.object({}),
+    execute: async () => 'ok',
+  });
+}
 
 type HasApiKey<T> = 'apiKey' extends keyof T ? true : false;
 
@@ -59,6 +78,35 @@ async function waitForRunCompletion(bureau: Bureau, runId: string) {
   await waitForRunState(bureau, runId);
   await drainMicrotasks(10);
 }
+
+/**
+ * Poll `check` up to `attempts` times, yielding one macrotask between tries.
+ * Each yield also drains Weft's deferred inline-launch queue (its `setTimeout(0)`
+ * starts), so a recovered run can advance — bounded, not a fixed wall-clock sleep
+ * that flakes on loaded hosts. `check` may be async (e.g. re-reading the session
+ * store each iteration). The cap is generous (20) because each tick is a cheap
+ * `setTimeout(0)` and a multi-step durable recovery yields several times (launch
+ * → resolver → per-step memo → saveConversation/recordStep/saveCursor); a tight
+ * cap would itself flake on a loaded host. A `check` that resolves earlier returns
+ * immediately, so the generous cap costs nothing on the happy path.
+ */
+async function pollUntil(check: () => boolean | Promise<boolean>, attempts = 20): Promise<boolean> {
+  for (let i = 0; i < attempts; i++) {
+    if (await check()) return true;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  return check();
+}
+
+// Weft's inline launch queue defers each workflow start onto a `setTimeout(0)`
+// macrotask. Under `bun test`, a prior test that leaves an unsettled async tail
+// (this file's recovery test parks bureauA's step-1 generate forever) can starve
+// that deferred launch, so a later durable run never advances and its test times
+// out. Yielding one macrotask between tests drains the timer queue so each test
+// starts clean. (Same fix as runtime-composition.test.ts / active-run-adapter.test.ts.)
+afterEach(async () => {
+  await yieldToPortableEventLoop();
+});
 
 describe('createBureau', () => {
   it('is not ready when no generate function is configured', async () => {
@@ -134,7 +182,7 @@ describe('createBureau', () => {
     const bureau = await createBureau({
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
-      persistence: createMemoryKeyValueStore(),
+      persistence: textValueStore(new MemoryStorage()),
     });
 
     const firstRun = await bureau.createRun({ message: 'First message' });
@@ -157,7 +205,7 @@ describe('createBureau', () => {
     const bureau = await createBureau({
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
-      persistence: createMemoryKeyValueStore(),
+      persistence: textValueStore(new MemoryStorage()),
     });
     const sessionId = 'session-aligned';
 
@@ -176,7 +224,7 @@ describe('createBureau', () => {
     const bureau = await createBureau({
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
-      persistence: createMemoryKeyValueStore(),
+      persistence: textValueStore(new MemoryStorage()),
     });
 
     const run = await bureau.createRun({ message: 'Fast completion' });
@@ -188,10 +236,10 @@ describe('createBureau', () => {
   });
 
   it('retries terminal session persistence after a transient save failure', async () => {
-    const backingStore = createMemoryKeyValueStore();
+    const backingStore = textValueStore(new MemoryStorage());
     let sessionSaveCount = 0;
 
-    const flakyStore: KeyValueStore = {
+    const flakyStore: TextValueStore = {
       async get(key) {
         return backingStore.get(key);
       },
@@ -210,6 +258,15 @@ describe('createBureau', () => {
       },
       async list(prefix) {
         return backingStore.list(prefix);
+      },
+      has(key) {
+        return backingStore.has(key);
+      },
+      deletePrefix(prefix) {
+        return backingStore.deletePrefix(prefix);
+      },
+      close() {
+        return backingStore.close();
       },
     };
 
@@ -233,12 +290,281 @@ describe('createBureau', () => {
     expect(session?.metadata['lastRunStatus']).toBe('completed');
   });
 
+  it('recovers an in-flight durable run across a process restart, rebuilding deps from config', async () => {
+    // THE CROSS-PROCESS PROOF (5d/5e): two bureaus share one persistent SQLite
+    // backend the way two processes would. Bureau A crashes mid-run; bureau B
+    // boots on the same file, reconstructs the run's behavior from its own config
+    // + the persisted session (NOTHING hand-injected), and resumes to completion.
+    const databasePath = join(
+      tmpdir(),
+      `bureau-recovery-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+
+    try {
+      // === Bureau A: step 0 commits a tool call, then step 1's generate HANGS.
+      // Disposing while suspended simulates a process dying mid-run: the Weft
+      // workflow is left in a non-terminal state for recoverAll to pick up. ===
+      //
+      // DETERMINISTIC crash anchor: the durable workflow runs step 0's whole
+      // memo (generate + tool), then `yield* saveConversation/recordStep/
+      // saveCursor`, THEN loops into step 1's memo. The `yield*` on saveCursor
+      // cannot resolve until that checkpoint is durably written — so entering
+      // `generate({ step: 1 })` PROVES step 0 is fully checkpointed. We crash
+      // exactly there, with no timing guess. (The earlier toolbox-action anchor
+      // raced: that event fires INSIDE step 0's memo, before any checkpoint yield.)
+      let bureauAReachedStep1 = false;
+      const bureauA = await createBureau({
+        generate: async ({ step }) => {
+          if (step === 0) {
+            return { content: 'A step 0', toolCalls: [{ name: 'next', arguments: {} }] };
+          }
+          bureauAReachedStep1 = true; // step 0's saveCursor has committed
+          // Hang forever — the "process" dies here.
+          return new Promise<never>(() => {});
+        },
+        toolbox: createToolbox([createNextTool()]) as unknown as Toolbox,
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+        stopWhen: stopWhen.noToolCalls(),
+      });
+
+      const run = await bureauA.createRun({ message: 'Recover me' });
+      // Crash once step 1's generate is entered — i.e. step 0 is durably
+      // checkpointed (see the anchor rationale above).
+      await pollUntil(() => bureauAReachedStep1);
+      expect(bureauAReachedStep1).toBe(true);
+      bureauA.dispose();
+
+      // === FRESH PROCESS: bureau B is a wholly separate bureau over the same
+      // SQLite file, with its own engine and its own `resolveWorkflowServices`
+      // resolver. There is no shared in-process state — disposing bureau A tore
+      // down its engine (and the per-run `services` it held), so the recovered
+      // run can ONLY advance on deps bureau B's resolver rebuilds from config +
+      // the persisted session. ===
+
+      // === Bureau B: same SQLite file, a generate that settles. On boot it
+      // reconstructs deps from config + the persisted session and resumes. ===
+      const bSteps: number[] = [];
+      const bureauB = await createBureau({
+        generate: async ({ step }) => {
+          bSteps.push(step);
+          return { content: `B recovered step ${step}`, toolCalls: [] };
+        },
+        toolbox: createToolbox([createNextTool()]) as unknown as Toolbox,
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+        stopWhen: stopWhen.noToolCalls(),
+      });
+
+      try {
+        // Recovery ran during boot, but the detached monitor drives the resumed
+        // run to completion AFTER createBureau returns (non-blocking boot). Poll
+        // (bounded) until the resumed run has taken step 1 — each poll drains the
+        // deferred Weft launch, so this is deterministic, not a fixed sleep.
+        await pollUntil(() => bSteps.includes(1));
+
+        // The run resumed at step 1 (not 0) and took ONLY step 1 — proving
+        // config-reconstructed deps short-circuited the completed step 0, not a
+        // restart from the top.
+        expect(bSteps).toEqual([1]);
+
+        // The session is no longer stuck `running`: the detached monitor persisted
+        // its terminal status. Poll (re-reading the store each iteration) until
+        // that write lands — it happens after the resumed run completes, off the
+        // boot path.
+        await pollUntil(async () => {
+          const current = await bureauB.getSession(run.sessionId);
+          return current?.metadata['lastRunStatus'] !== 'running';
+        });
+        const session = await bureauB.getSession(run.sessionId);
+        expect(session?.metadata['lastRunStatus']).toBe('completed');
+        // The session conversation must include step 1's content — written by the
+        // durable checkpoint on the resumed process, NOT the stale pre-crash history
+        // that was in the session store. If settleRecoveredRun fell back to the
+        // session store, 'B recovered step 1' would be absent.
+        const messages = session?.conversationHistory
+          ? getMessages(session.conversationHistory)
+          : [];
+        const hasBStep1 = messages.some(
+          (m) => typeof m.content === 'string' && m.content.includes('B recovered step 1'),
+        );
+        expect(hasBStep1).toBe(true);
+      } finally {
+        bureauB.dispose();
+      }
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
+  it('reconciles an in-flight session to error when recovery cannot rebuild its deps', async () => {
+    // The resolver-unavailable path: bureau A crashes mid-run, then bureau B
+    // boots over the same SQLite file WITHOUT a generate function. Its recovery
+    // resolver finds the `running` session but `createRunRuntime` throws ("No
+    // generate function configured") while rebuilding deps — so the run cannot be
+    // reconstructed. `resolveRunServices` reconciles that owning session to
+    // `error` synchronously (it has the sessionId in hand) instead of leaving it
+    // stuck `running`, and bureau B still boots cleanly.
+    const databasePath = join(
+      tmpdir(),
+      `bureau-unrecoverable-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+
+    try {
+      let bureauAReachedStep1 = false;
+      const bureauA = await createBureau({
+        generate: async ({ step }) => {
+          if (step === 0) {
+            return { content: 'A step 0', toolCalls: [{ name: 'next', arguments: {} }] };
+          }
+          bureauAReachedStep1 = true;
+          return new Promise<never>(() => {}); // hang — the "process" dies here
+        },
+        toolbox: createToolbox([createNextTool()]) as unknown as Toolbox,
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+        stopWhen: stopWhen.noToolCalls(),
+      });
+
+      const run = await bureauA.createRun({ message: 'Recover me' });
+      await pollUntil(() => bureauAReachedStep1);
+      expect(bureauAReachedStep1).toBe(true);
+      bureauA.dispose();
+
+      // === Bureau B: same file, durable forced on, but NO generate and NO
+      // provider — so reconstructing the run's deps throws on this process. ===
+      const bureauB = await createBureau({
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+        stopWhen: stopWhen.noToolCalls(),
+      });
+
+      try {
+        // The resolver runs synchronously during boot recovery and reconciles the
+        // session. Poll (bounded) until the reconciliation write lands.
+        await pollUntil(async () => {
+          const current = await bureauB.getSession(run.sessionId);
+          return current?.metadata['lastRunStatus'] !== 'running';
+        });
+
+        const session = await bureauB.getSession(run.sessionId);
+        // Reconciled to `error`, not left stale `running`.
+        expect(session?.metadata['lastRunStatus']).toBe('error');
+        const lastError = session?.metadata['lastError'];
+        expect(typeof lastError).toBe('string');
+        expect(lastError as string).toContain('could not be reconstructed');
+      } finally {
+        bureauB.dispose();
+      }
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
+  it('routes runs through the durable engine end-to-end when durableExecution is on', async () => {
+    // The seam #7 closure, validated through the REAL gateway wiring: a durable
+    // run must fire run.completed so store.register sees completion and the
+    // session is marked completed — exactly as an in-memory run does.
+    //
+    // NOTE: no `persistence` — it would shadow `storage`, leaving `durableStorage`
+    // undefined so NO engine is built (and, with `durableExecution: true`, the
+    // composition now throws on that contradiction). `storage: memory` +
+    // `durableExecution: true` is what actually builds the in-memory durable
+    // engine, so this test genuinely exercises the durable path.
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+      stopWhen: stopWhen.noToolCalls(),
+    });
+
+    const run = await bureau.createRun({ message: 'Durable hello' });
+    // Wait deterministically for the deferred-microtask start + durable workflow
+    // to drive the registered run to a terminal state (no fixed-wall-clock sleep).
+    await waitForRunCompletion(bureau, run.id);
+
+    // The run is registered and observed to completion through the durable path.
+    const detail = bureau.getRun(run.id);
+    expect(detail).toBeDefined();
+    expect(detail?.status).toBe('completed');
+    expect(detail?.finishReason).toBe('stop-condition');
+
+    // run.completed fired → the session was persisted as completed.
+    const session = await bureau.getSession(run.sessionId);
+    expect(session?.metadata['lastRunId']).toBe(run.id);
+    expect(session?.metadata['lastRunStatus']).toBe('completed');
+  });
+
+  it('routes a sqlite-backed run through the durable engine BY DEFAULT at observable parity', async () => {
+    // The flip's gate: sqlite storage and NO `durableExecution` flag now routes
+    // through Weft (the default-on contract). This must be at OBSERVABLE PARITY
+    // with the in-memory loop — the rich event surface gateway depends on
+    // (`action` events, toolbox events from a tool call, `run.completed`, and the
+    // persisted session status) must all fire exactly as for an in-memory run.
+    // Asserting WITHOUT the flag is the whole point: a test that set
+    // `durableExecution: true` would retest the old opt-in path and prove nothing
+    // about the flip.
+    const databasePath = join(
+      tmpdir(),
+      `default-on-parity-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    try {
+      const bureau = await createBureau({
+        // Step 0 commits a tool call (so toolbox events must fire on the durable
+        // path); step 1 has no tool call, so `noToolCalls()` stops the run.
+        generate: async ({ step }) =>
+          step === 0
+            ? { content: 'calling tool', toolCalls: [{ name: 'next', arguments: {} }] }
+            : { content: 'done', toolCalls: [] },
+        toolbox: createToolbox([createNextTool()]) as unknown as Toolbox,
+        storage: { type: 'sqlite', path: databasePath },
+        // NOTE: no `durableExecution` — relying on the default-on flip.
+        stopWhen: stopWhen.noToolCalls(),
+      });
+
+      const actions: string[] = [];
+      bureau.addEventListener('action', (event) => {
+        actions.push(event.action.type);
+      });
+
+      const run = await bureau.createRun({ message: 'Drive the durable default' });
+      await waitForRunCompletion(bureau, run.id);
+
+      // The observable surface fired on the durable path: `action` events flowed,
+      // the run is registered and observed to completion, and the session landed
+      // `completed` — full parity with the in-memory loop, with no opt-in.
+      expect(actions.length).toBeGreaterThan(0);
+      // A `toolbox.*` action proves the toolbox-event forwarding the adapter wires
+      // (active-run-adapter.ts) actually fired on the durable path — step 0's tool
+      // call must surface, not merely the run-lifecycle events.
+      expect(actions.some((type) => type.startsWith('toolbox.'))).toBe(true);
+      const detail = bureau.getRun(run.id);
+      expect(detail).toBeDefined();
+      expect(detail?.status).toBe('completed');
+      expect(detail?.finishReason).toBe('stop-condition');
+
+      const session = await bureau.getSession(run.sessionId);
+      expect(session?.metadata['lastRunStatus']).toBe('completed');
+
+      bureau.dispose();
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
   it('logs terminal session persistence failures when retry sleep rejects', async () => {
-    const backingStore = createMemoryKeyValueStore();
+    const backingStore = textValueStore(new MemoryStorage());
     let sessionSaveCount = 0;
     let retrySleepCount = 0;
 
-    const flakyStore: KeyValueStore = {
+    const flakyStore: TextValueStore = {
       async get(key) {
         return backingStore.get(key);
       },
@@ -257,6 +583,15 @@ describe('createBureau', () => {
       },
       async list(prefix) {
         return backingStore.list(prefix);
+      },
+      has(key) {
+        return backingStore.has(key);
+      },
+      deletePrefix(prefix) {
+        return backingStore.deletePrefix(prefix);
+      },
+      close() {
+        return backingStore.close();
       },
     };
 
@@ -295,8 +630,8 @@ describe('createBureau', () => {
   });
 
   it('does not register a run when initial session persistence fails', async () => {
-    const backingStore = createMemoryKeyValueStore();
-    const failingStore: KeyValueStore = {
+    const backingStore = textValueStore(new MemoryStorage());
+    const failingStore: TextValueStore = {
       async get(key) {
         return backingStore.get(key);
       },
@@ -312,6 +647,15 @@ describe('createBureau', () => {
       },
       async list(prefix) {
         return backingStore.list(prefix);
+      },
+      has(key) {
+        return backingStore.has(key);
+      },
+      deletePrefix(prefix) {
+        return backingStore.deletePrefix(prefix);
+      },
+      close() {
+        return backingStore.close();
       },
     };
 
@@ -339,7 +683,7 @@ describe('createBureau', () => {
     const bureau = await createBureau({
       generate,
       toolbox: createEmptyToolbox(),
-      persistence: createMemoryKeyValueStore(),
+      persistence: textValueStore(new MemoryStorage()),
     });
 
     const run = await bureau.createRun({ message: 'Explode' });
@@ -352,10 +696,10 @@ describe('createBureau', () => {
   });
 
   it('persists error session state once after the initial running save', async () => {
-    const backingStore = createMemoryKeyValueStore();
+    const backingStore = textValueStore(new MemoryStorage());
     let sessionSaveCount = 0;
 
-    const trackingStore: KeyValueStore = {
+    const trackingStore: TextValueStore = {
       async get(key) {
         return backingStore.get(key);
       },
@@ -371,6 +715,15 @@ describe('createBureau', () => {
       },
       async list(prefix) {
         return backingStore.list(prefix);
+      },
+      has(key) {
+        return backingStore.has(key);
+      },
+      deletePrefix(prefix) {
+        return backingStore.deletePrefix(prefix);
+      },
+      close() {
+        return backingStore.close();
       },
     };
 
@@ -492,7 +845,7 @@ describe('createBureau', () => {
     const bureau = await createBureau({
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
-      persistence: createMemoryKeyValueStore(),
+      persistence: textValueStore(new MemoryStorage()),
     });
 
     const run = await bureau.createRun({ message: 'Hello' });
@@ -734,5 +1087,68 @@ describe('createBureau', () => {
     const bureau = await createBureau();
     bureau.dispose();
     bureau.dispose();
+  });
+
+  it('disposes a sqlite-backed durable bureau cleanly more than once', async () => {
+    // The idempotency guard: a persistent bureau owns an engine AND a raw SQLite
+    // handle, both released on dispose. A second dispose must NOT re-close the
+    // already-closed SQLite connection (runtime-dependent whether that throws).
+    const databasePath = join(
+      tmpdir(),
+      `dispose-twice-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    try {
+      const bureau = await createBureau({
+        generate: createMockGenerate(),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+        stopWhen: stopWhen.noToolCalls(),
+      });
+      bureau.dispose();
+      // Second dispose is a no-op (guard short-circuits before re-closing).
+      expect(() => bureau.dispose()).not.toThrow();
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
+  it('releases backend handles even when a toObservable subscriber throws during dispose', async () => {
+    // dispose() dispatches BureauDisposedEvent through the emitter, which routes
+    // through CompletableEventTarget.dispatchEvent — an UN-guarded loop over
+    // toObservable() subscribers (lifecycle/completable.ts). A subscriber whose
+    // `next` throws therefore propagates straight into dispose()'s pre-teardown.
+    // This is a real, public path (`toObservable()` is on the Bureau surface), so
+    // pre-teardown is best-effort: dispose must swallow the throw and STILL release
+    // the SQLite handle, exactly like the already-best-effort scheduler/memory steps.
+    const databasePath = join(
+      tmpdir(),
+      `dispose-throwing-subscriber-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    try {
+      const bureau = await createBureau({
+        generate: createMockGenerate(),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+        stopWhen: stopWhen.noToolCalls(),
+      });
+      // A public-API subscriber that throws on the disposed event. With no guard
+      // in dispose(), this would propagate out of `emitter.dispatch(...)` and
+      // strand the SQLite handle behind the now-true `disposed` flag.
+      bureau.toObservable().subscribe(() => {
+        throw new Error('subscriber boom');
+      });
+
+      // dispose() must NOT propagate the subscriber throw...
+      expect(() => bureau.dispose()).not.toThrow();
+      // ...and the SQLite handle must still have been released — the second
+      // dispose is a clean no-op rather than a double-close of a live handle.
+      expect(() => bureau.dispose()).not.toThrow();
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
   });
 });

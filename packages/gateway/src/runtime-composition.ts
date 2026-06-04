@@ -1,3 +1,6 @@
+import type { WorkflowServicesResolution, WorkflowServicesResolverInfo } from '@lostgradient/weft';
+import type { Storage, TextValueStore } from '@lostgradient/weft/storage';
+import { resolveStorage, textValueStore } from '@lostgradient/weft/storage';
 import {
   combineToolboxes,
   createTool,
@@ -5,6 +8,7 @@ import {
   type Toolbox,
   type ToolCallInput,
 } from 'armorer';
+import { Conversation } from 'conversationalist';
 import {
   createAnthropicGenerate,
   createAnthropicGenerateStream,
@@ -38,10 +42,10 @@ import {
   withCache,
   withEnhancedStreaming,
 } from 'operative';
+import type { AnyRunEngine, CheckpointStore, DurableRunDeps } from 'operative/durable';
+import { createCheckpointStore, createRunEngine, createRunWorkflow } from 'operative/durable';
 import type { SkillSession } from 'skills';
 import { createSkillSession, escapeXml } from 'skills';
-import type { KeyValueStore } from 'storage';
-import { resolveKeyValueStore } from 'storage';
 import { z } from 'zod';
 
 import type {
@@ -229,7 +233,7 @@ function withUsageTracking(
 function applyCache(
   generate: GenerateFunction,
   configuration: CacheConfiguration | undefined,
-  store: KeyValueStore | undefined,
+  store: TextValueStore | undefined,
 ): GenerateFunction {
   if (!configuration) {
     return generate;
@@ -418,7 +422,25 @@ function createUnavailableToolbox(): GatewayToolbox {
 }
 
 export interface RuntimeComposition {
-  kv: KeyValueStore | undefined;
+  kv: TextValueStore | undefined;
+  /**
+   * The durable run engine + checkpoint store, present whenever durable
+   * execution resolves on (by default: a persistent `storage` backend is
+   * configured and `durableExecution` is not explicitly `false`). When present,
+   * `createBureau` routes every `createRun()` through it transparently — the run
+   * surface is unchanged, but the run is checkpointed and resumes after a crash.
+   */
+  durable: { engine: AnyRunEngine; checkpointStore: CheckpointStore } | undefined;
+  /**
+   * Disposes the raw `Storage` backend this composition resolved from
+   * `options.storage`, if any. The KV/checkpoint views are created with
+   * `disposeUnderlyingStorage: false` (they share one backend), and Weft's
+   * `engine[Symbol.dispose]()` does NOT close the storage either — so the owner
+   * (the bureau) must call this on teardown to release the SQLite/LMDB handle.
+   * `undefined` when the caller supplied their own `persistence` (we did not
+   * resolve a backend and do not own its lifecycle).
+   */
+  disposeStorage: (() => void) | undefined;
   memory: Memory | undefined;
   sessionStore: SessionStore | undefined;
   scheduler: Scheduler | undefined;
@@ -448,9 +470,81 @@ export async function createRuntimeComposition(
   const maximumSteps = options.maximumSteps ?? 10;
   const systemPrompt = options.systemPrompt;
 
-  let kv: KeyValueStore | undefined = options.persistence;
+  let kv: TextValueStore | undefined = options.persistence;
+  // Keep the raw Storage so the durable engine can share the exact backend with
+  // the text-value KV view (Weft requires one engine per durable store).
+  let durableStorage: Storage | undefined;
   if (!kv && options.storage) {
-    kv = await resolveKeyValueStore(options.storage);
+    durableStorage = await resolveStorage(options.storage);
+    kv = textValueStore(durableStorage, { disposeUnderlyingStorage: false });
+  }
+
+  // Durable execution is ON BY DEFAULT whenever a PERSISTENT storage backend is
+  // configured AND no custom `persistence` shadows it — a normal `createRun()`
+  // that crashes resumes from its last checkpoint with no opt-in. The default
+  // follows persistence because that is the only place resume is real: `memory`
+  // storage loses its checkpoints with the process, so default-on there would be
+  // pure overhead with zero recovery. The `persistence === undefined` guard keeps
+  // `wantsDurable` ⟺ buildable: a custom `persistence` shadows `storage` (the
+  // block above is skipped, so `durableStorage` is never resolved), and the
+  // engine and session store cannot then share one backend — so the honest
+  // default there is OFF, not a silently-wanted-but-unbuilt engine. The explicit
+  // `durableExecution` flag overrides the default either way — `true` forces the
+  // engine on even for `memory` (so durable behavior is testable locally),
+  // `false` forces it off even for sqlite/lmdb.
+  const wantsDurable =
+    options.durableExecution ??
+    (options.storage !== undefined &&
+      options.storage.type !== 'memory' &&
+      options.persistence === undefined);
+
+  // A custom `persistence` value shadows `storage` entirely (the
+  // `if (!kv && options.storage)` block above is skipped), so no raw `Storage`
+  // is resolved and a durable engine cannot be built on the same backend the
+  // sessions live on. Durable recovery REQUIRES the checkpoint store and the
+  // session store to share one durable backend — the boot reconstructor scans
+  // the SESSION store for `running` runs, so checkpoints in a separate backend
+  // would never be resumed. Therefore `durableExecution: true` + a custom
+  // `persistence` is contradictory: honor it silently and we ship an engine
+  // that looks durable but can't recover. Fail loud at composition instead.
+  // (Flag UNSET + `persistence` is fine — it falls to the documented
+  // default-off, since there was no explicit request to honor.)
+  if (options.durableExecution === true && options.persistence !== undefined) {
+    throw new Error(
+      'durableExecution: true is incompatible with a custom `persistence` value. ' +
+        'A durable engine must share its backend with the session store, but ' +
+        '`persistence` shadows `storage` — so the engine and sessions would live ' +
+        'on different backends and a recovered run could never be found. Provide ' +
+        '`storage` (sqlite/lmdb) WITHOUT `persistence` to get durable execution, ' +
+        'or drop `durableExecution: true` to use the custom persistence layer ' +
+        'with the in-memory run loop.',
+    );
+  }
+
+  let durable: { engine: AnyRunEngine; checkpointStore: CheckpointStore } | undefined;
+  if (wantsDurable && durableStorage) {
+    // Build the checkpoint store over the SAME backend the engine persists to.
+    const checkpointStore = createCheckpointStore(
+      textValueStore(durableStorage, { disposeUnderlyingStorage: false }),
+    );
+    const runWorkflow = createRunWorkflow(checkpointStore);
+    // recover: false is REQUIRED. Weft's `Engine.create` default is recover:true,
+    // which runs recoverAll() *during construction* — but the bureau needs the
+    // recovered handles itself (to attach the `settleRecoveredRun` monitors that
+    // persist each resumed run's terminal session status), and a handle started
+    // inside Engine.create is not surfaced to the caller. So the bureau owns
+    // recovery: it calls engine.recoverAll() at boot and keeps the handles. The
+    // per-run deps a recovered run needs are re-provided lazily by
+    // `resolveRunServices` (passed as resolveWorkflowServices), which Weft fires
+    // per recovered run before its generator advances — no pre-injection, no
+    // module-global registry.
+    durable = await createRunEngine({
+      storage: durableStorage,
+      runWorkflow,
+      checkpointStore,
+      recover: false,
+      resolveWorkflowServices: resolveRunServices,
+    });
   }
 
   let memory: Memory | undefined;
@@ -660,8 +754,122 @@ export async function createRuntimeComposition(
     });
   }
 
+  /**
+   * Rebuild a recovered run's non-serializable {@link DurableRunDeps} from durable
+   * config: reconstruct the run runtime from the owning session's persisted
+   * request — the same `createRunRuntime` a fresh run uses. Returns `null` when
+   * the session is absent (the run is not bureau-owned / not reconstructable).
+   *
+   * The reconstructed `conversation` is a placeholder: a resumed run reads its
+   * transcript from the checkpoint, not from `options.conversation`. No `emitter`
+   * is attached — a recovered run has no live event surface (the accepted
+   * seam #5b: recovered runs are observable via `getSession`, not `getRun`).
+   */
+  async function buildRunDepsFromSession(
+    session: Awaited<ReturnType<NonNullable<typeof sessionStore>['load']>>,
+  ): Promise<DurableRunDeps | null> {
+    if (!session) return null;
+    const message = session.metadata['lastUserMessage'];
+    const runRuntime = await createRunRuntime(
+      {
+        message: typeof message === 'string' ? message : '',
+        sessionId: session.id,
+      },
+      { liveStreaming: false },
+    );
+    return {
+      toolbox: runRuntime.toolbox,
+      options: {
+        generate: runRuntime.generate,
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment -- Toolbox generic variance; the durable layer never inspects the tool-tuple type parameter (matches createRunRuntime's internal Toolbox<any>).
+        toolbox: runRuntime.toolbox,
+        conversation: new Conversation(session.conversationHistory),
+        maximumSteps,
+        stopWhen: options.stopWhen,
+        prepareStep: runRuntime.prepareStep,
+        onStep: runRuntime.onStep,
+        validateResponse: runRuntime.validateResponse,
+      },
+    };
+  }
+
+  /**
+   * Weft's `resolveWorkflowServices` resolver: re-provide a recovered run's deps
+   * on a fresh-process resume. Weft fires it (per recovered inline run that was
+   * launched with `services`) BEFORE the generator advances, passing the run's
+   * `workflowId` — which equals our `runId`, since `engine.start` pins
+   * `{ id: runId }`. Finds the owning `running` session, rebuilds its deps, and
+   * returns `{ status: 'available', services }`; a run with no reconstructable
+   * session returns `{ status: 'unavailable' }`, which fails just that one run
+   * (terminal `failed`) without aborting recovery or the engine.
+   *
+   * When the owning session exists and is `running` but its deps cannot be rebuilt
+   * here (`buildRunDepsFromSession` throws — e.g. no `generate` configured on this
+   * process), it best-effort reconciles that session to `error` before returning
+   * unavailable, so the session metadata is not left stuck `running` for a run the
+   * engine is about to fail. This is the resolver's one write; it is keyed on the
+   * session it just loaded (no race) and swallowed on failure.
+   *
+   * Idempotent: once a session is reconciled to `error`, the `=== 'running'`
+   * predicate above no longer matches it on a later boot, so it falls through to
+   * the no-running-session return and is never re-failed or re-written.
+   */
+  async function resolveRunServices(
+    info: WorkflowServicesResolverInfo,
+  ): Promise<WorkflowServicesResolution> {
+    if (!sessionStore) {
+      return { status: 'unavailable', reason: 'no session store configured' };
+    }
+    const summaries = await sessionStore.list();
+    for (const summary of summaries) {
+      if (summary.metadata['lastRunId'] !== info.workflowId) continue;
+      if (summary.metadata['lastRunStatus'] !== 'running') continue;
+      const session = await sessionStore.load(summary.id);
+      let services: DurableRunDeps | null;
+      try {
+        services = await buildRunDepsFromSession(session);
+      } catch (error) {
+        // The owning session exists and is `running`, but its deps cannot be
+        // rebuilt on this process (e.g. no `generate`/provider configured here,
+        // so `createRunRuntime` throws). Weft will fail this run terminally
+        // pre-replay; its `settleRecoveredRun` monitor (if Weft surfaces a
+        // rejecting handle) only logs, it does not persist a session status — so
+        // without this reconcile the session would be left stuck `running`. We
+        // have the sessionId in hand here, so reconcile it to `error`
+        // synchronously on the boot path (not a racy detached write).
+        const reason = error instanceof Error ? error.message : String(error);
+        try {
+          await sessionStore.updateMetadata(summary.id, {
+            lastRunStatus: 'error',
+            lastFinishReason: 'error',
+            lastError: `Recovered run could not be reconstructed: ${reason}`,
+          });
+        } catch (writeError) {
+          // Reconciliation is best-effort — a failed write must not abort the
+          // rest of recovery — but it is NOT silent: a session left stale
+          // `running` cannot be repaired by a later boot (the run is already
+          // terminal `failed` and is skipped), so surface it for operators.
+          console.error(
+            `[bureau] Failed to reconcile unrecoverable run "${info.workflowId}" ` +
+              `(session ${summary.id}) to error: ${writeError instanceof Error ? writeError.message : String(writeError)}`,
+          );
+        }
+        return { status: 'unavailable', reason: `run ${info.workflowId} not reconstructable` };
+      }
+      if (services === null) {
+        // `load()` returned null between the `list()` summary and here — the
+        // session vanished (TOCTOU), so there is nothing to reconcile.
+        return { status: 'unavailable', reason: `run ${info.workflowId} not reconstructable` };
+      }
+      return { status: 'available', services };
+    }
+    return { status: 'unavailable', reason: `no running session for run ${info.workflowId}` };
+  }
+
   return {
     kv,
+    durable,
+    disposeStorage: durableStorage ? () => durableStorage[Symbol.dispose]() : undefined,
     memory,
     sessionStore,
     scheduler,

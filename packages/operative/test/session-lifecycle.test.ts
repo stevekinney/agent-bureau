@@ -1,13 +1,16 @@
+import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
 import { createTestToolbox } from 'armorer/test';
 import { describe, expect, it } from 'bun:test';
 import { createConversationHistory } from 'conversationalist';
-import { createMockKeyValueStore } from 'storage/test';
 
 import type { AgentSession } from '../src/agent-session';
 import { createAgentSession, saveAgentSession } from '../src/agent-session';
 import { noToolCalls } from '../src/conditions/predicates';
 import { defineAgent } from '../src/define-agent';
 import type { GenerateResponse } from '../src/types';
+
+/** In-memory text-value store for tests, backed by Weft's MemoryStorage. */
+const createMockKeyValueStore = () => textValueStore(new MemoryStorage());
 
 function textResponse(content: string): GenerateResponse {
   return { content, toolCalls: [], usage: { prompt: 10, completion: 5, total: 15 } };

@@ -1,5 +1,5 @@
+import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
 import { describe, expect, it } from 'bun:test';
-import { createMockKeyValueStore } from 'storage/test';
 
 import { createStorageIdentityProvider } from '../../src/identity/create-storage-provider';
 import type { SoulItem } from '../../src/identity/types';
@@ -17,14 +17,14 @@ function makeSoulItem(id: string, content: string): SoulItem {
 
 describe('createStorageIdentityProvider', () => {
   it('loads empty soul for unknown agent', async () => {
-    const adapter = createMockKeyValueStore();
+    const adapter = textValueStore(new MemoryStorage());
     const provider = createStorageIdentityProvider(adapter);
     const soul = await provider.loadSoul();
     expect(soul).toEqual([]);
   });
 
   it('soul items round-trip through JSON serialization', async () => {
-    const adapter = createMockKeyValueStore();
+    const adapter = textValueStore(new MemoryStorage());
     const provider = createStorageIdentityProvider(adapter);
 
     const items = [
@@ -50,27 +50,27 @@ describe('createStorageIdentityProvider', () => {
   });
 
   it('uses correct key namespace convention', async () => {
-    const adapter = createMockKeyValueStore();
+    const adapter = textValueStore(new MemoryStorage());
     const provider = createStorageIdentityProvider(adapter);
 
     await provider.saveSoul([makeSoulItem('1', 'Soul')]);
-    expect(adapter.store.has('identity:soul:orchestrator')).toBe(true);
+    expect(await adapter.has('identity:soul:orchestrator')).toBe(true);
 
     await provider.saveSoul([makeSoulItem('2', 'Agent soul')], 'research');
-    expect(adapter.store.has('identity:soul:research')).toBe(true);
+    expect(await adapter.has('identity:soul:research')).toBe(true);
 
     await provider.savePersona('code', { descriptor: { name: 'Forge', role: 'coder' } });
-    expect(adapter.store.has('identity:persona:code')).toBe(true);
+    expect(await adapter.has('identity:persona:code')).toBe(true);
 
     await provider.saveUserContext('User context here');
-    expect(adapter.store.has('identity:user-context')).toBe(true);
+    expect(await adapter.has('identity:user-context')).toBe(true);
 
     await provider.savePendingSoulUpdate([makeSoulItem('3', 'Pending')]);
-    expect(adapter.store.has('identity:pending:orchestrator')).toBe(true);
+    expect(await adapter.has('identity:pending:orchestrator')).toBe(true);
   });
 
   it('missing keys return appropriate defaults', async () => {
-    const adapter = createMockKeyValueStore();
+    const adapter = textValueStore(new MemoryStorage());
     const provider = createStorageIdentityProvider(adapter);
 
     expect(await provider.loadSoul()).toEqual([]);
@@ -81,15 +81,15 @@ describe('createStorageIdentityProvider', () => {
   });
 
   it('treats invalid JSON as missing data instead of throwing', async () => {
-    const adapter = createMockKeyValueStore();
-    adapter.store.set('identity:soul:orchestrator', '{not-valid-json');
+    const adapter = textValueStore(new MemoryStorage());
+    await adapter.set('identity:soul:orchestrator', '{not-valid-json');
     const provider = createStorageIdentityProvider(adapter);
 
     expect(await provider.loadSoul()).toEqual([]);
   });
 
   it('listPersonas uses prefix to discover persona keys', async () => {
-    const adapter = createMockKeyValueStore();
+    const adapter = textValueStore(new MemoryStorage());
     const provider = createStorageIdentityProvider(adapter);
 
     await provider.savePersona('research', { descriptor: { name: 'Atlas', role: 'researcher' } });
@@ -104,36 +104,36 @@ describe('createStorageIdentityProvider', () => {
   });
 
   it('listPersonas returns empty array when no persona keys exist', async () => {
-    const adapter = createMockKeyValueStore();
+    const adapter = textValueStore(new MemoryStorage());
     const provider = createStorageIdentityProvider(adapter);
     const personas = await provider.listPersonas();
     expect(personas).toEqual([]);
   });
 
   it('deletePersona removes the persona key from storage', async () => {
-    const adapter = createMockKeyValueStore();
+    const adapter = textValueStore(new MemoryStorage());
     const provider = createStorageIdentityProvider(adapter);
 
     await provider.savePersona('research', { descriptor: { name: 'Atlas', role: 'researcher' } });
-    expect(adapter.store.has('identity:persona:research')).toBe(true);
+    expect(await adapter.has('identity:persona:research')).toBe(true);
 
     await provider.deletePersona('research');
-    expect(adapter.store.has('identity:persona:research')).toBe(false);
+    expect(await adapter.has('identity:persona:research')).toBe(false);
 
     const personas = await provider.listPersonas();
     expect(personas).toEqual([]);
   });
 
   it('deletePersona on non-existent ID is a no-op', async () => {
-    const adapter = createMockKeyValueStore();
+    const adapter = textValueStore(new MemoryStorage());
     const provider = createStorageIdentityProvider(adapter);
     await provider.deletePersona('nonexistent');
     // Should not throw, store unchanged
-    expect(adapter.store.size).toBe(0);
+    expect(await adapter.list('')).toEqual([]);
   });
 
   it('version history accumulates on each save', async () => {
-    const adapter = createMockKeyValueStore();
+    const adapter = textValueStore(new MemoryStorage());
     const provider = createStorageIdentityProvider(adapter);
 
     await provider.saveSoul([makeSoulItem('1', 'Version 1')]);
@@ -154,7 +154,7 @@ describe('createStorageIdentityProvider', () => {
   });
 
   it('pending update lifecycle', async () => {
-    const adapter = createMockKeyValueStore();
+    const adapter = textValueStore(new MemoryStorage());
     const provider = createStorageIdentityProvider(adapter);
 
     expect(await provider.loadPendingSoulUpdate()).toBeUndefined();
@@ -171,7 +171,7 @@ describe('createStorageIdentityProvider', () => {
   });
 
   it('user context CRUD', async () => {
-    const adapter = createMockKeyValueStore();
+    const adapter = textValueStore(new MemoryStorage());
     const provider = createStorageIdentityProvider(adapter);
 
     expect(await provider.loadUserContext()).toBeUndefined();
@@ -181,7 +181,7 @@ describe('createStorageIdentityProvider', () => {
   });
 
   it('agent-specific souls are isolated', async () => {
-    const adapter = createMockKeyValueStore();
+    const adapter = textValueStore(new MemoryStorage());
     const provider = createStorageIdentityProvider(adapter);
 
     await provider.saveSoul([makeSoulItem('o1', 'Orchestrator')]);
@@ -194,7 +194,7 @@ describe('createStorageIdentityProvider', () => {
   });
 
   it('persona data round-trips through JSON', async () => {
-    const adapter = createMockKeyValueStore();
+    const adapter = textValueStore(new MemoryStorage());
     const provider = createStorageIdentityProvider(adapter);
 
     await provider.savePersona('research', {

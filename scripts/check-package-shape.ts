@@ -8,7 +8,7 @@
  *   1. Every file-referencing `package.json` field (`exports` conditions, `main`, `module`,
  *      `types`, `typesVersions`, `bin`) resolves to a file that exists in the tarball.
  *   2. No shipped `.js/.mjs/.cjs/.d.ts/.d.mts/.d.cts` imports a monorepo-internal foundation
- *      package (`lifecycle`, `interoperability`, `storage`) — those must be inlined at build time.
+ *      package (`lifecycle`, `interoperability`) — those must be inlined at build time.
  *   3. Every other bare import in shipped code is either a Node/Bun builtin, a self-reference to
  *      this package, or declared in `dependencies`/`peerDependencies`. Catches a real external
  *      left undeclared (the same `Cannot find module` failure class as a foundation leak).
@@ -29,7 +29,7 @@ import { join, resolve } from 'node:path';
 
 import { $ } from 'bun';
 
-const FOUNDATION_PACKAGES = new Set(['lifecycle', 'interoperability', 'storage']);
+const FOUNDATION_PACKAGES = new Set(['lifecycle', 'interoperability']);
 
 const PAYLOAD_AFFECTING_LIFECYCLE_SCRIPTS = [
   'prepack',

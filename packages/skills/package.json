@@ -63,10 +63,10 @@
     "validate": "bun run format:check && bun run lint && bun run check-types && bun run test"
   },
   "dependencies": {
+    "@lostgradient/weft": "^0.2.1",
     "armorer": "workspace:*",
     "gray-matter": "^4.0.3",
     "interoperability": "workspace:*",
-    "storage": "workspace:*",
     "zod": "^4.3.6"
   },
   "devDependencies": {

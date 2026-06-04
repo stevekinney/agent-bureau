@@ -1,12 +1,12 @@
 /**
  * Cache middleware for LLM generate functions.
  *
- * Wraps a `GenerateFunction` with a caching layer backed by a `KeyValueStore`.
+ * Wraps a `GenerateFunction` with a caching layer backed by a `TextValueStore`.
  * On cache hit, the stored response is returned without calling the underlying
  * generate function. On miss, the response is computed, stored, and returned.
  */
 
-import type { KeyValueStore } from 'storage';
+import type { TextValueStore } from '@lostgradient/weft/storage';
 
 import type { GenerateContext, GenerateFunction } from '../types';
 import { conversationHashKey, lastMessageKey } from './cache-keys';
@@ -34,7 +34,7 @@ function resolveKeyStrategy(strategy: CacheOptions['keyStrategy']): {
  * Returns the number of entries removed so the caller can adjust its counter.
  */
 async function evictOldest(
-  store: KeyValueStore,
+  store: TextValueStore,
   namespace: string,
   maxEntries: number,
 ): Promise<number> {
@@ -67,7 +67,7 @@ async function evictOldest(
 }
 
 /**
- * Wraps a `GenerateFunction` with configurable caching backed by a `KeyValueStore`.
+ * Wraps a `GenerateFunction` with configurable caching backed by a `TextValueStore`.
  *
  * On cache hit the stored response is returned without calling the underlying
  * generate function. On miss, the response is computed, stored, and returned.

@@ -1,4 +1,4 @@
-import type { KeyValueStore } from 'storage';
+import type { TextValueStore } from '@lostgradient/weft/storage';
 
 import type { ConversationHistory, Message, MessagePlugin, TokenEstimator } from './types';
 import { messageText } from './utilities';
@@ -42,7 +42,7 @@ export interface ConversationEnvironment {
   randomId: () => string;
   estimateTokens: TokenEstimator;
   plugins: MessagePlugin[];
-  persistence?: KeyValueStore;
+  persistence?: TextValueStore;
   /** Debounce duration for persistence saves. Defaults to 100ms. */
   persistenceDebounceMilliseconds?: number;
   /** Injectable timer for persistence debounce tests. */
