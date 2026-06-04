@@ -3,16 +3,6 @@ import { beforeEach, describe, expect, it } from 'bun:test';
 
 import { clearCache, invalidateCache } from './cache-utilities';
 
-function createStoreWithoutDeletePrefix(): TextValueStore {
-  const store = textValueStore(new MemoryStorage());
-  return {
-    get: store.get.bind(store),
-    set: store.set.bind(store),
-    delete: store.delete.bind(store),
-    list: store.list.bind(store),
-  } as TextValueStore;
-}
-
 describe('clearCache', () => {
   let store: TextValueStore;
 
@@ -47,28 +37,12 @@ describe('clearCache', () => {
     expect(count).toBe(0);
   });
 
-  it('uses deletePrefix when available', async () => {
+  it('uses the store deletePrefix to wipe the namespace', async () => {
     await store.set('llm-cache:key1', 'value1');
     await store.set('llm-cache:key2', 'value2');
 
-    // The memory adapter has deletePrefix — the function should use it
     const count = await clearCache(store, 'llm-cache:');
     expect(count).toBe(2);
-  });
-
-  it('falls back to listing and deleting keys when deletePrefix is unavailable', async () => {
-    const fallbackStore = createStoreWithoutDeletePrefix();
-
-    await fallbackStore.set('llm-cache:key1', 'value1');
-    await fallbackStore.set('llm-cache:key2', 'value2');
-    await fallbackStore.set('other:key3', 'value3');
-
-    const count = await clearCache(fallbackStore, 'llm-cache:');
-
-    expect(count).toBe(2);
-    expect(await fallbackStore.get('llm-cache:key1')).toBeNull();
-    expect(await fallbackStore.get('llm-cache:key2')).toBeNull();
-    expect(await fallbackStore.get('other:key3')).toBe('value3');
   });
 });
 

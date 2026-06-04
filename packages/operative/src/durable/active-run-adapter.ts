@@ -226,6 +226,12 @@ async function driveDurableRun(
   // checkpointed), and on a cross-process recovery the engine re-provides it via
   // `resolveWorkflowServices`. Inject the combined signal so an abort() reaches
   // the running step, and the emitter so step events flow (inline mode).
+  //
+  // NOTE: `services` is Weft inline-execution-mode ONLY (0.2.1) — passing it
+  // under `workflowExecutionMode: 'worker'` rejects at `engine.start`, because a
+  // non-serializable value cannot cross to a Worker. This run engine is inline
+  // by construction (tool execution runs in-process via `runStep`), so the
+  // constraint is always satisfied here.
   const handle = await context.engine.start(
     'agentRun',
     {
@@ -253,11 +259,12 @@ async function driveDurableRun(
     // resume it from its last checkpoint. We MUST NOT fire a terminal lifecycle
     // event here — `makeAbortResult`/`makeErrorResult` would drive gateway's
     // `once('run.aborted'/'completed')`, persist a terminal session status, and
-    // the boot reconstructor (which only rebuilds sessions still marked
-    // `running`) would then skip the run and recovery would never happen. So we
-    // resolve quietly with an interrupted-shaped result and leave the session
-    // `running`. Structural code match (not `instanceof`) to survive the module
-    // boundary — `isWeftErrorLike` narrows a caught unknown without `instanceof`.
+    // the boot recovery resolver (`resolveWorkflowServices`, which only rebuilds
+    // deps for sessions still marked `running`) would then never see the run and
+    // recovery would never happen. So we resolve quietly with an interrupted-
+    // shaped result and leave the session `running`. Structural code match (not
+    // `instanceof`) to survive the module boundary — `isWeftErrorLike` narrows a
+    // caught unknown without `instanceof`.
     if (isWeftErrorLike(error) && error.code === 'EngineDisposedError') {
       return makeInterruptedRunResult(conversation);
     }

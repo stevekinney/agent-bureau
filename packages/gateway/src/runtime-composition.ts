@@ -543,7 +543,7 @@ export async function createRuntimeComposition(
       runWorkflow,
       checkpointStore,
       recover: false,
-      resolveWorkflowServices: async (info) => resolveRunServices(info),
+      resolveWorkflowServices: resolveRunServices,
     });
   }
 
@@ -801,8 +801,18 @@ export async function createRuntimeComposition(
    * `{ id: runId }`. Finds the owning `running` session, rebuilds its deps, and
    * returns `{ status: 'available', services }`; a run with no reconstructable
    * session returns `{ status: 'unavailable' }`, which fails just that one run
-   * (terminal `failed`) without aborting recovery or the engine. Side-effect-free
-   * and idempotent — Weft may call it again on a later boot.
+   * (terminal `failed`) without aborting recovery or the engine.
+   *
+   * When the owning session exists and is `running` but its deps cannot be rebuilt
+   * here (`buildRunDepsFromSession` throws — e.g. no `generate` configured on this
+   * process), it best-effort reconciles that session to `error` before returning
+   * unavailable, so the session metadata is not left stuck `running` for a run the
+   * engine is about to fail. This is the resolver's one write; it is keyed on the
+   * session it just loaded (no race) and swallowed on failure.
+   *
+   * Idempotent: once a session is reconciled to `error`, the `=== 'running'`
+   * predicate above no longer matches it on a later boot, so it falls through to
+   * the no-running-session return and is never re-failed or re-written.
    */
   async function resolveRunServices(
     info: WorkflowServicesResolverInfo,
@@ -815,8 +825,34 @@ export async function createRuntimeComposition(
       if (summary.metadata['lastRunId'] !== info.workflowId) continue;
       if (summary.metadata['lastRunStatus'] !== 'running') continue;
       const session = await sessionStore.load(summary.id);
-      const services = await buildRunDepsFromSession(session);
+      let services: DurableRunDeps | null;
+      try {
+        services = await buildRunDepsFromSession(session);
+      } catch (error) {
+        // The owning session exists and is `running`, but its deps cannot be
+        // rebuilt on this process (e.g. no `generate`/provider configured here,
+        // so `createRunRuntime` throws). Weft will fail this run terminally
+        // pre-replay and surface NO handle, so `settleRecoveredRun` never
+        // reconciles the session — it would be left stuck `running`. We have the
+        // sessionId in hand here, so reconcile it to `error` synchronously on the
+        // boot path (not a racy detached write). Best-effort: a failed write must
+        // not abort recovery, so swallow it and still return unavailable.
+        const reason = error instanceof Error ? error.message : String(error);
+        try {
+          await sessionStore.updateMetadata(summary.id, {
+            lastRunStatus: 'error',
+            lastFinishReason: 'error',
+            lastError: `Recovered run could not be reconstructed: ${reason}`,
+          });
+        } catch {
+          // Reconciliation is best-effort; leaving the session stale is the
+          // documented fallback (see create-bureau.ts recoverDurableRuns).
+        }
+        return { status: 'unavailable', reason: `run ${info.workflowId} not reconstructable` };
+      }
       if (services === null) {
+        // `load()` returned null between the `list()` summary and here — the
+        // session vanished (TOCTOU), so there is nothing to reconcile.
         return { status: 'unavailable', reason: `run ${info.workflowId} not reconstructable` };
       }
       return { status: 'available', services };

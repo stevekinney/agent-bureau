@@ -399,6 +399,72 @@ describe('createBureau', () => {
     }
   });
 
+  it('reconciles an in-flight session to error when recovery cannot rebuild its deps', async () => {
+    // The resolver-unavailable path: bureau A crashes mid-run, then bureau B
+    // boots over the same SQLite file WITHOUT a generate function. Its recovery
+    // resolver finds the `running` session but `createRunRuntime` throws ("No
+    // generate function configured") while rebuilding deps — so the run cannot be
+    // reconstructed. `resolveRunServices` reconciles that owning session to
+    // `error` synchronously (it has the sessionId in hand) instead of leaving it
+    // stuck `running`, and bureau B still boots cleanly.
+    const databasePath = join(
+      tmpdir(),
+      `bureau-unrecoverable-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+
+    try {
+      let bureauAReachedStep1 = false;
+      const bureauA = await createBureau({
+        generate: async ({ step }) => {
+          if (step === 0) {
+            return { content: 'A step 0', toolCalls: [{ name: 'next', arguments: {} }] };
+          }
+          bureauAReachedStep1 = true;
+          return new Promise<never>(() => {}); // hang — the "process" dies here
+        },
+        toolbox: createToolbox([createNextTool()]) as unknown as Toolbox,
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+        stopWhen: stopWhen.noToolCalls(),
+      });
+
+      const run = await bureauA.createRun({ message: 'Recover me' });
+      await pollUntil(() => bureauAReachedStep1);
+      expect(bureauAReachedStep1).toBe(true);
+      bureauA.dispose();
+
+      // === Bureau B: same file, durable forced on, but NO generate and NO
+      // provider — so reconstructing the run's deps throws on this process. ===
+      const bureauB = await createBureau({
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+        stopWhen: stopWhen.noToolCalls(),
+      });
+
+      try {
+        // The resolver runs synchronously during boot recovery and reconciles the
+        // session. Poll (bounded) until the reconciliation write lands.
+        await pollUntil(async () => {
+          const current = await bureauB.getSession(run.sessionId);
+          return current?.metadata['lastRunStatus'] !== 'running';
+        });
+
+        const session = await bureauB.getSession(run.sessionId);
+        // Reconciled to `error`, not left stale `running`.
+        expect(session?.metadata['lastRunStatus']).toBe('error');
+        const lastError = session?.metadata['lastError'];
+        expect(typeof lastError).toBe('string');
+        expect(lastError as string).toContain('could not be reconstructed');
+      } finally {
+        bureauB.dispose();
+      }
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
   it('routes runs through the durable engine end-to-end when durableExecution is on', async () => {
     // The seam #7 closure, validated through the REAL gateway wiring: a durable
     // run must fire run.completed so store.register sees completion and the

@@ -531,19 +531,22 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
    * failed by the engine (terminal `failed`) BEFORE replay without aborting the
    * others or the boot — `recoverAll()` itself does not throw for it.
    *
-   * KNOWN LIMITATION (documented, accepted): such an engine-failed run never
-   * yields a handle, so `settleRecoveredRun` never runs for it and its OWNING
-   * SESSION's `lastRunStatus` stays `running` (stale metadata). The run is NOT
-   * re-executed — once Weft marks it terminal `failed`, the next boot's
-   * `recoverAll()` (which resumes only non-terminal workflows) skips it. So the
-   * worst case is a session metadata value that lags the engine's terminal state,
-   * never repeated work or a bricked engine. In practice this path is nearly
-   * unreachable: the resolver returns `available` for every in-flight session it
-   * finds, so a run only fails here if its session vanished mid-recovery or
-   * `createRunRuntime` threw. Reconciling that stale status would mean a
-   * timing-sensitive detached write keyed on the engine's per-run state — not
-   * worth the complexity for a path this narrow. Observe recovery outcomes via
-   * `getSession`, which reflects the durable run's own checkpoint, not this gate.
+   * Such an engine-failed run never yields a handle, so `settleRecoveredRun`
+   * never runs for it. The common reconstructable-failure case — the owning
+   * session is `running` but its deps cannot be rebuilt on this process — is
+   * reconciled to `error` SYNCHRONOUSLY inside the resolver (`resolveRunServices`
+   * in runtime-composition.ts), which has the sessionId in hand, so that session
+   * is not left stale.
+   *
+   * KNOWN LIMITATION (documented, accepted): one narrow residue remains — a run
+   * whose owning session VANISHED mid-recovery (loaded as null between the list
+   * scan and the load), so there is no session record to reconcile. Its prior
+   * `lastRunStatus` (if any) is left as-is. The run is NOT re-executed — once Weft
+   * marks it terminal `failed`, the next boot's `recoverAll()` (which resumes only
+   * non-terminal workflows) skips it. Recovered runs are not `store.register`'d
+   * either (seam #5b below), so there is no public surface reporting the engine's
+   * terminal state for such a run; this residue is benign (no repeated work, no
+   * bricked engine) and not worth a TOCTOU-racy reconciliation.
    *
    * TODO(weft-integration): #5b reconstructed runs complete without an ActiveRun
    *   adapter, so they are not individually observable via the live event surface

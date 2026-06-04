@@ -204,7 +204,7 @@ describe('durable agentRun workflow', () => {
       return engine.start('agentRun', input, { id: input.runId, services });
     }
 
-    it('resumes a suspended run via a RECONSTRUCTOR, skipping completed steps (no re-run)', async () => {
+    it('resumes a suspended run via the services RESOLVER, skipping completed steps (no re-run)', async () => {
       // One shared MemoryStorage instance both engines see, the way two processes
       // share a persistent backend.
       const storage = new MemoryStorage();
