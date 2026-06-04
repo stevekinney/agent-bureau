@@ -1,5 +1,6 @@
 import { activity, workflow } from '@lostgradient/weft';
 import { MemoryStorage } from '@lostgradient/weft/storage';
+import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
 import { afterEach, describe, expect, it } from 'bun:test';
 
 import { createCheckpointStore } from './checkpoint-store';
@@ -33,7 +34,7 @@ afterEach(async () => {
   // pending `setTimeout(0)` macrotask from one engine run is not starved under
   // full `bun test` concurrency, which would time out a later run. Matches the
   // drain in active-run-adapter.test.ts and run-workflow.test.ts.
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await yieldToPortableEventLoop();
 });
 
 describe('createRunEngine', () => {

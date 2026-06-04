@@ -112,20 +112,9 @@ export function createCheckpointStore(store: TextValueStore): CheckpointStore {
     },
 
     async clear(runId) {
-      const prefix = `durable-run:${runId}:`;
-      if (store.deletePrefix) {
-        return store.deletePrefix(prefix);
-      }
-      // Fallback for stores without a native prefix delete.
-      // TODO(weft-integration): Weft's TextValueStore always provides
-      // deletePrefix today, so this branch is unreachable with the real
-      // backend; it exists only to keep CheckpointStore decoupled from that
-      // guarantee for structural test doubles.
-      const allKeys = await store.list(prefix);
-      for (const key of allKeys) {
-        await store.delete(key);
-      }
-      return allKeys.length;
+      // `deletePrefix` is a required member of Weft's TextValueStore (0.2.1), so
+      // a prefix wipe needs no optional-method fallback.
+      return store.deletePrefix(`durable-run:${runId}:`);
     },
   };
 

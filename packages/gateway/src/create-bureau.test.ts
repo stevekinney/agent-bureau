@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { MemoryStorage, type TextValueStore, textValueStore } from '@lostgradient/weft/storage';
+import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
 import { createTool, createToolbox } from 'armorer';
 import { createMockTool, createTestToolbox } from 'armorer/test';
 import { afterEach, describe, expect, it, mock } from 'bun:test';
@@ -107,7 +108,7 @@ async function pollUntil(check: () => boolean | Promise<boolean>, attempts = 20)
 // out. Yielding one macrotask between tests drains the timer queue so each test
 // starts clean. (Same fix as runtime-composition.test.ts / active-run-adapter.test.ts.)
 afterEach(async () => {
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await yieldToPortableEventLoop();
 });
 
 describe('createBureau', () => {

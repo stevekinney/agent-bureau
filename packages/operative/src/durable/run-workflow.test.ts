@@ -1,5 +1,6 @@
 import { Engine } from '@lostgradient/weft';
 import { MemoryStorage, type Storage, textValueStore } from '@lostgradient/weft/storage';
+import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
 import { createTool, createToolbox } from 'armorer';
 import { afterEach, describe, expect, it } from 'bun:test';
 import { Conversation, createConversationHistory } from 'conversationalist';
@@ -82,7 +83,7 @@ afterEach(async () => {
   // durable run can be starved under full `bun test` concurrency, making a later
   // run that normally finishes in ~100ms blow past the 5s test timeout. Matches
   // the drain in active-run-adapter.test.ts and create-bureau.test.ts.
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await yieldToPortableEventLoop();
 });
 
 describe('durable agentRun workflow', () => {

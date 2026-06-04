@@ -120,14 +120,9 @@ export function createSessionStore(store: TextValueStore): SessionStore {
     },
 
     async exists(id: string): Promise<boolean> {
-      // TODO(weft-integration): TextValueStore always provides has(); the
-      // get-based fallback below is now reachable only via test doubles that
-      // omit the method.
-      if (store.has) {
-        return store.has(keyFor(id));
-      }
-      const raw = await store.get(keyFor(id));
-      return raw !== null;
+      // `has` is a required member of Weft's TextValueStore (0.2.1), so the
+      // existence check needs no get-based fallback.
+      return store.has(keyFor(id));
     },
 
     async updateMetadata(id: string, metadata: Record<string, JSONValue>): Promise<void> {

@@ -1,4 +1,4 @@
-import { MemoryStorage, type TextValueStore, textValueStore } from '@lostgradient/weft/storage';
+import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
 import { describe, expect, it } from 'bun:test';
 import { createConversationHistory } from 'conversationalist';
 
@@ -21,16 +21,6 @@ function makeSession(overrides: {
   if (overrides.updatedAt) session.updatedAt = overrides.updatedAt;
 
   return session;
-}
-
-function createStoreWithoutHas(): TextValueStore {
-  const store = textValueStore(new MemoryStorage());
-  return {
-    get: store.get.bind(store),
-    set: store.set.bind(store),
-    delete: store.delete.bind(store),
-    list: store.list.bind(store),
-  } as TextValueStore;
 }
 
 describe('createSessionStore', () => {
@@ -100,17 +90,6 @@ describe('createSessionStore', () => {
 
   it('exists returns false for missing sessions', async () => {
     const store = createSessionStore(textValueStore(new MemoryStorage()));
-    expect(await store.exists('missing')).toBe(false);
-  });
-
-  it('falls back to get() when the underlying store does not implement has()', async () => {
-    const rawStore = createStoreWithoutHas();
-    const store = createSessionStore(rawStore);
-    const session = makeSession({ id: 'fallback-has' });
-
-    await store.save(session);
-
-    expect(await store.exists('fallback-has')).toBe(true);
     expect(await store.exists('missing')).toBe(false);
   });
 

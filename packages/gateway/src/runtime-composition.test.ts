@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
+import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
 import { createToolbox } from 'armorer';
 import { afterEach, describe, expect, it } from 'bun:test';
 import { Conversation, createConversationHistory } from 'conversationalist';
@@ -19,11 +20,12 @@ import type { ProviderConfiguration } from './types';
 // later durable run's `handle.result()` never resolves and the test times out.
 // The run is correct — it completes start-to-finish in a plain `bun run`
 // process; this is purely a per-test scheduling artifact. Yielding one macrotask
-// between tests drains the timer queue so each test starts clean.
-// TODO(weft-integration): an `Engine`-level "drain pending launches on dispose"
-//   would let us drop this; tracked alongside the recovery seams.
+// between tests drains the timer queue so each test starts clean. Weft 0.2.1
+// ships this drain as the official `yieldToPortableEventLoop` testing helper
+// (the same MessageChannel-macrotask + microtask drain we hand-rolled), so the
+// drain is now a supported one-liner rather than a bespoke `setTimeout(0)`.
 afterEach(async () => {
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await yieldToPortableEventLoop();
 });
 
 function createGenerateForProvider(provider: ProviderConfiguration): GenerateFunction {

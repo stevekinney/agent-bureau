@@ -1,4 +1,5 @@
 import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
+import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
 import { createToolbox } from 'armorer';
 import { afterEach, describe, expect, it } from 'bun:test';
 import { createConversationHistory } from 'conversationalist';
@@ -35,7 +36,7 @@ function runOptions(generate: RunOptions['generate']): RunOptions {
 afterEach(async () => {
   resetRunDepsRegistry();
   // Drain Weft's deferred inline launch (see runtime-composition.test.ts).
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await yieldToPortableEventLoop();
 });
 
 describe('createRun with durable routing', () => {
