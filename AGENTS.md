@@ -1,6 +1,6 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code when working with code in the agent-bureau monorepo.
+This file provides guidance to Codex when working with code in the agent-bureau monorepo.
 
 ## Fix Problems, Do Not Report Them
 
