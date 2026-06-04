@@ -490,7 +490,7 @@ describe('createMCP', () => {
         input: z.object({ id: z.number() }),
         async execute({ id }) {
           calls += 1;
-          await new Promise((resolve) => setTimeout(resolve, 20));
+          await Promise.resolve();
           return { id };
         },
       },
@@ -660,8 +660,7 @@ describe('createMCP', () => {
         description: 'waits for abort',
         input: z.object({}),
         async execute() {
-          await new Promise((resolve) => setTimeout(resolve, 50));
-          return { ok: true };
+          return new Promise<{ ok: boolean }>(() => {});
         },
       },
       toolbox,
@@ -674,6 +673,7 @@ describe('createMCP', () => {
       const call = client.callTool({ name: 'wait', arguments: {} }, undefined, {
         signal: controller.signal,
       });
+      await Promise.resolve();
       controller.abort('stop');
       await expect(call).rejects.toBeDefined();
     } finally {

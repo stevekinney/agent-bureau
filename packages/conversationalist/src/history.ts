@@ -57,6 +57,7 @@ import { ensureConversationSafe } from './conversation/validation';
 import {
   type ConversationEnvironment,
   resolveConversationEnvironment,
+  type TimeoutHandle,
   toSessionInfo,
 } from './environment';
 import type {
@@ -222,21 +223,35 @@ export class Conversation {
 
     if (this.environment.persistence) {
       const store = this.environment.persistence;
-      let debounceTimer: ReturnType<typeof setTimeout> | undefined;
+      const setTimeoutFunction =
+        this.environment.setTimeoutFunction ??
+        ((callback, milliseconds) =>
+          setTimeout(() => {
+            void callback();
+          }, milliseconds));
+      const clearTimeoutFunction =
+        this.environment.clearTimeoutFunction ??
+        ((handle) => clearTimeout(handle as ReturnType<typeof setTimeout>));
+      const debounceMilliseconds = this.environment.persistenceDebounceMilliseconds ?? 100;
+      let debounceTimer: TimeoutHandle;
+      let hasDebounceTimer = false;
       this.addEventListener('change', () => {
-        if (debounceTimer !== undefined) clearTimeout(debounceTimer);
-        debounceTimer = setTimeout(() => {
+        if (hasDebounceTimer) clearTimeoutFunction(debounceTimer);
+        debounceTimer = setTimeoutFunction(() => {
           const conversation = this.current;
-          Promise.all([
+          return Promise.all([
             store.set(`session:${conversation.id}`, JSON.stringify(conversation)),
             store.set(
               `session-info:${conversation.id}`,
               JSON.stringify(toSessionInfo(conversation)),
             ),
-          ]).catch((error: unknown) => {
-            this.emitter.dispatchEvent(new PersistenceErrorEvent(error));
-          });
-        }, 100);
+          ])
+            .then(() => undefined)
+            .catch((error: unknown) => {
+              this.emitter.dispatchEvent(new PersistenceErrorEvent(error));
+            });
+        }, debounceMilliseconds);
+        hasDebounceTimer = true;
       });
     }
   }

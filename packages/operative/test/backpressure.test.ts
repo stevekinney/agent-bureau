@@ -154,15 +154,17 @@ describe('createTokenBucket', () => {
     expect(strategy.isActive).toBe(true);
   });
 
-  it('replenishes tokens over time', async () => {
+  it('replenishes tokens over time', () => {
+    let now = 0;
     const strategy = createTokenBucket({
       tokensPerInterval: 1,
       interval: 50,
       maximumTokens: 1,
+      now: () => now,
     });
     strategy.onSuccess();
     expect(strategy.isActive).toBe(true);
-    await new Promise((resolve) => setTimeout(resolve, 60));
+    now += 60;
     expect(strategy.beforeStep().delay).toBe(0);
     expect(strategy.isActive).toBe(false);
   });
@@ -201,14 +203,16 @@ describe('createSlidingWindow', () => {
     expect(strategy.isActive).toBe(true);
   });
 
-  it('window slides over time', async () => {
+  it('window slides over time', () => {
+    let now = 0;
     const strategy = createSlidingWindow({
       windowSize: 50,
       maximumRequests: 1,
+      now: () => now,
     });
     strategy.onSuccess();
     expect(strategy.isActive).toBe(true);
-    await new Promise((resolve) => setTimeout(resolve, 60));
+    now += 60;
     expect(strategy.beforeStep().delay).toBe(0);
     expect(strategy.isActive).toBe(false);
   });
@@ -357,16 +361,19 @@ describe('backpressure loop integration', () => {
       },
     };
 
-    // Abort shortly after starting
-    setTimeout(() => controller.abort('cancel'), 10);
-
     const result = await run({
       generate: async () => textResponse('Should not reach'),
       toolbox: createTestToolbox([]),
       conversation: new Conversation(),
       stopWhen: noToolCalls(),
       signal: controller.signal,
-      backpressure: mockStrategy,
+      backpressure: {
+        ...mockStrategy,
+        beforeStep: () => {
+          controller.abort('cancel');
+          return { delay: 10_000 };
+        },
+      },
     });
 
     expect(result.finishReason).toBe('aborted');

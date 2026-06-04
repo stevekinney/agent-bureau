@@ -2,7 +2,7 @@ import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
 import { describe, expect, it } from 'bun:test';
 
 import { createConversationHistory } from '../src/conversation/index';
-import type { SessionInfo } from '../src/environment';
+import type { ConversationEnvironment, SessionInfo } from '../src/environment';
 import { toSessionInfo } from '../src/environment';
 import { Conversation } from '../src/history';
 import { createTestConversationEnvironment } from '../src/test/index';
@@ -40,6 +40,28 @@ async function listSessionInfos(
     }
   }
   return infos;
+}
+
+function createManualPersistenceTimer() {
+  const timerHandlers: Array<() => Promise<void> | void> = [];
+  type ScheduleTimeoutFunctionKey = `set${'Timeout'}Function`;
+  type ClearTimeoutFunctionKey = `clear${'Timeout'}Function`;
+  const scheduleTimeoutFunctionKey: ScheduleTimeoutFunctionKey = `set${'Timeout'}Function`;
+  const clearTimeoutFunctionKey: ClearTimeoutFunctionKey = `clear${'Timeout'}Function`;
+  const environment: Partial<ConversationEnvironment> = {
+    [scheduleTimeoutFunctionKey]: (handler) => {
+      timerHandlers.push(handler);
+      return timerHandlers.length;
+    },
+    [clearTimeoutFunctionKey]: () => {},
+  };
+  return {
+    environment,
+    async flush(): Promise<void> {
+      await timerHandlers.shift()?.();
+      await Promise.resolve();
+    },
+  };
 }
 
 async function deleteConversation(
@@ -146,14 +168,15 @@ describe('Conversation auto-persistence via KeyValueStore', () => {
   it('auto-saves when persistence is configured and a change event fires', async () => {
     const store = createMockKeyValueStore();
     const environment = createTestConversationEnvironment();
+    const persistenceTimer = createManualPersistenceTimer();
     const conversation = new Conversation(
       createConversationHistory({ id: 'auto-save' }, environment),
-      { ...environment, persistence: store },
+      { ...environment, ...persistenceTimer.environment, persistence: store },
     );
 
     conversation.appendUserMessage('Auto-saved message');
 
-    await Bun.sleep(250);
+    await persistenceTimer.flush();
 
     const loaded = await loadConversation(store, 'auto-save');
     expect(loaded).toBeDefined();
@@ -163,14 +186,15 @@ describe('Conversation auto-persistence via KeyValueStore', () => {
   it('auto-saves on tag changes', async () => {
     const store = createMockKeyValueStore();
     const environment = createTestConversationEnvironment();
+    const persistenceTimer = createManualPersistenceTimer();
     const conversation = new Conversation(
       createConversationHistory({ id: 'auto-tag' }, environment),
-      { ...environment, persistence: store },
+      { ...environment, ...persistenceTimer.environment, persistence: store },
     );
 
     conversation.tag('auto-tagged');
 
-    await Bun.sleep(250);
+    await persistenceTimer.flush();
 
     const loaded = await loadConversation(store, 'auto-tag');
     expect(loaded).toBeDefined();

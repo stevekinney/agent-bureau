@@ -89,8 +89,12 @@ describe('createRun', () => {
   });
 
   it('abort() terminates the loop with aborted finish reason', async () => {
+    const generateStarted = Promise.withResolvers<void>();
+    const generateCanFinish = Promise.withResolvers<void>();
+
     async function slowGenerate() {
-      await Bun.sleep(100);
+      generateStarted.resolve();
+      await generateCanFinish.promise;
       return { content: 'done', toolCalls: [] } satisfies GenerateResponse;
     }
 
@@ -105,8 +109,9 @@ describe('createRun', () => {
       maximumSteps: 10,
     });
 
-    // Abort shortly after starting
-    setTimeout(() => activeRun.abort('test abort'), 10);
+    await generateStarted.promise;
+    activeRun.abort('test abort');
+    generateCanFinish.resolve();
 
     const result = await activeRun.result;
 
@@ -114,8 +119,12 @@ describe('createRun', () => {
   });
 
   it('Symbol.dispose aborts the run', async () => {
+    const generateStarted = Promise.withResolvers<void>();
+    const generateCanFinish = Promise.withResolvers<void>();
+
     async function slowGenerate() {
-      await Bun.sleep(100);
+      generateStarted.resolve();
+      await generateCanFinish.promise;
       return { content: 'done', toolCalls: [] } satisfies GenerateResponse;
     }
 
@@ -130,8 +139,9 @@ describe('createRun', () => {
       maximumSteps: 10,
     });
 
-    // Dispose shortly after starting
-    setTimeout(() => activeRun[Symbol.dispose](), 10);
+    await generateStarted.promise;
+    activeRun[Symbol.dispose]();
+    generateCanFinish.resolve();
 
     const result = await activeRun.result;
 

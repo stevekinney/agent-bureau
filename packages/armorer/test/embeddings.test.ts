@@ -19,6 +19,12 @@ const makeTool = (name: string, overrides: Partial<Parameters<typeof createTool>
     ...overrides,
   });
 
+async function drainMicrotasks(): Promise<void> {
+  for (let index = 0; index < 5; index++) {
+    await Promise.resolve();
+  }
+}
+
 describe('registry embedding helpers', () => {
   it('registers and retrieves embedders', () => {
     const registry = {};
@@ -47,7 +53,7 @@ describe('registry embedding helpers', () => {
     warmToolEmbeddings(tool, embed);
     expect(getToolEmbeddings(tool)).toBeUndefined();
 
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await drainMicrotasks();
     expect(getToolEmbeddings(tool)?.length).toBe(2);
   });
 
@@ -58,7 +64,7 @@ describe('registry embedding helpers', () => {
     const tool = makeTool('beta');
 
     warmToolEmbeddings(tool, embed);
-    await Promise.resolve();
+    await drainMicrotasks();
 
     expect(getToolEmbeddings(tool)).toBeUndefined();
   });
@@ -105,7 +111,7 @@ describe('registry embedding helpers', () => {
     expect(getQueryEmbedding(embed, 'async')).toBeUndefined();
 
     resolve?.([[1, 2]]);
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await drainMicrotasks();
 
     expect(getQueryEmbedding(embed, 'async')).toEqual([1, 2]);
   });
@@ -123,7 +129,7 @@ describe('registry embedding helpers', () => {
     };
 
     expect(getQueryEmbedding(embed, 'reject')).toBeUndefined();
-    await Promise.resolve();
+    await drainMicrotasks();
     expect(getQueryEmbedding(embed, 'reject')).toBeUndefined();
     expect(calls).toBeGreaterThanOrEqual(1);
   });
@@ -132,7 +138,7 @@ describe('registry embedding helpers', () => {
     const embed = async () => [[]];
 
     expect(getQueryEmbedding(embed, 'invalid')).toBeUndefined();
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await drainMicrotasks();
     expect(getQueryEmbedding(embed, 'invalid')).toBeUndefined();
   });
 });

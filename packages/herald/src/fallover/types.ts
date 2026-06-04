@@ -30,6 +30,10 @@ export type FalloverOptions = {
   retryDelay?: number;
   /** Duration in ms a provider stays on cooldown after auth/billing failures. Defaults to 300_000 (5 min). */
   cooldownDuration?: number;
+  /** Injectable clock for tests. Defaults to Date.now. */
+  now?: () => number;
+  /** Injectable retry sleep for tests. Defaults to a setTimeout-backed sleep. */
+  sleep?: (milliseconds: number, signal?: AbortSignal) => Promise<void>;
   /** Called when the system falls over from one provider to the next. */
   onFallover?: (event: FalloverEvent) => void;
   /** Called when a previously failed provider succeeds again. */

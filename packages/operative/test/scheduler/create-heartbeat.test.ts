@@ -4,33 +4,113 @@ import { Conversation } from 'conversationalist';
 
 import { createHeartbeat } from '../../src/scheduler/create-heartbeat';
 import type { Scheduler } from '../../src/scheduler/create-scheduler';
-import { createScheduler } from '../../src/scheduler/create-scheduler';
-import { sleep } from '../../src/scheduler/sleep';
 import { createMockGenerate } from '../../src/test/index';
-import type { GenerateResponse } from '../../src/types';
+import type { GenerateResponse, RunResult, StepResult } from '../../src/types';
 
 function textResponse(content: string): GenerateResponse {
   return { content, toolCalls: [] };
 }
 
 function createTestScheduler() {
-  return createScheduler({
-    generate: createMockGenerate([textResponse('default')]),
-    toolbox: createTestToolbox([]),
-    idleDelay: 1,
-  });
+  return {
+    submit: async (task) => {
+      const runOptions = await task.createRun();
+      const conversation = runOptions.conversation;
+      const toolbox = runOptions.toolbox ?? createTestToolbox([]);
+      const generate = runOptions.generate;
+
+      if (!generate) {
+        throw new Error('Heartbeat test runs must provide a generate function.');
+      }
+
+      try {
+        const response = await generate({
+          conversation,
+          step: 0,
+          signal: runOptions.signal,
+          toolbox,
+          toolChoice: runOptions.toolChoice,
+          responseFormat: runOptions.responseFormat,
+        });
+        const stepResult: StepResult = {
+          step: 0,
+          conversation,
+          content: response.content,
+          toolCalls: [],
+          results: [],
+          usage: response.usage,
+          metadata: response.metadata,
+          final: true,
+        };
+        return {
+          conversation,
+          steps: [stepResult],
+          content: response.content,
+          usage: response.usage ?? { prompt: 0, completion: 0, total: 0 },
+          finishReason: 'stop-condition',
+        } satisfies RunResult;
+      } catch (error) {
+        return {
+          conversation,
+          steps: [],
+          content: '',
+          usage: { prompt: 0, completion: 0, total: 0 },
+          finishReason: 'error',
+          error,
+        } satisfies RunResult;
+      }
+    },
+  } as Scheduler;
+}
+
+async function flushAsyncWork(): Promise<void> {
+  for (let iteration = 0; iteration < 5; iteration++) {
+    await Promise.resolve();
+  }
+}
+
+function createManualSleep() {
+  const resolvers: Array<() => void> = [];
+  const requestedIntervals: number[] = [];
+
+  return {
+    requestedIntervals,
+    sleepFunction: (milliseconds: number) =>
+      new Promise<void>((resolve) => {
+        requestedIntervals.push(milliseconds);
+        resolvers.push(resolve);
+      }),
+    get pendingCount() {
+      return resolvers.length;
+    },
+    async advanceOne(): Promise<void> {
+      const resolver = resolvers.shift();
+      if (!resolver) {
+        throw new Error('No pending heartbeat sleep to advance.');
+      }
+      resolver();
+      await flushAsyncWork();
+    },
+    async advanceAll(): Promise<void> {
+      while (resolvers.length > 0) {
+        resolvers.shift()!();
+      }
+      await flushAsyncWork();
+    },
+  };
 }
 
 describe('createHeartbeat', () => {
   it('fires ticks at the configured interval', async () => {
     const scheduler = createTestScheduler();
-    scheduler.start();
+    const manualSleep = createManualSleep();
 
     let tickCount = 0;
 
     const heartbeat = createHeartbeat({
       scheduler,
       interval: 10,
+      sleepFunction: manualSleep.sleepFunction,
       createHeartbeatRun: () => ({
         generate: createMockGenerate([textResponse('tick')]),
         toolbox: createTestToolbox([]),
@@ -43,25 +123,26 @@ describe('createHeartbeat', () => {
     });
 
     heartbeat.start();
-    await sleep(45);
+    await flushAsyncWork();
+    await manualSleep.advanceOne();
+    await manualSleep.advanceOne();
     heartbeat.stop();
 
-    expect(tickCount).toBeGreaterThanOrEqual(2);
+    expect(tickCount).toBe(2);
     expect(heartbeat.tickCount).toBe(tickCount);
-
-    await scheduler.stop();
   });
 
   it('runImmediately triggers a tick before the first sleep', async () => {
     const scheduler = createTestScheduler();
-    scheduler.start();
+    const manualSleep = createManualSleep();
 
-    let firstTickAt = 0;
+    let tickCount = 0;
 
     const heartbeat = createHeartbeat({
       scheduler,
-      interval: 1000, // Long interval — only the immediate tick should fire
+      interval: 1000,
       runImmediately: true,
+      sleepFunction: manualSleep.sleepFunction,
       createHeartbeatRun: () => ({
         generate: createMockGenerate([textResponse('immediate-tick')]),
         toolbox: createTestToolbox([]),
@@ -69,25 +150,22 @@ describe('createHeartbeat', () => {
         maximumSteps: 1,
       }),
       onTick: () => {
-        if (firstTickAt === 0) firstTickAt = performance.now();
+        tickCount++;
       },
     });
 
-    const startTime = performance.now();
     heartbeat.start();
-    await sleep(30);
+    await flushAsyncWork();
     heartbeat.stop();
 
-    expect(heartbeat.tickCount).toBeGreaterThanOrEqual(1);
-    // The first tick should have fired almost immediately
-    expect(firstTickAt - startTime).toBeLessThan(100);
-
-    await scheduler.stop();
+    expect(tickCount).toBe(1);
+    expect(heartbeat.tickCount).toBe(1);
+    expect(manualSleep.requestedIntervals).toEqual([1000]);
   });
 
   it('maxConsecutiveFailures stops the heartbeat', async () => {
     const scheduler = createTestScheduler();
-    scheduler.start();
+    const manualSleep = createManualSleep();
 
     let failureError: unknown;
 
@@ -95,6 +173,7 @@ describe('createHeartbeat', () => {
       scheduler,
       interval: 5,
       maxConsecutiveFailures: 2,
+      sleepFunction: manualSleep.sleepFunction,
       createHeartbeatRun: () => ({
         generate: async () => {
           throw new Error('tick-error');
@@ -108,28 +187,19 @@ describe('createHeartbeat', () => {
       },
     });
 
-    // Drive ticks manually so the assertion does not depend on wall-clock
-    // throughput. The loop-based variant flaked (even without CPU starvation)
-    // because a fixed sleep budget could not guarantee both failing ticks fired
-    // before the assertion ran.
-    // First failing tick → consecutiveFailures = 1, budget not yet exhausted.
-    await heartbeat.tick();
-    expect(heartbeat.consecutiveFailures).toBe(1);
-    expect(failureError).toBeUndefined();
+    heartbeat.start();
+    await flushAsyncWork();
+    await manualSleep.advanceOne();
+    await manualSleep.advanceOne();
 
-    // Second failing tick → budget exhausted → stop() + onFailure fire.
-    // onFailure fires only inside the same branch that calls stop(), so a
-    // defined failureError proves the stop path ran.
-    await heartbeat.tick();
+    expect(heartbeat.isRunning).toBe(false);
     expect(heartbeat.consecutiveFailures).toBe(2);
     expect(failureError).toBeDefined();
-
-    await scheduler.stop();
   });
 
   it('a successful tick resets consecutiveFailures', async () => {
     const scheduler = createTestScheduler();
-    scheduler.start();
+    const manualSleep = createManualSleep();
 
     let callCount = 0;
 
@@ -137,6 +207,7 @@ describe('createHeartbeat', () => {
       scheduler,
       interval: 5,
       maxConsecutiveFailures: 3,
+      sleepFunction: manualSleep.sleepFunction,
       createHeartbeatRun: () => {
         callCount++;
         if (callCount === 1) {
@@ -160,29 +231,27 @@ describe('createHeartbeat', () => {
       },
     });
 
-    // Drive ticks manually so the assertion does not depend on wall-clock
-    // throughput (the loop-based variant flaked under CPU starvation when the
-    // second, succeeding tick could not complete inside a fixed sleep budget).
-    // First tick fails → consecutiveFailures = 1
-    await heartbeat.tick();
+    heartbeat.start();
+    await flushAsyncWork();
+    await manualSleep.advanceOne();
     expect(heartbeat.consecutiveFailures).toBe(1);
+    await manualSleep.advanceOne();
+    heartbeat.stop();
 
-    // Second tick succeeds → counter resets to 0
-    await heartbeat.tick();
     expect(heartbeat.consecutiveFailures).toBe(0);
-
-    await scheduler.stop();
+    expect(heartbeat.isRunning).toBe(false);
   });
 
   it('stop() prevents further ticks', async () => {
     const scheduler = createTestScheduler();
-    scheduler.start();
+    const manualSleep = createManualSleep();
 
     let tickCount = 0;
 
     const heartbeat = createHeartbeat({
       scheduler,
       interval: 5,
+      sleepFunction: manualSleep.sleepFunction,
       createHeartbeatRun: () => ({
         generate: createMockGenerate([textResponse('tick')]),
         toolbox: createTestToolbox([]),
@@ -195,26 +264,24 @@ describe('createHeartbeat', () => {
     });
 
     heartbeat.start();
-    await sleep(15);
+    await flushAsyncWork();
+    await manualSleep.advanceOne();
     heartbeat.stop();
+    await flushAsyncWork();
 
     const countAtStop = tickCount;
-    await sleep(30);
+    await manualSleep.advanceAll();
 
-    // No more ticks should have fired after stop
     expect(tickCount).toBe(countAtStop);
     expect(heartbeat.isRunning).toBe(false);
-
-    await scheduler.stop();
   });
 
   it('tick() manually triggers a heartbeat', async () => {
     const scheduler = createTestScheduler();
-    scheduler.start();
 
     const heartbeat = createHeartbeat({
       scheduler,
-      interval: 60_000, // Long interval — won't fire naturally
+      interval: 60_000,
       createHeartbeatRun: () => ({
         generate: createMockGenerate([textResponse('manual-tick')]),
         toolbox: createTestToolbox([]),
@@ -223,44 +290,46 @@ describe('createHeartbeat', () => {
       }),
     });
 
-    // Don't start the loop — just call tick() manually
     const result = await heartbeat.tick();
 
     expect(result).not.toBeNull();
     expect(result!.content).toBe('manual-tick');
     expect(heartbeat.tickCount).toBe(1);
-
-    await scheduler.stop();
   });
 
   it('responds to abort signal', async () => {
     const scheduler = createTestScheduler();
-    scheduler.start();
+    const manualSleep = createManualSleep();
 
     const controller = new AbortController();
+    let tickCount = 0;
 
     const heartbeat = createHeartbeat({
       scheduler,
       interval: 5,
       signal: controller.signal,
+      sleepFunction: manualSleep.sleepFunction,
       createHeartbeatRun: () => ({
         generate: createMockGenerate([textResponse('tick')]),
         toolbox: createTestToolbox([]),
         conversation: new Conversation(),
         maximumSteps: 1,
       }),
+      onTick: () => {
+        tickCount++;
+      },
     });
 
     heartbeat.start();
-    await sleep(15);
+    await flushAsyncWork();
+    await manualSleep.advanceOne();
     controller.abort();
-    await sleep(20);
+    await manualSleep.advanceOne();
 
-    expect(heartbeat.isRunning).toBe(true); // isRunning reflects the flag, not the loop
-    // But no more ticks should fire because the signal is aborted
+    expect(heartbeat.isRunning).toBe(true);
+    expect(tickCount).toBe(1);
 
     heartbeat.stop();
-    await scheduler.stop();
   });
 
   it('treats a preempted heartbeat tick as a non-failure and forwards null to onTick', async () => {

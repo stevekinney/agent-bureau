@@ -27,12 +27,14 @@ export function createFalloverGenerate(options: FalloverOptions): GenerateFuncti
     retriesPerProvider = 1,
     retryDelay = 1000,
     cooldownDuration = 300_000,
+    now,
+    sleep: sleepFunction = sleep,
     onFallover,
     onRecovery,
     classifyError = classifyProviderError,
   } = options;
 
-  const tracker = createProviderHealthTracker(providers, { cooldownDuration });
+  const tracker = createProviderHealthTracker(providers, { cooldownDuration, now });
 
   // Track which providers have previously been on cooldown so we can detect recovery
   const previouslyFailed = new Set<string>();
@@ -102,7 +104,7 @@ export function createFalloverGenerate(options: FalloverOptions): GenerateFuncti
           // Exponential backoff between retries
           const delay = retryDelay * Math.pow(2, attempt - 1);
           if (delay > 0) {
-            await sleep(delay, context.signal);
+            await sleepFunction(delay, context.signal);
           }
         }
       }

@@ -24,7 +24,7 @@
     "test": {
       "dependsOn": ["^build"],
       "outputs": [],
-      "passThroughEnv": ["CI", "NODE_ENV"]
+      "passThroughEnv": ["CI", "NODE_BINARY", "NODE_ENV", "PATH"]
     },
     "coverage:check": {
       "dependsOn": ["^build"],

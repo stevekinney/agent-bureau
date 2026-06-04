@@ -104,11 +104,21 @@ describe('retry coverage edges', () => {
     const failing = makeRawTool(async () => {
       throw new Error('boom');
     });
-    const wrapped = retry(failing, { attempts: 3, delayMs: 50 });
     const controller = new AbortController();
-    const pending = (wrapped as any).execute({ value: 1 }, { signal: controller.signal });
+    const wrapped = retry(failing, {
+      attempts: 3,
+      delayMs: 50,
+      async sleep(milliseconds, signal) {
+        expect(milliseconds).toBe(50);
+        controller.abort('delay-stop');
+        if (signal?.aborted) {
+          throw new Error(String(signal.reason));
+        }
+      },
+    });
 
-    setTimeout(() => controller.abort('delay-stop'), 5);
-    await expect(pending).rejects.toThrow('delay-stop');
+    await expect(
+      (wrapped as any).execute({ value: 1 }, { signal: controller.signal }),
+    ).rejects.toThrow('delay-stop');
   });
 });

@@ -2450,9 +2450,9 @@ describe('createToolbox', () => {
       const toolbox = createToolbox([], { embed });
       toolbox.register(makeConfiguration({ name: 'retry-embed' }));
 
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      await Promise.resolve();
       toolbox.register(makeConfiguration({ name: 'retry-embed' }));
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      await Promise.resolve();
 
       expect(calls).toBeGreaterThanOrEqual(2);
     });
@@ -2471,7 +2471,7 @@ describe('createToolbox', () => {
       toolbox.register(makeConfiguration({ name: 'swap', description: 'second' }));
 
       resolveEmbeddings?.(lastTexts.map(() => [1, 0]));
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      await Promise.resolve();
 
       expect(toolbox.getTool('swap')?.description).toBe('second');
     });

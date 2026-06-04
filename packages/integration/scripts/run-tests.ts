@@ -1,7 +1,9 @@
+const packageDirectory = import.meta.dir.replace(/\/scripts$/, '');
+
 async function run(command: string[], environment: NodeJS.ProcessEnv = process.env) {
   const childProcess = Bun.spawn({
     cmd: command,
-    cwd: import.meta.dir.replace(/\/scripts$/, ''),
+    cwd: packageDirectory,
     env: environment,
     stdin: 'inherit',
     stdout: 'inherit',
@@ -14,48 +16,54 @@ async function run(command: string[], environment: NodeJS.ProcessEnv = process.e
   }
 }
 
-// Resolve a REAL Node.js binary for the cross-runtime test. The previous
-// implementation spawned `/bin/zsh -lc 'command -v node'`, which fails with
-// ENOENT on CI runners (ubuntu-latest has /bin/sh and /bin/bash, but no
-// /bin/zsh). `Bun.which('node')` searches PATH with no shell — but on a
-// Bun-only PATH it can resolve to a `node` that is actually Bun, and Bun cannot
-// run `runtime.test.mjs` (it uses `node:test`, which errors with "Cannot use
-// describe outside of the test runner" under Bun). So VERIFY the resolved binary
-// is genuinely Node (its `--version` prints `vX.Y.Z`; Bun prints `1.3.13` with
-// no `v`). If it isn't real Node, fail LOUDLY with the resolved path + version
-// rather than letting the downstream `node:test` error obscure the cause.
-/** Is `candidate` a REAL Node.js binary (its `--version` prints `vX.Y.Z`)? */
-function isRealNode(candidate: string): boolean {
-  const probe = Bun.spawnSync({ cmd: [candidate, '--version'], stdout: 'pipe', stderr: 'pipe' });
-  const version = new TextDecoder().decode(probe.stdout).trim();
-  return /^v\d+\.\d+\.\d+/.test(version);
-}
-
-function resolveNodeBinary(): string {
-  // When a script runs under `bun run`, Bun injects its OWN node-compatible shim
-  // (e.g. /tmp/bun-node-XXXX/node) at the FRONT of PATH. That shim is not real
-  // Node — its `--version` is empty and it cannot run `node:test` — so a plain
-  // `Bun.which('node')` resolves to it and shadows the real Node that CI's
-  // actions/setup-node installed. Strip Bun's injected shim dir from PATH and
-  // resolve against the remainder so we find the genuine Node binary.
-  const cleanedPath = (process.env['PATH'] ?? '')
+function resolveNodeBinary(): string | null {
+  const homeDirectory = process.env['HOME'];
+  const pathCandidates = (process.env['PATH'] ?? '')
     .split(':')
-    .filter((entry) => !entry.includes('bun-node') && !entry.endsWith('/.bun/bin'))
-    .join(':');
+    .filter(Boolean)
+    .map((directory) => `${directory}/node`);
 
-  const candidate = Bun.which('node', { PATH: cleanedPath });
-  if (!candidate || !isRealNode(candidate)) {
-    throw new Error(
-      `Unable to locate a real Node.js binary for the runtime cross-runtime test ` +
-        `(resolved "${candidate ?? 'nothing'}" on the Bun-stripped PATH). CI must ` +
-        'install Node (actions/setup-node) — Bun cannot run node:test files.',
-    );
+  const candidates = new Set(
+    [
+      process.env['NODE_BINARY'],
+      process.env['NODE'],
+      typeof Bun.which === 'function' ? Bun.which('node') : undefined,
+      'node',
+      ...pathCandidates,
+      homeDirectory ? `${homeDirectory}/.asdf/shims/node` : undefined,
+      homeDirectory ? `${homeDirectory}/.volta/bin/node` : undefined,
+      '/opt/homebrew/bin/node',
+      '/usr/local/bin/node',
+      '/usr/bin/node',
+    ].filter((candidate): candidate is string => Boolean(candidate)),
+  );
+
+  for (const candidate of candidates) {
+    let result: Bun.SyncSubprocess<Buffer, Buffer>;
+    try {
+      result = Bun.spawnSync({
+        cmd: [candidate, '--version'],
+        cwd: packageDirectory,
+        env: process.env,
+        stdout: 'pipe',
+        stderr: 'pipe',
+      });
+    } catch {
+      continue;
+    }
+
+    if (result.exitCode === 0) {
+      return candidate;
+    }
   }
 
-  return candidate;
+  return null;
 }
 
 const nodeBinary = resolveNodeBinary();
+if (!nodeBinary) {
+  throw new Error('Unable to locate the Node.js binary for runtime integration tests.');
+}
 
 await run(['bun', 'test', 'test/import-boundary.test.ts']);
 await run(['bun', 'test', 'test/operative.test.ts']);

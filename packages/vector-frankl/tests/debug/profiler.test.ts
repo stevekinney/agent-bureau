@@ -2,9 +2,16 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 
 import { debugManager } from '../../src/debug/debug-manager.ts';
 import { profiler } from '../../src/debug/profiler.ts';
+import { DeterministicClock } from '../../src/test/helpers/deterministic-clock.ts';
 
 describe('Profiler', () => {
+  let clock: DeterministicClock;
+
   beforeEach(() => {
+    clock = new DeterministicClock();
+    profiler.setTimeSource(clock);
+    debugManager.setTimeSource(clock);
+
     // Reset profiler state
     profiler.clear();
 
@@ -21,7 +28,7 @@ describe('Profiler', () => {
       exportFormat: 'json',
       sampling: { rate: 1, threshold: 0 },
       maxEntries: 10000,
-      consoleOutput: true,
+      consoleOutput: false,
     });
 
     debugManager.enable({ profile: true });
@@ -29,8 +36,10 @@ describe('Profiler', () => {
 
   afterEach(() => {
     profiler.clear();
+    profiler.setTimeSource();
     debugManager.disable();
     debugManager.clearEntries();
+    debugManager.setTimeSource();
   });
 
   describe('Basic Profiling', () => {
@@ -42,6 +51,7 @@ describe('Profiler', () => {
       expect(activeProfiles).toHaveLength(1);
       expect(activeProfiles[0]!.operation).toBe('test-operation');
 
+      clock.advanceBy(1);
       const entry = profiler.endProfile(profileId);
       expect(entry).toBeTruthy();
       expect(entry!.duration).toBeGreaterThan(0);
@@ -59,8 +69,7 @@ describe('Profiler', () => {
       const profileId = profiler.startProfile('test-operation');
 
       profiler.mark(profileId, 'checkpoint-1');
-      // Add small delay
-      await new Promise((resolve) => setTimeout(resolve, 1));
+      clock.advanceBy(1);
       profiler.mark(profileId, 'checkpoint-2');
 
       const entry = profiler.endProfile(profileId);
@@ -109,7 +118,7 @@ describe('Profiler', () => {
 
     it('should profile asynchronous functions', async () => {
       const result = await profiler.profile('async-operation', async () => {
-        await new Promise((resolve) => setTimeout(resolve, 20));
+        clock.advanceBy(20);
         return 'async-result';
       });
 
@@ -140,12 +149,12 @@ describe('Profiler', () => {
     it('should support nested profiling', async () => {
       const result = await profiler.profileNested('parent-operation', async (nested) => {
         await nested.profile('child-1', async () => {
-          await new Promise((resolve) => setTimeout(resolve, 5));
+          clock.advanceBy(5);
           return 'child-1-result';
         });
 
         await nested.profile('child-2', async () => {
-          await new Promise((resolve) => setTimeout(resolve, 5));
+          clock.advanceBy(5);
           return 'child-2-result';
         });
 
@@ -168,7 +177,7 @@ describe('Profiler', () => {
       // Generate some test data
       for (let i = 0; i < 5; i++) {
         await profiler.profile(`operation-${i % 2}`, async () => {
-          await new Promise((resolve) => setTimeout(resolve, 10 + i * 2));
+          clock.advanceBy(10 + i * 2);
         });
       }
     });
@@ -199,35 +208,18 @@ describe('Profiler', () => {
   });
 
   describe('Profile Filtering', () => {
-    // These tests exercise the duration-FILTER logic, not timing accuracy.
-    // Driving them with real `setTimeout` made the measured durations
-    // wall-clock-dependent: under CPU starvation a "fast" 5ms operation could
-    // measure >20ms and cross the `maxDuration: 20` boundary, flaking the test.
-    // Pin `performance.now()` to a controlled clock so each profiled operation
-    // gets an EXACT, well-separated duration (10ms / 30ms / 18ms) with zero
-    // dependence on real elapsed time.
-    const realPerformanceNow = performance.now.bind(performance);
-    let fakeNow = 0;
-
     beforeEach(async () => {
-      fakeNow = 0;
-      performance.now = () => fakeNow;
+      await profiler.profile('fast-operation', async () => {
+        clock.advanceBy(5);
+      });
 
-      // Each profile advances the fake clock by a fixed amount between the
-      // startProfile() and endProfile() reads, yielding a deterministic duration.
-      const profileWithDuration = async (operation: string, durationMs: number) => {
-        await profiler.profile(operation, async () => {
-          fakeNow += durationMs;
-        });
-      };
+      await profiler.profile('slow-operation', async () => {
+        clock.advanceBy(25);
+      });
 
-      await profileWithDuration('fast-operation', 10); // < 20
-      await profileWithDuration('slow-operation', 30); // > 20
-      await profileWithDuration('medium-operation', 18); // < 20
-    });
-
-    afterEach(() => {
-      performance.now = realPerformanceNow;
+      await profiler.profile('medium-operation', async () => {
+        clock.advanceBy(15);
+      });
     });
 
     it('should filter by operation name', () => {
@@ -238,7 +230,6 @@ describe('Profiler', () => {
 
     it('should filter by minimum duration', () => {
       const profiles = profiler.getCompletedProfiles({ minDuration: 20 });
-      // Only slow-operation (30ms) clears the 20ms floor.
       expect(profiles.length).toBeGreaterThan(0);
       profiles.forEach((p) => {
         expect(p.duration!).toBeGreaterThanOrEqual(20);
@@ -247,7 +238,6 @@ describe('Profiler', () => {
 
     it('should filter by maximum duration', () => {
       const profiles = profiler.getCompletedProfiles({ maxDuration: 20 });
-      // fast-operation (10ms) and medium-operation (18ms) sit under the 20ms ceiling.
       expect(profiles.length).toBeGreaterThan(0);
       profiles.forEach((p) => {
         expect(p.duration!).toBeLessThanOrEqual(20);

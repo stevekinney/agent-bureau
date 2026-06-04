@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { MemoryStorage, type TextValueStore, textValueStore } from '@lostgradient/weft/storage';
 import { createTool, createToolbox } from 'armorer';
 import { createMockTool, createTestToolbox } from 'armorer/test';
-import { afterEach, describe, expect, it } from 'bun:test';
+import { afterEach, describe, expect, it, mock } from 'bun:test';
 import { Conversation, getMessages } from 'conversationalist';
 import type { GenerateFunction, GenerateResponse, Toolbox } from 'operative';
 import { stopWhen } from 'operative';
@@ -17,7 +17,13 @@ import { createStore } from 'sentinel';
 import { z } from 'zod';
 
 import { BureauError, createBureau } from './create-bureau';
-import { type ConfigurationResponse, DEFAULT_MAXIMUM_STEPS, type ServerFrame } from './types';
+import { drainMicrotasks, waitForCondition, waitForRunState } from './test';
+import {
+  type Bureau,
+  type ConfigurationResponse,
+  DEFAULT_MAXIMUM_STEPS,
+  type ServerFrame,
+} from './types';
 
 let recoveryDatabaseCounter = 0;
 
@@ -70,8 +76,9 @@ function createBlockingGenerate(): {
   return { generate, resolve: resolveResponse! };
 }
 
-async function waitForRunCompletion() {
-  await new Promise((resolve) => setTimeout(resolve, 50));
+async function waitForRunCompletion(bureau: Bureau, runId: string) {
+  await waitForRunState(bureau, runId);
+  await drainMicrotasks(10);
 }
 
 /**
@@ -181,13 +188,13 @@ describe('createBureau', () => {
     });
 
     const firstRun = await bureau.createRun({ message: 'First message' });
-    await waitForRunCompletion();
+    await waitForRunCompletion(bureau, firstRun.id);
 
     const secondRun = await bureau.createRun({
       message: 'Second message',
       sessionId: firstRun.sessionId,
     });
-    await waitForRunCompletion();
+    await waitForRunCompletion(bureau, secondRun.id);
 
     expect(secondRun.sessionId).toBe(firstRun.sessionId);
 
@@ -204,11 +211,11 @@ describe('createBureau', () => {
     });
     const sessionId = 'session-aligned';
 
-    await bureau.createRun({
+    const run = await bureau.createRun({
       message: 'First message',
       sessionId,
     });
-    await waitForRunCompletion();
+    await waitForRunCompletion(bureau, run.id);
 
     const session = await bureau.getSession(sessionId);
     expect(session?.id).toBe(sessionId);
@@ -223,7 +230,7 @@ describe('createBureau', () => {
     });
 
     const run = await bureau.createRun({ message: 'Fast completion' });
-    await waitForRunCompletion();
+    await waitForRunCompletion(bureau, run.id);
 
     const session = await bureau.getSession(run.sessionId);
     expect(session?.metadata['lastRunId']).toBe(run.id);
@@ -269,10 +276,15 @@ describe('createBureau', () => {
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
       persistence: flakyStore,
+      sessionPersistenceSleep: async () => {},
     });
 
     const run = await bureau.createRun({ message: 'Retry completion' });
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    await waitForRunCompletion(bureau, run.id);
+    await waitForCondition(async () => {
+      const session = await bureau.getSession(run.sessionId);
+      return session?.metadata['lastRunStatus'] === 'completed';
+    }, 'completed session metadata was not persisted after retry');
 
     const session = await bureau.getSession(run.sessionId);
     expect(sessionSaveCount).toBe(3);
@@ -406,8 +418,9 @@ describe('createBureau', () => {
     });
 
     const run = await bureau.createRun({ message: 'Durable hello' });
-    // Allow the deferred-microtask start + durable workflow to settle.
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    // Wait deterministically for the deferred-microtask start + durable workflow
+    // to drive the registered run to a terminal state (no fixed-wall-clock sleep).
+    await waitForRunCompletion(bureau, run.id);
 
     // The run is registered and observed to completion through the durable path.
     const detail = bureau.getRun(run.id);
@@ -454,8 +467,7 @@ describe('createBureau', () => {
       });
 
       const run = await bureau.createRun({ message: 'Drive the durable default' });
-      await waitForRunCompletion();
-      await waitForRunCompletion();
+      await waitForRunCompletion(bureau, run.id);
 
       // The observable surface fired on the durable path: `action` events flowed,
       // the run is registered and observed to completion, and the session landed
@@ -479,6 +491,76 @@ describe('createBureau', () => {
       await rm(`${databasePath}-wal`, { force: true });
       await rm(`${databasePath}-shm`, { force: true });
       resetRunDepsRegistry();
+    }
+  });
+
+  it('logs terminal session persistence failures when retry sleep rejects', async () => {
+    const backingStore = textValueStore(new MemoryStorage());
+    let sessionSaveCount = 0;
+    let retrySleepCount = 0;
+
+    const flakyStore: TextValueStore = {
+      async get(key) {
+        return backingStore.get(key);
+      },
+      async set(key, value) {
+        if (key.startsWith('agent-session:')) {
+          sessionSaveCount += 1;
+          if (sessionSaveCount === 2) {
+            throw new Error('temporary persistence failure');
+          }
+        }
+
+        await backingStore.set(key, value);
+      },
+      async delete(key) {
+        await backingStore.delete(key);
+      },
+      async list(prefix) {
+        return backingStore.list(prefix);
+      },
+      has(key) {
+        return backingStore.has(key);
+      },
+      deletePrefix(prefix) {
+        return backingStore.deletePrefix(prefix);
+      },
+      close() {
+        return backingStore.close();
+      },
+    };
+
+    const warnSpy = mock(() => {});
+    const originalWarn = console.warn;
+    console.warn = warnSpy;
+
+    try {
+      const bureau = await createBureau({
+        generate: createMockGenerate(),
+        toolbox: createEmptyToolbox(),
+        persistence: flakyStore,
+        sessionPersistenceSleep: async () => {
+          retrySleepCount += 1;
+          throw new Error('retry sleep aborted');
+        },
+      });
+
+      const run = await bureau.createRun({ message: 'Retry sleep failure' });
+      await waitForRunCompletion(bureau, run.id);
+      await waitForCondition(
+        () => warnSpy.mock.calls.length === 1,
+        'session persistence warning was not logged after retry sleep failed',
+      );
+
+      expect(sessionSaveCount).toBe(2);
+      expect(retrySleepCount).toBe(1);
+
+      const callArgs = warnSpy.mock.calls[0] as unknown[];
+      const warningMessage = String(callArgs[0]);
+      expect(warningMessage).toContain('Failed to persist completed session state');
+      expect(warningMessage).toContain('retry sleep aborted');
+    } finally {
+      console.warn = originalWarn;
     }
   });
 
@@ -540,7 +622,7 @@ describe('createBureau', () => {
     });
 
     const run = await bureau.createRun({ message: 'Explode' });
-    await waitForRunCompletion();
+    await waitForRunCompletion(bureau, run.id);
 
     const session = await bureau.getSession(run.sessionId);
     expect(session?.metadata['lastRunId']).toBe(run.id);
@@ -590,8 +672,8 @@ describe('createBureau', () => {
       persistence: trackingStore,
     });
 
-    await bureau.createRun({ message: 'Explode once' });
-    await waitForRunCompletion();
+    const run = await bureau.createRun({ message: 'Explode once' });
+    await waitForRunCompletion(bureau, run.id);
 
     expect(sessionSaveCount).toBe(2);
   });
@@ -605,7 +687,7 @@ describe('createBureau', () => {
     const bureau = await createBureau({ generate });
 
     const run = await bureau.createRun({ message: 'Need a tool' });
-    await waitForRunCompletion();
+    await waitForRunCompletion(bureau, run.id);
 
     const detail = bureau.getRun(run.id);
     expect(detail?.status).toBe('error');
@@ -618,8 +700,8 @@ describe('createBureau', () => {
       toolbox: createEmptyToolbox(),
     });
 
-    await bureau.createRun({ message: 'Hello' });
-    await waitForRunCompletion();
+    const run = await bureau.createRun({ message: 'Hello' });
+    await waitForRunCompletion(bureau, run.id);
 
     const allRuns = bureau.listRuns();
     const completedRuns = bureau.listRuns('completed');
@@ -635,7 +717,7 @@ describe('createBureau', () => {
     });
 
     const run = await bureau.createRun({ message: 'Hello' });
-    await waitForRunCompletion();
+    await waitForRunCompletion(bureau, run.id);
 
     const summary = bureau.listRuns().find((entry) => entry.id === run.id);
     const detail = bureau.getRun(run.id);
@@ -651,7 +733,7 @@ describe('createBureau', () => {
     });
 
     const run = await bureau.createRun({ message: 'Hello' });
-    await waitForRunCompletion();
+    await waitForRunCompletion(bureau, run.id);
 
     const detail = bureau.getRun(run.id);
 
@@ -666,7 +748,6 @@ describe('createBureau', () => {
     const bureau = await createBureau({ generate, toolbox: createEmptyToolbox() });
 
     const run = await bureau.createRun({ message: 'Hello' });
-    await new Promise((resolve) => setTimeout(resolve, 10));
 
     const aborted = bureau.abortRun(run.id);
     expect(aborted.status).toBe('aborted');
@@ -677,7 +758,7 @@ describe('createBureau', () => {
     const bureau = await createBureau({ generate, toolbox: createEmptyToolbox() });
 
     const run = await bureau.createRun({ message: 'Hello' });
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(bureau.getRun(run.id)?.status).toBe('running');
 
     expect(() => bureau.deleteRun(run.id)).toThrow(BureauError);
   });
@@ -703,7 +784,7 @@ describe('createBureau', () => {
     });
 
     const run = await bureau.createRun({ message: 'Hello' });
-    await waitForRunCompletion();
+    await waitForRunCompletion(bureau, run.id);
 
     const sessions = await bureau.listSessions();
     expect(sessions).toHaveLength(1);
@@ -804,7 +885,10 @@ describe('createBureau', () => {
       priority: 'background',
     });
 
-    await waitForRunCompletion();
+    await waitForCondition(
+      () => bureau.scheduler?.getState().completedCount === 1,
+      'scheduled task did not complete',
+    );
 
     expect(response.status).toBe('queued');
     expect(echoTool.calls).toHaveLength(1);
@@ -882,7 +966,10 @@ describe('createBureau', () => {
       }),
     });
 
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await waitForCondition(
+      () => bureau.scheduler?.getState().activeTask?.id === 'background-task',
+      'background task was not dispatched',
+    );
     schedulerFrames.length = 0;
 
     const immediateResult = bureau.scheduler!.submitImmediate(() => ({
@@ -896,7 +983,10 @@ describe('createBureau', () => {
 
     await immediateResult;
     await backgroundResult;
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await waitForCondition(
+      () => schedulerFrames.some((frame) => frame.type === 'scheduler.task.preempted'),
+      'scheduler preempted frame was not emitted',
+    );
 
     const preemptedFrames = schedulerFrames.filter(
       (frame): frame is Extract<ServerFrame, { type: 'scheduler.task.preempted' }> =>
@@ -922,8 +1012,8 @@ describe('createBureau', () => {
       actions.push(event.action.type);
     });
 
-    await bureau.createRun({ message: 'Hello' });
-    await waitForRunCompletion();
+    const run = await bureau.createRun({ message: 'Hello' });
+    await waitForRunCompletion(bureau, run.id);
 
     expect(actions.length).toBeGreaterThan(0);
   });

@@ -82,6 +82,7 @@ export function withCache(generate: GenerateFunction, options: CacheOptions): Ge
     onHit,
     onMiss,
     maxEntries = 1000,
+    now = Date.now,
   } = options;
 
   const { keyFn, label } = resolveKeyStrategy(keyStrategy);
@@ -108,14 +109,14 @@ export function withCache(generate: GenerateFunction, options: CacheOptions): Ge
         const entry = JSON.parse(cached) as CacheEntry;
 
         // TTL check: ttl of 0 means no expiry
-        const expired = entry.ttl > 0 && Date.now() - entry.createdAt > entry.ttl * 1000;
+        const expired = entry.ttl > 0 && now() - entry.createdAt > entry.ttl * 1000;
 
         if (!expired) {
           // Update hit count
           const updated: CacheEntry = { ...entry, hits: entry.hits + 1 };
           await store.set(key, JSON.stringify(updated));
 
-          onHit?.({ key, age: Date.now() - entry.createdAt });
+          onHit?.({ key, age: now() - entry.createdAt });
           return entry.response;
         }
 
@@ -130,9 +131,9 @@ export function withCache(generate: GenerateFunction, options: CacheOptions): Ge
     }
 
     // Cache miss: call the underlying generate function
-    const start = Date.now();
+    const start = now();
     const response = await generate(context);
-    const duration = Date.now() - start;
+    const duration = now() - start;
 
     // Don't cache if the signal was aborted
     if (context.signal?.aborted) {
@@ -148,7 +149,7 @@ export function withCache(generate: GenerateFunction, options: CacheOptions): Ge
     // Store the entry
     const entry: CacheEntry = {
       response,
-      createdAt: Date.now(),
+      createdAt: now(),
       ttl,
       hits: 0,
       keyStrategy: label,

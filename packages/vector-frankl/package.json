@@ -30,8 +30,10 @@
     "lint:fix": "eslint . --fix",
     "prepack": "bun run clean && bun run build",
     "prepublishOnly": "bun run clean && bun run build",
-    "test": "bun test --timeout 30000",
-    "test:coverage": "bun test --coverage --timeout 30000",
+    "test": "bun test --path-ignore-patterns '**/*.benchmark.test.ts'",
+    "test:benchmark": "bun run scripts/run-benchmark-tests.ts",
+    "test:coverage": "bun test --coverage --path-ignore-patterns '**/*.benchmark.test.ts'",
+    "bench": "bun run test:benchmark",
     "validate": "bun run format:check && bun run lint && bun run check-types && bun run test"
   },
   "dependencies": {

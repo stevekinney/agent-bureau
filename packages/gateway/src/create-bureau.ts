@@ -133,6 +133,12 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
   const runtime = await createRuntimeComposition(options);
   const runSessionIdentifiers = new WeakMap<ActiveRun, string>();
   const liveFrameListeners = new Set<(frame: ServerFrame) => void>();
+  const sessionPersistenceRetryDelayMilliseconds =
+    options.sessionPersistenceRetryDelayMilliseconds ??
+    SESSION_PERSISTENCE_RETRY_DELAY_MILLISECONDS;
+  const sessionPersistenceSleep =
+    options.sessionPersistenceSleep ??
+    ((milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
 
   function getRunSessionIdentifier(runState: { activeRun: ActiveRun }): string {
     return runSessionIdentifiers.get(runState.activeRun) ?? '';
@@ -287,9 +293,12 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
           lastError = error;
 
           if (attempt < SESSION_PERSISTENCE_MAXIMUM_ATTEMPTS) {
-            await new Promise((resolve) =>
-              setTimeout(resolve, SESSION_PERSISTENCE_RETRY_DELAY_MILLISECONDS),
-            );
+            try {
+              await sessionPersistenceSleep(sessionPersistenceRetryDelayMilliseconds);
+            } catch (sleepError) {
+              lastError = sleepError;
+              break;
+            }
           }
         }
       }

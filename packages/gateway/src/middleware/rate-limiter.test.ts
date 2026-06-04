@@ -6,7 +6,12 @@ import { errorHandler } from './error-handler';
 import { createRateLimiter } from './rate-limiter';
 import { requestIdentifier } from './request-identifier';
 
-function createApp(options?: { limit?: number; store?: TextValueStore; windowMs?: number }) {
+function createApp(options?: {
+  limit?: number;
+  now?: () => number;
+  store?: TextValueStore;
+  windowMs?: number;
+}) {
   const app = new Hono();
   app.use('*', requestIdentifier);
   app.use('*', createRateLimiter(options));
@@ -114,7 +119,7 @@ describe('rate limiter', () => {
 
   it('serializes concurrent store-backed updates for the same principal', async () => {
     const backingStore = textValueStore(new MemoryStorage());
-    const delay = () => new Promise((resolve) => setTimeout(resolve, 10));
+    const delay = () => Promise.resolve();
     const store: TextValueStore = {
       async get(key) {
         await delay();
@@ -159,7 +164,7 @@ describe('rate limiter', () => {
     const store = textValueStore(new MemoryStorage());
     const headers = { 'x-auth-principal': 'api-key:pruned-key' };
     const storageKey = 'gateway:rate-limit:api-key:pruned-key';
-    const now = Date.now();
+    const now = 1_700_000_000_000;
 
     await store.set(
       storageKey,
@@ -168,7 +173,7 @@ describe('rate limiter', () => {
       }),
     );
 
-    const app = createApp({ limit: 1, store, windowMs: 1_000 });
+    const app = createApp({ limit: 1, now: () => now, store, windowMs: 1_000 });
     const response = await app.request('/test', { headers });
 
     expect(response.status).toBe(429);

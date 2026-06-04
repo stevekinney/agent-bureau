@@ -12,6 +12,12 @@ import type { Memory } from '../src/types';
 
 const DIMENSION = 64;
 
+async function drainMicrotasks(turns = 10): Promise<void> {
+  for (let i = 0; i < turns; i++) {
+    await Promise.resolve();
+  }
+}
+
 describe('createFileSynchronizer', () => {
   let memory: Memory;
   let tempDir: string;
@@ -134,11 +140,17 @@ describe('createFileSynchronizer', () => {
   it('swallows polling errors and releases the synchronizing lock for future ticks', async () => {
     const filePath = join(tempDir, 'polling.md');
     await writeFile(filePath, 'Initial content.');
+    let poll: (() => void) | undefined;
 
     const synchronizer = createFileSynchronizer({
       memory,
       directory: tempDir,
       pollingInterval: 20,
+      setIntervalFunction: ((handler: TimerHandler) => {
+        poll = handler as () => void;
+        return 1 as unknown as ReturnType<typeof setInterval>;
+      }) as typeof setInterval,
+      clearIntervalFunction: (() => {}) as typeof clearInterval,
     });
 
     await synchronizer.start();
@@ -155,11 +167,13 @@ describe('createFileSynchronizer', () => {
     });
 
     await writeFile(filePath, 'Updated once.');
-    await Bun.sleep(50);
+    poll?.();
+    await drainMicrotasks();
 
     failing = false;
     await writeFile(filePath, 'Updated twice.');
-    await Bun.sleep(50);
+    poll?.();
+    await drainMicrotasks();
 
     synchronizer.stop();
     expect(await memory.count()).toBeGreaterThan(0);

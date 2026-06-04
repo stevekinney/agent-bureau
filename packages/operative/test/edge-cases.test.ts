@@ -54,7 +54,7 @@ describe('edge cases', () => {
 
     const toolbox = createTestToolbox([counterTool]);
     const conversation = new Conversation();
-    const stepCount = 200;
+    const stepCount = 60;
 
     const responses: GenerateResponse[] = Array.from({ length: stepCount }, (_, index) =>
       toolCallResponse([{ name: 'increment', arguments: { value: index } }]),

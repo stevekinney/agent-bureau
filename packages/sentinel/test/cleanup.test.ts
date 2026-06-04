@@ -391,13 +391,13 @@ describe('run lifecycle and cleanup', () => {
 
       // Use a slow generate so we can deregister mid-run
       let step = 0;
+      const generateCanFinish = Promise.withResolvers<void>();
       const generate = async () => {
         const current = step++;
         if (current === 0) {
           return toolCallResponse([{ name: 'get_weather', arguments: { location: 'Denver' } }]);
         }
-        // Small delay to allow deregister to take effect
-        await Bun.sleep(50);
+        await generateCanFinish.promise;
         return textResponse('final');
       };
 
@@ -420,6 +420,7 @@ describe('run lifecycle and cleanup', () => {
       });
 
       const actionsAtDeregister = store.getRun(id)!.actions.length;
+      generateCanFinish.resolve();
 
       await activeRun.result;
 
@@ -438,11 +439,7 @@ describe('run lifecycle and cleanup', () => {
       const conversation = new Conversation();
       conversation.appendUserMessage('test');
 
-      // Use a slow generate so the loop doesn't complete before dispose
-      const generate = async () => {
-        await Bun.sleep(50);
-        return textResponse('after dispose');
-      };
+      const generate = async () => textResponse('after dispose');
 
       const activeRun = createRun({
         generate,

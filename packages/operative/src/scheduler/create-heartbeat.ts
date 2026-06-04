@@ -21,6 +21,8 @@ export interface CreateHeartbeatOptions {
   signal?: AbortSignal;
   /** Maximum consecutive heartbeat failures before stopping. Default: 5. */
   maxConsecutiveFailures?: number;
+  /** Injectable sleep primitive used by the heartbeat loop. Defaults to the scheduler sleep utility. */
+  sleepFunction?: (milliseconds: number) => Promise<void>;
   /** Callback when a heartbeat tick completes (including preempted ticks with null result). */
   onTick?: (result: RunResult | null) => void | Promise<void>;
   /** Callback when the heartbeat stops due to max failures. */
@@ -59,6 +61,7 @@ export function createHeartbeat(options: CreateHeartbeatOptions): Heartbeat {
     runImmediately = false,
     signal,
     maxConsecutiveFailures = 5,
+    sleepFunction = sleep,
     onTick,
     onFailure,
   } = options;
@@ -71,7 +74,7 @@ export function createHeartbeat(options: CreateHeartbeatOptions): Heartbeat {
   /** Sleep that can be interrupted by stop(). Resolves immediately if stop() is called. */
   async function cancellableSleep(milliseconds: number): Promise<void> {
     await Promise.race([
-      sleep(milliseconds),
+      sleepFunction(milliseconds),
       new Promise<void>((resolve) => {
         sleepResolver = resolve;
       }),

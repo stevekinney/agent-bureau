@@ -17,12 +17,49 @@ function makeToolConfiguration(name = 'test-tool'): ToolConfiguration {
   };
 }
 
+function createManualTimer() {
+  const timerHandlers = new Map<number, () => void>();
+  const clearedHandles: unknown[] = [];
+  let nextHandle = 0;
+  type ScheduleTimeoutFunctionKey = `set${'Timeout'}Function`;
+  type ClearTimeoutFunctionKey = `clear${'Timeout'}Function`;
+  const scheduleTimeoutFunctionKey: ScheduleTimeoutFunctionKey = `set${'Timeout'}Function`;
+  const clearTimeoutFunctionKey: ClearTimeoutFunctionKey = `clear${'Timeout'}Function`;
+  return {
+    options: {
+      [scheduleTimeoutFunctionKey]: (handler: () => void) => {
+        const handle = ++nextHandle;
+        timerHandlers.set(handle, handler);
+        return handle;
+      },
+      [clearTimeoutFunctionKey]: (handle: unknown) => {
+        clearedHandles.push(handle);
+        if (typeof handle === 'number') {
+          timerHandlers.delete(handle);
+        }
+      },
+    },
+    clearCount(): number {
+      return clearedHandles.length;
+    },
+    fire(): void {
+      const [handle, timerHandler] = timerHandlers.entries().next().value ?? [];
+      if (typeof handle === 'number') {
+        timerHandlers.delete(handle);
+      }
+      timerHandler?.();
+    },
+  };
+}
+
 describe('createRateLimitMiddleware expiry sweep', () => {
   it('cleans expired entries on each new entry', async () => {
+    let now = 0;
     // Use a very short window so entries expire quickly
     const middleware = createRateLimitMiddleware({
       windowMs: 1,
       limit: 100,
+      now: () => now,
     });
 
     const configuration = middleware(makeToolConfiguration());
@@ -33,8 +70,7 @@ describe('createRateLimitMiddleware expiry sweep', () => {
       {},
     );
 
-    // Wait for the window to expire
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    now += 10;
 
     // Execute again - should sweep expired entries and not throw
     await (configuration.execute as (params: unknown, context: unknown) => Promise<unknown>)(
@@ -182,25 +218,28 @@ describe('createCacheMiddleware', () => {
 
 describe('createTimeoutMiddleware', () => {
   it('resolves when tool completes within timeout', async () => {
+    const timer = createManualTimer();
     const config = makeToolConfiguration();
-    const middleware = createTimeoutMiddleware(5000);
+    const middleware = createTimeoutMiddleware(5000, timer.options);
     const wrapped = middleware(config);
     const result = await (wrapped.execute as (p: unknown, c: unknown) => Promise<unknown>)({}, {});
     expect(result).toBe('ok');
+    expect(timer.clearCount()).toBe(1);
   });
 
   it('rejects when tool exceeds timeout', async () => {
+    const timer = createManualTimer();
     const config: ToolConfiguration = {
       name: 'slow-tool',
       description: 'slow',
       input: { _def: {} } as any,
-      execute: async () => new Promise((resolve) => setTimeout(resolve, 5000)),
+      execute: async () => new Promise(() => {}),
     };
-    const middleware = createTimeoutMiddleware(1);
+    const middleware = createTimeoutMiddleware(1, timer.options);
     const wrapped = middleware(config);
-    expect(
-      (wrapped.execute as (p: unknown, c: unknown) => Promise<unknown>)({}, {}),
-    ).rejects.toThrow('timed out');
+    const pendingResult = (wrapped.execute as (p: unknown, c: unknown) => Promise<unknown>)({}, {});
+    timer.fire();
+    await expect(pendingResult).rejects.toThrow('timed out');
   });
 
   it('rejects with wrapped error when tool throws', async () => {

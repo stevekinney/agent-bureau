@@ -180,6 +180,7 @@ describe('createFalloverGenerate', () => {
   it('fires onRecovery when a provider succeeds after cooldown expires', async () => {
     const recoveries: string[] = [];
     let primaryCallCount = 0;
+    let now = 1_700_000_000_000;
 
     const primary = makeProvider('anthropic', async () => {
       primaryCallCount++;
@@ -197,14 +198,14 @@ describe('createFalloverGenerate', () => {
     const generate = createFalloverGenerate({
       providers: [primary, secondary],
       cooldownDuration: 1, // 1ms cooldown for testing
+      now: () => now,
       onRecovery: (provider) => recoveries.push(provider),
     });
 
     // First call: primary fails → cooldown → cascade
     await generate(makeContext());
 
-    // Wait for cooldown to expire
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    now += 2;
 
     // Second call: primary is back, succeeds
     const result = await generate(makeContext());
@@ -302,7 +303,6 @@ describe('createFalloverGenerate', () => {
   it('aborts while sleeping between retries', async () => {
     const controller = new AbortController();
     const primary = makeProvider('anthropic', async () => {
-      setTimeout(() => controller.abort(), 5);
       throw new HeraldError({
         provider: 'anthropic',
         cause: new Error('Internal'),
@@ -314,6 +314,12 @@ describe('createFalloverGenerate', () => {
       providers: [primary],
       retriesPerProvider: 1,
       retryDelay: 50,
+      sleep: async (_milliseconds, signal) => {
+        controller.abort();
+        if (signal?.aborted) {
+          throw new DOMException('The operation was aborted', 'AbortError');
+        }
+      },
     });
 
     try {

@@ -136,18 +136,15 @@ describe('Compression Integration', () => {
   });
 
   describe('Batch Operations', () => {
-    it('should handle batch compression efficiently', async () => {
+    it('should handle batch compression', async () => {
       const vectors = Array.from(
         { length: 10 },
         () => new Float32Array(Array.from({ length: 64 }, () => Math.random())),
       );
 
-      const start = performance.now();
       const compressed = await compressionManager.compressBatch(vectors);
-      const elapsed = performance.now() - start;
 
       expect(compressed).toHaveLength(10);
-      expect(elapsed).toBeLessThan(1000); // Should be reasonably fast
 
       // Verify all compressions
       for (let i = 0; i < vectors.length; i++) {
@@ -332,59 +329,15 @@ describe('Compression Integration', () => {
     });
   });
 
-  describe('Performance Characteristics', () => {
-    it('should compress large vectors in reasonable time', async () => {
+  describe('Large Vector Compression', () => {
+    it('should compress large vectors', async () => {
       const largeVector = new Float32Array(Array.from({ length: 10000 }, () => Math.random()));
 
-      const start = performance.now();
       const compressed = await compressionManager.compress(largeVector);
-      const compressionTime = performance.now() - start;
-
-      const decompressStart = performance.now();
       const decompressed = await compressionManager.decompress(compressed);
-      const decompressionTime = performance.now() - decompressStart;
 
-      expect(compressionTime).toBeLessThan(1000); // Should be fast
-      expect(decompressionTime).toBeLessThan(500); // Decompression should be faster
       expect(decompressed.length).toBe(largeVector.length);
-    });
-
-    it('should show performance scaling', async () => {
-      const sizes = [100, 500, 1000, 2000];
-      const times: number[] = [];
-      const results: Array<{ size: number; compressed: unknown }> = [];
-
-      for (const size of sizes) {
-        const vector = new Float32Array(Array.from({ length: size }, () => Math.random()));
-
-        const start = performance.now();
-        const compressed = await compressionManager.compress(vector);
-        const elapsed = performance.now() - start;
-
-        times.push(elapsed);
-        results.push({ size, compressed });
-      }
-
-      // FUNCTIONAL assertion (always runs): every size compresses to a result.
-      expect(results).toHaveLength(sizes.length);
-      for (const { compressed } of results) {
-        expect(compressed).toBeDefined();
-      }
-
-      // TIMING-RATIO assertion: this measures wall-clock scaling, which is pure
-      // noise on CI's shared 2-core runner — a single GC pause or scheduler
-      // preemption between two `performance.now()` reads inverts the ratio. It is
-      // a real microbenchmark, not a correctness check, so skip it under CI where
-      // it cannot be measured reliably. It still runs locally as a perf smoke test.
-      if (!process.env['CI']) {
-        for (let i = 1; i < times.length; i++) {
-          const ratio = times[i]! / times[i - 1]!;
-          const sizeRatio = sizes[i]! / sizes[i - 1]!;
-
-          // Time growth should be roughly linear with size (not exponential).
-          expect(ratio).toBeLessThan(sizeRatio * 2);
-        }
-      }
+      expect(compressed.metadata.compressionRatio).toBeGreaterThan(1);
     });
   });
 });

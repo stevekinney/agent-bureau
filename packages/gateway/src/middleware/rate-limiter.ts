@@ -10,6 +10,8 @@ export type RateLimitOptions = {
   store?: TextValueStore;
   /** Window duration in milliseconds. Defaults to 60_000 (1 minute). */
   windowMs?: number;
+  /** Clock used by tests to make pruning and reset calculations deterministic. */
+  now?: () => number;
 };
 
 type WindowEntry = {
@@ -31,7 +33,7 @@ type RateLimitDecision =
 const DEFAULT_LIMIT = 60;
 const DEFAULT_WINDOW_MS = 60_000;
 
-function createMemoryWindowStore(windowMs: number) {
+function createMemoryWindowStore(windowMs: number, now: () => number) {
   const windows = new Map<string, WindowEntry>();
   let requestCount = 0;
 
@@ -39,7 +41,7 @@ function createMemoryWindowStore(windowMs: number) {
     load(key: string): WindowEntry {
       requestCount += 1;
       if (requestCount % 1000 === 0) {
-        const cutoff = Date.now() - windowMs;
+        const cutoff = now() - windowMs;
         for (const [candidateKey, entry] of windows) {
           if (entry.timestamps.every((timestamp) => timestamp <= cutoff)) {
             windows.delete(candidateKey);
@@ -110,9 +112,10 @@ function createPrincipalMutex() {
 export function createRateLimiter(options?: RateLimitOptions) {
   const limit = options?.limit ?? DEFAULT_LIMIT;
   const windowMs = options?.windowMs ?? DEFAULT_WINDOW_MS;
+  const now = options?.now ?? Date.now;
   const windowStore = options?.store
     ? createStoreBackedWindowStore(options.store)
-    : createMemoryWindowStore(windowMs);
+    : createMemoryWindowStore(windowMs, now);
   const withPrincipalLock = createPrincipalMutex();
 
   return createMiddleware(async (context, next) => {
@@ -124,8 +127,8 @@ export function createRateLimiter(options?: RateLimitOptions) {
 
     const storageKey = `gateway:rate-limit:${principal}`;
     const decision = await withPrincipalLock(storageKey, async () => {
-      const now = Date.now();
-      const windowStart = now - windowMs;
+      const currentTime = now();
+      const windowStart = currentTime - windowMs;
       const entry = await windowStore.load(storageKey);
       const previousTimestampCount = entry.timestamps.length;
       entry.timestamps = entry.timestamps.filter((timestamp) => timestamp > windowStart);
@@ -135,20 +138,20 @@ export function createRateLimiter(options?: RateLimitOptions) {
           await windowStore.save(storageKey, entry);
         }
 
-        const oldestTimestamp = entry.timestamps[0] ?? now;
+        const oldestTimestamp = entry.timestamps[0] ?? currentTime;
         return {
-          retryAfter: Math.max(1, Math.ceil((oldestTimestamp + windowMs - now) / 1000)),
+          retryAfter: Math.max(1, Math.ceil((oldestTimestamp + windowMs - currentTime) / 1000)),
           resetAt: Math.ceil((oldestTimestamp + windowMs) / 1000),
           status: 'limited',
         } satisfies RateLimitDecision;
       }
 
-      entry.timestamps.push(now);
+      entry.timestamps.push(currentTime);
       await windowStore.save(storageKey, entry);
 
       return {
         remaining: Math.max(0, limit - entry.timestamps.length),
-        resetAt: Math.ceil(((entry.timestamps[0] ?? now) + windowMs) / 1000),
+        resetAt: Math.ceil(((entry.timestamps[0] ?? currentTime) + windowMs) / 1000),
         status: 'allowed',
       } satisfies RateLimitDecision;
     });

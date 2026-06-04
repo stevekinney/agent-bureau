@@ -9,6 +9,8 @@ import type {
   NamespaceStats,
   StorageAdapter,
 } from '@/core/types.ts';
+import type { TimeSource } from '@/utilities/time-source.ts';
+import { systemTimeSource } from '@/utilities/time-source.ts';
 
 import { validateNamespaceName } from './validate-namespace-name.ts';
 
@@ -26,9 +28,11 @@ import { validateNamespaceName } from './validate-namespace-name.ts';
 export class AdapterNamespaceRegistry {
   private adapter: StorageAdapter;
   private initialized = false;
+  private timeSource: TimeSource;
 
-  constructor(adapter: StorageAdapter) {
+  constructor(adapter: StorageAdapter, options: { timeSource?: TimeSource } = {}) {
     this.adapter = adapter;
+    this.timeSource = options.timeSource ?? systemTimeSource;
   }
 
   async init(): Promise<void> {
@@ -48,7 +52,7 @@ export class AdapterNamespaceRegistry {
       throw new NamespaceExistsError(name);
     }
 
-    const now = Date.now();
+    const now = this.timeSource.nowMilliseconds();
     const info: NamespaceInfo = {
       name,
       config,
@@ -99,7 +103,7 @@ export class AdapterNamespaceRegistry {
     }
 
     info.stats = { ...info.stats, ...stats };
-    info.modified = Date.now();
+    info.modified = this.timeSource.nowMilliseconds();
 
     await this.adapter.put({
       id: name,

@@ -276,7 +276,7 @@ describe('coverage edges', () => {
         return {
           async *[Symbol.asyncIterator]() {
             yield 'first';
-            await new Promise((resolve) => setTimeout(resolve, 0));
+            await Promise.resolve();
             yield 'second';
           },
         };

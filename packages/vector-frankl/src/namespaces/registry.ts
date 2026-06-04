@@ -1,6 +1,8 @@
 import { VectorDatabase } from '@/core/database.ts';
 import { NamespaceExistsError, NamespaceNotFoundError, TransactionError } from '@/core/errors.ts';
 import type { NamespaceConfig, NamespaceInfo, NamespaceStats } from '@/core/types.ts';
+import type { TimeSource } from '@/utilities/time-source.ts';
+import { systemTimeSource } from '@/utilities/time-source.ts';
 
 import { validateNamespaceName } from './validate-namespace-name.ts';
 
@@ -15,8 +17,10 @@ export class NamespaceRegistry {
 
   private database: VectorDatabase;
   private initialized = false;
+  private timeSource: TimeSource;
 
-  constructor(rootDatabaseName = 'vector-frankl-root') {
+  constructor(rootDatabaseName = 'vector-frankl-root', options: { timeSource?: TimeSource } = {}) {
+    this.timeSource = options.timeSource ?? systemTimeSource;
     this.database = new VectorDatabase({
       name: rootDatabaseName,
       version: 1,
@@ -60,7 +64,7 @@ export class NamespaceRegistry {
     // Validate namespace name
     validateNamespaceName(name);
 
-    const now = Date.now();
+    const now = this.timeSource.nowMilliseconds();
     const namespaceInfo: NamespaceInfo = {
       name,
       config,
@@ -179,7 +183,7 @@ export class NamespaceRegistry {
 
           // Update stats and modified timestamp
           namespace.stats = { ...namespace.stats, ...stats };
-          namespace.modified = Date.now();
+          namespace.modified = this.timeSource.nowMilliseconds();
 
           await this.promisifyRequest(namespaceStore.put(namespace));
         },

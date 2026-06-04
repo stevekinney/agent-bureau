@@ -2,7 +2,7 @@ import { createToolbox } from 'armorer';
 import { describe, expect, it } from 'bun:test';
 import type { GenerateFunction, Toolbox } from 'operative';
 
-import { createTestGateway, requestJSON } from '../test';
+import { createTestGateway, requestJSON, waitForRunState } from '../test';
 
 function createMockGenerate(): GenerateFunction {
   return async () => ({ content: 'Done.', toolCalls: [] });
@@ -119,8 +119,7 @@ describe('runs routes', () => {
     });
     const { id } = await createResponse.json();
 
-    // Wait a tick for the run to register
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(gateway.bureau.getRun(id)?.status).toBe('running');
 
     const response = await requestJSON(gateway, `/api/v1/runs/${id}`, {
       method: 'DELETE',
@@ -134,13 +133,13 @@ describe('runs routes', () => {
       toolbox: createEmptyToolbox(),
     });
 
-    await requestJSON(gateway, '/api/v1/runs', {
+    const createResponse = await requestJSON(gateway, '/api/v1/runs', {
       method: 'POST',
       body: JSON.stringify({ message: 'Hello' }),
     });
+    const createdRun = await createResponse.json();
 
-    // The run completes near-instantly since generate returns immediately with no tool calls
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await waitForRunState(gateway.bureau, createdRun.id);
 
     const response = await requestJSON(gateway, '/api/v1/runs?status=completed');
     expect(response.status).toBe(200);

@@ -30,6 +30,8 @@ export type CacheOptions = {
   onMiss?: (event: CacheMissEvent) => void;
   /** Maximum number of entries. When exceeded, oldest entries are evicted. Default: `1000`. */
   maxEntries?: number;
+  /** Injectable clock for deterministic tests. Defaults to Date.now. */
+  now?: () => number;
 };
 
 /** Event dispatched when a cached response is found and returned. */

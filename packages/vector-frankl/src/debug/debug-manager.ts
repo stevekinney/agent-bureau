@@ -3,6 +3,8 @@
  */
 
 import { log } from '@/utilities/logger.ts';
+import type { TimeSource } from '@/utilities/time-source.ts';
+import { systemTimeSource } from '@/utilities/time-source.ts';
 
 import { DebugContext } from './debug-context.ts';
 import type { DebugConfig, DebugEntry, DebugLevel, ExportFormat } from './types.ts';
@@ -15,10 +17,11 @@ export class DebugManager {
   private context: DebugContext;
   private startTime: number;
   private entryCounter = 0;
+  private timeSource: TimeSource = systemTimeSource;
 
   private constructor() {
     this.context = DebugContext.getInstance();
-    this.startTime = performance.now();
+    this.startTime = this.timeSource.highResolutionNowMilliseconds();
 
     // Default configuration
     this.config = {
@@ -50,6 +53,11 @@ export class DebugManager {
       DebugManager.instance = new DebugManager();
     }
     return DebugManager.instance;
+  }
+
+  setTimeSource(timeSource: TimeSource = systemTimeSource): void {
+    this.timeSource = timeSource;
+    this.startTime = this.timeSource.highResolutionNowMilliseconds();
   }
 
   /**
@@ -180,8 +188,8 @@ export class DebugManager {
 
     const fullEntry: DebugEntry = {
       ...entry,
-      id: `${Date.now()}-${++this.entryCounter}`,
-      timestamp: performance.now() - this.startTime,
+      id: `${this.timeSource.nowMilliseconds()}-${++this.entryCounter}`,
+      timestamp: this.timeSource.highResolutionNowMilliseconds() - this.startTime,
     };
 
     // Add context information
