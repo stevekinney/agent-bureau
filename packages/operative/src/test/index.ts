@@ -7,16 +7,8 @@ import {
 } from '../create-agent-registry';
 import type { ActiveRun } from '../create-run';
 import { createScratchpad, type Scratchpad } from '../create-scratchpad';
-import { resetRunDepsRegistry } from '../durable/deps-registry';
 import type { OperativeEventMap, OperativeEventType } from '../events';
 import type { AgentDefinition, GenerateFunction, GenerateResponse, StepResult } from '../types';
-
-/**
- * Reset the durable run deps registry (and its reconstructor) to simulate a
- * fresh process. Test-only: it clears process-global state, so it lives here in
- * `operative/test` rather than the production `operative/durable` barrel.
- */
-export { resetRunDepsRegistry };
 
 /**
  * Creates a mock generate function that returns responses in sequence.

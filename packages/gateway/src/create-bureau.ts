@@ -2,12 +2,6 @@ import { Conversation, createConversationHistory } from 'conversationalist';
 import { CompletableEventTarget } from 'lifecycle';
 import { type ActiveRun, createAgentSession, createRun, type JSONValue } from 'operative';
 import {
-  clearRunDeps,
-  type DurableRunDeps,
-  registerRunDeps,
-  setRunDepsReconstructor,
-} from 'operative/durable';
-import {
   createStore,
   RunRegisteredEvent as StoreRunRegisteredEvent,
   RunRemovedEvent as StoreRunRemovedEvent,
@@ -451,69 +445,17 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
   }
 
   /**
-   * Rebuild a recovered run's non-serializable behavior from durable config.
-   * Given a `runId`, find the session that owns it (its `lastRunId` while still
-   * `running`) and reconstruct the run runtime from that session's persisted
-   * request — the same `createRunRuntime` a fresh run uses. Returns `null` when
-   * no such session exists (the run is not bureau-owned / not reconstructable),
-   * so the durable workflow terminates it safely instead of bricking the engine.
-   *
-   * The reconstructed `conversation` is a placeholder: a resumed run reads its
-   * transcript from the checkpoint, not from `options.conversation`.
-   */
-  async function buildRunDepsFromSession(
-    session: Awaited<ReturnType<NonNullable<typeof runtime.sessionStore>['load']>>,
-  ): Promise<DurableRunDeps | null> {
-    if (!session) return null;
-    const message = session.metadata['lastUserMessage'];
-    const runRuntime = await runtime.createRunRuntime(
-      {
-        message: typeof message === 'string' ? message : '',
-        sessionId: session.id,
-      },
-      { liveStreaming: false },
-    );
-    return {
-      toolbox: runRuntime.toolbox,
-      options: {
-        generate: runRuntime.generate,
-        toolbox: runRuntime.toolbox,
-        conversation: new Conversation(session.conversationHistory),
-        maximumSteps: runtime.maximumSteps,
-        stopWhen: options.stopWhen,
-        prepareStep: runRuntime.prepareStep,
-        onStep: runRuntime.onStep,
-        validateResponse: runRuntime.validateResponse,
-      },
-    };
-  }
-
-  async function reconstructDurableRunDeps(runId: string): Promise<DurableRunDeps | null> {
-    const sessionStore = runtime.sessionStore;
-    if (!sessionStore) return null;
-
-    const summaries = await sessionStore.list();
-    for (const summary of summaries) {
-      if (summary.metadata['lastRunId'] !== runId) continue;
-      if (summary.metadata['lastRunStatus'] !== 'running') continue;
-      const session = await sessionStore.load(summary.id);
-      return buildRunDepsFromSession(session);
-    }
-    return null;
-  }
-
-  /**
-   * Await one recovered handle to completion, persist the owning session's
-   * terminal status, and release that run's deps. Runs detached, AFTER boot —
-   * never awaited by `recoverDurableRuns`, so one long or stuck recovered run
-   * cannot block the gateway from coming up.
+   * Await one recovered handle to completion and persist the owning session's
+   * terminal status. Runs detached, AFTER boot — never awaited by
+   * `recoverDurableRuns`, so one long or stuck recovered run cannot block the
+   * gateway from coming up.
    *
    * `runId` is taken from `handle.id` (the workflow id is pinned to the run id
-   * at `engine.start`), so it is known BEFORE awaiting the result — the `finally`
-   * therefore clears the credential-bearing closure UNCONDITIONALLY, even when
-   * `handle.result()` rejects (e.g. `EngineDisposedError` on bureau teardown).
-   * A rejection leaves the session `running` for a future process to retry,
-   * matching the dispose-mid-run crash semantic.
+   * at `engine.start`), so the owning session is known BEFORE awaiting the
+   * result. A rejection (e.g. `EngineDisposedError` on bureau teardown) leaves
+   * the session `running` for a future process to retry, matching the
+   * dispose-mid-run crash semantic. The run's non-serializable `services` are
+   * owned and cleared by the engine on terminal cleanup — nothing to release here.
    */
   async function settleRecoveredRun(
     handle: { id: string; result(): Promise<unknown> },
@@ -567,27 +509,41 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       console.error(
         `[bureau] Recovered durable run "${runId}" did not settle cleanly: ${serializeUnknownError(error)}`,
       );
-    } finally {
-      clearRunDeps(runId);
     }
   }
 
   /**
-   * Boot-time recovery for durable runs (seam #5). Registers the deps
-   * reconstructor, pre-injects deps for in-flight runs, then resumes any
-   * `agentRun` workflows a previous process left in flight via
-   * `engine.recoverAll()`. Each recovered run advances to completion through the
-   * reconstructed behavior; its terminal session status is persisted by a
-   * DETACHED monitor so a resumed run is not stuck `running` forever — without
+   * Boot-time recovery for durable runs (seam #5). Resumes any `agentRun`
+   * workflows a previous process left in flight via `engine.recoverAll()`. Each
+   * recovered run's non-serializable deps are re-provided per-run by the engine's
+   * `resolveWorkflowServices` resolver (`resolveRunServices` in
+   * runtime-composition) BEFORE its generator advances — no pre-injection, no
+   * module-global registry. The run's terminal session status is persisted by a
+   * DETACHED monitor so a resumed run is not stuck `running` forever, without
    * blocking boot on the run finishing.
    *
    * Boot returns once `recoverAll()` has STARTED the handles, not when they
    * complete: a recovered run that resumes into a long model call or a hanging
    * tool must not hold the whole gateway hostage. The per-handle monitors run
-   * after this function returns and clear their deps in a `finally`.
+   * after this function returns.
    *
-   * Best-effort and fail-safe: a single unrecoverable run terminates itself
-   * (safe error result) without aborting the others or the boot.
+   * Best-effort and fail-safe: a run whose deps the resolver cannot rebuild is
+   * failed by the engine (terminal `failed`) BEFORE replay without aborting the
+   * others or the boot — `recoverAll()` itself does not throw for it.
+   *
+   * KNOWN LIMITATION (documented, accepted): such an engine-failed run never
+   * yields a handle, so `settleRecoveredRun` never runs for it and its OWNING
+   * SESSION's `lastRunStatus` stays `running` (stale metadata). The run is NOT
+   * re-executed — once Weft marks it terminal `failed`, the next boot's
+   * `recoverAll()` (which resumes only non-terminal workflows) skips it. So the
+   * worst case is a session metadata value that lags the engine's terminal state,
+   * never repeated work or a bricked engine. In practice this path is nearly
+   * unreachable: the resolver returns `available` for every in-flight session it
+   * finds, so a run only fails here if its session vanished mid-recovery or
+   * `createRunRuntime` threw. Reconciling that stale status would mean a
+   * timing-sensitive detached write keyed on the engine's per-run state — not
+   * worth the complexity for a path this narrow. Observe recovery outcomes via
+   * `getSession`, which reflects the durable run's own checkpoint, not this gate.
    *
    * TODO(weft-integration): #5b reconstructed runs complete without an ActiveRun
    *   adapter, so they are not individually observable via the live event surface
@@ -597,59 +553,34 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
   async function recoverDurableRuns(): Promise<void> {
     if (!runtime.durable) return;
 
+    const durable = runtime.durable;
     const sessionStore = runtime.sessionStore;
     if (!sessionStore) return;
 
-    // PRE-INJECT, then recoverAll. Weft replays a recovered workflow from the
-    // top, replaying cached activity results — so the in-workflow `ensureDeps`
-    // activity returns its pre-crash cached value and does NOT re-invoke the
-    // reconstructor on resume. The deps must therefore already be in the registry
-    // before recoverAll resumes the generators. We also register the reconstructor
-    // as a fallback for any run that crashed before its session recorded it.
-    setRunDepsReconstructor(reconstructDurableRunDeps);
-
+    // Build the runId → sessionId map for every in-flight session. This is the
+    // only bookkeeping the bureau needs: the engine's `resolveWorkflowServices`
+    // resolver rebuilds each recovered run's deps lazily (per run, before its
+    // generator advances), so there is nothing to pre-inject here.
     const summaries = await sessionStore.list();
     const inFlight = summaries.filter((summary) => summary.metadata['lastRunStatus'] === 'running');
     const recovered = new Map<string, string>(); // runId -> sessionId
     for (const summary of inFlight) {
       const runId = summary.metadata['lastRunId'];
       if (typeof runId !== 'string') continue;
-      // Load the session directly from the summary we already have (O(1) per run)
-      // rather than calling reconstructDurableRunDeps which re-scans the full list.
-      const session = await sessionStore.load(summary.id);
-      const deps = await buildRunDepsFromSession(session);
-      if (deps === null) continue;
-      registerRunDeps(runId, deps);
       recovered.set(runId, summary.id);
     }
 
-    let handles: Array<{ id: string; result(): Promise<unknown> }>;
-    try {
-      handles = (await runtime.durable.engine.recoverAll()) as Array<{
-        id: string;
-        result(): Promise<unknown>;
-      }>;
-    } catch (error) {
-      // recoverAll itself failed — clear every pre-injected closure so nothing
-      // leaks, then rethrow to the boot try/catch (which logs and continues).
-      for (const runId of recovered.keys()) clearRunDeps(runId);
-      throw error;
-    }
+    // recoverAll resumes the in-flight workflows; if it throws, the boot
+    // try/catch logs and continues. No deps to clean up on failure — they are
+    // engine-owned and supplied lazily by the resolver.
+    const handles = (await durable.engine.recoverAll()) as Array<{
+      id: string;
+      result(): Promise<unknown>;
+    }>;
 
-    // Eagerly sweep any pre-injected run that recoverAll did NOT return a handle
-    // for (e.g. a stale `running` session whose workflow already completed or was
-    // pruned). Those have no monitor to clear them, so clear them now. Runs whose
-    // handle WAS returned are cleared by `settleRecoveredRun`'s `finally`.
-    const handledRunIds = new Set(handles.map((handle) => handle.id));
-    for (const runId of recovered.keys()) {
-      if (!handledRunIds.has(runId)) clearRunDeps(runId);
-    }
-
-    // Detached monitors — NOT awaited, so boot proceeds the moment recoverAll
-    // has started the handles. Each monitor persists its run's terminal session
-    // status and clears that run's deps in a `finally`. The `.catch` guards the
-    // unawaited chain against an unhandled rejection (settleRecoveredRun swallows
-    // its own errors, so this is belt-and-suspenders).
+    // Detached, NOT awaited — boot proceeds the moment recoverAll has started the
+    // handles. Each monitor settles one recovered handle: persists its terminal
+    // session status off the boot path so a resumed run is not stuck `running`.
     void Promise.allSettled(
       handles.map((handle) => settleRecoveredRun(handle, recovered, sessionStore)),
     ).catch((error) => {
@@ -839,13 +770,10 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         );
       }
     } finally {
-      // No future recovered run should reach the (about-to-close) storage through
-      // the reconstructor closure. Clear it FIRST in the finally — unconditionally,
-      // before the backend teardown — so a throwing pre-teardown step above can't
-      // leave a stale reconstructor (closing over the soon-to-be-disposed session
-      // store) live.
-      setRunDepsReconstructor(undefined);
-
+      // The per-run `resolveWorkflowServices` resolver is engine-scoped and is
+      // released when the engine is disposed below — there is no module-global
+      // reconstructor to clear here anymore.
+      //
       // Dispose the durable run engine, then the raw Storage, then the store —
       // each guarded so a throw in one stage does not skip the next (engine
       // dispose is synchronous and can throw in a degraded environment; the

@@ -5,7 +5,6 @@ import { afterEach, describe, expect, it } from 'bun:test';
 
 import { createCheckpointStore } from './checkpoint-store';
 import { createRunEngine } from './create-run-engine';
-import { resetRunDepsRegistry } from './deps-registry';
 
 /**
  * A throwaway workflow standing in for the real `agentRun` body (which depends
@@ -29,7 +28,6 @@ function makeProbeWorkflow() {
 }
 
 afterEach(async () => {
-  resetRunDepsRegistry();
   // Drain Weft's deferred inline launch (see runtime-composition.test.ts) so a
   // pending `setTimeout(0)` macrotask from one engine run is not starved under
   // full `bun test` concurrency, which would time out a later run. Matches the

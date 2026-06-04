@@ -1,4 +1,8 @@
-import type { AnyWorkflowDefinition } from '@lostgradient/weft';
+import type {
+  AnyWorkflowDefinition,
+  WorkflowServicesResolution,
+  WorkflowServicesResolverInfo,
+} from '@lostgradient/weft';
 import { Engine } from '@lostgradient/weft';
 import type { Storage } from '@lostgradient/weft/storage';
 import { textValueStore } from '@lostgradient/weft/storage';
@@ -37,6 +41,19 @@ export interface CreateRunEngineOptions {
   recover?: boolean;
 
   /**
+   * Re-provide a recovered run's non-serializable {@link DurableRunDeps} on a
+   * fresh-process resume. Weft calls this resolver per recovered inline run
+   * (those launched WITH `services`) BEFORE the generator advances, so the
+   * rebuilt `generate`/`toolbox`/`hooks` are in place when the workflow reads
+   * `ctx.services`. Returning `{ status: 'unavailable' }` fails just that one run
+   * (terminal `failed`) without aborting recovery or the engine. Omit for an
+   * engine that never resumes cross-process (e.g. isolated tests).
+   */
+  resolveWorkflowServices?: (
+    info: WorkflowServicesResolverInfo,
+  ) => WorkflowServicesResolution | Promise<WorkflowServicesResolution>;
+
+  /**
    * A pre-built {@link CheckpointStore}. When omitted, one is created over a
    * `textValueStore` view of `storage`. Inject one to share the exact store the
    * rest of composition already built.
@@ -73,10 +90,10 @@ export interface RunEngine {
  *
  * @remarks
  * `recover` defaults to `true`, so on boot the engine resumes any `agentRun`
- * workflows a previous process left in flight. Those recovered runs cannot
- * advance until their non-serializable deps are re-injected into the
- * {@link import('./deps-registry').registerRunDeps deps registry} — see the
- * recovery seam (#5) in the design doc.
+ * workflows a previous process left in flight. Each recovered run's
+ * non-serializable {@link DurableRunDeps} are re-provided through
+ * {@link CreateRunEngineOptions.resolveWorkflowServices}, which Weft fires before
+ * the resumed generator reads `ctx.services` — no module-global registry.
  *
  * TODO(weft-integration): tune `history.maxEvents` / checkpoint size warning
  * threshold once long-run checkpoint sizes are measured (design seam #12).
@@ -89,6 +106,7 @@ export async function createRunEngine(options: CreateRunEngineOptions): Promise<
   const engine = await Engine.create({
     storage: options.storage,
     recover: options.recover ?? true,
+    resolveWorkflowServices: options.resolveWorkflowServices,
     workflows: { agentRun: options.runWorkflow },
     activities: {
       saveCursor: storageActivities.saveCursor,

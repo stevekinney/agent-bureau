@@ -1,3 +1,4 @@
+import type { WorkflowServicesResolution, WorkflowServicesResolverInfo } from '@lostgradient/weft';
 import { Engine } from '@lostgradient/weft';
 import { MemoryStorage, type Storage, textValueStore } from '@lostgradient/weft/storage';
 import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
@@ -9,12 +10,14 @@ import { z } from 'zod';
 import { noToolCalls } from '../conditions/predicates';
 import type { GenerateFunction } from '../types';
 import { createCheckpointStore } from './checkpoint-store';
-import type { DurableRunDeps } from './deps-registry';
-import { registerRunDeps, resetRunDepsRegistry, setRunDepsReconstructor } from './deps-registry';
 import { createRunWorkflow } from './run-workflow';
 import { createStorageActivities } from './storage-activities';
+import type { DurableRunDeps } from './types';
 
 type RegistryToolbox = DurableRunDeps['toolbox'];
+type ServicesResolver = (
+  info: WorkflowServicesResolverInfo,
+) => WorkflowServicesResolution | Promise<WorkflowServicesResolution>;
 
 const nextTool = createTool({
   name: 'next',
@@ -28,8 +31,16 @@ function continuingToolbox(): RegistryToolbox {
   return createToolbox([nextTool]) as RegistryToolbox;
 }
 
-/** Build an engine + checkpoint store over a given backend. */
-async function buildEngine(storage: Storage, recover: boolean) {
+/**
+ * Build an engine + checkpoint store over a given backend. Pass
+ * `resolveWorkflowServices` to re-provide a recovered run's services on a fresh
+ * engine (the cross-process recovery path).
+ */
+async function buildEngine(
+  storage: Storage,
+  recover: boolean,
+  resolveWorkflowServices?: ServicesResolver,
+) {
   const checkpointStore = createCheckpointStore(
     textValueStore(storage, { disposeUnderlyingStorage: false }),
   );
@@ -38,6 +49,7 @@ async function buildEngine(storage: Storage, recover: boolean) {
   const engine = await Engine.create({
     storage,
     recover,
+    ...(resolveWorkflowServices ? { resolveWorkflowServices } : {}),
     workflows: { agentRun: runWorkflow },
     activities: {
       saveCursor: activities.saveCursor,
@@ -48,19 +60,25 @@ async function buildEngine(storage: Storage, recover: boolean) {
   return { engine, checkpointStore };
 }
 
-function registerDeps(runId: string, generate: GenerateFunction) {
-  registerRunDeps(runId, {
-    toolbox: continuingToolbox(),
+/**
+ * Build the per-run {@link DurableRunDeps} the workflow reads as `ctx.services`.
+ * One shared toolbox instance backs both `toolbox` and `options.toolbox` (the
+ * memo overrides `options.toolbox` with the top-level one anyway).
+ */
+function makeServices(generate: GenerateFunction): DurableRunDeps {
+  const toolbox = continuingToolbox();
+  return {
+    toolbox,
     options: {
       generate,
-      toolbox: continuingToolbox(),
+      toolbox,
       conversation: createConversationHistory(),
       // The durable driver inherits executeLoop's stop semantics: a run halts
       // only when a configured stopWhen fires. `noToolCalls` is the standard
       // "agent settled" condition a real caller supplies.
       stopWhen: noToolCalls(),
     },
-  });
+  };
 }
 
 /** Start a run and await its result, keeping the handle off the await chain. */
@@ -71,13 +89,13 @@ async function runToCompletion(
     prompt?: string;
     maximumSteps?: number;
   },
+  services: DurableRunDeps,
 ) {
-  const handle = await engine.start('agentRun', input);
+  const handle = await engine.start('agentRun', input, { id: input.runId, services });
   return handle.result();
 }
 
 afterEach(async () => {
-  resetRunDepsRegistry();
   // Drain Weft's deferred inline launch (see runtime-composition.test.ts).
   // Without this, a `setTimeout(0)` inline-launch macrotask left pending by one
   // durable run can be starved under full `bun test` concurrency, making a later
@@ -90,13 +108,17 @@ describe('durable agentRun workflow', () => {
   it('runs a single-step agent to completion when generate emits no tool calls', async () => {
     const { engine, checkpointStore } = await buildEngine(new MemoryStorage(), false);
     let calls = 0;
-    registerDeps('run-1', async () => {
+    const services = makeServices(async () => {
       calls++;
       return { content: 'done', toolCalls: [] };
     });
 
     try {
-      const handle = await engine.start('agentRun', { runId: 'run-1', prompt: 'Hi' });
+      const handle = await engine.start(
+        'agentRun',
+        { runId: 'run-1', prompt: 'Hi' },
+        { id: 'run-1', services },
+      );
       const result = await handle.result();
 
       expect(result.finishReason).toBe('stop-condition');
@@ -115,7 +137,7 @@ describe('durable agentRun workflow', () => {
 
   it('takes multiple steps while generate keeps emitting tool calls', async () => {
     const { engine, checkpointStore } = await buildEngine(new MemoryStorage(), false);
-    registerDeps('run-multi', async ({ step }) => {
+    const services = makeServices(async ({ step }) => {
       if (step < 3) {
         return { content: `step ${step}`, toolCalls: [{ name: 'next', arguments: {} }] };
       }
@@ -123,7 +145,7 @@ describe('durable agentRun workflow', () => {
     });
 
     try {
-      const result = await runToCompletion(engine, { runId: 'run-multi', prompt: 'Go' });
+      const result = await runToCompletion(engine, { runId: 'run-multi', prompt: 'Go' }, services);
 
       expect(result.steps).toBe(4); // steps 0,1,2 with tools + step 3 final
       expect(result.finishReason).toBe('stop-condition');
@@ -140,17 +162,21 @@ describe('durable agentRun workflow', () => {
 
   it('stops at maximumSteps when the agent never settles', async () => {
     const { engine } = await buildEngine(new MemoryStorage(), false);
-    registerDeps('run-cap', async ({ step }) => ({
+    const services = makeServices(async ({ step }) => ({
       content: `step ${step}`,
       toolCalls: [{ name: 'next', arguments: {} }],
     }));
 
     try {
-      const result = await runToCompletion(engine, {
-        runId: 'run-cap',
-        prompt: 'Loop',
-        maximumSteps: 3,
-      });
+      const result = await runToCompletion(
+        engine,
+        {
+          runId: 'run-cap',
+          prompt: 'Loop',
+          maximumSteps: 3,
+        },
+        services,
+      );
       expect(result.steps).toBe(3);
       expect(result.finishReason).toBe('maximum-steps');
     } finally {
@@ -166,14 +192,16 @@ describe('durable agentRun workflow', () => {
     // `ctx.memo` to its checkpointed value, so every COMPLETED step's generate is
     // skipped and only the in-flight step re-runs — proving generate does not
     // re-execute from step 0 on recovery. Behavior for the remaining steps comes
-    // from a reconstructor (the bureau's role), nothing hand-injected.
+    // from engine B's `resolveWorkflowServices` resolver (the bureau's role on a
+    // fresh process), nothing hand-injected.
 
     /** Start a run but do NOT await — used when the run hangs mid-step. */
     function startRun(
       engine: Awaited<ReturnType<typeof buildEngine>>['engine'],
       input: { runId: string; prompt?: string },
+      services: DurableRunDeps,
     ) {
-      return engine.start('agentRun', input);
+      return engine.start('agentRun', input, { id: input.runId, services });
     }
 
     it('resumes a suspended run via a RECONSTRUCTOR, skipping completed steps (no re-run)', async () => {
@@ -184,21 +212,14 @@ describe('durable agentRun workflow', () => {
       // === Engine A: step 0 emits a tool call (commits), step 1's generate HANGS.
       // Disposing while suspended leaves the Weft workflow non-terminal. ===
       const aRunId = 'aaaaaaaa-0000-4000-8000-000000000001';
-      registerRunDeps(aRunId, {
-        toolbox: continuingToolbox(),
-        options: {
-          generate: async ({ step }: { step: number }) =>
-            step === 0
-              ? { content: 'A step 0', toolCalls: [{ name: 'next', arguments: {} }] }
-              : new Promise<never>(() => {}),
-          toolbox: continuingToolbox(),
-          conversation: createConversationHistory(),
-          stopWhen: noToolCalls(),
-        },
-      });
+      const servicesA = makeServices(async ({ step }) =>
+        step === 0
+          ? { content: 'A step 0', toolCalls: [{ name: 'next', arguments: {} }] }
+          : new Promise<never>(() => {}),
+      );
 
       const a = await buildEngine(storage, false);
-      const handle = await startRun(a.engine, { runId: aRunId, prompt: 'Start' });
+      const handle = await startRun(a.engine, { runId: aRunId, prompt: 'Start' }, servicesA);
       void handle.result().catch(() => {}); // never settles; keep it off the chain
       // Let step 0 commit and step 1 reach its hanging generate.
       await new Promise((resolve) => setTimeout(resolve, 100));
@@ -208,24 +229,21 @@ describe('durable agentRun workflow', () => {
       expect(afterCrash.steps[0]!.content).toBe('A step 0');
       a.engine[Symbol.dispose]();
 
-      // === FRESH PROCESS: empty registry + a reconstructor that supplies a
-      // settling generate. recoverAll resumes the suspended workflow. ===
-      resetRunDepsRegistry();
+      // === FRESH PROCESS: a brand-new engine whose ONLY source of this run's
+      // behavior is its `resolveWorkflowServices` resolver — proving deps come
+      // from the resolver, not any in-process registry. recoverAll resumes the
+      // suspended workflow, and the resolver re-provides a settling generate. ===
       const recoveredSteps: number[] = [];
-      setRunDepsReconstructor(async () => ({
-        toolbox: continuingToolbox(),
-        options: {
-          generate: async ({ step }: { step: number }) => {
+      const b = await buildEngine(storage, false, async (info) => {
+        expect(info.workflowId).toBe(aRunId);
+        return {
+          status: 'available',
+          services: makeServices(async ({ step }) => {
             recoveredSteps.push(step);
             return { content: `recovered step ${step}`, toolCalls: [] };
-          },
-          toolbox: continuingToolbox(),
-          conversation: createConversationHistory(),
-          stopWhen: noToolCalls(),
-        },
-      }));
-
-      const b = await buildEngine(storage, false);
+          }),
+        };
+      });
       try {
         const handles = await b.engine.recoverAll();
         expect(handles.length).toBe(1);
@@ -244,43 +262,39 @@ describe('durable agentRun workflow', () => {
       }
     });
 
-    it('terminates an unrecoverable resumed run safely (no reconstructor) instead of bricking', async () => {
+    it('fails just the unrecoverable resumed run (resolver unavailable) without bricking the engine', async () => {
       const storage = new MemoryStorage();
       const runId = 'bbbbbbbb-0000-4000-8000-000000000002';
 
-      registerRunDeps(runId, {
-        toolbox: continuingToolbox(),
-        options: {
-          generate: async ({ step }: { step: number }) =>
-            step === 0
-              ? { content: 'A step 0', toolCalls: [{ name: 'next', arguments: {} }] }
-              : new Promise<never>(() => {}),
-          toolbox: continuingToolbox(),
-          conversation: createConversationHistory(),
-          stopWhen: noToolCalls(),
-        },
-      });
+      const servicesA = makeServices(async ({ step }) =>
+        step === 0
+          ? { content: 'A step 0', toolCalls: [{ name: 'next', arguments: {} }] }
+          : new Promise<never>(() => {}),
+      );
 
       const a = await buildEngine(storage, false);
-      const handle = await startRun(a.engine, { runId, prompt: 'Start' });
+      const handle = await startRun(a.engine, { runId, prompt: 'Start' }, servicesA);
       void handle.result().catch(() => {});
       await new Promise((resolve) => setTimeout(resolve, 100));
       a.engine[Symbol.dispose]();
 
-      // Fresh process, empty registry, NO reconstructor: the run cannot rebuild
-      // its behavior, so the workflow terminates with a safe error result rather
-      // than the engine bricking.
-      resetRunDepsRegistry();
-      const b = await buildEngine(storage, false);
+      // Fresh process whose resolver reports the run's services unavailable: Weft
+      // fails THIS run terminally (pre-replay) without aborting recoverAll or the
+      // engine. recoverAll resolves; the run is left `failed`, not running.
+      const b = await buildEngine(storage, false, () => ({
+        status: 'unavailable',
+        reason: 'no config for this run on the fresh process',
+      }));
       try {
-        const handles = await b.engine.recoverAll();
-        expect(handles.length).toBe(1);
-        const result = (await handles[0]!.result()) as {
-          finishReason: string;
-          errorMessage?: string;
-        };
-        expect(result.finishReason).toBe('error');
-        expect(result.errorMessage).toMatch(/could not be recovered/);
+        // recoverAll itself must not throw — the engine survives.
+        const recoveredHandles = await b.engine.recoverAll();
+        expect(recoveredHandles).toBeDefined();
+        await yieldToPortableEventLoop();
+
+        // The single unresolvable run is now terminally `failed` (not left
+        // `running`, which a later boot would re-attempt forever).
+        const state = (await b.engine.get(runId)) as { status?: string } | null;
+        expect(state?.status).toBe('failed');
       } finally {
         b.engine[Symbol.dispose]();
       }
@@ -288,14 +302,14 @@ describe('durable agentRun workflow', () => {
 
     it('never checkpoints a Conversation instance (raw bytes are plain JSON)', async () => {
       const storage = new MemoryStorage();
-      registerDeps('json-run', async ({ step }) => {
+      const services = makeServices(async ({ step }) => {
         if (step < 2) return { content: `s${step}`, toolCalls: [{ name: 'next', arguments: {} }] };
         return { content: 'final', toolCalls: [] };
       });
 
       const { engine } = await buildEngine(storage, false);
       try {
-        await runToCompletion(engine, { runId: 'json-run', prompt: 'Hi' });
+        await runToCompletion(engine, { runId: 'json-run', prompt: 'Hi' }, services);
 
         // Read the raw persisted transcript and assert it is plain JSON with no
         // function/prototype-bearing shape — i.e. no Conversation instance was
@@ -315,14 +329,14 @@ describe('durable agentRun workflow', () => {
 
     it('keeps per-step checkpoint size O(1) — step records do not embed the growing transcript', async () => {
       const storage = new MemoryStorage();
-      registerDeps('size-run', async ({ step }) => {
+      const services = makeServices(async ({ step }) => {
         if (step < 5) return { content: `s${step}`, toolCalls: [{ name: 'next', arguments: {} }] };
         return { content: 'final', toolCalls: [] };
       });
 
       const { engine, checkpointStore } = await buildEngine(storage, false);
       try {
-        await runToCompletion(engine, { runId: 'size-run', prompt: 'Hi' });
+        await runToCompletion(engine, { runId: 'size-run', prompt: 'Hi' }, services);
 
         const checkpoint = await checkpointStore.loadCheckpoint('size-run');
         const view = textValueStore(storage, { disposeUnderlyingStorage: false });

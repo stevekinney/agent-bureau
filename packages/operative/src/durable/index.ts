@@ -4,7 +4,6 @@ export type { CheckpointStore } from './checkpoint-store';
 export { createCheckpointStore } from './checkpoint-store';
 export type { AnyRunEngine, CreateRunEngineOptions, RunEngine } from './create-run-engine';
 export { createRunEngine } from './create-run-engine';
-export type { DurableRunDeps, RunDepsReconstructor } from './deps-registry';
 // `resetRunDepsRegistry` is intentionally NOT exported here — it resets
 // process-global state and is test-only. It is exposed from `operative/test`.
 export {
@@ -17,4 +16,4 @@ export {
 export type { AgentRunWorkflowInput, AgentRunWorkflowResult } from './run-workflow';
 export { createRunWorkflow } from './run-workflow';
 export { createStorageActivities } from './storage-activities';
-export type { RunCheckpoint, RunCursor, StepRecord } from './types';
+export type { DurableRunDeps, RunCheckpoint, RunCursor, StepRecord } from './types';

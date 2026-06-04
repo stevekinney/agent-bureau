@@ -1,6 +1,9 @@
-import type { ToolExecutionResult } from 'armorer';
+import type { Toolbox, ToolExecutionResult } from 'armorer';
 import type { ConversationSnapshot } from 'conversationalist';
 import type { JSONValue, ToolCall } from 'interoperability';
+
+import type { EventDispatcher } from '../run-step';
+import type { RunOptions } from '../types';
 
 /**
  * The durable cursor for a run. This is the minimal plain-cloneable state the
@@ -61,4 +64,30 @@ export interface RunCheckpoint {
   conversation: ConversationSnapshot | null;
   /** Completed step records in step order. */
   steps: StepRecord[];
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- Toolbox generic variance; the durable layer never inspects the tool-tuple type parameter (matches gateway's GatewayToolbox).
+type AnyToolbox = Toolbox<any>;
+
+/**
+ * The non-serializable, per-run behavior a durable workflow needs but cannot
+ * checkpoint: the `generate` function, the `toolbox`, the hook registry, the
+ * event emitter, and the other closures from {@link RunOptions}. Checkpoints
+ * persist run *state* (cursor, transcript, step records); this is run *behavior*.
+ *
+ * It is handed to the durable `agentRun` workflow as Weft's per-run `services`
+ * value (`engine.start(type, input, { services })`, read as `ctx.services`),
+ * which is never checkpointed and is re-provided on cross-process recovery by
+ * the engine's `resolveWorkflowServices` resolver.
+ */
+export interface DurableRunDeps {
+  options: RunOptions;
+  toolbox: AnyToolbox;
+  /**
+   * The event emitter the run's steps dispatch to. Present under inline mode so
+   * the durable path emits the same `CombinedOperativeEventMap` events as the
+   * in-memory loop (hooks/events parity); `undefined` for a headless durable run
+   * with no observable surface.
+   */
+  emitter?: EventDispatcher;
 }

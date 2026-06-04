@@ -11,7 +11,6 @@ import { BudgetExceededError, ElicitationDeniedError } from '../errors';
 import type { RunOptions, RunResult } from '../types';
 import { createCheckpointStore } from './checkpoint-store';
 import { createRunEngine } from './create-run-engine';
-import { resetRunDepsRegistry } from './deps-registry';
 import { createRunWorkflow } from './run-workflow';
 
 async function buildContext() {
@@ -34,7 +33,6 @@ function runOptions(generate: RunOptions['generate']): RunOptions {
 }
 
 afterEach(async () => {
-  resetRunDepsRegistry();
   // Drain Weft's deferred inline launch (see runtime-composition.test.ts).
   await yieldToPortableEventLoop();
 });

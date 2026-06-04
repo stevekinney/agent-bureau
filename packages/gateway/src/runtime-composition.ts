@@ -1,3 +1,4 @@
+import type { WorkflowServicesResolution, WorkflowServicesResolverInfo } from '@lostgradient/weft';
 import type { Storage, TextValueStore } from '@lostgradient/weft/storage';
 import { resolveStorage, textValueStore } from '@lostgradient/weft/storage';
 import {
@@ -7,6 +8,7 @@ import {
   type Toolbox,
   type ToolCallInput,
 } from 'armorer';
+import { Conversation } from 'conversationalist';
 import {
   createAnthropicGenerate,
   createAnthropicGenerateStream,
@@ -40,7 +42,7 @@ import {
   withCache,
   withEnhancedStreaming,
 } from 'operative';
-import type { AnyRunEngine, CheckpointStore } from 'operative/durable';
+import type { AnyRunEngine, CheckpointStore, DurableRunDeps } from 'operative/durable';
 import { createCheckpointStore, createRunEngine, createRunWorkflow } from 'operative/durable';
 import type { SkillSession } from 'skills';
 import { createSkillSession, escapeXml } from 'skills';
@@ -526,18 +528,22 @@ export async function createRuntimeComposition(
       textValueStore(durableStorage, { disposeUnderlyingStorage: false }),
     );
     const runWorkflow = createRunWorkflow(checkpointStore);
-    // recover: false is REQUIRED. With the default (recover: true), Engine.create
-    // runs recoverAll() during construction — but on a fresh process the deps
-    // registry is empty, so a recovered run's ensureDeps has no reconstructor yet
-    // and recoverAll would reject, and Engine.create rethrows: the bureau would
-    // fail to boot at all. The bureau owns recovery ordering instead — it
-    // registers a deps reconstructor, then calls engine.recoverAll() once the
-    // reconstructor is in place.
+    // recover: false is REQUIRED. Weft's `Engine.create` default is recover:true,
+    // which runs recoverAll() *during construction* — but the bureau needs the
+    // recovered handles itself (to attach the `settleRecoveredRun` monitors that
+    // persist each resumed run's terminal session status), and a handle started
+    // inside Engine.create is not surfaced to the caller. So the bureau owns
+    // recovery: it calls engine.recoverAll() at boot and keeps the handles. The
+    // per-run deps a recovered run needs are re-provided lazily by
+    // `resolveRunServices` (passed as resolveWorkflowServices), which Weft fires
+    // per recovered run before its generator advances — no pre-injection, no
+    // module-global registry.
     durable = await createRunEngine({
       storage: durableStorage,
       runWorkflow,
       checkpointStore,
       recover: false,
+      resolveWorkflowServices: async (info) => resolveRunServices(info),
     });
   }
 
@@ -746,6 +752,76 @@ export async function createRuntimeComposition(
       validateResponse,
       streamEventTarget,
     });
+  }
+
+  /**
+   * Rebuild a recovered run's non-serializable {@link DurableRunDeps} from durable
+   * config: reconstruct the run runtime from the owning session's persisted
+   * request — the same `createRunRuntime` a fresh run uses. Returns `null` when
+   * the session is absent (the run is not bureau-owned / not reconstructable).
+   *
+   * The reconstructed `conversation` is a placeholder: a resumed run reads its
+   * transcript from the checkpoint, not from `options.conversation`. No `emitter`
+   * is attached — a recovered run has no live event surface (the accepted
+   * seam #5b: recovered runs are observable via `getSession`, not `getRun`).
+   */
+  async function buildRunDepsFromSession(
+    session: Awaited<ReturnType<NonNullable<typeof sessionStore>['load']>>,
+  ): Promise<DurableRunDeps | null> {
+    if (!session) return null;
+    const message = session.metadata['lastUserMessage'];
+    const runRuntime = await createRunRuntime(
+      {
+        message: typeof message === 'string' ? message : '',
+        sessionId: session.id,
+      },
+      { liveStreaming: false },
+    );
+    return {
+      toolbox: runRuntime.toolbox,
+      options: {
+        generate: runRuntime.generate,
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment -- Toolbox generic variance; the durable layer never inspects the tool-tuple type parameter (matches createRunRuntime's internal Toolbox<any>).
+        toolbox: runRuntime.toolbox,
+        conversation: new Conversation(session.conversationHistory),
+        maximumSteps,
+        stopWhen: options.stopWhen,
+        prepareStep: runRuntime.prepareStep,
+        onStep: runRuntime.onStep,
+        validateResponse: runRuntime.validateResponse,
+      },
+    };
+  }
+
+  /**
+   * Weft's `resolveWorkflowServices` resolver: re-provide a recovered run's deps
+   * on a fresh-process resume. Weft fires it (per recovered inline run that was
+   * launched with `services`) BEFORE the generator advances, passing the run's
+   * `workflowId` — which equals our `runId`, since `engine.start` pins
+   * `{ id: runId }`. Finds the owning `running` session, rebuilds its deps, and
+   * returns `{ status: 'available', services }`; a run with no reconstructable
+   * session returns `{ status: 'unavailable' }`, which fails just that one run
+   * (terminal `failed`) without aborting recovery or the engine. Side-effect-free
+   * and idempotent — Weft may call it again on a later boot.
+   */
+  async function resolveRunServices(
+    info: WorkflowServicesResolverInfo,
+  ): Promise<WorkflowServicesResolution> {
+    if (!sessionStore) {
+      return { status: 'unavailable', reason: 'no session store configured' };
+    }
+    const summaries = await sessionStore.list();
+    for (const summary of summaries) {
+      if (summary.metadata['lastRunId'] !== info.workflowId) continue;
+      if (summary.metadata['lastRunStatus'] !== 'running') continue;
+      const session = await sessionStore.load(summary.id);
+      const services = await buildRunDepsFromSession(session);
+      if (services === null) {
+        return { status: 'unavailable', reason: `run ${info.workflowId} not reconstructable` };
+      }
+      return { status: 'available', services };
+    }
+    return { status: 'unavailable', reason: `no running session for run ${info.workflowId}` };
   }
 
   return {

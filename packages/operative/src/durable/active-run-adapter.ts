@@ -1,3 +1,4 @@
+import { isWeftErrorLike } from '@lostgradient/weft';
 import { Conversation, isConversation } from 'conversationalist';
 import type { ForwardableSource } from 'lifecycle';
 import { CompletableEventTarget, forwardEvents } from 'lifecycle';
@@ -16,7 +17,6 @@ import type { RunState } from '../run-step';
 import type { FinishReason, RunOptions, RunResult } from '../types';
 import type { CheckpointStore } from './checkpoint-store';
 import type { AnyRunEngine } from './create-run-engine';
-import { clearRunDeps, registerRunDeps } from './deps-registry';
 import type { AgentRunWorkflowResult } from './run-workflow';
 
 /** Dependencies the adapter needs from bureau composition. */
@@ -209,108 +209,93 @@ async function driveDurableRun(
   const runStartTime = performance.now();
   const { hooks } = options;
 
-  // The durable run's behavior is driven through the deps registry; the workflow
-  // body resolves it via getRunDeps. Inject the combined signal so an abort()
-  // reaches the running step, and the emitter so step events flow (inline mode).
-  registerRunDeps(runId, {
-    options: { ...options, signal },
-    toolbox: options.toolbox,
-    emitter,
-  });
-
-  try {
-    // RunStartedEvent + onRunStart (an onRunStart error aborts the run).
-    const startError = await startRunLifecycle(options, conversation, emitter);
-    if (startError !== undefined) {
-      return makeErrorResult(emptyRunState(), conversation, hooks, emitter, startError);
-    }
-
-    // Pin the Weft workflow id to `runId` so `handle.id === runId`. This makes
-    // the run's id its resume key (recoverAll surfaces handles keyed by it) and
-    // lets boot recovery clear deps by `handle.id` without first awaiting the
-    // result (see `settleRecoveredRun`). Each `runId` is unique per run, so the
-    // duplicate-id guard never trips on a fresh run.
-    const handle = await context.engine.start(
-      'agentRun',
-      {
-        runId,
-        prompt,
-        maximumSteps: options.maximumSteps,
-      },
-      { id: runId },
-    );
-
-    let summary: AgentRunWorkflowResult;
-    try {
-      summary = (await handle.result()) as AgentRunWorkflowResult;
-    } catch (error) {
-      // The engine was disposed while this run was still in flight — i.e. the
-      // bureau (or process) is tearing down mid-run. This is the CRASH semantic,
-      // not an abort: the run is abandoned FOR RECOVERY, so a fresh process can
-      // resume it from its last checkpoint. We MUST NOT fire a terminal lifecycle
-      // event here — `makeAbortResult`/`makeErrorResult` would drive gateway's
-      // `once('run.aborted'/'completed')`, persist a terminal session status, and
-      // the boot reconstructor (which only rebuilds sessions still marked
-      // `running`) would then skip the run and recovery would never happen. So we
-      // resolve quietly with an interrupted-shaped result and leave the session
-      // `running`. Code-matched (not `instanceof`) to survive the module boundary.
-      if (isEngineDisposedError(error)) {
-        return makeInterruptedRunResult(conversation);
-      }
-      throw error;
-    }
-
-    // The authoritative conversation on the durable path is the one rehydrated
-    // from the checkpoint — the workflow mutates rehydrated snapshots per step,
-    // never the input instance (which stays empty). Use the reconstructed one
-    // for the result AND the completion lifecycle so they agree.
-    const {
-      result,
-      runState,
-      conversation: durableConversation,
-    } = await reconstructRunResult(context, runId, summary);
-
-    // Fire the completion lifecycle from the SAME functions the loop uses, keyed
-    // on the durable run's finishReason. These run in-process on the launching
-    // engine (inline mode) and are intentionally not checkpointed. The terminal
-    // error message / abort reason are carried out of the workflow summary so the
-    // emitted RunAborted/RunError events and gateway's `lastError` reflect the
-    // real cause, not a synthetic placeholder.
-    return finalizeRunResult({
-      finishReason: result.finishReason,
-      runState,
-      conversation: durableConversation,
-      hooks,
-      emitter,
-      runStartTime,
-      errorMessage: summary.errorMessage,
-      abortReason: summary.abortReason,
-      schemaValidation: summary.schemaValidation,
-    });
-  } finally {
-    clearRunDeps(runId);
+  // RunStartedEvent + onRunStart (an onRunStart error aborts the run).
+  const startError = await startRunLifecycle(options, conversation, emitter);
+  if (startError !== undefined) {
+    return makeErrorResult(emptyRunState(), conversation, hooks, emitter, startError);
   }
+
+  // Pin the Weft workflow id to `runId` so `handle.id === runId`. This makes the
+  // run's id its resume key (recoverAll surfaces handles keyed by it) and lets
+  // boot recovery correlate handles to sessions by `handle.id` (see
+  // `settleRecoveredRun`). Each `runId` is unique per run, so the duplicate-id
+  // guard never trips on a fresh run.
+  //
+  // Hand the run's non-serializable behavior to the engine as its per-run
+  // `services` value: the workflow body reads it as `ctx.services` (never
+  // checkpointed), and on a cross-process recovery the engine re-provides it via
+  // `resolveWorkflowServices`. Inject the combined signal so an abort() reaches
+  // the running step, and the emitter so step events flow (inline mode).
+  const handle = await context.engine.start(
+    'agentRun',
+    {
+      runId,
+      prompt,
+      maximumSteps: options.maximumSteps,
+    },
+    {
+      id: runId,
+      services: {
+        options: { ...options, signal },
+        toolbox: options.toolbox,
+        emitter,
+      },
+    },
+  );
+
+  let summary: AgentRunWorkflowResult;
+  try {
+    summary = (await handle.result()) as AgentRunWorkflowResult;
+  } catch (error) {
+    // The engine was disposed while this run was still in flight — i.e. the
+    // bureau (or process) is tearing down mid-run. This is the CRASH semantic,
+    // not an abort: the run is abandoned FOR RECOVERY, so a fresh process can
+    // resume it from its last checkpoint. We MUST NOT fire a terminal lifecycle
+    // event here — `makeAbortResult`/`makeErrorResult` would drive gateway's
+    // `once('run.aborted'/'completed')`, persist a terminal session status, and
+    // the boot reconstructor (which only rebuilds sessions still marked
+    // `running`) would then skip the run and recovery would never happen. So we
+    // resolve quietly with an interrupted-shaped result and leave the session
+    // `running`. Structural code match (not `instanceof`) to survive the module
+    // boundary — `isWeftErrorLike` narrows a caught unknown without `instanceof`.
+    if (isWeftErrorLike(error) && error.code === 'EngineDisposedError') {
+      return makeInterruptedRunResult(conversation);
+    }
+    throw error;
+  }
+
+  // The authoritative conversation on the durable path is the one rehydrated
+  // from the checkpoint — the workflow mutates rehydrated snapshots per step,
+  // never the input instance (which stays empty). Use the reconstructed one
+  // for the result AND the completion lifecycle so they agree.
+  const {
+    result,
+    runState,
+    conversation: durableConversation,
+  } = await reconstructRunResult(context, runId, summary);
+
+  // Fire the completion lifecycle from the SAME functions the loop uses, keyed
+  // on the durable run's finishReason. These run in-process on the launching
+  // engine (inline mode) and are intentionally not checkpointed. The terminal
+  // error message / abort reason are carried out of the workflow summary so the
+  // emitted RunAborted/RunError events and gateway's `lastError` reflect the
+  // real cause, not a synthetic placeholder.
+  return finalizeRunResult({
+    finishReason: result.finishReason,
+    runState,
+    conversation: durableConversation,
+    hooks,
+    emitter,
+    runStartTime,
+    errorMessage: summary.errorMessage,
+    abortReason: summary.abortReason,
+    schemaValidation: summary.schemaValidation,
+  });
 }
 
 /** A throwaway run state for the pre-step error path (no steps completed yet). */
 function emptyRunState(): RunState {
   return createRunState();
-}
-
-/**
- * True when `error` is Weft's `EngineDisposedError` — the engine was disposed
- * while this run's `handle.result()` was still pending. Matched on `code` rather
- * than `instanceof` because the error class is constructed inside the `weft`
- * module and an `instanceof` check fails across the module boundary (same trap
- * as `isConversation` vs `instanceof Conversation`).
- */
-function isEngineDisposedError(error: unknown): boolean {
-  return (
-    typeof error === 'object' &&
-    error !== null &&
-    'code' in error &&
-    (error as { code: unknown }).code === 'EngineDisposedError'
-  );
 }
 
 /**

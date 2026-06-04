@@ -10,10 +10,7 @@ import { afterEach, describe, expect, it, mock } from 'bun:test';
 import { Conversation, getMessages } from 'conversationalist';
 import type { GenerateFunction, GenerateResponse, Toolbox } from 'operative';
 import { stopWhen } from 'operative';
-import {
-  createMockGenerate as createSequentialGenerate,
-  resetRunDepsRegistry,
-} from 'operative/test';
+import { createMockGenerate as createSequentialGenerate } from 'operative/test';
 import { createStore } from 'sentinel';
 import { z } from 'zod';
 
@@ -338,9 +335,12 @@ describe('createBureau', () => {
       expect(bureauAReachedStep1).toBe(true);
       bureauA.dispose();
 
-      // === FRESH PROCESS: clear the module-global deps registry so the recovered
-      // run cannot ride on bureau A's in-process closures. ===
-      resetRunDepsRegistry();
+      // === FRESH PROCESS: bureau B is a wholly separate bureau over the same
+      // SQLite file, with its own engine and its own `resolveWorkflowServices`
+      // resolver. There is no shared in-process state — disposing bureau A tore
+      // down its engine (and the per-run `services` it held), so the recovered
+      // run can ONLY advance on deps bureau B's resolver rebuilds from config +
+      // the persisted session. ===
 
       // === Bureau B: same SQLite file, a generate that settles. On boot it
       // reconstructs deps from config + the persisted session and resumes. ===
@@ -396,7 +396,6 @@ describe('createBureau', () => {
       await rm(databasePath, { force: true });
       await rm(`${databasePath}-wal`, { force: true });
       await rm(`${databasePath}-shm`, { force: true });
-      resetRunDepsRegistry();
     }
   });
 
@@ -491,7 +490,6 @@ describe('createBureau', () => {
       await rm(databasePath, { force: true });
       await rm(`${databasePath}-wal`, { force: true });
       await rm(`${databasePath}-shm`, { force: true });
-      resetRunDepsRegistry();
     }
   });
 
@@ -1047,7 +1045,6 @@ describe('createBureau', () => {
       await rm(databasePath, { force: true });
       await rm(`${databasePath}-wal`, { force: true });
       await rm(`${databasePath}-shm`, { force: true });
-      resetRunDepsRegistry();
     }
   });
 
@@ -1086,7 +1083,6 @@ describe('createBureau', () => {
       await rm(databasePath, { force: true });
       await rm(`${databasePath}-wal`, { force: true });
       await rm(`${databasePath}-shm`, { force: true });
-      resetRunDepsRegistry();
     }
   });
 });
