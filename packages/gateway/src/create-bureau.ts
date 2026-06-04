@@ -531,12 +531,16 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
    * failed by the engine (terminal `failed`) BEFORE replay without aborting the
    * others or the boot — `recoverAll()` itself does not throw for it.
    *
-   * Such an engine-failed run never yields a handle, so `settleRecoveredRun`
-   * never runs for it. The common reconstructable-failure case — the owning
-   * session is `running` but its deps cannot be rebuilt on this process — is
-   * reconciled to `error` SYNCHRONOUSLY inside the resolver (`resolveRunServices`
-   * in runtime-composition.ts), which has the sessionId in hand, so that session
-   * is not left stale.
+   * Such an engine-failed run DOES still yield a handle (observed: Weft surfaces a
+   * handle whose `result()` rejects with the services-unavailable error), so
+   * `settleRecoveredRun` runs for it — but its `handle.result()` rejects, so it
+   * takes the write-free `catch` (log only) and does NOT persist a session status.
+   * The session is therefore reconciled by the resolver, not the monitor: the
+   * common reconstructable-failure case — the owning session is `running` but its
+   * deps cannot be rebuilt on this process — is reconciled to `error`
+   * SYNCHRONOUSLY inside the resolver (`resolveRunServices` in
+   * runtime-composition.ts), which has the sessionId in hand AND runs strictly
+   * before `recoverAll()` returns the handles, so the monitor cannot clobber it.
    *
    * KNOWN LIMITATION (documented, accepted): one narrow residue remains — a run
    * whose owning session VANISHED mid-recovery (loaded as null between the list

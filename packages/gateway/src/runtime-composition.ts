@@ -832,11 +832,11 @@ export async function createRuntimeComposition(
         // The owning session exists and is `running`, but its deps cannot be
         // rebuilt on this process (e.g. no `generate`/provider configured here,
         // so `createRunRuntime` throws). Weft will fail this run terminally
-        // pre-replay and surface NO handle, so `settleRecoveredRun` never
-        // reconciles the session — it would be left stuck `running`. We have the
-        // sessionId in hand here, so reconcile it to `error` synchronously on the
-        // boot path (not a racy detached write). Best-effort: a failed write must
-        // not abort recovery, so swallow it and still return unavailable.
+        // pre-replay; its `settleRecoveredRun` monitor (if Weft surfaces a
+        // rejecting handle) only logs, it does not persist a session status — so
+        // without this reconcile the session would be left stuck `running`. We
+        // have the sessionId in hand here, so reconcile it to `error`
+        // synchronously on the boot path (not a racy detached write).
         const reason = error instanceof Error ? error.message : String(error);
         try {
           await sessionStore.updateMetadata(summary.id, {
@@ -844,9 +844,15 @@ export async function createRuntimeComposition(
             lastFinishReason: 'error',
             lastError: `Recovered run could not be reconstructed: ${reason}`,
           });
-        } catch {
-          // Reconciliation is best-effort; leaving the session stale is the
-          // documented fallback (see create-bureau.ts recoverDurableRuns).
+        } catch (writeError) {
+          // Reconciliation is best-effort — a failed write must not abort the
+          // rest of recovery — but it is NOT silent: a session left stale
+          // `running` cannot be repaired by a later boot (the run is already
+          // terminal `failed` and is skipped), so surface it for operators.
+          console.error(
+            `[bureau] Failed to reconcile unrecoverable run "${info.workflowId}" ` +
+              `(session ${summary.id}) to error: ${writeError instanceof Error ? writeError.message : String(writeError)}`,
+          );
         }
         return { status: 'unavailable', reason: `run ${info.workflowId} not reconstructable` };
       }

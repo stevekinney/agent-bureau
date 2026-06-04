@@ -86,7 +86,7 @@ async function waitForRunCompletion(bureau: Bureau, runId: string) {
  * that flakes on loaded hosts. `check` may be async (e.g. re-reading the session
  * store each iteration). The cap is generous (20) because each tick is a cheap
  * `setTimeout(0)` and a multi-step durable recovery yields several times (launch
- * → ensureDeps → per-step memo → saveConversation/recordStep/saveCursor); a tight
+ * → resolver → per-step memo → saveConversation/recordStep/saveCursor); a tight
  * cap would itself flake on a loaded host. A `check` that resolves earlier returns
  * immediately, so the generous cap costs nothing on the happy path.
  */
