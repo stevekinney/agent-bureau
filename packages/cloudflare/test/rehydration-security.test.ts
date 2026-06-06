@@ -58,7 +58,9 @@ describe('searchByVector rehydration security', () => {
     const call = vectorize.queryCalls[0]!;
     expect(call.options.filter).toEqual({ tenant_id: TENANT, namespace: NAMESPACE });
     expect(call.options.returnMetadata).toBe(true);
-    expect(call.options.topK).toBe(10);
+    // The backend OVERFETCHES (topK > limit) so rehydration can drop poison/stale
+    // hits and still return up to `limit` valid rows; it must not pass topK = limit.
+    expect(call.options.topK).toBeGreaterThan(10);
   });
 
   it('drops a cross-tenant hit', async () => {
@@ -73,9 +75,17 @@ describe('searchByVector rehydration security', () => {
 
     vectorize.injectPoison([
       {
-        id: 'shared-id',
+        id: 'tenant-b:alpha:shared-id',
         score: 0.99,
-        metadata: { tenant_id: 'tenant-b', namespace: NAMESPACE, version: 1 },
+        // memory_id is present and well-formed; the drop must come from the
+        // rehydration tenant scope-check (SCOPE is tenant-a) NOT finding a
+        // tenant-a row for this id, not from the metadata being unreadable.
+        metadata: {
+          tenant_id: 'tenant-b',
+          namespace: NAMESPACE,
+          memory_id: 'shared-id',
+          version: 1,
+        },
       },
     ]);
 
@@ -94,9 +104,9 @@ describe('searchByVector rehydration security', () => {
 
     vectorize.injectPoison([
       {
-        id: 'beta-row',
+        id: `${TENANT}:beta:beta-row`,
         score: 0.99,
-        metadata: { tenant_id: TENANT, namespace: 'beta', version: 1 },
+        metadata: { tenant_id: TENANT, namespace: 'beta', memory_id: 'beta-row', version: 1 },
       },
     ]);
 
@@ -104,15 +114,17 @@ describe('searchByVector rehydration security', () => {
     expect(hits.map((h) => h.id)).toEqual(['legit']);
   });
 
-  it('drops a stale-version hit even when the id is correctly scoped', async () => {
-    // 'legit' is at version 1; the adversary advertises a different version for
-    // the same id. The canonical row exists and is in-scope, so ONLY the version
-    // gate can drop it — proving the version compare is real.
+  it('drops a stale-version (ahead-of-canonical) hit even when the id is correctly scoped', async () => {
+    // 'legit' is at version 1; the adversary advertises version 99 — AHEAD of the
+    // canonical row. Because every write hits SQLite before Vectorize, the index
+    // can never legitimately be ahead, so an ahead-version hit is poison. The
+    // canonical row exists and is in-scope, so ONLY the version gate can drop it —
+    // proving the version compare is real.
     vectorize.injectPoison([
       {
-        id: 'legit',
+        id: `${TENANT}:${NAMESPACE}:legit`,
         score: 0.5,
-        metadata: { tenant_id: TENANT, namespace: NAMESPACE, version: 99 },
+        metadata: { tenant_id: TENANT, namespace: NAMESPACE, memory_id: 'legit', version: 99 },
       },
     ]);
 
@@ -125,11 +137,40 @@ describe('searchByVector rehydration security', () => {
 
   it('drops a hit whose advertised version is missing entirely', async () => {
     vectorize.injectPoison([
-      { id: 'legit', score: 0.5, metadata: { tenant_id: TENANT, namespace: NAMESPACE } },
+      {
+        id: `${TENANT}:${NAMESPACE}:legit`,
+        score: 0.5,
+        metadata: { tenant_id: TENANT, namespace: NAMESPACE, memory_id: 'legit' },
+      },
     ]);
 
     const hits = await storage.searchByVector([1, 0], SCOPE, { limit: 10 });
     expect(hits.map((h) => h.id)).toEqual(['legit']);
+  });
+
+  it('KEEPS a hit whose advertised version is behind canonical (benign index lag)', async () => {
+    // Bump 'legit' to version 3 in canonical SQLite; the index still advertises
+    // the older version 1 for the same id. Because the index can only ever lag
+    // (SQLite is written first), a behind-version hit is a valid pointer to a live
+    // row, NOT poison — it must surface, rehydrated to the canonical record. This
+    // is the case the old strict !== gate wrongly dropped, making a live record
+    // vanish from search on a benign lag.
+    await storage.update('legit', SCOPE, { content: 'v2' });
+    await storage.update('legit', SCOPE, { content: 'v3' });
+
+    vectorize.injectPoison([
+      {
+        id: `${TENANT}:${NAMESPACE}:legit`,
+        score: 0.9,
+        metadata: { tenant_id: TENANT, namespace: NAMESPACE, memory_id: 'legit', version: 1 },
+      },
+    ]);
+
+    const hits = await storage.searchByVector([1, 0], SCOPE, { limit: 10 });
+    expect(hits.map((h) => h.id)).toEqual(['legit']);
+    // Surfaced record is the CANONICAL current version, never the stale copy.
+    expect(hits[0]!.record.version).toBe(3);
+    expect(hits[0]!.record.content).toBe('v3');
   });
 
   it('drops a deleted (tombstoned) hit', async () => {
@@ -139,9 +180,9 @@ describe('searchByVector rehydration security', () => {
     // The secondary index still "remembers" the doomed id and returns it.
     vectorize.injectPoison([
       {
-        id: 'doomed',
+        id: `${TENANT}:${NAMESPACE}:doomed`,
         score: 0.99,
-        metadata: { tenant_id: TENANT, namespace: NAMESPACE, version: 1 },
+        metadata: { tenant_id: TENANT, namespace: NAMESPACE, memory_id: 'doomed', version: 1 },
       },
     ]);
 
@@ -152,9 +193,16 @@ describe('searchByVector rehydration security', () => {
   it('drops a hit absent from SQLite entirely', async () => {
     vectorize.injectPoison([
       {
-        id: 'never-stored',
+        id: `${TENANT}:${NAMESPACE}:never-stored`,
         score: 0.99,
-        metadata: { tenant_id: TENANT, namespace: NAMESPACE, version: 1 },
+        // Well-formed in-scope metadata; the drop is the SQLite rehydration
+        // finding no canonical row for this id.
+        metadata: {
+          tenant_id: TENANT,
+          namespace: NAMESPACE,
+          memory_id: 'never-stored',
+          version: 1,
+        },
       },
     ]);
 
@@ -166,31 +214,49 @@ describe('searchByVector rehydration security', () => {
     await storage.put(makeRecord('doomed', { vector: new Float32Array([1, 0]) }));
     await storage.delete('doomed', SCOPE);
 
+    // Every poison hit carries well-formed, in-band metadata (id, memory_id) so
+    // each is dropped by its intended rehydration check — scope, version (ahead),
+    // tombstone, or SQLite-absence — never by unreadable metadata.
     vectorize.injectPoison([
       {
-        id: 'cross-tenant',
+        id: 'tenant-b:alpha:cross-tenant',
         score: 0.99,
-        metadata: { tenant_id: 'tenant-b', namespace: NAMESPACE, version: 1 },
+        metadata: {
+          tenant_id: 'tenant-b',
+          namespace: NAMESPACE,
+          memory_id: 'cross-tenant',
+          version: 1,
+        },
       },
       {
-        id: 'wrong-namespace',
+        id: `${TENANT}:beta:wrong-namespace`,
         score: 0.98,
-        metadata: { tenant_id: TENANT, namespace: 'beta', version: 1 },
+        metadata: {
+          tenant_id: TENANT,
+          namespace: 'beta',
+          memory_id: 'wrong-namespace',
+          version: 1,
+        },
       },
       {
-        id: 'legit',
+        id: `${TENANT}:${NAMESPACE}:legit`,
         score: 0.97,
-        metadata: { tenant_id: TENANT, namespace: NAMESPACE, version: 99 },
+        metadata: { tenant_id: TENANT, namespace: NAMESPACE, memory_id: 'legit', version: 99 },
       },
       {
-        id: 'doomed',
+        id: `${TENANT}:${NAMESPACE}:doomed`,
         score: 0.96,
-        metadata: { tenant_id: TENANT, namespace: NAMESPACE, version: 1 },
+        metadata: { tenant_id: TENANT, namespace: NAMESPACE, memory_id: 'doomed', version: 1 },
       },
       {
-        id: 'never-stored',
+        id: `${TENANT}:${NAMESPACE}:never-stored`,
         score: 0.95,
-        metadata: { tenant_id: TENANT, namespace: NAMESPACE, version: 1 },
+        metadata: {
+          tenant_id: TENANT,
+          namespace: NAMESPACE,
+          memory_id: 'never-stored',
+          version: 1,
+        },
       },
     ]);
 
@@ -198,6 +264,42 @@ describe('searchByVector rehydration security', () => {
     expect(hits.map((h) => h.id)).toEqual(['legit']);
     expect(hits[0]!.record.version).toBe(1);
     expect(hits[0]!.record.content).toBe('content-legit');
+  });
+
+  describe('scoped Vectorize id: the same memory id in two scopes does not collide', () => {
+    it('keeps two tenants’ same-id vectors independent through search and delete', async () => {
+      // Same memory id 'doc' under tenant-a and tenant-b. If the Vectorize id were
+      // the bare memory id, the second put would overwrite the first's vector and
+      // deleting one would delete the other's index entry.
+      const scopeA: MemoryRecordScope = { tenantId: 'tenant-a', namespace: NAMESPACE };
+      const scopeB: MemoryRecordScope = { tenantId: 'tenant-b', namespace: NAMESPACE };
+      await storage.put({
+        ...makeRecord('doc', { content: 'A-doc', vector: new Float32Array([1, 0]) }),
+        tenantId: 'tenant-a',
+      });
+      await storage.put({
+        ...makeRecord('doc', { content: 'B-doc', vector: new Float32Array([1, 0]) }),
+        tenantId: 'tenant-b',
+      });
+
+      // Each tenant's search finds its OWN 'doc' (plus tenant-a also has 'legit').
+      const aHits = await storage.searchByVector([1, 0], scopeA, { limit: 10 });
+      expect(aHits.map((h) => h.id).sort()).toEqual(['doc', 'legit']);
+      expect(aHits.find((h) => h.id === 'doc')!.record.content).toBe('A-doc');
+
+      const bHits = await storage.searchByVector([1, 0], scopeB, { limit: 10 });
+      expect(bHits.map((h) => h.id)).toEqual(['doc']);
+      expect(bHits[0]!.record.content).toBe('B-doc');
+
+      // Deleting tenant-a's 'doc' must leave tenant-b's 'doc' fully searchable and
+      // gettable — the scoped Vectorize id keeps the two index entries distinct.
+      expect(await storage.delete('doc', scopeA)).toBe(true);
+      expect(await storage.get('doc', scopeA)).toBeUndefined();
+      expect(await storage.get('doc', scopeB)).toBeDefined();
+      const bAfter = await storage.searchByVector([1, 0], scopeB, { limit: 10 });
+      expect(bAfter.map((h) => h.id)).toEqual(['doc']);
+      expect(bAfter[0]!.record.content).toBe('B-doc');
+    });
   });
 
   describe('Vectorize upsert metadata is server-owned and allowlisted', () => {

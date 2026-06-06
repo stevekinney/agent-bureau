@@ -92,4 +92,53 @@ describe('createCloudflareMemoryTestHarness', () => {
       .toArray();
     expect(rows.map((r) => r.id)).toEqual(['a']);
   });
+
+  it('rejects a tableName that is not a safe SQL identifier', () => {
+    // The table name is interpolated as a SQL identifier (params cannot bind
+    // identifiers), so anything outside a strict identifier pattern — quotes,
+    // semicolons, spaces, a leading digit — must be refused at construction, not
+    // smuggled into a CREATE/SELECT.
+    const sql = createSqliteDouble();
+    const vectorize = createFakeVectorize();
+    for (const bad of ['memory; DROP TABLE x', 'mem ory', 'memory"', '1memory', 'has-dash', '']) {
+      expect(() => createCloudflareMemoryRecordStorage({ sql, vectorize, tableName: bad })).toThrow(
+        /tableName must be a valid SQL identifier/,
+      );
+    }
+  });
+});
+
+describe('searchByVector limit edges', () => {
+  let storage: ReturnType<typeof createCloudflareMemoryRecordStorage>;
+  let vectorize: ReturnType<typeof createFakeVectorize>;
+
+  beforeEach(async () => {
+    vectorize = createFakeVectorize();
+    storage = createCloudflareMemoryRecordStorage({ sql: createSqliteDouble(), vectorize });
+    await storage.init();
+  });
+
+  it('returns [] for limit 0 without querying Vectorize', async () => {
+    await storage.put(makeRecord('a'));
+    const hits = await storage.searchByVector([1, 0], SCOPE, { limit: 0 });
+    expect(hits).toEqual([]);
+    // Short-circuit before touching the index — no wasted query.
+    expect(vectorize.queryCalls).toHaveLength(0);
+  });
+
+  it('still returns a valid row at limit 1 when a poison hit sits in front', async () => {
+    // Overfetch + post-filter must not let a single front poison hit starve the
+    // result: with limit 1 and a leading poison id, the one real row must surface.
+    await storage.put(makeRecord('real'));
+    vectorize.injectPoison([
+      {
+        id: `${TENANT}:${NAMESPACE}:ghost`,
+        score: 0.999,
+        metadata: { tenant_id: TENANT, namespace: NAMESPACE, memory_id: 'ghost', version: 1 },
+      },
+    ]);
+
+    const hits = await storage.searchByVector([1, 0], SCOPE, { limit: 1 });
+    expect(hits.map((h) => h.id)).toEqual(['real']);
+  });
 });

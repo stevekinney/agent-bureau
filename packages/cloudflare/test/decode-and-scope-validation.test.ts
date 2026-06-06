@@ -71,7 +71,7 @@ describe('decode validation (SQLite-stored JSON is untrusted)', () => {
   it('throws when the stored vector JSON is not valid JSON', async () => {
     await storage.put(makeRecord('a'));
     corruptRow('a', { vector: '{ not json' });
-    expect(storage.get('a', SCOPE)).rejects.toThrow();
+    await expect(storage.get('a', SCOPE)).rejects.toThrow();
   });
 
   it('throws when a stored vector entry is non-finite', async () => {
@@ -79,19 +79,19 @@ describe('decode validation (SQLite-stored JSON is untrusted)', () => {
     // JSON has no Infinity literal; a corrupt finite-violating value arrives as
     // null, which the finite-number schema must reject.
     corruptRow('a', { vector: '[1, null, 3]' });
-    expect(storage.get('a', SCOPE)).rejects.toThrow();
+    await expect(storage.get('a', SCOPE)).rejects.toThrow();
   });
 
   it('throws when the stored metadata JSON is not an object', async () => {
     await storage.put(makeRecord('a'));
     corruptRow('a', { metadata: '"a bare string, not a record"' });
-    expect(storage.get('a', SCOPE)).rejects.toThrow();
+    await expect(storage.get('a', SCOPE)).rejects.toThrow();
   });
 
   it('surfaces corruption through list() too, not just get()', async () => {
     await storage.put(makeRecord('a'));
     corruptRow('a', { vector: 'not-json-at-all' });
-    expect(storage.list(SCOPE)).rejects.toThrow();
+    await expect(storage.list(SCOPE)).rejects.toThrow();
   });
 });
 
@@ -106,43 +106,43 @@ describe('tenantId / namespace required at the storage boundary', () => {
     await storage.init();
   });
 
-  it('rejects a missing tenantId on a scoped read', () => {
-    expect(storage.get('a', { namespace: NAMESPACE })).rejects.toThrow(
+  it('rejects a missing tenantId on a scoped read', async () => {
+    await expect(storage.get('a', { namespace: NAMESPACE })).rejects.toThrow(
       /tenantId must be a non-empty string/,
     );
-    expect(storage.count({ namespace: NAMESPACE })).rejects.toThrow(
-      /tenantId must be a non-empty string/,
-    );
-  });
-
-  it('rejects an empty tenantId on a scoped read', () => {
-    expect(storage.get('a', { tenantId: '', namespace: NAMESPACE })).rejects.toThrow(
+    await expect(storage.count({ namespace: NAMESPACE })).rejects.toThrow(
       /tenantId must be a non-empty string/,
     );
   });
 
-  it('rejects an empty namespace on a scoped read', () => {
-    expect(storage.get('a', { tenantId: TENANT, namespace: '' })).rejects.toThrow(
+  it('rejects an empty tenantId on a scoped read', async () => {
+    await expect(storage.get('a', { tenantId: '', namespace: NAMESPACE })).rejects.toThrow(
+      /tenantId must be a non-empty string/,
+    );
+  });
+
+  it('rejects an empty namespace on a scoped read', async () => {
+    await expect(storage.get('a', { tenantId: TENANT, namespace: '' })).rejects.toThrow(
       /namespace must be a non-empty string/,
     );
-    expect(storage.count({ tenantId: TENANT, namespace: '' })).rejects.toThrow(
+    await expect(storage.count({ tenantId: TENANT, namespace: '' })).rejects.toThrow(
       /namespace must be a non-empty string/,
     );
   });
 
-  it('rejects a put() whose record has no tenantId', () => {
+  it('rejects a put() whose record has no tenantId', async () => {
     const record = makeRecord('a');
     const { tenantId: _omit, ...withoutTenant } = record;
-    expect(storage.put(withoutTenant as MemoryRecord)).rejects.toThrow(
+    await expect(storage.put(withoutTenant as MemoryRecord)).rejects.toThrow(
       /tenantId must be a non-empty string/,
     );
   });
 
-  it('rejects searchByVector and deleteNamespace without a tenantId', () => {
-    expect(storage.searchByVector([1, 0], { namespace: NAMESPACE }, { limit: 5 })).rejects.toThrow(
-      /tenantId must be a non-empty string/,
-    );
-    expect(storage.deleteNamespace({ namespace: NAMESPACE })).rejects.toThrow(
+  it('rejects searchByVector and deleteNamespace without a tenantId', async () => {
+    await expect(
+      storage.searchByVector([1, 0], { namespace: NAMESPACE }, { limit: 5 }),
+    ).rejects.toThrow(/tenantId must be a non-empty string/);
+    await expect(storage.deleteNamespace({ namespace: NAMESPACE })).rejects.toThrow(
       /tenantId must be a non-empty string/,
     );
   });

@@ -110,6 +110,15 @@ function metadataNumber(
   return typeof value === 'number' ? value : undefined;
 }
 
+function metadataString(
+  metadata: Record<string, VectorizeMetadataValue> | undefined,
+  key: string,
+): string | undefined {
+  if (metadata === undefined) return undefined;
+  const value = metadata[key];
+  return typeof value === 'string' ? value : undefined;
+}
+
 /**
  * Creates a {@link MemoryRecordStorage} backed by Cloudflare Durable Object
  * SQLite (canonical) plus Vectorize (secondary index).
@@ -144,6 +153,28 @@ export function createCloudflareMemoryRecordStorage(
 ): MemoryRecordStorage {
   const { sql, vectorize } = options;
   const table = options.tableName ?? DEFAULT_MEMORY_TABLE_NAME;
+
+  // The table name is interpolated into SQL as an identifier (parameter binding
+  // cannot bind identifiers), so it must be a safe SQL identifier — never
+  // caller-controlled free text that could break or inject SQL.
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(table)) {
+    throw new Error(
+      `tableName must be a valid SQL identifier (letters, digits, underscore; not starting with a digit); got "${table}".`,
+    );
+  }
+
+  /**
+   * The Vectorize vector id for a record. Vectorize has a single flat id space,
+   * but our canonical key is (tenant_id, namespace, id) — so the same memory id
+   * under two tenants/namespaces must NOT share a Vectorize entry (or one scope
+   * would overwrite/delete the other's vector). Scope the id by encoding all
+   * three components. The bare memory id, tenant, and namespace also travel in
+   * the allowlisted metadata, so search rehydrates from metadata, not by parsing
+   * this id back apart.
+   */
+  function vectorizeId(tenantId: string, namespace: string, id: string): string {
+    return `${encodeURIComponent(tenantId)}:${encodeURIComponent(namespace)}:${encodeURIComponent(id)}`;
+  }
 
   /**
    * Validate and normalize a scope. `tenantId` and `namespace` are both required
@@ -259,7 +290,7 @@ export function createCloudflareMemoryRecordStorage(
       if (record.status === 'active') {
         await vectorize.upsert([
           {
-            id: record.id,
+            id: vectorizeId(tenantId, namespace, record.id),
             values: Array.from(record.vector),
             metadata: vectorizeMetadata(tenantId, record),
           },
@@ -267,7 +298,7 @@ export function createCloudflareMemoryRecordStorage(
       } else {
         // A directly put() non-active record is a tombstone: keep the secondary
         // index from holding a stale live id for it.
-        await vectorize.deleteByIds([record.id]);
+        await vectorize.deleteByIds([vectorizeId(tenantId, namespace, record.id)]);
       }
     },
 
@@ -339,40 +370,66 @@ export function createCloudflareMemoryRecordStorage(
       searchOptions: { limit: number; threshold?: number },
     ): Promise<MemoryVectorSearchResult[]> {
       const { tenantId, namespace } = requireScope(scope);
+      if (searchOptions.limit <= 0) return [];
       const queryVector = Array.from(vector);
+
+      // Overfetch from Vectorize: rehydration drops poison/stale/deleted hits, so
+      // asking for exactly `limit` candidates can return fewer than `limit` valid
+      // rows when a poisoned hit sits at the front. Fetch a wider candidate band
+      // (capped) so the post-filter still yields up to `limit` real results.
+      const topK = Math.min(Math.max(searchOptions.limit * 4, searchOptions.limit + 10), 200);
 
       // SECURITY-CRITICAL: the Vectorize filter is server-owned (tenant +
       // namespace). It is a best-effort narrowing, NOT the security boundary —
-      // every returned id is re-scoped against canonical SQLite below.
+      // every returned hit is re-scoped against canonical SQLite below.
       const result = await vectorize.query(queryVector, {
-        topK: searchOptions.limit,
+        topK,
         filter: { tenant_id: tenantId, namespace },
         returnMetadata: true,
       });
 
       const hits: MemoryVectorSearchResult[] = [];
+      const seen = new Set<string>();
       for (const match of result.matches) {
-        // REHYDRATE: the canonical active row for this id, in this exact scope.
+        // The Vectorize id is scope-encoded; never parse it apart. Take the bare
+        // memory id from the allowlisted metadata, and only trust it after the
+        // scoped SQLite rehydration below confirms the canonical row.
+        const memoryId = metadataString(match.metadata, 'memory_id');
+        if (memoryId === undefined) continue;
+
+        // Dedupe by canonical record id: the index could (e.g. mid-reindex)
+        // return more than one entry pointing at the same memory id. Matches are
+        // already in descending score, so the first survivor is the best-scored.
+        if (seen.has(memoryId)) continue;
+
+        // REHYDRATE: the canonical active row for this id, in THIS exact scope.
         // This single scoped lookup drops cross-tenant, wrong-namespace,
-        // deleted/tombstoned, and absent hits for free.
-        const row = activeRow(tenantId, namespace, match.id);
+        // deleted/tombstoned, and absent hits for free — Vectorize's own filter
+        // and metadata are never trusted as the security boundary.
+        const row = activeRow(tenantId, namespace, memoryId);
         if (row === undefined) continue;
 
-        // STALE-VERSION gate: the secondary index lags canonical writes, so a
-        // hit whose advertised version disagrees with the canonical row is
-        // stale and dropped. A non-numeric / missing advertised version is
-        // treated as a mismatch.
+        // STALE-VERSION gate: the index lags canonical writes. Because every
+        // write hits SQLite BEFORE Vectorize, the index can only ever be at or
+        // behind the canonical version — never ahead. So a hit advertising a
+        // version GREATER than canonical (or no usable version) is impossible
+        // under correct operation and is dropped; an at-or-behind hit is a valid
+        // (possibly slightly stale-scored) pointer to a live row and is kept,
+        // rehydrated to the canonical record. This drops the adversarial
+        // ahead-version poison without making a live row vanish on a benign lag.
         const advertisedVersion = metadataNumber(match.metadata, 'version');
-        if (advertisedVersion === undefined || advertisedVersion !== row.version) continue;
+        if (advertisedVersion === undefined || advertisedVersion > row.version) continue;
 
         // Score comes from Vectorize; the record comes from canonical SQLite.
         if (searchOptions.threshold !== undefined && match.score < searchOptions.threshold)
           continue;
-        hits.push({ id: match.id, score: match.score, record: rowToRecord(row) });
+        seen.add(memoryId);
+        hits.push({ id: memoryId, score: match.score, record: rowToRecord(row) });
+        if (hits.length >= searchOptions.limit) break;
       }
 
-      // Preserve Vectorize's descending-score order; bound to the limit.
-      return hits.slice(0, searchOptions.limit);
+      // Preserve Vectorize's descending-score order; already bounded to `limit`.
+      return hits;
     },
 
     async update(
@@ -411,7 +468,7 @@ export function createCloudflareMemoryRecordStorage(
 
       await vectorize.upsert([
         {
-          id: updated.id,
+          id: vectorizeId(tenantId, namespace, updated.id),
           values: Array.from(updated.vector),
           metadata: vectorizeMetadata(tenantId, updated),
         },
@@ -438,7 +495,7 @@ export function createCloudflareMemoryRecordStorage(
         namespace,
         id,
       );
-      await vectorize.deleteByIds([id]);
+      await vectorize.deleteByIds([vectorizeId(tenantId, namespace, id)]);
       return true;
     },
 
@@ -466,7 +523,7 @@ export function createCloudflareMemoryRecordStorage(
         tenantId,
         namespace,
       );
-      await vectorize.deleteByIds(ids);
+      await vectorize.deleteByIds(ids.map((rowId) => vectorizeId(tenantId, namespace, rowId)));
       return ids.length;
     },
   };
