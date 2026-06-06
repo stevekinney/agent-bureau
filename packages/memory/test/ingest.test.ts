@@ -1,9 +1,8 @@
 import { beforeEach, describe, expect, it } from 'bun:test';
-import { MemoryStorageAdapter } from 'vector-frankl';
 
 import { createMemory } from '../src/create-memory';
 import { CHUNK_INDEX_KEY, ingest, SOURCE_DOCUMENT_KEY } from '../src/ingest';
-import { createMockEmbedder } from '../src/test/index';
+import { createInMemoryMemoryRecordStorage, createMockEmbedder } from '../src/test/index';
 import type { Memory } from '../src/types';
 
 const DIMENSION = 64;
@@ -12,7 +11,7 @@ describe('ingest', () => {
   let memory: Memory;
 
   beforeEach(async () => {
-    const storage = new MemoryStorageAdapter();
+    const storage = createInMemoryMemoryRecordStorage();
     const embedder = createMockEmbedder(DIMENSION);
     memory = createMemory({ embedder, storage, dimension: DIMENSION });
     await memory.init();

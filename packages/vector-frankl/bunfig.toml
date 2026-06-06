@@ -1,7 +1,0 @@
-# Bun 1.3.13 does NOT honor `[test] timeout` from bunfig — it is silently
-# ignored and the effective default stays 5000ms (verified empirically). The
-# 30s timeout these benchmark/integration suites need is therefore set on the
-# CLI in package.json ("test": "bun test --timeout 30000"), which IS honored.
-# `[test] parallel` is likewise not a real bunfig key; Bun runs every test file
-# in one shared process regardless, so test isolation depends on each suite
-# restoring any globals it mutates (see tests/mocks/indexeddb-mock.ts).

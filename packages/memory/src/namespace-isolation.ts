@@ -74,7 +74,8 @@ export function withNamespaceIsolation(memory: Memory, options: NamespaceIsolati
         // 'ignore' — silently no-op
         return;
       }
-      await memory.forget(id);
+      // Records are scope-keyed, so deletion must target this wrapper's namespace.
+      await memory.forget(id, namespace);
       knownIds.delete(id);
     },
 

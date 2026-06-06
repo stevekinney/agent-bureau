@@ -167,8 +167,10 @@ export function createFileSynchronizer(options: FileSynchronizerOptions): FileSy
     const ids = entryIdsBySource.get(sourceIdentifier);
     if (!ids) return;
 
+    // Entries are ingested under the configured metadata namespace; deletion is
+    // scope-keyed and must target the same namespace.
     for (const id of ids) {
-      await memory.forget(id);
+      await memory.forget(id, metadata?.namespace);
     }
 
     entryIdsBySource.delete(sourceIdentifier);

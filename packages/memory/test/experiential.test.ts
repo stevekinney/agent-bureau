@@ -1,16 +1,15 @@
 import { beforeEach, describe, expect, it, mock } from 'bun:test';
-import { MemoryStorageAdapter } from 'vector-frankl';
 
 import { createMemory } from '../src/create-memory';
 import type { StepResultLike } from '../src/experiential';
 import { createRunCaptureHook, summarizeRun } from '../src/experiential';
-import { createMockEmbedder } from '../src/test/index';
+import { createInMemoryMemoryRecordStorage, createMockEmbedder } from '../src/test/index';
 import type { Memory } from '../src/types';
 
 const DIMENSION = 64;
 
 function createTestMemory() {
-  const storage = new MemoryStorageAdapter();
+  const storage = createInMemoryMemoryRecordStorage();
   const embedder = createMockEmbedder(DIMENSION);
   const memory = createMemory({
     embedder,

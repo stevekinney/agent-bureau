@@ -1,18 +1,17 @@
 import { describe, expect, it } from 'bun:test';
-import { MemoryStorageAdapter } from 'vector-frankl';
 
 import { createMemory } from '../../src/create-memory';
 import type { SoulDistillationState } from '../../src/identity/create-soul-distillation';
 import { createSoulDistillationTask } from '../../src/identity/create-soul-distillation';
 import { createStaticIdentityProvider } from '../../src/identity/create-static-provider';
 import type { SoulBudget, SoulItem } from '../../src/identity/types';
-import { createMockEmbedder } from '../../src/test/index';
+import { createInMemoryMemoryRecordStorage, createMockEmbedder } from '../../src/test/index';
 import type { Memory } from '../../src/types';
 
 function createTestMemory(): Memory {
   return createMemory({
     embedder: createMockEmbedder(128),
-    storage: new MemoryStorageAdapter(),
+    storage: createInMemoryMemoryRecordStorage(),
     deduplicationThreshold: 0.99,
   });
 }

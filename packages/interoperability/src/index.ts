@@ -1,4 +1,14 @@
-export type { Embedder, EmbeddingVector } from './embeddings';
+export type {
+  Embedder,
+  EmbeddingVector,
+  EmbeddingVectorLike,
+  IsEmbeddingVectorOptions,
+} from './embeddings';
+export {
+  computeEmbeddingVectorMagnitude,
+  cosineSimilarity,
+  isEmbeddingVector,
+} from './embeddings';
 export type { IncrementalHash } from './hash';
 export { createIncrementalHash, sha256Hex, sha256HexSync } from './hash';
 export type { MaterializeToolCallOptions } from './materialization';

@@ -1,15 +1,14 @@
 import { beforeEach, describe, expect, it } from 'bun:test';
-import { MemoryStorageAdapter } from 'vector-frankl';
 
 import { createMemory } from '../src/create-memory';
-import { createMockEmbedder } from '../src/test/index';
+import { createInMemoryMemoryRecordStorage, createMockEmbedder } from '../src/test/index';
 import type { TextSearchProvider } from '../src/text-search-provider';
-import type { Memory } from '../src/types';
+import type { Memory, MemoryRecordStorage } from '../src/types';
 
 const DIMENSION = 64;
 
 function createTestMemory(options?: { namespace?: string; deduplicationThreshold?: number }) {
-  const storage = new MemoryStorageAdapter();
+  const storage = createInMemoryMemoryRecordStorage();
   const embedder = createMockEmbedder(DIMENSION);
   const memory = createMemory({
     embedder,
@@ -23,7 +22,7 @@ function createTestMemory(options?: { namespace?: string; deduplicationThreshold
 
 describe('createMemory', () => {
   let memory: Memory;
-  let storage: MemoryStorageAdapter;
+  let storage: MemoryRecordStorage;
   let embedder: ReturnType<typeof createMockEmbedder>;
 
   beforeEach(async () => {
@@ -50,10 +49,10 @@ describe('createMemory', () => {
     it('stores the entry in the underlying storage', async () => {
       const entry = await memory.remember('Hello, world');
 
-      const stored = await storage.get(entry.id);
+      const stored = await storage.get(entry.id, { namespace: 'default' });
       expect(stored).toBeDefined();
-      expect(stored.id).toBe(entry.id);
-      expect(stored.vector).toBeInstanceOf(Float32Array);
+      expect(stored!.id).toBe(entry.id);
+      expect(stored!.vector).toBeInstanceOf(Float32Array);
     });
 
     it('preserves provided metadata', async () => {
@@ -88,6 +87,14 @@ describe('createMemory', () => {
       });
       expect(entry.metadata.namespace).toBe('custom');
     });
+
+    it('rejects an empty namespace override', async () => {
+      // The contract requires a non-empty namespace; an empty string would
+      // otherwise be persisted as a real but unreachable-by-default scope.
+      expect(memory.remember('Empty namespace', { namespace: '' })).rejects.toThrow(
+        /namespace must be a non-empty string/,
+      );
+    });
   });
 
   describe('deduplication', () => {
@@ -96,7 +103,7 @@ describe('createMemory', () => {
       const second = await memory.remember('The capital of France is Paris');
 
       expect(second.id).toBe(first.id);
-      const totalCount = await storage.count();
+      const totalCount = await storage.count({ namespace: 'default' });
       expect(totalCount).toBe(1);
     });
 
@@ -104,7 +111,7 @@ describe('createMemory', () => {
       await memory.remember('The capital of France is Paris');
       await memory.remember('TypeScript is a programming language');
 
-      const totalCount = await storage.count();
+      const totalCount = await storage.count({ namespace: 'default' });
       expect(totalCount).toBe(2);
     });
 
@@ -178,23 +185,21 @@ describe('createMemory', () => {
     });
 
     it('applies temporal decay when configured', async () => {
-      // Store an entry with a very old timestamp by manually writing to storage
+      // Store an entry with a very old timestamp by manually writing to storage.
       const vector = embedder(['old memory'])[0]!;
       const float32Vector = new Float32Array(vector);
-      let magnitude = 0;
-      for (const value of float32Vector) magnitude += value * value;
-      magnitude = Math.sqrt(magnitude);
+      const oldTimestamp = Date.now() - 30 * 24 * 60 * 60 * 1000; // 30 days ago
 
       await storage.put({
         id: 'old-entry',
+        namespace: 'default',
+        content: 'old memory',
         vector: float32Vector,
-        metadata: {
-          __memory_content: 'old memory',
-          __memory_namespace: 'default',
-          source: 'manual',
-        },
-        magnitude,
-        timestamp: Date.now() - 30 * 24 * 60 * 60 * 1000, // 30 days ago
+        metadata: { source: 'manual' },
+        createdAt: oldTimestamp,
+        updatedAt: oldTimestamp,
+        version: 1,
+        status: 'active',
       });
 
       // Store a recent entry
@@ -262,7 +267,7 @@ describe('createMemory', () => {
       const results = await memory.recall('test');
 
       for (const result of results) {
-        expect((result as Record<string, unknown>).vector).toBeUndefined();
+        expect(Object.hasOwn(result, 'vector')).toBe(false);
       }
     });
   });
@@ -288,6 +293,46 @@ describe('createMemory', () => {
 
       const results = await memory.recall('Keep this');
       expect(results.some((r) => r.id === first.id)).toBe(true);
+    });
+
+    it('does not strip the text index when the scoped delete removed nothing', async () => {
+      // Regression: textSearchProvider.remove(id) is keyed by bare id while
+      // storage.delete is scope-keyed. A wrong-namespace forget must NOT evict the
+      // index entry of the record still living under its real namespace.
+      const removeCalls: string[] = [];
+      const textSearchProvider: TextSearchProvider = {
+        async init() {},
+        async close() {},
+        async index() {},
+        async remove(id: string) {
+          removeCalls.push(id);
+        },
+        async clear() {},
+        async search() {
+          return new Map<string, number>();
+        },
+      };
+      const storage = createInMemoryMemoryRecordStorage();
+      const indexedMemory = createMemory({
+        embedder: createMockEmbedder(DIMENSION),
+        storage,
+        dimension: DIMENSION,
+        namespace: 'real',
+        textSearchProvider,
+      });
+      await indexedMemory.init();
+
+      const entry = await indexedMemory.remember('Indexed memory');
+
+      // Wrong namespace: nothing is deleted, and the index entry must survive.
+      await indexedMemory.forget(entry.id, 'wrong');
+      expect(removeCalls).toEqual([]);
+      expect(await storage.get(entry.id, { namespace: 'real' })).toBeDefined();
+
+      // Right namespace: the record is removed and the index entry is evicted once.
+      await indexedMemory.forget(entry.id, 'real');
+      expect(removeCalls).toEqual([entry.id]);
+      expect(await storage.get(entry.id, { namespace: 'real' })).toBeUndefined();
     });
   });
 
@@ -390,8 +435,8 @@ describe('createMemory', () => {
     it('stores vectors as Float32Array in storage', async () => {
       const entry = await memory.remember('Test Float32Array');
 
-      const stored = await storage.get(entry.id);
-      expect(stored.vector).toBeInstanceOf(Float32Array);
+      const stored = await storage.get(entry.id, { namespace: 'default' });
+      expect(stored!.vector).toBeInstanceOf(Float32Array);
     });
 
     it('returns vectors as number[] in MemoryEntry', async () => {
@@ -407,8 +452,8 @@ describe('createMemory', () => {
     it('round-trips vectors correctly', async () => {
       const entry = await memory.remember('Round trip test');
 
-      const stored = await storage.get(entry.id);
-      const roundTripped = Array.from(stored.vector);
+      const stored = await storage.get(entry.id, { namespace: 'default' });
+      const roundTripped = Array.from(stored!.vector);
 
       // Float32 has limited precision compared to Float64 (number),
       // so we compare with tolerance
@@ -420,7 +465,7 @@ describe('createMemory', () => {
 
   describe('init and close', () => {
     it('initializes storage on init', async () => {
-      const testStorage = new MemoryStorageAdapter();
+      const testStorage = createInMemoryMemoryRecordStorage();
       const testMemory = createMemory({
         embedder: createMockEmbedder(DIMENSION),
         storage: testStorage,
@@ -431,7 +476,7 @@ describe('createMemory', () => {
     });
 
     it('closes storage on close', async () => {
-      const testStorage = new MemoryStorageAdapter();
+      const testStorage = createInMemoryMemoryRecordStorage();
       const testMemory = createMemory({
         embedder: createMockEmbedder(DIMENSION),
         storage: testStorage,
@@ -445,7 +490,7 @@ describe('createMemory', () => {
 
   describe('default search options', () => {
     it('applies defaultSearchOptions when recall is called without options', async () => {
-      const testStorage = new MemoryStorageAdapter();
+      const testStorage = createInMemoryMemoryRecordStorage();
       const testMemory = createMemory({
         embedder: createMockEmbedder(DIMENSION),
         storage: testStorage,
@@ -462,7 +507,7 @@ describe('createMemory', () => {
     });
 
     it('allows overriding defaultSearchOptions per call', async () => {
-      const testStorage = new MemoryStorageAdapter();
+      const testStorage = createInMemoryMemoryRecordStorage();
       const testMemory = createMemory({
         embedder: createMockEmbedder(DIMENSION),
         storage: testStorage,
@@ -497,7 +542,7 @@ describe('createMemory', () => {
 
       const textSearchMemory = createMemory({
         embedder: createMockEmbedder(DIMENSION),
-        storage: new MemoryStorageAdapter(),
+        storage: createInMemoryMemoryRecordStorage(),
         dimension: DIMENSION,
         textSearchProvider,
       });
@@ -521,6 +566,55 @@ describe('createMemory', () => {
       ]);
 
       await textSearchMemory.close();
+    });
+
+    it('routes recall scoring, forget, and forgetAll through the text search provider', async () => {
+      const removedIds: string[] = [];
+      const clearedNamespaces: Array<string | undefined> = [];
+      // The provider scores documents by entry id; recall() maps those scores
+      // onto the hybrid candidates so we can prove the provider-driven branch
+      // contributes to ranking instead of the in-memory BM25 fallback.
+      const scoreById = new Map<string, number>();
+      const textSearchProvider = {
+        async init() {},
+        async close() {},
+        async index() {},
+        async remove(id: string) {
+          removedIds.push(id);
+        },
+        async clear(namespace?: string) {
+          clearedNamespaces.push(namespace);
+        },
+        async search() {
+          return new Map(scoreById);
+        },
+      } satisfies TextSearchProvider;
+
+      const providerMemory = createMemory({
+        embedder: createMockEmbedder(DIMENSION),
+        storage: createInMemoryMemoryRecordStorage(),
+        dimension: DIMENSION,
+        textSearchProvider,
+      });
+      await providerMemory.init();
+
+      const target = await providerMemory.remember('provider scored memory');
+      await providerMemory.remember('unscored memory');
+
+      // Give the target a strong provider-side text score so it ranks first.
+      scoreById.set(target.id, 0.9);
+
+      const results = await providerMemory.recall('provider scored memory');
+      expect(results.length).toBeGreaterThan(0);
+      expect(results[0]?.id).toBe(target.id);
+
+      await providerMemory.forget(target.id);
+      expect(removedIds).toEqual([target.id]);
+
+      await providerMemory.forgetAll();
+      expect(clearedNamespaces).toEqual(['default']);
+
+      await providerMemory.close();
     });
 
     it('applies temporal decay and MMR in vector-only recall mode', async () => {
@@ -551,7 +645,7 @@ describe('createMemory', () => {
 
       const cachedMemory = createMemory({
         embedder: embedderWithNamespaceClear,
-        storage: new MemoryStorageAdapter(),
+        storage: createInMemoryMemoryRecordStorage(),
         dimension: DIMENSION,
       });
       await cachedMemory.init();
