@@ -1,5 +1,12 @@
+# Register the Svelte loader so `.svelte` imports compile on the fly when
+# running the gateway from source (dev/start) and under the test runner.
+preload = ["./scripts/svelte-preload.ts"]
+
 [loader]
 ".md" = "text"
 
 [run]
 bun = true
+
+[test]
+preload = ["./scripts/svelte-preload.ts"]
