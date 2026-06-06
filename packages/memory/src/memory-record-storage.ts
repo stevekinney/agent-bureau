@@ -38,7 +38,13 @@ export interface MemoryRecord {
   createdAt: number;
   /** Last-update timestamp in epoch milliseconds. */
   updatedAt: number;
-  /** Monotonically increasing version; starts at `1` and is incremented on every `update()`. */
+  /**
+   * Best-effort local change marker. Starts at `1` and is bumped on `update()`.
+   * It is NOT a concurrency token: the local backend's `update()` is a
+   * read-modify-write without compare-and-swap, so two overlapping updates can
+   * both observe version N and both write N+1. Do not rely on it to detect or
+   * order concurrent writes.
+   */
   version: number;
   /**
    * Lifecycle status. Reads only ever surface live records, so callers always

@@ -90,6 +90,39 @@ describe('createWeftMemoryRecordStorage (Weft-specific)', () => {
       expect(keys).toHaveLength(1);
       expect(keys[0]!.startsWith(customPrefix)).toBe(true);
     });
+
+    it('rejects a custom keyPrefix that collides with a reserved Weft prefix', () => {
+      // A reserved prefix verbatim, and a prefix that is a parent of one, must
+      // both be rejected — either direction risks overwriting engine keys.
+      expect(() => createWeftMemoryRecordStorage(underlying, { keyPrefix: 'wf:' })).toThrow(
+        /collides with the reserved Weft prefix/,
+      );
+      expect(() => createWeftMemoryRecordStorage(underlying, { keyPrefix: 'wf:memory:' })).toThrow(
+        /collides with the reserved Weft prefix/,
+      );
+      expect(() => createWeftMemoryRecordStorage(underlying, { keyPrefix: 'w' })).toThrow(
+        /collides with the reserved Weft prefix/,
+      );
+    });
+
+    it('rejects an empty keyPrefix', () => {
+      expect(() => createWeftMemoryRecordStorage(underlying, { keyPrefix: '' })).toThrow(
+        /keyPrefix must be a non-empty string/,
+      );
+    });
+  });
+
+  describe('namespace validation at the storage boundary', () => {
+    it('rejects an empty namespace on a direct storage call', async () => {
+      // Direct storage callers bypass createMemory, so the backend itself must
+      // enforce the non-empty-namespace contract.
+      expect(storage.get('a', { namespace: '' })).rejects.toThrow(
+        /namespace must be a non-empty string/,
+      );
+      expect(storage.count({ namespace: '' })).rejects.toThrow(
+        /namespace must be a non-empty string/,
+      );
+    });
   });
 
   describe('delete is physical (no tombstone)', () => {

@@ -1,9 +1,9 @@
 import {
   encodeStorageKeyComponent,
   type Storage,
-  storageCount,
   storageDeletePrefix,
   storageKeys,
+  WEFT_RESERVED_KEY_PREFIXES,
 } from '@lostgradient/weft/storage/interface';
 import { cosineSimilarity, type EmbeddingVectorLike } from 'interoperability';
 import { z } from 'zod';
@@ -120,7 +120,29 @@ export function createWeftMemoryRecordStorage(
   const keyPrefix = options?.keyPrefix ?? DEFAULT_MEMORY_KEY_PREFIX;
   const disposeUnderlyingStorage = options?.disposeUnderlyingStorage ?? false;
 
+  // The key prefix is public and documented "must not collide with Weft's
+  // reserved prefixes" — but the backend is explicitly meant to share one
+  // underlying Storage with a Weft engine, so a colliding custom prefix would
+  // let memory records overwrite engine keys. Enforce it here rather than trust
+  // the caller.
+  if (keyPrefix.length === 0) {
+    throw new Error('keyPrefix must be a non-empty string.');
+  }
+  for (const reserved of WEFT_RESERVED_KEY_PREFIXES) {
+    if (keyPrefix.startsWith(reserved) || reserved.startsWith(keyPrefix)) {
+      throw new Error(
+        `keyPrefix "${keyPrefix}" collides with the reserved Weft prefix "${reserved}".`,
+      );
+    }
+  }
+
   function scopePrefix(scope: MemoryRecordScope): string {
+    // The public contract requires a non-empty namespace. Direct storage callers
+    // (not just createMemory) reach this boundary, so validate here so every
+    // scoped operation shares the check.
+    if (scope.namespace.length === 0) {
+      throw new Error('namespace must be a non-empty string.');
+    }
     const tenant = encodeStorageKeyComponent(scope.tenantId ?? '');
     const namespace = encodeStorageKeyComponent(scope.namespace);
     return `${keyPrefix}t:${tenant}:n:${namespace}:`;
@@ -192,12 +214,13 @@ export function createWeftMemoryRecordStorage(
     },
 
     async count(scope: MemoryRecordScope): Promise<number> {
-      // `storageCount` counts every key under the scope prefix without decoding.
-      // That equals the active-record count for THIS backend because `delete()`
-      // removes rows physically and nothing ever persists `status: 'deleted'` —
-      // so the fast key-count is exact. A tombstoning backend (e.g. Cloudflare)
-      // would instead need to count only active records.
-      return storageCount(storage, scopePrefix(scope));
+      // Count only active records, consistent with get/list/searchByVector. A
+      // raw key-count would diverge from those reads if a caller ever `put()` a
+      // record with `status: 'deleted'` (the contract permits passing one), so
+      // count is derived from the same active-record scan rather than a fast
+      // key-count that can't see status.
+      const active = await listAllInScope(scope);
+      return active.length;
     },
 
     async searchByVector(

@@ -240,6 +240,25 @@ for (const backend of BACKENDS) {
         await storage.delete('a', SCOPE);
         expect(await storage.update('a', SCOPE, { content: 'zombie' })).toBeUndefined();
       });
+
+      it('treats a directly put() non-active record as invisible to every read', async () => {
+        // The contract permits passing any MemoryRecord to put(); a record whose
+        // status is already 'deleted' must never surface from a read, and count()
+        // must agree with get/list/search. This pins both backends to the SAME
+        // answer on this input so neither can silently diverge — count() in
+        // particular must not fall back to a raw key-count that ignores status.
+        await storage.put(makeRecord('ghost', { status: 'deleted' }));
+        await storage.put(makeRecord('live', { status: 'active' }));
+
+        expect(await storage.get('ghost', SCOPE)).toBeUndefined();
+        const fetched = await storage.getMany(['ghost', 'live'], SCOPE);
+        expect(fetched.map((r) => r.id)).toEqual(['live']);
+        const listed = await storage.list(SCOPE);
+        expect(listed.map((r) => r.id)).toEqual(['live']);
+        expect(await storage.count(SCOPE)).toBe(1);
+        const hits = await storage.searchByVector([1, 0], SCOPE, { limit: 10 });
+        expect(hits.map((hit) => hit.id)).toEqual(['live']);
+      });
     });
 
     describe('deleteNamespace', () => {
