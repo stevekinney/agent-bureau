@@ -418,8 +418,12 @@ export function createMemory(options: CreateMemoryOptions): Memory {
     },
 
     async forget(id: string, namespace?: string): Promise<void> {
-      await storage.delete(id, scopeFor(namespace ?? defaultNamespace));
-      if (textSearchProvider) {
+      const removed = await storage.delete(id, scopeFor(namespace ?? defaultNamespace));
+      // Only strip the text-index entry if the scoped delete actually removed the
+      // record. `textSearchProvider.remove(id)` is keyed by bare id while
+      // `storage.delete` is scope-keyed, so an unmatched-namespace forget must NOT
+      // evict the index entry of the record still living under its real scope.
+      if (removed && textSearchProvider) {
         await textSearchProvider.remove(id);
       }
     },

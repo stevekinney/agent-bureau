@@ -294,6 +294,46 @@ describe('createMemory', () => {
       const results = await memory.recall('Keep this');
       expect(results.some((r) => r.id === first.id)).toBe(true);
     });
+
+    it('does not strip the text index when the scoped delete removed nothing', async () => {
+      // Regression: textSearchProvider.remove(id) is keyed by bare id while
+      // storage.delete is scope-keyed. A wrong-namespace forget must NOT evict the
+      // index entry of the record still living under its real namespace.
+      const removeCalls: string[] = [];
+      const textSearchProvider: TextSearchProvider = {
+        async init() {},
+        async close() {},
+        async index() {},
+        async remove(id: string) {
+          removeCalls.push(id);
+        },
+        async clear() {},
+        async search() {
+          return new Map<string, number>();
+        },
+      };
+      const storage = createInMemoryMemoryRecordStorage();
+      const indexedMemory = createMemory({
+        embedder: createMockEmbedder(DIMENSION),
+        storage,
+        dimension: DIMENSION,
+        namespace: 'real',
+        textSearchProvider,
+      });
+      await indexedMemory.init();
+
+      const entry = await indexedMemory.remember('Indexed memory');
+
+      // Wrong namespace: nothing is deleted, and the index entry must survive.
+      await indexedMemory.forget(entry.id, 'wrong');
+      expect(removeCalls).toEqual([]);
+      expect(await storage.get(entry.id, { namespace: 'real' })).toBeDefined();
+
+      // Right namespace: the record is removed and the index entry is evicted once.
+      await indexedMemory.forget(entry.id, 'real');
+      expect(removeCalls).toEqual([entry.id]);
+      expect(await storage.get(entry.id, { namespace: 'real' })).toBeUndefined();
+    });
   });
 
   describe('forgetAll', () => {
