@@ -21,7 +21,7 @@
   },
   "dependencies": {
     "@lostgradient/cinder": "^0.1.1",
-    "@lostgradient/weft": "^0.2.1",
+    "@lostgradient/weft": "^0.3.0",
     "armorer": "workspace:*",
     "conversationalist": "workspace:*",
     "herald": "workspace:*",
