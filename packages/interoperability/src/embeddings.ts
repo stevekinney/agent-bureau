@@ -35,15 +35,17 @@ export function isEmbeddingVector(
   value: unknown,
   options?: IsEmbeddingVectorOptions,
 ): value is EmbeddingVectorLike {
-  if (value === null || typeof value !== 'object') {
+  // Accept only genuine arrays and typed arrays — both `number[]` and the
+  // persisted `Float32Array` qualify. This rejects arbitrary `{ length: N }`
+  // objects, which would otherwise turn the predicate into an unbounded probe
+  // loop over a caller-controlled `length`. `DataView` is array-like-adjacent
+  // but is not a numeric-indexed view, so it is excluded.
+  if ((!Array.isArray(value) && !ArrayBuffer.isView(value)) || value instanceof DataView) {
     return false;
   }
 
-  const record = value as Record<PropertyKey, unknown>;
-  const length = record['length'];
-  if (typeof length !== 'number' || !Number.isInteger(length) || length < 0) {
-    return false;
-  }
+  const record = value as ArrayLike<unknown>;
+  const length = record.length;
 
   const dimension = options?.dimension;
   if (dimension !== undefined && length !== dimension) {

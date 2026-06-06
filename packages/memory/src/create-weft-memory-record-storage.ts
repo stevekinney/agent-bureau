@@ -6,6 +6,7 @@ import {
   storageKeys,
 } from '@lostgradient/weft/storage/interface';
 import { cosineSimilarity, type EmbeddingVectorLike } from 'interoperability';
+import { z } from 'zod';
 
 import type {
   MemoryRecord,
@@ -41,28 +42,30 @@ export interface CreateWeftMemoryRecordStorageOptions {
 }
 
 /**
- * Serializable form of a {@link MemoryRecord}. The dense `vector` is persisted
- * as a plain `number[]` because `Float32Array` does not survive JSON
- * round-trips; it is rehydrated to a `Float32Array` on read.
+ * Schema for the serializable form of a {@link MemoryRecord}. The dense `vector`
+ * is persisted as a plain `number[]` because `Float32Array` does not survive
+ * JSON round-trips; it is rehydrated to a `Float32Array` on read. Decoding runs
+ * untrusted durable bytes through this schema, so a corrupt or partially-written
+ * record fails loudly at the read boundary instead of yielding a garbage record.
  */
-interface StoredMemoryRecord {
-  id: string;
-  tenantId?: string;
-  namespace: string;
-  content: string;
-  vector: number[];
-  metadata: Record<string, unknown>;
-  createdAt: number;
-  updatedAt: number;
-  version: number;
-  status: 'active' | 'deleted';
-}
+const storedMemoryRecordSchema = z.object({
+  id: z.string(),
+  tenantId: z.string().optional(),
+  namespace: z.string(),
+  content: z.string(),
+  vector: z.array(z.number().finite()),
+  metadata: z.record(z.string(), z.unknown()),
+  createdAt: z.number().finite(),
+  updatedAt: z.number().finite(),
+  version: z.number().finite(),
+  status: z.union([z.literal('active'), z.literal('deleted')]),
+});
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 
 function encodeRecord(record: MemoryRecord): Uint8Array {
-  const stored: StoredMemoryRecord = {
+  const stored: z.infer<typeof storedMemoryRecordSchema> = {
     id: record.id,
     ...(record.tenantId !== undefined ? { tenantId: record.tenantId } : {}),
     namespace: record.namespace,
@@ -78,7 +81,7 @@ function encodeRecord(record: MemoryRecord): Uint8Array {
 }
 
 function decodeRecord(bytes: Uint8Array): MemoryRecord {
-  const stored = JSON.parse(textDecoder.decode(bytes)) as StoredMemoryRecord;
+  const stored = storedMemoryRecordSchema.parse(JSON.parse(textDecoder.decode(bytes)));
   return {
     id: stored.id,
     ...(stored.tenantId !== undefined ? { tenantId: stored.tenantId } : {}),
@@ -189,6 +192,11 @@ export function createWeftMemoryRecordStorage(
     },
 
     async count(scope: MemoryRecordScope): Promise<number> {
+      // `storageCount` counts every key under the scope prefix without decoding.
+      // That equals the active-record count for THIS backend because `delete()`
+      // removes rows physically and nothing ever persists `status: 'deleted'` —
+      // so the fast key-count is exact. A tombstoning backend (e.g. Cloudflare)
+      // would instead need to count only active records.
       return storageCount(storage, scopePrefix(scope));
     },
 
@@ -216,6 +224,11 @@ export function createWeftMemoryRecordStorage(
       scope: MemoryRecordScope,
       patch: { content?: string; vector?: Float32Array; metadata?: Record<string, unknown> },
     ): Promise<MemoryRecord | undefined> {
+      // Read-modify-write without compare-and-swap. `version` is a monotonic
+      // change marker, NOT a concurrency guard: two interleaved updates to the
+      // same id can both read version N and write N+1, losing one write. That is
+      // acceptable for the single-process local backend; a multi-writer backend
+      // would need conditional writes keyed on the prior version.
       const key = recordKey(scope, id);
       const existing = await readActive(key);
       if (!existing) return undefined;

@@ -81,6 +81,11 @@ export function createMemory(options: CreateMemoryOptions): Memory {
   }
 
   function scopeFor(namespace: string): MemoryRecordScope {
+    // The public contract requires a non-empty namespace; an empty string would
+    // otherwise be encoded as a real (but unreachable-by-default) scope key.
+    if (namespace.length === 0) {
+      throw new Error('namespace must be a non-empty string.');
+    }
     return { namespace };
   }
 

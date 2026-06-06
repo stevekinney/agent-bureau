@@ -57,15 +57,23 @@ describe('isEmbeddingVector', () => {
     expect(isEmbeddingVector({})).toBe(false);
   });
 
-  test('rejects an object with a non-integer or negative length', () => {
+  test('rejects a plain object masquerading as array-like (would otherwise be an unbounded probe)', () => {
+    // Only genuine arrays / typed arrays qualify — a hostile `{ length: huge }`
+    // must be rejected up front, never index-probed.
+    expect(isEmbeddingVector({ length: 3 })).toBe(false);
     expect(isEmbeddingVector({ length: -1 })).toBe(false);
     expect(isEmbeddingVector({ length: 1.5 })).toBe(false);
-    expect(isEmbeddingVector({ length: Number.NaN })).toBe(false);
+    expect(isEmbeddingVector({ length: 1e9, 0: 1 })).toBe(false);
   });
 
-  test('rejects an array-like whose entries are sparse / missing', () => {
-    // length claims 3 entries but indices are absent → undefined entries
-    expect(isEmbeddingVector({ length: 3 })).toBe(false);
+  test('accepts numeric typed arrays beyond Float32Array', () => {
+    expect(isEmbeddingVector(Float64Array.from([1, 2, 3]))).toBe(true);
+    expect(isEmbeddingVector(Int32Array.from([1, 2, 3]))).toBe(true);
+    expect(isEmbeddingVector(Uint8Array.from([1, 2, 3]))).toBe(true);
+  });
+
+  test('rejects a DataView (array-like-adjacent but not a numeric-indexed view)', () => {
+    expect(isEmbeddingVector(new DataView(new ArrayBuffer(8)))).toBe(false);
   });
 });
 

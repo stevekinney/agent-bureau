@@ -87,6 +87,14 @@ describe('createMemory', () => {
       });
       expect(entry.metadata.namespace).toBe('custom');
     });
+
+    it('rejects an empty namespace override', async () => {
+      // The contract requires a non-empty namespace; an empty string would
+      // otherwise be persisted as a real but unreachable-by-default scope.
+      expect(memory.remember('Empty namespace', { namespace: '' })).rejects.toThrow(
+        /namespace must be a non-empty string/,
+      );
+    });
   });
 
   describe('deduplication', () => {

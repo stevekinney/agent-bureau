@@ -141,4 +141,60 @@ describe('createWeftMemoryRecordStorage (Weft-specific)', () => {
       expect(underlying.size).toBe(0);
     });
   });
+
+  describe('decode validation (durable bytes are untrusted)', () => {
+    async function onlyKey(): Promise<string> {
+      const found: string[] = [];
+      for await (const key of underlying.keys(DEFAULT_MEMORY_KEY_PREFIX)) {
+        found.push(key);
+      }
+      expect(found).toHaveLength(1);
+      return found[0]!;
+    }
+
+    it('throws when a stored record is not valid JSON', async () => {
+      await storage.put(makeRecord('a'));
+      const key = await onlyKey();
+      await underlying.put(key, new TextEncoder().encode('{ not json'));
+
+      expect(storage.get('a', SCOPE)).rejects.toThrow();
+    });
+
+    it('throws when a stored record is structurally invalid (wrong status)', async () => {
+      await storage.put(makeRecord('a'));
+      const key = await onlyKey();
+      await underlying.put(
+        key,
+        new TextEncoder().encode(JSON.stringify({ id: 'a', status: 'bogus' })),
+      );
+
+      expect(storage.get('a', SCOPE)).rejects.toThrow();
+    });
+
+    it('throws when a stored vector entry is non-finite', async () => {
+      await storage.put(makeRecord('a'));
+      const key = await onlyKey();
+      const now = Date.now();
+      await underlying.put(
+        key,
+        new TextEncoder().encode(
+          JSON.stringify({
+            id: 'a',
+            namespace: 'alpha',
+            content: 'x',
+            // JSON has no Infinity literal, so a corrupt finite-violating value
+            // arrives as null — which the finite-number schema must reject.
+            vector: [1, null, 3],
+            metadata: {},
+            createdAt: now,
+            updatedAt: now,
+            version: 1,
+            status: 'active',
+          }),
+        ),
+      );
+
+      expect(storage.get('a', SCOPE)).rejects.toThrow();
+    });
+  });
 });
