@@ -190,6 +190,82 @@ describe('searchByVector rehydration security', () => {
     expect(hits.map((h) => h.id)).toEqual(['legit']);
   });
 
+  it('drops a hit whose Vectorize id is not a well-formed scoped id', async () => {
+    // A malformed vector id (wrong part count, or undecodable percent-escape)
+    // cannot be trusted for identity, so it is dropped before rehydration. Only
+    // the genuine 'legit' remains.
+    vectorize.injectPoison([
+      // Not three colon-separated parts.
+      {
+        id: 'not-a-scoped-id',
+        score: 0.99,
+        metadata: { tenant_id: TENANT, namespace: NAMESPACE, memory_id: 'legit', version: 1 },
+      },
+      // Three parts, but the id component is an invalid percent-escape that
+      // decodeURIComponent rejects.
+      {
+        id: `${TENANT}:${NAMESPACE}:%E0%A4%A`,
+        score: 0.98,
+        metadata: { tenant_id: TENANT, namespace: NAMESPACE, memory_id: 'legit', version: 1 },
+      },
+    ]);
+
+    const hits = await storage.searchByVector([1, 0], SCOPE, { limit: 10 });
+    expect(hits.map((h) => h.id)).toEqual(['legit']);
+  });
+
+  it('drops an identity-spoof hit whose scoped id and metadata memory_id disagree', async () => {
+    // Adversary crafts a hit whose metadata claims memory_id 'legit' (a real,
+    // in-scope, current row) but whose scope-encoded vector id points at a
+    // different memory id. Identity must come from the trustworthy scoped id, not
+    // the metadata, so this hit is dropped — it cannot borrow 'legit''s identity
+    // (and surface it with the spoof's score). Only the genuine 'legit' remains.
+    vectorize.injectPoison([
+      {
+        id: `${TENANT}:${NAMESPACE}:not-legit`,
+        score: 0.999,
+        metadata: { tenant_id: TENANT, namespace: NAMESPACE, memory_id: 'legit', version: 1 },
+      },
+    ]);
+
+    const hits = await storage.searchByVector([1, 0], SCOPE, { limit: 10 });
+    expect(hits.map((h) => h.id)).toEqual(['legit']);
+    // The surfaced 'legit' is the genuine hit (score 1.0 against [1,0]), not the
+    // 0.999 spoof — the spoof never claimed the slot.
+    expect(hits[0]!.score).toBeCloseTo(1, 5);
+  });
+
+  it('prefers the current-version hit over a higher-scored stale one for the same record', async () => {
+    // 'item' is bumped to version 2 in canonical SQLite. Its stored vector is
+    // ORTHOGONAL to the query, so the fake's genuine candidate for it scores 0 and
+    // does not dominate — isolating the dedupe decision to the two injected hits:
+    // a stale version-1 entry (high score) and the current version-2 entry (lower
+    // score). Dedupe must surface the CURRENT one, not let the higher-scored stale
+    // vector win the slot.
+    await storage.put(makeRecord('item', { vector: new Float32Array([0, 1]) }));
+    await storage.update('item', SCOPE, { content: 'v2' });
+
+    vectorize.injectPoison([
+      {
+        id: `${TENANT}:${NAMESPACE}:item`,
+        score: 0.4, // current version, lower score
+        metadata: { tenant_id: TENANT, namespace: NAMESPACE, memory_id: 'item', version: 2 },
+      },
+      {
+        id: `${TENANT}:${NAMESPACE}:item`,
+        score: 0.99, // stale version, higher score
+        metadata: { tenant_id: TENANT, namespace: NAMESPACE, memory_id: 'item', version: 1 },
+      },
+    ]);
+
+    const hits = await storage.searchByVector([1, 0], SCOPE, { limit: 10 });
+    const itemHits = hits.filter((h) => h.id === 'item');
+    expect(itemHits).toHaveLength(1);
+    // The current-version hit won the slot despite its lower score.
+    expect(itemHits[0]!.score).toBeCloseTo(0.4, 5);
+    expect(itemHits[0]!.record.version).toBe(2);
+  });
+
   it('drops a hit absent from SQLite entirely', async () => {
     vectorize.injectPoison([
       {

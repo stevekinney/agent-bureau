@@ -37,6 +37,15 @@ export interface CreateCloudflareMemoryRecordStorageOptions {
 export const DEFAULT_MEMORY_TABLE_NAME = 'memory_records';
 
 /**
+ * Maximum `searchByVector` result count. The backend overfetches Vectorize
+ * candidates (so rehydration can drop poison/stale hits and still fill the page)
+ * and caps that overfetch; a `limit` above this can't be honored without paging,
+ * so it is rejected rather than silently truncated. Well above expected memory
+ * namespace sizes — recall pages are small.
+ */
+export const MAX_SEARCH_LIMIT = 200;
+
+/**
  * Row schema for a canonical SQLite memory record. The dense `vector` and free
  * `metadata` are persisted as JSON strings (SQLite has no array/object column),
  * so they are decoded through this schema at the read boundary — exactly like
@@ -174,6 +183,32 @@ export function createCloudflareMemoryRecordStorage(
    */
   function vectorizeId(tenantId: string, namespace: string, id: string): string {
     return `${encodeURIComponent(tenantId)}:${encodeURIComponent(namespace)}:${encodeURIComponent(id)}`;
+  }
+
+  /**
+   * Decode a Vectorize vector id back to its `{ tenantId, namespace, id }`
+   * components, or `undefined` if it is not a well-formed scoped id. The scoped
+   * id is the TRUSTWORTHY identity — it is what the index keyed on — whereas a
+   * hit's metadata is adversary-influencable. Search verifies the decoded scope
+   * against the caller's scope and the decoded id against the metadata before
+   * rehydrating, so a poison hit can't borrow another record's identity.
+   * `encodeURIComponent` escapes `:` as `%3A`, so a real scoped id always splits
+   * into exactly three parts.
+   */
+  function decodeVectorizeId(
+    vectorId: string,
+  ): { tenantId: string; namespace: string; id: string } | undefined {
+    const parts = vectorId.split(':');
+    if (parts.length !== 3) return undefined;
+    try {
+      return {
+        tenantId: decodeURIComponent(parts[0]!),
+        namespace: decodeURIComponent(parts[1]!),
+        id: decodeURIComponent(parts[2]!),
+      };
+    } catch {
+      return undefined;
+    }
   }
 
   /**
@@ -371,13 +406,22 @@ export function createCloudflareMemoryRecordStorage(
     ): Promise<MemoryVectorSearchResult[]> {
       const { tenantId, namespace } = requireScope(scope);
       if (searchOptions.limit <= 0) return [];
+      if (searchOptions.limit > MAX_SEARCH_LIMIT) {
+        throw new Error(
+          `searchByVector limit must be <= ${MAX_SEARCH_LIMIT} (got ${searchOptions.limit}).`,
+        );
+      }
       const queryVector = Array.from(vector);
 
       // Overfetch from Vectorize: rehydration drops poison/stale/deleted hits, so
       // asking for exactly `limit` candidates can return fewer than `limit` valid
       // rows when a poisoned hit sits at the front. Fetch a wider candidate band
-      // (capped) so the post-filter still yields up to `limit` real results.
-      const topK = Math.min(Math.max(searchOptions.limit * 4, searchOptions.limit + 10), 200);
+      // (capped at the documented MAX_SEARCH_LIMIT) so the post-filter still
+      // yields up to `limit` real results.
+      const topK = Math.min(
+        Math.max(searchOptions.limit * 4, searchOptions.limit + 10),
+        MAX_SEARCH_LIMIT,
+      );
 
       // SECURITY-CRITICAL: the Vectorize filter is server-owned (tenant +
       // namespace). It is a best-effort narrowing, NOT the security boundary —
@@ -388,24 +432,27 @@ export function createCloudflareMemoryRecordStorage(
         returnMetadata: true,
       });
 
-      const hits: MemoryVectorSearchResult[] = [];
-      const seen = new Set<string>();
+      // Survivor per canonical record id, deduped with a deterministic preference:
+      // an EXACT-version hit always wins over a behind-version (stale) one, so a
+      // high-scored stale vector cannot claim the slot over the current vector;
+      // among equal exactness, the higher Vectorize score wins.
+      const survivors = new Map<string, { result: MemoryVectorSearchResult; exact: boolean }>();
       for (const match of result.matches) {
-        // The Vectorize id is scope-encoded; never parse it apart. Take the bare
-        // memory id from the allowlisted metadata, and only trust it after the
-        // scoped SQLite rehydration below confirms the canonical row.
+        // IDENTITY comes from the scope-encoded Vectorize id (what the index keyed
+        // on), NOT from the adversary-influencable metadata. Decode it, require it
+        // to match the caller's scope exactly, and require the metadata memory_id
+        // to agree — so a poison hit can't borrow another record's identity to
+        // surface it with the poison's score.
+        const decoded = decodeVectorizeId(match.id);
+        if (decoded === undefined) continue;
+        if (decoded.tenantId !== tenantId || decoded.namespace !== namespace) continue;
         const memoryId = metadataString(match.metadata, 'memory_id');
-        if (memoryId === undefined) continue;
-
-        // Dedupe by canonical record id: the index could (e.g. mid-reindex)
-        // return more than one entry pointing at the same memory id. Matches are
-        // already in descending score, so the first survivor is the best-scored.
-        if (seen.has(memoryId)) continue;
+        if (memoryId === undefined || memoryId !== decoded.id) continue;
 
         // REHYDRATE: the canonical active row for this id, in THIS exact scope.
-        // This single scoped lookup drops cross-tenant, wrong-namespace,
-        // deleted/tombstoned, and absent hits for free — Vectorize's own filter
-        // and metadata are never trusted as the security boundary.
+        // This scoped lookup drops cross-tenant, wrong-namespace,
+        // deleted/tombstoned, and absent hits — Vectorize's filter and metadata
+        // are never trusted as the security boundary.
         const row = activeRow(tenantId, namespace, memoryId);
         if (row === undefined) continue;
 
@@ -414,22 +461,36 @@ export function createCloudflareMemoryRecordStorage(
         // behind the canonical version — never ahead. So a hit advertising a
         // version GREATER than canonical (or no usable version) is impossible
         // under correct operation and is dropped; an at-or-behind hit is a valid
-        // (possibly slightly stale-scored) pointer to a live row and is kept,
-        // rehydrated to the canonical record. This drops the adversarial
-        // ahead-version poison without making a live row vanish on a benign lag.
+        // (possibly stale-scored) pointer to a live row and is kept, rehydrated to
+        // the canonical record.
         const advertisedVersion = metadataNumber(match.metadata, 'version');
         if (advertisedVersion === undefined || advertisedVersion > row.version) continue;
+        const exact = advertisedVersion === row.version;
 
-        // Score comes from Vectorize; the record comes from canonical SQLite.
+        // Threshold applies to the Vectorize score before dedupe.
         if (searchOptions.threshold !== undefined && match.score < searchOptions.threshold)
           continue;
-        seen.add(memoryId);
-        hits.push({ id: memoryId, score: match.score, record: rowToRecord(row) });
-        if (hits.length >= searchOptions.limit) break;
+
+        const candidate: MemoryVectorSearchResult = {
+          id: memoryId,
+          score: match.score,
+          record: rowToRecord(row),
+        };
+        const existing = survivors.get(memoryId);
+        if (
+          existing === undefined ||
+          (exact && !existing.exact) ||
+          (exact === existing.exact && candidate.score > existing.result.score)
+        ) {
+          survivors.set(memoryId, { result: candidate, exact });
+        }
       }
 
-      // Preserve Vectorize's descending-score order; already bounded to `limit`.
-      return hits;
+      // Order by score descending (dedupe may have reshuffled), bound to `limit`.
+      return [...survivors.values()]
+        .map((entry) => entry.result)
+        .sort((a, b) => b.score - a.score)
+        .slice(0, searchOptions.limit);
     },
 
     async update(

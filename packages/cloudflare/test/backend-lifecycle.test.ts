@@ -1,7 +1,10 @@
 import { beforeEach, describe, expect, it } from 'bun:test';
 import type { MemoryRecord, MemoryRecordScope } from 'memory';
 
-import { createCloudflareMemoryRecordStorage } from '../src/create-cloudflare-memory-record-storage';
+import {
+  createCloudflareMemoryRecordStorage,
+  MAX_SEARCH_LIMIT,
+} from '../src/create-cloudflare-memory-record-storage';
 import { createCloudflareMemoryTestHarness } from '../src/test';
 import { createFakeVectorize } from '../src/test/fake-vectorize';
 import { createSqliteDouble } from '../src/test/sqlite-double';
@@ -140,5 +143,14 @@ describe('searchByVector limit edges', () => {
 
     const hits = await storage.searchByVector([1, 0], SCOPE, { limit: 1 });
     expect(hits.map((h) => h.id)).toEqual(['real']);
+  });
+
+  it('rejects a limit above the documented maximum rather than silently truncating', async () => {
+    // The overfetch is capped, so a limit beyond MAX_SEARCH_LIMIT could not be
+    // honored without paging — reject it explicitly instead of returning fewer
+    // than asked and pretending it was the whole result.
+    await expect(
+      storage.searchByVector([1, 0], SCOPE, { limit: MAX_SEARCH_LIMIT + 1 }),
+    ).rejects.toThrow(/limit must be <=/);
   });
 });
