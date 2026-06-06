@@ -65,14 +65,22 @@
   // Timeline's per-entry snippet only receives a `TimelineEntry`, which carries
   // no `detail`. Build the entries plus a parallel id -> detail map so the
   // children snippet can look the raw value back up and hand it to JsonViewer.
+  //
+  // The displayed time is the UTC clock portion of the ISO string rather than
+  // `toLocaleTimeString()`, which is locale- and timezone-dependent: the server
+  // and the browser can format the same instant differently, which would cause
+  // a hydration mismatch. A fixed UTC HH:MM:SS renders identically on both.
   let timelineEntries = $derived<TimelineEntry[]>(
-    events.map((event, index) => ({
-      id: eventKey(event, index),
-      datetime: new Date(event.timestamp).toISOString(),
-      timestamp: new Date(event.timestamp).toLocaleTimeString(),
-      title: event.event,
-      tone: eventTone(event.event),
-    })),
+    events.map((event, index) => {
+      const datetime = new Date(event.timestamp).toISOString();
+      return {
+        id: eventKey(event, index),
+        datetime,
+        timestamp: `${datetime.slice(11, 19)} UTC`,
+        title: event.event,
+        tone: eventTone(event.event),
+      };
+    }),
   );
 
   let detailById = $derived.by(() => {

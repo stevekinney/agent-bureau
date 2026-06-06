@@ -22,6 +22,19 @@ describe('renderPage', () => {
     expect(html).toContain('<title>My Dashboard</title>');
   });
 
+  it('HTML-escapes the title so an untrusted run id cannot inject markup', async () => {
+    // pages.ts builds titles like `Run ${run.id}`; a malicious id must not be
+    // able to break out of the <title> element or inject a script.
+    const html = await renderPage({
+      title: 'Run </title><script>alert(1)</script>',
+      component: Fixture,
+      props: baseProps,
+    });
+
+    expect(html).not.toContain('</title><script>alert(1)');
+    expect(html).toContain('&lt;script&gt;alert(1)&lt;/script&gt;');
+  });
+
   it('renders the Svelte component markup inside the root div', async () => {
     const html = await renderPage({ title: 'Test', component: Fixture, props: baseProps });
 

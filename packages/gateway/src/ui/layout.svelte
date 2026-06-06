@@ -46,7 +46,7 @@
   <SideNavigation ariaLabel="Primary navigation" class="sidebar">
     <li class="sidebar-title">Agent Bureau</li>
     {#each navigationLinks as link (link.href)}
-      <SideNavigationItem href={link.href} active={isActive(link.href)} current="true">
+      <SideNavigationItem href={link.href} active={isActive(link.href)}>
         {link.label}
       </SideNavigationItem>
     {/each}

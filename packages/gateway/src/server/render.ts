@@ -10,12 +10,25 @@ type AssetManifest = Record<string, string>;
 let cachedManifest: AssetManifest | undefined;
 
 /**
+ * True when this module is running from the compiled `dist/` build rather than
+ * from source. The build emits content-hashed assets and a `manifest.json`
+ * alongside the bundled `dist/index.js`, so in this mode the manifest is
+ * load-bearing: the unhashed `/public/*` URLs do not exist and a missing
+ * manifest must fail loudly rather than serve a page with dead hydration.
+ */
+const isBuiltOutput = dirname(fileURLToPath(import.meta.url)).includes('/dist');
+
+/**
  * Loads the build manifest that maps logical client-entry names to their
  * content-hashed public URLs (e.g. `entry.js` -> `/public/entry-<hash>.js`).
+ *
  * The manifest is written by `scripts/build.ts` to `dist/manifest.json`,
  * which resolves relative to this module's compiled location in the flat
- * `dist/` output. A missing manifest degrades gracefully to the
- * unhashed `/public/*` fallbacks used during development.
+ * `dist/` output. In built (`dist/`) mode the manifest is required and a
+ * missing or invalid one throws — serving the unhashed fallbacks there would
+ * 404 the client bundle and silently break hydration. When running from
+ * source (dev/test, no `dist/manifest.json`), the manifest is absent by
+ * design and the caller degrades to the unhashed `/public/*` URLs.
  */
 async function loadManifest(): Promise<AssetManifest> {
   if (cachedManifest) return cachedManifest;
@@ -27,10 +40,33 @@ async function loadManifest(): Promise<AssetManifest> {
     const manifestPath = resolve(currentDirectory, 'manifest.json');
     const raw = await readFile(manifestPath, 'utf-8');
     cachedManifest = JSON.parse(raw) as AssetManifest;
-  } catch {
+  } catch (error) {
+    if (isBuiltOutput) {
+      throw new Error(
+        'gateway: dist/manifest.json is missing or invalid. The built server ' +
+          'requires the asset manifest to resolve content-hashed client bundles; ' +
+          'rebuild with `bun run build`.',
+        { cause: error },
+      );
+    }
+    // From source there is no manifest by design; degrade to unhashed URLs.
     cachedManifest = {};
   }
   return cachedManifest;
+}
+
+/**
+ * Escapes the five HTML metacharacters so untrusted text (e.g. a run id
+ * embedded in the document `<title>`) cannot break out of its element or
+ * inject markup. Mirrors the escaping React performed on text children.
+ */
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
 }
 
 const LINE_SEPARATOR = String.fromCharCode(0x2028);
@@ -92,6 +128,9 @@ export async function renderPage<Props extends Record<string, unknown>>({
   data,
 }: RenderPageOptions<Props>): Promise<string> {
   const manifest = await loadManifest();
+  // In built mode loadManifest() has already thrown if the manifest is absent,
+  // so these keys are present; the `??` only covers from-source dev/test where
+  // the unhashed `/public/*` URLs are the real assets.
   const clientScript = manifest['entry.js'] ?? '/public/entry.js';
   const stylesheet = manifest['styles.css'] ?? '/public/styles.css';
 
@@ -103,7 +142,7 @@ export async function renderPage<Props extends Record<string, unknown>>({
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>${title}</title>
+    <title>${escapeHtml(title)}</title>
     <link rel="stylesheet" href="${stylesheet}" />
     ${output.head}
   </head>
