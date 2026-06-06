@@ -1,5 +1,5 @@
 import { readFile } from 'node:fs/promises';
-import { dirname, resolve } from 'node:path';
+import { basename, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import type { Component } from 'svelte';
@@ -9,14 +9,20 @@ type AssetManifest = Record<string, string>;
 
 let cachedManifest: AssetManifest | undefined;
 
+const currentDirectory = dirname(fileURLToPath(import.meta.url));
+
 /**
  * True when this module is running from the compiled `dist/` build rather than
  * from source. The build emits content-hashed assets and a `manifest.json`
  * alongside the bundled `dist/index.js`, so in this mode the manifest is
  * load-bearing: the unhashed `/public/*` URLs do not exist and a missing
  * manifest must fail loudly rather than serve a page with dead hydration.
+ *
+ * Checks the exact directory name (`dist`) rather than a substring of the full
+ * path, so a source checkout living under a path that merely contains "dist"
+ * (e.g. `/tmp/distilled-agent-bureau/...`) is not misclassified as built.
  */
-const isBuiltOutput = dirname(fileURLToPath(import.meta.url)).includes('/dist');
+const isBuiltOutput = basename(currentDirectory) === 'dist';
 
 /**
  * Loads the build manifest that maps logical client-entry names to their
@@ -30,16 +36,19 @@ const isBuiltOutput = dirname(fileURLToPath(import.meta.url)).includes('/dist');
  * source (dev/test, no `dist/manifest.json`), the manifest is absent by
  * design and the caller degrades to the unhashed `/public/*` URLs.
  */
+/** Manifest keys the built server must be able to resolve to hashed assets. */
+const REQUIRED_MANIFEST_KEYS = ['entry.js', 'styles.css'] as const;
+
 async function loadManifest(): Promise<AssetManifest> {
   if (cachedManifest) return cachedManifest;
+  let manifest: AssetManifest;
   try {
     // Bun bundles the whole server graph flat into `dist/index.js`, so at
     // runtime `import.meta.url` resolves to `dist/`, and the manifest sits
     // alongside it at `dist/manifest.json`.
-    const currentDirectory = dirname(fileURLToPath(import.meta.url));
     const manifestPath = resolve(currentDirectory, 'manifest.json');
     const raw = await readFile(manifestPath, 'utf-8');
-    cachedManifest = JSON.parse(raw) as AssetManifest;
+    manifest = JSON.parse(raw) as AssetManifest;
   } catch (error) {
     if (isBuiltOutput) {
       throw new Error(
@@ -51,7 +60,24 @@ async function loadManifest(): Promise<AssetManifest> {
     }
     // From source there is no manifest by design; degrade to unhashed URLs.
     cachedManifest = {};
+    return cachedManifest;
   }
+
+  // A manifest that parses but omits a required key would otherwise fall through
+  // to the unhashed `/public/*` URLs, which 404 in built mode → a 200 page with
+  // dead hydration. Fail loudly instead.
+  if (isBuiltOutput) {
+    const missing = REQUIRED_MANIFEST_KEYS.filter((key) => !manifest[key]);
+    if (missing.length > 0) {
+      throw new Error(
+        `gateway: dist/manifest.json is missing required ${missing.join(', ')} ` +
+          'entr(y/ies). The built server cannot resolve content-hashed client ' +
+          'bundles; rebuild with `bun run build`.',
+      );
+    }
+  }
+
+  cachedManifest = manifest;
   return cachedManifest;
 }
 

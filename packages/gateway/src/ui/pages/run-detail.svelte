@@ -55,6 +55,23 @@
     return `${event.event}-${event.timestamp}-${event.sequence ?? index}`;
   }
 
+  /**
+   * Formats an event timestamp for both SSR and client without a hydration
+   * mismatch: the displayed value is the UTC clock portion of the ISO string,
+   * not `toLocaleTimeString()` (which is locale/timezone-dependent and differs
+   * between server and browser). Returns the ISO datetime for the machine
+   * `<time datetime>` and a stable human label, guarding against malformed
+   * timestamps that would otherwise throw inside `toISOString()`.
+   */
+  function formatEventTime(timestamp: number): { datetime: string; label: string } {
+    const date = new Date(timestamp);
+    if (Number.isNaN(date.valueOf())) {
+      return { datetime: '', label: 'Invalid timestamp' };
+    }
+    const datetime = date.toISOString();
+    return { datetime, label: `${datetime.slice(11, 19)} UTC` };
+  }
+
   let summaryItems = $derived([
     { term: 'Session', definition: run.sessionId || '—' },
     { term: 'Steps', definition: String(run.steps) },
@@ -65,18 +82,13 @@
   // Timeline's per-entry snippet only receives a `TimelineEntry`, which carries
   // no `detail`. Build the entries plus a parallel id -> detail map so the
   // children snippet can look the raw value back up and hand it to JsonViewer.
-  //
-  // The displayed time is the UTC clock portion of the ISO string rather than
-  // `toLocaleTimeString()`, which is locale- and timezone-dependent: the server
-  // and the browser can format the same instant differently, which would cause
-  // a hydration mismatch. A fixed UTC HH:MM:SS renders identically on both.
   let timelineEntries = $derived<TimelineEntry[]>(
     events.map((event, index) => {
-      const datetime = new Date(event.timestamp).toISOString();
+      const { datetime, label } = formatEventTime(event.timestamp);
       return {
         id: eventKey(event, index),
         datetime,
-        timestamp: `${datetime.slice(11, 19)} UTC`,
+        timestamp: label,
         title: event.event,
         tone: eventTone(event.event),
       };
