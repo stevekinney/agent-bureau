@@ -12,13 +12,8 @@ Real, gated commits across every dependency layer (all behind the full `validate
   armorer/conversationalist (tsdown is canonical), unused `change-case` dep, stale `./persistence`
   subpath export.
 - Killed the **fake-green gates**: `interoperability` and `integration` had no ESLint at all
-  (turbo silently skipped them); `vector-frankl`'s lint was an `echo TODO` stub hiding 162 real
-  violations. All packages now genuinely lint clean.
-- Fixed `vector-frankl`'s test script — it hardcoded a directory list that skipped `src/**/*.test.ts`
-  and `tests/end-to-end`; now `bun test` discovery runs all 1158 tests.
-- Resolved all 162 `vector-frankl` lint violations. Critically, the `require-await` fixes
-  **preserved every public/interface method's `Promise<T>` signature** (justified disable, not
-  de-async) so the `memory` consumer is unaffected — verified by a green full-monorepo gate.
+  (turbo silently skipped them); a since-removed vector-storage package's lint was a no-op `echo`
+  stub hiding 162 real violations. All packages now genuinely lint clean.
 - Deduped real duplication: herald status-code extraction (3 copies → 1), gateway
   `createSkillSession`/`escapeXml` (reuse from `skills`).
 - Fixed + enforced armorer's `check:boundaries` (was failing silently; now part of `lint`).
@@ -49,16 +44,6 @@ The only `.mjs` files in the repo; they violate the TS-only convention BUT inten
 to `bun:test` would change *what* they test (lose Node-compat coverage). weft brings cross-runtime
 durable-execution concerns that may reshape this suite — revisit the conversion then.
 
-### vector-frankl test coverage (currently 73% lines / 82% functions)
-**Deferred — too much changes today.** The 3817 uncovered lines split into: ~1897 in CORE
-testable-in-Bun files (search-engine, index-persistence, api, namespaces, debug, storage logic),
-~1474 in ENV-GATED files (Chrome/OPFS adapters, GPU/WebGPU, WASM, SIMD, workers, Redis/S3 — need a
-real browser/hardware/service harness), and ~446 in benchmark runners. vector-frankl is deliberately
-**excluded from the root `coverage:check` gate** for now. When picking this up: drive the CORE files
-to 100% with real tests first; treat the env-gated adapters as needing a real-environment test harness
-(don't force-mock them brittle); exclude or separately-handle the benchmark runners. Do this after the
-integration settles the file layout, not before.
-
 ### build-toolchain standardization (open A/B/C decision)
 11 packages use a hand-rolled `scripts/build.ts`; armorer/conversationalist use `tsdown`. Options:
 (A) migrate all to tsdown, (B) extract a shared `buildLibrary()` helper, (C) leave as-is.
@@ -72,9 +57,10 @@ regardless (dual build).
   public API ahead of its consumers on purpose; knip's core heuristic fights that and a passing gate
   would require an ever-growing ignore-config (a new fake-green gate). Use real lint + coverage +
   boundary checks instead. Do not re-propose.
-- **retry/backoff dedup (armorer ↔ vector-frankl): considered, deemed premature.** The two impls have
-  diverged (armorer lacks `linear`, has a `≤0→0` guard, different field names); extracting ~6 lines of
-  arithmetic to `interoperability` would couple two packages over trivial math. Not debt.
+- **retry/backoff dedup (armorer ↔ the since-removed vector-storage package): considered, deemed
+  premature.** The two impls had diverged (armorer lacks `linear`, has a `≤0→0` guard, different field
+  names); extracting ~6 lines of arithmetic to `interoperability` would couple two packages over
+  trivial math. Not debt. (Moot now that the second package is gone.)
 - **memory `ConversationLike`/`MessageLike` dedup: considered, low value.** `MessageLike` is identical
   across `experiential.ts` and `hooks/create-memory-hooks.ts`, but `ConversationLike` has forked (the
   hooks variant adds `appendSystemMessage`). A within-package extract of just `MessageLike` is a safe

@@ -70,7 +70,6 @@
     "@lostgradient/weft": "^0.2.1",
     "armorer": "workspace:*",
     "interoperability": "workspace:*",
-    "vector-frankl": "workspace:*",
     "zod": "^4.3.6"
   },
   "devDependencies": {

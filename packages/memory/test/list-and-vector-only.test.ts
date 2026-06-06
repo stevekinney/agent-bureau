@@ -1,13 +1,12 @@
 import { describe, expect, it } from 'bun:test';
-import { MemoryStorageAdapter } from 'vector-frankl';
 
 import { createMemory } from '../src/create-memory';
-import { createMockEmbedder } from '../src/test/index';
+import { createInMemoryMemoryRecordStorage, createMockEmbedder } from '../src/test/index';
 
 function createTestMemory() {
   return createMemory({
     embedder: createMockEmbedder(128),
-    storage: new MemoryStorageAdapter(),
+    storage: createInMemoryMemoryRecordStorage(),
   });
 }
 

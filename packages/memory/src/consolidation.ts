@@ -187,8 +187,8 @@ export function createConsolidationTask(
             }
 
             await memory.remember(mergedContent, metadata);
-            await memory.forget(entryA.id);
-            await memory.forget(entryB.id);
+            await memory.forget(entryA.id, namespace);
+            await memory.forget(entryB.id, namespace);
 
             mergedIds.add(entryA.id);
             mergedIds.add(entryB.id);
@@ -225,7 +225,7 @@ export function createConsolidationTask(
           if (similarity >= deduplicationThreshold) {
             // Keep the most recent, remove the older one
             const older = entryA.createdAt <= entryB.createdAt ? entryA : entryB;
-            await memory.forget(older.id);
+            await memory.forget(older.id, namespace);
             deduplicatedIds.add(older.id);
             deduplicated++;
           }
@@ -266,8 +266,8 @@ export function createConsolidationTask(
 
               if (reconciled !== null) {
                 await memory.remember(reconciled, { ...(namespace && { namespace }) });
-                await memory.forget(entryA.id);
-                await memory.forget(entryB.id);
+                await memory.forget(entryA.id, namespace);
+                await memory.forget(entryB.id, namespace);
                 resolvedIds.add(entryA.id);
                 resolvedIds.add(entryB.id);
                 conflictsResolved++;
@@ -298,7 +298,7 @@ export function createConsolidationTask(
             isExp && confidence < 0.5 ? pruneThreshold * 1.5 : pruneThreshold;
 
           if (importance < effectiveThreshold) {
-            await memory.forget(entry.id);
+            await memory.forget(entry.id, namespace);
             pruned++;
           }
         }

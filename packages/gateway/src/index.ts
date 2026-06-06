@@ -4,8 +4,6 @@ export { createGateway } from './create-gateway';
 export type { BureauEventMap } from './events';
 export { ActionEvent, BureauDisposedEvent, RunRegisteredEvent, RunRemovedEvent } from './events';
 export { serializeRunState } from './serialization';
-export type { ResolvedStorageBackend, StorageBackendConfiguration } from './storage';
-export { resolveStorageBackend } from './storage';
 export type {
   ApiErrorResponse,
   Bureau,

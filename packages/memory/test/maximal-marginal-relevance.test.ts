@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'bun:test';
+import { cosineSimilarity } from 'interoperability';
 
-import { applyMaximalMarginalRelevance, cosineSimilarity } from '../src/maximal-marginal-relevance';
+import { applyMaximalMarginalRelevance } from '../src/maximal-marginal-relevance';
 
 describe('cosineSimilarity', () => {
   it('returns 1 for identical unit vectors', () => {
@@ -20,8 +21,10 @@ describe('cosineSimilarity', () => {
     expect(cosineSimilarity([0, 0], [0, 0])).toBe(0);
   });
 
-  it('throws when vector lengths differ', () => {
-    expect(() => cosineSimilarity([1, 0], [1, 0, 0])).toThrow(/vector length mismatch/i);
+  it('throws a RangeError when vector lengths differ', () => {
+    // cosineSimilarity now comes from `interoperability`, whose spec throws
+    // RangeError on a length mismatch (previously a generic Error).
+    expect(() => cosineSimilarity([1, 0], [1, 0, 0])).toThrow(RangeError);
   });
 });
 

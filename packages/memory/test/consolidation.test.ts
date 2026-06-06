@@ -1,16 +1,15 @@
 import { describe, expect, it } from 'bun:test';
-import { MemoryStorageAdapter } from 'vector-frankl';
 
 import type { ConsolidationState } from '../src/consolidation';
 import { createConsolidationTask } from '../src/consolidation';
 import { createMemory } from '../src/create-memory';
-import { createMockEmbedder } from '../src/test/index';
+import { createInMemoryMemoryRecordStorage, createMockEmbedder } from '../src/test/index';
 import type { Memory, MemoryMetadata, MemorySearchResult } from '../src/types';
 
 function createTestMemory(): Memory {
   return createMemory({
     embedder: createMockEmbedder(128),
-    storage: new MemoryStorageAdapter(),
+    storage: createInMemoryMemoryRecordStorage(),
     deduplicationThreshold: 0.99, // High to avoid auto-dedup during setup
   });
 }
