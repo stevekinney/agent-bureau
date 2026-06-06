@@ -164,7 +164,7 @@ export async function renderPage<Props extends Record<string, unknown>>({
   const serializedData = serializeInitialData(data ?? props);
 
   return `<!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />

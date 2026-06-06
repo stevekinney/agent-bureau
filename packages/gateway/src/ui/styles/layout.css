@@ -1,12 +1,23 @@
+/*
+ * App-shell layout glue. Cinder provides no two-column shell primitive, so the
+ * gateway owns the grid, the sidebar chrome, and the content pane sizing. Every
+ * color/spacing value resolves to a cinder design token (--cinder-*) so the
+ * shell stays consistent with the cinder-rendered components inside it and
+ * tracks the active color-scheme (dark, via data-theme on <html>).
+ */
+
 .layout {
   display: grid;
   grid-template-columns: 220px 1fr;
-  min-height: 100vh;
+  /* A definite viewport height so the content pane (and a full-height Chat) can
+     resolve `height: 100%` against a sized row. `min-height` would leave the
+     row content-sized, collapsing Chat's `height: 100%` to zero. */
+  height: 100dvh;
 }
 
 .sidebar {
-  background: var(--color-surface);
-  border-right: 1px solid var(--color-border);
+  background: var(--cinder-surface);
+  border-right: 1px solid var(--cinder-border);
   padding: 1.5rem 1rem;
   display: flex;
   flex-direction: column;
@@ -15,28 +26,7 @@
 .sidebar-title {
   font-size: 1rem;
   margin-bottom: 1.5rem;
-  color: var(--color-text);
-}
-
-.nav-links {
-  list-style: none;
-  display: flex;
-  flex-direction: column;
-  gap: 0.25rem;
-}
-
-.nav-links a {
-  display: block;
-  padding: 0.5rem 0.75rem;
-  border-radius: var(--radius);
-  color: var(--color-text-muted);
-  transition: background 0.15s;
-}
-
-.nav-links a:hover {
-  background: var(--color-border);
-  color: var(--color-text);
-  text-decoration: none;
+  color: var(--cinder-text);
 }
 
 .sidebar-footer {
@@ -47,4 +37,8 @@
 .main-content {
   padding: 2rem;
   max-width: 960px;
+  /* Let long pages scroll inside the content pane while the sidebar stays put,
+     and allow a flex-height child (the chat page) to size against this pane. */
+  min-height: 0;
+  overflow-y: auto;
 }

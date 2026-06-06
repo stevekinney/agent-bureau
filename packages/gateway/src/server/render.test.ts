@@ -13,7 +13,17 @@ describe('renderPage', () => {
 
     expect(typeof html).toBe('string');
     expect(html).toStartWith('<!doctype html>');
-    expect(html).toContain('<html lang="en">');
+    expect(html).toContain('<html lang="en"');
+  });
+
+  it('activates cinder dark mode by setting data-theme="dark" on <html>', async () => {
+    // Cinder's tokens use CSS `light-dark()` gated on `color-scheme`; the
+    // `[data-theme="dark"]` selector flips `color-scheme` to dark so every
+    // component resolves its dark arm. Without this attribute the page renders
+    // cinder's light palette against the app shell — the bug this fixes.
+    const html = await renderPage({ title: 'Test', component: Fixture, props: baseProps });
+
+    expect(html).toContain('<html lang="en" data-theme="dark">');
   });
 
   it('includes the title in the HTML output', async () => {

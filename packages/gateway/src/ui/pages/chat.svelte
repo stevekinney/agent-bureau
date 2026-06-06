@@ -67,3 +67,29 @@
     </section>
   {/if}
 </main>
+
+<style>
+  /*
+   * Cinder's <Chat> root (.chat-container) is `height: 100%`, so it needs a
+   * definite-height parent or it collapses to its content. Make the page a
+   * full-height flex column and let the chat fill the remaining space below the
+   * heading. `:global(.chat-container)` targets cinder's documented root class
+   * (the same element its `class` prop forwards to) — the supported way to size
+   * a library component from its consumer.
+   */
+  .page-chat {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    height: 100%;
+  }
+
+  .page-chat > :global(.chat-container) {
+    flex: 1;
+    min-height: 0;
+  }
+
+  .chat-tool-activity {
+    margin-bottom: 1rem;
+  }
+</style>

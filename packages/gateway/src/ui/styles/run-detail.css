@@ -3,19 +3,10 @@
 }
 
 .page-run-detail .error {
-  color: var(--color-error);
-  font-family: var(--font-mono);
+  color: var(--cinder-danger);
+  font-family: var(--cinder-font-mono);
 }
 
-.page-run-detail pre {
-  overflow-x: auto;
-  padding: 0.75rem;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius);
-  background: var(--color-surface);
-}
-
-.run-event-list,
 .run-step-list {
   display: flex;
   flex-direction: column;
