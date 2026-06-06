@@ -74,9 +74,26 @@ export function createRunDetailStore(initialRun: RunDetail): RunDetailStore {
 
     const nextRun = (await response.json()) as RunDetail;
     run = nextRun;
+
+    // Merge the freshly-fetched timeline with the locally-held one keyed on
+    // `sequence`. The API can lag the websocket stream, so a sequenced event
+    // already shown live (e.g. the `step.completed` that triggered this
+    // refresh) may not be in `nextRun` yet — carrying only sequence-less rows
+    // would drop it, making timeline rows vanish. Keep every API event, then
+    // re-append (a) locally-held sequenced events the API hasn't caught up to
+    // and (b) the synthetic sequence-less rows (e.g. tool-call-start). Once the
+    // API includes a sequence, the Set dedup keeps it appearing exactly once.
+    const apiTimeline = timelineFromRun(nextRun);
+    const apiSequences = new Set(
+      apiTimeline
+        .map((event) => event.sequence)
+        .filter((sequence): sequence is number => sequence !== undefined),
+    );
     events = [
-      ...timelineFromRun(nextRun),
-      ...events.filter((event) => event.sequence === undefined),
+      ...apiTimeline,
+      ...events.filter(
+        (event) => event.sequence === undefined || !apiSequences.has(event.sequence),
+      ),
     ];
   }
 

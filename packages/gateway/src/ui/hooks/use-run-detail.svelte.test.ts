@@ -153,5 +153,63 @@ describe('createRunDetailStore', () => {
     expect(store.run.status).toBe('completed');
     const synthetic = store.events.filter((event) => event.sequence === undefined);
     expect(synthetic.map((event) => event.event)).toContain('stream:tool-call-start');
+
+    // The API also returned sequence 2, so the locally-appended sequence-2
+    // event must appear exactly once after the merge — no duplicate row.
+    const sequenceTwo = store.events.filter((event) => event.sequence === 2);
+    expect(sequenceTwo).toHaveLength(1);
+  });
+
+  it('keeps a live sequenced event the refreshed API response has not caught up to', async () => {
+    // Regression: refresh() used to rebuild the timeline from the API plus only
+    // sequence-less rows, so any sequenced websocket event missing from the
+    // (lagging) API response was dropped — timeline rows vanished right after a
+    // terminal event. The merge must keep such events until the API includes
+    // them.
+    const lagging: RunDetail = makeRunDetail({
+      id: 'run-1',
+      status: 'completed',
+      // The API lags the stream: it knows about sequence 1 but not the
+      // sequence-2 step.completed that the websocket already delivered.
+      events: [{ sequence: 1, runId: 'run-1', event: 'run.started', detail: {}, timestamp: 10 }],
+    });
+    const fetchMock = mock(() => Promise.resolve(new Response(JSON.stringify(lagging))));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const store = createRunDetailStore(makeRunDetail({ id: 'run-1' }));
+
+    store.handleMessage({
+      type: 'event',
+      runId: 'run-1',
+      event: 'step.completed',
+      detail: {},
+      sequence: 2,
+      timestamp: 20,
+    });
+
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // The lagging API event survives, AND the live sequence-2 event is retained.
+    const sequences = store.events
+      .map((event) => event.sequence)
+      .filter((sequence): sequence is number => sequence !== undefined)
+      .sort((a, b) => a - b);
+    expect(sequences).toEqual([1, 2]);
+    expect(store.events.map((event) => event.event)).toContain('step.completed');
+  });
+
+  it('does not duplicate a sequence value of 0 across a refresh', () => {
+    // `sequence` can legitimately be 0; the merge must dedup it like any other
+    // value and never treat it as "sequence-less" (which would double it).
+    const store = createRunDetailStore(
+      makeRunDetail({
+        id: 'run-1',
+        events: [{ sequence: 0, runId: 'run-1', event: 'run.started', detail: {}, timestamp: 1 }],
+      }),
+    );
+
+    expect(store.events.filter((event) => event.sequence === 0)).toHaveLength(1);
   });
 });
