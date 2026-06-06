@@ -6,7 +6,7 @@
     "rootDir": ".",
     "paths": { "@/*": ["./src/*"] },
     "typeRoots": ["node_modules/@types"],
-    "types": ["bun", "react", "react-dom"]
+    "types": ["bun"]
   },
   "include": ["src", "scripts"],
   "exclude": ["node_modules", "coverage", "**/dist/**", "**/build/**"]

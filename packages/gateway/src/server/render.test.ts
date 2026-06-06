@@ -1,0 +1,243 @@
+import { describe, expect, it } from 'bun:test';
+
+import type { RunDetail } from '../types';
+import RunDetailPage from '../ui/pages/run-detail.svelte';
+import { renderPage } from './render';
+import Fixture from './test-fixtures/render-fixture.svelte';
+
+const baseProps = { initialData: { label: 'hello' }, pathname: '/dashboard' };
+
+describe('renderPage', () => {
+  it('returns a complete HTML document string', async () => {
+    const html = await renderPage({ title: 'Test Page', component: Fixture, props: baseProps });
+
+    expect(typeof html).toBe('string');
+    expect(html).toStartWith('<!doctype html>');
+    expect(html).toContain('<html lang="en"');
+  });
+
+  it('activates cinder dark mode by setting data-theme="dark" on <html>', async () => {
+    // Cinder's tokens use CSS `light-dark()` gated on `color-scheme`; the
+    // `[data-theme="dark"]` selector flips `color-scheme` to dark so every
+    // component resolves its dark arm. Without this attribute the page renders
+    // cinder's light palette against the app shell — the bug this fixes.
+    const html = await renderPage({ title: 'Test', component: Fixture, props: baseProps });
+
+    expect(html).toContain('<html lang="en" data-theme="dark">');
+  });
+
+  it('includes the title in the HTML output', async () => {
+    const html = await renderPage({ title: 'My Dashboard', component: Fixture, props: baseProps });
+
+    expect(html).toContain('<title>My Dashboard</title>');
+  });
+
+  it('HTML-escapes the title so an untrusted run id cannot inject markup', async () => {
+    // pages.ts builds titles like `Run ${run.id}`; a malicious id must not be
+    // able to break out of the <title> element or inject a script.
+    const html = await renderPage({
+      title: 'Run </title><script>alert(1)</script>',
+      component: Fixture,
+      props: baseProps,
+    });
+
+    expect(html).not.toContain('</title><script>alert(1)');
+    expect(html).toContain('&lt;script&gt;alert(1)&lt;/script&gt;');
+  });
+
+  it('renders the Svelte component markup inside the root div', async () => {
+    const html = await renderPage({ title: 'Test', component: Fixture, props: baseProps });
+
+    expect(html).toContain('id="root"');
+    expect(html).toContain('<h1>Fixture</h1>');
+    expect(html).toContain('hello');
+  });
+
+  it('passes props through to the rendered component', async () => {
+    const html = await renderPage({
+      title: 'Test',
+      component: Fixture,
+      props: { initialData: { label: 'projected' }, pathname: '/runs/abc' },
+    });
+
+    expect(html).toContain('projected');
+    expect(html).toContain('data-pathname="/runs/abc"');
+  });
+
+  it('serializes the props into window.__INITIAL_DATA__ by default', async () => {
+    const html = await renderPage({ title: 'Test', component: Fixture, props: baseProps });
+
+    expect(html).toContain('window.__INITIAL_DATA__ =');
+    expect(html).toContain(JSON.stringify(baseProps));
+  });
+
+  it('serializes an explicit data payload over the props when provided', async () => {
+    const data = { runs: [{ id: 'run-1', status: 'completed' }] };
+    const html = await renderPage({
+      title: 'Test',
+      component: Fixture,
+      props: baseProps,
+      data,
+    });
+
+    expect(html).toContain('window.__INITIAL_DATA__ =');
+    expect(html).toContain(JSON.stringify(data));
+  });
+
+  it('escapes < to prevent breaking out of the script tag (XSS)', async () => {
+    const data = { value: '</script><script>alert(1)</script>' };
+    const html = await renderPage({
+      title: 'Test',
+      component: Fixture,
+      props: baseProps,
+      data,
+    });
+
+    // The raw closing tag must not survive into the inline data script.
+    expect(html).not.toContain('</script><script>alert(1)');
+    expect(html).toContain('\\u003c/script');
+  });
+
+  it('escapes U+2028 and U+2029 line terminators', async () => {
+    const lineSeparator = String.fromCharCode(0x2028);
+    const paragraphSeparator = String.fromCharCode(0x2029);
+    const data = { value: `line${lineSeparator}sep${paragraphSeparator}para` };
+    const html = await renderPage({
+      title: 'Test',
+      component: Fixture,
+      props: baseProps,
+      data,
+    });
+
+    expect(html).not.toContain(lineSeparator);
+    expect(html).not.toContain(paragraphSeparator);
+    expect(html).toContain('\\u2028');
+    expect(html).toContain('\\u2029');
+  });
+
+  it('includes the stylesheet link for a styled first paint', async () => {
+    const html = await renderPage({ title: 'Test', component: Fixture, props: baseProps });
+
+    expect(html).toContain('rel="stylesheet"');
+    expect(html).toContain('/public/styles.css');
+  });
+
+  it('includes the hydration client module script', async () => {
+    const html = await renderPage({ title: 'Test', component: Fixture, props: baseProps });
+
+    expect(html).toContain('type="module"');
+    expect(html).toContain('/public/entry.js');
+  });
+});
+
+describe('renderPage with a populated run-detail page', () => {
+  // The run-detail route is the heaviest cinder surface in the migration:
+  // CodeBlock (streaming output), JsonViewer (tool calls / results / snapshot
+  // / per-event detail), Timeline (with a children snippet), StatGroup, and
+  // Card. Empty-state rendering of the other routes proves none of this, so
+  // this test renders the REAL page with fully populated data — including a
+  // tool call carrying a code string to hit the CodeBlock/highlighter path —
+  // to prove SSR does not throw and emits the expected cinder markup.
+  const populatedRun: RunDetail = {
+    id: 'run-populated',
+    sessionId: 'session-1',
+    status: 'completed',
+    steps: 2,
+    usage: { prompt: 120, completion: 80, total: 200 },
+    finishReason: 'stop',
+    error: undefined,
+    actionCount: 1,
+    stepDetails: [
+      {
+        step: 0,
+        content: 'Calling a tool to read the file.',
+        final: false,
+        usage: { prompt: 60, completion: 40, total: 100 },
+        toolCalls: [
+          {
+            id: 'call-1',
+            name: 'read_file',
+            arguments: { path: 'src/index.ts', snippet: 'export const answer = 42;\n' },
+          },
+        ],
+        results: [{ toolName: 'read_file', result: { contents: 'export const answer = 42;\n' } }],
+      },
+      {
+        step: 1,
+        content: 'The file exports `answer = 42`.',
+        final: true,
+        usage: { prompt: 60, completion: 40, total: 100 },
+        toolCalls: [],
+        results: [],
+      },
+    ],
+    // The page passes latestSnapshot straight to JsonViewer (opaque object) or
+    // renders an EmptyState when undefined. Its internal shape is irrelevant to
+    // what this test proves, so leave it undefined and let the tool
+    // calls/results/timeline detail exercise JsonViewer instead.
+    latestSnapshot: undefined,
+    events: [
+      {
+        sequence: 0,
+        runId: 'run-populated',
+        event: 'run.started',
+        detail: { at: 0 },
+        timestamp: 1,
+      },
+      {
+        sequence: 1,
+        runId: 'run-populated',
+        event: 'tool.completed',
+        detail: { tool: 'read_file', ok: true },
+        timestamp: 2,
+      },
+      {
+        sequence: 2,
+        runId: 'run-populated',
+        event: 'run.completed',
+        detail: { finishReason: 'stop' },
+        timestamp: 3,
+      },
+    ],
+  };
+
+  const props = {
+    run: populatedRun,
+    events: populatedRun.events.map((record) => ({
+      event: record.event,
+      detail: record.detail,
+      timestamp: record.timestamp,
+      sequence: record.sequence,
+    })),
+    streamingAssistantContent: 'const greeting = "hello";\nconsole.log(greeting);\n',
+    toolActivity: ['read_file → completed'],
+  };
+
+  it('server-renders the heavy cinder components without throwing', async () => {
+    const html = await renderPage({ title: 'Run run-populated', component: RunDetailPage, props });
+
+    expect(html).toStartWith('<!doctype html>');
+    expect(html).toContain('<title>Run run-populated</title>');
+  });
+
+  it('emits markup from the timeline, code-block, json-viewer, and stat components', async () => {
+    const html = await renderPage({ title: 'Run run-populated', component: RunDetailPage, props });
+
+    // Section headings the page composes around the heavy components.
+    expect(html).toContain('Summary');
+    expect(html).toContain('Streaming Output');
+    expect(html).toContain('Tool Activity');
+    expect(html).toContain('Timeline');
+
+    // Each heavy cinder component emits its namespaced class under SSR.
+    expect(html).toContain('cinder-code-block');
+    expect(html).toContain('cinder-json-viewer');
+    expect(html).toContain('cinder-timeline');
+    expect(html).toContain('cinder-stat');
+
+    // Real data flows through: the code string, a tool name, and an event.
+    expect(html).toContain('greeting');
+    expect(html).toContain('read_file');
+    expect(html).toContain('run.completed');
+  });
+});

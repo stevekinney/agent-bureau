@@ -1,7 +1,3 @@
-.page-dashboard .runs-table {
-  margin-top: 1rem;
-}
-
 .run-row:hover {
-  background: var(--color-surface);
+  background: var(--cinder-surface-hover);
 }

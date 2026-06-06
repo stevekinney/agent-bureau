@@ -20,6 +20,7 @@
     "validate": "bun run format:check && bun run lint && bun run check-types && bun run test"
   },
   "dependencies": {
+    "@lostgradient/cinder": "^0.1.1",
     "@lostgradient/weft": "^0.2.1",
     "armorer": "workspace:*",
     "conversationalist": "workspace:*",
@@ -28,17 +29,15 @@
     "lifecycle": "workspace:*",
     "memory": "workspace:*",
     "operative": "workspace:*",
-    "react": "^19.1.0",
-    "react-dom": "^19.1.0",
     "sentinel": "workspace:*",
     "skills": "workspace:*",
+    "svelte": "^5.56.2",
     "zod": "^4.3.6"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@types/bun": "^1.3.9",
-    "@types/react": "^19.1.6",
-    "@types/react-dom": "^19.1.6",
+    "bun-plugin-svelte": "0.0.6",
     "eslint": "^10.0.0",
     "typescript": "5.9.2",
     "typescript-eslint": "^8.55.0"
