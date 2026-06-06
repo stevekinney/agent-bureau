@@ -209,8 +209,8 @@ log('Mapping the toolchain, render topology, component surface, and cinder API b
 
 const READ_CTX = `You are investigating a cross-framework UI migration in a Bun monorepo.
 
-REPO: /Users/stevekinney/Developer/agent-bureau (the gateway package lives at ${GATEWAY})
-CINDER SOURCE (sibling repo, for reference): /Users/stevekinney/Developer/cinder — the published package is ${CINDER}, a Svelte 5 component library (peer dep svelte >=5.55.0 <6).
+REPO ROOT: the current working directory (the gateway package lives at ${GATEWAY})
+CINDER: the published package ${CINDER} is installed at node_modules/${CINDER} — a Svelte 5 component library (peer dep svelte >=5.55.0 <6).
 
 GOAL: replace the gateway's custom React 19 UI entirely with Svelte 5 + ${CINDER} components. Server is Hono on Bun; current UI is React SSR (renderToReadableStream) + client hydration (hydrateRoot).
 
@@ -221,7 +221,7 @@ const [toolchain, topology, mapping, cinderApi] = await parallel([
     `${READ_CTX}
 
 YOUR FOCUS: the BUILD TOOLCHAIN. This is the load-bearing investigation — the whole migration depends on it.
-1. Resolve how ${CINDER} must be consumed. Inspect /Users/stevekinney/Developer/cinder/packages/components/package.json exports, the dist/ contents, and the "files" array. The "svelte" condition points at raw source (src/index.ts) while dist/ holds a compiled SSR build. Determine which the gateway bundler should use and what that implies (must svelte compile .svelte from node_modules?).
+1. Resolve how ${CINDER} must be consumed. Inspect node_modules/${CINDER}/package.json exports, the dist/ contents, and the "files" array. The "svelte" condition points at raw source (src/index.ts) while dist/ holds a compiled SSR build. Determine which the gateway bundler should use and what that implies (must svelte compile .svelte from node_modules?).
 2. CRITICAL: determine exactly how Bun.build will compile .svelte files. Bun does NOT compile Svelte natively. Find the real, currently-available Bun Svelte plugin (exact npm package name + version), verify it supports BOTH server (SSR/generate:'server') and client (DOM) compilation, and that it can compile cinder's source from node_modules. Use ToolSearch to load context7 (resolve-library-id + query-docs) for "bun svelte plugin" and "svelte 5 server-side rendering Bun" to verify against current docs. If no viable Bun plugin exists, say so loudly — that changes the build strategy (e.g. a separate vite/svelte client build).
 3. Pin every dep to add to ${GATEWAY}/package.json (svelte, the plugin, ${CINDER}@^0.1.1) and list every React dep to remove.
 4. Read ${GATEWAY}/scripts/build.ts and write the concrete new build plan: server SSR pass + client hydrate pass, plugin wiring, externals, how cinder CSS/tokens are emitted to dist/public.
@@ -246,7 +246,7 @@ YOUR FOCUS: the RENDER TOPOLOGY of the current gateway. Map reality, not the hap
 
 YOUR FOCUS: the COMPONENT MAPPING from React UI to Svelte/cinder. Produce the rewrite blueprint.
 Read every file under ${GATEWAY}/src/ui/ (pages/*.tsx, components/*.tsx, hooks/*.ts, layout.tsx, app.tsx) and the styles in ${GATEWAY}/src/ui/styles/.
-For each PAGE (dashboard, run-detail, configuration, chat): name the target .svelte file path, the cinder exports it should use (browse /Users/stevekinney/Developer/cinder/packages/components/src/components/ for the catalog — e.g. card, table, badge, button, message, timeline, stat, empty-state, connection-indicator, chat, code-block, form-field, input, textarea), and the stateful logic to port.
+For each PAGE (dashboard, run-detail, configuration, chat): name the target .svelte file path, the cinder exports it should use (browse node_modules/${CINDER}/src/components/ for the catalog — e.g. card, table, badge, button, message, timeline, stat, empty-state, connection-indicator, chat, code-block, form-field, input, textarea), and the stateful logic to port.
 For each SHARED COMPONENT (run-row, message-list, status-badge, connection-indicator): decide replace-with-cinder (cinder has connection-indicator, badge/status-dot, message, data-list among ~150 exports), rewrite-as-local-svelte, or delete.
 For each HOOK (use-chat, use-runs, use-run-detail, use-websocket, tool-activity): name its Svelte target (likely a .svelte.ts runes module) and the $state/$derived/$effect strategy.
 Output a deduped list of every cinder subpath export the migration needs.`,
@@ -258,8 +258,8 @@ Output a deduped list of every cinder subpath export the migration needs.`,
 
 YOUR FOCUS: the CINDER COMPONENT API for the components this migration will likely use.
 The migration needs (at least): card, table (+ table-row/cell/header), badge, status-dot, button, link, message, chat, timeline (+ timeline-item), stat (+ stat-group), empty-state, connection-indicator, code-block, json-viewer, form-field, input, textarea, label, container, surface, navigation-bar/side-navigation, spinner.
-For each, read its source under /Users/stevekinney/Developer/cinder/packages/components/src/components/<name>/ (schema.ts and the .svelte) and record: the exact import path (e.g. ${CINDER}/card), its key props/snippets/events, and whether it is SSR-safe (no window/document access at module load or during SSR render).
-Then determine the STYLES setup: read /Users/stevekinney/Developer/cinder/packages/components/src/styles/ and the package "./styles*" exports — which entrypoints must the gateway import (styles/all vs tokens+foundation+per-component) and where, so it looks correct.
+For each, read its source under node_modules/${CINDER}/src/components/<name>/ (schema.ts and the .svelte) and record: the exact import path (e.g. ${CINDER}/card), its key props/snippets/events, and whether it is SSR-safe (no window/document access at module load or during SSR render).
+Then determine the STYLES setup: read node_modules/${CINDER}/src/styles/ and the package "./styles*" exports — which entrypoints must the gateway import (styles/all vs tokens+foundation+per-component) and where, so it looks correct.
 List gotchas: SSR caveats, required peer deps, client-only components, runtime needs (shiki/mermaid for markdown/code-block).`,
     { label: 'investigate:cinder-api', phase: 'Investigate', schema: CINDER_API_SCHEMA },
   ),
