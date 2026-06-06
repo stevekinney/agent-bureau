@@ -111,6 +111,19 @@ export interface MemoryRecordStorage {
    * Find live records most similar to `vector`. Returns at most `limit`
    * results; when `threshold` is supplied, only results scoring at or above it
    * are returned.
+   *
+   * **Search strategy is a backend choice, not part of this contract.** The
+   * local backends (in-memory and Weft) compute exact cosine similarity by
+   * brute force over every live record in scope — O(n) per query, with the
+   * whole scope materialized in memory. This is deliberate: it needs no index
+   * to maintain, stays exact, and is sub-millisecond at the per-namespace
+   * scale agent memory actually reaches. The Cloudflare backend instead
+   * delegates to a Vectorize approximate-nearest-neighbor index. A future
+   * locally-embeddable indexed backend (e.g. PGLite + pgvector, or LanceDB)
+   * would be a drop-in: implement this interface and prove it against
+   * `runMemoryRecordStorageContract`. Reach for one only when a scope routinely
+   * holds tens of thousands of vectors on a hot query path and the brute-force
+   * scan is a measured bottleneck — not before.
    */
   searchByVector(
     vector: EmbeddingVectorLike,

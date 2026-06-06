@@ -223,6 +223,14 @@ export function createWeftMemoryRecordStorage(
       return active.length;
     },
 
+    /**
+     * Brute-force exact cosine similarity over every live record in scope —
+     * O(n) per query, materializing the whole scope. This backend keeps no
+     * vector index by design; see {@link MemoryRecordStorage.searchByVector}
+     * for why brute force is the right default here and when an indexed backend
+     * (Cloudflare's Vectorize today; a local PGLite/pgvector or LanceDB backend
+     * if a real need appears) becomes worth its cost.
+     */
     async searchByVector(
       vector: EmbeddingVectorLike,
       scope: MemoryRecordScope,
