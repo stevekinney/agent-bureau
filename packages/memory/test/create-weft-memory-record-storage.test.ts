@@ -116,10 +116,10 @@ describe('createWeftMemoryRecordStorage (Weft-specific)', () => {
     it('rejects an empty namespace on a direct storage call', async () => {
       // Direct storage callers bypass createMemory, so the backend itself must
       // enforce the non-empty-namespace contract.
-      expect(storage.get('a', { namespace: '' })).rejects.toThrow(
+      await expect(storage.get('a', { namespace: '' })).rejects.toThrow(
         /namespace must be a non-empty string/,
       );
-      expect(storage.count({ namespace: '' })).rejects.toThrow(
+      await expect(storage.count({ namespace: '' })).rejects.toThrow(
         /namespace must be a non-empty string/,
       );
     });
@@ -190,7 +190,7 @@ describe('createWeftMemoryRecordStorage (Weft-specific)', () => {
       const key = await onlyKey();
       await underlying.put(key, new TextEncoder().encode('{ not json'));
 
-      expect(storage.get('a', SCOPE)).rejects.toThrow();
+      await expect(storage.get('a', SCOPE)).rejects.toThrow();
     });
 
     it('throws when a stored record is structurally invalid (wrong status)', async () => {
@@ -201,7 +201,7 @@ describe('createWeftMemoryRecordStorage (Weft-specific)', () => {
         new TextEncoder().encode(JSON.stringify({ id: 'a', status: 'bogus' })),
       );
 
-      expect(storage.get('a', SCOPE)).rejects.toThrow();
+      await expect(storage.get('a', SCOPE)).rejects.toThrow();
     });
 
     it('throws when a stored vector entry is non-finite', async () => {
@@ -227,7 +227,7 @@ describe('createWeftMemoryRecordStorage (Weft-specific)', () => {
         ),
       );
 
-      expect(storage.get('a', SCOPE)).rejects.toThrow();
+      await expect(storage.get('a', SCOPE)).rejects.toThrow();
     });
   });
 });

@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "tsBuildInfoFile": "node_modules/.cache/tsconfig.tsbuildinfo",
+    "baseUrl": ".",
+    "rootDir": ".",
+    "paths": {
+      "@/*": ["./src/*"]
+    },
+    "typeRoots": ["node_modules/@types", "node_modules"],
+    "types": ["bun", "@cloudflare/workers-types"]
+  },
+  "include": ["src", "scripts"],
+  "exclude": ["node_modules", "coverage", "**/dist/**", "**/build/**"]
+}
