@@ -8,6 +8,7 @@
   "baseBranch": "main",
   "updateInternalDependencies": "patch",
   "ignore": [
+    "cloudflare",
     "evaluation",
     "gateway",
     "herald",
@@ -16,8 +17,6 @@
     "memory",
     "operative",
     "sentinel",
-    "skills",
-    "storage",
-    "vector-frankl"
+    "skills"
   ]
 }

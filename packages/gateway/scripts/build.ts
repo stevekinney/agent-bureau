@@ -4,7 +4,7 @@ await $`rm -rf dist`;
 
 // Server build
 const serverResult = await Bun.build({
-  entrypoints: ['./src/index.ts', './src/events.ts', './src/storage.ts'],
+  entrypoints: ['./src/index.ts', './src/events.ts'],
   outdir: './dist',
   root: './src',
   target: 'bun',
@@ -30,8 +30,6 @@ const serverResult = await Bun.build({
     'memory',
     'memory/*',
     'storage',
-    'vector-frankl',
-    'vector-frankl/*',
     'zod',
   ],
 });

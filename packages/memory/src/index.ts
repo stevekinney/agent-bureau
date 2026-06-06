@@ -6,9 +6,12 @@ export type {
   CreateConsolidationOptions,
 } from './consolidation';
 export { createConsolidationTask } from './consolidation';
-export { createMemory, METADATA_NAMESPACE_KEY } from './create-memory';
-export type { CreateSQLiteMemoryOptions } from './create-sqlite-memory';
-export { createSQLiteMemory, SQLiteStorageAdapter } from './create-sqlite-memory';
+export { createMemory } from './create-memory';
+export type { CreateWeftMemoryRecordStorageOptions } from './create-weft-memory-record-storage';
+export {
+  createWeftMemoryRecordStorage,
+  DEFAULT_MEMORY_KEY_PREFIX,
+} from './create-weft-memory-record-storage';
 export type { CachedEmbedder, EmbeddingCacheOptions } from './embedding-cache';
 export { withEmbeddingCache } from './embedding-cache';
 export type { RunCaptureHookOptions, StepResultLike } from './experiential';
@@ -19,8 +22,6 @@ export type {
   SynchronizeResult,
 } from './file-synchronizer';
 export { createFileSynchronizer } from './file-synchronizer';
-export type { Fts5TextSearchProviderOptions } from './fts5-text-search-provider';
-export { createFts5TextSearchProvider, isFts5Available } from './fts5-text-search-provider';
 export type { MemoryHookOptions } from './hooks';
 export { createMemoryHooks } from './hooks';
 export type {
@@ -35,12 +36,12 @@ export { createHyDEGenerator, withHyDE } from './hyde';
 export type { IngestOptions, IngestResult } from './ingest';
 export { CHUNK_INDEX_KEY, ingest, SOURCE_DOCUMENT_KEY } from './ingest';
 export type { MaximalMarginalRelevanceOptions } from './maximal-marginal-relevance';
-export { applyMaximalMarginalRelevance, cosineSimilarity } from './maximal-marginal-relevance';
+export { applyMaximalMarginalRelevance } from './maximal-marginal-relevance';
 export { withNamespaceIsolation } from './namespace-isolation';
 export { extractKeywords, isStopWord } from './query-expansion';
 export type { CreateReflectionHookOptions } from './reflection';
 export { createReflectionHook } from './reflection';
-export type { MemoryStatus } from './status';
+export type { GetMemoryStatusOptions, MemoryStatus } from './status';
 export { getMemoryStatus } from './status';
 export type { TemporalDecayOptions } from './temporal-decay';
 export { applyTemporalDecay, computeTemporalDecay } from './temporal-decay';
@@ -56,8 +57,12 @@ export type {
   MemoryEntry,
   MemoryListOptions,
   MemoryMetadata,
+  MemoryRecord,
+  MemoryRecordScope,
+  MemoryRecordStorage,
   MemorySearchOptions,
   MemorySearchResult,
+  MemoryVectorSearchResult,
   NamespaceIsolationOptions,
   OnConflictHandler,
 } from './types';

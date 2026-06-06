@@ -1,6 +1,14 @@
 import type { Embedder, EmbeddingVector } from 'interoperability';
 
+import type {
+  MemoryRecord,
+  MemoryRecordScope,
+  MemoryRecordStorage,
+  MemoryVectorSearchResult,
+} from './memory-record-storage';
+
 export type { Embedder, EmbeddingVector };
+export type { MemoryRecord, MemoryRecordScope, MemoryRecordStorage, MemoryVectorSearchResult };
 
 export interface MemoryEntry {
   id: string;
@@ -63,7 +71,13 @@ export interface Memory {
   recall(query: string, options?: MemorySearchOptions): Promise<MemorySearchResult[]>;
   /** List entries without semantic search. Returns entries sorted by creation time (newest first). */
   list(options?: MemoryListOptions): Promise<MemorySearchResult[]>;
-  forget(id: string): Promise<void>;
+  /**
+   * Remove a specific entry by id. Records are scope-keyed, so `namespace`
+   * selects the scope to delete from; it defaults to the configured default
+   * namespace. Callers that stored an entry under a non-default namespace must
+   * pass the same namespace here.
+   */
+  forget(id: string, namespace?: string): Promise<void>;
   forgetAll(namespace?: string): Promise<void>;
   count(namespace?: string): Promise<number>;
   init(): Promise<void>;
@@ -81,12 +95,16 @@ export type OnConflictHandler = (
 
 export interface CreateMemoryOptions {
   embedder: Embedder;
-  storage: import('vector-frankl').StorageAdapter;
+  storage: MemoryRecordStorage;
   namespace?: string;
   dimension?: number;
   defaultSearchOptions?: Partial<MemorySearchOptions>;
   deduplicationThreshold?: number;
-  /** Optional text search provider for database-level keyword search (e.g., FTS5). */
+  /**
+   * Optional EXTERNAL keyword-search index (e.g. a database-level FTS backend).
+   * When unset (the default), `recall()` uses in-memory BM25 scoring over the
+   * record corpus enumerated via `storage.list()`.
+   */
   textSearchProvider?: import('./text-search-provider').TextSearchProvider;
   /**
    * When true, `remember()` throws if no namespace is provided in metadata

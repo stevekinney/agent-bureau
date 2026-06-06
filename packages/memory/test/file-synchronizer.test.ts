@@ -3,11 +3,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import { MemoryStorageAdapter } from 'vector-frankl';
 
 import { createMemory } from '../src/create-memory';
 import { createFileSynchronizer } from '../src/file-synchronizer';
-import { createMockEmbedder } from '../src/test/index';
+import { createInMemoryMemoryRecordStorage, createMockEmbedder } from '../src/test/index';
 import type { Memory } from '../src/types';
 
 const DIMENSION = 64;
@@ -23,7 +22,7 @@ describe('createFileSynchronizer', () => {
   let tempDir: string;
 
   beforeEach(async () => {
-    const storage = new MemoryStorageAdapter();
+    const storage = createInMemoryMemoryRecordStorage();
     const embedder = createMockEmbedder(DIMENSION);
     memory = createMemory({ embedder, storage, dimension: DIMENSION });
     await memory.init();
@@ -157,8 +156,10 @@ describe('createFileSynchronizer', () => {
 
     const originalRemember = memory.remember.bind(memory);
     let failing = true;
+    let rememberCalls = 0;
     Object.assign(memory, {
       remember: async (...args: Parameters<Memory['remember']>) => {
+        rememberCalls += 1;
         if (failing) {
           throw new Error('poll failure');
         }
@@ -166,13 +167,30 @@ describe('createFileSynchronizer', () => {
       },
     });
 
+    // Change the file so the next poll re-ingests it, then fire the poll. The
+    // synchronize() running inside the interval performs real filesystem I/O on
+    // macrotasks, so we must wait until remember() has actually been invoked
+    // (and thrown) before proceeding — otherwise flipping `failing` below could
+    // race ahead of the in-flight sync and let it succeed, never exercising the
+    // polling error-swallow path.
     await writeFile(filePath, 'Updated once.');
     poll?.();
+    while (rememberCalls === 0) {
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    }
+    // Flush the ingest → synchronize rejection through the interval's .catch
+    // (swallow) and .finally (lock release).
     await drainMicrotasks();
 
+    // The failing tick must not leave the synchronizing lock stuck: a follow-up
+    // poll, now succeeding, should still ingest content.
     failing = false;
+    const callsBeforeRecovery = rememberCalls;
     await writeFile(filePath, 'Updated twice.');
     poll?.();
+    while (rememberCalls === callsBeforeRecovery) {
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    }
     await drainMicrotasks();
 
     synchronizer.stop();

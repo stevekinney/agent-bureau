@@ -1,35 +1,8 @@
+import { cosineSimilarity } from 'interoperability';
+
 export interface MaximalMarginalRelevanceOptions {
   /** Tradeoff between relevance (1) and diversity (0). */
   lambda: number;
-}
-
-/**
- * Computes cosine similarity between two vectors.
- * Returns 0 if either vector has zero magnitude.
- */
-export function cosineSimilarity(a: number[], b: number[]): number {
-  if (a.length !== b.length) {
-    throw new Error(
-      `Vector length mismatch: expected equal lengths but got ${a.length} and ${b.length}`,
-    );
-  }
-
-  let dotProduct = 0;
-  let magnitudeA = 0;
-  let magnitudeB = 0;
-
-  for (let i = 0; i < a.length; i++) {
-    const valueA = a[i]!;
-    const valueB = b[i]!;
-    dotProduct += valueA * valueB;
-    magnitudeA += valueA * valueA;
-    magnitudeB += valueB * valueB;
-  }
-
-  const magnitude = Math.sqrt(magnitudeA) * Math.sqrt(magnitudeB);
-  if (magnitude === 0) return 0;
-
-  return dotProduct / magnitude;
 }
 
 /**

@@ -67,7 +67,6 @@ Use an explicit SQLite path like the example above when you want sessions to sur
 - [`packages/operative`](packages/operative): the agent loop, sessions, scheduler, hooks, retry, guardrails, and streaming.
 - [`packages/sentinel`](packages/sentinel): run state tracking, ordered action logs, and snapshots.
 - [`packages/skills`](packages/skills): skill discovery, loading, storage, and self-improvement primitives.
-- [`packages/vector-frankl`](packages/vector-frankl): vector storage and similarity search.
 
 Key-value persistence (sessions, identity, skills, proposals, rate-limit and API-key state) is backed by [Weft](https://www.npmjs.com/package/@lostgradient/weft)'s durable storage, consumed through its `textValueStore` surface.
 

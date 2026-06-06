@@ -1,9 +1,8 @@
-import type { VectorData } from 'vector-frankl';
-
 import type { HybridSearchCandidate, VectorSearchResult } from './hybrid-search';
 import { mergeHybridResults } from './hybrid-search';
 import { SOURCE_DOCUMENT_KEY } from './ingest';
-import { applyMaximalMarginalRelevance, cosineSimilarity } from './maximal-marginal-relevance';
+import { applyMaximalMarginalRelevance } from './maximal-marginal-relevance';
+import type { MemoryRecord, MemoryRecordScope } from './memory-record-storage';
 import { extractKeywords } from './query-expansion';
 import { applyTemporalDecay } from './temporal-decay';
 import { computeBM25Scores } from './text-search';
@@ -19,32 +18,21 @@ import type {
 
 const DEFAULT_DEDUPLICATION_THRESHOLD = 0.95;
 const DEFAULT_NAMESPACE = 'default';
-const METADATA_CONTENT_KEY = '__memory_content';
-export const METADATA_NAMESPACE_KEY = '__memory_namespace';
 
 function generateId(): string {
   return crypto.randomUUID();
 }
 
-function computeMagnitude(vector: Float32Array): number {
-  let sum = 0;
-  for (let i = 0; i < vector.length; i++) {
-    sum += vector[i]! * vector[i]!;
-  }
-  return Math.sqrt(sum);
-}
-
-function parseMemoryMetadata(
-  raw: Record<string, unknown>,
-  fallbackNamespace: string,
-): MemoryMetadata {
-  // Preserve arbitrary extension keys (like __sourceDocument, __chunkIndex)
-  // while extracting known fields with proper types.
-  const { [METADATA_CONTENT_KEY]: _content, [METADATA_NAMESPACE_KEY]: _ns, ...rest } = raw;
-
+/**
+ * Builds the public {@link MemoryMetadata} view of a stored record. The
+ * authoritative `namespace` is sourced from the record itself; arbitrary
+ * extension keys on the stored metadata are preserved.
+ */
+function toMemoryMetadata(record: MemoryRecord): MemoryMetadata {
+  const raw = record.metadata;
   return {
-    ...rest,
-    namespace: (raw[METADATA_NAMESPACE_KEY] as string) ?? fallbackNamespace,
+    ...raw,
+    namespace: record.namespace,
     source: (raw['source'] as MemoryMetadata['source']) ?? 'manual',
     conversationId: raw['conversationId'] as string | undefined,
     agentId: raw['agentId'] as string | undefined,
@@ -54,20 +42,19 @@ function parseMemoryMetadata(
   };
 }
 
-function buildStorageMetadata(
-  content: string,
-  namespace: string,
-  metadata: Partial<MemoryMetadata>,
-): Record<string, unknown> {
-  return {
-    ...metadata,
-    [METADATA_CONTENT_KEY]: content,
-    [METADATA_NAMESPACE_KEY]: namespace,
-  };
+/**
+ * Strips the framework-managed fields from caller-supplied metadata so only
+ * extension data is persisted on the record. `namespace` lives on the record's
+ * own field, never in the metadata blob.
+ */
+function buildStoredMetadata(metadata: Partial<MemoryMetadata>): Record<string, unknown> {
+  const { namespace: _namespace, ...rest } = metadata;
+  return { source: 'manual', ...rest };
 }
 
 /**
- * Creates a Memory instance backed by a vector-frankl StorageAdapter.
+ * Creates a Memory instance backed by a {@link CreateMemoryOptions.storage}
+ * {@link import('./types').MemoryRecordStorage}.
  *
  * The returned object satisfies the Memory interface and provides:
  * - remember() with automatic deduplication
@@ -93,68 +80,51 @@ export function createMemory(options: CreateMemoryOptions): Memory {
     );
   }
 
+  function scopeFor(namespace: string): MemoryRecordScope {
+    // The public contract requires a non-empty namespace; an empty string would
+    // otherwise be encoded as a real (but unreachable-by-default) scope key.
+    if (namespace.length === 0) {
+      throw new Error('namespace must be a non-empty string.');
+    }
+    return { namespace };
+  }
+
   async function embed(text: string): Promise<number[]> {
     const vectors = await embedder([text]);
     return vectors[0]!;
   }
 
-  async function getAllInNamespace(namespace: string): Promise<VectorData[]> {
-    const all = await storage.getAll();
-    return all.filter((entry) => entry.metadata?.[METADATA_NAMESPACE_KEY] === namespace);
-  }
-
   interface DuplicateCheckResult {
-    duplicate: VectorData | undefined;
-    conflict: { entry: VectorData; similarity: number } | undefined;
+    duplicate: MemoryRecord | undefined;
+    conflict: { record: MemoryRecord; similarity: number } | undefined;
   }
 
   async function checkDuplicatesAndConflicts(
     vector: number[],
     namespace: string,
   ): Promise<DuplicateCheckResult> {
-    const entries = await getAllInNamespace(namespace);
-    let duplicate: VectorData | undefined;
-    let conflict: { entry: VectorData; similarity: number } | undefined;
+    // The lowest similarity worth retrieving is whichever floor is active:
+    // conflict detection (when enabled) reaches further down than dedup.
+    const threshold = conflictThreshold ?? deduplicationThreshold;
+    const hits = await storage.searchByVector(vector, scopeFor(namespace), {
+      limit: 1,
+      threshold,
+    });
 
-    for (const entry of entries) {
-      const existingVector = Array.from(entry.vector);
-      const similarity = cosineSimilarity(vector, existingVector);
+    const top = hits[0];
+    if (!top) return { duplicate: undefined, conflict: undefined };
 
-      if (similarity >= deduplicationThreshold) {
-        duplicate = entry;
-        break; // Exact duplicate takes priority
-      }
-
-      if (
-        conflictThreshold !== undefined &&
-        similarity >= conflictThreshold &&
-        similarity < deduplicationThreshold
-      ) {
-        if (!conflict || similarity > conflict.similarity) {
-          conflict = { entry, similarity };
-        }
-      }
+    if (top.score >= deduplicationThreshold) {
+      return { duplicate: top.record, conflict: undefined };
     }
 
-    return { duplicate, conflict };
-  }
-
-  async function vectorSearch(
-    queryVector: number[],
-    namespace: string,
-    limit: number,
-  ): Promise<VectorSearchResult[]> {
-    const entries = await getAllInNamespace(namespace);
-    const scored: VectorSearchResult[] = [];
-
-    for (const entry of entries) {
-      const entryVector = Array.from(entry.vector);
-      const score = cosineSimilarity(queryVector, entryVector);
-      scored.push({ id: entry.id, score });
-    }
-
-    scored.sort((a, b) => b.score - a.score);
-    return scored.slice(0, limit);
+    // Past the dedup check, `conflictThreshold` is necessarily set: if it were
+    // undefined the search floor would equal `deduplicationThreshold`, so any
+    // returned hit would have scored at or above it and been handled as a
+    // duplicate above. The storage contract guarantees `top.score >= threshold`
+    // (= `conflictThreshold`), so the top hit — the highest-similarity match
+    // below the dedup threshold — is exactly the conflict to surface.
+    return { duplicate: undefined, conflict: { record: top.record, similarity: top.score } };
   }
 
   const memory: Memory = {
@@ -166,63 +136,50 @@ export function createMemory(options: CreateMemoryOptions): Memory {
       }
 
       const namespace = metadata?.namespace ?? defaultNamespace;
+      const scope = scopeFor(namespace);
       const vector = await embed(content);
       const float32Vector = new Float32Array(vector);
 
-      // Check for deduplication and conflicts
       const { duplicate, conflict } = await checkDuplicatesAndConflicts(vector, namespace);
 
-      // Helper to update an existing entry in place (used for dedup and 'replace' conflict)
-      async function replaceExisting(existingEntry: VectorData): Promise<MemoryEntry> {
-        const now = Date.now();
-        const updatedMetadata = buildStorageMetadata(content, namespace, {
-          source: 'manual',
-          ...metadata,
+      // Update an existing record in place (used for dedup and 'replace' conflict).
+      async function replaceExisting(existing: MemoryRecord): Promise<MemoryEntry> {
+        const updated = await storage.update(existing.id, scope, {
+          content,
+          vector: float32Vector,
+          metadata: buildStoredMetadata({ source: 'manual', ...metadata }),
         });
-
-        await storage.updateMetadata(existingEntry.id, updatedMetadata, {
-          merge: false,
-          updateTimestamp: true,
-        });
-        await storage.updateVector(existingEntry.id, float32Vector, {
-          updateMagnitude: true,
-          updateTimestamp: true,
-        });
+        const record = updated ?? existing;
 
         if (textSearchProvider) {
-          await textSearchProvider.index(existingEntry.id, content, namespace);
+          await textSearchProvider.index(record.id, content, namespace);
         }
 
         return {
-          id: existingEntry.id,
+          id: record.id,
           content,
           vector,
-          metadata: {
-            namespace,
-            source: 'manual',
-            ...metadata,
-          } as MemoryMetadata,
-          createdAt: existingEntry.timestamp,
-          updatedAt: now,
+          metadata: toMemoryMetadata({ ...record, content, namespace }),
+          createdAt: record.createdAt,
+          updatedAt: record.updatedAt,
         };
       }
 
-      // Deduplication: near-identical entries are updated in place
+      // Deduplication: near-identical entries are updated in place.
       if (duplicate) {
         return replaceExisting(duplicate);
       }
 
-      // Conflict detection: topically similar but potentially contradictory
+      // Conflict detection: topically similar but potentially contradictory.
       if (conflict) {
-        const existingContent = (conflict.entry.metadata?.[METADATA_CONTENT_KEY] as string) ?? '';
-        const existingMeta = parseMemoryMetadata(conflict.entry.metadata ?? {}, namespace);
+        const existingMeta = toMemoryMetadata(conflict.record);
 
         const resolution = onConflict
           ? await onConflict(
               { content, metadata: metadata ?? {} },
               {
-                id: conflict.entry.id,
-                content: existingContent,
+                id: conflict.record.id,
+                content: conflict.record.content,
                 metadata: existingMeta,
                 similarity: conflict.similarity,
               },
@@ -230,39 +187,38 @@ export function createMemory(options: CreateMemoryOptions): Memory {
           : 'keep-both';
 
         if (resolution === 'replace') {
-          return replaceExisting(conflict.entry);
+          return replaceExisting(conflict.record);
         }
 
         if (resolution === 'skip') {
           return {
-            id: conflict.entry.id,
-            content: existingContent,
-            vector: Array.from(conflict.entry.vector),
+            id: conflict.record.id,
+            content: conflict.record.content,
+            vector: Array.from(conflict.record.vector),
             metadata: existingMeta,
-            createdAt: conflict.entry.timestamp,
-            updatedAt: conflict.entry.timestamp,
+            createdAt: conflict.record.createdAt,
+            updatedAt: conflict.record.updatedAt,
           };
         }
 
-        // 'keep-both' — fall through to normal insert
+        // 'keep-both' — fall through to normal insert.
       }
 
       const id = generateId();
       const now = Date.now();
-      const storageMetadata = buildStorageMetadata(content, namespace, {
-        source: 'manual',
-        ...metadata,
-      });
-
-      const vectorData: VectorData = {
+      const record: MemoryRecord = {
         id,
+        namespace,
+        content,
         vector: float32Vector,
-        metadata: storageMetadata,
-        magnitude: computeMagnitude(float32Vector),
-        timestamp: now,
+        metadata: buildStoredMetadata({ source: 'manual', ...metadata }),
+        createdAt: now,
+        updatedAt: now,
+        version: 1,
+        status: 'active',
       };
 
-      await storage.put(vectorData);
+      await storage.put(record);
 
       if (textSearchProvider) {
         await textSearchProvider.index(id, content, namespace);
@@ -272,11 +228,7 @@ export function createMemory(options: CreateMemoryOptions): Memory {
         id,
         content,
         vector,
-        metadata: {
-          namespace,
-          source: 'manual',
-          ...metadata,
-        } as MemoryMetadata,
+        metadata: toMemoryMetadata(record),
         createdAt: now,
         updatedAt: now,
       };
@@ -288,55 +240,33 @@ export function createMemory(options: CreateMemoryOptions): Memory {
     ): Promise<MemorySearchResult[]> {
       const mergedOptions = { ...defaultSearchOptions, ...searchOptions };
       const namespace = mergedOptions.namespace ?? defaultNamespace;
+      const scope = scopeFor(namespace);
       const limit = mergedOptions.limit ?? 10;
       const threshold = mergedOptions.threshold ?? 0;
       const vectorWeight = mergedOptions.vectorWeight ?? 0.7;
       const textWeight = mergedOptions.textWeight ?? 0.3;
 
       const queryVector = await embed(query);
-      const namespacedEntries = await getAllInNamespace(namespace);
-
-      if (namespacedEntries.length === 0) return [];
-
-      // Build a lookup map for O(1) entry access by id
-      const entriesById = new Map(namespacedEntries.map((entry) => [entry.id, entry]));
-
-      // Build candidates for hybrid search
-      const candidates: HybridSearchCandidate[] = namespacedEntries.map((entry) => ({
-        id: entry.id,
-        content: (entry.metadata?.[METADATA_CONTENT_KEY] as string) ?? '',
-        metadata: entry.metadata ?? {},
-        createdAt: entry.timestamp,
-      }));
-
-      // Vector similarity search
       const candidateMultiplier = 3;
       const vectorResultLimit = limit * candidateMultiplier;
-      const vectorResults = await vectorSearch(queryVector, namespace, vectorResultLimit);
 
-      // When vectorOnly is set, skip BM25 and return pure cosine similarity scores.
+      // When vectorOnly is set, skip BM25 and return pure cosine similarity
+      // scores filtered by the (cosine-semantics) threshold.
       if (mergedOptions.vectorOnly) {
-        const vectorScoreById = new Map(vectorResults.map((r) => [r.id, r.score]));
+        const hits = await storage.searchByVector(queryVector, scope, {
+          limit: vectorResultLimit,
+          threshold,
+        });
 
-        let results: (MemorySearchResult & { vector?: number[] })[] = candidates
-          .map((candidate) => {
-            const score = vectorScoreById.get(candidate.id) ?? 0;
-            if (score < threshold) return undefined;
-            return {
-              id: candidate.id,
-              content: candidate.content,
-              score,
-              metadata: parseMemoryMetadata(candidate.metadata, namespace),
-              createdAt: candidate.createdAt,
-              vector: entriesById.has(candidate.id)
-                ? Array.from(entriesById.get(candidate.id)!.vector)
-                : undefined,
-            };
-          })
-          .filter((r): r is NonNullable<typeof r> => r !== undefined)
-          .sort((a, b) => b.score - a.score);
+        let results: (MemorySearchResult & { vector?: number[] })[] = hits.map((hit) => ({
+          id: hit.id,
+          content: hit.record.content,
+          score: hit.score,
+          metadata: toMemoryMetadata(hit.record),
+          createdAt: hit.record.createdAt,
+          vector: Array.from(hit.record.vector),
+        }));
 
-        // Apply temporal decay if configured
         if (mergedOptions.temporalDecay) {
           results = applyTemporalDecay(results, {
             halfLifeMilliseconds: mergedOptions.temporalDecay.halfLifeMilliseconds,
@@ -344,7 +274,6 @@ export function createMemory(options: CreateMemoryOptions): Memory {
           });
         }
 
-        // Apply MMR for diversity if configured
         if (mergedOptions.diversify) {
           results = applyMaximalMarginalRelevance(results, limit, {
             lambda: mergedOptions.diversify.lambda,
@@ -353,6 +282,30 @@ export function createMemory(options: CreateMemoryOptions): Memory {
 
         return results.slice(0, limit).map(({ vector: _vector, ...rest }) => rest);
       }
+
+      // Hybrid path: enumerate the scoped corpus for BM25, run vector search
+      // through storage, then merge.
+      const corpus = await storage.list(scope);
+      if (corpus.length === 0) return [];
+
+      const recordsById = new Map(corpus.map((record) => [record.id, record]));
+      const candidates: HybridSearchCandidate[] = corpus.map((record) => ({
+        id: record.id,
+        content: record.content,
+        metadata: record.metadata,
+        createdAt: record.createdAt,
+      }));
+
+      // Vector similarity search — no threshold here: the recall threshold is
+      // applied to the COMBINED score by mergeHybridResults. Pre-filtering the
+      // vector half would discard valid hybrid matches.
+      const vectorHits = await storage.searchByVector(queryVector, scope, {
+        limit: vectorResultLimit,
+      });
+      const vectorResults: VectorSearchResult[] = vectorHits.map((hit) => ({
+        id: hit.id,
+        score: hit.score,
+      }));
 
       // Text search — use provider if available, otherwise in-memory BM25.
       let textScores: Map<number, number>;
@@ -376,14 +329,14 @@ export function createMemory(options: CreateMemoryOptions): Memory {
             : computeBM25Scores(query, documents);
 
         // Normalize raw BM25 scores to [0, 1) so they are on the same scale
-        // as vector similarity scores and FTS5 normalized scores.
+        // as vector similarity scores.
         textScores = new Map<number, number>();
         for (const [index, score] of rawScores) {
           textScores.set(index, score / (1 + score));
         }
       }
 
-      // Merge hybrid results
+      // Merge hybrid results.
       const hybridResults = mergeHybridResults(vectorResults, textScores, candidates, {
         vectorWeight,
         textWeight,
@@ -391,22 +344,22 @@ export function createMemory(options: CreateMemoryOptions): Memory {
         threshold,
       });
 
-      // Convert to MemorySearchResult with vectors for MMR
+      // Convert to MemorySearchResult with vectors for MMR.
       let results: (MemorySearchResult & { vector?: number[] })[] = hybridResults.map((result) => {
-        const matchedEntry = entriesById.get(result.id);
-        const rawMetadata = result.metadata;
-
+        const matched = recordsById.get(result.id);
         return {
           id: result.id,
           content: result.content,
           score: result.combinedScore,
-          metadata: parseMemoryMetadata(rawMetadata, namespace),
+          metadata: matched
+            ? toMemoryMetadata(matched)
+            : ({ ...result.metadata, namespace } as MemoryMetadata),
           createdAt: result.createdAt,
-          vector: matchedEntry ? Array.from(matchedEntry.vector) : undefined,
+          vector: matched ? Array.from(matched.vector) : undefined,
         };
       });
 
-      // Apply temporal decay if configured
+      // Apply temporal decay if configured.
       if (mergedOptions.temporalDecay) {
         results = applyTemporalDecay(results, {
           halfLifeMilliseconds: mergedOptions.temporalDecay.halfLifeMilliseconds,
@@ -414,16 +367,17 @@ export function createMemory(options: CreateMemoryOptions): Memory {
         });
       }
 
-      // Apply MMR for diversity if configured
+      // Apply MMR for diversity if configured.
       if (mergedOptions.diversify) {
         results = applyMaximalMarginalRelevance(results, limit, {
           lambda: mergedOptions.diversify.lambda,
         });
       }
 
-      // Deduplicate chunks from the same source document, keeping the highest score.
-      // After temporal decay and MMR, results may not be sorted by score, so we
-      // compare scores explicitly rather than assuming first-seen is best.
+      // Deduplicate chunks from the same source document, keeping the highest
+      // score. After temporal decay and MMR, results may not be sorted by
+      // score, so we compare scores explicitly rather than assuming first-seen
+      // is best.
       const seenSources = new Map<string, { index: number; score: number }>();
       for (let i = 0; i < results.length; i++) {
         const result = results[i]!;
@@ -442,7 +396,7 @@ export function createMemory(options: CreateMemoryOptions): Memory {
         return keptIndices.has(index);
       });
 
-      // Final limit and strip vectors from output
+      // Final limit and strip vectors from output.
       return results.slice(0, limit).map(({ vector: _vector, ...rest }) => rest);
     },
 
@@ -451,34 +405,32 @@ export function createMemory(options: CreateMemoryOptions): Memory {
       const limit = listOptions?.limit ?? 100;
       const offset = listOptions?.offset ?? 0;
 
-      const entries = await getAllInNamespace(namespace);
+      // Storage returns records newest-first; pagination is pushed down.
+      const records = await storage.list(scopeFor(namespace), { limit, offset });
 
-      // Sort by creation time, newest first
-      entries.sort((a, b) => b.timestamp - a.timestamp);
-
-      return entries.slice(offset, offset + limit).map((entry) => ({
-        id: entry.id,
-        content: (entry.metadata?.[METADATA_CONTENT_KEY] as string) ?? '',
-        score: 1, // No semantic scoring for list
-        metadata: parseMemoryMetadata(entry.metadata ?? {}, namespace),
-        createdAt: entry.timestamp,
+      return records.map((record) => ({
+        id: record.id,
+        content: record.content,
+        score: 1, // No semantic scoring for list.
+        metadata: toMemoryMetadata(record),
+        createdAt: record.createdAt,
       }));
     },
 
-    async forget(id: string): Promise<void> {
-      await storage.delete(id);
-      if (textSearchProvider) {
+    async forget(id: string, namespace?: string): Promise<void> {
+      const removed = await storage.delete(id, scopeFor(namespace ?? defaultNamespace));
+      // Only strip the text-index entry if the scoped delete actually removed the
+      // record. `textSearchProvider.remove(id)` is keyed by bare id while
+      // `storage.delete` is scope-keyed, so an unmatched-namespace forget must NOT
+      // evict the index entry of the record still living under its real scope.
+      if (removed && textSearchProvider) {
         await textSearchProvider.remove(id);
       }
     },
 
     async forgetAll(namespace?: string): Promise<void> {
       const targetNamespace = namespace ?? defaultNamespace;
-      const entries = await getAllInNamespace(targetNamespace);
-      const ids = entries.map((entry) => entry.id);
-      if (ids.length > 0) {
-        await storage.deleteMany(ids);
-      }
+      await storage.deleteNamespace(scopeFor(targetNamespace));
       if (textSearchProvider) {
         await textSearchProvider.clear(targetNamespace);
       }
@@ -492,9 +444,7 @@ export function createMemory(options: CreateMemoryOptions): Memory {
     },
 
     async count(namespace?: string): Promise<number> {
-      const targetNamespace = namespace ?? defaultNamespace;
-      const entries = await getAllInNamespace(targetNamespace);
-      return entries.length;
+      return storage.count(scopeFor(namespace ?? defaultNamespace));
     },
 
     async init(): Promise<void> {
