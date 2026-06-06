@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 
+import type { RunDetail } from '../types';
+import RunDetailPage from '../ui/pages/run-detail.svelte';
 import { renderPage } from './render';
 import Fixture from './test-fixtures/render-fixture.svelte';
 
@@ -102,5 +104,117 @@ describe('renderPage', () => {
 
     expect(html).toContain('type="module"');
     expect(html).toContain('/public/entry.js');
+  });
+});
+
+describe('renderPage with a populated run-detail page', () => {
+  // The run-detail route is the heaviest cinder surface in the migration:
+  // CodeBlock (streaming output), JsonViewer (tool calls / results / snapshot
+  // / per-event detail), Timeline (with a children snippet), StatGroup, and
+  // Card. Empty-state rendering of the other routes proves none of this, so
+  // this test renders the REAL page with fully populated data — including a
+  // tool call carrying a code string to hit the CodeBlock/highlighter path —
+  // to prove SSR does not throw and emits the expected cinder markup.
+  const populatedRun: RunDetail = {
+    id: 'run-populated',
+    sessionId: 'session-1',
+    status: 'completed',
+    steps: 2,
+    usage: { prompt: 120, completion: 80, total: 200 },
+    finishReason: 'stop',
+    error: undefined,
+    actionCount: 1,
+    stepDetails: [
+      {
+        step: 0,
+        content: 'Calling a tool to read the file.',
+        final: false,
+        usage: { prompt: 60, completion: 40, total: 100 },
+        toolCalls: [
+          {
+            id: 'call-1',
+            name: 'read_file',
+            arguments: { path: 'src/index.ts', snippet: 'export const answer = 42;\n' },
+          },
+        ],
+        results: [{ toolName: 'read_file', result: { contents: 'export const answer = 42;\n' } }],
+      },
+      {
+        step: 1,
+        content: 'The file exports `answer = 42`.',
+        final: true,
+        usage: { prompt: 60, completion: 40, total: 100 },
+        toolCalls: [],
+        results: [],
+      },
+    ],
+    // The page passes latestSnapshot straight to JsonViewer (opaque object) or
+    // renders an EmptyState when undefined. Its internal shape is irrelevant to
+    // what this test proves, so leave it undefined and let the tool
+    // calls/results/timeline detail exercise JsonViewer instead.
+    latestSnapshot: undefined,
+    events: [
+      {
+        sequence: 0,
+        runId: 'run-populated',
+        event: 'run.started',
+        detail: { at: 0 },
+        timestamp: 1,
+      },
+      {
+        sequence: 1,
+        runId: 'run-populated',
+        event: 'tool.completed',
+        detail: { tool: 'read_file', ok: true },
+        timestamp: 2,
+      },
+      {
+        sequence: 2,
+        runId: 'run-populated',
+        event: 'run.completed',
+        detail: { finishReason: 'stop' },
+        timestamp: 3,
+      },
+    ],
+  };
+
+  const props = {
+    run: populatedRun,
+    events: populatedRun.events.map((record) => ({
+      event: record.event,
+      detail: record.detail,
+      timestamp: record.timestamp,
+      sequence: record.sequence,
+    })),
+    streamingAssistantContent: 'const greeting = "hello";\nconsole.log(greeting);\n',
+    toolActivity: ['read_file → completed'],
+  };
+
+  it('server-renders the heavy cinder components without throwing', async () => {
+    const html = await renderPage({ title: 'Run run-populated', component: RunDetailPage, props });
+
+    expect(html).toStartWith('<!doctype html>');
+    expect(html).toContain('<title>Run run-populated</title>');
+  });
+
+  it('emits markup from the timeline, code-block, json-viewer, and stat components', async () => {
+    const html = await renderPage({ title: 'Run run-populated', component: RunDetailPage, props });
+
+    // Section headings the page composes around the heavy components.
+    expect(html).toContain('Summary');
+    expect(html).toContain('Streaming Output');
+    expect(html).toContain('Tool Activity');
+    expect(html).toContain('Timeline');
+
+    // Each heavy cinder component emits its namespaced class under SSR.
+    expect(html).toContain('cinder-code-block');
+    expect(html).toContain('cinder-json-viewer');
+    expect(html).toContain('cinder-timeline');
+    expect(html).toContain('cinder-stat');
+
+    // Real data flows through: the code string, a tool name, and an event.
+    expect(html).toContain('greeting');
+    expect(html).toContain('read_file');
+    expect(html).toContain('run.completed');
   });
 });
