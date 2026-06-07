@@ -43,7 +43,12 @@ import {
   withEnhancedStreaming,
 } from 'operative';
 import type { AnyRunEngine, CheckpointStore, DurableRunDeps } from 'operative/durable';
-import { createCheckpointStore, createRunEngine, createRunWorkflow } from 'operative/durable';
+import {
+  createCheckpointStore,
+  createRunEngine,
+  createRunWorkflow,
+  isAgentRunWorkflowInput,
+} from 'operative/durable';
 import type { SkillSession } from 'skills';
 import { createSkillSession, escapeXml } from 'skills';
 import { z } from 'zod';
@@ -820,50 +825,54 @@ export async function createRuntimeComposition(
     if (!sessionStore) {
       return { status: 'unavailable', reason: 'no session store configured' };
     }
-    const summaries = await sessionStore.list();
-    for (const summary of summaries) {
-      if (summary.metadata['lastRunId'] !== info.workflowId) continue;
-      if (summary.metadata['lastRunStatus'] !== 'running') continue;
-      const session = await sessionStore.load(summary.id);
-      let services: DurableRunDeps | null;
-      try {
-        services = await buildRunDepsFromSession(session);
-      } catch (error) {
-        // The owning session exists and is `running`, but its deps cannot be
-        // rebuilt on this process (e.g. no `generate`/provider configured here,
-        // so `createRunRuntime` throws). Weft will fail this run terminally
-        // pre-replay; its `settleRecoveredRun` monitor (if Weft surfaces a
-        // rejecting handle) only logs, it does not persist a session status — so
-        // without this reconcile the session would be left stuck `running`. We
-        // have the sessionId in hand here, so reconcile it to `error`
-        // synchronously on the boot path (not a racy detached write).
-        const reason = error instanceof Error ? error.message : String(error);
-        try {
-          await sessionStore.updateMetadata(summary.id, {
-            lastRunStatus: 'error',
-            lastFinishReason: 'error',
-            lastError: `Recovered run could not be reconstructed: ${reason}`,
-          });
-        } catch (writeError) {
-          // Reconciliation is best-effort — a failed write must not abort the
-          // rest of recovery — but it is NOT silent: a session left stale
-          // `running` cannot be repaired by a later boot (the run is already
-          // terminal `failed` and is skipped), so surface it for operators.
-          console.error(
-            `[bureau] Failed to reconcile unrecoverable run "${info.workflowId}" ` +
-              `(session ${summary.id}) to error: ${writeError instanceof Error ? writeError.message : String(writeError)}`,
-          );
-        }
-        return { status: 'unavailable', reason: `run ${info.workflowId} not reconstructable` };
-      }
-      if (services === null) {
-        // `load()` returned null between the `list()` summary and here — the
-        // session vanished (TOCTOU), so there is nothing to reconcile.
-        return { status: 'unavailable', reason: `run ${info.workflowId} not reconstructable` };
-      }
-      return { status: 'available', services };
+    // The owning session id rides in the run's durable input (Weft passes the
+    // persisted `input` to the resolver on recovery — see #2), so load the
+    // session DIRECTLY by id, with no `sessionStore.list()` scan or
+    // lastRunId/lastRunStatus correlation. A run whose input predates the
+    // sessionId field (or is not an agentRun) fails the guard and is treated as
+    // not-reconstructable — no compatibility fallback for cross-upgrade runs.
+    if (!isAgentRunWorkflowInput(info.input)) {
+      return { status: 'unavailable', reason: `run ${info.workflowId} has no recoverable session` };
     }
-    return { status: 'unavailable', reason: `no running session for run ${info.workflowId}` };
+    const sessionId = info.input.sessionId;
+    const session = await sessionStore.load(sessionId);
+
+    let services: DurableRunDeps | null;
+    try {
+      services = await buildRunDepsFromSession(session);
+    } catch (error) {
+      // The session exists, but its deps cannot be rebuilt on this process (e.g.
+      // no `generate`/provider configured here, so `createRunRuntime` throws).
+      // Weft will fail this run terminally pre-replay; the reattached handle then
+      // rejects and its adapter stays write-free — so without this reconcile the
+      // session would be left stuck `running`. We have the sessionId in hand, so
+      // reconcile it to `error` synchronously on the boot path (not a racy
+      // detached write).
+      const reason = error instanceof Error ? error.message : String(error);
+      try {
+        await sessionStore.updateMetadata(sessionId, {
+          lastRunStatus: 'error',
+          lastFinishReason: 'error',
+          lastError: `Recovered run could not be reconstructed: ${reason}`,
+        });
+      } catch (writeError) {
+        // Reconciliation is best-effort — a failed write must not abort the rest
+        // of recovery — but it is NOT silent: a session left stale `running`
+        // cannot be repaired by a later boot (the run is already terminal
+        // `failed` and is skipped), so surface it for operators.
+        console.error(
+          `[bureau] Failed to reconcile unrecoverable run "${info.workflowId}" ` +
+            `(session ${sessionId}) to error: ${writeError instanceof Error ? writeError.message : String(writeError)}`,
+        );
+      }
+      return { status: 'unavailable', reason: `run ${info.workflowId} not reconstructable` };
+    }
+    if (services === null) {
+      // The session vanished between launch and recovery (load returned null), so
+      // there is nothing to reconstruct or reconcile.
+      return { status: 'unavailable', reason: `run ${info.workflowId} not reconstructable` };
+    }
+    return { status: 'available', services };
   }
 
   return {

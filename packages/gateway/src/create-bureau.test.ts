@@ -357,6 +357,15 @@ describe('createBureau', () => {
         // restart from the top.
         expect(bSteps).toEqual([1]);
 
+        // #3/#5b LIVE VISIBILITY: the recovered run is reattached as a live
+        // ActiveRun and `store.register`d, so it rejoins `getRun(...)` — it is no
+        // longer invisible to the live surface the way a pre-#5b recovered run was.
+        // (Registration is synchronous in `recoverDurableRuns`, so the run is
+        // visible from the moment boot returned, even while it was still resuming.)
+        const recoveredDetail = bureauB.getRun(run.id);
+        expect(recoveredDetail).toBeDefined();
+        expect(recoveredDetail?.id).toBe(run.id);
+
         // The session is no longer stuck `running`: the detached monitor persisted
         // its terminal status. Poll (re-reading the store each iteration) until
         // that write lands — it happens after the resumed run completes, off the
@@ -805,6 +814,33 @@ describe('createBureau', () => {
 
     const aborted = bureau.abortRun(run.id);
     expect(aborted.status).toBe('aborted');
+  });
+
+  it('persists both lastRunStatus and lastFinishReason when a run is aborted', async () => {
+    // An aborted session's metadata must be internally consistent: status AND
+    // finishReason both `aborted`, so a prior run's stale `lastFinishReason` on
+    // the same session cannot linger. Boot recovery relies on this too — a
+    // recovered run that aborts settles through this same listener.
+    const generate: GenerateFunction = () => new Promise(() => {});
+    const bureau = await createBureau({
+      generate,
+      toolbox: createEmptyToolbox(),
+      persistence: textValueStore(new MemoryStorage()),
+    });
+
+    const run = await bureau.createRun({ message: 'Hello' });
+    bureau.abortRun(run.id);
+
+    // The session write happens after the run.aborted event settles; poll until
+    // the status leaves `running`.
+    await pollUntil(async () => {
+      const current = await bureau.getSession(run.sessionId);
+      return current?.metadata['lastRunStatus'] === 'aborted';
+    });
+
+    const session = await bureau.getSession(run.sessionId);
+    expect(session?.metadata['lastRunStatus']).toBe('aborted');
+    expect(session?.metadata['lastFinishReason']).toBe('aborted');
   });
 
   it('throws CONFLICT when deleting a running run', async () => {

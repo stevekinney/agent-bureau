@@ -29,6 +29,12 @@ export interface DurableActiveRunContext {
 export interface DurableActiveRunOptions {
   /** A stable id for the run; also the durable workflow id (resume key). */
   runId: string;
+  /**
+   * The bureau session that owns this run. Threaded into the durable workflow
+   * input so boot recovery can correlate a recovered handle back to its session
+   * from the durable input alone (see {@link AgentRunWorkflowInput.sessionId}).
+   */
+  sessionId: string;
   /** The run behavior (generate fn, toolbox, conversation, hooks, stopWhen). */
   options: RunOptions;
   /** First user message to seed a brand-new run. Ignored when resuming. */
@@ -158,6 +164,7 @@ export function createDurableActiveRun(
       driveDurableRun(
         context,
         runId,
+        durableRun.sessionId,
         options,
         conversation,
         combinedSignal,
@@ -192,6 +199,149 @@ export function createDurableActiveRun(
 }
 
 /**
+ * The minimal recovered-handle surface {@link reattachDurableActiveRun} needs: a
+ * pinned id (== runId) and the settling `result()`. `engine.recoverAll()` returns
+ * full `WorkflowHandle`s; this narrow shape avoids depending on Weft's invariant
+ * `WorkflowHandle` generics (matching the `AnyRunEngine` widening convention).
+ */
+export interface RecoveredRunHandle {
+  readonly id: string;
+  result(): Promise<unknown>;
+}
+
+/**
+ * Reattach an `ActiveRun` to a run RECOVERED in this process by
+ * `engine.recoverAll()` (closes seam #5b). Unlike {@link createDurableActiveRun},
+ * this does NOT `engine.start` a new run — the recovered generator is already
+ * relaunched by `recoverAll()`; this wraps the existing {@link RecoveredRunHandle}
+ * so the run rejoins the live surface (`store.register` makes `getRun(runId)`
+ * resolve and live subscribers see it) and fires its TERMINAL lifecycle when the
+ * resumed run settles.
+ *
+ * Contract (core scope — deliberately narrower than a fresh run):
+ * - **Terminal events only.** `run.completed` / `run.aborted` / `run.error` fire
+ *   when the recovered run settles. Per-step / toolbox / progress events are NOT
+ *   forwarded: the recovered generator runs against the resolver's rebuilt
+ *   `ctx.services.toolbox`, whose events fire on THAT toolbox, never this
+ *   adapter's. Live-per-step-during-resume is a documented sub-seam, not core.
+ * - **No start lifecycle (seam #11).** `startRunLifecycle` / `onRunStart` are NOT
+ *   re-fired — the run already started in the prior process and `onRunStart` is
+ *   side-effecting. Re-firing it on every recovery would double-execute it.
+ * - **Engine-failed / disposed runs fire NO terminal event.** A run the resolver
+ *   could not rebuild is terminally `failed` by Weft pre-replay, so `result()`
+ *   rejects; the resolver already persisted that session's status. An
+ *   `EngineDisposedError` means the bureau is tearing down mid-resume (re-recover
+ *   later). Either way this adapter logs and stays write-free — it must not
+ *   clobber the session status the resolver/teardown owns.
+ *
+ * NOTE: a recovered run's `onRunComplete.totalDuration` is measured from reattach
+ * on THIS process, not the original wall-clock start (the start timestamp is not
+ * checkpointed). No current consumer reads it for billing/classification; a
+ * persisted start time is deferred until one does.
+ */
+export function reattachDurableActiveRun(
+  context: DurableActiveRunContext,
+  reattach: { runId: string; handle: RecoveredRunHandle },
+): ActiveRun {
+  const { runId, handle } = reattach;
+  const emitter = new CompletableEventTarget<CombinedOperativeEventMap>();
+
+  function complete(): void {
+    emitter.complete();
+  }
+
+  // Deferred-microtask start — REQUIRED for the registration ordering invariant:
+  // the caller (`recoverDurableRuns`) must finish `store.register` +
+  // `runSessionIdentifiers.set` in its synchronous turn BEFORE any terminal event
+  // microtask fires, so `getRun(runId)` resolves and no subscriber misses the
+  // terminal event — even when `handle.result()` already settled before reattach.
+  const result = Promise.resolve()
+    .then(() => driveReattachedRun(context, runId, handle, emitter))
+    .finally(complete);
+
+  return {
+    result,
+    // A reattached run has no in-band abort — the recovered generator runs under
+    // the engine, not this adapter's signal. Abort is a no-op beyond completing
+    // the emitter; the run settles on its own.
+    abort(): void {},
+    addEventListener: emitter.addEventListener.bind(emitter) as ActiveRun['addEventListener'],
+    removeEventListener: emitter.removeEventListener.bind(
+      emitter,
+    ) as ActiveRun['removeEventListener'],
+    on: emitter.on.bind(emitter) as ActiveRun['on'],
+    once: emitter.once.bind(emitter) as ActiveRun['once'],
+    subscribe: emitter.subscribe.bind(emitter) as ActiveRun['subscribe'],
+    events: emitter.events.bind(emitter) as ActiveRun['events'],
+    toObservable: emitter.toObservable.bind(emitter) as ActiveRun['toObservable'],
+    complete,
+    [Symbol.dispose](): void {
+      complete();
+    },
+  };
+}
+
+/**
+ * Drive a REATTACHED recovered run: await the already-running handle, reconstruct
+ * the `RunResult` from the checkpoint, and fire ONLY the terminal lifecycle (no
+ * start lifecycle — seam #11). On a rejecting handle, stay write-free: the
+ * resolver (services-unavailable → engine-failed) or the teardown
+ * (`EngineDisposedError`) already owns that session's terminal status.
+ */
+async function driveReattachedRun(
+  context: DurableActiveRunContext,
+  runId: string,
+  handle: RecoveredRunHandle,
+  emitter: CompletableEventTarget<CombinedOperativeEventMap>,
+): Promise<RunResult> {
+  const runStartTime = performance.now();
+
+  let summary: AgentRunWorkflowResult;
+  try {
+    summary = (await handle.result()) as AgentRunWorkflowResult;
+  } catch (error) {
+    // Write-free on EVERY rejection. EngineDisposedError = bureau teardown
+    // mid-resume (leave running for a later boot). Any other rejection = the
+    // engine terminally failed this run pre-replay because the resolver returned
+    // services-unavailable, and the resolver ALREADY reconciled that session to
+    // `error`. Firing a terminal lifecycle here would drive a session write that
+    // clobbers what the resolver/teardown owns, so we only log and resolve quiet.
+    if (!(isWeftErrorLike(error) && error.code === 'EngineDisposedError')) {
+      console.error(
+        `[operative] Reattached durable run "${runId}" did not settle cleanly: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+    return makeInterruptedRunResult(new Conversation());
+  }
+
+  const {
+    result,
+    runState,
+    conversation: durableConversation,
+  } = await reconstructRunResult(context, runId, summary);
+
+  // `hooks: undefined` — the recovered run's `onRunComplete`/etc. hooks are
+  // non-serializable run behavior; they were rebuilt by the resolver into
+  // `ctx.services`, which the bureau never gets back. So reattach fires the
+  // terminal EVENTS (which gateway's session-persistence listeners need) but not
+  // the run HOOKS — matching the old `settleRecoveredRun`, which persisted the
+  // session directly and never fired operative run hooks for a recovered run.
+  return finalizeRunResult({
+    finishReason: result.finishReason,
+    runState,
+    conversation: durableConversation,
+    hooks: undefined,
+    emitter,
+    runStartTime,
+    errorMessage: summary.errorMessage,
+    abortReason: summary.abortReason,
+    schemaValidation: summary.schemaValidation,
+  });
+}
+
+/**
  * Drive one durable run: fire the start lifecycle, start (or resume) the
  * workflow, await it, reconstruct the `RunResult`, and fire the completion
  * lifecycle — all via the shared `run-lifecycle.ts` so events/hooks match the
@@ -200,6 +350,7 @@ export function createDurableActiveRun(
 async function driveDurableRun(
   context: DurableActiveRunContext,
   runId: string,
+  sessionId: string,
   options: RunOptions,
   conversation: Conversation,
   signal: AbortSignal,
@@ -236,6 +387,7 @@ async function driveDurableRun(
     'agentRun',
     {
       runId,
+      sessionId,
       prompt,
       maximumSteps: options.maximumSteps,
     },

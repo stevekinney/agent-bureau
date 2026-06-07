@@ -110,10 +110,35 @@ import type { DurableRunDeps, RunCursor, StepRecord } from './types';
 /** Input to the durable agent-run workflow. */
 export interface AgentRunWorkflowInput {
   runId: string;
+  /**
+   * The bureau session that owns this run. Carried in the durable input (not a
+   * side table) so boot recovery can correlate a recovered `WorkflowHandle` back
+   * to its session — the resolver reads it as `info.input.sessionId` and
+   * `recoverDurableRuns` reads it via `handle.getLaunchMetadata()` — without
+   * scanning the session store by `lastRunId`. A plain cloneable string, safe to
+   * checkpoint.
+   */
+  sessionId: string;
   /** The first user message to seed a brand-new run (ignored on resume). */
   prompt?: string;
   /** Safety bound on step count, mirroring `RunOptions.maximumSteps`. */
   maximumSteps?: number;
+}
+
+/**
+ * Narrow an `unknown` durable input (as Weft surfaces it via
+ * `resolveWorkflowServices`'s `info.input` and `WorkflowHandle.getLaunchMetadata`)
+ * to an {@link AgentRunWorkflowInput}. A type guard, not an `as` cast: the input
+ * crosses the checkpoint as plain JSON, so its shape must be validated at the
+ * trust boundary. Requires the two correlation fields recovery depends on
+ * (`runId`, `sessionId`); a run checkpointed before `sessionId` was added to the
+ * input fails this guard and is treated as not-reconstructable (no
+ * compatibility-bridge fallback — cross-upgrade in-flight runs are out of scope).
+ */
+export function isAgentRunWorkflowInput(value: unknown): value is AgentRunWorkflowInput {
+  if (typeof value !== 'object' || value === null) return false;
+  const candidate = value as Record<string, unknown>;
+  return typeof candidate['runId'] === 'string' && typeof candidate['sessionId'] === 'string';
 }
 
 /** Plain, cloneable summary returned when the durable run completes. */
