@@ -3,9 +3,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
-import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
 import { createToolbox } from 'armorer';
-import { afterEach, describe, expect, it } from 'bun:test';
+import { describe, expect, it } from 'bun:test';
 import { Conversation, createConversationHistory } from 'conversationalist';
 import type { GenerateFunction } from 'operative';
 import { stopWhen } from 'operative';
@@ -13,20 +12,6 @@ import { createDurableActiveRun } from 'operative/durable';
 
 import { createRuntimeComposition } from './runtime-composition';
 import type { ProviderConfiguration } from './types';
-
-// Weft's inline launch queue defers each workflow start onto a `setTimeout(0)`
-// macrotask. Under `bun test`, a prior test that leaves an unsettled async tail
-// (the cost-aware `generate` path here) can starve that deferred launch, so a
-// later durable run's `handle.result()` never resolves and the test times out.
-// The run is correct — it completes start-to-finish in a plain `bun run`
-// process; this is purely a per-test scheduling artifact. Yielding one macrotask
-// between tests drains the timer queue so each test starts clean. Weft 0.2.1
-// ships this drain as the official `yieldToPortableEventLoop` testing helper
-// (the same MessageChannel-macrotask + microtask drain we hand-rolled), so the
-// drain is now a supported one-liner rather than a bespoke `setTimeout(0)`.
-afterEach(async () => {
-  await yieldToPortableEventLoop();
-});
 
 function createGenerateForProvider(provider: ProviderConfiguration): GenerateFunction {
   return async () => {

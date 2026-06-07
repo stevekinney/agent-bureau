@@ -3,10 +3,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { MemoryStorage, type TextValueStore, textValueStore } from '@lostgradient/weft/storage';
-import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
 import { createTool, createToolbox } from 'armorer';
 import { createMockTool, createTestToolbox } from 'armorer/test';
-import { afterEach, describe, expect, it, mock } from 'bun:test';
+import { describe, expect, it, mock } from 'bun:test';
 import { Conversation, getMessages } from 'conversationalist';
 import type { GenerateFunction, GenerateResponse, Toolbox } from 'operative';
 import { stopWhen } from 'operative';
@@ -97,16 +96,6 @@ async function pollUntil(check: () => boolean | Promise<boolean>, attempts = 20)
   }
   return check();
 }
-
-// Weft's inline launch queue defers each workflow start onto a `setTimeout(0)`
-// macrotask. Under `bun test`, a prior test that leaves an unsettled async tail
-// (this file's recovery test parks bureauA's step-1 generate forever) can starve
-// that deferred launch, so a later durable run never advances and its test times
-// out. Yielding one macrotask between tests drains the timer queue so each test
-// starts clean. (Same fix as runtime-composition.test.ts / active-run-adapter.test.ts.)
-afterEach(async () => {
-  await yieldToPortableEventLoop();
-});
 
 describe('createBureau', () => {
   it('is not ready when no generate function is configured', async () => {

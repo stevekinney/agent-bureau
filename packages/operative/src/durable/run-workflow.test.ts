@@ -3,7 +3,7 @@ import { Engine } from '@lostgradient/weft';
 import { MemoryStorage, type Storage, textValueStore } from '@lostgradient/weft/storage';
 import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
 import { createTool, createToolbox } from 'armorer';
-import { afterEach, describe, expect, it } from 'bun:test';
+import { describe, expect, it } from 'bun:test';
 import { Conversation, createConversationHistory } from 'conversationalist';
 import { z } from 'zod';
 
@@ -94,15 +94,6 @@ async function runToCompletion(
   const handle = await engine.start('agentRun', input, { id: input.runId, services });
   return handle.result();
 }
-
-afterEach(async () => {
-  // Drain Weft's deferred inline launch (see runtime-composition.test.ts).
-  // Without this, a `setTimeout(0)` inline-launch macrotask left pending by one
-  // durable run can be starved under full `bun test` concurrency, making a later
-  // run that normally finishes in ~100ms blow past the 5s test timeout. Matches
-  // the drain in active-run-adapter.test.ts and create-bureau.test.ts.
-  await yieldToPortableEventLoop();
-});
 
 describe('durable agentRun workflow', () => {
   it('runs a single-step agent to completion when generate emits no tool calls', async () => {

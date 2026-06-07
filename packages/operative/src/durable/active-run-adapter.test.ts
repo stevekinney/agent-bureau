@@ -1,7 +1,6 @@
 import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
-import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
 import { createToolbox } from 'armorer';
-import { afterEach, describe, expect, it } from 'bun:test';
+import { describe, expect, it } from 'bun:test';
 import { createConversationHistory } from 'conversationalist';
 import { z } from 'zod';
 
@@ -31,11 +30,6 @@ function runOptions(generate: RunOptions['generate']): RunOptions {
     stopWhen: stopWhen.noToolCalls(),
   };
 }
-
-afterEach(async () => {
-  // Drain Weft's deferred inline launch (see runtime-composition.test.ts).
-  await yieldToPortableEventLoop();
-});
 
 describe('createRun with durable routing', () => {
   it('fires the full run-level lifecycle (run.started → run.completed) on the durable path', async () => {
