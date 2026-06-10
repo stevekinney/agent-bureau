@@ -597,42 +597,44 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     // and continues.
     const handles = await durable.engine.recoverAll();
 
-    // Read each handle's launch metadata CONCURRENTLY (Promise.allSettled), so one
-    // slow/stuck metadata read does not block registration of the rest (no
-    // head-of-line blocking). Then reattach each owned handle SYNCHRONOUSLY in one
-    // turn, preserving the register-before-terminal-event ordering invariant.
-    const resolved = await Promise.allSettled(
-      handles.map(async (handle) => ({
-        handle,
-        metadata: await handle.getLaunchMetadata(),
-      })),
+    // Read each handle's launch metadata CONCURRENTLY, so one slow/stuck read does
+    // not block registration of the rest (no head-of-line blocking). The read is
+    // caught PER HANDLE so the resolved value always carries the handle identity —
+    // a rejected read must not lose the handle, or we could not cancel the
+    // now-resumed-but-unidentifiable run (committee round-2 finding 1). Then
+    // reattach each owned handle SYNCHRONOUSLY in one turn, preserving the
+    // register-before-terminal-event ordering invariant.
+    const resolved = await Promise.all(
+      handles.map(async (handle) => {
+        try {
+          return { handle, metadata: await handle.getLaunchMetadata() };
+        } catch (error) {
+          return { handle, metadata: null, error };
+        }
+      }),
     );
 
-    for (const outcome of resolved) {
-      if (outcome.status === 'rejected') {
-        // A metadata read failed AFTER recoverAll already resumed the run, so the
-        // run is live but we cannot identify its session. Leaving it unowned would
-        // strand a running workflow; we cannot know which handle it was (the read
-        // rejected), so this is logged. recoverAll's own per-handle resolution
-        // means this is rare; surface it for operators.
-        console.error(
-          `[bureau] Could not read launch metadata for a recovered run: ${serializeUnknownError(outcome.reason)}`,
-        );
-        continue;
-      }
-      const { handle, metadata } = outcome.value;
+    for (const { handle, metadata, ...rest } of resolved) {
+      const readError = 'error' in rest ? rest.error : undefined;
       // A run is bureau-owned only if its launch metadata narrows to an agentRun
       // input AND its input runId matches this handle's id (the workflow id is the
-      // run id). A mismatch or a non-agentRun input means it is not ours / not
-      // reconstructable — CANCEL it rather than leave it running unowned with no
-      // ActiveRun, monitor, or session (committee MF-8). engine.cancel terminalizes
-      // it and rejects its waiter; the resolver already failed services-unavailable
-      // runs, so this covers the metadata-less / foreign-input residue.
+      // run id). A read failure, a mismatch, or a non-agentRun input means it is
+      // not ours / not reconstructable — CANCEL it rather than leave it running
+      // unowned with no ActiveRun, monitor, or session (committee MF-8 + round-2
+      // finding 1). engine.cancel terminalizes it and rejects its waiter; the
+      // resolver already failed services-unavailable runs, so this covers the
+      // metadata-less / read-failed / foreign-input residue.
       if (
+        readError !== undefined ||
         !metadata ||
         !isAgentRunWorkflowInput(metadata.input) ||
         metadata.input.runId !== handle.id
       ) {
+        if (readError !== undefined) {
+          console.error(
+            `[bureau] Could not read launch metadata for recovered run "${handle.id}"; cancelling: ${serializeUnknownError(readError)}`,
+          );
+        }
         void durable.engine.cancel(handle.id).catch(() => {});
         continue;
       }

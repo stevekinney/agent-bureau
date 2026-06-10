@@ -246,6 +246,11 @@ export function reattachDurableActiveRun(
   const { runId, handle } = reattach;
   const emitter = new CompletableEventTarget<CombinedOperativeEventMap>();
 
+  // Tracks an adapter-initiated abort so the result-rejection path can fire a
+  // real `run.aborted` lifecycle (persisting `aborted`) rather than the write-free
+  // path used for resolver/teardown failures (committee round-2 finding 2).
+  let locallyAborted = false;
+
   function complete(): void {
     emitter.complete();
   }
@@ -256,7 +261,7 @@ export function reattachDurableActiveRun(
   // microtask fires, so `getRun(runId)` resolves and no subscriber misses the
   // terminal event — even when `handle.result()` already settled before reattach.
   const result = Promise.resolve()
-    .then(() => driveReattachedRun(context, runId, handle, emitter))
+    .then(() => driveReattachedRun(context, runId, handle, emitter, () => locallyAborted))
     .finally(complete);
 
   return {
@@ -266,10 +271,11 @@ export function reattachDurableActiveRun(
     // engine instead (committee MF-3): a recovered run is now visible via
     // `getRun(runId)`, so `bureau.abortRun(runId)` must actually stop it rather
     // than silently no-op. `engine.cancel` terminalizes the run and rejects its
-    // result waiter; the resulting rejection is handled write-free in
-    // `driveReattachedRun` (the session status is the resolver/teardown's, not an
-    // abort's). Fire-and-forget — abort() is synchronous on the ActiveRun surface.
+    // result waiter; the rejection is then translated into a real `run.aborted`
+    // lifecycle (so gateway persists `aborted`) because `locallyAborted` is set —
+    // distinct from a resolver/teardown failure, which stays write-free.
     abort(): void {
+      locallyAborted = true;
       void context.engine.cancel(runId).catch(() => {});
     },
     addEventListener: emitter.addEventListener.bind(emitter) as ActiveRun['addEventListener'],
@@ -322,6 +328,7 @@ async function driveReattachedRun(
   runId: string,
   handle: RecoveredRunHandle,
   emitter: CompletableEventTarget<CombinedOperativeEventMap>,
+  wasAborted: () => boolean,
 ): Promise<RunResult> {
   const runStartTime = performance.now();
 
@@ -329,12 +336,21 @@ async function driveReattachedRun(
   try {
     summary = (await handle.result()) as AgentRunWorkflowResult;
   } catch (error) {
-    // Write-free on EVERY rejection. EngineDisposedError = bureau teardown
-    // mid-resume (leave running for a later boot). Any other rejection = the
-    // engine terminally failed this run pre-replay because the resolver returned
+    // An ADAPTER-INITIATED abort (bureau.abortRun → engine.cancel) is a real
+    // terminal: fire `run.aborted` so the gateway listener persists `aborted`,
+    // rather than leaving the session looking `running` (committee round-2
+    // finding 2). The conversation comes from the last checkpoint.
+    if (wasAborted()) {
+      const snapshot = await context.checkpointStore.loadConversation(runId);
+      const conversation = snapshot ? Conversation.from(snapshot) : new Conversation();
+      return makeAbortResult(createRunState(), conversation, undefined, emitter, 0, 'aborted');
+    }
+    // Otherwise write-free. EngineDisposedError = bureau teardown mid-resume
+    // (leave running for a later boot). Any other rejection = the engine
+    // terminally failed this run pre-replay because the resolver returned
     // services-unavailable, and the resolver ALREADY reconciled that session to
-    // `error`. Firing a terminal lifecycle here would drive a session write that
-    // clobbers what the resolver/teardown owns, so we only log and resolve quiet.
+    // `error`. Firing a terminal lifecycle here would clobber what the
+    // resolver/teardown owns, so we only log and resolve quiet.
     if (!(isWeftErrorLike(error) && error.code === 'EngineDisposedError')) {
       console.error(
         `[operative] Reattached durable run "${runId}" did not settle cleanly: ${

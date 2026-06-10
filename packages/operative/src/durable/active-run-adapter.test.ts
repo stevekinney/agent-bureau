@@ -8,7 +8,9 @@ import { stopWhen } from '../conditions/index';
 import { createRun } from '../create-run';
 import { BudgetExceededError, ElicitationDeniedError } from '../errors';
 import type { RunOptions, RunResult } from '../types';
+import { reattachDurableActiveRun } from './active-run-adapter';
 import { createCheckpointStore } from './checkpoint-store';
+import type { AnyRunEngine } from './create-run-engine';
 import { createRunEngine } from './create-run-engine';
 import { createRunWorkflow } from './run-workflow';
 
@@ -283,6 +285,54 @@ describe('createRun with durable routing', () => {
       expect(result.finishReason).toBe('stop-condition');
       expect(result.schemaValidation).toBeDefined();
       expect(result.schemaValidation?.success).toBe(true);
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+});
+
+describe('reattachDurableActiveRun', () => {
+  it('fires run.aborted when the run is aborted via the adapter (committee round-2 finding 2)', async () => {
+    const context = await buildContext();
+    try {
+      // A handle whose result() stays pending until the adapter cancels it, then
+      // rejects — modelling engine.cancel terminalizing a recovered run.
+      let rejectResult: ((error: unknown) => void) | undefined;
+      const handle = {
+        id: 'reattach-abort',
+        result: () => new Promise<unknown>((_resolve, reject) => (rejectResult = reject)),
+      };
+      const cancelled: string[] = [];
+      // The reattach adapter only calls `engine.cancel` (in abort()); a minimal
+      // stub whose cancel rejects the mock handle's result is all it needs.
+      const engine = {
+        cancel: async (id: string) => {
+          cancelled.push(id);
+          rejectResult?.(new Error('cancelled'));
+        },
+      } as unknown as AnyRunEngine;
+
+      const events: string[] = [];
+      const recoveredRun = reattachDurableActiveRun(
+        { engine, checkpointStore: context.checkpointStore },
+        { runId: 'reattach-abort', handle },
+      );
+      recoveredRun.addEventListener('run.aborted', () => events.push('run.aborted'));
+      recoveredRun.addEventListener('run.completed', () => events.push('run.completed'));
+
+      // The adapter starts driving (and calls handle.result(), wiring rejectResult)
+      // on a deferred microtask, so yield once before aborting — otherwise abort
+      // would cancel before result() is even awaited and the mock could not reject.
+      await Promise.resolve();
+      recoveredRun.abort();
+      const result = await recoveredRun.result;
+
+      // The adapter-initiated abort terminalized via engine.cancel AND fired a real
+      // run.aborted lifecycle (so gateway persists `aborted`), rather than the
+      // write-free interrupted path used for resolver/teardown failures.
+      expect(cancelled).toEqual(['reattach-abort']);
+      expect(events).toEqual(['run.aborted']);
+      expect(result.finishReason).toBe('aborted');
     } finally {
       context.engine[Symbol.dispose]();
     }

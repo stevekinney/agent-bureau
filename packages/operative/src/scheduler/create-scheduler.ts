@@ -457,7 +457,12 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
     running.delete(task.id);
     preemptedCount++;
 
-    const requeue = shouldRequeueOnPreempt(task, runningTask.requeues);
+    // Re-check `stopping` after the async suspend/get gap (committee round-2
+    // finding 3): if stop() cleared the queue while we were parking this run,
+    // enqueueing a __resume now would strand a queued resume with no dispatcher
+    // and leave its submit() resolver unresolved. So when stopping, cancel the
+    // parked run and resolve null instead of requeueing.
+    const requeue = !stopping && shouldRequeueOnPreempt(task, runningTask.requeues);
     emitEvent(new TaskPreemptedEvent(task.id, 'preempted', requeue));
 
     if (requeue) {
@@ -726,6 +731,12 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
     if (!started) return;
     stopping = true;
 
+    // Collect every durable cancel so stop() can AWAIT them (committee round-2
+    // finding 3): a fire-and-forget cancel would let stop() return while suspended
+    // workflows — and their in-memory API-key `services` — are still alive, which
+    // defeats stop() as a credential-lifetime boundary.
+    const durableCancellations: Promise<void>[] = [];
+
     // Discard queued tasks. A queued task carrying `__resume` points to a durable
     // run SUSPENDED by an earlier preemption — the queue entry is the only pointer
     // to it. Cancelling terminalizes the suspended run (so it does not dangle as a
@@ -735,7 +746,7 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
     // shutdown-hang on a suspended run in one pass.
     for (const task of queue) {
       if (durable && task.__resume) {
-        void durable.engine.cancel(task.__resume.runId).catch(() => {});
+        durableCancellations.push(durable.engine.cancel(task.__resume.runId).catch(() => {}));
       }
       const resolver = taskResolvers.get(task.id);
       if (resolver) {
@@ -756,7 +767,7 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
     for (const runningTask of running.values()) {
       if (runningTask.task.priority === 'immediate') continue;
       if (durable && runningTask.durableRunId !== undefined) {
-        void durable.engine.cancel(runningTask.durableRunId).catch(() => {});
+        durableCancellations.push(durable.engine.cancel(runningTask.durableRunId).catch(() => {}));
       } else {
         runningTask.abortController.abort('scheduler-stopped');
       }
@@ -764,8 +775,12 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
 
     wakeLoop();
 
-    // Wait for all running tasks to settle
-    await Promise.allSettled([...running.values()].map((runningTask) => runningTask.result));
+    // Await the durable cancels AND all running task results, so a stopped
+    // scheduler has genuinely released every run's services before returning.
+    await Promise.allSettled([
+      ...durableCancellations,
+      ...[...running.values()].map((runningTask) => runningTask.result),
+    ]);
 
     // Resolve any remaining task resolvers (e.g., for aborted tasks)
     for (const [taskId, resolver] of taskResolvers) {
