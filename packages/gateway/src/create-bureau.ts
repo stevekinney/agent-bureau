@@ -614,6 +614,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       }),
     );
 
+    const orphanCancellations: Array<{ runId: string; cancel: Promise<void> }> = [];
     for (const { handle, metadata, ...rest } of resolved) {
       const readError = 'error' in rest ? rest.error : undefined;
       // A run is bureau-owned only if its launch metadata narrows to an agentRun
@@ -635,10 +636,28 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
             `[bureau] Could not read launch metadata for recovered run "${handle.id}"; cancelling: ${serializeUnknownError(readError)}`,
           );
         }
-        void durable.engine.cancel(handle.id).catch(() => {});
+        // Collect the cancel (do NOT fire-and-forget swallow): a rejected cancel
+        // could leave an unowned, already-resumed run live with no monitor, so its
+        // failure must be surfaced for operators (committee final finding).
+        orphanCancellations.push({ runId: handle.id, cancel: durable.engine.cancel(handle.id) });
         continue;
       }
       reattachRecoveredRun(handle.id, metadata.input.sessionId, handle);
+    }
+
+    // Await the orphan cancels DETACHED — boot must not block on them (same as the
+    // recovered-run monitors), but a cancel that REJECTS leaves an unowned run
+    // running, which is an operator-actionable failure, not something to swallow.
+    if (orphanCancellations.length > 0) {
+      void Promise.allSettled(orphanCancellations.map(({ cancel }) => cancel)).then((outcomes) => {
+        outcomes.forEach((outcome, index) => {
+          if (outcome.status === 'rejected') {
+            console.error(
+              `[bureau] Failed to cancel unowned recovered run "${orphanCancellations[index]!.runId}" — it may still be running: ${serializeUnknownError(outcome.reason)}`,
+            );
+          }
+        });
+      });
     }
   }
 
