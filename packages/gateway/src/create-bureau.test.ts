@@ -14,7 +14,7 @@ import { createMockGenerate as createSequentialGenerate } from 'operative/test';
 import { createStore } from 'sentinel';
 import { z } from 'zod';
 
-import { BureauError, createBureau } from './create-bureau';
+import { BureauError, classifyRecoveredRun, createBureau } from './create-bureau';
 import { drainMicrotasks, waitForCondition, waitForRunState } from './test';
 import {
   type Bureau,
@@ -1188,5 +1188,72 @@ describe('createBureau', () => {
       await rm(`${databasePath}-wal`, { force: true });
       await rm(`${databasePath}-shm`, { force: true });
     }
+  });
+});
+
+describe('classifyRecoveredRun', () => {
+  const base = {
+    handleId: 'run-1',
+    ownedSessionId: 'session-1' as string | undefined,
+    metadataReadFailed: false,
+    hasSessionStore: true,
+    sessionLoad: { ok: true as const, session: { lastRunId: 'run-1', lastRunStatus: 'running' } },
+  };
+
+  it('reattaches an owned, in-flight run whose session confirms ownership', () => {
+    expect(classifyRecoveredRun(base)).toBe('reattach');
+  });
+
+  it('reattaches even when the engine-finished-fast run still shows running in its session', () => {
+    // The session monitor has not written the terminal status yet — must reattach
+    // so the completion is persisted (gate on SESSION status, not engine status).
+    expect(
+      classifyRecoveredRun({
+        ...base,
+        sessionLoad: { ok: true, session: { lastRunId: 'run-1', lastRunStatus: 'running' } },
+      }),
+    ).toBe('reattach');
+  });
+
+  it('cancels a run whose launch metadata could not be read', () => {
+    expect(classifyRecoveredRun({ ...base, metadataReadFailed: true })).toBe('cancel');
+  });
+
+  it('cancels a run that is not a bureau-owned agentRun (no owned session id)', () => {
+    expect(classifyRecoveredRun({ ...base, ownedSessionId: undefined })).toBe('cancel');
+  });
+
+  it('cancels a run whose owning session is absent', () => {
+    expect(classifyRecoveredRun({ ...base, sessionLoad: { ok: true, session: null } })).toBe(
+      'cancel',
+    );
+  });
+
+  it('cancels a run whose session now owns a different run', () => {
+    expect(
+      classifyRecoveredRun({
+        ...base,
+        sessionLoad: { ok: true, session: { lastRunId: 'other-run', lastRunStatus: 'running' } },
+      }),
+    ).toBe('cancel');
+  });
+
+  it('cancels a run whose session is already terminal (resolver reconciled it to error)', () => {
+    expect(
+      classifyRecoveredRun({
+        ...base,
+        sessionLoad: { ok: true, session: { lastRunId: 'run-1', lastRunStatus: 'error' } },
+      }),
+    ).toBe('cancel');
+  });
+
+  it('SKIPS (does not cancel) when the session load failed transiently — never kills a recovering run', () => {
+    // The Bugbot finding: a transient storage read failure must not terminate a
+    // legitimately-recovered in-flight run. Ownership is UNKNOWN → skip, not cancel.
+    expect(classifyRecoveredRun({ ...base, sessionLoad: { ok: false } })).toBe('skip');
+  });
+
+  it('skips an owned run when no session store is configured (cannot reattach, must not cancel)', () => {
+    expect(classifyRecoveredRun({ ...base, hasSessionStore: false })).toBe('skip');
   });
 });
