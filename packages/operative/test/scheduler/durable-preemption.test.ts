@@ -3,11 +3,13 @@ import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
 import { createTestToolbox } from 'armorer/test';
 import { afterEach, describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
+import { HookRegistry } from 'lifecycle';
 
 import { createCheckpointStore } from '../../src/durable/checkpoint-store';
 import type { AnyRunEngine } from '../../src/durable/index';
 import { createRunEngine } from '../../src/durable/index';
 import { createRunWorkflow } from '../../src/durable/run-workflow';
+import type { OperativeHookMap } from '../../src/index';
 import { stopWhen } from '../../src/index';
 import { createScheduler } from '../../src/scheduler/create-scheduler';
 import { sleep } from '../../src/scheduler/sleep';
@@ -400,6 +402,83 @@ describe('durable scheduler preemption (suspend/resume)', () => {
       // The submit promise RESOLVED null (did not hang, did not reject) — a
       // cancelled durable task matches the in-memory cancel contract.
       expect(bgRunResult).toBeNull();
+    } finally {
+      await scheduler.stop();
+      engine[Symbol.dispose]();
+    }
+  });
+
+  it("does not fire a preempted-then-resumed run's onRunComplete hook more than once", async () => {
+    // The structural bug (Bugbot: "suspended run duplicates lifecycle hooks"): the
+    // original hook-firing durable driver kept awaiting the un-settled handle after
+    // suspend, then fired onRunComplete a SECOND time when the run resumed and
+    // completed. The fix drives preemptable runs with a HOOKS-FREE result-only
+    // driver, so a run's onRunComplete hook fires AT MOST once across a full
+    // preempt→resume cycle (zero, by design — the scheduler owns the lifecycle).
+    const storage = new MemoryStorage();
+    const checkpointStore = createCheckpointStore(
+      textValueStore(storage, { disposeUnderlyingStorage: false }),
+    );
+    const runWorkflow = createRunWorkflow(checkpointStore);
+    const { engine } = await createRunEngine({
+      storage,
+      runWorkflow,
+      checkpointStore,
+      recover: false,
+    });
+    const blocking = createStepwiseBlockingGenerate();
+
+    let onRunCompleteCalls = 0;
+    const hooks = new HookRegistry<OperativeHookMap>();
+    hooks.on('onRunComplete', () => {
+      onRunCompleteCalls++;
+    });
+
+    let taskCompleteCalls = 0;
+    const scheduler = createScheduler({
+      generate: createMockGenerateFallback(),
+      toolbox: createNextToolbox(),
+      idleDelay: 1,
+      durable: { engine, checkpointStore },
+    });
+    scheduler.start();
+
+    try {
+      const bgResult = scheduler.submit({
+        id: 'bg-hooks',
+        priority: 'background',
+        requeue: true,
+        onComplete: () => {
+          taskCompleteCalls++;
+        },
+        createRun: () => ({
+          generate: blocking.generate,
+          toolbox: createNextToolbox(),
+          conversation: new Conversation(),
+          maximumSteps: 5,
+          stopWhen: stopWhen.noToolCalls(),
+          hooks,
+        }),
+      });
+
+      await waitFor(() => blocking.steps.includes(1));
+      await scheduler.submitImmediate(() => ({
+        generate: createMockGenerateOnce('imm'),
+        toolbox: createNextToolbox(),
+        conversation: new Conversation(),
+        maximumSteps: 1,
+      }));
+      blocking.releaseStep1({ content: 'bg final', toolCalls: [] });
+
+      await bgResult;
+      // Give any abandoned driver a chance to (wrongly) re-fire the hook.
+      await sleep(20);
+
+      // The run's onRunComplete hook did NOT double-fire (preemptable runs are
+      // hooks-free; it fires zero times — the key invariant is "not twice").
+      expect(onRunCompleteCalls).toBeLessThanOrEqual(1);
+      // The SCHEDULER's own task completion fired exactly once.
+      expect(taskCompleteCalls).toBe(1);
     } finally {
       await scheduler.stop();
       engine[Symbol.dispose]();

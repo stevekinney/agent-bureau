@@ -2,11 +2,13 @@ export type {
   DurableActiveRunContext,
   DurableActiveRunOptions,
   RecoveredRunHandle,
+  StartDurableRunResultOptions,
 } from './active-run-adapter';
 export {
   createDurableActiveRun,
   reattachDurableActiveRun,
   resumeDurableRunResult,
+  startDurableRunResult,
 } from './active-run-adapter';
 export type { CheckpointStore } from './checkpoint-store';
 export { createCheckpointStore } from './checkpoint-store';

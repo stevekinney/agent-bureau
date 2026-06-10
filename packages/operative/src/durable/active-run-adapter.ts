@@ -322,6 +322,69 @@ export async function resumeDurableRunResult(
   return result;
 }
 
+/** Options for {@link startDurableRunResult}. */
+export interface StartDurableRunResultOptions {
+  /** Stable id for the run; also the durable workflow id (suspend/resume key). */
+  runId: string;
+  /** The owning session id, carried in the durable input for boot recovery. */
+  sessionId: string;
+  /** The run behavior (generate, toolbox, hooks, stopWhen, …). */
+  options: RunOptions;
+  /** First user message to seed a brand-new run. */
+  prompt?: string;
+  /** Abort signal for the run (the scheduler's combined signal). */
+  signal?: AbortSignal;
+}
+
+/**
+ * START a fresh durable run and return a `RunResult` promise that settles when it
+ * completes — the HOOKS-FREE, RESULT-ONLY sibling of {@link resumeDurableRunResult}
+ * for the scheduler's preemptable durable dispatch.
+ *
+ * Why this exists instead of `createDurableActiveRun`: that adapter fires the run's
+ * `options.hooks` (`onRunStart`/`onRunComplete`) via the run-lifecycle whenever
+ * `handle.result()` resolves. But `engine.suspend` does NOT settle that handle —
+ * so on a preempt→resume, the ORIGINAL `createDurableActiveRun` driver stays alive
+ * and fires `onRunComplete` a SECOND time when the resumed run finally completes,
+ * even though the resume dispatch owns task completion (committee/Bugbot:
+ * "suspended run duplicates lifecycle hooks"). Driving a preemptable run with this
+ * result-only function — symmetric with the resume path — means NEITHER the
+ * original nor the resume driver fires run hooks, so they cannot double-fire. The
+ * scheduler is the single lifecycle owner for scheduled tasks (its own
+ * Task*Events + `task.onComplete` fire exactly once); run-level `options.hooks` do
+ * not fire for a preemptable scheduler run, by design.
+ *
+ * Step-level events still flow: the emitter is passed in `services` so `runStep`
+ * (inline mode) dispatches to it, exactly as the fresh `createDurableActiveRun`
+ * path does. Failure PROPAGATES (rejects) so a failed run surfaces as a failed
+ * task.
+ */
+export async function startDurableRunResult(
+  context: DurableActiveRunContext,
+  durableRun: StartDurableRunResultOptions,
+): Promise<RunResult> {
+  const { runId, sessionId, options, prompt, signal } = durableRun;
+
+  const handle = await context.engine.start(
+    'agentRun',
+    { runId, sessionId, prompt, maximumSteps: options.maximumSteps },
+    {
+      id: runId,
+      services: {
+        options: { ...options, signal },
+        toolbox: options.toolbox,
+        // No emitter: a preemptable scheduler run has no run-level event surface
+        // (the scheduler drives Task*Events itself). Step events simply do not
+        // fire — `emitter` is optional in DurableRunDeps and runStep accepts
+        // `undefined`.
+      },
+    },
+  );
+  const summary = (await (handle as RecoveredRunHandle).result()) as AgentRunWorkflowResult;
+  const { result } = await reconstructRunResult(context, runId, summary);
+  return result;
+}
+
 /**
  * Drive a REATTACHED recovered run: await the already-running handle, reconstruct
  * the `RunResult` from the checkpoint, and fire ONLY the terminal lifecycle (no

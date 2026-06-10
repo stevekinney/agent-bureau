@@ -1,7 +1,7 @@
 import type { ActiveRun } from '../create-run';
 import { createRun } from '../create-run';
 import type { AnyRunEngine, CheckpointStore } from '../durable';
-import { resumeDurableRunResult } from '../durable';
+import { resumeDurableRunResult, startDurableRunResult } from '../durable';
 import { executeLoop } from '../loop';
 import type { GenerateFunction, RunResult, Toolbox } from '../types';
 import type { SchedulerEventMap, SchedulerEventType } from './events';
@@ -626,20 +626,25 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
         failDispatch(task.id, error);
         return;
       }
-      result = createRun(
+      // HOOKS-FREE durable start (not createDurableActiveRun): a preemptable run
+      // is suspended on preemption, which does not settle its handle, so a
+      // hook-firing driver would fire onRunComplete a second time when the run
+      // resumes-and-completes. startDurableRunResult fires no run hooks — the
+      // scheduler is the single lifecycle owner (Task*Events + task.onComplete).
+      result = startDurableRunResult(
+        { engine: durable.engine, checkpointStore: durable.checkpointStore },
         {
-          ...runOptions,
-          generate: runOptions.generate ?? generate,
-          toolbox: runOptions.toolbox ?? toolbox,
-          signal: combinedSignal,
-        },
-        {
-          engine: durable.engine,
-          checkpointStore: durable.checkpointStore,
           runId: durableRunId,
           sessionId: durableRunId,
+          options: {
+            ...runOptions,
+            generate: runOptions.generate ?? generate,
+            toolbox: runOptions.toolbox ?? toolbox,
+            signal: combinedSignal,
+          },
+          signal: combinedSignal,
         },
-      ).result;
+      );
     } else {
       let runOptions: SchedulerRunOptions;
       try {
