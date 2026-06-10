@@ -678,6 +678,13 @@ export async function createRuntimeComposition(
           // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment -- GatewayToolbox variance; scheduler does not inspect tool tuple types
           toolbox: fallbackToolbox,
           idleDelay: options.scheduler?.idleDelay ?? 1000,
+          // When a durable engine is composed, preemptable scheduler tasks run as
+          // durable workflows and a preemption SUSPENDS the run (preserving its
+          // checkpoint) rather than aborting it — a requeue resumes from the last
+          // completed step. Without an engine the scheduler stays in-memory.
+          ...(durable
+            ? { durable: { engine: durable.engine, checkpointStore: durable.checkpointStore } }
+            : {}),
         })
       : undefined;
 
