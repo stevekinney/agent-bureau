@@ -15,7 +15,12 @@ export async function run(options: RunOptions, durable?: DurableRunRouting): Pro
   if (durable) {
     return createDurableActiveRun(
       { engine: durable.engine, checkpointStore: durable.checkpointStore },
-      { runId: durable.runId, options, prompt: durable.prompt },
+      {
+        runId: durable.runId,
+        sessionId: durable.sessionId ?? durable.runId,
+        options,
+        prompt: durable.prompt,
+      },
     ).result;
   }
   return executeLoop(options);

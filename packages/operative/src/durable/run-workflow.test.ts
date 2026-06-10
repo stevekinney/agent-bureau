@@ -86,21 +86,26 @@ async function runToCompletion(
   engine: Awaited<ReturnType<typeof buildEngine>>['engine'],
   input: {
     runId: string;
+    sessionId?: string;
     prompt?: string;
     maximumSteps?: number;
   },
   services: DurableRunDeps,
 ) {
-  const handle = await engine.start('agentRun', input, { id: input.runId, services });
+  const handle = await engine.start(
+    'agentRun',
+    { ...input, sessionId: input.sessionId ?? input.runId },
+    { id: input.runId, services },
+  );
   return handle.result();
 }
 
+// Drain Weft's deferred inline-launch queue between tests. A pending setTimeout(0)
+// inline-launch macrotask left by one durable run can be starved under full
+// `bun test` concurrency (CI), making a later run that normally finishes in ~100ms
+// blow past the 5s timeout. 0.3.0's drain-on-dispose only fires when an engine is
+// disposed; it does NOT replace this BETWEEN-TEST flush, so the drain is restored.
 afterEach(async () => {
-  // Drain Weft's deferred inline launch (see runtime-composition.test.ts).
-  // Without this, a `setTimeout(0)` inline-launch macrotask left pending by one
-  // durable run can be starved under full `bun test` concurrency, making a later
-  // run that normally finishes in ~100ms blow past the 5s test timeout. Matches
-  // the drain in active-run-adapter.test.ts and create-bureau.test.ts.
   await yieldToPortableEventLoop();
 });
 
@@ -116,7 +121,7 @@ describe('durable agentRun workflow', () => {
     try {
       const handle = await engine.start(
         'agentRun',
-        { runId: 'run-1', prompt: 'Hi' },
+        { runId: 'run-1', sessionId: 'run-1', prompt: 'Hi' },
         { id: 'run-1', services },
       );
       const result = await handle.result();
@@ -198,10 +203,14 @@ describe('durable agentRun workflow', () => {
     /** Start a run but do NOT await — used when the run hangs mid-step. */
     function startRun(
       engine: Awaited<ReturnType<typeof buildEngine>>['engine'],
-      input: { runId: string; prompt?: string },
+      input: { runId: string; sessionId?: string; prompt?: string },
       services: DurableRunDeps,
     ) {
-      return engine.start('agentRun', input, { id: input.runId, services });
+      return engine.start(
+        'agentRun',
+        { ...input, sessionId: input.sessionId ?? input.runId },
+        { id: input.runId, services },
+      );
     }
 
     it('resumes a suspended run via the services RESOLVER, skipping completed steps (no re-run)', async () => {

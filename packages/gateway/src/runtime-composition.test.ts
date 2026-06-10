@@ -14,16 +14,9 @@ import { createDurableActiveRun } from 'operative/durable';
 import { createRuntimeComposition } from './runtime-composition';
 import type { ProviderConfiguration } from './types';
 
-// Weft's inline launch queue defers each workflow start onto a `setTimeout(0)`
-// macrotask. Under `bun test`, a prior test that leaves an unsettled async tail
-// (the cost-aware `generate` path here) can starve that deferred launch, so a
-// later durable run's `handle.result()` never resolves and the test times out.
-// The run is correct — it completes start-to-finish in a plain `bun run`
-// process; this is purely a per-test scheduling artifact. Yielding one macrotask
-// between tests drains the timer queue so each test starts clean. Weft 0.2.1
-// ships this drain as the official `yieldToPortableEventLoop` testing helper
-// (the same MessageChannel-macrotask + microtask drain we hand-rolled), so the
-// drain is now a supported one-liner rather than a bespoke `setTimeout(0)`.
+// Drain Weft's deferred inline-launch queue between tests — a pending setTimeout(0)
+// inline-launch left by one durable run can starve a later one under full
+// `bun test` concurrency (CI). 0.3.0's dispose-drain does not replace this flush.
 afterEach(async () => {
   await yieldToPortableEventLoop();
 });
@@ -281,6 +274,7 @@ describe('createRuntimeComposition durable execution', () => {
       // the same `createDurableActiveRun` entry the gateway routes through.
       const activeRun = createDurableActiveRun(runtime.durable!, {
         runId: 'composition-run',
+        sessionId: 'composition-run',
         prompt: 'Hello',
         options: {
           generate: async () => ({ content: 'durable result', toolCalls: [] }),

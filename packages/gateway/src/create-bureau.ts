@@ -2,6 +2,11 @@ import { Conversation, createConversationHistory } from 'conversationalist';
 import { CompletableEventTarget } from 'lifecycle';
 import { type ActiveRun, createAgentSession, createRun, type JSONValue } from 'operative';
 import {
+  isAgentRunWorkflowInput,
+  reattachDurableActiveRun,
+  type RecoveredRunHandle,
+} from 'operative/durable';
+import {
   createStore,
   RunRegisteredEvent as StoreRunRegisteredEvent,
   RunRemovedEvent as StoreRunRemovedEvent,
@@ -115,6 +120,70 @@ function validateSubmitSchedulerTaskRequest(request: SubmitSchedulerTaskRequest)
   if (request.requeue !== undefined && typeof request.requeue !== 'boolean') {
     toBadRequest('"requeue" must be a boolean');
   }
+}
+
+/**
+ * The session metadata boot recovery needs to decide a recovered run's fate,
+ * loaded by id from the owning session. `null` ⇒ the session does not exist.
+ */
+export type RecoveredRunSessionMetadata = { lastRunId?: unknown; lastRunStatus?: unknown } | null;
+
+/**
+ * The outcome of loading a recovered run's owning session: a successful load
+ * (the metadata, possibly `null` for "absent") or a transient read FAILURE that
+ * leaves ownership UNKNOWN.
+ */
+export type SessionLoadOutcome = { ok: true; session: RecoveredRunSessionMetadata } | { ok: false };
+
+/**
+ * Decide what boot recovery does with one handle from `engine.recoverAll()`:
+ *
+ * - `reattach` — bureau-owned, in-flight, session-confirmed: wrap it in a live
+ *   ActiveRun and register it.
+ * - `cancel` — POSITIVELY not a reattachable bureau-owned in-flight run (bad/
+ *   missing launch metadata, foreign run id, or a session that is absent / owns a
+ *   different run / is already terminal). `engine.cancel` terminalizes it so it
+ *   does not run unowned with no monitor.
+ * - `skip` — ownership could NOT be confirmed (a transient session-load failure,
+ *   or no session store): do NOTHING. `engine.cancel` is terminal, so we never
+ *   cancel a run that may be legitimately recovering — the worst case is it
+ *   resumes without live `getRun` visibility (the pre-#3 behaviour).
+ *
+ * Pure (no I/O) so every branch is unit-testable. `recoverAll()` fires the
+ * services resolver synchronously per run before returning, and the resolver
+ * reconciles a deps-unrebuildable run's session to `lastRunStatus: 'error'` — so
+ * by the time this classifies, a session still `'running'` is one the resolver
+ * kept. The gate is on SESSION status, NOT engine run-status: a run that
+ * resolved-and-finished fast during `recoverAll` is terminal in the engine but its
+ * session is still `'running'` (its monitor has not written yet), and it must
+ * still be reattached so its completion is persisted.
+ */
+export function classifyRecoveredRun(args: {
+  handleId: string;
+  /** The narrowed agentRun input when the launch metadata is bureau-owned, else `undefined`. */
+  ownedSessionId: string | undefined;
+  /** Whether reading the handle's launch metadata threw. */
+  metadataReadFailed: boolean;
+  /** A session store is configured (recovery cannot reattach without one). */
+  hasSessionStore: boolean;
+  /** The session-load outcome; only meaningful when `ownedSessionId` is set + `hasSessionStore`. */
+  sessionLoad: SessionLoadOutcome;
+}): 'reattach' | 'cancel' | 'skip' {
+  // A failed metadata read means we cannot even identify the run — but it WAS
+  // resumed by recoverAll, so cancel it rather than leave it unowned.
+  if (args.metadataReadFailed) return 'cancel';
+  // Not a bureau-owned agentRun (foreign run id / non-agentRun input) — cancel.
+  if (args.ownedSessionId === undefined) return 'cancel';
+  // Owned input but no session store to confirm against / reattach into — skip.
+  if (!args.hasSessionStore) return 'skip';
+  // Transient session-load failure — ownership UNKNOWN, never cancel; skip.
+  if (!args.sessionLoad.ok) return 'skip';
+  const session = args.sessionLoad.session;
+  // Session absent / owns a different run / not in-flight — positively unowned.
+  if (!session || session.lastRunId !== args.handleId || session.lastRunStatus !== 'running') {
+    return 'cancel';
+  }
+  return 'reattach';
 }
 
 export async function createBureau(options: BureauOptions = {}): Promise<Bureau> {
@@ -390,6 +459,10 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
             engine: runtime.durable.engine,
             checkpointStore: runtime.durable.checkpointStore,
             runId,
+            // Carry the owning session in the durable input so boot recovery can
+            // correlate a recovered handle back to its session without a side
+            // table (see recoverDurableRuns / resolveRunServices).
+            sessionId,
           }
         : undefined,
     );
@@ -425,6 +498,13 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
           saveSession(sessionId, conversation, {
             lastRunId: runId,
             lastRunStatus: 'aborted',
+            // Write lastFinishReason too so an aborted session's metadata is
+            // internally consistent (status + finishReason agree) and a prior
+            // run's stale lastFinishReason on the same session can't linger. This
+            // is also what boot recovery now relies on: a recovered run that
+            // aborts settles through THIS listener (settleRecoveredRun is gone),
+            // so the field must be written here, not only on the old recovery path.
+            lastFinishReason: 'aborted',
           }),
         {
           runId,
@@ -445,154 +525,233 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
   }
 
   /**
-   * Await one recovered handle to completion and persist the owning session's
-   * terminal status. Runs detached, AFTER boot — never awaited by
-   * `recoverDurableRuns`, so one long or stuck recovered run cannot block the
-   * gateway from coming up.
+   * Reattach one run RECOVERED by `engine.recoverAll()` to the live surface
+   * (closes seam #5b). Builds a {@link reattachDurableActiveRun} adapter over the
+   * already-running handle, wires the SAME terminal session-persistence listeners
+   * the live-run path uses (so a recovered run's `getRun(...)` + session status
+   * behave exactly like a never-crashed one), and `store.register`s it.
    *
-   * `runId` is taken from `handle.id` (the workflow id is pinned to the run id
-   * at `engine.start`), so the owning session is known BEFORE awaiting the
-   * result. A rejection (e.g. `EngineDisposedError` on bureau teardown) leaves
-   * the session `running` for a future process to retry, matching the
-   * dispose-mid-run crash semantic. The run's non-serializable `services` are
-   * owned and cleared by the engine on terminal cleanup — nothing to release here.
+   * Synchronous by construction (no `await` before `store.register`): the adapter
+   * defers its `handle.result()` await onto a microtask, so registration +
+   * `runSessionIdentifiers.set` complete in this turn BEFORE any terminal event
+   * fires — even for a handle that already settled. So `getRun(runId)` resolves
+   * the instant this returns and no subscriber misses the terminal event.
+   *
+   * Idempotent: skips a `runId` already live on this process (the store uses a
+   * plain `Map.set`, which would silently overwrite + split-brain a double
+   * register). `recoverDurableRuns` is itself boot-single-shot; this is defense.
    */
-  async function settleRecoveredRun(
-    handle: { id: string; result(): Promise<unknown> },
-    recovered: ReadonlyMap<string, string>,
-    sessionStore: NonNullable<typeof runtime.sessionStore>,
-  ): Promise<void> {
-    const runId = handle.id;
-    try {
-      const summary = (await handle.result()) as {
-        runId?: unknown;
-        finishReason?: unknown;
-        errorMessage?: unknown;
-      };
-      const sessionId = recovered.get(runId);
-      if (sessionId === undefined) return; // not bureau-owned; nothing to persist
+  function reattachRecoveredRun(
+    runId: string,
+    sessionId: string,
+    handle: RecoveredRunHandle,
+  ): void {
+    // At-most-once registration per runId (guards double-recover / a runId already
+    // started live on this process — neither should reach here, but a silent
+    // Map.set overwrite would be a split-brain, so cheap-guard it).
+    if (store.getRun(runId)) return;
 
-      const session = await sessionStore.load(sessionId);
-      if (!session) return;
+    const recoveredRun = reattachDurableActiveRun(
+      { engine: runtime.durable!.engine, checkpointStore: runtime.durable!.checkpointStore },
+      { runId, handle },
+    );
 
-      const finishReason =
-        typeof summary.finishReason === 'string' ? summary.finishReason : 'error';
-      // Match the live-run status mapping: only a plain 'error' maps to 'error';
-      // 'aborted' maps to 'aborted' (not 'completed'); all other finish reasons
-      // (stop-condition, max-steps, budget-exceeded, etc.) map to 'completed'.
-      const lastRunStatus =
-        finishReason === 'error' ? 'error' : finishReason === 'aborted' ? 'aborted' : 'completed';
-
-      // Prefer the conversation snapshot written by the durable run's final
-      // checkpoint (steps completed on the resumed process are there, not in the
-      // session store which was last written before the crash). Fall back to the
-      // session store conversation only when no checkpoint snapshot is available.
-      const checkpointSnapshot = await runtime.durable?.checkpointStore.loadConversation(runId);
-      const conversation = checkpointSnapshot
-        ? Conversation.from(checkpointSnapshot)
-        : new Conversation(session.conversationHistory);
-
-      // Carry errorMessage → lastError for error-class finish reasons, matching
-      // the live-run path (run.completed sets lastError when finishReason is error,
-      // budget-exceeded, or elicitation-denied — i.e. whenever errorMessage is set).
-      const metadata: Record<string, string> = {
-        lastRunId: runId,
-        lastRunStatus,
-        lastFinishReason: finishReason,
-      };
-      if (typeof summary.errorMessage === 'string') {
-        metadata['lastError'] = summary.errorMessage;
-      }
-
-      await saveSession(sessionId, conversation, metadata);
-    } catch (error) {
-      console.error(
-        `[bureau] Recovered durable run "${runId}" did not settle cleanly: ${serializeUnknownError(error)}`,
+    // Persist terminal session status from the recovered run's OWN terminal
+    // events — the same fields the live-run listeners write. The conversation
+    // comes from `event.conversation`, which the reattach adapter reconstructs
+    // from the checkpoint (so completed steps from the resumed process are
+    // included), preserving the old `settleRecoveredRun`'s checkpoint-preferred
+    // conversation behavior. A run the engine failed pre-replay (services
+    // unavailable) or one interrupted by teardown fires NO terminal event — the
+    // adapter stays write-free for those and the resolver/teardown owns the
+    // session status; so these listeners only run for a genuinely settled run.
+    recoveredRun.once('run.completed', (event) => {
+      const lastRunStatus = event.finishReason === 'error' ? 'error' : 'completed';
+      persistSessionUpdate(
+        () =>
+          saveSession(sessionId, event.conversation, {
+            lastRunId: runId,
+            lastRunStatus,
+            lastFinishReason: event.finishReason,
+            ...(event.finishReason === 'error'
+              ? { lastError: serializeUnknownError(event.error) }
+              : {}),
+          }),
+        { runId, sessionId, status: lastRunStatus },
       );
-    }
+    });
+
+    recoveredRun.once('run.aborted', () => {
+      persistSessionUpdate(
+        // RunAbortedEvent carries no conversation (unlike run.completed), so load
+        // the transcript from the run's final checkpoint — the same
+        // checkpoint-preferred conversation the old settleRecoveredRun persisted.
+        async () => {
+          const snapshot = await runtime.durable?.checkpointStore.loadConversation(runId);
+          const conversation = snapshot ? Conversation.from(snapshot) : new Conversation();
+          await saveSession(sessionId, conversation, {
+            lastRunId: runId,
+            lastRunStatus: 'aborted',
+            lastFinishReason: 'aborted',
+          });
+        },
+        { runId, sessionId, status: 'aborted' },
+      );
+    });
+
+    store.register(recoveredRun, runId);
+    runSessionIdentifiers.set(recoveredRun, sessionId);
   }
 
   /**
-   * Boot-time recovery for durable runs (seam #5). Resumes any `agentRun`
-   * workflows a previous process left in flight via `engine.recoverAll()`. Each
-   * recovered run's non-serializable deps are re-provided per-run by the engine's
-   * `resolveWorkflowServices` resolver (`resolveRunServices` in
-   * runtime-composition) BEFORE its generator advances — no pre-injection, no
-   * module-global registry. The run's terminal session status is persisted by a
-   * DETACHED monitor so a resumed run is not stuck `running` forever, without
-   * blocking boot on the run finishing.
+   * Boot-time recovery for durable runs (seams #2, #3/#5b, #5). Resumes any
+   * `agentRun` workflows a previous process left in flight via
+   * `engine.recoverAll()` and REATTACHES each as a live `ActiveRun`.
    *
-   * Boot returns once `recoverAll()` has STARTED the handles, not when they
-   * complete: a recovered run that resumes into a long model call or a hanging
-   * tool must not hold the whole gateway hostage. The per-handle monitors run
-   * after this function returns.
+   * #2 — no side table. Each recovered run's owning session is read from the
+   * handle's own launch metadata (`handle.getLaunchMetadata().input.sessionId`,
+   * which the run carried in its durable input), not from a pre-built
+   * runId→sessionId scan of the session store. The deps a recovered run needs are
+   * re-provided lazily by the engine's `resolveWorkflowServices` resolver
+   * (`resolveRunServices`) before its generator advances — no pre-injection, no
+   * module-global registry.
    *
-   * Best-effort and fail-safe: a run whose deps the resolver cannot rebuild is
-   * failed by the engine (terminal `failed`) BEFORE replay without aborting the
-   * others or the boot — `recoverAll()` itself does not throw for it.
+   * #3/#5b — live visibility. Each recovered handle is wrapped in a
+   * {@link reattachRecoveredRun} adapter and `store.register`d, so the resumed run
+   * rejoins `getRun(...)` and the live subscriber surface and its terminal session
+   * status is persisted from its own lifecycle events. (Per-step events during
+   * resume are not forwarded — see `reattachDurableActiveRun`'s contract.)
    *
-   * Such an engine-failed run DOES still yield a handle (observed: Weft surfaces a
-   * handle whose `result()` rejects with the services-unavailable error), so
-   * `settleRecoveredRun` runs for it — but its `handle.result()` rejects, so it
-   * takes the write-free `catch` (log only) and does NOT persist a session status.
-   * The session is therefore reconciled by the resolver, not the monitor: the
-   * common reconstructable-failure case — the owning session is `running` but its
-   * deps cannot be rebuilt on this process — is reconciled to `error`
-   * SYNCHRONOUSLY inside the resolver (`resolveRunServices` in
-   * runtime-composition.ts), which has the sessionId in hand AND runs strictly
-   * before `recoverAll()` returns the handles, so the monitor cannot clobber it.
+   * Boot returns once `recoverAll()` has STARTED the handles and they are
+   * registered, not when they complete: a recovered run that resumes into a long
+   * model call must not hold the gateway hostage. Each adapter awaits its result
+   * detached.
    *
-   * KNOWN LIMITATION (documented, accepted): one narrow residue remains — a run
-   * whose owning session VANISHED mid-recovery (loaded as null between the list
-   * scan and the load), so there is no session record to reconcile. Its prior
-   * `lastRunStatus` (if any) is left as-is. The run is NOT re-executed — once Weft
-   * marks it terminal `failed`, the next boot's `recoverAll()` (which resumes only
-   * non-terminal workflows) skips it. Recovered runs are not `store.register`'d
-   * either (seam #5b below), so there is no public surface reporting the engine's
-   * terminal state for such a run; this residue is benign (no repeated work, no
-   * bricked engine) and not worth a TOCTOU-racy reconciliation.
+   * Fail-safe: a run whose deps the resolver cannot rebuild is failed terminally
+   * by the engine BEFORE replay (the resolver reconciles its session to `error`
+   * synchronously, with the sessionId in hand); its reattached handle then rejects
+   * and the adapter stays write-free, so the resolver's status is authoritative.
+   * A run whose launch metadata lacks a `sessionId` (checkpointed before #2, or
+   * not bureau-owned) is skipped — there is no compatibility fallback for
+   * cross-upgrade in-flight runs.
    *
-   * TODO(weft-integration): #5b reconstructed runs complete without an ActiveRun
-   *   adapter, so they are not individually observable via the live event surface
-   *   (their session status IS persisted). Reattaching ActiveRun + store.register
-   *   per recovered handle is the remaining visibility half.
+   * KNOWN SEAM — durable scheduler runs (#7b) are NOT cross-process recoverable.
+   * A durable scheduler task (durable scheduler enabled) runs as an `agentRun`
+   * workflow in this SAME engine with `sessionId === runId` (a synthetic
+   * `scheduler-run-…` id), and the durable run path does NOT write a session
+   * record (only the gateway's interactive `runDurable` path persists sessions).
+   * So if the process crashes with a scheduler run in flight, `recoverAll()`
+   * surfaces it here, but `resolveRunServices` finds no session for its synthetic
+   * id → returns `unavailable` → the engine fails it clean before replay. The
+   * reattached handle then rejects and the adapter stays write-free. Net: scheduler
+   * durable runs are SAME-PROCESS suspend/resume only (their value — preemption
+   * preserves progress within a live process); they surface briefly on recovery
+   * and fail clean rather than resuming. This is intentional, not a gap:
+   * cross-process recovery of scheduler tasks would require persisting a session
+   * per task, which the in-process scheduler deliberately does not do.
    */
   async function recoverDurableRuns(): Promise<void> {
     if (!runtime.durable) return;
+    if (!runtime.sessionStore) return;
 
     const durable = runtime.durable;
-    const sessionStore = runtime.sessionStore;
-    if (!sessionStore) return;
 
-    // Build the runId → sessionId map for every in-flight session. This is the
-    // only bookkeeping the bureau needs: the engine's `resolveWorkflowServices`
-    // resolver rebuilds each recovered run's deps lazily (per run, before its
-    // generator advances), so there is nothing to pre-inject here.
-    const summaries = await sessionStore.list();
-    const inFlight = summaries.filter((summary) => summary.metadata['lastRunStatus'] === 'running');
-    const recovered = new Map<string, string>(); // runId -> sessionId
-    for (const summary of inFlight) {
-      const runId = summary.metadata['lastRunId'];
-      if (typeof runId !== 'string') continue;
-      recovered.set(runId, summary.id);
+    // recoverAll resumes the in-flight workflows (firing the services resolver per
+    // run before each generator advances); if it throws, the boot try/catch logs
+    // and continues.
+    const handles = await durable.engine.recoverAll();
+
+    // Read each handle's launch metadata CONCURRENTLY, so one slow/stuck read does
+    // not block registration of the rest (no head-of-line blocking). The read is
+    // caught PER HANDLE so the resolved value always carries the handle identity —
+    // a rejected read must not lose the handle, or we could not cancel the
+    // now-resumed-but-unidentifiable run (committee round-2 finding 1). Then
+    // reattach each owned handle SYNCHRONOUSLY in one turn, preserving the
+    // register-before-terminal-event ordering invariant.
+    const resolved = await Promise.all(
+      handles.map(async (handle) => {
+        try {
+          return { handle, metadata: await handle.getLaunchMetadata() };
+        } catch (error) {
+          return { handle, metadata: null, error };
+        }
+      }),
+    );
+
+    const orphanCancellations: Array<{ runId: string; cancel: Promise<void> }> = [];
+    const sessionStore = runtime.sessionStore;
+    for (const { handle, metadata, ...rest } of resolved) {
+      const readError = 'error' in rest ? rest.error : undefined;
+      if (readError !== undefined) {
+        console.error(
+          `[bureau] Could not read launch metadata for recovered run "${handle.id}"; cancelling: ${serializeUnknownError(readError)}`,
+        );
+      }
+
+      // A run is bureau-owned only if its launch metadata narrows to an agentRun
+      // input AND its input runId matches this handle's id (the workflow id is the
+      // run id).
+      const ownedSessionId =
+        readError === undefined &&
+        metadata &&
+        isAgentRunWorkflowInput(metadata.input) &&
+        metadata.input.runId === handle.id
+          ? metadata.input.sessionId
+          : undefined;
+
+      // Load the owning session (only meaningful for an owned run with a store).
+      // A throw leaves ownership UNKNOWN — classifyRecoveredRun then skips rather
+      // than cancels, so a transient read blip never terminates a legitimately
+      // recovering run.
+      let sessionLoad: SessionLoadOutcome = { ok: true, session: null };
+      if (ownedSessionId !== undefined && sessionStore) {
+        try {
+          const session = await sessionStore.load(ownedSessionId);
+          sessionLoad = { ok: true, session: session ? { ...session.metadata } : null };
+        } catch (error) {
+          console.error(
+            `[bureau] Could not load owning session for recovered run "${handle.id}"; leaving it to resume without live visibility: ${serializeUnknownError(error)}`,
+          );
+          sessionLoad = { ok: false };
+        }
+      }
+
+      const verdict = classifyRecoveredRun({
+        handleId: handle.id,
+        ownedSessionId,
+        metadataReadFailed: readError !== undefined,
+        hasSessionStore: sessionStore !== undefined,
+        sessionLoad,
+      });
+
+      if (verdict === 'reattach') {
+        // ownedSessionId is defined when the verdict is 'reattach'.
+        reattachRecoveredRun(handle.id, ownedSessionId!, handle);
+      } else if (verdict === 'cancel') {
+        // Collect the cancel (do NOT fire-and-forget swallow): a rejected cancel
+        // could leave an unowned, already-resumed run live with no monitor, so its
+        // failure must be surfaced for operators. engine.cancel terminalizes the
+        // run and rejects its waiter — covering metadata-less / read-failed /
+        // foreign-input / orphaned-session residue without store.register'ing it.
+        orphanCancellations.push({ runId: handle.id, cancel: durable.engine.cancel(handle.id) });
+      }
+      // 'skip' — ownership unknown; leave the run to resume without live visibility.
     }
 
-    // recoverAll resumes the in-flight workflows; if it throws, the boot
-    // try/catch logs and continues. No deps to clean up on failure — they are
-    // engine-owned and supplied lazily by the resolver.
-    const handles = (await durable.engine.recoverAll()) as Array<{
-      id: string;
-      result(): Promise<unknown>;
-    }>;
-
-    // Detached, NOT awaited — boot proceeds the moment recoverAll has started the
-    // handles. Each monitor settles one recovered handle: persists its terminal
-    // session status off the boot path so a resumed run is not stuck `running`.
-    void Promise.allSettled(
-      handles.map((handle) => settleRecoveredRun(handle, recovered, sessionStore)),
-    ).catch((error) => {
-      console.error(`[bureau] Durable run recovery monitor error: ${serializeUnknownError(error)}`);
-    });
+    // Await the orphan cancels DETACHED — boot must not block on them (same as the
+    // recovered-run monitors), but a cancel that REJECTS leaves an unowned run
+    // running, which is an operator-actionable failure, not something to swallow.
+    if (orphanCancellations.length > 0) {
+      void Promise.allSettled(orphanCancellations.map(({ cancel }) => cancel)).then((outcomes) => {
+        outcomes.forEach((outcome, index) => {
+          if (outcome.status === 'rejected') {
+            console.error(
+              `[bureau] Failed to cancel unowned recovered run "${orphanCancellations[index]!.runId}" — it may still be running: ${serializeUnknownError(outcome.reason)}`,
+            );
+          }
+        });
+      });
+    }
   }
 
   function submitSchedulerTask(

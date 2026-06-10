@@ -14,7 +14,7 @@ import { createMockGenerate as createSequentialGenerate } from 'operative/test';
 import { createStore } from 'sentinel';
 import { z } from 'zod';
 
-import { BureauError, createBureau } from './create-bureau';
+import { BureauError, classifyRecoveredRun, createBureau } from './create-bureau';
 import { drainMicrotasks, waitForCondition, waitForRunState } from './test';
 import {
   type Bureau,
@@ -98,12 +98,9 @@ async function pollUntil(check: () => boolean | Promise<boolean>, attempts = 20)
   return check();
 }
 
-// Weft's inline launch queue defers each workflow start onto a `setTimeout(0)`
-// macrotask. Under `bun test`, a prior test that leaves an unsettled async tail
-// (this file's recovery test parks bureauA's step-1 generate forever) can starve
-// that deferred launch, so a later durable run never advances and its test times
-// out. Yielding one macrotask between tests drains the timer queue so each test
-// starts clean. (Same fix as runtime-composition.test.ts / active-run-adapter.test.ts.)
+// Drain Weft's deferred inline-launch queue between tests — a pending setTimeout(0)
+// inline-launch left by one durable run can starve a later one under full
+// `bun test` concurrency (CI). 0.3.0's dispose-drain does not replace this flush.
 afterEach(async () => {
   await yieldToPortableEventLoop();
 });
@@ -368,6 +365,15 @@ describe('createBureau', () => {
         // restart from the top.
         expect(bSteps).toEqual([1]);
 
+        // #3/#5b LIVE VISIBILITY: the recovered run is reattached as a live
+        // ActiveRun and `store.register`d, so it rejoins `getRun(...)` — it is no
+        // longer invisible to the live surface the way a pre-#5b recovered run was.
+        // (Registration is synchronous in `recoverDurableRuns`, so the run is
+        // visible from the moment boot returned, even while it was still resuming.)
+        const recoveredDetail = bureauB.getRun(run.id);
+        expect(recoveredDetail).toBeDefined();
+        expect(recoveredDetail?.id).toBe(run.id);
+
         // The session is no longer stuck `running`: the detached monitor persisted
         // its terminal status. Poll (re-reading the store each iteration) until
         // that write lands — it happens after the resumed run completes, off the
@@ -455,6 +461,11 @@ describe('createBureau', () => {
         const lastError = session?.metadata['lastError'];
         expect(typeof lastError).toBe('string');
         expect(lastError as string).toContain('could not be reconstructed');
+        // A run the resolver failed (session reconciled to `error`) must NOT be
+        // reattached + store.register'd — otherwise its write-free-rejecting
+        // handle would leave a store entry stuck `running` forever (committee/
+        // Bugbot review). It was cancelled, not registered.
+        expect(bureauB.getRun(run.id)).toBeUndefined();
       } finally {
         bureauB.dispose();
       }
@@ -818,6 +829,33 @@ describe('createBureau', () => {
     expect(aborted.status).toBe('aborted');
   });
 
+  it('persists both lastRunStatus and lastFinishReason when a run is aborted', async () => {
+    // An aborted session's metadata must be internally consistent: status AND
+    // finishReason both `aborted`, so a prior run's stale `lastFinishReason` on
+    // the same session cannot linger. Boot recovery relies on this too — a
+    // recovered run that aborts settles through this same listener.
+    const generate: GenerateFunction = () => new Promise(() => {});
+    const bureau = await createBureau({
+      generate,
+      toolbox: createEmptyToolbox(),
+      persistence: textValueStore(new MemoryStorage()),
+    });
+
+    const run = await bureau.createRun({ message: 'Hello' });
+    bureau.abortRun(run.id);
+
+    // The session write happens after the run.aborted event settles; poll until
+    // the status leaves `running`.
+    await pollUntil(async () => {
+      const current = await bureau.getSession(run.sessionId);
+      return current?.metadata['lastRunStatus'] === 'aborted';
+    });
+
+    const session = await bureau.getSession(run.sessionId);
+    expect(session?.metadata['lastRunStatus']).toBe('aborted');
+    expect(session?.metadata['lastFinishReason']).toBe('aborted');
+  });
+
   it('throws CONFLICT when deleting a running run', async () => {
     const generate: GenerateFunction = () => new Promise(() => {});
     const bureau = await createBureau({ generate, toolbox: createEmptyToolbox() });
@@ -1150,5 +1188,72 @@ describe('createBureau', () => {
       await rm(`${databasePath}-wal`, { force: true });
       await rm(`${databasePath}-shm`, { force: true });
     }
+  });
+});
+
+describe('classifyRecoveredRun', () => {
+  const base = {
+    handleId: 'run-1',
+    ownedSessionId: 'session-1' as string | undefined,
+    metadataReadFailed: false,
+    hasSessionStore: true,
+    sessionLoad: { ok: true as const, session: { lastRunId: 'run-1', lastRunStatus: 'running' } },
+  };
+
+  it('reattaches an owned, in-flight run whose session confirms ownership', () => {
+    expect(classifyRecoveredRun(base)).toBe('reattach');
+  });
+
+  it('reattaches even when the engine-finished-fast run still shows running in its session', () => {
+    // The session monitor has not written the terminal status yet — must reattach
+    // so the completion is persisted (gate on SESSION status, not engine status).
+    expect(
+      classifyRecoveredRun({
+        ...base,
+        sessionLoad: { ok: true, session: { lastRunId: 'run-1', lastRunStatus: 'running' } },
+      }),
+    ).toBe('reattach');
+  });
+
+  it('cancels a run whose launch metadata could not be read', () => {
+    expect(classifyRecoveredRun({ ...base, metadataReadFailed: true })).toBe('cancel');
+  });
+
+  it('cancels a run that is not a bureau-owned agentRun (no owned session id)', () => {
+    expect(classifyRecoveredRun({ ...base, ownedSessionId: undefined })).toBe('cancel');
+  });
+
+  it('cancels a run whose owning session is absent', () => {
+    expect(classifyRecoveredRun({ ...base, sessionLoad: { ok: true, session: null } })).toBe(
+      'cancel',
+    );
+  });
+
+  it('cancels a run whose session now owns a different run', () => {
+    expect(
+      classifyRecoveredRun({
+        ...base,
+        sessionLoad: { ok: true, session: { lastRunId: 'other-run', lastRunStatus: 'running' } },
+      }),
+    ).toBe('cancel');
+  });
+
+  it('cancels a run whose session is already terminal (resolver reconciled it to error)', () => {
+    expect(
+      classifyRecoveredRun({
+        ...base,
+        sessionLoad: { ok: true, session: { lastRunId: 'run-1', lastRunStatus: 'error' } },
+      }),
+    ).toBe('cancel');
+  });
+
+  it('SKIPS (does not cancel) when the session load failed transiently — never kills a recovering run', () => {
+    // The Bugbot finding: a transient storage read failure must not terminate a
+    // legitimately-recovered in-flight run. Ownership is UNKNOWN → skip, not cancel.
+    expect(classifyRecoveredRun({ ...base, sessionLoad: { ok: false } })).toBe('skip');
+  });
+
+  it('skips an owned run when no session store is configured (cannot reattach, must not cancel)', () => {
+    expect(classifyRecoveredRun({ ...base, hasSessionStore: false })).toBe('skip');
   });
 });

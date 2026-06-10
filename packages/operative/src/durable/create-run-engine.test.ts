@@ -6,6 +6,13 @@ import { afterEach, describe, expect, it } from 'bun:test';
 import { createCheckpointStore } from './checkpoint-store';
 import { createRunEngine } from './create-run-engine';
 
+// Drain Weft's deferred inline-launch queue between tests — a pending setTimeout(0)
+// inline-launch left by one durable run can starve a later one under full
+// `bun test` concurrency (CI). 0.3.0's dispose-drain does not replace this flush.
+afterEach(async () => {
+  await yieldToPortableEventLoop();
+});
+
 /**
  * A throwaway workflow standing in for the real `agentRun` body (which depends
  * on the loop refactor). Task #6 only verifies the engine WIRING — that
@@ -26,14 +33,6 @@ function makeProbeWorkflow() {
       return result;
     });
 }
-
-afterEach(async () => {
-  // Drain Weft's deferred inline launch (see runtime-composition.test.ts) so a
-  // pending `setTimeout(0)` macrotask from one engine run is not starved under
-  // full `bun test` concurrency, which would time out a later run. Matches the
-  // drain in active-run-adapter.test.ts and run-workflow.test.ts.
-  await yieldToPortableEventLoop();
-});
 
 describe('createRunEngine', () => {
   it('boots an engine that registers and runs the injected workflow', async () => {

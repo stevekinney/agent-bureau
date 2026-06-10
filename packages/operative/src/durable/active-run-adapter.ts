@@ -29,6 +29,12 @@ export interface DurableActiveRunContext {
 export interface DurableActiveRunOptions {
   /** A stable id for the run; also the durable workflow id (resume key). */
   runId: string;
+  /**
+   * The bureau session that owns this run. Threaded into the durable workflow
+   * input so boot recovery can correlate a recovered handle back to its session
+   * from the durable input alone (see {@link AgentRunWorkflowInput.sessionId}).
+   */
+  sessionId: string;
   /** The run behavior (generate fn, toolbox, conversation, hooks, stopWhen). */
   options: RunOptions;
   /** First user message to seed a brand-new run. Ignored when resuming. */
@@ -158,6 +164,7 @@ export function createDurableActiveRun(
       driveDurableRun(
         context,
         runId,
+        durableRun.sessionId,
         options,
         conversation,
         combinedSignal,
@@ -192,6 +199,274 @@ export function createDurableActiveRun(
 }
 
 /**
+ * The minimal recovered-handle surface {@link reattachDurableActiveRun} needs: a
+ * pinned id (== runId) and the settling `result()`. `engine.recoverAll()` returns
+ * full `WorkflowHandle`s; this narrow shape avoids depending on Weft's invariant
+ * `WorkflowHandle` generics (matching the `AnyRunEngine` widening convention).
+ */
+export interface RecoveredRunHandle {
+  readonly id: string;
+  result(): Promise<unknown>;
+}
+
+/**
+ * Reattach an `ActiveRun` to a run RECOVERED in this process by
+ * `engine.recoverAll()` (closes seam #5b). Unlike {@link createDurableActiveRun},
+ * this does NOT `engine.start` a new run — the recovered generator is already
+ * relaunched by `recoverAll()`; this wraps the existing {@link RecoveredRunHandle}
+ * so the run rejoins the live surface (`store.register` makes `getRun(runId)`
+ * resolve and live subscribers see it) and fires its TERMINAL lifecycle when the
+ * resumed run settles.
+ *
+ * Contract (core scope — deliberately narrower than a fresh run):
+ * - **Terminal events only.** `run.completed` / `run.aborted` / `run.error` fire
+ *   when the recovered run settles. Per-step / toolbox / progress events are NOT
+ *   forwarded: the recovered generator runs against the resolver's rebuilt
+ *   `ctx.services.toolbox`, whose events fire on THAT toolbox, never this
+ *   adapter's. Live-per-step-during-resume is a documented sub-seam, not core.
+ * - **No start lifecycle (seam #11).** `startRunLifecycle` / `onRunStart` are NOT
+ *   re-fired — the run already started in the prior process and `onRunStart` is
+ *   side-effecting. Re-firing it on every recovery would double-execute it.
+ * - **Engine-failed / disposed runs fire NO terminal event.** A run the resolver
+ *   could not rebuild is terminally `failed` by Weft pre-replay, so `result()`
+ *   rejects; the resolver already persisted that session's status. An
+ *   `EngineDisposedError` means the bureau is tearing down mid-resume (re-recover
+ *   later). Either way this adapter logs and stays write-free — it must not
+ *   clobber the session status the resolver/teardown owns.
+ *
+ * NOTE: a recovered run's `onRunComplete.totalDuration` is measured from reattach
+ * on THIS process, not the original wall-clock start (the start timestamp is not
+ * checkpointed). No current consumer reads it for billing/classification; a
+ * persisted start time is deferred until one does.
+ */
+export function reattachDurableActiveRun(
+  context: DurableActiveRunContext,
+  reattach: { runId: string; handle: RecoveredRunHandle },
+): ActiveRun {
+  const { runId, handle } = reattach;
+  const emitter = new CompletableEventTarget<CombinedOperativeEventMap>();
+
+  // Resolves `true` only when an adapter-initiated `engine.cancel` SUCCEEDS for
+  // this run — i.e. THIS abort terminalized the run. `undefined` means no abort
+  // was requested. The result-rejection path classifies as `aborted` ONLY when
+  // this proves the cancel caused the termination; if cancel rejected (the run was
+  // already terminal for a resolver/teardown reason) it stays on the write-free
+  // path and does not clobber that owner's status (committee round-3 finding 1).
+  let abortCancelled: Promise<boolean> | undefined;
+
+  function complete(): void {
+    emitter.complete();
+  }
+
+  // Deferred-microtask start — REQUIRED for the registration ordering invariant:
+  // the caller (`recoverDurableRuns`) must finish `store.register` +
+  // `runSessionIdentifiers.set` in its synchronous turn BEFORE any terminal event
+  // microtask fires, so `getRun(runId)` resolves and no subscriber misses the
+  // terminal event — even when `handle.result()` already settled before reattach.
+  const result = Promise.resolve()
+    .then(() => driveReattachedRun(context, runId, handle, emitter, () => abortCancelled))
+    .finally(complete);
+
+  return {
+    result,
+    // A reattached run has no abort SIGNAL (the recovered generator runs under the
+    // engine, not this adapter's controller), so abort cancels the run at the
+    // engine instead (committee MF-3): a recovered run is now visible via
+    // `getRun(runId)`, so `bureau.abortRun(runId)` must actually stop it rather
+    // than silently no-op. `engine.cancel` terminalizes the run and rejects its
+    // result waiter; the rejection is translated into a real `run.aborted`
+    // lifecycle (so gateway persists `aborted`) — but ONLY if the cancel actually
+    // succeeded (abortCancelled resolves true), distinguishing this abort from a
+    // resolver/teardown failure that merely raced an abort() call.
+    abort(): void {
+      abortCancelled ??= context.engine.cancel(runId).then(
+        () => true,
+        () => false,
+      );
+    },
+    addEventListener: emitter.addEventListener.bind(emitter) as ActiveRun['addEventListener'],
+    removeEventListener: emitter.removeEventListener.bind(
+      emitter,
+    ) as ActiveRun['removeEventListener'],
+    on: emitter.on.bind(emitter) as ActiveRun['on'],
+    once: emitter.once.bind(emitter) as ActiveRun['once'],
+    subscribe: emitter.subscribe.bind(emitter) as ActiveRun['subscribe'],
+    events: emitter.events.bind(emitter) as ActiveRun['events'],
+    toObservable: emitter.toObservable.bind(emitter) as ActiveRun['toObservable'],
+    complete,
+    [Symbol.dispose](): void {
+      complete();
+    },
+  };
+}
+
+/**
+ * Resume a SUSPENDED durable run and return a `RunResult` promise that settles
+ * when the resumed run completes. Unlike {@link reattachDurableActiveRun} — which
+ * is write-free and swallows a rejecting handle into an interrupted result because
+ * a recovered run's terminal status is owned by the resolver/teardown — this
+ * PROPAGATES failure: if `engine.resume(runId)` rejects (the run is already
+ * terminal) or the resumed handle's `result()` rejects, the returned promise
+ * REJECTS. The scheduler needs that so a failed resume surfaces as a failed task
+ * (committee MF-4), not a silently "completed" one. There is exactly one owner of
+ * the run — the resume caller — so reconstructing + returning the result here is
+ * safe (no lifecycle events; the scheduler drives task-level events itself).
+ */
+export async function resumeDurableRunResult(
+  context: DurableActiveRunContext,
+  runId: string,
+): Promise<RunResult> {
+  const handle = await context.engine.resume(runId);
+  const summary = (await (handle as RecoveredRunHandle).result()) as AgentRunWorkflowResult;
+  const { result } = await reconstructRunResult(context, runId, summary);
+  return result;
+}
+
+/** Options for {@link startDurableRunResult}. */
+export interface StartDurableRunResultOptions {
+  /** Stable id for the run; also the durable workflow id (suspend/resume key). */
+  runId: string;
+  /** The owning session id, carried in the durable input for boot recovery. */
+  sessionId: string;
+  /** The run behavior (generate, toolbox, hooks, stopWhen, …). */
+  options: RunOptions;
+  /** First user message to seed a brand-new run. */
+  prompt?: string;
+  /** Abort signal for the run (the scheduler's combined signal). */
+  signal?: AbortSignal;
+}
+
+/**
+ * START a fresh durable run and return a `RunResult` promise that settles when it
+ * completes — the HOOKS-FREE, RESULT-ONLY sibling of {@link resumeDurableRunResult}
+ * for the scheduler's preemptable durable dispatch.
+ *
+ * Why this exists instead of `createDurableActiveRun`: that adapter fires the run's
+ * `options.hooks` (`onRunStart`/`onRunComplete`) via the run-lifecycle whenever
+ * `handle.result()` resolves. But `engine.suspend` does NOT settle that handle —
+ * so on a preempt→resume, the ORIGINAL `createDurableActiveRun` driver stays alive
+ * and fires `onRunComplete` a SECOND time when the resumed run finally completes,
+ * even though the resume dispatch owns task completion (committee/Bugbot:
+ * "suspended run duplicates lifecycle hooks"). Driving a preemptable run with this
+ * result-only function — symmetric with the resume path — means NEITHER the
+ * original nor the resume driver fires run hooks, so they cannot double-fire. The
+ * scheduler is the single lifecycle owner for scheduled tasks (its own
+ * Task*Events + `task.onComplete` fire exactly once); run-level `options.hooks` do
+ * not fire for a preemptable scheduler run, by design.
+ *
+ * Step-level events still flow: the emitter is passed in `services` so `runStep`
+ * (inline mode) dispatches to it, exactly as the fresh `createDurableActiveRun`
+ * path does. Failure PROPAGATES (rejects) so a failed run surfaces as a failed
+ * task.
+ */
+export async function startDurableRunResult(
+  context: DurableActiveRunContext,
+  durableRun: StartDurableRunResultOptions,
+): Promise<RunResult> {
+  const { runId, sessionId, options, prompt, signal } = durableRun;
+
+  const handle = await context.engine.start(
+    'agentRun',
+    { runId, sessionId, prompt, maximumSteps: options.maximumSteps },
+    {
+      id: runId,
+      services: {
+        options: { ...options, signal },
+        toolbox: options.toolbox,
+        // No emitter: a preemptable scheduler run has no run-level event surface
+        // (the scheduler drives Task*Events itself). Step events simply do not
+        // fire — `emitter` is optional in DurableRunDeps and runStep accepts
+        // `undefined`.
+      },
+    },
+  );
+  const summary = (await (handle as RecoveredRunHandle).result()) as AgentRunWorkflowResult;
+  const { result } = await reconstructRunResult(context, runId, summary);
+  return result;
+}
+
+/**
+ * Drive a REATTACHED recovered run: await the already-running handle, reconstruct
+ * the `RunResult` from the checkpoint, and fire ONLY the terminal lifecycle (no
+ * start lifecycle — seam #11). On a rejecting handle, stay write-free: the
+ * resolver (services-unavailable → engine-failed) or the teardown
+ * (`EngineDisposedError`) already owns that session's terminal status.
+ */
+async function driveReattachedRun(
+  context: DurableActiveRunContext,
+  runId: string,
+  handle: RecoveredRunHandle,
+  emitter: CompletableEventTarget<CombinedOperativeEventMap>,
+  abortOutcome: () => Promise<boolean> | undefined,
+): Promise<RunResult> {
+  const runStartTime = performance.now();
+
+  let summary: AgentRunWorkflowResult;
+  try {
+    summary = (await handle.result()) as AgentRunWorkflowResult;
+  } catch (error) {
+    // An ADAPTER-INITIATED abort (bureau.abortRun → engine.cancel) that ACTUALLY
+    // terminalized this run is a real terminal: fire `run.aborted` so the gateway
+    // listener persists `aborted`, rather than leaving the session looking
+    // `running` (committee round-2 finding 2). Classify as aborted ONLY when the
+    // cancel succeeded (committee round-3 finding 1): if the cancel rejected, this
+    // rejection came from a resolver/teardown failure that merely raced abort(),
+    // and that owner's status must not be clobbered.
+    const cancelSucceeded = await (abortOutcome() ?? Promise.resolve(false));
+    if (cancelSucceeded) {
+      // A failed transcript read must NOT suppress the abort lifecycle (committee
+      // round-3 finding 2) — fall back to an empty conversation.
+      let conversation: Conversation;
+      try {
+        const snapshot = await context.checkpointStore.loadConversation(runId);
+        conversation = snapshot ? Conversation.from(snapshot) : new Conversation();
+      } catch {
+        conversation = new Conversation();
+      }
+      return makeAbortResult(createRunState(), conversation, undefined, emitter, 0, 'aborted');
+    }
+    // Otherwise write-free. EngineDisposedError = bureau teardown mid-resume
+    // (leave running for a later boot). Any other rejection = the engine
+    // terminally failed this run pre-replay because the resolver returned
+    // services-unavailable, and the resolver ALREADY reconciled that session to
+    // `error`. Firing a terminal lifecycle here would clobber what the
+    // resolver/teardown owns, so we only log and resolve quiet.
+    if (!(isWeftErrorLike(error) && error.code === 'EngineDisposedError')) {
+      console.error(
+        `[operative] Reattached durable run "${runId}" did not settle cleanly: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+    return makeInterruptedRunResult(new Conversation());
+  }
+
+  const {
+    result,
+    runState,
+    conversation: durableConversation,
+  } = await reconstructRunResult(context, runId, summary);
+
+  // `hooks: undefined` — the recovered run's `onRunComplete`/etc. hooks are
+  // non-serializable run behavior; they were rebuilt by the resolver into
+  // `ctx.services`, which the bureau never gets back. So reattach fires the
+  // terminal EVENTS (which gateway's session-persistence listeners need) but not
+  // the run HOOKS — matching the old `settleRecoveredRun`, which persisted the
+  // session directly and never fired operative run hooks for a recovered run.
+  return finalizeRunResult({
+    finishReason: result.finishReason,
+    runState,
+    conversation: durableConversation,
+    hooks: undefined,
+    emitter,
+    runStartTime,
+    errorMessage: summary.errorMessage,
+    abortReason: summary.abortReason,
+    schemaValidation: summary.schemaValidation,
+  });
+}
+
+/**
  * Drive one durable run: fire the start lifecycle, start (or resume) the
  * workflow, await it, reconstruct the `RunResult`, and fire the completion
  * lifecycle — all via the shared `run-lifecycle.ts` so events/hooks match the
@@ -200,6 +475,7 @@ export function createDurableActiveRun(
 async function driveDurableRun(
   context: DurableActiveRunContext,
   runId: string,
+  sessionId: string,
   options: RunOptions,
   conversation: Conversation,
   signal: AbortSignal,
@@ -236,6 +512,7 @@ async function driveDurableRun(
     'agentRun',
     {
       runId,
+      sessionId,
       prompt,
       maximumSteps: options.maximumSteps,
     },

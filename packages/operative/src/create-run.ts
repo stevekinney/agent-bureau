@@ -60,6 +60,13 @@ export interface ActiveRun {
 export interface DurableRunRouting extends DurableActiveRunContext {
   /** Stable id for the run; also the durable workflow id (resume key). */
   runId: string;
+  /**
+   * The session that owns this run, carried in the durable input so boot recovery
+   * can correlate a recovered handle to its session. Defaults to `runId` for a
+   * headless run with no distinct session (the run is its own session for
+   * recovery-correlation purposes).
+   */
+  sessionId?: string;
   /** First user message to seed a brand-new run. */
   prompt?: string;
 }
@@ -76,7 +83,12 @@ export function createRun(options: RunOptions, durable?: DurableRunRouting): Act
   if (durable) {
     return createDurableActiveRun(
       { engine: durable.engine, checkpointStore: durable.checkpointStore },
-      { runId: durable.runId, options, prompt: durable.prompt },
+      {
+        runId: durable.runId,
+        sessionId: durable.sessionId ?? durable.runId,
+        options,
+        prompt: durable.prompt,
+      },
     );
   }
 
