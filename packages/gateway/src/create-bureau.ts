@@ -594,30 +594,49 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
 
     // recoverAll resumes the in-flight workflows (firing the services resolver per
     // run before each generator advances); if it throws, the boot try/catch logs
-    // and continues. The handles are full WorkflowHandles; narrow to the surface
-    // reattach needs (id + result) plus getLaunchMetadata for the sessionId.
-    const handles = (await durable.engine.recoverAll()) as Array<
-      RecoveredRunHandle & { getLaunchMetadata(): Promise<{ input: unknown } | null> }
-    >;
+    // and continues.
+    const handles = await durable.engine.recoverAll();
 
-    // Reattach each handle synchronously (register-before-terminal-event ordering
-    // — see reattachRecoveredRun). getLaunchMetadata is an async state read, so do
-    // it per handle, then reattach in the same turn. A failed metadata read or a
-    // run that is not bureau-owned (no sessionId in its input) is skipped.
-    for (const handle of handles) {
-      let sessionId: string | undefined;
-      try {
-        const metadata = await handle.getLaunchMetadata();
-        if (metadata && isAgentRunWorkflowInput(metadata.input)) {
-          sessionId = metadata.input.sessionId;
-        }
-      } catch (error) {
+    // Read each handle's launch metadata CONCURRENTLY (Promise.allSettled), so one
+    // slow/stuck metadata read does not block registration of the rest (no
+    // head-of-line blocking). Then reattach each owned handle SYNCHRONOUSLY in one
+    // turn, preserving the register-before-terminal-event ordering invariant.
+    const resolved = await Promise.allSettled(
+      handles.map(async (handle) => ({
+        handle,
+        metadata: await handle.getLaunchMetadata(),
+      })),
+    );
+
+    for (const outcome of resolved) {
+      if (outcome.status === 'rejected') {
+        // A metadata read failed AFTER recoverAll already resumed the run, so the
+        // run is live but we cannot identify its session. Leaving it unowned would
+        // strand a running workflow; we cannot know which handle it was (the read
+        // rejected), so this is logged. recoverAll's own per-handle resolution
+        // means this is rare; surface it for operators.
         console.error(
-          `[bureau] Could not read launch metadata for recovered run "${handle.id}": ${serializeUnknownError(error)}`,
+          `[bureau] Could not read launch metadata for a recovered run: ${serializeUnknownError(outcome.reason)}`,
         );
+        continue;
       }
-      if (sessionId === undefined) continue;
-      reattachRecoveredRun(handle.id, sessionId, handle);
+      const { handle, metadata } = outcome.value;
+      // A run is bureau-owned only if its launch metadata narrows to an agentRun
+      // input AND its input runId matches this handle's id (the workflow id is the
+      // run id). A mismatch or a non-agentRun input means it is not ours / not
+      // reconstructable — CANCEL it rather than leave it running unowned with no
+      // ActiveRun, monitor, or session (committee MF-8). engine.cancel terminalizes
+      // it and rejects its waiter; the resolver already failed services-unavailable
+      // runs, so this covers the metadata-less / foreign-input residue.
+      if (
+        !metadata ||
+        !isAgentRunWorkflowInput(metadata.input) ||
+        metadata.input.runId !== handle.id
+      ) {
+        void durable.engine.cancel(handle.id).catch(() => {});
+        continue;
+      }
+      reattachRecoveredRun(handle.id, metadata.input.sessionId, handle);
     }
   }
 

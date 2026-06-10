@@ -51,60 +51,20 @@ import type { DurableRunDeps, RunCursor, StepRecord } from './types';
  *   the re-run step fires again. Read-only hooks are harmless; side-effecting
  *   ones need gating.
  *
- * ADR — #4 sub-step tool durability: the `runStep` split is REJECTED (do not
- * re-attempt). Durability granularity is one whole step (generate + all its
- * tools). A crash after `generate` but before the step's `ctx.memo` result
- * commits re-runs the whole step, re-executing its tools — Weft is at-least-once,
- * so a non-idempotent tool can double-execute. Making tool execution its own
- * checkpointed `yield* ctx.run('executeTool', …)` unit would require splitting
- * `runStep` so the durable generator can yield between "generate + append the
- * assistant message and tool calls" and "execute tools + append results". That
- * split is unsound, not merely risky, for three independent reasons:
- *
- *   1. Correctness — Conversation across a yield. Tool results must append to the
- *      live `Conversation` AFTER the checkpointed tool execution, but a live
- *      `Conversation` instance cannot cross a `yield*` (it fails `validateCloneable`).
- *      The second half would have to rehydrate from a snapshot taken AFTER the
- *      assistant message + tool calls were appended — a much fatter checkpoint
- *      payload (intermediate snapshot + the raw `response` + the tool plan), and
- *      `response` routinely carries non-cloneable provider SDK objects that fail
- *      the checkpoint silently.
- *   2. Hooks — `stepToolbox` is mutated by the `selectTools` / `selectToolChoice`
- *      hooks before tools run; a durable split would re-fire those hooks on the
- *      tool-execution side or serialize a resolved tool plan. Neither is clean.
- *   3. Payoff — `ctx.memo('step-N')` already short-circuits every COMPLETED step
- *      on resume, so the split only protects the single in-flight step, and only
- *      the narrow "crashed after generate, before tools" window (~a few percent
- *      of in-step crashes). It does NOTHING for the real hazard — non-idempotent
- *      tool side effects — which needs domain idempotency regardless.
- *
- * Accepted mitigation (NO agent-bureau code — the primitive already exists):
- * side-effecting tools opt into armorer's `withIdempotency(tool, { cache })`
- * (`armorer/src/idempotency`). Its key is CONTENT-based (`fullInputKey` /
- * `fieldKey('orderId')` / `compositeKey(...)`), NOT the tool-call id — which is
- * the right design here: a crashed step re-runs `generate`, so the model re-issues
- * fresh, NON-deterministic tool-call ids (`materializeToolCall` falls back to
- * `crypto.randomUUID()`), so any `runId+stepIndex+toolCallId` key would NOT dedup
- * the re-run. A content key the model reproduces deterministically does. Back the
- * idempotency `cache` with the durable store and a cached success survives the
- * crash-rerun within the same run. The clean upstream primitive
- * (durable-activity-from-plain-async OR an activity-level idempotency key) is
- * tracked in https://github.com/stevekinney/weft/issues/444; if Weft ships it,
- * this seam closes properly and the mitigation note can be deleted.
- *
- * #6 structured-error fidelity — NOT wired (deliberate). Weft 0.3.0 ships
- * `registerSerializer(ctor, { toJSON, fromJSON }, { tag })`, which could preserve
- * a `ZodError`'s `.issues` across the checkpoint (today `schemaValidation.error`
- * is reduced to its message — see {@link AgentRunWorkflowResult.schemaValidation}).
- * Declined: no consumer reads the structured error off the TERMINAL durable
- * result (the only `.issues` reader, `retry/schema-error-mutator.ts`, runs inside
- * `runStep` on the LIVE error, before any checkpoint), and `registerSerializer`
- * is process-global + one-shot + throws on duplicate registration — so wiring it
- * would convert a best-effort, can't-fail message reduction into a global
- * registration the schema-validation path depends on to not throw, for a field
- * nobody reads. To enable later (only if a consumer appears): register a `ZodError`
- * serializer at module load and let the live error flow through `ctx.memo` instead
- * of calling `serializeError` on it.
+ * #4 sub-step tool durability — the `runStep` split is REJECTED (do not
+ *   re-attempt): durability granularity is one whole step (generate + all its
+ *   tools), so a crash after generate but before the step memo commits re-runs the
+ *   step and re-executes its tools (at-least-once). Splitting `runStep` to
+ *   checkpoint tool execution independently is unsound (a live `Conversation`
+ *   cannot cross a `yield*`; `response` carries non-cloneable SDK objects;
+ *   `stepToolbox` is hook-mutated) and the payoff is marginal (`ctx.memo` already
+ *   frees completed steps). Side-effecting tools use armorer's existing
+ *   content-keyed `withIdempotency` instead. Full ADR + the upstream primitive
+ *   (weft#444): documentation/weft-030-recovery-rewrite-design.md.
+ * #6 structured-error fidelity — `registerSerializer(ZodError)` is NOT wired
+ *   (no consumer reads the structured error off the terminal durable result, and
+ *   it would make the schema-validation path depend on a global one-shot
+ *   registration to not throw). Rationale + one-liner to enable: same design doc.
  */
 
 /** Input to the durable agent-run workflow. */
@@ -138,7 +98,16 @@ export interface AgentRunWorkflowInput {
 export function isAgentRunWorkflowInput(value: unknown): value is AgentRunWorkflowInput {
   if (typeof value !== 'object' || value === null) return false;
   const candidate = value as Record<string, unknown>;
-  return typeof candidate['runId'] === 'string' && typeof candidate['sessionId'] === 'string';
+  if (typeof candidate['runId'] !== 'string' || typeof candidate['sessionId'] !== 'string') {
+    return false;
+  }
+  // Validate the optional fields too, so a narrowed value is sound end-to-end
+  // (not just for the two correlation fields recovery keys on).
+  const prompt = candidate['prompt'];
+  if (prompt !== undefined && typeof prompt !== 'string') return false;
+  const maximumSteps = candidate['maximumSteps'];
+  if (maximumSteps !== undefined && typeof maximumSteps !== 'number') return false;
+  return true;
 }
 
 /** Plain, cloneable summary returned when the durable run completes. */

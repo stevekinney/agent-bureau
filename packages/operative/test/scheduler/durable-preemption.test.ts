@@ -4,6 +4,7 @@ import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
 
 import { createCheckpointStore } from '../../src/durable/checkpoint-store';
+import type { AnyRunEngine } from '../../src/durable/index';
 import { createRunEngine } from '../../src/durable/index';
 import { createRunWorkflow } from '../../src/durable/run-workflow';
 import { stopWhen } from '../../src/index';
@@ -11,6 +12,37 @@ import { createScheduler } from '../../src/scheduler/create-scheduler';
 import { sleep } from '../../src/scheduler/sleep';
 import { createMockGenerate } from '../../src/test/index';
 import type { GenerateFunction, GenerateResponse } from '../../src/types';
+
+/** Counts calls to the engine's suspend/resume/cancel so a test can prove the
+ *  durable preemption path was actually exercised (not an accidental abort+rerun
+ *  that happens to satisfy the higher-level assertions). */
+interface EngineSpy {
+  engine: AnyRunEngine;
+  suspends: string[];
+  resumes: string[];
+  cancels: string[];
+}
+
+function spyEngine(engine: AnyRunEngine): EngineSpy {
+  const spy: EngineSpy = { engine, suspends: [], resumes: [], cancels: [] };
+  const realSuspend = engine.suspend.bind(engine);
+  const realResume = engine.resume.bind(engine);
+  const realCancel = engine.cancel.bind(engine);
+  // Wrap in place — the scheduler holds this same engine object.
+  engine.suspend = async (id: string) => {
+    spy.suspends.push(id);
+    return realSuspend(id);
+  };
+  engine.resume = async (id: string) => {
+    spy.resumes.push(id);
+    return realResume(id);
+  };
+  engine.cancel = async (id: string) => {
+    spy.cancels.push(id);
+    return realCancel(id);
+  };
+  return spy;
+}
 
 function textResponse(content: string): GenerateResponse {
   return { content, toolCalls: [] };
@@ -87,12 +119,13 @@ describe('durable scheduler preemption (suspend/resume)', () => {
       recover: false,
     });
 
+    const spy = spyEngine(engine);
     const blocking = createStepwiseBlockingGenerate();
     let createRunCount = 0;
 
     const scheduler = createScheduler({
       generate: createMockGenerateFallback(),
-      toolbox: createNextToolbox() as any,
+      toolbox: createNextToolbox(),
       idleDelay: 1,
       durable: { engine, checkpointStore },
     });
@@ -118,7 +151,7 @@ describe('durable scheduler preemption (suspend/resume)', () => {
           createRunCount++;
           return {
             generate: blocking.generate,
-            toolbox: createNextToolbox() as any,
+            toolbox: createNextToolbox(),
             conversation: new Conversation(),
             maximumSteps: 5,
             stopWhen: stopWhen.noToolCalls(),
@@ -132,7 +165,7 @@ describe('durable scheduler preemption (suspend/resume)', () => {
       // Preempt with an immediate task → the durable bg run SUSPENDS (not aborts).
       const immResult = scheduler.submitImmediate(() => ({
         generate: createMockGenerateOnce('imm'),
-        toolbox: createNextToolbox() as any,
+        toolbox: createNextToolbox(),
         conversation: new Conversation(),
         maximumSteps: 1,
       }));
@@ -154,6 +187,70 @@ describe('durable scheduler preemption (suspend/resume)', () => {
       // The bg task terminalized EXACTLY ONCE — no split-brain double-completion
       // from the abandoned suspended dispatch's still-settling result promise.
       expect(bgCompletedCount).toBe(1);
+      // PROVE the durable path was actually used: the bg run was SUSPENDED exactly
+      // once and RESUMED exactly once with the same run id (not abort+re-run).
+      expect(spy.suspends).toHaveLength(1);
+      expect(spy.resumes).toEqual(spy.suspends);
+    } finally {
+      await scheduler.stop();
+      engine[Symbol.dispose]();
+    }
+  });
+
+  it('cancels a preempted non-requeue durable task and resolves null', async () => {
+    const storage = new MemoryStorage();
+    const checkpointStore = createCheckpointStore(
+      textValueStore(storage, { disposeUnderlyingStorage: false }),
+    );
+    const runWorkflow = createRunWorkflow(checkpointStore);
+    const { engine } = await createRunEngine({
+      storage,
+      runWorkflow,
+      checkpointStore,
+      recover: false,
+    });
+    const spy = spyEngine(engine);
+    const blocking = createStepwiseBlockingGenerate();
+
+    const scheduler = createScheduler({
+      generate: createMockGenerateFallback(),
+      toolbox: createNextToolbox(),
+      idleDelay: 1,
+      durable: { engine, checkpointStore },
+    });
+    scheduler.start();
+
+    try {
+      // requeue:false → a preempted durable task is suspended then CANCELLED (it
+      // will never resume), and its submit() promise resolves null.
+      const bgResult = scheduler.submit({
+        id: 'bg-no-requeue',
+        priority: 'background',
+        requeue: false,
+        createRun: () => ({
+          generate: blocking.generate,
+          toolbox: createNextToolbox(),
+          conversation: new Conversation(),
+          maximumSteps: 5,
+          stopWhen: stopWhen.noToolCalls(),
+        }),
+      });
+
+      await waitFor(() => blocking.steps.includes(1));
+      await scheduler.submitImmediate(() => ({
+        generate: createMockGenerateOnce('imm'),
+        toolbox: createNextToolbox(),
+        conversation: new Conversation(),
+        maximumSteps: 1,
+      }));
+
+      const bgRunResult = await bgResult;
+      expect(bgRunResult).toBeNull();
+      // Suspended then cancelled — the cancel terminalizes the parked run so it
+      // does not dangle as a `suspended` workflow.
+      expect(spy.suspends).toHaveLength(1);
+      expect(spy.cancels).toEqual(spy.suspends);
+      expect(spy.resumes).toHaveLength(0);
     } finally {
       await scheduler.stop();
       engine[Symbol.dispose]();

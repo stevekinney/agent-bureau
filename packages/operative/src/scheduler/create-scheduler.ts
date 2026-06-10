@@ -1,7 +1,7 @@
 import type { ActiveRun } from '../create-run';
 import { createRun } from '../create-run';
-import type { AnyRunEngine, CheckpointStore, RecoveredRunHandle } from '../durable';
-import { reattachDurableActiveRun } from '../durable';
+import type { AnyRunEngine, CheckpointStore } from '../durable';
+import { resumeDurableRunResult } from '../durable';
 import { executeLoop } from '../loop';
 import type { GenerateFunction, RunResult, Toolbox } from '../types';
 import type { SchedulerEventMap, SchedulerEventType } from './events';
@@ -102,16 +102,6 @@ interface RunningTask {
   result: Promise<RunResult>;
   requeues: number;
   /**
-   * A monotonic token identifying THIS dispatch of the task. Incremented every
-   * time the task is suspended-and-detached, so a stale `result` continuation
-   * from a prior (now-suspended) dispatch can detect it no longer owns the task
-   * and must not resolve/emit. Closes the suspend/resume split-brain: the original
-   * durable `ActiveRun.result` promise still settles after a later resume (the
-   * SAME workflow drives to terminal), so without this guard the abandoned
-   * continuation would double-resolve the task resolver and double-fire events.
-   */
-  ownerGeneration: number;
-  /**
    * The durable workflow id, when this task runs as a durable engine workflow.
    * Present ⇒ preemption SUSPENDS this run (`engine.suspend(runId)`) and a requeue
    * RESUMES it; absent ⇒ preemption aborts + re-runs the factory (in-memory path).
@@ -142,6 +132,10 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
   const { generate, toolbox, idleDelay = 1000, signal: externalSignal, durable } = options;
 
   let taskIdCounter = 0;
+  // Monotonic suffix for synthetic durable scheduler-run ids, so each fresh
+  // dispatch of a task gets a distinct workflow id (a requeued resume reuses the
+  // suspended run's id instead — see startAndAwaitTask).
+  let durableRunCounter = 0;
 
   function generateTaskId(): string {
     return `task-${++taskIdCounter}-${Date.now().toString(36)}`;
@@ -150,10 +144,15 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
   const emitter = new EventTarget();
   const queue = createPriorityQueue<QueuedTask>();
   const running = new Map<string, RunningTask>();
-  // Per-task ownership generation. Bumped on every suspend-and-detach so a stale
-  // result continuation from the suspended dispatch can detect it no longer owns
-  // the task (see RunningTask.ownerGeneration).
-  const taskGenerations = new Map<string, number>();
+  // The CURRENT dispatch that owns each in-flight task, by object identity. Set
+  // when a dispatch starts; replaced when the task is suspended-and-redispatched
+  // (resume) so the abandoned suspended dispatch's still-settling result
+  // continuation can detect — by `currentDispatch.get(id) === self` — that it no
+  // longer owns the task and must stay silent (the suspend/resume split-brain
+  // guard). A missing entry means no live owner, which is also "not me". This is
+  // a distinct map from `running` because a completing dispatch deletes itself
+  // from `running` BEFORE its final await, yet must still prove ownership after.
+  const currentDispatch = new Map<string, RunningTask>();
   let completedCount = 0;
   let preemptedCount = 0;
   let started = false;
@@ -279,11 +278,9 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
       abortController,
       result: activeRun.result,
       requeues: 0,
-      // Immediate tasks are the highest lane and are never preempted, so this
-      // generation is never bumped; it exists only to satisfy the shape.
-      ownerGeneration: bumpGeneration(taskId),
     };
     running.set(taskId, runningTaskEntry);
+    currentDispatch.set(taskId, runningTaskEntry);
 
     emitEvent(new TaskDispatchedEvent(taskId, 'immediate'));
 
@@ -292,6 +289,7 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
     const result = activeRun.result.then(
       (runResult) => {
         running.delete(taskId);
+        currentDispatch.delete(taskId);
         if (runResult.finishReason !== 'aborted') {
           completedCount++;
           lastTaskCompletedAt = performance.now();
@@ -302,6 +300,7 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
       },
       (error) => {
         running.delete(taskId);
+        currentDispatch.delete(taskId);
         emitEvent(new TaskFailedEvent(taskId, error));
         wakeLoop();
         throw error;
@@ -393,11 +392,11 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
 
   /**
    * Resolve a preempted task's submit() promise with `null` (permanently
-   * preempted, not requeued). Bumps the ownership generation first so the
+   * preempted, not requeued). Clears the current dispatch owner first so the
    * detached dispatch's result continuation can never also resolve it.
    */
   function resolvePreemptedTaskNull(taskId: string): void {
-    bumpGeneration(taskId);
+    currentDispatch.delete(taskId);
     const resolver = taskResolvers.get(taskId);
     if (resolver) {
       taskResolvers.delete(taskId);
@@ -405,11 +404,9 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
     }
   }
 
-  /** Increment a task's ownership generation, invalidating its current dispatch. */
-  function bumpGeneration(taskId: string): number {
-    const next = (taskGenerations.get(taskId) ?? 0) + 1;
-    taskGenerations.set(taskId, next);
-    return next;
+  /** Whether `entry` is still the live dispatch owner for its task. */
+  function ownsTask(entry: RunningTask): boolean {
+    return currentDispatch.get(entry.task.id) === entry;
   }
 
   /**
@@ -421,28 +418,42 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
   async function suspendAndDetach(runningTask: RunningTask, runId: string): Promise<void> {
     const { task } = runningTask;
 
-    // Invalidate the current dispatch BEFORE suspending: the original
-    // `ActiveRun.result` promise still settles when the SAME workflow later
-    // completes via resume, so the abandoned continuation must see it no longer
-    // owns the task and stay silent (the ownership guard in startAndAwaitTask).
-    bumpGeneration(task.id);
+    if (!durable) return; // unreachable — a durableRunId implies an engine
 
-    // engine.suspend parks the run (status running→suspended), preserving its
-    // checkpoint and in-memory services; it does NOT abort the run's signal and
-    // does NOT settle result(). We deliberately do NOT abort the run's
-    // AbortController here — a suspend is a pause, not a cancel.
-    if (durable) {
-      try {
-        await durable.engine.suspend(runId);
-      } catch (error) {
-        // Suspend lost a race to the run completing/failing (idempotent no-op in
-        // Weft), or the engine is disposed. Either way the run is no longer
-        // ours to resume; fall through to drop it from `running` and let the
-        // detached continuation (now non-owning) settle harmlessly.
-        emitEvent(new TaskFailedEvent(task.id, error));
-      }
+    // Suspend BEFORE relinquishing ownership. engine.suspend parks the run
+    // (running→suspended), preserving its checkpoint + in-memory services; it does
+    // NOT abort the signal and does NOT settle result(). CRITICAL (committee MF-1):
+    // suspend is a no-op if the run already left `running` — completed, failed, or
+    // a concurrent cancel won. If we relinquished ownership / enqueued a resume
+    // before confirming the suspend, a run that actually COMPLETED would be
+    // neutered (its result continuation silenced) AND a resume enqueued for a
+    // terminal run. So we only detach + requeue once we know the run is genuinely
+    // parked. Distinguish via the run's status after the call.
+    try {
+      await durable.engine.suspend(runId);
+    } catch (error) {
+      // The engine is disposed (teardown) or the suspend write faulted. Do NOT
+      // detach: leave ownership with the original dispatch so its result
+      // continuation settles the task exactly once. Surface the error.
+      emitEvent(new TaskFailedEvent(task.id, error));
+      return;
     }
 
+    // If the run is NOT actually suspended (it completed/failed before suspend
+    // could park it — suspend no-op'd), the original dispatch still owns the task
+    // and its result continuation will settle it. Detaching here would race that.
+    const state = await durable.engine.get(runId);
+    if (state?.status !== 'suspended') {
+      return;
+    }
+
+    // The run is parked. Relinquish ownership: the original `ActiveRun.result`
+    // still settles when the SAME workflow later completes via resume, so the
+    // abandoned continuation must see (via ownsTask) that it no longer owns the
+    // task and stay silent.
+    if (currentDispatch.get(task.id) === runningTask) {
+      currentDispatch.delete(task.id);
+    }
     running.delete(task.id);
     preemptedCount++;
 
@@ -454,9 +465,9 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
       // is the ONLY pointer to the paused run) — no durable registry: the whole
       // scheduler is in-memory, so a hard crash loses this queued task exactly as
       // it loses every other queued/running task. stop() cancels any still-paused
-      // run so it never dangles as a `suspended` workflow (see stop()). The
-      // hard-crash residue (a `suspended` weft run with no in-memory pointer) is a
-      // documented seam, symmetric to the rest of the volatile scheduler.
+      // run so it never dangles as a `suspended` workflow. The hard-crash residue
+      // (a `suspended` weft run with no in-memory pointer) is a documented seam,
+      // symmetric to the rest of the volatile scheduler.
       const requeuedTask: QueuedTask = {
         ...task,
         __requeues: runningTask.requeues + 1,
@@ -465,9 +476,13 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
       queue.enqueue(requeuedTask);
     } else {
       // Not requeued — cancel the suspended run (it will never resume) so it does
-      // not linger as a dangling `suspended` workflow, then resolve null.
-      if (durable) {
-        void durable.engine.cancel(runId).catch(() => {});
+      // not linger as a dangling `suspended` workflow. AWAIT the cancel (committee
+      // MF-6) so a cancel failure surfaces deterministically rather than leaving
+      // the run suspended while the scheduler treats the task as done.
+      try {
+        await durable.engine.cancel(runId);
+      } catch (error) {
+        emitEvent(new TaskFailedEvent(task.id, error));
       }
       const resolver = taskResolvers.get(task.id);
       if (resolver) {
@@ -530,10 +545,6 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
 
     emitEvent(new TaskDispatchedEvent(task.id, task.priority));
 
-    // Claim ownership for THIS dispatch. A later suspend bumps the generation, so
-    // the result continuation below can detect it was superseded by a resume.
-    const generation = bumpGeneration(task.id);
-
     // Build the run for this dispatch. Three shapes:
     //  - resume: a durable task requeued after suspension → resume its existing
     //    run from the checkpoint (NOT a fresh createRun), reusing preserved
@@ -547,7 +558,7 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
       durableRunId = task.__resume.runId;
       result = resumeDurableRun(durable, durableRunId);
     } else if (durable) {
-      durableRunId = `scheduler-run-${task.id}-${bumpGeneration(`${task.id}:run`)}`;
+      durableRunId = `scheduler-run-${task.id}-${++durableRunCounter}`;
       let runOptions: SchedulerRunOptions;
       try {
         runOptions = await task.createRun();
@@ -590,10 +601,13 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
       abortController,
       result,
       requeues: task.__requeues ?? 0,
-      ownerGeneration: generation,
       ...(durableRunId !== undefined ? { durableRunId } : {}),
     };
     running.set(task.id, runningTaskEntry);
+    // Claim ownership by object identity. A suspend-and-detach (resume) replaces
+    // this with a new dispatch entry, so this continuation can detect — via
+    // ownsTask — that it was superseded and must stay silent.
+    currentDispatch.set(task.id, runningTaskEntry);
 
     // Wait for the task to complete, checking for preemption opportunities.
     // Track whether the result has settled to avoid preempting a completed task
@@ -601,7 +615,7 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
     let resultSettled = false;
     result.then(() => (resultSettled = true)).catch(() => (resultSettled = true));
 
-    while (running.has(task.id) && ownsTask(task.id, generation)) {
+    while (running.has(task.id) && ownsTask(runningTaskEntry)) {
       const completed = await Promise.race([
         result.then(() => true).catch(() => true),
         new Promise<false>((resolve) => {
@@ -623,12 +637,13 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
       }
     }
 
-    // OWNERSHIP GUARD: a suspend-and-detach bumps the generation and deletes the
-    // task from `running`. The original durable `result` promise still settles
-    // later (the SAME workflow completes via resume), but this continuation no
-    // longer owns the task — so it must NOT resolve the resolver, fire
-    // TaskCompletedEvent, or touch the counts. The resume dispatch owns those.
-    if (!running.has(task.id) || !ownsTask(task.id, generation)) {
+    // OWNERSHIP GUARD (committee MF-2): a suspend-and-detach replaces this entry
+    // as the current dispatch and deletes the task from `running`. The original
+    // durable `result` promise still settles later (the SAME workflow completes
+    // via resume), but this continuation no longer owns the task — so it must NOT
+    // resolve the resolver, fire TaskCompletedEvent, or touch the counts. The
+    // resume dispatch owns those.
+    if (!running.has(task.id) || !ownsTask(runningTaskEntry)) {
       return;
     }
 
@@ -637,11 +652,11 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
       const runResult = await result;
       // Re-check ownership after the await: a preemption could have landed while
       // the result settled in the same tick.
-      if (!ownsTask(task.id, generation)) return;
+      if (!ownsTask(runningTaskEntry)) return;
+      currentDispatch.delete(task.id);
       if (runResult.finishReason !== 'aborted') {
         completedCount++;
         lastTaskCompletedAt = performance.now();
-        taskGenerations.delete(task.id);
         emitEvent(new TaskCompletedEvent(task.id, runResult));
         const resolver = taskResolvers.get(task.id);
         if (resolver) {
@@ -652,7 +667,6 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
       } else {
         // Task was aborted (e.g., via external signal) without going through preemptTask.
         // Resolve the submit() promise with null so it doesn't hang forever.
-        taskGenerations.delete(task.id);
         const resolver = taskResolvers.get(task.id);
         if (resolver) {
           taskResolvers.delete(task.id);
@@ -660,8 +674,8 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
         }
       }
     } catch (error) {
-      if (!ownsTask(task.id, generation)) return;
-      taskGenerations.delete(task.id);
+      if (!ownsTask(runningTaskEntry)) return;
+      currentDispatch.delete(task.id);
       emitEvent(new TaskFailedEvent(task.id, error));
       const resolver = taskResolvers.get(task.id);
       if (resolver) {
@@ -671,14 +685,9 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
     }
   }
 
-  /** Whether `generation` is still the live ownership generation for `taskId`. */
-  function ownsTask(taskId: string, generation: number): boolean {
-    return (taskGenerations.get(taskId) ?? generation) === generation;
-  }
-
   /** Reject a task whose `createRun()` factory threw before any run started. */
   function failDispatch(taskId: string, error: unknown): void {
-    taskGenerations.delete(taskId);
+    currentDispatch.delete(taskId);
     emitEvent(new TaskFailedEvent(taskId, error));
     const resolver = taskResolvers.get(taskId);
     if (resolver) {
@@ -691,19 +700,17 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
    * Resume a suspended durable run from its checkpoint, returning a `RunResult`
    * promise that settles when the resumed run completes — the same shape the
    * fresh-dispatch path produces, so the dispatcher's completion logic is
-   * identical. Uses {@link reattachDurableActiveRun} to wrap the resumed handle.
+   * identical. Unlike the recovery reattach, a failed resume/result PROPAGATES
+   * (rejects) so the scheduler surfaces it as a failed task (committee MF-4).
    */
   function resumeDurableRun(
     durableContext: SchedulerDurableContext,
     runId: string,
   ): Promise<RunResult> {
-    return durableContext.engine.resume(runId).then((handle) => {
-      const reattached = reattachDurableActiveRun(
-        { engine: durableContext.engine, checkpointStore: durableContext.checkpointStore },
-        { runId, handle: handle as RecoveredRunHandle },
-      );
-      return reattached.result;
-    });
+    return resumeDurableRunResult(
+      { engine: durableContext.engine, checkpointStore: durableContext.checkpointStore },
+      runId,
+    );
   }
 
   // ── Lifecycle ─────────────────────────────────────────────────────
@@ -738,11 +745,19 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
     }
     queue.clear();
 
-    // Abort non-immediate running tasks. A running durable task's abort flows into
-    // the run via its combined signal (in-band stop), so its result settles
-    // `aborted` and the allSettled below does not hang.
+    // Stop non-immediate running tasks. A FRESH durable run is wired to its
+    // abortController (the signal flows into the run), so aborting it settles its
+    // result `aborted`. A RESUMED durable run is driven by `resumeDurableRunResult`
+    // and is NOT wired to this abortController, so aborting it would do nothing and
+    // it would keep executing past stop — keeping API-key `services` alive
+    // (committee MF-3). So for ANY running durable task, `engine.cancel(runId)`,
+    // which terminalizes the run AND settles its result; for non-durable tasks,
+    // abort as before.
     for (const runningTask of running.values()) {
-      if (runningTask.task.priority !== 'immediate') {
+      if (runningTask.task.priority === 'immediate') continue;
+      if (durable && runningTask.durableRunId !== undefined) {
+        void durable.engine.cancel(runningTask.durableRunId).catch(() => {});
+      } else {
         runningTask.abortController.abort('scheduler-stopped');
       }
     }

@@ -3,7 +3,11 @@ export type {
   DurableActiveRunOptions,
   RecoveredRunHandle,
 } from './active-run-adapter';
-export { createDurableActiveRun, reattachDurableActiveRun } from './active-run-adapter';
+export {
+  createDurableActiveRun,
+  reattachDurableActiveRun,
+  resumeDurableRunResult,
+} from './active-run-adapter';
 export type { CheckpointStore } from './checkpoint-store';
 export { createCheckpointStore } from './checkpoint-store';
 export type { AnyRunEngine, CreateRunEngineOptions, RunEngine } from './create-run-engine';

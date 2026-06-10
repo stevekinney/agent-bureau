@@ -261,10 +261,17 @@ export function reattachDurableActiveRun(
 
   return {
     result,
-    // A reattached run has no in-band abort — the recovered generator runs under
-    // the engine, not this adapter's signal. Abort is a no-op beyond completing
-    // the emitter; the run settles on its own.
-    abort(): void {},
+    // A reattached run has no abort SIGNAL (the recovered generator runs under the
+    // engine, not this adapter's controller), so abort cancels the run at the
+    // engine instead (committee MF-3): a recovered run is now visible via
+    // `getRun(runId)`, so `bureau.abortRun(runId)` must actually stop it rather
+    // than silently no-op. `engine.cancel` terminalizes the run and rejects its
+    // result waiter; the resulting rejection is handled write-free in
+    // `driveReattachedRun` (the session status is the resolver/teardown's, not an
+    // abort's). Fire-and-forget — abort() is synchronous on the ActiveRun surface.
+    abort(): void {
+      void context.engine.cancel(runId).catch(() => {});
+    },
     addEventListener: emitter.addEventListener.bind(emitter) as ActiveRun['addEventListener'],
     removeEventListener: emitter.removeEventListener.bind(
       emitter,
@@ -279,6 +286,28 @@ export function reattachDurableActiveRun(
       complete();
     },
   };
+}
+
+/**
+ * Resume a SUSPENDED durable run and return a `RunResult` promise that settles
+ * when the resumed run completes. Unlike {@link reattachDurableActiveRun} — which
+ * is write-free and swallows a rejecting handle into an interrupted result because
+ * a recovered run's terminal status is owned by the resolver/teardown — this
+ * PROPAGATES failure: if `engine.resume(runId)` rejects (the run is already
+ * terminal) or the resumed handle's `result()` rejects, the returned promise
+ * REJECTS. The scheduler needs that so a failed resume surfaces as a failed task
+ * (committee MF-4), not a silently "completed" one. There is exactly one owner of
+ * the run — the resume caller — so reconstructing + returning the result here is
+ * safe (no lifecycle events; the scheduler drives task-level events itself).
+ */
+export async function resumeDurableRunResult(
+  context: DurableActiveRunContext,
+  runId: string,
+): Promise<RunResult> {
+  const handle = await context.engine.resume(runId);
+  const summary = (await (handle as RecoveredRunHandle).result()) as AgentRunWorkflowResult;
+  const { result } = await reconstructRunResult(context, runId, summary);
+  return result;
 }
 
 /**

@@ -841,6 +841,14 @@ export async function createRuntimeComposition(
     if (!isAgentRunWorkflowInput(info.input)) {
       return { status: 'unavailable', reason: `run ${info.workflowId} has no recoverable session` };
     }
+    // CORRELATION GUARD (committee MF-5): the workflow id IS the run id (pinned at
+    // engine.start), so the input's own runId must match. A mismatch means a
+    // corrupt or crafted durable input is trying to correlate this run to a
+    // foreign session — fail closed (no session load, no reconcile write) rather
+    // than rebuild deps for / write to a session the input doesn't legitimately own.
+    if (info.input.runId !== info.workflowId) {
+      return { status: 'unavailable', reason: `run ${info.workflowId} input runId mismatch` };
+    }
     const sessionId = info.input.sessionId;
     const session = await sessionStore.load(sessionId);
 
