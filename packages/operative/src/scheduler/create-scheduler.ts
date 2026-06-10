@@ -855,6 +855,12 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
     for (const runningTask of running.values()) {
       if (runningTask.task.priority === 'immediate') continue;
       if (durable && runningTask.durableRunId !== undefined) {
+        // Mark it cancelled so the dispatch's completion catch resolves its
+        // submit() promise `null` (engine.cancel rejects result() with "Workflow
+        // cancelled") instead of REJECTING it — matching explicit cancel() and the
+        // in-memory abort-on-stop path (Bugbot: stop must not reject durable
+        // submit promises).
+        cancelledRunningTasks.add(runningTask.task.id);
         durableCancellations.push(durable.engine.cancel(runningTask.durableRunId));
       } else {
         runningTask.abortController.abort('scheduler-stopped');
