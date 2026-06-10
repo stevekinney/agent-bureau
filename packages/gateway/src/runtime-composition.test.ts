@@ -266,6 +266,7 @@ describe('createRuntimeComposition durable execution', () => {
       // the same `createDurableActiveRun` entry the gateway routes through.
       const activeRun = createDurableActiveRun(runtime.durable!, {
         runId: 'composition-run',
+        sessionId: 'composition-run',
         prompt: 'Hello',
         options: {
           generate: async () => ({ content: 'durable result', toolCalls: [] }),
