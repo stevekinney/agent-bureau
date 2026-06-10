@@ -885,15 +885,20 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
 
     wakeLoop();
 
-    // Await the durable cancels AND all running task results, so a stopped
-    // scheduler has genuinely released every run's services before returning.
-    // Cancel failures are NOT swallowed pre-await (committee round-3 finding 3): a
-    // run whose cancel REJECTED may still hold its services alive, so surface it as
-    // a scheduler-level failure event rather than reporting a clean stop.
-    const cancelOutcomes = await Promise.allSettled([
-      ...durableCancellations,
-      ...[...running.values()].map((runningTask) => runningTask.result),
-    ]);
+    // Await the running task RESULTS so a stopped scheduler does not return while a
+    // run is still settling. A cancelled durable task's result REJECTS with
+    // "Workflow cancelled" — that is the EXPECTED, deliberate shutdown outcome, NOT
+    // a failure, so it is swallowed here (the completion path already classifies it
+    // as a cancel via `cancelledRunningTasks`). Surfacing it as a TaskFailedEvent
+    // would be a spurious failure for a normal stop (Bugbot: "stop treats cancel
+    // rejections as failures").
+    await Promise.allSettled([...running.values()].map((runningTask) => runningTask.result));
+
+    // Surface ONLY failures of the cancel OPERATION itself (committee round-3
+    // finding 3): if `engine.cancel` rejects, the run may not have terminalized and
+    // its API-key services may still be alive — a real shutdown failure, distinct
+    // from the expected result()-rejection of a successfully cancelled run above.
+    const cancelOutcomes = await Promise.allSettled(durableCancellations);
     for (const outcome of cancelOutcomes) {
       if (outcome.status === 'rejected') {
         emitEvent(new TaskFailedEvent('scheduler-stop-cancel', outcome.reason));

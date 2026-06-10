@@ -487,6 +487,66 @@ describe('durable scheduler preemption (suspend/resume)', () => {
       engine[Symbol.dispose]();
     }
   });
+
+  it('does not emit a spurious task.failed when stop() cancels a running durable task', async () => {
+    // Bugbot: stop() merged engine.cancel promises with running result promises in
+    // one allSettled and emitted TaskFailedEvent for every rejection — but a
+    // cancelled durable run's result() REJECTS with "Workflow cancelled", which is
+    // the deliberate shutdown outcome, not a failure. stop() must surface ONLY a
+    // failure of the cancel OPERATION, not the expected result rejection.
+    const storage = new MemoryStorage();
+    const checkpointStore = createCheckpointStore(
+      textValueStore(storage, { disposeUnderlyingStorage: false }),
+    );
+    const runWorkflow = createRunWorkflow(checkpointStore);
+    const { engine } = await createRunEngine({
+      storage,
+      runWorkflow,
+      checkpointStore,
+      recover: false,
+    });
+    const blocking = createStepwiseBlockingGenerate();
+
+    const failedTaskIds: string[] = [];
+    const scheduler = createScheduler({
+      generate: createMockGenerateFallback(),
+      toolbox: createNextToolbox(),
+      idleDelay: 1,
+      durable: { engine, checkpointStore },
+    });
+    scheduler.addEventListener('task.failed', (event) => {
+      failedTaskIds.push(event.taskId);
+    });
+    scheduler.start();
+
+    try {
+      // A durable task that blocks at step 1 — still running when we stop().
+      void scheduler.submit({
+        id: 'bg-stop',
+        priority: 'background',
+        requeue: false,
+        createRun: () => ({
+          generate: blocking.generate,
+          toolbox: createNextToolbox(),
+          conversation: new Conversation(),
+          maximumSteps: 5,
+          stopWhen: stopWhen.noToolCalls(),
+        }),
+      });
+
+      await waitFor(() => blocking.steps.includes(1));
+
+      // stop() engine.cancels the running durable run; its result() rejects with
+      // "Workflow cancelled" — a normal shutdown, NOT a failure.
+      await scheduler.stop();
+
+      // No spurious scheduler-stop-cancel (or bg-stop) failure was emitted.
+      expect(failedTaskIds).not.toContain('scheduler-stop-cancel');
+      expect(failedTaskIds).not.toContain('bg-stop');
+    } finally {
+      engine[Symbol.dispose]();
+    }
+  });
 });
 
 function createMockGenerateFallback(): GenerateFunction {
