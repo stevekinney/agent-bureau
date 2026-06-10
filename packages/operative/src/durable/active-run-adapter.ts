@@ -246,10 +246,13 @@ export function reattachDurableActiveRun(
   const { runId, handle } = reattach;
   const emitter = new CompletableEventTarget<CombinedOperativeEventMap>();
 
-  // Tracks an adapter-initiated abort so the result-rejection path can fire a
-  // real `run.aborted` lifecycle (persisting `aborted`) rather than the write-free
-  // path used for resolver/teardown failures (committee round-2 finding 2).
-  let locallyAborted = false;
+  // Resolves `true` only when an adapter-initiated `engine.cancel` SUCCEEDS for
+  // this run — i.e. THIS abort terminalized the run. `undefined` means no abort
+  // was requested. The result-rejection path classifies as `aborted` ONLY when
+  // this proves the cancel caused the termination; if cancel rejected (the run was
+  // already terminal for a resolver/teardown reason) it stays on the write-free
+  // path and does not clobber that owner's status (committee round-3 finding 1).
+  let abortCancelled: Promise<boolean> | undefined;
 
   function complete(): void {
     emitter.complete();
@@ -261,7 +264,7 @@ export function reattachDurableActiveRun(
   // microtask fires, so `getRun(runId)` resolves and no subscriber misses the
   // terminal event — even when `handle.result()` already settled before reattach.
   const result = Promise.resolve()
-    .then(() => driveReattachedRun(context, runId, handle, emitter, () => locallyAborted))
+    .then(() => driveReattachedRun(context, runId, handle, emitter, () => abortCancelled))
     .finally(complete);
 
   return {
@@ -271,12 +274,15 @@ export function reattachDurableActiveRun(
     // engine instead (committee MF-3): a recovered run is now visible via
     // `getRun(runId)`, so `bureau.abortRun(runId)` must actually stop it rather
     // than silently no-op. `engine.cancel` terminalizes the run and rejects its
-    // result waiter; the rejection is then translated into a real `run.aborted`
-    // lifecycle (so gateway persists `aborted`) because `locallyAborted` is set —
-    // distinct from a resolver/teardown failure, which stays write-free.
+    // result waiter; the rejection is translated into a real `run.aborted`
+    // lifecycle (so gateway persists `aborted`) — but ONLY if the cancel actually
+    // succeeded (abortCancelled resolves true), distinguishing this abort from a
+    // resolver/teardown failure that merely raced an abort() call.
     abort(): void {
-      locallyAborted = true;
-      void context.engine.cancel(runId).catch(() => {});
+      abortCancelled ??= context.engine.cancel(runId).then(
+        () => true,
+        () => false,
+      );
     },
     addEventListener: emitter.addEventListener.bind(emitter) as ActiveRun['addEventListener'],
     removeEventListener: emitter.removeEventListener.bind(
@@ -328,7 +334,7 @@ async function driveReattachedRun(
   runId: string,
   handle: RecoveredRunHandle,
   emitter: CompletableEventTarget<CombinedOperativeEventMap>,
-  wasAborted: () => boolean,
+  abortOutcome: () => Promise<boolean> | undefined,
 ): Promise<RunResult> {
   const runStartTime = performance.now();
 
@@ -336,13 +342,24 @@ async function driveReattachedRun(
   try {
     summary = (await handle.result()) as AgentRunWorkflowResult;
   } catch (error) {
-    // An ADAPTER-INITIATED abort (bureau.abortRun → engine.cancel) is a real
-    // terminal: fire `run.aborted` so the gateway listener persists `aborted`,
-    // rather than leaving the session looking `running` (committee round-2
-    // finding 2). The conversation comes from the last checkpoint.
-    if (wasAborted()) {
-      const snapshot = await context.checkpointStore.loadConversation(runId);
-      const conversation = snapshot ? Conversation.from(snapshot) : new Conversation();
+    // An ADAPTER-INITIATED abort (bureau.abortRun → engine.cancel) that ACTUALLY
+    // terminalized this run is a real terminal: fire `run.aborted` so the gateway
+    // listener persists `aborted`, rather than leaving the session looking
+    // `running` (committee round-2 finding 2). Classify as aborted ONLY when the
+    // cancel succeeded (committee round-3 finding 1): if the cancel rejected, this
+    // rejection came from a resolver/teardown failure that merely raced abort(),
+    // and that owner's status must not be clobbered.
+    const cancelSucceeded = await (abortOutcome() ?? Promise.resolve(false));
+    if (cancelSucceeded) {
+      // A failed transcript read must NOT suppress the abort lifecycle (committee
+      // round-3 finding 2) — fall back to an empty conversation.
+      let conversation: Conversation;
+      try {
+        const snapshot = await context.checkpointStore.loadConversation(runId);
+        conversation = snapshot ? Conversation.from(snapshot) : new Conversation();
+      } catch {
+        conversation = new Conversation();
+      }
       return makeAbortResult(createRunState(), conversation, undefined, emitter, 0, 'aborted');
     }
     // Otherwise write-free. EngineDisposedError = bureau teardown mid-resume

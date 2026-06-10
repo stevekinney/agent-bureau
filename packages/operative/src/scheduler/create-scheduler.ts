@@ -746,7 +746,7 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
     // shutdown-hang on a suspended run in one pass.
     for (const task of queue) {
       if (durable && task.__resume) {
-        durableCancellations.push(durable.engine.cancel(task.__resume.runId).catch(() => {}));
+        durableCancellations.push(durable.engine.cancel(task.__resume.runId));
       }
       const resolver = taskResolvers.get(task.id);
       if (resolver) {
@@ -767,7 +767,7 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
     for (const runningTask of running.values()) {
       if (runningTask.task.priority === 'immediate') continue;
       if (durable && runningTask.durableRunId !== undefined) {
-        durableCancellations.push(durable.engine.cancel(runningTask.durableRunId).catch(() => {}));
+        durableCancellations.push(durable.engine.cancel(runningTask.durableRunId));
       } else {
         runningTask.abortController.abort('scheduler-stopped');
       }
@@ -777,10 +777,18 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
 
     // Await the durable cancels AND all running task results, so a stopped
     // scheduler has genuinely released every run's services before returning.
-    await Promise.allSettled([
+    // Cancel failures are NOT swallowed pre-await (committee round-3 finding 3): a
+    // run whose cancel REJECTED may still hold its services alive, so surface it as
+    // a scheduler-level failure event rather than reporting a clean stop.
+    const cancelOutcomes = await Promise.allSettled([
       ...durableCancellations,
       ...[...running.values()].map((runningTask) => runningTask.result),
     ]);
+    for (const outcome of cancelOutcomes) {
+      if (outcome.status === 'rejected') {
+        emitEvent(new TaskFailedEvent('scheduler-stop-cancel', outcome.reason));
+      }
+    }
 
     // Resolve any remaining task resolvers (e.g., for aborted tasks)
     for (const [taskId, resolver] of taskResolvers) {
