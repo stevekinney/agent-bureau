@@ -166,6 +166,15 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
     { resolve: (result: RunResult | null) => void; reject: (error: unknown) => void }
   >();
 
+  // Task ids explicitly cancelled while RUNNING via `cancel()`. For a DURABLE run,
+  // `engine.cancel` terminalizes the run by REJECTING its `result()` with
+  // "Workflow cancelled" (unlike the in-memory path, where abort settles the
+  // result as `aborted`). Without this marker the dispatch's completion catch
+  // would REJECT the submit() promise; with it, the catch resolves `null` instead
+  // — so a cancelled durable task matches the in-memory cancel contract (submit
+  // resolves null, not throws).
+  const cancelledRunningTasks = new Set<string>();
+
   function emitEvent(event: Event): void {
     emitter.dispatchEvent(event);
   }
@@ -313,6 +322,15 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
   function cancel(taskId: string): boolean {
     const queuedTask = queue.remove((task) => task.id === taskId);
     if (queuedTask) {
+      // A queued `__resume` task points to a durable run SUSPENDED by an earlier
+      // preemption — dropping the queue entry would orphan it as a `suspended`
+      // workflow, so cancel it at the engine (committee review: scheduler cancel
+      // must cover durable runs, not just abort the in-memory controller).
+      if (durable && queuedTask.__resume) {
+        void durable.engine.cancel(queuedTask.__resume.runId).catch((error: unknown) => {
+          emitEvent(new TaskFailedEvent(taskId, error));
+        });
+      }
       const resolver = taskResolvers.get(taskId);
       if (resolver) {
         taskResolvers.delete(taskId);
@@ -329,7 +347,24 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
       return false;
     }
 
-    runningTask.abortController.abort('cancelled');
+    // A FRESH durable run is wired to its abortController; a RESUMED durable run
+    // (driven by resumeDurableRunResult) is NOT, so aborting the controller would
+    // not stop it and its API-key services would stay alive. For any durable run,
+    // cancel at the engine, which terminalizes it AND settles its result — the
+    // dispatch's own completion path then resolves the task (ownership intact, so
+    // it is not double-resolved). For an in-memory run, abort the controller as
+    // before; its result settles `aborted` and the completion path resolves null.
+    if (durable && runningTask.durableRunId !== undefined) {
+      // Mark it cancelled so the dispatch's completion catch resolves null (the
+      // engine.cancel rejects result() with "Workflow cancelled") instead of
+      // rejecting the submit() promise — matching the in-memory cancel contract.
+      cancelledRunningTasks.add(taskId);
+      void durable.engine.cancel(runningTask.durableRunId).catch((error: unknown) => {
+        emitEvent(new TaskFailedEvent(taskId, error));
+      });
+    } else {
+      runningTask.abortController.abort('cancelled');
+    }
     emitEvent(new TaskCancelledEvent(taskId, 'running'));
     wakeLoop();
     return true;
@@ -415,10 +450,19 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
    * later resume, so awaiting here would deadlock the serial loop). The suspended
    * run keeps its checkpoint + in-memory services; a requeue resumes it.
    */
-  async function suspendAndDetach(runningTask: RunningTask, runId: string): Promise<void> {
+  /**
+   * Suspend a durable run and detach it for a later resume. Returns `true` when
+   * the task was actually preempted (removed from `running`, requeued or
+   * resolved); returns `false` when the run had ALREADY settled before it could be
+   * parked (suspend threw or the status is not `suspended`) — in that case the
+   * original dispatch STILL owns the task and must fall through to its normal
+   * completion path, NOT treat the task as preempted (committee review: otherwise
+   * the task is left stuck in `running` and the serial loop blocks forever).
+   */
+  async function suspendAndDetach(runningTask: RunningTask, runId: string): Promise<boolean> {
     const { task } = runningTask;
 
-    if (!durable) return; // unreachable — a durableRunId implies an engine
+    if (!durable) return false; // unreachable — a durableRunId implies an engine
 
     // Suspend BEFORE relinquishing ownership. engine.suspend parks the run
     // (running→suspended), preserving its checkpoint + in-memory services; it does
@@ -434,17 +478,20 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
     } catch (error) {
       // The engine is disposed (teardown) or the suspend write faulted. Do NOT
       // detach: leave ownership with the original dispatch so its result
-      // continuation settles the task exactly once. Surface the error.
+      // continuation settles the task exactly once. Surface the error and report
+      // "not preempted" so the caller falls through to the completion path.
       emitEvent(new TaskFailedEvent(task.id, error));
-      return;
+      return false;
     }
 
     // If the run is NOT actually suspended (it completed/failed before suspend
     // could park it — suspend no-op'd), the original dispatch still owns the task
-    // and its result continuation will settle it. Detaching here would race that.
+    // and its result continuation will settle it. Detaching here would race that —
+    // and reporting "preempted" would strand the task in `running`. Report "not
+    // preempted" so the caller drives the normal completion path instead.
     const state = await durable.engine.get(runId);
     if (state?.status !== 'suspended') {
-      return;
+      return false;
     }
 
     // The run is parked. Relinquish ownership: the original `ActiveRun.result`
@@ -497,14 +544,21 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
     }
 
     void task.onPreempted?.('preempted');
+    return true;
   }
 
-  async function preemptTask(runningTask: RunningTask): Promise<void> {
+  /**
+   * Preempt a running task. Returns `true` when the task was actually preempted
+   * (the caller must then return from its dispatch and let the loop pick up the
+   * higher-priority work); returns `false` when a durable run had already settled
+   * and could not be parked — the caller then falls through to the normal
+   * completion path so the task is not stranded in `running`.
+   */
+  async function preemptTask(runningTask: RunningTask): Promise<boolean> {
     // Durable task → suspend + detach (no await), so a requeue resumes from the
     // checkpoint rather than restarting. In-memory task → abort + re-run.
     if (runningTask.durableRunId !== undefined) {
-      await suspendAndDetach(runningTask, runningTask.durableRunId);
-      return;
+      return suspendAndDetach(runningTask, runningTask.durableRunId);
     }
 
     const { task, abortController } = runningTask;
@@ -532,6 +586,7 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
     }
 
     void task.onPreempted?.('preempted');
+    return true;
   }
 
   /**
@@ -637,8 +692,14 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
       if (resultSettled) break;
 
       if (queue.hasHigherPriority(task.priority)) {
-        await preemptTask(runningTaskEntry);
-        return; // The loop will dispatch the higher-priority task
+        // preemptTask returns false when a durable run had ALREADY settled and
+        // could not be parked — in that case this dispatch still owns the task, so
+        // fall through to the completion path below instead of returning (which
+        // would strand the task in `running` and block the serial loop forever).
+        if (await preemptTask(runningTaskEntry)) {
+          return; // Preempted — the loop will dispatch the higher-priority task.
+        }
+        break; // Not preempted (run already settled) — go finish the task.
       }
     }
 
@@ -659,6 +720,7 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
       // the result settled in the same tick.
       if (!ownsTask(runningTaskEntry)) return;
       currentDispatch.delete(task.id);
+      cancelledRunningTasks.delete(task.id);
       if (runResult.finishReason !== 'aborted') {
         completedCount++;
         lastTaskCompletedAt = performance.now();
@@ -681,8 +743,20 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
     } catch (error) {
       if (!ownsTask(runningTaskEntry)) return;
       currentDispatch.delete(task.id);
-      emitEvent(new TaskFailedEvent(task.id, error));
       const resolver = taskResolvers.get(task.id);
+      // An explicit cancel() of a running DURABLE task terminalizes it via
+      // engine.cancel, which REJECTS result() with "Workflow cancelled". That is a
+      // cancellation, not a failure — resolve the submit() promise with `null` to
+      // match the in-memory cancel contract, and fire no TaskFailedEvent (the
+      // TaskCancelledEvent already fired in cancel()).
+      if (cancelledRunningTasks.delete(task.id)) {
+        if (resolver) {
+          taskResolvers.delete(task.id);
+          resolver.resolve(null);
+        }
+        return;
+      }
+      emitEvent(new TaskFailedEvent(task.id, error));
       if (resolver) {
         taskResolvers.delete(task.id);
         resolver.reject(error);
@@ -724,6 +798,20 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
     if (started) return;
     started = true;
     stopping = false;
+    // `externalSignal` is documented as "shut down the entire scheduler". The
+    // loop already exits when it aborts, but a RESUMED durable run is driven by
+    // `resumeDurableRunResult` (not wired to any abortController), so the loop
+    // exiting does NOT stop it — it would outlive the scheduler with its API-key
+    // services alive (committee review). Route the abort through the full `stop()`
+    // shutdown path, which engine.cancels every durable run. Fire if it is already
+    // aborted at start.
+    if (externalSignal) {
+      if (externalSignal.aborted) {
+        void stop();
+      } else {
+        externalSignal.addEventListener('abort', () => void stop(), { once: true });
+      }
+    }
     loopPromise = schedulerLoop();
   }
 

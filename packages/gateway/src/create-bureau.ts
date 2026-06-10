@@ -615,22 +615,60 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     );
 
     const orphanCancellations: Array<{ runId: string; cancel: Promise<void> }> = [];
+    const sessionStore = runtime.sessionStore;
     for (const { handle, metadata, ...rest } of resolved) {
       const readError = 'error' in rest ? rest.error : undefined;
       // A run is bureau-owned only if its launch metadata narrows to an agentRun
       // input AND its input runId matches this handle's id (the workflow id is the
       // run id). A read failure, a mismatch, or a non-agentRun input means it is
-      // not ours / not reconstructable — CANCEL it rather than leave it running
-      // unowned with no ActiveRun, monitor, or session (committee MF-8 + round-2
-      // finding 1). engine.cancel terminalizes it and rejects its waiter; the
-      // resolver already failed services-unavailable runs, so this covers the
-      // metadata-less / read-failed / foreign-input residue.
-      if (
-        readError !== undefined ||
-        !metadata ||
-        !isAgentRunWorkflowInput(metadata.input) ||
-        metadata.input.runId !== handle.id
-      ) {
+      // not ours / not reconstructable.
+      const ownedInput =
+        readError === undefined &&
+        metadata &&
+        isAgentRunWorkflowInput(metadata.input) &&
+        metadata.input.runId === handle.id
+          ? metadata.input
+          : undefined;
+
+      // The session must EXIST and still own THIS run (its `lastRunId` matches).
+      // Verifying here — before reattach — is what prevents a run the resolver
+      // will fail (missing session, e.g. a durable scheduler run with
+      // sessionId===runId that writes no session, or a session that has since
+      // moved on to another run) from being `store.register`'d and then left stuck
+      // `running` when its handle rejects write-free (committee review: reattach
+      // leaves store running + session-run ownership). A run that fails this check
+      // is CANCELLED, not reattached.
+      // `recoverAll()` (awaited above) fires the services resolver synchronously
+      // per run BEFORE returning, and the resolver's catch reconciles a
+      // deps-unrebuildable run's session to `lastRunStatus: 'error'`. So the
+      // resolver's verdict is ALREADY in the session status by the time we load it
+      // here: a run still `'running'` is one the resolver kept (it will resume or
+      // already completed — the reattach monitor persists its terminal status); a
+      // run reconciled to `'error'` (or any non-running status) must NOT be
+      // reattached/registered, or its write-free-rejecting handle would leave a
+      // stuck `running` store entry. Gate on the SESSION status — NOT the engine
+      // run-status: a run that resolved-and-finished fast during recoverAll is
+      // terminal in the engine but its session is still `'running'` (the monitor
+      // hasn't written yet), and excluding it would lose its completion.
+      let owningSessionId: string | undefined;
+      if (ownedInput && sessionStore) {
+        try {
+          const session = await sessionStore.load(ownedInput.sessionId);
+          if (
+            session &&
+            session.metadata['lastRunId'] === handle.id &&
+            session.metadata['lastRunStatus'] === 'running'
+          ) {
+            owningSessionId = ownedInput.sessionId;
+          }
+        } catch (error) {
+          console.error(
+            `[bureau] Could not load owning session for recovered run "${handle.id}": ${serializeUnknownError(error)}`,
+          );
+        }
+      }
+
+      if (owningSessionId === undefined) {
         if (readError !== undefined) {
           console.error(
             `[bureau] Could not read launch metadata for recovered run "${handle.id}"; cancelling: ${serializeUnknownError(readError)}`,
@@ -638,11 +676,13 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         }
         // Collect the cancel (do NOT fire-and-forget swallow): a rejected cancel
         // could leave an unowned, already-resumed run live with no monitor, so its
-        // failure must be surfaced for operators (committee final finding).
+        // failure must be surfaced for operators. engine.cancel terminalizes the
+        // run and rejects its waiter — covering metadata-less / read-failed /
+        // foreign-input / orphaned-session residue without store.register'ing it.
         orphanCancellations.push({ runId: handle.id, cancel: durable.engine.cancel(handle.id) });
         continue;
       }
-      reattachRecoveredRun(handle.id, metadata.input.sessionId, handle);
+      reattachRecoveredRun(handle.id, owningSessionId, handle);
     }
 
     // Await the orphan cancels DETACHED — boot must not block on them (same as the

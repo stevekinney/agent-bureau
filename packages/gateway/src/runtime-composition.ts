@@ -852,6 +852,26 @@ export async function createRuntimeComposition(
     const sessionId = info.input.sessionId;
     const session = await sessionStore.load(sessionId);
 
+    // The session must still OWN this run AND be IN-FLIGHT (its `lastRunId`
+    // matches the workflow id AND `lastRunStatus` is `running`) before we rebuild
+    // its deps (committee/Bugbot review: recovery skips session-run ownership).
+    // The status check is load-bearing, not just symmetric with the post-recover
+    // gate in create-bureau: the resolver fires DURING `recoverAll()` and resuming
+    // a run whose session already says `completed`/`error` would let it advance
+    // (model/tool SIDE EFFECTS) before the post-recover gate could cancel it —
+    // too late. A durable input pointing at a session owning a DIFFERENT run, or
+    // at an already-terminal session, fails closed with NO session write.
+    if (
+      !session ||
+      session.metadata['lastRunId'] !== info.workflowId ||
+      session.metadata['lastRunStatus'] !== 'running'
+    ) {
+      return {
+        status: 'unavailable',
+        reason: `run ${info.workflowId} not owned by a running session`,
+      };
+    }
+
     let services: DurableRunDeps | null;
     try {
       services = await buildRunDepsFromSession(session);
@@ -883,8 +903,10 @@ export async function createRuntimeComposition(
       return { status: 'unavailable', reason: `run ${info.workflowId} not reconstructable` };
     }
     if (services === null) {
-      // The session vanished between launch and recovery (load returned null), so
-      // there is nothing to reconstruct or reconcile.
+      // Unreachable now (the owning-session check above guarantees a non-null
+      // session, and `buildRunDepsFromSession` only returns null for a null
+      // session) — kept as a defensive fail-closed in case that invariant ever
+      // changes, since rebuilding from a null session would otherwise NPE.
       return { status: 'unavailable', reason: `run ${info.workflowId} not reconstructable` };
     }
     return { status: 'available', services };

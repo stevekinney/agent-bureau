@@ -265,6 +265,146 @@ describe('durable scheduler preemption (suspend/resume)', () => {
       engine[Symbol.dispose]();
     }
   });
+
+  it('does not strand a durable task when its run settles before preemption can park it', async () => {
+    // The preemption race (committee review, high severity): a higher-priority
+    // task triggers preemption, but the durable run had ALREADY completed before
+    // engine.suspend could park it (engine.get status !== 'suspended'). The task
+    // must NOT be stranded in `running` — it falls through to its completion path,
+    // resolves, and the scheduler proceeds. Force the race by making engine.get
+    // report the run as completed (not suspended) for the suspend attempt.
+    const storage = new MemoryStorage();
+    const checkpointStore = createCheckpointStore(
+      textValueStore(storage, { disposeUnderlyingStorage: false }),
+    );
+    const runWorkflow = createRunWorkflow(checkpointStore);
+    const { engine } = await createRunEngine({
+      storage,
+      runWorkflow,
+      checkpointStore,
+      recover: false,
+    });
+
+    // Spy: engine.suspend succeeds, but engine.get reports a non-suspended status
+    // — modelling the run having completed in the suspend→get window.
+    const realGet = engine.get.bind(engine);
+    let suspendAttempts = 0;
+    engine.suspend = async () => {
+      suspendAttempts++;
+    };
+    engine.get = async (id: string) => {
+      const state = await realGet(id);
+      // Report 'completed' so suspendAndDetach takes the "already settled" path.
+      return state ? { ...state, status: 'completed' as const } : state;
+    };
+
+    const blocking = createStepwiseBlockingGenerate();
+
+    const scheduler = createScheduler({
+      generate: createMockGenerateFallback(),
+      toolbox: createNextToolbox(),
+      idleDelay: 1,
+      durable: { engine, checkpointStore },
+    });
+    scheduler.start();
+
+    try {
+      const bgResult = scheduler.submit({
+        id: 'bg-race',
+        priority: 'background',
+        requeue: true,
+        createRun: () => ({
+          generate: blocking.generate,
+          toolbox: createNextToolbox(),
+          conversation: new Conversation(),
+          maximumSteps: 5,
+          stopWhen: stopWhen.noToolCalls(),
+        }),
+      });
+
+      await waitFor(() => blocking.steps.includes(1));
+
+      // Preempt — suspend "succeeds" but the run reads back as completed, so
+      // suspendAndDetach reports not-preempted and the dispatch finishes the task.
+      const immResult = scheduler.submitImmediate(() => ({
+        generate: createMockGenerateOnce('imm'),
+        toolbox: createNextToolbox(),
+        conversation: new Conversation(),
+        maximumSteps: 1,
+      }));
+
+      // Let the bg run actually finish (release step 1 with no tool calls).
+      blocking.releaseStep1({ content: 'bg final', toolCalls: [] });
+
+      // The immediate task completes (the scheduler was NOT blocked by a stranded
+      // bg task) AND the bg task resolves to a real result (not null, not a hang).
+      const immRunResult = await immResult;
+      expect(immRunResult).not.toBeNull();
+      const bgRunResult = await bgResult;
+      expect(bgRunResult).not.toBeNull();
+      expect(suspendAttempts).toBe(1);
+    } finally {
+      await scheduler.stop();
+      engine[Symbol.dispose]();
+    }
+  });
+
+  it('cancel() on a running durable task engine-cancels it and resolves the submit promise', async () => {
+    const storage = new MemoryStorage();
+    const checkpointStore = createCheckpointStore(
+      textValueStore(storage, { disposeUnderlyingStorage: false }),
+    );
+    const runWorkflow = createRunWorkflow(checkpointStore);
+    const { engine } = await createRunEngine({
+      storage,
+      runWorkflow,
+      checkpointStore,
+      recover: false,
+    });
+    const spy = spyEngine(engine);
+    const blocking = createStepwiseBlockingGenerate();
+
+    const scheduler = createScheduler({
+      generate: createMockGenerateFallback(),
+      toolbox: createNextToolbox(),
+      idleDelay: 1,
+      durable: { engine, checkpointStore },
+    });
+    scheduler.start();
+
+    try {
+      const bgResult = scheduler.submit({
+        id: 'bg-cancel',
+        priority: 'background',
+        requeue: false,
+        createRun: () => ({
+          generate: blocking.generate,
+          toolbox: createNextToolbox(),
+          conversation: new Conversation(),
+          maximumSteps: 5,
+          stopWhen: stopWhen.noToolCalls(),
+        }),
+      });
+
+      await waitFor(() => blocking.steps.includes(1));
+
+      // cancel() a RUNNING durable task → engine.cancel (NOT just abortController,
+      // which a resumed run isn't wired to) terminalizes the run + settles its
+      // result, so the submit() promise resolves rather than hanging.
+      const cancelled = scheduler.cancel('bg-cancel');
+      expect(cancelled).toBe(true);
+
+      const bgRunResult = await bgResult;
+      // engine.cancel was called for the running durable run.
+      expect(spy.cancels).toHaveLength(1);
+      // The submit promise RESOLVED null (did not hang, did not reject) — a
+      // cancelled durable task matches the in-memory cancel contract.
+      expect(bgRunResult).toBeNull();
+    } finally {
+      await scheduler.stop();
+      engine[Symbol.dispose]();
+    }
+  });
 });
 
 function createMockGenerateFallback(): GenerateFunction {

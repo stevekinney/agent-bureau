@@ -461,6 +461,11 @@ describe('createBureau', () => {
         const lastError = session?.metadata['lastError'];
         expect(typeof lastError).toBe('string');
         expect(lastError as string).toContain('could not be reconstructed');
+        // A run the resolver failed (session reconciled to `error`) must NOT be
+        // reattached + store.register'd — otherwise its write-free-rejecting
+        // handle would leave a store entry stuck `running` forever (committee/
+        // Bugbot review). It was cancelled, not registered.
+        expect(bureauB.getRun(run.id)).toBeUndefined();
       } finally {
         bureauB.dispose();
       }
