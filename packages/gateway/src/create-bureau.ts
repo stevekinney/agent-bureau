@@ -570,6 +570,21 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
    * A run whose launch metadata lacks a `sessionId` (checkpointed before #2, or
    * not bureau-owned) is skipped — there is no compatibility fallback for
    * cross-upgrade in-flight runs.
+   *
+   * KNOWN SEAM — durable scheduler runs (#7b) are NOT cross-process recoverable.
+   * A durable scheduler task (durable scheduler enabled) runs as an `agentRun`
+   * workflow in this SAME engine with `sessionId === runId` (a synthetic
+   * `scheduler-run-…` id), and the durable run path does NOT write a session
+   * record (only the gateway's interactive `runDurable` path persists sessions).
+   * So if the process crashes with a scheduler run in flight, `recoverAll()`
+   * surfaces it here, but `resolveRunServices` finds no session for its synthetic
+   * id → returns `unavailable` → the engine fails it clean before replay. The
+   * reattached handle then rejects and the adapter stays write-free. Net: scheduler
+   * durable runs are SAME-PROCESS suspend/resume only (their value — preemption
+   * preserves progress within a live process); they surface briefly on recovery
+   * and fail clean rather than resuming. This is intentional, not a gap:
+   * cross-process recovery of scheduler tasks would require persisting a session
+   * per task, which the in-process scheduler deliberately does not do.
    */
   async function recoverDurableRuns(): Promise<void> {
     if (!runtime.durable) return;
