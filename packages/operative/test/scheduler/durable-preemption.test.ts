@@ -475,9 +475,12 @@ describe('durable scheduler preemption (suspend/resume)', () => {
       await sleep(20);
 
       // The run's onRunComplete hook did NOT double-fire (preemptable runs are
-      // hooks-free; it fires zero times — the key invariant is "not twice").
-      expect(onRunCompleteCalls).toBeLessThanOrEqual(1);
-      // The SCHEDULER's own task completion fired exactly once.
+      // hooks-free, so it fires ZERO times — the documented contract (durable
+      // scheduler tasks use task.onComplete, NOT run-level hooks). The
+      // load-bearing invariant is "never twice"; the exact value is 0 by design.
+      expect(onRunCompleteCalls).toBe(0);
+      // The SCHEDULER's own task completion fired exactly once — the single
+      // lifecycle signal for a scheduled task on either backend.
       expect(taskCompleteCalls).toBe(1);
     } finally {
       await scheduler.stop();

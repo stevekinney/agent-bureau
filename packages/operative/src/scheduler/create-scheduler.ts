@@ -48,6 +48,17 @@ export interface CreateSchedulerOptions {
    * In-process suspend→resume reuses the run's preserved in-memory `services`
    * (Weft does not re-consult the resolver same-process), so the resumed run keeps
    * its exact `generate`/`toolbox` with no rebuild.
+   *
+   * CONTRACT — run-level hooks on the durable path. A DURABLE scheduler task's
+   * RUN-level hooks (`RunOptions.hooks.onRunStart`/`onRunComplete`/etc.) do NOT
+   * fire: a preemptable run is driven by the hooks-free `startDurableRunResult` so
+   * that a preempt→resume cannot double-fire `onRunComplete` (the suspended run's
+   * original driver would otherwise re-fire it on resume). The scheduler is the
+   * single lifecycle owner for scheduled tasks — use `SchedulerTask.onComplete` /
+   * `onPreempted` and the scheduler's `Task*Event`s, which fire exactly once. This
+   * is a DELIBERATE divergence from the in-memory path (no engine), where
+   * `executeLoop` fires run-level hooks once: scheduled tasks should observe
+   * completion via the task callbacks, not run-level hooks, regardless of backend.
    */
   durable?: SchedulerDurableContext;
 }
