@@ -1,6 +1,7 @@
 import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
+import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
 import { createTestToolbox } from 'armorer/test';
-import { describe, expect, it } from 'bun:test';
+import { afterEach, describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
 
 import { createCheckpointStore } from '../../src/durable/checkpoint-store';
@@ -104,6 +105,14 @@ function createNextToolbox() {
     },
   ]);
 }
+
+// Drain Weft's deferred inline-launch queue between tests — these durable
+// preemption tests start several engine workflows, and a pending setTimeout(0)
+// inline-launch left by one can starve a later durable run under full `bun test`
+// concurrency (CI). 0.3.0's dispose-drain does not replace this between-test flush.
+afterEach(async () => {
+  await yieldToPortableEventLoop();
+});
 
 describe('durable scheduler preemption (suspend/resume)', () => {
   it('suspends a preempted durable task and resumes it from its checkpoint, not from step 0', async () => {

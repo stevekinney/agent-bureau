@@ -3,8 +3,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
+import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
 import { createToolbox } from 'armorer';
-import { describe, expect, it } from 'bun:test';
+import { afterEach, describe, expect, it } from 'bun:test';
 import { Conversation, createConversationHistory } from 'conversationalist';
 import type { GenerateFunction } from 'operative';
 import { stopWhen } from 'operative';
@@ -12,6 +13,13 @@ import { createDurableActiveRun } from 'operative/durable';
 
 import { createRuntimeComposition } from './runtime-composition';
 import type { ProviderConfiguration } from './types';
+
+// Drain Weft's deferred inline-launch queue between tests — a pending setTimeout(0)
+// inline-launch left by one durable run can starve a later one under full
+// `bun test` concurrency (CI). 0.3.0's dispose-drain does not replace this flush.
+afterEach(async () => {
+  await yieldToPortableEventLoop();
+});
 
 function createGenerateForProvider(provider: ProviderConfiguration): GenerateFunction {
   return async () => {

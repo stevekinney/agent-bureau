@@ -3,7 +3,7 @@ import { Engine } from '@lostgradient/weft';
 import { MemoryStorage, type Storage, textValueStore } from '@lostgradient/weft/storage';
 import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
 import { createTool, createToolbox } from 'armorer';
-import { describe, expect, it } from 'bun:test';
+import { afterEach, describe, expect, it } from 'bun:test';
 import { Conversation, createConversationHistory } from 'conversationalist';
 import { z } from 'zod';
 
@@ -99,6 +99,15 @@ async function runToCompletion(
   );
   return handle.result();
 }
+
+// Drain Weft's deferred inline-launch queue between tests. A pending setTimeout(0)
+// inline-launch macrotask left by one durable run can be starved under full
+// `bun test` concurrency (CI), making a later run that normally finishes in ~100ms
+// blow past the 5s timeout. 0.3.0's drain-on-dispose only fires when an engine is
+// disposed; it does NOT replace this BETWEEN-TEST flush, so the drain is restored.
+afterEach(async () => {
+  await yieldToPortableEventLoop();
+});
 
 describe('durable agentRun workflow', () => {
   it('runs a single-step agent to completion when generate emits no tool calls', async () => {

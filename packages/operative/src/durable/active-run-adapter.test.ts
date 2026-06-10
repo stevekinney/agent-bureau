@@ -1,6 +1,7 @@
 import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
+import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
 import { createToolbox } from 'armorer';
-import { describe, expect, it } from 'bun:test';
+import { afterEach, describe, expect, it } from 'bun:test';
 import { createConversationHistory } from 'conversationalist';
 import { z } from 'zod';
 
@@ -13,6 +14,14 @@ import { createCheckpointStore } from './checkpoint-store';
 import type { AnyRunEngine } from './create-run-engine';
 import { createRunEngine } from './create-run-engine';
 import { createRunWorkflow } from './run-workflow';
+
+// Drain Weft's deferred inline-launch queue between tests — a pending setTimeout(0)
+// inline-launch left by one durable run can starve a later one under full
+// `bun test` concurrency (CI). 0.3.0's dispose-drain does not replace this
+// between-test flush.
+afterEach(async () => {
+  await yieldToPortableEventLoop();
+});
 
 async function buildContext() {
   const storage = new MemoryStorage();

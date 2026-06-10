@@ -1,9 +1,17 @@
 import { activity, workflow } from '@lostgradient/weft';
 import { MemoryStorage } from '@lostgradient/weft/storage';
-import { describe, expect, it } from 'bun:test';
+import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
+import { afterEach, describe, expect, it } from 'bun:test';
 
 import { createCheckpointStore } from './checkpoint-store';
 import { createRunEngine } from './create-run-engine';
+
+// Drain Weft's deferred inline-launch queue between tests — a pending setTimeout(0)
+// inline-launch left by one durable run can starve a later one under full
+// `bun test` concurrency (CI). 0.3.0's dispose-drain does not replace this flush.
+afterEach(async () => {
+  await yieldToPortableEventLoop();
+});
 
 /**
  * A throwaway workflow standing in for the real `agentRun` body (which depends

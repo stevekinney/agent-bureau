@@ -3,9 +3,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { MemoryStorage, type TextValueStore, textValueStore } from '@lostgradient/weft/storage';
+import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
 import { createTool, createToolbox } from 'armorer';
 import { createMockTool, createTestToolbox } from 'armorer/test';
-import { describe, expect, it, mock } from 'bun:test';
+import { afterEach, describe, expect, it, mock } from 'bun:test';
 import { Conversation, getMessages } from 'conversationalist';
 import type { GenerateFunction, GenerateResponse, Toolbox } from 'operative';
 import { stopWhen } from 'operative';
@@ -96,6 +97,13 @@ async function pollUntil(check: () => boolean | Promise<boolean>, attempts = 20)
   }
   return check();
 }
+
+// Drain Weft's deferred inline-launch queue between tests — a pending setTimeout(0)
+// inline-launch left by one durable run can starve a later one under full
+// `bun test` concurrency (CI). 0.3.0's dispose-drain does not replace this flush.
+afterEach(async () => {
+  await yieldToPortableEventLoop();
+});
 
 describe('createBureau', () => {
   it('is not ready when no generate function is configured', async () => {
