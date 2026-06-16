@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.0.12
+
+### Patch Changes
+
+- 9f2420c: Integrate Weft 0.3.0 as the durable-execution substrate: durable recovery (#2/#3) and
+  suspend/resume scheduling (#7b). Internal change with no public API surface impact.
+
 ## Unreleased
 
 ### Breaking
