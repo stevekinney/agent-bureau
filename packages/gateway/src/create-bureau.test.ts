@@ -413,6 +413,77 @@ describe('createBureau', () => {
     }
   });
 
+  it('forwards toolbox events from a recovered run to the live surface during resume (#28)', async () => {
+    // #28: before this fix a recovered run fired only TERMINAL events — its
+    // per-step toolbox:* actions were silent. The resolver now pre-allocates the
+    // run's emitter+toolbox and the reattach adapter forwards toolbox events to it,
+    // so a tool the resumed step executes is observable on bureau B's `action`
+    // surface (same channel the live durable path uses).
+    const databasePath = join(
+      tmpdir(),
+      `bureau-recovery-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+
+    try {
+      // Bureau A: step 0 commits a tool call, then step 1's generate hangs (crash).
+      let reachedStep1 = false;
+      const bureauA = await createBureau({
+        generate: async ({ step }) => {
+          if (step === 0) {
+            return { content: 'A step 0', toolCalls: [{ name: 'next', arguments: {} }] };
+          }
+          reachedStep1 = true;
+          return new Promise<never>(() => {});
+        },
+        toolbox: createToolbox([createNextTool()]) as unknown as Toolbox,
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+        stopWhen: stopWhen.noToolCalls(),
+      });
+      const run = await bureauA.createRun({ message: 'Recover with a tool' });
+      await pollUntil(() => reachedStep1);
+      bureauA.dispose();
+
+      // Bureau B: resumes at step 1, which calls the `next` tool again before
+      // settling — so a toolbox action fires on the RECOVERED run's surface.
+      const actions: string[] = [];
+      const bureauB = await createBureau({
+        generate: async ({ step }) => {
+          if (step === 1) {
+            return { content: 'B resume step 1', toolCalls: [{ name: 'next', arguments: {} }] };
+          }
+          return { content: `B step ${step}`, toolCalls: [] };
+        },
+        toolbox: createToolbox([createNextTool()]) as unknown as Toolbox,
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+        stopWhen: stopWhen.noToolCalls(),
+      });
+      bureauB.addEventListener('action', (event) => {
+        actions.push(event.action.type);
+      });
+
+      try {
+        // Wait until the recovered run reaches a terminal session status (its
+        // resumed steps have run, including the tool execution on step 1).
+        await pollUntil(async () => {
+          const current = await bureauB.getSession(run.sessionId);
+          return current?.metadata['lastRunStatus'] !== 'running';
+        });
+
+        // The recovered run's toolbox events reached the live surface — previously
+        // silent on the recovery path. This is the seam-#10/#28 closure.
+        expect(actions.some((type) => type.startsWith('toolbox.'))).toBe(true);
+      } finally {
+        bureauB.dispose();
+      }
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
   it('reconciles an in-flight session to error when recovery cannot rebuild its deps', async () => {
     // The resolver-unavailable path: bureau A crashes mid-run, then bureau B
     // boots over the same SQLite file WITHOUT a generate function. Its recovery

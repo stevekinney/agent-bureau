@@ -252,10 +252,58 @@ export interface RecoveredRunHandle {
  */
 export function reattachDurableActiveRun(
   context: DurableActiveRunContext,
-  reattach: { runId: string; handle: RecoveredRunHandle },
+  reattach: {
+    runId: string;
+    handle: RecoveredRunHandle;
+    /**
+     * The emitter the resolver pre-allocated and injected into the recovered run's
+     * rebuilt `services` (#28). When present it IS this ActiveRun's event surface,
+     * so the per-step events `runStep` dispatches during resume reach
+     * `getRun(runId)` subscribers — instead of the reattach path opening a fresh,
+     * disconnected emitter. The resolver and this reattach run on the same boot
+     * pass keyed by the same `runId`, so reusing one emitter is the wiring that
+     * closes seam #10's step visibility. Omit (fresh emitter) when there is no
+     * resolver-built emitter (e.g. a handle reattached outside recovery).
+     *
+     * Residual race (documented, narrow): an event `runStep` dispatches in the
+     * SAME microtask `recoverAll()` drives the generator — i.e. before
+     * `recoverDurableRuns` attaches this ActiveRun's listeners synchronously on the
+     * next turn — is not observed (CompletableEventTarget does not replay to late
+     * subscribers). Only the earliest events of a run that races to its first step
+     * inside recoverAll are affected; every subsequent event is live.
+     */
+    emitter?: CompletableEventTarget<CombinedOperativeEventMap>;
+    /**
+     * The resolver-built toolbox the recovered run executes with (#28). When
+     * present, its `toolbox:*` events are forwarded to {@link emitter} exactly as
+     * the live `createDurableActiveRun` path does — `runStep` dispatches step
+     * events to the emitter itself, but toolbox action events come from the
+     * toolbox's own observable, so they need explicit forwarding. Omit to forward
+     * nothing (the prior reattach behavior: terminal events only). Typed as
+     * `RunOptions['toolbox']` — the same variance-widened toolbox the live path
+     * forwards — to avoid importing the durable-internal `AnyToolbox`.
+     */
+    toolbox?: RunOptions['toolbox'];
+  },
 ): ActiveRun {
   const { runId, handle } = reattach;
-  const emitter = new CompletableEventTarget<CombinedOperativeEventMap>();
+  const emitter = reattach.emitter ?? new CompletableEventTarget<CombinedOperativeEventMap>();
+
+  // #28: forward the resolver-built toolbox's action events to this ActiveRun's
+  // emitter, mirroring the live path (createDurableActiveRun). Without this a
+  // recovered run fired only terminal events; now toolbox:* events are observable
+  // via getRun(runId) during resume too.
+  const reattachCleanups: (() => void)[] = [];
+  if (reattach.toolbox) {
+    // The toolbox is variance-widened; the durable layer never inspects the
+    // tool-tuple type, matching createDurableActiveRun's documented cast.
+    const toolboxForward = forwardEvents(
+      reattach.toolbox as unknown as ForwardableSource,
+      emitter,
+      'toolbox',
+    );
+    reattachCleanups.push(() => toolboxForward.stop());
+  }
 
   // Resolves `true` only when an adapter-initiated `engine.cancel` SUCCEEDS for
   // this run — i.e. THIS abort terminalized the run. `undefined` means no abort
@@ -266,6 +314,7 @@ export function reattachDurableActiveRun(
   let abortCancelled: Promise<boolean> | undefined;
 
   function complete(): void {
+    for (const cleanup of reattachCleanups) cleanup();
     emitter.complete();
   }
 

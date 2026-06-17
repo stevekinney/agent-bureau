@@ -551,11 +551,30 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     // At-most-once registration per runId (guards double-recover / a runId already
     // started live on this process — neither should reach here, but a silent
     // Map.set overwrite would be a split-brain, so cheap-guard it).
-    if (store.getRun(runId)) return;
+    if (store.getRun(runId)) {
+      // Already registered: drain any pending emitter so it does not leak (the
+      // resolver populated it but this run will not be reattached again).
+      runtime.pendingRecoveryEmitters.delete(runId);
+      return;
+    }
+
+    // #28: reuse the emitter the resolver pre-allocated and injected into this
+    // run's rebuilt services (so the per-step events the resumed generator
+    // dispatched flow to this reattached ActiveRun's subscribers) AND the toolbox
+    // (so its toolbox:* action events are forwarded too). Consume-and-delete: the
+    // entry's lifetime ends here.
+    const pendingRecovery = runtime.pendingRecoveryEmitters.get(runId);
+    runtime.pendingRecoveryEmitters.delete(runId);
 
     const recoveredRun = reattachDurableActiveRun(
       { engine: runtime.durable!.engine, checkpointStore: runtime.durable!.checkpointStore },
-      { runId, handle },
+      {
+        runId,
+        handle,
+        ...(pendingRecovery
+          ? { emitter: pendingRecovery.emitter, toolbox: pendingRecovery.toolbox }
+          : {}),
+      },
     );
 
     // Persist terminal session status from the recovered run's OWN terminal
@@ -800,17 +819,26 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       });
 
       if (verdict === 'reattach') {
-        // ownedSessionId is defined when the verdict is 'reattach'.
+        // ownedSessionId is defined when the verdict is 'reattach'. reattach
+        // consumes-and-deletes any pending recovery emitter for this run.
         reattachRecoveredRun(handle.id, ownedSessionId!, handle);
-      } else if (verdict === 'cancel') {
-        // Collect the cancel (do NOT fire-and-forget swallow): a rejected cancel
-        // could leave an unowned, already-resumed run live with no monitor, so its
-        // failure must be surfaced for operators. engine.cancel terminalizes the
-        // run and rejects its waiter — covering metadata-less / read-failed /
-        // foreign-input / orphaned-session residue without store.register'ing it.
-        orphanCancellations.push({ runId: handle.id, cancel: durable.engine.cancel(handle.id) });
+      } else {
+        // 'cancel' or 'skip': this run will NOT be reattached, so drain its pending
+        // recovery emitter (#28) — the resolver may have populated one (it fires
+        // for any run that resolved to available, including one later cancelled),
+        // and an undrained entry would leak across boots.
+        runtime.pendingRecoveryEmitters.delete(handle.id);
+
+        if (verdict === 'cancel') {
+          // Collect the cancel (do NOT fire-and-forget swallow): a rejected cancel
+          // could leave an unowned, already-resumed run live with no monitor, so
+          // its failure must be surfaced for operators. engine.cancel terminalizes
+          // the run and rejects its waiter — covering metadata-less / read-failed /
+          // foreign-input / orphaned-session residue without store.register'ing it.
+          orphanCancellations.push({ runId: handle.id, cancel: durable.engine.cancel(handle.id) });
+        }
+        // 'skip' — ownership unknown; leave the run to resume without live visibility.
       }
-      // 'skip' — ownership unknown; leave the run to resume without live visibility.
     }
 
     // Await the orphan cancels DETACHED — boot must not block on them (same as the
@@ -1023,6 +1051,9 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         for (const disposeListener of schedulerCleanup) {
           disposeListener();
         }
+        // #28 backstop: drop any pending recovery emitters that the boot reattach
+        // pass did not consume, so the Map never retains entries past teardown.
+        runtime.pendingRecoveryEmitters.clear();
         emitter.complete();
       } catch (error) {
         console.error(

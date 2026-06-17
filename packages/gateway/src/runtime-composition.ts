@@ -22,10 +22,11 @@ import {
   createRoutingGenerate,
   createStepBasedStrategy,
 } from 'herald';
-import { TypedEventTarget } from 'lifecycle';
+import { CompletableEventTarget, TypedEventTarget } from 'lifecycle';
 import type { CreateMemoryOptions, Memory } from 'memory';
 import { createMemory } from 'memory';
 import type {
+  CombinedOperativeEventMap,
   GenerateFunction,
   OnStepHook,
   PrepareStepHook,
@@ -443,6 +444,18 @@ export interface DurableComposition {
   observability?: RunEngineObservability;
 }
 
+/**
+ * The pieces the resolver pre-allocates for a recovered run so the reattached
+ * ActiveRun can surface live events (#28): the `emitter` `runStep` dispatches step
+ * events to (and which becomes the ActiveRun's event surface), plus the
+ * `toolbox` whose `toolbox:*` action events must be explicitly forwarded to that
+ * emitter.
+ */
+export interface PendingRecoveryEvents {
+  emitter: CompletableEventTarget<CombinedOperativeEventMap>;
+  toolbox: DurableRunDeps['toolbox'];
+}
+
 export interface RuntimeComposition {
   kv: TextValueStore | undefined;
   /**
@@ -453,6 +466,18 @@ export interface RuntimeComposition {
    * surface is unchanged, but the run is checkpointed and resumes after a crash.
    */
   durable: DurableComposition | undefined;
+  /**
+   * Per-recovered-run emitters the resolver pre-allocates and injects into the
+   * rebuilt `services` (#28), keyed by `runId`. `reattachRecoveredRun` consumes
+   * (and DELETES) the entry so the reattached ActiveRun reuses the SAME emitter
+   * the resumed generator's `runStep` dispatches to — closing seam #10's toolbox/
+   * step-event visibility for recovered runs. Entry lifetime is one boot recovery
+   * pass: any entry the resolver populated but recovery did not reattach (the run
+   * failed/skipped) MUST be drained, since the emitter closes over nothing
+   * credential-bearing itself but the Map otherwise leaks across boots. The bureau
+   * clears it on dispose as a backstop.
+   */
+  pendingRecoveryEmitters: Map<string, PendingRecoveryEvents>;
   /**
    * Disposes the raw `Storage` backend this composition resolved from
    * `options.storage`, if any. The KV/checkpoint views are created with
@@ -491,6 +516,10 @@ export async function createRuntimeComposition(
 ): Promise<RuntimeComposition> {
   const maximumSteps = options.maximumSteps ?? 10;
   const systemPrompt = options.systemPrompt;
+
+  // #28: per-recovered-run emitter+toolbox the resolver pre-allocates and the
+  // bureau's reattach loop consumes — see RuntimeComposition.pendingRecoveryEmitters.
+  const pendingRecoveryEmitters = new Map<string, PendingRecoveryEvents>();
 
   let kv: TextValueStore | undefined = options.persistence;
   // Keep the raw Storage so the durable engine can share the exact backend with
@@ -958,12 +987,25 @@ export async function createRuntimeComposition(
       // changes, since rebuilding from a null session would otherwise NPE.
       return { status: 'unavailable', reason: `run ${info.workflowId} not reconstructable` };
     }
-    return { status: 'available', services };
+    // #28: pre-allocate the recovered run's emitter HERE (before the generator
+    // advances) and inject it into the rebuilt services, so `runStep` dispatches
+    // its toolbox/step events to it during resume. The bureau's reattach loop
+    // consumes this same emitter (by runId) as the reattached ActiveRun's surface,
+    // making those events observable via `getRun(runId)` — previously a recovered
+    // run fired no per-step events. The Map entry is drained by reattach (and on
+    // dispose) so it does not leak across boots.
+    const recoveryEmitter = new CompletableEventTarget<CombinedOperativeEventMap>();
+    pendingRecoveryEmitters.set(info.workflowId, {
+      emitter: recoveryEmitter,
+      toolbox: services.toolbox,
+    });
+    return { status: 'available', services: { ...services, emitter: recoveryEmitter } };
   }
 
   return {
     kv,
     durable,
+    pendingRecoveryEmitters,
     disposeStorage: durableStorage ? () => durableStorage[Symbol.dispose]() : undefined,
     memory,
     sessionStore,
