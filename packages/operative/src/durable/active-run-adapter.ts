@@ -1,4 +1,4 @@
-import { isWeftErrorLike } from '@lostgradient/weft';
+import { HISTORY_CIRCUIT_BREAKER_REASON, isWeftErrorLike } from '@lostgradient/weft';
 import { Conversation, isConversation } from 'conversationalist';
 import type { ForwardableSource } from 'lifecycle';
 import { CompletableEventTarget, forwardEvents } from 'lifecycle';
@@ -18,6 +18,27 @@ import type { FinishReason, RunOptions, RunResult } from '../types';
 import type { CheckpointStore } from './checkpoint-store';
 import type { AnyRunEngine } from './create-run-engine';
 import type { AgentRunWorkflowResult } from './run-workflow';
+
+/**
+ * Tag stamped on every durable run launched by the operative scheduler (via
+ * {@link startDurableRunResult}). Recovery and the boot sweep read it from
+ * `handle.getLaunchMetadata().launchOptions.tags` to discriminate scheduler-origin
+ * runs from genuine session runs — a scheduler run is a live-process concern with
+ * no bureau session behind it, so on a crash it is cancelled, never reattached as
+ * a session run. Exported through `operative/durable` (no `operative/scheduler`
+ * subpath export exists) so the gateway recovery path can import it.
+ */
+export const SCHEDULER_ORIGIN_TAG = 'bureau:scheduler-origin' as const;
+
+/**
+ * Id prefix for durable scheduler runs (`scheduler-run-<taskId>-<n>`). A scheduler
+ * run uses a synthetic id as BOTH its runId and its phantom sessionId, so boot
+ * recovery's resolver discriminates it by `input.sessionId === input.runId` AND
+ * this prefix — the prefix is what makes the discriminant contractually safe: a
+ * genuine session run's id is `run-<uuid>` (never this prefix), so a session that
+ * coincidentally set `sessionId === runId` is not misclassified as scheduler-origin.
+ */
+export const SCHEDULER_RUN_ID_PREFIX = 'scheduler-run-' as const;
 
 /** Dependencies the adapter needs from bureau composition. */
 export interface DurableActiveRunContext {
@@ -241,10 +262,45 @@ export interface RecoveredRunHandle {
  */
 export function reattachDurableActiveRun(
   context: DurableActiveRunContext,
-  reattach: { runId: string; handle: RecoveredRunHandle },
+  reattach: {
+    runId: string;
+    handle: RecoveredRunHandle;
+    /**
+     * The emitter the resolver pre-allocated and injected into the recovered run's
+     * rebuilt `services` (#28). When present it IS this ActiveRun's event surface,
+     * so the per-step events `runStep` dispatches during resume reach
+     * `getRun(runId)` subscribers — instead of the reattach path opening a fresh,
+     * disconnected emitter. The resolver and this reattach run on the same boot
+     * pass keyed by the same `runId`, so reusing one emitter is the wiring that
+     * closes seam #10's step visibility. Omit (fresh emitter) when there is no
+     * resolver-built emitter (e.g. a handle reattached outside recovery).
+     *
+     * Residual race (documented, narrow): an event `runStep` dispatches in the
+     * SAME microtask `recoverAll()` drives the generator — i.e. before
+     * `recoverDurableRuns` attaches this ActiveRun's listeners synchronously on the
+     * next turn — is not observed (CompletableEventTarget does not replay to late
+     * subscribers). Only the earliest events of a run that races to its first step
+     * inside recoverAll are affected; every subsequent event is live.
+     */
+    emitter?: CompletableEventTarget<CombinedOperativeEventMap>;
+    /**
+     * Cleanup for the `toolbox → emitter` forwarding the RESOLVER already wired
+     * (#28). The resolver forwards `toolbox:*` events from the moment services are
+     * built — closing the window where a fast-resuming run fires its first step
+     * before reattach runs — so reattach does NOT re-wire forwarding; it only takes
+     * OWNERSHIP of this cleanup and runs it when the run completes. Omit when there
+     * is no resolver-built forwarding (a handle reattached outside recovery).
+     */
+    stopToolboxForward?: () => void;
+  },
 ): ActiveRun {
   const { runId, handle } = reattach;
-  const emitter = new CompletableEventTarget<CombinedOperativeEventMap>();
+  const emitter = reattach.emitter ?? new CompletableEventTarget<CombinedOperativeEventMap>();
+
+  // #28: the resolver already forwards the toolbox's action events into `emitter`
+  // (race-free, from services-build time). Reattach just owns the teardown so the
+  // subscription stops when this run completes.
+  const toolboxForwardCleanup = reattach.stopToolboxForward;
 
   // Resolves `true` only when an adapter-initiated `engine.cancel` SUCCEEDS for
   // this run — i.e. THIS abort terminalized the run. `undefined` means no abort
@@ -255,6 +311,7 @@ export function reattachDurableActiveRun(
   let abortCancelled: Promise<boolean> | undefined;
 
   function complete(): void {
+    toolboxForwardCleanup?.();
     emitter.complete();
   }
 
@@ -334,6 +391,12 @@ export interface StartDurableRunResultOptions {
   prompt?: string;
   /** Abort signal for the run (the scheduler's combined signal). */
   signal?: AbortSignal;
+  /**
+   * Tags for the durable workflow start (e.g. {@link SCHEDULER_ORIGIN_TAG}). The
+   * scheduler stamps its origin tag here so boot recovery can distinguish these
+   * runs from session runs and the boot sweep can find suspended residue.
+   */
+  tags?: string[];
 }
 
 /**
@@ -363,13 +426,26 @@ export async function startDurableRunResult(
   context: DurableActiveRunContext,
   durableRun: StartDurableRunResultOptions,
 ): Promise<RunResult> {
-  const { runId, sessionId, options, prompt, signal } = durableRun;
+  const { runId, sessionId, options, prompt, signal, tags } = durableRun;
+
+  // 'start-new' is a DATA-LOSS policy (it purges a prior terminal run under the
+  // same id) and must be scoped to runs that legitimately reuse an id — i.e.
+  // SCHEDULER-ORIGIN runs, which reuse a synthetic, counter-suffixed id that can
+  // collide with a TERMINAL prior run after a crash+restart. For any other
+  // durable run a terminal-id collision is a genuine error to surface, NOT to
+  // silently overwrite, so we only opt into 'start-new' when the scheduler tag is
+  // present. NOTE: 'start-new' covers only TERMINAL conflicts — a `suspended`
+  // prior run is not terminal, so id-collision with suspended residue is prevented
+  // by the boot sweep (sweepSuspendedSchedulerRuns), not by this policy.
+  const isSchedulerOrigin = tags?.includes(SCHEDULER_ORIGIN_TAG) ?? false;
 
   const handle = await context.engine.start(
     'agentRun',
     { runId, sessionId, prompt, maximumSteps: options.maximumSteps },
     {
       id: runId,
+      ...(tags ? { tags } : {}),
+      ...(isSchedulerOrigin ? { onTerminalConflict: 'start-new' as const } : {}),
       services: {
         options: { ...options, signal },
         toolbox: options.toolbox,
@@ -424,6 +500,34 @@ async function driveReattachedRun(
         conversation = new Conversation();
       }
       return makeAbortResult(createRunState(), conversation, undefined, emitter, 0, 'aborted');
+    }
+    // A `history.maxEvents` circuit-breaker (or a genuine execution-deadline
+    // timeout) rejects `handle.result()` with a `WorkflowTimeoutError`. On a
+    // RECOVERED run this is an ENGINE-policy terminal that fired AFTER recovery —
+    // nothing else owns reconciling it (unlike a pre-replay resolver failure,
+    // which the resolver already reconciled to `error`, or an EngineDisposedError
+    // teardown). So, symmetric with `driveDurableRun`, classify it as `error` and
+    // fire the terminal lifecycle here; otherwise the session is left stuck
+    // `running` for a run that is actually terminal (Bugbot #38). `hooks: undefined`
+    // per the reattach contract; the conversation comes from the checkpoint.
+    if (isWeftErrorLike(error) && error.code === 'WorkflowTimeoutError') {
+      const message = await classifyTimeoutMessage(context, runId, error);
+      let conversation: Conversation;
+      try {
+        const snapshot = await context.checkpointStore.loadConversation(runId);
+        conversation = snapshot ? Conversation.from(snapshot) : new Conversation();
+      } catch {
+        conversation = new Conversation();
+      }
+      return finalizeRunResult({
+        finishReason: 'error',
+        runState: emptyRunState(),
+        conversation,
+        hooks: undefined,
+        emitter,
+        runStartTime,
+        errorMessage: message,
+      });
     }
     // Otherwise write-free. EngineDisposedError = bureau teardown mid-resume
     // (leave running for a later boot). Any other rejection = the engine
@@ -545,6 +649,28 @@ async function driveDurableRun(
     if (isWeftErrorLike(error) && error.code === 'EngineDisposedError') {
       return makeInterruptedRunResult(conversation);
     }
+    // A `history.maxEvents` circuit-breaker (or a genuine execution-deadline
+    // timeout) rejects `handle.result()` with a `WorkflowTimeoutError`. The error
+    // code is `'WorkflowTimeoutError'` (no 'd' — distinct from the
+    // `WorkflowTimedOutEvent` name) and carries NO `terminationReason`, so the
+    // circuit-breaker-vs-deadline distinction must come from the engine's stored
+    // state. Either way the run is genuinely terminal (not abandoned-for-recovery
+    // like EngineDisposedError), so classify it as `error` and fire the terminal
+    // lifecycle here rather than rethrowing into the unawaited `.then()` chain
+    // (which would surface as an unhandled rejection and leave the session stuck
+    // `running`).
+    if (isWeftErrorLike(error) && error.code === 'WorkflowTimeoutError') {
+      const message = await classifyTimeoutMessage(context, runId, error);
+      return finalizeRunResult({
+        finishReason: 'error',
+        runState: emptyRunState(),
+        conversation,
+        hooks,
+        emitter,
+        runStartTime,
+        errorMessage: message,
+      });
+    }
     throw error;
   }
 
@@ -580,6 +706,31 @@ async function driveDurableRun(
 /** A throwaway run state for the pre-step error path (no steps completed yet). */
 function emptyRunState(): RunState {
   return createRunState();
+}
+
+/**
+ * Build the error message for a `WorkflowTimeoutError`, distinguishing a history
+ * circuit-breaker kill from a genuine execution-deadline timeout. The error class
+ * itself carries no `terminationReason`, so the distinction comes from the
+ * engine's stored {@link WorkflowState}: `'history-circuit-breaker'` means the
+ * run's event-log breached `history.maxEvents`. A failed/absent state read falls
+ * back to the raw error message rather than guessing.
+ */
+async function classifyTimeoutMessage(
+  context: DurableActiveRunContext,
+  runId: string,
+  error: unknown,
+): Promise<string> {
+  const fallback = error instanceof Error ? error.message : String(error);
+  try {
+    const state = await context.engine.get(runId);
+    if (state?.terminationReason === HISTORY_CIRCUIT_BREAKER_REASON) {
+      return `Durable run terminated by the history circuit breaker (history.maxEvents exceeded): ${fallback}`;
+    }
+    return `Durable run exceeded its execution deadline: ${fallback}`;
+  } catch {
+    return fallback;
+  }
 }
 
 /**

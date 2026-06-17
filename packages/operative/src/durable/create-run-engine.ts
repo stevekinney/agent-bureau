@@ -1,9 +1,18 @@
 import type {
   AnyWorkflowDefinition,
+  CheckpointSizeWarningEvent,
+  HistoryPolicy,
+  PayloadSizePolicy,
+  WorkflowLogRecord,
   WorkflowServicesResolution,
   WorkflowServicesResolverInfo,
 } from '@lostgradient/weft';
 import { Engine } from '@lostgradient/weft';
+// `MetricsCollector` is NOT re-exported from the `@lostgradient/weft` root barrel
+// (only the metrics factories are) — the class lives on the `/observability`
+// subpath, so the type must be imported from there.
+import type { MetricsCollector, ObservabilityOptions } from '@lostgradient/weft/observability';
+import { createObservabilityInterceptors } from '@lostgradient/weft/observability';
 import type { Storage } from '@lostgradient/weft/storage';
 import { textValueStore } from '@lostgradient/weft/storage';
 
@@ -59,6 +68,72 @@ export interface CreateRunEngineOptions {
    * rest of composition already built.
    */
   checkpointStore?: CheckpointStore;
+
+  /**
+   * Opt into OpenTelemetry spans + metrics for durable workflows and activities.
+   * When `true`, wires Weft's `createObservabilityInterceptors()` with this engine
+   * as the `eventTarget` (so root workflow spans close on terminal lifecycle
+   * events rather than accumulating until disposal). Pass an
+   * {@link ObservabilityOptions} object to customize the tracer name, payload
+   * recording, etc. `@opentelemetry/api` is an optional peer dependency — without
+   * it every span operation is a documented no-op with near-zero overhead, so
+   * enabling this is safe even before a telemetry backend exists. The metrics
+   * handle and the cleanup `dispose` are returned on {@link RunEngine.observability}.
+   */
+  observability?: boolean | Omit<ObservabilityOptions, 'eventTarget'>;
+
+  /**
+   * Host sink for `ctx.log` records emitted by durable workflows (Weft 0.4.0
+   * structured logging). Receives every replay-safe log record from inline and
+   * worker execution. A throwing sink falls back to console without failing the
+   * workflow. Omit to leave logs going to the host console.
+   */
+  onLog?: (record: WorkflowLogRecord) => void;
+
+  /**
+   * History circuit breaker. An agent run checkpoints its full transcript per
+   * step, so a long run's event-log grows with steps × message size; activation
+   * replays that log (cost is O(history)), and an unbounded log can stall the
+   * shared single-process engine. When `history.maxEvents` is set, a run whose
+   * durable event-log would exceed it is force-terminated as `timed-out` with
+   * `terminationReason === 'history-circuit-breaker'` — which the adapter
+   * classifies distinctly from a genuine deadline timeout. Omit to disable.
+   */
+  history?: HistoryPolicy;
+
+  /**
+   * Early-warning threshold (bytes) for checkpoint payload size. When a
+   * checkpoint write exceeds it, the engine dispatches a
+   * `CheckpointSizeWarningEvent`; pass {@link onCheckpointSizeWarning} to observe
+   * it (a silent warning event is no warning). Does not terminate the run.
+   */
+  checkpointSizeWarningThreshold?: number;
+
+  /** How many past checkpoints to retain per run (storage-growth control). */
+  checkpointHistory?: number;
+
+  /** Admission cap on a single checkpoint payload (`PayloadSizeExceededError`). */
+  payloadSize?: PayloadSizePolicy;
+
+  /**
+   * Subscriber for `CheckpointSizeWarningEvent` (`checkpoint:size-warning`). Wired
+   * to the engine when provided, so a checkpoint approaching pathological size is
+   * surfaced rather than silently dispatched. Pairs with
+   * {@link checkpointSizeWarningThreshold}.
+   */
+  onCheckpointSizeWarning?: (event: CheckpointSizeWarningEvent) => void;
+}
+
+/**
+ * The observability handle returned when {@link CreateRunEngineOptions.observability}
+ * is enabled: the metrics collector for reading counters/histograms/gauges, and a
+ * `dispose` that ends still-open spans and unsubscribes the engine lifecycle
+ * listeners. `dispose` MUST run before the engine is disposed so the engine's
+ * terminal events still reach the span-closing listeners.
+ */
+export interface RunEngineObservability {
+  metrics: MetricsCollector;
+  dispose: () => void;
 }
 
 /**
@@ -80,6 +155,12 @@ export type AnyRunEngine = Engine<any, any>;
 export interface RunEngine {
   engine: AnyRunEngine;
   checkpointStore: CheckpointStore;
+  /**
+   * Present only when {@link CreateRunEngineOptions.observability} was enabled.
+   * Carries the metrics collector and a `dispose` the owner must call BEFORE
+   * disposing the engine.
+   */
+  observability?: RunEngineObservability;
 }
 
 /**
@@ -95,8 +176,11 @@ export interface RunEngine {
  * {@link CreateRunEngineOptions.resolveWorkflowServices}, which Weft fires before
  * the resumed generator reads `ctx.services` — no module-global registry.
  *
- * TODO(weft-integration): tune `history.maxEvents` / checkpoint size warning
- * threshold once long-run checkpoint sizes are measured (design seam #12).
+ * History/checkpoint guardrails ({@link CreateRunEngineOptions.history},
+ * `checkpointSizeWarningThreshold`, `checkpointHistory`, `payloadSize`) are
+ * threaded into the engine; a `history.maxEvents` breach surfaces as a
+ * `timed-out` terminal with `terminationReason: 'history-circuit-breaker'`, which
+ * the active-run adapter classifies as `error` (not a deadline timeout).
  */
 export async function createRunEngine(options: CreateRunEngineOptions): Promise<RunEngine> {
   const checkpointStore =
@@ -107,6 +191,15 @@ export async function createRunEngine(options: CreateRunEngineOptions): Promise<
     storage: options.storage,
     recover: options.recover ?? true,
     resolveWorkflowServices: options.resolveWorkflowServices,
+    ...(options.onLog ? { onLog: options.onLog } : {}),
+    ...(options.history ? { history: options.history } : {}),
+    ...(options.checkpointSizeWarningThreshold !== undefined
+      ? { checkpointSizeWarningThreshold: options.checkpointSizeWarningThreshold }
+      : {}),
+    ...(options.checkpointHistory !== undefined
+      ? { checkpointHistory: options.checkpointHistory }
+      : {}),
+    ...(options.payloadSize ? { payloadSize: options.payloadSize } : {}),
     workflows: { agentRun: options.runWorkflow },
     activities: {
       saveCursor: storageActivities.saveCursor,
@@ -115,7 +208,41 @@ export async function createRunEngine(options: CreateRunEngineOptions): Promise<
     },
   });
 
-  return { engine, checkpointStore };
+  // Surface checkpoint-size warnings: a dispatched event nobody listens to is no
+  // warning. The engine is an EventTarget; the subscription lives as long as the
+  // engine (released on dispose).
+  if (options.onCheckpointSizeWarning) {
+    engine.addEventListener('checkpoint:size-warning', options.onCheckpointSizeWarning);
+  }
+
+  // Wire observability AFTER construction so the engine itself is the
+  // `eventTarget`: root workflow spans then close on terminal lifecycle events
+  // instead of accumulating until disposal. `addInterceptor` is the documented
+  // idiom (see the weft observability example) and works on the created engine.
+  const observability = options.observability
+    ? wireObservability(engine, options.observability)
+    : undefined;
+
+  return { engine, checkpointStore, ...(observability ? { observability } : {}) };
+}
+
+/**
+ * Build and attach the observability interceptor, returning the metrics handle
+ * and a `dispose` the caller invokes before engine disposal. `eventTarget` is the
+ * engine so spans close on terminal events; `@opentelemetry/api` absence makes
+ * every span op a no-op.
+ */
+function wireObservability(
+  engine: AnyRunEngine,
+  observability: boolean | Omit<ObservabilityOptions, 'eventTarget'>,
+): RunEngineObservability {
+  const baseOptions = observability === true ? {} : observability;
+  const { interceptor, metrics, dispose } = createObservabilityInterceptors({
+    ...baseOptions,
+    eventTarget: engine,
+  });
+  engine.addInterceptor(interceptor);
+  return { metrics, dispose };
 }
 
 /**

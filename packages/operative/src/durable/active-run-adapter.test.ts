@@ -33,6 +33,22 @@ async function buildContext() {
   return { engine, checkpointStore };
 }
 
+/** Build a durable context whose engine trips the history circuit breaker early. */
+async function buildContextWithHistoryLimit(maxEvents: number) {
+  const storage = new MemoryStorage();
+  const checkpointStore = createCheckpointStore(
+    textValueStore(storage, { disposeUnderlyingStorage: false }),
+  );
+  const runWorkflow = createRunWorkflow(checkpointStore);
+  const { engine } = await createRunEngine({
+    storage,
+    runWorkflow,
+    recover: false,
+    history: { maxEvents },
+  });
+  return { engine, checkpointStore };
+}
+
 function runOptions(generate: RunOptions['generate']): RunOptions {
   return {
     generate,
@@ -272,6 +288,44 @@ describe('createRun with durable routing', () => {
     }
   });
 
+  it('classifies a history circuit-breaker termination as finishReason error (not an unhandled rejection)', async () => {
+    // With history.maxEvents set very low, the run's first checkpoint writes
+    // breach the limit and Weft force-terminates the workflow as `timed-out` with
+    // terminationReason 'history-circuit-breaker'. handle.result() then REJECTS
+    // with a WorkflowTimeoutError. The adapter must CATCH that, classify it as a
+    // terminal `error`, and fire run.completed — NOT rethrow into the unawaited
+    // driver chain (which would surface as an unhandled rejection and strand the
+    // session `running`). The error message must name the circuit breaker so the
+    // cause is distinguishable from a genuine deadline timeout.
+    const context = await buildContextWithHistoryLimit(1);
+    try {
+      let completedFinishReason: RunResult['finishReason'] | undefined;
+      const activeRun = createRun(
+        {
+          generate: async () => ({ content: 'never gets far', toolCalls: [] }),
+          toolbox: createToolbox([]) as unknown as RunOptions['toolbox'],
+          conversation: createConversationHistory(),
+          stopWhen: stopWhen.noToolCalls(),
+        },
+        { ...context, runId: 'circuit-breaker-run', prompt: 'Hello' },
+      );
+      activeRun.addEventListener('run.completed', (event) => {
+        completedFinishReason = event.finishReason;
+      });
+
+      const result = await activeRun.result;
+
+      // The run settled cleanly as an error (the catch fired) rather than the
+      // promise rejecting — and the terminal lifecycle fired.
+      expect(result.finishReason).toBe('error');
+      expect(completedFinishReason).toBe('error');
+      expect(result.error).toBeInstanceOf(Error);
+      expect((result.error as Error).message).toContain('history circuit breaker');
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+
   it('carries schemaValidation through to the durable RunResult (durable parity)', async () => {
     // A run with a `responseSchema` produces `RunResult.schemaValidation` on the
     // in-memory path; the durable path must surface the SAME shape. The live
@@ -342,6 +396,51 @@ describe('reattachDurableActiveRun', () => {
       expect(cancelled).toEqual(['reattach-abort']);
       expect(events).toEqual(['run.aborted']);
       expect(result.finishReason).toBe('aborted');
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+
+  it('fires run.completed with finishReason error when a recovered run is terminated by the history circuit breaker (Bugbot #38)', async () => {
+    // A recovered run whose handle.result() rejects with a WorkflowTimeoutError
+    // (history circuit breaker / execution deadline) is GENUINELY terminal — and
+    // unlike a pre-replay resolver failure, nothing else reconciles it. The
+    // reattach path must fire run.completed (finishReason 'error') so the gateway
+    // persists a terminal session status, rather than leaving it stuck `running`.
+    const context = await buildContext();
+    try {
+      // A WeftError-shaped rejection: a real Error carrying the `code` that
+      // isWeftErrorLike narrows on (mirrors weft's WorkflowTimeoutError).
+      const timeoutError = Object.assign(new Error('workflow timed out'), {
+        code: 'WorkflowTimeoutError',
+      });
+      const handle = {
+        id: 'reattach-timeout',
+        result: () => Promise.reject(timeoutError),
+      };
+      // engine.get returns a state whose terminationReason names the circuit
+      // breaker, so classifyTimeoutMessage distinguishes it from a deadline.
+      const engine = {
+        get: async () => ({ status: 'timed-out', terminationReason: 'history-circuit-breaker' }),
+        cancel: async () => {},
+      } as unknown as AnyRunEngine;
+
+      let completedFinishReason: RunResult['finishReason'] | undefined;
+      const recoveredRun = reattachDurableActiveRun(
+        { engine, checkpointStore: context.checkpointStore },
+        { runId: 'reattach-timeout', handle },
+      );
+      recoveredRun.addEventListener('run.completed', (event) => {
+        completedFinishReason = event.finishReason;
+      });
+
+      const result = await recoveredRun.result;
+
+      // Settled as a terminal error (not the write-free interrupted path) and the
+      // terminal lifecycle fired, so the session won't be left `running`.
+      expect(result.finishReason).toBe('error');
+      expect(completedFinishReason).toBe('error');
+      expect((result.error as Error).message).toContain('history circuit breaker');
     } finally {
       context.engine[Symbol.dispose]();
     }

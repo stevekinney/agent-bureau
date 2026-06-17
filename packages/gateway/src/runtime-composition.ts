@@ -22,10 +22,12 @@ import {
   createRoutingGenerate,
   createStepBasedStrategy,
 } from 'herald';
-import { TypedEventTarget } from 'lifecycle';
+import type { ForwardableSource, HookReplayPolicy } from 'lifecycle';
+import { CompletableEventTarget, forwardEvents, TypedEventTarget } from 'lifecycle';
 import type { CreateMemoryOptions, Memory } from 'memory';
 import { createMemory } from 'memory';
 import type {
+  CombinedOperativeEventMap,
   GenerateFunction,
   OnStepHook,
   PrepareStepHook,
@@ -42,12 +44,18 @@ import {
   withCache,
   withEnhancedStreaming,
 } from 'operative';
-import type { AnyRunEngine, CheckpointStore, DurableRunDeps } from 'operative/durable';
+import type {
+  AnyRunEngine,
+  CheckpointStore,
+  DurableRunDeps,
+  RunEngineObservability,
+} from 'operative/durable';
 import {
   createCheckpointStore,
   createRunEngine,
   createRunWorkflow,
   isAgentRunWorkflowInput,
+  SCHEDULER_RUN_ID_PREFIX,
 } from 'operative/durable';
 import type { SkillSession } from 'skills';
 import { createSkillSession, escapeXml } from 'skills';
@@ -79,6 +87,13 @@ function redactProvider(provider: ProviderConfiguration): RedactedProviderConfig
   return safeProvider;
 }
 
+/**
+ * Inject recalled memories as a system message on step 0. Replay classification
+ * (seam #11): `safe` — it only reads (`memory.recall`) and mutates the step's
+ * transient `Conversation` (the durable workflow rehydrates a fresh
+ * `Conversation.from(snapshot)` per step, so a recovery re-fire just re-injects
+ * into that step's conversation; no external side effect, no idempotency needed).
+ */
 function createMemoryRecallHook(memory: Memory, sessionId: string): PrepareStepHook {
   return async (context) => {
     if (context.step !== 0) {
@@ -111,18 +126,131 @@ function createMemoryRecallHook(memory: Memory, sessionId: string): PrepareStepH
   };
 }
 
-function createMemoryPersistHook(memory: Memory, sessionId: string): OnStepHook {
+/**
+ * Persist the final assistant content of a step as an experiential memory.
+ *
+ * EFFECTFUL hook (seam #11): on a durable recovery the crashed in-flight step
+ * re-runs from its boundary, so this hook can fire AGAIN for the same step. The
+ * mitigation is IDEMPOTENCY, not suppression-on-replay — suppressing the hook
+ * would drop the write for a step whose work (generate + tools) did re-execute,
+ * leaving memory out of sync with a step that ran.
+ *
+ * Idempotency is enforced by a DETERMINISTIC operation key, not by content: a
+ * replayed step may produce non-byte-identical content (its `generate` re-runs),
+ * so relying on the memory store's cosine-similarity dedup is not sufficient.
+ * Instead the write carries a stable `dedupeKey` of `${runId}:${step}` (the
+ * durable operation's identity — same run, same step index across a replay), and
+ * the hook skips the write when that key is already present. This makes a re-fire
+ * a guaranteed no-op regardless of content drift.
+ *
+ * The set of seen keys is loaded ONCE per run (lazily, on the first final step)
+ * by paging the whole namespace into an in-memory `Set`, then every subsequent
+ * per-step check and write is O(1) — not a full-namespace scan each step, which
+ * would be O(n²) over a long run. The one-time load pages the whole namespace
+ * because `memory.list` defaults to a 100-record page, so a single un-paged read
+ * would miss keys in a session with >100 memories and let a re-fire duplicate.
+ *
+ * When no `runId` is available (a non-durable run, where there is no replay and
+ * therefore no re-fire hazard), the dedup guard is skipped and the write proceeds
+ * — the at-least-once concern only exists on the durable recovery path.
+ *
+ * KNOWN RESIDUAL (filed upstream as a `memory` ticket): the lookup-then-write is
+ * not atomic, so two concurrent recoveries of the SAME `runId:step` could both
+ * miss and both write. The single-owner recovery model makes a concurrent
+ * same-run recovery unexpected, and the proper fix is an atomic keyed
+ * insert-if-absent in the memory store (a `rememberOnce`/dedupeKey-unique
+ * primitive) rather than a read-then-write here.
+ *
+ * `replay: 'effectful'` ({@link HookReplayPolicy}) is recorded on the write for
+ * diagnostics; it documents the contract and never gates execution.
+ */
+export function createMemoryPersistHook(
+  memory: Memory,
+  sessionId: string,
+  runId?: string,
+): OnStepHook {
+  // Per-run cache of the namespace's experiential dedupe keys (Bugbot #38): the
+  // hook fires on every final step, and the dedup check would otherwise PAGE THE
+  // WHOLE namespace each time the key is absent (the common, non-replay case) —
+  // O(n²) over a long session. Instead we seed this Set ONCE (lazily, on the
+  // first final step) by paging the namespace, then every steady-state check and
+  // write is an O(1) Set operation. `undefined` until seeded. Scoped to this
+  // run's hook closure: a recovered run gets a fresh hook that re-seeds from the
+  // persisted store, so cross-process recovery dedup still works.
+  let seenDedupeKeys: Set<string> | undefined;
+
   return async (context) => {
     if (!context.final || !context.content.trim()) {
       return;
+    }
+
+    // Deterministic identity of THIS durable operation: same run + same step
+    // index on a replay. Content-independent, so a divergent regenerate cannot
+    // produce a second record.
+    const dedupeKey = runId === undefined ? undefined : `${runId}:${context.step}`;
+
+    if (dedupeKey !== undefined) {
+      seenDedupeKeys ??= await loadExperientialDedupeKeys(memory, sessionId);
+      if (seenDedupeKeys.has(dedupeKey)) {
+        return; // Already persisted by the first (pre-crash) execution of this step.
+      }
     }
 
     await memory.remember(context.content, {
       namespace: sessionId,
       source: 'experiential',
       step: context.step,
+      ...(dedupeKey !== undefined ? { dedupeKey } : {}),
+      // Replay classification (seam #11): an external write → `effectful`, kept
+      // safe across a recovery re-fire by the dedupeKey guard above. Metadata
+      // only; never gates execution.
+      replay: 'effectful' satisfies HookReplayPolicy,
     });
+
+    // Record the write so a later step in THIS run (or a re-fire of this one)
+    // dedupes against it without re-reading the store.
+    if (dedupeKey !== undefined) {
+      seenDedupeKeys?.add(dedupeKey);
+    }
   };
+}
+
+/**
+ * Load the set of `dedupeKey`s on EXPERIENTIAL memories in a namespace, paging the
+ * whole namespace once. Called lazily, once per run, to seed the persist hook's
+ * in-memory dedup cache — so the hot-path per-step check is O(1) rather than a
+ * full-namespace scan each time. The `source === 'experiential'` filter mirrors
+ * exactly what the hook writes, so a non-experiential record carrying a colliding
+ * `dedupeKey` cannot poison the set.
+ *
+ * Unlike the boot-time sweep (which throws on its sanity cap), this runs on the
+ * request path, so a `MAX_PAGES` cap fails OPEN: a mis-paginating store that never
+ * returns a short page would otherwise spin forever here. On the cap we log and
+ * return whatever was collected (a possible later duplicate beats a hung run).
+ */
+async function loadExperientialDedupeKeys(memory: Memory, namespace: string): Promise<Set<string>> {
+  const PAGE_SIZE = 200;
+  const MAX_PAGES = 50_000; // far above any real session; a non-terminating guard
+  const keys = new Set<string>();
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const entries = await memory.list({ namespace, limit: PAGE_SIZE, offset: page * PAGE_SIZE });
+    for (const entry of entries) {
+      if (entry.metadata['source'] === 'experiential') {
+        const key = entry.metadata['dedupeKey'];
+        if (typeof key === 'string') {
+          keys.add(key);
+        }
+      }
+    }
+    if (entries.length < PAGE_SIZE) {
+      return keys; // Last (short) page — namespace exhausted.
+    }
+  }
+  console.warn(
+    `[bureau] experiential dedupeKey load exceeded ${MAX_PAGES} pages for namespace ` +
+      `"${namespace}" without a short page — proceeding with a partial set (fail-open).`,
+  );
+  return keys;
 }
 
 function resolveProviderGenerate(
@@ -426,6 +554,36 @@ function createUnavailableToolbox(): GatewayToolbox {
   };
 }
 
+/**
+ * The durable run engine + checkpoint store, plus the optional observability
+ * handle. `observability` is present only when `BureauOptions.observability` was
+ * enabled; its `dispose` MUST be called before `engine[Symbol.dispose]()` so the
+ * engine's terminal lifecycle events still reach the span-closing listeners.
+ */
+export interface DurableComposition {
+  engine: AnyRunEngine;
+  checkpointStore: CheckpointStore;
+  observability?: RunEngineObservability;
+}
+
+/**
+ * The pieces the resolver pre-allocates for a recovered run so the reattached
+ * ActiveRun can surface live events (#28):
+ * - `emitter` — what `runStep` dispatches step events to during resume; it becomes
+ *   the reattached ActiveRun's event surface (reattach reuses this exact instance).
+ * - `stopToolboxForward` — the cleanup for the `toolbox → emitter` forwarding that
+ *   the RESOLVER wires immediately (the moment services are built), so `toolbox:*`
+ *   action events are captured from the very first resumed step. Wiring it at
+ *   reattach instead would drop events the toolbox emits in the window between the
+ *   resolver firing (inside `recoverAll`) and reattach installing the bridge.
+ *   Reattach takes ownership and calls it on completion; the drain/dispose paths
+ *   call it for entries that are never reattached, so the subscription never leaks.
+ */
+export interface PendingRecoveryEvents {
+  emitter: CompletableEventTarget<CombinedOperativeEventMap>;
+  stopToolboxForward: () => void;
+}
+
 export interface RuntimeComposition {
   kv: TextValueStore | undefined;
   /**
@@ -435,7 +593,19 @@ export interface RuntimeComposition {
    * `createBureau` routes every `createRun()` through it transparently — the run
    * surface is unchanged, but the run is checkpointed and resumes after a crash.
    */
-  durable: { engine: AnyRunEngine; checkpointStore: CheckpointStore } | undefined;
+  durable: DurableComposition | undefined;
+  /**
+   * Per-recovered-run emitters the resolver pre-allocates and injects into the
+   * rebuilt `services` (#28), keyed by `runId`. `reattachRecoveredRun` consumes
+   * (and DELETES) the entry so the reattached ActiveRun reuses the SAME emitter
+   * the resumed generator's `runStep` dispatches to — closing seam #10's toolbox/
+   * step-event visibility for recovered runs. Entry lifetime is one boot recovery
+   * pass: any entry the resolver populated but recovery did not reattach (the run
+   * failed/skipped) MUST be drained, since the emitter closes over nothing
+   * credential-bearing itself but the Map otherwise leaks across boots. The bureau
+   * clears it on dispose as a backstop.
+   */
+  pendingRecoveryEmitters: Map<string, PendingRecoveryEvents>;
   /**
    * Disposes the raw `Storage` backend this composition resolved from
    * `options.storage`, if any. The KV/checkpoint views are created with
@@ -456,7 +626,7 @@ export interface RuntimeComposition {
   systemPrompt: string | undefined;
   getToolSummaries(): ToolSummary[];
   createRunRuntime(
-    request: CreateRunRequest & { sessionId: string },
+    request: CreateRunRequest & { sessionId: string; runId?: string },
     options?: { liveStreaming?: boolean },
   ): Promise<{
     generate: GenerateFunction;
@@ -474,6 +644,10 @@ export async function createRuntimeComposition(
 ): Promise<RuntimeComposition> {
   const maximumSteps = options.maximumSteps ?? 10;
   const systemPrompt = options.systemPrompt;
+
+  // #28: per-recovered-run emitter+toolbox the resolver pre-allocates and the
+  // bureau's reattach loop consumes — see RuntimeComposition.pendingRecoveryEmitters.
+  const pendingRecoveryEmitters = new Map<string, PendingRecoveryEvents>();
 
   let kv: TextValueStore | undefined = options.persistence;
   // Keep the raw Storage so the durable engine can share the exact backend with
@@ -526,7 +700,7 @@ export async function createRuntimeComposition(
     );
   }
 
-  let durable: { engine: AnyRunEngine; checkpointStore: CheckpointStore } | undefined;
+  let durable: DurableComposition | undefined;
   if (wantsDurable && durableStorage) {
     // Build the checkpoint store over the SAME backend the engine persists to.
     const checkpointStore = createCheckpointStore(
@@ -549,6 +723,12 @@ export async function createRuntimeComposition(
       checkpointStore,
       recover: false,
       resolveWorkflowServices: resolveRunServices,
+      ...(options.observability !== undefined ? { observability: options.observability } : {}),
+      ...(options.onLog ? { onLog: options.onLog } : {}),
+      // durableGuardrails is a Pick of these exact CreateRunEngineOptions fields, so
+      // it spreads straight through; createRunEngine guards each one internally, so
+      // passing `undefined` members is harmless.
+      ...options.durableGuardrails,
     });
   }
 
@@ -693,7 +873,7 @@ export async function createRuntimeComposition(
   }
 
   function createRunRuntime(
-    request: CreateRunRequest & { sessionId: string },
+    request: CreateRunRequest & { sessionId: string; runId?: string },
     runtimeOptions?: { liveStreaming?: boolean },
   ) {
     const liveStreaming = runtimeOptions?.liveStreaming ?? true;
@@ -722,7 +902,7 @@ export async function createRuntimeComposition(
 
     if (memory) {
       prepareStep.push(createMemoryRecallHook(memory, request.sessionId));
-      onStep.push(createMemoryPersistHook(memory, request.sessionId));
+      onStep.push(createMemoryPersistHook(memory, request.sessionId, request.runId));
     }
 
     if (options.skills) {
@@ -779,6 +959,7 @@ export async function createRuntimeComposition(
    */
   async function buildRunDepsFromSession(
     session: Awaited<ReturnType<NonNullable<typeof sessionStore>['load']>>,
+    runId?: string,
   ): Promise<DurableRunDeps | null> {
     if (!session) return null;
     const message = session.metadata['lastUserMessage'];
@@ -786,6 +967,10 @@ export async function createRuntimeComposition(
       {
         message: typeof message === 'string' ? message : '',
         sessionId: session.id,
+        // Thread the recovered run's id so the memory-persist hook's idempotency
+        // key (`${runId}:${step}`) matches the pre-crash execution — the durable
+        // recovery path is exactly where the at-least-once re-fire happens.
+        ...(runId !== undefined ? { runId } : {}),
       },
       { liveStreaming: false },
     );
@@ -841,6 +1026,26 @@ export async function createRuntimeComposition(
     if (!isAgentRunWorkflowInput(info.input)) {
       return { status: 'unavailable', reason: `run ${info.workflowId} has no recoverable session` };
     }
+    // SCHEDULER-ORIGIN GUARD (#25): a durable scheduler run carries a SYNTHETIC
+    // sessionId equal to its own runId, prefixed `scheduler-run-` (there is no
+    // bureau session behind it). The resolver's `info` does NOT carry tags
+    // (WorkflowServicesResolverInfo is {workflowId, workflowType, input}), so we
+    // discriminate by `sessionId === runId` AND the scheduler id prefix. The prefix
+    // is load-bearing for contractual safety: a genuine session run's id is
+    // `run-<uuid>`, so even a session that coincidentally set `sessionId === runId`
+    // is NOT misclassified. Return unavailable BEFORE the sessionStore.load — a
+    // load would always miss, and a scheduler run is a live-process concern that
+    // boot recovery must not resume as a session run. The boot sweep cancels any
+    // suspended scheduler residue.
+    if (
+      info.input.sessionId === info.input.runId &&
+      info.input.runId.startsWith(SCHEDULER_RUN_ID_PREFIX)
+    ) {
+      return {
+        status: 'unavailable',
+        reason: `run ${info.workflowId} is scheduler-origin (no session to recover)`,
+      };
+    }
     // CORRELATION GUARD (committee MF-5): the workflow id IS the run id (pinned at
     // engine.start), so the input's own runId must match. A mismatch means a
     // corrupt or crafted durable input is trying to correlate this run to a
@@ -874,7 +1079,9 @@ export async function createRuntimeComposition(
 
     let services: DurableRunDeps | null;
     try {
-      services = await buildRunDepsFromSession(session);
+      // info.workflowId === the run id (pinned at engine.start) — thread it so the
+      // recovered run's memory-persist idempotency key matches its pre-crash key.
+      services = await buildRunDepsFromSession(session, info.workflowId);
     } catch (error) {
       // The session exists, but its deps cannot be rebuilt on this process (e.g.
       // no `generate`/provider configured here, so `createRunRuntime` throws).
@@ -909,12 +1116,36 @@ export async function createRuntimeComposition(
       // changes, since rebuilding from a null session would otherwise NPE.
       return { status: 'unavailable', reason: `run ${info.workflowId} not reconstructable` };
     }
-    return { status: 'available', services };
+    // #28: pre-allocate the recovered run's emitter HERE (before the generator
+    // advances) and inject it into the rebuilt services, so `runStep` dispatches
+    // its step events to it during resume. CRITICAL (Codex round-1): also wire the
+    // `toolbox → emitter` forwarding RIGHT NOW, not at reattach — `toolbox:*` action
+    // events originate from the toolbox, and a recovered run can fire its first
+    // step (inside `recoverAll`) before the bureau's reattach loop runs on the next
+    // turn. Forwarding from the moment the toolbox exists closes that window. The
+    // bureau's reattach loop reuses this same emitter (by runId) as the reattached
+    // ActiveRun's surface and takes ownership of `stopToolboxForward`; the Map entry
+    // is drained (and the forward stopped) by reattach, the cancel/skip branches, or
+    // dispose, so the subscription never leaks across boots.
+    const recoveryEmitter = new CompletableEventTarget<CombinedOperativeEventMap>();
+    const toolboxForward = forwardEvents(
+      // The toolbox is variance-widened; the durable layer never inspects the
+      // tool-tuple type, matching createDurableActiveRun's documented cast.
+      services.toolbox as unknown as ForwardableSource,
+      recoveryEmitter,
+      'toolbox',
+    );
+    pendingRecoveryEmitters.set(info.workflowId, {
+      emitter: recoveryEmitter,
+      stopToolboxForward: () => toolboxForward.stop(),
+    });
+    return { status: 'available', services: { ...services, emitter: recoveryEmitter } };
   }
 
   return {
     kv,
     durable,
+    pendingRecoveryEmitters,
     disposeStorage: durableStorage ? () => durableStorage[Symbol.dispose]() : undefined,
     memory,
     sessionStore,

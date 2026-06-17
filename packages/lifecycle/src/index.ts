@@ -10,6 +10,7 @@ export type {
   HookMap,
   HookRegistrationOptions,
   HookRegistryOptions,
+  HookReplayPolicy,
 } from './hooks/types';
 export { TypedEventTarget } from './typed-event-target';
 export type {

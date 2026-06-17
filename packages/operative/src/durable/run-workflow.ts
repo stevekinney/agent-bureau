@@ -46,10 +46,21 @@ import type { DurableRunDeps, RunCursor, StepRecord } from './types';
  *   internal `onError` do/while and schema-retry decisions are not individually
  *   checkpointed, so a mid-step crash re-runs the whole step's retries from the
  *   step boundary rather than the exact retry attempt.
- * TODO(weft-integration): #11 classify hooks by side-effect-ness for resume —
- *   on resume a step re-runs from its boundary, so any side-effecting hook inside
- *   the re-run step fires again. Read-only hooks are harmless; side-effecting
- *   ones need gating.
+ * #11 hook side-effect-ness on resume — RESOLVED via idempotency, not gating.
+ *   On resume the crashed in-flight step re-runs from its boundary, so a
+ *   side-effecting hook inside it fires again (at-least-once) — the SAME contract
+ *   as side-effecting tools (#4 ADR below). The fix is to make effectful hooks
+ *   idempotent, NOT to skip them on replay: skipping would drop the side effect
+ *   for a step whose work (generate + tools) DID re-execute, leaving external
+ *   state out of sync with a step that ran. Read-only hooks are harmless and need
+ *   nothing. The gateway's only effectful run hook, `createMemoryPersistHook`, is
+ *   idempotent via a DETERMINISTIC `${runId}:${step}` dedupe key (NOT content —
+ *   a replayed step can regenerate different content): it skips the write when a
+ *   memory already carries that key, so a re-fire is a guaranteed no-op. Hooks
+ *   carry a `replay: 'safe' | 'effectful'` classification (lifecycle
+ *   `HookRegistrationOptions`) for documentation/diagnostics; it does NOT gate
+ *   execution. Earlier plan to filter effectful hooks on replay was rejected as
+ *   unsound (skipped-side-effect semantics + fragile function-identity tracking).
  *
  * #4 sub-step tool durability — the `runStep` split is REJECTED (do not
  *   re-attempt): durability granularity is one whole step (generate + all its

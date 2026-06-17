@@ -1,3 +1,12 @@
+import type {
+  ListFilter,
+  ListOptions,
+  PaginatedResult,
+  WorkflowLogRecord,
+  WorkflowState,
+  WorkflowSummary,
+} from '@lostgradient/weft';
+import type { ObservabilityOptions } from '@lostgradient/weft/observability';
 import type { StorageConfiguration, TextValueStore } from '@lostgradient/weft/storage';
 import type { Toolbox } from 'armorer';
 import type { ConversationSnapshot } from 'conversationalist';
@@ -25,6 +34,7 @@ import type {
   StopCondition,
   TokenUsage,
 } from 'operative';
+import type { CreateRunEngineOptions } from 'operative/durable';
 import type { Store } from 'sentinel';
 
 import type { BureauEventMap } from './events';
@@ -179,7 +189,44 @@ export interface BureauOptions {
   sessionPersistenceSleep?: (milliseconds: number) => Promise<void>;
   maximumSteps?: number;
   systemPrompt?: string;
+  /**
+   * Opt into OpenTelemetry spans + metrics for durable runs. `true` enables the
+   * default interceptor; pass an {@link ObservabilityOptions} (minus `eventTarget`,
+   * which the engine supplies) to customize. Has effect only when a durable engine
+   * is composed. `@opentelemetry/api` is an optional peer — without it spans are
+   * no-ops, so enabling this is safe before any telemetry backend exists.
+   */
+  observability?: boolean | Omit<ObservabilityOptions, 'eventTarget'>;
+  /**
+   * Host sink for `ctx.log` records emitted by durable workflows (Weft 0.4.0
+   * structured logging). Has effect only when a durable engine is composed.
+   */
+  onLog?: (record: WorkflowLogRecord) => void;
+  /**
+   * History/checkpoint guardrails for durable runs. `history.maxEvents` is a
+   * circuit breaker (a breach terminates the run as an error, classified
+   * distinctly from a deadline timeout); `checkpointSizeWarningThreshold` arms an
+   * early-warning event observed via {@link onCheckpointSizeWarning}. Has effect
+   * only when a durable engine is composed.
+   */
+  durableGuardrails?: DurableGuardrailsConfiguration;
 }
+
+/**
+ * Durable history/checkpoint guardrail configuration surfaced on
+ * {@link BureauOptions.durableGuardrails}. A direct `Pick` of the matching
+ * {@link CreateRunEngineOptions} fields — no duplicated field declarations, so the
+ * single source of truth stays on the engine options and the composition spreads
+ * this straight through.
+ */
+export type DurableGuardrailsConfiguration = Pick<
+  CreateRunEngineOptions,
+  | 'history'
+  | 'checkpointSizeWarningThreshold'
+  | 'checkpointHistory'
+  | 'payloadSize'
+  | 'onCheckpointSizeWarning'
+>;
 
 export type BureauEventType = keyof BureauEventMap & string;
 
@@ -195,6 +242,30 @@ export interface Bureau {
   getRun(id: string): RunDetail | undefined;
   abortRun(id: string): RunSummary;
   deleteRun(id: string): void;
+
+  /**
+   * Read the durable engine's view of a run: its full {@link WorkflowState}
+   * (status, step cursor, failure category, termination reason, timestamps).
+   * Backed by `engine.get(runId)`. Returns `null` when the run is unknown to the
+   * engine and `undefined` when no durable engine is composed. This is the only
+   * way to see a run's durable status mid-flight — session metadata is written
+   * only at terminal transitions, and a recovered run is otherwise opaque.
+   */
+  getDurableRun(runId: string): Promise<WorkflowState | null | undefined>;
+
+  /**
+   * List durable runs from the engine, optionally filtered (status, type, tags).
+   * Backed by `engine.list(filter, options)`. Returns `undefined` when no durable
+   * engine is composed. Note the engine internally types the filter as a
+   * `TypedListFilter`; the plain {@link ListFilter} accepted here is structurally
+   * compatible as long as `attributes` is omitted. A scan-cap breach from the
+   * engine surfaces as a thrown weft fault (catch generically — the cap error is
+   * not on the public barrel).
+   */
+  listDurableRuns(
+    filter?: ListFilter,
+    options?: ListOptions,
+  ): Promise<PaginatedResult<WorkflowSummary> | undefined>;
 
   listSessions(): Promise<SessionSummary[]>;
   getSession(id: string): Promise<AgentSession | undefined>;

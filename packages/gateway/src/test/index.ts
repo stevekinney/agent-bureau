@@ -1,3 +1,5 @@
+import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
+
 import { createGateway } from '../create-gateway';
 import type { Bureau, Gateway, GatewayOptions, RunDetail } from '../types';
 
@@ -24,29 +26,11 @@ export async function requestJSON(
   return gateway.app.request(path, { ...init, headers });
 }
 
-export async function drainMicrotasks(turns = 5): Promise<void> {
-  for (let i = 0; i < turns; i++) {
-    await Promise.resolve();
-  }
-}
-
-export function yieldEventLoopTurn(): Promise<void> {
-  return new Promise((resolve) => {
-    const channel = new MessageChannel();
-    channel.port1.onmessage = () => {
-      channel.port1.close();
-      channel.port2.close();
-      resolve();
-    };
-    channel.port2.postMessage(undefined);
-  });
-}
-
 export async function waitForCondition(
   condition: () => boolean | Promise<boolean>,
   failureMessage: string,
   maximumAttempts = 50,
-  yieldTurn: () => Promise<void> = yieldEventLoopTurn,
+  yieldTurn: () => Promise<void> = yieldToPortableEventLoop,
 ): Promise<void> {
   for (let attempt = 0; attempt < maximumAttempts; attempt++) {
     if (await condition()) {

@@ -12,7 +12,6 @@ import { createRunWorkflow } from '../../src/durable/run-workflow';
 import type { OperativeHookMap } from '../../src/index';
 import { stopWhen } from '../../src/index';
 import { createScheduler } from '../../src/scheduler/create-scheduler';
-import { sleep } from '../../src/scheduler/sleep';
 import { createMockGenerate } from '../../src/test/index';
 import type { GenerateFunction, GenerateResponse } from '../../src/types';
 
@@ -471,8 +470,13 @@ describe('durable scheduler preemption (suspend/resume)', () => {
       blocking.releaseStep1({ content: 'bg final', toolCalls: [] });
 
       await bgResult;
-      // Give any abandoned driver a chance to (wrongly) re-fire the hook.
-      await sleep(20);
+      // Give any abandoned driver a chance to (wrongly) re-fire the hook. An
+      // abandoned driver re-fires through the same deferred-macrotask queue, so
+      // draining several macrotask turns is the deterministic equivalent of the
+      // prior fixed sleep — without a wall-clock wait that flakes under load.
+      for (let i = 0; i < 5; i++) {
+        await yieldToPortableEventLoop();
+      }
 
       // The run's onRunComplete hook did NOT double-fire (preemptable runs are
       // hooks-free, so it fires ZERO times — the documented contract (durable
@@ -560,7 +564,11 @@ function createMockGenerateOnce(content: string): GenerateFunction {
 async function waitFor(check: () => boolean, attempts = 50): Promise<void> {
   for (let i = 0; i < attempts; i++) {
     if (check()) return;
-    await sleep(5);
+    // Yield a macrotask (MessageChannel via Weft's portable helper) rather than a
+    // fixed wall-clock sleep: the durable engine schedules inline launches on
+    // deferred macrotasks, so a condition-driven yield advances them without a
+    // load-sensitive 5ms poll that flakes on a busy CI host.
+    await yieldToPortableEventLoop();
   }
   throw new Error('waitFor: condition not met within attempts');
 }
