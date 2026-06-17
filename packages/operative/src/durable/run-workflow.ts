@@ -60,7 +60,6 @@ import type { DurableRunDeps, RunCursor, StepRecord } from './types';
  *   execution. Earlier plan to filter effectful hooks on replay was rejected as
  *   unsound (skipped-side-effect semantics + fragile function-identity tracking).
  *
-
  * #4 sub-step tool durability — the `runStep` split is REJECTED (do not
  *   re-attempt): durability granularity is one whole step (generate + all its
  *   tools), so a crash after generate but before the step memo commits re-runs the

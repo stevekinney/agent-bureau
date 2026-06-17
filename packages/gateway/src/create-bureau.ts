@@ -404,6 +404,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     const runRuntime = await runtime.createRunRuntime({
       ...request,
       sessionId,
+      runId,
     });
 
     const disposeStreamListeners: Array<() => void> = [];
@@ -552,17 +553,21 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     // started live on this process — neither should reach here, but a silent
     // Map.set overwrite would be a split-brain, so cheap-guard it).
     if (store.getRun(runId)) {
-      // Already registered: drain any pending emitter so it does not leak (the
-      // resolver populated it but this run will not be reattached again).
+      // Already registered: drain any pending entry so it does not leak (the
+      // resolver populated it but this run will not be reattached again) — and stop
+      // its toolbox forwarding, since nothing will take ownership of it here.
+      const orphan = runtime.pendingRecoveryEmitters.get(runId);
       runtime.pendingRecoveryEmitters.delete(runId);
+      orphan?.stopToolboxForward();
       return;
     }
 
     // #28: reuse the emitter the resolver pre-allocated and injected into this
     // run's rebuilt services (so the per-step events the resumed generator
-    // dispatched flow to this reattached ActiveRun's subscribers) AND the toolbox
-    // (so its toolbox:* action events are forwarded too). Consume-and-delete: the
-    // entry's lifetime ends here.
+    // dispatched flow to this reattached ActiveRun's subscribers), and take
+    // OWNERSHIP of the toolbox-forwarding cleanup the resolver wired (so toolbox:*
+    // events stop when the run completes). Consume-and-delete: the entry's lifetime
+    // ends here.
     const pendingRecovery = runtime.pendingRecoveryEmitters.get(runId);
     runtime.pendingRecoveryEmitters.delete(runId);
 
@@ -572,7 +577,10 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         runId,
         handle,
         ...(pendingRecovery
-          ? { emitter: pendingRecovery.emitter, toolbox: pendingRecovery.toolbox }
+          ? {
+              emitter: pendingRecovery.emitter,
+              stopToolboxForward: pendingRecovery.stopToolboxForward,
+            }
           : {}),
       },
     );
@@ -676,24 +684,41 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
    * (#25). A preempted scheduler task is parked `suspended`, and its only live
    * pointer is the in-memory queue entry — lost on crash. `recoverAll()` never
    * surfaces a suspended run (suspended ≠ running), so without this sweep the
-   * workflow and its checkpoints dangle in storage forever.
+   * workflow and its checkpoints dangle in storage forever. This sweep is the
+   * SOLE protection against a reused scheduler id colliding with suspended residue
+   * (`onTerminalConflict: 'start-new'` covers only TERMINAL conflicts), so it must
+   * be COMPLETE — it pages until no suspended scheduler runs remain rather than
+   * stopping at a cap (a partial sweep would leave an unsafe collision).
    *
    * TOCTOU: cancelling a run flips it suspended→cancelled and shrinks the next
    * page's `total`, which would terminate a per-page-cancel loop early and
-   * under-cancel. So we COLLECT every id across all pages FIRST, then cancel. The
-   * page scan is capped (defense against an unbounded backlog); a hit on the cap
-   * is logged rather than silently truncated.
+   * under-cancel. So we COLLECT every id across all pages FIRST, then cancel.
+   *
+   * A high sanity bound guards against a pathological/runaway backlog (or a
+   * mis-paginating store): if it is hit, the sweep FAILS LOUD (throws) rather than
+   * silently truncating and continuing in an unsafe state — the caller's boot
+   * try/catch logs it, and the operator sees a clear signal instead of a quiet
+   * partial sweep.
    */
   async function sweepSuspendedSchedulerRuns(
     engine: NonNullable<typeof runtime.durable>['engine'],
   ) {
     const PAGE_SIZE = 100;
-    const MAX_PAGES = 5;
+    // Sanity cap on TOTAL pages — far above any plausible suspended-residue count.
+    // Hitting it means something is wrong (a runaway backlog or a store that is
+    // not advancing), so we throw rather than truncate.
+    const MAX_PAGES = 10_000;
     const ids: string[] = [];
     let offset = 0;
-    let cappedWithRemainder = false;
 
-    for (let page = 0; page < MAX_PAGES; page++) {
+    for (let page = 0; ; page++) {
+      if (page >= MAX_PAGES) {
+        throw new Error(
+          `[bureau] Suspended scheduler-run sweep exceeded ${MAX_PAGES} pages ` +
+            `(${MAX_PAGES * PAGE_SIZE}+ runs) without draining — aborting boot recovery ` +
+            `rather than leaving suspended residue that could collide with a reused id.`,
+        );
+      }
       // Pagination (limit/offset) lives on ListFilter, not ListOptions.
       const result = await engine.list({
         status: 'suspended',
@@ -708,15 +733,6 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       if (offset >= result.total || result.items.length === 0) {
         break;
       }
-      if (page === MAX_PAGES - 1 && offset < result.total) {
-        cappedWithRemainder = true;
-      }
-    }
-
-    if (cappedWithRemainder) {
-      console.warn(
-        `[bureau] Suspended scheduler-run sweep capped at ${MAX_PAGES * PAGE_SIZE}; more suspended scheduler runs remain and were not cancelled this boot.`,
-      );
     }
 
     if (ids.length === 0) return;
@@ -824,10 +840,13 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         reattachRecoveredRun(handle.id, ownedSessionId!, handle);
       } else {
         // 'cancel' or 'skip': this run will NOT be reattached, so drain its pending
-        // recovery emitter (#28) — the resolver may have populated one (it fires
-        // for any run that resolved to available, including one later cancelled),
-        // and an undrained entry would leak across boots.
+        // recovery entry (#28) and stop its toolbox forwarding — the resolver may
+        // have populated one (it fires for any run that resolved to available,
+        // including one later cancelled), and an undrained entry would leak the
+        // forwarding subscription across boots.
+        const orphan = runtime.pendingRecoveryEmitters.get(handle.id);
         runtime.pendingRecoveryEmitters.delete(handle.id);
+        orphan?.stopToolboxForward();
 
         if (verdict === 'cancel') {
           // Collect the cancel (do NOT fire-and-forget swallow): a rejected cancel
@@ -1051,8 +1070,12 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         for (const disposeListener of schedulerCleanup) {
           disposeListener();
         }
-        // #28 backstop: drop any pending recovery emitters that the boot reattach
-        // pass did not consume, so the Map never retains entries past teardown.
+        // #28 backstop: stop the toolbox forwarding for any pending recovery entry
+        // the boot reattach pass did not consume, then drop them, so neither the Map
+        // nor the forwarding subscriptions survive teardown.
+        for (const pending of runtime.pendingRecoveryEmitters.values()) {
+          pending.stopToolboxForward();
+        }
         runtime.pendingRecoveryEmitters.clear();
         emitter.complete();
       } catch (error) {

@@ -22,8 +22,8 @@ import {
   createRoutingGenerate,
   createStepBasedStrategy,
 } from 'herald';
-import type { HookReplayPolicy } from 'lifecycle';
-import { CompletableEventTarget, TypedEventTarget } from 'lifecycle';
+import type { ForwardableSource, HookReplayPolicy } from 'lifecycle';
+import { CompletableEventTarget, forwardEvents, TypedEventTarget } from 'lifecycle';
 import type { CreateMemoryOptions, Memory } from 'memory';
 import { createMemory } from 'memory';
 import type {
@@ -55,6 +55,7 @@ import {
   createRunEngine,
   createRunWorkflow,
   isAgentRunWorkflowInput,
+  SCHEDULER_RUN_ID_PREFIX,
 } from 'operative/durable';
 import type { SkillSession } from 'skills';
 import { createSkillSession, escapeXml } from 'skills';
@@ -129,35 +130,55 @@ function createMemoryRecallHook(memory: Memory, sessionId: string): PrepareStepH
  * Persist the final assistant content of a step as an experiential memory.
  *
  * EFFECTFUL hook (seam #11): on a durable recovery the crashed in-flight step
- * re-runs from its boundary, so this hook fires AGAIN for that step. The correct
+ * re-runs from its boundary, so this hook can fire AGAIN for the same step. The
  * mitigation is IDEMPOTENCY, not suppression-on-replay — suppressing the hook
  * would drop the write for a step whose work (generate + tools) did re-execute,
- * leaving memory permanently out of sync with a step that ran. Idempotency holds
- * here because a replayed step produces the SAME final `context.content`, and
- * `memory.remember()` deduplicates near-identical entries: byte-identical content
- * embeds to the same vector (cosine similarity 1.0), so the existing record is
- * updated in place rather than duplicated. The write is also tagged with a
- * deterministic `dedupeKey` (namespace + content hash) so the dedup intent is
- * explicit and traceable in stored metadata. A re-fire is therefore a no-op
- * against the persisted set. {@link MEMORY_PERSIST_HOOK_REPLAY} records the
- * `effectful` classification for diagnostics; it does not gate execution.
+ * leaving memory out of sync with a step that ran.
+ *
+ * Idempotency is enforced by a DETERMINISTIC operation key, not by content: a
+ * replayed step may produce non-byte-identical content (its `generate` re-runs),
+ * so relying on the memory store's cosine-similarity dedup is not sufficient.
+ * Instead the write carries a stable `dedupeKey` of `${runId}:${step}` (the
+ * durable operation's identity — same run, same step index across a replay), and
+ * the hook skips the write when a memory in this namespace already carries that
+ * key. This makes a re-fire a guaranteed no-op regardless of content drift.
+ *
+ * When no `runId` is available (a non-durable run, where there is no replay and
+ * therefore no re-fire hazard), the dedup guard is skipped and the write proceeds
+ * — the at-least-once concern only exists on the durable recovery path.
+ *
+ * `replay: 'effectful'` ({@link HookReplayPolicy}) is recorded on the write for
+ * diagnostics; it documents the contract and never gates execution.
  */
-function createMemoryPersistHook(memory: Memory, sessionId: string): OnStepHook {
+export function createMemoryPersistHook(
+  memory: Memory,
+  sessionId: string,
+  runId?: string,
+): OnStepHook {
   return async (context) => {
     if (!context.final || !context.content.trim()) {
       return;
+    }
+
+    // Deterministic identity of THIS durable operation: same run + same step
+    // index on a replay. Content-independent, so a divergent regenerate cannot
+    // produce a second record.
+    const dedupeKey = runId === undefined ? undefined : `${runId}:${context.step}`;
+
+    if (dedupeKey !== undefined) {
+      const existing = await memory.list({ namespace: sessionId });
+      if (existing.some((entry) => entry.metadata['dedupeKey'] === dedupeKey)) {
+        return; // Already persisted by the first (pre-crash) execution of this step.
+      }
     }
 
     await memory.remember(context.content, {
       namespace: sessionId,
       source: 'experiential',
       step: context.step,
-      // Deterministic per-(namespace, content) marker: a replayed step produces
-      // the same content → same key, so the dedup is explicit, not only inferred
-      // from vector similarity.
-      dedupeKey: Bun.hash(`${sessionId} ${context.content}`).toString(16),
+      ...(dedupeKey !== undefined ? { dedupeKey } : {}),
       // Replay classification (seam #11): an external write → `effectful`, kept
-      // safe across a recovery re-fire by the idempotent write above. Metadata
+      // safe across a recovery re-fire by the dedupeKey guard above. Metadata
       // only; never gates execution.
       replay: 'effectful' satisfies HookReplayPolicy,
     });
@@ -479,14 +500,20 @@ export interface DurableComposition {
 
 /**
  * The pieces the resolver pre-allocates for a recovered run so the reattached
- * ActiveRun can surface live events (#28): the `emitter` `runStep` dispatches step
- * events to (and which becomes the ActiveRun's event surface), plus the
- * `toolbox` whose `toolbox:*` action events must be explicitly forwarded to that
- * emitter.
+ * ActiveRun can surface live events (#28):
+ * - `emitter` — what `runStep` dispatches step events to during resume; it becomes
+ *   the reattached ActiveRun's event surface (reattach reuses this exact instance).
+ * - `stopToolboxForward` — the cleanup for the `toolbox → emitter` forwarding that
+ *   the RESOLVER wires immediately (the moment services are built), so `toolbox:*`
+ *   action events are captured from the very first resumed step. Wiring it at
+ *   reattach instead would drop events the toolbox emits in the window between the
+ *   resolver firing (inside `recoverAll`) and reattach installing the bridge.
+ *   Reattach takes ownership and calls it on completion; the drain/dispose paths
+ *   call it for entries that are never reattached, so the subscription never leaks.
  */
 export interface PendingRecoveryEvents {
   emitter: CompletableEventTarget<CombinedOperativeEventMap>;
-  toolbox: DurableRunDeps['toolbox'];
+  stopToolboxForward: () => void;
 }
 
 export interface RuntimeComposition {
@@ -531,7 +558,7 @@ export interface RuntimeComposition {
   systemPrompt: string | undefined;
   getToolSummaries(): ToolSummary[];
   createRunRuntime(
-    request: CreateRunRequest & { sessionId: string },
+    request: CreateRunRequest & { sessionId: string; runId?: string },
     options?: { liveStreaming?: boolean },
   ): Promise<{
     generate: GenerateFunction;
@@ -630,22 +657,10 @@ export async function createRuntimeComposition(
       resolveWorkflowServices: resolveRunServices,
       ...(options.observability !== undefined ? { observability: options.observability } : {}),
       ...(options.onLog ? { onLog: options.onLog } : {}),
-      ...(options.durableGuardrails?.history ? { history: options.durableGuardrails.history } : {}),
-      ...(options.durableGuardrails?.checkpointSizeWarningThreshold !== undefined
-        ? {
-            checkpointSizeWarningThreshold:
-              options.durableGuardrails.checkpointSizeWarningThreshold,
-          }
-        : {}),
-      ...(options.durableGuardrails?.checkpointHistory !== undefined
-        ? { checkpointHistory: options.durableGuardrails.checkpointHistory }
-        : {}),
-      ...(options.durableGuardrails?.payloadSize
-        ? { payloadSize: options.durableGuardrails.payloadSize }
-        : {}),
-      ...(options.durableGuardrails?.onCheckpointSizeWarning
-        ? { onCheckpointSizeWarning: options.durableGuardrails.onCheckpointSizeWarning }
-        : {}),
+      // durableGuardrails is a Pick of these exact CreateRunEngineOptions fields, so
+      // it spreads straight through; createRunEngine guards each one internally, so
+      // passing `undefined` members is harmless.
+      ...options.durableGuardrails,
     });
   }
 
@@ -790,7 +805,7 @@ export async function createRuntimeComposition(
   }
 
   function createRunRuntime(
-    request: CreateRunRequest & { sessionId: string },
+    request: CreateRunRequest & { sessionId: string; runId?: string },
     runtimeOptions?: { liveStreaming?: boolean },
   ) {
     const liveStreaming = runtimeOptions?.liveStreaming ?? true;
@@ -819,7 +834,7 @@ export async function createRuntimeComposition(
 
     if (memory) {
       prepareStep.push(createMemoryRecallHook(memory, request.sessionId));
-      onStep.push(createMemoryPersistHook(memory, request.sessionId));
+      onStep.push(createMemoryPersistHook(memory, request.sessionId, request.runId));
     }
 
     if (options.skills) {
@@ -876,6 +891,7 @@ export async function createRuntimeComposition(
    */
   async function buildRunDepsFromSession(
     session: Awaited<ReturnType<NonNullable<typeof sessionStore>['load']>>,
+    runId?: string,
   ): Promise<DurableRunDeps | null> {
     if (!session) return null;
     const message = session.metadata['lastUserMessage'];
@@ -883,6 +899,10 @@ export async function createRuntimeComposition(
       {
         message: typeof message === 'string' ? message : '',
         sessionId: session.id,
+        // Thread the recovered run's id so the memory-persist hook's idempotency
+        // key (`${runId}:${step}`) matches the pre-crash execution — the durable
+        // recovery path is exactly where the at-least-once re-fire happens.
+        ...(runId !== undefined ? { runId } : {}),
       },
       { liveStreaming: false },
     );
@@ -939,14 +959,20 @@ export async function createRuntimeComposition(
       return { status: 'unavailable', reason: `run ${info.workflowId} has no recoverable session` };
     }
     // SCHEDULER-ORIGIN GUARD (#25): a durable scheduler run carries a SYNTHETIC
-    // sessionId equal to its own runId (there is no bureau session behind it). The
-    // resolver's `info` does NOT carry tags (WorkflowServicesResolverInfo is
-    // {workflowId, workflowType, input}), so the phantom `sessionId === runId`
-    // pattern is the discriminant available here. Return unavailable BEFORE the
-    // sessionStore.load — a load would always miss and waste a round-trip, and a
-    // scheduler run is a live-process concern that boot recovery must not resume
-    // as a session run. The boot sweep cancels any suspended scheduler residue.
-    if (info.input.sessionId === info.input.runId) {
+    // sessionId equal to its own runId, prefixed `scheduler-run-` (there is no
+    // bureau session behind it). The resolver's `info` does NOT carry tags
+    // (WorkflowServicesResolverInfo is {workflowId, workflowType, input}), so we
+    // discriminate by `sessionId === runId` AND the scheduler id prefix. The prefix
+    // is load-bearing for contractual safety: a genuine session run's id is
+    // `run-<uuid>`, so even a session that coincidentally set `sessionId === runId`
+    // is NOT misclassified. Return unavailable BEFORE the sessionStore.load — a
+    // load would always miss, and a scheduler run is a live-process concern that
+    // boot recovery must not resume as a session run. The boot sweep cancels any
+    // suspended scheduler residue.
+    if (
+      info.input.sessionId === info.input.runId &&
+      info.input.runId.startsWith(SCHEDULER_RUN_ID_PREFIX)
+    ) {
       return {
         status: 'unavailable',
         reason: `run ${info.workflowId} is scheduler-origin (no session to recover)`,
@@ -985,7 +1011,9 @@ export async function createRuntimeComposition(
 
     let services: DurableRunDeps | null;
     try {
-      services = await buildRunDepsFromSession(session);
+      // info.workflowId === the run id (pinned at engine.start) — thread it so the
+      // recovered run's memory-persist idempotency key matches its pre-crash key.
+      services = await buildRunDepsFromSession(session, info.workflowId);
     } catch (error) {
       // The session exists, but its deps cannot be rebuilt on this process (e.g.
       // no `generate`/provider configured here, so `createRunRuntime` throws).
@@ -1022,15 +1050,26 @@ export async function createRuntimeComposition(
     }
     // #28: pre-allocate the recovered run's emitter HERE (before the generator
     // advances) and inject it into the rebuilt services, so `runStep` dispatches
-    // its toolbox/step events to it during resume. The bureau's reattach loop
-    // consumes this same emitter (by runId) as the reattached ActiveRun's surface,
-    // making those events observable via `getRun(runId)` — previously a recovered
-    // run fired no per-step events. The Map entry is drained by reattach (and on
-    // dispose) so it does not leak across boots.
+    // its step events to it during resume. CRITICAL (Codex round-1): also wire the
+    // `toolbox → emitter` forwarding RIGHT NOW, not at reattach — `toolbox:*` action
+    // events originate from the toolbox, and a recovered run can fire its first
+    // step (inside `recoverAll`) before the bureau's reattach loop runs on the next
+    // turn. Forwarding from the moment the toolbox exists closes that window. The
+    // bureau's reattach loop reuses this same emitter (by runId) as the reattached
+    // ActiveRun's surface and takes ownership of `stopToolboxForward`; the Map entry
+    // is drained (and the forward stopped) by reattach, the cancel/skip branches, or
+    // dispose, so the subscription never leaks across boots.
     const recoveryEmitter = new CompletableEventTarget<CombinedOperativeEventMap>();
+    const toolboxForward = forwardEvents(
+      // The toolbox is variance-widened; the durable layer never inspects the
+      // tool-tuple type, matching createDurableActiveRun's documented cast.
+      services.toolbox as unknown as ForwardableSource,
+      recoveryEmitter,
+      'toolbox',
+    );
     pendingRecoveryEmitters.set(info.workflowId, {
       emitter: recoveryEmitter,
-      toolbox: services.toolbox,
+      stopToolboxForward: () => toolboxForward.stop(),
     });
     return { status: 'available', services: { ...services, emitter: recoveryEmitter } };
   }

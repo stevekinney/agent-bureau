@@ -1,7 +1,12 @@
 import type { ActiveRun } from '../create-run';
 import { createRun } from '../create-run';
 import type { AnyRunEngine, CheckpointStore } from '../durable';
-import { resumeDurableRunResult, SCHEDULER_ORIGIN_TAG, startDurableRunResult } from '../durable';
+import {
+  resumeDurableRunResult,
+  SCHEDULER_ORIGIN_TAG,
+  SCHEDULER_RUN_ID_PREFIX,
+  startDurableRunResult,
+} from '../durable';
 import { executeLoop } from '../loop';
 import type { GenerateFunction, RunResult, Toolbox } from '../types';
 import type { SchedulerEventMap, SchedulerEventType } from './events';
@@ -629,7 +634,7 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
       durableRunId = task.__resume.runId;
       result = resumeDurableRun(durable, durableRunId);
     } else if (durable) {
-      durableRunId = `scheduler-run-${task.id}-${++durableRunCounter}`;
+      durableRunId = `${SCHEDULER_RUN_ID_PREFIX}${task.id}-${++durableRunCounter}`;
       let runOptions: SchedulerRunOptions;
       try {
         runOptions = await task.createRun();

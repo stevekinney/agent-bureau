@@ -8,7 +8,7 @@ import { createTool, createToolbox } from 'armorer';
 import { createMockTool, createTestToolbox } from 'armorer/test';
 import { afterEach, describe, expect, it, mock } from 'bun:test';
 import { Conversation, getMessages } from 'conversationalist';
-import { createMemory } from 'memory';
+import { createMemory, type Memory } from 'memory';
 import { createInMemoryMemoryRecordStorage, createMockEmbedder } from 'memory/test';
 import type { GenerateFunction, GenerateResponse, Toolbox } from 'operative';
 import { stopWhen } from 'operative';
@@ -18,7 +18,7 @@ import { createStore } from 'sentinel';
 import { z } from 'zod';
 
 import { BureauError, classifyRecoveredRun, createBureau } from './create-bureau';
-import { createRuntimeComposition } from './runtime-composition';
+import { createMemoryPersistHook, createRuntimeComposition } from './runtime-composition';
 import { waitForCondition, waitForRunState } from './test';
 import {
   type Bureau,
@@ -1364,7 +1364,10 @@ describe('createBureau scheduler-origin crash semantics (#25)', () => {
       const suspendedState = await engine.get(runId);
       expect(suspendedState?.status).toBe('suspended');
 
-      composition.disposeStorage?.(); // release the file handle (engine dispose first)
+      // Tear down in the SAME order the production dispose path uses: dispose the
+      // engine FIRST (it holds the open SQLite connection), THEN release the raw
+      // storage handle. A single disposeStorage call — disposing twice could close
+      // an already-closed handle.
       engine[Symbol.dispose]?.();
       composition.disposeStorage?.();
 
@@ -1379,12 +1382,17 @@ describe('createBureau scheduler-origin crash semantics (#25)', () => {
       });
 
       try {
-        await pollUntil(async () => {
-          const swept = await bureau.getDurableRun(runId);
-          return swept?.status === 'cancelled';
-        });
-        const state = await bureau.getDurableRun(runId);
-        expect(state?.status).toBe('cancelled');
+        // The sweep is a multi-round-trip SQLite list+cancel on a cold boot — use a
+        // generous poll bound (matching the other cross-process recovery tests),
+        // and assert the poll actually succeeded rather than letting a timeout fall
+        // through to a confusing downstream assertion.
+        const swept = await pollUntil(async () => {
+          const state = await bureau.getDurableRun(runId);
+          return state?.status === 'cancelled';
+        }, 50);
+        expect(swept).toBe(true);
+        const finalState = await bureau.getDurableRun(runId);
+        expect(finalState?.status).toBe('cancelled');
       } finally {
         bureau.dispose();
       }
@@ -1397,13 +1405,14 @@ describe('createBureau scheduler-origin crash semantics (#25)', () => {
 });
 
 describe('createBureau effectful hook idempotency (#27)', () => {
-  it('does not duplicate experiential memory when the same final content is persisted twice', async () => {
-    // #27: createMemoryPersistHook is effectful (writes to the memory store). On a
-    // durable recovery the crashed step re-runs and the hook fires again with the
-    // SAME final content. The fix is idempotency, not skip-on-replay: a re-write
-    // of identical content must NOT create a duplicate memory. Two runs producing
-    // the byte-identical final content stand in for that re-fire (deterministic
-    // mock embedder → identical vector → the store dedups in place).
+  // List only the experiential memories in a namespace (avoids the lint against
+  // accessing a member directly off an await expression at each call site).
+  async function listExperiential(memory: Memory, namespace: string) {
+    const entries = await memory.list({ namespace, limit: 100 });
+    return entries.filter((entry) => entry.metadata['source'] === 'experiential');
+  }
+
+  it('persists an experiential memory tagged with a deterministic (runId:step) dedupeKey + effectful replay', async () => {
     const memory = createMemory({
       embedder: createMockEmbedder(128),
       storage: createInMemoryMemoryRecordStorage(),
@@ -1412,43 +1421,103 @@ describe('createBureau effectful hook idempotency (#27)', () => {
 
     const sessionId = 'memory-idempotency-session';
     const bureau = await createBureau({
-      // Deterministic: every run produces the identical final assistant content.
       generate: async () => ({ content: 'the stable remembered fact', toolCalls: [] }),
       toolbox: createEmptyToolbox(),
       memory,
-      // Without a stop condition a step never reaches `final:true`, so the persist
-      // hook (which fires on `context.final`) would not run — match the other
-      // bureau tests and stop when there are no tool calls.
       stopWhen: stopWhen.noToolCalls(),
       persistence: textValueStore(new MemoryStorage()),
     });
 
     try {
-      const first = await bureau.createRun({ message: 'remember this', sessionId });
-      await waitForRunCompletion(bureau, first.id);
-      const afterFirst = await memory.list({ namespace: sessionId, limit: 100 });
-      const experientialAfterFirst = afterFirst.filter(
-        (entry) => entry.metadata['source'] === 'experiential',
-      );
-      expect(experientialAfterFirst.length).toBe(1);
-      // The persist hook tagged the write with a deterministic dedupe key and the
-      // effectful replay classification.
-      expect(experientialAfterFirst[0]!.metadata['dedupeKey']).toBeDefined();
-      expect(experientialAfterFirst[0]!.metadata['replay']).toBe('effectful');
-
-      // Re-run: same final content. The idempotent write dedups in place — the
-      // experiential memory count must NOT grow (this is the at-least-once-safe
-      // contract a recovery re-fire relies on).
-      const second = await bureau.createRun({ message: 'remember this again', sessionId });
-      await waitForRunCompletion(bureau, second.id);
-      const afterSecond = await memory.list({ namespace: sessionId, limit: 100 });
-      const experientialAfterSecond = afterSecond.filter(
-        (entry) => entry.metadata['source'] === 'experiential',
-      );
-      expect(experientialAfterSecond.length).toBe(1);
+      const run = await bureau.createRun({ message: 'remember this', sessionId });
+      await waitForRunCompletion(bureau, run.id);
+      const persisted = await listExperiential(memory, sessionId);
+      expect(persisted.length).toBe(1);
+      // The dedupeKey is the durable operation's identity — runId:step — NOT a
+      // content hash, so a divergent regenerate on replay still maps to one record.
+      expect(persisted[0]!.metadata['dedupeKey']).toBe(`${run.id}:0`);
+      expect(persisted[0]!.metadata['replay']).toBe('effectful');
     } finally {
       bureau.dispose();
     }
+  });
+
+  it('re-firing the persist hook for the same (runId, step) is a no-op even when content differs', async () => {
+    // The real at-least-once hazard: a durable recovery re-runs the crashed final
+    // step, firing the effectful persist hook AGAIN for the SAME (runId, step) —
+    // and `generate` re-runs, so the regenerated content may DIFFER. Idempotency is
+    // keyed on runId:step (not on content), so the re-fire must be a no-op against
+    // a shared memory backend. Tested directly against the hook, which is the
+    // deterministic way to exercise the re-fire without racing a real mid-memo
+    // crash. (Skip-on-replay would instead DROP the write; this proves we dedup,
+    // not drop, AND that a divergent regenerate does not slip a duplicate through.)
+    const memory = createMemory({
+      embedder: createMockEmbedder(128),
+      storage: createInMemoryMemoryRecordStorage(),
+    });
+    await memory.init();
+
+    const namespace = 'hook-idempotency-ns';
+    const runId = 'run-fixed-id';
+    const hook = createMemoryPersistHook(memory, namespace, runId);
+
+    // A minimal final StepResult for step 0; only final/content/step are read.
+    const stepResult = (content: string) => ({
+      step: 0,
+      conversation: new Conversation(),
+      content,
+      toolCalls: [] as never[],
+      results: [] as never[],
+      final: true,
+    });
+
+    // First fire (pre-crash execution): persists one experiential memory.
+    await hook(stepResult('original content'));
+    const afterFirst = await listExperiential(memory, namespace);
+    expect(afterFirst.length).toBe(1);
+    expect(afterFirst[0]!.metadata['dedupeKey']).toBe(`${runId}:0`);
+
+    // Re-fire (recovery replay) for the SAME (runId, step) but DIVERGENT content.
+    // The dedupeKey guard skips the write — count stays 1, not 2.
+    await hook(stepResult('different regenerated content'));
+    const afterRefire = await listExperiential(memory, namespace);
+    expect(afterRefire.length).toBe(1);
+    // The original write survived (not overwritten/dropped) — at-least-once is safe.
+    expect(afterRefire[0]!.content).toBe('original content');
+  });
+
+  it('persists distinct memories for different (runId, step) pairs', async () => {
+    // Idempotency must not OVER-dedup: distinct durable operations (a different run
+    // or a different step) are different memories. Use distinct content per write
+    // so the memory store's own near-identical vector dedup does not merge them —
+    // the point here is that the per-(runId,step) key guard does not wrongly skip a
+    // genuinely-different operation.
+    const memory = createMemory({
+      embedder: createMockEmbedder(128),
+      storage: createInMemoryMemoryRecordStorage(),
+    });
+    await memory.init();
+
+    const namespace = 'hook-distinct-ns';
+    const stepResult = (step: number, content: string) => ({
+      step,
+      conversation: new Conversation(),
+      content,
+      toolCalls: [] as never[],
+      results: [] as never[],
+      final: true,
+    });
+
+    await createMemoryPersistHook(memory, namespace, 'run-A')(stepResult(0, 'fact from run A'));
+    await createMemoryPersistHook(
+      memory,
+      namespace,
+      'run-B',
+    )(stepResult(0, 'a wholly separate fact from run B'));
+
+    const persisted = await listExperiential(memory, namespace);
+    const keys = persisted.map((e) => e.metadata['dedupeKey']).sort();
+    expect(keys).toEqual(['run-A:0', 'run-B:0']);
   });
 });
 

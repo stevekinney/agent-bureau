@@ -1,10 +1,7 @@
 import type {
-  CheckpointSizeWarningEvent,
-  HistoryPolicy,
   ListFilter,
   ListOptions,
   PaginatedResult,
-  PayloadSizePolicy,
   WorkflowLogRecord,
   WorkflowState,
   WorkflowSummary,
@@ -37,6 +34,7 @@ import type {
   StopCondition,
   TokenUsage,
 } from 'operative';
+import type { CreateRunEngineOptions } from 'operative/durable';
 import type { Store } from 'sentinel';
 
 import type { BureauEventMap } from './events';
@@ -216,16 +214,19 @@ export interface BureauOptions {
 
 /**
  * Durable history/checkpoint guardrail configuration surfaced on
- * {@link BureauOptions.durableGuardrails}. A thin passthrough to the matching
- * `EngineOptions` fields.
+ * {@link BureauOptions.durableGuardrails}. A direct `Pick` of the matching
+ * {@link CreateRunEngineOptions} fields — no duplicated field declarations, so the
+ * single source of truth stays on the engine options and the composition spreads
+ * this straight through.
  */
-export interface DurableGuardrailsConfiguration {
-  history?: HistoryPolicy;
-  checkpointSizeWarningThreshold?: number;
-  checkpointHistory?: number;
-  payloadSize?: PayloadSizePolicy;
-  onCheckpointSizeWarning?: (event: CheckpointSizeWarningEvent) => void;
-}
+export type DurableGuardrailsConfiguration = Pick<
+  CreateRunEngineOptions,
+  | 'history'
+  | 'checkpointSizeWarningThreshold'
+  | 'checkpointHistory'
+  | 'payloadSize'
+  | 'onCheckpointSizeWarning'
+>;
 
 export type BureauEventType = keyof BureauEventMap & string;
 

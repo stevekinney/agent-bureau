@@ -30,6 +30,16 @@ import type { AgentRunWorkflowResult } from './run-workflow';
  */
 export const SCHEDULER_ORIGIN_TAG = 'bureau:scheduler-origin' as const;
 
+/**
+ * Id prefix for durable scheduler runs (`scheduler-run-<taskId>-<n>`). A scheduler
+ * run uses a synthetic id as BOTH its runId and its phantom sessionId, so boot
+ * recovery's resolver discriminates it by `input.sessionId === input.runId` AND
+ * this prefix — the prefix is what makes the discriminant contractually safe: a
+ * genuine session run's id is `run-<uuid>` (never this prefix), so a session that
+ * coincidentally set `sessionId === runId` is not misclassified as scheduler-origin.
+ */
+export const SCHEDULER_RUN_ID_PREFIX = 'scheduler-run-' as const;
+
 /** Dependencies the adapter needs from bureau composition. */
 export interface DurableActiveRunContext {
   engine: AnyRunEngine;
@@ -274,36 +284,23 @@ export function reattachDurableActiveRun(
      */
     emitter?: CompletableEventTarget<CombinedOperativeEventMap>;
     /**
-     * The resolver-built toolbox the recovered run executes with (#28). When
-     * present, its `toolbox:*` events are forwarded to {@link emitter} exactly as
-     * the live `createDurableActiveRun` path does — `runStep` dispatches step
-     * events to the emitter itself, but toolbox action events come from the
-     * toolbox's own observable, so they need explicit forwarding. Omit to forward
-     * nothing (the prior reattach behavior: terminal events only). Typed as
-     * `RunOptions['toolbox']` — the same variance-widened toolbox the live path
-     * forwards — to avoid importing the durable-internal `AnyToolbox`.
+     * Cleanup for the `toolbox → emitter` forwarding the RESOLVER already wired
+     * (#28). The resolver forwards `toolbox:*` events from the moment services are
+     * built — closing the window where a fast-resuming run fires its first step
+     * before reattach runs — so reattach does NOT re-wire forwarding; it only takes
+     * OWNERSHIP of this cleanup and runs it when the run completes. Omit when there
+     * is no resolver-built forwarding (a handle reattached outside recovery).
      */
-    toolbox?: RunOptions['toolbox'];
+    stopToolboxForward?: () => void;
   },
 ): ActiveRun {
   const { runId, handle } = reattach;
   const emitter = reattach.emitter ?? new CompletableEventTarget<CombinedOperativeEventMap>();
 
-  // #28: forward the resolver-built toolbox's action events to this ActiveRun's
-  // emitter, mirroring the live path (createDurableActiveRun). Without this a
-  // recovered run fired only terminal events; now toolbox:* events are observable
-  // via getRun(runId) during resume too.
-  const reattachCleanups: (() => void)[] = [];
-  if (reattach.toolbox) {
-    // The toolbox is variance-widened; the durable layer never inspects the
-    // tool-tuple type, matching createDurableActiveRun's documented cast.
-    const toolboxForward = forwardEvents(
-      reattach.toolbox as unknown as ForwardableSource,
-      emitter,
-      'toolbox',
-    );
-    reattachCleanups.push(() => toolboxForward.stop());
-  }
+  // #28: the resolver already forwards the toolbox's action events into `emitter`
+  // (race-free, from services-build time). Reattach just owns the teardown so the
+  // subscription stops when this run completes.
+  const toolboxForwardCleanup = reattach.stopToolboxForward;
 
   // Resolves `true` only when an adapter-initiated `engine.cancel` SUCCEEDS for
   // this run — i.e. THIS abort terminalized the run. `undefined` means no abort
@@ -314,7 +311,7 @@ export function reattachDurableActiveRun(
   let abortCancelled: Promise<boolean> | undefined;
 
   function complete(): void {
-    for (const cleanup of reattachCleanups) cleanup();
+    toolboxForwardCleanup?.();
     emitter.complete();
   }
 
@@ -431,20 +428,24 @@ export async function startDurableRunResult(
 ): Promise<RunResult> {
   const { runId, sessionId, options, prompt, signal, tags } = durableRun;
 
+  // 'start-new' is a DATA-LOSS policy (it purges a prior terminal run under the
+  // same id) and must be scoped to runs that legitimately reuse an id — i.e.
+  // SCHEDULER-ORIGIN runs, which reuse a synthetic, counter-suffixed id that can
+  // collide with a TERMINAL prior run after a crash+restart. For any other
+  // durable run a terminal-id collision is a genuine error to surface, NOT to
+  // silently overwrite, so we only opt into 'start-new' when the scheduler tag is
+  // present. NOTE: 'start-new' covers only TERMINAL conflicts — a `suspended`
+  // prior run is not terminal, so id-collision with suspended residue is prevented
+  // by the boot sweep (sweepSuspendedSchedulerRuns), not by this policy.
+  const isSchedulerOrigin = tags?.includes(SCHEDULER_ORIGIN_TAG) ?? false;
+
   const handle = await context.engine.start(
     'agentRun',
     { runId, sessionId, prompt, maximumSteps: options.maximumSteps },
     {
       id: runId,
       ...(tags ? { tags } : {}),
-      // A scheduler run reuses a synthetic, counter-suffixed id that can collide
-      // with a TERMINAL prior run after a crash+restart; 'start-new' purges that
-      // terminal run and starts fresh atomically rather than throwing
-      // WorkflowAlreadyExistsError. NOTE: this covers only TERMINAL conflicts —
-      // a `suspended` prior run is NOT terminal, so id-collision with suspended
-      // residue is prevented by the boot sweep (sweepSuspendedSchedulerRuns),
-      // not by this policy.
-      onTerminalConflict: 'start-new',
+      ...(isSchedulerOrigin ? { onTerminalConflict: 'start-new' as const } : {}),
       services: {
         options: { ...options, signal },
         toolbox: options.toolbox,

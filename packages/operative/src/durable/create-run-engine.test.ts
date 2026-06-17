@@ -158,8 +158,10 @@ describe('createRunEngine', () => {
       expect(typeof observability!.metrics.snapshot).toBe('function');
       const handle = await engine.start('agentRun', { value: 3 });
       expect(await handle.result()).toEqual({ doubled: 6 });
+      // The interceptor actually recorded metrics for the run (a no-op interceptor
+      // would leave the snapshot empty) — assert it is populated, not merely defined.
       const snapshot = observability!.metrics.snapshot();
-      expect(snapshot).toBeDefined();
+      expect(Object.keys(snapshot).length).toBeGreaterThan(0);
     } finally {
       // dispose() must be callable and idempotent-safe before engine teardown.
       observability!.dispose();
