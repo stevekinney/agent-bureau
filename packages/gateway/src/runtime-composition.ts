@@ -196,10 +196,18 @@ export function createMemoryPersistHook(
 }
 
 /**
- * Whether the namespace already holds a memory carrying `dedupeKey`. Pages the
- * whole namespace (NOT a single default 100-record page, which would miss the key
- * in a long session and break the persist hook's idempotency), early-exiting on
- * the first match.
+ * Whether the namespace already holds an EXPERIENTIAL memory carrying `dedupeKey`.
+ * Pages the whole namespace (NOT a single default 100-record page, which would
+ * miss the key in a long session and break the persist hook's idempotency),
+ * early-exiting on the first match. The match also requires `source ===
+ * 'experiential'` to mirror exactly what the hook writes, so a non-experiential
+ * record that happened to carry a colliding `dedupeKey` could not suppress it.
+ *
+ * Unlike the boot-time sweep (which throws on its sanity cap), this runs on the
+ * hot path — every final durable step — so a `MAX_PAGES` cap fails OPEN: a
+ * mis-paginating store that never returns a short page would otherwise spin
+ * forever here. On the cap we log and return `false` (let the write proceed,
+ * preferring a possible duplicate over a hung run), rather than throw.
  */
 async function hasExperientialDedupeKey(
   memory: Memory,
@@ -207,15 +215,26 @@ async function hasExperientialDedupeKey(
   dedupeKey: string,
 ): Promise<boolean> {
   const PAGE_SIZE = 200;
-  for (let offset = 0; ; offset += PAGE_SIZE) {
-    const page = await memory.list({ namespace, limit: PAGE_SIZE, offset });
-    if (page.some((entry) => entry.metadata['dedupeKey'] === dedupeKey)) {
+  const MAX_PAGES = 50_000; // far above any real session; a non-terminating guard
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const entries = await memory.list({ namespace, limit: PAGE_SIZE, offset: page * PAGE_SIZE });
+    if (
+      entries.some(
+        (entry) =>
+          entry.metadata['source'] === 'experiential' && entry.metadata['dedupeKey'] === dedupeKey,
+      )
+    ) {
       return true;
     }
-    if (page.length < PAGE_SIZE) {
+    if (entries.length < PAGE_SIZE) {
       return false; // Last (short) page — namespace exhausted, no match.
     }
   }
+  console.warn(
+    `[bureau] dedupeKey lookup exceeded ${MAX_PAGES} pages for namespace "${namespace}" ` +
+      `(key "${dedupeKey}") without a short page — proceeding with the write (fail-open).`,
+  );
+  return false;
 }
 
 function resolveProviderGenerate(

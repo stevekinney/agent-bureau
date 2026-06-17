@@ -1553,9 +1553,13 @@ describe('createBureau effectful hook idempotency (#27)', () => {
       final: true,
     });
 
-    // The target write (the one that will be re-fired) goes in FIRST, so after
-    // 220 later distinct writes it is buried deep in the namespace.
-    await hook(stepResult(0, 'the target memory to dedup'));
+    // Seed 220 distinct fillers FIRST, then the target LAST. The in-memory store
+    // returns newest-first; with the (typically equal) same-millisecond timestamps
+    // of a tight loop, its stable sort preserves insertion order, so the
+    // last-inserted target lands at index ~220 — past page 0 (0-199) AND page 1.
+    // That forces hasExperientialDedupeKey to actually page beyond the first chunk
+    // to find it; seeding the target first would put it on page 0 and the test
+    // would never exercise the multi-page path it is here to prove.
     for (let i = 0; i < 220; i++) {
       await createMemoryPersistHook(
         memory,
@@ -1563,11 +1567,12 @@ describe('createBureau effectful hook idempotency (#27)', () => {
         `filler-run-${i}`,
       )(stepResult(0, `distinct filler memory number ${i}`));
     }
+    await hook(stepResult(0, 'the target memory to dedup'));
     const beforeEntries = await listExperiential(memory, namespace);
     const before = beforeEntries.length;
     expect(before).toBeGreaterThan(200);
 
-    // Re-fire (run-paged, step 0) — its key sits past the default page. The paged
+    // Re-fire (run-paged, step 0) — its key sits past the first page. The paged
     // lookup must still find it and skip; the count must not grow.
     await hook(stepResult(0, 'a divergent regenerate of the target'));
     const afterEntries = await listExperiential(memory, namespace);
