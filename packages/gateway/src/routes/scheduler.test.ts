@@ -1,3 +1,4 @@
+import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
 import { createTestToolbox } from 'armorer/test';
 import { describe, expect, it } from 'bun:test';
 import { Conversation, createConversationHistory } from 'conversationalist';
@@ -6,7 +7,6 @@ import type { GenerateResponse, Scheduler, SchedulerPriority } from 'operative';
 import { createScheduler } from 'operative';
 import { createMockGenerate } from 'operative/test';
 
-import { drainMicrotasks } from '../test';
 import type { SubmitSchedulerTaskRequest, SubmitSchedulerTaskResponse } from '../types';
 import { createSchedulerRoutes } from './scheduler';
 
@@ -15,7 +15,11 @@ function textResponse(content: string): GenerateResponse {
 }
 
 async function waitForSchedulerTick() {
-  await drainMicrotasks();
+  // Yield a macrotask so the scheduler loop dispatches the next queued task —
+  // matches the prior drainMicrotasks() drain of Weft's deferred launch queue.
+  for (let i = 0; i < 5; i++) {
+    await yieldToPortableEventLoop();
+  }
 }
 
 function createSubmitSchedulerTask(

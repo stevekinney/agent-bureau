@@ -15,7 +15,7 @@ import { createStore } from 'sentinel';
 import { z } from 'zod';
 
 import { BureauError, classifyRecoveredRun, createBureau } from './create-bureau';
-import { drainMicrotasks, waitForCondition, waitForRunState } from './test';
+import { waitForCondition, waitForRunState } from './test';
 import {
   type Bureau,
   type ConfigurationResponse,
@@ -76,7 +76,13 @@ function createBlockingGenerate(): {
 
 async function waitForRunCompletion(bureau: Bureau, runId: string) {
   await waitForRunState(bureau, runId);
-  await drainMicrotasks(10);
+  // Drain Weft's deferred inline-launch queue (its `setTimeout(0)` starts) so the
+  // terminal session-persistence listeners settle. yieldToPortableEventLoop is a
+  // macrotask (MessageChannel), which advances that queue — a microtask flush
+  // would not. Ten yields match the prior drainMicrotasks(10) budget.
+  for (let i = 0; i < 10; i++) {
+    await yieldToPortableEventLoop();
+  }
 }
 
 /**
