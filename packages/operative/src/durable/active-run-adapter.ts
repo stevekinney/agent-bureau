@@ -1,4 +1,4 @@
-import { isWeftErrorLike } from '@lostgradient/weft';
+import { HISTORY_CIRCUIT_BREAKER_REASON, isWeftErrorLike } from '@lostgradient/weft';
 import { Conversation, isConversation } from 'conversationalist';
 import type { ForwardableSource } from 'lifecycle';
 import { CompletableEventTarget, forwardEvents } from 'lifecycle';
@@ -545,6 +545,28 @@ async function driveDurableRun(
     if (isWeftErrorLike(error) && error.code === 'EngineDisposedError') {
       return makeInterruptedRunResult(conversation);
     }
+    // A `history.maxEvents` circuit-breaker (or a genuine execution-deadline
+    // timeout) rejects `handle.result()` with a `WorkflowTimeoutError`. The error
+    // code is `'WorkflowTimeoutError'` (no 'd' — distinct from the
+    // `WorkflowTimedOutEvent` name) and carries NO `terminationReason`, so the
+    // circuit-breaker-vs-deadline distinction must come from the engine's stored
+    // state. Either way the run is genuinely terminal (not abandoned-for-recovery
+    // like EngineDisposedError), so classify it as `error` and fire the terminal
+    // lifecycle here rather than rethrowing into the unawaited `.then()` chain
+    // (which would surface as an unhandled rejection and leave the session stuck
+    // `running`).
+    if (isWeftErrorLike(error) && error.code === 'WorkflowTimeoutError') {
+      const message = await classifyTimeoutMessage(context, runId, error);
+      return finalizeRunResult({
+        finishReason: 'error',
+        runState: emptyRunState(),
+        conversation,
+        hooks,
+        emitter,
+        runStartTime,
+        errorMessage: message,
+      });
+    }
     throw error;
   }
 
@@ -580,6 +602,31 @@ async function driveDurableRun(
 /** A throwaway run state for the pre-step error path (no steps completed yet). */
 function emptyRunState(): RunState {
   return createRunState();
+}
+
+/**
+ * Build the error message for a `WorkflowTimeoutError`, distinguishing a history
+ * circuit-breaker kill from a genuine execution-deadline timeout. The error class
+ * itself carries no `terminationReason`, so the distinction comes from the
+ * engine's stored {@link WorkflowState}: `'history-circuit-breaker'` means the
+ * run's event-log breached `history.maxEvents`. A failed/absent state read falls
+ * back to the raw error message rather than guessing.
+ */
+async function classifyTimeoutMessage(
+  context: DurableActiveRunContext,
+  runId: string,
+  error: unknown,
+): Promise<string> {
+  const fallback = error instanceof Error ? error.message : String(error);
+  try {
+    const state = await context.engine.get(runId);
+    if (state?.terminationReason === HISTORY_CIRCUIT_BREAKER_REASON) {
+      return `Durable run terminated by the history circuit breaker (history.maxEvents exceeded): ${fallback}`;
+    }
+    return `Durable run exceeded its execution deadline: ${fallback}`;
+  } catch {
+    return fallback;
+  }
 }
 
 /**

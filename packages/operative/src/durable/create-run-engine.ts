@@ -1,5 +1,8 @@
 import type {
   AnyWorkflowDefinition,
+  CheckpointSizeWarningEvent,
+  HistoryPolicy,
+  PayloadSizePolicy,
   WorkflowLogRecord,
   WorkflowServicesResolution,
   WorkflowServicesResolverInfo,
@@ -86,6 +89,39 @@ export interface CreateRunEngineOptions {
    * workflow. Omit to leave logs going to the host console.
    */
   onLog?: (record: WorkflowLogRecord) => void;
+
+  /**
+   * History circuit breaker. An agent run checkpoints its full transcript per
+   * step, so a long run's event-log grows with steps × message size; activation
+   * replays that log (cost is O(history)), and an unbounded log can stall the
+   * shared single-process engine. When `history.maxEvents` is set, a run whose
+   * durable event-log would exceed it is force-terminated as `timed-out` with
+   * `terminationReason === 'history-circuit-breaker'` — which the adapter
+   * classifies distinctly from a genuine deadline timeout. Omit to disable.
+   */
+  history?: HistoryPolicy;
+
+  /**
+   * Early-warning threshold (bytes) for checkpoint payload size. When a
+   * checkpoint write exceeds it, the engine dispatches a
+   * `CheckpointSizeWarningEvent`; pass {@link onCheckpointSizeWarning} to observe
+   * it (a silent warning event is no warning). Does not terminate the run.
+   */
+  checkpointSizeWarningThreshold?: number;
+
+  /** How many past checkpoints to retain per run (storage-growth control). */
+  checkpointHistory?: number;
+
+  /** Admission cap on a single checkpoint payload (`PayloadSizeExceededError`). */
+  payloadSize?: PayloadSizePolicy;
+
+  /**
+   * Subscriber for `CheckpointSizeWarningEvent` (`checkpoint:size-warning`). Wired
+   * to the engine when provided, so a checkpoint approaching pathological size is
+   * surfaced rather than silently dispatched. Pairs with
+   * {@link checkpointSizeWarningThreshold}.
+   */
+  onCheckpointSizeWarning?: (event: CheckpointSizeWarningEvent) => void;
 }
 
 /**
@@ -140,8 +176,11 @@ export interface RunEngine {
  * {@link CreateRunEngineOptions.resolveWorkflowServices}, which Weft fires before
  * the resumed generator reads `ctx.services` — no module-global registry.
  *
- * TODO(weft-integration): tune `history.maxEvents` / checkpoint size warning
- * threshold once long-run checkpoint sizes are measured (design seam #12).
+ * History/checkpoint guardrails ({@link CreateRunEngineOptions.history},
+ * `checkpointSizeWarningThreshold`, `checkpointHistory`, `payloadSize`) are
+ * threaded into the engine; a `history.maxEvents` breach surfaces as a
+ * `timed-out` terminal with `terminationReason: 'history-circuit-breaker'`, which
+ * the active-run adapter classifies as `error` (not a deadline timeout).
  */
 export async function createRunEngine(options: CreateRunEngineOptions): Promise<RunEngine> {
   const checkpointStore =
@@ -153,6 +192,14 @@ export async function createRunEngine(options: CreateRunEngineOptions): Promise<
     recover: options.recover ?? true,
     resolveWorkflowServices: options.resolveWorkflowServices,
     ...(options.onLog ? { onLog: options.onLog } : {}),
+    ...(options.history ? { history: options.history } : {}),
+    ...(options.checkpointSizeWarningThreshold !== undefined
+      ? { checkpointSizeWarningThreshold: options.checkpointSizeWarningThreshold }
+      : {}),
+    ...(options.checkpointHistory !== undefined
+      ? { checkpointHistory: options.checkpointHistory }
+      : {}),
+    ...(options.payloadSize ? { payloadSize: options.payloadSize } : {}),
     workflows: { agentRun: options.runWorkflow },
     activities: {
       saveCursor: storageActivities.saveCursor,
@@ -160,6 +207,13 @@ export async function createRunEngine(options: CreateRunEngineOptions): Promise<
       recordStep: storageActivities.recordStep,
     },
   });
+
+  // Surface checkpoint-size warnings: a dispatched event nobody listens to is no
+  // warning. The engine is an EventTarget; the subscription lives as long as the
+  // engine (released on dispose).
+  if (options.onCheckpointSizeWarning) {
+    engine.addEventListener('checkpoint:size-warning', options.onCheckpointSizeWarning);
+  }
 
   // Wire observability AFTER construction so the engine itself is the
   // `eventTarget`: root workflow spans then close on terminal lifecycle events

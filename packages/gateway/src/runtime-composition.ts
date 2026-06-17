@@ -568,6 +568,22 @@ export async function createRuntimeComposition(
       resolveWorkflowServices: resolveRunServices,
       ...(options.observability !== undefined ? { observability: options.observability } : {}),
       ...(options.onLog ? { onLog: options.onLog } : {}),
+      ...(options.durableGuardrails?.history ? { history: options.durableGuardrails.history } : {}),
+      ...(options.durableGuardrails?.checkpointSizeWarningThreshold !== undefined
+        ? {
+            checkpointSizeWarningThreshold:
+              options.durableGuardrails.checkpointSizeWarningThreshold,
+          }
+        : {}),
+      ...(options.durableGuardrails?.checkpointHistory !== undefined
+        ? { checkpointHistory: options.durableGuardrails.checkpointHistory }
+        : {}),
+      ...(options.durableGuardrails?.payloadSize
+        ? { payloadSize: options.durableGuardrails.payloadSize }
+        : {}),
+      ...(options.durableGuardrails?.onCheckpointSizeWarning
+        ? { onCheckpointSizeWarning: options.durableGuardrails.onCheckpointSizeWarning }
+        : {}),
     });
   }
 

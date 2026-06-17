@@ -207,4 +207,51 @@ describe('createRunEngine', () => {
       engine[Symbol.dispose]();
     }
   });
+
+  it('surfaces CheckpointSizeWarningEvent to the onCheckpointSizeWarning subscriber', async () => {
+    // A 1-byte threshold trips on the first checkpoint write of any run, so the
+    // subscriber fires — proving the engine wires the event through rather than
+    // dispatching it into the void.
+    let warningCount = 0;
+    const { engine } = await createRunEngine({
+      storage: new MemoryStorage(),
+      runWorkflow: makeProbeWorkflow(),
+      recover: false,
+      checkpointSizeWarningThreshold: 1,
+      onCheckpointSizeWarning: () => {
+        warningCount++;
+      },
+    });
+
+    try {
+      const handle = await engine.start('agentRun', { value: 11 });
+      expect(await handle.result()).toEqual({ doubled: 22 });
+      expect(warningCount).toBeGreaterThan(0);
+    } finally {
+      engine[Symbol.dispose]();
+    }
+  });
+
+  it('accepts a history policy without breaking a run that stays under the limit', async () => {
+    // The history policy is threaded into Engine.create. A generous maxEvents
+    // leaves a normal run unaffected. (The circuit-breaker TRIP + the adapter's
+    // error classification are covered against the real agentRun body in
+    // active-run-adapter.test.ts, where the multi-step transcript breaches a low
+    // limit; the trivial probe workflow here does not generate enough history to
+    // trip a tight bound deterministically, so this only guards the passthrough.)
+    const { engine } = await createRunEngine({
+      storage: new MemoryStorage(),
+      runWorkflow: makeProbeWorkflow(),
+      recover: false,
+      history: { maxEvents: 10_000 },
+      payloadSize: { maxBytes: 1_000_000 },
+    });
+
+    try {
+      const handle = await engine.start('agentRun', { value: 4 });
+      expect(await handle.result()).toEqual({ doubled: 8 });
+    } finally {
+      engine[Symbol.dispose]();
+    }
+  });
 });

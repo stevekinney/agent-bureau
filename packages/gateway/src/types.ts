@@ -1,4 +1,9 @@
-import type { WorkflowLogRecord } from '@lostgradient/weft';
+import type {
+  CheckpointSizeWarningEvent,
+  HistoryPolicy,
+  PayloadSizePolicy,
+  WorkflowLogRecord,
+} from '@lostgradient/weft';
 import type { ObservabilityOptions } from '@lostgradient/weft/observability';
 import type { StorageConfiguration, TextValueStore } from '@lostgradient/weft/storage';
 import type { Toolbox } from 'armorer';
@@ -194,6 +199,27 @@ export interface BureauOptions {
    * structured logging). Has effect only when a durable engine is composed.
    */
   onLog?: (record: WorkflowLogRecord) => void;
+  /**
+   * History/checkpoint guardrails for durable runs. `history.maxEvents` is a
+   * circuit breaker (a breach terminates the run as an error, classified
+   * distinctly from a deadline timeout); `checkpointSizeWarningThreshold` arms an
+   * early-warning event observed via {@link onCheckpointSizeWarning}. Has effect
+   * only when a durable engine is composed.
+   */
+  durableGuardrails?: DurableGuardrailsConfiguration;
+}
+
+/**
+ * Durable history/checkpoint guardrail configuration surfaced on
+ * {@link BureauOptions.durableGuardrails}. A thin passthrough to the matching
+ * `EngineOptions` fields.
+ */
+export interface DurableGuardrailsConfiguration {
+  history?: HistoryPolicy;
+  checkpointSizeWarningThreshold?: number;
+  checkpointHistory?: number;
+  payloadSize?: PayloadSizePolicy;
+  onCheckpointSizeWarning?: (event: CheckpointSizeWarningEvent) => void;
 }
 
 export type BureauEventType = keyof BureauEventMap & string;

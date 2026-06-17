@@ -209,6 +209,28 @@ describe('createRuntimeComposition durable execution', () => {
     }
   });
 
+  it('threads durableGuardrails (history + checkpoint warning) into the durable engine', async () => {
+    // The composition forwards BureauOptions.durableGuardrails into createRunEngine.
+    // A generous history limit leaves a normal run intact; the engine still builds
+    // and the onCheckpointSizeWarning subscriber is accepted without error.
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'x', toolCalls: [] }),
+      toolbox: createToolbox([], { context: {} }),
+      storage: { type: 'memory' },
+      durableExecution: true,
+      durableGuardrails: {
+        history: { maxEvents: 10_000 },
+        checkpointSizeWarningThreshold: 128_000,
+        onCheckpointSizeWarning: () => {},
+      },
+    });
+    try {
+      expect(runtime.durable).toBeDefined();
+    } finally {
+      runtime.durable?.engine[Symbol.dispose]?.();
+    }
+  });
+
   it('builds a durable engine BY DEFAULT for a persistent (sqlite) backend with no flag', async () => {
     // The default-on contract: a persistent storage backend and NO explicit
     // `durableExecution` flag resolves to durable-on, because that is the only

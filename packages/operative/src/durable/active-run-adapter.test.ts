@@ -33,6 +33,22 @@ async function buildContext() {
   return { engine, checkpointStore };
 }
 
+/** Build a durable context whose engine trips the history circuit breaker early. */
+async function buildContextWithHistoryLimit(maxEvents: number) {
+  const storage = new MemoryStorage();
+  const checkpointStore = createCheckpointStore(
+    textValueStore(storage, { disposeUnderlyingStorage: false }),
+  );
+  const runWorkflow = createRunWorkflow(checkpointStore);
+  const { engine } = await createRunEngine({
+    storage,
+    runWorkflow,
+    recover: false,
+    history: { maxEvents },
+  });
+  return { engine, checkpointStore };
+}
+
 function runOptions(generate: RunOptions['generate']): RunOptions {
   return {
     generate,
@@ -267,6 +283,44 @@ describe('createRun with durable routing', () => {
 
       expect(result.finishReason).toBe('elicitation-denied');
       expect(result.error).toBeInstanceOf(ElicitationDeniedError);
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+
+  it('classifies a history circuit-breaker termination as finishReason error (not an unhandled rejection)', async () => {
+    // With history.maxEvents set very low, the run's first checkpoint writes
+    // breach the limit and Weft force-terminates the workflow as `timed-out` with
+    // terminationReason 'history-circuit-breaker'. handle.result() then REJECTS
+    // with a WorkflowTimeoutError. The adapter must CATCH that, classify it as a
+    // terminal `error`, and fire run.completed — NOT rethrow into the unawaited
+    // driver chain (which would surface as an unhandled rejection and strand the
+    // session `running`). The error message must name the circuit breaker so the
+    // cause is distinguishable from a genuine deadline timeout.
+    const context = await buildContextWithHistoryLimit(1);
+    try {
+      let completedFinishReason: RunResult['finishReason'] | undefined;
+      const activeRun = createRun(
+        {
+          generate: async () => ({ content: 'never gets far', toolCalls: [] }),
+          toolbox: createToolbox([]) as unknown as RunOptions['toolbox'],
+          conversation: createConversationHistory(),
+          stopWhen: stopWhen.noToolCalls(),
+        },
+        { ...context, runId: 'circuit-breaker-run', prompt: 'Hello' },
+      );
+      activeRun.addEventListener('run.completed', (event) => {
+        completedFinishReason = event.finishReason;
+      });
+
+      const result = await activeRun.result;
+
+      // The run settled cleanly as an error (the catch fired) rather than the
+      // promise rejecting — and the terminal lifecycle fired.
+      expect(result.finishReason).toBe('error');
+      expect(completedFinishReason).toBe('error');
+      expect(result.error).toBeInstanceOf(Error);
+      expect((result.error as Error).message).toContain('history circuit breaker');
     } finally {
       context.engine[Symbol.dispose]();
     }
