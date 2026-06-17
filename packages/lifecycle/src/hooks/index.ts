@@ -5,4 +5,5 @@ export type {
   HookMap,
   HookRegistrationOptions,
   HookRegistryOptions,
+  HookReplayPolicy,
 } from './types';

@@ -22,6 +22,7 @@ import {
   createRoutingGenerate,
   createStepBasedStrategy,
 } from 'herald';
+import type { HookReplayPolicy } from 'lifecycle';
 import { CompletableEventTarget, TypedEventTarget } from 'lifecycle';
 import type { CreateMemoryOptions, Memory } from 'memory';
 import { createMemory } from 'memory';
@@ -85,6 +86,13 @@ function redactProvider(provider: ProviderConfiguration): RedactedProviderConfig
   return safeProvider;
 }
 
+/**
+ * Inject recalled memories as a system message on step 0. Replay classification
+ * (seam #11): `safe` — it only reads (`memory.recall`) and mutates the step's
+ * transient `Conversation` (the durable workflow rehydrates a fresh
+ * `Conversation.from(snapshot)` per step, so a recovery re-fire just re-injects
+ * into that step's conversation; no external side effect, no idempotency needed).
+ */
 function createMemoryRecallHook(memory: Memory, sessionId: string): PrepareStepHook {
   return async (context) => {
     if (context.step !== 0) {
@@ -117,6 +125,23 @@ function createMemoryRecallHook(memory: Memory, sessionId: string): PrepareStepH
   };
 }
 
+/**
+ * Persist the final assistant content of a step as an experiential memory.
+ *
+ * EFFECTFUL hook (seam #11): on a durable recovery the crashed in-flight step
+ * re-runs from its boundary, so this hook fires AGAIN for that step. The correct
+ * mitigation is IDEMPOTENCY, not suppression-on-replay — suppressing the hook
+ * would drop the write for a step whose work (generate + tools) did re-execute,
+ * leaving memory permanently out of sync with a step that ran. Idempotency holds
+ * here because a replayed step produces the SAME final `context.content`, and
+ * `memory.remember()` deduplicates near-identical entries: byte-identical content
+ * embeds to the same vector (cosine similarity 1.0), so the existing record is
+ * updated in place rather than duplicated. The write is also tagged with a
+ * deterministic `dedupeKey` (namespace + content hash) so the dedup intent is
+ * explicit and traceable in stored metadata. A re-fire is therefore a no-op
+ * against the persisted set. {@link MEMORY_PERSIST_HOOK_REPLAY} records the
+ * `effectful` classification for diagnostics; it does not gate execution.
+ */
 function createMemoryPersistHook(memory: Memory, sessionId: string): OnStepHook {
   return async (context) => {
     if (!context.final || !context.content.trim()) {
@@ -127,6 +152,14 @@ function createMemoryPersistHook(memory: Memory, sessionId: string): OnStepHook 
       namespace: sessionId,
       source: 'experiential',
       step: context.step,
+      // Deterministic per-(namespace, content) marker: a replayed step produces
+      // the same content → same key, so the dedup is explicit, not only inferred
+      // from vector similarity.
+      dedupeKey: Bun.hash(`${sessionId} ${context.content}`).toString(16),
+      // Replay classification (seam #11): an external write → `effectful`, kept
+      // safe across a recovery re-fire by the idempotent write above. Metadata
+      // only; never gates execution.
+      replay: 'effectful' satisfies HookReplayPolicy,
     });
   };
 }

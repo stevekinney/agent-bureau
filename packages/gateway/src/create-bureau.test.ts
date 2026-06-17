@@ -8,6 +8,8 @@ import { createTool, createToolbox } from 'armorer';
 import { createMockTool, createTestToolbox } from 'armorer/test';
 import { afterEach, describe, expect, it, mock } from 'bun:test';
 import { Conversation, getMessages } from 'conversationalist';
+import { createMemory } from 'memory';
+import { createInMemoryMemoryRecordStorage, createMockEmbedder } from 'memory/test';
 import type { GenerateFunction, GenerateResponse, Toolbox } from 'operative';
 import { stopWhen } from 'operative';
 import { SCHEDULER_ORIGIN_TAG, startDurableRunResult } from 'operative/durable';
@@ -1390,6 +1392,62 @@ describe('createBureau scheduler-origin crash semantics (#25)', () => {
       await rm(databasePath, { force: true });
       await rm(`${databasePath}-wal`, { force: true });
       await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+});
+
+describe('createBureau effectful hook idempotency (#27)', () => {
+  it('does not duplicate experiential memory when the same final content is persisted twice', async () => {
+    // #27: createMemoryPersistHook is effectful (writes to the memory store). On a
+    // durable recovery the crashed step re-runs and the hook fires again with the
+    // SAME final content. The fix is idempotency, not skip-on-replay: a re-write
+    // of identical content must NOT create a duplicate memory. Two runs producing
+    // the byte-identical final content stand in for that re-fire (deterministic
+    // mock embedder → identical vector → the store dedups in place).
+    const memory = createMemory({
+      embedder: createMockEmbedder(128),
+      storage: createInMemoryMemoryRecordStorage(),
+    });
+    await memory.init();
+
+    const sessionId = 'memory-idempotency-session';
+    const bureau = await createBureau({
+      // Deterministic: every run produces the identical final assistant content.
+      generate: async () => ({ content: 'the stable remembered fact', toolCalls: [] }),
+      toolbox: createEmptyToolbox(),
+      memory,
+      // Without a stop condition a step never reaches `final:true`, so the persist
+      // hook (which fires on `context.final`) would not run — match the other
+      // bureau tests and stop when there are no tool calls.
+      stopWhen: stopWhen.noToolCalls(),
+      persistence: textValueStore(new MemoryStorage()),
+    });
+
+    try {
+      const first = await bureau.createRun({ message: 'remember this', sessionId });
+      await waitForRunCompletion(bureau, first.id);
+      const afterFirst = await memory.list({ namespace: sessionId, limit: 100 });
+      const experientialAfterFirst = afterFirst.filter(
+        (entry) => entry.metadata['source'] === 'experiential',
+      );
+      expect(experientialAfterFirst.length).toBe(1);
+      // The persist hook tagged the write with a deterministic dedupe key and the
+      // effectful replay classification.
+      expect(experientialAfterFirst[0]!.metadata['dedupeKey']).toBeDefined();
+      expect(experientialAfterFirst[0]!.metadata['replay']).toBe('effectful');
+
+      // Re-run: same final content. The idempotent write dedups in place — the
+      // experiential memory count must NOT grow (this is the at-least-once-safe
+      // contract a recovery re-fire relies on).
+      const second = await bureau.createRun({ message: 'remember this again', sessionId });
+      await waitForRunCompletion(bureau, second.id);
+      const afterSecond = await memory.list({ namespace: sessionId, limit: 100 });
+      const experientialAfterSecond = afterSecond.filter(
+        (entry) => entry.metadata['source'] === 'experiential',
+      );
+      expect(experientialAfterSecond.length).toBe(1);
+    } finally {
+      bureau.dispose();
     }
   });
 });
