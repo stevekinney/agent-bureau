@@ -1,8 +1,13 @@
 import type {
   CheckpointSizeWarningEvent,
   HistoryPolicy,
+  ListFilter,
+  ListOptions,
+  PaginatedResult,
   PayloadSizePolicy,
   WorkflowLogRecord,
+  WorkflowState,
+  WorkflowSummary,
 } from '@lostgradient/weft';
 import type { ObservabilityOptions } from '@lostgradient/weft/observability';
 import type { StorageConfiguration, TextValueStore } from '@lostgradient/weft/storage';
@@ -236,6 +241,30 @@ export interface Bureau {
   getRun(id: string): RunDetail | undefined;
   abortRun(id: string): RunSummary;
   deleteRun(id: string): void;
+
+  /**
+   * Read the durable engine's view of a run: its full {@link WorkflowState}
+   * (status, step cursor, failure category, termination reason, timestamps).
+   * Backed by `engine.get(runId)`. Returns `null` when the run is unknown to the
+   * engine and `undefined` when no durable engine is composed. This is the only
+   * way to see a run's durable status mid-flight — session metadata is written
+   * only at terminal transitions, and a recovered run is otherwise opaque.
+   */
+  getDurableRun(runId: string): Promise<WorkflowState | null | undefined>;
+
+  /**
+   * List durable runs from the engine, optionally filtered (status, type, tags).
+   * Backed by `engine.list(filter, options)`. Returns `undefined` when no durable
+   * engine is composed. Note the engine internally types the filter as a
+   * `TypedListFilter`; the plain {@link ListFilter} accepted here is structurally
+   * compatible as long as `attributes` is omitted. A scan-cap breach from the
+   * engine surfaces as a thrown weft fault (catch generically — the cap error is
+   * not on the public barrel).
+   */
+  listDurableRuns(
+    filter?: ListFilter,
+    options?: ListOptions,
+  ): Promise<PaginatedResult<WorkflowSummary> | undefined>;
 
   listSessions(): Promise<SessionSummary[]>;
   getSession(id: string): Promise<AgentSession | undefined>;

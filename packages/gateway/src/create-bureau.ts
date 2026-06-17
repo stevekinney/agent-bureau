@@ -1,3 +1,4 @@
+import type { ListFilter, ListOptions } from '@lostgradient/weft';
 import { Conversation, createConversationHistory } from 'conversationalist';
 import { CompletableEventTarget } from 'lifecycle';
 import { type ActiveRun, createAgentSession, createRun, type JSONValue } from 'operative';
@@ -867,6 +868,25 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     store.removeRun(id);
   }
 
+  /**
+   * Read the durable engine's full state for a run (status, step, failure
+   * category, termination reason). Thin passthrough to `engine.get`; `undefined`
+   * when no durable engine is composed, `null` when the engine has no such run.
+   */
+  async function getDurableRun(runId: string) {
+    if (!runtime.durable) return undefined;
+    return runtime.durable.engine.get(runId);
+  }
+
+  /**
+   * List durable runs from the engine, optionally filtered. Thin passthrough to
+   * `engine.list`; `undefined` when no durable engine is composed.
+   */
+  async function listDurableRuns(filter?: ListFilter, options?: ListOptions) {
+    if (!runtime.durable) return undefined;
+    return runtime.durable.engine.list(filter, options);
+  }
+
   async function listSessions() {
     return requireSessionStore().list();
   }
@@ -1002,6 +1022,8 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     getRun,
     abortRun,
     deleteRun,
+    getDurableRun,
+    listDurableRuns,
     listSessions,
     getSession,
     deleteSession,

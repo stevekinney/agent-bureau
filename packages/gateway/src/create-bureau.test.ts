@@ -1197,6 +1197,44 @@ describe('createBureau', () => {
   });
 });
 
+describe('createBureau durable inspection surface', () => {
+  it('getDurableRun and listDurableRuns return undefined when no durable engine is composed', async () => {
+    // A memory-backed bureau with no durableExecution flag has no engine, so the
+    // durable read accessors report "no durable surface" via undefined.
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+    });
+
+    expect(await bureau.getDurableRun('any-run')).toBeUndefined();
+    expect(await bureau.listDurableRuns()).toBeUndefined();
+  });
+
+  it('getDurableRun returns null for an unknown run and state for a completed run', async () => {
+    // durableExecution:true on a memory backend builds an engine, so the
+    // accessors pass through to engine.get / engine.list.
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+
+    expect(await bureau.getDurableRun('nonexistent-run')).toBeNull();
+
+    const run = await bureau.createRun({ message: 'durable inspection' });
+    await waitForRunCompletion(bureau, run.id);
+
+    const state = await bureau.getDurableRun(run.id);
+    expect(state).not.toBeNull();
+    expect(state?.status).toBe('completed');
+
+    const listed = await bureau.listDurableRuns();
+    expect(listed).toBeDefined();
+    expect(listed!.items.some((summary) => summary.id === run.id)).toBe(true);
+  });
+});
+
 describe('classifyRecoveredRun', () => {
   const base = {
     handleId: 'run-1',
