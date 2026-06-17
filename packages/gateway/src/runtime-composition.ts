@@ -143,9 +143,22 @@ function createMemoryRecallHook(memory: Memory, sessionId: string): PrepareStepH
  * the hook skips the write when a memory in this namespace already carries that
  * key. This makes a re-fire a guaranteed no-op regardless of content drift.
  *
+ * The lookup PAGES through the whole namespace until it finds the key or
+ * exhausts the records — `memory.list` defaults to a 100-record page, so a single
+ * un-paged call would silently miss the key in a session with >100 memories and
+ * let a re-fire write a duplicate. The scan early-exits on the first match (the
+ * common case on a re-fire).
+ *
  * When no `runId` is available (a non-durable run, where there is no replay and
  * therefore no re-fire hazard), the dedup guard is skipped and the write proceeds
  * — the at-least-once concern only exists on the durable recovery path.
+ *
+ * KNOWN RESIDUAL (filed upstream as a `memory` ticket): the lookup-then-write is
+ * not atomic, so two concurrent recoveries of the SAME `runId:step` could both
+ * miss and both write. The single-owner recovery model makes a concurrent
+ * same-run recovery unexpected, and the proper fix is an atomic keyed
+ * insert-if-absent in the memory store (a `rememberOnce`/dedupeKey-unique
+ * primitive) rather than a read-then-write here.
  *
  * `replay: 'effectful'` ({@link HookReplayPolicy}) is recorded on the write for
  * diagnostics; it documents the contract and never gates execution.
@@ -165,11 +178,8 @@ export function createMemoryPersistHook(
     // produce a second record.
     const dedupeKey = runId === undefined ? undefined : `${runId}:${context.step}`;
 
-    if (dedupeKey !== undefined) {
-      const existing = await memory.list({ namespace: sessionId });
-      if (existing.some((entry) => entry.metadata['dedupeKey'] === dedupeKey)) {
-        return; // Already persisted by the first (pre-crash) execution of this step.
-      }
+    if (dedupeKey !== undefined && (await hasExperientialDedupeKey(memory, sessionId, dedupeKey))) {
+      return; // Already persisted by the first (pre-crash) execution of this step.
     }
 
     await memory.remember(context.content, {
@@ -183,6 +193,29 @@ export function createMemoryPersistHook(
       replay: 'effectful' satisfies HookReplayPolicy,
     });
   };
+}
+
+/**
+ * Whether the namespace already holds a memory carrying `dedupeKey`. Pages the
+ * whole namespace (NOT a single default 100-record page, which would miss the key
+ * in a long session and break the persist hook's idempotency), early-exiting on
+ * the first match.
+ */
+async function hasExperientialDedupeKey(
+  memory: Memory,
+  namespace: string,
+  dedupeKey: string,
+): Promise<boolean> {
+  const PAGE_SIZE = 200;
+  for (let offset = 0; ; offset += PAGE_SIZE) {
+    const page = await memory.list({ namespace, limit: PAGE_SIZE, offset });
+    if (page.some((entry) => entry.metadata['dedupeKey'] === dedupeKey)) {
+      return true;
+    }
+    if (page.length < PAGE_SIZE) {
+      return false; // Last (short) page — namespace exhausted, no match.
+    }
+  }
 }
 
 function resolveProviderGenerate(

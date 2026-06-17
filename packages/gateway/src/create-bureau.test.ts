@@ -1407,9 +1407,18 @@ describe('createBureau scheduler-origin crash semantics (#25)', () => {
 describe('createBureau effectful hook idempotency (#27)', () => {
   // List only the experiential memories in a namespace (avoids the lint against
   // accessing a member directly off an await expression at each call site).
+  // Pages the whole namespace — memory.list's 100-record default page would
+  // under-count a long namespace (the same trap the production dedup guard pages
+  // around), which the >1-page pagination test below depends on.
   async function listExperiential(memory: Memory, namespace: string) {
-    const entries = await memory.list({ namespace, limit: 100 });
-    return entries.filter((entry) => entry.metadata['source'] === 'experiential');
+    const all: Awaited<ReturnType<Memory['list']>> = [];
+    const pageSize = 200;
+    for (let offset = 0; ; offset += pageSize) {
+      const page = await memory.list({ namespace, limit: pageSize, offset });
+      all.push(...page);
+      if (page.length < pageSize) break;
+    }
+    return all.filter((entry) => entry.metadata['source'] === 'experiential');
   }
 
   it('persists an experiential memory tagged with a deterministic (runId:step) dedupeKey + effectful replay', async () => {
@@ -1518,6 +1527,51 @@ describe('createBureau effectful hook idempotency (#27)', () => {
     const persisted = await listExperiential(memory, namespace);
     const keys = persisted.map((e) => e.metadata['dedupeKey']).sort();
     expect(keys).toEqual(['run-A:0', 'run-B:0']);
+  });
+
+  it('still dedups a re-fire when the namespace holds more than one page of memories', async () => {
+    // memory.list defaults to a 100-record page; the dedup lookup must page the
+    // WHOLE namespace, not just the first page, or a re-fire in a long session
+    // (>100 memories) would miss the key and write a duplicate. Seed >200 distinct
+    // memories so the target key sits well past the first/second page, then re-fire
+    // its (runId, step) and assert no duplicate.
+    const memory = createMemory({
+      embedder: createMockEmbedder(128),
+      storage: createInMemoryMemoryRecordStorage(),
+    });
+    await memory.init();
+
+    const namespace = 'hook-pagination-ns';
+    const runId = 'run-paged';
+    const hook = createMemoryPersistHook(memory, namespace, runId);
+    const stepResult = (step: number, content: string) => ({
+      step,
+      conversation: new Conversation(),
+      content,
+      toolCalls: [] as never[],
+      results: [] as never[],
+      final: true,
+    });
+
+    // The target write (the one that will be re-fired) goes in FIRST, so after
+    // 220 later distinct writes it is buried deep in the namespace.
+    await hook(stepResult(0, 'the target memory to dedup'));
+    for (let i = 0; i < 220; i++) {
+      await createMemoryPersistHook(
+        memory,
+        namespace,
+        `filler-run-${i}`,
+      )(stepResult(0, `distinct filler memory number ${i}`));
+    }
+    const beforeEntries = await listExperiential(memory, namespace);
+    const before = beforeEntries.length;
+    expect(before).toBeGreaterThan(200);
+
+    // Re-fire (run-paged, step 0) — its key sits past the default page. The paged
+    // lookup must still find it and skip; the count must not grow.
+    await hook(stepResult(0, 'a divergent regenerate of the target'));
+    const afterEntries = await listExperiential(memory, namespace);
+    expect(afterEntries.length).toBe(before);
   });
 });
 

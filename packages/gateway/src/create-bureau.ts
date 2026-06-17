@@ -760,7 +760,18 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     // suspended runs whose ids could collide with a fresh dispatch's reused
     // counter id — onTerminalConflict:'start-new' does NOT cover suspended (only
     // terminal), so the sweep is the sole protection against that collision.
-    await sweepSuspendedSchedulerRuns(durable.engine);
+    //
+    // The sweep is isolated in its own try/catch: a sweep failure (its
+    // sanity-cap throw, or a storage error) is logged LOUDLY but must NOT block
+    // session-run reattach below — a pathological suspended-scheduler backlog
+    // should not also strand every genuine session run's recovery.
+    try {
+      await sweepSuspendedSchedulerRuns(durable.engine);
+    } catch (error) {
+      console.error(
+        `[bureau] Suspended scheduler-run sweep failed; session-run recovery continues: ${serializeUnknownError(error)}`,
+      );
+    }
 
     // The reattach loop below correlates recovered runs to bureau SESSIONS, so it
     // is meaningless without a session store. The sweep above already ran.
