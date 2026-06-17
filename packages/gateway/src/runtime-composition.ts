@@ -717,11 +717,19 @@ export async function createRuntimeComposition(
     // `resolveRunServices` (passed as resolveWorkflowServices), which Weft fires
     // per recovered run before its generator advances — no pre-injection, no
     // module-global registry.
+    //
+    // startScheduler: true is then REQUIRED too (Weft 0.6.0). recover:false
+    // decouples *who drives recovery* from *whether timers fire*, and the poller
+    // defaults to following recover — so without this flag a recover:false engine
+    // leaves durable `ctx.sleep(...)` / `engine.schedule(...)` timers parked
+    // forever. The bureau owns recovery but still needs durable timers, so it
+    // arms the poller explicitly.
     durable = await createRunEngine({
       storage: durableStorage,
       runWorkflow,
       checkpointStore,
       recover: false,
+      startScheduler: true,
       resolveWorkflowServices: resolveRunServices,
       ...(options.observability !== undefined ? { observability: options.observability } : {}),
       ...(options.onLog ? { onLog: options.onLog } : {}),

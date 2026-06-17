@@ -53,6 +53,19 @@ function makeLoggingWorkflow() {
     });
 }
 
+/**
+ * A probe workflow that parks on a durable `ctx.sleep` before finishing. The
+ * sleep only resolves if the engine's durable-timer poller is armed, so this
+ * workflow's completion is a direct observation of whether `startScheduler`
+ * took effect (the #590 seam).
+ */
+function makeSleepingWorkflow(sleepMilliseconds: number) {
+  return workflow({ name: 'agentRun' }).execute(async function* (ctx, input: { value: number }) {
+    yield* ctx.sleep(sleepMilliseconds);
+    return { doubled: input.value * 2 };
+  });
+}
+
 describe('createRunEngine', () => {
   it('boots an engine that registers and runs the injected workflow', async () => {
     const { engine } = await createRunEngine({
@@ -252,6 +265,70 @@ describe('createRunEngine', () => {
     try {
       const handle = await engine.start('agentRun', { value: 4 });
       expect(await handle.result()).toEqual({ doubled: 8 });
+    } finally {
+      engine[Symbol.dispose]();
+    }
+  });
+
+  it('fires durable ctx.sleep timers under recover:false when startScheduler:true (#590)', async () => {
+    // The bureau owns recovery (recover:false) but still needs durable timers.
+    // Weft 0.6.0's startScheduler arms the poller independently of recover, so a
+    // workflow parked on ctx.sleep resolves. This is the regression that proves
+    // recover:false hosts can run timers — the whole reason #590 was filed.
+    const { engine } = await createRunEngine({
+      storage: new MemoryStorage(),
+      runWorkflow: makeSleepingWorkflow(5),
+      recover: false,
+      startScheduler: true,
+    });
+
+    try {
+      const handle = await engine.start('agentRun', { value: 21 });
+      // result() only settles once the durable sleep elapses, which only happens
+      // if the poller is armed; an unarmed poller would leave this pending.
+      expect(await handle.result()).toEqual({ doubled: 42 });
+    } finally {
+      engine[Symbol.dispose]();
+    }
+  });
+
+  it('leaves durable ctx.sleep timers parked under recover:false without startScheduler (#590)', async () => {
+    // The inverse: with the poller unarmed (the recover:false default), the
+    // durable sleep never elapses, so the run stays pending. Asserting a parked
+    // timer is safe — a never-resolving result() loses the race deterministically
+    // (a fired timer would resolve well within the deadline since the sleep is 5ms).
+    const { engine } = await createRunEngine({
+      storage: new MemoryStorage(),
+      runWorkflow: makeSleepingWorkflow(5),
+      recover: false,
+    });
+
+    try {
+      const handle = await engine.start('agentRun', { value: 21 });
+      const pending = Symbol('pending');
+      const settled = await Promise.race([
+        handle.result(),
+        new Promise((resolve) => setTimeout(() => resolve(pending), 200)),
+      ]);
+      // 200ms is 40x the 5ms sleep — an armed poller would have fired long ago.
+      expect(settled).toBe(pending);
+    } finally {
+      engine[Symbol.dispose]();
+    }
+  });
+
+  it('defaults startScheduler to recover (poller armed when recover defaults to true)', async () => {
+    // startScheduler defaults to `recover !== false`. With recover left at its
+    // true default, the poller arms, so a durable sleep fires without passing the
+    // flag — the common in-process host keeps prior behavior.
+    const { engine } = await createRunEngine({
+      storage: new MemoryStorage(),
+      runWorkflow: makeSleepingWorkflow(5),
+    });
+
+    try {
+      const handle = await engine.start('agentRun', { value: 9 });
+      expect(await handle.result()).toEqual({ doubled: 18 });
     } finally {
       engine[Symbol.dispose]();
     }
