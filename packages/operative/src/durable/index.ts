@@ -8,6 +8,7 @@ export {
   createDurableActiveRun,
   reattachDurableActiveRun,
   resumeDurableRunResult,
+  SCHEDULER_ORIGIN_TAG,
   startDurableRunResult,
 } from './active-run-adapter';
 export type { CheckpointStore } from './checkpoint-store';

@@ -1,7 +1,7 @@
 import type { ActiveRun } from '../create-run';
 import { createRun } from '../create-run';
 import type { AnyRunEngine, CheckpointStore } from '../durable';
-import { resumeDurableRunResult, startDurableRunResult } from '../durable';
+import { resumeDurableRunResult, SCHEDULER_ORIGIN_TAG, startDurableRunResult } from '../durable';
 import { executeLoop } from '../loop';
 import type { GenerateFunction, RunResult, Toolbox } from '../types';
 import type { SchedulerEventMap, SchedulerEventType } from './events';
@@ -647,6 +647,12 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
         {
           runId: durableRunId,
           sessionId: durableRunId,
+          // Stamp the scheduler-origin tag so boot recovery does NOT reattach this
+          // run as a session run (there is no session behind the synthetic id) and
+          // the boot sweep can find suspended residue. The phantom `sessionId`
+          // remains for the in-process resume path; the tag is the cross-process
+          // discriminant.
+          tags: [SCHEDULER_ORIGIN_TAG],
           options: {
             ...runOptions,
             generate: runOptions.generate ?? generate,

@@ -19,6 +19,17 @@ import type { CheckpointStore } from './checkpoint-store';
 import type { AnyRunEngine } from './create-run-engine';
 import type { AgentRunWorkflowResult } from './run-workflow';
 
+/**
+ * Tag stamped on every durable run launched by the operative scheduler (via
+ * {@link startDurableRunResult}). Recovery and the boot sweep read it from
+ * `handle.getLaunchMetadata().launchOptions.tags` to discriminate scheduler-origin
+ * runs from genuine session runs — a scheduler run is a live-process concern with
+ * no bureau session behind it, so on a crash it is cancelled, never reattached as
+ * a session run. Exported through `operative/durable` (no `operative/scheduler`
+ * subpath export exists) so the gateway recovery path can import it.
+ */
+export const SCHEDULER_ORIGIN_TAG = 'bureau:scheduler-origin' as const;
+
 /** Dependencies the adapter needs from bureau composition. */
 export interface DurableActiveRunContext {
   engine: AnyRunEngine;
@@ -334,6 +345,12 @@ export interface StartDurableRunResultOptions {
   prompt?: string;
   /** Abort signal for the run (the scheduler's combined signal). */
   signal?: AbortSignal;
+  /**
+   * Tags for the durable workflow start (e.g. {@link SCHEDULER_ORIGIN_TAG}). The
+   * scheduler stamps its origin tag here so boot recovery can distinguish these
+   * runs from session runs and the boot sweep can find suspended residue.
+   */
+  tags?: string[];
 }
 
 /**
@@ -363,13 +380,22 @@ export async function startDurableRunResult(
   context: DurableActiveRunContext,
   durableRun: StartDurableRunResultOptions,
 ): Promise<RunResult> {
-  const { runId, sessionId, options, prompt, signal } = durableRun;
+  const { runId, sessionId, options, prompt, signal, tags } = durableRun;
 
   const handle = await context.engine.start(
     'agentRun',
     { runId, sessionId, prompt, maximumSteps: options.maximumSteps },
     {
       id: runId,
+      ...(tags ? { tags } : {}),
+      // A scheduler run reuses a synthetic, counter-suffixed id that can collide
+      // with a TERMINAL prior run after a crash+restart; 'start-new' purges that
+      // terminal run and starts fresh atomically rather than throwing
+      // WorkflowAlreadyExistsError. NOTE: this covers only TERMINAL conflicts —
+      // a `suspended` prior run is NOT terminal, so id-collision with suspended
+      // residue is prevented by the boot sweep (sweepSuspendedSchedulerRuns),
+      // not by this policy.
+      onTerminalConflict: 'start-new',
       services: {
         options: { ...options, signal },
         toolbox: options.toolbox,

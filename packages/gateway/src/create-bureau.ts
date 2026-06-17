@@ -6,6 +6,7 @@ import {
   isAgentRunWorkflowInput,
   reattachDurableActiveRun,
   type RecoveredRunHandle,
+  SCHEDULER_ORIGIN_TAG,
 } from 'operative/durable';
 import {
   createStore,
@@ -651,11 +652,84 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
    * cross-process recovery of scheduler tasks would require persisting a session
    * per task, which the in-process scheduler deliberately does not do.
    */
+  /**
+   * Cancel suspended scheduler-origin durable runs left behind by a hard crash
+   * (#25). A preempted scheduler task is parked `suspended`, and its only live
+   * pointer is the in-memory queue entry — lost on crash. `recoverAll()` never
+   * surfaces a suspended run (suspended ≠ running), so without this sweep the
+   * workflow and its checkpoints dangle in storage forever.
+   *
+   * TOCTOU: cancelling a run flips it suspended→cancelled and shrinks the next
+   * page's `total`, which would terminate a per-page-cancel loop early and
+   * under-cancel. So we COLLECT every id across all pages FIRST, then cancel. The
+   * page scan is capped (defense against an unbounded backlog); a hit on the cap
+   * is logged rather than silently truncated.
+   */
+  async function sweepSuspendedSchedulerRuns(
+    engine: NonNullable<typeof runtime.durable>['engine'],
+  ) {
+    const PAGE_SIZE = 100;
+    const MAX_PAGES = 5;
+    const ids: string[] = [];
+    let offset = 0;
+    let cappedWithRemainder = false;
+
+    for (let page = 0; page < MAX_PAGES; page++) {
+      // Pagination (limit/offset) lives on ListFilter, not ListOptions.
+      const result = await engine.list({
+        status: 'suspended',
+        tags: [SCHEDULER_ORIGIN_TAG],
+        limit: PAGE_SIZE,
+        offset,
+      });
+      for (const summary of result.items) {
+        ids.push(summary.id);
+      }
+      offset += result.items.length;
+      if (offset >= result.total || result.items.length === 0) {
+        break;
+      }
+      if (page === MAX_PAGES - 1 && offset < result.total) {
+        cappedWithRemainder = true;
+      }
+    }
+
+    if (cappedWithRemainder) {
+      console.warn(
+        `[bureau] Suspended scheduler-run sweep capped at ${MAX_PAGES * PAGE_SIZE}; more suspended scheduler runs remain and were not cancelled this boot.`,
+      );
+    }
+
+    if (ids.length === 0) return;
+
+    const outcomes = await Promise.allSettled(ids.map((id) => engine.cancel(id)));
+    outcomes.forEach((outcome, index) => {
+      if (outcome.status === 'rejected') {
+        console.error(
+          `[bureau] Failed to cancel suspended scheduler run "${ids[index]!}": ${serializeUnknownError(outcome.reason)}`,
+        );
+      }
+    });
+  }
+
   async function recoverDurableRuns(): Promise<void> {
     if (!runtime.durable) return;
-    if (!runtime.sessionStore) return;
 
     const durable = runtime.durable;
+
+    // Sweep suspended scheduler-origin residue FIRST and UNCONDITIONALLY (not
+    // gated on a session store): a hard crash with a preempted scheduler task in
+    // `suspended` leaves a workflow that recoverAll() never surfaces (suspended ≠
+    // running) and that would otherwise dangle forever. A durable-scheduler-only
+    // deployment (no gateway session store) still needs this. It also clears
+    // suspended runs whose ids could collide with a fresh dispatch's reused
+    // counter id — onTerminalConflict:'start-new' does NOT cover suspended (only
+    // terminal), so the sweep is the sole protection against that collision.
+    await sweepSuspendedSchedulerRuns(durable.engine);
+
+    // The reattach loop below correlates recovered runs to bureau SESSIONS, so it
+    // is meaningless without a session store. The sweep above already ran.
+    if (!runtime.sessionStore) return;
 
     // recoverAll resumes the in-flight workflows (firing the services resolver per
     // run before each generator advances); if it throws, the boot try/catch logs

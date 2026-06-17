@@ -876,6 +876,20 @@ export async function createRuntimeComposition(
     if (!isAgentRunWorkflowInput(info.input)) {
       return { status: 'unavailable', reason: `run ${info.workflowId} has no recoverable session` };
     }
+    // SCHEDULER-ORIGIN GUARD (#25): a durable scheduler run carries a SYNTHETIC
+    // sessionId equal to its own runId (there is no bureau session behind it). The
+    // resolver's `info` does NOT carry tags (WorkflowServicesResolverInfo is
+    // {workflowId, workflowType, input}), so the phantom `sessionId === runId`
+    // pattern is the discriminant available here. Return unavailable BEFORE the
+    // sessionStore.load — a load would always miss and waste a round-trip, and a
+    // scheduler run is a live-process concern that boot recovery must not resume
+    // as a session run. The boot sweep cancels any suspended scheduler residue.
+    if (info.input.sessionId === info.input.runId) {
+      return {
+        status: 'unavailable',
+        reason: `run ${info.workflowId} is scheduler-origin (no session to recover)`,
+      };
+    }
     // CORRELATION GUARD (committee MF-5): the workflow id IS the run id (pinned at
     // engine.start), so the input's own runId must match. A mismatch means a
     // corrupt or crafted durable input is trying to correlate this run to a

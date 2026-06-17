@@ -10,11 +10,13 @@ import { afterEach, describe, expect, it, mock } from 'bun:test';
 import { Conversation, getMessages } from 'conversationalist';
 import type { GenerateFunction, GenerateResponse, Toolbox } from 'operative';
 import { stopWhen } from 'operative';
+import { SCHEDULER_ORIGIN_TAG, startDurableRunResult } from 'operative/durable';
 import { createMockGenerate as createSequentialGenerate } from 'operative/test';
 import { createStore } from 'sentinel';
 import { z } from 'zod';
 
 import { BureauError, classifyRecoveredRun, createBureau } from './create-bureau';
+import { createRuntimeComposition } from './runtime-composition';
 import { waitForCondition, waitForRunState } from './test';
 import {
   type Bureau,
@@ -1232,6 +1234,92 @@ describe('createBureau durable inspection surface', () => {
     const listed = await bureau.listDurableRuns();
     expect(listed).toBeDefined();
     expect(listed!.items.some((summary) => summary.id === run.id)).toBe(true);
+  });
+});
+
+describe('createBureau scheduler-origin crash semantics (#25)', () => {
+  let schedulerSweepDatabaseCounter = 0;
+
+  it('sweeps a suspended scheduler-origin run left by a crash on the next boot', async () => {
+    const databasePath = join(
+      tmpdir(),
+      `bureau-sched-sweep-${process.pid}-${schedulerSweepDatabaseCounter++}.sqlite`,
+    );
+
+    try {
+      // === "Process 1": compose a durable engine over the SQLite file and start a
+      // scheduler-origin durable run (tagged SCHEDULER_ORIGIN_TAG, with the phantom
+      // sessionId === runId the real scheduler uses). Let it reach step 0, then
+      // suspend it — simulating a preemption — and dispose the composition WITHOUT
+      // resuming. That leaves a `suspended` scheduler run dangling in storage, the
+      // exact hard-crash residue #25 must clean up. ===
+      const runId = 'scheduler-run-sweep-me-1';
+      const composition = await createRuntimeComposition({
+        generate: async () => new Promise<never>(() => {}), // hang so it stays in flight
+        toolbox: createToolbox([]) as unknown as Toolbox,
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+      });
+      const engine = composition.durable!.engine;
+      const checkpointStore = composition.durable!.checkpointStore;
+
+      // Start the scheduler-origin run (do not await — it hangs in generate). Its
+      // result() promise rejects when the engine is disposed below (EngineDisposed
+      // for a still-pending run); swallow that — it is the expected crash semantic,
+      // not a test failure.
+      void startDurableRunResult(
+        { engine, checkpointStore },
+        {
+          runId,
+          sessionId: runId, // phantom: scheduler runs use sessionId === runId
+          tags: [SCHEDULER_ORIGIN_TAG],
+          options: {
+            generate: async () => new Promise<never>(() => {}),
+            toolbox: createToolbox([]) as unknown as Toolbox,
+            conversation: new Conversation(),
+            stopWhen: stopWhen.noToolCalls(),
+          },
+        },
+      ).catch(() => {});
+
+      // Wait until the run is actually running, then suspend it.
+      await pollUntil(async () => {
+        const state = await engine.get(runId);
+        return state?.status === 'running';
+      });
+      await engine.suspend(runId);
+      const suspendedState = await engine.get(runId);
+      expect(suspendedState?.status).toBe('suspended');
+
+      composition.disposeStorage?.(); // release the file handle (engine dispose first)
+      engine[Symbol.dispose]?.();
+      composition.disposeStorage?.();
+
+      // === "Process 2": a fresh bureau over the same SQLite file. recoverDurableRuns
+      // runs the suspended-scheduler sweep at boot. The dangling suspended run must
+      // be cancelled. ===
+      const bureau = await createBureau({
+        generate: createMockGenerate(),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+      });
+
+      try {
+        await pollUntil(async () => {
+          const swept = await bureau.getDurableRun(runId);
+          return swept?.status === 'cancelled';
+        });
+        const state = await bureau.getDurableRun(runId);
+        expect(state?.status).toBe('cancelled');
+      } finally {
+        bureau.dispose();
+      }
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
   });
 });
 
