@@ -6,7 +6,7 @@ import {
   isAgentRunWorkflowInput,
   reattachDurableActiveRun,
   type RecoveredRunHandle,
-  SCHEDULER_ORIGIN_TAG,
+  SCHEDULER_RUN_ID_PREFIX,
 } from 'operative/durable';
 import {
   createStore,
@@ -719,10 +719,16 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
             `rather than leaving suspended residue that could collide with a reused id.`,
         );
       }
-      // Pagination (limit/offset) lives on ListFilter, not ListOptions.
+      // Match by the synthetic-id PREFIX, not the origin TAG: the tag is new in
+      // this change, so suspended `scheduler-run-*` residue left by an EARLIER
+      // release carries the prefix (and phantom sessionId) but NOT the tag, and a
+      // tag-only filter would never collect it (Bugbot #38). The id format is
+      // release-stable, so the prefix catches both legacy and new residue. (The
+      // tag remains the recovery-time discriminant in the resolver, where only
+      // `input` — not the id — is available.) Pagination lives on ListFilter.
       const result = await engine.list({
         status: 'suspended',
-        tags: [SCHEDULER_ORIGIN_TAG],
+        idPrefix: SCHEDULER_RUN_ID_PREFIX,
         limit: PAGE_SIZE,
         offset,
       });

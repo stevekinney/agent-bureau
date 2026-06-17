@@ -1327,6 +1327,11 @@ describe('createBureau scheduler-origin crash semantics (#25)', () => {
       // resuming. That leaves a `suspended` scheduler run dangling in storage, the
       // exact hard-crash residue #25 must clean up. ===
       const runId = 'scheduler-run-sweep-me-1';
+      // LEGACY residue: a scheduler-run-* id with the phantom sessionId but NO
+      // SCHEDULER_ORIGIN_TAG — i.e. a suspended run left by a release before the
+      // tag existed. A tag-only sweep would miss it; the prefix-based sweep must
+      // still cancel it (Bugbot #38).
+      const legacyRunId = 'scheduler-run-legacy-untagged-9';
       const composition = await createRuntimeComposition({
         generate: async () => new Promise<never>(() => {}), // hang so it stays in flight
         toolbox: createToolbox([]) as unknown as Toolbox,
@@ -1336,10 +1341,11 @@ describe('createBureau scheduler-origin crash semantics (#25)', () => {
       const engine = composition.durable!.engine;
       const checkpointStore = composition.durable!.checkpointStore;
 
-      // Start the scheduler-origin run (do not await — it hangs in generate). Its
-      // result() promise rejects when the engine is disposed below (EngineDisposed
-      // for a still-pending run); swallow that — it is the expected crash semantic,
-      // not a test failure.
+      // Start the scheduler-origin runs (do not await — they hang in generate).
+      // Their result() promises reject when the engine is disposed below
+      // (EngineDisposed for a still-pending run); swallow that — it is the expected
+      // crash semantic, not a test failure. One TAGGED (new-style), one UNTAGGED
+      // (legacy residue).
       void startDurableRunResult(
         { engine, checkpointStore },
         {
@@ -1354,15 +1360,31 @@ describe('createBureau scheduler-origin crash semantics (#25)', () => {
           },
         },
       ).catch(() => {});
+      void startDurableRunResult(
+        { engine, checkpointStore },
+        {
+          runId: legacyRunId,
+          sessionId: legacyRunId,
+          // NO tags — legacy residue from before SCHEDULER_ORIGIN_TAG existed.
+          options: {
+            generate: async () => new Promise<never>(() => {}),
+            toolbox: createToolbox([]) as unknown as Toolbox,
+            conversation: new Conversation(),
+            stopWhen: stopWhen.noToolCalls(),
+          },
+        },
+      ).catch(() => {});
 
-      // Wait until the run is actually running, then suspend it.
-      await pollUntil(async () => {
-        const state = await engine.get(runId);
-        return state?.status === 'running';
-      });
-      await engine.suspend(runId);
-      const suspendedState = await engine.get(runId);
-      expect(suspendedState?.status).toBe('suspended');
+      // Wait until both runs are running, then suspend them.
+      for (const id of [runId, legacyRunId]) {
+        await pollUntil(async () => {
+          const state = await engine.get(id);
+          return state?.status === 'running';
+        });
+        await engine.suspend(id);
+        const suspendedState = await engine.get(id);
+        expect(suspendedState?.status).toBe('suspended');
+      }
 
       // Tear down in the SAME order the production dispose path uses: dispose the
       // engine FIRST (it holds the open SQLite connection), THEN release the raw
@@ -1385,14 +1407,19 @@ describe('createBureau scheduler-origin crash semantics (#25)', () => {
         // The sweep is a multi-round-trip SQLite list+cancel on a cold boot — use a
         // generous poll bound (matching the other cross-process recovery tests),
         // and assert the poll actually succeeded rather than letting a timeout fall
-        // through to a confusing downstream assertion.
+        // through to a confusing downstream assertion. BOTH the tagged and the
+        // untagged (legacy) scheduler runs must be cancelled — the sweep matches by
+        // id prefix, not by tag.
         const swept = await pollUntil(async () => {
-          const state = await bureau.getDurableRun(runId);
-          return state?.status === 'cancelled';
+          const tagged = await bureau.getDurableRun(runId);
+          const legacy = await bureau.getDurableRun(legacyRunId);
+          return tagged?.status === 'cancelled' && legacy?.status === 'cancelled';
         }, 50);
         expect(swept).toBe(true);
-        const finalState = await bureau.getDurableRun(runId);
-        expect(finalState?.status).toBe('cancelled');
+        const taggedFinal = await bureau.getDurableRun(runId);
+        const legacyFinal = await bureau.getDurableRun(legacyRunId);
+        expect(taggedFinal?.status).toBe('cancelled');
+        expect(legacyFinal?.status).toBe('cancelled');
       } finally {
         bureau.dispose();
       }
