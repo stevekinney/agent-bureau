@@ -1,3 +1,5 @@
+import type { WorkflowLogRecord } from '@lostgradient/weft';
+import type { ObservabilityOptions } from '@lostgradient/weft/observability';
 import type { StorageConfiguration, TextValueStore } from '@lostgradient/weft/storage';
 import type { Toolbox } from 'armorer';
 import type { ConversationSnapshot } from 'conversationalist';
@@ -179,6 +181,19 @@ export interface BureauOptions {
   sessionPersistenceSleep?: (milliseconds: number) => Promise<void>;
   maximumSteps?: number;
   systemPrompt?: string;
+  /**
+   * Opt into OpenTelemetry spans + metrics for durable runs. `true` enables the
+   * default interceptor; pass an {@link ObservabilityOptions} (minus `eventTarget`,
+   * which the engine supplies) to customize. Has effect only when a durable engine
+   * is composed. `@opentelemetry/api` is an optional peer — without it spans are
+   * no-ops, so enabling this is safe before any telemetry backend exists.
+   */
+  observability?: boolean | Omit<ObservabilityOptions, 'eventTarget'>;
+  /**
+   * Host sink for `ctx.log` records emitted by durable workflows (Weft 0.4.0
+   * structured logging). Has effect only when a durable engine is composed.
+   */
+  onLog?: (record: WorkflowLogRecord) => void;
 }
 
 export type BureauEventType = keyof BureauEventMap & string;

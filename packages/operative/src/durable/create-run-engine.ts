@@ -1,9 +1,15 @@
 import type {
   AnyWorkflowDefinition,
+  WorkflowLogRecord,
   WorkflowServicesResolution,
   WorkflowServicesResolverInfo,
 } from '@lostgradient/weft';
 import { Engine } from '@lostgradient/weft';
+// `MetricsCollector` is NOT re-exported from the `@lostgradient/weft` root barrel
+// (only the metrics factories are) — the class lives on the `/observability`
+// subpath, so the type must be imported from there.
+import type { MetricsCollector, ObservabilityOptions } from '@lostgradient/weft/observability';
+import { createObservabilityInterceptors } from '@lostgradient/weft/observability';
 import type { Storage } from '@lostgradient/weft/storage';
 import { textValueStore } from '@lostgradient/weft/storage';
 
@@ -59,6 +65,39 @@ export interface CreateRunEngineOptions {
    * rest of composition already built.
    */
   checkpointStore?: CheckpointStore;
+
+  /**
+   * Opt into OpenTelemetry spans + metrics for durable workflows and activities.
+   * When `true`, wires Weft's `createObservabilityInterceptors()` with this engine
+   * as the `eventTarget` (so root workflow spans close on terminal lifecycle
+   * events rather than accumulating until disposal). Pass an
+   * {@link ObservabilityOptions} object to customize the tracer name, payload
+   * recording, etc. `@opentelemetry/api` is an optional peer dependency — without
+   * it every span operation is a documented no-op with near-zero overhead, so
+   * enabling this is safe even before a telemetry backend exists. The metrics
+   * handle and the cleanup `dispose` are returned on {@link RunEngine.observability}.
+   */
+  observability?: boolean | Omit<ObservabilityOptions, 'eventTarget'>;
+
+  /**
+   * Host sink for `ctx.log` records emitted by durable workflows (Weft 0.4.0
+   * structured logging). Receives every replay-safe log record from inline and
+   * worker execution. A throwing sink falls back to console without failing the
+   * workflow. Omit to leave logs going to the host console.
+   */
+  onLog?: (record: WorkflowLogRecord) => void;
+}
+
+/**
+ * The observability handle returned when {@link CreateRunEngineOptions.observability}
+ * is enabled: the metrics collector for reading counters/histograms/gauges, and a
+ * `dispose` that ends still-open spans and unsubscribes the engine lifecycle
+ * listeners. `dispose` MUST run before the engine is disposed so the engine's
+ * terminal events still reach the span-closing listeners.
+ */
+export interface RunEngineObservability {
+  metrics: MetricsCollector;
+  dispose: () => void;
 }
 
 /**
@@ -80,6 +119,12 @@ export type AnyRunEngine = Engine<any, any>;
 export interface RunEngine {
   engine: AnyRunEngine;
   checkpointStore: CheckpointStore;
+  /**
+   * Present only when {@link CreateRunEngineOptions.observability} was enabled.
+   * Carries the metrics collector and a `dispose` the owner must call BEFORE
+   * disposing the engine.
+   */
+  observability?: RunEngineObservability;
 }
 
 /**
@@ -107,6 +152,7 @@ export async function createRunEngine(options: CreateRunEngineOptions): Promise<
     storage: options.storage,
     recover: options.recover ?? true,
     resolveWorkflowServices: options.resolveWorkflowServices,
+    ...(options.onLog ? { onLog: options.onLog } : {}),
     workflows: { agentRun: options.runWorkflow },
     activities: {
       saveCursor: storageActivities.saveCursor,
@@ -115,7 +161,34 @@ export async function createRunEngine(options: CreateRunEngineOptions): Promise<
     },
   });
 
-  return { engine, checkpointStore };
+  // Wire observability AFTER construction so the engine itself is the
+  // `eventTarget`: root workflow spans then close on terminal lifecycle events
+  // instead of accumulating until disposal. `addInterceptor` is the documented
+  // idiom (see the weft observability example) and works on the created engine.
+  const observability = options.observability
+    ? wireObservability(engine, options.observability)
+    : undefined;
+
+  return { engine, checkpointStore, ...(observability ? { observability } : {}) };
+}
+
+/**
+ * Build and attach the observability interceptor, returning the metrics handle
+ * and a `dispose` the caller invokes before engine disposal. `eventTarget` is the
+ * engine so spans close on terminal events; `@opentelemetry/api` absence makes
+ * every span op a no-op.
+ */
+function wireObservability(
+  engine: AnyRunEngine,
+  observability: boolean | Omit<ObservabilityOptions, 'eventTarget'>,
+): RunEngineObservability {
+  const baseOptions = observability === true ? {} : observability;
+  const { interceptor, metrics, dispose } = createObservabilityInterceptors({
+    ...baseOptions,
+    eventTarget: engine,
+  });
+  engine.addInterceptor(interceptor);
+  return { metrics, dispose };
 }
 
 /**

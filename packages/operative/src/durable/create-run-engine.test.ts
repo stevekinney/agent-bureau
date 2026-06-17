@@ -1,4 +1,4 @@
-import { activity, workflow } from '@lostgradient/weft';
+import { activity, workflow, type WorkflowLogRecord } from '@lostgradient/weft';
 import { MemoryStorage } from '@lostgradient/weft/storage';
 import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
 import { afterEach, describe, expect, it } from 'bun:test';
@@ -29,6 +29,25 @@ function makeProbeWorkflow() {
   return workflow({ name: 'agentRun' })
     .activities({ probe })
     .execute(async function* (ctx, input: { value: number }) {
+      const result = yield* ctx.run('probe', input);
+      return result;
+    });
+}
+
+/**
+ * A probe workflow that emits a `ctx.log` record so the `onLog` host sink can be
+ * observed. Named `agentRun` like the real body so `engine.start('agentRun', …)`
+ * resolves it.
+ */
+function makeLoggingWorkflow() {
+  const probe = activity({
+    name: 'probe',
+    execute: async (input: { value: number }) => ({ doubled: input.value * 2 }),
+  });
+  return workflow({ name: 'agentRun' })
+    .activities({ probe })
+    .execute(async function* (ctx, input: { value: number }) {
+      ctx.log?.info('probe running', { value: input.value });
       const result = yield* ctx.run('probe', input);
       return result;
     });
@@ -106,6 +125,84 @@ describe('createRunEngine', () => {
     try {
       const handle = await engine.start('agentRun', { value: 5 });
       expect(await handle.result()).toEqual({ doubled: 10 });
+    } finally {
+      engine[Symbol.dispose]();
+    }
+  });
+
+  it('omits the observability handle when not requested', async () => {
+    const { engine, observability } = await createRunEngine({
+      storage: new MemoryStorage(),
+      runWorkflow: makeProbeWorkflow(),
+      recover: false,
+    });
+    try {
+      expect(observability).toBeUndefined();
+    } finally {
+      engine[Symbol.dispose]();
+    }
+  });
+
+  it('returns a metrics collector and disposer when observability is enabled', async () => {
+    const { engine, observability } = await createRunEngine({
+      storage: new MemoryStorage(),
+      runWorkflow: makeProbeWorkflow(),
+      recover: false,
+      observability: true,
+    });
+
+    try {
+      expect(observability).toBeDefined();
+      // The metrics collector exposes a serializable snapshot; running a workflow
+      // records activity/workflow metrics through the attached interceptor.
+      expect(typeof observability!.metrics.snapshot).toBe('function');
+      const handle = await engine.start('agentRun', { value: 3 });
+      expect(await handle.result()).toEqual({ doubled: 6 });
+      const snapshot = observability!.metrics.snapshot();
+      expect(snapshot).toBeDefined();
+    } finally {
+      // dispose() must be callable and idempotent-safe before engine teardown.
+      observability!.dispose();
+      engine[Symbol.dispose]();
+    }
+  });
+
+  it('accepts an observability options object (custom tracer name)', async () => {
+    const { engine, observability } = await createRunEngine({
+      storage: new MemoryStorage(),
+      runWorkflow: makeProbeWorkflow(),
+      recover: false,
+      observability: { tracerName: 'agent-bureau-test', recordPayloads: false },
+    });
+    try {
+      expect(observability).toBeDefined();
+    } finally {
+      observability!.dispose();
+      engine[Symbol.dispose]();
+    }
+  });
+
+  it('routes ctx.log records to the onLog host sink', async () => {
+    const records: WorkflowLogRecord[] = [];
+    const { engine } = await createRunEngine({
+      storage: new MemoryStorage(),
+      runWorkflow: makeLoggingWorkflow(),
+      recover: false,
+      onLog: (record) => {
+        records.push(record);
+      },
+    });
+
+    try {
+      const handle = await engine.start('agentRun', { value: 7 });
+      expect(await handle.result()).toEqual({ doubled: 14 });
+      // The workflow emitted exactly one ctx.log.info record; the envelope fields
+      // are engine-owned, caller attributes nest under `attributes`.
+      const infoRecords = records.filter((r) => r.message === 'probe running');
+      expect(infoRecords.length).toBe(1);
+      expect(infoRecords[0]!.level).toBe('info');
+      expect(infoRecords[0]!.workflowType).toBe('agentRun');
+      expect(infoRecords[0]!.attributes).toEqual({ value: 7 });
     } finally {
       engine[Symbol.dispose]();
     }

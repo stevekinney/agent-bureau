@@ -42,7 +42,12 @@ import {
   withCache,
   withEnhancedStreaming,
 } from 'operative';
-import type { AnyRunEngine, CheckpointStore, DurableRunDeps } from 'operative/durable';
+import type {
+  AnyRunEngine,
+  CheckpointStore,
+  DurableRunDeps,
+  RunEngineObservability,
+} from 'operative/durable';
 import {
   createCheckpointStore,
   createRunEngine,
@@ -426,6 +431,18 @@ function createUnavailableToolbox(): GatewayToolbox {
   };
 }
 
+/**
+ * The durable run engine + checkpoint store, plus the optional observability
+ * handle. `observability` is present only when `BureauOptions.observability` was
+ * enabled; its `dispose` MUST be called before `engine[Symbol.dispose]()` so the
+ * engine's terminal lifecycle events still reach the span-closing listeners.
+ */
+export interface DurableComposition {
+  engine: AnyRunEngine;
+  checkpointStore: CheckpointStore;
+  observability?: RunEngineObservability;
+}
+
 export interface RuntimeComposition {
   kv: TextValueStore | undefined;
   /**
@@ -435,7 +452,7 @@ export interface RuntimeComposition {
    * `createBureau` routes every `createRun()` through it transparently — the run
    * surface is unchanged, but the run is checkpointed and resumes after a crash.
    */
-  durable: { engine: AnyRunEngine; checkpointStore: CheckpointStore } | undefined;
+  durable: DurableComposition | undefined;
   /**
    * Disposes the raw `Storage` backend this composition resolved from
    * `options.storage`, if any. The KV/checkpoint views are created with
@@ -526,7 +543,7 @@ export async function createRuntimeComposition(
     );
   }
 
-  let durable: { engine: AnyRunEngine; checkpointStore: CheckpointStore } | undefined;
+  let durable: DurableComposition | undefined;
   if (wantsDurable && durableStorage) {
     // Build the checkpoint store over the SAME backend the engine persists to.
     const checkpointStore = createCheckpointStore(
@@ -549,6 +566,8 @@ export async function createRuntimeComposition(
       checkpointStore,
       recover: false,
       resolveWorkflowServices: resolveRunServices,
+      ...(options.observability !== undefined ? { observability: options.observability } : {}),
+      ...(options.onLog ? { onLog: options.onLog } : {}),
     });
   }
 
