@@ -140,14 +140,15 @@ function createMemoryRecallHook(memory: Memory, sessionId: string): PrepareStepH
  * so relying on the memory store's cosine-similarity dedup is not sufficient.
  * Instead the write carries a stable `dedupeKey` of `${runId}:${step}` (the
  * durable operation's identity — same run, same step index across a replay), and
- * the hook skips the write when a memory in this namespace already carries that
- * key. This makes a re-fire a guaranteed no-op regardless of content drift.
+ * the hook skips the write when that key is already present. This makes a re-fire
+ * a guaranteed no-op regardless of content drift.
  *
- * The lookup PAGES through the whole namespace until it finds the key or
- * exhausts the records — `memory.list` defaults to a 100-record page, so a single
- * un-paged call would silently miss the key in a session with >100 memories and
- * let a re-fire write a duplicate. The scan early-exits on the first match (the
- * common case on a re-fire).
+ * The set of seen keys is loaded ONCE per run (lazily, on the first final step)
+ * by paging the whole namespace into an in-memory `Set`, then every subsequent
+ * per-step check and write is O(1) — not a full-namespace scan each step, which
+ * would be O(n²) over a long run. The one-time load pages the whole namespace
+ * because `memory.list` defaults to a 100-record page, so a single un-paged read
+ * would miss keys in a session with >100 memories and let a re-fire duplicate.
  *
  * When no `runId` is available (a non-durable run, where there is no replay and
  * therefore no re-fire hazard), the dedup guard is skipped and the write proceeds
@@ -168,6 +169,16 @@ export function createMemoryPersistHook(
   sessionId: string,
   runId?: string,
 ): OnStepHook {
+  // Per-run cache of the namespace's experiential dedupe keys (Bugbot #38): the
+  // hook fires on every final step, and the dedup check would otherwise PAGE THE
+  // WHOLE namespace each time the key is absent (the common, non-replay case) —
+  // O(n²) over a long session. Instead we seed this Set ONCE (lazily, on the
+  // first final step) by paging the namespace, then every steady-state check and
+  // write is an O(1) Set operation. `undefined` until seeded. Scoped to this
+  // run's hook closure: a recovered run gets a fresh hook that re-seeds from the
+  // persisted store, so cross-process recovery dedup still works.
+  let seenDedupeKeys: Set<string> | undefined;
+
   return async (context) => {
     if (!context.final || !context.content.trim()) {
       return;
@@ -178,8 +189,11 @@ export function createMemoryPersistHook(
     // produce a second record.
     const dedupeKey = runId === undefined ? undefined : `${runId}:${context.step}`;
 
-    if (dedupeKey !== undefined && (await hasExperientialDedupeKey(memory, sessionId, dedupeKey))) {
-      return; // Already persisted by the first (pre-crash) execution of this step.
+    if (dedupeKey !== undefined) {
+      seenDedupeKeys ??= await loadExperientialDedupeKeys(memory, sessionId);
+      if (seenDedupeKeys.has(dedupeKey)) {
+        return; // Already persisted by the first (pre-crash) execution of this step.
+      }
     }
 
     await memory.remember(context.content, {
@@ -192,49 +206,51 @@ export function createMemoryPersistHook(
       // only; never gates execution.
       replay: 'effectful' satisfies HookReplayPolicy,
     });
+
+    // Record the write so a later step in THIS run (or a re-fire of this one)
+    // dedupes against it without re-reading the store.
+    if (dedupeKey !== undefined) {
+      seenDedupeKeys?.add(dedupeKey);
+    }
   };
 }
 
 /**
- * Whether the namespace already holds an EXPERIENTIAL memory carrying `dedupeKey`.
- * Pages the whole namespace (NOT a single default 100-record page, which would
- * miss the key in a long session and break the persist hook's idempotency),
- * early-exiting on the first match. The match also requires `source ===
- * 'experiential'` to mirror exactly what the hook writes, so a non-experiential
- * record that happened to carry a colliding `dedupeKey` could not suppress it.
+ * Load the set of `dedupeKey`s on EXPERIENTIAL memories in a namespace, paging the
+ * whole namespace once. Called lazily, once per run, to seed the persist hook's
+ * in-memory dedup cache — so the hot-path per-step check is O(1) rather than a
+ * full-namespace scan each time. The `source === 'experiential'` filter mirrors
+ * exactly what the hook writes, so a non-experiential record carrying a colliding
+ * `dedupeKey` cannot poison the set.
  *
  * Unlike the boot-time sweep (which throws on its sanity cap), this runs on the
- * hot path — every final durable step — so a `MAX_PAGES` cap fails OPEN: a
- * mis-paginating store that never returns a short page would otherwise spin
- * forever here. On the cap we log and return `false` (let the write proceed,
- * preferring a possible duplicate over a hung run), rather than throw.
+ * request path, so a `MAX_PAGES` cap fails OPEN: a mis-paginating store that never
+ * returns a short page would otherwise spin forever here. On the cap we log and
+ * return whatever was collected (a possible later duplicate beats a hung run).
  */
-async function hasExperientialDedupeKey(
-  memory: Memory,
-  namespace: string,
-  dedupeKey: string,
-): Promise<boolean> {
+async function loadExperientialDedupeKeys(memory: Memory, namespace: string): Promise<Set<string>> {
   const PAGE_SIZE = 200;
   const MAX_PAGES = 50_000; // far above any real session; a non-terminating guard
+  const keys = new Set<string>();
   for (let page = 0; page < MAX_PAGES; page++) {
     const entries = await memory.list({ namespace, limit: PAGE_SIZE, offset: page * PAGE_SIZE });
-    if (
-      entries.some(
-        (entry) =>
-          entry.metadata['source'] === 'experiential' && entry.metadata['dedupeKey'] === dedupeKey,
-      )
-    ) {
-      return true;
+    for (const entry of entries) {
+      if (entry.metadata['source'] === 'experiential') {
+        const key = entry.metadata['dedupeKey'];
+        if (typeof key === 'string') {
+          keys.add(key);
+        }
+      }
     }
     if (entries.length < PAGE_SIZE) {
-      return false; // Last (short) page — namespace exhausted, no match.
+      return keys; // Last (short) page — namespace exhausted.
     }
   }
   console.warn(
-    `[bureau] dedupeKey lookup exceeded ${MAX_PAGES} pages for namespace "${namespace}" ` +
-      `(key "${dedupeKey}") without a short page — proceeding with the write (fail-open).`,
+    `[bureau] experiential dedupeKey load exceeded ${MAX_PAGES} pages for namespace ` +
+      `"${namespace}" without a short page — proceeding with a partial set (fail-open).`,
   );
-  return false;
+  return keys;
 }
 
 function resolveProviderGenerate(

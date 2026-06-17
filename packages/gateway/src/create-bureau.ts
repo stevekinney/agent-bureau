@@ -1112,10 +1112,11 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       // e.g. `durableExecution: false` with sqlite).
       try {
         // Observability dispose runs BEFORE engine dispose: it ends still-open
-        // spans and unsubscribes the engine lifecycle listeners. Done after the
-        // engine, the listeners would already be gone and any spans the engine's
-        // terminal-disposal events would have closed leak. Best-effort — a throw
-        // here must not skip the backend teardown below.
+        // spans and unsubscribes the engine lifecycle listeners. If the engine
+        // were disposed first, those listeners would already be gone, so the spans
+        // they would have closed in response to the engine's terminal-disposal
+        // events would leak instead. Best-effort — a throw here must not skip the
+        // backend teardown below.
         try {
           runtime.durable?.observability?.dispose();
         } catch (error) {

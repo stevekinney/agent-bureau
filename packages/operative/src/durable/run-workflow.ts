@@ -54,8 +54,10 @@ import type { DurableRunDeps, RunCursor, StepRecord } from './types';
  *   for a step whose work (generate + tools) DID re-execute, leaving external
  *   state out of sync with a step that ran. Read-only hooks are harmless and need
  *   nothing. The gateway's only effectful run hook, `createMemoryPersistHook`, is
- *   idempotent (content-addressed write, deduped by the memory store). Hooks carry
- *   a `replay: 'safe' | 'effectful'` classification (lifecycle
+ *   idempotent via a DETERMINISTIC `${runId}:${step}` dedupe key (NOT content —
+ *   a replayed step can regenerate different content): it skips the write when a
+ *   memory already carries that key, so a re-fire is a guaranteed no-op. Hooks
+ *   carry a `replay: 'safe' | 'effectful'` classification (lifecycle
  *   `HookRegistrationOptions`) for documentation/diagnostics; it does NOT gate
  *   execution. Earlier plan to filter effectful hooks on replay was rejected as
  *   unsound (skipped-side-effect semantics + fragile function-identity tracking).

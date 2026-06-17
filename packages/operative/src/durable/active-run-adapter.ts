@@ -501,6 +501,34 @@ async function driveReattachedRun(
       }
       return makeAbortResult(createRunState(), conversation, undefined, emitter, 0, 'aborted');
     }
+    // A `history.maxEvents` circuit-breaker (or a genuine execution-deadline
+    // timeout) rejects `handle.result()` with a `WorkflowTimeoutError`. On a
+    // RECOVERED run this is an ENGINE-policy terminal that fired AFTER recovery —
+    // nothing else owns reconciling it (unlike a pre-replay resolver failure,
+    // which the resolver already reconciled to `error`, or an EngineDisposedError
+    // teardown). So, symmetric with `driveDurableRun`, classify it as `error` and
+    // fire the terminal lifecycle here; otherwise the session is left stuck
+    // `running` for a run that is actually terminal (Bugbot #38). `hooks: undefined`
+    // per the reattach contract; the conversation comes from the checkpoint.
+    if (isWeftErrorLike(error) && error.code === 'WorkflowTimeoutError') {
+      const message = await classifyTimeoutMessage(context, runId, error);
+      let conversation: Conversation;
+      try {
+        const snapshot = await context.checkpointStore.loadConversation(runId);
+        conversation = snapshot ? Conversation.from(snapshot) : new Conversation();
+      } catch {
+        conversation = new Conversation();
+      }
+      return finalizeRunResult({
+        finishReason: 'error',
+        runState: emptyRunState(),
+        conversation,
+        hooks: undefined,
+        emitter,
+        runStartTime,
+        errorMessage: message,
+      });
+    }
     // Otherwise write-free. EngineDisposedError = bureau teardown mid-resume
     // (leave running for a later boot). Any other rejection = the engine
     // terminally failed this run pre-replay because the resolver returned

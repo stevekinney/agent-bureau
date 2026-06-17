@@ -15,9 +15,11 @@ export type HookErrorHandler = (
  *   mitigation is to make the hook IDEMPOTENT (e.g. content/key-addressed writes),
  *   NOT to skip it on replay — skipping would drop the side effect for a step
  *   whose work (generate + tools) did re-execute. This classification is
- *   METADATA ONLY: it documents the contract and powers a dev-time warning; it
- *   does NOT gate execution. Default (unset) is treated as the conservative
- *   `effectful` for warning purposes.
+ *   METADATA ONLY: it documents a hook's replay contract for authors and review.
+ *   It does NOT gate execution, and nothing currently reads it at runtime —
+ *   `HookRegistry` stores `replay` but does not act on it (a future dev-time
+ *   warning could, but none exists yet). When unset, treat a hook as the
+ *   conservative `effectful`.
  */
 export type HookReplayPolicy = 'safe' | 'effectful';
 

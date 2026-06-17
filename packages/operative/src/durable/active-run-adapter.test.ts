@@ -400,4 +400,49 @@ describe('reattachDurableActiveRun', () => {
       context.engine[Symbol.dispose]();
     }
   });
+
+  it('fires run.completed with finishReason error when a recovered run is terminated by the history circuit breaker (Bugbot #38)', async () => {
+    // A recovered run whose handle.result() rejects with a WorkflowTimeoutError
+    // (history circuit breaker / execution deadline) is GENUINELY terminal — and
+    // unlike a pre-replay resolver failure, nothing else reconciles it. The
+    // reattach path must fire run.completed (finishReason 'error') so the gateway
+    // persists a terminal session status, rather than leaving it stuck `running`.
+    const context = await buildContext();
+    try {
+      // A WeftError-shaped rejection: a real Error carrying the `code` that
+      // isWeftErrorLike narrows on (mirrors weft's WorkflowTimeoutError).
+      const timeoutError = Object.assign(new Error('workflow timed out'), {
+        code: 'WorkflowTimeoutError',
+      });
+      const handle = {
+        id: 'reattach-timeout',
+        result: () => Promise.reject(timeoutError),
+      };
+      // engine.get returns a state whose terminationReason names the circuit
+      // breaker, so classifyTimeoutMessage distinguishes it from a deadline.
+      const engine = {
+        get: async () => ({ status: 'timed-out', terminationReason: 'history-circuit-breaker' }),
+        cancel: async () => {},
+      } as unknown as AnyRunEngine;
+
+      let completedFinishReason: RunResult['finishReason'] | undefined;
+      const recoveredRun = reattachDurableActiveRun(
+        { engine, checkpointStore: context.checkpointStore },
+        { runId: 'reattach-timeout', handle },
+      );
+      recoveredRun.addEventListener('run.completed', (event) => {
+        completedFinishReason = event.finishReason;
+      });
+
+      const result = await recoveredRun.result;
+
+      // Settled as a terminal error (not the write-free interrupted path) and the
+      // terminal lifecycle fired, so the session won't be left `running`.
+      expect(result.finishReason).toBe('error');
+      expect(completedFinishReason).toBe('error');
+      expect((result.error as Error).message).toContain('history circuit breaker');
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
 });
