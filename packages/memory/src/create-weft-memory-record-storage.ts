@@ -164,6 +164,19 @@ export function createWeftMemoryRecordStorage(
     return `${dedupeScopePrefix(scope)}${encodeStorageKeyComponent(dedupeKey)}`;
   }
 
+  function requireRecordDedupeKey(record: MemoryRecord): string {
+    const dedupeKey = record.metadata['dedupeKey'];
+    if (typeof dedupeKey !== 'string' || dedupeKey.length === 0) {
+      throw new Error('record.metadata.dedupeKey must be a non-empty string.');
+    }
+    return dedupeKey;
+  }
+
+  function recordDedupeKey(record: MemoryRecord): string | undefined {
+    const dedupeKey = record.metadata['dedupeKey'];
+    return typeof dedupeKey === 'string' ? dedupeKey : undefined;
+  }
+
   async function readActive(key: string): Promise<MemoryRecord | undefined> {
     const bytes = await storage.get(key);
     if (bytes === null) return undefined;
@@ -186,6 +199,14 @@ export function createWeftMemoryRecordStorage(
     return out;
   }
 
+  async function readByDedupeKey(
+    scope: MemoryRecordScope,
+    dedupeKey: string,
+  ): Promise<MemoryRecord | undefined> {
+    const existingId = await readRecordId(dedupeIndexKey(scope, dedupeKey));
+    return existingId === undefined ? undefined : readActive(recordKey(scope, existingId));
+  }
+
   return {
     init(): Promise<void> {
       return Promise.resolve();
@@ -203,10 +224,35 @@ export function createWeftMemoryRecordStorage(
         ...(record.tenantId !== undefined ? { tenantId: record.tenantId } : {}),
         namespace: record.namespace,
       };
-      await storage.put(recordKey(scope, record.id), encodeRecord(record));
+      const key = recordKey(scope, record.id);
+      const existing = await readActive(key);
+      const oldDedupeKey = existing === undefined ? undefined : recordDedupeKey(existing);
+      const newDedupeKey = record.status === 'active' ? recordDedupeKey(record) : undefined;
+      const mutations: Parameters<typeof storageConditionalBatch>[2] = [
+        { type: 'put', key, value: encodeRecord(record) },
+      ];
+      if (oldDedupeKey !== undefined && oldDedupeKey !== newDedupeKey) {
+        mutations.push({ type: 'delete', key: dedupeIndexKey(scope, oldDedupeKey) });
+      }
+      if (newDedupeKey !== undefined) {
+        mutations.push({
+          type: 'put',
+          key: dedupeIndexKey(scope, newDedupeKey),
+          value: textEncoder.encode(record.id),
+        });
+      }
+      await storageConditionalBatch(storage, [], mutations);
     },
 
-    async putOnce(record: MemoryRecord, dedupeKey: string) {
+    async getByDedupeKey(
+      scope: MemoryRecordScope,
+      dedupeKey: string,
+    ): Promise<MemoryRecord | undefined> {
+      return readByDedupeKey(scope, dedupeKey);
+    },
+
+    async putOnce(record: MemoryRecord) {
+      const dedupeKey = requireRecordDedupeKey(record);
       const scope: MemoryRecordScope = {
         ...(record.tenantId !== undefined ? { tenantId: record.tenantId } : {}),
         namespace: record.namespace,
@@ -229,9 +275,7 @@ export function createWeftMemoryRecordStorage(
         return { record, inserted: true };
       }
 
-      const existingId = await readRecordId(indexKey);
-      const existing =
-        existingId === undefined ? undefined : await readActive(recordKey(scope, existingId));
+      const existing = await readByDedupeKey(scope, dedupeKey);
       if (existing !== undefined) return { record: existing, inserted: false };
 
       throw new Error(`dedupeKey "${dedupeKey}" exists but its memory record is missing.`);
@@ -320,7 +364,22 @@ export function createWeftMemoryRecordStorage(
         updatedAt: Date.now(),
         version: existing.version + 1,
       };
-      await storage.put(key, encodeRecord(updated));
+      const oldDedupeKey = recordDedupeKey(existing);
+      const newDedupeKey = updated.status === 'active' ? recordDedupeKey(updated) : undefined;
+      const mutations: Parameters<typeof storageConditionalBatch>[2] = [
+        { type: 'put', key, value: encodeRecord(updated) },
+      ];
+      if (oldDedupeKey !== undefined && oldDedupeKey !== newDedupeKey) {
+        mutations.push({ type: 'delete', key: dedupeIndexKey(scope, oldDedupeKey) });
+      }
+      if (newDedupeKey !== undefined) {
+        mutations.push({
+          type: 'put',
+          key: dedupeIndexKey(scope, newDedupeKey),
+          value: textEncoder.encode(updated.id),
+        });
+      }
+      await storageConditionalBatch(storage, [], mutations);
       return updated;
     },
 

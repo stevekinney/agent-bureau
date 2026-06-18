@@ -62,6 +62,7 @@ const storedRowSchema = z.object({
   vector: z.string(),
   metadata: z.string(),
   dedupe_key: z.string().nullable().optional(),
+  indexed_at: z.number().finite().optional(),
   created_at: z.number().finite(),
   updated_at: z.number().finite(),
 });
@@ -249,6 +250,14 @@ export function createCloudflareMemoryRecordStorage(
     return typeof dedupeKey === 'string' ? dedupeKey : null;
   }
 
+  function requireRecordDedupeKey(record: MemoryRecord): string {
+    const dedupeKey = recordDedupeKey(record);
+    if (dedupeKey === null || dedupeKey.length === 0) {
+      throw new Error('record.metadata.dedupeKey must be a non-empty string.');
+    }
+    return dedupeKey;
+  }
+
   /** Fetch a single ACTIVE row in scope, or `undefined`. */
   function activeRow(
     tenantId: string,
@@ -257,7 +266,7 @@ export function createCloudflareMemoryRecordStorage(
   ): z.infer<typeof storedRowSchema> | undefined {
     const rows = sql
       .exec<Record<string, SqlValue>>(
-        `SELECT tenant_id, namespace, id, status, version, content, vector, metadata, dedupe_key, created_at, updated_at
+        `SELECT tenant_id, namespace, id, status, version, content, vector, metadata, dedupe_key, indexed_at, created_at, updated_at
          FROM ${table}
          WHERE tenant_id = ? AND namespace = ? AND id = ? AND status = 'active'`,
         tenantId,
@@ -276,7 +285,7 @@ export function createCloudflareMemoryRecordStorage(
   ): z.infer<typeof storedRowSchema> | undefined {
     const rows = sql
       .exec<Record<string, SqlValue>>(
-        `SELECT tenant_id, namespace, id, status, version, content, vector, metadata, dedupe_key, created_at, updated_at
+        `SELECT tenant_id, namespace, id, status, version, content, vector, metadata, dedupe_key, indexed_at, created_at, updated_at
          FROM ${table}
          WHERE tenant_id = ? AND namespace = ? AND dedupe_key = ? AND status = 'active'
          LIMIT 1`,
@@ -315,6 +324,31 @@ export function createCloudflareMemoryRecordStorage(
       if (!columns.includes('dedupe_key')) {
         sql.exec(`ALTER TABLE ${table} ADD COLUMN dedupe_key TEXT`);
       }
+      const seen = new Set<string>();
+      const rows = sql
+        .exec<{ tenant_id: string; namespace: string; id: string; metadata: string }>(
+          `SELECT tenant_id, namespace, id, metadata
+           FROM ${table}
+           WHERE status = 'active' AND dedupe_key IS NULL`,
+        )
+        .toArray();
+      for (const row of rows) {
+        const parsed = metadataJsonSchema.parse(JSON.parse(row.metadata));
+        const dedupeKey = parsed['dedupeKey'];
+        if (typeof dedupeKey !== 'string' || dedupeKey.length === 0) continue;
+        const indexKey = `${row.tenant_id}\0${row.namespace}\0${dedupeKey}`;
+        if (seen.has(indexKey)) continue;
+        seen.add(indexKey);
+        sql.exec(
+          `UPDATE ${table}
+             SET dedupe_key = ?
+           WHERE tenant_id = ? AND namespace = ? AND id = ? AND status = 'active'`,
+          dedupeKey,
+          row.tenant_id,
+          row.namespace,
+          row.id,
+        );
+      }
       sql.exec(
         `CREATE UNIQUE INDEX IF NOT EXISTS ${table}_active_dedupe_key_unique
          ON ${table} (tenant_id, namespace, dedupe_key)
@@ -334,7 +368,6 @@ export function createCloudflareMemoryRecordStorage(
         ...(record.tenantId !== undefined ? { tenantId: record.tenantId } : {}),
         namespace: record.namespace,
       });
-      const now = Date.now();
       const dedupeKey = recordDedupeKey(record);
       sql.exec(
         `INSERT INTO ${table}
@@ -361,7 +394,7 @@ export function createCloudflareMemoryRecordStorage(
         dedupeKey,
         record.createdAt,
         record.updatedAt,
-        now,
+        0,
       );
 
       if (record.status === 'active') {
@@ -372,6 +405,15 @@ export function createCloudflareMemoryRecordStorage(
             metadata: vectorizeMetadata(tenantId, record),
           },
         ]);
+        sql.exec(
+          `UPDATE ${table}
+             SET indexed_at = ?
+           WHERE tenant_id = ? AND namespace = ? AND id = ?`,
+          Date.now(),
+          tenantId,
+          namespace,
+          record.id,
+        );
       } else {
         // A directly put() non-active record is a tombstone: keep the secondary
         // index from holding a stale live id for it.
@@ -379,12 +421,20 @@ export function createCloudflareMemoryRecordStorage(
       }
     },
 
-    async putOnce(record: MemoryRecord, dedupeKey: string) {
+    getByDedupeKey(scope: MemoryRecordScope, dedupeKey: string): Promise<MemoryRecord | undefined> {
+      return runSync(() => {
+        const { tenantId, namespace } = requireScope(scope);
+        const row = activeRowByDedupeKey(tenantId, namespace, dedupeKey);
+        return row === undefined ? undefined : rowToRecord(row);
+      });
+    },
+
+    async putOnce(record: MemoryRecord) {
+      const dedupeKey = requireRecordDedupeKey(record);
       const { tenantId, namespace } = requireScope({
         ...(record.tenantId !== undefined ? { tenantId: record.tenantId } : {}),
         namespace: record.namespace,
       });
-      const now = Date.now();
       sql.exec(
         `INSERT OR IGNORE INTO ${table}
            (tenant_id, namespace, id, status, version, content, vector, metadata, dedupe_key, created_at, updated_at, indexed_at)
@@ -400,7 +450,7 @@ export function createCloudflareMemoryRecordStorage(
         dedupeKey,
         record.createdAt,
         record.updatedAt,
-        now,
+        0,
       );
 
       const row = activeRowByDedupeKey(tenantId, namespace, dedupeKey);
@@ -417,7 +467,35 @@ export function createCloudflareMemoryRecordStorage(
             metadata: vectorizeMetadata(tenantId, record),
           },
         ]);
+        sql.exec(
+          `UPDATE ${table}
+             SET indexed_at = ?
+           WHERE tenant_id = ? AND namespace = ? AND id = ?`,
+          Date.now(),
+          tenantId,
+          namespace,
+          record.id,
+        );
         return { record: stored, inserted: true };
+      }
+
+      if (row.indexed_at === 0) {
+        await vectorize.upsert([
+          {
+            id: vectorizeId(tenantId, namespace, stored.id),
+            values: Array.from(stored.vector),
+            metadata: vectorizeMetadata(tenantId, stored),
+          },
+        ]);
+        sql.exec(
+          `UPDATE ${table}
+             SET indexed_at = ?
+           WHERE tenant_id = ? AND namespace = ? AND id = ?`,
+          Date.now(),
+          tenantId,
+          namespace,
+          stored.id,
+        );
       }
 
       return { record: stored, inserted: false };
@@ -455,7 +533,7 @@ export function createCloudflareMemoryRecordStorage(
         const { tenantId, namespace } = requireScope(scope);
         const rows = sql
           .exec<Record<string, SqlValue>>(
-            `SELECT tenant_id, namespace, id, status, version, content, vector, metadata, dedupe_key, created_at, updated_at
+            `SELECT tenant_id, namespace, id, status, version, content, vector, metadata, dedupe_key, indexed_at, created_at, updated_at
              FROM ${table}
              WHERE tenant_id = ? AND namespace = ? AND status = 'active'
              ORDER BY created_at DESC`,
@@ -608,7 +686,7 @@ export function createCloudflareMemoryRecordStorage(
         JSON.stringify(updated.metadata),
         recordDedupeKey(updated),
         updated.updatedAt,
-        updated.updatedAt,
+        0,
         tenantId,
         namespace,
         id,
@@ -621,6 +699,15 @@ export function createCloudflareMemoryRecordStorage(
           metadata: vectorizeMetadata(tenantId, updated),
         },
       ]);
+      sql.exec(
+        `UPDATE ${table}
+           SET indexed_at = ?
+         WHERE tenant_id = ? AND namespace = ? AND id = ?`,
+        Date.now(),
+        tenantId,
+        namespace,
+        id,
+      );
 
       return updated;
     },

@@ -123,7 +123,7 @@ describe('createWeftMemoryRecordStorage (Weft-specific)', () => {
         /namespace must be a non-empty string/,
       );
       await expect(
-        storage.putOnce(makeRecord('a', { namespace: '' }), 'dedupe-key'),
+        storage.putOnce!(makeRecord('a', { namespace: '', metadata: { dedupeKey: 'dedupe-key' } })),
       ).rejects.toThrow(/namespace must be a non-empty string/);
     });
   });

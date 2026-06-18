@@ -246,6 +246,16 @@ export function createMemory(options: CreateMemoryOptions): Memory {
       }
 
       const namespace = metadata.namespace ?? defaultNamespace;
+      const scope = scopeFor(namespace);
+      const existing = await storage.getByDedupeKey?.(scope, metadata.dedupeKey);
+      if (existing !== undefined) {
+        return toMemoryEntry(existing);
+      }
+
+      if (storage.putOnce === undefined) {
+        throw new Error('rememberOnce requires storage.putOnce support.');
+      }
+
       const vector = await embed(content);
       const now = Date.now();
       const record: MemoryRecord = {
@@ -260,7 +270,7 @@ export function createMemory(options: CreateMemoryOptions): Memory {
         status: 'active',
       };
 
-      const result = await storage.putOnce(record, metadata.dedupeKey);
+      const result = await storage.putOnce(record);
       if (result.inserted && textSearchProvider) {
         await textSearchProvider.index(record.id, content, namespace);
       }

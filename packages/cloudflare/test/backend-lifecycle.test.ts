@@ -20,7 +20,7 @@ const TENANT = 'tenant-a';
 const NAMESPACE = 'alpha';
 const SCOPE: MemoryRecordScope = { tenantId: TENANT, namespace: NAMESPACE };
 
-function makeRecord(id: string): MemoryRecord {
+function makeRecord(id: string, overrides: Partial<MemoryRecord> = {}): MemoryRecord {
   const now = Date.now();
   return {
     id,
@@ -33,6 +33,7 @@ function makeRecord(id: string): MemoryRecord {
     updatedAt: now,
     version: 1,
     status: 'active',
+    ...overrides,
   };
 }
 
@@ -108,6 +109,128 @@ describe('createCloudflareMemoryTestHarness', () => {
         /tableName must be a valid SQL identifier/,
       );
     }
+  });
+});
+
+describe('Cloudflare memory dedupe keys', () => {
+  it('returns an existing record for duplicate putOnce without a second Vectorize upsert', async () => {
+    const vectorize = createFakeVectorize();
+    const storage = createCloudflareMemoryRecordStorage({
+      sql: createSqliteDouble(),
+      vectorize,
+    });
+    await storage.init();
+
+    const first = await storage.putOnce!(makeRecord('first', { metadata: { dedupeKey: 'same' } }));
+    const second = await storage.putOnce!(
+      makeRecord('second', { content: 'different', metadata: { dedupeKey: 'same' } }),
+    );
+
+    expect(first.inserted).toBe(true);
+    expect(second.inserted).toBe(false);
+    expect(second.record.id).toBe('first');
+    expect(second.record.content).toBe('content-first');
+    expect(vectorize.upsertCalls).toHaveLength(1);
+  });
+
+  it('backfills dedupe_key from existing metadata before enforcing the unique index', async () => {
+    const sql = createSqliteDouble();
+    sql.exec(
+      `CREATE TABLE memory_records (
+         tenant_id  TEXT    NOT NULL,
+         namespace  TEXT    NOT NULL,
+         id         TEXT    NOT NULL,
+         status     TEXT    NOT NULL,
+         version    INTEGER NOT NULL,
+         content    TEXT    NOT NULL,
+         vector     TEXT    NOT NULL,
+         metadata   TEXT    NOT NULL,
+         created_at INTEGER NOT NULL,
+         updated_at INTEGER NOT NULL,
+         indexed_at INTEGER NOT NULL,
+         PRIMARY KEY (tenant_id, namespace, id)
+       )`,
+    );
+    sql.exec(
+      `INSERT INTO memory_records
+         (tenant_id, namespace, id, status, version, content, vector, metadata, created_at, updated_at, indexed_at)
+       VALUES (?, ?, ?, 'active', 1, ?, ?, ?, 1, 1, 1)`,
+      TENANT,
+      NAMESPACE,
+      'old-row',
+      'old content',
+      JSON.stringify([1, 0]),
+      JSON.stringify({ dedupeKey: 'old-key' }),
+    );
+    const vectorize = createFakeVectorize();
+    const storage = createCloudflareMemoryRecordStorage({ sql, vectorize });
+
+    await storage.init();
+    const existing = await storage.getByDedupeKey!(SCOPE, 'old-key');
+    const duplicate = await storage.putOnce!(
+      makeRecord('new-row', { metadata: { dedupeKey: 'old-key' } }),
+    );
+
+    expect(existing?.id).toBe('old-row');
+    expect(duplicate.inserted).toBe(false);
+    expect(duplicate.record.id).toBe('old-row');
+    expect(await storage.count(SCOPE)).toBe(1);
+  });
+
+  it('enforces one active row per dedupe key at the SQLite index', async () => {
+    const sql = createSqliteDouble();
+    const storage = createCloudflareMemoryRecordStorage({
+      sql,
+      vectorize: createFakeVectorize(),
+    });
+    await storage.init();
+    await storage.put(makeRecord('first', { metadata: { dedupeKey: 'unique-key' } }));
+
+    expect(() =>
+      sql.exec(
+        `INSERT INTO memory_records
+           (tenant_id, namespace, id, status, version, content, vector, metadata, dedupe_key, created_at, updated_at, indexed_at)
+         VALUES (?, ?, ?, 'active', 1, ?, ?, ?, ?, 1, 1, 1)`,
+        TENANT,
+        NAMESPACE,
+        'second',
+        'second content',
+        JSON.stringify([0, 1]),
+        JSON.stringify({ dedupeKey: 'unique-key' }),
+        'unique-key',
+      ),
+    ).toThrow();
+  });
+
+  it('repairs an unindexed dedupe winner on a later duplicate putOnce call', async () => {
+    const sql = createSqliteDouble();
+    const vectorize = createFakeVectorize();
+    let failNextUpsert = true;
+    const flakyVectorize = {
+      ...vectorize,
+      async upsert(vectors: Parameters<typeof vectorize.upsert>[0]) {
+        if (failNextUpsert) {
+          failNextUpsert = false;
+          throw new Error('temporary vectorize failure');
+        }
+        return vectorize.upsert(vectors);
+      },
+    };
+    const storage = createCloudflareMemoryRecordStorage({ sql, vectorize: flakyVectorize });
+    await storage.init();
+
+    await expect(
+      storage.putOnce!(makeRecord('first', { metadata: { dedupeKey: 'repair-key' } })),
+    ).rejects.toThrow(/temporary vectorize failure/);
+
+    const duplicate = await storage.putOnce!(
+      makeRecord('second', { metadata: { dedupeKey: 'repair-key' } }),
+    );
+
+    expect(duplicate.inserted).toBe(false);
+    expect(duplicate.record.id).toBe('first');
+    expect(vectorize.upsertCalls).toHaveLength(1);
+    expect(vectorize.upsertCalls[0]![0]!.id).toContain(':first');
   });
 });
 

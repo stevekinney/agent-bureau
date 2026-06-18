@@ -140,8 +140,8 @@ export function runMemoryRecordStorageContract(
         });
 
         const [firstResult, secondResult] = await Promise.all([
-          storage.putOnce(first, 'run-1:0'),
-          storage.putOnce(second, 'run-1:0'),
+          storage.putOnce!(first),
+          storage.putOnce!(second),
         ]);
 
         const inserted = [firstResult, secondResult].filter((result) => result.inserted);
@@ -155,6 +155,9 @@ export function runMemoryRecordStorageContract(
         const duplicateResult = firstResult.inserted ? secondResult : firstResult;
         expect(duplicateResult.record.id).toBe(records[0]!.id);
         expect(duplicateResult.inserted).toBe(false);
+        await expect(storage.getByDedupeKey!(SCOPE, 'run-1:0')).resolves.toMatchObject({
+          id: records[0]!.id,
+        });
       });
 
       it('returns the existing record unchanged for a sequential duplicate dedupe key', async () => {
@@ -167,8 +170,8 @@ export function runMemoryRecordStorageContract(
           metadata: { dedupeKey: 'run-1:0', attempted: true },
         });
 
-        const firstResult = await storage.putOnce(first, 'run-1:0');
-        const secondResult = await storage.putOnce(second, 'run-1:0');
+        const firstResult = await storage.putOnce!(first);
+        const secondResult = await storage.putOnce!(second);
 
         expect(firstResult.inserted).toBe(true);
         expect(secondResult.inserted).toBe(false);
@@ -178,14 +181,21 @@ export function runMemoryRecordStorageContract(
         expect(await storage.count(SCOPE)).toBe(1);
       });
 
-      it('allows the same dedupe key in a different namespace', async () => {
-        await storage.putOnce(
-          makeRecord('alpha', { namespace: 'alpha', metadata: { dedupeKey: 'shared' } }),
-          'shared',
+      it('rejects a putOnce record without a non-empty dedupe key in metadata', async () => {
+        await expect(storage.putOnce!(makeRecord('missing-key'))).rejects.toThrow(
+          /record\.metadata\.dedupeKey must be a non-empty string/,
         );
-        await storage.putOnce(
+        await expect(
+          storage.putOnce!(makeRecord('empty-key', { metadata: { dedupeKey: '' } })),
+        ).rejects.toThrow(/record\.metadata\.dedupeKey must be a non-empty string/);
+      });
+
+      it('allows the same dedupe key in a different namespace', async () => {
+        await storage.putOnce!(
+          makeRecord('alpha', { namespace: 'alpha', metadata: { dedupeKey: 'shared' } }),
+        );
+        await storage.putOnce!(
           makeRecord('beta', { namespace: 'beta', metadata: { dedupeKey: 'shared' } }),
-          'shared',
         );
 
         expect(await storage.count(scopeFor({ namespace: 'alpha' }))).toBe(1);
@@ -196,10 +206,10 @@ export function runMemoryRecordStorageContract(
         const first = makeRecord('first', { metadata: { dedupeKey: 'deleted-key' } });
         const second = makeRecord('second', { metadata: { dedupeKey: 'deleted-key' } });
 
-        await storage.putOnce(first, 'deleted-key');
+        await storage.putOnce!(first);
         expect(await storage.delete(first.id, SCOPE)).toBe(true);
 
-        const result = await storage.putOnce(second, 'deleted-key');
+        const result = await storage.putOnce!(second);
         expect(result.inserted).toBe(true);
         expect(result.record.id).toBe(second.id);
         expect(await storage.count(SCOPE)).toBe(1);
@@ -209,13 +219,44 @@ export function runMemoryRecordStorageContract(
         const first = makeRecord('first', { metadata: { dedupeKey: 'namespace-key' } });
         const second = makeRecord('second', { metadata: { dedupeKey: 'namespace-key' } });
 
-        await storage.putOnce(first, 'namespace-key');
+        await storage.putOnce!(first);
         expect(await storage.deleteNamespace(SCOPE)).toBe(1);
 
-        const result = await storage.putOnce(second, 'namespace-key');
+        const result = await storage.putOnce!(second);
         expect(result.inserted).toBe(true);
         expect(result.record.id).toBe(second.id);
         expect(await storage.count(SCOPE)).toBe(1);
+      });
+
+      it('allows reusing a dedupe key after a put replacement changes the key', async () => {
+        const original = makeRecord('same-id', { metadata: { dedupeKey: 'old-key' } });
+        await storage.put(original);
+        await storage.put(makeRecord('same-id', { metadata: { dedupeKey: 'new-key' } }));
+
+        const result = await storage.putOnce!(
+          makeRecord('new-id', { metadata: { dedupeKey: 'old-key' } }),
+        );
+
+        expect(result.inserted).toBe(true);
+        expect(result.record.id).toBe('new-id');
+        await expect(storage.getByDedupeKey!(SCOPE, 'new-key')).resolves.toMatchObject({
+          id: 'same-id',
+        });
+      });
+
+      it('allows reusing a dedupe key after an update changes the key', async () => {
+        await storage.put(makeRecord('same-id', { metadata: { dedupeKey: 'old-key' } }));
+        await storage.update('same-id', SCOPE, { metadata: { dedupeKey: 'new-key' } });
+
+        const result = await storage.putOnce!(
+          makeRecord('new-id', { metadata: { dedupeKey: 'old-key' } }),
+        );
+
+        expect(result.inserted).toBe(true);
+        expect(result.record.id).toBe('new-id');
+        await expect(storage.getByDedupeKey!(SCOPE, 'new-key')).resolves.toMatchObject({
+          id: 'same-id',
+        });
       });
     });
 

@@ -68,10 +68,9 @@ export interface MemoryVectorSearchResult {
  * Result of an operation-keyed insert. `inserted` is `true` only for the caller
  * that created the record; duplicate callers receive the existing live record.
  */
-export interface MemoryRecordPutOnceResult {
-  record: MemoryRecord;
-  inserted: boolean;
-}
+export type MemoryRecordPutOnceResult =
+  | { record: MemoryRecord; inserted: true }
+  | { record: MemoryRecord; inserted: false };
 
 /**
  * Persistence contract for memory records.
@@ -106,11 +105,20 @@ export interface MemoryRecordStorage {
   /** Insert or replace a record. */
   put(record: MemoryRecord): Promise<void>;
   /**
-   * Atomically insert a live record if no live record in the same scope already
-   * owns `dedupeKey`. Returns the existing record unchanged when the key is
-   * already present.
+   * Fetch the live record in scope that owns `dedupeKey`, or `undefined` when
+   * no live record owns it. Implementations that provide `putOnce()` should
+   * provide this keyed lookup too so callers can avoid expensive record
+   * materialization when the operation key already exists.
    */
-  putOnce(record: MemoryRecord, dedupeKey: string): Promise<MemoryRecordPutOnceResult>;
+  getByDedupeKey?(scope: MemoryRecordScope, dedupeKey: string): Promise<MemoryRecord | undefined>;
+  /**
+   * Atomically insert a live record if no live record in the same scope already
+   * owns `record.metadata.dedupeKey`. Returns the existing record unchanged when
+   * the key is already present. Built-in backends implement this; custom
+   * backends that do not support it can still satisfy the base storage contract
+   * and will fail only when `Memory.rememberOnce()` is called.
+   */
+  putOnce?(record: MemoryRecord): Promise<MemoryRecordPutOnceResult>;
   /** Fetch a single live record by id, or `undefined` if absent (deleted records never appear). */
   get(id: string, scope: MemoryRecordScope): Promise<MemoryRecord | undefined>;
   /** Fetch multiple live records by id. Missing and deleted ids are omitted. */

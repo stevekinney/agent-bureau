@@ -141,6 +141,26 @@ describe('createMemory', () => {
 
       await strict.close();
     });
+
+    it('throws when the configured storage does not support putOnce', async () => {
+      const unsupportedStorage: MemoryRecordStorage = {
+        ...createInMemoryMemoryRecordStorage(),
+        getByDedupeKey: undefined,
+        putOnce: undefined,
+      };
+      const unsupported = createMemory({
+        embedder,
+        storage: unsupportedStorage,
+      });
+      await unsupported.init();
+
+      await expect(
+        unsupported.rememberOnce('unsupported storage', {
+          source: 'manual',
+          dedupeKey: 'unsupported-key',
+        }),
+      ).rejects.toThrow(/rememberOnce requires storage\.putOnce support/);
+    });
   });
 
   describe('deduplication', () => {

@@ -34,6 +34,7 @@ export interface MemoryMetadata {
   importance?: number;
   evergreen?: boolean;
   tags?: string[];
+  dedupeKey?: string;
   [key: string]: unknown;
 }
 

@@ -1496,6 +1496,13 @@ describe('createBureau effectful hook idempotency (#27)', () => {
     const namespace = 'hook-idempotency-ns';
     const runId = 'run-fixed-id';
     const hook = createMemoryPersistHook(memory, namespace, runId);
+    for (let i = 0; i < 125; i++) {
+      await memory.remember(`seed memory ${i} with unique content ${i * 7919}`, {
+        namespace,
+        source: 'manual',
+      });
+    }
+    expect(await memory.count(namespace)).toBe(125);
 
     // A minimal final StepResult for step 0; only final/content/step are read.
     const stepResult = (content: string) => ({
@@ -1518,6 +1525,7 @@ describe('createBureau effectful hook idempotency (#27)', () => {
     await hook(stepResult('different regenerated content'));
     const afterRefire = await listExperiential(memory, namespace);
     expect(afterRefire.length).toBe(1);
+    expect(await memory.count(namespace)).toBe(126);
     // The original write survived (not overwritten/dropped) — at-least-once is safe.
     expect(afterRefire[0]!.content).toBe('original content');
   });
