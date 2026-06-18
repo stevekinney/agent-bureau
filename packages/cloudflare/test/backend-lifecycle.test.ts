@@ -177,6 +177,54 @@ describe('Cloudflare memory dedupe keys', () => {
     expect(await storage.count(SCOPE)).toBe(1);
   });
 
+  it('tombstones duplicate active rows while backfilling dedupe_key from metadata', async () => {
+    const sql = createSqliteDouble();
+    sql.exec(
+      `CREATE TABLE memory_records (
+         tenant_id  TEXT    NOT NULL,
+         namespace  TEXT    NOT NULL,
+         id         TEXT    NOT NULL,
+         status     TEXT    NOT NULL,
+         version    INTEGER NOT NULL,
+         content    TEXT    NOT NULL,
+         vector     TEXT    NOT NULL,
+         metadata   TEXT    NOT NULL,
+         created_at INTEGER NOT NULL,
+         updated_at INTEGER NOT NULL,
+         indexed_at INTEGER NOT NULL,
+         PRIMARY KEY (tenant_id, namespace, id)
+       )`,
+    );
+    for (const [id, createdAt] of [
+      ['old-row', 1],
+      ['duplicate-row', 2],
+    ] as const) {
+      sql.exec(
+        `INSERT INTO memory_records
+           (tenant_id, namespace, id, status, version, content, vector, metadata, created_at, updated_at, indexed_at)
+         VALUES (?, ?, ?, 'active', 1, ?, ?, ?, ?, ?, 1)`,
+        TENANT,
+        NAMESPACE,
+        id,
+        `${id} content`,
+        JSON.stringify([1, 0]),
+        JSON.stringify({ dedupeKey: 'old-key' }),
+        createdAt,
+        createdAt,
+      );
+    }
+    const vectorize = createFakeVectorize();
+    const storage = createCloudflareMemoryRecordStorage({ sql, vectorize });
+
+    await storage.init();
+
+    const existing = await storage.getByDedupeKey!(SCOPE, 'old-key');
+    expect(existing?.id).toBe('old-row');
+    expect(await storage.get('duplicate-row', SCOPE)).toBeUndefined();
+    expect(await storage.count(SCOPE)).toBe(1);
+    expect(vectorize.deleteCalls).toEqual([[`${TENANT}:${NAMESPACE}:duplicate-row`]]);
+  });
+
   it('enforces one active row per dedupe key at the SQLite index', async () => {
     const sql = createSqliteDouble();
     const storage = createCloudflareMemoryRecordStorage({
@@ -231,6 +279,42 @@ describe('Cloudflare memory dedupe keys', () => {
     expect(duplicate.record.id).toBe('first');
     expect(vectorize.upsertCalls).toHaveLength(1);
     expect(vectorize.upsertCalls[0]![0]!.id).toContain(':first');
+  });
+
+  it('repairs an unindexed dedupe winner on keyed lookup before duplicate putOnce', async () => {
+    const sql = createSqliteDouble();
+    const vectorize = createFakeVectorize();
+    const storage = createCloudflareMemoryRecordStorage({ sql, vectorize });
+    await storage.init();
+    sql.exec(
+      `INSERT INTO memory_records
+         (tenant_id, namespace, id, status, version, content, vector, metadata, dedupe_key, created_at, updated_at, indexed_at)
+       VALUES (?, ?, ?, 'active', 1, ?, ?, ?, ?, 1, 1, 0)`,
+      TENANT,
+      NAMESPACE,
+      'first',
+      'first content',
+      JSON.stringify([1, 0]),
+      JSON.stringify({ dedupeKey: 'repair-key' }),
+      'repair-key',
+    );
+
+    const existing = await storage.getByDedupeKey!(SCOPE, 'repair-key');
+
+    expect(existing?.id).toBe('first');
+    expect(vectorize.upsertCalls).toHaveLength(1);
+    expect(vectorize.upsertCalls[0]![0]!.id).toContain(':first');
+    const rows = sql
+      .exec<{
+        indexed_at: number;
+      }>(
+        `SELECT indexed_at FROM memory_records WHERE tenant_id = ? AND namespace = ? AND id = ?`,
+        TENANT,
+        NAMESPACE,
+        'first',
+      )
+      .toArray();
+    expect(rows[0]?.indexed_at).toBeGreaterThan(0);
   });
 });
 

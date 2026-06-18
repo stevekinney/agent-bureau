@@ -298,8 +298,29 @@ export function createCloudflareMemoryRecordStorage(
     return first === undefined ? undefined : storedRowSchema.parse(first);
   }
 
+  async function repairUnindexedRow(row: z.infer<typeof storedRowSchema>): Promise<void> {
+    if ((row.indexed_at ?? 0) !== 0) return;
+    const record = rowToRecord(row);
+    await vectorize.upsert([
+      {
+        id: vectorizeId(row.tenant_id, row.namespace, row.id),
+        values: Array.from(record.vector),
+        metadata: vectorizeMetadata(row.tenant_id, record),
+      },
+    ]);
+    sql.exec(
+      `UPDATE ${table}
+         SET indexed_at = ?
+       WHERE tenant_id = ? AND namespace = ? AND id = ?`,
+      Date.now(),
+      row.tenant_id,
+      row.namespace,
+      row.id,
+    );
+  }
+
   return {
-    init(): Promise<void> {
+    async init(): Promise<void> {
       sql.exec(
         `CREATE TABLE IF NOT EXISTS ${table} (
            tenant_id  TEXT    NOT NULL,
@@ -325,11 +346,18 @@ export function createCloudflareMemoryRecordStorage(
         sql.exec(`ALTER TABLE ${table} ADD COLUMN dedupe_key TEXT`);
       }
       const seen = new Set<string>();
+      const duplicateVectorIds: string[] = [];
       const rows = sql
-        .exec<{ tenant_id: string; namespace: string; id: string; metadata: string }>(
+        .exec<{
+          tenant_id: string;
+          namespace: string;
+          id: string;
+          metadata: string;
+        }>(
           `SELECT tenant_id, namespace, id, metadata
            FROM ${table}
-           WHERE status = 'active' AND dedupe_key IS NULL`,
+           WHERE status = 'active' AND dedupe_key IS NULL
+           ORDER BY tenant_id, namespace, created_at, id`,
         )
         .toArray();
       for (const row of rows) {
@@ -337,7 +365,19 @@ export function createCloudflareMemoryRecordStorage(
         const dedupeKey = parsed['dedupeKey'];
         if (typeof dedupeKey !== 'string' || dedupeKey.length === 0) continue;
         const indexKey = `${row.tenant_id}\0${row.namespace}\0${dedupeKey}`;
-        if (seen.has(indexKey)) continue;
+        if (seen.has(indexKey)) {
+          sql.exec(
+            `UPDATE ${table}
+               SET status = 'deleted', updated_at = ?
+             WHERE tenant_id = ? AND namespace = ? AND id = ? AND status = 'active'`,
+            Date.now(),
+            row.tenant_id,
+            row.namespace,
+            row.id,
+          );
+          duplicateVectorIds.push(vectorizeId(row.tenant_id, row.namespace, row.id));
+          continue;
+        }
         seen.add(indexKey);
         sql.exec(
           `UPDATE ${table}
@@ -348,6 +388,9 @@ export function createCloudflareMemoryRecordStorage(
           row.namespace,
           row.id,
         );
+      }
+      if (duplicateVectorIds.length > 0) {
+        await vectorize.deleteByIds(duplicateVectorIds);
       }
       sql.exec(
         `CREATE UNIQUE INDEX IF NOT EXISTS ${table}_active_dedupe_key_unique
@@ -421,12 +464,15 @@ export function createCloudflareMemoryRecordStorage(
       }
     },
 
-    getByDedupeKey(scope: MemoryRecordScope, dedupeKey: string): Promise<MemoryRecord | undefined> {
-      return runSync(() => {
-        const { tenantId, namespace } = requireScope(scope);
-        const row = activeRowByDedupeKey(tenantId, namespace, dedupeKey);
-        return row === undefined ? undefined : rowToRecord(row);
-      });
+    async getByDedupeKey(
+      scope: MemoryRecordScope,
+      dedupeKey: string,
+    ): Promise<MemoryRecord | undefined> {
+      const { tenantId, namespace } = requireScope(scope);
+      const row = activeRowByDedupeKey(tenantId, namespace, dedupeKey);
+      if (row === undefined) return undefined;
+      await repairUnindexedRow(row);
+      return rowToRecord(row);
     },
 
     async putOnce(record: MemoryRecord) {
@@ -479,24 +525,7 @@ export function createCloudflareMemoryRecordStorage(
         return { record: stored, inserted: true };
       }
 
-      if (row.indexed_at === 0) {
-        await vectorize.upsert([
-          {
-            id: vectorizeId(tenantId, namespace, stored.id),
-            values: Array.from(stored.vector),
-            metadata: vectorizeMetadata(tenantId, stored),
-          },
-        ]);
-        sql.exec(
-          `UPDATE ${table}
-             SET indexed_at = ?
-           WHERE tenant_id = ? AND namespace = ? AND id = ?`,
-          Date.now(),
-          tenantId,
-          namespace,
-          stored.id,
-        );
-      }
+      await repairUnindexedRow(row);
 
       return { record: stored, inserted: false };
     },
