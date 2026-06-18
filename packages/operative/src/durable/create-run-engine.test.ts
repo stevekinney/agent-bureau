@@ -9,7 +9,7 @@ import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
 import { afterEach, describe, expect, it } from 'bun:test';
 
 import { createCheckpointStore } from './checkpoint-store';
-import { createRunEngine } from './create-run-engine';
+import { type AnyRunEngine, createRunEngine } from './create-run-engine';
 
 // A run is "parked" — not finished — when its status is neither completed nor a
 // failure terminal. A durable ctx.sleep that never fires (poller unarmed) can
@@ -71,17 +71,59 @@ function makeLoggingWorkflow() {
     });
 }
 
+// A sleep no real test process can outlast: a durable timer this far out cannot
+// fire on its own, so a run parked on it stays non-terminal for the test's life.
+const ONE_DAY_MILLISECONDS = 24 * 60 * 60 * 1000;
+
+// Logged by makeSleepingWorkflow on the step BEFORE ctx.sleep. Observing it via
+// the onLog sink is positive proof the generator actually reached the sleep —
+// "non-terminal" alone would also hold if the run never started, which is not
+// what the parked-timer tests mean to assert.
+const REACHED_SLEEP_MARKER = 'reached sleep';
+
 /**
- * A probe workflow that parks on a durable `ctx.sleep` before finishing. The
- * sleep only resolves if the engine's durable-timer poller is armed, so this
- * workflow's completion is a direct observation of whether `startScheduler`
- * took effect (the #590 seam).
+ * A probe workflow that parks on a durable `ctx.sleep` before finishing. It logs
+ * {@link REACHED_SLEEP_MARKER} on the step immediately before the sleep, so a test
+ * can prove the generator reached the timer. The sleep only resolves if the
+ * engine's durable-timer poller is armed, so this workflow's completion is a
+ * direct observation of whether `startScheduler` took effect (the #590 seam).
  */
 function makeSleepingWorkflow(sleepMilliseconds: number) {
   return workflow({ name: 'agentRun' }).execute(async function* (ctx, input: { value: number }) {
+    ctx.log?.info(REACHED_SLEEP_MARKER);
     yield* ctx.sleep(sleepMilliseconds);
     return { doubled: input.value * 2 };
   });
+}
+
+/**
+ * Assert a run is parked on its durable `ctx.sleep`: it has provably reached the
+ * sleep (the pre-sleep log marker arrived) and has not finished (its snapshot
+ * status is non-terminal). A day-long timer cannot fire on its own, so an armed
+ * poller would be the only thing able to drive it terminal — and an unarmed one
+ * cannot. `result()` is never awaited, so engine disposal has no pending promise
+ * to reject.
+ */
+async function assertRunParkedOnSleep(
+  engine: AnyRunEngine,
+  reachedSleepMarkers: readonly WorkflowLogRecord[],
+) {
+  const handle = await engine.start('agentRun', { value: 21 });
+  // Drain Weft's deferred inline launch until the generator has provably reached
+  // ctx.sleep (its pre-sleep marker logged). A single drain is not always enough
+  // for the inline start to advance, so loop with a bounded cap — the marker is
+  // emitted synchronously as the generator runs, so a handful of yields suffice;
+  // the cap turns a genuine hang into a clear failure rather than a spin.
+  for (let attempt = 0; attempt < 50 && reachedSleepMarkers.length === 0; attempt++) {
+    await yieldToPortableEventLoop();
+  }
+  // Positive proof the run reached the sleep, not that it merely never started.
+  expect(reachedSleepMarkers.length).toBe(1);
+  // Non-terminal: an armed poller would have fired the day-long timer to drive
+  // the run terminal; an unarmed one cannot, so it stays parked.
+  const snapshot = await handle.snapshot();
+  expect(snapshot).not.toBeNull();
+  expect(TERMINAL_STATUSES.has(snapshot!.status)).toBe(false);
 }
 
 describe('createRunEngine', () => {
@@ -314,29 +356,22 @@ describe('createRunEngine', () => {
 
   it('leaves durable ctx.sleep timers parked under recover:false without startScheduler (#590)', async () => {
     // The inverse: with the poller unarmed (the recover:false default), the
-    // durable sleep never elapses. Asserted DETERMINISTICALLY (not a wall-clock
-    // race): a day-long sleep cannot fire on its own, so the run can never reach
-    // a terminal status — snapshot reports a non-terminal status forever. result()
-    // is never awaited here, so there is no pending promise for engine disposal to
-    // reject.
-    const oneDayMilliseconds = 24 * 60 * 60 * 1000;
+    // durable sleep never elapses, so the run parks on the timer forever. Proven
+    // deterministically (not a wall-clock race): the run reaches the sleep (the
+    // pre-sleep marker arrives) and stays non-terminal (a day-long timer cannot
+    // fire on its own, and an unarmed poller cannot drive it terminal).
+    const reachedSleep: WorkflowLogRecord[] = [];
     const { engine } = await createRunEngine({
       storage: new MemoryStorage(),
-      runWorkflow: makeSleepingWorkflow(oneDayMilliseconds),
+      runWorkflow: makeSleepingWorkflow(ONE_DAY_MILLISECONDS),
       recover: false,
+      onLog: (record) => {
+        if (record.message === REACHED_SLEEP_MARKER) reachedSleep.push(record);
+      },
     });
 
     try {
-      const handle = await engine.start('agentRun', { value: 21 });
-      // Drain Weft's deferred inline launch so the generator has actually run up
-      // to its ctx.sleep — otherwise a still-queued start would also read as not
-      // settled, for the wrong reason (the false-pass the committee flagged).
-      await yieldToPortableEventLoop();
-      const snapshot = await handle.snapshot();
-      // Non-terminal: the run exists and has not finished. An armed poller would
-      // have fired the (day-long) timer to drive it terminal — it cannot here.
-      expect(snapshot).not.toBeNull();
-      expect(TERMINAL_STATUSES.has(snapshot!.status)).toBe(false);
+      await assertRunParkedOnSleep(engine, reachedSleep);
     } finally {
       engine[Symbol.dispose]();
     }
@@ -346,24 +381,21 @@ describe('createRunEngine', () => {
     // The full cross-product: startScheduler:false suppresses the poller even
     // though recovery runs (recover:true). This exercises the branch where the
     // option is explicitly forwarded to override Weft's `recover !== false`
-    // default, so the durable sleep stays parked. Same deterministic non-terminal
-    // assertion as the recover:false case.
-    const oneDayMilliseconds = 24 * 60 * 60 * 1000;
+    // default, so the durable sleep stays parked. Same deterministic proof as the
+    // recover:false case (reached-sleep marker + non-terminal status).
+    const reachedSleep: WorkflowLogRecord[] = [];
     const { engine } = await createRunEngine({
       storage: new MemoryStorage(),
-      runWorkflow: makeSleepingWorkflow(oneDayMilliseconds),
+      runWorkflow: makeSleepingWorkflow(ONE_DAY_MILLISECONDS),
       recover: true,
       startScheduler: false,
+      onLog: (record) => {
+        if (record.message === REACHED_SLEEP_MARKER) reachedSleep.push(record);
+      },
     });
 
     try {
-      const handle = await engine.start('agentRun', { value: 21 });
-      await yieldToPortableEventLoop();
-      const snapshot = await handle.snapshot();
-      // Non-terminal: the run exists and has not finished. An armed poller would
-      // have fired the (day-long) timer to drive it terminal — it cannot here.
-      expect(snapshot).not.toBeNull();
-      expect(TERMINAL_STATUSES.has(snapshot!.status)).toBe(false);
+      await assertRunParkedOnSleep(engine, reachedSleep);
     } finally {
       engine[Symbol.dispose]();
     }
