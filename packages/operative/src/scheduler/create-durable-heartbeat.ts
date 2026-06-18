@@ -4,7 +4,6 @@ import type { AnyRunEngine } from '../durable/create-run-engine';
 import type {
   DurableHeartbeatTickInput,
   DurableHeartbeatTickServices,
-  DurableHeartbeatTickServicesRegistration,
 } from '../durable/durable-heartbeat-tick-workflow';
 import {
   assertDurableHeartbeatServicesStore,
@@ -126,25 +125,27 @@ export async function createDurableHeartbeat(
     ...(options.onTick ? { onTick: options.onTick } : {}),
     ...(options.onFailure ? { onFailure: options.onFailure } : {}),
   };
-  let servicesRegistration: DurableHeartbeatTickServicesRegistration;
-
-  await withDurableHeartbeatLifecycleLock(engine, scheduleId, async () => {
-    assertDurableHeartbeatServicesStore(engine);
-    const existingSchedule = await engine.getSchedule(scheduleId);
-    if (existingSchedule) {
-      assertDurableHeartbeatSchedule(existingSchedule, scheduleId, options.spec);
-    } else {
-      await engine.schedule(
-        DURABLE_HEARTBEAT_TICK_WORKFLOW_TYPE,
-        {
-          scheduleId,
-        } satisfies DurableHeartbeatTickInput,
-        options.spec,
-        { id: scheduleId, overlap: 'skip', backfill: false },
-      );
-    }
-    servicesRegistration = registerDurableHeartbeatTickServices(engine, scheduleId, services);
-  });
+  const servicesRegistration = await withDurableHeartbeatLifecycleLock(
+    engine,
+    scheduleId,
+    async () => {
+      assertDurableHeartbeatServicesStore(engine);
+      const existingSchedule = await engine.getSchedule(scheduleId);
+      if (existingSchedule) {
+        assertDurableHeartbeatSchedule(existingSchedule, scheduleId, options.spec);
+      } else {
+        await engine.schedule(
+          DURABLE_HEARTBEAT_TICK_WORKFLOW_TYPE,
+          {
+            scheduleId,
+          } satisfies DurableHeartbeatTickInput,
+          options.spec,
+          { id: scheduleId, overlap: 'skip', backfill: false },
+        );
+      }
+      return registerDurableHeartbeatTickServices(engine, scheduleId, services);
+    },
+  );
 
   let servicesRegistered = true;
 
