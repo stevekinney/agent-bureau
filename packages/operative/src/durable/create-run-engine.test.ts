@@ -12,11 +12,10 @@ import { createCheckpointStore } from './checkpoint-store';
 import { type AnyRunEngine, createRunEngine } from './create-run-engine';
 
 // A run is "parked" — not finished — when its status is neither completed nor a
-// failure terminal. A durable ctx.sleep that never fires (poller unarmed) can
-// never leave this set, so asserting non-terminal status is a race-free proof the
-// timer did not fire. `snapshot()` reports 'pending' for a still-queued inline
-// start and 'running' once the generator has reached the sleep — both are
-// non-terminal, so the assertion holds regardless of how far the launch advanced.
+// failure terminal. Asserting non-terminal (rather than a specific intermediate
+// status) is robust to which intermediate Weft reports: `snapshot()` gives
+// 'pending' for a still-queued inline start and 'running' once the generator has
+// reached the sleep — both are non-terminal.
 const TERMINAL_STATUSES: ReadonlySet<WorkflowStatus> = new Set<WorkflowStatus>([
   'completed',
   'failed',
@@ -71,9 +70,18 @@ function makeLoggingWorkflow() {
     });
 }
 
-// A sleep no real test process can outlast: a durable timer this far out cannot
-// fire on its own, so a run parked on it stays non-terminal for the test's life.
-const ONE_DAY_MILLISECONDS = 24 * 60 * 60 * 1000;
+// Weft's durable-timer poller ticks on a fixed ~1000ms real-time interval
+// (pollIntervalMs default). A sleep due comfortably inside one poll cycle but
+// past the inline-launch drain window is the discriminator: an ARMED poller fires
+// it within a cycle, while an UNARMED poller never does. Kept short so a poller
+// that DID arm cannot be mistaken for "just not due yet".
+const SCHEDULER_POLL_INTERVAL_MILLISECONDS = 1000;
+const DURABLE_SLEEP_MILLISECONDS = 50;
+// Wait past a full poll cycle (plus margin) before asserting a run stayed parked,
+// so an armed poller would provably have fired by now. The poll is a real-time
+// setInterval, not the inline-launch macrotask queue, so this interval is
+// reliable and not subject to the bun-test starvation this file otherwise guards.
+const POLL_CYCLE_WAIT_MILLISECONDS = SCHEDULER_POLL_INTERVAL_MILLISECONDS + 500;
 
 // Logged by makeSleepingWorkflow on the step BEFORE ctx.sleep. Observing it via
 // the onLog sink is positive proof the generator actually reached the sleep —
@@ -97,14 +105,17 @@ function makeSleepingWorkflow(sleepMilliseconds: number) {
 }
 
 /**
- * Assert a run is parked on its durable `ctx.sleep`: it has provably reached the
- * sleep (the pre-sleep log marker arrived) and has not finished (its snapshot
- * status is non-terminal). A day-long timer cannot fire on its own, so an armed
- * poller would be the only thing able to drive it terminal — and an unarmed one
- * cannot. `result()` is never awaited, so engine disposal has no pending promise
- * to reject.
+ * Assert a run stays parked on its durable `ctx.sleep` because the poller is NOT
+ * armed. Discriminating and deterministic:
+ *  1. drain the inline launch until the pre-sleep marker arrives (proof the
+ *     generator reached the sleep, not that it merely never started);
+ *  2. wait past one full poll cycle — an ARMED poller would have fired the
+ *     now-due {@link DURABLE_SLEEP_MILLISECONDS} timer and driven the run
+ *     terminal by now;
+ *  3. assert the run is still non-terminal — only an unarmed poller leaves it so.
+ * `result()` is never awaited, so engine disposal has no pending promise to reject.
  */
-async function assertRunParkedOnSleep(
+async function assertRunStaysParkedWhenPollerUnarmed(
   engine: AnyRunEngine,
   reachedSleepMarkers: readonly WorkflowLogRecord[],
 ) {
@@ -117,10 +128,10 @@ async function assertRunParkedOnSleep(
   for (let attempt = 0; attempt < 50 && reachedSleepMarkers.length === 0; attempt++) {
     await yieldToPortableEventLoop();
   }
-  // Positive proof the run reached the sleep, not that it merely never started.
   expect(reachedSleepMarkers.length).toBe(1);
-  // Non-terminal: an armed poller would have fired the day-long timer to drive
-  // the run terminal; an unarmed one cannot, so it stays parked.
+  // Give an armed poller more than a full cycle to fire the now-due timer.
+  await new Promise((resolve) => setTimeout(resolve, POLL_CYCLE_WAIT_MILLISECONDS));
+  // Still non-terminal ⇒ no poller fired the due timer ⇒ the poller is unarmed.
   const snapshot = await handle.snapshot();
   expect(snapshot).not.toBeNull();
   expect(TERMINAL_STATUSES.has(snapshot!.status)).toBe(false);
@@ -339,7 +350,7 @@ describe('createRunEngine', () => {
     // deadline, so a starved poller delays the test rather than failing it falsely.
     const { engine } = await createRunEngine({
       storage: new MemoryStorage(),
-      runWorkflow: makeSleepingWorkflow(5),
+      runWorkflow: makeSleepingWorkflow(DURABLE_SLEEP_MILLISECONDS),
       recover: false,
       startScheduler: true,
     });
@@ -363,7 +374,7 @@ describe('createRunEngine', () => {
     const reachedSleep: WorkflowLogRecord[] = [];
     const { engine } = await createRunEngine({
       storage: new MemoryStorage(),
-      runWorkflow: makeSleepingWorkflow(ONE_DAY_MILLISECONDS),
+      runWorkflow: makeSleepingWorkflow(DURABLE_SLEEP_MILLISECONDS),
       recover: false,
       onLog: (record) => {
         if (record.message === REACHED_SLEEP_MARKER) reachedSleep.push(record);
@@ -371,7 +382,7 @@ describe('createRunEngine', () => {
     });
 
     try {
-      await assertRunParkedOnSleep(engine, reachedSleep);
+      await assertRunStaysParkedWhenPollerUnarmed(engine, reachedSleep);
     } finally {
       engine[Symbol.dispose]();
     }
@@ -386,7 +397,7 @@ describe('createRunEngine', () => {
     const reachedSleep: WorkflowLogRecord[] = [];
     const { engine } = await createRunEngine({
       storage: new MemoryStorage(),
-      runWorkflow: makeSleepingWorkflow(ONE_DAY_MILLISECONDS),
+      runWorkflow: makeSleepingWorkflow(DURABLE_SLEEP_MILLISECONDS),
       recover: true,
       startScheduler: false,
       onLog: (record) => {
@@ -395,7 +406,7 @@ describe('createRunEngine', () => {
     });
 
     try {
-      await assertRunParkedOnSleep(engine, reachedSleep);
+      await assertRunStaysParkedWhenPollerUnarmed(engine, reachedSleep);
     } finally {
       engine[Symbol.dispose]();
     }
@@ -407,7 +418,7 @@ describe('createRunEngine', () => {
     // flag — the common in-process host keeps prior behavior.
     const { engine } = await createRunEngine({
       storage: new MemoryStorage(),
-      runWorkflow: makeSleepingWorkflow(5),
+      runWorkflow: makeSleepingWorkflow(DURABLE_SLEEP_MILLISECONDS),
     });
 
     try {
