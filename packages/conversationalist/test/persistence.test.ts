@@ -183,6 +183,27 @@ describe('Conversation auto-persistence via KeyValueStore', () => {
     expect(loaded!.ids).toHaveLength(1);
   });
 
+  it('auto-saves through the default debounce timer when no timer override is configured', async () => {
+    const store = createMockKeyValueStore();
+    const environment = createTestConversationEnvironment();
+    const conversation = new Conversation(
+      createConversationHistory({ id: 'auto-save-default-timer' }, environment),
+      {
+        ...environment,
+        persistence: store,
+        persistenceDebounceMilliseconds: 0,
+      },
+    );
+
+    conversation.appendUserMessage('Auto-saved with default timer');
+    conversation.appendAssistantMessage('Default timer debounce reset');
+    await new Promise((resolve) => setTimeout(resolve, 5));
+
+    const loaded = await loadConversation(store, 'auto-save-default-timer');
+    expect(loaded).toBeDefined();
+    expect(loaded!.ids).toHaveLength(2);
+  });
+
   it('auto-saves on tag changes', async () => {
     const store = createMockKeyValueStore();
     const environment = createTestConversationEnvironment();

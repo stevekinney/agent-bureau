@@ -107,6 +107,52 @@ function createNextToolbox() {
   ]);
 }
 
+function createManualDurableEngine() {
+  let resolveResult: ((value: unknown) => void) | undefined;
+  let rejectResult: ((error: unknown) => void) | undefined;
+  const result = new Promise<unknown>((resolve, reject) => {
+    resolveResult = resolve;
+    rejectResult = reject;
+  });
+  const engine = {
+    start: async () => ({ result: () => result }),
+    resume: async () => ({ result: () => result }),
+    suspend: async () => {},
+    get: async () => ({ status: 'suspended' }),
+    cancel: async () => {
+      rejectResult?.(new Error('Workflow cancelled'));
+    },
+  } as unknown as AnyRunEngine;
+
+  return {
+    engine,
+    resolveResult: () =>
+      resolveResult?.({
+        runId: 'manual-run',
+        steps: 0,
+        content: 'manual',
+        finishReason: 'stop-condition',
+      }),
+    rejectResult: (error: unknown) => rejectResult?.(error),
+  };
+}
+
+function createManualCheckpointStore() {
+  return {
+    loadCheckpoint: async (runId: string) => ({
+      runId,
+      cursor: {
+        step: 0,
+        totalUsage: { prompt: 0, completion: 0, total: 0 },
+        lastContent: '',
+        schemaAttempts: 0,
+      },
+      conversation: null,
+      steps: [],
+    }),
+  } as unknown as ReturnType<typeof createCheckpointStore>;
+}
+
 // Drain Weft's deferred inline-launch queue between tests — these durable
 // preemption tests start several engine workflows, and a pending setTimeout(0)
 // inline-launch left by one can starve a later durable run under full `bun test`
@@ -407,6 +453,242 @@ describe('durable scheduler preemption (suspend/resume)', () => {
     }
   });
 
+  it('emits task.failed when cancelling a running durable task fails', async () => {
+    const manual = createManualDurableEngine();
+    const engine = manual.engine;
+    const checkpointStore = createManualCheckpointStore();
+    const failedTaskIds: string[] = [];
+    engine.cancel = async () => {
+      manual.rejectResult(new Error('Workflow cancelled'));
+      throw new Error('cancel write failed');
+    };
+
+    const scheduler = createScheduler({
+      generate: createMockGenerateFallback(),
+      toolbox: createNextToolbox(),
+      idleDelay: 1,
+      durable: { engine, checkpointStore },
+    });
+    scheduler.addEventListener('task.failed', (event) => {
+      failedTaskIds.push(event.taskId);
+    });
+    scheduler.start();
+
+    try {
+      const bgResult = scheduler.submit({
+        id: 'bg-cancel-fails',
+        priority: 'background',
+        requeue: false,
+        createRun: () => ({
+          generate: createMockGenerateOnce('unused'),
+          toolbox: createNextToolbox(),
+          conversation: new Conversation(),
+          maximumSteps: 1,
+        }),
+      });
+
+      await waitFor(() => scheduler.getState().activeTask?.id === 'bg-cancel-fails');
+      expect(scheduler.cancel('bg-cancel-fails')).toBe(true);
+      await bgResult;
+      await yieldToPortableEventLoop();
+
+      expect(failedTaskIds).toContain('bg-cancel-fails');
+    } finally {
+      await scheduler.stop();
+    }
+  });
+
+  it('emits task.failed and completes normally when durable suspend fails during preemption', async () => {
+    const manual = createManualDurableEngine();
+    const engine = manual.engine;
+    const checkpointStore = createManualCheckpointStore();
+    const failedTaskIds: string[] = [];
+    engine.suspend = async () => {
+      throw new Error('suspend failed');
+    };
+
+    const scheduler = createScheduler({
+      generate: createMockGenerateFallback(),
+      toolbox: createNextToolbox(),
+      idleDelay: 1,
+      durable: { engine, checkpointStore },
+    });
+    scheduler.addEventListener('task.failed', (event) => {
+      failedTaskIds.push(event.taskId);
+    });
+    scheduler.start();
+
+    try {
+      const bgResult = scheduler.submit({
+        id: 'bg-suspend-fails',
+        priority: 'background',
+        requeue: true,
+        createRun: () => ({
+          generate: createMockGenerateOnce('unused'),
+          toolbox: createNextToolbox(),
+          conversation: new Conversation(),
+          maximumSteps: 1,
+        }),
+      });
+
+      await waitFor(() => scheduler.getState().activeTask?.id === 'bg-suspend-fails');
+      const immediate = scheduler.submitImmediate(() => ({
+        generate: createMockGenerateOnce('imm'),
+        toolbox: createNextToolbox(),
+        conversation: new Conversation(),
+        maximumSteps: 1,
+      }));
+      await yieldToPortableEventLoop();
+      manual.resolveResult();
+
+      await immediate;
+      const result = await bgResult;
+
+      expect(result).not.toBeNull();
+      expect(failedTaskIds).toContain('bg-suspend-fails');
+    } finally {
+      await scheduler.stop();
+    }
+  });
+
+  it('cancels a queued durable resume task through the engine', async () => {
+    const manual = createManualDurableEngine();
+    const engine = manual.engine;
+    const checkpointStore = createManualCheckpointStore();
+    const failedTaskIds: string[] = [];
+    engine.cancel = async () => {
+      throw new Error('queued cancel failed');
+    };
+
+    const immediateBlock = createStepwiseBlockingGenerate();
+    const scheduler = createScheduler({
+      generate: createMockGenerateFallback(),
+      toolbox: createNextToolbox(),
+      idleDelay: 1,
+      durable: { engine, checkpointStore },
+    });
+    scheduler.addEventListener('task.failed', (event) => {
+      failedTaskIds.push(event.taskId);
+    });
+    scheduler.start();
+
+    try {
+      const bgResult = scheduler.submit({
+        id: 'bg-queued-resume-cancel',
+        priority: 'background',
+        requeue: true,
+        maxRequeues: 1,
+        createRun: () => ({
+          generate: createMockGenerateOnce('unused'),
+          toolbox: createNextToolbox(),
+          conversation: new Conversation(),
+          maximumSteps: 1,
+        }),
+      });
+
+      await waitFor(() => scheduler.getState().activeTask?.id === 'bg-queued-resume-cancel');
+      const immediate = scheduler.submitImmediate(() => ({
+        generate: immediateBlock.generate,
+        toolbox: createNextToolbox(),
+        conversation: new Conversation(),
+        maximumSteps: 5,
+        stopWhen: stopWhen.noToolCalls(),
+      }));
+      await waitFor(() =>
+        scheduler
+          .getState()
+          .queued.background.some((task) => task.id === 'bg-queued-resume-cancel'),
+      );
+
+      expect(scheduler.cancel('bg-queued-resume-cancel')).toBe(true);
+      await yieldToPortableEventLoop();
+      immediateBlock.releaseStep1({ content: 'immediate done', toolCalls: [] });
+      manual.resolveResult();
+
+      await immediate;
+      expect(await bgResult).toBeNull();
+      expect(failedTaskIds).toContain('bg-queued-resume-cancel');
+    } finally {
+      await scheduler.stop();
+    }
+  });
+
+  it('emits task.failed when cancelling a suspended non-requeue durable task fails', async () => {
+    const manual = createManualDurableEngine();
+    const engine = manual.engine;
+    const checkpointStore = createManualCheckpointStore();
+    const failedTaskIds: string[] = [];
+    engine.cancel = async () => {
+      manual.resolveResult();
+      throw new Error('suspended cancel failed');
+    };
+
+    const scheduler = createScheduler({
+      generate: createMockGenerateFallback(),
+      toolbox: createNextToolbox(),
+      idleDelay: 1,
+      durable: { engine, checkpointStore },
+    });
+    scheduler.addEventListener('task.failed', (event) => {
+      failedTaskIds.push(event.taskId);
+    });
+    scheduler.start();
+
+    try {
+      const bgResult = scheduler.submit({
+        id: 'bg-suspended-cancel-fails',
+        priority: 'background',
+        requeue: false,
+        createRun: () => ({
+          generate: createMockGenerateOnce('unused'),
+          toolbox: createNextToolbox(),
+          conversation: new Conversation(),
+          maximumSteps: 1,
+        }),
+      });
+
+      await waitFor(() => scheduler.getState().activeTask?.id === 'bg-suspended-cancel-fails');
+      const immediate = scheduler.submitImmediate(() => ({
+        generate: createMockGenerateOnce('imm'),
+        toolbox: createNextToolbox(),
+        conversation: new Conversation(),
+        maximumSteps: 1,
+      }));
+      await yieldToPortableEventLoop();
+
+      expect(await bgResult).toBeNull();
+      await immediate;
+      expect(failedTaskIds).toContain('bg-suspended-cancel-fails');
+    } finally {
+      await scheduler.stop();
+    }
+  });
+
+  it('rejects a durable task when its createRun factory throws', async () => {
+    const manual = createManualDurableEngine();
+    const scheduler = createScheduler({
+      generate: createMockGenerateFallback(),
+      toolbox: createNextToolbox(),
+      idleDelay: 1,
+      durable: { engine: manual.engine, checkpointStore: createManualCheckpointStore() },
+    });
+    scheduler.start();
+
+    try {
+      await expect(
+        scheduler.submit({
+          id: 'durable-factory-fails',
+          priority: 'background',
+          createRun: () => {
+            throw new Error('durable factory failed');
+          },
+        }),
+      ).rejects.toThrow('durable factory failed');
+    } finally {
+      await scheduler.stop();
+    }
+  });
+
   it("does not fire a preempted-then-resumed run's onRunComplete hook more than once", async () => {
     // The structural bug (Bugbot: "suspended run duplicates lifecycle hooks"): the
     // original hook-firing durable driver kept awaiting the un-settled handle after
@@ -550,6 +832,118 @@ describe('durable scheduler preemption (suspend/resume)', () => {
     } finally {
       engine[Symbol.dispose]();
     }
+  });
+
+  it('emits scheduler-stop-cancel when stopping fails to cancel a durable run', async () => {
+    const manual = createManualDurableEngine();
+    const engine = manual.engine;
+    const checkpointStore = createManualCheckpointStore();
+    const failedTaskIds: string[] = [];
+    engine.cancel = async () => {
+      manual.rejectResult(new Error('Workflow cancelled'));
+      throw new Error('cancel operation failed');
+    };
+
+    const scheduler = createScheduler({
+      generate: createMockGenerateFallback(),
+      toolbox: createNextToolbox(),
+      idleDelay: 1,
+      durable: { engine, checkpointStore },
+    });
+    scheduler.addEventListener('task.failed', (event) => {
+      failedTaskIds.push(event.taskId);
+    });
+    scheduler.start();
+
+    void scheduler.submit({
+      id: 'bg-stop-cancel-fails',
+      priority: 'background',
+      requeue: false,
+      createRun: () => ({
+        generate: createMockGenerateOnce('unused'),
+        toolbox: createNextToolbox(),
+        conversation: new Conversation(),
+        maximumSteps: 1,
+      }),
+    });
+
+    await waitFor(() => scheduler.getState().activeTask?.id === 'bg-stop-cancel-fails');
+    await scheduler.stop();
+
+    expect(failedTaskIds).toContain('scheduler-stop-cancel');
+  });
+
+  it('cancels queued durable resume tasks during stop', async () => {
+    const manual = createManualDurableEngine();
+    const engine = manual.engine;
+    const checkpointStore = createManualCheckpointStore();
+    const failedTaskIds: string[] = [];
+    engine.cancel = () => {
+      return new Promise((_resolve, reject) => {
+        setTimeout(() => reject(new Error('queued stop cancel failed')), 0);
+      });
+    };
+    const immediateBlock = createStepwiseBlockingGenerate();
+
+    const scheduler = createScheduler({
+      generate: createMockGenerateFallback(),
+      toolbox: createNextToolbox(),
+      idleDelay: 1,
+      durable: { engine, checkpointStore },
+    });
+    scheduler.addEventListener('task.failed', (event) => {
+      failedTaskIds.push(event.taskId);
+    });
+    scheduler.start();
+
+    const bgResult = scheduler.submit({
+      id: 'bg-queued-stop',
+      priority: 'background',
+      requeue: true,
+      maxRequeues: 1,
+      createRun: () => ({
+        generate: createMockGenerateOnce('unused'),
+        toolbox: createNextToolbox(),
+        conversation: new Conversation(),
+        maximumSteps: 1,
+      }),
+    });
+
+    await waitFor(() => scheduler.getState().activeTask?.id === 'bg-queued-stop');
+    const immediate = scheduler.submitImmediate(() => ({
+      generate: immediateBlock.generate,
+      toolbox: createNextToolbox(),
+      conversation: new Conversation(),
+      maximumSteps: 5,
+      stopWhen: stopWhen.noToolCalls(),
+    }));
+    await waitFor(() =>
+      scheduler.getState().queued.background.some((task) => task.id === 'bg-queued-stop'),
+    );
+
+    const stopPromise = scheduler.stop();
+    immediateBlock.releaseStep1({ content: 'immediate done', toolCalls: [] });
+    manual.resolveResult();
+    await stopPromise;
+
+    await immediate;
+    expect(await bgResult).toBeNull();
+    expect(failedTaskIds).toContain('scheduler-stop-cancel');
+  });
+
+  it('stops immediately when started with an already-aborted external signal', async () => {
+    const scheduler = createScheduler({
+      generate: createMockGenerateFallback(),
+      toolbox: createNextToolbox(),
+      idleDelay: 1,
+      signal: AbortSignal.abort('already stopped'),
+    });
+
+    scheduler.start();
+    await yieldToPortableEventLoop();
+    await scheduler.stop();
+
+    expect(scheduler.getState().idle).toBe(true);
   });
 });
 

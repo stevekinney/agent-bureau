@@ -300,6 +300,61 @@ describe('createFalloverGenerate', () => {
     }
   });
 
+  it('uses the default retry sleep before retrying', async () => {
+    let callCount = 0;
+    const primary = makeProvider('anthropic', async () => {
+      callCount++;
+      if (callCount === 1) {
+        throw new HeraldError({
+          provider: 'anthropic',
+          cause: new Error('Internal'),
+          statusCode: 500,
+        });
+      }
+      return makeResponse('after retry');
+    });
+
+    const generate = createFalloverGenerate({
+      providers: [primary],
+      retriesPerProvider: 1,
+      retryDelay: 1,
+    });
+
+    const result = await generate(makeContext());
+
+    expect(result.content).toBe('after retry');
+    expect(callCount).toBe(2);
+  });
+
+  it('aborts the default retry sleep while waiting between retries', async () => {
+    const controller = new AbortController();
+    let callCount = 0;
+    const primary = makeProvider('anthropic', async () => {
+      callCount++;
+      throw new HeraldError({
+        provider: 'anthropic',
+        cause: new Error('Internal'),
+        statusCode: 500,
+      });
+    });
+
+    const generate = createFalloverGenerate({
+      providers: [primary],
+      retriesPerProvider: 1,
+      retryDelay: 20,
+    });
+
+    setTimeout(() => controller.abort(), 0);
+
+    try {
+      await generate(makeContext({ signal: controller.signal }));
+      expect.unreachable('Expected generate() to abort');
+    } catch (error) {
+      expect(error).toMatchObject({ name: 'AbortError' });
+    }
+    expect(callCount).toBe(1);
+  });
+
   it('aborts while sleeping between retries', async () => {
     const controller = new AbortController();
     const primary = makeProvider('anthropic', async () => {

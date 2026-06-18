@@ -2,13 +2,20 @@ import type { Embedder, EmbeddingVector } from 'interoperability';
 
 import type {
   MemoryRecord,
+  MemoryRecordPutOnceResult,
   MemoryRecordScope,
   MemoryRecordStorage,
   MemoryVectorSearchResult,
 } from './memory-record-storage';
 
 export type { Embedder, EmbeddingVector };
-export type { MemoryRecord, MemoryRecordScope, MemoryRecordStorage, MemoryVectorSearchResult };
+export type {
+  MemoryRecord,
+  MemoryRecordPutOnceResult,
+  MemoryRecordScope,
+  MemoryRecordStorage,
+  MemoryVectorSearchResult,
+};
 
 export interface MemoryEntry {
   id: string;
@@ -27,6 +34,7 @@ export interface MemoryMetadata {
   importance?: number;
   evergreen?: boolean;
   tags?: string[];
+  dedupeKey?: string;
   [key: string]: unknown;
 }
 
@@ -68,6 +76,10 @@ export interface MemorySearchResult {
 
 export interface Memory {
   remember(content: string, metadata?: Partial<MemoryMetadata>): Promise<MemoryEntry>;
+  rememberOnce(
+    content: string,
+    metadata: Partial<MemoryMetadata> & { dedupeKey: string },
+  ): Promise<MemoryEntry>;
   recall(query: string, options?: MemorySearchOptions): Promise<MemorySearchResult[]>;
   /** List entries without semantic search. Returns entries sorted by creation time (newest first). */
   list(options?: MemoryListOptions): Promise<MemorySearchResult[]>;

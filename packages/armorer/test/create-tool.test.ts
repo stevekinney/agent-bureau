@@ -240,6 +240,33 @@ describe('createTool', () => {
     expect(resolvedCount).toBe(1);
   });
 
+  it('cancels after a lazy execute function resolves but before execution starts', async () => {
+    const controller = new AbortController();
+    let executed = false;
+    const executePromise = Promise.resolve().then(() => {
+      controller.abort('cancelled after load');
+      return async () => {
+        executed = true;
+        return 'should not run';
+      };
+    });
+
+    const tool = createTool({
+      name: 'lazy-abort-after-load',
+      description: 'loads execute lazily and aborts before execution',
+      input: z.object({}),
+      execute: executePromise,
+    });
+
+    const result = await tool.execute(createToolCall('lazy-abort-after-load', {}), {
+      signal: controller.signal,
+    });
+
+    expect(result.outcome).toBe('error');
+    expect(result.errorMessage).toBe('cancelled after load');
+    expect(executed).toBe(false);
+  });
+
   it('returns an error when lazy execute rejects', async () => {
     const tool = createTool({
       name: 'lazy-reject',

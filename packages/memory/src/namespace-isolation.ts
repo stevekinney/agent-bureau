@@ -39,6 +39,18 @@ export function withNamespaceIsolation(memory: Memory, options: NamespaceIsolati
       return entry;
     },
 
+    async rememberOnce(
+      content: string,
+      metadata: Partial<MemoryMetadata> & { dedupeKey: string },
+    ): Promise<MemoryEntry> {
+      const entry = await memory.rememberOnce(content, {
+        ...metadata,
+        namespace,
+      });
+      knownIds.add(entry.id);
+      return entry;
+    },
+
     async recall(
       query: string,
       searchOptions?: MemorySearchOptions,

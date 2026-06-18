@@ -3,13 +3,16 @@ import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
 import { createToolbox } from 'armorer';
 import { afterEach, describe, expect, it } from 'bun:test';
 import { createConversationHistory } from 'conversationalist';
+import { HookRegistry } from 'lifecycle';
 import { z } from 'zod';
 
 import { stopWhen } from '../conditions/index';
 import { createRun } from '../create-run';
 import { BudgetExceededError, ElicitationDeniedError } from '../errors';
+import type { OperativeHookMap } from '../hooks';
+import { run } from '../run';
 import type { RunOptions, RunResult } from '../types';
-import { reattachDurableActiveRun } from './active-run-adapter';
+import { createDurableActiveRun, reattachDurableActiveRun } from './active-run-adapter';
 import { createCheckpointStore } from './checkpoint-store';
 import type { AnyRunEngine } from './create-run-engine';
 import { createRunEngine } from './create-run-engine';
@@ -59,6 +62,25 @@ function runOptions(generate: RunOptions['generate']): RunOptions {
 }
 
 describe('createRun with durable routing', () => {
+  it('runs through the durable routing overload of run()', async () => {
+    const context = await buildContext();
+    try {
+      const result = await run(
+        runOptions(async () => ({ content: 'durable run', toolCalls: [] })),
+        {
+          ...context,
+          runId: 'run-wrapper',
+          prompt: 'Hello',
+        },
+      );
+
+      expect(result.finishReason).toBe('stop-condition');
+      expect(result.content).toBe('durable run');
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+
   it('fires the full run-level lifecycle (run.started → run.completed) on the durable path', async () => {
     const context = await buildContext();
     try {
@@ -96,6 +118,48 @@ describe('createRun with durable routing', () => {
       expect(result.steps).toHaveLength(1);
       expect(result.conversation.getMessages().length).toBeGreaterThan(0);
       expect(result.usage).toEqual({ prompt: 0, completion: 0, total: 0 });
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+
+  it('exposes the full durable active-run event facade', async () => {
+    const context = await buildContext();
+    try {
+      const activeRun = createRun(
+        runOptions(async () => ({ content: 'facade done', toolCalls: [] })),
+        { ...context, runId: 'event-facade-run', prompt: 'Hello' },
+      );
+      const collected: string[] = [];
+      const removedListener = () => collected.push('removed');
+      const iterator = activeRun.events('run.completed');
+      const observableSubscription = activeRun.toObservable().subscribe({
+        next(event) {
+          if (event.type === 'run.completed') collected.push('observable');
+        },
+      });
+
+      activeRun.addEventListener('run.started', removedListener);
+      activeRun.removeEventListener('run.started', removedListener);
+      activeRun.on('step.completed').subscribe({
+        next() {
+          collected.push('on');
+        },
+      });
+      activeRun.once('run.completed', () => collected.push('once'));
+      activeRun.subscribe('run.completed', () => collected.push('subscribe'));
+
+      const result = await activeRun.result;
+      const iteratorResult = await iterator.next();
+      observableSubscription.unsubscribe();
+
+      expect(result.finishReason).toBe('stop-condition');
+      expect(iteratorResult.value.finishReason).toBe('stop-condition');
+      expect(collected).toContain('on');
+      expect(collected).toContain('once');
+      expect(collected).toContain('subscribe');
+      expect(collected).toContain('observable');
+      expect(collected).not.toContain('removed');
     } finally {
       context.engine[Symbol.dispose]();
     }
@@ -232,6 +296,152 @@ describe('createRun with durable routing', () => {
     } finally {
       context.engine[Symbol.dispose]();
     }
+  });
+
+  it('disposes a durable active run by aborting and completing the event surface', async () => {
+    const context = await buildContext();
+    try {
+      const activeRun = createRun(
+        {
+          generate: ({ signal }) =>
+            new Promise((_resolve, reject) => {
+              signal?.addEventListener('abort', () => reject(new Error('disposed')), {
+                once: true,
+              });
+            }),
+          toolbox: createToolbox([]) as unknown as RunOptions['toolbox'],
+          conversation: createConversationHistory(),
+          stopWhen: stopWhen.noToolCalls(),
+        },
+        { ...context, runId: 'dispose-run', prompt: 'Hello' },
+      );
+
+      await Promise.resolve();
+      activeRun[Symbol.dispose]();
+
+      const result = await activeRun.result;
+      expect(result.finishReason).toBe('aborted');
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+
+  it('returns an error result when durable onRunStart fails before engine start', async () => {
+    const context = await buildContext();
+    const hooks = new HookRegistry<OperativeHookMap>();
+    hooks.on('onRunStart', async () => {
+      throw new Error('start hook failed');
+    });
+
+    try {
+      const activeRun = createDurableActiveRun(context, {
+        runId: 'durable-start-hook-fails',
+        sessionId: 'durable-start-hook-fails',
+        options: {
+          ...runOptions(async () => ({ content: 'unused', toolCalls: [] })),
+          hooks,
+        },
+      });
+
+      const result = await activeRun.result;
+
+      expect(result.finishReason).toBe('error');
+      expect((result.error as Error).message).toBe('start hook failed');
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+
+  it('returns an interrupted result when the durable engine is disposed during a run', async () => {
+    const disposedError = Object.assign(new Error('engine disposed'), {
+      code: 'EngineDisposedError',
+    });
+    const engine = {
+      start: async () => ({
+        result: () => Promise.reject(disposedError),
+      }),
+    } as unknown as AnyRunEngine;
+    const context = {
+      engine,
+      checkpointStore: {
+        loadCheckpoint: async () => {
+          throw new Error('unused');
+        },
+      },
+    } as never;
+
+    const activeRun = createDurableActiveRun(context, {
+      runId: 'durable-engine-disposed',
+      sessionId: 'durable-engine-disposed',
+      options: runOptions(async () => ({ content: 'unused', toolCalls: [] })),
+    });
+
+    const result = await activeRun.result;
+
+    expect(result.finishReason).toBe('aborted');
+  });
+
+  it('classifies a durable workflow timeout as an execution deadline error', async () => {
+    const timeoutError = Object.assign(new Error('timed out'), {
+      code: 'WorkflowTimeoutError',
+    });
+    const engine = {
+      start: async () => ({
+        result: () => Promise.reject(timeoutError),
+      }),
+      get: async () => ({ status: 'timed-out' }),
+    } as unknown as AnyRunEngine;
+    const context = {
+      engine,
+      checkpointStore: {
+        loadCheckpoint: async () => {
+          throw new Error('unused');
+        },
+      },
+    } as never;
+
+    const activeRun = createDurableActiveRun(context, {
+      runId: 'durable-deadline-timeout',
+      sessionId: 'durable-deadline-timeout',
+      options: runOptions(async () => ({ content: 'unused', toolCalls: [] })),
+    });
+
+    const result = await activeRun.result;
+
+    expect(result.finishReason).toBe('error');
+    expect((result.error as Error).message).toContain('execution deadline');
+  });
+
+  it('propagates unexpected durable handle result rejections', async () => {
+    const unexpectedError = new Error('unexpected durable rejection');
+    const engine = {
+      start: async () => ({
+        result: () => Promise.reject(unexpectedError),
+      }),
+    } as unknown as AnyRunEngine;
+    const context = {
+      engine,
+      checkpointStore: {
+        loadCheckpoint: async () => {
+          throw new Error('unused');
+        },
+      },
+    } as never;
+
+    const activeRun = createDurableActiveRun(context, {
+      runId: 'durable-unexpected-rejection',
+      sessionId: 'durable-unexpected-rejection',
+      options: runOptions(async () => ({ content: 'unused', toolCalls: [] })),
+    });
+
+    await activeRun.result.then(
+      () => {
+        throw new Error('Expected durable run to reject');
+      },
+      (error) => {
+        expect(error).toBe(unexpectedError);
+      },
+    );
   });
 
   it('classifies a BudgetExceededError as finishReason budget-exceeded (durable parity)', async () => {
@@ -401,6 +611,74 @@ describe('reattachDurableActiveRun', () => {
     }
   });
 
+  it('falls back to an empty conversation when abort reconstruction cannot read the checkpoint', async () => {
+    let rejectResult: ((error: unknown) => void) | undefined;
+    const handle = {
+      id: 'reattach-abort-load-fails',
+      result: () => new Promise<unknown>((_resolve, reject) => (rejectResult = reject)),
+    };
+    const engine = {
+      cancel: async () => {
+        rejectResult?.(new Error('cancelled'));
+      },
+    } as unknown as AnyRunEngine;
+    const checkpointStore = {
+      loadConversation: async () => {
+        throw new Error('checkpoint unavailable');
+      },
+    };
+
+    const recoveredRun = reattachDurableActiveRun(
+      { engine, checkpointStore: checkpointStore as never },
+      { runId: 'reattach-abort-load-fails', handle },
+    );
+
+    await Promise.resolve();
+    recoveredRun.abort();
+    const result = await recoveredRun.result;
+
+    expect(result.finishReason).toBe('aborted');
+  });
+
+  it('does not fire an abort lifecycle when recovered cancel fails', async () => {
+    const originalConsoleError = console.error;
+    const logs: unknown[] = [];
+    console.error = (...args: unknown[]) => {
+      logs.push(args);
+    };
+    try {
+      let rejectResult: ((error: unknown) => void) | undefined;
+      const handle = {
+        id: 'reattach-abort-cancel-fails',
+        result: () => new Promise<unknown>((_resolve, reject) => (rejectResult = reject)),
+      };
+      const engine = {
+        cancel: async () => {
+          rejectResult?.(new Error('resolver-owned failure'));
+          throw new Error('cancel failed');
+        },
+      } as unknown as AnyRunEngine;
+      const events: string[] = [];
+
+      const recoveredRun = reattachDurableActiveRun(
+        { engine, checkpointStore: {} as never },
+        { runId: 'reattach-abort-cancel-fails', handle },
+      );
+      recoveredRun.addEventListener('run.aborted', () => events.push('run.aborted'));
+
+      await Promise.resolve();
+      recoveredRun.abort();
+      const result = await recoveredRun.result;
+
+      expect(result.finishReason).toBe('aborted');
+      expect(events).toEqual([]);
+      expect(logs.length).toBe(1);
+      expect(String((logs[0] as unknown[])[0])).toContain('resolver-owned failure');
+    } finally {
+      console.error = originalConsoleError;
+    }
+  });
+
   it('fires run.completed with finishReason error when a recovered run is terminated by the history circuit breaker (Bugbot #38)', async () => {
     // A recovered run whose handle.result() rejects with a WorkflowTimeoutError
     // (history circuit breaker / execution deadline) is GENUINELY terminal — and
@@ -441,6 +719,160 @@ describe('reattachDurableActiveRun', () => {
       expect(result.finishReason).toBe('error');
       expect(completedFinishReason).toBe('error');
       expect((result.error as Error).message).toContain('history circuit breaker');
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+
+  it('falls back to the timeout error message when the recovered state cannot be read', async () => {
+    const context = await buildContext();
+    try {
+      const timeoutError = Object.assign(new Error('deadline unknown'), {
+        code: 'WorkflowTimeoutError',
+      });
+      const handle = {
+        id: 'reattach-timeout-get-fails',
+        result: () => Promise.reject(timeoutError),
+      };
+      const engine = {
+        get: async () => {
+          throw new Error('state unavailable');
+        },
+        cancel: async () => {},
+      } as unknown as AnyRunEngine;
+
+      const recoveredRun = reattachDurableActiveRun(
+        { engine, checkpointStore: context.checkpointStore },
+        { runId: 'reattach-timeout-get-fails', handle },
+      );
+
+      const result = await recoveredRun.result;
+
+      expect(result.finishReason).toBe('error');
+      expect((result.error as Error).message).toBe('deadline unknown');
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+
+  it('falls back to an empty conversation when recovered timeout checkpoint read fails', async () => {
+    const timeoutError = Object.assign(new Error('workflow timed out'), {
+      code: 'WorkflowTimeoutError',
+    });
+    const handle = {
+      id: 'reattach-timeout-load-fails',
+      result: () => Promise.reject(timeoutError),
+    };
+    const engine = {
+      get: async () => ({ status: 'timed-out', terminationReason: 'history-circuit-breaker' }),
+      cancel: async () => {},
+    } as unknown as AnyRunEngine;
+    const checkpointStore = {
+      loadConversation: async () => {
+        throw new Error('checkpoint unavailable');
+      },
+    };
+
+    const recoveredRun = reattachDurableActiveRun(
+      { engine, checkpointStore: checkpointStore as never },
+      { runId: 'reattach-timeout-load-fails', handle },
+    );
+
+    const result = await recoveredRun.result;
+
+    expect(result.finishReason).toBe('error');
+    expect((result.error as Error).message).toContain('history circuit breaker');
+  });
+
+  it('returns an interrupted result and logs when a recovered run rejects without engine disposal', async () => {
+    const context = await buildContext();
+    const originalConsoleError = console.error;
+    const logs: unknown[] = [];
+    console.error = (...args: unknown[]) => {
+      logs.push(args);
+    };
+    try {
+      const handle = {
+        id: 'reattach-unexpected',
+        result: () => Promise.reject(new Error('resolver failed')),
+      };
+      const engine = {
+        cancel: async () => {},
+      } as unknown as AnyRunEngine;
+
+      const recoveredRun = reattachDurableActiveRun(
+        { engine, checkpointStore: context.checkpointStore },
+        { runId: 'reattach-unexpected', handle },
+      );
+
+      const result = await recoveredRun.result;
+
+      expect(result.finishReason).toBe('aborted');
+      expect(logs.length).toBe(1);
+      expect(String((logs[0] as unknown[])[0])).toContain('did not settle cleanly');
+    } finally {
+      console.error = originalConsoleError;
+      context.engine[Symbol.dispose]();
+    }
+  });
+
+  it('disposes a reattached active run event surface', async () => {
+    const context = await buildContext();
+    try {
+      const handle = {
+        id: 'reattach-dispose',
+        result: () =>
+          Promise.resolve({
+            runId: 'reattach-dispose',
+            steps: 0,
+            content: '',
+            finishReason: 'stop-condition',
+          }),
+      };
+      const engine = {
+        cancel: async () => {},
+      } as unknown as AnyRunEngine;
+
+      const recoveredRun = reattachDurableActiveRun(
+        { engine, checkpointStore: context.checkpointStore },
+        { runId: 'reattach-dispose', handle },
+      );
+      recoveredRun[Symbol.dispose]();
+
+      const result = await recoveredRun.result;
+      expect(result.finishReason).toBe('stop-condition');
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+
+  it('reconstructs schema validation errors from recovered summaries', async () => {
+    const context = await buildContext();
+    try {
+      const handle = {
+        id: 'reattach-schema-error',
+        result: () =>
+          Promise.resolve({
+            runId: 'reattach-schema-error',
+            steps: 0,
+            content: '',
+            finishReason: 'stop-condition',
+            schemaValidation: { success: false, error: 'schema failed' },
+          }),
+      };
+      const engine = {
+        cancel: async () => {},
+      } as unknown as AnyRunEngine;
+
+      const recoveredRun = reattachDurableActiveRun(
+        { engine, checkpointStore: context.checkpointStore },
+        { runId: 'reattach-schema-error', handle },
+      );
+
+      const result = await recoveredRun.result;
+      expect(result.schemaValidation?.success).toBe(false);
+      expect(result.schemaValidation?.error).toBeInstanceOf(Error);
+      expect((result.schemaValidation?.error as Error).message).toBe('schema failed');
     } finally {
       context.engine[Symbol.dispose]();
     }

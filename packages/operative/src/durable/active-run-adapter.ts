@@ -179,21 +179,21 @@ export function createDurableActiveRun(
     emitter.complete();
   }
 
+  function drive(): Promise<RunResult> {
+    return driveDurableRun(
+      context,
+      runId,
+      durableRun.sessionId,
+      options,
+      conversation,
+      combinedSignal,
+      emitter,
+      durableRun.prompt,
+    );
+  }
+
   // Deferred-microtask start so callers attach listeners first (createRun contract).
-  const result = Promise.resolve()
-    .then(() =>
-      driveDurableRun(
-        context,
-        runId,
-        durableRun.sessionId,
-        options,
-        conversation,
-        combinedSignal,
-        emitter,
-        durableRun.prompt,
-      ),
-    )
-    .finally(complete);
+  const result = Promise.resolve().then(drive).finally(complete);
 
   function abort(reason?: string): void {
     abortController.abort(reason);
@@ -315,14 +315,28 @@ export function reattachDurableActiveRun(
     emitter.complete();
   }
 
+  function abortOutcome(): Promise<boolean> | undefined {
+    return abortCancelled;
+  }
+
+  function drive(): Promise<RunResult> {
+    return driveReattachedRun(context, runId, handle, emitter, abortOutcome);
+  }
+
+  function cancelSucceeded(): boolean {
+    return true;
+  }
+
+  function cancelFailed(): boolean {
+    return false;
+  }
+
   // Deferred-microtask start — REQUIRED for the registration ordering invariant:
   // the caller (`recoverDurableRuns`) must finish `store.register` +
   // `runSessionIdentifiers.set` in its synchronous turn BEFORE any terminal event
   // microtask fires, so `getRun(runId)` resolves and no subscriber misses the
   // terminal event — even when `handle.result()` already settled before reattach.
-  const result = Promise.resolve()
-    .then(() => driveReattachedRun(context, runId, handle, emitter, () => abortCancelled))
-    .finally(complete);
+  const result = Promise.resolve().then(drive).finally(complete);
 
   return {
     result,
@@ -336,10 +350,7 @@ export function reattachDurableActiveRun(
     // succeeded (abortCancelled resolves true), distinguishing this abort from a
     // resolver/teardown failure that merely raced an abort() call.
     abort(): void {
-      abortCancelled ??= context.engine.cancel(runId).then(
-        () => true,
-        () => false,
-      );
+      abortCancelled ??= context.engine.cancel(runId).then(cancelSucceeded, cancelFailed);
     },
     addEventListener: emitter.addEventListener.bind(emitter) as ActiveRun['addEventListener'],
     removeEventListener: emitter.removeEventListener.bind(
@@ -659,19 +670,18 @@ async function driveDurableRun(
     // lifecycle here rather than rethrowing into the unawaited `.then()` chain
     // (which would surface as an unhandled rejection and leave the session stuck
     // `running`).
-    if (isWeftErrorLike(error) && error.code === 'WorkflowTimeoutError') {
-      const message = await classifyTimeoutMessage(context, runId, error);
-      return finalizeRunResult({
-        finishReason: 'error',
-        runState: emptyRunState(),
-        conversation,
-        hooks,
-        emitter,
-        runStartTime,
-        errorMessage: message,
-      });
-    }
-    throw error;
+    if (!isWeftErrorLike(error) || error.code !== 'WorkflowTimeoutError') throw error;
+
+    const message = await classifyTimeoutMessage(context, runId, error);
+    return finalizeRunResult({
+      finishReason: 'error',
+      runState: emptyRunState(),
+      conversation,
+      hooks,
+      emitter,
+      runStartTime,
+      errorMessage: message,
+    });
   }
 
   // The authoritative conversation on the durable path is the one rehydrated
@@ -811,6 +821,15 @@ function finalizeRunResult(args: FinalizeArgs): RunResult {
           : new Error(message);
     return makeErrorResult(runState, conversation, hooks, emitter, error);
   }
+  const schemaValidation = args.schemaValidation
+    ? {
+        success: args.schemaValidation.success,
+        ...(args.schemaValidation.error !== undefined
+          ? { error: new Error(args.schemaValidation.error) }
+          : {}),
+      }
+    : undefined;
+
   return makeCompletedResult(
     runState,
     conversation,
@@ -818,13 +837,6 @@ function finalizeRunResult(args: FinalizeArgs): RunResult {
     emitter,
     finishReason === 'stop-condition' ? 'stop-condition' : 'maximum-steps',
     runStartTime,
-    args.schemaValidation
-      ? {
-          success: args.schemaValidation.success,
-          ...(args.schemaValidation.error !== undefined
-            ? { error: new Error(args.schemaValidation.error) }
-            : {}),
-        }
-      : undefined,
+    schemaValidation,
   );
 }

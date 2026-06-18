@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it } from 'bun:test';
 import { createMemory } from '../src/create-memory';
 import { createInMemoryMemoryRecordStorage, createMockEmbedder } from '../src/test/index';
 import type { TextSearchProvider } from '../src/text-search-provider';
-import type { Memory, MemoryRecordStorage } from '../src/types';
+import type { Memory, MemoryMetadata, MemoryRecordStorage } from '../src/types';
 
 const DIMENSION = 64;
 
@@ -94,6 +94,87 @@ describe('createMemory', () => {
       await expect(memory.remember('Empty namespace', { namespace: '' })).rejects.toThrow(
         /namespace must be a non-empty string/,
       );
+    });
+  });
+
+  describe('rememberOnce', () => {
+    it('stores only one record for divergent content with the same dedupe key', async () => {
+      const first = await memory.rememberOnce('original content', {
+        namespace: 'once',
+        source: 'experiential',
+        dedupeKey: 'run-1:0',
+      });
+      const second = await memory.rememberOnce('different regenerated content', {
+        namespace: 'once',
+        source: 'experiential',
+        dedupeKey: 'run-1:0',
+      });
+
+      expect(second.id).toBe(first.id);
+      expect(second.content).toBe('original content');
+      expect(await memory.count('once')).toBe(1);
+    });
+
+    it('rejects an empty dedupe key', async () => {
+      await expect(
+        memory.rememberOnce('missing key', {
+          source: 'manual',
+          dedupeKey: '',
+        }),
+      ).rejects.toThrow(/dedupeKey must be a non-empty string/);
+    });
+
+    it('rejects a non-string dedupe key at the public boundary', async () => {
+      await expect(
+        memory.rememberOnce('invalid key', {
+          source: 'manual',
+          dedupeKey: undefined,
+        } as Partial<MemoryMetadata> & { dedupeKey: string }),
+      ).rejects.toThrow(/dedupeKey must be a non-empty string/);
+      await expect(
+        memory.rememberOnce('invalid key', {
+          source: 'manual',
+          dedupeKey: 123,
+        } as unknown as Partial<MemoryMetadata> & { dedupeKey: string }),
+      ).rejects.toThrow(/dedupeKey must be a non-empty string/);
+    });
+
+    it('requires a namespace when requireNamespace is true', async () => {
+      const strict = createMemory({
+        embedder: createMockEmbedder(DIMENSION),
+        storage: createInMemoryMemoryRecordStorage(),
+        requireNamespace: true,
+      });
+      await strict.init();
+
+      await expect(
+        strict.rememberOnce('strict namespace', {
+          source: 'manual',
+          dedupeKey: 'strict-key',
+        }),
+      ).rejects.toThrow(/Namespace is required/);
+
+      await strict.close();
+    });
+
+    it('throws when the configured storage does not support putOnce', async () => {
+      const unsupportedStorage: MemoryRecordStorage = {
+        ...createInMemoryMemoryRecordStorage(),
+        getByDedupeKey: undefined,
+        putOnce: undefined,
+      };
+      const unsupported = createMemory({
+        embedder,
+        storage: unsupportedStorage,
+      });
+      await unsupported.init();
+
+      await expect(
+        unsupported.rememberOnce('unsupported storage', {
+          source: 'manual',
+          dedupeKey: 'unsupported-key',
+        }),
+      ).rejects.toThrow(/rememberOnce requires storage\.putOnce support/);
     });
   });
 
@@ -615,6 +696,110 @@ describe('createMemory', () => {
       expect(clearedNamespaces).toEqual(['default']);
 
       await providerMemory.close();
+    });
+
+    it('indexes rememberOnce hits through the text search provider using stored content', async () => {
+      const textSearchIndexCalls: Array<{ id: string; content: string; namespace: string }> = [];
+      const textSearchProvider = {
+        async init() {},
+        async close() {},
+        async index(id: string, content: string, namespace: string) {
+          textSearchIndexCalls.push({ id, content, namespace });
+        },
+        async remove() {},
+        async clear() {},
+        async search() {
+          return new Map<string, number>();
+        },
+      } satisfies TextSearchProvider;
+
+      const textSearchMemory = createMemory({
+        embedder: createMockEmbedder(DIMENSION),
+        storage: createInMemoryMemoryRecordStorage(),
+        dimension: DIMENSION,
+        textSearchProvider,
+      });
+      await textSearchMemory.init();
+
+      const firstEntry = await textSearchMemory.rememberOnce('keyed content for indexing', {
+        namespace: 'indexed-once',
+        source: 'experiential',
+        dedupeKey: 'indexed-key',
+      });
+      const secondEntry = await textSearchMemory.rememberOnce('different keyed content', {
+        namespace: 'indexed-once',
+        source: 'experiential',
+        dedupeKey: 'indexed-key',
+      });
+
+      expect(secondEntry.id).toBe(firstEntry.id);
+      expect(textSearchIndexCalls).toEqual([
+        {
+          id: firstEntry.id,
+          content: 'keyed content for indexing',
+          namespace: 'indexed-once',
+        },
+        {
+          id: firstEntry.id,
+          content: 'keyed content for indexing',
+          namespace: 'indexed-once',
+        },
+      ]);
+
+      await textSearchMemory.close();
+    });
+
+    it('repairs rememberOnce text search indexing after a failed initial index', async () => {
+      const textSearchIndexCalls: Array<{ id: string; content: string; namespace: string }> = [];
+      let failNextIndex = true;
+      const textSearchProvider = {
+        async init() {},
+        async close() {},
+        async index(id: string, content: string, namespace: string) {
+          if (failNextIndex) {
+            failNextIndex = false;
+            throw new Error('temporary text index failure');
+          }
+          textSearchIndexCalls.push({ id, content, namespace });
+        },
+        async remove() {},
+        async clear() {},
+        async search() {
+          return new Map<string, number>();
+        },
+      } satisfies TextSearchProvider;
+
+      const textSearchMemory = createMemory({
+        embedder: createMockEmbedder(DIMENSION),
+        storage: createInMemoryMemoryRecordStorage(),
+        dimension: DIMENSION,
+        textSearchProvider,
+      });
+      await textSearchMemory.init();
+
+      await expect(
+        textSearchMemory.rememberOnce('keyed content for indexing', {
+          namespace: 'indexed-once',
+          source: 'experiential',
+          dedupeKey: 'repair-index-key',
+        }),
+      ).rejects.toThrow(/temporary text index failure/);
+      const secondEntry = await textSearchMemory.rememberOnce('different keyed content', {
+        namespace: 'indexed-once',
+        source: 'experiential',
+        dedupeKey: 'repair-index-key',
+      });
+
+      expect(secondEntry.content).toBe('keyed content for indexing');
+      expect(textSearchIndexCalls).toEqual([
+        {
+          id: secondEntry.id,
+          content: 'keyed content for indexing',
+          namespace: 'indexed-once',
+        },
+      ]);
+
+      await textSearchMemory.close();
     });
 
     it('applies temporal decay and MMR in vector-only recall mode', async () => {

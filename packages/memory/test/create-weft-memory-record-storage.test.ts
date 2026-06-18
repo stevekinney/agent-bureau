@@ -1,5 +1,8 @@
 import { MemoryStorage } from '@lostgradient/weft/storage';
-import { WEFT_RESERVED_KEY_PREFIXES } from '@lostgradient/weft/storage/interface';
+import {
+  encodeStorageKeyComponent,
+  WEFT_RESERVED_KEY_PREFIXES,
+} from '@lostgradient/weft/storage/interface';
 import { beforeEach, describe, expect, it } from 'bun:test';
 
 import {
@@ -36,6 +39,19 @@ function makeRecord(id: string, overrides: Partial<MemoryRecord> = {}): MemoryRe
     status: 'active',
     ...overrides,
   };
+}
+
+function legacyRecordKey(record: MemoryRecord): string {
+  return `${DEFAULT_MEMORY_KEY_PREFIX}t:${encodeStorageKeyComponent(record.tenantId ?? '')}:n:${encodeStorageKeyComponent(record.namespace)}:${encodeStorageKeyComponent(record.id)}`;
+}
+
+function encodeLegacyRecord(record: MemoryRecord): Uint8Array {
+  return new TextEncoder().encode(
+    JSON.stringify({
+      ...record,
+      vector: Array.from(record.vector),
+    }),
+  );
 }
 
 describe('createWeftMemoryRecordStorage (Weft-specific)', () => {
@@ -122,6 +138,9 @@ describe('createWeftMemoryRecordStorage (Weft-specific)', () => {
       await expect(storage.count({ namespace: '' })).rejects.toThrow(
         /namespace must be a non-empty string/,
       );
+      await expect(
+        storage.putOnce!(makeRecord('a', { namespace: '', metadata: { dedupeKey: 'dedupe-key' } })),
+      ).rejects.toThrow(/namespace must be a non-empty string/);
     });
   });
 
@@ -148,6 +167,72 @@ describe('createWeftMemoryRecordStorage (Weft-specific)', () => {
 
       const keys = [...underlying.snapshot().keys()];
       expect(keys).toHaveLength(1);
+    });
+  });
+
+  describe('dedupe index migration', () => {
+    it('backfills legacy dedupe indexes and removes duplicate live rows', async () => {
+      const legacyStorage = new MemoryStorage();
+      const oldRow = makeRecord('old-row', {
+        metadata: { dedupeKey: 'old-key' },
+        createdAt: 1,
+        updatedAt: 1,
+      });
+      const duplicateRow = makeRecord('z-duplicate-row', {
+        metadata: { dedupeKey: 'old-key' },
+        createdAt: 1,
+        updatedAt: 1,
+      });
+      await legacyStorage.put(legacyRecordKey(oldRow), encodeLegacyRecord(oldRow));
+      await legacyStorage.put(legacyRecordKey(duplicateRow), encodeLegacyRecord(duplicateRow));
+
+      const migrated = createWeftMemoryRecordStorage(legacyStorage);
+      await migrated.init();
+      const existing = await migrated.getByDedupeKey!(SCOPE, 'old-key');
+      const duplicate = await migrated.putOnce!(
+        makeRecord('new-row', { metadata: { dedupeKey: 'old-key' } }),
+      );
+
+      expect(existing?.id).toBe('old-row');
+      expect(duplicate.inserted).toBe(false);
+      expect(duplicate.record.id).toBe('old-row');
+      expect(await migrated.get('z-duplicate-row', SCOPE)).toBeUndefined();
+      expect(await migrated.count(SCOPE)).toBe(1);
+    });
+  });
+
+  describe('dedupe index ownership', () => {
+    it('rejects a direct put that would repoint an existing live dedupe key', async () => {
+      const original = makeRecord('original', { metadata: { dedupeKey: 'shared-key' } });
+      await storage.put(original);
+
+      await expect(
+        storage.put(makeRecord('replacement', { metadata: { dedupeKey: 'shared-key' } })),
+      ).rejects.toThrow(/already belongs to memory record "original"/);
+
+      const dedupeOwner = await storage.getByDedupeKey!(SCOPE, 'shared-key');
+      expect(dedupeOwner?.id).toBe('original');
+      expect(await storage.get('replacement', SCOPE)).toBeUndefined();
+      expect(await storage.count(SCOPE)).toBe(1);
+    });
+
+    it('rejects an update that would repoint an existing live dedupe key', async () => {
+      const original = makeRecord('original', { metadata: { dedupeKey: 'shared-key' } });
+      const other = makeRecord('other', { metadata: { dedupeKey: 'other-key' } });
+      await storage.put(original);
+      await storage.put(other);
+
+      await expect(
+        storage.update('other', SCOPE, { metadata: { dedupeKey: 'shared-key' } }),
+      ).rejects.toThrow(/already belongs to memory record "original"/);
+
+      const sharedDedupeOwner = await storage.getByDedupeKey!(SCOPE, 'shared-key');
+      const otherDedupeOwner = await storage.getByDedupeKey!(SCOPE, 'other-key');
+      const storedOther = await storage.get('other', SCOPE);
+      expect(sharedDedupeOwner?.id).toBe('original');
+      expect(otherDedupeOwner?.id).toBe('other');
+      expect(storedOther?.metadata['dedupeKey']).toBe('other-key');
+      expect(await storage.count(SCOPE)).toBe(2);
     });
   });
 

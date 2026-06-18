@@ -1496,6 +1496,13 @@ describe('createBureau effectful hook idempotency (#27)', () => {
     const namespace = 'hook-idempotency-ns';
     const runId = 'run-fixed-id';
     const hook = createMemoryPersistHook(memory, namespace, runId);
+    for (let i = 0; i < 125; i++) {
+      await memory.remember(`seed memory ${i} with unique content ${i * 7919}`, {
+        namespace,
+        source: 'manual',
+      });
+    }
+    expect(await memory.count(namespace)).toBe(125);
 
     // A minimal final StepResult for step 0; only final/content/step are read.
     const stepResult = (content: string) => ({
@@ -1518,6 +1525,7 @@ describe('createBureau effectful hook idempotency (#27)', () => {
     await hook(stepResult('different regenerated content'));
     const afterRefire = await listExperiential(memory, namespace);
     expect(afterRefire.length).toBe(1);
+    expect(await memory.count(namespace)).toBe(126);
     // The original write survived (not overwritten/dropped) — at-least-once is safe.
     expect(afterRefire[0]!.content).toBe('original content');
   });
@@ -1554,56 +1562,6 @@ describe('createBureau effectful hook idempotency (#27)', () => {
     const persisted = await listExperiential(memory, namespace);
     const keys = persisted.map((e) => e.metadata['dedupeKey']).sort();
     expect(keys).toEqual(['run-A:0', 'run-B:0']);
-  });
-
-  it('still dedups a re-fire when the namespace holds more than one page of memories', async () => {
-    // memory.list defaults to a 100-record page; the dedup lookup must page the
-    // WHOLE namespace, not just the first page, or a re-fire in a long session
-    // (>100 memories) would miss the key and write a duplicate. Seed >200 distinct
-    // memories so the target key sits well past the first/second page, then re-fire
-    // its (runId, step) and assert no duplicate.
-    const memory = createMemory({
-      embedder: createMockEmbedder(128),
-      storage: createInMemoryMemoryRecordStorage(),
-    });
-    await memory.init();
-
-    const namespace = 'hook-pagination-ns';
-    const runId = 'run-paged';
-    const hook = createMemoryPersistHook(memory, namespace, runId);
-    const stepResult = (step: number, content: string) => ({
-      step,
-      conversation: new Conversation(),
-      content,
-      toolCalls: [] as never[],
-      results: [] as never[],
-      final: true,
-    });
-
-    // Seed 220 distinct fillers FIRST, then the target LAST. The in-memory store
-    // returns newest-first; with the (typically equal) same-millisecond timestamps
-    // of a tight loop, its stable sort preserves insertion order, so the
-    // last-inserted target lands at index ~220 — past page 0 (0-199) AND page 1.
-    // That forces hasExperientialDedupeKey to actually page beyond the first chunk
-    // to find it; seeding the target first would put it on page 0 and the test
-    // would never exercise the multi-page path it is here to prove.
-    for (let i = 0; i < 220; i++) {
-      await createMemoryPersistHook(
-        memory,
-        namespace,
-        `filler-run-${i}`,
-      )(stepResult(0, `distinct filler memory number ${i}`));
-    }
-    await hook(stepResult(0, 'the target memory to dedup'));
-    const beforeEntries = await listExperiential(memory, namespace);
-    const before = beforeEntries.length;
-    expect(before).toBeGreaterThan(200);
-
-    // Re-fire (run-paged, step 0) — its key sits past the first page. The paged
-    // lookup must still find it and skip; the count must not grow.
-    await hook(stepResult(0, 'a divergent regenerate of the target'));
-    const afterEntries = await listExperiential(memory, namespace);
-    expect(afterEntries.length).toBe(before);
   });
 });
 
