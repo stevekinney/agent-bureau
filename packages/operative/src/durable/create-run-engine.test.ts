@@ -81,6 +81,9 @@ const DURABLE_SLEEP_MILLISECONDS = 50;
 // so an armed poller would provably have fired by now. The poll is a real-time
 // setInterval, not the inline-launch macrotask queue, so this interval is
 // reliable and not subject to the bun-test starvation this file otherwise guards.
+// This wall-clock wait is only necessary because Weft 0.6.0 exposes neither a
+// configurable poll interval nor a scheduler-started signal — tracked upstream as
+// weft task dfbaf26e; once either lands, these tests can drop the wait.
 const POLL_CYCLE_WAIT_MILLISECONDS = SCHEDULER_POLL_INTERVAL_MILLISECONDS + 500;
 
 // Logged by makeSleepingWorkflow on the step BEFORE ctx.sleep. Observing it via
@@ -123,8 +126,9 @@ async function assertRunStaysParkedWhenPollerUnarmed(
   // Drain Weft's deferred inline launch until the generator has provably reached
   // ctx.sleep (its pre-sleep marker logged). A single drain is not always enough
   // for the inline start to advance, so loop with a bounded cap — the marker is
-  // emitted synchronously as the generator runs, so a handful of yields suffice;
-  // the cap turns a genuine hang into a clear failure rather than a spin.
+  // emitted synchronously as the generator runs, so 2-3 yields suffice in practice.
+  // The cap (50, far above that) turns a genuine hang into a clear assertion
+  // failure rather than an infinite spin; it is a backstop, not a tuned value.
   for (let attempt = 0; attempt < 50 && reachedSleepMarkers.length === 0; attempt++) {
     await yieldToPortableEventLoop();
   }
