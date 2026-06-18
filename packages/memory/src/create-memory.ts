@@ -235,7 +235,7 @@ export function createMemory(options: CreateMemoryOptions): Memory {
       content: string,
       metadata: Partial<MemoryMetadata> & { dedupeKey: string },
     ): Promise<MemoryEntry> {
-      if (metadata.dedupeKey.length === 0) {
+      if (typeof metadata.dedupeKey !== 'string' || metadata.dedupeKey.length === 0) {
         throw new Error('dedupeKey must be a non-empty string.');
       }
 
@@ -249,6 +249,9 @@ export function createMemory(options: CreateMemoryOptions): Memory {
       const scope = scopeFor(namespace);
       const existing = await storage.getByDedupeKey?.(scope, metadata.dedupeKey);
       if (existing !== undefined) {
+        if (textSearchProvider) {
+          await textSearchProvider.index(existing.id, existing.content, namespace);
+        }
         return toMemoryEntry(existing);
       }
 
@@ -271,8 +274,8 @@ export function createMemory(options: CreateMemoryOptions): Memory {
       };
 
       const result = await storage.putOnce(record);
-      if (result.inserted && textSearchProvider) {
-        await textSearchProvider.index(record.id, content, namespace);
+      if (textSearchProvider) {
+        await textSearchProvider.index(result.record.id, result.record.content, namespace);
       }
 
       return toMemoryEntry(result.record, result.inserted ? vector : undefined);

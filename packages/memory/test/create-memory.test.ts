@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it } from 'bun:test';
 import { createMemory } from '../src/create-memory';
 import { createInMemoryMemoryRecordStorage, createMockEmbedder } from '../src/test/index';
 import type { TextSearchProvider } from '../src/text-search-provider';
-import type { Memory, MemoryRecordStorage } from '../src/types';
+import type { Memory, MemoryMetadata, MemoryRecordStorage } from '../src/types';
 
 const DIMENSION = 64;
 
@@ -121,6 +121,21 @@ describe('createMemory', () => {
           source: 'manual',
           dedupeKey: '',
         }),
+      ).rejects.toThrow(/dedupeKey must be a non-empty string/);
+    });
+
+    it('rejects a non-string dedupe key at the public boundary', async () => {
+      await expect(
+        memory.rememberOnce('invalid key', {
+          source: 'manual',
+          dedupeKey: undefined,
+        } as Partial<MemoryMetadata> & { dedupeKey: string }),
+      ).rejects.toThrow(/dedupeKey must be a non-empty string/);
+      await expect(
+        memory.rememberOnce('invalid key', {
+          source: 'manual',
+          dedupeKey: 123,
+        } as unknown as Partial<MemoryMetadata> & { dedupeKey: string }),
       ).rejects.toThrow(/dedupeKey must be a non-empty string/);
     });
 
@@ -683,7 +698,7 @@ describe('createMemory', () => {
       await providerMemory.close();
     });
 
-    it('indexes newly inserted rememberOnce entries through the text search provider', async () => {
+    it('indexes rememberOnce hits through the text search provider using stored content', async () => {
       const textSearchIndexCalls: Array<{ id: string; content: string; namespace: string }> = [];
       const textSearchProvider = {
         async init() {},
@@ -721,6 +736,64 @@ describe('createMemory', () => {
       expect(textSearchIndexCalls).toEqual([
         {
           id: firstEntry.id,
+          content: 'keyed content for indexing',
+          namespace: 'indexed-once',
+        },
+        {
+          id: firstEntry.id,
+          content: 'keyed content for indexing',
+          namespace: 'indexed-once',
+        },
+      ]);
+
+      await textSearchMemory.close();
+    });
+
+    it('repairs rememberOnce text search indexing after a failed initial index', async () => {
+      const textSearchIndexCalls: Array<{ id: string; content: string; namespace: string }> = [];
+      let failNextIndex = true;
+      const textSearchProvider = {
+        async init() {},
+        async close() {},
+        async index(id: string, content: string, namespace: string) {
+          if (failNextIndex) {
+            failNextIndex = false;
+            throw new Error('temporary text index failure');
+          }
+          textSearchIndexCalls.push({ id, content, namespace });
+        },
+        async remove() {},
+        async clear() {},
+        async search() {
+          return new Map<string, number>();
+        },
+      } satisfies TextSearchProvider;
+
+      const textSearchMemory = createMemory({
+        embedder: createMockEmbedder(DIMENSION),
+        storage: createInMemoryMemoryRecordStorage(),
+        dimension: DIMENSION,
+        textSearchProvider,
+      });
+      await textSearchMemory.init();
+
+      await expect(
+        textSearchMemory.rememberOnce('keyed content for indexing', {
+          namespace: 'indexed-once',
+          source: 'experiential',
+          dedupeKey: 'repair-index-key',
+        }),
+      ).rejects.toThrow(/temporary text index failure/);
+      const secondEntry = await textSearchMemory.rememberOnce('different keyed content', {
+        namespace: 'indexed-once',
+        source: 'experiential',
+        dedupeKey: 'repair-index-key',
+      });
+
+      expect(secondEntry.content).toBe('keyed content for indexing');
+      expect(textSearchIndexCalls).toEqual([
+        {
+          id: secondEntry.id,
           content: 'keyed content for indexing',
           namespace: 'indexed-once',
         },

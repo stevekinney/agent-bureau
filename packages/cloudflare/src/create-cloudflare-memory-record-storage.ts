@@ -476,6 +476,9 @@ export function createCloudflareMemoryRecordStorage(
     },
 
     async putOnce(record: MemoryRecord) {
+      if (record.status !== 'active') {
+        throw new Error('putOnce requires an active record.');
+      }
       const dedupeKey = requireRecordDedupeKey(record);
       const { tenantId, namespace } = requireScope({
         ...(record.tenantId !== undefined ? { tenantId: record.tenantId } : {}),

@@ -190,6 +190,17 @@ export function runMemoryRecordStorageContract(
         ).rejects.toThrow(/record\.metadata\.dedupeKey must be a non-empty string/);
       });
 
+      it('rejects a putOnce record that is not active', async () => {
+        await expect(
+          storage.putOnce!(
+            makeRecord('deleted-key', {
+              metadata: { dedupeKey: 'deleted-key' },
+              status: 'deleted',
+            }),
+          ),
+        ).rejects.toThrow(/putOnce requires an active record/);
+      });
+
       it('allows the same dedupe key in a different namespace', async () => {
         await storage.putOnce!(
           makeRecord('alpha', { namespace: 'alpha', metadata: { dedupeKey: 'shared' } }),

@@ -252,6 +252,9 @@ export function createWeftMemoryRecordStorage(
     },
 
     async putOnce(record: MemoryRecord) {
+      if (record.status !== 'active') {
+        throw new Error('putOnce requires an active record.');
+      }
       const dedupeKey = requireRecordDedupeKey(record);
       const scope: MemoryRecordScope = {
         ...(record.tenantId !== undefined ? { tenantId: record.tenantId } : {}),
