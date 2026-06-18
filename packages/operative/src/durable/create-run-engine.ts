@@ -50,6 +50,18 @@ export interface CreateRunEngineOptions {
   recover?: boolean;
 
   /**
+   * Arm Weft's durable-timer polling loop, independent of {@link recover}
+   * (Weft 0.6.0). `recover` decides *who drives `recoverAll`*; `startScheduler`
+   * decides *whether `ctx.sleep(...)` / `engine.schedule(...)` timers fire*. It
+   * defaults to `recover !== false`, so the common in-process host keeps prior
+   * behavior. A host that owns its own recovery — passing `recover: false` so it
+   * can capture the recovered handles from its own `engine.recoverAll()` — must
+   * pass `startScheduler: true` here, otherwise durable timers silently never
+   * fire on that engine.
+   */
+  startScheduler?: boolean;
+
+  /**
    * Re-provide a recovered run's non-serializable {@link DurableRunDeps} on a
    * fresh-process resume. Weft calls this resolver per recovered inline run
    * (those launched WITH `services`) BEFORE the generator advances, so the
@@ -176,6 +188,11 @@ export interface RunEngine {
  * {@link CreateRunEngineOptions.resolveWorkflowServices}, which Weft fires before
  * the resumed generator reads `ctx.services` — no module-global registry.
  *
+ * Weft's durable-timer poller follows {@link CreateRunEngineOptions.startScheduler},
+ * which defaults to `recover !== false`. A host that owns recovery (`recover:
+ * false`) must pass `startScheduler: true` so `ctx.sleep(...)` /
+ * `engine.schedule(...)` timers still fire.
+ *
  * History/checkpoint guardrails ({@link CreateRunEngineOptions.history},
  * `checkpointSizeWarningThreshold`, `checkpointHistory`, `payloadSize`) are
  * threaded into the engine; a `history.maxEvents` breach surfaces as a
@@ -190,6 +207,7 @@ export async function createRunEngine(options: CreateRunEngineOptions): Promise<
   const engine = await Engine.create({
     storage: options.storage,
     recover: options.recover ?? true,
+    ...(options.startScheduler !== undefined ? { startScheduler: options.startScheduler } : {}),
     resolveWorkflowServices: options.resolveWorkflowServices,
     ...(options.onLog ? { onLog: options.onLog } : {}),
     ...(options.history ? { history: options.history } : {}),
