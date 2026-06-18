@@ -18,6 +18,13 @@ import { textValueStore } from '@lostgradient/weft/storage';
 
 import type { CheckpointStore } from './checkpoint-store';
 import { createCheckpointStore } from './checkpoint-store';
+import {
+  attachDurableHeartbeatServicesStore,
+  createDurableHeartbeatServicesStore,
+  createDurableHeartbeatTickWorkflow,
+  DURABLE_HEARTBEAT_TICK_WORKFLOW_TYPE,
+  resolveDurableHeartbeatTickServices,
+} from './durable-heartbeat-tick-workflow';
 import { createStorageActivities } from './storage-activities';
 
 /**
@@ -203,12 +210,34 @@ export async function createRunEngine(options: CreateRunEngineOptions): Promise<
   const checkpointStore =
     options.checkpointStore ?? createCheckpointStoreFromStorage(options.storage);
   const storageActivities = createStorageActivities(checkpointStore);
+  const durableHeartbeatServicesStore = createDurableHeartbeatServicesStore();
+
+  async function resolveWorkflowServices(
+    info: WorkflowServicesResolverInfo,
+  ): Promise<WorkflowServicesResolution> {
+    if (info.workflowType === DURABLE_HEARTBEAT_TICK_WORKFLOW_TYPE) {
+      return resolveDurableHeartbeatTickServices(durableHeartbeatServicesStore, info);
+    }
+
+    if (options.resolveWorkflowServices) {
+      return options.resolveWorkflowServices(info);
+    }
+
+    return {
+      status: 'unavailable',
+      reason: `run ${info.workflowId} has no configured workflow services resolver`,
+    };
+  }
+  const workflows: Record<string, AnyWorkflowDefinition> = {
+    agentRun: options.runWorkflow,
+    durableHeartbeatTick: createDurableHeartbeatTickWorkflow(),
+  };
 
   const engine = await Engine.create({
     storage: options.storage,
     recover: options.recover ?? true,
     ...(options.startScheduler !== undefined ? { startScheduler: options.startScheduler } : {}),
-    resolveWorkflowServices: options.resolveWorkflowServices,
+    resolveWorkflowServices,
     ...(options.onLog ? { onLog: options.onLog } : {}),
     ...(options.history ? { history: options.history } : {}),
     ...(options.checkpointSizeWarningThreshold !== undefined
@@ -218,13 +247,14 @@ export async function createRunEngine(options: CreateRunEngineOptions): Promise<
       ? { checkpointHistory: options.checkpointHistory }
       : {}),
     ...(options.payloadSize ? { payloadSize: options.payloadSize } : {}),
-    workflows: { agentRun: options.runWorkflow },
+    workflows,
     activities: {
       saveCursor: storageActivities.saveCursor,
       saveConversation: storageActivities.saveConversation,
       recordStep: storageActivities.recordStep,
     },
   });
+  attachDurableHeartbeatServicesStore(engine, durableHeartbeatServicesStore);
 
   // Surface checkpoint-size warnings: a dispatched event nobody listens to is no
   // warning. The engine is an EventTarget; the subscription lives as long as the
