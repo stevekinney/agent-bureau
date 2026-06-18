@@ -207,6 +207,19 @@ export function createWeftMemoryRecordStorage(
     return existingId === undefined ? undefined : readActive(recordKey(scope, existingId));
   }
 
+  async function assertDedupeKeyAvailable(
+    scope: MemoryRecordScope,
+    dedupeKey: string,
+    recordId: string,
+  ): Promise<void> {
+    const existing = await readByDedupeKey(scope, dedupeKey);
+    if (existing !== undefined && existing.id !== recordId) {
+      throw new Error(
+        `dedupeKey "${dedupeKey}" already belongs to memory record "${existing.id}".`,
+      );
+    }
+  }
+
   async function backfillDedupeIndexes(): Promise<void> {
     await storageDeletePrefix(storage, `${keyPrefix}dedupe:`);
     const candidates: Array<{
@@ -282,6 +295,9 @@ export function createWeftMemoryRecordStorage(
       const existing = await readActive(key);
       const oldDedupeKey = existing === undefined ? undefined : recordDedupeKey(existing);
       const newDedupeKey = record.status === 'active' ? recordDedupeKey(record) : undefined;
+      if (newDedupeKey !== undefined) {
+        await assertDedupeKeyAvailable(scope, newDedupeKey, record.id);
+      }
       const mutations: Parameters<typeof storageConditionalBatch>[2] = [
         { type: 'put', key, value: encodeRecord(record) },
       ];
@@ -423,6 +439,9 @@ export function createWeftMemoryRecordStorage(
       };
       const oldDedupeKey = recordDedupeKey(existing);
       const newDedupeKey = updated.status === 'active' ? recordDedupeKey(updated) : undefined;
+      if (newDedupeKey !== undefined) {
+        await assertDedupeKeyAvailable(scope, newDedupeKey, updated.id);
+      }
       const mutations: Parameters<typeof storageConditionalBatch>[2] = [
         { type: 'put', key, value: encodeRecord(updated) },
       ];

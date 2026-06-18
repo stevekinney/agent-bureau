@@ -201,6 +201,41 @@ describe('createWeftMemoryRecordStorage (Weft-specific)', () => {
     });
   });
 
+  describe('dedupe index ownership', () => {
+    it('rejects a direct put that would repoint an existing live dedupe key', async () => {
+      const original = makeRecord('original', { metadata: { dedupeKey: 'shared-key' } });
+      await storage.put(original);
+
+      await expect(
+        storage.put(makeRecord('replacement', { metadata: { dedupeKey: 'shared-key' } })),
+      ).rejects.toThrow(/already belongs to memory record "original"/);
+
+      const dedupeOwner = await storage.getByDedupeKey!(SCOPE, 'shared-key');
+      expect(dedupeOwner?.id).toBe('original');
+      expect(await storage.get('replacement', SCOPE)).toBeUndefined();
+      expect(await storage.count(SCOPE)).toBe(1);
+    });
+
+    it('rejects an update that would repoint an existing live dedupe key', async () => {
+      const original = makeRecord('original', { metadata: { dedupeKey: 'shared-key' } });
+      const other = makeRecord('other', { metadata: { dedupeKey: 'other-key' } });
+      await storage.put(original);
+      await storage.put(other);
+
+      await expect(
+        storage.update('other', SCOPE, { metadata: { dedupeKey: 'shared-key' } }),
+      ).rejects.toThrow(/already belongs to memory record "original"/);
+
+      const sharedDedupeOwner = await storage.getByDedupeKey!(SCOPE, 'shared-key');
+      const otherDedupeOwner = await storage.getByDedupeKey!(SCOPE, 'other-key');
+      const storedOther = await storage.get('other', SCOPE);
+      expect(sharedDedupeOwner?.id).toBe('original');
+      expect(otherDedupeOwner?.id).toBe('other');
+      expect(storedOther?.metadata['dedupeKey']).toBe('other-key');
+      expect(await storage.count(SCOPE)).toBe(2);
+    });
+  });
+
   describe('close', () => {
     it('does not dispose shared storage by default', async () => {
       await storage.put(makeRecord('a'));
