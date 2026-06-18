@@ -65,6 +65,15 @@ export interface MemoryVectorSearchResult {
 }
 
 /**
+ * Result of an operation-keyed insert. `inserted` is `true` only for the caller
+ * that created the record; duplicate callers receive the existing live record.
+ */
+export interface MemoryRecordPutOnceResult {
+  record: MemoryRecord;
+  inserted: boolean;
+}
+
+/**
  * Persistence contract for memory records.
  *
  * Implementations expose vector similarity search and full lifecycle
@@ -96,6 +105,12 @@ export interface MemoryRecordStorage {
   close(): Promise<void>;
   /** Insert or replace a record. */
   put(record: MemoryRecord): Promise<void>;
+  /**
+   * Atomically insert a live record if no live record in the same scope already
+   * owns `dedupeKey`. Returns the existing record unchanged when the key is
+   * already present.
+   */
+  putOnce(record: MemoryRecord, dedupeKey: string): Promise<MemoryRecordPutOnceResult>;
   /** Fetch a single live record by id, or `undefined` if absent (deleted records never appear). */
   get(id: string, scope: MemoryRecordScope): Promise<MemoryRecord | undefined>;
   /** Fetch multiple live records by id. Missing and deleted ids are omitted. */

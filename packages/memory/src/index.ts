@@ -58,6 +58,7 @@ export type {
   MemoryListOptions,
   MemoryMetadata,
   MemoryRecord,
+  MemoryRecordPutOnceResult,
   MemoryRecordScope,
   MemoryRecordStorage,
   MemorySearchOptions,

@@ -52,6 +52,17 @@ function buildStoredMetadata(metadata: Partial<MemoryMetadata>): Record<string, 
   return { source: 'manual', ...rest };
 }
 
+function toMemoryEntry(record: MemoryRecord, vector?: number[]): MemoryEntry {
+  return {
+    id: record.id,
+    content: record.content,
+    vector: vector ?? Array.from(record.vector),
+    metadata: toMemoryMetadata(record),
+    createdAt: record.createdAt,
+    updatedAt: record.updatedAt,
+  };
+}
+
 /**
  * Creates a Memory instance backed by a {@link CreateMemoryOptions.storage}
  * {@link import('./types').MemoryRecordStorage}.
@@ -155,14 +166,7 @@ export function createMemory(options: CreateMemoryOptions): Memory {
           await textSearchProvider.index(record.id, content, namespace);
         }
 
-        return {
-          id: record.id,
-          content,
-          vector,
-          metadata: toMemoryMetadata({ ...record, content, namespace }),
-          createdAt: record.createdAt,
-          updatedAt: record.updatedAt,
-        };
+        return toMemoryEntry(record, vector);
       }
 
       // Deduplication: near-identical entries are updated in place.
@@ -224,14 +228,44 @@ export function createMemory(options: CreateMemoryOptions): Memory {
         await textSearchProvider.index(id, content, namespace);
       }
 
-      return {
-        id,
+      return toMemoryEntry(record, vector);
+    },
+
+    async rememberOnce(
+      content: string,
+      metadata: Partial<MemoryMetadata> & { dedupeKey: string },
+    ): Promise<MemoryEntry> {
+      if (metadata.dedupeKey.length === 0) {
+        throw new Error('dedupeKey must be a non-empty string.');
+      }
+
+      if (requireNamespace && !metadata.namespace && defaultNamespace === DEFAULT_NAMESPACE) {
+        throw new Error(
+          'Namespace is required: provide a namespace in metadata or configure a default namespace.',
+        );
+      }
+
+      const namespace = metadata.namespace ?? defaultNamespace;
+      const vector = await embed(content);
+      const now = Date.now();
+      const record: MemoryRecord = {
+        id: generateId(),
+        namespace,
         content,
-        vector,
-        metadata: toMemoryMetadata(record),
+        vector: new Float32Array(vector),
+        metadata: buildStoredMetadata({ source: 'manual', ...metadata }),
         createdAt: now,
         updatedAt: now,
+        version: 1,
+        status: 'active',
       };
+
+      const result = await storage.putOnce(record, metadata.dedupeKey);
+      if (result.inserted && textSearchProvider) {
+        await textSearchProvider.index(record.id, content, namespace);
+      }
+
+      return toMemoryEntry(result.record, result.inserted ? vector : undefined);
     },
 
     async recall(

@@ -97,6 +97,52 @@ describe('createMemory', () => {
     });
   });
 
+  describe('rememberOnce', () => {
+    it('stores only one record for divergent content with the same dedupe key', async () => {
+      const first = await memory.rememberOnce('original content', {
+        namespace: 'once',
+        source: 'experiential',
+        dedupeKey: 'run-1:0',
+      });
+      const second = await memory.rememberOnce('different regenerated content', {
+        namespace: 'once',
+        source: 'experiential',
+        dedupeKey: 'run-1:0',
+      });
+
+      expect(second.id).toBe(first.id);
+      expect(second.content).toBe('original content');
+      expect(await memory.count('once')).toBe(1);
+    });
+
+    it('rejects an empty dedupe key', async () => {
+      await expect(
+        memory.rememberOnce('missing key', {
+          source: 'manual',
+          dedupeKey: '',
+        }),
+      ).rejects.toThrow(/dedupeKey must be a non-empty string/);
+    });
+
+    it('requires a namespace when requireNamespace is true', async () => {
+      const strict = createMemory({
+        embedder: createMockEmbedder(DIMENSION),
+        storage: createInMemoryMemoryRecordStorage(),
+        requireNamespace: true,
+      });
+      await strict.init();
+
+      await expect(
+        strict.rememberOnce('strict namespace', {
+          source: 'manual',
+          dedupeKey: 'strict-key',
+        }),
+      ).rejects.toThrow(/Namespace is required/);
+
+      await strict.close();
+    });
+  });
+
   describe('deduplication', () => {
     it('prevents near-duplicate entries', async () => {
       const first = await memory.remember('The capital of France is Paris');
@@ -615,6 +661,52 @@ describe('createMemory', () => {
       expect(clearedNamespaces).toEqual(['default']);
 
       await providerMemory.close();
+    });
+
+    it('indexes newly inserted rememberOnce entries through the text search provider', async () => {
+      const textSearchIndexCalls: Array<{ id: string; content: string; namespace: string }> = [];
+      const textSearchProvider = {
+        async init() {},
+        async close() {},
+        async index(id: string, content: string, namespace: string) {
+          textSearchIndexCalls.push({ id, content, namespace });
+        },
+        async remove() {},
+        async clear() {},
+        async search() {
+          return new Map<string, number>();
+        },
+      } satisfies TextSearchProvider;
+
+      const textSearchMemory = createMemory({
+        embedder: createMockEmbedder(DIMENSION),
+        storage: createInMemoryMemoryRecordStorage(),
+        dimension: DIMENSION,
+        textSearchProvider,
+      });
+      await textSearchMemory.init();
+
+      const firstEntry = await textSearchMemory.rememberOnce('keyed content for indexing', {
+        namespace: 'indexed-once',
+        source: 'experiential',
+        dedupeKey: 'indexed-key',
+      });
+      const secondEntry = await textSearchMemory.rememberOnce('different keyed content', {
+        namespace: 'indexed-once',
+        source: 'experiential',
+        dedupeKey: 'indexed-key',
+      });
+
+      expect(secondEntry.id).toBe(firstEntry.id);
+      expect(textSearchIndexCalls).toEqual([
+        {
+          id: firstEntry.id,
+          content: 'keyed content for indexing',
+          namespace: 'indexed-once',
+        },
+      ]);
+
+      await textSearchMemory.close();
     });
 
     it('applies temporal decay and MMR in vector-only recall mode', async () => {

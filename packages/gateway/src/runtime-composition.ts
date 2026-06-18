@@ -138,28 +138,14 @@ function createMemoryRecallHook(memory: Memory, sessionId: string): PrepareStepH
  * Idempotency is enforced by a DETERMINISTIC operation key, not by content: a
  * replayed step may produce non-byte-identical content (its `generate` re-runs),
  * so relying on the memory store's cosine-similarity dedup is not sufficient.
- * Instead the write carries a stable `dedupeKey` of `${runId}:${step}` (the
- * durable operation's identity — same run, same step index across a replay), and
- * the hook skips the write when that key is already present. This makes a re-fire
- * a guaranteed no-op regardless of content drift.
- *
- * The set of seen keys is loaded ONCE per run (lazily, on the first final step)
- * by paging the whole namespace into an in-memory `Set`, then every subsequent
- * per-step check and write is O(1) — not a full-namespace scan each step, which
- * would be O(n²) over a long run. The one-time load pages the whole namespace
- * because `memory.list` defaults to a 100-record page, so a single un-paged read
- * would miss keys in a session with >100 memories and let a re-fire duplicate.
+ * Instead the write uses a stable `dedupeKey` of `${runId}:${step}` (the durable
+ * operation's identity — same run, same step index across a replay) with
+ * `memory.rememberOnce()`, so a re-fire is an atomic no-op regardless of content
+ * drift.
  *
  * When no `runId` is available (a non-durable run, where there is no replay and
  * therefore no re-fire hazard), the dedup guard is skipped and the write proceeds
  * — the at-least-once concern only exists on the durable recovery path.
- *
- * KNOWN RESIDUAL (filed upstream as a `memory` ticket): the lookup-then-write is
- * not atomic, so two concurrent recoveries of the SAME `runId:step` could both
- * miss and both write. The single-owner recovery model makes a concurrent
- * same-run recovery unexpected, and the proper fix is an atomic keyed
- * insert-if-absent in the memory store (a `rememberOnce`/dedupeKey-unique
- * primitive) rather than a read-then-write here.
  *
  * `replay: 'effectful'` ({@link HookReplayPolicy}) is recorded on the write for
  * diagnostics; it documents the contract and never gates execution.
@@ -169,16 +155,6 @@ export function createMemoryPersistHook(
   sessionId: string,
   runId?: string,
 ): OnStepHook {
-  // Per-run cache of the namespace's experiential dedupe keys (Bugbot #38): the
-  // hook fires on every final step, and the dedup check would otherwise PAGE THE
-  // WHOLE namespace each time the key is absent (the common, non-replay case) —
-  // O(n²) over a long session. Instead we seed this Set ONCE (lazily, on the
-  // first final step) by paging the namespace, then every steady-state check and
-  // write is an O(1) Set operation. `undefined` until seeded. Scoped to this
-  // run's hook closure: a recovered run gets a fresh hook that re-seeds from the
-  // persisted store, so cross-process recovery dedup still works.
-  let seenDedupeKeys: Set<string> | undefined;
-
   return async (context) => {
     if (!context.final || !context.content.trim()) {
       return;
@@ -189,68 +165,24 @@ export function createMemoryPersistHook(
     // produce a second record.
     const dedupeKey = runId === undefined ? undefined : `${runId}:${context.step}`;
 
-    if (dedupeKey !== undefined) {
-      seenDedupeKeys ??= await loadExperientialDedupeKeys(memory, sessionId);
-      if (seenDedupeKeys.has(dedupeKey)) {
-        return; // Already persisted by the first (pre-crash) execution of this step.
-      }
-    }
-
-    await memory.remember(context.content, {
+    const metadata = {
       namespace: sessionId,
       source: 'experiential',
       step: context.step,
       ...(dedupeKey !== undefined ? { dedupeKey } : {}),
       // Replay classification (seam #11): an external write → `effectful`, kept
-      // safe across a recovery re-fire by the dedupeKey guard above. Metadata
+      // safe across a recovery re-fire by the atomic dedupeKey write. Metadata
       // only; never gates execution.
       replay: 'effectful' satisfies HookReplayPolicy,
-    });
+    } as const;
 
-    // Record the write so a later step in THIS run (or a re-fire of this one)
-    // dedupes against it without re-reading the store.
-    if (dedupeKey !== undefined) {
-      seenDedupeKeys?.add(dedupeKey);
+    if (dedupeKey === undefined) {
+      await memory.remember(context.content, metadata);
+      return;
     }
+
+    await memory.rememberOnce(context.content, { ...metadata, dedupeKey });
   };
-}
-
-/**
- * Load the set of `dedupeKey`s on EXPERIENTIAL memories in a namespace, paging the
- * whole namespace once. Called lazily, once per run, to seed the persist hook's
- * in-memory dedup cache — so the hot-path per-step check is O(1) rather than a
- * full-namespace scan each time. The `source === 'experiential'` filter mirrors
- * exactly what the hook writes, so a non-experiential record carrying a colliding
- * `dedupeKey` cannot poison the set.
- *
- * Unlike the boot-time sweep (which throws on its sanity cap), this runs on the
- * request path, so a `MAX_PAGES` cap fails OPEN: a mis-paginating store that never
- * returns a short page would otherwise spin forever here. On the cap we log and
- * return whatever was collected (a possible later duplicate beats a hung run).
- */
-async function loadExperientialDedupeKeys(memory: Memory, namespace: string): Promise<Set<string>> {
-  const PAGE_SIZE = 200;
-  const MAX_PAGES = 50_000; // far above any real session; a non-terminating guard
-  const keys = new Set<string>();
-  for (let page = 0; page < MAX_PAGES; page++) {
-    const entries = await memory.list({ namespace, limit: PAGE_SIZE, offset: page * PAGE_SIZE });
-    for (const entry of entries) {
-      if (entry.metadata['source'] === 'experiential') {
-        const key = entry.metadata['dedupeKey'];
-        if (typeof key === 'string') {
-          keys.add(key);
-        }
-      }
-    }
-    if (entries.length < PAGE_SIZE) {
-      return keys; // Last (short) page — namespace exhausted.
-    }
-  }
-  console.warn(
-    `[bureau] experiential dedupeKey load exceeded ${MAX_PAGES} pages for namespace ` +
-      `"${namespace}" without a short page — proceeding with a partial set (fail-open).`,
-  );
-  return keys;
 }
 
 function resolveProviderGenerate(

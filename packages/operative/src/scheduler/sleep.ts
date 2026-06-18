@@ -20,7 +20,6 @@ function resolveSleepRuntime(): SleepRuntime {
 
   return {
     bunSleep: typeof Bun !== 'undefined' ? Bun.sleep.bind(Bun) : undefined,
-    setTimeoutFunction: (callback, milliseconds) => setTimeout(callback, milliseconds),
   };
 }
 

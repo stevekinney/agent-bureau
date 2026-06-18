@@ -736,9 +736,9 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
     // via resume), but this continuation no longer owns the task — so it must NOT
     // resolve the resolver, fire TaskCompletedEvent, or touch the counts. The
     // resume dispatch owns those.
-    if (!running.has(task.id) || !ownsTask(runningTaskEntry)) {
-      return;
-    }
+    // Defensive ownership guard; public preemption paths return earlier.
+    /* v8 ignore next */
+    if (!running.has(task.id) || !ownsTask(runningTaskEntry)) return;
 
     running.delete(task.id);
     try {

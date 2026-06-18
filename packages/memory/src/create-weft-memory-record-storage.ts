@@ -1,6 +1,7 @@
 import {
   encodeStorageKeyComponent,
   type Storage,
+  storageConditionalBatch,
   storageDeletePrefix,
   storageKeys,
   WEFT_RESERVED_KEY_PREFIXES,
@@ -152,11 +153,27 @@ export function createWeftMemoryRecordStorage(
     return `${scopePrefix(scope)}${encodeStorageKeyComponent(id)}`;
   }
 
+  function dedupeScopePrefix(scope: MemoryRecordScope): string {
+    scopePrefix(scope);
+    const tenant = encodeStorageKeyComponent(scope.tenantId ?? '');
+    const namespace = encodeStorageKeyComponent(scope.namespace);
+    return `${keyPrefix}dedupe:t:${tenant}:n:${namespace}:`;
+  }
+
+  function dedupeIndexKey(scope: MemoryRecordScope, dedupeKey: string): string {
+    return `${dedupeScopePrefix(scope)}${encodeStorageKeyComponent(dedupeKey)}`;
+  }
+
   async function readActive(key: string): Promise<MemoryRecord | undefined> {
     const bytes = await storage.get(key);
     if (bytes === null) return undefined;
     const record = decodeRecord(bytes);
     return record.status === 'active' ? record : undefined;
+  }
+
+  async function readRecordId(key: string): Promise<string | undefined> {
+    const bytes = await storage.get(key);
+    return bytes === null ? undefined : textDecoder.decode(bytes);
   }
 
   async function listAllInScope(scope: MemoryRecordScope): Promise<MemoryRecord[]> {
@@ -187,6 +204,37 @@ export function createWeftMemoryRecordStorage(
         namespace: record.namespace,
       };
       await storage.put(recordKey(scope, record.id), encodeRecord(record));
+    },
+
+    async putOnce(record: MemoryRecord, dedupeKey: string) {
+      const scope: MemoryRecordScope = {
+        ...(record.tenantId !== undefined ? { tenantId: record.tenantId } : {}),
+        namespace: record.namespace,
+      };
+      const key = recordKey(scope, record.id);
+      const indexKey = dedupeIndexKey(scope, dedupeKey);
+      const applied = await storageConditionalBatch(
+        storage,
+        [
+          { key: indexKey, expectedValue: null },
+          { key, expectedValue: null },
+        ],
+        [
+          { type: 'put', key, value: encodeRecord(record) },
+          { type: 'put', key: indexKey, value: textEncoder.encode(record.id) },
+        ],
+      );
+
+      if (applied) {
+        return { record, inserted: true };
+      }
+
+      const existingId = await readRecordId(indexKey);
+      const existing =
+        existingId === undefined ? undefined : await readActive(recordKey(scope, existingId));
+      if (existing !== undefined) return { record: existing, inserted: false };
+
+      throw new Error(`dedupeKey "${dedupeKey}" exists but its memory record is missing.`);
     },
 
     async get(id: string, scope: MemoryRecordScope): Promise<MemoryRecord | undefined> {
@@ -278,14 +326,28 @@ export function createWeftMemoryRecordStorage(
 
     async delete(id: string, scope: MemoryRecordScope): Promise<boolean> {
       const key = recordKey(scope, id);
-      const existing = await storage.get(key);
-      if (existing === null) return false;
-      await storage.delete(key);
+      const existing = await readActive(key);
+      if (existing === undefined) return false;
+      const dedupeKey = existing.metadata['dedupeKey'];
+      if (typeof dedupeKey === 'string') {
+        await storageConditionalBatch(
+          storage,
+          [],
+          [
+            { type: 'delete', key },
+            { type: 'delete', key: dedupeIndexKey(scope, dedupeKey) },
+          ],
+        );
+      } else {
+        await storage.delete(key);
+      }
       return true;
     },
 
     async deleteNamespace(scope: MemoryRecordScope): Promise<number> {
-      return storageDeletePrefix(storage, scopePrefix(scope));
+      const removed = await storageDeletePrefix(storage, scopePrefix(scope));
+      await storageDeletePrefix(storage, dedupeScopePrefix(scope));
+      return removed;
     },
   };
 }

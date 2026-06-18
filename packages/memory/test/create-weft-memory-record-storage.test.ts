@@ -122,6 +122,9 @@ describe('createWeftMemoryRecordStorage (Weft-specific)', () => {
       await expect(storage.count({ namespace: '' })).rejects.toThrow(
         /namespace must be a non-empty string/,
       );
+      await expect(
+        storage.putOnce(makeRecord('a', { namespace: '' }), 'dedupe-key'),
+      ).rejects.toThrow(/namespace must be a non-empty string/);
     });
   });
 

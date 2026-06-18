@@ -128,6 +128,97 @@ export function runMemoryRecordStorageContract(
       });
     });
 
+    describe('putOnce', () => {
+      it('inserts only one live record for the same dedupe key', async () => {
+        const first = makeRecord('first', {
+          content: 'first content',
+          metadata: { dedupeKey: 'run-1:0' },
+        });
+        const second = makeRecord('second', {
+          content: 'second content',
+          metadata: { dedupeKey: 'run-1:0' },
+        });
+
+        const [firstResult, secondResult] = await Promise.all([
+          storage.putOnce(first, 'run-1:0'),
+          storage.putOnce(second, 'run-1:0'),
+        ]);
+
+        const inserted = [firstResult, secondResult].filter((result) => result.inserted);
+        expect(inserted).toHaveLength(1);
+        expect(await storage.count(SCOPE)).toBe(1);
+
+        const records = await storage.list(SCOPE);
+        expect(records).toHaveLength(1);
+        expect([first.id, second.id]).toContain(records[0]!.id);
+
+        const duplicateResult = firstResult.inserted ? secondResult : firstResult;
+        expect(duplicateResult.record.id).toBe(records[0]!.id);
+        expect(duplicateResult.inserted).toBe(false);
+      });
+
+      it('returns the existing record unchanged for a sequential duplicate dedupe key', async () => {
+        const first = makeRecord('first', {
+          content: 'first content',
+          metadata: { dedupeKey: 'run-1:0' },
+        });
+        const second = makeRecord('second', {
+          content: 'second content',
+          metadata: { dedupeKey: 'run-1:0', attempted: true },
+        });
+
+        const firstResult = await storage.putOnce(first, 'run-1:0');
+        const secondResult = await storage.putOnce(second, 'run-1:0');
+
+        expect(firstResult.inserted).toBe(true);
+        expect(secondResult.inserted).toBe(false);
+        expect(secondResult.record.id).toBe(first.id);
+        expect(secondResult.record.content).toBe(first.content);
+        expect(secondResult.record.metadata).toEqual(first.metadata);
+        expect(await storage.count(SCOPE)).toBe(1);
+      });
+
+      it('allows the same dedupe key in a different namespace', async () => {
+        await storage.putOnce(
+          makeRecord('alpha', { namespace: 'alpha', metadata: { dedupeKey: 'shared' } }),
+          'shared',
+        );
+        await storage.putOnce(
+          makeRecord('beta', { namespace: 'beta', metadata: { dedupeKey: 'shared' } }),
+          'shared',
+        );
+
+        expect(await storage.count(scopeFor({ namespace: 'alpha' }))).toBe(1);
+        expect(await storage.count(scopeFor({ namespace: 'beta' }))).toBe(1);
+      });
+
+      it('allows reusing a dedupe key after deleting its record', async () => {
+        const first = makeRecord('first', { metadata: { dedupeKey: 'deleted-key' } });
+        const second = makeRecord('second', { metadata: { dedupeKey: 'deleted-key' } });
+
+        await storage.putOnce(first, 'deleted-key');
+        expect(await storage.delete(first.id, SCOPE)).toBe(true);
+
+        const result = await storage.putOnce(second, 'deleted-key');
+        expect(result.inserted).toBe(true);
+        expect(result.record.id).toBe(second.id);
+        expect(await storage.count(SCOPE)).toBe(1);
+      });
+
+      it('allows reusing a dedupe key after deleting the namespace', async () => {
+        const first = makeRecord('first', { metadata: { dedupeKey: 'namespace-key' } });
+        const second = makeRecord('second', { metadata: { dedupeKey: 'namespace-key' } });
+
+        await storage.putOnce(first, 'namespace-key');
+        expect(await storage.deleteNamespace(SCOPE)).toBe(1);
+
+        const result = await storage.putOnce(second, 'namespace-key');
+        expect(result.inserted).toBe(true);
+        expect(result.record.id).toBe(second.id);
+        expect(await storage.count(SCOPE)).toBe(1);
+      });
+    });
+
     describe('getMany', () => {
       it('returns only the present records, omitting missing ids', async () => {
         await storage.put(makeRecord('a'));

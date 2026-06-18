@@ -140,6 +140,30 @@ describe('loop helper coverage', () => {
     expect(calls).toBe(1);
   });
 
+  it('covers the default retry delay abort path directly', async () => {
+    const controller = new AbortController();
+    let calls = 0;
+
+    setTimeout(() => controller.abort('cancel default retry'), 0);
+
+    const result = await executeLoop({
+      generate: async () => {
+        calls++;
+        throw new Error('retry me');
+      },
+      toolbox: createTestToolbox([]),
+      conversation: new Conversation(),
+      signal: controller.signal,
+      retry: {
+        attempts: 3,
+        delay: 20,
+      },
+    });
+
+    expect(result.finishReason).toBe('aborted');
+    expect(calls).toBe(1);
+  });
+
   it('covers the backpressure abort path directly', async () => {
     const controller = new AbortController();
 
@@ -153,6 +177,26 @@ describe('loop helper coverage', () => {
           controller.abort('cancel backpressure');
           return { delay: 1000 };
         },
+        onSuccess: () => {},
+        onError: () => {},
+      },
+    });
+
+    expect(result.finishReason).toBe('aborted');
+  });
+
+  it('covers the default backpressure delay abort path directly', async () => {
+    const controller = new AbortController();
+
+    setTimeout(() => controller.abort('cancel default backpressure'), 0);
+
+    const result = await executeLoop({
+      generate: async () => textResponse('unused'),
+      toolbox: createTestToolbox([]),
+      conversation: new Conversation(),
+      signal: controller.signal,
+      backpressure: {
+        beforeStep: () => ({ delay: 20 }),
         onSuccess: () => {},
         onError: () => {},
       },

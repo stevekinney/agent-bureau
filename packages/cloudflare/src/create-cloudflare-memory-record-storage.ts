@@ -61,6 +61,7 @@ const storedRowSchema = z.object({
   content: z.string(),
   vector: z.string(),
   metadata: z.string(),
+  dedupe_key: z.string().nullable().optional(),
   created_at: z.number().finite(),
   updated_at: z.number().finite(),
 });
@@ -243,6 +244,11 @@ export function createCloudflareMemoryRecordStorage(
     };
   }
 
+  function recordDedupeKey(record: MemoryRecord): string | null {
+    const dedupeKey = record.metadata['dedupeKey'];
+    return typeof dedupeKey === 'string' ? dedupeKey : null;
+  }
+
   /** Fetch a single ACTIVE row in scope, or `undefined`. */
   function activeRow(
     tenantId: string,
@@ -251,12 +257,32 @@ export function createCloudflareMemoryRecordStorage(
   ): z.infer<typeof storedRowSchema> | undefined {
     const rows = sql
       .exec<Record<string, SqlValue>>(
-        `SELECT tenant_id, namespace, id, status, version, content, vector, metadata, created_at, updated_at
+        `SELECT tenant_id, namespace, id, status, version, content, vector, metadata, dedupe_key, created_at, updated_at
          FROM ${table}
          WHERE tenant_id = ? AND namespace = ? AND id = ? AND status = 'active'`,
         tenantId,
         namespace,
         id,
+      )
+      .toArray();
+    const first = rows[0];
+    return first === undefined ? undefined : storedRowSchema.parse(first);
+  }
+
+  function activeRowByDedupeKey(
+    tenantId: string,
+    namespace: string,
+    dedupeKey: string,
+  ): z.infer<typeof storedRowSchema> | undefined {
+    const rows = sql
+      .exec<Record<string, SqlValue>>(
+        `SELECT tenant_id, namespace, id, status, version, content, vector, metadata, dedupe_key, created_at, updated_at
+         FROM ${table}
+         WHERE tenant_id = ? AND namespace = ? AND dedupe_key = ? AND status = 'active'
+         LIMIT 1`,
+        tenantId,
+        namespace,
+        dedupeKey,
       )
       .toArray();
     const first = rows[0];
@@ -275,11 +301,24 @@ export function createCloudflareMemoryRecordStorage(
            content    TEXT    NOT NULL,
            vector     TEXT    NOT NULL,
            metadata   TEXT    NOT NULL,
+           dedupe_key TEXT,
            created_at INTEGER NOT NULL,
            updated_at INTEGER NOT NULL,
            indexed_at INTEGER NOT NULL,
            PRIMARY KEY (tenant_id, namespace, id)
          )`,
+      );
+      const columns = sql
+        .exec<{ name: string }>(`PRAGMA table_info(${table})`)
+        .toArray()
+        .map((row) => row.name);
+      if (!columns.includes('dedupe_key')) {
+        sql.exec(`ALTER TABLE ${table} ADD COLUMN dedupe_key TEXT`);
+      }
+      sql.exec(
+        `CREATE UNIQUE INDEX IF NOT EXISTS ${table}_active_dedupe_key_unique
+         ON ${table} (tenant_id, namespace, dedupe_key)
+         WHERE status = 'active' AND dedupe_key IS NOT NULL`,
       );
       return Promise.resolve();
     },
@@ -296,16 +335,18 @@ export function createCloudflareMemoryRecordStorage(
         namespace: record.namespace,
       });
       const now = Date.now();
+      const dedupeKey = recordDedupeKey(record);
       sql.exec(
         `INSERT INTO ${table}
-           (tenant_id, namespace, id, status, version, content, vector, metadata, created_at, updated_at, indexed_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           (tenant_id, namespace, id, status, version, content, vector, metadata, dedupe_key, created_at, updated_at, indexed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (tenant_id, namespace, id) DO UPDATE SET
            status = excluded.status,
            version = excluded.version,
            content = excluded.content,
            vector = excluded.vector,
            metadata = excluded.metadata,
+           dedupe_key = excluded.dedupe_key,
            created_at = excluded.created_at,
            updated_at = excluded.updated_at,
            indexed_at = excluded.indexed_at`,
@@ -317,6 +358,7 @@ export function createCloudflareMemoryRecordStorage(
         record.content,
         JSON.stringify(Array.from(record.vector)),
         JSON.stringify(record.metadata),
+        dedupeKey,
         record.createdAt,
         record.updatedAt,
         now,
@@ -335,6 +377,50 @@ export function createCloudflareMemoryRecordStorage(
         // index from holding a stale live id for it.
         await vectorize.deleteByIds([vectorizeId(tenantId, namespace, record.id)]);
       }
+    },
+
+    async putOnce(record: MemoryRecord, dedupeKey: string) {
+      const { tenantId, namespace } = requireScope({
+        ...(record.tenantId !== undefined ? { tenantId: record.tenantId } : {}),
+        namespace: record.namespace,
+      });
+      const now = Date.now();
+      sql.exec(
+        `INSERT OR IGNORE INTO ${table}
+           (tenant_id, namespace, id, status, version, content, vector, metadata, dedupe_key, created_at, updated_at, indexed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        tenantId,
+        namespace,
+        record.id,
+        record.status,
+        record.version,
+        record.content,
+        JSON.stringify(Array.from(record.vector)),
+        JSON.stringify(record.metadata),
+        dedupeKey,
+        record.createdAt,
+        record.updatedAt,
+        now,
+      );
+
+      const row = activeRowByDedupeKey(tenantId, namespace, dedupeKey);
+      if (row === undefined) {
+        throw new Error(`dedupeKey "${dedupeKey}" exists but its memory record is missing.`);
+      }
+
+      const stored = rowToRecord(row);
+      if (stored.id === record.id) {
+        await vectorize.upsert([
+          {
+            id: vectorizeId(tenantId, namespace, record.id),
+            values: Array.from(record.vector),
+            metadata: vectorizeMetadata(tenantId, record),
+          },
+        ]);
+        return { record: stored, inserted: true };
+      }
+
+      return { record: stored, inserted: false };
     },
 
     // The reads below run synchronously against SQLite but return Promises (per
@@ -369,7 +455,7 @@ export function createCloudflareMemoryRecordStorage(
         const { tenantId, namespace } = requireScope(scope);
         const rows = sql
           .exec<Record<string, SqlValue>>(
-            `SELECT tenant_id, namespace, id, status, version, content, vector, metadata, created_at, updated_at
+            `SELECT tenant_id, namespace, id, status, version, content, vector, metadata, dedupe_key, created_at, updated_at
              FROM ${table}
              WHERE tenant_id = ? AND namespace = ? AND status = 'active'
              ORDER BY created_at DESC`,
@@ -514,12 +600,13 @@ export function createCloudflareMemoryRecordStorage(
 
       sql.exec(
         `UPDATE ${table}
-           SET version = ?, content = ?, vector = ?, metadata = ?, updated_at = ?, indexed_at = ?
+           SET version = ?, content = ?, vector = ?, metadata = ?, dedupe_key = ?, updated_at = ?, indexed_at = ?
          WHERE tenant_id = ? AND namespace = ? AND id = ? AND status = 'active'`,
         updated.version,
         updated.content,
         JSON.stringify(Array.from(updated.vector)),
         JSON.stringify(updated.metadata),
+        recordDedupeKey(updated),
         updated.updatedAt,
         updated.updatedAt,
         tenantId,

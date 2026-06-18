@@ -10,7 +10,7 @@ import { z } from 'zod';
 import { noToolCalls } from '../conditions/predicates';
 import type { GenerateFunction } from '../types';
 import { createCheckpointStore } from './checkpoint-store';
-import { createRunWorkflow } from './run-workflow';
+import { createRunWorkflow, isAgentRunWorkflowInput } from './run-workflow';
 import { createStorageActivities } from './storage-activities';
 import type { DurableRunDeps } from './types';
 
@@ -110,6 +110,36 @@ afterEach(async () => {
 });
 
 describe('durable agentRun workflow', () => {
+  it('treats malformed checkpoint JSON as absent data', async () => {
+    const checkpointStore = createCheckpointStore({
+      get: async () => '{',
+      has: async () => true,
+      set: async () => {},
+      list: async () => [],
+      delete: async () => {},
+      deletePrefix: async () => 0,
+      close: async () => {},
+    });
+
+    expect(await checkpointStore.loadCursor('bad-json')).toBeNull();
+  });
+
+  it('validates durable workflow input at the trust boundary', () => {
+    expect(isAgentRunWorkflowInput(null)).toBe(false);
+    expect(isAgentRunWorkflowInput({})).toBe(false);
+    expect(isAgentRunWorkflowInput({ runId: 'run', sessionId: 'session' })).toBe(true);
+    expect(isAgentRunWorkflowInput({ runId: 'run', sessionId: 'session', prompt: 'Hello' })).toBe(
+      true,
+    );
+    expect(isAgentRunWorkflowInput({ runId: 'run', sessionId: 'session', prompt: 1 })).toBe(false);
+    expect(isAgentRunWorkflowInput({ runId: 'run', sessionId: 'session', maximumSteps: 2 })).toBe(
+      true,
+    );
+    expect(isAgentRunWorkflowInput({ runId: 'run', sessionId: 'session', maximumSteps: '2' })).toBe(
+      false,
+    );
+  });
+
   it('runs a single-step agent to completion when generate emits no tool calls', async () => {
     const { engine, checkpointStore } = await buildEngine(new MemoryStorage(), false);
     let calls = 0;
@@ -186,6 +216,47 @@ describe('durable agentRun workflow', () => {
       expect(result.finishReason).toBe('maximum-steps');
     } finally {
       engine[Symbol.dispose]();
+    }
+  });
+
+  it('serializes non-Error terminal failures across the durable workflow boundary', async () => {
+    const stringRun = await buildEngine(new MemoryStorage(), false);
+    try {
+      const stringResult = await runToCompletion(
+        stringRun.engine,
+        { runId: 'run-string-error', prompt: 'Go' },
+        makeServices(async () => {
+          // This regression intentionally verifies non-Error terminal rejection serialization.
+          // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+          return Promise.reject('string failure');
+        }),
+      );
+
+      expect(stringResult.finishReason).toBe('error');
+      expect(stringResult.errorMessage).toBe('string failure');
+    } finally {
+      stringRun.engine[Symbol.dispose]();
+    }
+
+    const circularRun = await buildEngine(new MemoryStorage(), false);
+    try {
+      const circular: Record<string, unknown> = {};
+      circular['self'] = circular;
+
+      const circularResult = await runToCompletion(
+        circularRun.engine,
+        { runId: 'run-circular-error', prompt: 'Go' },
+        makeServices(async () => {
+          // This regression intentionally verifies non-Error terminal rejection serialization.
+          // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+          return Promise.reject(circular);
+        }),
+      );
+
+      expect(circularResult.finishReason).toBe('error');
+      expect(circularResult.errorMessage).toBe('[object Object]');
+    } finally {
+      circularRun.engine[Symbol.dispose]();
     }
   });
 

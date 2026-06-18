@@ -51,6 +51,21 @@ describe('withNamespaceIsolation', () => {
     });
   });
 
+  describe('rememberOnce', () => {
+    it('forces the configured namespace on keyed writes', async () => {
+      const tenantA = withNamespaceIsolation(baseMemory, { namespace: 'tenant-a' });
+      const entry = await tenantA.rememberOnce('Remember this once', {
+        namespace: 'attacker',
+        source: 'manual',
+        dedupeKey: 'once-key',
+      });
+
+      expect(entry.metadata.namespace).toBe('tenant-a');
+      expect(await baseMemory.count('tenant-a')).toBe(1);
+      expect(await baseMemory.count('attacker')).toBe(0);
+    });
+  });
+
   describe('recall', () => {
     it('scopes recall to the configured namespace', async () => {
       // Store entries in two namespaces via base memory
