@@ -1,5 +1,8 @@
 import { MemoryStorage } from '@lostgradient/weft/storage';
-import { WEFT_RESERVED_KEY_PREFIXES } from '@lostgradient/weft/storage/interface';
+import {
+  encodeStorageKeyComponent,
+  WEFT_RESERVED_KEY_PREFIXES,
+} from '@lostgradient/weft/storage/interface';
 import { beforeEach, describe, expect, it } from 'bun:test';
 
 import {
@@ -36,6 +39,19 @@ function makeRecord(id: string, overrides: Partial<MemoryRecord> = {}): MemoryRe
     status: 'active',
     ...overrides,
   };
+}
+
+function legacyRecordKey(record: MemoryRecord): string {
+  return `${DEFAULT_MEMORY_KEY_PREFIX}t:${encodeStorageKeyComponent(record.tenantId ?? '')}:n:${encodeStorageKeyComponent(record.namespace)}:${encodeStorageKeyComponent(record.id)}`;
+}
+
+function encodeLegacyRecord(record: MemoryRecord): Uint8Array {
+  return new TextEncoder().encode(
+    JSON.stringify({
+      ...record,
+      vector: Array.from(record.vector),
+    }),
+  );
 }
 
 describe('createWeftMemoryRecordStorage (Weft-specific)', () => {
@@ -151,6 +167,37 @@ describe('createWeftMemoryRecordStorage (Weft-specific)', () => {
 
       const keys = [...underlying.snapshot().keys()];
       expect(keys).toHaveLength(1);
+    });
+  });
+
+  describe('dedupe index migration', () => {
+    it('backfills legacy dedupe indexes and removes duplicate live rows', async () => {
+      const legacyStorage = new MemoryStorage();
+      const oldRow = makeRecord('old-row', {
+        metadata: { dedupeKey: 'old-key' },
+        createdAt: 1,
+        updatedAt: 1,
+      });
+      const duplicateRow = makeRecord('z-duplicate-row', {
+        metadata: { dedupeKey: 'old-key' },
+        createdAt: 1,
+        updatedAt: 1,
+      });
+      await legacyStorage.put(legacyRecordKey(oldRow), encodeLegacyRecord(oldRow));
+      await legacyStorage.put(legacyRecordKey(duplicateRow), encodeLegacyRecord(duplicateRow));
+
+      const migrated = createWeftMemoryRecordStorage(legacyStorage);
+      await migrated.init();
+      const existing = await migrated.getByDedupeKey!(SCOPE, 'old-key');
+      const duplicate = await migrated.putOnce!(
+        makeRecord('new-row', { metadata: { dedupeKey: 'old-key' } }),
+      );
+
+      expect(existing?.id).toBe('old-row');
+      expect(duplicate.inserted).toBe(false);
+      expect(duplicate.record.id).toBe('old-row');
+      expect(await migrated.get('z-duplicate-row', SCOPE)).toBeUndefined();
+      expect(await migrated.count(SCOPE)).toBe(1);
     });
   });
 

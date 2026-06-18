@@ -207,9 +207,63 @@ export function createWeftMemoryRecordStorage(
     return existingId === undefined ? undefined : readActive(recordKey(scope, existingId));
   }
 
+  async function backfillDedupeIndexes(): Promise<void> {
+    await storageDeletePrefix(storage, `${keyPrefix}dedupe:`);
+    const candidates: Array<{
+      dedupeKey: string;
+      key: string;
+      record: MemoryRecord;
+      scope: MemoryRecordScope;
+    }> = [];
+    for await (const key of storageKeys(storage, `${keyPrefix}t:`)) {
+      const record = await readActive(key);
+      if (record === undefined) continue;
+      const dedupeKey = recordDedupeKey(record);
+      if (dedupeKey === undefined || dedupeKey.length === 0) continue;
+      candidates.push({
+        dedupeKey,
+        key,
+        record,
+        scope: {
+          ...(record.tenantId !== undefined ? { tenantId: record.tenantId } : {}),
+          namespace: record.namespace,
+        },
+      });
+    }
+    candidates.sort((a, b) => {
+      const tenantOrder = (a.record.tenantId ?? '').localeCompare(b.record.tenantId ?? '');
+      if (tenantOrder !== 0) return tenantOrder;
+      const namespaceOrder = a.record.namespace.localeCompare(b.record.namespace);
+      if (namespaceOrder !== 0) return namespaceOrder;
+      const keyOrder = a.dedupeKey.localeCompare(b.dedupeKey);
+      if (keyOrder !== 0) return keyOrder;
+      const createdOrder = a.record.createdAt - b.record.createdAt;
+      if (createdOrder !== 0) return createdOrder;
+      return a.record.id.localeCompare(b.record.id);
+    });
+    const seen = new Set<string>();
+    const mutations: Parameters<typeof storageConditionalBatch>[2] = [];
+    for (const candidate of candidates) {
+      const groupKey = `${candidate.record.tenantId ?? ''}\0${candidate.record.namespace}\0${candidate.dedupeKey}`;
+      if (seen.has(groupKey)) {
+        mutations.push({ type: 'delete', key: candidate.key });
+        continue;
+      }
+      seen.add(groupKey);
+      mutations.push({
+        type: 'put',
+        key: dedupeIndexKey(candidate.scope, candidate.dedupeKey),
+        value: textEncoder.encode(candidate.record.id),
+      });
+    }
+    if (mutations.length > 0) {
+      await storageConditionalBatch(storage, [], mutations);
+    }
+  }
+
   return {
-    init(): Promise<void> {
-      return Promise.resolve();
+    async init(): Promise<void> {
+      await backfillDedupeIndexes();
     },
 
     close(): Promise<void> {

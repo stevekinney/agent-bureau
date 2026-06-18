@@ -484,6 +484,7 @@ export function createCloudflareMemoryRecordStorage(
         ...(record.tenantId !== undefined ? { tenantId: record.tenantId } : {}),
         namespace: record.namespace,
       });
+      const existingById = activeRow(tenantId, namespace, record.id);
       sql.exec(
         `INSERT OR IGNORE INTO ${table}
            (tenant_id, namespace, id, status, version, content, vector, metadata, dedupe_key, created_at, updated_at, indexed_at)
@@ -508,7 +509,7 @@ export function createCloudflareMemoryRecordStorage(
       }
 
       const stored = rowToRecord(row);
-      if (stored.id === record.id) {
+      if (stored.id === record.id && existingById === undefined) {
         await vectorize.upsert([
           {
             id: vectorizeId(tenantId, namespace, record.id),

@@ -133,6 +133,31 @@ describe('Cloudflare memory dedupe keys', () => {
     expect(vectorize.upsertCalls).toHaveLength(1);
   });
 
+  it('returns inserted false for a duplicate putOnce with the same id', async () => {
+    const vectorize = createFakeVectorize();
+    const storage = createCloudflareMemoryRecordStorage({
+      sql: createSqliteDouble(),
+      vectorize,
+    });
+    await storage.init();
+
+    const first = await storage.putOnce!(
+      makeRecord('same-id', { metadata: { dedupeKey: 'same' } }),
+    );
+    const second = await storage.putOnce!(
+      makeRecord('same-id', {
+        content: 'attempted replacement',
+        metadata: { dedupeKey: 'same', attempted: true },
+      }),
+    );
+
+    expect(first.inserted).toBe(true);
+    expect(second.inserted).toBe(false);
+    expect(second.record.content).toBe('content-same-id');
+    expect(second.record.metadata).toEqual({ dedupeKey: 'same' });
+    expect(vectorize.upsertCalls).toHaveLength(1);
+  });
+
   it('backfills dedupe_key from existing metadata before enforcing the unique index', async () => {
     const sql = createSqliteDouble();
     sql.exec(
