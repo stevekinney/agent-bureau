@@ -246,8 +246,12 @@ export {
 export { run } from './run';
 export type {
   CreateChunkedTaskOptions,
+  CreateDurableHeartbeatOptions,
   CreateHeartbeatOptions,
   CreateSchedulerOptions,
+  DurableHeartbeat,
+  DurableHeartbeatTickInput,
+  DurableHeartbeatTickResult,
   Heartbeat,
   Scheduler,
 } from './scheduler/index';
@@ -263,6 +267,7 @@ export type {
 } from './scheduler/index';
 export {
   createChunkedTask,
+  createDurableHeartbeat,
   createHeartbeat,
   createPriorityQueue,
   createScheduler,
