@@ -162,11 +162,8 @@ export async function createDurableHeartbeat(
     async cancel() {
       await withDurableHeartbeatLifecycleLock(engine, scheduleId, async () => {
         if (servicesRegistered && servicesRegistration.isOnlyRegistration()) {
-          try {
-            await engine.cancelSchedule(scheduleId);
-          } finally {
-            unregister();
-          }
+          await engine.cancelSchedule(scheduleId);
+          unregister();
           return;
         }
         unregister();

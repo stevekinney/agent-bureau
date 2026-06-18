@@ -326,7 +326,7 @@ describe('createDurableHeartbeat', () => {
     }
   });
 
-  it('unregisters tick services when cancelling the underlying schedule throws', async () => {
+  it('keeps tick services registered when cancelling the underlying schedule throws', async () => {
     const failedWorkflowMessages: string[] = [];
     const { engine } = await createRunEngine({
       storage: new MemoryStorage(),
@@ -357,11 +357,14 @@ describe('createDurableHeartbeat', () => {
         status: 'active',
       });
       await fireSchedule(engine, 'heartbeat-cancel-failure');
-      expect(submittedTasks).toHaveLength(0);
-      expect(failedWorkflowMessages).toHaveLength(1);
-      expect(failedWorkflowMessages[0]).toContain(
-        'no durable heartbeat services registered for schedule heartbeat-cancel-failure',
-      );
+      expect(submittedTasks).toHaveLength(1);
+      expect(failedWorkflowMessages).toHaveLength(0);
+
+      engine.cancelSchedule = originalCancelSchedule;
+      await heartbeat.cancel();
+      expect(await engine.getSchedule('heartbeat-cancel-failure')).toMatchObject({
+        status: 'cancelled',
+      });
     } finally {
       engine.cancelSchedule = originalCancelSchedule;
       await originalCancelSchedule('heartbeat-cancel-failure').catch(() => {});
