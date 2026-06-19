@@ -56,7 +56,7 @@
       <ConnectionIndicator status={connectionStatus} />
     </li>
   </SideNavigation>
-  <div id="main-content" class="main-content">
+  <div id="main-content" class="main-content" tabindex="-1">
     {@render children()}
   </div>
 </div>
