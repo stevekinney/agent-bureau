@@ -20,12 +20,13 @@
     "validate": "bun run format:check && bun run lint && bun run check-types && bun run test"
   },
   "dependencies": {
-    "@lostgradient/cinder": "^0.1.1",
+    "@lostgradient/cinder": "^0.2.0",
     "@lostgradient/weft": "^0.6.0",
     "armorer": "workspace:*",
     "conversationalist": "workspace:*",
     "herald": "workspace:*",
     "hono": "^4.7.10",
+    "lucide-svelte": "^0.503.0",
     "lifecycle": "workspace:*",
     "memory": "workspace:*",
     "operative": "workspace:*",
