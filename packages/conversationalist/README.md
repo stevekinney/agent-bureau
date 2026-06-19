@@ -1,6 +1,22 @@
 # Conversationalist
 
-`conversationalist` manages immutable conversation state for LLM applications. It gives you a JSON-safe `ConversationHistory` data type, a mutable `Conversation` runtime for undo/redo and evented history, provider adapters for OpenAI, Anthropic, and Gemini, and serialization utilities for storage and testing.
+`conversationalist` manages immutable conversation state for large language model applications. It gives you a JSON-safe `ConversationHistory` data type, a mutable `Conversation` runtime for undo/redo and evented history, provider adapters for OpenAI, Anthropic, and Gemini, and serialization utilities for storage and testing.
+
+## What It Does
+
+- Represents conversation state as immutable, JSON-safe `ConversationHistory` values.
+- Provides a mutable `Conversation` runtime for undo, redo, branching, events, and provider import/export.
+- Materializes tool calls and tool results through the shared `interoperability` contracts.
+- Converts conversations to and from OpenAI, Anthropic, and Gemini message formats.
+- Supports streaming messages, compaction, redaction, Markdown export, templates, and deterministic test helpers.
+
+## How It Works
+
+Pure helper functions transform `ConversationHistory` values without side effects. The `Conversation` class wraps those helpers with evented runtime behavior for applications that need stateful history management. Provider adapters sit at the edges so the internal message model stays stable even when an external provider expects a different message shape.
+
+## Project Role
+
+`conversationalist` is the conversation state layer for Agent Bureau. `operative` uses it during the agent loop, `herald` uses it to build provider payloads, `gateway` persists sessions around it, and `armorer` shares its tool-call model through `interoperability`.
 
 ## Installation
 
@@ -190,7 +206,7 @@ Streaming messages (those with `metadata.__streaming === true`) are automaticall
 
 ## Compaction
 
-Reclaim context window space by summarizing older messages. The summarization function is caller-provided -- no LLM dependency in the library.
+Reclaim context window space by summarizing older messages. The summarization function is caller-provided -- no large language model dependency in the library.
 
 ```ts
 import { Conversation } from 'conversationalist';
@@ -199,7 +215,7 @@ const conversation = new Conversation(existingHistory);
 
 const result = await conversation.compact(
   async (messages) => {
-    // Call your LLM to summarize
+    // Call your large language model to summarize
     const response = await llm.summarize(messages.map((m) => m.content).join('\n'));
     return response.text;
   },
@@ -215,7 +231,7 @@ if (result.compacted) {
 
 ## Documentation
 
-- [API Reference](/Users/stevekinney/Developer/agent-bureau/packages/conversationalist/documentation/api-reference.md)
+- [API Reference](documentation/api-reference.md)
 
 ## Development
 
