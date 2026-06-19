@@ -1,17 +1,23 @@
 <script lang="ts">
-  import { Card } from '@lostgradient/cinder/card';
   import { CodeBlock } from '@lostgradient/cinder/code-block';
   import { DescriptionList } from '@lostgradient/cinder/description-list';
   import { EmptyState } from '@lostgradient/cinder/empty-state';
-  import { JsonViewer } from '@lostgradient/cinder/json-viewer';
+  import { EventStreamViewer } from '@lostgradient/cinder/event-stream-viewer';
+  import type {
+    EventSeverity,
+    EventStreamState,
+    StreamEvent,
+  } from '@lostgradient/cinder/event-stream-viewer';
+  import { PayloadInspector } from '@lostgradient/cinder/payload-inspector';
+  import { RunStepTimeline } from '@lostgradient/cinder/run-step-timeline';
+  import type { RunStep, RunStepStatus } from '@lostgradient/cinder/run-step-timeline';
   import { SectionHeading } from '@lostgradient/cinder/section-heading';
   import { Stat } from '@lostgradient/cinder/stat';
   import { StatGroup } from '@lostgradient/cinder/stat-group';
-  import { Timeline } from '@lostgradient/cinder/timeline';
-  import type { TimelineEntry, TimelineTone } from '@lostgradient/cinder/timeline';
 
   import type { RunDetail } from '../../types';
   import StatusBadge from '../components/status-badge.svelte';
+  import type { ConnectionStatus } from '../hooks/use-websocket.svelte';
 
   type TimelineEvent = {
     event: string;
@@ -20,30 +26,36 @@
     sequence?: number;
   };
 
+  type SerializedRunStepDetail = RunDetail['stepDetails'][number];
+
   /**
    * Run detail page. Renders the rich view of a single run: summary, usage
    * stats, streaming output, tool activity, per-step cards, the latest
-   * conversation snapshot, and an event timeline.
+   * conversation snapshot, and an event stream.
    *
    * All reactive inputs (`run`, `events`, `streamingAssistantContent`,
-   * `toolActivity`) are owned by the run-detail store (use-run-detail.svelte.ts)
-   * and passed in by {@link app.svelte}. This page is presentational and holds
-   * no state or effects of its own.
+   * `toolActivity`) are owned by the run-detail store (use-run-detail.svelte.ts).
+   * The only local state is the event-stream filter query owned by Cinder's
+   * EventStreamViewer control.
    */
   let {
     run,
     events,
     streamingAssistantContent,
     toolActivity,
+    connectionStatus,
   }: {
     run: RunDetail;
     events: TimelineEvent[];
     streamingAssistantContent: string;
     toolActivity: string[];
+    connectionStatus: ConnectionStatus;
   } = $props();
 
-  /** Maps an event name onto a Timeline marker tone. */
-  function eventTone(event: string): TimelineTone {
+  let eventFilterQuery = $state('');
+
+  /** Maps an event name onto an EventStreamViewer severity. */
+  function eventSeverity(event: string): EventSeverity {
     if (event.endsWith('.completed')) return 'success';
     if (event.endsWith('.error') || event === 'stream:error') return 'error';
     if (event.endsWith('.aborted')) return 'warning';
@@ -53,6 +65,11 @@
   /** Stable, unique key for a timeline event. Mirrors the React row key. */
   function eventKey(event: TimelineEvent, index: number): string {
     return `${event.event}-${event.timestamp}-${event.sequence ?? index}`;
+  }
+
+  function eventSource(event: string): string | undefined {
+    const [source] = event.split('.');
+    return source || undefined;
   }
 
   /**
@@ -72,6 +89,66 @@
     return { datetime, label: `${datetime.slice(11, 19)} UTC` };
   }
 
+  function stringifyPayload(value: unknown): string {
+    if (value === undefined) return '';
+    if (typeof value === 'string') return value;
+    try {
+      return JSON.stringify(value, null, 2) ?? String(value);
+    } catch {
+      return String(value);
+    }
+  }
+
+  function stepStatus(
+    step: SerializedRunStepDetail,
+    index: number,
+    steps: SerializedRunStepDetail[],
+  ): RunStepStatus {
+    const isLastStep = index === steps.length - 1;
+    if (step.results.some((result) => result.error)) return 'failed';
+    if (isLastStep && run.status === 'error') return 'failed';
+    if (isLastStep && run.status === 'aborted') return 'cancelled';
+    return 'succeeded';
+  }
+
+  function stepDetails(step: SerializedRunStepDetail): NonNullable<RunStep['details']> {
+    const details: NonNullable<RunStep['details']> = [
+      {
+        id: `step-${step.step}-content`,
+        label: 'Content',
+        content: step.content || 'No content.',
+      },
+    ];
+
+    if (step.usage) {
+      details.push({
+        id: `step-${step.step}-usage`,
+        label: 'Token usage',
+        content: [
+          `Prompt: ${step.usage.prompt}`,
+          `Completion: ${step.usage.completion}`,
+          `Total: ${step.usage.total}`,
+        ].join('\n'),
+      });
+    }
+
+    return details;
+  }
+
+  function eventMatchesQuery(event: StreamEvent, query: string): boolean {
+    const haystack = [
+      event.summary,
+      event.source ?? '',
+      event.timestamp ?? '',
+      event.datetime,
+      stringifyPayload(event.details),
+    ]
+      .join('\n')
+      .toLowerCase();
+
+    return haystack.includes(query);
+  }
+
   let summaryItems = $derived([
     { term: 'Session', definition: run.sessionId || '—' },
     { term: 'Steps', definition: String(run.steps) },
@@ -79,30 +156,66 @@
     ...(run.error ? [{ term: 'Error', definition: run.error }] : []),
   ]);
 
-  // Timeline's per-entry snippet only receives a `TimelineEntry`, which carries
-  // no `detail`. Build the entries plus a parallel id -> detail map so the
-  // children snippet can look the raw value back up and hand it to JsonViewer.
-  let timelineEntries = $derived<TimelineEntry[]>(
+  let runSteps = $derived<RunStep[]>(
+    run.stepDetails.map((step, index, steps) => ({
+      id: `step-${step.step}`,
+      label: `Step ${step.step + 1}${step.final ? ' (final)' : ''}`,
+      status: stepStatus(step, index, steps),
+      details: stepDetails(step),
+    })),
+  );
+
+  function stepDetailFor(step: RunStep): SerializedRunStepDetail | undefined {
+    return run.stepDetails.find((detail) => `step-${detail.step}` === step.id);
+  }
+
+  let streamEvents = $derived<StreamEvent[]>(
     events.map((event, index) => {
       const { datetime, label } = formatEventTime(event.timestamp);
       return {
         id: eventKey(event, index),
         datetime,
         timestamp: label,
-        title: event.event,
-        tone: eventTone(event.event),
+        severity: eventSeverity(event.event),
+        source: eventSource(event.event),
+        summary: event.event,
+        details: event.detail,
       };
     }),
   );
 
-  let detailById = $derived.by(() => {
-    const map = new Map<string, unknown>();
-    for (const [index, event] of events.entries()) {
-      map.set(eventKey(event, index), event.detail);
+  let visibleStreamEvents = $derived.by(() => {
+    const query = eventFilterQuery.trim().toLowerCase();
+    if (!query) {
+      return streamEvents;
     }
-    return map;
+    return streamEvents.filter((event) => eventMatchesQuery(event, query));
   });
+
+  let eventStreamConnectionState = $derived<EventStreamState>(connectionStatus);
 </script>
+
+{#snippet stepPayload(step: RunStep)}
+  {@const detail = stepDetailFor(step)}
+  {#if detail}
+    {#if detail.toolCalls.length > 0}
+      <PayloadInspector
+        value={detail.toolCalls}
+        activeView="raw"
+        label={`${step.label} tool calls`}
+        meta={{ contentType: 'application/json', source: step.label }}
+      />
+    {/if}
+    {#if detail.results.length > 0}
+      <PayloadInspector
+        value={detail.results}
+        activeView="raw"
+        label={`${step.label} results`}
+        meta={{ contentType: 'application/json', source: step.label }}
+      />
+    {/if}
+  {/if}
+{/snippet}
 
 <main class="page-run-detail">
   <div class="run-detail-heading">
@@ -140,25 +253,10 @@
 
   <section>
     <SectionHeading level={3} title="Steps" />
-    {#if run.stepDetails.length === 0}
+    {#if runSteps.length === 0}
       <EmptyState title="No completed steps yet." />
     {:else}
-      <div class="run-step-list">
-        {#each run.stepDetails as step (step.step)}
-          <Card title={`Step ${step.step + 1}`}>
-            <p>{step.content || '—'}</p>
-            <p>Final: {step.final ? 'yes' : 'no'}</p>
-            {#if step.toolCalls.length > 0}
-              <SectionHeading level={4} title="Tool Calls" />
-              <JsonViewer value={step.toolCalls} />
-            {/if}
-            {#if step.results.length > 0}
-              <SectionHeading level={4} title="Results" />
-              <JsonViewer value={step.results} />
-            {/if}
-          </Card>
-        {/each}
-      </div>
+      <RunStepTimeline steps={runSteps} label="Run steps" children={stepPayload} />
     {/if}
   </section>
 
@@ -167,23 +265,25 @@
     {#if run.latestSnapshot === undefined}
       <EmptyState title="No snapshot yet." />
     {:else}
-      <JsonViewer value={run.latestSnapshot} />
+      <PayloadInspector
+        value={run.latestSnapshot}
+        activeView="tree"
+        label="Latest conversation snapshot"
+        meta={{ contentType: 'application/json', source: 'conversation snapshot' }}
+      />
     {/if}
   </section>
 
   <section>
-    <SectionHeading level={3} title="Timeline" />
-    {#if timelineEntries.length === 0}
-      <EmptyState title="No events yet." />
-    {:else}
-      <Timeline entries={timelineEntries} label="Run event timeline">
-        {#snippet children(entry: TimelineEntry)}
-          {@const detail = detailById.get(entry.id)}
-          {#if detail !== undefined}
-            <JsonViewer value={detail} />
-          {/if}
-        {/snippet}
-      </Timeline>
-    {/if}
+    <SectionHeading level={3} title="Event Stream" />
+    <EventStreamViewer
+      events={visibleStreamEvents}
+      connectionState={eventStreamConnectionState}
+      filterQuery={eventFilterQuery}
+      onfilter={(query) => {
+        eventFilterQuery = query;
+      }}
+      label="Run event stream"
+    />
   </section>
 </main>

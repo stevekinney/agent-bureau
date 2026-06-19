@@ -125,6 +125,7 @@
       events={runDetailStore.events}
       streamingAssistantContent={runDetailStore.streamingAssistantContent}
       toolActivity={runDetailStore.toolActivity}
+      connectionStatus={websocket.status}
     />
   {:else if route?.name === 'configuration'}
     <ConfigurationPage config={initialData.config ?? EMPTY_CONFIGURATION} />

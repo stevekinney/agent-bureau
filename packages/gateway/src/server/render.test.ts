@@ -132,12 +132,12 @@ describe('renderPage', () => {
 
 describe('renderPage with a populated run-detail page', () => {
   // The run-detail route is the heaviest cinder surface in the migration:
-  // CodeBlock (streaming output), JsonViewer (tool calls / results / snapshot
-  // / per-event detail), Timeline (with a children snippet), StatGroup, and
-  // Card. Empty-state rendering of the other routes proves none of this, so
-  // this test renders the REAL page with fully populated data — including a
-  // tool call carrying a code string to hit the CodeBlock/highlighter path —
-  // to prove SSR does not throw and emits the expected cinder markup.
+  // CodeBlock (streaming output), PayloadInspector (tool calls / results),
+  // RunStepTimeline, EventStreamViewer, and StatGroup. Empty-state rendering of
+  // the other routes proves none of this, so this test renders the REAL page
+  // with fully populated data — including a tool call carrying a code string to
+  // hit the payload/code path — to prove SSR does not throw and emits the
+  // expected cinder markup.
   const populatedRun: RunDetail = {
     id: 'run-populated',
     sessionId: 'session-1',
@@ -211,6 +211,7 @@ describe('renderPage with a populated run-detail page', () => {
     })),
     streamingAssistantContent: 'const greeting = "hello";\nconsole.log(greeting);\n',
     toolActivity: ['read_file → completed'],
+    connectionStatus: 'connected',
   };
 
   it('server-renders the heavy cinder components without throwing', async () => {
@@ -220,24 +221,25 @@ describe('renderPage with a populated run-detail page', () => {
     expect(html).toContain('<title>Run run-populated</title>');
   });
 
-  it('emits markup from the timeline, code-block, json-viewer, and stat components', async () => {
+  it('emits markup from the event stream, run-step, payload, code-block, and stat components', async () => {
     const html = await renderPage({ title: 'Run run-populated', component: RunDetailPage, props });
 
     // Section headings the page composes around the heavy components.
     expect(html).toContain('Summary');
     expect(html).toContain('Streaming Output');
     expect(html).toContain('Tool Activity');
-    expect(html).toContain('Timeline');
+    expect(html).toContain('Event Stream');
 
     // Each heavy cinder component emits its namespaced class under SSR.
     expect(html).toContain('cinder-code-block');
-    expect(html).toContain('cinder-json-viewer');
-    expect(html).toContain('cinder-timeline');
+    expect(html).toContain('cinder-event-stream-viewer');
+    expect(html).toContain('cinder-payload-inspector');
+    expect(html).toContain('cinder-run-step-timeline');
     expect(html).toContain('cinder-stat');
 
-    // Real data flows through: the code string, a tool name, and an event.
+    // Real data flows through: the code string, step content, and an event.
     expect(html).toContain('greeting');
-    expect(html).toContain('read_file');
+    expect(html).toContain('Calling a tool');
     expect(html).toContain('run.completed');
   });
 });
