@@ -32,13 +32,13 @@ import type {
   StopCondition as OperativeStopCondition,
   ToolCall as OperativeToolCall,
 } from 'operative';
-// Sentinel type compatibility assertions
+// Operative store type compatibility assertions
 import type {
-  Action as SentinelAction,
-  RunState as SentinelRunState,
-  Store as SentinelStore,
-  StoreState as SentinelStoreState,
-} from 'sentinel';
+  Action as OperativeStoreAction,
+  RunState as OperativeStoreRunState,
+  Store as OperativeStore,
+  StoreState as OperativeStoreState,
+} from 'operative/store';
 
 type Assert<T extends true> = T;
 type IsAssignable<From, To> = [From] extends [To] ? true : false;
@@ -141,11 +141,11 @@ void _stepResultCheck;
 void _generateFunctionCheck;
 void _stopConditionCheck;
 
-const _sentinelStoreCheck: SentinelStore = {} as SentinelStore;
-const _sentinelStoreStateCheck: SentinelStoreState = {} as SentinelStoreState;
-const _sentinelRunStateCheck: SentinelRunState = {} as SentinelRunState;
-const _sentinelActionCheck: SentinelAction = {} as SentinelAction;
-void _sentinelStoreCheck;
-void _sentinelStoreStateCheck;
-void _sentinelRunStateCheck;
-void _sentinelActionCheck;
+const _operativeStoreCheck: OperativeStore = {} as OperativeStore;
+const _operativeStoreStateCheck: OperativeStoreState = {} as OperativeStoreState;
+const _operativeStoreRunStateCheck: OperativeStoreRunState = {} as OperativeStoreRunState;
+const _operativeStoreActionCheck: OperativeStoreAction = {} as OperativeStoreAction;
+void _operativeStoreCheck;
+void _operativeStoreStateCheck;
+void _operativeStoreRunStateCheck;
+void _operativeStoreActionCheck;

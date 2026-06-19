@@ -1,5 +1,6 @@
 {
   "name": "herald",
+  "private": true,
   "version": "0.1.0",
   "description": "LLM provider factories that return GenerateFunction implementations for Anthropic, OpenAI, and Gemini. Each factory wires conversation and tool adapters to an SDK call.",
   "keywords": [
@@ -140,10 +141,6 @@
   "main": "./dist/index.js",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "files": [
-    "dist",
-    "src"
-  ],
   "scripts": {
     "build": "bun run scripts/build.ts",
     "check-types": "tsc --noEmit",
@@ -154,8 +151,6 @@
     "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,json,md}\"",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
-    "prepack": "bun run clean && bun run build",
-    "prepublishOnly": "bun run clean && bun run build",
     "start": "bun run src/index.ts",
     "test": "bun test",
     "test:coverage": "bun test --coverage",
@@ -215,9 +210,5 @@
   },
   "engines": {
     "bun": ">=1.3.0"
-  },
-  "publishConfig": {
-    "access": "public",
-    "registry": "https://registry.npmjs.org"
   }
 }

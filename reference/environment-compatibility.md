@@ -67,11 +67,15 @@ The gateway uses Hono, which is runtime-agnostic. The coupling to Bun is only in
 
 ```typescript
 interface ServerAdapter {
-  serve(app: Hono, options: { port: number; hostname?: string; wsHandler?: WebSocketHandler }): { stop(): void };
+  serve(
+    app: Hono,
+    options: { port: number; hostname?: string; wsHandler?: WebSocketHandler },
+  ): { stop(): void };
 }
 ```
 
 Create two adapters:
+
 - `gateway/src/adapters/bun-adapter.ts` — wraps `Bun.serve()` and `serveStatic` from `hono/bun`
 - `gateway/src/adapters/node-adapter.ts` — uses `@hono/node-server` and `serveStatic` from `@hono/node-server/serve-static`
 
@@ -106,7 +110,7 @@ Add `"browser"` condition to `package.json` exports for packages that should wor
 }
 ```
 
-Packages to update: `interoperability`, `armorer`, `storage`, `memory`, `conversationalist`, `lifecycle`, `operative`, `sentinel`, `herald`.
+Packages to update: `interoperability`, `armorer`, `storage`, `memory`, `conversationalist`, `lifecycle`, `operative`, `operative/store`, `herald`.
 
 Packages to skip (server-only by design): `gateway`, `integration`.
 
@@ -117,7 +121,9 @@ Replace `Bun.file()` calls in `scan-directory.ts` with `readFile` from `node:fs/
 ```typescript
 function assertServerRuntime(): void {
   if (typeof globalThis.Bun === 'undefined' && typeof globalThis.process === 'undefined') {
-    throw new Error('scanDirectory() requires Bun or Node.js. It cannot run in browser environments.');
+    throw new Error(
+      'scanDirectory() requires Bun or Node.js. It cannot run in browser environments.',
+    );
   }
 }
 ```

@@ -6,7 +6,7 @@ This roadmap reflects the current repository, not the historical backlog. The ga
 
 - **Tooling and conversation foundations**: `armorer`, `conversationalist`, `interoperability`, and `lifecycle` provide the validated tool surface, conversation model, provider-format interoperability, and event primitives the rest of the workspace builds on.
 - **Provider and loop runtime**: `herald` and `operative` ship provider factories, fallover, routing, structured output, cache wrappers, retries, hook expansion, guardrails, sessions, scheduler support, and enhanced streaming.
-- **State, skills, memory, and storage**: `sentinel`, `skills`, and `memory` cover run tracking, skill loading, and memory ranking; key-value persistence is backed by Weft's durable storage (`@lostgradient/weft`).
+- **State, skills, memory, and storage**: `operative/store`, `skills`, and `memory` cover run tracking, skill loading, and memory ranking; key-value persistence is backed by Weft's durable storage (`@lostgradient/weft`).
 - **Gateway product surface**: `gateway` now exposes session-first APIs, run detail payloads, live updates over WebSocket and server-sent events, scheduler administration, managed API keys, and a browser UI wired to the same runtime.
 - **Evaluation**: `evaluation` provides runners, reports, metrics, and comparison tooling for agent behavior validation.
 

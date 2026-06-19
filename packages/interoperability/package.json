@@ -1,5 +1,6 @@
 {
   "name": "interoperability",
+  "private": true,
   "version": "0.0.1",
   "description": "Shared tool interoperability types and materialization utilities",
   "license": "MIT",
@@ -16,10 +17,6 @@
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "files": [
-    "dist",
-    "README.md"
-  ],
   "scripts": {
     "build": "bun run scripts/build.ts",
     "check-types": "tsc --noEmit",

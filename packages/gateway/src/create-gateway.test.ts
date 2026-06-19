@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { createStore } from 'sentinel';
+import { createStore } from 'operative/store';
 
 import { createBunAdapter } from './adapters/bun-adapter';
 import { createGateway } from './create-gateway';

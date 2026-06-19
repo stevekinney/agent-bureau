@@ -2,13 +2,15 @@ import { createTool } from 'armorer';
 import { createTestToolbox } from 'armorer/test';
 import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
-import { createRun, type GenerateResponse, stopWhen } from 'operative';
-import { createMockGenerate } from 'operative/test';
 import { z } from 'zod';
 
-import type { StoreActionEvent } from '../src/events';
-import { createStore } from '../src/store';
-import type { Action } from '../src/types';
+import { stopWhen } from '../../src/conditions';
+import { createRun } from '../../src/create-run';
+import { createStore } from '../../src/store';
+import type { StoreActionEvent } from '../../src/store/events';
+import type { Action } from '../../src/store/types';
+import { createMockGenerate } from '../../src/test';
+import type { GenerateResponse } from '../../src/types';
 
 function textResponse(content: string): GenerateResponse {
   return { content, toolCalls: [] };

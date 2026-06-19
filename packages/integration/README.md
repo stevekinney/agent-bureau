@@ -6,7 +6,7 @@
 
 - Builds dependent packages before running integration checks.
 - Verifies import boundaries for published package entry points.
-- Exercises `operative` and `sentinel` through consumer-style tests.
+- Exercises `operative` and `operative/store` through consumer-style tests.
 - Runs a Node.js runtime test in addition to Bun tests.
 - Catches package-shape and runtime compatibility regressions that package-local unit tests can miss.
 
@@ -18,7 +18,7 @@ This package intentionally tests from package boundaries instead of source inter
 
 ## Project Role
 
-Most packages prove their own behavior with unit tests. `integration` proves the larger Agent Bureau package graph: `armorer`, `conversationalist`, `operative`, and `sentinel` must remain usable together after build output and runtime boundaries are involved.
+Most packages prove their own behavior with unit tests. `integration` proves the larger Agent Bureau package graph: `armorer`, `conversationalist`, `operative`, and `operative/store` must remain usable together after build output and runtime boundaries are involved.
 
 ## Development
 

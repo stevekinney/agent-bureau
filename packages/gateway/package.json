@@ -29,7 +29,6 @@
     "lifecycle": "workspace:*",
     "memory": "workspace:*",
     "operative": "workspace:*",
-    "sentinel": "workspace:*",
     "skills": "workspace:*",
     "svelte": "^5.56.2",
     "zod": "^4.3.6"

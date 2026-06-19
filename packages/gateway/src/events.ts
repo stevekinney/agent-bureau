@@ -1,5 +1,5 @@
 import type { EventMap } from 'lifecycle';
-import type { Action } from 'sentinel';
+import type { Action } from 'operative/store';
 
 /**
  * Fired when the store records an action from a run.

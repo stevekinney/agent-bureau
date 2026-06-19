@@ -1,5 +1,5 @@
+import type { Action, RunState, Store, StoreOptions } from '../store';
 import { createStore } from '../store';
-import type { Action, RunState, Store, StoreOptions } from '../types';
 
 export function createTestStore(options?: StoreOptions): {
   store: Store;

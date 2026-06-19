@@ -52,17 +52,15 @@ async function withDurableHeartbeatLifecycleLock<T>(
   const lifecycleLocks = getDurableHeartbeatLifecycleLocks(engine);
   const previousLifecycle = lifecycleLocks.get(scheduleId) ?? Promise.resolve();
   let releaseCurrentLifecycle!: () => void;
-  const currentLifecycle = previousLifecycle
-    .catch(() => {})
-    .then(
-      () =>
-        new Promise<void>((resolve) => {
-          releaseCurrentLifecycle = resolve;
-        }),
-    );
+  const currentLifecycle = previousLifecycle.then(
+    () =>
+      new Promise<void>((resolve) => {
+        releaseCurrentLifecycle = resolve;
+      }),
+  );
   lifecycleLocks.set(scheduleId, currentLifecycle);
 
-  await previousLifecycle.catch(() => {});
+  await previousLifecycle;
   try {
     return await operation();
   } finally {

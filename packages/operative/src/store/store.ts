@@ -1,6 +1,7 @@
 import { CompletableEventTarget, type Observer, type Subscription } from 'lifecycle';
-import type { RunResult, StepResult, TokenUsage } from 'operative';
 
+import type { ActiveRun } from '../create-run';
+import type { RunResult, StepResult, TokenUsage } from '../types';
 import {
   RunRegisteredEvent,
   RunRemovedEvent,
@@ -66,7 +67,7 @@ export function createStore(options: StoreOptions = {}): Store {
     return action;
   }
 
-  function register(activeRun: import('operative').ActiveRun, id?: string): string {
+  function register(activeRun: ActiveRun, id?: string): string {
     const runId = id ?? `run-${++idCounter}`;
 
     const initialState: RunState = {

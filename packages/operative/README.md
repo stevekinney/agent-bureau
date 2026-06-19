@@ -19,12 +19,14 @@ Everything provider-specific stays outside the package. `herald` can supply gene
 
 ## Project Role
 
-`operative` is the center of the Agent Bureau runtime graph. `gateway` uses it to run requests and scheduler tasks, `sentinel` observes its run state, `memory` and `skills` attach through hooks and tools, `armorer` supplies actions, and `conversationalist` supplies the conversation model.
+`operative` is the center of the Agent Bureau runtime graph. `gateway` uses it to run requests and scheduler tasks, `operative/store` observes run state and action history, `memory` and `skills` attach through hooks and tools, `armorer` supplies actions, and `conversationalist` supplies the conversation model.
 
-## Public Entry Points
+## Workspace Entry Points
 
 - `defineAgent()`
 - `run()` and `createRun()`
+- `operative/store` for the internal run store, action log, snapshots, and store events
+- `operative/test` for runtime and store test helpers used by package-boundary tests
 - `createAgentSession()`, `createSessionStore()`, and `resumeSession()`
 - `createScheduler()`, `createHeartbeat()`, and durable run helpers
 - Hook helpers such as `composeHooks()`, `runOnce()`, `onlyOnStep()`, and `withTimeout()`
