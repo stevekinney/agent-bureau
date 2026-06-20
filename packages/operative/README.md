@@ -46,7 +46,7 @@ import type { GenerateFunction } from 'operative';
 
 // Minimal inline generate function — swap for a real provider in production.
 const generate: GenerateFunction = async ({ conversation }) => {
-  const last = conversation.current.at(-1);
+  const last = conversation.getMessages().at(-1);
   return {
     content: `Echo: ${last?.content ?? '(empty)'}`,
     toolCalls: [],

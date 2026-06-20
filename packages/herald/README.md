@@ -25,12 +25,16 @@ Higher-level wrappers compose those generate functions. Fallover tries providers
 
 ```typescript
 import { createAnthropicGenerate } from 'herald/anthropic';
-import { run } from 'operative';
+import { defineAgent } from 'operative';
+import { createToolbox } from 'armorer';
 
 // Client is optional — herald imports the SDK lazily using ANTHROPIC_API_KEY
 const generate = createAnthropicGenerate({ model: 'claude-opus-4-5' });
 
-const result = await run({ generate, prompt: 'What is the capital of France?' });
+// Herald produces a `GenerateFunction`; run it through an operative agent.
+const agent = defineAgent({ name: 'assistant', generate, toolbox: createToolbox([]) });
+
+const result = await agent.run('What is the capital of France?');
 console.log(result.content);
 ```
 
@@ -87,7 +91,8 @@ Same options as `createAnthropicGenerate` except `client` accepts an `AnthropicS
 
 ```typescript
 import { createAnthropicGenerate } from 'herald/anthropic';
-import { run } from 'operative';
+import { defineAgent } from 'operative';
+import { createToolbox } from 'armorer';
 
 const generate = createAnthropicGenerate({
   model: 'claude-opus-4-5',
@@ -95,7 +100,8 @@ const generate = createAnthropicGenerate({
   temperature: 0.7,
 });
 
-const result = await run({ generate, prompt: 'Summarize the Anthropic alignment approach.' });
+const agent = defineAgent({ name: 'assistant', generate, toolbox: createToolbox([]) });
+const result = await agent.run('Summarize the Anthropic alignment approach.');
 console.log(result.content);
 ```
 
@@ -132,7 +138,8 @@ Same options as `createOpenAIGenerate` except `client` accepts an `OpenAIStreami
 
 ```typescript
 import { createOpenAIGenerate } from 'herald/openai';
-import { run } from 'operative';
+import { defineAgent } from 'operative';
+import { createToolbox } from 'armorer';
 
 // Standard OpenAI
 const generate = createOpenAIGenerate({ model: 'gpt-4o' });
@@ -145,7 +152,8 @@ const localGenerate = createOpenAIGenerate({
   apiKey: process.env.OPENAI_COMPATIBLE_API_KEY ?? 'local-development-only',
 });
 
-const result = await run({ generate, prompt: 'List three prime numbers.' });
+const agent = defineAgent({ name: 'assistant', generate, toolbox: createToolbox([]) });
+const result = await agent.run('List three prime numbers.');
 console.log(result.content);
 ```
 
@@ -181,10 +189,12 @@ Same options as `createGeminiGenerate` except `client` accepts a `GeminiStreamin
 
 ```typescript
 import { createGeminiGenerate } from 'herald/gemini';
-import { run } from 'operative';
+import { defineAgent } from 'operative';
+import { createToolbox } from 'armorer';
 
 const generate = createGeminiGenerate({ model: 'gemini-2.0-flash' });
-const result = await run({ generate, prompt: 'What is 2 + 2?' });
+const agent = defineAgent({ name: 'assistant', generate, toolbox: createToolbox([]) });
+const result = await agent.run('What is 2 + 2?');
 console.log(result.content);
 ```
 
@@ -208,18 +218,19 @@ Converts OpenAI streaming chunks into the same unified `StreamEvent` shape. Hand
 
 ```typescript
 import { createAnthropicGenerateStream } from 'herald/anthropic';
-import { run } from 'operative';
+import { defineAgent, withStreaming } from 'operative';
+import { createToolbox } from 'armorer';
 
-// Streaming generate functions are used directly with operative
-const generate = createAnthropicGenerateStream({ model: 'claude-opus-4-5' });
+// `create*GenerateStream` returns a `StreamingGenerateFunction`, which needs a
+// `streaming` handle and cannot be passed to operative directly. Wrap it with
+// `withStreaming` to get a standard `GenerateFunction`: the wrapper appends a
+// streaming message to the conversation and updates it as tokens arrive.
+const streamingGenerate = createAnthropicGenerateStream({ model: 'claude-opus-4-5' });
+const generate = withStreaming(streamingGenerate);
 
-const result = await run({
-  generate,
-  prompt: 'Write a haiku about distributed systems.',
-  streaming: {
-    onUpdate: (text) => process.stdout.write(text),
-  },
-});
+const agent = defineAgent({ name: 'assistant', generate, toolbox: createToolbox([]) });
+const result = await agent.run('Write a haiku about distributed systems.');
+console.log(result.content);
 ```
 
 ---
@@ -450,7 +461,8 @@ Thrown when all providers have been tried and failed. Contains an `errors` array
 import { createAnthropicGenerate } from 'herald/anthropic';
 import { createOpenAIGenerate } from 'herald/openai';
 import { createFalloverGenerate, FalloverExhaustedError } from 'herald/fallover';
-import { run } from 'operative';
+import { defineAgent } from 'operative';
+import { createToolbox } from 'armorer';
 
 const generate = createFalloverGenerate({
   providers: [
@@ -462,8 +474,10 @@ const generate = createFalloverGenerate({
     console.warn(`${failedProvider} failed, trying ${nextProvider}`),
 });
 
+const agent = defineAgent({ name: 'assistant', generate, toolbox: createToolbox([]) });
+
 try {
-  const result = await run({ generate, prompt: 'Hello!' });
+  const result = await agent.run('Hello!');
   console.log(result.content);
 } catch (error) {
   if (error instanceof FalloverExhaustedError) {
@@ -580,7 +594,8 @@ type RoutingMetrics = {
 import { createAnthropicGenerate } from 'herald/anthropic';
 import { createOpenAIGenerate } from 'herald/openai';
 import { createStepBasedStrategy, withRoutingMetrics } from 'herald/routing';
-import { run } from 'operative';
+import { defineAgent } from 'operative';
+import { createToolbox } from 'armorer';
 
 const { generate, metrics } = withRoutingMetrics({
   routes: [
@@ -599,7 +614,8 @@ const { generate, metrics } = withRoutingMetrics({
   fallback: 'fast',
 });
 
-await run({ generate, prompt: 'Plan a software architecture.' });
+const agent = defineAgent({ name: 'architect', generate, toolbox: createToolbox([]) });
+await agent.run('Plan a software architecture.');
 console.log(metrics.routeCounts); // Map { 'fast' => 1 }
 metrics.reset();
 ```
@@ -667,6 +683,8 @@ Yields queued `AnthropicStreamEvent[]` sequences one per call. Pass `{ errorAfte
 
 ```typescript
 import { describe, it, expect } from 'bun:test';
+import { createToolbox } from 'armorer';
+import { appendMessages, Conversation, createConversationHistory } from 'conversationalist';
 import { createAnthropicGenerate } from 'herald/anthropic';
 import { createMockAnthropicClient, anthropicTextResponse } from 'herald/test';
 
@@ -675,10 +693,18 @@ describe('createAnthropicGenerate', () => {
     const client = createMockAnthropicClient([anthropicTextResponse]);
     const generate = createAnthropicGenerate({ model: 'claude-opus-4-5', client });
 
-    // Invoke generate directly in unit tests without operative's run()
+    // Build the real GenerateContext shapes — a Conversation instance and a
+    // Toolbox — so the adapter can read conversation.current and enumerate tools.
+    const history = appendMessages(createConversationHistory(), {
+      role: 'user',
+      content: 'Hello',
+    });
+    const conversation = new Conversation(history);
+
+    // Invoke generate directly in unit tests without operative's run().
     const response = await generate({
-      conversation: { current: { ids: [], messages: {} } },
-      toolbox: { tools: () => [] },
+      conversation,
+      toolbox: createToolbox([]),
       step: 0,
     });
 

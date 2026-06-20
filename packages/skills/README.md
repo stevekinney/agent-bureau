@@ -212,7 +212,7 @@ import {
 - **`createLoadSkillResourceTool(options)`**: Creates just the `load_skill_resource` tool.
 - **`createDeactivateSkillTool(options)`**: Creates just the `deactivate_skill` tool.
 - **`createListSkillsTool(options)`**: Creates just the `list_skills` tool.
-- **`isSkillContent(value)`**: Type guard that returns `true` if a value conforms to `SkillContent`.
+- **`isSkillContent(message)`**: Returns `true` if a message string contains an embedded `<skill_content ...>` marker. Used by context compactors to detect injected skill content. Signature: `isSkillContent(message: string): boolean`.
 
 **Memory:**
 
@@ -235,7 +235,7 @@ import {
 
 ### `skills/test`
 
-Testing utilities for code that depends on `SkillProvider`. Both exports are synchronous and require no filesystem or network access.
+Testing utilities for code that depends on `SkillProvider`. Both require no filesystem or network access, but their methods are async (Promise-returning) — `await` store and provider calls as the examples below do.
 
 ```typescript
 import { createMockKeyValueStore, createMockSkillProvider } from 'skills/test';
@@ -270,7 +270,7 @@ const calls = provider.calls;
 
 **Key exports:**
 
-- **`createMockKeyValueStore()`**: Returns a `TextValueStore` backed by Weft's `MemoryStorage`. All `TextValueStore` methods (`get`, `set`, `delete`, `list`, etc.) work synchronously after construction.
+- **`createMockKeyValueStore()`**: Returns a `TextValueStore` backed by Weft's `MemoryStorage`. No `init()` or setup is required, but all `TextValueStore` methods (`get`, `set`, `delete`, `list`, etc.) are async and return Promises — `await` them.
 - **`createMockSkillProvider(initialSkills?)`**: Returns a `SkillProvider` plus a `calls` array. Every method call—`listSkills`, `loadSkill`, `saveSkill`, `deleteSkill`, `listResources`, `loadResource`, `saveResource`, `isEnabled`, `setEnabled`—is logged to `calls` as `{ method, args }`.
 
 ---
