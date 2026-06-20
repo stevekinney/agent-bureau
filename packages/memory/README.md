@@ -68,6 +68,8 @@ For production, supply a real embedder (your model provider's embedding endpoint
 import { createMemory, createWeftMemoryRecordStorage } from 'memory';
 
 // Wire this to your provider — e.g. OpenAI's text-embedding-3-small (1536 dims).
+// An `Embedder` may return vectors synchronously or as a promise; a provider
+// call is async, so this one is too.
 const embedder = async (texts: string[]): Promise<number[][]> => embedProvider(texts);
 
 // `weftStorage` is a Weft Storage instance from the operative/gateway runtime.
