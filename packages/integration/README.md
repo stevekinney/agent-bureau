@@ -12,24 +12,61 @@
 
 ## How It Works
 
-The `transit` script builds the packages that the integration tests import from their distribution output. `scripts/run-tests.ts` then runs the Bun test files and locates a Node.js binary for `node --test test/runtime.test.mjs`.
+The `transit` script builds `armorer`, `conversationalist`, and `operative` from their source before the tests run—so every import resolves to real distribution output, not TypeScript source. `scripts/run-tests.ts` then sequences three Bun test files followed by a Node.js compatibility run.
 
 This package intentionally tests from package boundaries instead of source internals. If an export map, build script, CommonJS output, or runtime assumption breaks consumers, the integration package is where that failure should surface.
+
+## Running the Suite
+
+### From this package directory
+
+```bash
+# Build dependencies, then run all integration tests (Bun + Node)
+bun run validate
+```
+
+`validate` expands to:
+
+```bash
+bun run transit      # builds armorer, conversationalist, operative
+bun run test         # runs scripts/run-tests.ts
+bun run check-types  # TypeScript type-check
+bun run lint         # ESLint
+```
+
+You can run individual steps in isolation:
+
+```bash
+# Rebuild just the dependency graph
+bun run transit
+
+# Run only the test files (requires transit to have run first)
+bun run test
+
+# Type-check without running tests
+bun run check-types
+```
+
+### From the repository root
+
+```bash
+# Equivalent workspace gate—runs the full validate pipeline via Turborepo
+bun run integration
+```
+
+## What `test` Runs
+
+`scripts/run-tests.ts` executes four test files in order:
+
+| File                           | Runner  | What it checks                                                   |
+| ------------------------------ | ------- | ---------------------------------------------------------------- |
+| `test/import-boundary.test.ts` | Bun     | Published entry points resolve and export the expected shapes    |
+| `test/operative.test.ts`       | Bun     | `operative` consumer-style run behavior from dist output         |
+| `test/operative-store.test.ts` | Bun     | `operative/store` consumer-style store behavior from dist output |
+| `test/runtime.test.mjs`        | Node.js | CommonJS/ESM compatibility and runtime assumptions under Node    |
+
+The Node.js binary is located automatically—`$NODE_BINARY`, `$NODE`, `Bun.which('node')`, and common install paths are all tried. The suite fails loudly if no Node binary is found.
 
 ## Project Role
 
 Most packages prove their own behavior with unit tests. `integration` proves the larger Agent Bureau package graph: `armorer`, `conversationalist`, `operative`, and `operative/store` must remain usable together after build output and runtime boundaries are involved.
-
-## Development
-
-Run package checks from this directory:
-
-```bash
-bun run validate
-```
-
-From the repository root, the equivalent workspace gate is:
-
-```bash
-bun run integration
-```

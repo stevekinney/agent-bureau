@@ -47,10 +47,16 @@ describe('cloudflare dependencies stay inside packages/cloudflare', () => {
 
   it('no non-cloudflare package imports a Workers-only module or binding', async () => {
     const files = await nonCloudflareSourceFiles();
-    const offenders: string[] = [];
 
-    for (const file of files) {
-      const source = await Bun.file(file).text();
+    // Read every file concurrently. A serial `await` loop over hundreds of
+    // source files is I/O-bound and raced bun:test's 5s default under CI load;
+    // batching the reads keeps this well under a second.
+    const sources = await Promise.all(
+      files.map(async (file) => ({ file, source: await Bun.file(file).text() })),
+    );
+
+    const offenders: string[] = [];
+    for (const { file, source } of sources) {
       for (const line of source.split('\n')) {
         if (FORBIDDEN_SPECIFIER.test(line)) {
           offenders.push(`${file}: ${line.trim()}`);

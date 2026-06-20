@@ -28,7 +28,7 @@ This package is ESM-only. `zod` is a peer dependency.
 
 ## Quick Start
 
-```ts
+```typescript
 import {
   Conversation,
   appendAssistantMessage,
@@ -36,92 +36,533 @@ import {
   createConversationHistory,
 } from 'conversationalist';
 
-let conversationHistory = createConversationHistory({
+let history = createConversationHistory({
   title: 'Order Support',
   metadata: { orderId: 'ord_123' },
 });
 
-conversationHistory = appendUserMessage(conversationHistory, 'Where is my order?');
-conversationHistory = appendAssistantMessage(conversationHistory, 'Let me look that up.');
+history = appendUserMessage(history, 'Where is my order?');
+history = appendAssistantMessage(history, 'Let me look that up.');
 
-const conversation = new Conversation(conversationHistory);
+const conversation = new Conversation(history);
 const openAIRequest = await conversation.toProvider('openai');
 ```
 
 ## Core Model
 
-- `ConversationHistory`: immutable, JSON-safe conversation data.
-- `Conversation`: runtime history manager with undo, redo, branching, event emission, provider import/export helpers, and convenience wrappers around the immutable helpers.
-- `Message`: ordered conversation entry with roles such as `user`, `assistant`, `system`, `developer`, `tool-call`, `tool-result`, and `snapshot`.
-- `ToolCall` and `ToolResult`: canonical, JSON-safe tool interaction payloads shared with `armorer` through `interoperability`.
+- **`ConversationHistory`**: immutable, JSON-safe conversation data.
+- **`Conversation`**: runtime history manager with undo, redo, branching, event emission, provider import/export helpers, and convenience wrappers around the immutable helpers.
+- **`Message`**: ordered conversation entry with roles such as `user`, `assistant`, `system`, `developer`, `tool-call`, `tool-result`, and `snapshot`.
+- **`ToolCall`** and **`ToolResult`**: canonical, JSON-safe tool interaction payloads shared with `armorer` through `interoperability`.
 
-## Main Entry Points
+## Package Structure
 
-### `conversationalist`
+### `conversationalist` (root)
 
-Use the root entry point for the common runtime API:
+The primary runtime API. Imports the `Conversation` class, all immutable helpers, errors, guards, and types.
 
-- `Conversation`
-- `createConversationHistory`
-- `createConversationHistoryUnsafe`
-- `deserializeConversationHistory`
-- append helpers such as `appendMessages`, `appendUserMessage`, `appendAssistantMessage`, `appendSystemMessage`
-- system-message helpers such as `hasSystemMessage`, `getSystemMessages`, `prependSystemMessage`, `replaceSystemMessage`, `collapseSystemMessages`
-- tool helpers such as `appendToolCall`, `appendToolCalls`, `appendToolResult`, `appendToolResultAsync`, `appendToolResults`, `appendToolResultsAsync`, `getPendingToolCalls`, `getToolInteractions`
-- tool materializers such as `materializeToolCall`, `materializeToolCalls`, `materializeToolResult`, `materializeToolResultAsync`, `materializeToolResults`, `materializeToolResultsAsync`
-- validation helpers such as `validateConversationHistoryIntegrity`, `assertConversationHistoryIntegrity`
-- builder helpers such as `withConversationHistory` and `pipeConversationHistory`
-- runtime errors, guards, and core types
+```typescript
+import {
+  Conversation,
+  appendAssistantMessage,
+  appendSystemMessage,
+  appendToolCalls,
+  appendToolResultsAsync,
+  appendUserMessage,
+  createConversationHistory,
+  deserializeConversationHistory,
+  getPendingToolCalls,
+  hasSystemMessage,
+  pipeConversationHistory,
+  prependSystemMessage,
+  validateConversationHistoryIntegrity,
+  withConversationHistory,
+} from 'conversationalist';
+```
+
+**Key exports:**
+
+- `Conversation`—the runtime class with undo/redo/branching/events.
+- `createConversationHistory(options?)`—creates an empty, valid `ConversationHistory`.
+- `createConversationHistoryUnsafe(data)`—skips validation; use only when you control the input.
+- `deserializeConversationHistory(raw)`—parses and validates a stored JSON blob.
+- Append helpers: `appendMessages`, `appendUserMessage`, `appendAssistantMessage`, `appendSystemMessage`, `appendUnsafeMessage`.
+- System-message helpers: `hasSystemMessage`, `getSystemMessages`, `getFirstSystemMessage`, `prependSystemMessage`, `replaceSystemMessage`, `collapseSystemMessages`.
+- Query helpers: `getMessages`, `getMessageById`, `getMessageAtPosition`, `getMessageIds`, `getStatistics`, `searchConversationMessages`, `toChatMessages`.
+- Tool helpers: `appendToolCall`, `appendToolCalls`, `appendToolResult`, `appendToolResultAsync`, `appendToolResults`, `appendToolResultsAsync`, `getPendingToolCalls`, `getToolInteractions`.
+- Materializer helpers: `materializeToolCall`, `materializeToolCalls`, `materializeToolResult`, `materializeToolResultAsync`, `materializeToolResults`, `materializeToolResultsAsync`.
+- Validation: `validateConversationHistoryIntegrity`, `assertConversationHistoryIntegrity`.
+- Builder helpers: `withConversationHistory`, `pipeConversationHistory`.
+- Modify: `redactMessageAtPosition`.
+- Guards: `isConversation`, `isConversationHistory`, `isMessage`, `isToolCall`, `isToolResult`, and more.
+- Error constructors: `ConversationalistError`, `createNotFoundError`, `createValidationError`, and others.
+- Composition exports: `createInstructionComposer`, `createInstructionTemplate`, `createConditionalInstructionComposer`, `whenStep`, `whenToolsAvailable`, `whenAnyToolAvailable`, `whenMetadata`, `whenMetadataPresent`.
+- Event classes: `ConversationChangeEvent`, `ConversationPushEvent`, `MessagesAppendedEvent`, `StreamStartedEvent`, `StreamFinalizedEvent`, and others.
+
+---
 
 ### `conversationalist/conversation`
 
-Pure immutable conversation helpers. Use this subpath when you want persistent data transforms without the runtime `Conversation` class.
+Pure immutable conversation helpers with no `Conversation` class dependency. Use this subpath in libraries or server contexts where you want functional transforms over data.
+
+```typescript
+import {
+  appendUserMessage,
+  appendAssistantMessage,
+  createConversationHistory,
+  getPendingToolCalls,
+  getSystemMessages,
+  prependSystemMessage,
+  searchConversationMessages,
+  validateConversationHistoryIntegrity,
+} from 'conversationalist/conversation';
+```
+
+**Key exports:** `createConversationHistory`, `createConversationHistoryUnsafe`, `appendMessages`, `appendUserMessage`, `appendAssistantMessage`, `appendSystemMessage`, `appendUnsafeMessage`, `getMessages`, `getMessageById`, `getMessageAtPosition`, `getMessageIds`, `getStatistics`, `searchConversationMessages`, `getSystemMessages`, `getFirstSystemMessage`, `hasSystemMessage`, `prependSystemMessage`, `replaceSystemMessage`, `collapseSystemMessages`, `redactMessageAtPosition`, `deserializeConversationHistory`, `validateConversationHistoryIntegrity`, `assertConversationHistoryIntegrity`, `toChatMessages`, `appendToolCall`, `appendToolCalls`, `appendToolResult`, `appendToolResultAsync`, `appendToolResults`, `appendToolResultsAsync`, `getPendingToolCalls`, `getToolInteractions`, `materializeToolCall`, `materializeToolCalls`, `materializeToolResult`, `materializeToolResultAsync`, `materializeToolResults`, `materializeToolResultsAsync`, `withEnvironment`.
+
+---
 
 ### `conversationalist/history`
 
-The `Conversation` class and event types.
+The `Conversation` runtime class and its event types.
+
+```typescript
+import { Conversation } from 'conversationalist/history';
+import type {
+  ConversationActionType,
+  ConversationEvent,
+  ConversationEventType,
+} from 'conversationalist/history';
+
+const conversation = new Conversation();
+conversation.appendUserMessage('Hello');
+
+const previous = conversation.undo(); // ConversationHistory | undefined
+if (previous) {
+  console.log('Undone');
+}
+
+conversation.on('change', ({ detail }) => {
+  console.log('New history:', detail.current);
+});
+```
+
+**Key exports:** `Conversation`, `ConversationActionType`, `ConversationEvent`, `ConversationEventDetail`, `ConversationEvents`, `ConversationEventType`.
+
+---
 
 ### `conversationalist/context`
 
-Context-window helpers such as `estimateConversationTokens`, `truncateToTokenLimit`, `getRecentMessages`, `truncateFromPosition`, and `simpleTokenEstimator`.
+Context-window management helpers that estimate token counts and trim messages to fit within limits.
+
+```typescript
+import {
+  estimateConversationTokens,
+  getRecentMessages,
+  simpleTokenEstimator,
+  truncateFromPosition,
+  truncateToTokenLimit,
+} from 'conversationalist/context';
+
+// Estimate total tokens in a conversation
+const tokens = estimateConversationTokens(history);
+
+// Trim to fit a 4096-token context window
+const trimmed = truncateToTokenLimit(history, 4096, {
+  preserveSystemMessages: true,
+  preserveLastN: 4,
+  preserveToolPairs: true,
+});
+
+// Get the 10 most recent non-system messages
+const recent = getRecentMessages(history, 10);
+
+// Drop everything before position 20
+const sliced = truncateFromPosition(history, 20);
+```
+
+**Key exports:** `estimateConversationTokens`, `truncateToTokenLimit`, `getRecentMessages`, `truncateFromPosition`, `simpleTokenEstimator`. Also exports `TruncateOptions` type.
+
+---
 
 ### `conversationalist/streaming`
 
-Streaming-message helpers such as `appendStreamingMessage`, `updateStreamingMessage`, `finalizeStreamingMessage`, `cancelStreamingMessage`, `isStreamingMessage`, and `getStreamingMessage`.
+Streaming-message helpers for building real-time assistant responses token by token.
 
-### `conversationalist/adapters/*`
+```typescript
+import {
+  appendStreamingMessage,
+  cancelStreamingMessage,
+  finalizeStreamingMessage,
+  getStreamingMessage,
+  isStreamingMessage,
+  updateStreamingMessage,
+} from 'conversationalist/streaming';
 
-Provider message adapters:
+// Start a streaming placeholder
+let { conversation, messageId } = appendStreamingMessage(history, 'assistant');
 
-- `conversationalist/adapters/openai`
-- `conversationalist/adapters/anthropic`
-- `conversationalist/adapters/gemini`
+// Accumulate tokens as they arrive
+for await (const chunk of stream) {
+  conversation = updateStreamingMessage(conversation, messageId, accumulatedText);
+}
 
-Each adapter exports:
+// Mark complete with optional token usage
+conversation = finalizeStreamingMessage(conversation, messageId, {
+  tokenUsage: { prompt: 120, completion: 48, total: 168 },
+});
 
-- provider payload types
-- `to...Messages(...)` export helpers
-- `from...Messages(...)` import helpers
-- `append...Messages(...)` append helpers for existing histories
-- an adapter object used by `Conversation.fromProvider(...)`, `conversation.toProvider(...)`, and `conversation.appendProvider(...)`
+// Or cancel on error
+conversation = cancelStreamingMessage(conversation, messageId);
+```
 
-### Other public subpaths
+**Key exports:** `appendStreamingMessage`, `updateStreamingMessage`, `finalizeStreamingMessage`, `cancelStreamingMessage`, `isStreamingMessage`, `getStreamingMessage`.
 
-- `conversationalist/message`: message formatting and narrowing helpers
-- `conversationalist/utilities`: message, transient-metadata, and content utilities
-- `conversationalist/markdown`: markdown serialization and role-label helpers
-- `conversationalist/export`: export helpers such as `exportMarkdown`
-- `conversationalist/schemas`: runtime validation schemas
-- `conversationalist/redaction`: PII redaction helpers
-- `conversationalist/versioning`: schema version constant
-- `conversationalist/sort`: deterministic sort helpers
-- `conversationalist/test`: deterministic test environments, test conversations, and event recorders
+Streaming messages (those with `metadata.__streaming === true`) are automatically protected from compaction, truncation, and adapter export until finalized.
+
+---
+
+### `conversationalist/message`
+
+Utility functions for inspecting and formatting individual `Message` objects.
+
+```typescript
+import {
+  createMessage,
+  isAssistantMessage,
+  messageHasImages,
+  messageParts,
+  messageText,
+  messageToString,
+} from 'conversationalist/message';
+
+const text = messageText(message);
+const parts = messageParts(message); // ReadonlyArray<MultiModalContent>
+const hasImages = messageHasImages(message);
+```
+
+**Key exports:** `createMessage`, `messageToJSON`, `messageParts`, `messageText`, `messageHasImages`, `messageToString`, `isAssistantMessage`.
+
+---
+
+### `conversationalist/utilities`
+
+Lower-level helpers for content normalization, tool-call pairing, transient metadata, and type-safe object operations.
+
+```typescript
+import {
+  normalizeContent,
+  pairToolCallsWithResults,
+  stripTransientMetadata,
+  toMultiModalArray,
+} from 'conversationalist/utilities';
+```
+
+**Key exports:** `normalizeContent`, `toMultiModalArray`, `pairToolCallsWithResults`, `stripTransientMetadata`, `isTransientKey`, `stripTransientFromRecord`, `hasOwnProperty`, `toReadonly`. Also re-exports materializer helpers and `MaterializeToolCallOptions` type.
+
+---
+
+### `conversationalist/markdown`
+
+Round-trip Markdown serialization. Converts a conversation to Markdown for display or storage, and parses Markdown back into a `ConversationHistory`.
+
+```typescript
+import {
+  conversationFromMarkdown,
+  conversationToMarkdown,
+  fromMarkdown,
+  getRoleLabel,
+  toMarkdown,
+} from 'conversationalist/markdown';
+
+// From a Conversation instance
+const md = conversationToMarkdown(conversation);
+
+// From raw ConversationHistory
+const md2 = toMarkdown(history);
+
+// Parse Markdown back into a Conversation
+const restored = conversationFromMarkdown(md);
+
+// Parse Markdown into raw ConversationHistory
+const rawHistory = fromMarkdown(md2);
+```
+
+**Key exports:** `toMarkdown`, `fromMarkdown`, `conversationToMarkdown`, `conversationFromMarkdown`, `getRoleLabel`, `getRoleFromLabel`, `ROLE_LABELS`, `LABEL_TO_ROLE`, `MarkdownParseError`. Also exports `ToMarkdownOptions` type.
+
+---
+
+### `conversationalist/export`
+
+Export helpers that normalize line endings for cross-platform file output.
+
+```typescript
+import { exportMarkdown, normalizeLineEndings } from 'conversationalist/export';
+
+const file = exportMarkdown(history, { includeMetadata: true });
+await Bun.write('transcript.md', file);
+```
+
+**Key exports:** `exportMarkdown`, `normalizeLineEndings`.
+
+---
+
+### `conversationalist/schemas`
+
+Zod runtime validation schemas for all core types. Use these to validate external data before constructing `ConversationHistory` values.
+
+```typescript
+import {
+  conversationSchema,
+  messageSchema,
+  toolCallSchema,
+  toolResultSchema,
+} from 'conversationalist/schemas';
+
+const result = conversationSchema.safeParse(rawData);
+if (!result.success) {
+  console.error(result.error.flatten());
+}
+```
+
+**Key exports:** `jsonValueSchema`, `multiModalContentSchema`, `messageRoleSchema`, `toolCallSchema`, `toolCallInputSchema`, `toolErrorCategorySchema`, `toolErrorSchema`, `toolActionSchema`, `toolResultSchema`, `tokenUsageSchema`, `messageInputSchema`, `messageSchema`, `conversationStatusSchema`, `conversationShape`, `conversationSchema`.
+
+---
+
+### `conversationalist/redaction`
+
+PII redaction plugin. Scans assistant and user message text and replaces sensitive patterns with placeholder tokens.
+
+```typescript
+import {
+  createPIIRedaction,
+  createPIIRedactionPlugin,
+  DEFAULT_PII_RULES,
+  redactPii,
+} from 'conversationalist/redaction';
+
+// Use the pre-built default plugin (redacts emails, phone numbers, and API keys/secrets)
+const conversation = new Conversation(history, {
+  plugins: [redactPii],
+});
+
+// Or define custom rules
+const customPlugin = createPIIRedactionPlugin({
+  rules: [{ pattern: /\b\d{9}\b/g, replacement: '[ID_REDACTED]' }],
+});
+
+// Or use the lower-level redaction function directly
+const redact = createPIIRedaction();
+const clean = redact('Call me at 555-123-4567');
+// 'Call me at [PHONE_REDACTED]'
+```
+
+**Key exports:** `createPIIRedaction`, `createPIIRedactionPlugin`, `redactPii`, `DEFAULT_PII_RULES`. Also exports `PIIRedactionRule` and `PIIRedactionOptions` types.
+
+---
+
+### `conversationalist/versioning`
+
+Schema version constant for serialization compatibility checks.
+
+```typescript
+import { CURRENT_SCHEMA_VERSION } from 'conversationalist/versioning';
+
+console.log(CURRENT_SCHEMA_VERSION); // e.g. 1
+```
+
+**Key exports:** `CURRENT_SCHEMA_VERSION`.
+
+---
+
+### `conversationalist/sort`
+
+Deterministic sort helpers for consistent ordering and snapshot comparisons.
+
+```typescript
+import { sortMessagesByPosition, sortObjectKeys } from 'conversationalist/sort';
+
+const ordered = sortMessagesByPosition([...messages]);
+const stable = sortObjectKeys(obj); // alphabetically sorted copy
+```
+
+**Key exports:** `sortMessagesByPosition`, `sortObjectKeys`.
+
+---
+
+### `conversationalist/composition`
+
+System-prompt composition helpers. Build rich, context-aware instruction strings from typed sections, templates, and conditional blocks.
+
+```typescript
+import {
+  createConditionalInstructionComposer,
+  createInstructionComposer,
+  createInstructionTemplate,
+  extractTemplateVariables,
+  renderTemplate,
+  whenAnyToolAvailable,
+  whenMetadata,
+  whenStep,
+  whenToolsAvailable,
+} from 'conversationalist/composition';
+
+// Static instruction composer
+const composer = createInstructionComposer([
+  { heading: 'Role', content: 'You are a helpful assistant.' },
+  { heading: 'Rules', content: 'Be concise.' },
+]);
+
+const systemPrompt = await composer.render({ step: 0, metadata: {} });
+
+// Template with variable interpolation
+const template = createInstructionTemplate('You are assisting {{userName}} on step {{step}}.');
+const rendered = renderTemplate(template, { userName: 'Alice', step: '1' });
+
+// Conditional sections—only included when their predicate passes
+const conditionalComposer = createConditionalInstructionComposer([
+  whenStep(0, { heading: 'Welcome', content: 'Welcome! Here is how I can help.' }),
+  whenToolsAvailable(['search', 'read-file'], {
+    heading: 'Available tools',
+    content: 'You may search the web and read files.',
+  }),
+  whenAnyToolAvailable({ heading: 'Tools', content: 'You have tools available.' }),
+  whenMetadata('mode', 'strict', { heading: 'Strict mode', content: 'Follow all rules exactly.' }),
+]);
+```
+
+**Key exports:** `createInstructionComposer`, `createInstructionTemplate`, `createConditionalInstructionComposer`, `renderTemplate`, `extractTemplateVariables`, `whenStep`, `whenToolsAvailable`, `whenAnyToolAvailable`, `whenMetadata`, `whenMetadataPresent`. Also exports types `InstructionComposer`, `InstructionSection`, `InstructionComposerRenderOptions`, `InstructionTemplate`, `MissingVariableStrategy`, `TemplateOptions`, `ConditionalInstructionComposer`, `ConditionalInstructionSection`, `ConditionalInstructionComposerRenderOptions`, `InstructionContext`.
+
+---
+
+### `conversationalist/adapters/openai`
+
+OpenAI Chat Completions message format adapter.
+
+```typescript
+import {
+  appendOpenAIMessages,
+  fromOpenAIMessages,
+  openAIConversationAdapter,
+  toOpenAIMessages,
+  toOpenAIMessagesGrouped,
+} from 'conversationalist/adapters/openai';
+import type { OpenAIMessage } from 'conversationalist/adapters/openai';
+
+// Export to OpenAI format
+const messages = toOpenAIMessages(history);
+
+// Group tool-call and tool-result pairs (preferred for most providers)
+const grouped = toOpenAIMessagesGrouped(history);
+
+// Import from OpenAI format
+const imported = fromOpenAIMessages(openAIMessages);
+
+// Append new OpenAI messages to an existing history
+const updated = appendOpenAIMessages(history, newMessages);
+
+// Use with Conversation.fromProvider / conversation.toProvider
+const restored = await Conversation.fromProvider('openai', { messages: openAIMessages });
+```
+
+**Key exports:** `toOpenAIMessages`, `toOpenAIMessagesGrouped`, `fromOpenAIMessages`, `appendOpenAIMessages`, `openAIConversationAdapter`. Type exports: `OpenAIMessage`, `OpenAISystemMessage`, `OpenAIUserMessage`, `OpenAIAssistantMessage`, `OpenAIToolMessage`, `OpenAIToolCall`, `OpenAIContentPart`, `OpenAITextContentPart`, `OpenAIImageContentPart`, `OpenAIConversationExportOptions`.
+
+---
+
+### `conversationalist/adapters/anthropic`
+
+Anthropic Messages API format adapter.
+
+```typescript
+import {
+  appendAnthropicMessages,
+  anthropicConversationAdapter,
+  fromAnthropicMessages,
+  toAnthropicMessages,
+} from 'conversationalist/adapters/anthropic';
+import type { AnthropicConversation } from 'conversationalist/adapters/anthropic';
+
+const payload = toAnthropicMessages(history);
+// payload.system: string, payload.messages: AnthropicMessage[]
+
+const imported = fromAnthropicMessages(payload);
+const updated = appendAnthropicMessages(history, payload);
+```
+
+**Key exports:** `toAnthropicMessages`, `fromAnthropicMessages`, `appendAnthropicMessages`, `anthropicConversationAdapter`. Type exports: `AnthropicConversation`, `AnthropicMessage`, `AnthropicContentBlock`, `AnthropicTextBlock`, `AnthropicToolUseBlock`, `AnthropicToolResultBlock`, `AnthropicImageBlock`, `AnthropicImageSource`, `AnthropicBase64ImageSource`, `AnthropicUrlImageSource`.
+
+---
+
+### `conversationalist/adapters/gemini`
+
+Google Gemini API format adapter.
+
+```typescript
+import {
+  appendGeminiMessages,
+  fromGeminiMessages,
+  geminiConversationAdapter,
+  toGeminiMessages,
+} from 'conversationalist/adapters/gemini';
+import type { GeminiConversation } from 'conversationalist/adapters/gemini';
+
+const payload = toGeminiMessages(history);
+// payload.contents: GeminiContent[]
+
+const imported = fromGeminiMessages(payload);
+const updated = appendGeminiMessages(history, payload);
+```
+
+**Key exports:** `toGeminiMessages`, `fromGeminiMessages`, `appendGeminiMessages`, `geminiConversationAdapter`. Type exports: `GeminiConversation`, `GeminiContent`, `GeminiPart`, `GeminiTextPart`, `GeminiInlineDataPart`, `GeminiFileDataPart`, `GeminiFunctionCallPart`, `GeminiFunctionResponsePart`.
+
+---
+
+### `conversationalist/test`
+
+Deterministic test environments with fixed clocks and IDs, prebuilt test conversations, and event recorders.
+
+```typescript
+import {
+  createConversationRecorder,
+  createTestConversation,
+  createTestConversationEnvironment,
+  createTestInstructionContext,
+} from 'conversationalist/test';
+
+// Deterministic clock + ID generator—no random values in snapshots.
+// `now` returns an ISO string; `identifiers` supplies the deterministic id sequence.
+const env = createTestConversationEnvironment({
+  now: () => '2024-01-01T00:00:00.000Z',
+  identifiers: ['id-1', 'id-2', 'id-3'],
+});
+
+// Test conversation in a deterministic environment. The first argument is an
+// optional initial ConversationHistory; the second is the same options object.
+const conversation = createTestConversation(undefined, {
+  now: () => '2024-01-01T00:00:00.000Z',
+});
+
+// Collect all events emitted during a test
+const recorder = createConversationRecorder(conversation);
+conversation.appendUserMessage('Hello');
+console.log(recorder.events); // [{ type: 'change', ... }, ...]
+recorder.clear();
+
+// Instruction rendering context for testing composition helpers
+const context = createTestInstructionContext({ step: 0, metadata: { mode: 'strict' } });
+```
+
+**Key exports:** `createTestConversationEnvironment`, `createTestConversation`, `createConversationRecorder`. Types: `TestConversationEnvironmentOptions`, `TestConversationEnvironment`, `ConversationRecorder`.
+
+Also exports `createTestInstructionContext`.
+
+---
 
 ## Provider Conversion
 
 ### Generic provider helpers
 
-```ts
+```typescript
 import { Conversation } from 'conversationalist';
 
 const conversation = new Conversation();
@@ -152,7 +593,7 @@ const restored = await Conversation.fromProvider('gemini', {
 
 `conversationalist` is designed to pair naturally with `armorer`.
 
-```ts
+```typescript
 import { appendToolCalls, appendToolResultsAsync } from 'conversationalist';
 import { createToolbox } from 'armorer';
 import { parseOpenAIToolCalls, toOpenAITools } from 'armorer/adapters/openai';
@@ -199,16 +640,19 @@ Event types include:
 - `stream.finalized`
 - `stream.cancelled`
 - `compaction.started`
+- `compaction.completed`
+- `session.forked`
+- `session.renamed`
+- `session.tagged`
+- `persistence.error`
 
 Streaming messages (those with `metadata.__streaming === true`) are automatically protected from compaction, truncation, and adapter export. They are preserved in `partitionMessages`, locked in `truncateToTokenLimit` and `truncateFromPosition`, and excluded from provider adapters so that incomplete content is never sent to an API.
 
-- `compaction.completed`
-
 ## Compaction
 
-Reclaim context window space by summarizing older messages. The summarization function is caller-provided -- no large language model dependency in the library.
+Reclaim context window space by summarizing older messages. The summarization function is caller-provided—no large language model dependency in the library.
 
-```ts
+```typescript
 import { Conversation } from 'conversationalist';
 
 const conversation = new Conversation(existingHistory);

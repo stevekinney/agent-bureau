@@ -117,4 +117,18 @@ describe('createGeminiEmbedder', () => {
       expect((error as HeraldError).provider).toBe('gemini');
     }
   });
+
+  it('throws a clear HeraldError when neither client nor apiKey is provided', async () => {
+    const embedder = createGeminiEmbedder();
+
+    try {
+      await embedder(['test']);
+      expect.unreachable('Expected embedder to throw');
+    } catch (error) {
+      expect(error).toBeInstanceOf(HeraldError);
+      const heraldError = error as HeraldError;
+      expect(heraldError.provider).toBe('gemini');
+      expect(heraldError.message).toContain('apiKey');
+    }
+  });
 });

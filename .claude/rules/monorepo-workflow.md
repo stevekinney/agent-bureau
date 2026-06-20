@@ -19,9 +19,9 @@ All tasks except `format:check` depend on `^build` (build dependencies first):
 
 Build and modify packages in dependency order:
 
-- **Foundation** (no workspace dependencies): `interoperability`, `lifecycle`, `vector-frankl`
+- **Foundation** (no workspace dependencies): `interoperability`, `lifecycle`
 - **Layer 1**: `armorer` (lifecycle, interoperability), `conversationalist` (lifecycle, interoperability)
-- **Layer 2**: `operative` (armorer, conversationalist, interoperability, lifecycle), `memory` (armorer, interoperability, vector-frankl)
+- **Layer 2**: `operative` (armorer, conversationalist, interoperability, lifecycle), `memory` (armorer, interoperability)
 - **Layer 3**: `herald` (armorer, conversationalist, interoperability), `sentinel` (conversationalist, lifecycle, operative)
 - **Aggregator**: `gateway` (most packages), `integration` (test-only cross-package suite)
 
