@@ -299,7 +299,7 @@ interface MemoryStatus {
 
 ### `createConsolidationTask(options)`
 
-Returns a chunked-task descriptor compatible with `operative`'s `createChunkedTask`. When run, consolidation scans stored memories in batches, merges near-duplicates, resolves conflicts, prunes low-importance entries, and evaluates candidates for soul graduation.
+Returns a chunked-task descriptor compatible with `operative`'s `createChunkedTask`. When run, consolidation scans stored memories in batches, merges near-duplicates (above `mergeThreshold`), resolves conflicts within `conflictRange`, and prunes entries whose evaluated importance falls below `pruneThreshold`. It operates only on stored memory records — it does not touch the identity/soul system.
 
 ```typescript
 function createConsolidationTask(
