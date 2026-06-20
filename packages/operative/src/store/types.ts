@@ -1,7 +1,8 @@
 import type { ConversationSnapshot } from 'conversationalist';
 import type { ObservableLike, Subscription } from 'lifecycle';
-import type { ActiveRun, FinishReason, StepResult, TokenUsage } from 'operative';
 
+import type { ActiveRun } from '../create-run';
+import type { FinishReason, StepResult, TokenUsage } from '../types';
 import type { StoreEventMap } from './events';
 
 export type RunStatus = 'running' | 'completed' | 'error' | 'aborted';

@@ -10,6 +10,8 @@ import { createScratchpad, type Scratchpad } from '../create-scratchpad';
 import type { OperativeEventMap, OperativeEventType } from '../events';
 import type { AgentDefinition, GenerateFunction, GenerateResponse, StepResult } from '../types';
 
+export { createTestStore } from './store';
+
 /**
  * Creates a mock generate function that returns responses in sequence.
  */

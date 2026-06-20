@@ -3,8 +3,7 @@ import { createTestToolbox } from 'armorer/test';
 import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
 import { createRun, type GenerateResponse, stopWhen } from 'operative';
-import { createMockGenerate } from 'operative/test';
-import { createTestStore } from 'sentinel/test';
+import { createMockGenerate, createTestStore } from 'operative/test';
 import { z } from 'zod';
 
 const weatherTool = createTool({
@@ -26,7 +25,7 @@ function toolCallResponse(
   return { content, toolCalls, ...(usage ? { usage } : {}) };
 }
 
-describe('sentinel integration: full operative loop tracked by store', () => {
+describe('operative store integration: full operative loop tracked by store', () => {
   it('tracks a complete run with correct status, steps, and actions', async () => {
     const { store, waitForRun } = createTestStore();
     const toolbox = createTestToolbox([weatherTool]);

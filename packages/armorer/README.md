@@ -1,13 +1,15 @@
-# Toolbox
+# Armorer
 
-A lightweight, type-safe registry for validated AI tools. Build tools with Zod schemas and metadata, register them in a toolbox, execute them, and query them with registry helpers and event hooks.
+`armorer` is the Agent Bureau tool layer. It provides type-safe tool definitions, validated execution, toolbox registries, provider adapters, middleware, MCP integration, and testing utilities.
 
 ## Table of Contents
 
 - [Overview](#overview)
+- [What It Does](#what-it-does)
+- [How It Works](#how-it-works)
+- [Project Role](#project-role)
 - [Features](#features)
 - [Package Structure](#package-structure)
-- [Installation](#installation)
 - [Quick Start](#quick-start)
 - [Safety, Policy, and Metadata](#safety-policy-and-metadata)
 - [Creating Tools](#creating-tools)
@@ -18,6 +20,22 @@ A lightweight, type-safe registry for validated AI tools. Build tools with Zod s
 ## Overview
 
 Toolbox turns tool calling into a structured, observable, and searchable workflow. Define schemas once, validate at runtime, and export tools to popular providers without rewriting adapters.
+
+## What It Does
+
+- Creates validated tools with `createTool()`.
+- Groups tools into immutable registries with `createToolbox()`.
+- Executes tool calls with runtime validation, middleware, events, policies, idempotency, and streaming support.
+- Converts tool definitions and tool results for OpenAI, Anthropic, Gemini, OpenAI Agents SDK, and MCP.
+- Supports registry querying, semantic search, inspection, truncation, and testing utilities.
+
+## How It Works
+
+A tool combines metadata, an input schema, and an execute function. A toolbox registers one or more tools, validates incoming calls, runs middleware and policy hooks, executes the matching tool, and emits typed lifecycle events. Provider adapters materialize the same toolbox into provider-specific tool declarations and parse provider tool calls back into the shared `interoperability` contract.
+
+## Project Role
+
+`armorer` is the action layer for Agent Bureau. `operative` uses it to execute tool calls during an agent run, `herald` uses its adapters when sending tools to providers, `skills` and `memory` expose their capabilities as toolboxes, and `gateway` surfaces the composed tool set through API and UI state.
 
 ## Features
 
@@ -312,7 +330,7 @@ if (result.outcome === 'action_required') {
 
 ## Agent Integration
 
-Toolbox provides helpers to integrate with LLM providers like OpenAI.
+Toolbox provides helpers to integrate with large language model providers like OpenAI.
 
 ```typescript
 import {
@@ -803,7 +821,7 @@ longTask.addEventListener('progress', (event) => {
 
 ## Search Tool for Agentic Workflows
 
-Toolbox includes a pre-configured search tool that lets agents discover available tools dynamically. This is useful when you have many tools and want the LLM to find the right one for a task.
+Toolbox includes a pre-configured search tool that lets agents discover available tools dynamically. This is useful when you have many tools and want the large language model to find the right one for a task.
 
 ```typescript
 import { createToolbox, createTool } from 'armorer';
@@ -898,11 +916,10 @@ Longer-form docs live in `documentation/`:
 - [Agent SDK Integrations](documentation/agent-sdk-integrations.md) - OpenAI and Anthropic Agent SDK usage via MCP
 - [OpenAI Agents SDK](documentation/openai-agents-sdk.md) - Integration with `@openai/agents` including tool gating
 - [Public API Reference](documentation/api-reference.md) - Complete API reference with all exports and types
-- [Contributing](CONTRIBUTING.md) - Local development workflows
 
 ## Roadmap
 
-See [ROADMAP.md](ROADMAP.md) for planned features, community requests, and version goals.
+See the workspace [roadmap](../../ROADMAP.md) for planned features, community requests, and version goals.
 
 ## License
 

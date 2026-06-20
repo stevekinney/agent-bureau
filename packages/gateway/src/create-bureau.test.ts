@@ -13,8 +13,8 @@ import { createInMemoryMemoryRecordStorage, createMockEmbedder } from 'memory/te
 import type { GenerateFunction, GenerateResponse, Toolbox } from 'operative';
 import { stopWhen } from 'operative';
 import { SCHEDULER_ORIGIN_TAG, startDurableRunResult } from 'operative/durable';
+import { createStore } from 'operative/store';
 import { createMockGenerate as createSequentialGenerate } from 'operative/test';
-import { createStore } from 'sentinel';
 import { z } from 'zod';
 
 import { BureauError, classifyRecoveredRun, createBureau } from './create-bureau';

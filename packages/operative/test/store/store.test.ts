@@ -2,12 +2,15 @@ import { createTool } from 'armorer';
 import { createTestToolbox } from 'armorer/test';
 import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
-import { createRun, type GenerateResponse, stopWhen } from 'operative';
-import { createMockGenerate } from 'operative/test';
 import { z } from 'zod';
 
-import { createStore } from '../src/store';
-import type { Action, StoreState } from '../src/types';
+import { stopWhen } from '../../src/conditions';
+import { createRun } from '../../src/create-run';
+import { createStore } from '../../src/store';
+import type { Action, StoreState } from '../../src/store/types';
+import { createMockGenerate } from '../../src/test';
+import { createTestStore } from '../../src/test/store';
+import type { GenerateResponse } from '../../src/types';
 
 function textResponse(content: string): GenerateResponse {
   return { content, toolCalls: [] };
@@ -315,6 +318,24 @@ describe('createStore', () => {
       originalEvent: 'primitive-original-event',
     });
 
+    store.dispose();
+  });
+});
+
+describe('createTestStore', () => {
+  it('returns action helpers and waits for terminal runs', async () => {
+    const { store, getActions, getActionTypes, waitForRun } = createTestStore();
+    const activeRun = createActiveRun();
+    const runId = store.register(activeRun, 'test-store-run');
+
+    const finalRun = await waitForRun(runId);
+    expect(finalRun.status).toBe('completed');
+    expect(getActions(runId)).toEqual(finalRun.actions);
+    expect(getActions('missing-run')).toEqual([]);
+    expect(getActionTypes(runId)).toContain('run.completed');
+    expect(getActionTypes()).toContain('run.completed');
+
+    await expect(waitForRun(runId)).resolves.toEqual(finalRun);
     store.dispose();
   });
 });

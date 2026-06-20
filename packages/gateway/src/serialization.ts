@@ -1,4 +1,4 @@
-import type { RunState } from 'sentinel';
+import type { RunState } from 'operative/store';
 
 import type { RunDetail, RunSummary } from './types';
 

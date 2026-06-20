@@ -1,5 +1,6 @@
 {
   "name": "memory",
+  "private": true,
   "version": "0.0.1",
   "description": "Pure utility functions for agent memory: temporal decay, MMR diversity, BM25 text search, and hybrid result merging.",
   "keywords": [
@@ -48,11 +49,6 @@
   "main": "./dist/index.js",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "files": [
-    "dist",
-    "src",
-    "test/contract-harness.ts"
-  ],
   "scripts": {
     "build": "bun run scripts/build.ts",
     "check-types": "tsc --noEmit",
@@ -64,8 +60,6 @@
     "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,json,md}\"",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
-    "prepack": "bun run clean && bun run build",
-    "prepublishOnly": "bun run clean && bun run build",
     "start": "bun run src/index.ts",
     "test": "bun test",
     "test:coverage": "bun test --coverage",
@@ -82,9 +76,5 @@
   },
   "engines": {
     "bun": ">=1.3.0"
-  },
-  "publishConfig": {
-    "access": "public",
-    "registry": "https://registry.npmjs.org"
   }
 }

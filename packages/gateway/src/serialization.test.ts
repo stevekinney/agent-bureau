@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import type { ActiveRun } from 'operative';
-import type { RunState } from 'sentinel';
+import type { RunState } from 'operative/store';
 
 import {
   serializeActionDetail,

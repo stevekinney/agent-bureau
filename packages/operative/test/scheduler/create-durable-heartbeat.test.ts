@@ -6,8 +6,12 @@ import { Conversation } from 'conversationalist';
 
 import { createRunEngine } from '../../src/durable/create-run-engine';
 import {
+  assertDurableHeartbeatServicesStore,
+  createDurableHeartbeatServicesStore,
+  createDurableHeartbeatTickWorkflow,
   DURABLE_HEARTBEAT_TICK_WORKFLOW_TYPE,
   type DurableHeartbeatTickResult,
+  resolveDurableHeartbeatTickServices,
 } from '../../src/durable/durable-heartbeat-tick-workflow';
 import { createDurableHeartbeat } from '../../src/scheduler/create-durable-heartbeat';
 import type { Scheduler } from '../../src/scheduler/create-scheduler';
@@ -98,7 +102,64 @@ async function fireSchedule(engine: RunEngineInstance, scheduleId: string): Prom
   }
 }
 
+function createTickWorkflowHandler() {
+  const tickWorkflow = createDurableHeartbeatTickWorkflow();
+  return tickWorkflow.handler as (
+    context: {
+      workflowId: string;
+      services?: unknown;
+      memo: <T>(key: string, callback: () => T | Promise<T>) => AsyncGenerator<unknown, Awaited<T>>;
+    },
+    input: unknown,
+  ) => AsyncGenerator<unknown, DurableHeartbeatTickResult>;
+}
+
+async function* runMemo<T>(
+  _key: string,
+  callback: () => T | Promise<T>,
+): AsyncGenerator<unknown, Awaited<T>> {
+  yield* [];
+  return await callback();
+}
+
 describe('createDurableHeartbeat', () => {
+  it('requires an engine created by createRunEngine', () => {
+    expect(() => assertDurableHeartbeatServicesStore({})).toThrow(
+      'Durable heartbeat requires an engine created by createRunEngine.',
+    );
+  });
+
+  it('rejects invalid durable heartbeat service-resolution input', () => {
+    const resolution = resolveDurableHeartbeatTickServices(createDurableHeartbeatServicesStore(), {
+      workflowId: 'invalid-heartbeat-input',
+      workflowType: DURABLE_HEARTBEAT_TICK_WORKFLOW_TYPE,
+      input: {},
+    } as never);
+
+    expect(resolution).toEqual({
+      status: 'unavailable',
+      reason: 'run invalid-heartbeat-input has invalid durable heartbeat input',
+    });
+  });
+
+  it('throws when the durable tick workflow receives invalid input', async () => {
+    await expect(
+      createTickWorkflowHandler()(
+        { workflowId: 'invalid-tick', memo: runMemo },
+        { missingScheduleId: true },
+      ).next(),
+    ).rejects.toThrow('durable heartbeat tick input must include a scheduleId');
+  });
+
+  it('throws when the durable tick workflow runs without services', async () => {
+    await expect(
+      createTickWorkflowHandler()(
+        { workflowId: 'missing-services-tick', memo: runMemo },
+        { scheduleId: 'heartbeat' },
+      ).next(),
+    ).rejects.toThrow('durable heartbeat tick services are unavailable');
+  });
+
   it('reuses an existing schedule with the same scheduleId', async () => {
     const { engine } = await createRunEngine({
       storage: new MemoryStorage(),
@@ -142,6 +203,62 @@ describe('createDurableHeartbeat', () => {
       second[Symbol.dispose]();
       first[Symbol.dispose]();
     } finally {
+      engine[Symbol.dispose]();
+    }
+  });
+
+  it('reuses an existing cron schedule and exposes lifecycle controls', async () => {
+    const { engine } = await createRunEngine({
+      storage: new MemoryStorage(),
+      runWorkflow: createAgentRunProbeWorkflow(),
+      recover: false,
+      startScheduler: false,
+    });
+    const firstScheduler = createRecordingScheduler();
+    const secondScheduler = createRecordingScheduler();
+
+    try {
+      const heartbeat = await createDurableHeartbeat(engine, {
+        scheduler: firstScheduler.scheduler,
+        scheduleId: 'heartbeat-cron-reuse',
+        spec: '*/5 * * * *',
+        createHeartbeatRun: () => ({ conversation: new Conversation() }),
+      });
+
+      expect(await heartbeat.describe()).toMatchObject({
+        id: 'heartbeat-cron-reuse',
+        cronExpression: '*/5 * * * *',
+        status: 'active',
+      });
+
+      await heartbeat.pause();
+      expect(await heartbeat.describe()).toMatchObject({ status: 'paused' });
+
+      await heartbeat.resume();
+      expect(await heartbeat.describe()).toMatchObject({ status: 'active' });
+
+      await heartbeat.update('*/10 * * * *');
+      expect(await heartbeat.describe()).toMatchObject({
+        cronExpression: '*/10 * * * *',
+      });
+
+      const reused = await createDurableHeartbeat(engine, {
+        scheduler: secondScheduler.scheduler,
+        scheduleId: 'heartbeat-cron-reuse',
+        spec: '*/10 * * * *',
+        createHeartbeatRun: () => ({ conversation: new Conversation() }),
+      });
+
+      expect(await reused.describe()).toMatchObject({
+        id: 'heartbeat-cron-reuse',
+        cronExpression: '*/10 * * * *',
+      });
+
+      reused[Symbol.dispose]();
+      reused[Symbol.dispose]();
+      await heartbeat.cancel();
+    } finally {
+      await engine.cancelSchedule('heartbeat-cron-reuse').catch(() => {});
       engine[Symbol.dispose]();
     }
   });
@@ -289,6 +406,132 @@ describe('createDurableHeartbeat', () => {
         }),
       ).rejects.toThrow(
         'Schedule heartbeat-collision already exists for workflow agentRun; expected durableHeartbeatTick.',
+      );
+    } finally {
+      engine[Symbol.dispose]();
+    }
+  });
+
+  it('rejects an existing durable heartbeat schedule with a different overlap policy', async () => {
+    const { engine } = await createRunEngine({
+      storage: new MemoryStorage(),
+      runWorkflow: createAgentRunProbeWorkflow(),
+      recover: false,
+      startScheduler: false,
+    });
+    const { scheduler } = createRecordingScheduler();
+
+    try {
+      await engine.schedule(
+        DURABLE_HEARTBEAT_TICK_WORKFLOW_TYPE,
+        { scheduleId: 'heartbeat-overlap-collision' },
+        { every: '1h' },
+        { id: 'heartbeat-overlap-collision', overlap: 'queue', backfill: false },
+      );
+
+      await expect(
+        createDurableHeartbeat(engine, {
+          scheduler,
+          scheduleId: 'heartbeat-overlap-collision',
+          spec: { every: '1h' },
+          createHeartbeatRun: () => ({ conversation: new Conversation() }),
+        }),
+      ).rejects.toThrow('Schedule heartbeat-overlap-collision already exists with overlap queue.');
+    } finally {
+      engine[Symbol.dispose]();
+    }
+  });
+
+  it('rejects an existing durable heartbeat schedule with backfill enabled', async () => {
+    const { engine } = await createRunEngine({
+      storage: new MemoryStorage(),
+      runWorkflow: createAgentRunProbeWorkflow(),
+      recover: false,
+      startScheduler: false,
+    });
+    const { scheduler } = createRecordingScheduler();
+
+    try {
+      await engine.schedule(
+        DURABLE_HEARTBEAT_TICK_WORKFLOW_TYPE,
+        { scheduleId: 'heartbeat-backfill-collision' },
+        { every: '1h' },
+        { id: 'heartbeat-backfill-collision', overlap: 'skip', backfill: true },
+      );
+
+      await expect(
+        createDurableHeartbeat(engine, {
+          scheduler,
+          scheduleId: 'heartbeat-backfill-collision',
+          spec: { every: '1h' },
+          createHeartbeatRun: () => ({ conversation: new Conversation() }),
+        }),
+      ).rejects.toThrow(
+        'Schedule heartbeat-backfill-collision already exists with backfill enabled.',
+      );
+    } finally {
+      engine[Symbol.dispose]();
+    }
+  });
+
+  it('rejects an existing durable heartbeat schedule with a different cron spec', async () => {
+    const { engine } = await createRunEngine({
+      storage: new MemoryStorage(),
+      runWorkflow: createAgentRunProbeWorkflow(),
+      recover: false,
+      startScheduler: false,
+    });
+    const { scheduler } = createRecordingScheduler();
+
+    try {
+      await engine.schedule(
+        DURABLE_HEARTBEAT_TICK_WORKFLOW_TYPE,
+        { scheduleId: 'heartbeat-cron-collision' },
+        { cron: '0 * * * *' },
+        { id: 'heartbeat-cron-collision', overlap: 'skip', backfill: false },
+      );
+
+      await expect(
+        createDurableHeartbeat(engine, {
+          scheduler,
+          scheduleId: 'heartbeat-cron-collision',
+          spec: { cron: '5 * * * *' },
+          createHeartbeatRun: () => ({ conversation: new Conversation() }),
+        }),
+      ).rejects.toThrow(
+        'Schedule heartbeat-cron-collision already exists with a different cron spec.',
+      );
+    } finally {
+      engine[Symbol.dispose]();
+    }
+  });
+
+  it('rejects an existing durable heartbeat schedule with a different interval spec', async () => {
+    const { engine } = await createRunEngine({
+      storage: new MemoryStorage(),
+      runWorkflow: createAgentRunProbeWorkflow(),
+      recover: false,
+      startScheduler: false,
+    });
+    const { scheduler } = createRecordingScheduler();
+
+    try {
+      await engine.schedule(
+        DURABLE_HEARTBEAT_TICK_WORKFLOW_TYPE,
+        { scheduleId: 'heartbeat-interval-collision' },
+        { every: '1h' },
+        { id: 'heartbeat-interval-collision', overlap: 'skip', backfill: false },
+      );
+
+      await expect(
+        createDurableHeartbeat(engine, {
+          scheduler,
+          scheduleId: 'heartbeat-interval-collision',
+          spec: { every: '2h' },
+          createHeartbeatRun: () => ({ conversation: new Conversation() }),
+        }),
+      ).rejects.toThrow(
+        'Schedule heartbeat-interval-collision already exists with a different interval spec.',
       );
     } finally {
       engine[Symbol.dispose]();
@@ -482,6 +725,95 @@ describe('createDurableHeartbeat', () => {
       expect(submittedTasks[0]!.priority).toBe('scheduled');
       expect(submittedTasks[0]!.id).toBe(`durable-heartbeat-${completedTicks[0]!.workflowId}`);
       expect(resolverDelegationCount).toBe(0);
+    } finally {
+      await heartbeat.cancel();
+      engine[Symbol.dispose]();
+    }
+  });
+
+  it('reports a preempted durable tick when scheduler submission returns null', async () => {
+    const { engine } = await createRunEngine({
+      storage: new MemoryStorage(),
+      runWorkflow: createAgentRunProbeWorkflow(),
+      recover: false,
+      startScheduler: false,
+    });
+    const { scheduler, submittedTasks } = createRecordingScheduler(null);
+    const completedTicks: DurableHeartbeatTickResult[] = [];
+    const tickResults: Array<RunResult | null> = [];
+    engine.addEventListener(weft.WorkflowCompletedEvent.type, (event) => {
+      const result = (event as weft.WorkflowCompletedEvent).result;
+      if (isDurableHeartbeatTickResult(result)) completedTicks.push(result);
+    });
+
+    const heartbeat = await createDurableHeartbeat(engine, {
+      scheduler,
+      scheduleId: 'heartbeat-preempted-result',
+      spec: { every: '1h' },
+      createHeartbeatRun: () => ({ conversation: new Conversation() }),
+      onTick: (result) => {
+        tickResults.push(result);
+      },
+    });
+
+    try {
+      await fireSchedule(engine, 'heartbeat-preempted-result');
+
+      expect(completedTicks).toHaveLength(1);
+      expect(completedTicks[0]).toMatchObject({
+        scheduleId: 'heartbeat-preempted-result',
+        status: 'preempted',
+      });
+      expect(submittedTasks).toHaveLength(1);
+      expect(tickResults).toEqual([null]);
+    } finally {
+      await heartbeat.cancel();
+      engine[Symbol.dispose]();
+    }
+  });
+
+  it('reports a failed durable tick when scheduler submission returns an error result', async () => {
+    const failedResult: RunResult = {
+      ...createRunResult('failed heartbeat tick'),
+      finishReason: 'error',
+      error: undefined,
+    };
+    const { engine } = await createRunEngine({
+      storage: new MemoryStorage(),
+      runWorkflow: createAgentRunProbeWorkflow(),
+      recover: false,
+      startScheduler: false,
+    });
+    const { scheduler, submittedTasks } = createRecordingScheduler(failedResult);
+    const completedTicks: DurableHeartbeatTickResult[] = [];
+    const failureErrors: unknown[] = [];
+    engine.addEventListener(weft.WorkflowCompletedEvent.type, (event) => {
+      const result = (event as weft.WorkflowCompletedEvent).result;
+      if (isDurableHeartbeatTickResult(result)) completedTicks.push(result);
+    });
+
+    const heartbeat = await createDurableHeartbeat(engine, {
+      scheduler,
+      scheduleId: 'heartbeat-error-result',
+      spec: { every: '1h' },
+      createHeartbeatRun: () => ({ conversation: new Conversation() }),
+      onFailure: (error) => {
+        failureErrors.push(error);
+      },
+    });
+
+    try {
+      await fireSchedule(engine, 'heartbeat-error-result');
+
+      expect(completedTicks).toHaveLength(1);
+      expect(completedTicks[0]).toMatchObject({
+        scheduleId: 'heartbeat-error-result',
+        status: 'failed',
+      });
+      expect(submittedTasks).toHaveLength(1);
+      expect(failureErrors).toHaveLength(1);
+      expect(failureErrors[0]).toBeInstanceOf(Error);
+      expect((failureErrors[0] as Error).message).toBe('durable heartbeat tick failed');
     } finally {
       await heartbeat.cancel();
       engine[Symbol.dispose]();

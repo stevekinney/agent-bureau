@@ -14,7 +14,7 @@ import {
   RunRemovedEvent as StoreRunRemovedEvent,
   type Store,
   StoreActionEvent,
-} from 'sentinel';
+} from 'operative/store';
 
 import {
   ActionEvent,

@@ -16,10 +16,6 @@
   "main": "./dist/index.js",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "files": [
-    "dist",
-    "src"
-  ],
   "scripts": {
     "build": "bun run scripts/build.ts",
     "check-types": "tsc --noEmit",
@@ -30,8 +26,6 @@
     "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,json,md}\"",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
-    "prepack": "bun run clean && bun run build",
-    "prepublishOnly": "bun run clean && bun run build",
     "test": "bun test",
     "test:coverage": "bun test --coverage",
     "validate": "bun run format:check && bun run lint && bun run check-types && bun run test"

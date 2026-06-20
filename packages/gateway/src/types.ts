@@ -35,7 +35,7 @@ import type {
   TokenUsage,
 } from 'operative';
 import type { CreateRunEngineOptions } from 'operative/durable';
-import type { Store } from 'sentinel';
+import type { Store } from 'operative/store';
 
 import type { BureauEventMap } from './events';
 

@@ -42,7 +42,6 @@ const serverResult = await Bun.build({
     'svelte',
     'svelte/*',
     'operative',
-    'sentinel',
     'herald',
     'armorer',
     'conversationalist',

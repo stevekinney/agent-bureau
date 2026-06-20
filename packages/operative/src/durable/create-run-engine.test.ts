@@ -70,6 +70,17 @@ function makeLoggingWorkflow() {
     });
 }
 
+function makeRecoverableServicesWorkflow(sleepMilliseconds: number) {
+  return workflow({ name: 'agentRun' })
+    .services<{ multiplier: number }>()
+    .execute(async function* (ctx, input: { value: number }) {
+      yield* ctx.sleep(sleepMilliseconds);
+      const services = ctx.services;
+      if (!services) throw new Error('missing services');
+      return { multiplied: input.value * services.multiplier };
+    });
+}
+
 // Weft's durable-timer poller ticks on a fixed ~1000ms real-time interval
 // (pollIntervalMs default). A sleep due comfortably inside one poll cycle but
 // past the inline-launch drain window is the discriminator: an ARMED poller fires
@@ -213,6 +224,98 @@ describe('createRunEngine', () => {
     try {
       const handle = await engine.start('agentRun', { value: 5 });
       expect(await handle.result()).toEqual({ doubled: 10 });
+    } finally {
+      engine[Symbol.dispose]();
+    }
+  });
+
+  it('delegates recovered agentRun service resolution to the configured resolver', async () => {
+    const storage = new MemoryStorage();
+    const runWorkflow = makeRecoverableServicesWorkflow(DURABLE_SLEEP_MILLISECONDS);
+    const firstEngine = await createRunEngine({
+      storage,
+      runWorkflow,
+      recover: false,
+      startScheduler: false,
+    });
+
+    try {
+      const handle = await firstEngine.engine.start(
+        'agentRun',
+        { value: 7 },
+        { id: 'recoverable-services-run', services: { multiplier: 2 } },
+      );
+      void handle.result().catch(() => {});
+      for (let turn = 0; turn < 5; turn++) {
+        await yieldToPortableEventLoop();
+      }
+    } finally {
+      firstEngine.engine[Symbol.dispose]();
+    }
+
+    const seenWorkflowTypes: string[] = [];
+    const { engine } = await createRunEngine({
+      storage,
+      runWorkflow,
+      recover: false,
+      startScheduler: true,
+      resolveWorkflowServices: (info) => {
+        seenWorkflowTypes.push(info.workflowType);
+        return { status: 'available', services: { multiplier: 3 } };
+      },
+    });
+
+    try {
+      const handles = await engine.recoverAll();
+      expect(handles).toHaveLength(1);
+      expect(await handles[0]!.result()).toEqual({ multiplied: 21 });
+      expect(seenWorkflowTypes).toEqual(['agentRun']);
+    } finally {
+      engine[Symbol.dispose]();
+    }
+  });
+
+  it('fails a recovered services-backed agentRun when no service resolver is configured', async () => {
+    const storage = new MemoryStorage();
+    const runWorkflow = makeRecoverableServicesWorkflow(DURABLE_SLEEP_MILLISECONDS);
+    const firstEngine = await createRunEngine({
+      storage,
+      runWorkflow,
+      recover: false,
+      startScheduler: false,
+    });
+
+    try {
+      const handle = await firstEngine.engine.start(
+        'agentRun',
+        { value: 7 },
+        { id: 'unresolved-services-run', services: { multiplier: 2 } },
+      );
+      void handle.result().catch(() => {});
+      for (let turn = 0; turn < 5; turn++) {
+        await yieldToPortableEventLoop();
+      }
+    } finally {
+      firstEngine.engine[Symbol.dispose]();
+    }
+
+    const { engine } = await createRunEngine({
+      storage,
+      runWorkflow,
+      recover: false,
+      startScheduler: true,
+    });
+
+    try {
+      const handles = await engine.recoverAll();
+      expect(handles).toHaveLength(1);
+      try {
+        await handles[0]!.result();
+        throw new Error('expected recovered run to fail without services');
+      } catch (error) {
+        expect(error).toBeInstanceOf(Error);
+        expect((error as Error).message).toContain('has no configured workflow services resolver');
+      }
     } finally {
       engine[Symbol.dispose]();
     }
