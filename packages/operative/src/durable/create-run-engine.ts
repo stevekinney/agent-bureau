@@ -58,7 +58,7 @@ export interface CreateRunEngineOptions {
 
   /**
    * Arm Weft's durable-timer polling loop, independent of {@link recover}
-   * (Weft 0.6.0). `recover` decides *who drives `recoverAll`*; `startScheduler`
+   * in Weft. `recover` decides *who drives `recoverAll`*; `startScheduler`
    * decides *whether `ctx.sleep(...)` / `engine.schedule(...)` timers fire*. It
    * defaults to `recover !== false`, so the common in-process host keeps prior
    * behavior. A host that owns its own recovery — passing `recover: false` so it

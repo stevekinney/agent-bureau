@@ -1,5 +1,6 @@
 import {
   activity,
+  DEFAULT_POLL_INTERVAL_MS,
   workflow,
   type WorkflowLogRecord,
   type WorkflowStatus,
@@ -81,21 +82,17 @@ function makeRecoverableServicesWorkflow(sleepMilliseconds: number) {
     });
 }
 
-// Weft's durable-timer poller ticks on a fixed ~1000ms real-time interval
-// (pollIntervalMs default). A sleep due comfortably inside one poll cycle but
+// Weft's durable-timer poller ticks on its default real-time interval. A sleep
+// due comfortably inside one poll cycle but
 // past the inline-launch drain window is the discriminator: an ARMED poller fires
 // it within a cycle, while an UNARMED poller never does. Kept short so a poller
 // that DID arm cannot be mistaken for "just not due yet".
-const SCHEDULER_POLL_INTERVAL_MILLISECONDS = 1000;
 const DURABLE_SLEEP_MILLISECONDS = 50;
 // Wait past a full poll cycle (plus margin) before asserting a run stayed parked,
 // so an armed poller would provably have fired by now. The poll is a real-time
 // setInterval, not the inline-launch macrotask queue, so this interval is
 // reliable and not subject to the bun-test starvation this file otherwise guards.
-// This wall-clock wait is only necessary because Weft 0.6.0 exposes neither a
-// configurable poll interval nor a scheduler-started signal — tracked upstream as
-// weft task dfbaf26e; once either lands, these tests can drop the wait.
-const POLL_CYCLE_WAIT_MILLISECONDS = SCHEDULER_POLL_INTERVAL_MILLISECONDS + 500;
+const POLL_CYCLE_WAIT_MILLISECONDS = DEFAULT_POLL_INTERVAL_MS + 500;
 
 // Logged by makeSleepingWorkflow on the step BEFORE ctx.sleep. Observing it via
 // the onLog sink is positive proof the generator actually reached the sleep —
@@ -450,7 +447,7 @@ describe('createRunEngine', () => {
 
   it('fires durable ctx.sleep timers under recover:false when startScheduler:true (#590)', async () => {
     // The bureau owns recovery (recover:false) but still needs durable timers.
-    // Weft 0.6.0's startScheduler arms the poller independently of recover, so a
+    // Weft's startScheduler arms the poller independently of recover, so a
     // workflow parked on ctx.sleep resolves. This is the regression that proves
     // recover:false hosts can run timers — the whole reason #590 was filed.
     // A short sleep keeps the test fast; `result()` is awaited with no artificial

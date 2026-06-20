@@ -1,3 +1,5 @@
+import type { Message } from 'conversationalist';
+
 import type { PrepareStepHook } from './types';
 
 /**
@@ -40,7 +42,7 @@ export function createIdentityHook(options: CreateIdentityHookOptions): PrepareS
     // (handles reuse of the same hook across multiple run() calls)
     const messages = context.conversation.getMessages();
     const alreadyInjected = messages.some(
-      (message) => message.metadata && '_identityInjected' in message.metadata,
+      (message: Message) => message.metadata && '_identityInjected' in message.metadata,
     );
     if (alreadyInjected) return;
 
