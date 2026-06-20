@@ -63,7 +63,7 @@ The storage-backed provider writes skills under keys such as `skill:{name}:metad
 
 Use the static provider when you already have skill content in memory.
 
-```ts
+```typescript
 import {
   createSkillCatalogHook,
   createSkillSession,
@@ -93,7 +93,7 @@ In an agent loop, call `catalogHook.prepareStep(context)` on step 0 and inject t
 
 Use `scanDirectory()` when skills live on disk:
 
-```ts
+```typescript
 import { createStorageSkillProvider, scanDirectory } from 'skills';
 
 const provider = createStorageSkillProvider(textValueStore);
@@ -101,7 +101,9 @@ const provider = createStorageSkillProvider(textValueStore);
 const result = await scanDirectory('/path/to/skills', provider);
 
 if (result.errors.length > 0) {
-  console.error(result.errors);
+  for (const error of result.errors) {
+    process.stderr.write(String(error) + '\n');
+  }
 }
 ```
 
@@ -109,7 +111,7 @@ Each directory containing a `SKILL.md` becomes one skill. Other files in that sa
 
 Use `fetchFromRegistry()` when a registry serves skill files at `{baseUrl}/{name}/SKILL.md`:
 
-```ts
+```typescript
 import { fetchFromRegistry } from 'skills';
 
 await fetchFromRegistry({
@@ -150,16 +152,128 @@ The self-improvement helpers store proposed changes in durable storage and expos
 
 Accepting a skill proposal parses its content as `SKILL.md` and saves it through the configured `SkillProvider`. Rejecting a proposal records a content hash so the same content is not proposed again.
 
-## Public Entry Points
+## Package Structure
 
-- Parsing: `parseSkillMarkdown()`, `serializeSkillMarkdown()`, `isValidSkillName()`
-- Providers: `createStaticSkillProvider()`, `createStorageSkillProvider()`
-- Ingestion: `scanDirectory()`, `fetchFromRegistry()`
-- Runtime state: `createSkillSession()`
-- Runtime hooks: `createSkillCatalogHook()`, `createSkillMemoryHooks()`
-- Tools: `createSkillToolbox()`, `createActivateSkillTool()`, `createLoadSkillResourceTool()`, `createDeactivateSkillTool()`, `createListSkillsTool()`
-- Memory: `createSkillMemory()`
-- Proposals: `createProposalToolbox()`, `saveProposal()`, `acceptProposal()`, `rejectProposal()`, `listProposals()`
+### `skills` (root)
+
+The primary API covering providers, parsing, ingestion, sessions, hooks, tools, proposals, and all public types.
+
+```typescript
+import {
+  createSkillCatalogHook,
+  createSkillSession,
+  createSkillToolbox,
+  createStaticSkillProvider,
+  createStorageSkillProvider,
+  parseSkillMarkdown,
+  serializeSkillMarkdown,
+  isValidSkillName,
+  scanDirectory,
+  fetchFromRegistry,
+  createSkillMemory,
+  createSkillMemoryHooks,
+  createProposalToolbox,
+  saveProposal,
+  acceptProposal,
+  rejectProposal,
+  listProposals,
+} from 'skills';
+```
+
+**Parsing:**
+
+- **`parseSkillMarkdown(text)`**: Parses a `SKILL.md` string into a `SkillContent` object. Throws `SkillParseError` for invalid frontmatter or missing required fields.
+- **`serializeSkillMarkdown(content)`**: Serializes a `SkillContent` object back to a `SKILL.md` string.
+- **`isValidSkillName(name)`**: Returns `true` if the name matches the required kebab-case pattern (`SKILL_NAME_PATTERN`).
+
+**Providers:**
+
+- **`createStaticSkillProvider(skills?)`**: In-memory provider. Accepts an optional array of `SkillContent` values. Suitable for tests, local bundles, and browser contexts.
+- **`createStorageSkillProvider(store)`**: Storage-backed provider that persists skills under structured keys in a `TextValueStore`.
+
+**Ingestion:**
+
+- **`scanDirectory(path, provider, options?)`**: Recursively scans a directory for `SKILL.md` files and loads them into the provider. Returns a `ScanResult` with `loaded`, `skipped`, and `errors`.
+- **`fetchFromRegistry(options)`**: Fetches named skills from an HTTP registry by convention (`{baseUrl}/{name}/SKILL.md`) and saves them into the provider.
+
+**Session:**
+
+- **`createSkillSession()`**: Creates a `SkillSession` that tracks active skills and merges their tool policies (`allowed-tools`, `denied-tools`) across activations.
+
+**Hooks:**
+
+- **`createSkillCatalogHook(options)`**: Returns a `prepareStep` hook. On step 0 it renders `<available_skills>` XML into the conversation. Pass `{ provider, session? }`.
+- **`escapeXml(text)`**: Escapes characters that would break the `<available_skills>` XML block.
+
+**Tools:**
+
+- **`createSkillToolbox(options)`**: Creates a toolbox containing `activate_skill`, `load_skill_resource`, `deactivate_skill`, and `list_skills`.
+- **`createActivateSkillTool(options)`**: Creates just the `activate_skill` tool.
+- **`createLoadSkillResourceTool(options)`**: Creates just the `load_skill_resource` tool.
+- **`createDeactivateSkillTool(options)`**: Creates just the `deactivate_skill` tool.
+- **`createListSkillsTool(options)`**: Creates just the `list_skills` tool.
+- **`isSkillContent(value)`**: Type guard that returns `true` if a value conforms to `SkillContent`.
+
+**Memory:**
+
+- **`createSkillMemory(memory, skillName)`**: Wraps a `MemoryLike` to namespace all reads and writes under `skill:{skillName}:`.
+- **`createSkillMemoryHooks(options)`**: Returns a `{ prepareStep, onComplete }` hook pair that recalls and stores skill-specific memory.
+
+**Proposals:**
+
+- **`createProposalToolbox(options)`**: Creates a toolbox with `list_proposals`, `view_proposal`, `accept_proposal`, and `reject_proposal` tools.
+- **`createAcceptProposalTool(options)`**, **`createListProposalsTool(options)`**, **`createRejectProposalTool(options)`**, **`createViewProposalTool(options)`**: Create individual proposal tools.
+- **`saveProposal(store, content, options?)`**: Persists a skill proposal to storage.
+- **`acceptProposal(store, id, provider, options?)`**: Parses the proposal as `SKILL.md` and saves it through the provider.
+- **`rejectProposal(store, id, options?)`**: Records the proposal's content hash as rejected so duplicates are blocked.
+- **`listProposals(store, options?)`**: Returns all stored proposals.
+- **`getProposal(store, id)`**: Returns a single `Proposal` by ID, or `undefined`.
+- **`clearProposals(store)`**: Removes all proposals from storage.
+- **`isRejectedPattern(store, content)`**: Returns `true` if the content hash matches a previously rejected proposal.
+
+---
+
+### `skills/test`
+
+Testing utilities for code that depends on `SkillProvider`. Both exports are synchronous and require no filesystem or network access.
+
+```typescript
+import { createMockKeyValueStore, createMockSkillProvider } from 'skills/test';
+import { parseSkillMarkdown } from 'skills';
+
+// In-memory TextValueStore backed by Weft MemoryStorage—
+// drop-in replacement for production stores in unit tests.
+const store = createMockKeyValueStore();
+await store.set('hello', 'world');
+const value = await store.get('hello'); // 'world'
+
+// Mock SkillProvider with full call tracking
+const provider = createMockSkillProvider([
+  parseSkillMarkdown(`---
+name: code-review
+description: Review code.
+---
+Body here.
+`),
+]);
+
+const catalog = await provider.listSkills();
+// [{ name: 'code-review', description: 'Review code.' }]
+
+const skill = await provider.loadSkill('code-review');
+// { metadata: { name: 'code-review', ... }, body: 'Body here.' }
+
+// Inspect every method call for assertions
+const calls = provider.calls;
+// [{ method: 'listSkills', args: [] }, { method: 'loadSkill', args: ['code-review'] }]
+```
+
+**Key exports:**
+
+- **`createMockKeyValueStore()`**: Returns a `TextValueStore` backed by Weft's `MemoryStorage`. All `TextValueStore` methods (`get`, `set`, `delete`, `list`, etc.) work synchronously after construction.
+- **`createMockSkillProvider(initialSkills?)`**: Returns a `SkillProvider` plus a `calls` array. Every method call—`listSkills`, `loadSkill`, `saveSkill`, `deleteSkill`, `listResources`, `loadResource`, `saveResource`, `isEnabled`, `setEnabled`—is logged to `calls` as `{ method, args }`.
+
+---
 
 ## Development
 

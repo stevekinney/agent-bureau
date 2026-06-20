@@ -21,13 +21,214 @@
 
 The other packages can be used as libraries. `gateway` is the integrated application surface that proves those libraries work together as a service. Product features such as live runs, session history, scheduler controls, and browser navigation belong here, while reusable runtime logic stays in the lower-level packages.
 
-## Public Entry Points
+## Quick Start
 
-- `createGateway(options)`: create the HTTP application and startable server.
-- `createBureau(options)`: compose the runtime without starting the HTTP server.
-- `resolveGenerate(configuration)`: resolve provider configuration into a generate function.
-- `serializeRunState()`: convert internal run state into API-safe state.
-- Gateway and Bureau types from `gateway`.
+### Starting the HTTP server
+
+```typescript
+import { createGateway } from './src/index';
+
+const gateway = await createGateway({
+  provider: {
+    provider: 'anthropic',
+    model: 'claude-opus-4-5',
+    apiKey: process.env.ANTHROPIC_API_KEY,
+  },
+  systemPrompt: 'You are a helpful assistant.',
+  port: 5555,
+});
+
+const server = await gateway.start();
+
+// Shut down cleanly
+server.stop();
+```
+
+`createGateway()` auto-detects the runtime (`'bun'` when `typeof Bun !== 'undefined'`, `'node'` otherwise). The default port is `5555`. Pass `authToken` to require a bearer token on every request.
+
+### Running the bureau without HTTP
+
+Use `createBureau()` directly when you want the runtime but not the HTTP layer—useful for embedding in another server or running offline.
+
+```typescript
+import { createBureau } from './src/index';
+
+const bureau = await createBureau({
+  provider: { provider: 'openai', model: 'gpt-4o', apiKey: process.env.OPENAI_API_KEY },
+  maximumSteps: 10,
+  systemPrompt: 'You are a coding assistant.',
+});
+
+// Dispatch a run
+const summary = await bureau.createRun({ message: 'Explain closures in JavaScript.' });
+// summary: { id, sessionId, status, steps, usage, finishReason, ... }
+
+// Subscribe to live frames
+const unsubscribe = bureau.subscribeLiveFrames((frame) => {
+  // frame.type: 'event' | 'stream:text-delta' | 'scheduler.state' | ...
+  void frame;
+});
+
+bureau.dispose();
+```
+
+### Resolving a generate function from provider config
+
+`resolveGenerate()` is the thin bridge between a `ProviderConfiguration` object and a `GenerateFunction`. The gateway uses it internally; call it directly when you need a bare generate function outside of a full bureau composition.
+
+```typescript
+import { resolveGenerate } from './src/index';
+
+const generate = resolveGenerate({
+  provider: 'gemini',
+  model: 'gemini-2.0-flash',
+  apiKey: process.env.GEMINI_API_KEY,
+});
+```
+
+### Serializing run state
+
+`serializeRunState()` converts an internal `RunState` (which holds live objects) into the JSON-safe `RunSummary` DTO used by the REST API. Call it when you hold a `RunState` from `operative/store` and need a wire-safe representation.
+
+```typescript
+import { serializeRunState } from './src/index';
+
+const summary = serializeRunState(runState, sessionId);
+// { id, sessionId, status, steps, usage, finishReason, error, actionCount }
+```
+
+### Durable execution with SQLite
+
+Pass `storage` to enable checkpoint-based recovery. Durable execution is on by default whenever a persistent backend is configured.
+
+```typescript
+import { createGateway } from './src/index';
+
+const gateway = await createGateway({
+  provider: { provider: 'anthropic', model: 'claude-opus-4-5' },
+  storage: { type: 'sqlite', path: './bureau.db' },
+  // durableExecution defaults to true for sqlite/lmdb; override with false to disable
+});
+
+const server = await gateway.start();
+```
+
+## Public API
+
+### `createGateway(options?): Promise<Gateway>`
+
+Creates the Hono application, wires all middleware and routes, and returns a `Gateway` handle. The server is **not** started until you call `gateway.start()`.
+
+```typescript
+interface GatewayOptions extends BureauOptions {
+  port?: number; // default: 5555
+  hostname?: string;
+  authToken?: string; // bearer token required on every request when set
+  runtime?: 'bun' | 'node'; // default: auto-detected
+}
+
+interface Gateway {
+  readonly app: Hono;
+  readonly bureau: Bureau;
+  readonly store: Store;
+  readonly port: number;
+  start(): Promise<{ stop(): void }>;
+}
+```
+
+### `createBureau(options?): Promise<Bureau>`
+
+Composes the runtime without the HTTP layer. All `BureauOptions` fields are optional—the bureau starts with no provider configured when `generate`, `provider`, and `providers` are all omitted (`bureau.ready` returns `false`).
+
+```typescript
+interface BureauOptions {
+  generate?: GenerateFunction;
+  provider?: ProviderConfiguration; // single provider
+  providers?: ProviderRouteConfiguration[]; // multi-provider routing
+  routing?: RoutingConfiguration; // step-based, complexity, or cost-aware
+  toolbox?: Toolbox;
+  store?: Store; // default: in-memory store
+  persistence?: TextValueStore; // KV-only session storage
+  storage?: StorageConfiguration; // sqlite | lmdb | memory (+ durable engine)
+  durableExecution?: boolean; // default: true for sqlite/lmdb, false otherwise
+  memory?: CreateMemoryOptions | Memory;
+  cache?: CacheConfiguration;
+  guardrails?: GuardrailsOptions;
+  skills?: SkillRuntimeConfiguration;
+  streaming?: StreamingConfiguration;
+  scheduler?: SchedulerConfiguration;
+  systemPrompt?: string;
+  maximumSteps?: number; // default: 10
+  stopWhen?: StopCondition | StopCondition[];
+  observability?: boolean | ObservabilityOptions;
+  onLog?: (record: WorkflowLogRecord) => void;
+  durableGuardrails?: DurableGuardrailsConfiguration;
+}
+```
+
+Key `Bureau` methods:
+
+| Method                    | Returns                              | Description                        |
+| ------------------------- | ------------------------------------ | ---------------------------------- |
+| `createRun(request)`      | `Promise<RunSummary>`                | Dispatch a new agent run           |
+| `listRuns(status?)`       | `RunSummary[]`                       | List active or filtered runs       |
+| `getRun(id)`              | `RunDetail \| undefined`             | Fetch full run detail              |
+| `abortRun(id)`            | `RunSummary`                         | Abort an in-flight run             |
+| `deleteRun(id)`           | `void`                               | Remove a completed run             |
+| `listSessions()`          | `Promise<SessionSummary[]>`          | List persisted sessions            |
+| `getSession(id)`          | `Promise<AgentSession \| undefined>` | Load a session by id               |
+| `getConfiguration()`      | `ConfigurationResponse`              | Current provider and tool config   |
+| `subscribeLiveFrames(fn)` | `() => void`                         | Subscribe to live WebSocket frames |
+| `dispose()`               | `void`                               | Tear down the runtime              |
+
+### `resolveGenerate(configuration): GenerateFunction`
+
+Maps a `ProviderConfiguration` to a generate function from `herald`. Supports `'anthropic'`, `'openai'`, and `'gemini'`.
+
+```typescript
+interface ProviderConfiguration {
+  provider: 'anthropic' | 'openai' | 'gemini';
+  model: string;
+  maximumTokens?: number;
+  temperature?: number;
+  apiKey?: string;
+}
+```
+
+### `serializeRunState(runState, sessionId?): RunSummary`
+
+Converts a live `RunState` to the JSON-safe `RunSummary` DTO. Strips non-serializable objects (`Conversation`, `ActiveRun`) and normalizes errors to strings.
+
+```typescript
+interface RunSummary {
+  id: string;
+  sessionId: string;
+  status: string;
+  steps: number;
+  usage: { prompt: number; completion: number; total: number };
+  finishReason: string | undefined;
+  error: string | undefined;
+  actionCount: number;
+}
+```
+
+### Constants
+
+| Export                  | Value  | Description                   |
+| ----------------------- | ------ | ----------------------------- |
+| `DEFAULT_PORT`          | `5555` | Default HTTP port             |
+| `DEFAULT_MAXIMUM_STEPS` | `10`   | Default agentic loop step cap |
+
+### Events
+
+The `Bureau` emits typed events through its `CompletableEventTarget` interface.
+
+| Event class           | Fires when                                             |
+| --------------------- | ------------------------------------------------------ |
+| `ActionEvent`         | A run action (step, tool call, completion) is recorded |
+| `RunRegisteredEvent`  | A new run is registered with the store                 |
+| `RunRemovedEvent`     | A run is removed from the store                        |
+| `BureauDisposedEvent` | `bureau.dispose()` is called                           |
 
 ## Development
 
