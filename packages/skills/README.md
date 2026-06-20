@@ -221,7 +221,7 @@ import {
 
 **Proposals:**
 
-- **`createProposalToolbox(options)`**: Creates a toolbox with `list_proposals`, `view_proposal`, `accept_proposal`, and `reject_proposal` tools.
+- **`createProposalToolbox(options)`**: Returns a plain object of four `Tool` instances — `{ listProposals, viewProposal, acceptProposal, rejectProposal }` (the `list_proposals`, `view_proposal`, `accept_proposal`, and `reject_proposal` tools). Like `createSkillToolbox`, it is not an armorer `Toolbox`; spread the tools into `createToolbox([...])` to build one.
 - **`createAcceptProposalTool(options)`**, **`createListProposalsTool(options)`**, **`createRejectProposalTool(options)`**, **`createViewProposalTool(options)`**: Create individual proposal tools.
 - **`saveProposal(store, content, options?)`**: Persists a skill proposal to storage.
 - **`acceptProposal(store, id, provider, options?)`**: Parses the proposal as `SKILL.md` and saves it through the provider.

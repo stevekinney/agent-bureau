@@ -212,6 +212,7 @@ Returns an `ActiveRun` — the event-emitting entry point. Attach listeners befo
 | ------------------------------------- | ------------------------------------------------------ |
 | `result: Promise<RunResult>`          | Resolves when the loop completes.                      |
 | `abort(reason?)`                      | Cancels the loop immediately.                          |
+| `complete()`                          | Completes the event stream without aborting the loop.  |
 | `addEventListener(type, listener)`    | Standard `EventTarget` listener.                       |
 | `removeEventListener(type, listener)` | Removes a listener.                                    |
 | `on(type)`                            | Returns an `ObservableLike` stream for the event type. |
@@ -698,7 +699,18 @@ const agent = defineAgent({
 #### Memory Bridge
 
 ```typescript
-import { createMemoryBridge, createScratchpad } from 'operative';
+import {
+  createMemoryBridge,
+  createScratchpad,
+  createScratchpadReadTool,
+  createScratchpadWriteTool,
+  defineAgent,
+} from 'operative';
+import { createToolbox } from 'armorer';
+import type { GenerateFunction, MemoryLike } from 'operative';
+
+declare const generate: GenerateFunction;
+declare const myMemoryAdapter: MemoryLike;
 
 // operative never imports the memory package directly — supply a MemoryLike adapter.
 // createMemoryBridge returns { prepareStep, onStep }.
