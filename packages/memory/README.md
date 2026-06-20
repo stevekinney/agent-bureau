@@ -39,20 +39,15 @@ The storage contract is intentionally lower-level than the public memory API. Ba
 
 ## Quick Start
 
+`createMemory()` needs two things: an **embedder** (any function mapping strings to float vectors) and a **storage backend**. This Quick Start uses the deterministic test embedder and the in-memory backend from `memory/test` so it runs with no provider or runtime wiring:
+
 ```typescript
 import { createMemory } from 'memory';
-import { createWeftMemoryRecordStorage } from 'memory';
+import { createInMemoryMemoryRecordStorage, createMockEmbedder } from 'memory/test';
 
-// Provide an embedder — any function that maps strings to float vectors.
-// In production, wire this to your model provider's embedding endpoint.
-const embedder = async (texts: string[]) => {
-  // e.g. call OpenAI's text-embedding-3-small
-  return texts.map(() => new Array(1536).fill(0)); // placeholder
-};
-
-// Wire up the Weft-backed storage (requires a Weft Storage instance
-// from the operative/gateway runtime).
-const storage = createWeftMemoryRecordStorage(weftStorage);
+// Deterministic, unit-normalized, hash-based vectors — no network calls.
+const embedder = createMockEmbedder(128);
+const storage = createInMemoryMemoryRecordStorage();
 
 const memory = createMemory({ embedder, storage });
 await memory.init();
@@ -67,15 +62,19 @@ const results = await memory.recall('How should I format responses?');
 await memory.close();
 ```
 
-For tests and local development, swap in the in-memory backend from `memory/test`:
+For production, supply a real embedder (your model provider's embedding endpoint) and the durable Weft-backed storage instead of the test doubles:
 
 ```typescript
-import { createInMemoryMemoryRecordStorage, createMockEmbedder } from 'memory/test';
+import { createMemory, createWeftMemoryRecordStorage } from 'memory';
 
-const storage = createInMemoryMemoryRecordStorage();
-const embedder = createMockEmbedder(128); // deterministic, hash-based
+// Wire this to your provider — e.g. OpenAI's text-embedding-3-small (1536 dims).
+const embedder = async (texts: string[]): Promise<number[][]> => embedProvider(texts);
+
+// `weftStorage` is a Weft Storage instance from the operative/gateway runtime.
+const storage = createWeftMemoryRecordStorage(weftStorage);
 
 const memory = createMemory({ embedder, storage });
+await memory.init();
 ```
 
 ---

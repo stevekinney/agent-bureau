@@ -34,17 +34,21 @@ export class MemoryDurableObject {
 
   constructor(
     private readonly ctx: DurableObjectState,
-    private readonly env: { MEMORY_INDEX: VectorizeIndex },
+    private readonly env: {
+      MEMORY_INDEX: VectorizeIndex;
+      embed: (texts: string[]) => Promise<number[][]>;
+    },
   ) {
     const storage = createCloudflareMemoryRecordStorage({
       sql: ctx.storage.sql,
       vectorize: env.MEMORY_INDEX,
     });
-    this.memory = createMemory({ storage });
+    // `createMemory` requires both an embedder and a storage backend.
+    this.memory = createMemory({ embedder: env.embed, storage });
   }
 
   async fetch(request: Request): Promise<Response> {
-    await this.memory.storage.init(); // creates table on first request
+    await this.memory.init(); // creates the SQLite table on first request
     // ...use this.memory...
     return new Response('ok');
   }

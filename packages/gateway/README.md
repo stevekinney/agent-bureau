@@ -26,7 +26,7 @@ The other packages can be used as libraries. `gateway` is the integrated applica
 ### Starting the HTTP server
 
 ```typescript
-import { createGateway } from './src/index';
+import { createGateway } from 'gateway';
 
 const gateway = await createGateway({
   provider: {
@@ -51,7 +51,7 @@ server.stop();
 Use `createBureau()` directly when you want the runtime but not the HTTP layer—useful for embedding in another server or running offline.
 
 ```typescript
-import { createBureau } from './src/index';
+import { createBureau } from 'gateway';
 
 const bureau = await createBureau({
   provider: { provider: 'openai', model: 'gpt-4o', apiKey: process.env.OPENAI_API_KEY },
@@ -77,7 +77,7 @@ bureau.dispose();
 `resolveGenerate()` is the thin bridge between a `ProviderConfiguration` object and a `GenerateFunction`. The gateway uses it internally; call it directly when you need a bare generate function outside of a full bureau composition.
 
 ```typescript
-import { resolveGenerate } from './src/index';
+import { resolveGenerate } from 'gateway';
 
 const generate = resolveGenerate({
   provider: 'gemini',
@@ -91,7 +91,7 @@ const generate = resolveGenerate({
 `serializeRunState()` converts an internal `RunState` (which holds live objects) into the JSON-safe `RunSummary` DTO used by the REST API. Call it when you hold a `RunState` from `operative/store` and need a wire-safe representation.
 
 ```typescript
-import { serializeRunState } from './src/index';
+import { serializeRunState } from 'gateway';
 
 const summary = serializeRunState(runState, sessionId);
 // { id, sessionId, status, steps, usage, finishReason, error, actionCount }
@@ -102,7 +102,7 @@ const summary = serializeRunState(runState, sessionId);
 Pass `storage` to enable checkpoint-based recovery. Durable execution is on by default whenever a persistent backend is configured.
 
 ```typescript
-import { createGateway } from './src/index';
+import { createGateway } from 'gateway';
 
 const gateway = await createGateway({
   provider: { provider: 'anthropic', model: 'claude-opus-4-5' },

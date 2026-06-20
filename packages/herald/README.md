@@ -137,11 +137,12 @@ import { run } from 'operative';
 // Standard OpenAI
 const generate = createOpenAIGenerate({ model: 'gpt-4o' });
 
-// OpenAI-compatible local model
+// OpenAI-compatible local model — a local server ignores the key, but read it
+// from the environment so the example never normalizes a fake secret literal.
 const localGenerate = createOpenAIGenerate({
   model: 'llama-3.2-3b-instruct',
   baseURL: 'http://localhost:1234/v1',
-  apiKey: 'not-needed',
+  apiKey: process.env.OPENAI_COMPATIBLE_API_KEY ?? 'local-development-only',
 });
 
 const result = await run({ generate, prompt: 'List three prime numbers.' });
