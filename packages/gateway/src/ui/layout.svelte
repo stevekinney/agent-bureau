@@ -3,6 +3,7 @@
 
   import { SideNavigation } from '@lostgradient/cinder/side-navigation';
   import { SideNavigationItem } from '@lostgradient/cinder/side-navigation-item';
+  import { SkipLink } from '@lostgradient/cinder/skip-link';
 
   import ConnectionIndicator from './components/connection-indicator.svelte';
   import type { ConnectionStatus } from './hooks/use-websocket.svelte';
@@ -43,6 +44,7 @@
 </script>
 
 <div class="layout">
+  <SkipLink target="main-content" />
   <SideNavigation ariaLabel="Primary navigation" class="sidebar">
     <li class="sidebar-title">Agent Bureau</li>
     {#each navigationLinks as link (link.href)}
@@ -54,7 +56,7 @@
       <ConnectionIndicator status={connectionStatus} />
     </li>
   </SideNavigation>
-  <div class="main-content">
+  <div id="main-content" class="main-content" tabindex="-1">
     {@render children()}
   </div>
 </div>

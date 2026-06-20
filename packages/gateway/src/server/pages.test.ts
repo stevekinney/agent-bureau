@@ -52,6 +52,9 @@ describe('SSR pages', () => {
     // The Svelte app actually rendered into #root server-side, not just the
     // empty shell.
     expect(extractRootMarkup(html).trim().length).toBeGreaterThan(0);
+    expect(html).toContain('href="#main-content"');
+    expect(html).toContain('id="main-content"');
+    expect(html).toContain('tabindex="-1"');
 
     const data = extractInitialData(html);
     expect(data).toHaveProperty('runs');
