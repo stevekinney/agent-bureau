@@ -53,7 +53,7 @@ bun run build
 
 ### `herald` — Main entry point
 
-Re-exports everything from all subpath modules. Use this when you want a single import for multiple providers or utilities.
+Re-exports the provider, fallover, routing, embedding, and streaming subpaths. Use this when you want a single import for multiple providers or utilities. The exception is `herald/instrumentation` (`instrument` and its option types), which is only available from its own subpath.
 
 **Exported values:** `createAnthropicGenerate`, `createAnthropicGenerateStream`, `createOpenAIGenerate`, `createOpenAIGenerateStream`, `createGeminiGenerate`, `createGeminiGenerateStream`, `createFalloverGenerate`, `FalloverExhaustedError`, `classifyProviderError`, `createProviderHealthTracker`, `createRoutingGenerate`, `createStepBasedStrategy`, `createComplexityStrategy`, `createCostAwareStrategy`, `composeStrategies`, `extractComplexitySignals`, `withRoutingMetrics`, `createOpenAIEmbedder`, `createGeminiEmbedder`, `createVoyageEmbedder`, `createOllamaEmbedder`, `normalizeAnthropicStream`, `normalizeOpenAIStream`, `toOpenAIResponseFormat`, `toGeminiResponseFormat`, `toAnthropicToolChoice`, `toOpenAIToolChoice`, `toGeminiToolChoice`, `HeraldError`, `shouldRetryHeraldError`.
 
@@ -257,6 +257,9 @@ type InstrumentationOptions = {
   tracerName?: string; // defaults to 'herald'
   tracerVersion?: string; // defaults to '0.0.0'
 };
+
+// `options` is a single object satisfying both types:
+//   instrument(fn, options: InstrumentableGenerateOptions & InstrumentationOptions)
 ```
 
 ```typescript
@@ -323,7 +326,7 @@ import { createGeminiEmbedder } from 'herald/embeddings/gemini';
 ```typescript
 interface GeminiEmbedderOptions {
   client?: GeminiEmbeddingClient; // inject a pre-built GoogleGenerativeAI instance (or mock)
-  apiKey?: string; // falls back to GEMINI_API_KEY
+  apiKey?: string; // required when no client is provided — no env var fallback
   model?: string; // default: 'gemini-embedding-001'
 }
 ```
@@ -455,7 +458,7 @@ Classifies an arbitrary SDK error into `'auth' | 'rate-limit' | 'server-error' |
 
 **`FalloverExhaustedError`**
 
-Thrown when all providers have been tried and failed. Contains an `errors` array of `{ provider: string; error: unknown }` entries.
+Thrown when all providers have been tried and failed. Contains an `errors` array of `{ provider: string; error: unknown }` entries, plus `lastError: unknown` pointing to the final provider's raw error.
 
 ```typescript
 import { createAnthropicGenerate } from 'herald/anthropic';
@@ -540,7 +543,7 @@ type StepBasedStrategyOptions = {
 
 **`createComplexityStrategy(options: ComplexityStrategyOptions): RoutingStrategy`**
 
-Scores the conversation context and routes to `simple`, `complex`, or `frontier` models. The default heuristic routes to `frontier` when `toolCount > 10`, `lastMessageLength > 2000`, or `conversationDepth > 20`; to `simple` when all are below 3/500/5; to `complex` otherwise.
+Scores the conversation context and routes to `simple`, `complex`, or `frontier` models. The default heuristic routes to `frontier` when `toolCount > 10`, `lastMessageLength > 2000`, or `conversationDepth > 20`; to `simple` when `toolCount < 3`, `lastMessageLength < 500`, no code content is detected, and `conversationDepth < 5`; to `complex` otherwise.
 
 ```typescript
 type ComplexityStrategyOptions = {
@@ -667,7 +670,7 @@ Mock clients inject pre-queued responses without making real API calls. Every ca
 
 **`createMockAnthropicClient(responses: AnthropicMessageResponse[], errors?: Error[]): MockAnthropicClient`**
 
-Returns responses in queue order. When `errors` is provided, throws each error in sequence before the corresponding response.
+Returns responses in queue order. When `errors` is provided, all queued errors are thrown first (one per call) until exhausted, then responses are returned.
 
 **`createMockOpenAIClient(responses: OpenAIChatCompletion[], errors?: Error[]): MockOpenAIClient`**
 

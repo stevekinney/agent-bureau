@@ -23,6 +23,9 @@ The other packages can be used as libraries. `gateway` is the integrated applica
 
 ## Quick Start
 
+> [!NOTE]
+> `gateway` is a private application package (`"private": true`, no `exports` map). The `gateway` import specifier in these examples is the monorepo workspace name, resolved via `workspace:*` — it is not published to npm and is not importable outside this repository.
+
 ### Starting the HTTP server
 
 ```typescript
@@ -160,7 +163,7 @@ interface BureauOptions {
   systemPrompt?: string;
   maximumSteps?: number; // default: 10
   stopWhen?: StopCondition | StopCondition[];
-  observability?: boolean | ObservabilityOptions;
+  observability?: boolean | Omit<ObservabilityOptions, 'eventTarget'>; // eventTarget is injected by the engine
   onLog?: (record: WorkflowLogRecord) => void;
   durableGuardrails?: DurableGuardrailsConfiguration;
 }
@@ -168,26 +171,32 @@ interface BureauOptions {
 
 Key `Bureau` methods:
 
-| Method                    | Returns                              | Description                        |
-| ------------------------- | ------------------------------------ | ---------------------------------- |
-| `createRun(request)`      | `Promise<RunSummary>`                | Dispatch a new agent run           |
-| `listRuns(status?)`       | `RunSummary[]`                       | List active or filtered runs       |
-| `getRun(id)`              | `RunDetail \| undefined`             | Fetch full run detail              |
-| `abortRun(id)`            | `RunSummary`                         | Abort an in-flight run             |
-| `deleteRun(id)`           | `void`                               | Remove a completed run             |
-| `listSessions()`          | `Promise<SessionSummary[]>`          | List persisted sessions            |
-| `getSession(id)`          | `Promise<AgentSession \| undefined>` | Load a session by id               |
-| `getConfiguration()`      | `ConfigurationResponse`              | Current provider and tool config   |
-| `subscribeLiveFrames(fn)` | `() => void`                         | Subscribe to live WebSocket frames |
-| `dispose()`               | `void`                               | Tear down the runtime              |
+| Method                     | Returns                                       | Description                        |
+| -------------------------- | --------------------------------------------- | ---------------------------------- |
+| `createRun(request)`       | `Promise<RunSummary>`                         | Dispatch a new agent run           |
+| `listRuns(status?)`        | `RunSummary[]`                                | List active or filtered runs       |
+| `getRun(id)`               | `RunDetail \| undefined`                      | Fetch full run detail              |
+| `abortRun(id)`             | `RunSummary`                                  | Abort an in-flight run             |
+| `deleteRun(id)`            | `void`                                        | Remove a completed run             |
+| `listSessions()`           | `Promise<SessionSummary[]>`                   | List persisted sessions            |
+| `getSession(id)`           | `Promise<AgentSession \| undefined>`          | Load a session by id               |
+| `getConfiguration()`       | `ConfigurationResponse`                       | Current provider and tool config   |
+| `submitSchedulerTask(req)` | `Promise<SubmitSchedulerTaskResponse>`        | Queue a background scheduler task  |
+| `deleteSession(id)`        | `Promise<void>`                               | Remove a persisted session         |
+| `getDurableRun(runId)`     | `Promise<WorkflowState \| null \| undefined>` | Fetch durable run state            |
+| `listDurableRuns(...)`     | `Promise<...>`                                | List durable runs                  |
+| `getTools()`               | `ToolSummary[]`                               | List the configured tools          |
+| `subscribeLiveFrames(fn)`  | `() => void`                                  | Subscribe to live WebSocket frames |
+| `ready`                    | `boolean`                                     | Whether the runtime is initialized |
+| `dispose()`                | `void`                                        | Tear down the runtime              |
 
 ### `resolveGenerate(configuration): GenerateFunction`
 
-Maps a `ProviderConfiguration` to a generate function from `herald`. Supports `'anthropic'`, `'openai'`, and `'gemini'`.
+Maps a `ProviderConfiguration` to a generate function from `herald`. Supports `'anthropic'`, `'openai'`, `'gemini'`, `'voyage'`, and `'ollama'` (herald's full `ProviderName` set).
 
 ```typescript
 interface ProviderConfiguration {
-  provider: 'anthropic' | 'openai' | 'gemini';
+  provider: 'anthropic' | 'openai' | 'gemini' | 'voyage' | 'ollama';
   model: string;
   maximumTokens?: number;
   temperature?: number;

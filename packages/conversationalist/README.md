@@ -137,8 +137,8 @@ import type {
 const conversation = new Conversation();
 conversation.appendUserMessage('Hello');
 
-const undoResult = conversation.undo();
-if (undoResult.ok) {
+const previous = conversation.undo(); // ConversationHistory | undefined
+if (previous) {
   console.log('Undone');
 }
 
@@ -341,7 +341,7 @@ import {
   redactPii,
 } from 'conversationalist/redaction';
 
-// Use the pre-built default plugin (redacts emails, phone numbers, SSNs, credit cards)
+// Use the pre-built default plugin (redacts emails, phone numbers, and API keys/secrets)
 const conversation = new Conversation(history, {
   plugins: [redactPii],
 });
@@ -529,14 +529,18 @@ import {
   createTestInstructionContext,
 } from 'conversationalist/test';
 
-// Deterministic clock + ID generator—no random values in snapshots
+// Deterministic clock + ID generator—no random values in snapshots.
+// `now` returns an ISO string; `identifiers` supplies the deterministic id sequence.
 const env = createTestConversationEnvironment({
-  now: () => new Date('2024-01-01T00:00:00.000Z'),
-  seed: 0,
+  now: () => '2024-01-01T00:00:00.000Z',
+  identifiers: ['id-1', 'id-2', 'id-3'],
 });
 
-// Pre-populated test conversation in the deterministic environment
-const conversation = createTestConversation(env);
+// Test conversation in a deterministic environment. The first argument is an
+// optional initial ConversationHistory; the second is the same options object.
+const conversation = createTestConversation(undefined, {
+  now: () => '2024-01-01T00:00:00.000Z',
+});
 
 // Collect all events emitted during a test
 const recorder = createConversationRecorder(conversation);

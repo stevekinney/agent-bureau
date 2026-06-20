@@ -22,6 +22,9 @@ The `memory` package owns the memory API and retrieval behavior. `cloudflare` ow
 
 ## Quick Start
 
+> [!NOTE]
+> This is a private, monorepo-internal package named `cloudflare` and resolved via `workspace:*`. The `cloudflare` import specifier below refers to it — not the public `cloudflare` npm package (Cloudflare's official SDK), which is unrelated and has a different API.
+
 Wire the storage adapter into `memory.createMemory()` inside a Cloudflare Worker. The `sql` binding is `ctx.storage.sql` from your Durable Object; the `vectorize` binding comes from your Worker's env.
 
 ```typescript
@@ -110,7 +113,7 @@ interface CreateCloudflareMemoryRecordStorageOptions {
   /**
    * SQLite table name. Defaults to `'memory_records'` (`DEFAULT_MEMORY_TABLE_NAME`).
    * Provide a custom name when multiple logical stores share one Durable Object.
-   * Must be a valid SQL identifier (letters, digits, underscore; not starting with a digit).
+   * Must be a valid SQL identifier (letters, digits, underscore; must start with a letter or underscore, not a digit).
    */
   tableName?: string;
 }
@@ -219,7 +222,8 @@ function createCloudflareMemoryTestHarness(
 ): CloudflareMemoryTestHarness;
 
 interface CloudflareMemoryTestHarness {
-  /** The backend under test, wired to `sql` and `vectorize`. */
+  /** The backend under test, wired to `sql` and `vectorize`.
+   *  `MemoryRecordStorage` is the contract type from the `memory` package. */
   storage: MemoryRecordStorage;
   /** The bun:sqlite-backed canonical store double. */
   sql: SqliteDouble;
@@ -304,7 +308,7 @@ interface FakeVectorize extends VectorizeIndex {
   readonly queryCalls: RecordedQuery[];
   /** Every deleteByIds call's id list, in order. */
   readonly deleteCalls: string[][];
-  /** Flat ordered log of mutating call kinds ('upsert' | 'query' | 'delete'). */
+  /** Flat ordered log of all call kinds ('upsert' | 'query' | 'delete'), in invocation order. */
   readonly callLog: ReadonlyArray<'upsert' | 'query' | 'delete'>;
   /**
    * Splice poison hits into the front of the NEXT query result.

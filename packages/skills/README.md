@@ -87,7 +87,7 @@ const catalogHook = createSkillCatalogHook({ provider });
 const skillTools = createSkillToolbox({ provider, session });
 ```
 
-In an agent loop, call `catalogHook.prepareStep(context)` on step 0 and inject the returned string into the conversation. `createSkillToolbox` returns a plain object of four `Tool` instances, so spread them into your toolbox — `createToolbox([...Object.values(skillTools)])` — so the agent can activate skills and load resources when the catalog says one is relevant.
+In an agent loop, call `catalogHook.prepareStep(context)` on step 0; it returns `string | undefined` (`undefined` when no skills are available or the provider errors), so inject the value only when it is defined. `createSkillToolbox` returns a plain object of four `Tool` instances, so spread them into your toolbox — `createToolbox([...Object.values(skillTools)])` — so the agent can activate skills and load resources when the catalog says one is relevant.
 
 ## Ingesting Skills
 

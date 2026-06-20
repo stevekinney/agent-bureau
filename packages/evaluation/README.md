@@ -240,15 +240,29 @@ const { score, reasoning } = await judge(
 // score: 4, reasoning: 'Accurate and reasonably complete...'
 ```
 
-The result can be wired into an `EvaluationCase` via the `assert` callback:
+The `assert` callback is **synchronous** — `(result: RunResult) => EvaluationAssertion` — so it cannot `await` an LLM judge directly. Use it for deterministic checks on the run result:
 
 ```typescript
-const case: EvaluationCase = {
+const factualCase: EvaluationCase = {
+  name: 'mentions-types',
+  input: 'Explain TypeScript in one sentence.',
+  assert: (runResult) => ({
+    pass: runResult.content.toLowerCase().includes('type'),
+    score: runResult.content.length > 0 ? 1 : 0,
+  }),
+};
+```
+
+For LLM-based scoring inside a suite, wire the judge through a semantic `expectedOutput` matcher instead, which the runner evaluates asynchronously:
+
+```typescript
+const semanticCase: EvaluationCase = {
   name: 'factual-accuracy',
   input: 'Explain TypeScript in one sentence.',
-  assert: async (runResult) => {
-    const { score } = await judge('Explain TypeScript in one sentence.', runResult.content);
-    return { pass: score >= 3, score: (score - 1) / 4 };
+  expectedOutput: {
+    type: 'semantic',
+    reference: 'TypeScript is a typed superset of JavaScript.',
+    threshold: 0.8,
   },
 };
 ```
