@@ -7,9 +7,13 @@ import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
 import { createToolbox } from 'armorer';
 import { afterEach, describe, expect, it } from 'bun:test';
 import { Conversation, createConversationHistory } from 'conversationalist';
-import type { GenerateFunction } from 'operative';
-import { stopWhen } from 'operative';
-import { createDurableActiveRun } from 'operative/durable';
+import type { GenerateFunction, SessionStore } from 'operative';
+import { createAgentSession, stopWhen } from 'operative';
+import {
+  createDurableActiveRun,
+  SCHEDULER_ORIGIN_TAG,
+  startDurableRunResult,
+} from 'operative/durable';
 
 import { createRuntimeComposition } from './runtime-composition';
 import type { ProviderConfiguration } from './types';
@@ -35,6 +39,29 @@ function createGenerateForProvider(provider: ProviderConfiguration): GenerateFun
       },
     };
   };
+}
+
+async function pollUntil(check: () => boolean | Promise<boolean>, attempts = 20): Promise<boolean> {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    if (await check()) return true;
+    await yieldToPortableEventLoop();
+  }
+  return false;
+}
+
+async function saveRecoverableSession(sessionStore: SessionStore, runId: string): Promise<void> {
+  await sessionStore.save(
+    createAgentSession({
+      id: runId,
+      agentName: 'test-agent',
+      conversationHistory: createConversationHistory(),
+      metadata: {
+        lastRunId: runId,
+        lastRunStatus: 'running',
+        lastUserMessage: 'recover this session if it is not scheduler-origin',
+      },
+    }),
+  );
 }
 
 describe('createRuntimeComposition', () => {
@@ -354,6 +381,79 @@ describe('createRuntimeComposition durable execution', () => {
       expect(checkpoint.steps).toHaveLength(1);
     } finally {
       runtime.durable!.engine[Symbol.dispose]();
+    }
+  });
+
+  it('uses Weft launch tags instead of scheduler id heuristics during service resolution', async () => {
+    const databasePath = join(
+      tmpdir(),
+      `resolver-launch-tags-${process.pid}-${durableDatabaseCounter++}.sqlite`,
+    );
+    const runId = 'tagged-scheduler-origin-without-prefix';
+    let recoveredGenerateCalls = 0;
+
+    try {
+      const firstRuntime = await createRuntimeComposition({
+        generate: async () => new Promise<never>(() => {}),
+        toolbox: createToolbox([], { context: {} }),
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+      });
+
+      try {
+        expect(firstRuntime.durable).toBeDefined();
+        expect(firstRuntime.sessionStore).toBeDefined();
+        await saveRecoverableSession(firstRuntime.sessionStore!, runId);
+
+        void startDurableRunResult(firstRuntime.durable!, {
+          runId,
+          sessionId: runId,
+          tags: [SCHEDULER_ORIGIN_TAG],
+          options: {
+            generate: async () => new Promise<never>(() => {}),
+            toolbox: createToolbox([], { context: {} }) as never,
+            conversation: createConversationHistory(),
+            stopWhen: stopWhen.noToolCalls(),
+          },
+        }).catch(() => {});
+
+        const running = await pollUntil(async () => {
+          const state = await firstRuntime.durable!.engine.get(runId);
+          return state?.status === 'running';
+        });
+        expect(running).toBe(true);
+      } finally {
+        firstRuntime.durable?.engine[Symbol.dispose]?.();
+        firstRuntime.disposeStorage?.();
+      }
+
+      const secondRuntime = await createRuntimeComposition({
+        generate: async () => {
+          recoveredGenerateCalls += 1;
+          return { content: 'should not recover scheduler-origin runs', toolCalls: [] };
+        },
+        toolbox: createToolbox([], { context: {} }),
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+      });
+
+      try {
+        expect(secondRuntime.durable).toBeDefined();
+        await secondRuntime.durable!.engine.recoverAll();
+        const failedWithoutReplayingSession = await pollUntil(async () => {
+          const state = await secondRuntime.durable!.engine.get(runId);
+          return state?.status === 'failed' && recoveredGenerateCalls === 0;
+        });
+        expect(failedWithoutReplayingSession).toBe(true);
+        expect(recoveredGenerateCalls).toBe(0);
+      } finally {
+        secondRuntime.durable?.engine[Symbol.dispose]?.();
+        secondRuntime.disposeStorage?.();
+      }
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
     }
   });
 });

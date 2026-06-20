@@ -21,22 +21,24 @@ import type { AgentRunWorkflowResult } from './run-workflow';
 
 /**
  * Tag stamped on every durable run launched by the operative scheduler (via
- * {@link startDurableRunResult}). Recovery and the boot sweep read it from
- * `handle.getLaunchMetadata().launchOptions.tags` to discriminate scheduler-origin
- * runs from genuine session runs — a scheduler run is a live-process concern with
- * no bureau session behind it, so on a crash it is cancelled, never reattached as
- * a session run. Exported through `operative/durable` (no `operative/scheduler`
- * subpath export exists) so the gateway recovery path can import it.
+ * {@link startDurableRunResult}). Weft 0.7 recovery reads it from
+ * `WorkflowServicesResolverInfo.launchOptions.tags` to discriminate
+ * scheduler-origin runs from genuine session runs — a scheduler run is a
+ * live-process concern with no bureau session behind it, so on a crash it is
+ * cancelled, never reattached as a session run. Direct handle metadata carries
+ * the same tag; the boot sweep still uses the stable id prefix so legacy untagged
+ * suspended residue remains cleanupable. Exported through `operative/durable`
+ * (no `operative/scheduler` subpath export exists) so the gateway recovery path
+ * can import it.
  */
 export const SCHEDULER_ORIGIN_TAG = 'bureau:scheduler-origin' as const;
 
 /**
  * Id prefix for durable scheduler runs (`scheduler-run-<taskId>-<n>`). A scheduler
- * run uses a synthetic id as BOTH its runId and its phantom sessionId, so boot
- * recovery's resolver discriminates it by `input.sessionId === input.runId` AND
- * this prefix — the prefix is what makes the discriminant contractually safe: a
- * genuine session run's id is `run-<uuid>` (never this prefix), so a session that
- * coincidentally set `sessionId === runId` is not misclassified as scheduler-origin.
+ * run uses a synthetic id as BOTH its runId and its phantom sessionId. New
+ * recovery resolver calls use {@link SCHEDULER_ORIGIN_TAG}; the prefix remains
+ * for suspended-residue cleanup and for legacy persisted runs whose launch
+ * metadata predates the tag-aware resolver context.
  */
 export const SCHEDULER_RUN_ID_PREFIX = 'scheduler-run-' as const;
 

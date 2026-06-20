@@ -55,6 +55,7 @@ import {
   createRunEngine,
   createRunWorkflow,
   isAgentRunWorkflowInput,
+  SCHEDULER_ORIGIN_TAG,
   SCHEDULER_RUN_ID_PREFIX,
 } from 'operative/durable';
 import type { SkillSession } from 'skills';
@@ -966,21 +967,17 @@ export async function createRuntimeComposition(
     if (!isAgentRunWorkflowInput(info.input)) {
       return { status: 'unavailable', reason: `run ${info.workflowId} has no recoverable session` };
     }
-    // SCHEDULER-ORIGIN GUARD (#25): a durable scheduler run carries a SYNTHETIC
-    // sessionId equal to its own runId, prefixed `scheduler-run-` (there is no
-    // bureau session behind it). The resolver's `info` does NOT carry tags
-    // (WorkflowServicesResolverInfo is {workflowId, workflowType, input}), so we
-    // discriminate by `sessionId === runId` AND the scheduler id prefix. The prefix
-    // is load-bearing for contractual safety: a genuine session run's id is
-    // `run-<uuid>`, so even a session that coincidentally set `sessionId === runId`
-    // is NOT misclassified. Return unavailable BEFORE the sessionStore.load — a
-    // load would always miss, and a scheduler run is a live-process concern that
-    // boot recovery must not resume as a session run. The boot sweep cancels any
-    // suspended scheduler residue.
-    if (
+    // SCHEDULER-ORIGIN GUARD (#25, #44): Weft 0.7 includes launch metadata in
+    // WorkflowServicesResolverInfo, so new scheduler-origin runs discriminate by
+    // their explicit launch tag instead of the old synthetic-input shape. Keep
+    // the prefix check only as legacy cleanup for persisted scheduler runs
+    // created before resolver launch context was available.
+    const schedulerOriginByLaunchTag =
+      info.launchOptions?.tags?.includes(SCHEDULER_ORIGIN_TAG) ?? false;
+    const legacySchedulerOriginBySyntheticInput =
       info.input.sessionId === info.input.runId &&
-      info.input.runId.startsWith(SCHEDULER_RUN_ID_PREFIX)
-    ) {
+      info.input.runId.startsWith(SCHEDULER_RUN_ID_PREFIX);
+    if (schedulerOriginByLaunchTag || legacySchedulerOriginBySyntheticInput) {
       return {
         status: 'unavailable',
         reason: `run ${info.workflowId} is scheduler-origin (no session to recover)`,

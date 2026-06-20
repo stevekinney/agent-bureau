@@ -719,13 +719,14 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
             `rather than leaving suspended residue that could collide with a reused id.`,
         );
       }
-      // Match by the synthetic-id PREFIX, not the origin TAG: the tag is new in
-      // this change, so suspended `scheduler-run-*` residue left by an EARLIER
-      // release carries the prefix (and phantom sessionId) but NOT the tag, and a
-      // tag-only filter would never collect it (Bugbot #38). The id format is
-      // release-stable, so the prefix catches both legacy and new residue. (The
-      // tag remains the recovery-time discriminant in the resolver, where only
-      // `input` — not the id — is available.) Pagination lives on ListFilter.
+      // Match by the synthetic-id PREFIX, not the origin TAG: suspended
+      // `scheduler-run-*` residue left by an earlier release carries the prefix
+      // (and phantom sessionId) but may not carry the tag, and a tag-only filter
+      // would never collect it (Bugbot #38). The id format is release-stable, so
+      // the prefix catches both legacy and new residue. The tag remains the
+      // primary recovery-time discriminant in the resolver via Weft's launch
+      // context; this prefix sweep is legacy cleanup for untagged residue.
+      // Pagination lives on ListFilter.
       const result = await engine.list({
         status: 'suspended',
         idPrefix: SCHEDULER_RUN_ID_PREFIX,
