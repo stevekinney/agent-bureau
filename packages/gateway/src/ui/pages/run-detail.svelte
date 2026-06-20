@@ -99,15 +99,8 @@
     }
   }
 
-  function stepStatus(
-    step: SerializedRunStepDetail,
-    index: number,
-    steps: SerializedRunStepDetail[],
-  ): RunStepStatus {
-    const isLastStep = index === steps.length - 1;
+  function stepStatus(step: SerializedRunStepDetail): RunStepStatus {
     if (step.results.some((result) => result.error)) return 'failed';
-    if (isLastStep && run.status === 'error') return 'failed';
-    if (isLastStep && run.status === 'aborted') return 'cancelled';
     return 'succeeded';
   }
 
@@ -157,10 +150,10 @@
   ]);
 
   let runSteps = $derived<RunStep[]>(
-    run.stepDetails.map((step, index, steps) => ({
+    run.stepDetails.map((step) => ({
       id: `step-${step.step}`,
       label: `Step ${step.step + 1}${step.final ? ' (final)' : ''}`,
-      status: stepStatus(step, index, steps),
+      status: stepStatus(step),
       details: stepDetails(step),
     })),
   );

@@ -242,4 +242,60 @@ describe('renderPage with a populated run-detail page', () => {
     expect(html).toContain('Calling a tool');
     expect(html).toContain('run.completed');
   });
+
+  it('does not mark a completed step failed just because the run failed later', async () => {
+    const erroredRun: RunDetail = {
+      ...populatedRun,
+      id: 'run-error-after-step',
+      status: 'error',
+      finishReason: 'error',
+      error: 'The next step failed before it completed.',
+      steps: 1,
+      stepDetails: [
+        {
+          step: 0,
+          content: 'This step completed before the later failure.',
+          final: false,
+          usage: { prompt: 60, completion: 40, total: 100 },
+          toolCalls: [],
+          results: [],
+        },
+      ],
+      events: [
+        {
+          sequence: 0,
+          runId: 'run-error-after-step',
+          event: 'step.completed',
+          detail: { step: 0 },
+          timestamp: 1,
+        },
+        {
+          sequence: 1,
+          runId: 'run-error-after-step',
+          event: 'run.error',
+          detail: { error: 'The next step failed before it completed.' },
+          timestamp: 2,
+        },
+      ],
+    };
+    const html = await renderPage({
+      title: 'Run run-error-after-step',
+      component: RunDetailPage,
+      props: {
+        ...props,
+        run: erroredRun,
+        events: erroredRun.events.map((record) => ({
+          event: record.event,
+          detail: record.detail,
+          timestamp: record.timestamp,
+          sequence: record.sequence,
+        })),
+        streamingAssistantContent: '',
+        toolActivity: [],
+      },
+    });
+
+    expect(html).toContain('data-cinder-status="succeeded"');
+    expect(html).not.toContain('data-cinder-status="failed"');
+  });
 });
