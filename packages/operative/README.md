@@ -318,7 +318,6 @@ Hooks plug into the loop lifecycle. Register them on `RunOptions.hooks` using a 
 ```typescript
 import { defineAgent } from 'operative';
 import { composeHooks, onlyOnStep, runOnce, withTimeout, everyNSteps } from 'operative';
-import { createHookRegistry } from 'lifecycle';
 
 // Compose two prepare-step hooks into one
 const combined = composeHooks(
