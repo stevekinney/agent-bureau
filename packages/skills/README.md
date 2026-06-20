@@ -95,8 +95,12 @@ Use `scanDirectory()` when skills live on disk:
 
 ```typescript
 import { createStorageSkillProvider, scanDirectory } from 'skills';
+import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
 
-const provider = createStorageSkillProvider(textValueStore);
+// createStorageSkillProvider needs a Weft TextValueStore. Use a real durable
+// store in production; this in-memory one is enough to illustrate the API.
+const store = textValueStore(new MemoryStorage());
+const provider = createStorageSkillProvider(store);
 
 const result = await scanDirectory('/path/to/skills', provider);
 console.log(`discovered ${result.discovered}, loaded ${result.loaded}`);

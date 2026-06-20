@@ -334,7 +334,8 @@ interface GeminiEmbedderOptions {
 ```typescript
 import { createGeminiEmbedder } from 'herald/embeddings/gemini';
 
-const embed = createGeminiEmbedder();
+// apiKey is required — this embedder does not read an environment variable.
+const embed = createGeminiEmbedder({ apiKey: process.env.GEMINI_API_KEY! });
 const [vector] = await embed(['hello world']);
 ```
 
