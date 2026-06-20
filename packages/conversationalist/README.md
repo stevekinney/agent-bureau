@@ -209,7 +209,7 @@ for await (const chunk of stream) {
 
 // Mark complete with optional token usage
 conversation = finalizeStreamingMessage(conversation, messageId, {
-  tokenUsage: { input: 120, output: 48 },
+  tokenUsage: { prompt: 120, completion: 48, total: 168 },
 });
 
 // Or cancel on error

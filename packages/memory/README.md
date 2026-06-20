@@ -39,7 +39,7 @@ The storage contract is intentionally lower-level than the public memory API. Ba
 
 ## Quick Start
 
-`createMemory()` needs two things: an **embedder** (any function mapping strings to float vectors) and a **storage backend**. This Quick Start uses the deterministic test embedder and the in-memory backend from `memory/test` so it runs with no provider or runtime wiring:
+`createMemory()` needs two things: an **embedder** (an `Embedder` — `(texts: string[]) => number[][] | Promise<number[][]>`, mapping a batch of strings to one float vector each) and a **storage backend**. This Quick Start uses the deterministic test embedder and the in-memory backend from `memory/test` so it runs with no provider or runtime wiring:
 
 ```typescript
 import { createMemory } from 'memory';
@@ -468,6 +468,7 @@ interface MemoryHookOptions {
 
 ```typescript
 import { createMemoryHooks } from 'memory';
+import { createRun } from 'operative';
 
 const hooks = createMemoryHooks({ memory, recallLimit: 10 });
 
@@ -503,11 +504,12 @@ function summarizeRun(result: StepResultLike): string;
 
 ```typescript
 import { createRunCaptureHook } from 'memory';
+import { createRun } from 'operative';
 
 const captureHook = createRunCaptureHook({
   memory,
   namespace: 'experiential',
-  summarize: (result) => `Step completed with ${result.toolCalls?.length ?? 0} tool calls.`,
+  summarize: (result) => `Step ${result.step}${result.final ? ' (final)' : ''}: ${result.content}`,
 });
 
 // Wire into an operative run via the top-level `onStep` option:
@@ -542,7 +544,7 @@ import { createReflectionHook, summarizeRun } from 'memory';
 const reflectionHook = createReflectionHook({
   memory,
   reflect: async (summary) => await llm.complete(`Reflect on: ${summary}`),
-  shouldReflect: (result) => result.toolCalls !== undefined,
+  shouldReflect: (result) => result.final,
 });
 ```
 

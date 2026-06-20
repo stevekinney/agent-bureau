@@ -169,7 +169,7 @@ const result = await run({ generate, toolbox, conversation });
 console.log(result.content, result.usage.total);
 ```
 
-**`RunOptions`** — extends `DefineAgentOptions` minus `name`/`instructions`/persistence fields:
+**`RunOptions`** — the standalone options interface accepted by `run()` and `createRun()`:
 
 | Field                | Type                                                 | Description                              |
 | -------------------- | ---------------------------------------------------- | ---------------------------------------- |
@@ -199,6 +199,7 @@ interface RunResult {
   usage: TokenUsage; // { prompt, completion, total }
   finishReason: FinishReason; // 'stop-condition' | 'maximum-steps' | 'aborted' | 'error' | …
   error?: unknown;
+  schemaValidation?: { success: boolean; error?: unknown }; // present when responseSchema is set
 }
 ```
 
@@ -283,7 +284,7 @@ import { createSessionStore, resumeSession } from 'operative';
 const sessions = createSessionStore(kvStore);
 
 await sessions.save(session);
-const summary = await sessions.list({ agentName: 'my-agent', sortBy: 'updatedAt' });
+const summaries = await sessions.list({ agentName: 'my-agent', sortBy: 'updatedAt' });
 const loaded = await sessions.load('session-abc');
 await sessions.delete('session-abc');
 await sessions.cleanup({ olderThan: 7 * 24 * 60 * 60 * 1000 }); // 1 week
@@ -575,8 +576,10 @@ const task: SchedulerTask = {
   id: 'background-sync',
   priority: 'background',
   createRun: () => ({
+    generate,
+    toolbox,
     conversation,
-    stopWhen: stopWhen.noToolCalls,
+    stopWhen: stopWhen.noToolCalls(),
   }),
   onComplete: (result) => {
     /* result.content */
@@ -589,7 +592,7 @@ await scheduler.submit(task);
 const heartbeat = createHeartbeat({
   scheduler,
   interval: 60_000,
-  createHeartbeatRun: () => ({ conversation, stopWhen: stopWhen.noToolCalls }),
+  createHeartbeatRun: () => ({ generate, toolbox, conversation, stopWhen: stopWhen.noToolCalls() }),
 });
 heartbeat.start();
 
@@ -806,8 +809,8 @@ Composable predicates for loop exit. All are available on the `stopWhen` namespa
 ```typescript
 import { stopWhen } from 'operative/conditions';
 
-// Stop when the model produces no tool calls
-const noTools = stopWhen.noToolCalls;
+// Stop when the model produces no tool calls (each predicate is a factory — call it)
+const noTools = stopWhen.noToolCalls();
 
 // Stop after 5 steps
 const maxSteps = stopWhen.maximumSteps(5);
@@ -815,29 +818,29 @@ const maxSteps = stopWhen.maximumSteps(5);
 // Stop when a specific tool was called
 const submitted = stopWhen.toolCalled('submit-form');
 
-// Stop when a tool returns a specific outcome
-const resolved = stopWhen.toolOutcome('resolve-ticket', (result) => result.success === true);
+// Stop when any tool result's outcome is 'error' or 'action_required'
+const errored = stopWhen.toolOutcome('error');
 
-// Stop when content matches a pattern
-const goodbyeDetected = stopWhen.contentMatches(/goodbye/i);
+// Stop when content satisfies a predicate
+const goodbyeDetected = stopWhen.contentMatches((content) => /goodbye/i.test(content));
 
 // Logical composition
-const compound = stopWhen.some(stopWhen.noToolCalls, stopWhen.maximumSteps(10));
+const compound = stopWhen.some(stopWhen.noToolCalls(), stopWhen.maximumSteps(10));
 
 // Must ALL conditions be true to stop
-const strict = stopWhen.every(stopWhen.noToolCalls, stopWhen.toolCalled('finalize'));
+const strict = stopWhen.every(stopWhen.noToolCalls(), stopWhen.toolCalled('finalize'));
 
 // Invert any condition
-const mustUseTool = stopWhen.not(stopWhen.noToolCalls);
+const mustUseTool = stopWhen.not(stopWhen.noToolCalls());
 
-// Detect the model repeating the same tool call in a loop
-const noLoop = stopWhen.repeatingToolCalls({ threshold: 3 });
+// Detect the model repeating the same tool call in a loop (windowSize defaults to 3)
+const noLoop = stopWhen.repeatingToolCalls({ windowSize: 3 });
 
-// Stop on token budget
-const underBudget = stopWhen.tokenBudget({ maxTokens: 50_000 });
+// Stop on token budget (maxTokens is positional)
+const underBudget = stopWhen.tokenBudget(50_000);
 
-// Hard wall-clock timeout
-const timed = stopWhen.wallClockTimeout({ timeoutMs: 30_000 });
+// Hard wall-clock timeout (milliseconds is positional)
+const timed = stopWhen.wallClockTimeout(30_000);
 
 // Stop when accumulated cost exceeds a dollar amount
 const affordable = stopWhen.costBudget({ budget: 0.05, model: 'claude-sonnet-4-20250514' });
@@ -855,21 +858,21 @@ const agent = defineAgent({
 
 **All `stopWhen` predicates:**
 
-| Predicate                      | Description                                                 |
-| ------------------------------ | ----------------------------------------------------------- |
-| `noToolCalls`                  | Stop when a step produces zero tool calls.                  |
-| `toolCalled(name)`             | Stop when a tool with the given name was called.            |
-| `maximumSteps(n)`              | Stop after `n` steps.                                       |
-| `toolOutcome(name, predicate)` | Stop when a tool result satisfies `predicate`.              |
-| `contentMatches(pattern)`      | Stop when the response content matches a string or regex.   |
-| `every(...conditions)`         | AND — stop when all conditions are true.                    |
-| `some(...conditions)`          | OR — stop when any condition is true.                       |
-| `not(condition)`               | Negate a condition.                                         |
-| `forked()`                     | Stop condition for branching / forked workflow control.     |
-| `repeatingToolCalls(options?)` | Stop when the same tool repeats above a threshold.          |
-| `tokenBudget(options)`         | Stop when cumulative token usage exceeds `maxTokens`.       |
-| `wallClockTimeout(options)`    | Stop when elapsed wall-clock time exceeds `timeoutMs`.      |
-| `costBudget(options)`          | Stop when accumulated dollar cost exceeds `options.budget`. |
+| Predicate                                  | Description                                                              |
+| ------------------------------------------ | ------------------------------------------------------------------------ |
+| `noToolCalls()`                            | Stop when a step produces zero tool calls.                               |
+| `toolCalled(name)`                         | Stop when a tool with the given name was called.                         |
+| `maximumSteps(n)`                          | Stop after `n` steps.                                                    |
+| `toolOutcome(outcome)`                     | Stop when any tool result's outcome is `'error'` or `'action_required'`. |
+| `contentMatches(predicate)`                | Stop when `predicate(content)` returns `true`.                           |
+| `every(...conditions)`                     | AND — stop when all conditions are true.                                 |
+| `some(...conditions)`                      | OR — stop when any condition is true.                                    |
+| `not(condition)`                           | Negate a condition.                                                      |
+| `forked()`                                 | Stop condition for branching / forked workflow control.                  |
+| `repeatingToolCalls(options?)`             | Stop when the same tool repeats `windowSize` times (default 3).          |
+| `tokenBudget(maxTokens, options?)`         | Stop when cumulative token usage exceeds `maxTokens`.                    |
+| `wallClockTimeout(milliseconds, options?)` | Stop when elapsed wall-clock time exceeds `milliseconds`.                |
+| `costBudget(options)`                      | Stop when accumulated dollar cost exceeds `options.budget`.              |
 
 ---
 
