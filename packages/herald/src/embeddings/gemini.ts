@@ -41,10 +41,19 @@ export function createGeminiEmbedder(options: GeminiEmbedderOptions = {}): Embed
 
   function getClient(): Promise<GeminiEmbeddingClient> {
     if (options.client) return Promise.resolve(options.client);
+    if (!options.apiKey) {
+      // This embedder does not read an environment variable. Fail up front with a
+      // clear error rather than constructing a client with an empty key, which
+      // would surface as a confusing downstream auth failure.
+      throw new HeraldError({
+        provider: 'gemini',
+        cause: new Error('createGeminiEmbedder requires an `apiKey` (or a `client`).'),
+      });
+    }
     if (!clientPromise) {
+      const { apiKey } = options;
       clientPromise = import('@google/generative-ai').then((module) => {
         const GoogleGenerativeAI = module.GoogleGenerativeAI;
-        const apiKey = options.apiKey ?? '';
         return new GoogleGenerativeAI(apiKey) as unknown as GeminiEmbeddingClient;
       });
     }

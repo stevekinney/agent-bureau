@@ -331,6 +331,8 @@ interface GeminiEmbedderOptions {
 }
 ```
 
+Throws a `HeraldError` (provider `'gemini'`) up front if called with neither `client` nor `apiKey`, rather than constructing a client with an empty key.
+
 ```typescript
 import { createGeminiEmbedder } from 'herald/embeddings/gemini';
 
