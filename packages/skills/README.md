@@ -99,11 +99,11 @@ import { createStorageSkillProvider, scanDirectory } from 'skills';
 const provider = createStorageSkillProvider(textValueStore);
 
 const result = await scanDirectory('/path/to/skills', provider);
+console.log(`discovered ${result.discovered}, loaded ${result.loaded}`);
 
-if (result.errors.length > 0) {
-  for (const error of result.errors) {
-    process.stderr.write(String(error) + '\n');
-  }
+// `errors` is an array of { path, error } objects, not strings.
+for (const { path, error } of result.errors) {
+  process.stderr.write(`${path}: ${error}\n`);
 }
 ```
 
@@ -193,7 +193,7 @@ import {
 
 **Ingestion:**
 
-- **`scanDirectory(path, provider, options?)`**: Recursively scans a directory for `SKILL.md` files and loads them into the provider. Returns a `ScanResult` with `loaded`, `skipped`, and `errors`.
+- **`scanDirectory(path, provider, options?)`**: Recursively scans a directory for `SKILL.md` files and loads them into the provider. Returns a `ScanResult` with `discovered` (count), `loaded` (count), and `errors` (an array of `{ path, error }` objects).
 - **`fetchFromRegistry(options)`**: Fetches named skills from an HTTP registry by convention (`{baseUrl}/{name}/SKILL.md`) and saves them into the provider.
 
 **Session:**
@@ -202,7 +202,7 @@ import {
 
 **Hooks:**
 
-- **`createSkillCatalogHook(options)`**: Returns a `prepareStep` hook. On step 0 it renders `<available_skills>` XML into the conversation. Pass `{ provider, session? }`.
+- **`createSkillCatalogHook(options)`**: Returns a `{ prepareStep }` hook. On step 0 its `prepareStep` returns the `<available_skills>` XML string (the caller injects it into the conversation; the hook does not inject it itself). Pass `{ provider, skillPolicy? }`.
 - **`escapeXml(text)`**: Escapes characters that would break the `<available_skills>` XML block.
 
 **Tools:**
@@ -217,7 +217,7 @@ import {
 **Memory:**
 
 - **`createSkillMemory(memory, skillName)`**: Wraps a `MemoryLike` to namespace all reads and writes under `skill:{skillName}:`.
-- **`createSkillMemoryHooks(options)`**: Returns a `{ prepareStep, onComplete }` hook pair that recalls and stores skill-specific memory.
+- **`createSkillMemoryHooks(options)`**: Returns a `{ prepareStep, onStep }` hook pair that recalls and stores skill-specific memory.
 
 **Proposals:**
 

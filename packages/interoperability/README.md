@@ -99,7 +99,7 @@ type ToolAction = {
 
 ### Embedding types
 
-**`EmbeddingVector`**: A plain `number[]`. The mutable, mutable-write type.
+**`EmbeddingVector`**: A plain, mutable `number[]`. Use this when a function needs to own or write to the vector; for read-only parameters, prefer `EmbeddingVectorLike`.
 
 **`EmbeddingVectorLike`**: `ArrayLike<number>`—widens to `Float32Array` and other typed arrays as well as `number[]`. Functions that only _read_ a vector accept this type.
 
