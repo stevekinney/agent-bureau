@@ -31,8 +31,9 @@ export interface GeminiEmbedderOptions {
  * Creates an Embedder backed by the Gemini Embedding API.
  *
  * When no `client` is provided, dynamically imports `@google/generative-ai`
- * and constructs one using `apiKey`. Unlike the OpenAI/Voyage embedders, this
- * does not read an environment variable — pass `apiKey` (or a `client`) explicitly.
+ * and constructs one using `apiKey`. This embedder does not read an environment
+ * variable, so pass `apiKey` (or a `client`) explicitly. (The OpenAI embedder
+ * differs: the `openai` SDK falls back to `OPENAI_API_KEY` when no key is given.)
  */
 export function createGeminiEmbedder(options: GeminiEmbedderOptions = {}): Embedder {
   const { model = 'gemini-embedding-001' } = options;

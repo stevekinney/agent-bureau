@@ -146,7 +146,7 @@ interface Memory {
 
 **`list(options?)`:** Returns stored entries newest-first without embedding the caller's query. Useful for browsing, not ranked retrieval.
 
-**`forget(id, namespace?)`:** Soft-deletes one entry by id.
+**`forget(id, namespace?)`:** Removes one entry by id. The observable guarantee is that the record disappears from reads; how that removal is realized is backend-specific (physical row deletion in the local backend, a tombstone elsewhere).
 
 **`forgetAll(namespace?)`:** Deletes all entries in the given namespace (defaults to the instance namespace). Also clears the embedding cache if one is attached.
 
