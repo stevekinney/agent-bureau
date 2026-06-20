@@ -135,7 +135,7 @@ await activeRun.result;
 | `generate`            | `GenerateFunction`                                     | The caller-supplied LLM call.             |
 | `toolbox`             | `Toolbox`                                              | Tool registry from `armorer`.             |
 | `stopWhen`            | `StopCondition \| StopCondition[]`                     | Loop exit predicates.                     |
-| `maximumSteps`        | `number`                                               | Hard step cap.                            |
+| `maximumSteps`        | `number`                                               | Hard step cap (default: `25`).            |
 | `prepareStep`         | `PrepareStepHook \| PrepareStepHook[]`                 | Runs before each generate call.           |
 | `beforeToolExecution` | `BeforeToolExecutionHook \| BeforeToolExecutionHook[]` | Modifies tool call list before execution. |
 | `afterToolExecution`  | `AfterToolExecutionHook \| AfterToolExecutionHook[]`   | Inspects/modifies tool results.           |
@@ -177,7 +177,7 @@ console.log(result.content, result.usage.total);
 | `toolbox`            | `Toolbox`                                            | Required. Tool registry.                 |
 | `conversation`       | `Conversation \| ConversationHistory`                | Required. Seed conversation.             |
 | `stopWhen`           | `StopCondition \| StopCondition[]`                   | Loop exit predicates.                    |
-| `maximumSteps`       | `number`                                             | Hard step cap (default: unlimited).      |
+| `maximumSteps`       | `number`                                             | Hard step cap (default: `25`).           |
 | `retry`              | `RetryOptions`                                       | Retry policy for transient errors.       |
 | `backpressure`       | `BackpressureStrategy`                               | Delay strategy applied before each step. |
 | `validateResponse`   | `ValidateResponseHook \| ValidateResponseHook[]`     | Post-generate response validation.       |

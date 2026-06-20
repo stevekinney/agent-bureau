@@ -471,13 +471,14 @@ import { createMemoryHooks } from 'memory';
 
 const hooks = createMemoryHooks({ memory, recallLimit: 10 });
 
-// Wire into an operative run:
+// Wire into an operative run via the top-level hook options. (RunOptions.hooks is
+// a HookRegistry, not an object map — individual hooks go at the top level.)
 const run = createRun({
-  hooks: {
-    prepareStep: hooks.prepareStep,
-    afterToolExecution: hooks.afterToolExecution,
-  },
-  // ...
+  generate,
+  toolbox,
+  conversation,
+  prepareStep: hooks.prepareStep,
+  afterToolExecution: hooks.afterToolExecution,
 });
 ```
 
@@ -509,10 +510,12 @@ const captureHook = createRunCaptureHook({
   summarize: (result) => `Step completed with ${result.toolCalls?.length ?? 0} tool calls.`,
 });
 
-// Wire into an operative run:
+// Wire into an operative run via the top-level `onStep` option:
 const run = createRun({
-  hooks: { onStep: captureHook.onStep },
-  // ...
+  generate,
+  toolbox,
+  conversation,
+  onStep: captureHook.onStep,
 });
 ```
 
