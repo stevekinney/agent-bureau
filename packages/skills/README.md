@@ -87,7 +87,7 @@ const catalogHook = createSkillCatalogHook({ provider });
 const skillTools = createSkillToolbox({ provider, session });
 ```
 
-In an agent loop, call `catalogHook.prepareStep(context)` on step 0 and inject the returned string into the conversation. Add `skillTools` to the active toolbox so the agent can activate skills and load resources when the catalog says one is relevant.
+In an agent loop, call `catalogHook.prepareStep(context)` on step 0 and inject the returned string into the conversation. `createSkillToolbox` returns a plain object of four `Tool` instances, so spread them into your toolbox — `createToolbox([...Object.values(skillTools)])` — so the agent can activate skills and load resources when the catalog says one is relevant.
 
 ## Ingesting Skills
 
@@ -207,7 +207,7 @@ import {
 
 **Tools:**
 
-- **`createSkillToolbox(options)`**: Creates a toolbox containing `activate_skill`, `load_skill_resource`, `deactivate_skill`, and `list_skills`.
+- **`createSkillToolbox(options)`**: Returns a plain object of four `Tool` instances — `{ activateSkill, loadSkillResource, deactivateSkill, listSkills }` (the `activate_skill`, `load_skill_resource`, `deactivate_skill`, and `list_skills` tools). It is not an armorer `Toolbox`; spread the tools into `createToolbox([...])` to build one.
 - **`createActivateSkillTool(options)`**: Creates just the `activate_skill` tool.
 - **`createLoadSkillResourceTool(options)`**: Creates just the `load_skill_resource` tool.
 - **`createDeactivateSkillTool(options)`**: Creates just the `deactivate_skill` tool.
