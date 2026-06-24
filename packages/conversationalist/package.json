@@ -172,7 +172,7 @@
     "validate": "bun run format:check && bun run lint && bun run check-types && bun run test"
   },
   "dependencies": {
-    "@lostgradient/weft": "^0.7.0",
+    "@lostgradient/weft": "^0.8.0",
     "gray-matter": "^4.0.3"
   },
   "devDependencies": {
