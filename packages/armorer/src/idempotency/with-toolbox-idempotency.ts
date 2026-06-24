@@ -141,11 +141,6 @@ export function withToolboxIdempotency(
       return originalExecute(call, executeOptions);
     }
 
-    const keyFn = getKeyFn(fields.name);
-    if (!keyFn) {
-      return originalExecute(call, executeOptions);
-    }
-
     const suppliedKey = (executeOptions as ToolboxExecuteOptionsWithIdempotencyKey | undefined)
       ?.idempotencyKey;
     const externalKey =
@@ -154,7 +149,12 @@ export function withToolboxIdempotency(
         : typeof suppliedKey === 'string'
           ? suppliedKey
           : undefined;
-    const cacheKey = namespacedKey(fields.name, externalKey ?? keyFn(fields.arguments));
+    const keyFn = getKeyFn(fields.name);
+    if (!keyFn && externalKey === undefined) {
+      return originalExecute(call, executeOptions);
+    }
+
+    const cacheKey = namespacedKey(fields.name, externalKey ?? keyFn!(fields.arguments));
     const cached = await getCacheEntry(cache, cacheKey);
 
     const retryUnknownOutcome = (

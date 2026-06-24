@@ -106,6 +106,28 @@ describe('withToolboxIdempotency', () => {
     expect(addCallCount).toBe(1);
   });
 
+  it('uses externally supplied idempotency keys for tools without their own key', async () => {
+    const toolbox = createToolbox([createToolWithoutKey()]);
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
+
+    const result1 = await idempotentToolbox.execute(
+      { id: 'call-1', name: 'multiply', arguments: { a: 2, b: 3 } },
+      { idempotencyKey: 'orchestrator-tool-call-id' },
+    );
+    const result2 = await idempotentToolbox.execute(
+      { id: 'call-2', name: 'multiply', arguments: { a: 9, b: 9 } },
+      { idempotencyKey: 'orchestrator-tool-call-id' },
+    );
+
+    expect(result1.result).toBe(6);
+    expect(result2.result).toBe(6);
+    expect(result2.idempotency).toEqual({
+      key: 'multiply:orchestrator-tool-call-id',
+      outcome: 'deduped',
+    });
+    expect(mulCallCount).toBe(1);
+  });
+
   it('scopes externally supplied idempotency keys by tool name', async () => {
     const toolbox = createToolbox([createToolWithKey(), createToolWithoutKey()]);
     const idempotentToolbox = withToolboxIdempotency(toolbox, {
