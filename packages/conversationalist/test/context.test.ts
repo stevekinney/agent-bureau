@@ -346,6 +346,56 @@ describe('estimateConversationTokens', () => {
     const tokens = estimateConversationTokens(conv);
     expect(tokens).toBe(3);
   });
+
+  it('accepts a conversation-level estimator over ordered messages', () => {
+    let conv = createConversation({ id: 'test' }, testEnvironment);
+    conv = appendMessages(
+      conv,
+      { role: 'user', content: 'First' },
+      { role: 'assistant', content: 'Second' },
+      testEnvironment,
+    );
+
+    const tokens = estimateConversationTokens(conv, {
+      estimateConversationTokens(messages) {
+        expect(messages.map((message) => message.content)).toEqual(['First', 'Second']);
+        return messages.length * 10;
+      },
+    });
+
+    expect(tokens).toBe(20);
+  });
+
+  it('prefers a conversation-level estimator when options also include a message estimator', () => {
+    let conv = createConversation({ id: 'test' }, testEnvironment);
+    conv = appendMessages(conv, { role: 'user', content: 'First' }, testEnvironment);
+
+    const tokens = estimateConversationTokens(conv, {
+      estimateTokens: () => 100,
+      estimateConversationTokens: () => 5,
+    });
+
+    expect(tokens).toBe(5);
+  });
+
+  it('accepts an async conversation-level estimator over ordered messages', async () => {
+    let conv = createConversation({ id: 'test' }, testEnvironment);
+    conv = appendMessages(
+      conv,
+      { role: 'user', content: 'First' },
+      { role: 'assistant', content: 'Second' },
+      testEnvironment,
+    );
+
+    const tokens = await estimateConversationTokens(conv, {
+      async estimateConversationTokens(messages) {
+        expect(messages.map((message) => message.content)).toEqual(['First', 'Second']);
+        return messages.length * 20;
+      },
+    });
+
+    expect(tokens).toBe(40);
+  });
 });
 
 describe('simpleTokenEstimator', () => {
@@ -664,6 +714,75 @@ describe('truncateToTokenLimit', () => {
 
     const truncated = truncateToTokenLimit(conv, 1, () => 100);
     expect(getOrderedMessages(truncated).length).toBe(0);
+  });
+
+  it('accepts a conversation-level estimator in options', () => {
+    let conv = createConversation({ id: 'test' }, testEnvironment);
+    conv = appendMessages(
+      conv,
+      { role: 'user', content: 'Old' },
+      { role: 'assistant', content: 'Middle' },
+      { role: 'user', content: 'New' },
+      testEnvironment,
+    );
+    const estimatorCalls: number[] = [];
+
+    const truncated = truncateToTokenLimit(conv, 2, {
+      estimateConversationTokens(messages) {
+        estimatorCalls.push(messages.length);
+        return messages.length;
+      },
+    });
+
+    expect(estimatorCalls).toContain(3);
+    expect(getOrderedMessages(truncated).map((message) => message.content)).toEqual([
+      'Middle',
+      'New',
+    ]);
+  });
+
+  it('counts each retained candidate as a full conversation for provider-style estimators', () => {
+    let conv = createConversation({ id: 'test' }, testEnvironment);
+    conv = appendMessages(
+      conv,
+      { role: 'user', content: 'Old' },
+      { role: 'assistant', content: 'Middle' },
+      { role: 'user', content: 'New' },
+      testEnvironment,
+    );
+
+    const truncated = truncateToTokenLimit(conv, 12, {
+      estimateConversationTokens(messages) {
+        return messages.length + 10;
+      },
+    });
+
+    expect(getOrderedMessages(truncated).map((message) => message.content)).toEqual([
+      'Middle',
+      'New',
+    ]);
+  });
+
+  it('accepts an async conversation-level estimator in options', async () => {
+    let conv = createConversation({ id: 'test' }, testEnvironment);
+    conv = appendMessages(
+      conv,
+      { role: 'user', content: 'Old' },
+      { role: 'assistant', content: 'Middle' },
+      { role: 'user', content: 'New' },
+      testEnvironment,
+    );
+
+    const truncated = await truncateToTokenLimit(conv, 2, {
+      async estimateConversationTokens(messages) {
+        return messages.length;
+      },
+    });
+
+    expect(getOrderedMessages(truncated).map((message) => message.content)).toEqual([
+      'Middle',
+      'New',
+    ]);
   });
 
   it('does not overwrite explicitly passed environment when options contain an estimator', () => {

@@ -314,6 +314,9 @@ This document tracks the published export map in [package.json](/Users/stevekinn
 
 ### Types
 
+- `AsyncEstimateConversationTokensOptions`
+- `AsyncTruncateOptions`
+- `EstimateConversationTokensOptions`
 - `TruncateOptions`
 
 ## `conversationalist/streaming`

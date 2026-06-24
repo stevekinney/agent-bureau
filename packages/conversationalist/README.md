@@ -303,11 +303,25 @@ import {
 // Estimate total tokens in a conversation
 const tokens = estimateConversationTokens(history);
 
+// Use a provider tokenizer when budget math must match the model.
+const providerTokens = await estimateConversationTokens(history, {
+  async estimateConversationTokens(messages) {
+    return countWithProviderTokenizer(messages);
+  },
+});
+
 // Trim to fit a 4096-token context window
 const trimmed = truncateToTokenLimit(history, 4096, {
   preserveSystemMessages: true,
   preserveLastN: 4,
   preserveToolPairs: true,
+});
+
+const providerTrimmed = await truncateToTokenLimit(history, 4096, {
+  async estimateConversationTokens(messages) {
+    return countWithProviderTokenizer(messages);
+  },
+  preserveLastN: 4,
 });
 
 // Get the 10 most recent non-system messages
@@ -317,7 +331,7 @@ const recent = getRecentMessages(history, 10);
 const sliced = truncateFromPosition(history, 20);
 ```
 
-**Key exports:** `estimateConversationTokens`, `truncateToTokenLimit`, `getRecentMessages`, `truncateFromPosition`, `simpleTokenEstimator`. Also exports `TruncateOptions` type.
+**Key exports:** `estimateConversationTokens`, `truncateToTokenLimit`, `getRecentMessages`, `truncateFromPosition`, `simpleTokenEstimator`. Also exports `EstimateConversationTokensOptions`, `AsyncEstimateConversationTokensOptions`, `TruncateOptions`, and `AsyncTruncateOptions` types.
 
 ---
 
