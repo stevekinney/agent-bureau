@@ -366,6 +366,18 @@ describe('estimateConversationTokens', () => {
     expect(tokens).toBe(20);
   });
 
+  it('prefers a conversation-level estimator when options also include a message estimator', () => {
+    let conv = createConversation({ id: 'test' }, testEnvironment);
+    conv = appendMessages(conv, { role: 'user', content: 'First' }, testEnvironment);
+
+    const tokens = estimateConversationTokens(conv, {
+      estimateTokens: () => 100,
+      estimateConversationTokens: () => 5,
+    });
+
+    expect(tokens).toBe(5);
+  });
+
   it('accepts an async conversation-level estimator over ordered messages', async () => {
     let conv = createConversation({ id: 'test' }, testEnvironment);
     conv = appendMessages(
@@ -723,6 +735,28 @@ describe('truncateToTokenLimit', () => {
     });
 
     expect(estimatorCalls).toContain(3);
+    expect(getOrderedMessages(truncated).map((message) => message.content)).toEqual([
+      'Middle',
+      'New',
+    ]);
+  });
+
+  it('counts each retained candidate as a full conversation for provider-style estimators', () => {
+    let conv = createConversation({ id: 'test' }, testEnvironment);
+    conv = appendMessages(
+      conv,
+      { role: 'user', content: 'Old' },
+      { role: 'assistant', content: 'Middle' },
+      { role: 'user', content: 'New' },
+      testEnvironment,
+    );
+
+    const truncated = truncateToTokenLimit(conv, 12, {
+      estimateConversationTokens(messages) {
+        return messages.length + 10;
+      },
+    });
+
     expect(getOrderedMessages(truncated).map((message) => message.content)).toEqual([
       'Middle',
       'New',

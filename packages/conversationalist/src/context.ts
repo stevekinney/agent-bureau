@@ -77,6 +77,17 @@ type EstimateOptions = EstimateConversationTokensOptions | AsyncEstimateConversa
 const isPromiseLike = <T>(value: MaybePromise<T>): value is Promise<T> =>
   typeof (value as Promise<T>)?.then === 'function';
 
+const hasConversationTokenEstimator = (
+  value: unknown,
+): value is EstimateOptions & {
+  estimateConversationTokens: ConversationTokenEstimator | AsyncConversationTokenEstimator;
+} =>
+  Boolean(
+    value &&
+    typeof value === 'object' &&
+    typeof (value as Record<string, unknown>)['estimateConversationTokens'] === 'function',
+  );
+
 const createMessageBlock = (message: Message): MessageBlock => ({
   messages: [message],
   minPosition: message.position,
@@ -181,6 +192,13 @@ const buildMessageBlocksAsync = async (
   return { blocks, messageToBlock };
 };
 
+const estimateBlocksAsConversation = (
+  blocks: ReadonlyArray<MessageBlock>,
+  options: EstimateOptions,
+  environment: ConversationEnvironment,
+): MaybePromise<number> =>
+  estimateMessageBlockTokens(collectMessagesFromBlocks(blocks), options, environment);
+
 const collectBlocksForMessages = (
   messages: ReadonlyArray<Message>,
   messageToBlock: Map<string, MessageBlock>,
@@ -268,7 +286,11 @@ export function estimateConversationTokens(
   if (typeof optionsOrEstimator === 'function') {
     options = { estimateTokens: optionsOrEstimator };
   } else if (optionsOrEstimator) {
-    if (!environment && isConversationEnvironmentParameter(optionsOrEstimator)) {
+    if (
+      !environment &&
+      !hasConversationTokenEstimator(optionsOrEstimator) &&
+      isConversationEnvironmentParameter(optionsOrEstimator)
+    ) {
       env = optionsOrEstimator;
     } else {
       options = optionsOrEstimator as EstimateOptions;
@@ -373,6 +395,138 @@ const truncateToTokenLimitFromBlocks = (
   return ensureTruncationSafe(next, preserveToolPairs, 'truncateToTokenLimit');
 };
 
+const truncateToTokenLimitWithConversationEstimator = (
+  conversation: Conversation,
+  maxTokens: number,
+  orderedMessages: ReadonlyArray<Message>,
+  options: ResolvedTruncateOptions,
+  environment: ConversationEnvironment,
+): MaybePromise<Conversation> => {
+  const preserveSystem = options.preserveSystemMessages ?? true;
+  const preserveLastN = options.preserveLastN ?? 0;
+  const preserveToolPairs = options.preserveToolPairs ?? true;
+  const { blocks, messageToBlock } = buildMessageBlocks(
+    orderedMessages,
+    () => 0,
+    preserveToolPairs,
+  );
+
+  const countAllMessages = estimateMessageBlockTokens(orderedMessages, options, environment);
+
+  const selectBlocks = (currentTokens: number): MaybePromise<ReadonlyArray<MessageBlock>> => {
+    if (currentTokens <= maxTokens) {
+      return blocks;
+    }
+
+    const systemMessages = preserveSystem ? orderedMessages.filter((m) => m.role === 'system') : [];
+    const nonSystemMessages = orderedMessages.filter((m) => m.role !== 'system');
+    const protectedMessages = preserveLastN > 0 ? nonSystemMessages.slice(-preserveLastN) : [];
+    const streamingMessages = orderedMessages.filter(isStreamingMessage);
+
+    const systemBlocks = collectBlocksForMessages(systemMessages, messageToBlock);
+    const protectedBlocks = collectBlocksForMessages(protectedMessages, messageToBlock);
+    const streamingBlocks = collectBlocksForMessages(streamingMessages, messageToBlock);
+    const lockedBlocks = new Set([...systemBlocks, ...protectedBlocks, ...streamingBlocks]);
+    const removableBlocks = blocks.filter((block) => !lockedBlocks.has(block));
+    const selectedLockedBlocks = [...lockedBlocks];
+    const sortedRemovable = [...removableBlocks].sort((a, b) => a.maxPosition - b.maxPosition);
+
+    const lockedTokens = estimateBlocksAsConversation(selectedLockedBlocks, options, environment);
+
+    const selectFromNewest = (
+      lockedTokenCount: number,
+    ): MaybePromise<ReadonlyArray<MessageBlock>> => {
+      if (lockedTokenCount >= maxTokens) {
+        return selectedLockedBlocks;
+      }
+
+      const keptRemovable: MessageBlock[] = [];
+
+      for (let index = sortedRemovable.length - 1; index >= 0; index--) {
+        const candidate = sortedRemovable[index]!;
+        const candidateBlocks = [...selectedLockedBlocks, candidate, ...keptRemovable];
+        const candidateTokens = estimateBlocksAsConversation(candidateBlocks, options, environment);
+
+        if (isPromiseLike(candidateTokens)) {
+          return candidateTokens.then(async (resolvedCandidateTokens) => {
+            if (resolvedCandidateTokens > maxTokens) {
+              return [...selectedLockedBlocks, ...keptRemovable];
+            }
+
+            keptRemovable.unshift(candidate);
+            for (let asyncIndex = index - 1; asyncIndex >= 0; asyncIndex--) {
+              const asyncCandidate = sortedRemovable[asyncIndex]!;
+              const asyncCandidateBlocks = [
+                ...selectedLockedBlocks,
+                asyncCandidate,
+                ...keptRemovable,
+              ];
+              const asyncCandidateTokens = await estimateBlocksAsConversation(
+                asyncCandidateBlocks,
+                options,
+                environment,
+              );
+
+              if (asyncCandidateTokens > maxTokens) {
+                break;
+              }
+
+              keptRemovable.unshift(asyncCandidate);
+            }
+
+            return [...selectedLockedBlocks, ...keptRemovable];
+          });
+        }
+
+        if (candidateTokens > maxTokens) {
+          break;
+        }
+
+        keptRemovable.unshift(candidate);
+      }
+
+      return [...selectedLockedBlocks, ...keptRemovable];
+    };
+
+    if (isPromiseLike(lockedTokens)) {
+      return lockedTokens.then(selectFromNewest);
+    }
+
+    return selectFromNewest(lockedTokens);
+  };
+
+  const finish = (selectedBlocks: ReadonlyArray<MessageBlock>): Conversation => {
+    if (selectedBlocks === blocks) {
+      return conversation;
+    }
+
+    const allMessages = collectMessagesFromBlocks(selectedBlocks);
+    const renumbered = allMessages.map((message, index) =>
+      cloneMessageWithPosition(message, index, copyContent(message.content)),
+    );
+
+    const next = toReadonly({
+      ...conversation,
+      ids: renumbered.map((message) => message.id),
+      messages: toIdRecord(renumbered),
+      updatedAt: environment.now(),
+    });
+    return ensureTruncationSafe(next, preserveToolPairs, 'truncateToTokenLimit');
+  };
+
+  const finishAsync = async (currentTokens: Promise<number>): Promise<Conversation> => {
+    const selectedBlocks = await selectBlocks(await currentTokens);
+    return finish(selectedBlocks);
+  };
+
+  if (isPromiseLike(countAllMessages)) {
+    return finishAsync(countAllMessages);
+  }
+
+  const selectedBlocks = selectBlocks(countAllMessages);
+  return isPromiseLike(selectedBlocks) ? selectedBlocks.then(finish) : finish(selectedBlocks);
+};
+
 export function truncateToTokenLimit(
   conversation: Conversation,
   maxTokens: number,
@@ -426,6 +580,17 @@ export function truncateToTokenLimit(
   const resolvedEnvironment = resolveConversationEnvironment(env);
   const preserveToolPairs = options.preserveToolPairs ?? true;
   const orderedMessages = getOrderedMessages(conversation);
+
+  if (options.estimateConversationTokens) {
+    return truncateToTokenLimitWithConversationEstimator(
+      conversation,
+      maxTokens,
+      orderedMessages,
+      options,
+      resolvedEnvironment,
+    );
+  }
+
   const estimateBlockTokens = (messages: ReadonlyArray<Message>) =>
     estimateMessageBlockTokens(messages, options, resolvedEnvironment);
 
