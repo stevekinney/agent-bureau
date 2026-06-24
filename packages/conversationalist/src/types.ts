@@ -159,6 +159,16 @@ export interface ConversationHistory {
 export type TokenEstimator = (message: Message) => number;
 
 /**
+ * A function that estimates the number of tokens in a list of messages.
+ */
+export type ConversationTokenEstimator = (messages: ReadonlyArray<Message>) => number;
+
+/**
+ * A function that asynchronously estimates the number of tokens in a list of messages.
+ */
+export type AsyncConversationTokenEstimator = (messages: ReadonlyArray<Message>) => Promise<number>;
+
+/**
  * A plugin that can transform a MessageInput before it is appended.
  */
 export type MessagePlugin = (input: MessageInput) => MessageInput;

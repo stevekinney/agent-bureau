@@ -11,7 +11,9 @@ import { copyContent } from './multi-modal';
 import { isStreamingMessage } from './streaming';
 import type {
   AssistantMessage,
+  AsyncConversationTokenEstimator,
   ConversationHistory as Conversation,
+  ConversationTokenEstimator,
   Message,
   TokenEstimator,
 } from './types';
@@ -58,23 +60,56 @@ type MessageBlock = {
   orphanToolResult?: boolean;
 };
 
-const createMessageBlock = (message: Message, estimator: TokenEstimator): MessageBlock => ({
+type MaybePromise<T> = T | Promise<T>;
+
+export interface EstimateConversationTokensOptions {
+  estimateTokens?: TokenEstimator;
+  estimateConversationTokens?: ConversationTokenEstimator;
+}
+
+export interface AsyncEstimateConversationTokensOptions {
+  estimateTokens?: TokenEstimator;
+  estimateConversationTokens: AsyncConversationTokenEstimator;
+}
+
+type EstimateOptions = EstimateConversationTokensOptions | AsyncEstimateConversationTokensOptions;
+
+const isPromiseLike = <T>(value: MaybePromise<T>): value is Promise<T> =>
+  typeof (value as Promise<T>)?.then === 'function';
+
+const createMessageBlock = (message: Message): MessageBlock => ({
   messages: [message],
   minPosition: message.position,
   maxPosition: message.position,
-  tokenCount: estimator(message),
+  tokenCount: 0,
 });
+
+const estimateMessageBlockTokens = (
+  messages: ReadonlyArray<Message>,
+  options: EstimateOptions,
+  environment: ConversationEnvironment,
+): MaybePromise<number> => {
+  if (options.estimateConversationTokens) {
+    return options.estimateConversationTokens(messages);
+  }
+
+  const estimator = options.estimateTokens ?? environment.estimateTokens;
+  return messages.reduce((total, message) => total + estimator(message), 0);
+};
 
 const buildMessageBlocks = (
   messages: ReadonlyArray<Message>,
-  estimator: TokenEstimator,
+  estimateBlockTokens: (messages: ReadonlyArray<Message>) => number,
   preserveToolPairs: boolean,
 ): {
   blocks: MessageBlock[];
   messageToBlock: Map<string, MessageBlock>;
 } => {
   if (!preserveToolPairs) {
-    const blocks = messages.map((message) => createMessageBlock(message, estimator));
+    const blocks = messages.map((message) => createMessageBlock(message));
+    for (const block of blocks) {
+      block.tokenCount = estimateBlockTokens(block.messages);
+    }
     const messageToBlock = new Map<string, MessageBlock>();
     for (const block of blocks) {
       const message = block.messages[0];
@@ -90,7 +125,7 @@ const buildMessageBlocks = (
 
   for (const message of messages) {
     if (message.role === 'tool-call' && message.toolCall) {
-      const block = createMessageBlock(message, estimator);
+      const block = createMessageBlock(message);
       toolUses.set(message.toolCall.id, block);
       blocks.push(block);
       continue;
@@ -101,20 +136,22 @@ const buildMessageBlocks = (
       if (existing) {
         existing.messages.push(message);
         existing.maxPosition = Math.max(existing.maxPosition, message.position);
-        existing.tokenCount += estimator(message);
         continue;
       }
 
-      const orphanBlock = createMessageBlock(message, estimator);
+      const orphanBlock = createMessageBlock(message);
       orphanBlock.orphanToolResult = true;
       blocks.push(orphanBlock);
       continue;
     }
 
-    blocks.push(createMessageBlock(message, estimator));
+    blocks.push(createMessageBlock(message));
   }
 
   const filteredBlocks = blocks.filter((block) => !block.orphanToolResult);
+  for (const block of filteredBlocks) {
+    block.tokenCount = estimateBlockTokens(block.messages);
+  }
   const messageToBlock = new Map<string, MessageBlock>();
   for (const block of filteredBlocks) {
     for (const message of block.messages) {
@@ -123,6 +160,25 @@ const buildMessageBlocks = (
   }
 
   return { blocks: filteredBlocks, messageToBlock };
+};
+
+const buildMessageBlocksAsync = async (
+  messages: ReadonlyArray<Message>,
+  estimateBlockTokens: (messages: ReadonlyArray<Message>) => MaybePromise<number>,
+  preserveToolPairs: boolean,
+): Promise<{
+  blocks: MessageBlock[];
+  messageToBlock: Map<string, MessageBlock>;
+}> => {
+  const { blocks, messageToBlock } = buildMessageBlocks(messages, () => 0, preserveToolPairs);
+
+  await Promise.all(
+    blocks.map(async (block) => {
+      block.tokenCount = await estimateBlockTokens(block.messages);
+    }),
+  );
+
+  return { blocks, messageToBlock };
 };
 
 const collectBlocksForMessages = (
@@ -190,29 +246,49 @@ export function estimateConversationTokens(
   conversation: Conversation,
   estimateTokens?: TokenEstimator,
   environment?: Partial<ConversationEnvironment>,
-): number {
-  let estimator = estimateTokens;
+): number;
+export function estimateConversationTokens(
+  conversation: Conversation,
+  options: EstimateConversationTokensOptions,
+  environment?: Partial<ConversationEnvironment>,
+): number;
+export function estimateConversationTokens(
+  conversation: Conversation,
+  options: AsyncEstimateConversationTokensOptions,
+  environment?: Partial<ConversationEnvironment>,
+): Promise<number>;
+export function estimateConversationTokens(
+  conversation: Conversation,
+  optionsOrEstimator?: EstimateOptions | TokenEstimator | Partial<ConversationEnvironment>,
+  environment?: Partial<ConversationEnvironment>,
+): MaybePromise<number> {
+  let options: EstimateOptions = {};
   let env = environment;
 
-  if (!environment && estimateTokens && isConversationEnvironmentParameter(estimateTokens)) {
-    env = estimateTokens;
-    estimator = undefined;
+  if (typeof optionsOrEstimator === 'function') {
+    options = { estimateTokens: optionsOrEstimator };
+  } else if (optionsOrEstimator) {
+    if (!environment && isConversationEnvironmentParameter(optionsOrEstimator)) {
+      env = optionsOrEstimator;
+    } else {
+      options = optionsOrEstimator as EstimateOptions;
+    }
   }
 
   const resolvedEnvironment = resolveConversationEnvironment(env);
-  const finalEstimator =
-    typeof estimator === 'function' ? estimator : resolvedEnvironment.estimateTokens;
-
-  return getOrderedMessages(conversation).reduce(
-    (total, message) => total + finalEstimator(message),
-    0,
-  );
+  return estimateMessageBlockTokens(getOrderedMessages(conversation), options, resolvedEnvironment);
 }
 
 /**
  * Options for truncateToTokenLimit.
  */
-export interface TruncateOptions {
+export interface TruncateOptions extends EstimateConversationTokensOptions {
+  preserveSystemMessages?: boolean;
+  preserveLastN?: number;
+  preserveToolPairs?: boolean;
+}
+
+export interface AsyncTruncateOptions extends AsyncEstimateConversationTokensOptions {
   estimateTokens?: TokenEstimator;
   preserveSystemMessages?: boolean;
   preserveLastN?: number;
@@ -225,64 +301,26 @@ export interface TruncateOptions {
  * If no estimator is provided, the environment's default estimator is used.
  * Tool interactions are preserved as atomic blocks by default.
  */
-export function truncateToTokenLimit(
+type ResolvedTruncateOptions = TruncateOptions | AsyncTruncateOptions;
+
+const truncateToTokenLimitFromBlocks = (
   conversation: Conversation,
   maxTokens: number,
-  optionsOrEstimator?: TruncateOptions | TokenEstimator,
-  environment?: Partial<ConversationEnvironment>,
-): Conversation {
-  assertConversationSafe(conversation);
-  // Handle overloaded arguments
-  let options: TruncateOptions = {};
-  let env = environment;
-
-  if (typeof optionsOrEstimator === 'function') {
-    options = { estimateTokens: optionsOrEstimator };
-  } else if (optionsOrEstimator) {
-    // If environment was not explicitly passed, check if optionsOrEstimator IS the environment
-    if (!environment && isConversationEnvironmentParameter(optionsOrEstimator)) {
-      // Disambiguate between TruncateOptions and ConversationEnvironment.
-      // Environment fields (now, randomId, non-empty plugins) take priority because they're
-      // exclusive to ConversationEnvironment, while estimateTokens exists in both types.
-      const candidate = optionsOrEstimator as Record<string, unknown>;
-      const hasEnvFields = !!(
-        candidate['now'] ||
-        candidate['randomId'] ||
-        (Array.isArray(candidate['plugins']) && candidate['plugins'].length > 0)
-      );
-
-      if (hasEnvFields) {
-        // Treat as environment, not options
-        env = optionsOrEstimator;
-      } else {
-        // Has estimateTokens but no exclusive environment fields, treat as options
-        options = optionsOrEstimator;
-      }
-    } else {
-      options = optionsOrEstimator;
-    }
-  }
-
-  const resolvedEnvironment = resolveConversationEnvironment(env);
-  const estimator = options.estimateTokens ?? resolvedEnvironment.estimateTokens;
-  const preserveSystem = options.preserveSystemMessages ?? true;
-  const preserveLastN = options.preserveLastN ?? 0;
-  const preserveToolPairs = options.preserveToolPairs ?? true;
-
-  // Calculate current token count
-  const currentTokens = estimateConversationTokens(conversation, estimator, resolvedEnvironment);
+  currentTokens: number,
+  orderedMessages: ReadonlyArray<Message>,
+  blocks: ReadonlyArray<MessageBlock>,
+  messageToBlock: Map<string, MessageBlock>,
+  options: ResolvedTruncateOptions,
+  environment: ConversationEnvironment,
+): Conversation => {
   if (currentTokens <= maxTokens) {
     return conversation;
   }
 
-  const now = resolvedEnvironment.now();
-
-  const orderedMessages = getOrderedMessages(conversation);
-  const { blocks, messageToBlock } = buildMessageBlocks(
-    orderedMessages,
-    estimator,
-    preserveToolPairs,
-  );
+  const now = environment.now();
+  const preserveSystem = options.preserveSystemMessages ?? true;
+  const preserveLastN = options.preserveLastN ?? 0;
+  const preserveToolPairs = options.preserveToolPairs ?? true;
 
   const systemMessages = preserveSystem ? orderedMessages.filter((m) => m.role === 'system') : [];
   const nonSystemMessages = orderedMessages.filter((m) => m.role !== 'system');
@@ -333,6 +371,109 @@ export function truncateToTokenLimit(
     updatedAt: now,
   });
   return ensureTruncationSafe(next, preserveToolPairs, 'truncateToTokenLimit');
+};
+
+export function truncateToTokenLimit(
+  conversation: Conversation,
+  maxTokens: number,
+  optionsOrEstimator?: TruncateOptions | TokenEstimator,
+  environment?: Partial<ConversationEnvironment>,
+): Conversation;
+export function truncateToTokenLimit(
+  conversation: Conversation,
+  maxTokens: number,
+  options: AsyncTruncateOptions,
+  environment?: Partial<ConversationEnvironment>,
+): Promise<Conversation>;
+export function truncateToTokenLimit(
+  conversation: Conversation,
+  maxTokens: number,
+  optionsOrEstimator?: ResolvedTruncateOptions | TokenEstimator | Partial<ConversationEnvironment>,
+  environment?: Partial<ConversationEnvironment>,
+): MaybePromise<Conversation> {
+  assertConversationSafe(conversation);
+  // Handle overloaded arguments
+  let options: ResolvedTruncateOptions = {};
+  let env = environment;
+
+  if (typeof optionsOrEstimator === 'function') {
+    options = { estimateTokens: optionsOrEstimator };
+  } else if (optionsOrEstimator) {
+    // If environment was not explicitly passed, check if optionsOrEstimator IS the environment
+    if (!environment && isConversationEnvironmentParameter(optionsOrEstimator)) {
+      // Disambiguate between TruncateOptions and ConversationEnvironment.
+      // Environment fields (now, randomId, non-empty plugins) take priority because they're
+      // exclusive to ConversationEnvironment, while estimateTokens exists in both types.
+      const candidate = optionsOrEstimator as Record<string, unknown>;
+      const hasEnvFields = !!(
+        candidate['now'] ||
+        candidate['randomId'] ||
+        (Array.isArray(candidate['plugins']) && candidate['plugins'].length > 0)
+      );
+
+      if (hasEnvFields) {
+        // Treat as environment, not options
+        env = optionsOrEstimator;
+      } else {
+        // Has estimateTokens but no exclusive environment fields, treat as options
+        options = optionsOrEstimator;
+      }
+    } else {
+      options = optionsOrEstimator;
+    }
+  }
+
+  const resolvedEnvironment = resolveConversationEnvironment(env);
+  const preserveToolPairs = options.preserveToolPairs ?? true;
+  const orderedMessages = getOrderedMessages(conversation);
+  const estimateBlockTokens = (messages: ReadonlyArray<Message>) =>
+    estimateMessageBlockTokens(messages, options, resolvedEnvironment);
+
+  // Calculate current token count
+  const currentTokens = estimateBlockTokens(orderedMessages);
+  if (isPromiseLike(currentTokens)) {
+    return currentTokens.then(async (resolvedCurrentTokens) => {
+      if (resolvedCurrentTokens <= maxTokens) {
+        return conversation;
+      }
+
+      const { blocks, messageToBlock } = await buildMessageBlocksAsync(
+        orderedMessages,
+        estimateBlockTokens,
+        preserveToolPairs,
+      );
+      return truncateToTokenLimitFromBlocks(
+        conversation,
+        maxTokens,
+        resolvedCurrentTokens,
+        orderedMessages,
+        blocks,
+        messageToBlock,
+        options,
+        resolvedEnvironment,
+      );
+    });
+  }
+
+  if (currentTokens <= maxTokens) {
+    return conversation;
+  }
+
+  const { blocks, messageToBlock } = buildMessageBlocks(
+    orderedMessages,
+    (messages) => estimateMessageBlockTokens(messages, options, resolvedEnvironment) as number,
+    preserveToolPairs,
+  );
+  return truncateToTokenLimitFromBlocks(
+    conversation,
+    maxTokens,
+    currentTokens,
+    orderedMessages,
+    blocks,
+    messageToBlock,
+    options,
+    resolvedEnvironment,
+  );
 }
 
 /**
