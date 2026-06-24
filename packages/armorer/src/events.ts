@@ -1,3 +1,8 @@
+import type {
+  Context as OpenTelemetryContext,
+  Link as OpenTelemetrySpanLink,
+} from '@opentelemetry/api';
+
 import type { ToolErrorCategory } from './core/errors';
 import type { ToolCall, ToolExecutionResult } from './types';
 
@@ -350,10 +355,19 @@ export class ToolboxCallEvent extends Event {
   static readonly type = 'call' as const;
   readonly tool: Tool;
   readonly call: ToolCall;
-  constructor(detail: { tool: Tool; call: ToolCall }) {
+  readonly parentContext?: OpenTelemetryContext;
+  readonly spanLinks?: OpenTelemetrySpanLink[];
+  constructor(detail: {
+    tool: Tool;
+    call: ToolCall;
+    parentContext?: OpenTelemetryContext;
+    spanLinks?: OpenTelemetrySpanLink[];
+  }) {
     super(ToolboxCallEvent.type);
     this.tool = detail.tool;
     this.call = detail.call;
+    this.parentContext = detail.parentContext;
+    this.spanLinks = detail.spanLinks;
   }
 }
 

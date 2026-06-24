@@ -406,9 +406,21 @@ Native instrumentation for distributed tracing.
 ```ts
 import { createToolbox } from 'armorer';
 import { instrument } from 'armorer/instrumentation';
+import { context, trace } from '@opentelemetry/api';
 
 const toolbox = createToolbox();
-instrument(toolbox); // Auto-wires all tool calls to OTel Spans
+instrument(toolbox); // Auto-wires all tool calls to OpenTelemetry spans
+
+const tracer = trace.getTracer('worker');
+await tracer.startActiveSpan('temporal.activity', async (activitySpan) => {
+  await toolbox.execute(
+    { id: 'lookup-account', name: 'lookupAccount', arguments: { accountId: 'acct_123' } },
+    {
+      parentContext: trace.setSpan(context.active(), activitySpan),
+      spanLinks: [{ context: activitySpan.spanContext() }],
+    },
+  );
+});
 ```
 
 ## Middleware
