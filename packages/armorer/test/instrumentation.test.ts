@@ -85,7 +85,7 @@ function createMockTracer(): Tracer & {
   return {
     spans,
     startActiveSpan: (() => undefined) as Tracer['startActiveSpan'],
-    startSpan(name, options, parentContext) {
+    startSpan(name: string, options?: SpanOptions, parentContext?: OpenTelemetryContext) {
       const span = createMockSpan();
       spans.push({ name, options, parentContext, span });
       return span;

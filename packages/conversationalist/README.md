@@ -98,11 +98,18 @@ type TranscriptEventRow =
     };
 
 function replayTranscriptRows(rows: readonly TranscriptEventRow[]): ConversationHistory {
-  let conversation = createConversationHistory({
-    title: 'Durable activity transcript',
-  });
   const seenSequences = new Set<number>();
   const orderedRows = [...rows].sort((left, right) => left.sequence - right.sequence);
+  const firstRow = orderedRows[0];
+  let conversation = createConversationHistory(
+    {
+      title: 'Durable activity transcript',
+    },
+    {
+      now: () => firstRow?.createdAt ?? new Date(0).toISOString(),
+      randomId: () => (firstRow ? `conversation-${firstRow.messageId}` : 'empty-transcript'),
+    },
+  );
 
   for (const row of orderedRows) {
     if (seenSequences.has(row.sequence)) {
