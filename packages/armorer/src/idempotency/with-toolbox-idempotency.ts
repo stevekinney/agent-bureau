@@ -26,6 +26,22 @@ type ToolboxExecuteOptionsWithIdempotencyKey = {
   retryUnknownOutcome?: boolean;
 };
 
+const PRE_EXECUTION_CONFLICT_CODES = new Set(['BUDGET_EXCEEDED', 'LOOP_BLOCKED']);
+
+function getErrorCode(error: unknown): string | undefined {
+  if (!error || typeof error !== 'object') {
+    return undefined;
+  }
+
+  const code = (error as { code?: unknown })['code'];
+  return typeof code === 'string' ? code : undefined;
+}
+
+function isPreExecutionConflict(error: unknown): boolean {
+  const code = getErrorCode(error);
+  return code !== undefined && PRE_EXECUTION_CONFLICT_CODES.has(code);
+}
+
 function shouldClearStartedState(result: ToolExecutionResult): boolean {
   if (result.outcome === 'action_required') {
     return true;
@@ -36,7 +52,12 @@ function shouldClearStartedState(result: ToolExecutionResult): boolean {
   }
 
   const category = result.error?.category ?? result.errorCategory;
-  return category === 'validation' || category === 'permission' || category === 'not_found';
+  return (
+    category === 'validation' ||
+    category === 'permission' ||
+    category === 'not_found' ||
+    isPreExecutionConflict(result.error)
+  );
 }
 
 function shouldClearStartedStateForThrownError(error: unknown): boolean {
@@ -45,7 +66,12 @@ function shouldClearStartedStateForThrownError(error: unknown): boolean {
   }
 
   const category = (error as { category?: unknown })['category'];
-  return category === 'validation' || category === 'permission' || category === 'not_found';
+  return (
+    category === 'validation' ||
+    category === 'permission' ||
+    category === 'not_found' ||
+    isPreExecutionConflict(error)
+  );
 }
 
 /**

@@ -328,6 +328,56 @@ describe('withToolboxIdempotency', () => {
     expect(addCallCount).toBe(0);
   });
 
+  it('does not keep started state for budget blocks before execution', async () => {
+    const toolbox = createToolbox([createToolWithKey()], {
+      budget: { maxCalls: 0 },
+    });
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
+
+    const first = await idempotentToolbox.execute(
+      { name: 'add', arguments: { a: 1, b: 2 } },
+      { idempotencyKey: 'budget-block' },
+    );
+    const second = await idempotentToolbox.execute(
+      { name: 'add', arguments: { a: 1, b: 2 } },
+      { idempotencyKey: 'budget-block' },
+    );
+
+    expect(first.outcome).toBe('error');
+    expect(first.error?.category).toBe('conflict');
+    expect(first.error?.code).toBe('BUDGET_EXCEEDED');
+    expect(second.outcome).toBe('error');
+    expect(second.idempotency).toBeUndefined();
+    expect(await cache.getState!('add:budget-block')).toBeUndefined();
+    expect(addCallCount).toBe(0);
+  });
+
+  it('does not keep started state when fail-fast budget blocks throw', async () => {
+    const toolbox = createToolbox([createToolWithKey()], {
+      budget: { maxCalls: 0 },
+    });
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
+
+    await expect(
+      idempotentToolbox.execute(
+        { name: 'add', arguments: { a: 1, b: 2 } },
+        { idempotencyKey: 'budget-block', errorMode: 'failFast' },
+      ),
+    ).rejects.toMatchObject({ category: 'conflict', code: 'BUDGET_EXCEEDED' });
+
+    expect(await cache.getState!('add:budget-block')).toBeUndefined();
+
+    const retry = await idempotentToolbox.execute(
+      { name: 'add', arguments: { a: 1, b: 2 } },
+      { idempotencyKey: 'budget-block' },
+    );
+
+    expect(retry.outcome).toBe('error');
+    expect(retry.idempotency).toBeUndefined();
+    expect(await cache.getState!('add:budget-block')).toBeUndefined();
+    expect(addCallCount).toBe(0);
+  });
+
   it('routes signed approval resumes through toolbox idempotency', async () => {
     const charges: number[] = [];
     const chargeTool = createTool({
@@ -483,6 +533,46 @@ describe('withToolboxIdempotency', () => {
       outcome: 'unknown-outcome',
     });
     expect(await cache.getState!('add:primitive-error')).toEqual(
+      expect.objectContaining({ status: 'started', toolName: 'add' }),
+    );
+  });
+
+  it('keeps started state for error results without an error object', async () => {
+    const tool = createToolWithKey();
+    const toolbox = {
+      getTool(name: string) {
+        return name === 'add' ? tool : undefined;
+      },
+      async execute(call: ToolCallInput) {
+        return {
+          callId: call.id ?? '',
+          outcome: 'error',
+          content: 'provider failed after side effect',
+          toolCallId: call.id ?? '',
+          toolName: call.name,
+          result: undefined,
+          errorCategory: 'transient',
+        };
+      },
+    } as Toolbox;
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
+
+    const first = await idempotentToolbox.execute(
+      { id: 'call-1', name: 'add', arguments: { a: 1, b: 2 } },
+      { idempotencyKey: 'error-without-object' },
+    );
+    const second = await idempotentToolbox.execute(
+      { id: 'call-2', name: 'add', arguments: { a: 1, b: 2 } },
+      { idempotencyKey: 'error-without-object' },
+    );
+
+    expect(first.outcome).toBe('error');
+    expect(second.outcome).toBe('action_required');
+    expect(second.idempotency).toEqual({
+      key: 'add:error-without-object',
+      outcome: 'unknown-outcome',
+    });
+    expect(await cache.getState!('add:error-without-object')).toEqual(
       expect.objectContaining({ status: 'started', toolName: 'add' }),
     );
   });
