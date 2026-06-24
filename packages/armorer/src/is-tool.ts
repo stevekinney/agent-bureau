@@ -225,6 +225,14 @@ export interface ToolExecuteOptions {
    * When false/omitted, async-iterables are collected into arrays.
    */
   stream?: boolean;
+  /**
+   * Marks this execution as an approved resume of a previously paused call.
+   * Validation still runs; approval policies are not asked to approve the same
+   * call again.
+   */
+  approved?: boolean;
+  /** The arguments proposed before approval, used to report operator edits. */
+  proposedArguments?: unknown;
 }
 
 /**

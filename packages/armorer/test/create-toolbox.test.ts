@@ -41,6 +41,62 @@ describe('createToolbox', () => {
     expect(result.result).toBe(3);
   });
 
+  it('returns a serializable pending approval descriptor and resumes with edited arguments', async () => {
+    const toolbox = createToolbox(
+      [
+        createTool({
+          name: 'charge-card',
+          description: 'Charge a payment card',
+          input: z.object({ cents: z.number() }),
+          metadata: { mutates: true },
+          async execute({ cents }) {
+            return { charged: cents };
+          },
+        }),
+      ],
+      {
+        policy: {
+          beforeExecute() {
+            return {
+              allow: false,
+              status: 'needs_approval',
+              reason: 'Operator approval required',
+              action: { message: 'Approve charge' },
+            };
+          },
+        },
+      },
+    );
+
+    const paused = await toolbox.execute({
+      id: 'tool-call-1',
+      name: 'charge-card',
+      arguments: { cents: 100 },
+    });
+
+    expect(paused.outcome).toBe('action_required');
+    expect(paused.pendingApproval).toEqual({
+      callId: 'tool-call-1',
+      toolName: 'charge-card',
+      arguments: { cents: 100 },
+      action: {
+        type: 'approval',
+        message: 'Approve charge',
+      },
+      reason: 'Operator approval required',
+      metadata: { mutates: true },
+    });
+    expect(JSON.parse(JSON.stringify(paused.pendingApproval))).toEqual(paused.pendingApproval);
+
+    const resumed = await toolbox.resumeApproval(paused.pendingApproval!, {
+      arguments: { cents: 125 },
+    });
+
+    expect(resumed.outcome).toBe('success');
+    expect(resumed.result).toEqual({ charged: 125 });
+    expect(resumed.executedArgumentsEdited).toBe(true);
+  });
+
   it('exports provider tools through lazy toolbox methods', async () => {
     const toolbox = createToolbox([makeConfiguration()]);
 

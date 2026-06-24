@@ -140,11 +140,13 @@ export { awaitToolEmbeddings, registerToolEmbeddings } from './core/registry/emb
 export type {
   JSONValue,
   MinimalToolConfiguration,
+  PendingToolApproval,
   ToolAction,
   ToolActionInput,
   ToolCall,
   ToolCallInput,
   ToolErrorInput,
+  ToolExecutionIdempotency,
   ToolExecutionResult,
   ToolProvider,
   ToolResult,

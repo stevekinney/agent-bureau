@@ -13,6 +13,23 @@ export interface ToolResultTruncationOptions {
   base64Placeholder?: string;
 }
 
+export interface StructuredToolResultTruncationOptions {
+  maxBytes?: number;
+  headBytes?: number;
+  tailBytes?: number;
+  base64Placeholder?: string;
+}
+
+export type StructuredToolResultTruncation = {
+  head: string;
+  tail: string;
+  originalSize: number;
+  omittedBytes: number;
+  truncated: boolean;
+};
+
+const textEncoder = new TextEncoder();
+
 export function isHighSurrogate(code: number): boolean {
   return code >= 0xd800 && code <= 0xdbff;
 }
@@ -139,4 +156,91 @@ export function truncateToolResultContent(
 
   // 3. Truncate with the marker
   return truncateText(processed, max, { marker: options?.marker });
+}
+
+function byteLength(text: string): number {
+  return textEncoder.encode(text).byteLength;
+}
+
+function safeSliceByBytes(text: string, maxBytes: number): string {
+  if (maxBytes <= 0) return '';
+  if (byteLength(text) <= maxBytes) return text;
+
+  let low = 0;
+  let high = text.length;
+  let best = '';
+
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    const candidate = safeSlice(text, middle);
+    const candidateBytes = byteLength(candidate);
+    if (candidateBytes <= maxBytes) {
+      best = candidate;
+      low = middle + 1;
+    } else {
+      high = middle - 1;
+    }
+  }
+
+  return best;
+}
+
+function safeTailByBytes(text: string, maxBytes: number): string {
+  if (maxBytes <= 0) return '';
+  if (byteLength(text) <= maxBytes) return text;
+
+  const characters = Array.from(text);
+  let tail = '';
+
+  for (let index = characters.length - 1; index >= 0; index -= 1) {
+    const candidate = characters[index] + tail;
+    if (byteLength(candidate) > maxBytes) {
+      break;
+    }
+    tail = candidate;
+  }
+
+  return tail;
+}
+
+export function truncateToolResultContentStructured(
+  content: string,
+  options?: StructuredToolResultTruncationOptions,
+): StructuredToolResultTruncation {
+  let processed = content;
+  try {
+    if (containsBase64Data(processed)) {
+      processed = stripBase64Data(processed, options?.base64Placeholder);
+    }
+  } catch {
+    // Silently fall back to unprocessed content.
+  }
+
+  const originalSize = byteLength(processed);
+  const maxBytes = options?.maxBytes ?? DEFAULT_MAX_CHARACTERS;
+
+  if (originalSize <= maxBytes) {
+    return {
+      head: processed,
+      tail: '',
+      originalSize,
+      omittedBytes: 0,
+      truncated: false,
+    };
+  }
+
+  const requestedHeadBytes = options?.headBytes ?? Math.ceil(maxBytes / 2);
+  const headBudget = Math.max(0, Math.min(maxBytes, requestedHeadBytes));
+  const tailBudget = Math.max(0, Math.min(maxBytes - headBudget, options?.tailBytes ?? maxBytes));
+  const head = safeSliceByBytes(processed, headBudget);
+  const tail = safeTailByBytes(processed, tailBudget);
+  const visibleBytes = byteLength(head) + byteLength(tail);
+
+  return {
+    head,
+    tail,
+    originalSize,
+    omittedBytes: Math.max(0, originalSize - visibleBytes),
+    truncated: true,
+  };
 }

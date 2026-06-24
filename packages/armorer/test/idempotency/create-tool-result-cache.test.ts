@@ -42,7 +42,7 @@ describe('createToolResultCache', () => {
       await cache.set('key-1', result);
       const retrieved = await cache.get('key-1');
 
-      expect(retrieved).toEqual(result);
+      expect(retrieved).toMatchObject(result);
     });
 
     it('returns undefined for a missing key', async () => {
@@ -62,7 +62,10 @@ describe('createToolResultCache', () => {
       const raw = await store.get('key-2');
 
       expect(typeof raw).toBe('string');
-      expect(JSON.parse(raw!)).toEqual(result);
+      expect(JSON.parse(raw!)).toMatchObject({
+        ...result,
+        status: 'completed',
+      });
     });
   });
 
@@ -92,7 +95,7 @@ describe('createToolResultCache', () => {
       await cache.set('fresh-key', result);
       const retrieved = await cache.get('fresh-key');
 
-      expect(retrieved).toEqual(result);
+      expect(retrieved).toMatchObject(result);
     });
   });
 
@@ -122,7 +125,7 @@ describe('createToolResultCache', () => {
 
       // Cache should still retrieve it via the original key
       const retrieved = await namespacedCache.get('my-key');
-      expect(retrieved).toEqual(result);
+      expect(retrieved).toMatchObject(result);
     });
   });
 
@@ -162,6 +165,25 @@ describe('createToolResultCache', () => {
     });
   });
 
+  describe('started executions', () => {
+    it('stores and retrieves a started state separately from completed results', async () => {
+      await cache.markStarted('started-key', {
+        status: 'started',
+        toolName: 'charge-card',
+        startedAt: Date.now(),
+        ttl: 60_000,
+      });
+
+      expect(await cache.get('started-key')).toBeUndefined();
+      expect(await cache.getState('started-key')).toEqual({
+        status: 'started',
+        toolName: 'charge-card',
+        startedAt: expect.any(Number),
+        ttl: 60_000,
+      });
+    });
+  });
+
   describe('defaultTTL', () => {
     it('returns an entry whose TTL has not yet expired', async () => {
       const defaultCache = createToolResultCache({ store });
@@ -174,7 +196,7 @@ describe('createToolResultCache', () => {
 
       await defaultCache.set('ttl-valid', result);
       const retrieved = await defaultCache.get('ttl-valid');
-      expect(retrieved).toEqual(result);
+      expect(retrieved).toMatchObject(result);
     });
 
     it('treats an entry as expired when executedAt + ttl is in the past', async () => {

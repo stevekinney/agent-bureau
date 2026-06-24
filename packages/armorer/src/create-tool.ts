@@ -699,7 +699,11 @@ export function createTool<
           policyContext.policyContext = injected;
         }
       }
-      const decision = await resolvePolicyDecision(policyContext);
+      const decision = options.approved ? undefined : await resolvePolicyDecision(policyContext);
+      const executedArgumentsEdited =
+        options.proposedArguments !== undefined &&
+        stableStringify(normalizeToolContent(options.proposedArguments)) !==
+          stableStringify(normalizeToolContent(parsed));
 
       if (decision?.status === 'needs_approval' || decision?.status === 'needs_input') {
         const type = decision.status === 'needs_approval' ? 'approval' : 'input';
@@ -715,6 +719,11 @@ export function createTool<
         finishTelemetry('paused', { reason });
 
         const callId = typedToolCall.id;
+        const action = {
+          type,
+          message: decision.action?.message ?? reason,
+          schema: decision.action?.schema,
+        };
         return {
           callId,
           outcome: 'action_required',
@@ -722,10 +731,14 @@ export function createTool<
           toolCallId: callId,
           toolName: name,
           result: undefined,
-          action: {
-            type,
-            message: decision.action?.message ?? reason,
-            schema: decision.action?.schema,
+          action,
+          pendingApproval: {
+            callId,
+            toolName: name,
+            arguments: normalizeToolContent(parsed),
+            action,
+            reason,
+            metadata: normalizeToolContent(configuration.metadata ?? {}),
           },
           inputDigest,
         } as ToolExecutionResult;
@@ -944,6 +957,7 @@ export function createTool<
             toolName: name,
             result: stream,
             stream,
+            executedArgumentsEdited,
             inputDigest,
           } as ToolExecutionResult;
         }
@@ -1000,6 +1014,7 @@ export function createTool<
         toolCallId: callId,
         toolName: name,
         result: value,
+        executedArgumentsEdited,
         inputDigest,
         outputDigest,
       } as ToolExecutionResult;

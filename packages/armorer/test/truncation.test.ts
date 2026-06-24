@@ -11,6 +11,7 @@ import {
   stripBase64Data,
   truncateText,
   truncateToolResultContent,
+  truncateToolResultContentStructured,
 } from '../src/truncation/index';
 
 describe('truncation', () => {
@@ -149,6 +150,63 @@ describe('truncation', () => {
         maxCharacters: 50,
       });
       expect(result.length).toBeLessThanOrEqual(50);
+    });
+  });
+
+  describe('truncateToolResultContentStructured', () => {
+    it('keeps head and tail excerpts within a byte budget', () => {
+      const result = truncateToolResultContentStructured('abcdefghijklmnopqrstuvwxyz', {
+        maxBytes: 10,
+      });
+
+      expect(result).toEqual({
+        head: 'abcde',
+        tail: 'vwxyz',
+        originalSize: 26,
+        omittedBytes: 16,
+        truncated: true,
+      });
+    });
+
+    it('returns the whole content as the head when no truncation is needed', () => {
+      const result = truncateToolResultContentStructured('short', {
+        maxBytes: 100,
+      });
+
+      expect(result).toEqual({
+        head: 'short',
+        tail: '',
+        originalSize: 5,
+        omittedBytes: 0,
+        truncated: false,
+      });
+    });
+
+    it('does not split surrogate pairs when applying byte budgets', () => {
+      const result = truncateToolResultContentStructured('aaa😀bbb😀ccc', {
+        maxBytes: 10,
+        headBytes: 5,
+        tailBytes: 5,
+      });
+
+      expect(result.head).toBe('aaa');
+      expect(result.tail).toBe('ccc');
+      expect(result.truncated).toBe(true);
+      expect(result.omittedBytes).toBeGreaterThan(0);
+    });
+
+    it('strips base64 payloads before creating structured excerpts', () => {
+      const result = truncateToolResultContentStructured(
+        'before data:image/png;base64,AAAA after',
+        {
+          maxBytes: 100,
+          base64Placeholder: '[asset omitted]',
+        },
+      );
+
+      expect(result.head).toBe('before [asset omitted] after');
+      expect(result.originalSize).toBe('before [asset omitted] after'.length);
+      expect(result.truncated).toBe(false);
     });
   });
 

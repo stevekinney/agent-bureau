@@ -20,6 +20,10 @@ export type WithToolboxIdempotencyOptions = {
   requireExplicitKey?: boolean;
 };
 
+type ToolboxExecuteOptionsWithIdempotencyKey = {
+  idempotencyKey?: string | ((call: ToolCallInput) => string | undefined);
+};
+
 /**
  * Wraps a toolbox so that tool executions are deduplicated via an idempotency
  * cache. Returns a new toolbox object — the original is not mutated.
@@ -75,8 +79,36 @@ export function withToolboxIdempotency(
       return originalExecute(call, executeOptions);
     }
 
-    const cacheKey = `${fields.name}:${keyFn(fields.arguments)}`;
-    const cached = await cache.get(cacheKey);
+    const suppliedKey = (executeOptions as ToolboxExecuteOptionsWithIdempotencyKey | undefined)
+      ?.idempotencyKey;
+    const externalKey =
+      typeof suppliedKey === 'function'
+        ? suppliedKey(call)
+        : typeof suppliedKey === 'string'
+          ? suppliedKey
+          : undefined;
+    const cacheKey = externalKey ?? `${fields.name}:${keyFn(fields.arguments)}`;
+    const cached = await cache.getState(cacheKey);
+
+    if (cached?.status === 'started') {
+      return {
+        callId: fields.id,
+        outcome: 'action_required',
+        content: 'Tool execution started earlier, but no result was recorded.',
+        toolCallId: fields.id,
+        toolName: cached.toolName,
+        result: undefined,
+        idempotency: {
+          key: cacheKey,
+          outcome: 'unknown-outcome',
+        },
+        action: {
+          type: 'approval',
+          message:
+            'This idempotency key has an unknown outcome. Re-approve before retrying the side effect.',
+        },
+      } as ToolExecutionResult;
+    }
 
     if (cached) {
       return {
@@ -86,10 +118,25 @@ export function withToolboxIdempotency(
         toolCallId: fields.id,
         toolName: cached.toolName,
         result: cached.result,
+        idempotency: {
+          key: cacheKey,
+          outcome: 'deduped',
+        },
       } as ToolExecutionResult;
     }
 
+    await cache.markStarted(cacheKey, {
+      status: 'started',
+      toolName: fields.name,
+      startedAt: Date.now(),
+      ttl: defaultTTL,
+    });
+
     const result = await originalExecute(call, executeOptions);
+    result.idempotency = {
+      key: cacheKey,
+      outcome: 'fresh',
+    };
 
     // Only cache successful results
     if (result.outcome === 'success' && !result.error) {

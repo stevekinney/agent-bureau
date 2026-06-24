@@ -31,7 +31,7 @@ function isToolCall(value: unknown): value is ToolCallWithArguments {
  * @returns A new tool with the same interface but idempotent execution.
  */
 export function withIdempotency<T extends Tool>(tool: T, options: IdempotencyOptions): T {
-  const { cache, ttl = DEFAULT_TTL, onCacheHit } = options;
+  const { cache, ttl = DEFAULT_TTL, onCacheHit, onUnknownOutcome } = options;
 
   // Access the idempotencyKey from the tool (set via createTool options).
   // Tools store this as an own property set by createTool when configured.
@@ -50,11 +50,22 @@ export function withIdempotency<T extends Tool>(tool: T, options: IdempotencyOpt
   async function executeWithCache(params: unknown): Promise<unknown> {
     const key = idempotencyKey!(params);
 
-    const cached = await cache.get(key);
+    const cached = await cache.getState(key);
+    if (cached?.status === 'started') {
+      onUnknownOutcome?.(key, cached);
+      throw new Error(`Idempotency key "${key}" has an unknown outcome.`);
+    }
     if (cached) {
       onCacheHit?.(key, cached);
       return cached.result;
     }
+
+    await cache.markStarted(key, {
+      status: 'started',
+      toolName: tool.name,
+      startedAt: Date.now(),
+      ttl,
+    });
 
     // Execute the tool via its callable interface (params → result)
     const result = await tool(params);

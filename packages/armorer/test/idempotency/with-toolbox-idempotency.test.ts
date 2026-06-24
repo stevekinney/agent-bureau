@@ -71,7 +71,55 @@ describe('withToolboxIdempotency', () => {
 
     expect(result1.result).toBe(3);
     expect(result2.result).toBe(3);
+    expect(result1.idempotency?.outcome).toBe('fresh');
+    expect(result2.idempotency?.outcome).toBe('deduped');
     expect(addCallCount).toBe(1); // Cached on second call
+  });
+
+  it('accepts an externally supplied idempotency key', async () => {
+    const toolbox = createToolbox([createToolWithKey()]);
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
+
+    const result1 = await idempotentToolbox.execute(
+      { id: 'call-1', name: 'add', arguments: { a: 1, b: 2 } },
+      { idempotencyKey: 'temporal-tool-call-id' },
+    );
+    const result2 = await idempotentToolbox.execute(
+      { id: 'call-2', name: 'add', arguments: { a: 9, b: 9 } },
+      { idempotencyKey: 'temporal-tool-call-id' },
+    );
+
+    expect(result1.result).toBe(3);
+    expect(result2.result).toBe(3);
+    expect(result2.idempotency).toEqual({
+      key: 'temporal-tool-call-id',
+      outcome: 'deduped',
+    });
+    expect(addCallCount).toBe(1);
+  });
+
+  it('returns unknown-outcome when a key was started without a recorded result', async () => {
+    const toolbox = createToolbox([createToolWithKey()]);
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
+
+    await cache.markStarted('started-key', {
+      status: 'started',
+      toolName: 'add',
+      startedAt: Date.now(),
+      ttl: 60_000,
+    });
+
+    const result = await idempotentToolbox.execute(
+      { id: 'call-1', name: 'add', arguments: { a: 1, b: 2 } },
+      { idempotencyKey: 'started-key' },
+    );
+
+    expect(result.outcome).toBe('action_required');
+    expect(result.idempotency).toEqual({
+      key: 'started-key',
+      outcome: 'unknown-outcome',
+    });
+    expect(addCallCount).toBe(0);
   });
 
   it('does not wrap tools without idempotencyKey by default (requireExplicitKey: true)', async () => {

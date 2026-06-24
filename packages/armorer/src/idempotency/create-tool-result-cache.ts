@@ -1,4 +1,9 @@
-import type { CachedToolResult, ToolResultCache } from './types';
+import type {
+  CachedToolResult,
+  StartedToolExecution,
+  ToolResultCache,
+  ToolResultCacheEntry,
+} from './types';
 
 /**
  * Minimal store interface matching KeyValueStore from the storage package.
@@ -40,33 +45,57 @@ export function createToolResultCache(options: CreateToolResultCacheOptions): To
   }
 
   /** TTL of 0 means "never expire." */
-  function isExpired(entry: CachedToolResult): boolean {
+  function getEntryTime(entry: ToolResultCacheEntry): number {
+    return entry.status === 'started' ? entry.startedAt : entry.executedAt;
+  }
+
+  function isExpired(entry: ToolResultCacheEntry): boolean {
     if (entry.ttl === 0) return false;
-    return Date.now() > entry.executedAt + entry.ttl;
+    return Date.now() > getEntryTime(entry) + entry.ttl;
+  }
+
+  async function getEntry(key: string): Promise<ToolResultCacheEntry | undefined> {
+    const raw = await store.get(resolveKey(key));
+    if (raw === null) {
+      return undefined;
+    }
+
+    const entry = JSON.parse(raw) as ToolResultCacheEntry;
+
+    if (isExpired(entry)) {
+      // Lazily clean up expired entries
+      await store.delete(resolveKey(key));
+      return undefined;
+    }
+
+    return entry;
   }
 
   return {
     async get(key: string): Promise<CachedToolResult | undefined> {
-      const raw = await store.get(resolveKey(key));
-      if (raw === null) {
-        return undefined;
-      }
-
-      const entry = JSON.parse(raw) as CachedToolResult;
-
-      if (isExpired(entry)) {
-        // Lazily clean up expired entries
-        await store.delete(resolveKey(key));
+      const entry = await getEntry(key);
+      if (!entry || entry.status === 'started') {
         return undefined;
       }
 
       return entry;
     },
 
+    getState: getEntry,
+
     async set(key: string, result: CachedToolResult, ttl?: number): Promise<void> {
       // Priority: explicit ttl param > entry's own ttl (including 0 = never expire) > defaultTTL
       const effectiveTTL = ttl ?? (result.ttl !== undefined ? result.ttl : defaultTTL);
-      const entry = effectiveTTL !== undefined ? { ...result, ttl: effectiveTTL } : result;
+      const entry =
+        effectiveTTL !== undefined
+          ? { ...result, status: 'completed' as const, ttl: effectiveTTL }
+          : { ...result, status: 'completed' as const };
+      await store.set(resolveKey(key), JSON.stringify(entry));
+    },
+
+    async markStarted(key: string, execution: StartedToolExecution, ttl?: number): Promise<void> {
+      const effectiveTTL = ttl ?? (execution.ttl !== undefined ? execution.ttl : defaultTTL);
+      const entry = effectiveTTL !== undefined ? { ...execution, ttl: effectiveTTL } : execution;
       await store.set(resolveKey(key), JSON.stringify(entry));
     },
 

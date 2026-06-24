@@ -162,7 +162,17 @@ Truncation utilities for tool results:
 import { truncateToolResultContent, containsBase64Data } from 'armorer/truncation';
 ```
 
-**Exports:** `truncateToolResultContent`, `truncateText`, `safeSlice`, `createTruncatingAsyncIterable`, `containsBase64Data`, `stripBase64Data`, `isHighSurrogate`, `isLowSurrogate`, `DEFAULT_MAX_CHARACTERS`, `DEFAULT_ERROR_MAX_CHARACTERS`, and types `TruncationOptions`, `ToolResultTruncationOptions`.
+**Exports:** `truncateToolResultContent`, `truncateToolResultContentStructured`, `truncateText`, `safeSlice`, `createTruncatingAsyncIterable`, `containsBase64Data`, `stripBase64Data`, `isHighSurrogate`, `isLowSurrogate`, `DEFAULT_MAX_CHARACTERS`, `DEFAULT_ERROR_MAX_CHARACTERS`, and types `TruncationOptions`, `ToolResultTruncationOptions`, `StructuredToolResultTruncationOptions`, and `StructuredToolResultTruncation`.
+
+#### `armorer/idempotency`
+
+Persistent idempotency helpers for at-least-once executors:
+
+```typescript
+import { createToolResultCache, fullInputKey, withToolboxIdempotency } from 'armorer/idempotency';
+```
+
+**Exports:** `createToolResultCache`, `withIdempotency`, `withToolboxIdempotency`, `fullInputKey`, `fieldKey`, `compositeKey`, `namespacedKey`, and idempotency cache/result types.
 
 ### Infrastructure
 
@@ -324,9 +334,23 @@ const toolbox = createToolbox([], {
 
 const result = await toolbox.execute(sensitiveCall);
 if (result.outcome === 'action_required') {
-  // Present approval UI to user...
+  // Persist the descriptor and present approval UI to the operator.
+  await durableStore.set(result.pendingApproval!.callId, result.pendingApproval);
+}
+
+// Later, possibly in another process, rebuild the same toolbox and resume.
+const approved = await durableStore.get('tool-call-id');
+const resumed = await toolbox.resumeApproval(approved, {
+  // Optional operator edits are re-validated before execution.
+  arguments: { ...approved.arguments, confirmed: true },
+});
+
+if (resumed.executedArgumentsEdited) {
+  // Record proposed-vs-executed provenance in your transcript.
 }
 ```
+
+`pendingApproval` is JSON-serializable and includes `callId`, `toolName`, validated `arguments`, the requested action, reason, and tool metadata. `resumeApproval()` reconstructs the original call id, re-validates the original or edited arguments, skips the already-granted approval gate, runs the tool, and sets `executedArgumentsEdited` when the resumed arguments differ from the proposed arguments.
 
 ## Agent Integration
 
@@ -423,6 +447,8 @@ await tracer.startActiveSpan('temporal.activity', async (activitySpan) => {
 });
 ```
 
+Pass `parentContext` to nest tool spans under an existing OpenTelemetry context. Pass `links` to attach span links when the orchestrator prefers linked traces over a direct parent-child relationship.
+
 ## Middleware
 
 Batteries-included middleware for production needs.
@@ -463,6 +489,56 @@ const toolbox = createToolbox(tools, {
   middleware: [createTruncationMiddleware({ maxCharacters: 4000 })],
 });
 ```
+
+For artifact spill workflows, use the structured head-and-tail helper:
+
+```ts
+import { truncateToolResultContentStructured } from 'armorer/truncation';
+
+const excerpt = truncateToolResultContentStructured(toolOutput, {
+  maxBytes: 8000,
+});
+
+if (excerpt.truncated) {
+  console.log(`${excerpt.head}\n... omitted ${excerpt.omittedBytes} bytes ...\n${excerpt.tail}`);
+}
+```
+
+The structured result is `{ head, tail, originalSize, omittedBytes, truncated }`. Byte counts use UTF-8 size, and the excerpts avoid splitting UTF-16 surrogate pairs.
+
+## Idempotency
+
+Use `armorer/idempotency` when a tool might be retried by an at-least-once executor. The cache records three outcomes:
+
+- `fresh`: this process executed the tool and recorded the result.
+- `deduped`: a completed result already existed and was returned.
+- `unknown-outcome`: execution started earlier, but no result was recorded.
+
+```ts
+import { createToolbox } from 'armorer';
+import { createToolResultCache, withToolboxIdempotency } from 'armorer/idempotency';
+
+const cache = createToolResultCache({ store: durableKeyValueStore });
+const toolbox = createToolbox([chargeCardTool]);
+const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
+
+const result = await idempotentToolbox.execute(
+  {
+    id: 'provider-call-1',
+    name: 'charge-card',
+    arguments: { cents: 2500 },
+  },
+  {
+    idempotencyKey: temporalToolCallId,
+  },
+);
+
+if (result.idempotency?.outcome === 'unknown-outcome') {
+  // Do not replay blindly. Ask for operator review before retrying.
+}
+```
+
+If you do not pass `idempotencyKey`, `withToolboxIdempotency()` uses each tool's configured `idempotencyKey` function. Caller-supplied keys are useful when an orchestrator already mints a stable key per provider `tool_call_id` and needs retries to reuse that exact key.
 
 ### Fuzzy Tool Name Resolution
 

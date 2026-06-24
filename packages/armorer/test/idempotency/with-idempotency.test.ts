@@ -105,7 +105,7 @@ describe('withIdempotency', () => {
     expect(onCacheHit.mock.calls[0]![1]!.toolName).toBe('add');
   });
 
-  it('does not cache errors', async () => {
+  it('surfaces an unknown outcome after an execution starts but does not complete', async () => {
     let shouldFail = true;
     const tool = createTool({
       name: 'flaky',
@@ -124,14 +124,11 @@ describe('withIdempotency', () => {
 
     const wrapped = withIdempotency(tool, { cache });
 
-    // First call fails
     await expect(wrapped({ x: 5 })).rejects.toThrow('temporary failure');
     expect(callCount).toBe(1);
 
-    // Second call should retry (not return cached error)
-    const result = await wrapped({ x: 5 });
-    expect(result).toBe(10);
-    expect(callCount).toBe(2);
+    await expect(wrapped({ x: 5 })).rejects.toThrow('unknown outcome');
+    expect(callCount).toBe(1);
   });
 
   it('throws when tool has no idempotencyKey', () => {

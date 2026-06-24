@@ -92,6 +92,7 @@ import { resolveFuzzyToolName } from './resolution/index';
 import { isAsyncIterable, isPromise, isTestRuntime } from './type-guards';
 import type {
   JSONValue,
+  PendingToolApproval,
   ToolCall,
   ToolCallInput,
   ToolExecutionResult,
@@ -321,6 +322,7 @@ export interface ToolboxExecuteOptions extends ToolExecuteOptions {
   errorMode?: 'failFast' | 'collect';
   parentContext?: OpenTelemetryContext;
   spanLinks?: OpenTelemetrySpanLink[];
+  idempotencyKey?: string | ((call: ToolCall) => string | undefined);
 }
 
 export type ToolboxEntry = ToolConfiguration | Tool;
@@ -398,6 +400,10 @@ export interface Toolbox<TTools extends readonly Tool[] = readonly Tool[]> {
   ): Promise<{ [K in keyof TCalls]: ToolboxResultForCall<TTools, TCalls[K]> }>;
   execute(call: ToolCallInput, options?: ToolboxExecuteOptions): Promise<ToolExecutionResult>;
   execute(calls: ToolCallInput[], options?: ToolboxExecuteOptions): Promise<ToolExecutionResult[]>;
+  resumeApproval(
+    approval: PendingToolApproval,
+    options?: ToolboxExecuteOptions & { arguments?: unknown },
+  ): Promise<ToolExecutionResult>;
   extend<const TEntries extends ToolboxEntries>(
     ...entries: TEntries
   ): Toolbox<MergeTools<TTools, ToolsFromEntries<TEntries>>>;
@@ -949,11 +955,19 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
 
       try {
         const executeOptions: ToolExecuteOptions =
-          options?.signal || options?.timeout !== undefined || options?.stream !== undefined
+          options?.signal ||
+          options?.timeout !== undefined ||
+          options?.stream !== undefined ||
+          options?.approved !== undefined ||
+          options?.proposedArguments !== undefined
             ? {
                 ...(options?.signal ? { signal: options.signal } : {}),
                 ...(options?.timeout !== undefined ? { timeout: options.timeout } : {}),
                 ...(options?.stream !== undefined ? { stream: options.stream } : {}),
+                ...(options?.approved !== undefined ? { approved: options.approved } : {}),
+                ...(options?.proposedArguments !== undefined
+                  ? { proposedArguments: options.proposedArguments }
+                  : {}),
               }
             : {};
 
@@ -1017,6 +1031,28 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
     const promises = tasks.map((task) => runTask(task));
     const results = await Promise.all(promises);
     return isMultiple ? results : results[0]!;
+  }
+
+  function resumeApproval(
+    approval: PendingToolApproval,
+    resumeOptions?: ToolboxExecuteOptions & { arguments?: unknown },
+  ): Promise<ToolExecutionResult> {
+    const executeArguments = Object.prototype.hasOwnProperty.call(resumeOptions ?? {}, 'arguments')
+      ? resumeOptions!.arguments
+      : approval.arguments;
+
+    return execute(
+      {
+        id: approval.callId,
+        name: approval.toolName,
+        arguments: executeArguments,
+      },
+      {
+        ...resumeOptions,
+        approved: true,
+        proposedArguments: approval.arguments,
+      },
+    );
   }
 
   function extend<const TExtendEntries extends ToolboxEntries>(
@@ -1173,6 +1209,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
 
   const api: Toolbox<ToolsFromEntries<TEntries>> = {
     execute,
+    resumeApproval,
     extend,
     tools,
     getTool,
