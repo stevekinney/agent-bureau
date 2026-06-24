@@ -39,6 +39,7 @@ export function createToolResultCache(options: CreateToolResultCacheOptions): To
   const { store, defaultTTL, namespace } = options;
 
   const prefix = namespace ? `${namespace}:` : '';
+  const pendingClaims = new Map<string, Promise<unknown>>();
 
   function resolveKey(key: string): string {
     return `${prefix}${key}`;
@@ -121,6 +122,23 @@ export function createToolResultCache(options: CreateToolResultCacheOptions): To
     return entry;
   }
 
+  async function withKeyClaimLock<T>(key: string, operation: () => Promise<T>): Promise<T> {
+    const previous = pendingClaims.get(key);
+    if (previous) {
+      await previous.catch(() => undefined);
+    }
+
+    const current = operation();
+    pendingClaims.set(key, current);
+    try {
+      return await current;
+    } finally {
+      if (pendingClaims.get(key) === current) {
+        pendingClaims.delete(key);
+      }
+    }
+  }
+
   return {
     async get(key: string): Promise<CachedToolResult | undefined> {
       const entry = await getEntry(key);
@@ -138,15 +156,17 @@ export function createToolResultCache(options: CreateToolResultCacheOptions): To
       execution: StartedToolExecution,
       ttl?: number,
     ): Promise<{ outcome: 'claimed' } | { outcome: 'existing'; entry: ToolResultCacheEntry }> {
-      const existing = await getEntry(key);
-      if (existing) {
-        return { outcome: 'existing', entry: existing };
-      }
+      return withKeyClaimLock(key, async () => {
+        const existing = await getEntry(key);
+        if (existing) {
+          return { outcome: 'existing', entry: existing };
+        }
 
-      const effectiveTTL = ttl ?? (execution.ttl !== undefined ? execution.ttl : defaultTTL);
-      const entry = effectiveTTL !== undefined ? { ...execution, ttl: effectiveTTL } : execution;
-      await store.set(resolveKey(key), JSON.stringify(entry));
-      return { outcome: 'claimed' };
+        const effectiveTTL = ttl ?? (execution.ttl !== undefined ? execution.ttl : defaultTTL);
+        const entry = effectiveTTL !== undefined ? { ...execution, ttl: effectiveTTL } : execution;
+        await store.set(resolveKey(key), JSON.stringify(entry));
+        return { outcome: 'claimed' };
+      });
     },
 
     async set(key: string, result: CachedToolResult, ttl?: number): Promise<void> {

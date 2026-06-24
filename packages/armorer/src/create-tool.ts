@@ -706,20 +706,23 @@ export function createTool<
       }
       const approvalResume = options[approvalResumeSymbol];
       const decision = await resolvePolicyDecision(policyContext);
+      const parsedArgumentsDigest = stableStringify(normalizeToolContent(parsed));
+      const proposedArgumentsDigest =
+        approvalResume === undefined
+          ? undefined
+          : stableStringify(normalizeToolContent(approvalResume.proposedArguments));
       const executedArgumentsEdited =
-        approvalResume !== undefined &&
-        stableStringify(normalizeToolContent(approvalResume.proposedArguments)) !==
-          stableStringify(normalizeToolContent(parsed));
+        approvalResume !== undefined && proposedArgumentsDigest !== parsedArgumentsDigest;
 
       let resumedApprovalIsSatisfied = false;
       if (decision?.status === 'needs_approval' || decision?.status === 'needs_input') {
         const type = decision.status === 'needs_approval' ? 'approval' : 'input';
+        const resumedArgumentsMatchApproval = proposedArgumentsDigest === parsedArgumentsDigest;
         resumedApprovalIsSatisfied =
           approvalResume !== undefined &&
           type === 'approval' &&
           approvalResume.approvedAction.type === 'approval' &&
-          stableStringify(normalizeToolContent(approvalResume.proposedArguments)) ===
-            stableStringify(normalizeToolContent(parsed));
+          resumedArgumentsMatchApproval;
 
         if (!resumedApprovalIsSatisfied) {
           const reason = decision.reason ?? `Tool execution requires ${type}`;

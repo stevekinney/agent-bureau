@@ -202,6 +202,77 @@ describe('createToolResultCache', () => {
       ).resolves.toEqual({ outcome: 'existing', entry: { ...completed, status: 'completed' } });
     });
 
+    it('serializes concurrent claims for the same key within a cache instance', async () => {
+      const firstClaim = cache.claimStarted!('racing-key', {
+        status: 'started',
+        toolName: 'charge-card',
+        startedAt: Date.now(),
+        ttl: 60_000,
+      });
+      const secondClaim = cache.claimStarted!('racing-key', {
+        status: 'started',
+        toolName: 'charge-card',
+        startedAt: Date.now(),
+        ttl: 60_000,
+      });
+
+      const results = await Promise.all([firstClaim, secondClaim]);
+
+      expect(results.filter((result) => result.outcome === 'claimed')).toHaveLength(1);
+      expect(results.filter((result) => result.outcome === 'existing')).toHaveLength(1);
+      expect(await cache.getState!('racing-key')).toEqual(
+        expect.objectContaining({
+          status: 'started',
+          toolName: 'charge-card',
+        }),
+      );
+    });
+
+    it('continues serializing claims after an earlier claim fails', async () => {
+      const map = new Map<string, string>();
+      let writes = 0;
+      const failingCache = createToolResultCache({
+        store: {
+          get: async (key: string) => map.get(key) ?? null,
+          set: async (key: string, value: string) => {
+            writes++;
+            if (writes === 1) {
+              throw new Error('write failed');
+            }
+            map.set(key, value);
+          },
+          delete: async (key: string) => {
+            map.delete(key);
+          },
+          list: async (prefix: string) =>
+            [...map.keys()].filter((key) => key.startsWith(prefix)).sort(),
+        },
+        defaultTTL: 60_000,
+      });
+
+      const firstClaim = failingCache.claimStarted!('recover-key', {
+        status: 'started',
+        toolName: 'charge-card',
+        startedAt: Date.now(),
+        ttl: 60_000,
+      }).catch((error: unknown) => (error instanceof Error ? error.message : String(error)));
+      const secondClaim = failingCache.claimStarted!('recover-key', {
+        status: 'started',
+        toolName: 'charge-card',
+        startedAt: Date.now(),
+        ttl: 60_000,
+      });
+
+      await expect(firstClaim).resolves.toBe('write failed');
+      await expect(secondClaim).resolves.toEqual({ outcome: 'claimed' });
+      expect(await failingCache.getState!('recover-key')).toEqual(
+        expect.objectContaining({
+          status: 'started',
+          toolName: 'charge-card',
+        }),
+      );
+    });
+
     it('expires and deletes stale started state', async () => {
       await cache.markStarted!('expired-started-key', {
         status: 'started',

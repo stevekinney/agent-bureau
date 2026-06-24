@@ -223,6 +223,35 @@ describe('truncation', () => {
       expect(result.originalSize).toBe('before [asset omitted] after'.length);
       expect(result.truncated).toBe(false);
     });
+
+    it('clamps custom excerpt budgets to maxBytes', () => {
+      const encoder = new TextEncoder();
+      const result = truncateToolResultContentStructured('abcdefghijklmnopqrstuvwxyz', {
+        maxBytes: 6,
+        headBytes: 12,
+        tailBytes: 12,
+      });
+
+      expect(result.truncated).toBe(true);
+      expect(encoder.encode(result.head).byteLength + encoder.encode(result.tail).byteLength).toBe(
+        6,
+      );
+      expect(result.tail).toBe('');
+    });
+
+    it('supports a zero-byte structured excerpt budget', () => {
+      const result = truncateToolResultContentStructured('abcdef', {
+        maxBytes: 0,
+      });
+
+      expect(result).toEqual({
+        head: '',
+        tail: '',
+        originalSize: 6,
+        omittedBytes: 6,
+        truncated: true,
+      });
+    });
   });
 
   describe('constants', () => {

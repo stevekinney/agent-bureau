@@ -75,6 +75,13 @@ describe('withToolboxIdempotency', () => {
     expect(result1.idempotency?.outcome).toBe('fresh');
     expect(result2.idempotency?.outcome).toBe('deduped');
     expect(addCallCount).toBe(1); // Cached on second call
+    expect(await cache.getState!(`add:${fullInputKey({ a: 1, b: 2 })}`)).toEqual(
+      expect.objectContaining({
+        status: 'completed',
+        toolName: 'add',
+        result: 3,
+      }),
+    );
   });
 
   it('accepts an externally supplied idempotency key', async () => {
@@ -145,6 +152,43 @@ describe('withToolboxIdempotency', () => {
       outcome: 'unknown-outcome',
     });
     expect(addCallCount).toBe(0);
+  });
+
+  it('retries an unknown outcome only after explicit approval', async () => {
+    const toolbox = createToolbox([createToolWithKey()]);
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
+
+    await cache.markStarted!('add:retry-after-review', {
+      status: 'started',
+      toolName: 'add',
+      startedAt: Date.now(),
+      ttl: 60_000,
+    });
+
+    const pause = await idempotentToolbox.execute(
+      { id: 'call-1', name: 'add', arguments: { a: 1, b: 2 } },
+      { idempotencyKey: 'retry-after-review' },
+    );
+    const retry = await idempotentToolbox.execute(
+      { id: 'call-2', name: 'add', arguments: { a: 1, b: 2 } },
+      { idempotencyKey: 'retry-after-review', retryUnknownOutcome: true },
+    );
+
+    expect(pause.outcome).toBe('action_required');
+    expect(retry.outcome).toBe('success');
+    expect(retry.result).toBe(3);
+    expect(retry.idempotency).toEqual({
+      key: 'add:retry-after-review',
+      outcome: 'fresh',
+    });
+    expect(addCallCount).toBe(1);
+    expect(await cache.getState!('add:retry-after-review')).toEqual(
+      expect.objectContaining({
+        status: 'completed',
+        toolName: 'add',
+        result: 3,
+      }),
+    );
   });
 
   it('does not keep started state for validation failures', async () => {
@@ -457,8 +501,9 @@ describe('withToolboxIdempotency', () => {
 
     expect(results).toHaveLength(2);
     expect(results[0]?.result).toBe(3);
-    expect(results[1]?.result).toBe(3);
-    expect(addCallCount).toBe(2);
+    expect(results[1]?.outcome).toBe('action_required');
+    expect(results[1]?.idempotency?.outcome).toBe('unknown-outcome');
+    expect(addCallCount).toBe(1);
   });
 
   it('handles empty toolbox gracefully', () => {

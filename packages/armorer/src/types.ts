@@ -30,7 +30,7 @@ export interface ToolExecutionResult extends ToolResult {
   toolCallId: string;
   toolName: string;
   result: unknown;
-  pendingApproval?: SignedPendingToolApproval;
+  pendingApproval?: PendingToolApproval;
   executedArgumentsEdited?: boolean;
   idempotency?: ToolExecutionIdempotency;
   /**

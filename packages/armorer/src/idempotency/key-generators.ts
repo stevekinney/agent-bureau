@@ -75,8 +75,15 @@ export function compositeKey(...fieldNames: string[]): (input: unknown) => strin
 export function namespacedKey(
   toolName: string,
   keyFn: (input: unknown) => string,
-): (input: unknown) => string {
-  return (input: unknown): string => {
-    return `${toolName}:${keyFn(input)}`;
-  };
+): (input: unknown) => string;
+export function namespacedKey(toolName: string, key: string): string;
+export function namespacedKey(
+  toolName: string,
+  keyFnOrKey: ((input: unknown) => string) | string,
+): ((input: unknown) => string) | string {
+  if (typeof keyFnOrKey === 'string') {
+    return `${toolName}:${keyFnOrKey}`;
+  }
+
+  return (input: unknown): string => `${toolName}:${keyFnOrKey(input)}`;
 }

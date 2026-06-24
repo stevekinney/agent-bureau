@@ -7,6 +7,7 @@ import {
   createToolbox,
   createToolCall,
   lazy,
+  type SignedPendingToolApproval,
   type ToolConfiguration,
 } from '../src';
 import { toAnthropicTools } from '../src/adapters/anthropic';
@@ -102,31 +103,46 @@ describe('createToolbox', () => {
       metadata: { mutates: true },
     });
     expect(JSON.parse(JSON.stringify(paused.pendingApproval))).toEqual(paused.pendingApproval);
+    const signedApproval = paused.pendingApproval as SignedPendingToolApproval;
 
     expect(() =>
       toolbox.resumeApproval({
-        ...paused.pendingApproval!,
+        ...signedApproval,
         approvalToken: 'forged',
       }),
     ).toThrow('invalid approval token');
 
     expect(() =>
       toolbox.resumeApproval({
-        ...paused.pendingApproval!,
+        ...signedApproval,
+        approvalToken: undefined,
+      } as unknown as SignedPendingToolApproval),
+    ).toThrow('invalid approval token');
+
+    expect(() =>
+      toolbox.resumeApproval({
+        ...signedApproval,
+        callId: 'other-call',
+      }),
+    ).toThrow('invalid approval token');
+
+    expect(() =>
+      toolbox.resumeApproval({
+        ...signedApproval,
         arguments: { cents: 999 },
       }),
     ).toThrow('invalid approval token');
 
     expect(() =>
       toolbox.resumeApproval({
-        ...paused.pendingApproval!,
+        ...signedApproval,
         toolName: 'other-tool',
       }),
     ).toThrow('invalid approval token');
 
     expect(() =>
       toolbox.resumeApproval({
-        ...paused.pendingApproval!,
+        ...signedApproval,
         action: {
           type: 'approval',
           message: 'Different approval',
@@ -136,24 +152,24 @@ describe('createToolbox', () => {
 
     expect(() =>
       toolbox.resumeApproval({
-        ...paused.pendingApproval!,
+        ...signedApproval,
         reason: 'Changed reason',
       }),
     ).toThrow('invalid approval token');
 
     expect(() =>
       toolbox.resumeApproval({
-        ...paused.pendingApproval!,
+        ...signedApproval,
         metadata: { mutates: false },
       }),
     ).toThrow('invalid approval token');
 
     const incompatibleToolbox = createChargeToolbox('other-secret');
-    expect(() => incompatibleToolbox.resumeApproval(paused.pendingApproval!)).toThrow(
+    expect(() => incompatibleToolbox.resumeApproval(signedApproval)).toThrow(
       'invalid approval token',
     );
 
-    const unconfirmedEdit = await toolbox.resumeApproval(paused.pendingApproval!, {
+    const unconfirmedEdit = await toolbox.resumeApproval(signedApproval, {
       arguments: { cents: 125 },
     });
 
@@ -161,7 +177,7 @@ describe('createToolbox', () => {
     expect(unconfirmedEdit.pendingApproval?.approvalToken).toEqual(expect.any(String));
     expect(charges).toEqual([]);
 
-    const resumed = await toolbox.resumeApproval(paused.pendingApproval!, {
+    const resumed = await toolbox.resumeApproval(signedApproval, {
       arguments: { cents: 125, confirmed: true },
     });
 
@@ -170,19 +186,108 @@ describe('createToolbox', () => {
     expect(resumed.executedArgumentsEdited).toBe(true);
 
     const equivalentToolbox = createChargeToolbox('test-secret');
-    const resumedOriginal = await equivalentToolbox.resumeApproval(paused.pendingApproval!);
+    const resumedOriginal = await equivalentToolbox.resumeApproval(signedApproval);
 
     expect(resumedOriginal.outcome).toBe('success');
     expect(resumedOriginal.result).toEqual({ charged: 100 });
     expect(resumedOriginal.executedArgumentsEdited).toBe(false);
 
-    const invalidResume = await toolbox.resumeApproval(paused.pendingApproval!, {
+    const invalidResume = await toolbox.resumeApproval(signedApproval, {
       arguments: { cents: '125' },
     });
 
     expect(invalidResume.outcome).toBe('error');
     expect(invalidResume.errorCategory).toBe('validation');
     expect(charges).toEqual([125, 100]);
+  });
+
+  it('requires an approval secret before signing or resuming pending approvals', async () => {
+    const toolbox = createToolbox(
+      [
+        createTool({
+          name: 'sensitive-action',
+          description: 'Requires approval',
+          input: z.object({ value: z.string() }),
+          async execute({ value }) {
+            return value;
+          },
+        }),
+      ],
+      {
+        policy: {
+          beforeExecute() {
+            return {
+              allow: false,
+              status: 'needs_approval',
+              reason: 'approval required',
+            };
+          },
+        },
+      },
+    );
+
+    const paused = await toolbox.execute({
+      id: 'unsigned-approval',
+      name: 'sensitive-action',
+      arguments: { value: 'x' },
+    });
+
+    expect(paused.pendingApproval?.approvalToken).toBeUndefined();
+    expect(() =>
+      toolbox.resumeApproval({
+        ...paused.pendingApproval!,
+        approvalToken: 'token',
+      }),
+    ).toThrow('approvalSecret is required');
+  });
+
+  it('re-runs policy when resuming an approval with unchanged arguments', async () => {
+    const tool = createTool({
+      name: 'charge-card',
+      description: 'Charge a payment card',
+      input: z.object({ cents: z.number() }),
+      async execute({ cents }) {
+        return { charged: cents };
+      },
+    });
+
+    const approvingToolbox = createToolbox([tool], {
+      approvalSecret: 'shared-secret',
+      policy: {
+        beforeExecute() {
+          return {
+            allow: false,
+            status: 'needs_approval',
+            reason: 'approval required',
+          };
+        },
+      },
+    });
+    const denyingToolbox = createToolbox([tool], {
+      approvalSecret: 'shared-secret',
+      policy: {
+        beforeExecute() {
+          return {
+            allow: false,
+            status: 'denied',
+            reason: 'approval no longer valid',
+          };
+        },
+      },
+    });
+
+    const paused = await approvingToolbox.execute({
+      id: 'policy-change',
+      name: 'charge-card',
+      arguments: { cents: 100 },
+    });
+    const resumed = await denyingToolbox.resumeApproval(
+      paused.pendingApproval! as SignedPendingToolApproval,
+    );
+
+    expect(resumed.outcome).toBe('error');
+    expect(resumed.errorCategory).toBe('permission');
+    expect(resumed.result).toBeUndefined();
   });
 
   it('exports provider tools through lazy toolbox methods', async () => {

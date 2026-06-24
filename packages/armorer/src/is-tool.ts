@@ -225,16 +225,6 @@ export interface ToolExecuteOptions {
    * When false/omitted, async-iterables are collected into arrays.
    */
   stream?: boolean;
-  /**
-   * @deprecated Approval resume is now handled by Toolbox.resumeApproval().
-   * This option is ignored and no longer bypasses policy checks.
-   */
-  approved?: boolean;
-  /**
-   * @deprecated Approval resume provenance is now handled by Toolbox.resumeApproval().
-   * This option is ignored.
-   */
-  proposedArguments?: unknown;
 }
 
 /**

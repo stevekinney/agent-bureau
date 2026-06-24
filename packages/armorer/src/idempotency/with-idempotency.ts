@@ -1,5 +1,6 @@
 import type { Tool, ToolCallWithArguments } from '../is-tool';
 import { claimCacheStarted, getCacheEntry } from './cache-operations';
+import { namespacedKey } from './key-generators';
 import type { CachedToolResult, IdempotencyOptions } from './types';
 
 const DEFAULT_TTL = 300_000;
@@ -61,7 +62,7 @@ export function withIdempotency<T extends Tool>(tool: T, options: IdempotencyOpt
   }
 
   async function executeWithCache(params: unknown): Promise<unknown> {
-    const key = `${tool.name}:${idempotencyKey!(params)}`;
+    const key = namespacedKey(tool.name, idempotencyKey!(params));
 
     if (!inputMatchesToolSchema(tool, params)) {
       return tool(params);

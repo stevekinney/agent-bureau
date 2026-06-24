@@ -141,6 +141,7 @@ export type {
   JSONValue,
   MinimalToolConfiguration,
   PendingToolApproval,
+  SignedPendingToolApproval,
   ToolAction,
   ToolActionInput,
   ToolCall,

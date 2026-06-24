@@ -349,7 +349,7 @@ if (resumed.executedArgumentsEdited) {
 }
 ```
 
-`pendingApproval` is JSON-serializable and includes `callId`, `toolName`, validated `arguments`, the requested action, reason, tool metadata, and an `approvalToken` signed with the toolbox `approvalSecret`. Use the same `approvalSecret` anywhere the approval may be resumed. `resumeApproval()` verifies the token, reconstructs the original call id, re-validates the original or edited arguments, and re-runs policy against those arguments. The granted approval only satisfies the original approval prompt when the resumed arguments match the proposed arguments; edited arguments must be allowed by policy. The result sets `executedArgumentsEdited` when the resumed arguments differ from the proposed arguments.
+`pendingApproval` is JSON-serializable and includes `callId`, `toolName`, validated `arguments`, the requested action, reason, and tool metadata. When the toolbox has an `approvalSecret`, the descriptor also includes an `approvalToken` and can be treated as `SignedPendingToolApproval` for `resumeApproval()`. Use the same `approvalSecret` anywhere the approval may be resumed. Without `approvalSecret`, pending approvals are unsigned and cannot be resumed through `resumeApproval()`. `resumeApproval()` verifies the token, reconstructs the original call id, re-validates the original or edited arguments, and re-runs policy against those arguments. The granted approval only satisfies the original approval prompt when the resumed arguments match the proposed arguments; edited arguments must be allowed by policy. The result sets `executedArgumentsEdited` when the resumed arguments differ from the proposed arguments.
 
 ## Agent Integration
 
@@ -503,7 +503,7 @@ if (excerpt.truncated) {
 }
 ```
 
-The structured result is `{ head, tail, originalSize, omittedBytes, truncated }`. Byte counts use UTF-8 size, and the excerpts avoid splitting UTF-16 surrogate pairs.
+The structured result is `{ head, tail, originalSize, omittedBytes, truncated }`. Byte counts use UTF-8 size after base64 payload replacement, and the excerpts avoid splitting UTF-16 surrogate pairs.
 
 ## Idempotency
 
@@ -537,9 +537,18 @@ if (result.idempotency?.outcome === 'unknown-outcome') {
 }
 ```
 
-If you do not pass `idempotencyKey`, `withToolboxIdempotency()` uses each tool's configured `idempotencyKey` function. Caller-supplied keys are useful when an orchestrator already mints a stable key per provider `tool_call_id` and needs retries to reuse that exact key. Armorer scopes the cache entry by tool name, so the same external key cannot dedupe two different tools into one result.
+After human review, retry an unknown outcome explicitly:
 
-For durable stores that can atomically claim a key, implement `ToolResultCache.claimStarted()` with compare-and-set semantics. Without that method, Armorer keeps compatibility with the original completed-result cache shape and falls back to a read-then-mark path when `markStarted()` is available. That fallback protects retries after a crashed execution, but only an atomic cache backend can prevent two concurrent processes from claiming the same new key at exactly the same time.
+```ts
+await idempotentToolbox.execute(call, {
+  idempotencyKey: temporalToolCallId,
+  retryUnknownOutcome: true,
+});
+```
+
+If you do not pass `idempotencyKey`, `withToolboxIdempotency()` uses each tool's configured `idempotencyKey` function. Tools without an `idempotencyKey` are not deduped by default; set `requireExplicitKey: false` to use `fullInputKey` for those tools. Caller-supplied keys are useful when an orchestrator already mints a stable key per provider `tool_call_id` and needs retries to reuse that exact key. Armorer scopes the cache entry by tool name, so the same external key cannot dedupe two different tools into one result.
+
+The default `createToolResultCache()` serializes `claimStarted()` calls for the same key within a cache instance. For durable stores shared across processes, implement `ToolResultCache.claimStarted()` with compare-and-set semantics. Without that method, Armorer keeps compatibility with the original completed-result cache shape and falls back to a read-then-mark path when `markStarted()` is available. That fallback protects retries after a crashed execution, but only an atomic cache backend can prevent two concurrent processes from claiming the same new key at exactly the same time.
 
 ### Fuzzy Tool Name Resolution
 

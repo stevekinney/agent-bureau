@@ -1,7 +1,7 @@
 import type { Toolbox } from '../create-toolbox';
 import type { ToolCallInput, ToolExecutionResult } from '../types';
 import { claimCacheStarted, getCacheEntry } from './cache-operations';
-import { fullInputKey } from './key-generators';
+import { fullInputKey, namespacedKey } from './key-generators';
 import type { CachedToolResult, ToolResultCache } from './types';
 
 const DEFAULT_TTL = 300_000;
@@ -23,6 +23,7 @@ export type WithToolboxIdempotencyOptions = {
 
 type ToolboxExecuteOptionsWithIdempotencyKey = {
   idempotencyKey?: string | ((call: ToolCallInput) => string | undefined);
+  retryUnknownOutcome?: boolean;
 };
 
 function shouldClearStartedState(result: ToolExecutionResult): boolean {
@@ -78,6 +79,30 @@ export function withToolboxIdempotency(
     };
   }
 
+  function createUnknownOutcomeResult(
+    fields: { id: string },
+    cacheKey: string,
+    toolName: string,
+  ): ToolExecutionResult {
+    return {
+      callId: fields.id,
+      outcome: 'action_required',
+      content: 'Tool execution started earlier, but no result was recorded.',
+      toolCallId: fields.id,
+      toolName,
+      result: undefined,
+      idempotency: {
+        key: cacheKey,
+        outcome: 'unknown-outcome',
+      },
+      action: {
+        type: 'approval',
+        message:
+          'This idempotency key has an unknown outcome. Re-approve before retrying the side effect.',
+      },
+    } as ToolExecutionResult;
+  }
+
   async function executeWithCache(
     call: ToolCallInput,
     originalExecute: (call: ToolCallInput, options?: unknown) => Promise<ToolExecutionResult>,
@@ -101,30 +126,18 @@ export function withToolboxIdempotency(
         : typeof suppliedKey === 'string'
           ? suppliedKey
           : undefined;
-    const cacheKey = `${fields.name}:${externalKey ?? keyFn(fields.arguments)}`;
+    const cacheKey = namespacedKey(fields.name, externalKey ?? keyFn(fields.arguments));
     const cached = await getCacheEntry(cache, cacheKey);
 
     if (cached?.status === 'started') {
-      return {
-        callId: fields.id,
-        outcome: 'action_required',
-        content: 'Tool execution started earlier, but no result was recorded.',
-        toolCallId: fields.id,
-        toolName: cached.toolName,
-        result: undefined,
-        idempotency: {
-          key: cacheKey,
-          outcome: 'unknown-outcome',
-        },
-        action: {
-          type: 'approval',
-          message:
-            'This idempotency key has an unknown outcome. Re-approve before retrying the side effect.',
-        },
-      } as ToolExecutionResult;
-    }
-
-    if (cached) {
+      if (
+        (executeOptions as ToolboxExecuteOptionsWithIdempotencyKey | undefined)?.retryUnknownOutcome
+      ) {
+        await cache.delete(cacheKey);
+      } else {
+        return createUnknownOutcomeResult(fields, cacheKey, cached.toolName);
+      }
+    } else if (cached) {
       return {
         callId: fields.id,
         outcome: 'success',
@@ -149,23 +162,7 @@ export function withToolboxIdempotency(
     if (started.outcome === 'existing') {
       const entry = started.entry;
       if (entry.status === 'started') {
-        return {
-          callId: fields.id,
-          outcome: 'action_required',
-          content: 'Tool execution started earlier, but no result was recorded.',
-          toolCallId: fields.id,
-          toolName: entry.toolName,
-          result: undefined,
-          idempotency: {
-            key: cacheKey,
-            outcome: 'unknown-outcome',
-          },
-          action: {
-            type: 'approval',
-            message:
-              'This idempotency key has an unknown outcome. Re-approve before retrying the side effect.',
-          },
-        } as ToolExecutionResult;
+        return createUnknownOutcomeResult(fields, cacheKey, entry.toolName);
       }
 
       return {

@@ -332,6 +332,11 @@ export interface ToolboxExecuteOptions extends ToolExecuteOptions {
   parentContext?: OpenTelemetryContext;
   spanLinks?: OpenTelemetrySpanLink[];
   idempotencyKey?: string | ((call: ToolCall) => string | undefined);
+  /**
+   * Retry an idempotent call after a human has reviewed a prior unknown outcome.
+   * Interpreted by withToolboxIdempotency().
+   */
+  retryUnknownOutcome?: boolean;
 }
 
 type InternalToolboxExecuteOptions = ToolboxExecuteOptions & {
@@ -717,10 +722,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
   // Loop detection: instances are created on demand and stored
   const loopDetectors = new Map<string, LoopDetector>();
   let loopDetectorIdCounter = 0;
-  const approvalSecret =
-    options.approvalSecret ??
-    globalThis.crypto?.randomUUID?.() ??
-    `local-${Date.now()}-${Math.random()}`;
+  const approvalSecret = options.approvalSecret;
   const buildTool =
     typeof options.toolFactory === 'function'
       ? (configuration: ToolConfiguration) =>
@@ -987,7 +989,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
             : {};
 
         const result = await tool.execute(toolCall as ToolCallWithArguments, executeOptions);
-        if (result.pendingApproval) {
+        if (result.pendingApproval && approvalSecret) {
           result.pendingApproval.approvalToken = signPendingApproval(result.pendingApproval);
         }
         let hasLiveStream = false;
@@ -1056,8 +1058,9 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
     resumeOptions?: ToolboxExecuteOptions & { arguments?: unknown },
   ): Promise<ToolExecutionResult> {
     verifyPendingApproval(approval);
+    const { arguments: overrideArguments, ...executeOptions } = resumeOptions ?? {};
     const executeArguments = Object.prototype.hasOwnProperty.call(resumeOptions ?? {}, 'arguments')
-      ? resumeOptions!.arguments
+      ? overrideArguments
       : approval.arguments;
 
     return execute(
@@ -1067,7 +1070,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
         arguments: executeArguments,
       } as ToolCallInput,
       {
-        ...resumeOptions,
+        ...executeOptions,
         [approvalResumeSymbol]: {
           approvedAction: approval.action,
           proposedArguments: approval.arguments,
@@ -1084,11 +1087,17 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
   }
 
   function signPendingApproval(approval: PendingToolApproval): string {
-    return hmacSha256HexSync(approvalSecret, stableStringify(approvalTokenPayload(approval)));
+    return hmacSha256HexSync(approvalSecret!, stableStringify(approvalTokenPayload(approval)));
   }
 
   function verifyPendingApproval(approval: SignedPendingToolApproval): void {
-    if (!timingSafeEqualHex(approval.approvalToken, signPendingApproval(approval))) {
+    if (!approvalSecret) {
+      throw new Error('Toolbox approvalSecret is required to resume signed pending approvals.');
+    }
+    if (
+      typeof approval.approvalToken !== 'string' ||
+      !timingSafeEqualHex(approval.approvalToken, signPendingApproval(approval))
+    ) {
       throw new Error('Pending approval descriptor is missing or has an invalid approval token.');
     }
   }
