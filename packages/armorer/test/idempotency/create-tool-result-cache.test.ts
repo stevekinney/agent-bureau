@@ -67,6 +67,26 @@ describe('createToolResultCache', () => {
         status: 'completed',
       });
     });
+
+    it('preserves completed results whose value is undefined', async () => {
+      const result: CachedToolResult = {
+        result: undefined,
+        toolName: 'no-output-tool',
+        executedAt: Date.now(),
+        ttl: 60_000,
+      };
+
+      await cache.set('undefined-result', result);
+
+      expect(await cache.get('undefined-result')).toEqual({
+        ...result,
+        status: 'completed',
+      });
+      expect(await cache.getState!('undefined-result')).toEqual({
+        ...result,
+        status: 'completed',
+      });
+    });
   });
 
   describe('TTL expiration', () => {

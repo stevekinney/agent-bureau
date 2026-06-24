@@ -20,7 +20,6 @@ import {
   type LoopDetectionOptions,
   type LoopDetectionResult,
   LoopDetector,
-  stableStringify,
 } from './core/loop-detection';
 import type {
   QuerySelectionResult,
@@ -33,7 +32,7 @@ import type { Embedder, EmbeddingVector } from './core/registry/embeddings';
 import { registerRegistryEmbedder, warmToolEmbeddings } from './core/registry/embeddings';
 import type { ToolRisk } from './core/risk';
 import { type SerializedToolDefinition, serializeToolDefinition } from './core/serialization';
-import { assertJsonValue } from './core/serialization/json';
+import { assertJsonValue, type JsonValue, stableStringifyJson } from './core/serialization/json';
 import type { AnyToolDefinition } from './core/tool-definition';
 import { defineTool } from './core/tool-definition';
 import {
@@ -1054,6 +1053,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
   }
 
   function resumeApproval(
+    this: Toolbox,
     approval: SignedPendingToolApproval,
     resumeOptions?: ToolboxExecuteOptions & { arguments?: unknown },
   ): Promise<ToolExecutionResult> {
@@ -1063,7 +1063,10 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
       ? overrideArguments
       : approval.arguments;
 
-    return execute(
+    const executeForResume =
+      this && typeof this === 'object' && 'execute' in this ? this.execute.bind(this) : execute;
+
+    return executeForResume(
       {
         id: approval.callId,
         name: approval.toolName,
@@ -1074,6 +1077,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
         [approvalResumeSymbol]: {
           approvedAction: approval.action,
           proposedArguments: approval.arguments,
+          reason: approval.reason,
         },
       } as InternalToolboxExecuteOptions,
     );
@@ -1086,8 +1090,18 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
     return payload;
   }
 
+  function normalizePendingApprovalPayload(
+    approval: Omit<PendingToolApproval, 'approvalToken'>,
+  ): JsonValue {
+    const serialized = JSON.stringify(approval);
+    return JSON.parse(serialized) as JsonValue;
+  }
+
   function signPendingApproval(approval: PendingToolApproval): string {
-    return hmacSha256HexSync(approvalSecret!, stableStringify(approvalTokenPayload(approval)));
+    return hmacSha256HexSync(
+      approvalSecret!,
+      stableStringifyJson(normalizePendingApprovalPayload(approvalTokenPayload(approval))),
+    );
   }
 
   function verifyPendingApproval(approval: SignedPendingToolApproval): void {

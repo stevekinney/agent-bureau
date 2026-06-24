@@ -5,4 +5,5 @@ export const approvalResumeSymbol: unique symbol = Symbol('armorer.approvalResum
 export type ApprovalResumeState = {
   approvedAction: ToolAction;
   proposedArguments: unknown;
+  reason?: string;
 };

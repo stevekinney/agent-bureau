@@ -16,6 +16,8 @@ type KeyValueStoreLike = {
   list(prefix: string): Promise<string[]>;
 };
 
+const RESULT_UNDEFINED_SENTINEL = '__armorerResultUndefined';
+
 /**
  * Options for creating a tool result cache.
  */
@@ -72,15 +74,16 @@ export function createToolResultCache(options: CreateToolResultCacheOptions): To
       };
     }
 
+    const hasResult = 'result' in value || value[RESULT_UNDEFINED_SENTINEL] === true;
     if (
       (value['status'] === undefined || value['status'] === 'completed') &&
-      'result' in value &&
+      hasResult &&
       typeof value['toolName'] === 'string' &&
       typeof value['executedAt'] === 'number'
     ) {
       return {
         status: 'completed',
-        result: value['result'],
+        result: value[RESULT_UNDEFINED_SENTINEL] === true ? undefined : value['result'],
         toolName: value['toolName'],
         executedAt: value['executedAt'],
         ttl: typeof value['ttl'] === 'number' ? value['ttl'] : (defaultTTL ?? 0),
@@ -139,6 +142,18 @@ export function createToolResultCache(options: CreateToolResultCacheOptions): To
     }
   }
 
+  function encodeEntry(entry: ToolResultCacheEntry): Record<string, unknown> {
+    if (entry.status === 'started' || entry.result !== undefined) {
+      return entry as unknown as Record<string, unknown>;
+    }
+
+    const { result: _result, ...encoded } = entry;
+    return {
+      ...encoded,
+      [RESULT_UNDEFINED_SENTINEL]: true,
+    };
+  }
+
   return {
     async get(key: string): Promise<CachedToolResult | undefined> {
       const entry = await getEntry(key);
@@ -164,7 +179,7 @@ export function createToolResultCache(options: CreateToolResultCacheOptions): To
 
         const effectiveTTL = ttl ?? (execution.ttl !== undefined ? execution.ttl : defaultTTL);
         const entry = effectiveTTL !== undefined ? { ...execution, ttl: effectiveTTL } : execution;
-        await store.set(resolveKey(key), JSON.stringify(entry));
+        await store.set(resolveKey(key), JSON.stringify(encodeEntry(entry)));
         return { outcome: 'claimed' };
       });
     },
@@ -176,13 +191,13 @@ export function createToolResultCache(options: CreateToolResultCacheOptions): To
         effectiveTTL !== undefined
           ? { ...result, status: 'completed' as const, ttl: effectiveTTL }
           : { ...result, status: 'completed' as const };
-      await store.set(resolveKey(key), JSON.stringify(entry));
+      await store.set(resolveKey(key), JSON.stringify(encodeEntry(entry)));
     },
 
     async markStarted(key: string, execution: StartedToolExecution, ttl?: number): Promise<void> {
       const effectiveTTL = ttl ?? (execution.ttl !== undefined ? execution.ttl : defaultTTL);
       const entry = effectiveTTL !== undefined ? { ...execution, ttl: effectiveTTL } : execution;
-      await store.set(resolveKey(key), JSON.stringify(entry));
+      await store.set(resolveKey(key), JSON.stringify(encodeEntry(entry)));
     },
 
     async delete(key: string): Promise<void> {

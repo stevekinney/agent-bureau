@@ -7,7 +7,7 @@ import { createToolResultCache } from '../../src/idempotency/create-tool-result-
 import { fullInputKey } from '../../src/idempotency/key-generators';
 import type { ToolResultCache } from '../../src/idempotency/types';
 import { withToolboxIdempotency } from '../../src/idempotency/with-toolbox-idempotency';
-import type { ToolCallInput } from '../../src/types';
+import type { SignedPendingToolApproval, ToolCallInput } from '../../src/types';
 
 function createTestStore() {
   const map = new Map<string, string>();
@@ -191,6 +191,51 @@ describe('withToolboxIdempotency', () => {
     );
   });
 
+  it('retries an unknown outcome returned by an atomic claim only after explicit approval', async () => {
+    const started = {
+      status: 'started' as const,
+      toolName: 'add',
+      startedAt: Date.now(),
+      ttl: 60_000,
+    };
+    let claims = 0;
+    let deletes = 0;
+    const atomicCache: ToolResultCache = {
+      async get() {
+        return undefined;
+      },
+      async claimStarted(_key, execution) {
+        claims++;
+        if (claims === 1) {
+          return { outcome: 'existing', entry: started };
+        }
+        return { outcome: 'claimed' };
+      },
+      async set() {},
+      async delete() {
+        deletes++;
+      },
+      async clear() {},
+    };
+    const toolbox = createToolbox([createToolWithKey()]);
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache: atomicCache });
+
+    const result = await idempotentToolbox.execute(
+      { id: 'call-1', name: 'add', arguments: { a: 1, b: 2 } },
+      { idempotencyKey: 'atomic-retry', retryUnknownOutcome: true },
+    );
+
+    expect(result.outcome).toBe('success');
+    expect(result.result).toBe(3);
+    expect(result.idempotency).toEqual({
+      key: 'add:atomic-retry',
+      outcome: 'fresh',
+    });
+    expect(claims).toBe(2);
+    expect(deletes).toBe(1);
+    expect(addCallCount).toBe(1);
+  });
+
   it('does not keep started state for validation failures', async () => {
     const toolbox = createToolbox([createToolWithKey()]);
     const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
@@ -259,6 +304,58 @@ describe('withToolboxIdempotency', () => {
     expect(second.idempotency).toBeUndefined();
     expect(await cache.getState!('add:approval-pause')).toBeUndefined();
     expect(addCallCount).toBe(0);
+  });
+
+  it('routes signed approval resumes through toolbox idempotency', async () => {
+    const charges: number[] = [];
+    const chargeTool = createTool({
+      name: 'charge',
+      description: 'Charges a payment method',
+      input: z.object({ cents: z.number() }),
+      idempotencyKey: (input: unknown) => fullInputKey(input),
+      async execute({ cents }) {
+        charges.push(cents);
+        return { charged: cents };
+      },
+    });
+    const toolbox = createToolbox([chargeTool], {
+      approvalSecret: 'approval-idempotency-secret',
+      policy: {
+        beforeExecute() {
+          return {
+            allow: false,
+            status: 'needs_approval',
+            reason: 'approval required',
+          };
+        },
+      },
+    });
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
+    const paused = await idempotentToolbox.execute(
+      { id: 'charge-call', name: 'charge', arguments: { cents: 100 } },
+      { idempotencyKey: 'charge-once' },
+    );
+
+    const firstResume = await idempotentToolbox.resumeApproval(
+      paused.pendingApproval! as SignedPendingToolApproval,
+      { idempotencyKey: 'charge-once' },
+    );
+    const secondResume = await idempotentToolbox.resumeApproval(
+      paused.pendingApproval! as SignedPendingToolApproval,
+      { idempotencyKey: 'charge-once' },
+    );
+
+    expect(firstResume.result).toEqual({ charged: 100 });
+    expect(firstResume.idempotency).toEqual({
+      key: 'charge:charge-once',
+      outcome: 'fresh',
+    });
+    expect(secondResume.result).toEqual({ charged: 100 });
+    expect(secondResume.idempotency).toEqual({
+      key: 'charge:charge-once',
+      outcome: 'deduped',
+    });
+    expect(charges).toEqual([100]);
   });
 
   it('does not keep started state for denied results before execution', async () => {

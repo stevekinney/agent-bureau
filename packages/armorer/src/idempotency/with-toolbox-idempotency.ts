@@ -112,6 +112,25 @@ export function withToolboxIdempotency(
     } as ToolExecutionResult;
   }
 
+  function createDedupedResult(
+    fields: { id: string },
+    cacheKey: string,
+    cached: CachedToolResult,
+  ): ToolExecutionResult {
+    return {
+      callId: fields.id,
+      outcome: 'success',
+      content: typeof cached.result === 'string' ? cached.result : JSON.stringify(cached.result),
+      toolCallId: fields.id,
+      toolName: cached.toolName,
+      result: cached.result,
+      idempotency: {
+        key: cacheKey,
+        outcome: 'deduped',
+      },
+    } as ToolExecutionResult;
+  }
+
   async function executeWithCache(
     call: ToolCallInput,
     originalExecute: (call: ToolCallInput, options?: unknown) => Promise<ToolExecutionResult>,
@@ -138,35 +157,40 @@ export function withToolboxIdempotency(
     const cacheKey = namespacedKey(fields.name, externalKey ?? keyFn(fields.arguments));
     const cached = await getCacheEntry(cache, cacheKey);
 
+    const retryUnknownOutcome = (
+      executeOptions as ToolboxExecuteOptionsWithIdempotencyKey | undefined
+    )?.retryUnknownOutcome;
+
     if (cached?.status === 'started') {
-      if (
-        (executeOptions as ToolboxExecuteOptionsWithIdempotencyKey | undefined)?.retryUnknownOutcome
-      ) {
+      if (retryUnknownOutcome) {
         await cache.delete(cacheKey);
       } else {
         return createUnknownOutcomeResult(fields, cacheKey, cached.toolName);
       }
     } else if (cached) {
-      return {
-        callId: fields.id,
-        outcome: 'success',
-        content: typeof cached.result === 'string' ? cached.result : JSON.stringify(cached.result),
-        toolCallId: fields.id,
-        toolName: cached.toolName,
-        result: cached.result,
-        idempotency: {
-          key: cacheKey,
-          outcome: 'deduped',
-        },
-      } as ToolExecutionResult;
+      return createDedupedResult(fields, cacheKey, cached);
     }
 
-    const started = await claimCacheStarted(cache, cacheKey, {
+    let started = await claimCacheStarted(cache, cacheKey, {
       status: 'started',
       toolName: fields.name,
       startedAt: Date.now(),
       ttl: defaultTTL,
     });
+
+    if (
+      started.outcome === 'existing' &&
+      started.entry.status === 'started' &&
+      retryUnknownOutcome
+    ) {
+      await cache.delete(cacheKey);
+      started = await claimCacheStarted(cache, cacheKey, {
+        status: 'started',
+        toolName: fields.name,
+        startedAt: Date.now(),
+        ttl: defaultTTL,
+      });
+    }
 
     if (started.outcome === 'existing') {
       const entry = started.entry;
@@ -174,18 +198,7 @@ export function withToolboxIdempotency(
         return createUnknownOutcomeResult(fields, cacheKey, entry.toolName);
       }
 
-      return {
-        callId: fields.id,
-        outcome: 'success',
-        content: typeof entry.result === 'string' ? entry.result : JSON.stringify(entry.result),
-        toolCallId: fields.id,
-        toolName: entry.toolName,
-        result: entry.result,
-        idempotency: {
-          key: cacheKey,
-          outcome: 'deduped',
-        },
-      } as ToolExecutionResult;
+      return createDedupedResult(fields, cacheKey, entry);
     }
 
     let result: ToolExecutionResult;

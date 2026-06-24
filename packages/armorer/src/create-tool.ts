@@ -5,7 +5,7 @@ import { z } from 'zod';
 import type { ToolError, ToolErrorCategory } from './core/errors';
 import type { ToolRisk } from './core/risk';
 import { serializeToolDefinition } from './core/serialization';
-import { assertJsonValue, type JsonValue } from './core/serialization/json';
+import { assertJsonValue, type JsonValue, stableStringifyJson } from './core/serialization/json';
 import { assertKebabCaseTag, type NormalizeTagsOption, uniqTags } from './core/tag-utilities';
 import type { AnyToolDefinition, ToolLifecycle } from './core/tool-definition';
 import { defineTool } from './core/tool-definition';
@@ -56,7 +56,7 @@ import type {
   ToolValidationReport,
 } from './is-tool';
 import { isAsyncIterable, isPromise, isTestRuntime } from './type-guards';
-import type { ToolCall, ToolExecutionResult } from './types';
+import type { ToolAction, ToolCall, ToolExecutionResult } from './types';
 import { createConcurrencyLimiter, normalizeConcurrency } from './utilities/concurrency';
 import { normalizeSchema } from './utilities/schema-normalization';
 
@@ -706,25 +706,29 @@ export function createTool<
       }
       const approvalResume = options[approvalResumeSymbol];
       const decision = await resolvePolicyDecision(policyContext);
-      const parsedArgumentsDigest = stableStringify(normalizeToolContent(parsed));
+      const parsedArgumentsDigest = stableStringifyJson(normalizeToolContent(parsed));
       const proposedArgumentsDigest =
         approvalResume === undefined
           ? undefined
-          : stableStringify(normalizeToolContent(approvalResume.proposedArguments));
+          : stableStringifyJson(normalizeToolContent(approvalResume.proposedArguments));
       const executedArgumentsEdited =
         approvalResume !== undefined && proposedArgumentsDigest !== parsedArgumentsDigest;
 
       let resumedApprovalIsSatisfied = false;
       if (decision?.status === 'needs_approval' || decision?.status === 'needs_input') {
         const type = decision.status === 'needs_approval' ? 'approval' : 'input';
+        const reason = decision.reason ?? `Tool execution requires ${type}`;
+        const action = createToolAction(type, decision, reason);
         const resumedArgumentsMatchApproval = proposedArgumentsDigest === parsedArgumentsDigest;
         resumedApprovalIsSatisfied =
           approvalResume !== undefined &&
           approvalResume.approvedAction.type === type &&
-          resumedArgumentsMatchApproval;
+          resumedArgumentsMatchApproval &&
+          approvalResume.reason === reason &&
+          stableStringifyJson(normalizeToolContent(approvalResume.approvedAction)) ===
+            stableStringifyJson(normalizeToolContent(action));
 
         if (!resumedApprovalIsSatisfied) {
-          const reason = decision.reason ?? `Tool execution requires ${type}`;
           emit('policy-action-required', { ...parsedDetail, params: parsed, reason });
 
           await runPolicyAfter({
@@ -736,11 +740,6 @@ export function createTool<
           finishTelemetry('paused', { reason });
 
           const callId = typedToolCall.id;
-          const action = {
-            type,
-            message: decision.action?.message ?? reason,
-            schema: decision.action?.schema,
-          };
           return {
             callId,
             outcome: 'action_required',
@@ -1577,6 +1576,23 @@ function normalizeToolContent(value: unknown): JsonValue {
       return stableStringify(value);
     }
   }
+}
+
+function createToolAction(
+  type: 'approval' | 'input',
+  decision: ToolPolicyDecision,
+  reason: string,
+): ToolAction {
+  const action = {
+    type,
+    message: decision.action?.message ?? reason,
+  } as ToolAction;
+
+  if (decision.action?.schema !== undefined) {
+    action.schema = normalizeToolContent(decision.action.schema);
+  }
+
+  return action;
 }
 
 function stableStringify(value: unknown): string {
