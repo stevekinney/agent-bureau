@@ -319,6 +319,8 @@ Policies can pause execution for human approval or input.
 
 ```ts
 const toolbox = createToolbox([], {
+  // Use the same secret anywhere pending approvals may be resumed.
+  approvalSecret: process.env.ARMORER_APPROVAL_SECRET,
   policy: {
     async beforeExecute(context) {
       if (context.metadata?.sensitive) {
@@ -334,23 +336,20 @@ const toolbox = createToolbox([], {
 
 const result = await toolbox.execute(sensitiveCall);
 if (result.outcome === 'action_required') {
-  // Persist the descriptor and present approval UI to the operator.
+  // Persist the descriptor and show the approval UI to the user.
   await durableStore.set(result.pendingApproval!.callId, result.pendingApproval);
 }
 
 // Later, possibly in another process, rebuild the same toolbox and resume.
 const approved = await durableStore.get('tool-call-id');
-const resumed = await toolbox.resumeApproval(approved, {
-  // Optional operator edits are re-validated before execution.
-  arguments: { ...approved.arguments, confirmed: true },
-});
+const resumed = await toolbox.resumeApproval(approved);
 
 if (resumed.executedArgumentsEdited) {
-  // Record proposed-vs-executed provenance in your transcript.
+  // Record both the proposed and executed arguments in your transcript.
 }
 ```
 
-`pendingApproval` is JSON-serializable and includes `callId`, `toolName`, validated `arguments`, the requested action, reason, and tool metadata. `resumeApproval()` reconstructs the original call id, re-validates the original or edited arguments, skips the already-granted approval gate, runs the tool, and sets `executedArgumentsEdited` when the resumed arguments differ from the proposed arguments.
+`pendingApproval` is JSON-serializable and includes `callId`, `toolName`, validated `arguments`, the requested action, reason, tool metadata, and an `approvalToken` signed with the toolbox `approvalSecret`. Use the same `approvalSecret` anywhere the approval may be resumed. `resumeApproval()` verifies the token, reconstructs the original call id, re-validates the original or edited arguments, and re-runs policy against those arguments. The granted approval only satisfies the original approval prompt when the resumed arguments match the proposed arguments; edited arguments must be allowed by policy. The result sets `executedArgumentsEdited` when the resumed arguments differ from the proposed arguments.
 
 ## Agent Integration
 
@@ -490,7 +489,7 @@ const toolbox = createToolbox(tools, {
 });
 ```
 
-For artifact spill workflows, use the structured head-and-tail helper:
+For large tool outputs that are stored separately, use the structured head-and-tail helper:
 
 ```ts
 import { truncateToolResultContentStructured } from 'armorer/truncation';
@@ -534,11 +533,13 @@ const result = await idempotentToolbox.execute(
 );
 
 if (result.idempotency?.outcome === 'unknown-outcome') {
-  // Do not replay blindly. Ask for operator review before retrying.
+  // Do not replay blindly. Ask for review before retrying.
 }
 ```
 
-If you do not pass `idempotencyKey`, `withToolboxIdempotency()` uses each tool's configured `idempotencyKey` function. Caller-supplied keys are useful when an orchestrator already mints a stable key per provider `tool_call_id` and needs retries to reuse that exact key.
+If you do not pass `idempotencyKey`, `withToolboxIdempotency()` uses each tool's configured `idempotencyKey` function. Caller-supplied keys are useful when an orchestrator already mints a stable key per provider `tool_call_id` and needs retries to reuse that exact key. Armorer scopes the cache entry by tool name, so the same external key cannot dedupe two different tools into one result.
+
+For durable stores that can atomically claim a key, implement `ToolResultCache.claimStarted()` with compare-and-set semantics. Without that method, Armorer keeps compatibility with the original completed-result cache shape and falls back to a read-then-mark path when `markStarted()` is available. That fallback protects retries after a crashed execution, but only an atomic cache backend can prevent two concurrent processes from claiming the same new key at exactly the same time.
 
 ### Fuzzy Tool Name Resolution
 

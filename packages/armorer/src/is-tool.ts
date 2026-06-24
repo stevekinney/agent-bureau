@@ -226,12 +226,14 @@ export interface ToolExecuteOptions {
    */
   stream?: boolean;
   /**
-   * Marks this execution as an approved resume of a previously paused call.
-   * Validation still runs; approval policies are not asked to approve the same
-   * call again.
+   * @deprecated Approval resume is now handled by Toolbox.resumeApproval().
+   * This option is ignored and no longer bypasses policy checks.
    */
   approved?: boolean;
-  /** The arguments proposed before approval, used to report operator edits. */
+  /**
+   * @deprecated Approval resume provenance is now handled by Toolbox.resumeApproval().
+   * This option is ignored.
+   */
   proposedArguments?: unknown;
 }
 

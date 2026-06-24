@@ -1,5 +1,6 @@
 import type { Toolbox } from '../create-toolbox';
 import type { ToolCallInput, ToolExecutionResult } from '../types';
+import { claimCacheStarted, getCacheEntry } from './cache-operations';
 import { fullInputKey } from './key-generators';
 import type { CachedToolResult, ToolResultCache } from './types';
 
@@ -23,6 +24,19 @@ export type WithToolboxIdempotencyOptions = {
 type ToolboxExecuteOptionsWithIdempotencyKey = {
   idempotencyKey?: string | ((call: ToolCallInput) => string | undefined);
 };
+
+function shouldClearStartedState(result: ToolExecutionResult): boolean {
+  if (result.outcome === 'action_required') {
+    return true;
+  }
+
+  if (result.outcome !== 'error') {
+    return true;
+  }
+
+  const category = result.error?.category ?? result.errorCategory;
+  return category === 'validation' || category === 'permission' || category === 'not_found';
+}
 
 /**
  * Wraps a toolbox so that tool executions are deduplicated via an idempotency
@@ -87,8 +101,8 @@ export function withToolboxIdempotency(
         : typeof suppliedKey === 'string'
           ? suppliedKey
           : undefined;
-    const cacheKey = externalKey ?? `${fields.name}:${keyFn(fields.arguments)}`;
-    const cached = await cache.getState(cacheKey);
+    const cacheKey = `${fields.name}:${externalKey ?? keyFn(fields.arguments)}`;
+    const cached = await getCacheEntry(cache, cacheKey);
 
     if (cached?.status === 'started') {
       return {
@@ -125,18 +139,50 @@ export function withToolboxIdempotency(
       } as ToolExecutionResult;
     }
 
-    await cache.markStarted(cacheKey, {
+    const started = await claimCacheStarted(cache, cacheKey, {
       status: 'started',
       toolName: fields.name,
       startedAt: Date.now(),
       ttl: defaultTTL,
     });
 
+    if (started.outcome === 'existing') {
+      const entry = started.entry;
+      if (entry.status === 'started') {
+        return {
+          callId: fields.id,
+          outcome: 'action_required',
+          content: 'Tool execution started earlier, but no result was recorded.',
+          toolCallId: fields.id,
+          toolName: entry.toolName,
+          result: undefined,
+          idempotency: {
+            key: cacheKey,
+            outcome: 'unknown-outcome',
+          },
+          action: {
+            type: 'approval',
+            message:
+              'This idempotency key has an unknown outcome. Re-approve before retrying the side effect.',
+          },
+        } as ToolExecutionResult;
+      }
+
+      return {
+        callId: fields.id,
+        outcome: 'success',
+        content: typeof entry.result === 'string' ? entry.result : JSON.stringify(entry.result),
+        toolCallId: fields.id,
+        toolName: entry.toolName,
+        result: entry.result,
+        idempotency: {
+          key: cacheKey,
+          outcome: 'deduped',
+        },
+      } as ToolExecutionResult;
+    }
+
     const result = await originalExecute(call, executeOptions);
-    result.idempotency = {
-      key: cacheKey,
-      outcome: 'fresh',
-    };
 
     // Only cache successful results
     if (result.outcome === 'success' && !result.error) {
@@ -147,6 +193,12 @@ export function withToolboxIdempotency(
         ttl: defaultTTL,
       };
       await cache.set(cacheKey, entry, defaultTTL);
+      result.idempotency = {
+        key: cacheKey,
+        outcome: 'fresh',
+      };
+    } else if (shouldClearStartedState(result)) {
+      await cache.delete(cacheKey);
     }
 
     return result;

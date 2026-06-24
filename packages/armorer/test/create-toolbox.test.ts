@@ -42,31 +42,45 @@ describe('createToolbox', () => {
   });
 
   it('returns a serializable pending approval descriptor and resumes with edited arguments', async () => {
-    const toolbox = createToolbox(
-      [
-        createTool({
-          name: 'charge-card',
-          description: 'Charge a payment card',
-          input: z.object({ cents: z.number() }),
-          metadata: { mutates: true },
-          async execute({ cents }) {
-            return { charged: cents };
-          },
-        }),
-      ],
-      {
-        policy: {
-          beforeExecute() {
-            return {
-              allow: false,
-              status: 'needs_approval',
-              reason: 'Operator approval required',
-              action: { message: 'Approve charge' },
-            };
+    const charges: number[] = [];
+    const createChargeToolbox = (approvalSecret: string) =>
+      createToolbox(
+        [
+          createTool({
+            name: 'charge-card',
+            description: 'Charge a payment card',
+            input: z.object({ cents: z.number(), confirmed: z.boolean().optional() }),
+            metadata: { mutates: true },
+            async execute({ cents }) {
+              charges.push(cents);
+              return { charged: cents };
+            },
+          }),
+        ],
+        {
+          approvalSecret,
+          policy: {
+            beforeExecute(context) {
+              if (
+                context.params &&
+                typeof context.params === 'object' &&
+                'confirmed' in context.params &&
+                context.params.confirmed === true
+              ) {
+                return { allow: true };
+              }
+              return {
+                allow: false,
+                status: 'needs_approval',
+                reason: 'Operator approval required',
+                action: { message: 'Approve charge' },
+              };
+            },
           },
         },
-      },
-    );
+      );
+
+    const toolbox = createChargeToolbox('test-secret');
 
     const paused = await toolbox.execute({
       id: 'tool-call-1',
@@ -79,6 +93,7 @@ describe('createToolbox', () => {
       callId: 'tool-call-1',
       toolName: 'charge-card',
       arguments: { cents: 100 },
+      approvalToken: expect.any(String),
       action: {
         type: 'approval',
         message: 'Approve charge',
@@ -88,13 +103,86 @@ describe('createToolbox', () => {
     });
     expect(JSON.parse(JSON.stringify(paused.pendingApproval))).toEqual(paused.pendingApproval);
 
-    const resumed = await toolbox.resumeApproval(paused.pendingApproval!, {
+    expect(() =>
+      toolbox.resumeApproval({
+        ...paused.pendingApproval!,
+        approvalToken: 'forged',
+      }),
+    ).toThrow('invalid approval token');
+
+    expect(() =>
+      toolbox.resumeApproval({
+        ...paused.pendingApproval!,
+        arguments: { cents: 999 },
+      }),
+    ).toThrow('invalid approval token');
+
+    expect(() =>
+      toolbox.resumeApproval({
+        ...paused.pendingApproval!,
+        toolName: 'other-tool',
+      }),
+    ).toThrow('invalid approval token');
+
+    expect(() =>
+      toolbox.resumeApproval({
+        ...paused.pendingApproval!,
+        action: {
+          type: 'approval',
+          message: 'Different approval',
+        },
+      }),
+    ).toThrow('invalid approval token');
+
+    expect(() =>
+      toolbox.resumeApproval({
+        ...paused.pendingApproval!,
+        reason: 'Changed reason',
+      }),
+    ).toThrow('invalid approval token');
+
+    expect(() =>
+      toolbox.resumeApproval({
+        ...paused.pendingApproval!,
+        metadata: { mutates: false },
+      }),
+    ).toThrow('invalid approval token');
+
+    const incompatibleToolbox = createChargeToolbox('other-secret');
+    expect(() => incompatibleToolbox.resumeApproval(paused.pendingApproval!)).toThrow(
+      'invalid approval token',
+    );
+
+    const unconfirmedEdit = await toolbox.resumeApproval(paused.pendingApproval!, {
       arguments: { cents: 125 },
+    });
+
+    expect(unconfirmedEdit.outcome).toBe('action_required');
+    expect(unconfirmedEdit.pendingApproval?.approvalToken).toEqual(expect.any(String));
+    expect(charges).toEqual([]);
+
+    const resumed = await toolbox.resumeApproval(paused.pendingApproval!, {
+      arguments: { cents: 125, confirmed: true },
     });
 
     expect(resumed.outcome).toBe('success');
     expect(resumed.result).toEqual({ charged: 125 });
     expect(resumed.executedArgumentsEdited).toBe(true);
+
+    const equivalentToolbox = createChargeToolbox('test-secret');
+    const resumedOriginal = await equivalentToolbox.resumeApproval(paused.pendingApproval!);
+
+    expect(resumedOriginal.outcome).toBe('success');
+    expect(resumedOriginal.result).toEqual({ charged: 100 });
+    expect(resumedOriginal.executedArgumentsEdited).toBe(false);
+
+    const invalidResume = await toolbox.resumeApproval(paused.pendingApproval!, {
+      arguments: { cents: '125' },
+    });
+
+    expect(invalidResume.outcome).toBe('error');
+    expect(invalidResume.errorCategory).toBe('validation');
+    expect(charges).toEqual([125, 100]);
   });
 
   it('exports provider tools through lazy toolbox methods', async () => {

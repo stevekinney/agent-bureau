@@ -32,6 +32,7 @@ import {
   ToolValidateErrorEvent,
   ToolValidateSuccessEvent,
 } from './events';
+import { type ApprovalResumeState, approvalResumeSymbol } from './internal/approval-resume';
 import type {
   DefaultToolEvents,
   MinimalAbortSignal,
@@ -58,6 +59,10 @@ import { isAsyncIterable, isPromise, isTestRuntime } from './type-guards';
 import type { ToolCall, ToolExecutionResult } from './types';
 import { createConcurrencyLimiter, normalizeConcurrency } from './utilities/concurrency';
 import { normalizeSchema } from './utilities/schema-normalization';
+
+type InternalToolExecuteOptions = ToolExecuteOptions & {
+  [approvalResumeSymbol]?: ApprovalResumeState;
+};
 
 // Map from event type strings to their Event subclass constructors.
 // Used by the `emit(type, detail)` helper to construct the correct Event.
@@ -557,10 +562,10 @@ export function createTool<
 
   const executeCall = async (
     toolCall: ToolCallWithArguments,
-    options?: ToolExecuteOptions,
+    options?: InternalToolExecuteOptions,
   ): Promise<ToolExecutionResult> => {
     const resolvedTimeout = options?.timeout ?? timeout;
-    const executeOptions: ToolExecuteOptions = {
+    const executeOptions: InternalToolExecuteOptions = {
       ...options,
       ...(resolvedTimeout !== undefined ? { timeout: resolvedTimeout } : {}),
     };
@@ -589,7 +594,7 @@ export function createTool<
 
   const executeInner = async (
     toolCall: ToolCall & { arguments: unknown },
-    options: ToolExecuteOptions = {},
+    options: InternalToolExecuteOptions = {},
   ): Promise<ToolExecutionResult> => {
     const baseDetail = { toolCall, configuration };
     const nowFunction = options.now ?? Date.now;
@@ -699,52 +704,63 @@ export function createTool<
           policyContext.policyContext = injected;
         }
       }
-      const decision = options.approved ? undefined : await resolvePolicyDecision(policyContext);
+      const approvalResume = options[approvalResumeSymbol];
+      const decision = await resolvePolicyDecision(policyContext);
       const executedArgumentsEdited =
-        options.proposedArguments !== undefined &&
-        stableStringify(normalizeToolContent(options.proposedArguments)) !==
+        approvalResume !== undefined &&
+        stableStringify(normalizeToolContent(approvalResume.proposedArguments)) !==
           stableStringify(normalizeToolContent(parsed));
 
+      let resumedApprovalIsSatisfied = false;
       if (decision?.status === 'needs_approval' || decision?.status === 'needs_input') {
         const type = decision.status === 'needs_approval' ? 'approval' : 'input';
-        const reason = decision.reason ?? `Tool execution requires ${type}`;
-        emit('policy-action-required', { ...parsedDetail, params: parsed, reason });
+        resumedApprovalIsSatisfied =
+          approvalResume !== undefined &&
+          type === 'approval' &&
+          approvalResume.approvedAction.type === 'approval' &&
+          stableStringify(normalizeToolContent(approvalResume.proposedArguments)) ===
+            stableStringify(normalizeToolContent(parsed));
 
-        await runPolicyAfter({
-          ...policyContext,
-          outcome: 'action_required',
-          reason,
-        });
+        if (!resumedApprovalIsSatisfied) {
+          const reason = decision.reason ?? `Tool execution requires ${type}`;
+          emit('policy-action-required', { ...parsedDetail, params: parsed, reason });
 
-        finishTelemetry('paused', { reason });
-
-        const callId = typedToolCall.id;
-        const action = {
-          type,
-          message: decision.action?.message ?? reason,
-          schema: decision.action?.schema,
-        };
-        return {
-          callId,
-          outcome: 'action_required',
-          content: reason,
-          toolCallId: callId,
-          toolName: name,
-          result: undefined,
-          action,
-          pendingApproval: {
-            callId,
-            toolName: name,
-            arguments: normalizeToolContent(parsed),
-            action,
+          await runPolicyAfter({
+            ...policyContext,
+            outcome: 'action_required',
             reason,
-            metadata: normalizeToolContent(configuration.metadata ?? {}),
-          },
-          inputDigest,
-        } as ToolExecutionResult;
+          });
+
+          finishTelemetry('paused', { reason });
+
+          const callId = typedToolCall.id;
+          const action = {
+            type,
+            message: decision.action?.message ?? reason,
+            schema: decision.action?.schema,
+          };
+          return {
+            callId,
+            outcome: 'action_required',
+            content: reason,
+            toolCallId: callId,
+            toolName: name,
+            result: undefined,
+            action,
+            pendingApproval: {
+              callId,
+              toolName: name,
+              arguments: normalizeToolContent(parsed),
+              action,
+              reason,
+              metadata: normalizeToolContent(configuration.metadata ?? {}),
+            },
+            inputDigest,
+          } as ToolExecutionResult;
+        }
       }
 
-      if (decision?.allow === false) {
+      if (decision?.allow === false && !resumedApprovalIsSatisfied) {
         const reason = decision.reason ?? 'Policy denied';
         emit('policy-denied', { ...parsedDetail, params: parsed, reason });
         const errorObj = new Error(reason);

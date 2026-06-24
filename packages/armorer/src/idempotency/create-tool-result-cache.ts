@@ -49,6 +49,46 @@ export function createToolResultCache(options: CreateToolResultCacheOptions): To
     return entry.status === 'started' ? entry.startedAt : entry.executedAt;
   }
 
+  function isRecord(value: unknown): value is Record<string, unknown> {
+    return value !== null && typeof value === 'object' && !Array.isArray(value);
+  }
+
+  function decodeEntry(value: unknown): ToolResultCacheEntry | undefined {
+    if (!isRecord(value)) {
+      return undefined;
+    }
+
+    if (
+      value['status'] === 'started' &&
+      typeof value['toolName'] === 'string' &&
+      typeof value['startedAt'] === 'number'
+    ) {
+      return {
+        status: 'started',
+        toolName: value['toolName'],
+        startedAt: value['startedAt'],
+        ttl: typeof value['ttl'] === 'number' ? value['ttl'] : (defaultTTL ?? 0),
+      };
+    }
+
+    if (
+      (value['status'] === undefined || value['status'] === 'completed') &&
+      'result' in value &&
+      typeof value['toolName'] === 'string' &&
+      typeof value['executedAt'] === 'number'
+    ) {
+      return {
+        status: 'completed',
+        result: value['result'],
+        toolName: value['toolName'],
+        executedAt: value['executedAt'],
+        ttl: typeof value['ttl'] === 'number' ? value['ttl'] : (defaultTTL ?? 0),
+      };
+    }
+
+    return undefined;
+  }
+
   function isExpired(entry: ToolResultCacheEntry): boolean {
     if (entry.ttl === 0) return false;
     return Date.now() > getEntryTime(entry) + entry.ttl;
@@ -60,7 +100,17 @@ export function createToolResultCache(options: CreateToolResultCacheOptions): To
       return undefined;
     }
 
-    const entry = JSON.parse(raw) as ToolResultCacheEntry;
+    let entry: ToolResultCacheEntry | undefined;
+    try {
+      entry = decodeEntry(JSON.parse(raw));
+    } catch {
+      entry = undefined;
+    }
+
+    if (!entry) {
+      await store.delete(resolveKey(key));
+      return undefined;
+    }
 
     if (isExpired(entry)) {
       // Lazily clean up expired entries
@@ -82,6 +132,22 @@ export function createToolResultCache(options: CreateToolResultCacheOptions): To
     },
 
     getState: getEntry,
+
+    async claimStarted(
+      key: string,
+      execution: StartedToolExecution,
+      ttl?: number,
+    ): Promise<{ outcome: 'claimed' } | { outcome: 'existing'; entry: ToolResultCacheEntry }> {
+      const existing = await getEntry(key);
+      if (existing) {
+        return { outcome: 'existing', entry: existing };
+      }
+
+      const effectiveTTL = ttl ?? (execution.ttl !== undefined ? execution.ttl : defaultTTL);
+      const entry = effectiveTTL !== undefined ? { ...execution, ttl: effectiveTTL } : execution;
+      await store.set(resolveKey(key), JSON.stringify(entry));
+      return { outcome: 'claimed' };
+    },
 
     async set(key: string, result: CachedToolResult, ttl?: number): Promise<void> {
       // Priority: explicit ttl param > entry's own ttl (including 0 = never expire) > defaultTTL

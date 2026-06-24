@@ -4,13 +4,15 @@ export type {
   EmbeddingVectorLike,
   IsEmbeddingVectorOptions,
 } from './embeddings';
-export {
-  computeEmbeddingVectorMagnitude,
-  cosineSimilarity,
-  isEmbeddingVector,
-} from './embeddings';
+export { computeEmbeddingVectorMagnitude, cosineSimilarity, isEmbeddingVector } from './embeddings';
 export type { IncrementalHash } from './hash';
-export { createIncrementalHash, sha256Hex, sha256HexSync } from './hash';
+export {
+  createIncrementalHash,
+  hmacSha256HexSync,
+  sha256Hex,
+  sha256HexSync,
+  timingSafeEqualHex,
+} from './hash';
 export type { MaterializeToolCallOptions } from './materialization';
 export {
   materializeToolCall,

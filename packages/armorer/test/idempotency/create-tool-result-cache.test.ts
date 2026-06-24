@@ -167,7 +167,7 @@ describe('createToolResultCache', () => {
 
   describe('started executions', () => {
     it('stores and retrieves a started state separately from completed results', async () => {
-      await cache.markStarted('started-key', {
+      await cache.markStarted!('started-key', {
         status: 'started',
         toolName: 'charge-card',
         startedAt: Date.now(),
@@ -175,12 +175,84 @@ describe('createToolResultCache', () => {
       });
 
       expect(await cache.get('started-key')).toBeUndefined();
-      expect(await cache.getState('started-key')).toEqual({
+      expect(await cache.getState!('started-key')).toEqual({
         status: 'started',
         toolName: 'charge-card',
         startedAt: expect.any(Number),
         ttl: 60_000,
       });
+    });
+
+    it('returns an existing entry when claiming an already completed key', async () => {
+      const completed: CachedToolResult = {
+        result: { ok: true },
+        toolName: 'charge-card',
+        executedAt: Date.now(),
+        ttl: 60_000,
+      };
+      await cache.set('completed-key', completed);
+
+      await expect(
+        cache.claimStarted!('completed-key', {
+          status: 'started',
+          toolName: 'charge-card',
+          startedAt: Date.now(),
+          ttl: 60_000,
+        }),
+      ).resolves.toEqual({ outcome: 'existing', entry: { ...completed, status: 'completed' } });
+    });
+
+    it('expires and deletes stale started state', async () => {
+      await cache.markStarted!('expired-started-key', {
+        status: 'started',
+        toolName: 'charge-card',
+        startedAt: Date.now() - 120_000,
+        ttl: 60_000,
+      });
+
+      expect(await cache.getState!('expired-started-key')).toBeUndefined();
+      expect(await store.get('expired-started-key')).toBeNull();
+    });
+
+    it('reads legacy completed entries without a status field', async () => {
+      await store.set(
+        'legacy-key',
+        JSON.stringify({
+          result: 'legacy-result',
+          toolName: 'legacy-tool',
+          executedAt: Date.now(),
+          ttl: 60_000,
+        }),
+      );
+
+      expect(await cache.get('legacy-key')).toEqual({
+        status: 'completed',
+        result: 'legacy-result',
+        toolName: 'legacy-tool',
+        executedAt: expect.any(Number),
+        ttl: 60_000,
+      });
+    });
+
+    it('deletes malformed entries on read', async () => {
+      await store.set('malformed-key', JSON.stringify({ status: 'completed' }));
+
+      expect(await cache.getState!('malformed-key')).toBeUndefined();
+      expect(await store.get('malformed-key')).toBeNull();
+    });
+
+    it('deletes non-object entries on read', async () => {
+      await store.set('array-key', JSON.stringify([]));
+
+      expect(await cache.getState!('array-key')).toBeUndefined();
+      expect(await store.get('array-key')).toBeNull();
+    });
+
+    it('deletes invalid JSON entries on read', async () => {
+      await store.set('invalid-json-key', '{');
+
+      expect(await cache.getState!('invalid-json-key')).toBeUndefined();
+      expect(await store.get('invalid-json-key')).toBeNull();
     });
   });
 

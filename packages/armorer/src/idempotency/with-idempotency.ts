@@ -1,4 +1,5 @@
 import type { Tool, ToolCallWithArguments } from '../is-tool';
+import { claimCacheStarted, getCacheEntry } from './cache-operations';
 import type { CachedToolResult, IdempotencyOptions } from './types';
 
 const DEFAULT_TTL = 300_000;
@@ -15,6 +16,18 @@ function isToolCall(value: unknown): value is ToolCallWithArguments {
   return (
     typeof record['name'] === 'string' && typeof record['id'] === 'string' && 'arguments' in record
   );
+}
+
+function inputMatchesToolSchema(tool: Tool, params: unknown): boolean {
+  const input = (
+    tool as unknown as { input?: { safeParse?: (value: unknown) => { success: boolean } } }
+  ).input;
+
+  if (typeof input?.safeParse !== 'function') {
+    return true;
+  }
+
+  return input.safeParse(params).success;
 }
 
 /**
@@ -48,9 +61,13 @@ export function withIdempotency<T extends Tool>(tool: T, options: IdempotencyOpt
   }
 
   async function executeWithCache(params: unknown): Promise<unknown> {
-    const key = idempotencyKey!(params);
+    const key = `${tool.name}:${idempotencyKey!(params)}`;
 
-    const cached = await cache.getState(key);
+    if (!inputMatchesToolSchema(tool, params)) {
+      return tool(params);
+    }
+
+    const cached = await getCacheEntry(cache, key);
     if (cached?.status === 'started') {
       onUnknownOutcome?.(key, cached);
       throw new Error(`Idempotency key "${key}" has an unknown outcome.`);
@@ -60,12 +77,21 @@ export function withIdempotency<T extends Tool>(tool: T, options: IdempotencyOpt
       return cached.result;
     }
 
-    await cache.markStarted(key, {
+    const started = await claimCacheStarted(cache, key, {
       status: 'started',
       toolName: tool.name,
       startedAt: Date.now(),
       ttl,
     });
+
+    if (started.outcome === 'existing') {
+      if (started.entry.status === 'started') {
+        onUnknownOutcome?.(key, started.entry);
+        throw new Error(`Idempotency key "${key}" has an unknown outcome.`);
+      }
+      onCacheHit?.(key, started.entry);
+      return started.entry.result;
+    }
 
     // Execute the tool via its callable interface (params → result)
     const result = await tool(params);

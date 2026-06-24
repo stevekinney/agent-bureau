@@ -195,6 +195,21 @@ describe('truncation', () => {
       expect(result.omittedBytes).toBeGreaterThan(0);
     });
 
+    it('keeps multibyte excerpts within the byte budget', () => {
+      const encoder = new TextEncoder();
+      const result = truncateToolResultContentStructured('ééé漢字漢字ééé', {
+        maxBytes: 12,
+        headBytes: 6,
+        tailBytes: 6,
+      });
+
+      expect(result.truncated).toBe(true);
+      expect(result.originalSize).toBe(24);
+      expect(
+        encoder.encode(result.head).byteLength + encoder.encode(result.tail).byteLength,
+      ).toBeLessThanOrEqual(12);
+    });
+
     it('strips base64 payloads before creating structured excerpts', () => {
       const result = truncateToolResultContentStructured(
         'before data:image/png;base64,AAAA after',

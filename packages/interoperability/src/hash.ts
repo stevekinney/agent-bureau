@@ -3,6 +3,8 @@
  *
  * - `sha256Hex` uses the Web Crypto API and works in all environments (browser, Node, Bun, Deno).
  * - `sha256HexSync` is synchronous and works in Node.js and Bun (throws in browsers).
+ * - `hmacSha256HexSync` signs text with HMAC-SHA-256 in Node.js and Bun.
+ * - `timingSafeEqualHex` compares hex digests without leaking the first differing byte.
  * - `createIncrementalHash` returns a streaming hasher for accumulating data across multiple `.update()` calls.
  */
 
@@ -80,6 +82,44 @@ export function sha256HexSync(text: string): string {
     throw new Error(
       'sha256HexSync is not available in this environment. Use the async sha256Hex instead, which works everywhere via Web Crypto.',
     );
+  }
+}
+
+/**
+ * Computes an HMAC-SHA-256 hex signature synchronously.
+ * Uses `node:crypto` in Node.js and Bun.
+ * Throws in browser environments where no synchronous HMAC API is available.
+ */
+export function hmacSha256HexSync(secret: string, text: string): string {
+  try {
+    const { createHmac } = requireNodeCrypto();
+    return createHmac('sha256', secret).update(text).digest('hex');
+  } catch {
+    throw new Error(
+      'hmacSha256HexSync is not available in this environment. Use Web Crypto for browser-compatible HMAC signing.',
+    );
+  }
+}
+
+/**
+ * Compares two hex strings with Node's timing-safe equality when available.
+ * Invalid hex strings and different-length values are never equal.
+ */
+export function timingSafeEqualHex(left: string, right: string): boolean {
+  if (
+    left.length !== right.length ||
+    left.length % 2 !== 0 ||
+    !/^[0-9a-f]+$/i.test(left) ||
+    !/^[0-9a-f]+$/i.test(right)
+  ) {
+    return false;
+  }
+
+  try {
+    const { timingSafeEqual } = requireNodeCrypto();
+    return timingSafeEqual(Buffer.from(left, 'hex'), Buffer.from(right, 'hex'));
+  } catch {
+    throw new Error('timingSafeEqualHex is not available in this environment.');
   }
 }
 

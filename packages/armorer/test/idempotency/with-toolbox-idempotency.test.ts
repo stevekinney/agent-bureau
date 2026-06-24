@@ -2,11 +2,12 @@ import { beforeEach, describe, expect, it } from 'bun:test';
 import { z } from 'zod';
 
 import { createTool } from '../../src/create-tool';
-import { createToolbox } from '../../src/create-toolbox';
+import { createToolbox, type Toolbox } from '../../src/create-toolbox';
 import { createToolResultCache } from '../../src/idempotency/create-tool-result-cache';
 import { fullInputKey } from '../../src/idempotency/key-generators';
 import type { ToolResultCache } from '../../src/idempotency/types';
 import { withToolboxIdempotency } from '../../src/idempotency/with-toolbox-idempotency';
+import type { ToolCallInput } from '../../src/types';
 
 function createTestStore() {
   const map = new Map<string, string>();
@@ -92,17 +93,41 @@ describe('withToolboxIdempotency', () => {
     expect(result1.result).toBe(3);
     expect(result2.result).toBe(3);
     expect(result2.idempotency).toEqual({
-      key: 'temporal-tool-call-id',
+      key: 'add:temporal-tool-call-id',
       outcome: 'deduped',
     });
     expect(addCallCount).toBe(1);
+  });
+
+  it('scopes externally supplied idempotency keys by tool name', async () => {
+    const toolbox = createToolbox([createToolWithKey(), createToolWithoutKey()]);
+    const idempotentToolbox = withToolboxIdempotency(toolbox, {
+      cache,
+      requireExplicitKey: false,
+    });
+
+    const addResult = await idempotentToolbox.execute(
+      { name: 'add', arguments: { a: 1, b: 2 } },
+      { idempotencyKey: 'shared-key' },
+    );
+    const multiplyResult = await idempotentToolbox.execute(
+      { name: 'multiply', arguments: { a: 3, b: 4 } },
+      { idempotencyKey: 'shared-key' },
+    );
+
+    expect(addResult.result).toBe(3);
+    expect(multiplyResult.result).toBe(12);
+    expect(addResult.idempotency?.key).toBe('add:shared-key');
+    expect(multiplyResult.idempotency?.key).toBe('multiply:shared-key');
+    expect(addCallCount).toBe(1);
+    expect(mulCallCount).toBe(1);
   });
 
   it('returns unknown-outcome when a key was started without a recorded result', async () => {
     const toolbox = createToolbox([createToolWithKey()]);
     const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
 
-    await cache.markStarted('started-key', {
+    await cache.markStarted!('add:started-key', {
       status: 'started',
       toolName: 'add',
       startedAt: Date.now(),
@@ -116,10 +141,129 @@ describe('withToolboxIdempotency', () => {
 
     expect(result.outcome).toBe('action_required');
     expect(result.idempotency).toEqual({
-      key: 'started-key',
+      key: 'add:started-key',
       outcome: 'unknown-outcome',
     });
     expect(addCallCount).toBe(0);
+  });
+
+  it('does not keep started state for validation failures', async () => {
+    const toolbox = createToolbox([createToolWithKey()]);
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
+
+    const result = await idempotentToolbox.execute(
+      { name: 'add', arguments: { a: '1', b: 2 } },
+      { idempotencyKey: 'invalid-input' },
+    );
+
+    expect(result.outcome).toBe('error');
+    expect(result.idempotency).toBeUndefined();
+    expect(await cache.getState!('add:invalid-input')).toBeUndefined();
+    expect(addCallCount).toBe(0);
+  });
+
+  it('does not keep started state for approval pauses before execution', async () => {
+    const toolbox = createToolbox([createToolWithKey()], {
+      policy: {
+        beforeExecute() {
+          return {
+            allow: false,
+            status: 'needs_approval',
+            reason: 'approval required',
+          };
+        },
+      },
+    });
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
+
+    const first = await idempotentToolbox.execute(
+      { name: 'add', arguments: { a: 1, b: 2 } },
+      { idempotencyKey: 'approval-pause' },
+    );
+    const second = await idempotentToolbox.execute(
+      { name: 'add', arguments: { a: 1, b: 2 } },
+      { idempotencyKey: 'approval-pause' },
+    );
+
+    expect(first.outcome).toBe('action_required');
+    expect(second.outcome).toBe('action_required');
+    expect(first.idempotency).toBeUndefined();
+    expect(second.idempotency).toBeUndefined();
+    expect(await cache.getState!('add:approval-pause')).toBeUndefined();
+    expect(addCallCount).toBe(0);
+  });
+
+  it('does not keep started state for denied results before execution', async () => {
+    const tool = createToolWithKey();
+    const toolbox = {
+      getTool(name: string) {
+        return name === 'add' ? tool : undefined;
+      },
+      async execute(call: ToolCallInput) {
+        return {
+          callId: call.id ?? '',
+          outcome: 'denied',
+          content: 'not allowed',
+          toolCallId: call.id ?? '',
+          toolName: call.name,
+          result: undefined,
+        };
+      },
+    } as Toolbox;
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
+
+    const first = await idempotentToolbox.execute(
+      { name: 'add', arguments: { a: 1, b: 2 } },
+      { idempotencyKey: 'policy-denied' },
+    );
+    const second = await idempotentToolbox.execute(
+      { name: 'add', arguments: { a: 1, b: 2 } },
+      { idempotencyKey: 'policy-denied' },
+    );
+
+    expect(first.outcome).toBe('denied');
+    expect(second.outcome).toBe('denied');
+    expect(first.idempotency).toBeUndefined();
+    expect(second.idempotency).toBeUndefined();
+    expect(await cache.getState!('add:policy-denied')).toBeUndefined();
+    expect(addCallCount).toBe(0);
+  });
+
+  it('keeps started state when execution errors after a side effect', async () => {
+    const sideEffects: number[] = [];
+    const chargeTool = createTool({
+      name: 'charge',
+      description: 'Charges a payment method',
+      input: z.object({ cents: z.number() }),
+      idempotencyKey: (input: unknown) => fullInputKey(input),
+      async execute({ cents }) {
+        sideEffects.push(cents);
+        throw new Error('provider timeout after charge');
+      },
+    });
+    const toolbox = createToolbox([chargeTool]);
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
+
+    const first = await idempotentToolbox.execute(
+      { id: 'call-1', name: 'charge', arguments: { cents: 100 } },
+      { idempotencyKey: 'charge-once' },
+    );
+    const second = await idempotentToolbox.execute(
+      { id: 'call-2', name: 'charge', arguments: { cents: 100 } },
+      { idempotencyKey: 'charge-once' },
+    );
+
+    expect(first.outcome).toBe('error');
+    expect(first.idempotency).toBeUndefined();
+    expect(second.outcome).toBe('action_required');
+    expect(second.idempotency).toEqual({
+      key: 'charge:charge-once',
+      outcome: 'unknown-outcome',
+    });
+    expect(sideEffects).toEqual([100]);
+    expect(await cache.getState!('charge:charge-once')).toEqual(
+      expect.objectContaining({ status: 'started', toolName: 'charge' }),
+    );
   });
 
   it('does not wrap tools without idempotencyKey by default (requireExplicitKey: true)', async () => {
@@ -134,6 +278,114 @@ describe('withToolboxIdempotency', () => {
     await idempotentToolbox.execute({ name: 'multiply', arguments: { a: 2, b: 3 } });
 
     expect(mulCallCount).toBe(2); // Not cached
+  });
+
+  it('supports caches that only implement the original completed-result API', async () => {
+    const completedResults = new Map<string, Awaited<ReturnType<ToolResultCache['get']>>>();
+    const legacyCache: ToolResultCache = {
+      async get(key) {
+        return completedResults.get(key);
+      },
+      async set(key, result) {
+        completedResults.set(key, result);
+      },
+      async delete(key) {
+        completedResults.delete(key);
+      },
+      async clear() {
+        completedResults.clear();
+      },
+    };
+    const toolbox = createToolbox([createToolWithKey()]);
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache: legacyCache });
+
+    const first = await idempotentToolbox.execute({ name: 'add', arguments: { a: 1, b: 2 } });
+    const second = await idempotentToolbox.execute({ name: 'add', arguments: { a: 1, b: 2 } });
+
+    expect(first.result).toBe(3);
+    expect(second.idempotency?.outcome).toBe('deduped');
+    expect(addCallCount).toBe(1);
+  });
+
+  it('uses an existing completed result returned while claiming a toolbox key', async () => {
+    const completed = {
+      result: 99,
+      toolName: 'add',
+      executedAt: Date.now(),
+      ttl: 60_000,
+    };
+    let reads = 0;
+    const racingCache: ToolResultCache = {
+      async get() {
+        reads++;
+        return reads === 1 ? undefined : completed;
+      },
+      async set() {
+        throw new Error('set should not be called');
+      },
+      async delete() {
+        throw new Error('delete should not be called');
+      },
+      async clear() {},
+    };
+    const toolbox = createToolbox([createToolWithKey()]);
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache: racingCache });
+    const key = `add:${fullInputKey({ a: 1, b: 2 })}`;
+
+    const result = await idempotentToolbox.execute({ name: 'add', arguments: { a: 1, b: 2 } });
+
+    expect(result).toMatchObject({
+      outcome: 'success',
+      result: 99,
+      idempotency: {
+        key,
+        outcome: 'deduped',
+      },
+    });
+    expect(addCallCount).toBe(0);
+  });
+
+  it('surfaces an existing started result returned while claiming a toolbox key', async () => {
+    const started = {
+      status: 'started' as const,
+      toolName: 'add',
+      startedAt: Date.now(),
+      ttl: 60_000,
+    };
+    let reads = 0;
+    const racingCache: ToolResultCache = {
+      async getState() {
+        reads++;
+        return reads === 1 ? undefined : started;
+      },
+      async get() {
+        return undefined;
+      },
+      async set() {
+        throw new Error('set should not be called');
+      },
+      async delete() {
+        throw new Error('delete should not be called');
+      },
+      async clear() {},
+    };
+    const toolbox = createToolbox([createToolWithKey()]);
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache: racingCache });
+    const key = `add:${fullInputKey({ a: 1, b: 2 })}`;
+
+    const result = await idempotentToolbox.execute({ name: 'add', arguments: { a: 1, b: 2 } });
+
+    expect(result).toMatchObject({
+      outcome: 'action_required',
+      idempotency: {
+        key,
+        outcome: 'unknown-outcome',
+      },
+      action: {
+        type: 'approval',
+      },
+    });
+    expect(addCallCount).toBe(0);
   });
 
   it('wraps all tools with fullInputKey when requireExplicitKey is false', async () => {

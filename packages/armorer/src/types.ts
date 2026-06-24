@@ -30,7 +30,7 @@ export interface ToolExecutionResult extends ToolResult {
   toolCallId: string;
   toolName: string;
   result: unknown;
-  pendingApproval?: PendingToolApproval;
+  pendingApproval?: SignedPendingToolApproval;
   executedArgumentsEdited?: boolean;
   idempotency?: ToolExecutionIdempotency;
   /**
@@ -57,6 +57,11 @@ export type PendingToolApproval = {
   action: ToolAction;
   reason?: string;
   metadata?: JSONValue;
+  approvalToken?: string;
+};
+
+export type SignedPendingToolApproval = PendingToolApproval & {
+  approvalToken: string;
 };
 
 export type ToolExecutionIdempotency = {
