@@ -1,3 +1,7 @@
+import type {
+  Context as OpenTelemetryContext,
+  Link as OpenTelemetrySpanLink,
+} from '@opentelemetry/api';
 import type { EventIteratorOptions, ObservableLike, Observer, Subscription } from 'lifecycle';
 import { CompletableEventTarget } from 'lifecycle';
 import { z } from 'zod';
@@ -219,7 +223,12 @@ export interface ToolStatusUpdate {
 }
 
 export interface ToolboxEvents {
-  call: { tool: Tool; call: ToolCall };
+  call: {
+    tool: Tool;
+    call: ToolCall;
+    parentContext?: OpenTelemetryContext;
+    spanLinks?: OpenTelemetrySpanLink[];
+  };
   complete: { tool: Tool; result: ToolExecutionResult };
   error: { tool?: Tool; result: ToolExecutionResult };
   'not-found': ToolCall;
@@ -310,6 +319,8 @@ export interface ToolboxExecuteOptions extends ToolExecuteOptions {
   concurrency?: number;
   mode?: 'parallel' | 'sequential';
   errorMode?: 'failFast' | 'collect';
+  parentContext?: OpenTelemetryContext;
+  spanLinks?: OpenTelemetrySpanLink[];
 }
 
 export type ToolboxEntry = ToolConfiguration | Tool;
@@ -793,7 +804,12 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
         return notFound;
       }
 
-      emit('call', { tool, call: toolCall });
+      emit('call', {
+        tool,
+        call: toolCall,
+        ...(options?.parentContext ? { parentContext: options.parentContext } : {}),
+        ...(options?.spanLinks ? { spanLinks: options.spanLinks } : {}),
+      });
 
       // Notify if a deprecated tool is being called
       if (onDeprecatedToolCalled) {

@@ -52,15 +52,20 @@ export function instrument(
   subscriptions.push(
     toolbox.addEventListener('call', (event) => {
       const { tool, call } = event;
-      const span = tracer.startSpan(`tool ${tool.identity.name}`, {
-        kind: SpanKind.CLIENT,
-        attributes: {
-          'gen_ai.system': 'toolbox',
-          'gen_ai.tool.name': tool.identity.name,
-          'gen_ai.tool.id': call.id,
-          'gen_ai.tool.arguments': safeStringify(call.arguments),
+      const span = tracer.startSpan(
+        `tool ${tool.identity.name}`,
+        {
+          kind: SpanKind.CLIENT,
+          attributes: {
+            'gen_ai.system': 'toolbox',
+            'gen_ai.tool.name': tool.identity.name,
+            'gen_ai.tool.id': call.id,
+            'gen_ai.tool.arguments': safeStringify(call.arguments),
+          },
+          ...(event.spanLinks ? { links: event.spanLinks } : {}),
         },
-      });
+        event.parentContext,
+      );
       activeSpans.set(call.id, span);
     }),
   );

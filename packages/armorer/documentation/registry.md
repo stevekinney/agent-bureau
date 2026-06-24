@@ -104,11 +104,22 @@ Toolbox provides native OpenTelemetry instrumentation via the `armorer/instrumen
 ```typescript
 import { createToolbox } from 'armorer';
 import { instrument } from 'armorer/instrumentation';
+import { context, trace } from '@opentelemetry/api';
 
 const toolbox = createToolbox();
 const unregister = instrument(toolbox);
+const tracer = trace.getTracer('worker');
 
-// All subsequent calls via toolbox.execute() will create OTel Spans
+// All subsequent calls via toolbox.execute() will create OpenTelemetry spans
+await tracer.startActiveSpan('temporal.activity', async (activitySpan) => {
+  await toolbox.execute(
+    { id: 'lookup-account', name: 'lookupAccount', arguments: { accountId: 'acct_123' } },
+    {
+      parentContext: trace.setSpan(context.active(), activitySpan),
+      spanLinks: [{ context: activitySpan.spanContext() }],
+    },
+  );
+});
 ```
 
 ### Middleware

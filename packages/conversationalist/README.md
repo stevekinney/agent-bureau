@@ -55,6 +55,135 @@ const openAIRequest = await conversation.toProvider('openai');
 - **`Message`**: ordered conversation entry with roles such as `user`, `assistant`, `system`, `developer`, `tool-call`, `tool-result`, and `snapshot`.
 - **`ToolCall`** and **`ToolResult`**: canonical, JSON-safe tool interaction payloads shared with `armorer` through `interoperability`.
 
+## Rebuilding From an Append-Only Event Log
+
+If your worker stores durable transcript rows instead of a serialized `ConversationHistory`, replay those rows through the immutable append helpers after a restart. The helpers rebuild the ordered message list and validate that every tool result references an earlier tool call.
+
+```typescript
+import {
+  appendAssistantMessage,
+  appendToolCalls,
+  appendToolResults,
+  appendUserMessage,
+  createConversationHistory,
+  getToolInteractions,
+  type AppendableToolCallInput,
+  type AppendableToolResult,
+  type ConversationHistory,
+  type JSONValue,
+} from 'conversationalist';
+
+type TranscriptEventRow =
+  | {
+      sequence: number;
+      messageId: string;
+      createdAt: string;
+      kind: 'user' | 'assistant';
+      content: string;
+      metadata?: Record<string, JSONValue>;
+    }
+  | {
+      sequence: number;
+      messageId: string;
+      createdAt: string;
+      kind: 'tool-call';
+      toolCall: AppendableToolCallInput;
+    }
+  | {
+      sequence: number;
+      messageId: string;
+      createdAt: string;
+      kind: 'tool-result';
+      toolResult: AppendableToolResult;
+    };
+
+function replayTranscriptRows(rows: readonly TranscriptEventRow[]): ConversationHistory {
+  let conversation = createConversationHistory({
+    title: 'Durable activity transcript',
+  });
+  const seenSequences = new Set<number>();
+  const orderedRows = [...rows].sort((left, right) => left.sequence - right.sequence);
+
+  for (const row of orderedRows) {
+    if (seenSequences.has(row.sequence)) {
+      throw new Error(`Duplicate transcript sequence: ${row.sequence}`);
+    }
+    seenSequences.add(row.sequence);
+
+    const environment = {
+      now: () => row.createdAt,
+      randomId: () => row.messageId,
+    };
+
+    switch (row.kind) {
+      case 'user': {
+        conversation = appendUserMessage(conversation, row.content, row.metadata, environment);
+        break;
+      }
+      case 'assistant': {
+        conversation = appendAssistantMessage(conversation, row.content, row.metadata, environment);
+        break;
+      }
+      case 'tool-call': {
+        conversation = appendToolCalls(conversation, [row.toolCall], environment);
+        break;
+      }
+      case 'tool-result': {
+        conversation = appendToolResults(conversation, [row.toolResult], environment);
+        break;
+      }
+    }
+  }
+
+  return conversation;
+}
+
+const rows: TranscriptEventRow[] = [
+  {
+    sequence: 1,
+    messageId: 'message-user-1',
+    createdAt: '2026-06-24T12:00:00.000Z',
+    kind: 'user',
+    content: 'Find the account status.',
+  },
+  {
+    sequence: 2,
+    messageId: 'message-tool-call-1',
+    createdAt: '2026-06-24T12:00:01.000Z',
+    kind: 'tool-call',
+    toolCall: {
+      id: 'tool-call-account-1',
+      name: 'lookupAccount',
+      arguments: { accountId: 'acct_123' },
+    },
+  },
+  {
+    sequence: 3,
+    messageId: 'message-tool-result-1',
+    createdAt: '2026-06-24T12:00:02.000Z',
+    kind: 'tool-result',
+    toolResult: {
+      callId: 'tool-call-account-1',
+      outcome: 'success',
+      content: { status: 'active' },
+    },
+  },
+];
+
+const conversation = replayTranscriptRows(rows);
+const orderedMessages = conversation.ids.map((id) => conversation.messages[id]);
+const interactions = getToolInteractions(conversation);
+
+console.assert(
+  orderedMessages.map((message) => message.id).join(',') ===
+    rows.map((row) => row.messageId).join(','),
+);
+console.assert(interactions.length === 1);
+console.assert(interactions.every(({ call, result }) => call.id === result?.callId));
+```
+
+The `sequence` column is the replay authority. The message identifier and timestamp hooks keep the rebuilt `ConversationHistory` aligned with the external event rows, while the tool-call identifier remains the durable key that pairs every tool result with its call across process restarts.
+
 ## Package Structure
 
 ### `conversationalist` (root)
