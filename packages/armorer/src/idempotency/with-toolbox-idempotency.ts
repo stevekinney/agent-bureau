@@ -39,6 +39,15 @@ function shouldClearStartedState(result: ToolExecutionResult): boolean {
   return category === 'validation' || category === 'permission' || category === 'not_found';
 }
 
+function shouldClearStartedStateForThrownError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') {
+    return false;
+  }
+
+  const category = (error as { category?: unknown })['category'];
+  return category === 'validation' || category === 'permission' || category === 'not_found';
+}
+
 /**
  * Wraps a toolbox so that tool executions are deduplicated via an idempotency
  * cache. Returns a new toolbox object — the original is not mutated.
@@ -179,7 +188,15 @@ export function withToolboxIdempotency(
       } as ToolExecutionResult;
     }
 
-    const result = await originalExecute(call, executeOptions);
+    let result: ToolExecutionResult;
+    try {
+      result = await originalExecute(call, executeOptions);
+    } catch (error) {
+      if (shouldClearStartedStateForThrownError(error)) {
+        await cache.delete(cacheKey);
+      }
+      throw error;
+    }
 
     // Only cache successful results
     if (result.outcome === 'success' && !result.error) {

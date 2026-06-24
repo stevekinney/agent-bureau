@@ -206,6 +206,30 @@ describe('withToolboxIdempotency', () => {
     expect(addCallCount).toBe(0);
   });
 
+  it('does not keep started state when fail-fast validation throws', async () => {
+    const toolbox = createToolbox([createToolWithKey()]);
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
+
+    await expect(
+      idempotentToolbox.execute(
+        { name: 'add', arguments: { a: '1', b: 2 } },
+        { idempotencyKey: 'invalid-input', errorMode: 'failFast' },
+      ),
+    ).rejects.toMatchObject({ category: 'validation' });
+
+    expect(await cache.getState!('add:invalid-input')).toBeUndefined();
+
+    const retry = await idempotentToolbox.execute(
+      { name: 'add', arguments: { a: '1', b: 2 } },
+      { idempotencyKey: 'invalid-input' },
+    );
+
+    expect(retry.outcome).toBe('error');
+    expect(retry.idempotency).toBeUndefined();
+    expect(await cache.getState!('add:invalid-input')).toBeUndefined();
+    expect(addCallCount).toBe(0);
+  });
+
   it('does not keep started state for approval pauses before execution', async () => {
     const toolbox = createToolbox([createToolWithKey()], {
       policy: {
@@ -307,6 +331,40 @@ describe('withToolboxIdempotency', () => {
     expect(sideEffects).toEqual([100]);
     expect(await cache.getState!('charge:charge-once')).toEqual(
       expect.objectContaining({ status: 'started', toolName: 'charge' }),
+    );
+  });
+
+  it('keeps started state when execution throws an unknown primitive error', async () => {
+    const tool = createToolWithKey();
+    const toolbox = {
+      getTool(name: string) {
+        return name === 'add' ? tool : undefined;
+      },
+      async execute() {
+        throw 'provider timeout after side effect';
+      },
+    } as Toolbox;
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
+
+    await expect(
+      idempotentToolbox.execute(
+        { id: 'call-1', name: 'add', arguments: { a: 1, b: 2 } },
+        { idempotencyKey: 'primitive-error' },
+      ),
+    ).rejects.toBe('provider timeout after side effect');
+
+    const retry = await idempotentToolbox.execute(
+      { id: 'call-2', name: 'add', arguments: { a: 1, b: 2 } },
+      { idempotencyKey: 'primitive-error' },
+    );
+
+    expect(retry.outcome).toBe('action_required');
+    expect(retry.idempotency).toEqual({
+      key: 'add:primitive-error',
+      outcome: 'unknown-outcome',
+    });
+    expect(await cache.getState!('add:primitive-error')).toEqual(
+      expect.objectContaining({ status: 'started', toolName: 'add' }),
     );
   });
 

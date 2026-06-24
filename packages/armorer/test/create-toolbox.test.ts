@@ -241,6 +241,49 @@ describe('createToolbox', () => {
     ).toThrow('approvalSecret is required');
   });
 
+  it('resumes signed input requests with unchanged arguments', async () => {
+    const toolbox = createToolbox(
+      [
+        createTool({
+          name: 'collect-name',
+          description: 'Collect a name',
+          input: z.object({ name: z.string() }),
+          async execute({ name }) {
+            return { name };
+          },
+        }),
+      ],
+      {
+        approvalSecret: 'input-secret',
+        policy: {
+          beforeExecute() {
+            return {
+              allow: false,
+              status: 'needs_input',
+              reason: 'Name confirmation required',
+              action: { message: 'Confirm name' },
+            };
+          },
+        },
+      },
+    );
+
+    const paused = await toolbox.execute({
+      id: 'input-request',
+      name: 'collect-name',
+      arguments: { name: 'Ada' },
+    });
+    const resumed = await toolbox.resumeApproval(
+      paused.pendingApproval! as SignedPendingToolApproval,
+    );
+
+    expect(paused.outcome).toBe('action_required');
+    expect(paused.pendingApproval?.action.type).toBe('input');
+    expect(resumed.outcome).toBe('success');
+    expect(resumed.result).toEqual({ name: 'Ada' });
+    expect(resumed.executedArgumentsEdited).toBe(false);
+  });
+
   it('re-runs policy when resuming an approval with unchanged arguments', async () => {
     const tool = createTool({
       name: 'charge-card',

@@ -190,17 +190,23 @@ function safeTailByBytes(text: string, maxBytes: number): string {
   if (byteLength(text) <= maxBytes) return text;
 
   const characters = Array.from(text);
-  let tail = '';
+  let low = 0;
+  let high = characters.length;
+  let best = '';
 
-  for (let index = characters.length - 1; index >= 0; index -= 1) {
-    const candidate = characters[index] + tail;
-    if (byteLength(candidate) > maxBytes) {
-      break;
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    const candidate = characters.slice(characters.length - middle).join('');
+    const candidateBytes = byteLength(candidate);
+    if (candidateBytes <= maxBytes) {
+      best = candidate;
+      low = middle + 1;
+    } else {
+      high = middle - 1;
     }
-    tail = candidate;
   }
 
-  return tail;
+  return best;
 }
 
 export function truncateToolResultContentStructured(

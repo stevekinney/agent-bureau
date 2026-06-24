@@ -210,6 +210,25 @@ describe('truncation', () => {
       ).toBeLessThanOrEqual(12);
     });
 
+    it('uses byte-safe tail excerpts for large multibyte content', () => {
+      const encoder = new TextEncoder();
+      const result = truncateToolResultContentStructured(
+        `${'start'.repeat(1000)}${'漢'.repeat(1000)}tail`,
+        {
+          maxBytes: 128,
+          headBytes: 32,
+          tailBytes: 96,
+        },
+      );
+
+      expect(result.truncated).toBe(true);
+      expect(result.tail).toEndWith('tail');
+      expect(encoder.encode(result.tail).byteLength).toBeLessThanOrEqual(96);
+      expect(
+        encoder.encode(result.head).byteLength + encoder.encode(result.tail).byteLength,
+      ).toBeLessThanOrEqual(128);
+    });
+
     it('strips base64 payloads before creating structured excerpts', () => {
       const result = truncateToolResultContentStructured(
         'before data:image/png;base64,AAAA after',

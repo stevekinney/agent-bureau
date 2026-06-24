@@ -720,8 +720,7 @@ export function createTool<
         const resumedArgumentsMatchApproval = proposedArgumentsDigest === parsedArgumentsDigest;
         resumedApprovalIsSatisfied =
           approvalResume !== undefined &&
-          type === 'approval' &&
-          approvalResume.approvedAction.type === 'approval' &&
+          approvalResume.approvedAction.type === type &&
           resumedArgumentsMatchApproval;
 
         if (!resumedApprovalIsSatisfied) {
