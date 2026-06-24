@@ -6,6 +6,7 @@ import { createToolResultCache } from '../../src/idempotency/create-tool-result-
 import { fullInputKey } from '../../src/idempotency/key-generators';
 import type { CachedToolResult, ToolResultCache } from '../../src/idempotency/types';
 import { withIdempotency } from '../../src/idempotency/with-idempotency';
+import type { Tool } from '../../src/is-tool';
 
 function createTestStore() {
   const map = new Map<string, string>();
@@ -105,8 +106,82 @@ describe('withIdempotency', () => {
     expect(onCacheHit.mock.calls[0]![1]!.toolName).toBe('add');
   });
 
-  it('does not cache errors', async () => {
-    let shouldFail = true;
+  it('keeps started state when execution throws after claiming a key', async () => {
+    const sideEffects: number[] = [];
+    const tool = createTool({
+      name: 'charge',
+      description: 'Charges a payment method',
+      input: z.object({ cents: z.number() }),
+      idempotencyKey: (input: unknown) => fullInputKey(input),
+      async execute({ cents }) {
+        callCount++;
+        sideEffects.push(cents);
+        throw new Error('provider timeout after charge');
+      },
+    });
+
+    const onUnknownOutcome = mock(() => {});
+    const wrapped = withIdempotency(tool, { cache, onUnknownOutcome });
+    const key = `charge:${fullInputKey({ cents: 100 })}`;
+
+    await expect(wrapped({ cents: 100 })).rejects.toThrow('provider timeout after charge');
+    expect(callCount).toBe(1);
+    expect(sideEffects).toEqual([100]);
+
+    await expect(wrapped({ cents: 100 })).rejects.toThrow('unknown outcome');
+    expect(callCount).toBe(1);
+    expect(sideEffects).toEqual([100]);
+    expect(onUnknownOutcome).toHaveBeenCalledWith(
+      key,
+      expect.objectContaining({ status: 'started', toolName: 'charge' }),
+    );
+  });
+
+  it('does not mark invalid inputs as started', async () => {
+    const tool = createTool({
+      name: 'typed-input',
+      description: 'Requires a numeric input',
+      input: z.object({ x: z.number() }),
+      idempotencyKey: (input: unknown) => fullInputKey(input),
+      async execute({ x }) {
+        callCount++;
+        return x * 2;
+      },
+    });
+    const wrapped = withIdempotency(tool, { cache });
+    const key = `typed-input:${fullInputKey({ x: '5' })}`;
+
+    await expect(wrapped({ x: '5' })).rejects.toThrow();
+    expect(await cache.getState!(key)).toBeUndefined();
+    expect(callCount).toBe(0);
+  });
+
+  it('supports tools with non-Zod input schemas', async () => {
+    const tool = Object.assign(
+      async function jsonSchemaInput(input: { x: number }) {
+        callCount++;
+        return input.x * 2;
+      },
+      {
+        description: 'Uses a JSON schema input',
+        input: { type: 'object', properties: { x: { type: 'number' } }, required: ['x'] },
+        idempotencyKey: (input: unknown) => fullInputKey(input),
+        execute(input: { x: number }) {
+          return tool(input);
+        },
+        configuration: {
+          identity: { name: 'jsonSchemaInput' },
+        },
+      },
+    ) as unknown as Tool & { idempotencyKey: (input: unknown) => string };
+    const wrapped = withIdempotency(tool, { cache });
+
+    await expect(wrapped({ x: 5 })).resolves.toBe(10);
+    await expect(wrapped({ x: 5 })).resolves.toBe(10);
+    expect(callCount).toBe(1);
+  });
+
+  it('surfaces an unknown outcome when a key was started without a result', async () => {
     const tool = createTool({
       name: 'flaky',
       description: 'A flaky tool',
@@ -114,24 +189,26 @@ describe('withIdempotency', () => {
       idempotencyKey: (input: unknown) => fullInputKey(input),
       async execute({ x }) {
         callCount++;
-        if (shouldFail) {
-          shouldFail = false;
-          throw new Error('temporary failure');
-        }
         return x * 2;
       },
     });
+    const key = `flaky:${fullInputKey({ x: 5 })}`;
+    await cache.markStarted!(key, {
+      status: 'started',
+      toolName: 'flaky',
+      startedAt: Date.now(),
+      ttl: 60_000,
+    });
 
-    const wrapped = withIdempotency(tool, { cache });
+    const onUnknownOutcome = mock(() => {});
+    const wrapped = withIdempotency(tool, { cache, onUnknownOutcome });
 
-    // First call fails
-    await expect(wrapped({ x: 5 })).rejects.toThrow('temporary failure');
-    expect(callCount).toBe(1);
-
-    // Second call should retry (not return cached error)
-    const result = await wrapped({ x: 5 });
-    expect(result).toBe(10);
-    expect(callCount).toBe(2);
+    await expect(wrapped({ x: 5 })).rejects.toThrow('unknown outcome');
+    expect(onUnknownOutcome).toHaveBeenCalledWith(
+      key,
+      expect.objectContaining({ status: 'started', toolName: 'flaky' }),
+    );
+    expect(callCount).toBe(0);
   });
 
   it('throws when tool has no idempotencyKey', () => {
@@ -145,6 +222,98 @@ describe('withIdempotency', () => {
     });
 
     expect(() => withIdempotency(tool, { cache })).toThrow();
+  });
+
+  it('supports caches that only implement the original completed-result API', async () => {
+    const completedResults = new Map<string, CachedToolResult>();
+    const legacyCache: ToolResultCache = {
+      async get(key) {
+        return completedResults.get(key);
+      },
+      async set(key, result) {
+        completedResults.set(key, result);
+      },
+      async delete(key) {
+        completedResults.delete(key);
+      },
+      async clear() {
+        completedResults.clear();
+      },
+    };
+    const tool = createTestTool();
+    const wrapped = withIdempotency(tool, { cache: legacyCache });
+
+    await expect(wrapped({ a: 1, b: 2 })).resolves.toBe(3);
+    await expect(wrapped({ a: 1, b: 2 })).resolves.toBe(3);
+
+    expect(callCount).toBe(1);
+  });
+
+  it('uses an existing completed result returned while claiming a key', async () => {
+    const completed: CachedToolResult = {
+      result: 99,
+      toolName: 'add',
+      executedAt: Date.now(),
+      ttl: 60_000,
+    };
+    let reads = 0;
+    const racingCache: ToolResultCache = {
+      async get() {
+        reads++;
+        return reads === 1 ? undefined : completed;
+      },
+      async set() {
+        throw new Error('set should not be called');
+      },
+      async delete() {
+        throw new Error('delete should not be called');
+      },
+      async clear() {},
+    };
+    const onCacheHit = mock(() => {});
+    const tool = createTestTool();
+    const wrapped = withIdempotency(tool, { cache: racingCache, onCacheHit });
+    const key = `add:${fullInputKey({ a: 1, b: 2 })}`;
+
+    await expect(wrapped({ a: 1, b: 2 })).resolves.toBe(99);
+
+    expect(callCount).toBe(0);
+    expect(onCacheHit).toHaveBeenCalledWith(key, completed);
+  });
+
+  it('surfaces an existing started state returned while claiming a key', async () => {
+    const started = {
+      status: 'started' as const,
+      toolName: 'add',
+      startedAt: Date.now(),
+      ttl: 60_000,
+    };
+    let reads = 0;
+    const racingCache: ToolResultCache = {
+      async getState() {
+        reads++;
+        return reads === 1 ? undefined : started;
+      },
+      async get() {
+        return undefined;
+      },
+      async set() {
+        throw new Error('set should not be called');
+      },
+      async delete() {
+        throw new Error('delete should not be called');
+      },
+      async clear() {},
+    };
+    const onUnknownOutcome = mock(() => {});
+    const tool = createTestTool();
+    const wrapped = withIdempotency(tool, { cache: racingCache, onUnknownOutcome });
+    const key = `add:${fullInputKey({ a: 1, b: 2 })}`;
+
+    await expect(wrapped({ a: 1, b: 2 })).rejects.toThrow('unknown outcome');
+
+    expect(callCount).toBe(0);
+    expect(onUnknownOutcome).toHaveBeenCalledWith(key, started);
   });
 
   it('uses custom TTL when provided', async () => {

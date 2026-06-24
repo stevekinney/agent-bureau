@@ -1,6 +1,7 @@
 import type { Toolbox } from '../create-toolbox';
 import type { ToolCallInput, ToolExecutionResult } from '../types';
-import { fullInputKey } from './key-generators';
+import { claimCacheStarted, getCacheEntry } from './cache-operations';
+import { fullInputKey, namespacedKey } from './key-generators';
 import type { CachedToolResult, ToolResultCache } from './types';
 
 const DEFAULT_TTL = 300_000;
@@ -19,6 +20,59 @@ export type WithToolboxIdempotencyOptions = {
    */
   requireExplicitKey?: boolean;
 };
+
+type ToolboxExecuteOptionsWithIdempotencyKey = {
+  idempotencyKey?: string | ((call: ToolCallInput) => string | undefined);
+  retryUnknownOutcome?: boolean;
+};
+
+const PRE_EXECUTION_CONFLICT_CODES = new Set(['BUDGET_EXCEEDED', 'LOOP_BLOCKED']);
+
+function getErrorCode(error: unknown): string | undefined {
+  if (!error || typeof error !== 'object') {
+    return undefined;
+  }
+
+  const code = (error as { code?: unknown })['code'];
+  return typeof code === 'string' ? code : undefined;
+}
+
+function isPreExecutionConflict(error: unknown): boolean {
+  const code = getErrorCode(error);
+  return code !== undefined && PRE_EXECUTION_CONFLICT_CODES.has(code);
+}
+
+function shouldClearStartedState(result: ToolExecutionResult): boolean {
+  if (result.outcome === 'action_required') {
+    return true;
+  }
+
+  if (result.outcome !== 'error') {
+    return true;
+  }
+
+  const category = result.error?.category ?? result.errorCategory;
+  return (
+    category === 'validation' ||
+    category === 'permission' ||
+    category === 'not_found' ||
+    isPreExecutionConflict(result.error)
+  );
+}
+
+function shouldClearStartedStateForThrownError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') {
+    return false;
+  }
+
+  const category = (error as { category?: unknown })['category'];
+  return (
+    category === 'validation' ||
+    category === 'permission' ||
+    category === 'not_found' ||
+    isPreExecutionConflict(error)
+  );
+}
 
 /**
  * Wraps a toolbox so that tool executions are deduplicated via an idempotency
@@ -60,6 +114,49 @@ export function withToolboxIdempotency(
     };
   }
 
+  function createUnknownOutcomeResult(
+    fields: { id: string },
+    cacheKey: string,
+    toolName: string,
+  ): ToolExecutionResult {
+    return {
+      callId: fields.id,
+      outcome: 'action_required',
+      content: 'Tool execution started earlier, but no result was recorded.',
+      toolCallId: fields.id,
+      toolName,
+      result: undefined,
+      idempotency: {
+        key: cacheKey,
+        outcome: 'unknown-outcome',
+      },
+      action: {
+        type: 'approval',
+        message:
+          'This idempotency key has an unknown outcome. Re-approve before retrying the side effect.',
+      },
+    } as ToolExecutionResult;
+  }
+
+  function createDedupedResult(
+    fields: { id: string },
+    cacheKey: string,
+    cached: CachedToolResult,
+  ): ToolExecutionResult {
+    return {
+      callId: fields.id,
+      outcome: 'success',
+      content: typeof cached.result === 'string' ? cached.result : JSON.stringify(cached.result),
+      toolCallId: fields.id,
+      toolName: cached.toolName,
+      result: cached.result,
+      idempotency: {
+        key: cacheKey,
+        outcome: 'deduped',
+      },
+    } as ToolExecutionResult;
+  }
+
   async function executeWithCache(
     call: ToolCallInput,
     originalExecute: (call: ToolCallInput, options?: unknown) => Promise<ToolExecutionResult>,
@@ -70,26 +167,75 @@ export function withToolboxIdempotency(
       return originalExecute(call, executeOptions);
     }
 
+    const suppliedKey = (executeOptions as ToolboxExecuteOptionsWithIdempotencyKey | undefined)
+      ?.idempotencyKey;
+    const externalKey =
+      typeof suppliedKey === 'function'
+        ? suppliedKey(call)
+        : typeof suppliedKey === 'string'
+          ? suppliedKey
+          : undefined;
     const keyFn = getKeyFn(fields.name);
-    if (!keyFn) {
+    if (!keyFn && externalKey === undefined) {
       return originalExecute(call, executeOptions);
     }
 
-    const cacheKey = `${fields.name}:${keyFn(fields.arguments)}`;
-    const cached = await cache.get(cacheKey);
+    const cacheKey = namespacedKey(fields.name, externalKey ?? keyFn!(fields.arguments));
+    const cached = await getCacheEntry(cache, cacheKey);
 
-    if (cached) {
-      return {
-        callId: fields.id,
-        outcome: 'success',
-        content: typeof cached.result === 'string' ? cached.result : JSON.stringify(cached.result),
-        toolCallId: fields.id,
-        toolName: cached.toolName,
-        result: cached.result,
-      } as ToolExecutionResult;
+    const retryUnknownOutcome = (
+      executeOptions as ToolboxExecuteOptionsWithIdempotencyKey | undefined
+    )?.retryUnknownOutcome;
+
+    if (cached?.status === 'started') {
+      if (retryUnknownOutcome) {
+        await cache.delete(cacheKey);
+      } else {
+        return createUnknownOutcomeResult(fields, cacheKey, cached.toolName);
+      }
+    } else if (cached) {
+      return createDedupedResult(fields, cacheKey, cached);
     }
 
-    const result = await originalExecute(call, executeOptions);
+    let started = await claimCacheStarted(cache, cacheKey, {
+      status: 'started',
+      toolName: fields.name,
+      startedAt: Date.now(),
+      ttl: defaultTTL,
+    });
+
+    if (
+      started.outcome === 'existing' &&
+      started.entry.status === 'started' &&
+      retryUnknownOutcome
+    ) {
+      await cache.delete(cacheKey);
+      started = await claimCacheStarted(cache, cacheKey, {
+        status: 'started',
+        toolName: fields.name,
+        startedAt: Date.now(),
+        ttl: defaultTTL,
+      });
+    }
+
+    if (started.outcome === 'existing') {
+      const entry = started.entry;
+      if (entry.status === 'started') {
+        return createUnknownOutcomeResult(fields, cacheKey, entry.toolName);
+      }
+
+      return createDedupedResult(fields, cacheKey, entry);
+    }
+
+    let result: ToolExecutionResult;
+    try {
+      result = await originalExecute(call, executeOptions);
+    } catch (error) {
+      if (shouldClearStartedStateForThrownError(error)) {
+        await cache.delete(cacheKey);
+      }
+      throw error;
+    }
 
     // Only cache successful results
     if (result.outcome === 'success' && !result.error) {
@@ -100,6 +246,12 @@ export function withToolboxIdempotency(
         ttl: defaultTTL,
       };
       await cache.set(cacheKey, entry, defaultTTL);
+      result.idempotency = {
+        key: cacheKey,
+        outcome: 'fresh',
+      };
+    } else if (shouldClearStartedState(result)) {
+      await cache.delete(cacheKey);
     }
 
     return result;

@@ -162,7 +162,17 @@ Truncation utilities for tool results:
 import { truncateToolResultContent, containsBase64Data } from 'armorer/truncation';
 ```
 
-**Exports:** `truncateToolResultContent`, `truncateText`, `safeSlice`, `createTruncatingAsyncIterable`, `containsBase64Data`, `stripBase64Data`, `isHighSurrogate`, `isLowSurrogate`, `DEFAULT_MAX_CHARACTERS`, `DEFAULT_ERROR_MAX_CHARACTERS`, and types `TruncationOptions`, `ToolResultTruncationOptions`.
+**Exports:** `truncateToolResultContent`, `truncateToolResultContentStructured`, `truncateText`, `safeSlice`, `createTruncatingAsyncIterable`, `containsBase64Data`, `stripBase64Data`, `isHighSurrogate`, `isLowSurrogate`, `DEFAULT_MAX_CHARACTERS`, `DEFAULT_ERROR_MAX_CHARACTERS`, and types `TruncationOptions`, `ToolResultTruncationOptions`, `StructuredToolResultTruncationOptions`, and `StructuredToolResultTruncation`.
+
+#### `armorer/idempotency`
+
+Persistent idempotency helpers for at-least-once executors:
+
+```typescript
+import { createToolResultCache, fullInputKey, withToolboxIdempotency } from 'armorer/idempotency';
+```
+
+**Exports:** `createToolResultCache`, `withIdempotency`, `withToolboxIdempotency`, `fullInputKey`, `fieldKey`, `compositeKey`, `namespacedKey`, and idempotency cache/result types.
 
 ### Infrastructure
 
@@ -309,6 +319,8 @@ Policies can pause execution for human approval or input.
 
 ```ts
 const toolbox = createToolbox([], {
+  // Use the same secret anywhere pending approvals may be resumed.
+  approvalSecret: process.env.ARMORER_APPROVAL_SECRET,
   policy: {
     async beforeExecute(context) {
       if (context.metadata?.sensitive) {
@@ -324,9 +336,20 @@ const toolbox = createToolbox([], {
 
 const result = await toolbox.execute(sensitiveCall);
 if (result.outcome === 'action_required') {
-  // Present approval UI to user...
+  // Persist the descriptor and show the approval UI to the user.
+  await durableStore.set(result.pendingApproval!.callId, result.pendingApproval);
+}
+
+// Later, possibly in another process, rebuild the same toolbox and resume.
+const approved = await durableStore.get('tool-call-id');
+const resumed = await toolbox.resumeApproval(approved);
+
+if (resumed.executedArgumentsEdited) {
+  // Record both the proposed and executed arguments in your transcript.
 }
 ```
+
+`pendingApproval` is JSON-serializable and includes `callId`, `toolName`, validated `arguments`, the requested action, reason, and tool metadata. When the toolbox has an `approvalSecret`, the descriptor also includes an `approvalToken` and can be treated as `SignedPendingToolApproval` for `resumeApproval()`. Use the same `approvalSecret` anywhere the approval may be resumed. Without `approvalSecret`, pending approvals are unsigned and cannot be resumed through `resumeApproval()`. `resumeApproval()` verifies the token, reconstructs the original call id, re-validates the original or edited arguments, and re-runs policy against those arguments. The granted approval only satisfies the original approval prompt when the resumed arguments match the proposed arguments; edited arguments must be allowed by policy. The result sets `executedArgumentsEdited` when the resumed arguments differ from the proposed arguments.
 
 ## Agent Integration
 
@@ -423,6 +446,8 @@ await tracer.startActiveSpan('temporal.activity', async (activitySpan) => {
 });
 ```
 
+Pass `parentContext` to nest tool spans under an existing OpenTelemetry context. Pass `links` to attach span links when the orchestrator prefers linked traces over a direct parent-child relationship.
+
 ## Middleware
 
 Batteries-included middleware for production needs.
@@ -463,6 +488,67 @@ const toolbox = createToolbox(tools, {
   middleware: [createTruncationMiddleware({ maxCharacters: 4000 })],
 });
 ```
+
+For large tool outputs that are stored separately, use the structured head-and-tail helper:
+
+```ts
+import { truncateToolResultContentStructured } from 'armorer/truncation';
+
+const excerpt = truncateToolResultContentStructured(toolOutput, {
+  maxBytes: 8000,
+});
+
+if (excerpt.truncated) {
+  console.log(`${excerpt.head}\n... omitted ${excerpt.omittedBytes} bytes ...\n${excerpt.tail}`);
+}
+```
+
+The structured result is `{ head, tail, originalSize, omittedBytes, truncated }`. Byte counts use UTF-8 size after base64 payload replacement, and the excerpts avoid splitting UTF-16 surrogate pairs.
+
+## Idempotency
+
+Use `armorer/idempotency` when a tool might be retried by an at-least-once executor. The cache records three outcomes:
+
+- `fresh`: this process executed the tool and recorded the result.
+- `deduped`: a completed result already existed and was returned.
+- `unknown-outcome`: execution started earlier, but no result was recorded.
+
+```ts
+import { createToolbox } from 'armorer';
+import { createToolResultCache, withToolboxIdempotency } from 'armorer/idempotency';
+
+const cache = createToolResultCache({ store: durableKeyValueStore });
+const toolbox = createToolbox([chargeCardTool]);
+const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
+
+const result = await idempotentToolbox.execute(
+  {
+    id: 'provider-call-1',
+    name: 'charge-card',
+    arguments: { cents: 2500 },
+  },
+  {
+    idempotencyKey: temporalToolCallId,
+  },
+);
+
+if (result.idempotency?.outcome === 'unknown-outcome') {
+  // Do not replay blindly. Ask for review before retrying.
+}
+```
+
+After human review, retry an unknown outcome explicitly:
+
+```ts
+await idempotentToolbox.execute(call, {
+  idempotencyKey: temporalToolCallId,
+  retryUnknownOutcome: true,
+});
+```
+
+If you do not pass `idempotencyKey`, `withToolboxIdempotency()` uses each tool's configured `idempotencyKey` function. Tools without an `idempotencyKey` are not deduped by default; set `requireExplicitKey: false` to use `fullInputKey` for those tools. Caller-supplied keys are useful when an orchestrator already mints a stable key per provider `tool_call_id` and needs retries to reuse that exact key. Armorer scopes the cache entry by tool name, so the same external key cannot dedupe two different tools into one result.
+
+The default `createToolResultCache()` serializes `claimStarted()` calls for the same key within a cache instance. For durable stores shared across processes, implement `ToolResultCache.claimStarted()` with compare-and-set semantics. Without that method, Armorer keeps compatibility with the original completed-result cache shape and falls back to a read-then-mark path when `markStarted()` is available. That fallback protects retries after a crashed execution, but only an atomic cache backend can prevent two concurrent processes from claiming the same new key at exactly the same time.
 
 ### Fuzzy Tool Name Resolution
 

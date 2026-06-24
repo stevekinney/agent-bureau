@@ -15,7 +15,12 @@ export {
   materializeToolResults,
   materializeToolResultsAsync,
 } from '../tool-materialization';
-export type { ToolResultTruncationOptions, TruncationOptions } from '../truncation/index';
+export type {
+  StructuredToolResultTruncation,
+  StructuredToolResultTruncationOptions,
+  ToolResultTruncationOptions,
+  TruncationOptions,
+} from '../truncation/index';
 export {
   containsBase64Data,
   DEFAULT_ERROR_MAX_CHARACTERS,
@@ -26,6 +31,7 @@ export {
   stripBase64Data,
   truncateText,
   truncateToolResultContent,
+  truncateToolResultContentStructured,
 } from '../truncation/index';
 export { parallel } from './parallel';
 export { postprocess } from './postprocess';

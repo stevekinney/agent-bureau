@@ -1,8 +1,14 @@
-import { createHash } from 'node:crypto';
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 
 import { describe, expect, test } from 'bun:test';
 
-import { createIncrementalHash, sha256Hex, sha256HexSync } from '../src/hash';
+import {
+  createIncrementalHash,
+  hmacSha256HexSync,
+  sha256Hex,
+  sha256HexSync,
+  timingSafeEqualHex,
+} from '../src/hash';
 
 type HashRuntimeOverride = {
   Bun?: { CryptoHasher: typeof Bun.CryptoHasher } | undefined;
@@ -133,6 +139,112 @@ describe('sha256HexSync', () => {
       () => {
         expect(() => sha256HexSync('hello')).toThrow(
           'sha256HexSync is not available in this environment. Use the async sha256Hex instead, which works everywhere via Web Crypto.',
+        );
+      },
+    );
+  });
+});
+
+// ── hmacSha256HexSync ─────────────────────────────────────────────
+
+describe('hmacSha256HexSync', () => {
+  test('matches node crypto HMAC-SHA-256 output', () => {
+    expect(hmacSha256HexSync('secret', 'payload')).toBe(
+      createHmac('sha256', 'secret').update('payload').digest('hex'),
+    );
+  });
+
+  test('changes when either the secret or payload changes', () => {
+    const signature = hmacSha256HexSync('secret', 'payload');
+    expect(hmacSha256HexSync('other-secret', 'payload')).not.toBe(signature);
+    expect(hmacSha256HexSync('secret', 'other-payload')).not.toBe(signature);
+  });
+
+  test('falls back to node crypto when the Bun runtime is unavailable', async () => {
+    await withRuntimeOverride(
+      {
+        Bun: undefined,
+        require: (specifier) => {
+          expect(specifier).toBe('node:crypto');
+          return { createHmac };
+        },
+      },
+      () => {
+        expect(hmacSha256HexSync('secret', 'payload')).toBe(
+          createHmac('sha256', 'secret').update('payload').digest('hex'),
+        );
+      },
+    );
+  });
+
+  test('throws a helpful error when no synchronous HMAC runtime is available', async () => {
+    await withRuntimeOverride(
+      {
+        Bun: undefined,
+        require: () => {
+          throw new Error('runtime unavailable');
+        },
+      },
+      () => {
+        expect(() => hmacSha256HexSync('secret', 'payload')).toThrow(
+          'hmacSha256HexSync is not available in this environment. Use Web Crypto for browser-compatible HMAC signing.',
+        );
+      },
+    );
+  });
+});
+
+// ── timingSafeEqualHex ────────────────────────────────────────────
+
+describe('timingSafeEqualHex', () => {
+  test('matches equal hex digests', () => {
+    const left = createHash('sha256').update('same').digest('hex');
+    const right = createHash('sha256').update('same').digest('hex');
+
+    expect(timingSafeEqualHex(left, right)).toBe(true);
+  });
+
+  test('rejects different, invalid, and different-length hex strings', () => {
+    const left = createHash('sha256').update('left').digest('hex');
+    const right = createHash('sha256').update('right').digest('hex');
+
+    expect(timingSafeEqualHex(left, right)).toBe(false);
+    expect(timingSafeEqualHex(left, 'not-hex')).toBe(false);
+    expect(timingSafeEqualHex(left, right.slice(2))).toBe(false);
+  });
+
+  test('uses node timing-safe comparison when the Bun runtime is unavailable', async () => {
+    const left = createHash('sha256').update('same').digest('hex');
+    const right = createHash('sha256').update('same').digest('hex');
+
+    await withRuntimeOverride(
+      {
+        Bun: undefined,
+        require: (specifier) => {
+          expect(specifier).toBe('node:crypto');
+          return { timingSafeEqual };
+        },
+      },
+      () => {
+        expect(timingSafeEqualHex(left, right)).toBe(true);
+      },
+    );
+  });
+
+  test('throws a helpful error when timing-safe comparison is unavailable', async () => {
+    const left = createHash('sha256').update('same').digest('hex');
+    const right = createHash('sha256').update('same').digest('hex');
+
+    await withRuntimeOverride(
+      {
+        Bun: undefined,
+        require: () => {
+          throw new Error('runtime unavailable');
+        },
+      },
+      () => {
+        expect(() => timingSafeEqualHex(left, right)).toThrow(
+          'timingSafeEqualHex is not available in this environment.',
         );
       },
     );

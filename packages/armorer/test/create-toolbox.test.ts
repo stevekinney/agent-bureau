@@ -7,6 +7,7 @@ import {
   createToolbox,
   createToolCall,
   lazy,
+  type SignedPendingToolApproval,
   type ToolConfiguration,
 } from '../src';
 import { toAnthropicTools } from '../src/adapters/anthropic';
@@ -39,6 +40,449 @@ describe('createToolbox', () => {
     expect(result.toolCallId).toBe('abc');
     expect(result.toolName).toBe('sum');
     expect(result.result).toBe(3);
+  });
+
+  it('returns a serializable pending approval descriptor and resumes with edited arguments', async () => {
+    const charges: number[] = [];
+    const createChargeToolbox = (approvalSecret: string) =>
+      createToolbox(
+        [
+          createTool({
+            name: 'charge-card',
+            description: 'Charge a payment card',
+            input: z.object({ cents: z.number(), confirmed: z.boolean().optional() }),
+            metadata: { mutates: true },
+            async execute({ cents }) {
+              charges.push(cents);
+              return { charged: cents };
+            },
+          }),
+        ],
+        {
+          approvalSecret,
+          policy: {
+            beforeExecute(context) {
+              if (
+                context.params &&
+                typeof context.params === 'object' &&
+                'confirmed' in context.params &&
+                context.params.confirmed === true
+              ) {
+                return { allow: true };
+              }
+              return {
+                allow: false,
+                status: 'needs_approval',
+                reason: 'Operator approval required',
+                action: { message: 'Approve charge' },
+              };
+            },
+          },
+        },
+      );
+
+    const toolbox = createChargeToolbox('test-secret');
+
+    const paused = await toolbox.execute({
+      id: 'tool-call-1',
+      name: 'charge-card',
+      arguments: { cents: 100 },
+    });
+
+    expect(paused.outcome).toBe('action_required');
+    expect(paused.pendingApproval).toEqual({
+      callId: 'tool-call-1',
+      toolName: 'charge-card',
+      arguments: { cents: 100 },
+      approvalToken: expect.any(String),
+      action: {
+        type: 'approval',
+        message: 'Approve charge',
+      },
+      reason: 'Operator approval required',
+      metadata: { mutates: true },
+    });
+    expect(Object.hasOwn(paused.pendingApproval!.action, 'schema')).toBe(false);
+    expect(JSON.parse(JSON.stringify(paused.pendingApproval))).toEqual(paused.pendingApproval);
+    const signedApproval = paused.pendingApproval as SignedPendingToolApproval;
+
+    expect(() =>
+      toolbox.resumeApproval({
+        ...signedApproval,
+        approvalToken: 'forged',
+      }),
+    ).toThrow('invalid approval token');
+
+    expect(() =>
+      toolbox.resumeApproval({
+        ...signedApproval,
+        approvalToken: undefined,
+      } as unknown as SignedPendingToolApproval),
+    ).toThrow('invalid approval token');
+
+    expect(() =>
+      toolbox.resumeApproval({
+        ...signedApproval,
+        callId: 'other-call',
+      }),
+    ).toThrow('invalid approval token');
+
+    expect(() =>
+      toolbox.resumeApproval({
+        ...signedApproval,
+        arguments: { cents: 999 },
+      }),
+    ).toThrow('invalid approval token');
+
+    expect(() =>
+      toolbox.resumeApproval({
+        ...signedApproval,
+        toolName: 'other-tool',
+      }),
+    ).toThrow('invalid approval token');
+
+    expect(() =>
+      toolbox.resumeApproval({
+        ...signedApproval,
+        action: {
+          type: 'approval',
+          message: 'Different approval',
+        },
+      }),
+    ).toThrow('invalid approval token');
+
+    expect(() =>
+      toolbox.resumeApproval({
+        ...signedApproval,
+        reason: 'Changed reason',
+      }),
+    ).toThrow('invalid approval token');
+
+    expect(() =>
+      toolbox.resumeApproval({
+        ...signedApproval,
+        metadata: { mutates: false },
+      }),
+    ).toThrow('invalid approval token');
+
+    const incompatibleToolbox = createChargeToolbox('other-secret');
+    expect(() => incompatibleToolbox.resumeApproval(signedApproval)).toThrow(
+      'invalid approval token',
+    );
+
+    const unconfirmedEdit = await toolbox.resumeApproval(signedApproval, {
+      arguments: { cents: 125 },
+    });
+
+    expect(unconfirmedEdit.outcome).toBe('action_required');
+    expect(unconfirmedEdit.pendingApproval?.approvalToken).toEqual(expect.any(String));
+    expect(charges).toEqual([]);
+
+    const resumed = await toolbox.resumeApproval(signedApproval, {
+      arguments: { cents: 125, confirmed: true },
+    });
+
+    expect(resumed.outcome).toBe('success');
+    expect(resumed.result).toEqual({ charged: 125 });
+    expect(resumed.executedArgumentsEdited).toBe(true);
+
+    const equivalentToolbox = createChargeToolbox('test-secret');
+    const resumedOriginal = await equivalentToolbox.resumeApproval(signedApproval);
+
+    expect(resumedOriginal.outcome).toBe('success');
+    expect(resumedOriginal.result).toEqual({ charged: 100 });
+    expect(resumedOriginal.executedArgumentsEdited).toBe(false);
+
+    const invalidResume = await toolbox.resumeApproval(signedApproval, {
+      arguments: { cents: '125' },
+    });
+
+    expect(invalidResume.outcome).toBe('error');
+    expect(invalidResume.errorCategory).toBe('validation');
+    expect(charges).toEqual([125, 100]);
+  });
+
+  it('requires an approval secret before signing or resuming pending approvals', async () => {
+    const toolbox = createToolbox(
+      [
+        createTool({
+          name: 'sensitive-action',
+          description: 'Requires approval',
+          input: z.object({ value: z.string() }),
+          async execute({ value }) {
+            return value;
+          },
+        }),
+      ],
+      {
+        policy: {
+          beforeExecute() {
+            return {
+              allow: false,
+              status: 'needs_approval',
+              reason: 'approval required',
+            };
+          },
+        },
+      },
+    );
+
+    const paused = await toolbox.execute({
+      id: 'unsigned-approval',
+      name: 'sensitive-action',
+      arguments: { value: 'x' },
+    });
+
+    expect(paused.pendingApproval?.approvalToken).toBeUndefined();
+    expect(() =>
+      toolbox.resumeApproval({
+        ...paused.pendingApproval!,
+        approvalToken: 'token',
+      }),
+    ).toThrow('approvalSecret is required');
+  });
+
+  it('resumes signed input requests with unchanged arguments', async () => {
+    const toolbox = createToolbox(
+      [
+        createTool({
+          name: 'collect-name',
+          description: 'Collect a name',
+          input: z.object({ name: z.string() }),
+          async execute({ name }) {
+            return { name };
+          },
+        }),
+      ],
+      {
+        approvalSecret: 'input-secret',
+        policy: {
+          beforeExecute() {
+            return {
+              allow: false,
+              status: 'needs_input',
+              reason: 'Name confirmation required',
+              action: { message: 'Confirm name' },
+            };
+          },
+        },
+      },
+    );
+
+    const paused = await toolbox.execute({
+      id: 'input-request',
+      name: 'collect-name',
+      arguments: { name: 'Ada' },
+    });
+    const resumed = await toolbox.resumeApproval(
+      paused.pendingApproval! as SignedPendingToolApproval,
+    );
+
+    expect(paused.outcome).toBe('action_required');
+    expect(paused.pendingApproval?.action.type).toBe('input');
+    expect(resumed.outcome).toBe('success');
+    expect(resumed.result).toEqual({ name: 'Ada' });
+    expect(resumed.executedArgumentsEdited).toBe(false);
+  });
+
+  it('re-runs policy when resuming an approval with unchanged arguments', async () => {
+    const tool = createTool({
+      name: 'charge-card',
+      description: 'Charge a payment card',
+      input: z.object({ cents: z.number() }),
+      async execute({ cents }) {
+        return { charged: cents };
+      },
+    });
+
+    const approvingToolbox = createToolbox([tool], {
+      approvalSecret: 'shared-secret',
+      policy: {
+        beforeExecute() {
+          return {
+            allow: false,
+            status: 'needs_approval',
+            reason: 'approval required',
+          };
+        },
+      },
+    });
+    const denyingToolbox = createToolbox([tool], {
+      approvalSecret: 'shared-secret',
+      policy: {
+        beforeExecute() {
+          return {
+            allow: false,
+            status: 'denied',
+            reason: 'approval no longer valid',
+          };
+        },
+      },
+    });
+
+    const paused = await approvingToolbox.execute({
+      id: 'policy-change',
+      name: 'charge-card',
+      arguments: { cents: 100 },
+    });
+    const resumed = await denyingToolbox.resumeApproval(
+      paused.pendingApproval! as SignedPendingToolApproval,
+    );
+
+    expect(resumed.outcome).toBe('error');
+    expect(resumed.errorCategory).toBe('permission');
+    expect(resumed.result).toBeUndefined();
+  });
+
+  it('requires the current approval prompt to match the signed approval before resuming', async () => {
+    const tool = createTool({
+      name: 'charge-card',
+      description: 'Charge a payment card',
+      input: z.object({ cents: z.number() }),
+      async execute({ cents }) {
+        return { charged: cents };
+      },
+    });
+
+    const originalToolbox = createToolbox([tool], {
+      approvalSecret: 'shared-secret',
+      policy: {
+        beforeExecute() {
+          return {
+            allow: false,
+            status: 'needs_approval',
+            reason: 'Original approval required',
+            action: { message: 'Approve original charge' },
+          };
+        },
+      },
+    });
+    const changedToolbox = createToolbox([tool], {
+      approvalSecret: 'shared-secret',
+      policy: {
+        beforeExecute() {
+          return {
+            allow: false,
+            status: 'needs_approval',
+            reason: 'Changed approval required',
+            action: { message: 'Approve changed charge' },
+          };
+        },
+      },
+    });
+
+    const paused = await originalToolbox.execute({
+      id: 'changed-prompt',
+      name: 'charge-card',
+      arguments: { cents: 100 },
+    });
+    const resumed = await changedToolbox.resumeApproval(
+      paused.pendingApproval! as SignedPendingToolApproval,
+    );
+
+    expect(resumed.outcome).toBe('action_required');
+    expect(resumed.pendingApproval?.reason).toBe('Changed approval required');
+    expect(resumed.result).toBeUndefined();
+  });
+
+  it('preserves approval action schemas in signed pending approvals', async () => {
+    const toolbox = createToolbox(
+      [
+        createTool({
+          name: 'create-ticket',
+          description: 'Create a ticket',
+          input: z.object({ title: z.string() }),
+          async execute({ title }) {
+            return { title };
+          },
+        }),
+      ],
+      {
+        approvalSecret: 'schema-secret',
+        policy: {
+          beforeExecute() {
+            return {
+              allow: false,
+              status: 'needs_input',
+              reason: 'Need ticket metadata',
+              action: {
+                message: 'Add ticket metadata',
+                schema: {
+                  type: 'object',
+                  properties: {
+                    title: { type: 'string' },
+                  },
+                  required: ['title'],
+                },
+              },
+            };
+          },
+        },
+      },
+    );
+
+    const paused = await toolbox.execute({
+      id: 'schema-approval',
+      name: 'create-ticket',
+      arguments: { title: 'Investigate approval schema' },
+    });
+    const resumed = await toolbox.resumeApproval(
+      paused.pendingApproval! as SignedPendingToolApproval,
+    );
+
+    expect(paused.pendingApproval?.action.schema).toEqual({
+      type: 'object',
+      properties: {
+        title: { type: 'string' },
+      },
+      required: ['title'],
+    });
+    expect(resumed.outcome).toBe('success');
+    expect(resumed.result).toEqual({ title: 'Investigate approval schema' });
+  });
+
+  it('does not treat approval arguments with different JSON types as equivalent', async () => {
+    const executedValues: unknown[] = [];
+    const toolbox = createToolbox(
+      [
+        createTool({
+          name: 'persist-value',
+          description: 'Persist a value',
+          input: z.object({ value: z.union([z.string(), z.number()]) }),
+          async execute({ value }) {
+            executedValues.push(value);
+            return { value };
+          },
+        }),
+      ],
+      {
+        approvalSecret: 'typed-value-secret',
+        policy: {
+          beforeExecute() {
+            return {
+              allow: false,
+              status: 'needs_approval',
+              reason: 'approval required',
+            };
+          },
+        },
+      },
+    );
+
+    const paused = await toolbox.execute({
+      id: 'typed-value',
+      name: 'persist-value',
+      arguments: { value: '1' },
+    });
+    const resumed = await toolbox.resumeApproval(
+      paused.pendingApproval! as SignedPendingToolApproval,
+      {
+        arguments: { value: 1 },
+      },
+    );
+
+    expect(resumed.outcome).toBe('action_required');
+    expect(executedValues).toEqual([]);
   });
 
   it('exports provider tools through lazy toolbox methods', async () => {

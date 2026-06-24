@@ -30,6 +30,9 @@ export interface ToolExecutionResult extends ToolResult {
   toolCallId: string;
   toolName: string;
   result: unknown;
+  pendingApproval?: PendingToolApproval;
+  executedArgumentsEdited?: boolean;
+  idempotency?: ToolExecutionIdempotency;
   /**
    * Optional streaming handle for incremental tool output.
    *
@@ -46,6 +49,25 @@ export interface ToolExecutionResult extends ToolResult {
 }
 
 export type ToolResultLike = ToolResultInput | ToolExecutionResult;
+
+export type PendingToolApproval = {
+  callId: string;
+  toolName: string;
+  arguments: JSONValue;
+  action: ToolAction;
+  reason?: string;
+  metadata?: JSONValue;
+  approvalToken?: string;
+};
+
+export type SignedPendingToolApproval = PendingToolApproval & {
+  approvalToken: string;
+};
+
+export type ToolExecutionIdempotency = {
+  key: string;
+  outcome: 'fresh' | 'deduped' | 'unknown-outcome';
+};
 
 /**
  * Minimal tool configuration for JSON schema output.

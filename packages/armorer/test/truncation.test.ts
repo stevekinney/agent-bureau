@@ -11,6 +11,7 @@ import {
   stripBase64Data,
   truncateText,
   truncateToolResultContent,
+  truncateToolResultContentStructured,
 } from '../src/truncation/index';
 
 describe('truncation', () => {
@@ -149,6 +150,126 @@ describe('truncation', () => {
         maxCharacters: 50,
       });
       expect(result.length).toBeLessThanOrEqual(50);
+    });
+  });
+
+  describe('truncateToolResultContentStructured', () => {
+    it('keeps head and tail excerpts within a byte budget', () => {
+      const result = truncateToolResultContentStructured('abcdefghijklmnopqrstuvwxyz', {
+        maxBytes: 10,
+      });
+
+      expect(result).toEqual({
+        head: 'abcde',
+        tail: 'vwxyz',
+        originalSize: 26,
+        omittedBytes: 16,
+        truncated: true,
+      });
+    });
+
+    it('returns the whole content as the head when no truncation is needed', () => {
+      const result = truncateToolResultContentStructured('short', {
+        maxBytes: 100,
+      });
+
+      expect(result).toEqual({
+        head: 'short',
+        tail: '',
+        originalSize: 5,
+        omittedBytes: 0,
+        truncated: false,
+      });
+    });
+
+    it('does not split surrogate pairs when applying byte budgets', () => {
+      const result = truncateToolResultContentStructured('aaa😀bbb😀ccc', {
+        maxBytes: 10,
+        headBytes: 5,
+        tailBytes: 5,
+      });
+
+      expect(result.head).toBe('aaa');
+      expect(result.tail).toBe('ccc');
+      expect(result.truncated).toBe(true);
+      expect(result.omittedBytes).toBeGreaterThan(0);
+    });
+
+    it('keeps multibyte excerpts within the byte budget', () => {
+      const encoder = new TextEncoder();
+      const result = truncateToolResultContentStructured('ééé漢字漢字ééé', {
+        maxBytes: 12,
+        headBytes: 6,
+        tailBytes: 6,
+      });
+
+      expect(result.truncated).toBe(true);
+      expect(result.originalSize).toBe(24);
+      expect(
+        encoder.encode(result.head).byteLength + encoder.encode(result.tail).byteLength,
+      ).toBeLessThanOrEqual(12);
+    });
+
+    it('uses byte-safe tail excerpts for large multibyte content', () => {
+      const encoder = new TextEncoder();
+      const result = truncateToolResultContentStructured(
+        `${'start'.repeat(1000)}${'漢'.repeat(1000)}tail`,
+        {
+          maxBytes: 128,
+          headBytes: 32,
+          tailBytes: 96,
+        },
+      );
+
+      expect(result.truncated).toBe(true);
+      expect(result.tail).toEndWith('tail');
+      expect(encoder.encode(result.tail).byteLength).toBeLessThanOrEqual(96);
+      expect(
+        encoder.encode(result.head).byteLength + encoder.encode(result.tail).byteLength,
+      ).toBeLessThanOrEqual(128);
+    });
+
+    it('strips base64 payloads before creating structured excerpts', () => {
+      const result = truncateToolResultContentStructured(
+        'before data:image/png;base64,AAAA after',
+        {
+          maxBytes: 100,
+          base64Placeholder: '[asset omitted]',
+        },
+      );
+
+      expect(result.head).toBe('before [asset omitted] after');
+      expect(result.originalSize).toBe('before [asset omitted] after'.length);
+      expect(result.truncated).toBe(false);
+    });
+
+    it('clamps custom excerpt budgets to maxBytes', () => {
+      const encoder = new TextEncoder();
+      const result = truncateToolResultContentStructured('abcdefghijklmnopqrstuvwxyz', {
+        maxBytes: 6,
+        headBytes: 12,
+        tailBytes: 12,
+      });
+
+      expect(result.truncated).toBe(true);
+      expect(encoder.encode(result.head).byteLength + encoder.encode(result.tail).byteLength).toBe(
+        6,
+      );
+      expect(result.tail).toBe('');
+    });
+
+    it('supports a zero-byte structured excerpt budget', () => {
+      const result = truncateToolResultContentStructured('abcdef', {
+        maxBytes: 0,
+      });
+
+      expect(result).toEqual({
+        head: '',
+        tail: '',
+        originalSize: 6,
+        omittedBytes: 6,
+        truncated: true,
+      });
     });
   });
 
