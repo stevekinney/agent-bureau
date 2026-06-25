@@ -439,6 +439,83 @@ describe('createAgent — async iteration', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Concurrent runs — toolbox isolation (regression for per-run toolbox)
+// ---------------------------------------------------------------------------
+
+describe('createAgent — concurrent run toolbox isolation', () => {
+  it('concurrent runs do not share tool.started events across each other', async () => {
+    // Barrier: both tool executions block until the gate is released,
+    // ensuring both runs are in-flight simultaneously and the shared-toolbox
+    // bug (cross-firing) can manifest before we assert.
+    let releaseGate!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releaseGate = resolve;
+    });
+
+    const blockingTool = createTool({
+      name: 'blocking',
+      description: 'Blocks until the gate is released',
+      input: z.object({ id: z.number() }),
+      execute: async ({ id }) => {
+        await gate;
+        return `result-${id}`;
+      },
+    });
+
+    // GenerateContext exposes step directly (0-based); step 0 is the first call.
+    const generate: GenerateFunction = async ({ step }) => {
+      if (step === 0) {
+        return toolCallResponse([{ name: 'blocking', arguments: { id: step } }]);
+      }
+      return textResponse('done');
+    };
+
+    // A SINGLE agent reused for both runs — the shared toolbox is the crux of the bug.
+    const agent = createAgent({
+      generate,
+      tools: { blocking: blockingTool },
+      stopWhen: noToolCalls(),
+    });
+
+    // Collect events from each run via the async iterator.
+    const run1Events: string[] = [];
+    const run2Events: string[] = [];
+
+    const handle1 = agent.run('go');
+    const handle2 = agent.run('go');
+
+    // Consume both event streams concurrently.
+    const drain1 = (async () => {
+      for await (const event of handle1) {
+        run1Events.push(event.type);
+      }
+    })();
+    const drain2 = (async () => {
+      for await (const event of handle2) {
+        run2Events.push(event.type);
+      }
+    })();
+
+    // Give both runs time to reach their blocked tool calls.
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+
+    // Release both tools simultaneously — they're now provably in-flight together.
+    releaseGate();
+
+    await Promise.all([drain1, drain2]);
+
+    // With the bug (shared toolbox emitter): each run's stream receives
+    // tool.started events from BOTH runs → count >= 2 for each.
+    // With the fix (per-run toolbox): each run receives exactly 1 tool.started.
+    const run1ToolStarted = run1Events.filter((t) => t === 'tool.started');
+    const run2ToolStarted = run2Events.filter((t) => t === 'tool.started');
+
+    expect(run1ToolStarted).toHaveLength(1);
+    expect(run2ToolStarted).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Non-thenable verification
 // ---------------------------------------------------------------------------
 
