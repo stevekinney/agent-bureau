@@ -87,6 +87,7 @@ async function runToCompletion(
   input: {
     runId: string;
     sessionId?: string;
+    agentName?: string;
     prompt?: string;
     maximumSteps?: number;
   },
@@ -94,7 +95,13 @@ async function runToCompletion(
 ) {
   const handle = await engine.start(
     'agentRun',
-    { ...input, sessionId: input.sessionId ?? input.runId },
+    {
+      ...input,
+      sessionId: input.sessionId ?? input.runId,
+      // F2: agentName in durable workflow input — defaults to '' in tests
+      // where no specific agent name is relevant.
+      agentName: input.agentName ?? '',
+    },
     { id: input.runId, services },
   );
   return handle.result();
@@ -127,15 +134,47 @@ describe('durable agentRun workflow', () => {
   it('validates durable workflow input at the trust boundary', () => {
     expect(isAgentRunWorkflowInput(null)).toBe(false);
     expect(isAgentRunWorkflowInput({})).toBe(false);
-    expect(isAgentRunWorkflowInput({ runId: 'run', sessionId: 'session' })).toBe(true);
-    expect(isAgentRunWorkflowInput({ runId: 'run', sessionId: 'session', prompt: 'Hello' })).toBe(
-      true,
-    );
-    expect(isAgentRunWorkflowInput({ runId: 'run', sessionId: 'session', prompt: 1 })).toBe(false);
-    expect(isAgentRunWorkflowInput({ runId: 'run', sessionId: 'session', maximumSteps: 2 })).toBe(
-      true,
-    );
-    expect(isAgentRunWorkflowInput({ runId: 'run', sessionId: 'session', maximumSteps: '2' })).toBe(
+    // F2: agentName is now required alongside runId and sessionId. A run
+    // checkpointed before F2 (without agentName) fails this guard and is treated
+    // as not-reconstructable — no compatibility-bridge fallback (cross-upgrade
+    // in-flight runs are explicitly out of scope per architecture.md).
+    expect(isAgentRunWorkflowInput({ runId: 'run', sessionId: 'session' })).toBe(false);
+    expect(
+      isAgentRunWorkflowInput({ runId: 'run', sessionId: 'session', agentName: 'researcher' }),
+    ).toBe(true);
+    expect(
+      isAgentRunWorkflowInput({
+        runId: 'run',
+        sessionId: 'session',
+        agentName: 'researcher',
+        prompt: 'Hello',
+      }),
+    ).toBe(true);
+    expect(
+      isAgentRunWorkflowInput({
+        runId: 'run',
+        sessionId: 'session',
+        agentName: 'researcher',
+        prompt: 1,
+      }),
+    ).toBe(false);
+    expect(
+      isAgentRunWorkflowInput({
+        runId: 'run',
+        sessionId: 'session',
+        agentName: 'researcher',
+        maximumSteps: 2,
+      }),
+    ).toBe(true);
+    expect(
+      isAgentRunWorkflowInput({
+        runId: 'run',
+        sessionId: 'session',
+        agentName: 'researcher',
+        maximumSteps: '2',
+      }),
+    ).toBe(false);
+    expect(isAgentRunWorkflowInput({ runId: 'run', sessionId: 'session', agentName: 42 })).toBe(
       false,
     );
   });
@@ -151,7 +190,7 @@ describe('durable agentRun workflow', () => {
     try {
       const handle = await engine.start(
         'agentRun',
-        { runId: 'run-1', sessionId: 'run-1', prompt: 'Hi' },
+        { runId: 'run-1', sessionId: 'run-1', agentName: '', prompt: 'Hi' },
         { id: 'run-1', services },
       );
       const result = await handle.result();
@@ -274,12 +313,16 @@ describe('durable agentRun workflow', () => {
     /** Start a run but do NOT await — used when the run hangs mid-step. */
     function startRun(
       engine: Awaited<ReturnType<typeof buildEngine>>['engine'],
-      input: { runId: string; sessionId?: string; prompt?: string },
+      input: { runId: string; sessionId?: string; agentName?: string; prompt?: string },
       services: DurableRunDeps,
     ) {
       return engine.start(
         'agentRun',
-        { ...input, sessionId: input.sessionId ?? input.runId },
+        {
+          ...input,
+          sessionId: input.sessionId ?? input.runId,
+          agentName: input.agentName ?? '',
+        },
         { id: input.runId, services },
       );
     }
@@ -430,6 +473,109 @@ describe('durable agentRun workflow', () => {
           expect(record).not.toHaveProperty('conversation');
           expect(record).not.toHaveProperty('root');
         }
+      } finally {
+        engine[Symbol.dispose]();
+      }
+    });
+  });
+
+  describe('F3 — HITL via requestHumanInput tool (pendingHumanWait + ctx.waitForSignal)', () => {
+    /**
+     * Proves that setting `deps.pendingHumanWait` in a tool causes the run
+     * workflow to park via `yield* ctx.waitForSignal(signalName)` after the
+     * step loop exits, and that a subsequent `engine.signal(runId, signalName,
+     * payload)` releases the parked run so it reaches 'completed'.
+     *
+     * This tests the F3 seam: the tool writes `pendingHumanWait`, the workflow
+     * reads it outside `ctx.memo`, and parks until the signal arrives.
+     */
+    it('parks via ctx.waitForSignal when pendingHumanWait is set, then resumes on signal', async () => {
+      const storage = new MemoryStorage();
+      const { engine } = await buildEngine(storage, false);
+
+      // A tool that sets deps.pendingHumanWait (mimics createRequestHumanInputTool).
+      // Use a container object so the closure captures the reference before
+      // `services` is constructed, avoiding a `prefer-const` lint violation.
+      const depsContainer: { ref: DurableRunDeps | undefined } = { ref: undefined };
+      const hitlTool = createTool({
+        name: 'requestHumanInput',
+        description: 'Park waiting for human input',
+        input: z.object({ signalName: z.string() }),
+        execute: async (params) => {
+          if (depsContainer.ref) {
+            depsContainer.ref.pendingHumanWait = {
+              signalName: (params as { signalName: string }).signalName,
+            };
+          }
+          return 'parked';
+        },
+      });
+
+      const hitlToolbox = createToolbox([hitlTool]) as unknown as RegistryToolbox;
+
+      // Step counter so the generate function knows which step it is on. The
+      // durable run calls the hitlTool on step 0, then finishes on step 1.
+      let stepCallCount = 0;
+      const services: DurableRunDeps = {
+        options: {
+          generate: async () => {
+            const callIndex = stepCallCount++;
+            if (callIndex === 0) {
+              // First generate call: emit a hitl tool call to set pendingHumanWait.
+              return {
+                content: '',
+                toolCalls: [
+                  { name: 'requestHumanInput', arguments: { signalName: 'human-response' } },
+                ],
+              };
+            }
+            // Subsequent call (after signal): finish.
+            return { content: 'done after human input', toolCalls: [] };
+          },
+          toolbox: hitlToolbox,
+          conversation: createConversationHistory(),
+          stopWhen: noToolCalls(),
+          maximumSteps: 5,
+        },
+        toolbox: hitlToolbox,
+      };
+      // Capture the deps ref so the tool can set pendingHumanWait.
+      depsContainer.ref = services;
+
+      try {
+        const handle = await engine.start(
+          'agentRun',
+          { runId: 'hitl-run', sessionId: 'hitl-run', agentName: 'hitl-agent', prompt: 'start' },
+          { id: 'hitl-run', services },
+        );
+
+        // Let the workflow run the first step and reach ctx.waitForSignal.
+        // Weft inline-launch is async: we need to give the queue several ticks.
+        let parked = false;
+        for (let i = 0; i < 50; i++) {
+          await yieldToPortableEventLoop();
+          const snap = await handle.snapshot();
+          // The run stays 'running' while parked on waitForSignal.
+          if (snap?.status === 'running' && depsContainer.ref?.pendingHumanWait !== undefined) {
+            parked = true;
+            break;
+          }
+        }
+
+        expect(parked).toBe(true);
+
+        // Deliver the human signal to release the parked run.
+        await engine.signal('hitl-run', 'human-response', { approved: true });
+
+        // Wait for the run to complete. The step loop exited via noToolCalls()
+        // (stop-condition) before parking, so the finish reason is 'stop-condition'.
+        const result = await handle.result();
+        expect(result.finishReason).toBe('stop-condition');
+        // F3: humanWaitSignal carries the signal name the run parked on.
+        expect(result.humanWaitSignal).toBe('human-response');
+
+        const finalSnap = await handle.snapshot();
+        expect(finalSnap?.status).toBe('completed');
       } finally {
         engine[Symbol.dispose]();
       }

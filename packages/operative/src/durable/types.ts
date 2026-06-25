@@ -89,6 +89,23 @@ export interface PendingWakeup {
 }
 
 /**
+ * A pending human-input gate registered by the `requestHumanInput` tool during
+ * a run (F3 — HITL). When present after the main step loop exits, the
+ * `agentRun` workflow will `yield* ctx.waitForSignal(signalName)` before
+ * continuing — parking the durable run until a human sends the named signal via
+ * `session.signal(runId, signalName, payload)`.
+ */
+export interface PendingHumanWait {
+  /**
+   * The signal name the run parks on. The human sends the same name when
+   * releasing the run (e.g. `'human-response'`).
+   */
+  signalName: string;
+  /** Optional prompt to surface to the human reviewer. */
+  prompt?: string;
+}
+
+/**
  * The non-serializable, per-run behavior a durable workflow needs but cannot
  * checkpoint: the `generate` function, the `toolbox`, the hook registry, the
  * event emitter, and the other closures from {@link RunOptions}. Checkpoints
@@ -120,4 +137,15 @@ export interface DurableRunDeps {
    * it is never checkpointed (tools can safely mutate it in-process).
    */
   pendingWakeup?: PendingWakeup;
+  /**
+   * F3 — A pending human-input gate registered by the `requestHumanInput` tool.
+   * When present after the main step loop exits, the workflow performs
+   * `yield* ctx.waitForSignal(signalName)` to park until a human sends the
+   * signal via `session.signal(runId, signalName, payload)`.
+   *
+   * Mutually exclusive with `pendingWakeup`; only the LAST assignment (either
+   * wakeup or human-wait) governs parking. Mutable by the `requestHumanInput`
+   * tool inside `ctx.memo`.
+   */
+  pendingHumanWait?: PendingHumanWait;
 }

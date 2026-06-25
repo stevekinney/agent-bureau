@@ -173,6 +173,19 @@ describe('session.run()', () => {
     expect(result.finishReason).toBe('maximum-steps');
   });
 
+  it('F2: RunRef.agentName carries the name of the agent that ran the run', async () => {
+    // The fixture uses 'test-agent' as the agentName for the session handle.
+    const { handle, store } = createSessionHandleFixture();
+
+    await handle.run('say something').result();
+
+    // Give the persistence callback a tick to run.
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+
+    const session = await store.load(handle.id);
+    expect(session!.runs[0]!.agentName).toBe('test-agent');
+  });
+
   it('accumulates multiple runs in sequence', async () => {
     const { handle, store } = createSessionHandleFixture();
 
@@ -338,6 +351,7 @@ describe('session.cancel()', () => {
           sequence: 0,
           status: 'running',
           startedAt: new Date().toISOString(),
+          agentName: '',
         },
       ],
     });
@@ -468,6 +482,7 @@ describe('session.signal()', () => {
           sequence: 0,
           status: 'running',
           startedAt: new Date().toISOString(),
+          agentName: '',
         },
       ],
     });
@@ -506,6 +521,7 @@ describe('session.signal()', () => {
           sequence: 0,
           status: 'completed',
           startedAt: new Date().toISOString(),
+          agentName: '',
         },
       ],
     });
@@ -557,6 +573,7 @@ describe('session.signal()', () => {
           sequence: 0,
           status: 'running',
           startedAt: new Date().toISOString(),
+          agentName: '',
         },
       ],
     });
@@ -602,6 +619,7 @@ describe('session.update()', () => {
           sequence: 0,
           status: 'running',
           startedAt: new Date().toISOString(),
+          agentName: '',
         },
       ],
     });
@@ -644,6 +662,7 @@ describe('session.update()', () => {
           sequence: 0,
           status: 'running',
           startedAt: new Date().toISOString(),
+          agentName: '',
         },
       ],
     });
@@ -683,6 +702,7 @@ describe('session.query()', () => {
           sequence: 0,
           status: 'running',
           startedAt: new Date().toISOString(),
+          agentName: '',
         },
       ],
     });
@@ -760,6 +780,7 @@ describe('session.query()', () => {
           sequence: 0,
           status: 'running',
           startedAt: new Date().toISOString(),
+          agentName: '',
         },
       ],
     });
@@ -797,6 +818,7 @@ describe('session.query()', () => {
           sequence: 0,
           status: 'completed', // terminal — not running
           startedAt: new Date().toISOString(),
+          agentName: '',
         },
       ],
     });
@@ -1020,6 +1042,7 @@ describe('session verb event dispatch (C3 completeness rule)', () => {
           sequence: 0,
           status: 'running',
           startedAt: new Date().toISOString(),
+          agentName: '',
         },
       ],
     });
@@ -1064,6 +1087,7 @@ describe('session verb event dispatch (C3 completeness rule)', () => {
           sequence: 0,
           status: 'running',
           startedAt: new Date().toISOString(),
+          agentName: '',
         },
       ],
     });
@@ -1108,6 +1132,7 @@ describe('session verb event dispatch (C3 completeness rule)', () => {
           sequence: 0,
           status: 'running',
           startedAt: new Date().toISOString(),
+          agentName: '',
         },
       ],
     });
@@ -1241,6 +1266,7 @@ describe('D2 — Recovery-on-boot: session.recover() durable re-attach path', ()
             sequence: 0,
             status: 'completed',
             startedAt: new Date().toISOString(),
+            agentName: '',
           },
         ],
       });
@@ -1301,6 +1327,7 @@ describe('D2 — Recovery-on-boot: session.recover() durable re-attach path', ()
           sequence: 0,
           status: 'running',
           startedAt: new Date().toISOString(),
+          agentName: '',
         },
       ],
     });
@@ -1375,7 +1402,15 @@ describe('D2 — Recovery-on-boot: session.recover() durable re-attach path', ()
       agentName: 'agent',
       conversationHistory: createConversationHistory(),
       id: sessionId,
-      runs: [{ runId, sequence: 0, status: 'running', startedAt: new Date().toISOString() }],
+      runs: [
+        {
+          runId,
+          sequence: 0,
+          status: 'running',
+          startedAt: new Date().toISOString(),
+          agentName: '',
+        },
+      ],
     });
     await store.save(session);
 
@@ -1453,6 +1488,7 @@ describe('D2 — Recovery-on-boot: session.recover() durable re-attach path', ()
           sequence: 0,
           status: 'running',
           startedAt: new Date().toISOString(),
+          agentName: '',
         },
       ],
     });

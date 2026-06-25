@@ -404,6 +404,10 @@ export function createSessionHandle(
             sequence,
             status: finishReasonToStatus(result.finishReason),
             startedAt: new Date().toISOString(),
+            // F2: carry agentName on each RunRef so a session worked by a
+            // SEQUENCE of different agents (via handoff) preserves a full audit
+            // trail of which agent ran each run.
+            agentName,
           };
           const updated: AgentSession = {
             ...session,

@@ -58,6 +58,16 @@ export interface DurableActiveRunOptions {
    * from the durable input alone (see {@link AgentRunWorkflowInput.sessionId}).
    */
   sessionId: string;
+  /**
+   * The name of the agent that owns this run (F2 — RunRef.agentName).
+   *
+   * Threaded into the durable workflow input so boot recovery can identify which
+   * agent ran a given workflow without reading the session store. Defaults to
+   * `options.agentName ?? ''` when not explicitly supplied. A session worked by
+   * a SEQUENCE of different agents (via handoff) stores one agentName per run,
+   * giving a full audit trail of which agent handled each run.
+   */
+  agentName?: string;
   /** The run behavior (generate fn, toolbox, conversation, hooks, stopWhen). */
   options: RunOptions;
   /** First user message to seed a brand-new run. Ignored when resuming. */
@@ -147,6 +157,8 @@ export function createDurableActiveRun(
   durableRun: DurableActiveRunOptions,
 ): ActiveRun {
   const { runId, options } = durableRun;
+  // F2: resolve agentName — explicit > RunOptions.agentName > empty string.
+  const agentName = durableRun.agentName ?? options.agentName ?? '';
   const emitter = new CompletableEventTarget<CombinedOperativeEventMap>();
   const abortController = new AbortController();
 
@@ -186,6 +198,7 @@ export function createDurableActiveRun(
       context,
       runId,
       durableRun.sessionId,
+      agentName,
       options,
       conversation,
       combinedSignal,
@@ -436,6 +449,11 @@ export interface StartDurableRunResultOptions {
   runId: string;
   /** The owning session id, carried in the durable input for boot recovery. */
   sessionId: string;
+  /**
+   * The name of the agent running this workflow (F2 — RunRef.agentName).
+   * Defaults to `options.agentName ?? ''` when omitted.
+   */
+  agentName?: string;
   /** The run behavior (generate, toolbox, hooks, stopWhen, …). */
   options: RunOptions;
   /** First user message to seed a brand-new run. */
@@ -478,6 +496,8 @@ export async function startDurableRunResult(
   durableRun: StartDurableRunResultOptions,
 ): Promise<RunResult> {
   const { runId, sessionId, options, prompt, signal, tags } = durableRun;
+  // F2: resolve agentName for durable input — explicit > RunOptions.agentName > ''.
+  const agentName = durableRun.agentName ?? options.agentName ?? '';
 
   // 'start-new' is a DATA-LOSS policy (it purges a prior terminal run under the
   // same id) and must be scoped to runs that legitimately reuse an id — i.e.
@@ -492,7 +512,7 @@ export async function startDurableRunResult(
 
   const handle = await context.engine.start(
     'agentRun',
-    { runId, sessionId, prompt, maximumSteps: options.maximumSteps },
+    { runId, sessionId, agentName, prompt, maximumSteps: options.maximumSteps },
     {
       id: runId,
       ...(tags ? { tags } : {}),
@@ -631,6 +651,7 @@ async function driveDurableRun(
   context: DurableActiveRunContext,
   runId: string,
   sessionId: string,
+  agentName: string,
   options: RunOptions,
   conversation: Conversation,
   signal: AbortSignal,
@@ -668,6 +689,9 @@ async function driveDurableRun(
     {
       runId,
       sessionId,
+      // F2: thread agentName into the durable input so boot recovery can
+      // identify which agent ran this workflow without reading the session store.
+      agentName,
       prompt,
       maximumSteps: options.maximumSteps,
     },
