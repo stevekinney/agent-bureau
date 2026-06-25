@@ -558,7 +558,7 @@ export class ToolPolicyDeniedBubbleEvent extends Event {
 // Session verb events (C3 completeness rule — every new state transition
 // emits an event). Covers: recover / cancel / fork / sleep / signal / update / query.
 // Multi-agent transitions (child-workflow-started, handoff-occurred,
-// human-wait-parked) land in Phase F under the same rule.
+// human-wait-parked) are implemented below in the Phase F section.
 // ---------------------------------------------------------------------------
 
 export class SessionRecoverEvent extends Event {
@@ -690,6 +690,97 @@ export class SessionMonitorDoneEvent extends Event {
 }
 
 // ---------------------------------------------------------------------------
+// Phase F — Durable multi-agent transition events (C3 / invariant #2 rule).
+// Every multi-agent state transition emits an event and exposes a hook.
+// ---------------------------------------------------------------------------
+
+/**
+ * Emitted when a subagent tool starts executing a child run.
+ *
+ * On the in-memory path the child run is a plain async call. On the durable
+ * path (when `.persistence()` is set on the bureau) it is a child workflow
+ * launched via the Weft engine. Either way this event fires at the point the
+ * delegation begins, carrying enough context to reconstruct the multi-agent tree
+ * (parent agent + run, child agent, request).
+ */
+export class ChildWorkflowStartedEvent extends Event {
+  static readonly type = 'multiagent.child-workflow.started' as const;
+  /** The agent name delegating to the subagent. */
+  readonly parentAgentName: string;
+  /** The parent run id (derived as `${sessionId}:${sequence}`). */
+  readonly parentRunId: string;
+  /** The subagent's name. */
+  readonly childAgentName: string;
+  /** The prompt sent to the subagent. */
+  readonly input: string;
+  /** True when the child is a durable Weft child workflow; false for in-process. */
+  readonly durable: boolean;
+
+  constructor(data: {
+    parentAgentName: string;
+    parentRunId: string;
+    childAgentName: string;
+    input: string;
+    durable: boolean;
+  }) {
+    super(ChildWorkflowStartedEvent.type);
+    this.parentAgentName = data.parentAgentName;
+    this.parentRunId = data.parentRunId;
+    this.childAgentName = data.childAgentName;
+    this.input = data.input;
+    this.durable = data.durable;
+  }
+}
+
+/**
+ * Emitted when a handoff tool transfers control to another agent.
+ *
+ * On the in-process path the handoff embeds a `HANDOFF_MARKER` in the result
+ * and the caller re-dispatches. On the durable session-continuation path
+ * (F2) the handoff creates a new run in the same session bound to the target
+ * agent — the session is worked by a sequence of agents over time.
+ */
+export class HandoffOccurredEvent extends Event {
+  static readonly type = 'multiagent.handoff.occurred' as const;
+  /** The agent that is handing off. */
+  readonly sourceAgentName: string;
+  /** The agent receiving the handoff. */
+  readonly targetAgentName: string;
+  /** The session id (if the handoff is session-scoped). */
+  readonly sessionId?: string;
+
+  constructor(data: { sourceAgentName: string; targetAgentName: string; sessionId?: string }) {
+    super(HandoffOccurredEvent.type);
+    this.sourceAgentName = data.sourceAgentName;
+    this.targetAgentName = data.targetAgentName;
+    this.sessionId = data.sessionId;
+  }
+}
+
+/**
+ * Emitted when a durable run parks on `ctx.waitForSignal` waiting for a
+ * human-in-the-loop approval (or any external event delivered via
+ * `session.signal()`).
+ *
+ * The parked run costs nothing (no active compute, no timer threads) and
+ * survives restarts. It is resumed by delivering the named signal via
+ * `session.signal(signalName, payload)`.
+ */
+export class HumanWaitParkedEvent extends Event {
+  static readonly type = 'multiagent.human-wait.parked' as const;
+  /** The signal name the run is parked on (e.g. `'human-response'`). */
+  readonly signalName: string;
+  /** The run id of the parked workflow. */
+  readonly runId: string;
+
+  constructor(signalName: string, runId: string) {
+    super(HumanWaitParkedEvent.type);
+    this.signalName = signalName;
+    this.runId = runId;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Scheduling events (D6 — Tier-1 scheduling completeness rule).
 // Every state transition emits an event (C3 / invariant #2 rule).
 // ---------------------------------------------------------------------------
@@ -788,6 +879,10 @@ export interface OperativeEventMap extends EventMap {
   // session.monitor loop events (D7)
   [SessionMonitorTickEvent.type]: SessionMonitorTickEvent;
   [SessionMonitorDoneEvent.type]: SessionMonitorDoneEvent;
+  // Phase F — durable multi-agent transition events (C3 completeness rule)
+  [ChildWorkflowStartedEvent.type]: ChildWorkflowStartedEvent;
+  [HandoffOccurredEvent.type]: HandoffOccurredEvent;
+  [HumanWaitParkedEvent.type]: HumanWaitParkedEvent;
 }
 
 export type OperativeEventType = keyof OperativeEventMap;

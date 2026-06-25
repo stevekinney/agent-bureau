@@ -1,7 +1,10 @@
 import type { ToolContext } from 'armorer';
 import { createTool } from 'armorer';
+import type { TypedEventTarget } from 'lifecycle';
 import type { ZodType } from 'zod';
 
+import type { OperativeEventMap } from './events';
+import { ChildWorkflowStartedEvent } from './events';
 import type { RunResult } from './types';
 
 /**
@@ -29,10 +32,32 @@ export interface CreateSubagentToolOptions {
    * treated as an error and throws. Set to false to accept partial results.
    */
   treatMaximumStepsAsError?: boolean;
+  /**
+   * F1/F3 — parent run context for event emission.
+   *
+   * When provided, a `ChildWorkflowStartedEvent` is dispatched on the emitter
+   * each time the subagent tool executes, carrying the parent agent name, parent
+   * run id, child agent name, input, and whether the child is durable.
+   *
+   * The `durable` flag must be set to `true` when the child run is started as a
+   * Weft child workflow (i.e. when the bureau has `.persistence()` set).
+   */
+  parentContext?: {
+    emitter: TypedEventTarget<OperativeEventMap>;
+    parentAgentName: string;
+    parentRunId: string;
+    /** True when the bureau has `.persistence()` configured (durable child workflow). */
+    durable: boolean;
+  };
 }
 
 /**
  * Creates a tool that delegates execution to a sub-agent.
+ *
+ * F1: When `parentContext` is supplied the tool emits a `ChildWorkflowStartedEvent`
+ * on every execution, exposing the multi-agent delegation transition as an
+ * observable event (C3 completeness rule — every state transition emits an event
+ * and exposes a hook).
  */
 export function createSubagentTool(options: CreateSubagentToolOptions) {
   const {
@@ -44,6 +69,7 @@ export function createSubagentTool(options: CreateSubagentToolOptions) {
     mapInput = (params: unknown) => String(params),
     mapOutput = (result: RunResult) => result.content,
     treatMaximumStepsAsError = true,
+    parentContext,
   } = options;
 
   return createTool({
@@ -52,6 +78,19 @@ export function createSubagentTool(options: CreateSubagentToolOptions) {
     input,
     execute: async (params: unknown, context: ToolContext) => {
       const prompt = mapInput(params);
+
+      // F1 — emit ChildWorkflowStartedEvent before the child run begins.
+      if (parentContext) {
+        parentContext.emitter.dispatchEvent(
+          new ChildWorkflowStartedEvent({
+            parentAgentName: parentContext.parentAgentName,
+            parentRunId: parentContext.parentRunId,
+            childAgentName: agentName,
+            input: prompt,
+            durable: parentContext.durable,
+          }),
+        );
+      }
 
       const result = await run(prompt, {
         signal: context.signal,

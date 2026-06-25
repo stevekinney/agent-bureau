@@ -7,6 +7,10 @@ import type { JSONValue } from 'interoperability';
  * `runId` is derived as `${sessionId}:${sequence}` — self-describing and
  * unambiguous. A recovered workflow id reveals its session + sequence with
  * no side-table lookup.
+ *
+ * F2: `agentName` is carried on the ref so a session worked by a SEQUENCE
+ * of different agents (via handoff) retains a full audit trail of which
+ * agent ran each run.
  */
 export interface RunRef {
   /** Derived run id: `${sessionId}:${sequence}`. */
@@ -20,6 +24,14 @@ export interface RunRef {
   status: 'running' | 'completed' | 'error' | 'aborted';
   /** ISO timestamp when this run was started. */
   startedAt: string;
+  /**
+   * The name of the agent that ran this run.
+   *
+   * Carrying agentName on each RunRef (F2) enables a session to be worked
+   * by a SEQUENCE of different agents over time (e.g. via handoff) while
+   * preserving a full audit trail of which agent handled each run.
+   */
+  agentName: string;
 }
 
 export interface AgentSession {

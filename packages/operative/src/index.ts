@@ -199,6 +199,8 @@ export {
   SessionSleepEvent,
   SessionUpdateEvent,
 } from './events';
+// F1/F2/F3 — durable multi-agent transition events
+export { ChildWorkflowStartedEvent, HandoffOccurredEvent, HumanWaitParkedEvent } from './events';
 // D6 — scheduling events
 export type {
   CreateScheduleSelfToolOptions,
@@ -216,6 +218,15 @@ export type {
   ScheduleWakeupTool,
 } from './create-schedule-wakeup-tool';
 export { createScheduleWakeupTool } from './create-schedule-wakeup-tool';
+// F3 — HITL human-input gate
+export type {
+  CreateRequestHumanInputToolOptions,
+  RequestHumanInputContext,
+  RequestHumanInputInput,
+  RequestHumanInputResult,
+  RequestHumanInputTool,
+} from './create-request-human-input-tool';
+export { createRequestHumanInputTool } from './create-request-human-input-tool';
 export type {
   AgentScheduleHandle,
   AgentScheduleOptions,
@@ -266,7 +277,11 @@ export type {
   AfterCompactionHookContext,
   AfterContextAssemblyHookContext,
   BeforeCompactionHookContext,
+  // Phase F — durable multi-agent hook context types (C3 completeness rule)
+  ChildWorkflowStartedHookContext,
   ContextAssemblyHookContext,
+  HandoffOccurredHookContext,
+  HumanWaitParkedHookContext,
   // Session verb hook context types (C3 completeness rule)
   SessionCancelHookContext,
   SessionForkHookContext,

@@ -90,6 +90,15 @@ export interface AgentRunWorkflowInput {
    * checkpoint.
    */
   sessionId: string;
+  /**
+   * The name of the agent that owns this run (F2 — RunRef.agentName).
+   *
+   * Carried in the durable input (not a side table) so a recovered workflow can
+   * be correlated to its owning agent without reading the session store. A session
+   * may be worked by a SEQUENCE of different agents over time (via handoff);
+   * agentName on each workflow uniquely identifies which agent ran each run.
+   */
+  agentName: string;
   /** The first user message to seed a brand-new run (ignored on resume). */
   prompt?: string;
   /** Safety bound on step count, mirroring `RunOptions.maximumSteps`. */
@@ -101,19 +110,23 @@ export interface AgentRunWorkflowInput {
  * `resolveWorkflowServices`'s `info.input` and `WorkflowHandle.getLaunchMetadata`)
  * to an {@link AgentRunWorkflowInput}. A type guard, not an `as` cast: the input
  * crosses the checkpoint as plain JSON, so its shape must be validated at the
- * trust boundary. Requires the two correlation fields recovery depends on
- * (`runId`, `sessionId`); a run checkpointed before `sessionId` was added to the
- * input fails this guard and is treated as not-reconstructable (no
+ * trust boundary. Requires the three correlation fields recovery depends on
+ * (`runId`, `sessionId`, `agentName`); a run checkpointed before `agentName` was
+ * added to the input fails this guard and is treated as not-reconstructable (no
  * compatibility-bridge fallback — cross-upgrade in-flight runs are out of scope).
  */
 export function isAgentRunWorkflowInput(value: unknown): value is AgentRunWorkflowInput {
   if (typeof value !== 'object' || value === null) return false;
   const candidate = value as Record<string, unknown>;
-  if (typeof candidate['runId'] !== 'string' || typeof candidate['sessionId'] !== 'string') {
+  if (
+    typeof candidate['runId'] !== 'string' ||
+    typeof candidate['sessionId'] !== 'string' ||
+    typeof candidate['agentName'] !== 'string'
+  ) {
     return false;
   }
   // Validate the optional fields too, so a narrowed value is sound end-to-end
-  // (not just for the two correlation fields recovery keys on).
+  // (not just for the three correlation fields recovery keys on).
   const prompt = candidate['prompt'];
   if (prompt !== undefined && typeof prompt !== 'string') return false;
   const maximumSteps = candidate['maximumSteps'];
@@ -163,6 +176,13 @@ export interface AgentRunWorkflowResult {
    * Absent when no wakeup was scheduled.
    */
   wakeupNote?: string;
+  /**
+   * F3 — The signal name the run parked on via `requestHumanInput`. Present
+   * when the agent called `requestHumanInput({ signalName })` during this run
+   * and the workflow parked via `yield* ctx.waitForSignal(signalName)`. Callers
+   * can surface this so the next run knows which signal triggered its resume.
+   */
+  humanWaitSignal?: string;
 }
 
 /** Serialize an unknown error to a stable message string for the checkpoint. */
@@ -437,10 +457,23 @@ export function createRunWorkflow(checkpointStore: CheckpointStore) {
         //
         // IMPORTANT: `ctx.services` (deps) must be read inside a no-yield*
         // region (same invariant as the step body). We capture `pendingWakeup`
-        // before the sleep yield, where `ctx.services` is still in scope.
-        const wakeupBeforeSleep = runDepsFrom(ctx.services).pendingWakeup;
+        // and `pendingHumanWait` before any yield, where `ctx.services` is
+        // still in scope.
+        const depsSnapshot = runDepsFrom(ctx.services);
+        const wakeupBeforeSleep = depsSnapshot.pendingWakeup;
+        const humanWaitBeforePark = depsSnapshot.pendingHumanWait;
+
         if (wakeupBeforeSleep !== undefined) {
           yield* ctx.sleep(wakeupBeforeSleep.duration);
+        }
+
+        // === F3 — HITL human-input gate (requestHumanInput tool) ===
+        // If the `requestHumanInput` tool was called during any step, its
+        // signal name is stored in `deps.pendingHumanWait`. We park the
+        // workflow via `yield* ctx.waitForSignal(signalName)` so it suspends
+        // until the human sends the named signal via `session.signal(...)`.
+        if (humanWaitBeforePark !== undefined) {
+          yield* ctx.waitForSignal(humanWaitBeforePark.signalName);
         }
 
         ctx.setAttribute('runId', runId);
@@ -454,6 +487,9 @@ export function createRunWorkflow(checkpointStore: CheckpointStore) {
           ...(abortReason !== undefined ? { abortReason } : {}),
           ...(schemaValidation !== undefined ? { schemaValidation } : {}),
           ...(wakeupBeforeSleep?.note !== undefined ? { wakeupNote: wakeupBeforeSleep.note } : {}),
+          ...(humanWaitBeforePark !== undefined
+            ? { humanWaitSignal: humanWaitBeforePark.signalName }
+            : {}),
         } satisfies AgentRunWorkflowResult;
       })
   );
