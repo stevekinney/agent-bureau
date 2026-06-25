@@ -1,3 +1,5 @@
+import { z } from 'zod';
+
 import type { PendingWakeup } from './durable/types';
 
 /**
@@ -102,6 +104,28 @@ export function createScheduleWakeupTool(options: CreateScheduleWakeupToolOption
     description:
       'Schedule a wakeup: park this run for the given duration and resume automatically. ' +
       'Use to sleep until a future event (e.g. "wake me in 6h to check the deploy").',
+
+    /**
+     * Zod schema for the tool's input arguments. Armorer's `createToolbox`
+     * calls `normalizeSchema` on this field; without it the schema defaults to
+     * `z.object({})` which strips `in` and `note` before `execute` receives them.
+     */
+    input: z.object({
+      in: z
+        .union([z.number(), z.string()])
+        .describe(
+          'How long to sleep before resuming. Accepts milliseconds as a number ' +
+            'or a human-readable string (e.g. "6h", "30m", "500ms") ' +
+            'or an ISO-8601 duration (e.g. "PT6H").',
+        ),
+      note: z
+        .string()
+        .optional()
+        .describe(
+          'Optional note the agent attaches to the wakeup, surfaced to the next ' +
+            'run so it knows why it resumed.',
+        ),
+    }),
 
     /**
      * Execute the `scheduleWakeup` tool. Writes the wakeup request into the
