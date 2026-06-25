@@ -238,6 +238,20 @@ export type {
   AfterContextAssemblyHookContext,
   BeforeCompactionHookContext,
   ContextAssemblyHookContext,
+  // Session verb hook context types (C3 completeness rule)
+  SessionCancelHookContext,
+  SessionForkHookContext,
+  SessionQueryHookContext,
+  SessionRecoverHookContext,
+  SessionSignalHookContext,
+  SessionSleepHookContext,
+  SessionUpdateHookContext,
+  // Curated tool.* bubble event hook context types (C3)
+  ToolErrorHookContext,
+  ToolPolicyDeniedHookContext,
+  ToolProgressHookContext,
+  ToolSettledHookContext,
+  ToolStartedHookContext,
 } from './hooks';
 export type {
   AfterGenerateContext,
