@@ -283,7 +283,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
   function requireSessionStore() {
     if (!runtime.sessionStore) {
       throw new BureauError(
-        'No SessionStore configured (set options.persistence or options.storage)',
+        'No SessionStore configured (set options.persistence with a StorageConfiguration or PersistenceOptions)',
         'NOT_IMPLEMENTED',
       );
     }
