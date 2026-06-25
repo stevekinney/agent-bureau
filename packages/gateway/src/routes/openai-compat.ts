@@ -187,10 +187,21 @@ export function createOpenAICompatRoutes(bureau: Bureau) {
       throw error;
     }
 
-    // Get the run's final content. The run starts asynchronously; for the
-    // OpenAI-compat surface we read the last step's content from the run detail.
-    // This is a best-effort synchronous response — streaming clients should
-    // use the WebSocket endpoint for real-time event delivery.
+    // createRun() only registers the ActiveRun and returns a RunSummary — the
+    // provider loop continues asynchronously. Await the run's result promise
+    // before reading stepDetails so the response is never empty with a live provider.
+    // The result promise rejects only when the run errors; handle gracefully.
+    const runState = bureau.store.getRun(summary.id);
+    if (runState) {
+      try {
+        await runState.activeRun.result;
+      } catch {
+        // Run errored: getRun() below will reflect the error state; proceed
+        // to format the response with whatever content was accumulated.
+      }
+    }
+
+    // Read the final content from the settled run detail.
     const runDetail = bureau.getRun(summary.id);
     const lastStep = runDetail?.stepDetails.at(-1);
     const textContent = lastStep?.content ?? '';
