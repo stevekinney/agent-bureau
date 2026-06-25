@@ -1,7 +1,9 @@
-import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
+import { waitForCondition, waitForRunState } from 'operative/test';
 
 import { createGateway } from '../create-gateway';
-import type { Bureau, Gateway, GatewayOptions, RunDetail } from '../types';
+import type { Gateway, GatewayOptions } from '../types';
+
+export { waitForCondition, waitForRunState };
 
 /**
  * Creates a gateway for testing. Uses app.request() for HTTP assertions
@@ -24,38 +26,4 @@ export async function requestJSON(
     headers.set('content-type', 'application/json');
   }
   return gateway.app.request(path, { ...init, headers });
-}
-
-export async function waitForCondition(
-  condition: () => boolean | Promise<boolean>,
-  failureMessage: string,
-  maximumAttempts = 50,
-  yieldTurn: () => Promise<void> = yieldToPortableEventLoop,
-): Promise<void> {
-  for (let attempt = 0; attempt < maximumAttempts; attempt++) {
-    if (await condition()) {
-      return;
-    }
-    await yieldTurn();
-  }
-
-  throw new Error(failureMessage);
-}
-
-export async function waitForRunState(
-  bureau: Bureau,
-  runId: string,
-  predicate: (run: RunDetail) => boolean = (run) => run.status !== 'running',
-): Promise<RunDetail> {
-  let matchingRun: RunDetail | undefined;
-  await waitForCondition(() => {
-    const run = bureau.getRun(runId);
-    if (run && predicate(run)) {
-      matchingRun = run;
-      return true;
-    }
-    return false;
-  }, `Run ${runId} did not reach the expected state`);
-
-  return matchingRun!;
 }
