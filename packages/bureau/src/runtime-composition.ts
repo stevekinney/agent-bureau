@@ -994,6 +994,7 @@ export async function createRuntimeComposition(
   async function buildRunDepsFromSession(
     session: Awaited<ReturnType<NonNullable<typeof sessionStore>['load']>>,
     runId?: string,
+    agentName?: string,
   ): Promise<DurableRunDeps | null> {
     if (!session) return null;
     const message = session.metadata['lastUserMessage'];
@@ -1005,6 +1006,7 @@ export async function createRuntimeComposition(
         // key (`${runId}:${step}`) matches the pre-crash execution — the durable
         // recovery path is exactly where the at-least-once re-fire happens.
         ...(runId !== undefined ? { runId } : {}),
+        ...(agentName !== undefined ? { agentName } : {}),
       },
       { liveStreaming: false },
     );
@@ -1020,6 +1022,11 @@ export async function createRuntimeComposition(
         prepareStep: runRuntime.prepareStep,
         onStep: runRuntime.onStep,
         validateResponse: runRuntime.validateResponse,
+        // Thread agentName and runId so curated tool.* bubble events stamped by
+        // the resumed run carry the same {agentName, runId, step} metadata as the
+        // pre-crash run (C3 parity). Without them, recovered runs emit blank ids.
+        ...(agentName !== undefined ? { agentName } : {}),
+        ...(runId !== undefined ? { runId } : {}),
       },
     };
   }
@@ -1111,7 +1118,9 @@ export async function createRuntimeComposition(
     try {
       // info.workflowId === the run id (pinned at engine.start) — thread it so the
       // recovered run's memory-persist idempotency key matches its pre-crash key.
-      services = await buildRunDepsFromSession(session, info.workflowId);
+      // info.input.agentName is guaranteed non-empty here: isAgentRunWorkflowInput
+      // requires a non-empty string (the guard returned earlier if it's missing).
+      services = await buildRunDepsFromSession(session, info.workflowId, info.input.agentName);
     } catch (error) {
       // The session exists, but its deps cannot be rebuilt on this process (e.g.
       // no `generate`/provider configured here, so `createRunRuntime` throws).
