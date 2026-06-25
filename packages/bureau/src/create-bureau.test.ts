@@ -1761,6 +1761,59 @@ describe('classifyRecoveredRun', () => {
   });
 });
 
+describe('createBureau session signal/update/query without durable engine', () => {
+  // Regression for findings PRRT_kwDORvupsc6MXEmd and PRRT_kwDORvupsc6MXEmm:
+  // signalSession / updateSession / querySession must throw BureauError('NOT_CONFIGURED')
+  // when no durable engine is composed, not return undefined. Returning undefined was
+  // indistinguishable from a void signal result or a handler that returns undefined,
+  // causing the gateway route to respond 501 even on successful signal delivery.
+
+  it('signalSession throws NOT_CONFIGURED when no durable engine is composed', async () => {
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+    });
+
+    const error = await bureau
+      .signalSession('any-session', 'any-signal')
+      .then(() => null)
+      .catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(BureauError);
+    expect((error as BureauError).code).toBe('NOT_CONFIGURED');
+  });
+
+  it('updateSession throws NOT_CONFIGURED when no durable engine is composed', async () => {
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+    });
+
+    const error = await bureau
+      .updateSession('any-session', 'any-update')
+      .then(() => null)
+      .catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(BureauError);
+    expect((error as BureauError).code).toBe('NOT_CONFIGURED');
+  });
+
+  it('querySession throws NOT_CONFIGURED when no durable engine is composed', async () => {
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+    });
+
+    const error = await bureau
+      .querySession('any-session', 'any-query')
+      .then(() => null)
+      .catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(BureauError);
+    expect((error as BureauError).code).toBe('NOT_CONFIGURED');
+  });
+});
+
 describe('createBureau session signal/update/query with terminal sessions', () => {
   // Regression for findings PRRT_kwDORvupsc6MT46y and PRRT_kwDORvupsc6MUE_7:
   // requireSessionRunId must check lastRunStatus, not just lastRunId. A completed,
