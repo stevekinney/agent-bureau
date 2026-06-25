@@ -23,5 +23,14 @@ export type {
 export { createRunEngine } from './create-run-engine';
 export type { AgentRunWorkflowInput, AgentRunWorkflowResult } from './run-workflow';
 export { createRunWorkflow, isAgentRunWorkflowInput } from './run-workflow';
+export type {
+  AgentScheduleHandle,
+  AgentScheduleOptions,
+  AgentScheduler,
+  CreateAgentScheduleOptions,
+  ScheduledAgentRunInput,
+  SchedulingEngine,
+} from './schedule-agent';
+export { createAgentSchedule, createAgentScheduler } from './schedule-agent';
 export { createStorageActivities } from './storage-activities';
-export type { DurableRunDeps, RunCheckpoint, RunCursor, StepRecord } from './types';
+export type { DurableRunDeps, PendingWakeup, RunCheckpoint, RunCursor, StepRecord } from './types';
