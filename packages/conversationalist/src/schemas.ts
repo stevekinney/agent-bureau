@@ -57,6 +57,7 @@ const multiModalContentUnion = z.discriminatedUnion('type', [
   z.object({
     type: z.literal('text'),
     text: z.string(),
+    citations: jsonValueSchema.optional(),
   }),
   z.object({
     type: z.literal('image'),
@@ -71,7 +72,7 @@ const multiModalContentUnion = z.discriminatedUnion('type', [
   }),
   z.object({
     type: z.literal('redacted_thinking'),
-    signature: z.string(),
+    data: z.string(),
   }),
   z.object({
     type: z.literal('tool_use'),
@@ -103,23 +104,35 @@ const multiModalContentUnion = z.discriminatedUnion('type', [
 
 /**
  * Zod schema for multi-modal content parts (text, image, thinking,
- * redacted_thinking, tool_use, server_tool_use, or web_search_tool_result).
+ * redacted_thinking, tool_use, server_tool_use, web_search_tool_result, and
+ * code-execution result blocks).
  *
  * The per-variant object schemas already guarantee every required protocol field
- * (signatures, ids, names) is present — no `?? ''` defaulting after the fact. The
- * only post-parse work is dropping absent optional image fields rather than
- * carrying `key: undefined`, so the output matches {@link MultiModalContent}
- * under `exactOptionalPropertyTypes`.
+ * (data, ids, names) is present — no `?? ''` defaulting after the fact. The only
+ * post-parse work is dropping absent optional fields (image mimeType/text, text
+ * citations) rather than carrying `key: undefined`, so the output matches
+ * {@link MultiModalContent} under `exactOptionalPropertyTypes`.
  */
 export const multiModalContentSchema = multiModalContentUnion.transform(
   (value): MultiModalContent => {
-    if (value.type !== 'image') return value;
-    return {
-      type: 'image',
-      url: value.url,
-      ...(value.mimeType !== undefined ? { mimeType: value.mimeType } : {}),
-      ...(value.text !== undefined ? { text: value.text } : {}),
-    };
+    // Drop absent optional fields rather than carrying `key: undefined`, so the
+    // output matches the interfaces under `exactOptionalPropertyTypes`.
+    if (value.type === 'image') {
+      return {
+        type: 'image',
+        url: value.url,
+        ...(value.mimeType !== undefined ? { mimeType: value.mimeType } : {}),
+        ...(value.text !== undefined ? { text: value.text } : {}),
+      };
+    }
+    if (value.type === 'text') {
+      return {
+        type: 'text',
+        text: value.text,
+        ...(value.citations !== undefined ? { citations: value.citations } : {}),
+      };
+    }
+    return value;
   },
 ) satisfies z.ZodType<MultiModalContent>;
 

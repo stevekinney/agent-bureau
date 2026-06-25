@@ -4,10 +4,12 @@ import { createConversationHistory as createConversation } from '../src/conversa
 import {
   appendStreamingMessage,
   cancelStreamingMessage,
+  contentOf,
   createStreamingAccumulator,
   finalizeStreamingMessage,
   getStreamingMessage,
   isStreamingMessage,
+  toolCallsOf,
   updateStreamingMessage,
 } from '../src/streaming';
 import type { ConversationHistory as Conversation, Message } from '../src/types';
@@ -367,13 +369,12 @@ describe('C4 — createStreamingAccumulator (multi-part accumulation)', () => {
     acc.getBlock(0)?.appendTextDelta('Hello');
     acc.getBlock(0)?.appendTextDelta(', world!');
 
-    const { content, toolCalls } = acc.finalize();
-    expect(content).toHaveLength(1);
-    expect(content[0]).toEqual({ type: 'text', text: 'Hello, world!' });
-    expect(toolCalls).toEqual([]);
+    const result = acc.finalize();
+    expect(contentOf(result)).toEqual([{ type: 'text', text: 'Hello, world!' }]);
+    expect(toolCallsOf(result)).toEqual([]);
   });
 
-  it('returns a client tool_use as a tool-call (in toolCalls, NOT content) so pairing stays intact', () => {
+  it('returns a client tool_use as a tool-call segment (NOT content) so pairing stays intact', () => {
     const acc = createStreamingAccumulator();
     // Block 0: text
     acc.openBlock(0, { type: 'text', buffer: '' });
@@ -384,12 +385,31 @@ describe('C4 — createStreamingAccumulator (multi-part accumulation)', () => {
     acc.getBlock(1)?.appendInputJsonDelta('{"q":');
     acc.getBlock(1)?.appendInputJsonDelta('"cats"}');
 
-    const { content, toolCalls } = acc.finalize();
+    const result = acc.finalize();
     // The client tool call does NOT land in assistant content — it becomes a
-    // tool-call so a later tool-result can pair to it.
-    expect(content).toHaveLength(1);
-    expect(content[0]).toEqual({ type: 'text', text: 'Let me search.' });
-    expect(toolCalls).toEqual([{ id: 'call-1', name: 'search', arguments: { q: 'cats' } }]);
+    // tool-call segment so a later tool-result can pair to it.
+    expect(contentOf(result)).toEqual([{ type: 'text', text: 'Let me search.' }]);
+    expect(toolCallsOf(result)).toEqual([
+      { id: 'call-1', name: 'search', arguments: { q: 'cats' } },
+    ]);
+  });
+
+  it('preserves block order with a client tool_use interleaved: [text, tool_use, text] → content/tool-call/content segments', () => {
+    const acc = createStreamingAccumulator();
+    acc.openBlock(0, { type: 'text', buffer: '' });
+    acc.getBlock(0)?.appendTextDelta('Before.');
+    acc.openBlock(1, { type: 'tool_use', id: 'call-mid', name: 'lookup', inputBuffer: '' });
+    acc.getBlock(1)?.appendInputJsonDelta('{"k":"v"}');
+    acc.openBlock(2, { type: 'text', buffer: '' });
+    acc.getBlock(2)?.appendTextDelta('After.');
+
+    const { segments } = acc.finalize();
+    // The tool call keeps its TRUE position between the two text runs.
+    expect(segments).toEqual([
+      { kind: 'content', content: [{ type: 'text', text: 'Before.' }] },
+      { kind: 'tool-call', toolCall: { id: 'call-mid', name: 'lookup', arguments: { k: 'v' } } },
+      { kind: 'content', content: [{ type: 'text', text: 'After.' }] },
+    ]);
   });
 
   it('accumulates a server_tool_use block as server_tool_use content (distinct from client tool_use)', () => {
@@ -397,16 +417,12 @@ describe('C4 — createStreamingAccumulator (multi-part accumulation)', () => {
     acc.openBlock(0, { type: 'server_tool_use', id: 'stu-1', name: 'web_search', inputBuffer: '' });
     acc.getBlock(0)?.appendInputJsonDelta('{"query":"news"}');
 
-    const { content, toolCalls } = acc.finalize();
+    const result = acc.finalize();
     // Server tool use stays in content; it is part of the assistant turn.
-    expect(content).toHaveLength(1);
-    expect(content[0]).toEqual({
-      type: 'server_tool_use',
-      id: 'stu-1',
-      name: 'web_search',
-      input: { query: 'news' },
-    });
-    expect(toolCalls).toEqual([]);
+    expect(contentOf(result)).toEqual([
+      { type: 'server_tool_use', id: 'stu-1', name: 'web_search', input: { query: 'news' } },
+    ]);
+    expect(toolCallsOf(result)).toEqual([]);
   });
 
   it('separates multiple client tool calls in block order, leaving content untouched', () => {
@@ -418,9 +434,9 @@ describe('C4 — createStreamingAccumulator (multi-part accumulation)', () => {
     acc.openBlock(2, { type: 'tool_use', id: 'call-b', name: 'second', inputBuffer: '' });
     acc.getBlock(2)?.appendInputJsonDelta('{"y":2}');
 
-    const { content, toolCalls } = acc.finalize();
-    expect(content).toEqual([{ type: 'text', text: 'Doing two things.' }]);
-    expect(toolCalls).toEqual([
+    const result = acc.finalize();
+    expect(contentOf(result)).toEqual([{ type: 'text', text: 'Doing two things.' }]);
+    expect(toolCallsOf(result)).toEqual([
       { id: 'call-a', name: 'first', arguments: { x: 1 } },
       { id: 'call-b', name: 'second', arguments: { y: 2 } },
     ]);
@@ -433,24 +449,18 @@ describe('C4 — createStreamingAccumulator (multi-part accumulation)', () => {
     acc.getBlock(0)?.appendThinkingDelta('I should think about this.');
     acc.getBlock(0)?.setSignature(SIG);
 
-    const { content } = acc.finalize();
-    expect(content).toHaveLength(1);
-    expect(content[0]).toEqual({
-      type: 'thinking',
-      thinking: 'I should think about this.',
-      signature: SIG,
-    });
+    expect(contentOf(acc.finalize())).toEqual([
+      { type: 'thinking', thinking: 'I should think about this.', signature: SIG },
+    ]);
   });
 
-  it('accumulates a redacted_thinking block (no thinking_delta, only signature)', () => {
-    const SIG = 'redacted-signature==';
+  it('accumulates a redacted_thinking block (data seeded at openBlock, no signature)', () => {
+    const DATA = 'encrypted-redacted-payload==';
     const acc = createStreamingAccumulator();
-    acc.openBlock(0, { type: 'redacted_thinking', signature: '' });
-    acc.getBlock(0)?.setSignature(SIG);
+    // redacted_thinking carries its encrypted `data` in the start event.
+    acc.openBlock(0, { type: 'redacted_thinking', data: DATA });
 
-    const { content } = acc.finalize();
-    expect(content).toHaveLength(1);
-    expect(content[0]).toEqual({ type: 'redacted_thinking', signature: SIG });
+    expect(contentOf(acc.finalize())).toEqual([{ type: 'redacted_thinking', data: DATA }]);
   });
 
   it('preserves block order by index regardless of open order', () => {
@@ -466,7 +476,7 @@ describe('C4 — createStreamingAccumulator (multi-part accumulation)', () => {
     acc.openBlock(1, { type: 'text', buffer: '' });
     acc.getBlock(1)?.appendTextDelta('Second');
 
-    const { content } = acc.finalize();
+    const content = contentOf(acc.finalize());
     expect(content).toHaveLength(3);
     expect(content[0]?.type).toBe('thinking');
     expect(content[1]?.type).toBe('text');
@@ -481,8 +491,9 @@ describe('C4 — createStreamingAccumulator (multi-part accumulation)', () => {
     const acc = createStreamingAccumulator();
     acc.openBlock(0, { type: 'tool_use', id: 'call-noarg', name: 'ping', inputBuffer: '' });
 
-    const { toolCalls } = acc.finalize();
-    expect(toolCalls).toEqual([{ id: 'call-noarg', name: 'ping', arguments: {} }]);
+    expect(toolCallsOf(acc.finalize())).toEqual([
+      { id: 'call-noarg', name: 'ping', arguments: {} },
+    ]);
   });
 
   it('throws on NON-EMPTY malformed JSON in a tool_use block rather than emitting empty input', () => {
@@ -515,9 +526,7 @@ describe('C4 — createStreamingAccumulator (multi-part accumulation)', () => {
     // Only the signature arrives (no thinking_delta).
     acc.getBlock(0)?.setSignature(SIG);
 
-    const { content } = acc.finalize();
-    expect(content).toHaveLength(1);
-    expect(content[0]).toEqual({ type: 'thinking', thinking: '', signature: SIG });
+    expect(contentOf(acc.finalize())).toEqual([{ type: 'thinking', thinking: '', signature: SIG }]);
   });
 
   it('getBlock returns undefined for a block index that has not been opened', () => {
@@ -538,16 +547,22 @@ describe('C4 — createStreamingAccumulator (multi-part accumulation)', () => {
     acc.openBlock(1, { type: 'tool_use', id: 'call-pay', name: 'pay', inputBuffer: '' });
     acc.getBlock(1)?.appendInputJsonDelta('{"amount":5}');
 
-    const { content, toolCalls } = acc.finalize();
+    const { segments } = acc.finalize();
 
     let conversation = createConversationHistory({ id: 'stream-pairing' }, testEnvironment);
-    conversation = appendMessages(conversation, { role: 'assistant', content }, testEnvironment);
-    for (const toolCall of toolCalls) {
-      conversation = appendMessages(
-        conversation,
-        { role: 'tool-call', content: '', toolCall },
-        testEnvironment,
-      );
+    for (const segment of segments) {
+      conversation =
+        segment.kind === 'content'
+          ? appendMessages(
+              conversation,
+              { role: 'assistant', content: segment.content },
+              testEnvironment,
+            )
+          : appendMessages(
+              conversation,
+              { role: 'tool-call', content: '', toolCall: segment.toolCall },
+              testEnvironment,
+            );
     }
 
     // The matching tool-result pairs cleanly — no throw.
@@ -575,7 +590,7 @@ describe('C4 — createStreamingAccumulator (multi-part accumulation)', () => {
       content: [{ url: 'https://example.com', title: 'News' }],
     });
 
-    const { content } = acc.finalize();
+    const content = contentOf(acc.finalize());
     expect(content.map((c) => c.type)).toEqual(['server_tool_use', 'web_search_tool_result']);
     expect(content[1]).toEqual({
       type: 'web_search_tool_result',
@@ -592,8 +607,7 @@ describe('C4 — createStreamingAccumulator (multi-part accumulation)', () => {
       content: { stdout: 'ok', exit_code: 0 },
     });
 
-    const { content } = acc.finalize();
-    expect(content).toEqual([
+    expect(contentOf(acc.finalize())).toEqual([
       {
         type: 'bash_code_execution_tool_result',
         tool_use_id: 'stu-bash',

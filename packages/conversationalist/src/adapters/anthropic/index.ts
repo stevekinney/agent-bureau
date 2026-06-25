@@ -18,6 +18,8 @@ import { isCanonicalToolResultPayload, parseJSONValue, toJSONValue } from '../sh
 export interface AnthropicTextBlock {
   type: 'text';
   text: string;
+  /** Citation references on cited text (e.g. web-search results); preserved opaquely. */
+  citations?: unknown;
 }
 
 /**
@@ -78,7 +80,7 @@ export interface AnthropicThinkingBlock {
  */
 export interface AnthropicRedactedThinkingBlock {
   type: 'redacted_thinking';
-  signature: string;
+  data: string;
 }
 
 /**
@@ -161,15 +163,19 @@ function toAnthropicContent(
   for (const part of content) {
     switch (part.type) {
       case 'text':
-        blocks.push({ type: 'text', text: part.text ?? '' });
+        blocks.push({
+          type: 'text',
+          text: part.text ?? '',
+          ...(part.citations !== undefined ? { citations: part.citations } : {}),
+        });
         break;
       case 'thinking':
         // Preserve thinking blocks byte-for-byte (signature is integrity-critical)
         blocks.push({ type: 'thinking', thinking: part.thinking, signature: part.signature });
         break;
       case 'redacted_thinking':
-        // Preserve redacted_thinking blocks byte-for-byte (signature is integrity-critical)
-        blocks.push({ type: 'redacted_thinking', signature: part.signature });
+        // Preserve redacted_thinking blocks byte-for-byte (the encrypted `data` is integrity-critical)
+        blocks.push({ type: 'redacted_thinking', data: part.data });
         break;
       case 'tool_use':
         blocks.push({ type: 'tool_use', id: part.id, name: part.name, input: part.input });
@@ -225,7 +231,10 @@ function toAnthropicContent(
     }
   }
 
-  return blocks.length === 1 && blocks[0]?.type === 'text' ? blocks[0].text : blocks;
+  // Collapse a lone plain text block to a string — but NOT one carrying
+  // citations, which would be lost in the string form.
+  const only = blocks.length === 1 ? blocks[0] : undefined;
+  return only?.type === 'text' && only.citations === undefined ? only.text : blocks;
 }
 
 /**
@@ -331,12 +340,11 @@ export function toAnthropicMessages(conversation: Conversation): AnthropicConver
 
   const flushCurrent = () => {
     if (currentRole && currentBlocks.length > 0) {
+      const onlyBlock = currentBlocks.length === 1 ? currentBlocks[0] : undefined;
+      const collapsible = onlyBlock?.type === 'text' && onlyBlock.citations === undefined;
       messages.push({
         role: currentRole,
-        content:
-          currentBlocks.length === 1 && currentBlocks[0]?.type === 'text'
-            ? currentBlocks[0].text
-            : currentBlocks,
+        content: collapsible && onlyBlock?.type === 'text' ? onlyBlock.text : currentBlocks,
       });
       currentBlocks = [];
     }
@@ -464,11 +472,15 @@ function toMessageInputFromBlock(
 function toGroupableContentPart(block: AnthropicContentBlock): MultiModalContent | undefined {
   switch (block.type) {
     case 'text':
-      return { type: 'text', text: block.text };
+      return {
+        type: 'text',
+        text: block.text,
+        ...(block.citations !== undefined ? { citations: toJSONValue(block.citations) } : {}),
+      };
     case 'thinking':
       return { type: 'thinking', thinking: block.thinking, signature: block.signature };
     case 'redacted_thinking':
-      return { type: 'redacted_thinking', signature: block.signature };
+      return { type: 'redacted_thinking', data: block.data };
     case 'server_tool_use':
       return {
         type: 'server_tool_use',
@@ -535,10 +547,11 @@ function toMessageInputs(payload: AnthropicConversation): MessageInput[] {
 
     const flushPending = () => {
       if (pendingParts.length === 0) return;
-      // A lone text part round-trips as a plain string to match the
-      // one-block-one-string storage convention; mixed runs stay as arrays.
+      // A lone PLAIN text part round-trips as a string to match the
+      // one-block-one-string storage convention; a cited text part (or any mixed
+      // run) stays as an array so citations aren't lost.
       const first = pendingParts[0];
-      if (pendingParts.length === 1 && first?.type === 'text') {
+      if (pendingParts.length === 1 && first?.type === 'text' && first.citations === undefined) {
         inputs.push({ role: message.role, content: first.text });
       } else {
         inputs.push({ role: message.role, content: pendingParts });

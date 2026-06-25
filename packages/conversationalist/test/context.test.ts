@@ -331,6 +331,30 @@ describe('estimateConversationTokens', () => {
     expect(tokens).toBeGreaterThan(0);
   });
 
+  it('counts structural blocks (thinking/tool/result) toward the estimate, not just text', () => {
+    let textOnly = createConversation({ id: 'a' }, testEnvironment);
+    textOnly = appendMessages(textOnly, { role: 'assistant', content: 'hi' }, testEnvironment);
+
+    let withThinking = createConversation({ id: 'b' }, testEnvironment);
+    withThinking = appendMessages(
+      withThinking,
+      {
+        role: 'assistant',
+        content: [
+          { type: 'text', text: 'hi' },
+          // A large thinking payload must NOT estimate as ~zero tokens.
+          { type: 'thinking', thinking: 'x'.repeat(400), signature: 'sig' },
+        ],
+      },
+      testEnvironment,
+    );
+
+    const textTokens = estimateConversationTokens(textOnly, simpleTokenEstimator);
+    const thinkingTokens = estimateConversationTokens(withThinking, simpleTokenEstimator);
+    // The 400-char thinking block adds ~100 tokens over the text-only message.
+    expect(thinkingTokens).toBeGreaterThan(textTokens + 90);
+  });
+
   it('uses estimator from environment when only environment is provided', () => {
     let conv = createConversation({ id: 'test' }, testEnvironment);
     conv = appendMessages(conv, { role: 'user', content: 'Hello world' }, testEnvironment);

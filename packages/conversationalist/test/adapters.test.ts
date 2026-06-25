@@ -1417,7 +1417,7 @@ describe('C5 — Server-tool content blocks (Anthropic adapter)', () => {
 
 describe('C3 — Extended-thinking content blocks (Anthropic adapter)', () => {
   const THINKING_SIGNATURE = 'EqoBCkgIARABGAIiQL8gy6bfP3E5example_signature==';
-  const REDACTED_SIGNATURE = 'EqoBCkgIARRedactedSignature==';
+  const REDACTED_DATA = 'EqoBCkgIARRedactedData==';
 
   it('round-trips a thinking block through fromAnthropicMessages → toAnthropicMessages, preserving signature byte-for-byte', () => {
     const payload: AnthropicConversation = {
@@ -1456,14 +1456,14 @@ describe('C3 — Extended-thinking content blocks (Anthropic adapter)', () => {
     expect(textBlock.text).toBe('The answer is 4.');
   });
 
-  it('round-trips a redacted_thinking block, preserving signature byte-for-byte', () => {
+  it('round-trips a redacted_thinking block, preserving data byte-for-byte', () => {
     const payload: AnthropicConversation = {
       messages: [
         { role: 'user', content: 'Tell me something' },
         {
           role: 'assistant',
           content: [
-            { type: 'redacted_thinking', signature: REDACTED_SIGNATURE },
+            { type: 'redacted_thinking', data: REDACTED_DATA },
             { type: 'text', text: 'Here is my response.' },
           ],
         },
@@ -1482,7 +1482,7 @@ describe('C3 — Extended-thinking content blocks (Anthropic adapter)', () => {
     );
     expect(redactedBlock).toBeDefined();
     // Signature must be byte-for-byte identical
-    expect(redactedBlock.signature).toBe(REDACTED_SIGNATURE);
+    expect(redactedBlock.data).toBe(REDACTED_DATA);
   });
 
   it('preserves block order: thinking → text → tool_use in a round-trip', () => {
@@ -1592,7 +1592,7 @@ describe('C3 — Extended-thinking content blocks (Anthropic adapter)', () => {
         { role: 'user', content: 'Redacted only' },
         {
           role: 'assistant',
-          content: [{ type: 'redacted_thinking', signature: REDACTED_SIGNATURE }],
+          content: [{ type: 'redacted_thinking', data: REDACTED_DATA }],
         },
       ],
     };
@@ -1606,6 +1606,35 @@ describe('C3 — Extended-thinking content blocks (Anthropic adapter)', () => {
       (b: any) => b.type === 'redacted_thinking',
     );
     expect(redactedBlock).toBeDefined();
-    expect(redactedBlock.signature).toBe(REDACTED_SIGNATURE);
+    expect(redactedBlock.data).toBe(REDACTED_DATA);
+  });
+
+  it('preserves citations on a cited text block through the round-trip', () => {
+    const citations = [
+      { type: 'web_search_result_location', url: 'https://example.com', cited_text: 'fact' },
+    ];
+    const payload: AnthropicConversation = {
+      messages: [
+        { role: 'user', content: 'Cite a source' },
+        {
+          role: 'assistant',
+          // A cited text block carries a citations array Anthropic needs for replay.
+          content: [{ type: 'text', text: 'Here is a fact.', citations } as any],
+        },
+      ],
+    };
+
+    const conversation = fromAnthropicMessages(payload);
+    const roundTripped = toAnthropicMessages(conversation);
+
+    const assistantContent = roundTripped.messages.find((m) => m.role === 'assistant')?.content;
+    // Single cited text block collapses to a multi-part array (citations make it
+    // non-plain); the citations must survive.
+    const textBlock = Array.isArray(assistantContent)
+      ? (assistantContent as any[]).find((b: any) => b.type === 'text')
+      : undefined;
+    expect(textBlock).toBeDefined();
+    expect(textBlock.text).toBe('Here is a fact.');
+    expect(textBlock.citations).toEqual(citations);
   });
 });

@@ -3,6 +3,11 @@ import type { JSONValue } from './types';
 export interface TextContent {
   type: 'text';
   text: string;
+  /**
+   * Citation references Anthropic attaches to cited text (e.g. from web search).
+   * Preserved opaquely so they round-trip for display and multi-turn replay.
+   */
+  citations?: JSONValue;
 }
 
 export interface ImageContent {
@@ -25,12 +30,13 @@ export interface ThinkingContent {
 
 /**
  * Redacted extended thinking content block.
- * The thinking text is omitted; only the signature is present to verify integrity.
- * The signature must be preserved byte-for-byte for subsequent conversation turns.
+ * The plaintext reasoning is withheld; Anthropic returns its encrypted payload in
+ * a `data` field (NOT a `signature`). The `data` must be preserved byte-for-byte
+ * and replayed unchanged on subsequent conversation turns.
  */
 export interface RedactedThinkingContent {
   type: 'redacted_thinking';
-  signature: string;
+  data: string;
 }
 
 /**
@@ -106,6 +112,7 @@ export function copyMultiModalContent(item: MultiModalContent): MultiModalConten
     return {
       type: 'text',
       text: item.text,
+      ...(item.citations !== undefined ? { citations: structuredClone(item.citations) } : {}),
     };
   }
   if (item.type === 'thinking') {
@@ -118,7 +125,7 @@ export function copyMultiModalContent(item: MultiModalContent): MultiModalConten
   if (item.type === 'redacted_thinking') {
     return {
       type: 'redacted_thinking',
-      signature: item.signature,
+      data: item.data,
     };
   }
   if (item.type === 'tool_use') {

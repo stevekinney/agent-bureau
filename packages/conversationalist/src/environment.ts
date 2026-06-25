@@ -1,7 +1,7 @@
 import type { TextValueStore } from '@lostgradient/weft/storage';
 
 import type { ConversationHistory, Message, MessagePlugin, TokenEstimator } from './types';
-import { messageText } from './utilities';
+import { messageParts } from './utilities';
 
 export interface SessionInfo {
   id: string;
@@ -54,12 +54,46 @@ export interface ConversationEnvironment {
 }
 
 /**
+ * Approximate serialized character length of a single content part. Text and
+ * image-alt count as their text; thinking/tool/result blocks count by the size
+ * of their payload (reasoning text, encrypted data, tool input/result JSON) so a
+ * message made mostly of structural blocks is NOT estimated as near-zero tokens
+ * and can still be truncated. This is a rough size proxy, not an exact tokenizer.
+ */
+function partCharLength(part: ReturnType<typeof messageParts>[number]): number {
+  switch (part.type) {
+    case 'text':
+      return part.text.length;
+    case 'image':
+      return (part.text ?? '').length + (part.url?.length ?? 0);
+    case 'thinking':
+      return part.thinking.length + part.signature.length;
+    case 'redacted_thinking':
+      return part.data.length;
+    case 'tool_use':
+    case 'server_tool_use':
+      return part.name.length + JSON.stringify(part.input).length;
+    case 'web_search_tool_result':
+      return JSON.stringify(part.content).length;
+    case 'code_execution_tool_result':
+    case 'bash_code_execution_tool_result':
+    case 'text_editor_code_execution_tool_result':
+      return JSON.stringify(part.content).length;
+  }
+}
+
+/**
  * Simple character-based token estimator.
- * Approximates ~4 characters per token (rough average for English text).
+ * Approximates ~4 characters per token (rough average for English text). Counts
+ * ALL content parts — including thinking and tool/result blocks — so structural
+ * payloads are not under-counted toward the context budget.
  */
 export function simpleTokenEstimator(message: Message): number {
-  const text = messageText(message);
-  return Math.ceil(text.length / 4);
+  if (typeof message.content === 'string') {
+    return Math.ceil(message.content.length / 4);
+  }
+  const total = messageParts(message).reduce((sum, part) => sum + partCharLength(part), 0);
+  return Math.ceil(total / 4);
 }
 
 /**

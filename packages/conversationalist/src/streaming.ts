@@ -4,15 +4,7 @@ import {
   isConversationEnvironmentParameter,
   resolveConversationEnvironment,
 } from './environment';
-import type {
-  CodeExecutionToolResultContent,
-  MultiModalContent,
-  RedactedThinkingContent,
-  ServerToolUseContent,
-  TextContent,
-  ThinkingContent,
-  WebSearchToolResultContent,
-} from './multi-modal';
+import type { MultiModalContent } from './multi-modal';
 import type {
   AssistantMessage,
   ConversationHistory as Conversation,
@@ -220,7 +212,9 @@ export function finalizeStreamingMessage(
 export type BlockAccumulatorState =
   | { type: 'text'; buffer: string }
   | { type: 'thinking'; buffer: string; signature: string }
-  | { type: 'redacted_thinking'; signature: string }
+  // redacted_thinking carries its encrypted payload in `data` (seeded at
+  // content_block_start), not a streamed signature.
+  | { type: 'redacted_thinking'; data: string }
   | { type: 'tool_use'; id: string; name: string; inputBuffer: string }
   | { type: 'server_tool_use'; id: string; name: string; inputBuffer: string }
   // Server-tool result blocks (web search, code execution) arrive with their
@@ -255,20 +249,37 @@ export interface BlockAccumulator {
 }
 
 /**
- * The result of finalizing a streamed message. Client `tool_use` blocks are
- * returned separately as {@link ToolCall}s rather than as assistant content,
- * because the conversation model represents a client tool call as its own
- * `tool-call` role message — pairing a later `tool-result` to it relies on that
- * message existing. The caller appends the assistant `content` message, then one
- * `tool-call` message per entry in `toolCalls` (in order), preserving the
- * stream's relative block order. Server tool use (`server_tool_use`) stays in
- * `content`, since it is genuinely part of the assistant turn's content.
+ * One ordered piece of a finalized stream. Either a run of assistant content
+ * blocks, or a single client tool call (which the conversation model represents
+ * as its own `tool-call` role message). Emitting these in order preserves the
+ * stream's true block order even when a client `tool_use` is interleaved between
+ * content blocks (`[text, tool_use, text]`).
+ */
+export type StreamSegment =
+  | { kind: 'content'; content: MultiModalContent[] }
+  | { kind: 'tool-call'; toolCall: ToolCall };
+
+/**
+ * The result of finalizing a streamed message: an ordered list of
+ * {@link StreamSegment}s. The caller appends each segment in order — a `content`
+ * segment as an assistant message, a `tool-call` segment as a `tool-call` role
+ * message — which both keeps tool-call/tool-result pairing intact (the tool call
+ * becomes a real message a later `tool-result` can reference) AND preserves the
+ * original block order. {@link contentOf} / {@link toolCallsOf} are convenience
+ * accessors when order across the content/tool boundary does not matter.
  */
 export interface StreamFinalizeResult {
-  /** Assistant message content: text, thinking, server-tool, and search-result blocks, in order. */
-  content: MultiModalContent[];
-  /** Client tool calls extracted from the stream, in block order, to append as `tool-call` messages. */
-  toolCalls: ToolCall[];
+  segments: StreamSegment[];
+}
+
+/** All assistant-content blocks across a finalized stream, in order (ignoring tool-call interleaving). */
+export function contentOf(result: StreamFinalizeResult): MultiModalContent[] {
+  return result.segments.flatMap((s) => (s.kind === 'content' ? s.content : []));
+}
+
+/** All client tool calls across a finalized stream, in block order. */
+export function toolCallsOf(result: StreamFinalizeResult): ToolCall[] {
+  return result.segments.flatMap((s) => (s.kind === 'tool-call' ? [s.toolCall] : []));
 }
 
 /**
@@ -345,10 +356,10 @@ function createBlockAccumulator(initial: BlockAccumulatorState): BlockAccumulato
       }
     },
     setSignature(signature: string) {
+      // Only thinking blocks receive a streamed signature_delta. A
+      // redacted_thinking block's encrypted `data` is seeded at openBlock.
       if (state.type === 'thinking') {
         state = { ...state, signature };
-      } else if (state.type === 'redacted_thinking') {
-        state = { type: 'redacted_thinking', signature };
       }
     },
     appendInputJsonDelta(delta: string) {
@@ -381,12 +392,14 @@ function createBlockAccumulator(initial: BlockAccumulatorState): BlockAccumulato
  * // On input_json_delta:
  * acc.getBlock(1)?.appendInputJsonDelta(delta.partial_json);
  *
- * // On message_stop:
- * const { content, toolCalls } = acc.finalize();
- * // Append the assistant content, then one tool-call message per client call:
- * let conversation = appendMessages(conversation, { role: 'assistant', content });
- * for (const toolCall of toolCalls) {
- *   conversation = appendMessages(conversation, { role: 'tool-call', content: '', toolCall });
+ * // On message_stop: append each segment in order to preserve block order and
+ * // keep tool-call/tool-result pairing intact.
+ * const { segments } = acc.finalize();
+ * for (const segment of segments) {
+ *   conversation =
+ *     segment.kind === 'content'
+ *       ? appendMessages(conversation, { role: 'assistant', content: segment.content })
+ *       : appendMessages(conversation, { role: 'tool-call', content: '', toolCall: segment.toolCall });
  * }
  * ```
  */
@@ -403,8 +416,18 @@ export function createStreamingAccumulator(): StreamingMessageAccumulator {
       return blocks.get(index);
     },
     finalize(): StreamFinalizeResult {
-      const content: MultiModalContent[] = [];
-      const toolCalls: ToolCall[] = [];
+      const segments: StreamSegment[] = [];
+      // The current run of contiguous assistant-content blocks. A client tool_use
+      // flushes it and emits a tool-call segment, so interleaved sequences like
+      // [text, tool_use, text] keep their true block order across the segments.
+      let currentContent: MultiModalContent[] = [];
+      const flushContent = () => {
+        if (currentContent.length > 0) {
+          segments.push({ kind: 'content', content: currentContent });
+          currentContent = [];
+        }
+      };
+
       // Sort by index to preserve block order
       const sortedIndices = [...blocks.keys()].sort((a, b) => a - b);
 
@@ -414,73 +437,62 @@ export function createStreamingAccumulator(): StreamingMessageAccumulator {
 
         const { state } = block;
         switch (state.type) {
-          case 'text': {
-            const textPart: TextContent = { type: 'text', text: state.buffer };
-            content.push(textPart);
+          case 'text':
+            currentContent.push({ type: 'text', text: state.buffer });
             break;
-          }
-          case 'thinking': {
-            const thinkingPart: ThinkingContent = {
+          case 'thinking':
+            currentContent.push({
               type: 'thinking',
               thinking: state.buffer,
               signature: state.signature,
-            };
-            content.push(thinkingPart);
+            });
             break;
-          }
-          case 'redacted_thinking': {
-            const redactedPart: RedactedThinkingContent = {
-              type: 'redacted_thinking',
-              signature: state.signature,
-            };
-            content.push(redactedPart);
+          case 'redacted_thinking':
+            currentContent.push({ type: 'redacted_thinking', data: state.data });
             break;
-          }
           case 'tool_use': {
-            // Client tool calls become tool-call role messages, not content —
-            // see StreamFinalizeResult. This keeps tool-call/tool-result pairing
-            // intact when the caller appends the result later.
-            toolCalls.push({
-              id: state.id,
-              name: state.name,
-              arguments: parseStreamedToolInput(state.name, state.inputBuffer),
+            // Client tool call: flush the content run first so the tool-call
+            // segment lands in its true block position, then emit it.
+            flushContent();
+            segments.push({
+              kind: 'tool-call',
+              toolCall: {
+                id: state.id,
+                name: state.name,
+                arguments: parseStreamedToolInput(state.name, state.inputBuffer),
+              },
             });
             break;
           }
-          case 'server_tool_use': {
-            const serverToolPart: ServerToolUseContent = {
+          case 'server_tool_use':
+            currentContent.push({
               type: 'server_tool_use',
               id: state.id,
               name: state.name,
               input: parseStreamedToolInput(state.name, state.inputBuffer),
-            };
-            content.push(serverToolPart);
+            });
             break;
-          }
-          case 'web_search_tool_result': {
-            const searchResultPart: WebSearchToolResultContent = {
+          case 'web_search_tool_result':
+            currentContent.push({
               type: 'web_search_tool_result',
               tool_use_id: state.tool_use_id,
               content: state.content,
-            };
-            content.push(searchResultPart);
+            });
             break;
-          }
           case 'code_execution_tool_result':
           case 'bash_code_execution_tool_result':
-          case 'text_editor_code_execution_tool_result': {
-            const codeResultPart: CodeExecutionToolResultContent = {
+          case 'text_editor_code_execution_tool_result':
+            currentContent.push({
               type: state.type,
               tool_use_id: state.tool_use_id,
               content: state.content,
-            };
-            content.push(codeResultPart);
+            });
             break;
-          }
         }
       }
 
-      return { content, toolCalls };
+      flushContent();
+      return { segments };
     },
   };
 }
