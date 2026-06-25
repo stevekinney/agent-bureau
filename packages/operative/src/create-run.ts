@@ -81,6 +81,9 @@ export function createActiveRun(options: RunOptions, durable?: DurableRunRouting
       {
         runId: durable.runId,
         sessionId: durable.sessionId ?? durable.runId,
+        // F2: thread agentName from RunOptions into the durable input. Falls
+        // back to '' inside createDurableActiveRun if undefined here.
+        agentName: options.agentName,
         options,
         prompt: durable.prompt,
       },

@@ -138,6 +138,52 @@ export interface SessionQueryHookContext {
   readonly input: unknown;
 }
 
+// ---------------------------------------------------------------------------
+// Phase F — Durable multi-agent hook context types (C3 completeness rule)
+// Every multi-agent state transition exposes a hook.
+// ---------------------------------------------------------------------------
+
+/**
+ * Context passed to onChildWorkflowStarted hooks.
+ * Fires when a subagent tool starts a child run (in-process or durable).
+ */
+export interface ChildWorkflowStartedHookContext {
+  /** The delegating agent's name. */
+  readonly parentAgentName: string;
+  /** The delegating run's id. */
+  readonly parentRunId: string;
+  /** The subagent's name. */
+  readonly childAgentName: string;
+  /** The prompt sent to the subagent. */
+  readonly input: string;
+  /** True when the child is a durable Weft child workflow. */
+  readonly durable: boolean;
+}
+
+/**
+ * Context passed to onHandoffOccurred hooks.
+ * Fires when a handoff tool transfers control to another agent.
+ */
+export interface HandoffOccurredHookContext {
+  /** The agent handing off. */
+  readonly sourceAgentName: string;
+  /** The agent receiving the handoff. */
+  readonly targetAgentName: string;
+  /** The session id (when the handoff is session-scoped). */
+  readonly sessionId?: string;
+}
+
+/**
+ * Context passed to onHumanWaitParked hooks.
+ * Fires when a durable run parks on ctx.waitForSignal waiting for a human reply.
+ */
+export interface HumanWaitParkedHookContext {
+  /** The signal name the run is parked on (e.g. `'human-response'`). */
+  readonly signalName: string;
+  /** The run id of the parked workflow. */
+  readonly runId: string;
+}
+
 /** Context passed to beforeContextAssembly hooks. */
 export interface ContextAssemblyHookContext {
   conversation: StepContext['conversation'];
@@ -245,4 +291,14 @@ export interface OperativeHookMap extends HookMap {
   onSessionUpdate: (context: SessionUpdateHookContext) => Promise<void>;
   /** Called when session.query() is invoked, after the last run is resolved. Read-only, non-blocking. */
   onSessionQuery: (context: SessionQueryHookContext) => Promise<void>;
+  // -------------------------------------------------------------------------
+  // Phase F — Durable multi-agent transition hooks (C3 completeness rule).
+  // Every multi-agent state transition exposes a hook. Read-only, non-blocking.
+  // -------------------------------------------------------------------------
+  /** Called when a subagent tool starts a child run (in-process or durable child workflow). Read-only, non-blocking. */
+  onChildWorkflowStarted: (context: ChildWorkflowStartedHookContext) => Promise<void>;
+  /** Called when a handoff tool transfers control to another agent. Read-only, non-blocking. */
+  onHandoffOccurred: (context: HandoffOccurredHookContext) => Promise<void>;
+  /** Called when a durable run parks waiting for a human signal (HITL). Read-only, non-blocking. */
+  onHumanWaitParked: (context: HumanWaitParkedHookContext) => Promise<void>;
 }

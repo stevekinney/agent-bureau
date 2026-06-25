@@ -48,6 +48,23 @@ describe('B2 tearout — remaining surface is coherent', () => {
     expect(typeof operative.createHandoffTool).toBe('function');
   });
 
+  // F1/F2/F3 — Phase F multi-agent durable exports
+  it('F1: ChildWorkflowStartedEvent is exported', () => {
+    expect(typeof operative.ChildWorkflowStartedEvent).toBe('function');
+  });
+
+  it('F2: HandoffOccurredEvent is exported', () => {
+    expect(typeof operative.HandoffOccurredEvent).toBe('function');
+  });
+
+  it('F3: HumanWaitParkedEvent is exported', () => {
+    expect(typeof operative.HumanWaitParkedEvent).toBe('function');
+  });
+
+  it('F3: createRequestHumanInputTool is exported', () => {
+    expect(typeof operative.createRequestHumanInputTool).toBe('function');
+  });
+
   it('createAgentRegistry is still exported', () => {
     expect(typeof operative.createAgentRegistry).toBe('function');
   });
