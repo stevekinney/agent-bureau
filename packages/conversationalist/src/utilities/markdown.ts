@@ -122,15 +122,45 @@ function resolveMarkdownOptions(options: ToMarkdownOptions = {}): ResolvedMarkdo
   };
 }
 
+/**
+ * Replaces the payload of structural tool-result / tool-use content blocks with
+ * the placeholder. Mirrors `redactToolResults` for the role-level tool-result
+ * field — server-tool results (web search/fetch, code execution) carry their
+ * data inside assistant content, so they must be redacted there too.
+ */
+function redactStructuralToolBlocks(
+  content: string | MultiModalContent[],
+  placeholder: string,
+): string | MultiModalContent[] {
+  if (typeof content === 'string') return content;
+  return content.map((part) => {
+    switch (part.type) {
+      case 'server_tool_use':
+        return { ...part, input: placeholder };
+      case 'web_search_tool_result':
+      case 'web_fetch_tool_result':
+      case 'code_execution_tool_result':
+      case 'bash_code_execution_tool_result':
+      case 'text_editor_code_execution_tool_result':
+        return { ...part, content: placeholder };
+      default:
+        return part;
+    }
+  });
+}
+
 function sanitizeMessage(message: Message, options: ResolvedMarkdownOptions): Message {
   const metadata = options.stripTransient
     ? stripTransientFromRecord({ ...message.metadata })
     : { ...message.metadata };
 
+  const copiedContent = copyContent(message.content);
   const content =
     options.redactHiddenContent && message.hidden
       ? options.redactedPlaceholder
-      : copyContent(message.content);
+      : options.redactToolResults
+        ? redactStructuralToolBlocks(copiedContent, options.redactedPlaceholder)
+        : copiedContent;
 
   const toolCall = message.toolCall
     ? {

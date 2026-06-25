@@ -512,6 +512,38 @@ describe('toMarkdown', () => {
       expect(result).toContain('call-1');
       expect(result).toContain('search');
     });
+
+    test('redacts structural tool-result block content (web_search/code-execution) in assistant content', () => {
+      const conversation = createConversation([
+        {
+          id: 'm1',
+          role: 'assistant',
+          content: [
+            { type: 'text', text: 'Result below.' },
+            {
+              type: 'web_search_tool_result',
+              tool_use_id: 'stu-1',
+              content: [{ snippet: 'leaked-secret-snippet' }],
+            },
+          ],
+          position: 0,
+          createdAt: '2024-01-15T10:00:00.000Z',
+          metadata: {},
+          hidden: false,
+        },
+      ]);
+
+      // includeMetadata embeds the (redacted) content JSON, so the placeholder
+      // is observable and we can prove the secret never reaches the output.
+      const result = toMarkdown(conversation, {
+        includeMetadata: true,
+        redactToolResults: true,
+        redactedPlaceholder: '[MASKED]',
+      });
+
+      expect(result).not.toContain('leaked-secret-snippet');
+      expect(result).toContain('[MASKED]');
+    });
   });
 });
 

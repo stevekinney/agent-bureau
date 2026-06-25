@@ -3,6 +3,7 @@ import { getMessages } from '../conversation/index';
 import { ensureConversationSafe } from '../conversation/validation';
 import type { ConversationEnvironment } from '../environment';
 import { resolveConversationEnvironment, simpleTokenEstimator } from '../environment';
+import type { MultiModalContent } from '../multi-modal';
 import { isStreamingMessage } from '../streaming';
 import type { ConversationHistory, Message, MessageInput } from '../types';
 import { CURRENT_SCHEMA_VERSION } from '../types';
@@ -144,17 +145,49 @@ export function chunkMessages(
   return chunks;
 }
 
+const STRIPPED_PLACEHOLDER = '[tool result]';
+
+/**
+ * Replaces structural tool-result/tool-use block payloads inside a content array
+ * with a placeholder, mirroring the role-level tool-result stripping. Server-tool
+ * results (web search/fetch, code execution) store stdout / fetched pages /
+ * snippets inside assistant content, so compaction must shrink them there too.
+ */
+function stripStructuralToolBlocks(
+  content: string | ReadonlyArray<MultiModalContent>,
+): string | MultiModalContent[] {
+  if (typeof content === 'string') return content;
+  return content.map((part) => {
+    switch (part.type) {
+      case 'server_tool_use':
+        return { ...part, input: STRIPPED_PLACEHOLDER };
+      case 'web_search_tool_result':
+      case 'web_fetch_tool_result':
+      case 'code_execution_tool_result':
+      case 'bash_code_execution_tool_result':
+      case 'text_editor_code_execution_tool_result':
+        return { ...part, content: STRIPPED_PLACEHOLDER };
+      default:
+        return part;
+    }
+  });
+}
+
 export function stripToolResultDetails(messages: Message[]): Message[] {
   return messages.map((message) => {
     if (message.role === 'tool-result' && message.toolResult) {
       return {
         ...message,
-        content: '[tool result]',
+        content: STRIPPED_PLACEHOLDER,
         toolResult: {
           ...message.toolResult,
-          content: '[tool result]',
+          content: STRIPPED_PLACEHOLDER,
         },
       } as Message;
+    }
+    // Structural tool-result blocks live inside assistant content; strip them too.
+    if (typeof message.content !== 'string') {
+      return { ...message, content: stripStructuralToolBlocks(message.content) } as Message;
     }
     return message;
   });

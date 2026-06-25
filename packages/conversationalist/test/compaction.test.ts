@@ -259,6 +259,37 @@ describe('summarizer-based compaction', () => {
       const stripped = stripToolResultDetailsBatch(messages);
       expect(stripped[0]).toBe(messages[0]);
     });
+
+    test('strips structural tool-result block content inside assistant content', () => {
+      const messages: Message[] = [
+        {
+          id: 'm-0',
+          role: 'assistant',
+          content: [
+            { type: 'text', text: 'See results.' },
+            {
+              type: 'web_search_tool_result',
+              tool_use_id: 'stu-1',
+              content: [{ snippet: 'a very long search snippet to be stripped' }],
+            },
+          ],
+          position: 0,
+          createdAt: new Date().toISOString(),
+          metadata: {},
+          hidden: false,
+        },
+      ];
+
+      const stripped = stripToolResultDetailsBatch(messages);
+      const parts = stripped[0].content as Array<{
+        type: string;
+        text?: string;
+        content?: unknown;
+      }>;
+      // Text is preserved; the structural result content is replaced.
+      expect(parts[0]).toEqual({ type: 'text', text: 'See results.' });
+      expect(parts[1]?.content).toBe('[tool result]');
+    });
   });
 
   describe('calculateChunkSize', () => {
