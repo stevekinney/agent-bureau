@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 
-import { toAnthropicMessages } from '../src/adapters/anthropic';
+import type { AnthropicConversation } from '../src/adapters/anthropic';
+import { fromAnthropicMessages, toAnthropicMessages } from '../src/adapters/anthropic';
 import { toGeminiMessages } from '../src/adapters/gemini';
 import { toOpenAIMessages, toOpenAIMessagesGrouped } from '../src/adapters/openai';
 import { simpleTokenEstimator, truncateToTokenLimit } from '../src/context';
@@ -1185,5 +1186,147 @@ describe('Streaming message protection in adapters', () => {
     expect(contents).toHaveLength(2);
     expect(contents[0]?.role).toBe('user');
     expect(contents[1]?.role).toBe('model');
+  });
+});
+
+describe('C3 — Extended-thinking content blocks (Anthropic adapter)', () => {
+  const THINKING_SIGNATURE = 'EqoBCkgIARABGAIiQL8gy6bfP3E5example_signature==';
+  const REDACTED_SIGNATURE = 'EqoBCkgIARRedactedSignature==';
+
+  it('round-trips a thinking block through fromAnthropicMessages → toAnthropicMessages, preserving signature byte-for-byte', () => {
+    const payload: AnthropicConversation = {
+      messages: [
+        { role: 'user', content: 'What is 2+2?' },
+        {
+          role: 'assistant',
+          content: [
+            {
+              type: 'thinking',
+              thinking: 'Let me think... 2+2 is 4',
+              signature: THINKING_SIGNATURE,
+            },
+            { type: 'text', text: 'The answer is 4.' },
+          ],
+        },
+      ],
+    };
+
+    const conversation = fromAnthropicMessages(payload);
+    const roundTripped = toAnthropicMessages(conversation);
+
+    // Should have user and assistant messages
+    expect(roundTripped.messages).toHaveLength(2);
+    const assistantBlocks = roundTripped.messages[1]?.content;
+    expect(Array.isArray(assistantBlocks)).toBe(true);
+
+    const thinkingBlock = (assistantBlocks as any[]).find((b: any) => b.type === 'thinking');
+    expect(thinkingBlock).toBeDefined();
+    expect(thinkingBlock.thinking).toBe('Let me think... 2+2 is 4');
+    // Signature must be byte-for-byte identical
+    expect(thinkingBlock.signature).toBe(THINKING_SIGNATURE);
+
+    const textBlock = (assistantBlocks as any[]).find((b: any) => b.type === 'text');
+    expect(textBlock).toBeDefined();
+    expect(textBlock.text).toBe('The answer is 4.');
+  });
+
+  it('round-trips a redacted_thinking block, preserving signature byte-for-byte', () => {
+    const payload: AnthropicConversation = {
+      messages: [
+        { role: 'user', content: 'Tell me something' },
+        {
+          role: 'assistant',
+          content: [
+            { type: 'redacted_thinking', signature: REDACTED_SIGNATURE },
+            { type: 'text', text: 'Here is my response.' },
+          ],
+        },
+      ],
+    };
+
+    const conversation = fromAnthropicMessages(payload);
+    const roundTripped = toAnthropicMessages(conversation);
+
+    expect(roundTripped.messages).toHaveLength(2);
+    const assistantBlocks = roundTripped.messages[1]?.content;
+    expect(Array.isArray(assistantBlocks)).toBe(true);
+
+    const redactedBlock = (assistantBlocks as any[]).find(
+      (b: any) => b.type === 'redacted_thinking',
+    );
+    expect(redactedBlock).toBeDefined();
+    // Signature must be byte-for-byte identical
+    expect(redactedBlock.signature).toBe(REDACTED_SIGNATURE);
+  });
+
+  it('preserves block order: thinking → text → tool_use in a round-trip', () => {
+    const payload: AnthropicConversation = {
+      messages: [
+        { role: 'user', content: 'What is the weather?' },
+        {
+          role: 'assistant',
+          content: [
+            { type: 'thinking', thinking: 'I should check weather', signature: THINKING_SIGNATURE },
+            { type: 'text', text: 'Let me look that up.' },
+            { type: 'tool_use', id: 'call-weather', name: 'get_weather', input: { city: 'NYC' } },
+          ],
+        },
+        {
+          role: 'user',
+          content: [{ type: 'tool_result', tool_use_id: 'call-weather', content: '{"temp": 72}' }],
+        },
+        {
+          role: 'assistant',
+          content: 'The weather in NYC is 72°F.',
+        },
+      ],
+    };
+
+    const conversation = fromAnthropicMessages(payload);
+    const roundTripped = toAnthropicMessages(conversation);
+
+    // Find the assistant message that has thinking + text blocks
+    const assistantMsgWithThinking = roundTripped.messages.find(
+      (m) =>
+        m.role === 'assistant' &&
+        Array.isArray(m.content) &&
+        (m.content as any[]).some((b: any) => b.type === 'thinking'),
+    );
+    expect(assistantMsgWithThinking).toBeDefined();
+
+    const blocks = assistantMsgWithThinking?.content as any[];
+    // Block order must be preserved
+    expect(blocks[0]?.type).toBe('thinking');
+    expect(blocks[0]?.signature).toBe(THINKING_SIGNATURE);
+    expect(blocks[1]?.type).toBe('text');
+  });
+
+  it('does not drop thinking blocks during compaction / toAnthropicMessages export', () => {
+    const payload: AnthropicConversation = {
+      messages: [
+        { role: 'user', content: 'Summarize' },
+        {
+          role: 'assistant',
+          content: [
+            {
+              type: 'thinking',
+              thinking: 'Internal reasoning here',
+              signature: THINKING_SIGNATURE,
+            },
+            { type: 'text', text: 'Here is a summary.' },
+          ],
+        },
+      ],
+    };
+
+    const conversation = fromAnthropicMessages(payload);
+    // Re-export should still have the thinking block
+    const exported = toAnthropicMessages(conversation);
+    const assistantContent = exported.messages.find((m) => m.role === 'assistant')?.content;
+    expect(Array.isArray(assistantContent)).toBe(true);
+
+    const thinkingBlock = (assistantContent as any[]).find((b: any) => b.type === 'thinking');
+    expect(thinkingBlock).toBeDefined();
+    expect(thinkingBlock.signature).toBe(THINKING_SIGNATURE);
   });
 });

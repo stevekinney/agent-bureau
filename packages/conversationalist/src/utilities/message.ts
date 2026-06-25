@@ -107,9 +107,12 @@ export function messageHasImages(message: Message): boolean {
 export function messageToString(message: Message): string {
   if (typeof message.content === 'string') return message.content;
   return messageParts(message)
-    .map((part) =>
-      part.type === 'text' ? part.text : `![${part.text ?? ''}](${(part as { url: string }).url})`,
-    )
+    .map((part) => {
+      if (part.type === 'text') return part.text;
+      if (part.type === 'thinking') return '';
+      if (part.type === 'redacted_thinking') return '';
+      return `![${part.text ?? ''}](${part.url})`;
+    })
     .join('\n\n');
 }
 

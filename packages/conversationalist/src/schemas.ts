@@ -24,10 +24,12 @@ const isPlainObject = (value: unknown): value is Record<string, unknown> => {
 };
 
 type RawMultiModalContent = {
-  type: 'text' | 'image';
+  type: 'text' | 'image' | 'thinking' | 'redacted_thinking';
   text?: string | undefined;
   url?: string | undefined;
   mimeType?: string | undefined;
+  thinking?: string | undefined;
+  signature?: string | undefined;
 };
 
 function toMultiModalContent(value: RawMultiModalContent): MultiModalContent {
@@ -35,6 +37,21 @@ function toMultiModalContent(value: RawMultiModalContent): MultiModalContent {
     return {
       type: 'text',
       text: value.text ?? '',
+    };
+  }
+
+  if (value.type === 'thinking') {
+    return {
+      type: 'thinking',
+      thinking: value.thinking ?? '',
+      signature: value.signature ?? '',
+    };
+  }
+
+  if (value.type === 'redacted_thinking') {
+    return {
+      type: 'redacted_thinking',
+      signature: value.signature ?? '',
     };
   }
 
@@ -77,7 +94,7 @@ export const jsonValueSchema: z.ZodType<JSONValue> = z.lazy(() => {
 }) satisfies z.ZodType<JSONValue>;
 
 /**
- * Zod schema for multi-modal content parts (text or image).
+ * Zod schema for multi-modal content parts (text, image, thinking, or redacted_thinking).
  */
 export const multiModalContentSchema = z
   .discriminatedUnion('type', [
@@ -90,6 +107,15 @@ export const multiModalContentSchema = z
       url: z.string().url(),
       mimeType: z.string().optional(),
       text: z.string().optional(),
+    }),
+    z.object({
+      type: z.literal('thinking'),
+      thinking: z.string(),
+      signature: z.string(),
+    }),
+    z.object({
+      type: z.literal('redacted_thinking'),
+      signature: z.string(),
     }),
   ])
   .transform(toMultiModalContent) satisfies z.ZodType<MultiModalContent>;

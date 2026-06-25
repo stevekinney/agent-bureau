@@ -62,13 +62,35 @@ export interface AnthropicToolResultBlock {
 }
 
 /**
+ * Anthropic extended thinking content block.
+ * The signature must be preserved byte-for-byte for subsequent conversation turns.
+ */
+export interface AnthropicThinkingBlock {
+  type: 'thinking';
+  thinking: string;
+  signature: string;
+}
+
+/**
+ * Anthropic redacted extended thinking content block.
+ * The thinking text is omitted; only the signature is present to verify integrity.
+ * The signature must be preserved byte-for-byte for subsequent conversation turns.
+ */
+export interface AnthropicRedactedThinkingBlock {
+  type: 'redacted_thinking';
+  signature: string;
+}
+
+/**
  * Anthropic content block union type.
  */
 export type AnthropicContentBlock =
   | AnthropicTextBlock
   | AnthropicImageBlock
   | AnthropicToolUseBlock
-  | AnthropicToolResultBlock;
+  | AnthropicToolResultBlock
+  | AnthropicThinkingBlock
+  | AnthropicRedactedThinkingBlock;
 
 /**
  * Anthropic message format for the Messages API.
@@ -99,33 +121,45 @@ function toAnthropicContent(
 
   const blocks: AnthropicContentBlock[] = [];
   for (const part of content) {
-    if (part.type === 'text') {
-      blocks.push({ type: 'text', text: part.text ?? '' });
-    } else if (part.type === 'image') {
-      // Anthropic supports both URL and base64
-      const url = part.url ?? '';
-      if (url.startsWith('data:')) {
-        // Base64 data URL
-        const matches = url.match(/^data:([^;]+);base64,(.+)$/);
-        if (matches && matches[1] && matches[2]) {
+    switch (part.type) {
+      case 'text':
+        blocks.push({ type: 'text', text: part.text ?? '' });
+        break;
+      case 'thinking':
+        // Preserve thinking blocks byte-for-byte (signature is integrity-critical)
+        blocks.push({ type: 'thinking', thinking: part.thinking, signature: part.signature });
+        break;
+      case 'redacted_thinking':
+        // Preserve redacted_thinking blocks byte-for-byte (signature is integrity-critical)
+        blocks.push({ type: 'redacted_thinking', signature: part.signature });
+        break;
+      case 'image': {
+        // Anthropic supports both URL and base64
+        const url = part.url ?? '';
+        if (url.startsWith('data:')) {
+          // Base64 data URL
+          const matches = url.match(/^data:([^;]+);base64,(.+)$/);
+          if (matches && matches[1] && matches[2]) {
+            blocks.push({
+              type: 'image',
+              source: {
+                type: 'base64',
+                media_type: matches[1],
+                data: matches[2],
+              },
+            });
+          }
+        } else {
+          // Regular URL
           blocks.push({
             type: 'image',
             source: {
-              type: 'base64',
-              media_type: matches[1],
-              data: matches[2],
+              type: 'url',
+              url,
             },
           });
         }
-      } else {
-        // Regular URL
-        blocks.push({
-          type: 'image',
-          source: {
-            type: 'url',
-            url,
-          },
-        });
+        break;
       }
     }
   }
@@ -343,6 +377,33 @@ function toMessageInputFromBlock(
     };
   }
 
+  if (block.type === 'thinking') {
+    // Preserve thinking block with signature byte-for-byte
+    return {
+      role,
+      content: [
+        {
+          type: 'thinking',
+          thinking: block.thinking,
+          signature: block.signature,
+        },
+      ],
+    };
+  }
+
+  if (block.type === 'redacted_thinking') {
+    // Preserve redacted_thinking block with signature byte-for-byte
+    return {
+      role,
+      content: [
+        {
+          type: 'redacted_thinking',
+          signature: block.signature,
+        },
+      ],
+    };
+  }
+
   if (block.type === 'image') {
     if (block.source.type === 'url') {
       return {
@@ -406,9 +467,58 @@ function toMessageInputs(payload: AnthropicConversation): MessageInput[] {
       continue;
     }
 
+    // Thinking and redacted_thinking blocks must be grouped with the following
+    // text block (if any) within the same Anthropic message. This ensures that
+    // an assistant turn containing [thinking, text] round-trips as a single
+    // multi-part message with the signature preserved byte-for-byte.
+    //
+    // All other block types (text, image, tool_use, tool_result) retain the
+    // existing one-block-one-MessageInput behaviour so pre-existing tests and
+    // storage formats are unaffected.
+    let pendingThinkingParts: MultiModalContent[] = [];
+
+    const flushThinkingParts = () => {
+      if (pendingThinkingParts.length === 0) return;
+      inputs.push({ role: message.role, content: [...pendingThinkingParts] });
+      pendingThinkingParts = [];
+    };
+
     for (const block of message.content) {
-      inputs.push(toMessageInputFromBlock(message.role, block));
+      switch (block.type) {
+        case 'thinking':
+          // Accumulate thinking blocks; they will be flushed with the next text block
+          pendingThinkingParts.push({
+            type: 'thinking',
+            thinking: block.thinking,
+            signature: block.signature,
+          });
+          break;
+        case 'redacted_thinking':
+          // Accumulate redacted_thinking blocks similarly
+          pendingThinkingParts.push({ type: 'redacted_thinking', signature: block.signature });
+          break;
+        case 'text':
+          if (pendingThinkingParts.length > 0) {
+            // Merge accumulated thinking blocks with this text block
+            inputs.push({
+              role: message.role,
+              content: [...pendingThinkingParts, { type: 'text', text: block.text }],
+            });
+            pendingThinkingParts = [];
+          } else {
+            inputs.push({ role: message.role, content: block.text });
+          }
+          break;
+        default:
+          // For image, tool_use, tool_result: flush any pending thinking blocks first
+          flushThinkingParts();
+          inputs.push(toMessageInputFromBlock(message.role, block));
+          break;
+      }
     }
+
+    // Flush any trailing thinking blocks that had no following text block
+    flushThinkingParts();
   }
 
   return inputs;
