@@ -364,7 +364,9 @@ describe('instrument', () => {
     // tracer: a no-parent call must forward `undefined`, and a sibling call WITH a
     // distinct sentinel parent must forward THAT EXACT parent by identity. Together
     // these prove the `undefined` is a real "no parent" decision, not a coincidence.
-    const sentinelParent = { __sentinel: 'parent' } as unknown as Context;
+    // Single cast (matching the existing supplied-parent test above): we only
+    // need a distinct reference to assert forwarding by identity via `toBe`.
+    const sentinelParent = { __sentinel: 'parent' } as Context;
     const startedSpans: Array<{
       name: string;
       options?: SpanOptions;
