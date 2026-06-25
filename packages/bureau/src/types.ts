@@ -626,7 +626,7 @@ export interface DurableScheduleDefinition {
   agentName: string;
   /** Input message delivered to the agent each fire. */
   input: string;
-  /** Cron expression (e.g. `'0 9 * * *'`) or ISO-8601 repeat duration (e.g. `'PT6H'`). */
+  /** Cron expression (e.g. `'0 9 * * *'`) or weft duration shorthand (e.g. `'6h'`, `'30s'`, `'1d'`). */
   spec: string;
   /**
    * When given, each schedule fire appends a run to this session — building a
