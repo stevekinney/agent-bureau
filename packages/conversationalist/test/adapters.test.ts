@@ -1264,7 +1264,7 @@ describe('C5 — Server-tool content blocks (Anthropic adapter)', () => {
     expect(searchResultBlock.tool_use_id).toBe('stu_123');
   });
 
-  it('preserves block index order for server_tool_use interleaved with text in a round-trip', () => {
+  it('round-trips [text, server_tool_use, text] as ONE assistant message with blocks in their original order', () => {
     const payload: AnthropicConversation = {
       messages: [
         { role: 'user', content: 'Do a search' },
@@ -1282,20 +1282,63 @@ describe('C5 — Server-tool content blocks (Anthropic adapter)', () => {
     const conversation = fromAnthropicMessages(payload);
     const roundTripped = toAnthropicMessages(conversation);
 
-    // The assistant turn should preserve all blocks in order
-    const assistantMsg = roundTripped.messages.find((m) => m.role === 'assistant');
-    expect(assistantMsg).toBeDefined();
+    // Groupable blocks of one Anthropic turn must round-trip as a single
+    // assistant message, not be fragmented across multiple messages.
+    const assistantMessages = roundTripped.messages.filter((m) => m.role === 'assistant');
+    expect(assistantMessages).toHaveLength(1);
 
-    // The round-trip creates separate messages per block (existing one-block-one-message pattern)
-    // Verify both text messages and the server_tool_use message are present
-    const allAssistantMessages = roundTripped.messages.filter((m) => m.role === 'assistant');
-    const hasServerToolUse = roundTripped.messages.some(
-      (m) =>
-        Array.isArray(m.content) &&
-        (m.content as any[]).some((b: any) => b.type === 'server_tool_use' && b.id === 'stu_a'),
-    );
-    expect(hasServerToolUse).toBe(true);
-    expect(allAssistantMessages.length).toBeGreaterThanOrEqual(1);
+    const blocks = assistantMessages[0]?.content;
+    expect(Array.isArray(blocks)).toBe(true);
+
+    // Block TYPES must appear in exactly the original order.
+    const typedBlocks = blocks as Array<{ type: string }>;
+    expect(typedBlocks.map((b) => b.type)).toEqual(['text', 'server_tool_use', 'text']);
+
+    // And the actual values must be preserved, not just the shape.
+    const first = typedBlocks[0] as { type: 'text'; text: string };
+    const middle = typedBlocks[1] as { type: 'server_tool_use'; id: string; name: string };
+    const last = typedBlocks[2] as { type: 'text'; text: string };
+    expect(first.text).toBe('Searching now.');
+    expect(middle.id).toBe('stu_a');
+    expect(middle.name).toBe('web_search');
+    expect(last.text).toBe('Done searching.');
+  });
+
+  it('keeps a client tool_use interleaved between text blocks in true order across the round-trip', () => {
+    // tool_use is role-bearing on import (a tool-call message), but every piece
+    // of this turn is assistant-role on export, so toAnthropicMessages merges
+    // the consecutive assistant messages back into one ordered block array.
+    const payload: AnthropicConversation = {
+      messages: [
+        { role: 'user', content: 'Look it up' },
+        {
+          role: 'assistant',
+          content: [
+            { type: 'text', text: 'Before.' },
+            { type: 'tool_use', id: 'call-mid', name: 'lookup', input: { k: 'v' } },
+            { type: 'text', text: 'After.' },
+          ],
+        },
+      ],
+    };
+
+    const conversation = fromAnthropicMessages(payload);
+    const roundTripped = toAnthropicMessages(conversation);
+
+    const assistantMessages = roundTripped.messages.filter((m) => m.role === 'assistant');
+    expect(assistantMessages).toHaveLength(1);
+
+    const blocks = assistantMessages[0]?.content as Array<{ type: string }>;
+    expect(blocks.map((b) => b.type)).toEqual(['text', 'tool_use', 'text']);
+
+    const first = blocks[0] as { type: 'text'; text: string };
+    const mid = blocks[1] as { type: 'tool_use'; id: string; name: string; input: unknown };
+    const last = blocks[2] as { type: 'text'; text: string };
+    expect(first.text).toBe('Before.');
+    expect(mid.id).toBe('call-mid');
+    expect(mid.name).toBe('lookup');
+    expect(mid.input).toEqual({ k: 'v' });
+    expect(last.text).toBe('After.');
   });
 });
 
@@ -1438,5 +1481,58 @@ describe('C3 — Extended-thinking content blocks (Anthropic adapter)', () => {
     const thinkingBlock = (assistantContent as any[]).find((b: any) => b.type === 'thinking');
     expect(thinkingBlock).toBeDefined();
     expect(thinkingBlock.signature).toBe(THINKING_SIGNATURE);
+  });
+
+  it('preserves a trailing thinking block that has no following text block', () => {
+    // Exercises the flush of accumulated content at the end of a turn: an
+    // assistant message whose only content is a thinking block.
+    const payload: AnthropicConversation = {
+      messages: [
+        { role: 'user', content: 'Think only' },
+        {
+          role: 'assistant',
+          content: [
+            {
+              type: 'thinking',
+              thinking: 'Reasoning, no answer yet',
+              signature: THINKING_SIGNATURE,
+            },
+          ],
+        },
+      ],
+    };
+
+    const conversation = fromAnthropicMessages(payload);
+    const roundTripped = toAnthropicMessages(conversation);
+
+    const assistantContent = roundTripped.messages.find((m) => m.role === 'assistant')?.content;
+    expect(Array.isArray(assistantContent)).toBe(true);
+    const thinkingBlock = (assistantContent as any[]).find((b: any) => b.type === 'thinking');
+    expect(thinkingBlock).toBeDefined();
+    expect(thinkingBlock.thinking).toBe('Reasoning, no answer yet');
+    expect(thinkingBlock.signature).toBe(THINKING_SIGNATURE);
+  });
+
+  it('preserves a trailing redacted_thinking block that has no following text block', () => {
+    const payload: AnthropicConversation = {
+      messages: [
+        { role: 'user', content: 'Redacted only' },
+        {
+          role: 'assistant',
+          content: [{ type: 'redacted_thinking', signature: REDACTED_SIGNATURE }],
+        },
+      ],
+    };
+
+    const conversation = fromAnthropicMessages(payload);
+    const roundTripped = toAnthropicMessages(conversation);
+
+    const assistantContent = roundTripped.messages.find((m) => m.role === 'assistant')?.content;
+    expect(Array.isArray(assistantContent)).toBe(true);
+    const redactedBlock = (assistantContent as any[]).find(
+      (b: any) => b.type === 'redacted_thinking',
+    );
+    expect(redactedBlock).toBeDefined();
+    expect(redactedBlock.signature).toBe(REDACTED_SIGNATURE);
   });
 });

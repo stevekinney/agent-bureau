@@ -10,7 +10,9 @@ import type {
   ServerToolUseContent,
   TextContent,
   ThinkingContent,
+  ToolUseContent,
 } from './multi-modal';
+import { jsonValueSchema } from './schemas';
 import type {
   AssistantMessage,
   ConversationHistory as Conversation,
@@ -258,14 +260,39 @@ export interface StreamingMessageAccumulator {
   /**
    * Finalize the accumulated blocks into a `MultiModalContent[]`.
    * JSON input buffers for tool_use / server_tool_use blocks are parsed at
-   * this point; malformed JSON falls back to an empty object.
+   * this point. A malformed or non-JSON-value buffer throws, because a tool
+   * call with silently-dropped input is indistinguishable from one the model
+   * deliberately invoked with empty input — a dangerous ambiguity for a
+   * protocol layer to paper over.
    * Call this when the `message_stop` event arrives.
    */
   finalize(): MultiModalContent[];
 }
 
+/**
+ * Parses a streamed tool-input buffer into a {@link JSONValue}, throwing if the
+ * buffer is not valid JSON or does not encode a JSON value. The block name is
+ * included in the error to make a corrupt stream diagnosable.
+ */
+function parseStreamedToolInput(toolName: string, inputBuffer: string): JSONValue {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(inputBuffer);
+  } catch (cause) {
+    throw new Error(
+      `Streamed tool input for "${toolName}" is not valid JSON; the stream may be incomplete or corrupt.`,
+      { cause },
+    );
+  }
+  const result = jsonValueSchema.safeParse(parsed);
+  if (!result.success) {
+    throw new Error(`Streamed tool input for "${toolName}" is not a JSON value.`);
+  }
+  return result.data;
+}
+
 function createBlockAccumulator(initial: BlockAccumulatorState): BlockAccumulator {
-  let state: BlockAccumulatorState = { ...initial } as BlockAccumulatorState;
+  let state: BlockAccumulatorState = { ...initial };
 
   return {
     get state() {
@@ -372,33 +399,21 @@ export function createStreamingAccumulator(): StreamingMessageAccumulator {
             break;
           }
           case 'tool_use': {
-            let parsedInput: unknown;
-            try {
-              parsedInput = JSON.parse(state.inputBuffer);
-            } catch {
-              parsedInput = {};
-            }
-            const serverToolPart: ServerToolUseContent = {
-              type: 'server_tool_use',
+            const toolPart: ToolUseContent = {
+              type: 'tool_use',
               id: state.id,
               name: state.name,
-              input: parsedInput,
+              input: parseStreamedToolInput(state.name, state.inputBuffer),
             };
-            result.push(serverToolPart);
+            result.push(toolPart);
             break;
           }
           case 'server_tool_use': {
-            let parsedInput: unknown;
-            try {
-              parsedInput = JSON.parse(state.inputBuffer);
-            } catch {
-              parsedInput = {};
-            }
             const serverToolPart: ServerToolUseContent = {
               type: 'server_tool_use',
               id: state.id,
               name: state.name,
-              input: parsedInput,
+              input: parseStreamedToolInput(state.name, state.inputBuffer),
             };
             result.push(serverToolPart);
             break;

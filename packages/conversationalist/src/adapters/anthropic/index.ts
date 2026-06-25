@@ -155,6 +155,9 @@ function toAnthropicContent(
         // Preserve redacted_thinking blocks byte-for-byte (signature is integrity-critical)
         blocks.push({ type: 'redacted_thinking', signature: part.signature });
         break;
+      case 'tool_use':
+        blocks.push({ type: 'tool_use', id: part.id, name: part.name, input: part.input });
+        break;
       case 'server_tool_use':
         blocks.push({ type: 'server_tool_use', id: part.id, name: part.name, input: part.input });
         break;
@@ -398,69 +401,14 @@ function parseToolResultContent(callId: string, content: string, isError?: boole
   };
 }
 
+/**
+ * Maps the role-bearing Anthropic blocks — `tool_use` and `tool_result` — to
+ * their dedicated conversation messages. Groupable content blocks are handled by
+ * {@link toGroupableContentPart}; only `tool_use`/`tool_result` reach here.
+ */
 function toMessageInputFromBlock(
-  role: AnthropicMessage['role'],
-  block: AnthropicContentBlock,
+  block: AnthropicToolUseBlock | AnthropicToolResultBlock,
 ): MessageInput {
-  if (block.type === 'text') {
-    return {
-      role,
-      content: block.text,
-    };
-  }
-
-  if (block.type === 'thinking') {
-    // Preserve thinking block with signature byte-for-byte
-    return {
-      role,
-      content: [
-        {
-          type: 'thinking',
-          thinking: block.thinking,
-          signature: block.signature,
-        },
-      ],
-    };
-  }
-
-  if (block.type === 'redacted_thinking') {
-    // Preserve redacted_thinking block with signature byte-for-byte
-    return {
-      role,
-      content: [
-        {
-          type: 'redacted_thinking',
-          signature: block.signature,
-        },
-      ],
-    };
-  }
-
-  if (block.type === 'image') {
-    if (block.source.type === 'url') {
-      return {
-        role,
-        content: [
-          {
-            type: 'image',
-            url: block.source.url,
-          },
-        ],
-      };
-    }
-
-    return {
-      role,
-      content: [
-        {
-          type: 'image',
-          url: `data:${block.source.media_type};base64,${block.source.data}`,
-          mimeType: block.source.media_type,
-        },
-      ],
-    };
-  }
-
   if (block.type === 'tool_use') {
     return {
       role: 'tool-call',
@@ -473,38 +421,53 @@ function toMessageInputFromBlock(
     };
   }
 
-  if (block.type === 'server_tool_use') {
-    return {
-      role,
-      content: [
-        {
-          type: 'server_tool_use',
-          id: block.id,
-          name: block.name,
-          input: block.input,
-        },
-      ],
-    };
-  }
-
-  if (block.type === 'web_search_tool_result') {
-    return {
-      role,
-      content: [
-        {
-          type: 'web_search_tool_result',
-          tool_use_id: block.tool_use_id,
-          content: block.content,
-        },
-      ],
-    };
-  }
-
   return {
     role: 'tool-result',
     content: '',
     toolResult: parseToolResultContent(block.tool_use_id, block.content, block.is_error),
   };
+}
+
+/**
+ * Maps an Anthropic content block that can coexist with siblings inside a single
+ * message to its {@link MultiModalContent} part, preserving fields byte-for-byte.
+ * Returns `undefined` for blocks that must become their own message because the
+ * conversation model represents them as distinct roles (`tool_use` →
+ * `tool-call`, `tool_result` → `tool-result`).
+ */
+function toGroupableContentPart(block: AnthropicContentBlock): MultiModalContent | undefined {
+  switch (block.type) {
+    case 'text':
+      return { type: 'text', text: block.text };
+    case 'thinking':
+      return { type: 'thinking', thinking: block.thinking, signature: block.signature };
+    case 'redacted_thinking':
+      return { type: 'redacted_thinking', signature: block.signature };
+    case 'server_tool_use':
+      return {
+        type: 'server_tool_use',
+        id: block.id,
+        name: block.name,
+        input: toJSONValue(block.input),
+      };
+    case 'web_search_tool_result':
+      return {
+        type: 'web_search_tool_result',
+        tool_use_id: block.tool_use_id,
+        content: toJSONValue(block.content),
+      };
+    case 'image':
+      return block.source.type === 'url'
+        ? { type: 'image', url: block.source.url }
+        : {
+            type: 'image',
+            url: `data:${block.source.media_type};base64,${block.source.data}`,
+            mimeType: block.source.media_type,
+          };
+    default:
+      // tool_use / tool_result are role-bearing and handled separately.
+      return undefined;
+  }
 }
 
 function toMessageInputs(payload: AnthropicConversation): MessageInput[] {
@@ -526,58 +489,40 @@ function toMessageInputs(payload: AnthropicConversation): MessageInput[] {
       continue;
     }
 
-    // Thinking and redacted_thinking blocks must be grouped with the following
-    // text block (if any) within the same Anthropic message. This ensures that
-    // an assistant turn containing [thinking, text] round-trips as a single
-    // multi-part message with the signature preserved byte-for-byte.
-    //
-    // All other block types (text, image, tool_use, tool_result) retain the
-    // existing one-block-one-MessageInput behaviour so pre-existing tests and
-    // storage formats are unaffected.
-    let pendingThinkingParts: MultiModalContent[] = [];
+    // Preserve the original Anthropic block order. Groupable blocks (text,
+    // thinking, redacted_thinking, image, server_tool_use, web_search_tool_result)
+    // accumulate into a single ordered multi-part MessageInput. Role-bearing
+    // blocks (tool_use → tool-call, tool_result → tool-result) are distinct
+    // messages in the conversation model, so they flush the current run and emit
+    // their own message, keeping interleaved sequences like
+    // [text, tool_use, text] in their true order.
+    let pendingParts: MultiModalContent[] = [];
 
-    const flushThinkingParts = () => {
-      if (pendingThinkingParts.length === 0) return;
-      inputs.push({ role: message.role, content: [...pendingThinkingParts] });
-      pendingThinkingParts = [];
+    const flushPending = () => {
+      if (pendingParts.length === 0) return;
+      // A lone text part round-trips as a plain string to match the
+      // one-block-one-string storage convention; mixed runs stay as arrays.
+      const first = pendingParts[0];
+      if (pendingParts.length === 1 && first?.type === 'text') {
+        inputs.push({ role: message.role, content: first.text });
+      } else {
+        inputs.push({ role: message.role, content: pendingParts });
+      }
+      pendingParts = [];
     };
 
     for (const block of message.content) {
-      switch (block.type) {
-        case 'thinking':
-          // Accumulate thinking blocks; they will be flushed with the next text block
-          pendingThinkingParts.push({
-            type: 'thinking',
-            thinking: block.thinking,
-            signature: block.signature,
-          });
-          break;
-        case 'redacted_thinking':
-          // Accumulate redacted_thinking blocks similarly
-          pendingThinkingParts.push({ type: 'redacted_thinking', signature: block.signature });
-          break;
-        case 'text':
-          if (pendingThinkingParts.length > 0) {
-            // Merge accumulated thinking blocks with this text block
-            inputs.push({
-              role: message.role,
-              content: [...pendingThinkingParts, { type: 'text', text: block.text }],
-            });
-            pendingThinkingParts = [];
-          } else {
-            inputs.push({ role: message.role, content: block.text });
-          }
-          break;
-        default:
-          // For image, tool_use, tool_result: flush any pending thinking blocks first
-          flushThinkingParts();
-          inputs.push(toMessageInputFromBlock(message.role, block));
-          break;
+      const part = toGroupableContentPart(block);
+      if (part !== undefined) {
+        pendingParts.push(part);
+      } else if (block.type === 'tool_use' || block.type === 'tool_result') {
+        // Role-bearing block: flush the accumulated run first to preserve order.
+        flushPending();
+        inputs.push(toMessageInputFromBlock(block));
       }
     }
 
-    // Flush any trailing thinking blocks that had no following text block
-    flushThinkingParts();
+    flushPending();
   }
 
   return inputs;

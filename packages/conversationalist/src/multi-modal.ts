@@ -1,3 +1,5 @@
+import type { JSONValue } from './types';
+
 export interface TextContent {
   type: 'text';
   text: string;
@@ -32,14 +34,27 @@ export interface RedactedThinkingContent {
 }
 
 /**
+ * Client tool-use content block: a call to a caller-defined tool.
+ * Distinct from {@link ServerToolUseContent}, which represents Anthropic's
+ * built-in server tools. Keeping them as separate types makes it a compile
+ * error to emit one where the other is expected.
+ */
+export interface ToolUseContent {
+  type: 'tool_use';
+  id: string;
+  name: string;
+  input: JSONValue;
+}
+
+/**
  * Server-side tool use content block (e.g. Anthropic built-in tools such as web_search).
- * Input is the partial JSON accumulated during streaming.
+ * Input is the JSON the model produced for the built-in tool.
  */
 export interface ServerToolUseContent {
   type: 'server_tool_use';
   id: string;
   name: string;
-  input: unknown;
+  input: JSONValue;
 }
 
 /**
@@ -48,7 +63,7 @@ export interface ServerToolUseContent {
 export interface WebSearchToolResultContent {
   type: 'web_search_tool_result';
   tool_use_id: string;
-  content: unknown;
+  content: JSONValue;
 }
 
 export type MultiModalContent =
@@ -56,6 +71,7 @@ export type MultiModalContent =
   | ImageContent
   | ThinkingContent
   | RedactedThinkingContent
+  | ToolUseContent
   | ServerToolUseContent
   | WebSearchToolResultContent;
 
@@ -80,6 +96,14 @@ export function copyMultiModalContent(item: MultiModalContent): MultiModalConten
     return {
       type: 'redacted_thinking',
       signature: item.signature,
+    };
+  }
+  if (item.type === 'tool_use') {
+    return {
+      type: 'tool_use',
+      id: item.id,
+      name: item.name,
+      input: item.input,
     };
   }
   if (item.type === 'server_tool_use') {

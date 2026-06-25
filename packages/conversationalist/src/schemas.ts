@@ -23,74 +23,6 @@ const isPlainObject = (value: unknown): value is Record<string, unknown> => {
   return prototype === Object.prototype || prototype === null;
 };
 
-type RawMultiModalContent = {
-  type:
-    | 'text'
-    | 'image'
-    | 'thinking'
-    | 'redacted_thinking'
-    | 'server_tool_use'
-    | 'web_search_tool_result';
-  text?: string | undefined;
-  url?: string | undefined;
-  mimeType?: string | undefined;
-  thinking?: string | undefined;
-  signature?: string | undefined;
-  id?: string | undefined;
-  name?: string | undefined;
-  input?: unknown;
-  tool_use_id?: string | undefined;
-  content?: unknown;
-};
-
-function toMultiModalContent(value: RawMultiModalContent): MultiModalContent {
-  if (value.type === 'text') {
-    return {
-      type: 'text',
-      text: value.text ?? '',
-    };
-  }
-
-  if (value.type === 'thinking') {
-    return {
-      type: 'thinking',
-      thinking: value.thinking ?? '',
-      signature: value.signature ?? '',
-    };
-  }
-
-  if (value.type === 'redacted_thinking') {
-    return {
-      type: 'redacted_thinking',
-      signature: value.signature ?? '',
-    };
-  }
-
-  if (value.type === 'server_tool_use') {
-    return {
-      type: 'server_tool_use',
-      id: value.id ?? '',
-      name: value.name ?? '',
-      input: value.input,
-    };
-  }
-
-  if (value.type === 'web_search_tool_result') {
-    return {
-      type: 'web_search_tool_result',
-      tool_use_id: value.tool_use_id ?? '',
-      content: value.content,
-    };
-  }
-
-  return {
-    type: 'image',
-    url: value.url ?? '',
-    ...(value.mimeType !== undefined ? { mimeType: value.mimeType } : {}),
-    ...(value.text !== undefined ? { text: value.text } : {}),
-  };
-}
-
 /**
  * Zod schema for JSON-serializable values.
  */
@@ -121,44 +53,66 @@ export const jsonValueSchema: z.ZodType<JSONValue> = z.lazy(() => {
   ]);
 }) satisfies z.ZodType<JSONValue>;
 
+const multiModalContentUnion = z.discriminatedUnion('type', [
+  z.object({
+    type: z.literal('text'),
+    text: z.string(),
+  }),
+  z.object({
+    type: z.literal('image'),
+    url: z.string().url(),
+    mimeType: z.string().optional(),
+    text: z.string().optional(),
+  }),
+  z.object({
+    type: z.literal('thinking'),
+    thinking: z.string(),
+    signature: z.string(),
+  }),
+  z.object({
+    type: z.literal('redacted_thinking'),
+    signature: z.string(),
+  }),
+  z.object({
+    type: z.literal('tool_use'),
+    id: z.string(),
+    name: z.string(),
+    input: jsonValueSchema,
+  }),
+  z.object({
+    type: z.literal('server_tool_use'),
+    id: z.string(),
+    name: z.string(),
+    input: jsonValueSchema,
+  }),
+  z.object({
+    type: z.literal('web_search_tool_result'),
+    tool_use_id: z.string(),
+    content: jsonValueSchema,
+  }),
+]);
+
 /**
- * Zod schema for multi-modal content parts (text, image, thinking, redacted_thinking,
- * server_tool_use, or web_search_tool_result).
+ * Zod schema for multi-modal content parts (text, image, thinking,
+ * redacted_thinking, tool_use, server_tool_use, or web_search_tool_result).
+ *
+ * The per-variant object schemas already guarantee every required protocol field
+ * (signatures, ids, names) is present — no `?? ''` defaulting after the fact. The
+ * only post-parse work is dropping absent optional image fields rather than
+ * carrying `key: undefined`, so the output matches {@link MultiModalContent}
+ * under `exactOptionalPropertyTypes`.
  */
-export const multiModalContentSchema = z
-  .discriminatedUnion('type', [
-    z.object({
-      type: z.literal('text'),
-      text: z.string(),
-    }),
-    z.object({
-      type: z.literal('image'),
-      url: z.string().url(),
-      mimeType: z.string().optional(),
-      text: z.string().optional(),
-    }),
-    z.object({
-      type: z.literal('thinking'),
-      thinking: z.string(),
-      signature: z.string(),
-    }),
-    z.object({
-      type: z.literal('redacted_thinking'),
-      signature: z.string(),
-    }),
-    z.object({
-      type: z.literal('server_tool_use'),
-      id: z.string(),
-      name: z.string(),
-      input: z.unknown(),
-    }),
-    z.object({
-      type: z.literal('web_search_tool_result'),
-      tool_use_id: z.string(),
-      content: z.unknown(),
-    }),
-  ])
-  .transform(toMultiModalContent) satisfies z.ZodType<MultiModalContent>;
+export const multiModalContentSchema = multiModalContentUnion.transform(
+  (value): MultiModalContent => {
+    if (value.type !== 'image') return value;
+    return {
+      type: 'image',
+      url: value.url,
+      ...(value.mimeType !== undefined ? { mimeType: value.mimeType } : {}),
+      ...(value.text !== undefined ? { text: value.text } : {}),
+    };
+  },
+) satisfies z.ZodType<MultiModalContent>;
 
 /**
  * Zod schema for valid message roles.

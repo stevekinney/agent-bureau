@@ -101,8 +101,17 @@ export function messageHasImages(message: Message): boolean {
 }
 
 /**
- * Converts a message to a string representation.
- * Images are rendered as markdown image syntax.
+ * Converts a message to a human-readable plain-text representation. Text parts
+ * are emitted verbatim and images as markdown image syntax.
+ *
+ * Non-text structural parts — `thinking`, `redacted_thinking`, `tool_use`,
+ * `server_tool_use`, and `web_search_tool_result` — render as the empty string,
+ * because they carry no user-facing prose (thinking is private; tool blocks are
+ * structured data). As a result this function is **not** a faithful measure of a
+ * message's size or content presence: a message composed solely of tool/thinking
+ * blocks stringifies to `''`. Do not use it for token estimation or
+ * emptiness/presence checks — use the token estimators and the structured parts
+ * (`messageParts`) for those.
  */
 export function messageToString(message: Message): string {
   if (typeof message.content === 'string') return message.content;
@@ -111,6 +120,7 @@ export function messageToString(message: Message): string {
       if (part.type === 'text') return part.text;
       if (part.type === 'thinking') return '';
       if (part.type === 'redacted_thinking') return '';
+      if (part.type === 'tool_use') return '';
       if (part.type === 'server_tool_use') return '';
       if (part.type === 'web_search_tool_result') return '';
       return `![${part.text ?? ''}](${part.url})`;

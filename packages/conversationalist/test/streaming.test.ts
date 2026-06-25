@@ -372,13 +372,13 @@ describe('C4 — createStreamingAccumulator (multi-part accumulation)', () => {
     expect(content[0]).toEqual({ type: 'text', text: 'Hello, world!' });
   });
 
-  it('accumulates text + tool_use blocks keyed by index and parses JSON at finalize', () => {
+  it('accumulates text + a client tool_use block keyed by index and parses JSON at finalize', () => {
     const acc = createStreamingAccumulator();
     // Block 0: text
     acc.openBlock(0, { type: 'text', buffer: '' });
     acc.getBlock(0)?.appendTextDelta('Let me search.');
 
-    // Block 1: tool_use with partial JSON deltas
+    // Block 1: client tool_use with partial JSON deltas
     acc.openBlock(1, { type: 'tool_use', id: 'call-1', name: 'search', inputBuffer: '' });
     acc.getBlock(1)?.appendInputJsonDelta('{"q":');
     acc.getBlock(1)?.appendInputJsonDelta('"cats"}');
@@ -386,11 +386,28 @@ describe('C4 — createStreamingAccumulator (multi-part accumulation)', () => {
     const content = acc.finalize();
     expect(content).toHaveLength(2);
     expect(content[0]).toEqual({ type: 'text', text: 'Let me search.' });
-    expect(content[1]).toMatchObject({
-      type: 'server_tool_use',
+    // A client tool_use block finalizes as 'tool_use' — NOT 'server_tool_use'.
+    // The two are distinct Anthropic concepts and must not be conflated.
+    expect(content[1]).toEqual({
+      type: 'tool_use',
       id: 'call-1',
       name: 'search',
       input: { q: 'cats' },
+    });
+  });
+
+  it('accumulates a server_tool_use block as server_tool_use (distinct from client tool_use)', () => {
+    const acc = createStreamingAccumulator();
+    acc.openBlock(0, { type: 'server_tool_use', id: 'stu-1', name: 'web_search', inputBuffer: '' });
+    acc.getBlock(0)?.appendInputJsonDelta('{"query":"news"}');
+
+    const content = acc.finalize();
+    expect(content).toHaveLength(1);
+    expect(content[0]).toEqual({
+      type: 'server_tool_use',
+      id: 'stu-1',
+      name: 'web_search',
+      input: { query: 'news' },
     });
   });
 
@@ -443,14 +460,39 @@ describe('C4 — createStreamingAccumulator (multi-part accumulation)', () => {
     if (content[2]?.type === 'text') expect(content[2].text).toBe('Third');
   });
 
-  it('falls back to empty object for malformed JSON in tool_use', () => {
+  it('throws on malformed JSON in a tool_use block rather than emitting empty input', () => {
     const acc = createStreamingAccumulator();
-    acc.openBlock(0, { type: 'tool_use', id: 'call-bad', name: 'tool', inputBuffer: '' });
+    acc.openBlock(0, { type: 'tool_use', id: 'call-bad', name: 'pay', inputBuffer: '' });
     acc.getBlock(0)?.appendInputJsonDelta('{invalid json');
+
+    // A corrupt/incomplete stream must not silently become a valid-looking
+    // tool call with empty input — finalize throws, naming the tool.
+    expect(() => acc.finalize()).toThrow(/Streamed tool input for "pay" is not valid JSON/);
+  });
+
+  it('throws on malformed JSON in a server_tool_use block', () => {
+    const acc = createStreamingAccumulator();
+    acc.openBlock(0, {
+      type: 'server_tool_use',
+      id: 'stu-bad',
+      name: 'web_search',
+      inputBuffer: '',
+    });
+    acc.getBlock(0)?.appendInputJsonDelta('{"query":');
+
+    expect(() => acc.finalize()).toThrow(/Streamed tool input for "web_search" is not valid JSON/);
+  });
+
+  it('finalizes a thinking block with an empty buffer when no thinking_delta arrives', () => {
+    const SIG = 'sig-only==';
+    const acc = createStreamingAccumulator();
+    acc.openBlock(0, { type: 'thinking', buffer: '', signature: '' });
+    // Only the signature arrives (no thinking_delta).
+    acc.getBlock(0)?.setSignature(SIG);
 
     const content = acc.finalize();
     expect(content).toHaveLength(1);
-    expect(content[0]).toMatchObject({ type: 'server_tool_use', input: {} });
+    expect(content[0]).toEqual({ type: 'thinking', thinking: '', signature: SIG });
   });
 
   it('getBlock returns undefined for a block index that has not been opened', () => {

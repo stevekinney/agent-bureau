@@ -132,7 +132,16 @@ export type {
   ConversationEventType,
 } from './history';
 export { Conversation } from './history';
-export type { ImageContent, MultiModalContent, TextContent } from './multi-modal';
+export type {
+  ImageContent,
+  MultiModalContent,
+  RedactedThinkingContent,
+  ServerToolUseContent,
+  TextContent,
+  ThinkingContent,
+  ToolUseContent,
+  WebSearchToolResultContent,
+} from './multi-modal';
 export type {
   AppendableToolAction,
   AppendableToolCallInput,
