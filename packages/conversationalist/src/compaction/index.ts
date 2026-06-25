@@ -148,38 +148,49 @@ export function chunkMessages(
 const STRIPPED_PLACEHOLDER = '[tool result]';
 
 /**
- * Replaces structural tool-result/tool-use block payloads inside a content array
- * with a placeholder, mirroring the role-level tool-result stripping. Server-tool
- * results (web search/fetch, code execution) store stdout / fetched pages /
- * snippets inside assistant content, so compaction must shrink them there too.
+ * Shrinks structural tool blocks inside a content array before summarization.
+ * `compactConversation` passes the result to a summarizer that may re-serialize
+ * the chunk through the Anthropic adapter/API, so each block must remain a VALID
+ * Anthropic block:
+ * - server-tool results / server_tool_use input: the payload is replaced with a
+ *   placeholder string (a result block with `content: "[tool result]"` is still
+ *   well-formed).
+ * - cited text: the `citations` FIELD is removed (not scalarized) — `citations`
+ *   must be a structured array/object, so `"[tool result]"` would be malformed.
+ * - thinking / redacted_thinking: the whole block is DROPPED — a thinking block
+ *   with mutated text no longer matches its signature, and a redacted block with
+ *   a placeholder in place of Anthropic's encrypted `data` is invalid, so the
+ *   API would reject the summarization request. Internal reasoning need not go to
+ *   the summarizer anyway.
  */
 function stripStructuralToolBlocks(
   content: string | ReadonlyArray<MultiModalContent>,
 ): string | MultiModalContent[] {
   if (typeof content === 'string') return content;
-  return content.map((part) => {
+  return content.flatMap((part): MultiModalContent[] => {
     switch (part.type) {
       case 'server_tool_use':
-        return { ...part, input: STRIPPED_PLACEHOLDER };
+        return [{ ...part, input: STRIPPED_PLACEHOLDER }];
       case 'web_search_tool_result':
       case 'web_fetch_tool_result':
       case 'code_execution_tool_result':
       case 'bash_code_execution_tool_result':
       case 'text_editor_code_execution_tool_result':
-        return { ...part, content: STRIPPED_PLACEHOLDER };
-      case 'text':
-        // Citation payloads (cited_text, urls, encrypted refs) are tool-result
-        // evidence too — strip them so they don't reach the summarizer.
-        return part.citations !== undefined ? { ...part, citations: STRIPPED_PLACEHOLDER } : part;
+        return [{ ...part, content: STRIPPED_PLACEHOLDER }];
+      case 'text': {
+        // Drop the citations field entirely (it must be structured, not a string);
+        // keep the visible text.
+        if (part.citations === undefined) return [part];
+        const { citations: _citations, ...rest } = part;
+        return [rest];
+      }
       case 'thinking':
-        // Internal reasoning can be large and need not go to the summarizer.
-        // (This is the compaction/summarize path — unlike redaction-for-replay,
-        // there is no signature byte-for-byte concern here; the block is discarded.)
-        return { ...part, thinking: STRIPPED_PLACEHOLDER };
       case 'redacted_thinking':
-        return { ...part, data: STRIPPED_PLACEHOLDER };
+        // Drop the block — a mutated thinking/redacted block is an invalid
+        // Anthropic block and would break re-serialization to the API.
+        return [];
       default:
-        return part;
+        return [part];
     }
   });
 }

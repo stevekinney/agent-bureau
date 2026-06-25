@@ -314,12 +314,13 @@ describe('summarizer-based compaction', () => {
       const part = (
         stripped[0].content as Array<{ type: string; text?: string; citations?: unknown }>
       )[0];
-      // Visible text is preserved; the citation evidence is stripped.
+      // Visible text is preserved; the citation FIELD is removed entirely (it must
+      // be structured, so scalarizing it would produce a malformed block).
       expect(part?.text).toBe('The answer is 4.');
-      expect(part?.citations).toBe('[tool result]');
+      expect('citations' in (part as object)).toBe(false);
     });
 
-    test('strips thinking and redacted_thinking payloads so internal reasoning is not summarized', () => {
+    test('drops thinking and redacted_thinking blocks (mutating them would be invalid for re-serialization)', () => {
       const messages: Message[] = [
         {
           id: 'm-0',
@@ -337,17 +338,10 @@ describe('summarizer-based compaction', () => {
       ];
 
       const stripped = stripToolResultDetailsBatch(messages);
-      const parts = stripped[0].content as Array<{
-        type: string;
-        thinking?: string;
-        data?: string;
-        signature?: string;
-        text?: string;
-      }>;
-      expect(parts[0]?.thinking).toBe('[tool result]');
-      expect(parts[0]?.signature).toBe('sig=='); // signature kept; only the bulky text is dropped
-      expect(parts[1]?.data).toBe('[tool result]');
-      expect(parts[2]?.text).toBe('Final answer.');
+      const parts = stripped[0].content as Array<{ type: string; text?: string }>;
+      // The thinking blocks are removed entirely; only the answer text remains.
+      expect(parts).toHaveLength(1);
+      expect(parts[0]).toEqual({ type: 'text', text: 'Final answer.' });
     });
   });
 
