@@ -191,6 +191,8 @@ export {
 export {
   SessionCancelEvent,
   SessionForkEvent,
+  SessionMonitorDoneEvent,
+  SessionMonitorTickEvent,
   SessionQueryEvent,
   SessionRecoverEvent,
   SessionSignalEvent,
@@ -330,6 +332,7 @@ export {
   TaskQueuedEvent,
 } from './scheduler/index';
 export type {
+  MonitorOptions,
   ResumeSessionOptions,
   ResumeSessionResult,
   SessionCleanupOptions,

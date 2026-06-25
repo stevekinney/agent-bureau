@@ -650,6 +650,45 @@ export class SessionQueryEvent extends Event {
   }
 }
 
+/**
+ * Emitted when a `session.monitor()` loop ticks (starts a new poll run).
+ * Carries the tick number (0-based) and whether the predicate was satisfied.
+ * The `met` field is `null` on the tick-started emission (before the run
+ * completes) and `true` / `false` after the predicate is evaluated.
+ */
+export class SessionMonitorTickEvent extends Event {
+  static readonly type = 'session.monitor.tick' as const;
+  readonly sessionId: string;
+  readonly tick: number;
+  /** Whether the `until` predicate was satisfied. `null` before the run finishes. */
+  readonly met: boolean | null;
+  constructor(sessionId: string, tick: number, met: boolean | null) {
+    super(SessionMonitorTickEvent.type);
+    this.sessionId = sessionId;
+    this.tick = tick;
+    this.met = met;
+  }
+}
+
+/**
+ * Emitted when a `session.monitor()` loop completes — either because the
+ * predicate was satisfied or the `maxDuration` deadline was reached.
+ */
+export class SessionMonitorDoneEvent extends Event {
+  static readonly type = 'session.monitor.done' as const;
+  readonly sessionId: string;
+  /** Whether the loop exited because the `until` predicate was satisfied. */
+  readonly met: boolean;
+  /** Total number of ticks executed (including the final one). */
+  readonly ticks: number;
+  constructor(sessionId: string, met: boolean, ticks: number) {
+    super(SessionMonitorDoneEvent.type);
+    this.sessionId = sessionId;
+    this.met = met;
+    this.ticks = ticks;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Event map: maps event type string to the Event subclass instance
 // ---------------------------------------------------------------------------
@@ -699,6 +738,9 @@ export interface OperativeEventMap extends EventMap {
   [SessionSignalEvent.type]: SessionSignalEvent;
   [SessionUpdateEvent.type]: SessionUpdateEvent;
   [SessionQueryEvent.type]: SessionQueryEvent;
+  // session.monitor loop events (D7)
+  [SessionMonitorTickEvent.type]: SessionMonitorTickEvent;
+  [SessionMonitorDoneEvent.type]: SessionMonitorDoneEvent;
 }
 
 export type OperativeEventType = keyof OperativeEventMap;

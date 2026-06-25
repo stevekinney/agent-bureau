@@ -1,5 +1,10 @@
 export { createSessionStore } from './create-session-store';
-export type { SessionHandle, SessionHandleContext, SessionRunOptions } from './session-handle';
+export type {
+  MonitorOptions,
+  SessionHandle,
+  SessionHandleContext,
+  SessionRunOptions,
+} from './session-handle';
 export {
   createSessionHandle,
   deriveRunId,
