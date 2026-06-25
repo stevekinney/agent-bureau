@@ -36,14 +36,13 @@ export function createHooksRoutes(bureau: Bureau) {
     }
 
     // ── Idempotency ────────────────────────────────────────────────────
+    // Only check for duplicates here — we defer the add until after validation
+    // so that a corrected retry with the same key is not spuriously rejected.
     const idempotencyKey = context.req.header('Idempotency-Key');
-    if (idempotencyKey) {
-      if (idempotencyKeys.has(idempotencyKey)) {
-        throw new HTTPException(409, {
-          message: `Duplicate idempotency key: ${idempotencyKey}`,
-        });
-      }
-      idempotencyKeys.add(idempotencyKey);
+    if (idempotencyKey && idempotencyKeys.has(idempotencyKey)) {
+      throw new HTTPException(409, {
+        message: `Duplicate idempotency key: ${idempotencyKey}`,
+      });
     }
 
     // ── Request body ───────────────────────────────────────────────────
@@ -68,6 +67,12 @@ export function createHooksRoutes(bureau: Bureau) {
       ...(typeof body['systemPrompt'] === 'string' ? { systemPrompt: body['systemPrompt'] } : {}),
       ...(typeof body['maximumSteps'] === 'number' ? { maximumSteps: body['maximumSteps'] } : {}),
     };
+
+    // Persist the idempotency key only after the request is fully validated.
+    // This ensures a corrected retry is not blocked by a prior failed attempt.
+    if (idempotencyKey) {
+      idempotencyKeys.add(idempotencyKey);
+    }
 
     try {
       const summary = await bureau.createRun(request);
