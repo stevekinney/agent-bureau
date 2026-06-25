@@ -1,3 +1,30 @@
+export type {
+  AgentBuilder,
+  AgentConfig,
+  AgentGenerateFunction,
+  AgentInput,
+  AgentNameFor,
+  AgentOptions,
+  AgentRun,
+  AgentTable,
+  AgentToolNames,
+  AgentTools,
+  BureauAgentsInput,
+  BureauBuilder,
+  BureauToolNames,
+  BureauTools,
+  CreateAgentOptions,
+  NormalizeAgents,
+  NormalizeTools,
+  RunEvent,
+  RunResult,
+  SkillPolicy,
+  SkillProviderLike,
+  ToolEntry,
+  ToolEntryInput,
+  ToolMap,
+  ToolMapInput,
+} from './builder-types';
 export type { RecoveredRunSessionMetadata, SessionLoadOutcome } from './create-bureau';
 export { BureauError, classifyRecoveredRun, createBureau } from './create-bureau';
 export type { BureauEventMap } from './events';
