@@ -118,6 +118,7 @@ export async function createGateway(
       hostname: options.hostname,
       wsHandler,
       authToken: options.authToken,
+      idleTimeout: options.idleTimeout,
     });
 
     return {
