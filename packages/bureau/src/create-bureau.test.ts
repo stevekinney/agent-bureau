@@ -190,6 +190,51 @@ describe('createBureau', () => {
     expect(bureau.store.getRun(summary.id)).toBeDefined();
   });
 
+  it('stamps tool.started events with agentName and runId when agentName is supplied (regression PRRT_kwDORvupsc6MV8Xf)', async () => {
+    // REGRESSION: createRunFromRequest omitted `agentName` and `runId` from
+    // the RunOptions passed to createActiveRun, so curated tool.* bubble events
+    // were stamped with empty metadata ({agentName:'', runId:'', step:0}) even
+    // when the caller supplied a named dispatch route. The fix threads
+    // request.agentName and the run's own runId into RunOptions.
+    const capturedStamps: Array<{ agentName: string; runId: string }> = [];
+
+    // A generate function that calls the `next` tool on step 0 so a tool.started
+    // event fires, then completes on step 1. The toolbox must be a real createToolbox
+    // (not empty) so toolbox addEventListener is wired and the event bubbles.
+    const bureau = await createBureau({
+      generate: async ({ step }) =>
+        step === 0
+          ? { content: 'calling', toolCalls: [{ name: 'next', arguments: {} }] }
+          : { content: 'done', toolCalls: [] },
+      toolbox: createToolbox([createNextTool()]) as unknown as Toolbox,
+      stopWhen: stopWhen.noToolCalls(),
+    });
+
+    const summary = await bureau.createRun({
+      message: 'Stamp test',
+      agentName: 'audit-agent',
+    });
+
+    // Capture tool.started events via the ActiveRun's event surface.
+    const runState = bureau.store.getRun(summary.id);
+    runState?.activeRun.addEventListener('tool.started', (event) => {
+      capturedStamps.push({
+        agentName: event.agentName,
+        runId: event.runId,
+      });
+    });
+
+    await waitForRunCompletion(bureau, summary.id);
+
+    // At least one tool.started event must have fired (step 0 called `next`).
+    expect(capturedStamps.length).toBeGreaterThan(0);
+    // Every stamped event must carry the caller's agentName and the run's own id.
+    for (const stamp of capturedStamps) {
+      expect(stamp.agentName).toBe('audit-agent');
+      expect(stamp.runId).toBe(summary.id);
+    }
+  });
+
   it('persists and resumes sessions through the session store', async () => {
     const bureau = await createBureau({
       generate: createMockGenerate(),
