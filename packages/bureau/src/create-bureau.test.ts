@@ -1510,6 +1510,73 @@ describe('createBureau schedule management sentinel (regression PRRT_kwDORvupsc6
   });
 });
 
+describe('createBureau createSchedule spec normalization (regression PRRT_kwDORvupsc6MXbzr)', () => {
+  // REGRESSION: createSchedule forwarded the raw `spec` string directly to
+  // engine.schedule(). Weft treats a bare string as a cron expression
+  // (normalizeCronSpec → parseCronExpression), so a duration spec like '6h'
+  // or '30s' threw "Cron expression must have 5 fields or 6 fields with
+  // seconds" — interval scheduling was completely unreachable through the
+  // string API.
+  //
+  // The fix detects whether the spec is a 5- or 6-field cron expression and
+  // routes it to { cron } or { every } accordingly, then passes the
+  // discriminated ScheduleSpec object to engine.schedule(). These tests
+  // verify against a REAL engine so weft's validation confirms the normalized
+  // form is actually accepted — a spy-only test would pass even if we routed
+  // to a form weft then rejects.
+
+  it('createSchedule accepts a duration spec string and produces a schedule with intervalMs', async () => {
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+
+    try {
+      const summary = await bureau.createSchedule({
+        agentName: 'worker',
+        input: 'do work',
+        spec: '30s',
+      });
+
+      // The real engine accepted the spec; the returned summary must carry
+      // intervalMs (not cronExpression) confirming it was routed as an
+      // interval schedule, not rejected as an invalid cron.
+      expect(summary).toBeDefined();
+      expect(summary?.intervalMs).toBeGreaterThan(0);
+      expect(summary?.cronExpression).toBeUndefined();
+    } finally {
+      bureau.dispose();
+    }
+  });
+
+  it('createSchedule accepts a cron spec string and produces a schedule with cronExpression', async () => {
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+
+    try {
+      const summary = await bureau.createSchedule({
+        agentName: 'reporter',
+        input: 'generate report',
+        spec: '0 9 * * *',
+      });
+
+      // The real engine accepted the spec; cronExpression must be set and
+      // intervalMs must be absent, confirming cron routing.
+      expect(summary).toBeDefined();
+      expect(summary?.cronExpression).toBe('0 9 * * *');
+      expect(summary?.intervalMs).toBeUndefined();
+    } finally {
+      bureau.dispose();
+    }
+  });
+});
+
 describe('createBureau scheduler-origin crash semantics (#25)', () => {
   let schedulerSweepDatabaseCounter = 0;
 
