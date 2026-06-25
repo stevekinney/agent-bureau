@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'bun:test';
+import { describe, expect, it, spyOn } from 'bun:test';
+import { createRuntimeComposition } from 'bureau';
 
 import { createTestGateway, requestJSON } from '../test';
 
@@ -111,5 +112,126 @@ describe('schedules routes', () => {
     });
 
     expect(response.status).toBe(501);
+  });
+});
+
+describe('schedules routes with durable engine (regression PRRT_kwDORvupsc6MXEmg)', () => {
+  // Before the fix, pauseSchedule/resumeSchedule/cancelSchedule returned void
+  // (undefined) on success, which was indistinguishable from the undefined sentinel
+  // used to signal "no durable engine". Routes checking `result === undefined` would
+  // therefore return 501 even when the durable operation succeeded.
+
+  it('POST /schedules/:id/pause returns 200 when durable engine is configured', async () => {
+    // Probe the bundled Engine prototype so we can spy at the engine level —
+    // this exercises the real bureau wrapper, which is where the bug lived.
+    const probe = await createRuntimeComposition({
+      generate: async () => ({ content: 'Done.', toolCalls: [] }),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+    const realEngineProto = Object.getPrototypeOf(probe.durable!.engine) as object;
+    probe.durable!.engine[Symbol.dispose]?.();
+    probe.disposeStorage?.();
+
+    const pauseSpy = spyOn(
+      realEngineProto as { pauseSchedule: (id: string) => Promise<void> },
+      'pauseSchedule',
+    ).mockResolvedValue(undefined);
+
+    try {
+      const gateway = await createTestGateway({
+        authToken: AUTH_TOKEN,
+        storage: { type: 'memory' },
+        durableExecution: true,
+      });
+
+      const response = await requestJSON(gateway, '/schedules/my-schedule/pause', {
+        method: 'POST',
+        headers: authHeaders,
+      });
+
+      // Must be 200 (operation performed), not 501 (falsely treated as no engine).
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body.status).toBe('paused');
+
+      gateway.bureau.dispose();
+    } finally {
+      pauseSpy.mockRestore();
+    }
+  });
+
+  it('POST /schedules/:id/resume returns 200 when durable engine is configured', async () => {
+    const probe = await createRuntimeComposition({
+      generate: async () => ({ content: 'Done.', toolCalls: [] }),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+    const realEngineProto = Object.getPrototypeOf(probe.durable!.engine) as object;
+    probe.durable!.engine[Symbol.dispose]?.();
+    probe.disposeStorage?.();
+
+    const resumeSpy = spyOn(
+      realEngineProto as { resumeSchedule: (id: string) => Promise<void> },
+      'resumeSchedule',
+    ).mockResolvedValue(undefined);
+
+    try {
+      const gateway = await createTestGateway({
+        authToken: AUTH_TOKEN,
+        storage: { type: 'memory' },
+        durableExecution: true,
+      });
+
+      const response = await requestJSON(gateway, '/schedules/my-schedule/resume', {
+        method: 'POST',
+        headers: authHeaders,
+      });
+
+      // Must be 200 (operation performed), not 501 (falsely treated as no engine).
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body.status).toBe('resumed');
+
+      gateway.bureau.dispose();
+    } finally {
+      resumeSpy.mockRestore();
+    }
+  });
+
+  it('DELETE /schedules/:id returns 204 when durable engine is configured', async () => {
+    const probe = await createRuntimeComposition({
+      generate: async () => ({ content: 'Done.', toolCalls: [] }),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+    const realEngineProto = Object.getPrototypeOf(probe.durable!.engine) as object;
+    probe.durable!.engine[Symbol.dispose]?.();
+    probe.disposeStorage?.();
+
+    const cancelSpy = spyOn(
+      realEngineProto as { cancelSchedule: (id: string) => Promise<void> },
+      'cancelSchedule',
+    ).mockResolvedValue(undefined);
+
+    try {
+      const gateway = await createTestGateway({
+        authToken: AUTH_TOKEN,
+        storage: { type: 'memory' },
+        durableExecution: true,
+      });
+
+      const response = await requestJSON(gateway, '/schedules/my-schedule', {
+        method: 'DELETE',
+        headers: authHeaders,
+      });
+
+      // Must be 204 (schedule deleted), not 501 (falsely treated as no engine).
+      expect(response.status).toBe(204);
+
+      gateway.bureau.dispose();
+    } finally {
+      cancelSpy.mockRestore();
+    }
   });
 });

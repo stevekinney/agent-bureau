@@ -389,20 +389,22 @@ export interface Bureau {
   listSchedules(filter?: ScheduleFilter): Promise<PaginatedResult<ScheduleSummary> | undefined>;
 
   /**
-   * Pause a durable schedule. Returns `undefined` when no durable engine is composed.
-   */
-  pauseSchedule(scheduleId: string): Promise<void | undefined>;
-
-  /**
-   * Resume a paused durable schedule. Returns `undefined` when no durable engine is composed.
-   */
-  resumeSchedule(scheduleId: string): Promise<void | undefined>;
-
-  /**
-   * Cancel and permanently delete a durable schedule. Returns `undefined` when no
+   * Pause a durable schedule. Returns `true` on success, `undefined` when no
    * durable engine is composed.
    */
-  cancelSchedule(scheduleId: string): Promise<void | undefined>;
+  pauseSchedule(scheduleId: string): Promise<true | undefined>;
+
+  /**
+   * Resume a paused durable schedule. Returns `true` on success, `undefined` when no
+   * durable engine is composed.
+   */
+  resumeSchedule(scheduleId: string): Promise<true | undefined>;
+
+  /**
+   * Cancel and permanently delete a durable schedule. Returns `true` on success,
+   * `undefined` when no durable engine is composed.
+   */
+  cancelSchedule(scheduleId: string): Promise<true | undefined>;
 
   getConfiguration(): ConfigurationResponse;
   getTools(): ToolSummary[];
