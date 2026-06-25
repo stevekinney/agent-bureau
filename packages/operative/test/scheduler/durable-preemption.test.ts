@@ -6,95 +6,19 @@ import { Conversation } from 'conversationalist';
 import { HookRegistry } from 'lifecycle';
 
 import { createCheckpointStore } from '../../src/durable/checkpoint-store';
-import type { AnyRunEngine } from '../../src/durable/index';
 import { createRunEngine } from '../../src/durable/index';
 import { createRunWorkflow } from '../../src/durable/run-workflow';
 import type { OperativeHookMap } from '../../src/index';
 import { stopWhen } from '../../src/index';
 import { createScheduler } from '../../src/scheduler/create-scheduler';
-import { createMockGenerate } from '../../src/test/index';
-import type { GenerateFunction, GenerateResponse } from '../../src/types';
-
-/** Counts calls to the engine's suspend/resume/cancel so a test can prove the
- *  durable preemption path was actually exercised (not an accidental abort+rerun
- *  that happens to satisfy the higher-level assertions). */
-interface EngineSpy {
-  engine: AnyRunEngine;
-  suspends: string[];
-  resumes: string[];
-  cancels: string[];
-}
-
-function spyEngine(engine: AnyRunEngine): EngineSpy {
-  const spy: EngineSpy = { engine, suspends: [], resumes: [], cancels: [] };
-  const realSuspend = engine.suspend.bind(engine);
-  const realResume = engine.resume.bind(engine);
-  const realCancel = engine.cancel.bind(engine);
-  // Wrap in place — the scheduler holds this same engine object.
-  engine.suspend = async (id: string) => {
-    spy.suspends.push(id);
-    return realSuspend(id);
-  };
-  engine.resume = async (id: string) => {
-    spy.resumes.push(id);
-    return realResume(id);
-  };
-  engine.cancel = async (id: string) => {
-    spy.cancels.push(id);
-    return realCancel(id);
-  };
-  return spy;
-}
-
-function textResponse(content: string): GenerateResponse {
-  return { content, toolCalls: [] };
-}
-
-/**
- * A generate that, on its FIRST step, blocks until released (or aborts on signal);
- * on every later step it completes immediately with a step-numbered marker. This
- * lets a test park a durable run mid-flight (at step 1's generate) and then prove
- * a resume continues from step 1 rather than re-running step 0.
- */
-function createStepwiseBlockingGenerate(): {
-  generate: GenerateFunction;
-  releaseStep1: (response: GenerateResponse) => void;
-  steps: number[];
-} {
-  const steps: number[] = [];
-  let step1Resolver: ((response: GenerateResponse) => void) | undefined;
-  const step1Promise = new Promise<GenerateResponse>((resolve) => {
-    step1Resolver = resolve;
-  });
-
-  const generate: GenerateFunction = async (context) => {
-    steps.push(context.step);
-    if (context.step === 0) {
-      // Step 0 completes immediately with a tool call so the run takes a 2nd step.
-      return { content: 'step 0', toolCalls: [{ name: 'next', arguments: {} }] };
-    }
-    if (context.step === 1) {
-      // Block at step 1 until released, or abort if the signal fires — BUT under
-      // suspend (not cancel) the signal does NOT fire, so this stays blocked and
-      // the run parks at step 1.
-      return Promise.race([
-        step1Promise,
-        new Promise<GenerateResponse>((resolve) => {
-          context.signal?.addEventListener('abort', () => resolve(textResponse('aborted')), {
-            once: true,
-          });
-        }),
-      ]);
-    }
-    return textResponse(`step ${context.step}`);
-  };
-
-  return {
-    generate,
-    releaseStep1: (response) => step1Resolver?.(response),
-    steps,
-  };
-}
+import {
+  createManualCheckpointStore,
+  createManualDurableEngine,
+  createMockGenerate,
+  createStepwiseBlockingGenerate,
+  spyEngine,
+} from '../../src/test/index';
+import type { GenerateFunction } from '../../src/types';
 
 function createNextToolbox() {
   return createTestToolbox([
@@ -105,52 +29,6 @@ function createNextToolbox() {
       execute: () => ({ outcome: 'success' as const, content: 'ok', result: 'ok' }),
     },
   ]);
-}
-
-function createManualDurableEngine() {
-  let resolveResult: ((value: unknown) => void) | undefined;
-  let rejectResult: ((error: unknown) => void) | undefined;
-  const result = new Promise<unknown>((resolve, reject) => {
-    resolveResult = resolve;
-    rejectResult = reject;
-  });
-  const engine = {
-    start: async () => ({ result: () => result }),
-    resume: async () => ({ result: () => result }),
-    suspend: async () => {},
-    get: async () => ({ status: 'suspended' }),
-    cancel: async () => {
-      rejectResult?.(new Error('Workflow cancelled'));
-    },
-  } as unknown as AnyRunEngine;
-
-  return {
-    engine,
-    resolveResult: () =>
-      resolveResult?.({
-        runId: 'manual-run',
-        steps: 0,
-        content: 'manual',
-        finishReason: 'stop-condition',
-      }),
-    rejectResult: (error: unknown) => rejectResult?.(error),
-  };
-}
-
-function createManualCheckpointStore() {
-  return {
-    loadCheckpoint: async (runId: string) => ({
-      runId,
-      cursor: {
-        step: 0,
-        totalUsage: { prompt: 0, completion: 0, total: 0 },
-        lastContent: '',
-        schemaAttempts: 0,
-      },
-      conversation: null,
-      steps: [],
-    }),
-  } as unknown as ReturnType<typeof createCheckpointStore>;
 }
 
 // Drain Weft's deferred inline-launch queue between tests — these durable
@@ -946,6 +824,10 @@ describe('durable scheduler preemption (suspend/resume)', () => {
     expect(scheduler.getState().idle).toBe(true);
   });
 });
+
+function textResponse(content: string) {
+  return { content, toolCalls: [] as never[] };
+}
 
 function createMockGenerateFallback(): GenerateFunction {
   return createMockGenerate([textResponse('fallback')]);
