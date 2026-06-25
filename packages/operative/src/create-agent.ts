@@ -115,7 +115,7 @@ export type { AgentRun };
 export function createAgent(options: CreateAgentOptions): StandaloneAgent {
   const { generate, tools = {}, instructions, ...rest } = options;
 
-  // Build a Toolbox from the name-keyed tool map.
+  // Pre-compute tool entries once (pure transform — no per-run state).
   // The map key is canonical — override each tool's inner `.name` with the
   // map key so that the LLM-issued tool call name always matches the key,
   // regardless of what the tool was originally authored with.
@@ -123,10 +123,16 @@ export function createAgent(options: CreateAgentOptions): StandaloneAgent {
     ...tool.configuration,
     name: key,
   }));
-  const toolbox = createToolbox(toolEntries);
 
   return {
     run(input: string): AgentRun {
+      // Build a fresh Toolbox for each run. `createActiveRun` attaches
+      // listeners to the toolbox emitter and the toolbox tracks per-instance
+      // state (loop detection, budget counters). A shared toolbox causes
+      // concurrent runs to cross-fire each other's tool events and share
+      // budget limits. The tool entries are pure config and are safe to share.
+      const toolbox = createToolbox(toolEntries);
+
       // Build a fresh Conversation for each run (ephemeral — no session state).
       const conversation = new Conversation();
 
