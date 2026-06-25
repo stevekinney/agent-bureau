@@ -28,6 +28,7 @@ import { createSessionStore } from './create-session-store';
 import {
   createSessionHandle,
   deriveRunId,
+  ForkThroughRunError,
   NoDurableEngineError,
   NoRunningRunError,
 } from './session-handle';
@@ -609,6 +610,81 @@ describe('session.fork()', () => {
     const forked = await handle.fork();
     const session = await forked.getSession();
     expect(session.id).toBe(forked.id);
+  });
+
+  // Regression: PRRT_kwDORvupsc6MXEmV — fork({ throughRun: n }) must not
+  // silently include conversation history from runs after n. Without per-run
+  // snapshots, forking before the last run is rejected with ForkThroughRunError
+  // instead of silently returning a contaminated branch.
+  it('throws ForkThroughRunError when throughRun points before the last run (contamination guard)', async () => {
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+
+    const h = createSessionHandle('fork-guard-source', {
+      store,
+      agentName: 'fork-agent',
+      runOptions: createTestRunOptions(),
+    });
+
+    // Complete two runs so that run 0 is followed by run 1 (last index = 1).
+    await h.run('first run').result();
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    await h.run('second run').result();
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+
+    // fork({ throughRun: 0 }) would branch before run 1, but the full history
+    // includes run 1's messages — silently contaminating the branch. Must throw.
+    let threw = false;
+    try {
+      await h.fork({ throughRun: 0 });
+    } catch (e) {
+      threw = true;
+      expect(e).toBeInstanceOf(ForkThroughRunError);
+    }
+    expect(threw).toBe(true);
+  });
+
+  it('fork({ throughRun: lastIndex }) succeeds (no contamination possible)', async () => {
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+
+    const h = createSessionHandle('fork-guard-last', {
+      store,
+      agentName: 'fork-agent',
+      runOptions: createTestRunOptions(),
+    });
+
+    await h.run('first run').result();
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    await h.run('second run').result();
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+
+    // throughRun: 1 is the last run index — no later runs exist, so the full
+    // history is correct for this fork point.
+    const forked = await h.fork({ throughRun: 1 });
+    expect(forked.id).toBeDefined();
+    const session = await forked.getSession();
+    expect(session.runs).toHaveLength(0);
+  });
+
+  it('fork() with no options succeeds regardless of run count', async () => {
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+
+    const h = createSessionHandle('fork-guard-default', {
+      store,
+      agentName: 'fork-agent',
+      runOptions: createTestRunOptions(),
+    });
+
+    await h.run('first run').result();
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    await h.run('second run').result();
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+
+    // Default fork (no throughRun) always copies full history — no guard needed.
+    const forked = await h.fork();
+    expect(forked.id).toBeDefined();
   });
 });
 
