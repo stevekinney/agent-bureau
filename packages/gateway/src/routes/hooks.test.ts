@@ -172,4 +172,31 @@ describe('webhook ingress routes (POST /hooks/*)', () => {
     });
     expect(pathB.status).toBe(202);
   });
+
+  it('rejects one of two concurrent requests with the same Idempotency-Key (TOCTOU fix)', async () => {
+    // Both requests are dispatched concurrently via Promise.all. Without the fix,
+    // both pass idempotencyKeys.has() before either reaches idempotencyKeys.add()
+    // (the await on json() yields the event loop between check and add). With the
+    // fix, the key is reserved synchronously before the first await, so exactly
+    // one request wins and the other gets 409.
+    const gateway = await createTestGateway({ generate: createMockGenerate() });
+    const key = 'concurrent-key';
+
+    const [first, second] = await Promise.all([
+      requestJSON(gateway, '/hooks/event?agent=bureau', {
+        method: 'POST',
+        headers: { 'Idempotency-Key': key },
+        body: JSON.stringify({ message: 'Concurrent request A.' }),
+      }),
+      requestJSON(gateway, '/hooks/event?agent=bureau', {
+        method: 'POST',
+        headers: { 'Idempotency-Key': key },
+        body: JSON.stringify({ message: 'Concurrent request B.' }),
+      }),
+    ]);
+
+    const statuses = [first.status, second.status].sort();
+    // Exactly one should succeed (202) and one should be rejected (409).
+    expect(statuses).toEqual([202, 409]);
+  });
 });
