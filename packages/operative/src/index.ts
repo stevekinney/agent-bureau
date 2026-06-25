@@ -1,4 +1,4 @@
-export type { AgentSession } from './agent-session';
+export type { AgentSession, RunRef } from './agent-session';
 export { createAgentSession, loadAgentSession, saveAgentSession } from './agent-session';
 export type {
   AdaptiveBackoffOptions,
@@ -288,11 +288,21 @@ export type {
   ResumeSessionOptions,
   ResumeSessionResult,
   SessionCleanupOptions,
+  SessionHandle,
+  SessionHandleContext,
   SessionListOptions,
+  SessionRunOptions,
   SessionStore,
   SessionSummary,
 } from './session/index';
-export { createSessionStore, resumeSession } from './session/index';
+export {
+  createSessionHandle,
+  createSessionStore,
+  deriveRunId,
+  NoDurableEngineError,
+  NoRunningRunError,
+  resumeSession,
+} from './session/index';
 export { withStreaming } from './streaming';
 export type { BackpressureBuffer, BackpressureBufferOptions } from './streaming/index';
 export type {
