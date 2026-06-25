@@ -111,6 +111,8 @@ export function messageToString(message: Message): string {
       if (part.type === 'text') return part.text;
       if (part.type === 'thinking') return '';
       if (part.type === 'redacted_thinking') return '';
+      if (part.type === 'server_tool_use') return '';
+      if (part.type === 'web_search_tool_result') return '';
       return `![${part.text ?? ''}](${part.url})`;
     })
     .join('\n\n');

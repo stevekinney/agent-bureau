@@ -24,12 +24,23 @@ const isPlainObject = (value: unknown): value is Record<string, unknown> => {
 };
 
 type RawMultiModalContent = {
-  type: 'text' | 'image' | 'thinking' | 'redacted_thinking';
+  type:
+    | 'text'
+    | 'image'
+    | 'thinking'
+    | 'redacted_thinking'
+    | 'server_tool_use'
+    | 'web_search_tool_result';
   text?: string | undefined;
   url?: string | undefined;
   mimeType?: string | undefined;
   thinking?: string | undefined;
   signature?: string | undefined;
+  id?: string | undefined;
+  name?: string | undefined;
+  input?: unknown;
+  tool_use_id?: string | undefined;
+  content?: unknown;
 };
 
 function toMultiModalContent(value: RawMultiModalContent): MultiModalContent {
@@ -52,6 +63,23 @@ function toMultiModalContent(value: RawMultiModalContent): MultiModalContent {
     return {
       type: 'redacted_thinking',
       signature: value.signature ?? '',
+    };
+  }
+
+  if (value.type === 'server_tool_use') {
+    return {
+      type: 'server_tool_use',
+      id: value.id ?? '',
+      name: value.name ?? '',
+      input: value.input,
+    };
+  }
+
+  if (value.type === 'web_search_tool_result') {
+    return {
+      type: 'web_search_tool_result',
+      tool_use_id: value.tool_use_id ?? '',
+      content: value.content,
     };
   }
 
@@ -94,7 +122,8 @@ export const jsonValueSchema: z.ZodType<JSONValue> = z.lazy(() => {
 }) satisfies z.ZodType<JSONValue>;
 
 /**
- * Zod schema for multi-modal content parts (text, image, thinking, or redacted_thinking).
+ * Zod schema for multi-modal content parts (text, image, thinking, redacted_thinking,
+ * server_tool_use, or web_search_tool_result).
  */
 export const multiModalContentSchema = z
   .discriminatedUnion('type', [
@@ -116,6 +145,17 @@ export const multiModalContentSchema = z
     z.object({
       type: z.literal('redacted_thinking'),
       signature: z.string(),
+    }),
+    z.object({
+      type: z.literal('server_tool_use'),
+      id: z.string(),
+      name: z.string(),
+      input: z.unknown(),
+    }),
+    z.object({
+      type: z.literal('web_search_tool_result'),
+      tool_use_id: z.string(),
+      content: z.unknown(),
     }),
   ])
   .transform(toMultiModalContent) satisfies z.ZodType<MultiModalContent>;

@@ -82,6 +82,26 @@ export interface AnthropicRedactedThinkingBlock {
 }
 
 /**
+ * Anthropic server-tool use content block (e.g. built-in tools like web_search).
+ * Input accumulates via input_json_delta during streaming.
+ */
+export interface AnthropicServerToolUseBlock {
+  type: 'server_tool_use';
+  id: string;
+  name: string;
+  input: unknown;
+}
+
+/**
+ * Anthropic web search tool result content block returned by the built-in web_search tool.
+ */
+export interface AnthropicWebSearchToolResultBlock {
+  type: 'web_search_tool_result';
+  tool_use_id: string;
+  content: unknown;
+}
+
+/**
  * Anthropic content block union type.
  */
 export type AnthropicContentBlock =
@@ -90,7 +110,9 @@ export type AnthropicContentBlock =
   | AnthropicToolUseBlock
   | AnthropicToolResultBlock
   | AnthropicThinkingBlock
-  | AnthropicRedactedThinkingBlock;
+  | AnthropicRedactedThinkingBlock
+  | AnthropicServerToolUseBlock
+  | AnthropicWebSearchToolResultBlock;
 
 /**
  * Anthropic message format for the Messages API.
@@ -132,6 +154,16 @@ function toAnthropicContent(
       case 'redacted_thinking':
         // Preserve redacted_thinking blocks byte-for-byte (signature is integrity-critical)
         blocks.push({ type: 'redacted_thinking', signature: part.signature });
+        break;
+      case 'server_tool_use':
+        blocks.push({ type: 'server_tool_use', id: part.id, name: part.name, input: part.input });
+        break;
+      case 'web_search_tool_result':
+        blocks.push({
+          type: 'web_search_tool_result',
+          tool_use_id: part.tool_use_id,
+          content: part.content,
+        });
         break;
       case 'image': {
         // Anthropic supports both URL and base64
@@ -438,6 +470,33 @@ function toMessageInputFromBlock(
         name: block.name,
         arguments: toJSONValue(block.input),
       },
+    };
+  }
+
+  if (block.type === 'server_tool_use') {
+    return {
+      role,
+      content: [
+        {
+          type: 'server_tool_use',
+          id: block.id,
+          name: block.name,
+          input: block.input,
+        },
+      ],
+    };
+  }
+
+  if (block.type === 'web_search_tool_result') {
+    return {
+      role,
+      content: [
+        {
+          type: 'web_search_tool_result',
+          tool_use_id: block.tool_use_id,
+          content: block.content,
+        },
+      ],
     };
   }
 
