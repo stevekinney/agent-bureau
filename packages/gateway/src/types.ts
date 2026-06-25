@@ -91,7 +91,13 @@ export interface IdentityConfiguration {
 }
 
 export interface SkillRuntimeConfiguration {
-  provider: SkillProvider;
+  /**
+   * The skill provider backing the catalog. When omitted and the bureau has
+   * a `.persistence()` / `storage` backend configured, the gateway automatically
+   * constructs a storage-backed provider via `createStorageSkillProvider(kv)`.
+   * Supply an explicit provider to use a static catalog or a custom backend.
+   */
+  provider?: SkillProvider;
   includeTools?: boolean;
   skillPolicy?: ToolPolicy;
 }
