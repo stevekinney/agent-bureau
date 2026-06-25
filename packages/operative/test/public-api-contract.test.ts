@@ -23,19 +23,17 @@ import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
 import { createTool, createToolbox } from 'armorer';
 import { afterEach, describe, expect, it } from 'bun:test';
 import { createConversationHistory } from 'conversationalist';
-import { z } from 'zod';
-
-import { stopWhen } from '../src/conditions/index';
-import { createRun } from '../src/create-run';
-import type { DurableRunDeps } from '../src/durable/index';
+import type { GenerateFunction, RunOptions } from 'operative';
+import { createRun, run } from 'operative';
+import { stopWhen } from 'operative/conditions';
+import type { DurableRunDeps } from 'operative/durable';
 import {
   createCheckpointStore,
   createDurableActiveRun,
   createRunEngine,
   createRunWorkflow,
-} from '../src/durable/index';
-import { run } from '../src/run';
-import type { GenerateFunction, RunOptions } from '../src/types';
+} from 'operative/durable';
+import { z } from 'zod';
 
 // ---------------------------------------------------------------------------
 // Shared helpers
