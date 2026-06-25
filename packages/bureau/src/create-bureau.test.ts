@@ -1631,3 +1631,116 @@ describe('classifyRecoveredRun', () => {
     expect(classifyRecoveredRun({ ...base, hasSessionStore: false })).toBe('skip');
   });
 });
+
+describe('createBureau session signal/update/query with terminal sessions', () => {
+  // Regression for findings PRRT_kwDORvupsc6MT46y and PRRT_kwDORvupsc6MUE_7:
+  // requireSessionRunId must check lastRunStatus, not just lastRunId. A completed,
+  // aborted, or errored session retains its lastRunId but has no active workflow
+  // handle — routing signal/update/query to a terminal run yields a low-level engine
+  // error instead of the expected "no active run" NOT_FOUND response.
+
+  it('signalSession throws NOT_FOUND when lastRunStatus is completed (not running)', async () => {
+    // Full-stack regression: in a durable bureau (memory engine + built-in session
+    // store), complete a run, then verify that signalSession throws NOT_FOUND instead
+    // of routing to the now-terminal engine handle.
+    //
+    // `storage: { type: 'memory' }` with `durableExecution: true` gives us both a
+    // durable engine AND a built-in session store (created from the same Memory
+    // storage backend) — the combination required to hit requireSessionRunId.
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+
+    // Complete a run — the session listener writes lastRunStatus: 'completed'.
+    const run = await bureau.createRun({ message: 'Complete me' });
+    await waitForRunCompletion(bureau, run.id);
+
+    // Verify the session is persisted as completed (the guard condition).
+    const session = await bureau.getSession(run.sessionId);
+    expect(session?.metadata['lastRunStatus']).toBe('completed');
+    expect(session?.metadata['lastRunId']).toBe(run.id);
+
+    // signalSession must throw NOT_FOUND (not route to the terminal engine handle).
+    const error = await bureau.signalSession(run.sessionId, 'any-signal').then(
+      () => undefined,
+      (rejection) => rejection,
+    );
+    expect(error).toBeInstanceOf(BureauError);
+    expect((error as BureauError).code).toBe('NOT_FOUND');
+
+    bureau.dispose();
+  });
+
+  it('updateSession throws NOT_FOUND when lastRunStatus is completed (not running)', async () => {
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+
+    const run = await bureau.createRun({ message: 'Complete me' });
+    await waitForRunCompletion(bureau, run.id);
+
+    const error = await bureau.updateSession(run.sessionId, 'any-update').then(
+      () => undefined,
+      (rejection) => rejection,
+    );
+    expect(error).toBeInstanceOf(BureauError);
+    expect((error as BureauError).code).toBe('NOT_FOUND');
+
+    bureau.dispose();
+  });
+
+  it('querySession throws NOT_FOUND when lastRunStatus is completed (not running)', async () => {
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+
+    const run = await bureau.createRun({ message: 'Complete me' });
+    await waitForRunCompletion(bureau, run.id);
+
+    const error = await bureau.querySession(run.sessionId, 'any-query').then(
+      () => undefined,
+      (rejection) => rejection,
+    );
+    expect(error).toBeInstanceOf(BureauError);
+    expect((error as BureauError).code).toBe('NOT_FOUND');
+
+    bureau.dispose();
+  });
+
+  it('signalSession throws NOT_FOUND when lastRunStatus is aborted (not running)', async () => {
+    const generate: GenerateFunction = () => new Promise(() => {});
+    const bureau = await createBureau({
+      generate,
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+
+    const run = await bureau.createRun({ message: 'Abort me' });
+    bureau.abortRun(run.id);
+
+    // Wait for the abort to propagate and the session status to update.
+    await pollUntil(async () => {
+      const current = await bureau.getSession(run.sessionId);
+      return current?.metadata['lastRunStatus'] === 'aborted';
+    });
+
+    const error = await bureau.signalSession(run.sessionId, 'any-signal').then(
+      () => undefined,
+      (rejection) => rejection,
+    );
+    expect(error).toBeInstanceOf(BureauError);
+    expect((error as BureauError).code).toBe('NOT_FOUND');
+
+    bureau.dispose();
+  });
+});
