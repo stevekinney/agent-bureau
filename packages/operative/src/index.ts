@@ -1,6 +1,6 @@
 export type { AgentRun, CreateAgentRunOptions, RunEvent } from './agent-run';
 export { CompletedRunIterationError, createAgentRun } from './agent-run';
-export type { AgentSession } from './agent-session';
+export type { AgentSession, RunRef } from './agent-session';
 export { createAgentSession, loadAgentSession, saveAgentSession } from './agent-session';
 export type {
   AdaptiveBackoffOptions,
@@ -60,7 +60,7 @@ export type {
 export { createCostBudgetMonitor } from './cost-budget-monitor';
 export type { CostEstimate, CostEstimationOptions, ModelPricing } from './cost-estimation';
 export { defaultPricingTable, estimateCost, getModelPricing } from './cost-estimation';
-export type { AgentRun, CreateAgentOptions, RunEvent, StandaloneAgent } from './create-agent';
+export type { CreateAgentOptions, StandaloneAgent } from './create-agent';
 export { createAgent } from './create-agent';
 export type {
   AgentRegistry,
@@ -292,11 +292,21 @@ export type {
   ResumeSessionOptions,
   ResumeSessionResult,
   SessionCleanupOptions,
+  SessionHandle,
+  SessionHandleContext,
   SessionListOptions,
+  SessionRunOptions,
   SessionStore,
   SessionSummary,
 } from './session/index';
-export { createSessionStore, resumeSession } from './session/index';
+export {
+  createSessionHandle,
+  createSessionStore,
+  deriveRunId,
+  NoDurableEngineError,
+  NoRunningRunError,
+  resumeSession,
+} from './session/index';
 export { withStreaming } from './streaming';
 export type { BackpressureBuffer, BackpressureBufferOptions } from './streaming/index';
 export type {

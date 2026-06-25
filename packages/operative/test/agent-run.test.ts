@@ -13,7 +13,7 @@ import { Conversation } from 'conversationalist';
 
 import { CompletedRunIterationError, createAgentRun } from '../src/agent-run';
 import { noToolCalls } from '../src/conditions/predicates';
-import { createRun } from '../src/create-run';
+import { createActiveRun as createRun } from '../src/create-run';
 import { createMockGenerate } from '../src/test/index';
 import type { GenerateResponse } from '../src/types';
 
