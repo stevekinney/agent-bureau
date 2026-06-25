@@ -613,11 +613,17 @@ describe('createRun with durable routing', () => {
       expect(started[0]?.toolName).toBe('echo');
       expect(started[0]?.agentName).toBe('durable-agent');
       expect(started[0]?.runId).toBe('durable-tool-run');
+      // step stamp must be a non-negative integer — confirms StepStartedEvent fired
+      // on the durable emitter before execute-start (not stuck at default 0 from a
+      // missing listener, which would also be 0 for step 0, so assert type).
+      expect(typeof started[0]?.step).toBe('number');
+      expect(started[0]?.step).toBe(0); // tool runs on step 0
 
       expect(settled).toHaveLength(1);
       expect(settled[0]).toBeInstanceOf(ToolSettledBubbleEvent);
       expect(settled[0]?.toolName).toBe('echo');
       expect(settled[0]?.status).toBe('success');
+      expect(settled[0]?.step).toBe(0);
     } finally {
       context.engine[Symbol.dispose]();
     }
@@ -666,8 +672,56 @@ describe('createRun with durable routing', () => {
       expect(errors[0]?.toolName).toBe('fail');
       expect(errors[0]?.agentName).toBe('durable-agent');
       expect(errors[0]?.error).toBeDefined();
+      expect(errors[0]?.step).toBe(0); // tool runs on step 0
 
       expect(settled[0]?.status).toBe('error');
+      expect(settled[0]?.step).toBe(0);
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+
+  it('stamps tool events with the correct step index across multiple steps on the durable path', async () => {
+    const context = await buildContext();
+    try {
+      const echoTool = createTool({
+        name: 'echo',
+        description: 'Echo the input',
+        input: z.object({ message: z.string() }),
+        execute: async ({ message }: { message: string }) => message,
+      });
+
+      const toolbox = createToolbox([echoTool]) as unknown as RunOptions['toolbox'];
+
+      // Step 0: tool call, Step 1: tool call again, Step 2: stop
+      const generate = createMockGenerate([
+        { content: '', toolCalls: [{ name: 'echo', arguments: { message: 'step-zero' } }] },
+        { content: '', toolCalls: [{ name: 'echo', arguments: { message: 'step-one' } }] },
+        { content: 'done', toolCalls: [] },
+      ]);
+
+      const activeRun = createRun(
+        {
+          generate,
+          toolbox,
+          conversation: createConversationHistory(),
+          stopWhen: stopWhen.noToolCalls(),
+          agentName: 'durable-agent',
+          runId: 'durable-step-stamp-run',
+        },
+        { ...context, runId: 'durable-step-stamp-run', prompt: 'Start' },
+      );
+
+      const started: ToolStartedBubbleEvent[] = [];
+      activeRun.addEventListener('tool.started', (e) => started.push(e));
+
+      await activeRun.result;
+
+      expect(started).toHaveLength(2);
+      // First tool call happens on step 0
+      expect(started[0]?.step).toBe(0);
+      // Second tool call happens on step 1 — proves the step listener updated currentStep
+      expect(started[1]?.step).toBe(1);
     } finally {
       context.engine[Symbol.dispose]();
     }
