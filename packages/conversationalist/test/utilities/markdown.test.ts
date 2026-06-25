@@ -544,6 +544,66 @@ describe('toMarkdown', () => {
       expect(result).not.toContain('leaked-secret-snippet');
       expect(result).toContain('[MASKED]');
     });
+
+    test('masks server_tool_use input under redactToolArguments (even when redactToolResults is false)', () => {
+      const conversation = createConversation([
+        {
+          id: 'm1',
+          role: 'assistant',
+          content: [
+            {
+              type: 'server_tool_use',
+              id: 'stu-1',
+              name: 'web_search',
+              input: { query: 'leaked-secret-query' },
+            },
+          ],
+          position: 0,
+          createdAt: '2024-01-15T10:00:00.000Z',
+          metadata: {},
+          hidden: false,
+        },
+      ]);
+
+      const result = toMarkdown(conversation, {
+        includeMetadata: true,
+        redactToolArguments: true,
+        redactToolResults: false,
+        redactedPlaceholder: '[MASKED]',
+      });
+
+      expect(result).not.toContain('leaked-secret-query');
+      expect(result).toContain('[MASKED]');
+    });
+
+    test('redacts cited-text citation metadata under redactToolResults', () => {
+      const conversation = createConversation([
+        {
+          id: 'm1',
+          role: 'assistant',
+          content: [
+            {
+              type: 'text',
+              text: 'See source.',
+              citations: [{ cited_text: 'leaked-cited-secret', url: 'https://example.com' }],
+            },
+          ],
+          position: 0,
+          createdAt: '2024-01-15T10:00:00.000Z',
+          metadata: {},
+          hidden: false,
+        },
+      ]);
+
+      const result = toMarkdown(conversation, {
+        includeMetadata: true,
+        redactToolResults: true,
+        redactedPlaceholder: '[MASKED]',
+      });
+
+      expect(result).not.toContain('leaked-cited-secret');
+      expect(result).toContain('[MASKED]');
+    });
   });
 });
 

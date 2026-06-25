@@ -167,6 +167,10 @@ function stripStructuralToolBlocks(
       case 'bash_code_execution_tool_result':
       case 'text_editor_code_execution_tool_result':
         return { ...part, content: STRIPPED_PLACEHOLDER };
+      case 'text':
+        // Citation payloads (cited_text, urls, encrypted refs) are tool-result
+        // evidence too — strip them so they don't reach the summarizer.
+        return part.citations !== undefined ? { ...part, citations: STRIPPED_PLACEHOLDER } : part;
       default:
         return part;
     }

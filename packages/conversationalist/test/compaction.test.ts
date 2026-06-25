@@ -290,6 +290,34 @@ describe('summarizer-based compaction', () => {
       expect(parts[0]).toEqual({ type: 'text', text: 'See results.' });
       expect(parts[1]?.content).toBe('[tool result]');
     });
+
+    test('strips citation payloads on cited text parts', () => {
+      const messages: Message[] = [
+        {
+          id: 'm-0',
+          role: 'assistant',
+          content: [
+            {
+              type: 'text',
+              text: 'The answer is 4.',
+              citations: [{ cited_text: 'long cited evidence to strip', url: 'https://e.com' }],
+            },
+          ],
+          position: 0,
+          createdAt: new Date().toISOString(),
+          metadata: {},
+          hidden: false,
+        },
+      ];
+
+      const stripped = stripToolResultDetailsBatch(messages);
+      const part = (
+        stripped[0].content as Array<{ type: string; text?: string; citations?: unknown }>
+      )[0];
+      // Visible text is preserved; the citation evidence is stripped.
+      expect(part?.text).toBe('The answer is 4.');
+      expect(part?.citations).toBe('[tool result]');
+    });
   });
 
   describe('calculateChunkSize', () => {

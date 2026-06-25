@@ -123,26 +123,36 @@ function resolveMarkdownOptions(options: ToMarkdownOptions = {}): ResolvedMarkdo
 }
 
 /**
- * Replaces the payload of structural tool-result / tool-use content blocks with
- * the placeholder. Mirrors `redactToolResults` for the role-level tool-result
- * field — server-tool results (web search/fetch, code execution) carry their
- * data inside assistant content, so they must be redacted there too.
+ * Replaces the payloads of structural tool blocks inside a content array with
+ * the placeholder, mirroring the role-level redaction options:
+ * - `redactArguments` masks server-tool INPUT (a tool argument, e.g. a web-search
+ *   query), gated like role-level `redactToolArguments`.
+ * - `redactResults` masks server-tool RESULT content (web search/fetch, code
+ *   execution) and citation metadata on text parts (tool-result evidence),
+ *   gated like role-level `redactToolResults`.
  */
 function redactStructuralToolBlocks(
   content: string | MultiModalContent[],
   placeholder: string,
+  redactArguments: boolean,
+  redactResults: boolean,
 ): string | MultiModalContent[] {
   if (typeof content === 'string') return content;
   return content.map((part) => {
     switch (part.type) {
       case 'server_tool_use':
-        return { ...part, input: placeholder };
+        return redactArguments ? { ...part, input: placeholder } : part;
       case 'web_search_tool_result':
       case 'web_fetch_tool_result':
       case 'code_execution_tool_result':
       case 'bash_code_execution_tool_result':
       case 'text_editor_code_execution_tool_result':
-        return { ...part, content: placeholder };
+        return redactResults ? { ...part, content: placeholder } : part;
+      case 'text':
+        // Citations are tool-result evidence (cited_text, urls, encrypted refs).
+        return redactResults && part.citations !== undefined
+          ? { ...part, citations: placeholder }
+          : part;
       default:
         return part;
     }
@@ -158,8 +168,13 @@ function sanitizeMessage(message: Message, options: ResolvedMarkdownOptions): Me
   const content =
     options.redactHiddenContent && message.hidden
       ? options.redactedPlaceholder
-      : options.redactToolResults
-        ? redactStructuralToolBlocks(copiedContent, options.redactedPlaceholder)
+      : options.redactToolArguments || options.redactToolResults
+        ? redactStructuralToolBlocks(
+            copiedContent,
+            options.redactedPlaceholder,
+            options.redactToolArguments,
+            options.redactToolResults,
+          )
         : copiedContent;
 
   const toolCall = message.toolCall
