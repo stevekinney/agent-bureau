@@ -78,6 +78,8 @@ export const SCOPE = {
   SESSIONS_WRITE: 'sessions:write',
   CONFIG_READ: 'config:read',
   KEYS_MANAGE: 'keys:manage',
+  /** Webhook ingress — typed dispatch endpoints (`POST /hooks/*`). */
+  HOOKS_WRITE: 'hooks:write',
 } as const;
 
 export type Scope = (typeof SCOPE)[keyof typeof SCOPE];

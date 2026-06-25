@@ -8,7 +8,9 @@ import { SCOPE } from '../types';
 import { createConfigurationRoutes } from './configuration';
 import { createEventsRoutes } from './events';
 import { createHealthRoutes } from './health';
+import { createHooksRoutes } from './hooks';
 import { createKeysRoutes } from './keys';
+import { createOpenAICompatRoutes } from './openai-compat';
 import { createRunsRoutes } from './runs';
 import { createSchedulerRoutes } from './scheduler';
 import { createSessionsRoutes } from './sessions';
@@ -67,6 +69,22 @@ export function createRoutes({ bureau, broker, apiKeyStore }: CreateRoutesOption
     keysRouter.route('/', createKeysRoutes(apiKeyStore));
     app.route('/api/v1/keys', keysRouter);
   }
+
+  // Webhook ingress — typed dispatch endpoints.
+  // Caller MUST name the agent explicitly via ?agent=<name>; no routing, no
+  // default-agent fallback. The HOOKS_WRITE scope guards these routes.
+  const hooksRouter = new Hono();
+  hooksRouter.post('*', createScopeGuard([SCOPE.HOOKS_WRITE]));
+  hooksRouter.route('/', createHooksRoutes(bureau));
+  app.route('/hooks', hooksRouter);
+
+  // OpenAI-compatible chat completions endpoint.
+  // The `model` field in the request body carries the agent name — typed
+  // dispatch with no routing. Uses the same RUNS_WRITE scope as direct runs.
+  const openaiRouter = new Hono();
+  openaiRouter.post('*', createScopeGuard([SCOPE.RUNS_WRITE]));
+  openaiRouter.route('/', createOpenAICompatRoutes(bureau));
+  app.route('/v1', openaiRouter);
 
   return app;
 }

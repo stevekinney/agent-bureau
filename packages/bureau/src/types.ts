@@ -441,6 +441,16 @@ export interface CreateRunRequest {
   sessionId?: string;
   systemPrompt?: string;
   maximumSteps?: number;
+  /**
+   * The name of the agent to run. When provided, the bureau validates the name
+   * is non-empty. In a multi-agent bureau this is used to select the correct
+   * agent; in a single-agent bureau it is carried through as metadata.
+   *
+   * Typed dispatch endpoints (webhook ingress, OpenAI-compat) require this
+   * field — callers must name the agent explicitly; there is no default-agent
+   * fallback at the door.
+   */
+  agentName?: string;
 }
 
 export interface SubmitSchedulerTaskRequest {

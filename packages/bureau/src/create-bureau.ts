@@ -100,6 +100,16 @@ function validateCreateRunRequest(request: CreateRunRequest): void {
       toBadRequest('"sessionId" must be a non-empty string');
     }
   }
+
+  if (request.agentName !== undefined) {
+    if (typeof request.agentName !== 'string') {
+      toBadRequest('"agentName" must be a string');
+    }
+
+    if (request.agentName.trim().length === 0) {
+      toBadRequest('"agentName" must be a non-empty string');
+    }
+  }
 }
 
 function validateSubmitSchedulerTaskRequest(request: SubmitSchedulerTaskRequest): void {
