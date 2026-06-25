@@ -1,3 +1,19 @@
+// ── Tool Policy ──────────────────────────────────────────────────────
+
+/**
+ * Reusable allow/deny list for tool and skill filtering.
+ * Used by persona tool policies, persona skill policies, and skill tool policies.
+ * Deny always wins over allow.
+ */
+export interface ToolPolicy {
+  /** If set, ONLY these are available. */
+  allowList?: string[];
+  /** These are never available, even if in the allowList. Deny wins. */
+  denyList?: string[];
+}
+
+// ── JSON Types ────────────────────────────────────────────────────────
+
 export type JSONPrimitive = string | number | boolean | null;
 export type JSONValue = JSONPrimitive | ReadonlyArray<JSONValue> | { [key: string]: JSONValue };
 

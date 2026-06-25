@@ -11,6 +11,7 @@ import type { ObservabilityOptions } from '@lostgradient/weft/observability';
 import type { StorageConfiguration, TextValueStore } from '@lostgradient/weft/storage';
 import type { Toolbox } from 'armorer';
 import type { ConversationSnapshot } from 'conversationalist';
+import type { ToolPolicy } from 'interoperability';
 import type {
   EventIteratorOptions,
   EventObservableOptions,
@@ -102,10 +103,7 @@ export interface SkillRuntimeConfiguration {
   skillPolicy?: ToolPolicy;
 }
 
-export interface ToolPolicy {
-  allowList?: string[];
-  denyList?: string[];
-}
+export type { ToolPolicy };
 
 export interface SkillCatalogEntry {
   name: string;

@@ -18,6 +18,7 @@ export type {
   ServerFrame,
   SubmitSchedulerTaskRequest,
   SubmitSchedulerTaskResponse,
+  ToolPolicy,
   ToolSummary,
 } from 'bureau';
 export { DEFAULT_MAXIMUM_STEPS } from 'bureau';

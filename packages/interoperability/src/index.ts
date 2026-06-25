@@ -32,6 +32,7 @@ export type {
   ToolError,
   ToolErrorCategory,
   ToolErrorInput,
+  ToolPolicy,
   ToolResult,
   ToolResultInput,
 } from './types';

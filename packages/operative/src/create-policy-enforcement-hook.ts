@@ -1,11 +1,6 @@
-/**
- * Structural interface compatible with ToolPolicy from the skills package.
- * Defined here to avoid a dependency from operative to skills.
- */
-export interface ToolPolicyLike {
-  allowList?: string[];
-  denyList?: string[];
-}
+import type { ToolPolicy } from 'interoperability';
+
+export type { ToolPolicy };
 
 export interface ToolLike {
   name: string;
@@ -13,9 +8,9 @@ export interface ToolLike {
 
 export interface CreatePolicyEnforcementHookOptions {
   /** Persona tool policy (static for the run). */
-  personaToolPolicy?: ToolPolicyLike;
+  personaToolPolicy?: ToolPolicy;
   /** Returns the currently active skill's tool policy (dynamic, changes during run). */
-  getActiveSkillToolPolicy?: () => ToolPolicyLike | undefined;
+  getActiveSkillToolPolicy?: () => ToolPolicy | undefined;
 }
 
 /**
@@ -24,7 +19,7 @@ export interface CreatePolicyEnforcementHookOptions {
  * Allow list restricts to only named tools. Deny list excludes named tools.
  * When both are present, deny list wins — a tool present in both lists is excluded.
  */
-function applyPolicy<T extends ToolLike>(tools: T[], policy: ToolPolicyLike | undefined): T[] {
+function applyPolicy<T extends ToolLike>(tools: T[], policy: ToolPolicy | undefined): T[] {
   if (!policy) return tools;
 
   const { allowList, denyList } = policy;
