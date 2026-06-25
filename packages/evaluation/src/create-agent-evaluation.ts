@@ -55,7 +55,15 @@ async function runCase(
           toolbox: options.agent.toolbox,
         }).result;
       } else {
-        // RegistryAgent path: call the agent's run method directly
+        // RegistryAgent path: call the agent's run method directly.
+        // RegistryAgent.run() does not accept a systemPrompt — the agent's
+        // instructions are baked in at construction time. Fail loudly rather
+        // than silently dropping the override.
+        if (evaluationCase.systemPrompt) {
+          throw new Error(
+            `Evaluation case "${evaluationCase.name}" specifies systemPrompt, but RegistryAgent does not support per-case system prompt overrides. Remove the systemPrompt from the case or use the generate+toolbox agent shape instead.`,
+          );
+        }
         const agentResult = await options.agent.run(evaluationCase.input, {
           signal: controller.signal,
         });
