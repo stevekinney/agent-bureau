@@ -101,37 +101,37 @@ describe('handleWsUpgrade', () => {
   }
 
   describe('origin check', () => {
-    it('allows any origin when allowedOrigins is empty', () => {
+    it('allows any origin when allowedOrigins is empty', async () => {
       const [request, url] = makeRequest({ origin: 'http://evil.example' });
-      const result = handleWsUpgrade(request, url, noopUpgrade, { allowedOrigins: [] });
+      const result = await handleWsUpgrade(request, url, noopUpgrade, { allowedOrigins: [] });
       expect(result?.status).not.toBe(403);
     });
 
-    it('allows any origin when allowedOrigins is omitted', () => {
+    it('allows any origin when allowedOrigins is omitted', async () => {
       const [request, url] = makeRequest({ origin: 'http://evil.example' });
-      const result = handleWsUpgrade(request, url, noopUpgrade, {});
+      const result = await handleWsUpgrade(request, url, noopUpgrade, {});
       expect(result?.status).not.toBe(403);
     });
 
-    it('allows a listed origin when allowedOrigins is configured', () => {
+    it('allows a listed origin when allowedOrigins is configured', async () => {
       const [request, url] = makeRequest({ origin: 'http://app.example' });
-      const result = handleWsUpgrade(request, url, noopUpgrade, {
+      const result = await handleWsUpgrade(request, url, noopUpgrade, {
         allowedOrigins: ['http://app.example'],
       });
       expect(result?.status).not.toBe(403);
     });
 
-    it('rejects an unlisted origin with 403 when allowedOrigins is configured', () => {
+    it('rejects an unlisted origin with 403 when allowedOrigins is configured', async () => {
       const [request, url] = makeRequest({ origin: 'http://evil.example' });
-      const result = handleWsUpgrade(request, url, noopUpgrade, {
+      const result = await handleWsUpgrade(request, url, noopUpgrade, {
         allowedOrigins: ['http://app.example'],
       });
       expect(result?.status).toBe(403);
     });
 
-    it('rejects a missing Origin header with 403 when allowedOrigins is configured', () => {
+    it('rejects a missing Origin header with 403 when allowedOrigins is configured', async () => {
       const [request, url] = makeRequest({});
-      const result = handleWsUpgrade(request, url, noopUpgrade, {
+      const result = await handleWsUpgrade(request, url, noopUpgrade, {
         allowedOrigins: ['http://app.example'],
       });
       expect(result?.status).toBe(403);
@@ -139,43 +139,43 @@ describe('handleWsUpgrade', () => {
   });
 
   describe('auth token check', () => {
-    it('rejects with 401 when token is missing and authToken is required', () => {
+    it('rejects with 401 when token is missing and authToken is required', async () => {
       const [request, url] = makeRequest({});
-      const result = handleWsUpgrade(request, url, noopUpgrade, { authToken: 'secret' });
+      const result = await handleWsUpgrade(request, url, noopUpgrade, { authToken: 'secret' });
       expect(result?.status).toBe(401);
     });
 
-    it('rejects with 401 when Bearer token is wrong', () => {
+    it('rejects with 401 when Bearer token is wrong', async () => {
       const [request, url] = makeRequest({ authorization: 'Bearer wrong' });
-      const result = handleWsUpgrade(request, url, noopUpgrade, { authToken: 'secret' });
+      const result = await handleWsUpgrade(request, url, noopUpgrade, { authToken: 'secret' });
       expect(result?.status).toBe(401);
     });
 
-    it('accepts a correct Bearer token', () => {
+    it('accepts a correct Bearer token', async () => {
       const [request, url] = makeRequest({ authorization: 'Bearer secret' });
-      const result = handleWsUpgrade(request, url, noopUpgrade, { authToken: 'secret' });
+      const result = await handleWsUpgrade(request, url, noopUpgrade, { authToken: 'secret' });
       expect(result?.status).not.toBe(401);
     });
 
-    it('accepts a correct query-string token', () => {
+    it('accepts a correct query-string token', async () => {
       const [request, url] = makeRequest({}, '?token=secret');
-      const result = handleWsUpgrade(request, url, noopUpgrade, { authToken: 'secret' });
+      const result = await handleWsUpgrade(request, url, noopUpgrade, { authToken: 'secret' });
       expect(result?.status).not.toBe(401);
     });
   });
 
   describe('upgrade failure', () => {
-    it('returns 400 when upgrade() returns false', () => {
+    it('returns 400 when upgrade() returns false', async () => {
       const [request, url] = makeRequest({ origin: 'http://app.example' });
-      const result = handleWsUpgrade(request, url, () => false, {
+      const result = await handleWsUpgrade(request, url, () => false, {
         allowedOrigins: ['http://app.example'],
       });
       expect(result?.status).toBe(400);
     });
 
-    it('returns undefined when upgrade() succeeds', () => {
+    it('returns undefined when upgrade() succeeds', async () => {
       const [request, url] = makeRequest({ origin: 'http://app.example' });
-      const result = handleWsUpgrade(request, url, () => true, {
+      const result = await handleWsUpgrade(request, url, () => true, {
         allowedOrigins: ['http://app.example'],
       });
       expect(result).toBeUndefined();

@@ -9,6 +9,20 @@ export type ServerAdapterOptions = {
   wsHandler?: WebSocketHandler;
   authToken?: string;
   /**
+   * Optional async verifier for WebSocket upgrade requests. The adapter
+   * calls this before accepting an upgrade; returning `false` causes a 401.
+   *
+   * Build this from the same precedence as the HTTP auth middleware:
+   * managed `ab_live_` keys verified via `ApiKeyStore.verify`, then static
+   * token comparison. Keeping a single source of truth here prevents the WS
+   * path from diverging from the HTTP path when the auth logic changes.
+   *
+   * When absent and `authToken` is also absent, all upgrades are accepted
+   * (no-auth deployment). When absent and `authToken` is present, the Bun
+   * adapter falls back to static-token comparison for backwards compatibility.
+   */
+  authenticate?: (request: Request) => Promise<boolean>;
+  /**
    * Explicit list of allowed origins for WebSocket upgrade requests. When
    * non-empty, upgrade requests whose `Origin` header is absent or not in
    * the list are rejected with 403. When omitted or empty, no origin check
