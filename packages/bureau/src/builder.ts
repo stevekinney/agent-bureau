@@ -162,6 +162,13 @@ function toolboxFromMap(toolsMap: Record<string, unknown>): Toolbox {
  * Merge a bureau toolbox and an agent toolbox. Agent tools win on name
  * collision (combineToolboxes last-writer-wins semantics). Returns undefined
  * when both are absent.
+ *
+ * When only one side is present the stored reference is cloned via extend()
+ * so each run() call gets its own CompletableEventTarget emitter. Sharing the
+ * stored instance across concurrent run() calls causes cross-run tool event
+ * pollution and shared budget/loop-detector state (the same pattern used by
+ * createRunRuntime() in runtime-composition.ts which calls baseToolbox.extend()
+ * per run).
  */
 function mergeToolboxes(
   bureau: Toolbox | undefined,
@@ -170,7 +177,8 @@ function mergeToolboxes(
   if (bureau && agent) {
     return combineToolboxes(bureau, agent) as unknown as Toolbox;
   }
-  return bureau ?? agent;
+  const single = bureau ?? agent;
+  return single !== undefined ? (single.extend() as Toolbox) : undefined;
 }
 
 /**
