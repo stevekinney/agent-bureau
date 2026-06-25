@@ -519,6 +519,11 @@ export interface CreateRunRequest {
   systemPrompt?: string;
   maximumSteps?: number;
   /**
+   * Per-request output token cap; overrides the provider's construction-time
+   * maximumTokens for this run. Maps to the provider's max_tokens parameter.
+   */
+  maximumTokens?: number;
+  /**
    * The name of the agent to run. When provided, the bureau validates the name
    * is non-empty. In a multi-agent bureau this is used to select the correct
    * agent; in a single-agent bureau it is carried through as metadata.

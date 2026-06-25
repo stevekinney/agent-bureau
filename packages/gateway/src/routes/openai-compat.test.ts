@@ -1,5 +1,8 @@
+import { createTool, createToolbox } from 'armorer';
 import { describe, expect, it } from 'bun:test';
-import type { GenerateFunction } from 'operative';
+import type { GenerateContext, GenerateFunction } from 'operative';
+import { noToolCalls } from 'operative/conditions';
+import { z } from 'zod';
 
 import { createTestGateway, requestJSON } from '../test';
 
@@ -181,5 +184,87 @@ describe('OpenAI-compat route (POST /v1/chat/completions)', () => {
     // The content chunk must contain the actual provider output, not an
     // empty string produced before the run settled.
     expect(text).toContain('"Done."');
+  });
+
+  describe('max_tokens regression: must not cap agent loop ITERATIONS', () => {
+    it('a tool-using run completes multiple steps when max_tokens is set (was broken: maximumSteps:1)', async () => {
+      // Regression: the old code mapped max_tokens → maximumSteps:1, which
+      // stopped the agent loop after ONE STEP even when the agent needed to
+      // call tools and observe the results. The fix maps max_tokens →
+      // maximumTokens (a PER-CALL output cap), allowing the loop to run to
+      // natural completion.
+      //
+      // This test is RED on the old `maximumSteps: 1` mapping and GREEN on the
+      // new `maximumTokens` mapping.
+      const callCount = { value: 0 };
+      const echoPingTool = createTool({
+        name: 'echo_ping',
+        description: 'ping',
+        input: z.object({}),
+        execute: async () => 'pong',
+      });
+
+      // Step 0: return a tool call. Step 1: return the final text (no tool calls → noToolCalls fires).
+      const generate: GenerateFunction = async (context: GenerateContext) => {
+        callCount.value++;
+        if (context.step === 0) {
+          return { content: '', toolCalls: [{ name: 'echo_ping', arguments: {} }] };
+        }
+        return { content: 'Finished after tool.', toolCalls: [] };
+      };
+
+      const gateway = await createTestGateway({
+        generate,
+        toolbox: createToolbox([echoPingTool]),
+        stopWhen: noToolCalls(),
+      });
+
+      const response = await requestJSON(gateway, '/v1/chat/completions', {
+        method: 'POST',
+        body: JSON.stringify({
+          model: 'bureau',
+          messages: [{ role: 'user', content: 'Use the ping tool.' }],
+          max_tokens: 256,
+        }),
+      });
+
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      // The run must have gone to step 1 (two generate calls) to produce
+      // the final content. Under the old maximumSteps:1 bug, callCount.value
+      // would be 1 and content would be empty/missing.
+      expect(callCount.value).toBe(2);
+      expect(body.choices[0].message.content).toBe('Finished after tool.');
+    });
+
+    it('max_tokens value flows as maximumTokens on the CreateRunRequest (not maximumSteps)', async () => {
+      // Verify the actual mapping at the gateway layer. The captured generate
+      // context should carry maximumTokens (the provider receives it).
+      const capturedContexts: GenerateContext[] = [];
+      const generate: GenerateFunction = async (context: GenerateContext) => {
+        capturedContexts.push(context);
+        return { content: 'ok', toolCalls: [] };
+      };
+
+      const gateway = await createTestGateway({
+        generate,
+        stopWhen: noToolCalls(),
+      });
+      const response = await requestJSON(gateway, '/v1/chat/completions', {
+        method: 'POST',
+        body: JSON.stringify({
+          model: 'bureau',
+          messages: [{ role: 'user', content: 'Hello' }],
+          max_tokens: 128,
+        }),
+      });
+
+      expect(response.status).toBe(200);
+      expect(capturedContexts.length).toBeGreaterThanOrEqual(1);
+      // The GenerateContext must carry maximumTokens=128 (not undefined)
+      for (const ctx of capturedContexts) {
+        expect(ctx.maximumTokens).toBe(128);
+      }
+    });
   });
 });

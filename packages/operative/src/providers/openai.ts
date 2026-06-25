@@ -58,7 +58,8 @@ export function createOpenAIProvider(options: OpenAIProviderOptions): GenerateFu
       messages,
     };
 
-    if (common.maximumTokens !== undefined) params['max_tokens'] = common.maximumTokens;
+    const effectiveMaxTokens = context.maximumTokens ?? common.maximumTokens;
+    if (effectiveMaxTokens !== undefined) params['max_tokens'] = effectiveMaxTokens;
     if (hasTools && options.toolChoice !== 'none')
       params['tools'] = Array.isArray(tools) ? tools : [tools];
     if (hasTools && options.toolChoice && options.toolChoice !== 'none')
@@ -148,7 +149,8 @@ export function createOpenAIProviderStream(
       stream_options: { include_usage: true },
     };
 
-    if (common.maximumTokens !== undefined) params['max_tokens'] = common.maximumTokens;
+    const effectiveMaxTokensStream = context.maximumTokens ?? common.maximumTokens;
+    if (effectiveMaxTokensStream !== undefined) params['max_tokens'] = effectiveMaxTokensStream;
     if (hasTools && options.toolChoice !== 'none')
       params['tools'] = Array.isArray(tools) ? tools : [tools];
     if (hasTools && options.toolChoice && options.toolChoice !== 'none')
