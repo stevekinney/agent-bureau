@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test';
 import { createBureau } from 'bureau';
 import { createStore } from 'operative/store';
 
-import { createBunAdapter } from './adapters/bun-adapter';
+import { createBunAdapter, handleWsUpgrade } from './adapters/bun-adapter';
 import { createGateway } from './create-gateway';
 import { DEFAULT_PORT } from './types';
 
@@ -79,5 +79,106 @@ describe('createBunAdapter', () => {
     const adapter = createBunAdapter();
     expect(typeof adapter.serve).toBe('function');
     expect(typeof adapter.mountStaticFiles).toBe('function');
+  });
+});
+
+// ── handleWsUpgrade — Bun adapter origin enforcement ────────────────────────
+//
+// The Bun adapter intercepts /ws upgrade requests before app.fetch() runs,
+// so the Hono createSecurityHeaders middleware is bypassed. handleWsUpgrade
+// encapsulates the auth + origin check logic and is tested here directly
+// without requiring a real Bun server.
+
+describe('handleWsUpgrade', () => {
+  function makeRequest(headers: Record<string, string> = {}, search = ''): [Request, URL] {
+    const url = new URL(`http://localhost/ws${search}`);
+    const request = new Request(url.toString(), { headers });
+    return [request, url];
+  }
+
+  function noopUpgrade(_request: Request): boolean {
+    return true;
+  }
+
+  describe('origin check', () => {
+    it('allows any origin when allowedOrigins is empty', () => {
+      const [request, url] = makeRequest({ origin: 'http://evil.example' });
+      const result = handleWsUpgrade(request, url, noopUpgrade, { allowedOrigins: [] });
+      expect(result?.status).not.toBe(403);
+    });
+
+    it('allows any origin when allowedOrigins is omitted', () => {
+      const [request, url] = makeRequest({ origin: 'http://evil.example' });
+      const result = handleWsUpgrade(request, url, noopUpgrade, {});
+      expect(result?.status).not.toBe(403);
+    });
+
+    it('allows a listed origin when allowedOrigins is configured', () => {
+      const [request, url] = makeRequest({ origin: 'http://app.example' });
+      const result = handleWsUpgrade(request, url, noopUpgrade, {
+        allowedOrigins: ['http://app.example'],
+      });
+      expect(result?.status).not.toBe(403);
+    });
+
+    it('rejects an unlisted origin with 403 when allowedOrigins is configured', () => {
+      const [request, url] = makeRequest({ origin: 'http://evil.example' });
+      const result = handleWsUpgrade(request, url, noopUpgrade, {
+        allowedOrigins: ['http://app.example'],
+      });
+      expect(result?.status).toBe(403);
+    });
+
+    it('rejects a missing Origin header with 403 when allowedOrigins is configured', () => {
+      const [request, url] = makeRequest({});
+      const result = handleWsUpgrade(request, url, noopUpgrade, {
+        allowedOrigins: ['http://app.example'],
+      });
+      expect(result?.status).toBe(403);
+    });
+  });
+
+  describe('auth token check', () => {
+    it('rejects with 401 when token is missing and authToken is required', () => {
+      const [request, url] = makeRequest({});
+      const result = handleWsUpgrade(request, url, noopUpgrade, { authToken: 'secret' });
+      expect(result?.status).toBe(401);
+    });
+
+    it('rejects with 401 when Bearer token is wrong', () => {
+      const [request, url] = makeRequest({ authorization: 'Bearer wrong' });
+      const result = handleWsUpgrade(request, url, noopUpgrade, { authToken: 'secret' });
+      expect(result?.status).toBe(401);
+    });
+
+    it('accepts a correct Bearer token', () => {
+      const [request, url] = makeRequest({ authorization: 'Bearer secret' });
+      const result = handleWsUpgrade(request, url, noopUpgrade, { authToken: 'secret' });
+      expect(result?.status).not.toBe(401);
+    });
+
+    it('accepts a correct query-string token', () => {
+      const [request, url] = makeRequest({}, '?token=secret');
+      const result = handleWsUpgrade(request, url, noopUpgrade, { authToken: 'secret' });
+      expect(result?.status).not.toBe(401);
+    });
+  });
+
+  describe('upgrade failure', () => {
+    it('returns 400 when upgrade() returns false', () => {
+      const [request, url] = makeRequest({ origin: 'http://app.example' });
+      const result = handleWsUpgrade(request, url, () => false, {
+        allowedOrigins: ['http://app.example'],
+      });
+      expect(result?.status).toBe(400);
+    });
+
+    it('returns undefined when upgrade() succeeds', () => {
+      const [request, url] = makeRequest({ origin: 'http://app.example' });
+      const result = handleWsUpgrade(request, url, () => true, {
+        allowedOrigins: ['http://app.example'],
+      });
+      expect(result).toBeUndefined();
+    });
   });
 });
