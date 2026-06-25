@@ -228,6 +228,14 @@ export type {
   RunStartContext,
 } from './hooks/index';
 export { composeHooks, everyNSteps, onlyOnStep, runOnce, withTimeout } from './hooks/index';
+export type { IdentityInheritanceLayer, MemoryInheritanceSide } from './inheritance';
+export {
+  combineHooks,
+  combineIdentity,
+  combineMemory,
+  combineProvider,
+  combineTools,
+} from './inheritance';
 export type {
   JitterOptions,
   OverflowMutatorOptions,
