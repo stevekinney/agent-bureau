@@ -1,4 +1,5 @@
 import type {
+  HistoryPolicy,
   ListFilter,
   ListOptions,
   PaginatedResult,
@@ -139,6 +140,54 @@ export interface SchedulerConfiguration {
   idleDelay?: number;
 }
 
+// ── Persistence Options ─────────────────────────────────────────────
+
+/**
+ * Unified persistence options for {@link BureauOptions.persistence}.
+ *
+ * Pass `.persistence({ store, history, observability, onLog })` to co-locate the
+ * storage backend with its operational knobs. The bureau builds one Weft engine
+ * over `store` — the engine handles durable run checkpointing; a `TextValueStore`
+ * view of the same backend is used for sessions, cache, and memory.
+ *
+ * Only `store` is required. `history` and `observability` are the two operational
+ * knobs exposed in v1; additional guardrails can be specified but are deferred.
+ *
+ * @see {@link BureauOptions.persistence}
+ */
+export interface PersistenceOptions {
+  /**
+   * The Weft storage backend config. The bureau resolves this to a raw `Storage`
+   * and builds both the durable engine AND the `TextValueStore` KV layer from it.
+   * One config → one backend → one engine (the Weft invariant: one engine per
+   * durable store).
+   */
+  store: StorageConfiguration;
+
+  /**
+   * History circuit-breaker for the durable engine. An agent run checkpoints its
+   * full transcript per step; `history.maxEvents` caps how long the event-log may
+   * grow before the run is force-terminated. Omit to disable.
+   */
+  history?: HistoryPolicy;
+
+  /**
+   * Opt into OpenTelemetry spans + metrics for durable runs. `true` enables the
+   * default interceptor; pass an {@link ObservabilityOptions} object (minus
+   * `eventTarget`, which the engine supplies) to customize.
+   * `@opentelemetry/api` is an optional peer — spans are no-ops without it, so
+   * enabling this is safe before any telemetry backend exists.
+   */
+  observability?: boolean | Omit<ObservabilityOptions, 'eventTarget'>;
+
+  /**
+   * Host sink for `ctx.log` records emitted by durable workflows. Receives every
+   * replay-safe log record from inline execution. A throwing sink falls back to
+   * the host console without failing the workflow.
+   */
+  onLog?: (record: WorkflowLogRecord) => void;
+}
+
 // ── Bureau (headless, no HTTP) ──────────────────────────────────────
 
 export interface BureauOptions {
@@ -149,7 +198,26 @@ export interface BureauOptions {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   toolbox?: Toolbox<any>;
   store?: Store;
-  persistence?: TextValueStore;
+  /**
+   * Persistence for this bureau. Accepts three forms:
+   *
+   * - **`PersistenceOptions`** — `{ store: StorageConfiguration, history?, observability?, onLog? }`:
+   *   the full options-object form. The bureau resolves `store` to a Weft `Storage`
+   *   backend and builds both the durable engine AND the KV layer from it. This is
+   *   the canonical form for durable bureaus: one config → one engine.
+   *
+   * - **`StorageConfiguration`** — shorthand for `{ store: config }` with no extra
+   *   knobs. Durable execution is on by default for persistent backends (`sqlite`,
+   *   `lmdb`) and off by default for `memory` (which loses checkpoints with the
+   *   process). Use `storage` field or `durableExecution` override if needed.
+   *
+   * - **`TextValueStore`** — KV-only (no durable engine). Used for session/cache
+   *   persistence without durability. Cannot be combined with `durableExecution:
+   *   true` (a durable engine needs a raw `Storage` to checkpoint against).
+   *
+   * When omitted, runs are ephemeral (in-memory loop, no sessions persisted).
+   */
+  persistence?: PersistenceOptions | StorageConfiguration | TextValueStore;
   storage?: StorageConfiguration;
   /**
    * Override for Weft-backed durable execution. Durable execution is **on by
