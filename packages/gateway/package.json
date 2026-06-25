@@ -24,7 +24,6 @@
     "@lostgradient/weft": "^0.8.0",
     "armorer": "workspace:*",
     "conversationalist": "workspace:*",
-    "herald": "workspace:*",
     "hono": "^4.7.10",
     "lifecycle": "workspace:*",
     "lucide-svelte": "^0.503.0",

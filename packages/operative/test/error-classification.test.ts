@@ -3,7 +3,7 @@ import { describe, expect, it } from 'bun:test';
 import { classifyError } from '../src/errors';
 
 describe('classifyError', () => {
-  it('HeraldError-like with retryable=true, statusCode=429 → rate-limit', () => {
+  it('ProviderError-like with retryable=true, statusCode=429 → rate-limit', () => {
     const error = Object.assign(new Error('rate limited'), {
       retryable: true,
       statusCode: 429,
