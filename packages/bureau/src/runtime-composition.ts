@@ -31,10 +31,7 @@ import {
   withCache,
   withEnhancedStreaming,
 } from 'operative';
-import {
-  createAnthropicProvider as createAnthropicGenerate,
-  createAnthropicProviderStream as createAnthropicGenerateStream,
-} from 'operative/anthropic';
+import { createAnthropicProvider, createAnthropicProviderStream } from 'operative/anthropic';
 import type {
   AnyRunEngine,
   CheckpointStore,
@@ -49,14 +46,8 @@ import {
   SCHEDULER_ORIGIN_TAG,
   SCHEDULER_RUN_ID_PREFIX,
 } from 'operative/durable';
-import {
-  createGeminiProvider as createGeminiGenerate,
-  createGeminiProviderStream as createGeminiGenerateStream,
-} from 'operative/gemini';
-import {
-  createOpenAIProvider as createOpenAIGenerate,
-  createOpenAIProviderStream as createOpenAIGenerateStream,
-} from 'operative/openai';
+import { createGeminiProvider, createGeminiProviderStream } from 'operative/gemini';
+import { createOpenAIProvider, createOpenAIProviderStream } from 'operative/openai';
 import {
   createComplexityStrategy,
   createCostAwareStrategy,
@@ -293,17 +284,17 @@ function resolveProviderGenerate(
   if (streamEventTarget) {
     switch (provider.provider) {
       case 'anthropic':
-        return withEnhancedStreaming(createAnthropicGenerateStream(provider), {
+        return withEnhancedStreaming(createAnthropicProviderStream(provider), {
           eventTarget: streamEventTarget,
           onTextDelta: streamingConfiguration?.onTextDelta,
         });
       case 'openai':
-        return withEnhancedStreaming(createOpenAIGenerateStream(provider), {
+        return withEnhancedStreaming(createOpenAIProviderStream(provider), {
           eventTarget: streamEventTarget,
           onTextDelta: streamingConfiguration?.onTextDelta,
         });
       case 'gemini':
-        return withEnhancedStreaming(createGeminiGenerateStream(provider), {
+        return withEnhancedStreaming(createGeminiProviderStream(provider), {
           eventTarget: streamEventTarget,
           onTextDelta: streamingConfiguration?.onTextDelta,
         });
@@ -314,11 +305,11 @@ function resolveProviderGenerate(
 
   switch (provider.provider) {
     case 'anthropic':
-      return createAnthropicGenerate(provider);
+      return createAnthropicProvider(provider);
     case 'openai':
-      return createOpenAIGenerate(provider);
+      return createOpenAIProvider(provider);
     case 'gemini':
-      return createGeminiGenerate(provider);
+      return createGeminiProvider(provider);
     default:
       throw new Error(`Unknown provider: ${String(provider.provider)}`);
   }
