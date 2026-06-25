@@ -31,7 +31,7 @@ import {
 } from '../src/create-weft-memory-record-storage';
 import { createDualNamespaceMemory } from '../src/dual-namespace-memory';
 import { createInMemoryMemoryRecordStorage, createMockEmbedder } from '../src/test/index';
-import type { Memory } from '../src/types';
+import type { Memory, MemoryRecordStorage } from '../src/types';
 
 const DIMENSION = 64;
 
@@ -440,5 +440,138 @@ describe('D3 tenantId scoping — bureau is the tenant boundary', () => {
     // bureau-b scope only sees rec-b.
     const bRecords = await storage.list({ tenantId: 'bureau-b', namespace: 'agent' });
     expect(bRecords.map((r) => r.id)).toEqual(['rec-b']);
+  });
+});
+
+// ─── Regression: list() fetches enough records to serve deep pages ────────────
+//
+// PRRT_kwDORvupsc6MV8XV: `limit: undefined` in the inner list() calls was
+// capped at 100 by createMemory's default, so pages past offset 100 were
+// empty or truncated. The fix fetches (offset + limit) from each side.
+
+describe('createDualNamespaceMemory list() — deep pagination regression (PRRT_kwDORvupsc6MV8XV)', () => {
+  /**
+   * Builds a Memory instance backed by a shared storage, pre-populated
+   * with `count` distinct records in the given namespace. Records are put
+   * directly into storage to bypass embedding overhead.
+   */
+  async function makeMemoryWithRecords(
+    namespace: string,
+    count: number,
+    storage: MemoryRecordStorage,
+  ): Promise<Memory> {
+    const embedder = createMockEmbedder(DIMENSION);
+    const mem = createMemory({ embedder, storage, namespace });
+    await mem.init();
+
+    const now = Date.now();
+    for (let i = 0; i < count; i++) {
+      await storage.put({
+        id: `${namespace}-record-${i}`,
+        namespace,
+        content: `Record ${i} in ${namespace}`,
+        vector: new Float32Array(DIMENSION).fill(0),
+        metadata: {},
+        createdAt: now + i,
+        updatedAt: now + i,
+        version: 1,
+        status: 'active',
+      });
+    }
+
+    return mem;
+  }
+
+  it('returns non-empty pages for offset >= 100 when private namespace has > 100 records', async () => {
+    // 105 records in private, 0 in shared.
+    const privateStorage = createInMemoryMemoryRecordStorage();
+    const sharedStorage = createInMemoryMemoryRecordStorage();
+    const embedder = createMockEmbedder(DIMENSION);
+
+    const privateMemory = await makeMemoryWithRecords('agent-private', 105, privateStorage);
+    const sharedMemory = createMemory({ embedder, storage: sharedStorage, namespace: 'shared' });
+    await sharedMemory.init();
+
+    const dual = createDualNamespaceMemory(privateMemory, sharedMemory);
+
+    // Page starting at offset 100 should have 5 records (indices 100-104).
+    const page = await dual.list({ limit: 10, offset: 100 });
+    expect(page.length).toBe(5);
+  });
+
+  it('paginates correctly across pages when combined total exceeds 100', async () => {
+    // 60 private + 60 shared = 120 total. A page at offset 100 should return 20.
+    const privateStorage = createInMemoryMemoryRecordStorage();
+    const sharedStorage = createInMemoryMemoryRecordStorage();
+
+    const privateMemory = await makeMemoryWithRecords('agent-private', 60, privateStorage);
+    const sharedMemory = await makeMemoryWithRecords('bureau-global', 60, sharedStorage);
+
+    const dual = createDualNamespaceMemory(privateMemory, sharedMemory);
+
+    const firstHundred = await dual.list({ limit: 100, offset: 0 });
+    const remainder = await dual.list({ limit: 100, offset: 100 });
+
+    expect(firstHundred.length).toBe(100);
+    expect(remainder.length).toBe(20);
+
+    // Pages must not overlap.
+    const firstIds = new Set(firstHundred.map((r) => r.id));
+    for (const r of remainder) {
+      expect(firstIds.has(r.id)).toBe(false);
+    }
+  });
+});
+
+// ─── Regression: forget() / forgetAll() ignore caller-supplied namespace ─────
+//
+// PRRT_kwDORvupsc6MV8Xi: the original code forwarded `namespace` to
+// privateMemory.forget / forgetAll. When private and shared memories share
+// the same underlying storage (the intended D3 prefix-namespacing topology),
+// a caller could pass the shared namespace name and delete a shared record.
+
+describe('createDualNamespaceMemory forget() / forgetAll() — namespace isolation regression (PRRT_kwDORvupsc6MV8Xi)', () => {
+  /**
+   * Shared storage backend, private and shared Memory instances over it with
+   * different namespaces. This is the D3 prefix-namespacing topology where the
+   * namespace-forwarding bug is exploitable.
+   */
+  let sharedStorage: MemoryRecordStorage;
+  let privateMemory: Memory;
+  let sharedMemory: Memory;
+  let dual: Memory;
+
+  beforeEach(async () => {
+    sharedStorage = createInMemoryMemoryRecordStorage();
+    const embedder = createMockEmbedder(DIMENSION);
+    privateMemory = createMemory({ embedder, storage: sharedStorage, namespace: 'agent-private' });
+    sharedMemory = createMemory({ embedder, storage: sharedStorage, namespace: 'bureau-global' });
+    dual = createDualNamespaceMemory(privateMemory, sharedMemory);
+    await dual.init();
+  });
+
+  it('forget() with the shared namespace name cannot delete a shared record', async () => {
+    // Write directly to the shared namespace via sharedMemory.
+    const sharedEntry = await sharedMemory.remember('Shared bureau fact');
+    expect(await sharedMemory.count()).toBe(1);
+
+    // Attempt to delete via dual, explicitly naming the shared namespace.
+    // With the bug, privateMemory.forget(id, 'bureau-global') targets the
+    // shared scope in storage and removes the record. After the fix the
+    // namespace argument is dropped and the call is a private-scope no-op.
+    await dual.forget(sharedEntry.id, 'bureau-global');
+
+    expect(await sharedMemory.count()).toBe(1);
+  });
+
+  it('forgetAll() with the shared namespace name cannot clear the shared namespace', async () => {
+    await sharedMemory.remember('Shared fact A');
+    await sharedMemory.remember('Shared fact B');
+    expect(await sharedMemory.count()).toBe(2);
+
+    // Attempt a forgetAll targeting the shared namespace through the dual wrapper.
+    await dual.forgetAll('bureau-global');
+
+    expect(await sharedMemory.count()).toBe(2);
   });
 });

@@ -904,8 +904,27 @@ export async function createRuntimeComposition(
       throw new Error('No generate function configured');
     }
 
+    // Clone the toolbox for this run so concurrent runs do not share a single
+    // CompletableEventTarget emitter. A shared emitter would route every tool.*
+    // event (execute-start, settled, …) to ALL runs that have subscribed, causing
+    // cross-run event pollution and shared budget/loop-detector state.
+    // `extend()` (no args) creates a fresh toolbox with a new emitter while
+    // preserving all tool configurations, context, and policy from the original.
+    // The unavailable-toolbox sentinel (no user toolbox, no skill tools) is
+    // structurally distinct (custom throwing execute) and must be freshly
+    // instantiated per-call via createUnavailableToolbox() instead.
+    //
+    // The skills path below calls combineToolboxes(toolbox, skillToolbox) which
+    // always creates a fresh toolbox — so cloning here also means the combined
+    // result is based on a per-run clone, which is correct.
+    //
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Toolbox generic variance; bureau never inspects the type parameter
-    let toolbox: Toolbox<any> = fallbackToolbox;
+    let toolbox: Toolbox<any> =
+      options.toolbox !== undefined
+        ? baseToolbox.extend()
+        : hasSkillTools
+          ? fallbackToolbox.extend()
+          : createUnavailableToolbox();
     const prepareStep: PrepareStepHook[] = [];
     const onStep: OnStepHook[] = [];
     const validateResponse: ValidateResponseHook[] = [];

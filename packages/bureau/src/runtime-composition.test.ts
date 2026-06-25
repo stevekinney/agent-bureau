@@ -804,3 +804,93 @@ describe('D4: skills catalog injection', () => {
     expect(catalogMessage).toContain('A skill seeded directly into KV');
   });
 });
+
+// ── Toolbox isolation across concurrent runs ──────────────────────────────────
+//
+// Each call to createRunRuntime must receive a FRESH toolbox clone, not a
+// shared instance. A shared toolbox has a single CompletableEventTarget emitter;
+// when createActiveRun subscribes to it via forwardEvents / addEventListener, all
+// concurrent runs receive each other's tool.* events, corrupting their event
+// streams and sharing budget/loop state.
+describe('createRunRuntime toolbox isolation', () => {
+  it('returns a distinct toolbox instance per call when options.toolbox is set', async () => {
+    const sharedToolbox = createToolbox([], { context: {} });
+
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'ok', toolCalls: [] }),
+      toolbox: sharedToolbox,
+    });
+
+    const runRuntimeA = await runtime.createRunRuntime({
+      message: 'Hello from A',
+      sessionId: 'isolation-session-a',
+    });
+
+    const runRuntimeB = await runtime.createRunRuntime({
+      message: 'Hello from B',
+      sessionId: 'isolation-session-b',
+    });
+
+    // The two runtimes must NOT share the same toolbox instance.
+    // A shared emitter would let run A's tool events reach run B's listeners.
+    expect(runRuntimeA.toolbox).not.toBe(runRuntimeB.toolbox);
+    // And neither must be the original options.toolbox reference.
+    expect(runRuntimeA.toolbox).not.toBe(sharedToolbox);
+    expect(runRuntimeB.toolbox).not.toBe(sharedToolbox);
+  });
+
+  it('does not deliver tool events from one run to another concurrent run', async () => {
+    const { createTool, createToolbox: makeToolbox } = await import('armorer');
+    const { z } = await import('zod');
+
+    // Deferred resolve so we can keep run A's tool call in-flight while run B
+    // subscribes to its own toolbox — proving zero cross-talk.
+    let resolveToolA!: (value: string) => void;
+    const toolADone = new Promise<string>((resolve) => {
+      resolveToolA = resolve;
+    });
+
+    const deferredTool = createTool({
+      name: 'deferred_action',
+      description: 'A tool whose execution can be deferred for testing',
+      input: z.object({ payload: z.string() }),
+      async execute({ payload }) {
+        const result = await toolADone;
+        return `${payload}:${result}`;
+      },
+    });
+
+    const toolbox = makeToolbox([deferredTool], { context: {} });
+
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'ok', toolCalls: [] }),
+      toolbox,
+    });
+
+    const runRuntimeA = await runtime.createRunRuntime({
+      message: 'A',
+      sessionId: 'event-isolation-a',
+    });
+    const runRuntimeB = await runtime.createRunRuntime({
+      message: 'B',
+      sessionId: 'event-isolation-b',
+    });
+
+    const bReceivedEvents: string[] = [];
+    runRuntimeB.toolbox.addEventListener('execute-start', (e) => {
+      bReceivedEvents.push(e.call.name);
+    });
+
+    // Start run A's tool call in the background (it will block until resolved).
+    void runRuntimeA.toolbox.execute({ name: 'deferred_action', arguments: { payload: 'test' } });
+
+    // Give the in-flight execute a microtask to register with the emitter.
+    await Promise.resolve();
+
+    // Run B must not have received any events from run A's tool execution.
+    expect(bReceivedEvents).toHaveLength(0);
+
+    // Unblock run A.
+    resolveToolA('done');
+  });
+});

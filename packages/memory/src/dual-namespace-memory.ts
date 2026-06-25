@@ -125,11 +125,17 @@ export function createDualNamespaceMemory(privateMemory: Memory, sharedMemory?: 
       const limit = listOptions?.limit ?? 100;
       const offset = listOptions?.offset ?? 0;
 
-      // Fetch all from both (no offset push-down across two sources), merge,
-      // sort newest-first, then apply offset + limit.
+      // We must fetch at least (offset + limit) records from each namespace so
+      // that after merge + sort we can always slice the correct page. Passing
+      // `limit: undefined` would be capped at 100 by the underlying Memory
+      // implementation's default, producing empty or truncated pages for
+      // callers with `offset >= 100` or large combined result sets.
+      const fetchLimit = offset + limit;
+
+      // No offset push-down across two sources — merge first, then paginate.
       const [privateEntries, sharedEntries] = await Promise.all([
-        privateMemory.list({ ...listOptions, limit: undefined, offset: 0 }),
-        sharedMemory.list({ ...listOptions, limit: undefined, offset: 0 }),
+        privateMemory.list({ ...listOptions, limit: fetchLimit, offset: 0 }),
+        sharedMemory.list({ ...listOptions, limit: fetchLimit, offset: 0 }),
       ]);
 
       const seen = new Set<string>();
@@ -153,16 +159,20 @@ export function createDualNamespaceMemory(privateMemory: Memory, sharedMemory?: 
       return merged.slice(offset, offset + limit);
     },
 
-    async forget(id: string, namespace?: string): Promise<void> {
-      // Deletes target the private namespace only. Shared records cannot be
-      // removed through this wrapper; promotion (private → shared) is a
-      // deliberate bureau-level act, and the inverse must be too.
-      return privateMemory.forget(id, namespace);
+    async forget(id: string): Promise<void> {
+      // Deletes target the private namespace only. The `namespace` argument is
+      // intentionally not forwarded: if private and shared memories share the
+      // same underlying storage (prefix-namespaced), forwarding a caller-
+      // supplied namespace (e.g. the shared namespace name) would let the
+      // caller bypass the private-write constraint and delete a shared record.
+      return privateMemory.forget(id);
     },
 
-    async forgetAll(namespace?: string): Promise<void> {
-      // Clears the private namespace only, for the same reason.
-      return privateMemory.forgetAll(namespace);
+    async forgetAll(): Promise<void> {
+      // Clears the private namespace only. Same rationale as forget() above —
+      // the namespace argument is dropped to prevent the caller from targeting
+      // the shared namespace through this wrapper.
+      return privateMemory.forgetAll();
     },
 
     async count(): Promise<number> {

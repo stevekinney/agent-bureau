@@ -5,23 +5,42 @@ import type { ServerAdapter, ServerAdapterOptions, ServerHandle } from './types'
 
 /**
  * Handles an incoming `/ws` upgrade request for the Bun adapter, enforcing
- * token authentication and origin checks before handing off to `server.upgrade`.
+ * authentication and origin checks before handing off to `server.upgrade`.
  *
  * This logic is extracted so it can be tested independently of `Bun.serve`.
+ *
+ * Authentication is resolved in priority order:
+ * 1. `authenticate` — injected async verifier built from the same precedence
+ *    as the HTTP middleware (managed `ab_live_` keys, then static token).
+ *    Used when an `ApiKeyStore` is configured.
+ * 2. `authToken` — static token fallback for backwards compatibility when no
+ *    `ApiKeyStore` is present.
+ * 3. No-op — when neither is provided, all upgrades are accepted (no-auth).
  *
  * Returns a `Response` when the request should be rejected, or calls
  * `upgrade(request)` and returns `undefined` (cast as Response to satisfy
  * Bun's fetch signature) when the upgrade is accepted.
  */
-export function handleWsUpgrade(
+export async function handleWsUpgrade(
   request: Request,
   url: URL,
   upgrade: (request: Request) => boolean,
-  options: { authToken?: string; allowedOrigins?: string[] },
-): Response | undefined {
-  const { authToken, allowedOrigins = [] } = options;
+  options: {
+    authToken?: string;
+    authenticate?: (request: Request) => Promise<boolean>;
+    allowedOrigins?: string[];
+  },
+): Promise<Response | undefined> {
+  const { authToken, authenticate, allowedOrigins = [] } = options;
 
-  if (authToken) {
+  if (authenticate) {
+    // Delegate to the injected verifier, which mirrors the HTTP auth middleware.
+    const allowed = await authenticate(request);
+    if (!allowed) {
+      return new Response('Unauthorized', { status: 401 });
+    }
+  } else if (authToken) {
+    // Static-token fallback for backwards compatibility (no ApiKeyStore).
     const authHeader = request.headers.get('authorization') ?? '';
     const headerToken = authHeader.toLowerCase().startsWith('bearer ')
       ? authHeader.slice(7).trim()
@@ -62,7 +81,15 @@ export function createBunAdapter(): ServerAdapter {
     },
 
     serve(app: Hono, options: ServerAdapterOptions): ServerHandle {
-      const { port, hostname, wsHandler, authToken, allowedOrigins = [], idleTimeout } = options;
+      const {
+        port,
+        hostname,
+        wsHandler,
+        authToken,
+        authenticate,
+        allowedOrigins = [],
+        idleTimeout,
+      } = options;
 
       if (wsHandler) {
         const handler = wsHandler;
@@ -74,22 +101,23 @@ export function createBunAdapter(): ServerAdapter {
           // must fire before this threshold; see DEFAULT_HEARTBEAT_INTERVAL_MS
           // in live-events.ts.
           idleTimeout,
-          fetch(request, server) {
+          async fetch(request, server) {
             const url = new URL(request.url);
 
             if (url.pathname === '/ws') {
-              const result = handleWsUpgrade(
+              const result = await handleWsUpgrade(
                 request,
                 url,
                 (r) => server.upgrade(r, { data: undefined }),
                 {
                   authToken,
+                  authenticate,
                   allowedOrigins,
                 },
               );
-              // When upgrade succeeds, result is undefined; Bun requires returning
-              // undefined here but TypeScript expects Response, hence the cast.
-              return result as Response;
+              // When upgrade succeeds, handleWsUpgrade returns undefined.
+              // Bun's fetch signature requires Response | undefined here.
+              return result;
             }
             return app.fetch(request);
           },

@@ -252,6 +252,64 @@ describe('session.run()', () => {
     expect(historyLengths[1]).toBeGreaterThan(historyLengths[0]!);
   });
 
+  // Regression: Finding PRRT_kwDORvupsc6MV8XO — run() only persisted a RunRef
+  // after the run completed, so signal()/update()/recover() could not find a
+  // running run in the store while the workflow was still in-flight (HITL, parked
+  // durable runs). After the fix, a 'running' RunRef is persisted BEFORE the
+  // inner run starts, and replaced with the terminal status on completion.
+  it('PRRT_kwDORvupsc6MV8XO regression: persists running RunRef before awaiting completion', async () => {
+    // Use a blocking generate so the run stays in-flight long enough to inspect.
+    let resolveGenerate!: () => void;
+    let signalGenerateStarted!: () => void;
+    const generateStarted = new Promise<void>((resolve) => {
+      signalGenerateStarted = resolve;
+    });
+
+    const blockingGenerate: GenerateFunction = () => {
+      return new Promise<{ content: string; toolCalls: [] }>((resolve) => {
+        resolveGenerate = () => resolve({ content: 'done', toolCalls: [] });
+        signalGenerateStarted();
+      });
+    };
+
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+    const h = createSessionHandle('running-ref-session', {
+      store,
+      agentName: 'test-agent',
+      runOptions: {
+        generate: blockingGenerate,
+        toolbox: createToolbox([]) as unknown as Toolbox,
+        maximumSteps: 1,
+      },
+    });
+
+    const run = h.run('do something');
+
+    // Wait until generate is executing (i.e. the session has been loaded and
+    // the 'running' ref has been persisted).
+    await generateStarted;
+
+    // The store MUST contain a running ref while the run is still in-flight.
+    const mid = await store.load('running-ref-session');
+    expect(mid).toBeDefined();
+    expect(mid!.runs).toHaveLength(1);
+    expect(mid!.runs[0]!.status).toBe('running');
+    expect(mid!.runs[0]!.runId).toBe('running-ref-session:0');
+
+    // Resolve the generate so the run can finish.
+    resolveGenerate();
+    await run.result();
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+
+    // After completion, the ref must be updated to a terminal status in-place
+    // (still only 1 RunRef — not appended).
+    const final = await store.load('running-ref-session');
+    expect(final!.runs).toHaveLength(1);
+    expect(final!.runs[0]!.status).toBe('completed');
+    expect(final!.runs[0]!.runId).toBe('running-ref-session:0');
+  });
+
   // Regression: Finding PRRT_kwDORvupsc6MUE_1 — run() never routed through the
   // Weft durable engine even when engine+checkpointStore were present. After the
   // fix, a new run must start via engine.start() so it is checkpointed and

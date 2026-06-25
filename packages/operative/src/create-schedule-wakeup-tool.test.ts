@@ -125,4 +125,53 @@ describe('createScheduleWakeupTool', () => {
 
     expect(result.message).toContain('5000ms');
   });
+
+  describe('input schema', () => {
+    it('exposes an input Zod schema so armorer does not strip arguments', () => {
+      const context = makeContext();
+      const tool = createScheduleWakeupTool({ context });
+
+      // The tool MUST have an `input` schema. Without it, armorer's
+      // normalizeSchema(undefined) returns z.object({}) which strips every
+      // field before execute() is called (Zod strips unknown keys by default).
+      expect(tool.input).toBeDefined();
+    });
+
+    it('input schema preserves in and note when parsed', () => {
+      const context = makeContext();
+      const tool = createScheduleWakeupTool({ context });
+
+      const parsed = tool.input.parse({ in: '6h', note: 'Check the deploy' });
+
+      // Both fields must survive schema parsing — no stripping.
+      expect(parsed.in).toBe('6h');
+      expect(parsed.note).toBe('Check the deploy');
+    });
+
+    it('input schema accepts a numeric duration', () => {
+      const context = makeContext();
+      const tool = createScheduleWakeupTool({ context });
+
+      const parsed = tool.input.parse({ in: 21_600_000 });
+
+      expect(parsed.in).toBe(21_600_000);
+    });
+
+    it('input schema treats note as optional', () => {
+      const context = makeContext();
+      const tool = createScheduleWakeupTool({ context });
+
+      const parsed = tool.input.parse({ in: '6h' });
+
+      expect(parsed.in).toBe('6h');
+      expect(parsed.note).toBeUndefined();
+    });
+
+    it('input schema rejects calls with no in field', () => {
+      const context = makeContext();
+      const tool = createScheduleWakeupTool({ context });
+
+      expect(() => tool.input.parse({ note: 'oops' })).toThrow();
+    });
+  });
 });
