@@ -22,7 +22,7 @@
       "outputs": []
     },
     "test": {
-      "dependsOn": ["^build"],
+      "dependsOn": ["^build", "build"],
       "outputs": [],
       "passThroughEnv": ["CI", "NODE_BINARY", "NODE_ENV", "PATH"]
     },
