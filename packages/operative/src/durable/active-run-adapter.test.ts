@@ -7,16 +7,18 @@ import { HookRegistry } from 'lifecycle';
 import { z } from 'zod';
 
 import { stopWhen } from '../conditions/index';
-import { createRun } from '../create-run';
+import { createActiveRun } from '../create-run';
 import { BudgetExceededError, ElicitationDeniedError } from '../errors';
 import type { OperativeHookMap } from '../hooks';
-import { run } from '../run';
 import type { RunOptions, RunResult } from '../types';
 import { createDurableActiveRun, reattachDurableActiveRun } from './active-run-adapter';
 import { createCheckpointStore } from './checkpoint-store';
 import type { AnyRunEngine } from './create-run-engine';
 import { createRunEngine } from './create-run-engine';
 import { createRunWorkflow } from './run-workflow';
+
+const run = (...args: Parameters<typeof createActiveRun>) => createActiveRun(...args).result;
+const createRun = createActiveRun;
 
 // Drain Weft's deferred inline-launch queue between tests — a pending setTimeout(0)
 // inline-launch left by one durable run can starve a later one under full

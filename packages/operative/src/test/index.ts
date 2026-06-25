@@ -1,14 +1,13 @@
-import { createTestToolbox } from 'armorer/test';
-
 import {
   type AgentRegistry,
   type AgentRegistryEntry,
   createAgentRegistry,
+  type RegistryAgent,
 } from '../create-agent-registry';
 import type { ActiveRun } from '../create-run';
 import { createScratchpad, type Scratchpad } from '../create-scratchpad';
 import type { OperativeEventMap, OperativeEventType } from '../events';
-import type { AgentDefinition, GenerateFunction, GenerateResponse, StepResult } from '../types';
+import type { GenerateFunction, GenerateResponse, RunResult, StepResult } from '../types';
 
 export {
   createManualCheckpointStore,
@@ -93,25 +92,23 @@ export function createMockScratchpad(initialValues?: Record<string, unknown>): S
   return createScratchpad({ initialValues });
 }
 
-export function createMockAgentDefinition(
+/**
+ * Creates a minimal mock agent for registry-based tests.
+ */
+export function createMockRegistryAgent(
   name: string,
-  overrides: Partial<AgentDefinition> = {},
-): AgentDefinition {
+  overrides: Partial<RegistryAgent> = {},
+): RegistryAgent {
+  const mockResult: RunResult = {
+    conversation: {} as never,
+    steps: [],
+    content: `Mock response from ${name}`,
+    usage: { prompt: 0, completion: 0, total: 0 },
+    finishReason: 'stop-condition' as const,
+  };
   return {
     name,
-    options: {
-      name,
-      generate: async () => ({ content: `Mock response from ${name}`, toolCalls: [] }),
-      toolbox: createTestToolbox([]),
-    },
-    run: async () => ({
-      conversation: {} as never,
-      steps: [],
-      content: `Mock response from ${name}`,
-      usage: { prompt: 0, completion: 0, total: 0 },
-      finishReason: 'stop-condition' as const,
-    }),
-    createRun: () => ({}) as never,
+    run: async () => mockResult,
     ...overrides,
   };
 }

@@ -3,8 +3,8 @@ import { describe, expect, it, mock } from 'bun:test';
 import {
   createManualCheckpointStore,
   createManualDurableEngine,
-  createMockAgentDefinition,
   createMockAgentRegistry,
+  createMockRegistryAgent,
   createMockScratchpad,
   createStepwiseBlockingGenerate,
   spyEngine,
@@ -25,38 +25,21 @@ describe('createMockScratchpad', () => {
   });
 });
 
-describe('createMockAgentDefinition', () => {
+describe('createMockRegistryAgent', () => {
   it('creates a mock agent with the given name', () => {
-    const agent = createMockAgentDefinition('test');
+    const agent = createMockRegistryAgent('test');
     expect(agent.name).toBe('test');
   });
 
   it('run returns mock content', async () => {
-    const agent = createMockAgentDefinition('helper');
+    const agent = createMockRegistryAgent('helper');
     const result = await agent.run('Hello');
     expect(result.content).toBe('Mock response from helper');
     expect(result.finishReason).toBe('stop-condition');
   });
 
-  it('exposes options with a mock generate function', async () => {
-    const agent = createMockAgentDefinition('helper');
-    const response = await agent.options.generate({
-      conversation: {} as never,
-      step: 0,
-      toolbox: {} as never,
-    });
-    expect(response.content).toBe('Mock response from helper');
-  });
-
-  it('createRun returns a placeholder', () => {
-    const agent = createMockAgentDefinition('helper');
-    // Just verify it doesn't throw
-    const result = agent.createRun('Hi');
-    expect(result).toBeDefined();
-  });
-
   it('applies overrides', async () => {
-    const agent = createMockAgentDefinition('custom', {
+    const agent = createMockRegistryAgent('custom', {
       run: async () => ({
         conversation: {} as never,
         steps: [],
@@ -77,7 +60,7 @@ describe('createMockAgentRegistry', () => {
   });
 
   it('creates a pre-populated registry', () => {
-    const agent = createMockAgentDefinition('a');
+    const agent = createMockRegistryAgent('a');
     const registry = createMockAgentRegistry([
       { agent, description: 'Agent A', capabilities: ['x'] },
     ]);
@@ -161,7 +144,6 @@ describe('waitForRunState', () => {
     const store = {
       getRun: (_id: string) => ({ status: 'running' as const }),
     };
-    // Override the internal yield to be instant so the test completes quickly
     await expect(
       waitForRunState({ getRun: store.getRun }, 'run-never', (r) => r.status === 'completed'),
     ).rejects.toThrow('run-never');

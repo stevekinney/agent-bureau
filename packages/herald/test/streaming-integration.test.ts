@@ -2,13 +2,15 @@ import { createTool, createToolbox } from 'armorer';
 import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
 import type { RunResult } from 'operative';
-import { run, stopWhen, withStreaming } from 'operative';
+import { createActiveRun, stopWhen, withStreaming } from 'operative';
 import { z } from 'zod';
 
 import { createAnthropicGenerateStream } from '../src/anthropic.ts';
 import { HeraldError } from '../src/errors.ts';
 import { anthropicStreamTextEvents, anthropicStreamToolUseEvents } from '../src/test/fixtures.ts';
 import { createMockAnthropicStreamingClient } from '../src/test/mock-clients.ts';
+
+const run = (options: Parameters<typeof createActiveRun>[0]) => createActiveRun(options).result;
 
 const weatherTool = createTool({
   name: 'get_weather',

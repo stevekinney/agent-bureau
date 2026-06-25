@@ -4,10 +4,10 @@ import { Conversation } from 'conversationalist';
 import { z } from 'zod';
 
 import { noToolCalls } from '../src/conditions/predicates';
-import { createRun } from '../src/create-run';
-import { run } from '../src/run';
+import { createActiveRun } from '../src/create-run';
 import { createRunRecorder } from '../src/test/index';
 import type { GenerateResponse } from '../src/types';
+const run = (options: Parameters<typeof createActiveRun>[0]) => createActiveRun(options).result;
 
 function textResponse(content: string): GenerateResponse {
   return { content, toolCalls: [] };
@@ -135,7 +135,7 @@ describe('structured output enforcement', () => {
       return textResponse(JSON.stringify({ answer: 'Good', confidence: 1.0 }));
     };
 
-    const activeRun = createRun({
+    const activeRun = createActiveRun({
       generate,
       toolbox: createTestToolbox([]),
       conversation: new Conversation(),

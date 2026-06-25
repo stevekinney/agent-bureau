@@ -66,6 +66,7 @@ export type {
   AgentRegistryEventMap,
   AgentRegistryEvents,
   AgentRegistryQuery,
+  RegistryAgent,
 } from './create-agent-registry';
 export {
   AgentQueriedEvent,
@@ -91,7 +92,7 @@ export type {
 } from './create-policy-enforcement-hook';
 export { createPolicyEnforcementHook } from './create-policy-enforcement-hook';
 export type { ActiveRun, DurableRunRouting } from './create-run';
-export { createRun } from './create-run';
+export { createActiveRun } from './create-run';
 export type {
   CreateScratchpadOptions,
   Scratchpad,
@@ -108,6 +109,7 @@ export {
   EntrySetEvent,
   ScratchpadClearedEvent,
 } from './create-scratchpad';
+export type { CreateSubagentToolOptions } from './create-subagent-tool';
 export { createSubagentTool } from './create-subagent-tool';
 export type {
   CreateSupervisorOptions,
@@ -131,7 +133,6 @@ export {
   TaskFailedEvent,
   TaskRoutedEvent,
 } from './create-supervisor';
-export { defineAgent } from './define-agent';
 export type { ClassifiedError, ErrorCategory } from './errors';
 export { BudgetExceededError, classifyError, ElicitationDeniedError } from './errors';
 export type {
@@ -245,7 +246,6 @@ export {
   createToolRemovalMutator,
   RETRY_TEMPERATURE_KEY,
 } from './retry/index';
-export { run } from './run';
 export type {
   CreateChunkedTaskOptions,
   CreateDurableHeartbeatOptions,
@@ -318,15 +318,11 @@ export { zodToJsonSchema } from './structured-output/index';
 export type {
   AfterGenerateHook,
   AfterToolExecutionHook,
-  AgentDefinition,
-  AgentRunOptions,
   BeforeGenerateHook,
   BeforeToolExecutionHook,
   ContextManagementOptions,
   Conversation,
   ConversationHistory,
-  CreateSubagentToolOptions,
-  DefineAgentOptions,
   ElicitationRequest,
   ElicitationResponse,
   FinishReason,

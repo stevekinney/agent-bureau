@@ -6,10 +6,11 @@ import { HookRegistry } from 'lifecycle';
 import { z } from 'zod';
 
 import { noToolCalls } from '../src/conditions/predicates';
+import { createActiveRun } from '../src/create-run';
 import type { OperativeHookMap } from '../src/hooks';
 import { executeLoop } from '../src/loop';
-import { run } from '../src/run';
 import type { GenerateResponse } from '../src/types';
+const run = (options: Parameters<typeof createActiveRun>[0]) => createActiveRun(options).result;
 
 function textResponse(content: string): GenerateResponse {
   return { content, toolCalls: [] };

@@ -1,6 +1,6 @@
 import { createMockTool, createTestToolbox } from 'armorer/test';
 import { describe, expect, it } from 'bun:test';
-import type { AgentDefinition, GenerateFunction, GenerateResponse, RunResult } from 'operative';
+import type { GenerateFunction, GenerateResponse, RegistryAgent, RunResult } from 'operative';
 import { createMockGenerate } from 'operative/test';
 import { z } from 'zod';
 
@@ -12,27 +12,6 @@ function singleResponse(
   toolCalls: GenerateResponse['toolCalls'] = [],
 ): GenerateResponse {
   return { content, toolCalls, usage: { prompt: 10, completion: 5, total: 15 } };
-}
-
-function createAgentDefinition(
-  generate: GenerateFunction,
-  instructions?: string | { render(): string },
-): AgentDefinition {
-  return {
-    name: 'evaluation-agent',
-    options: {
-      name: 'evaluation-agent',
-      generate,
-      toolbox: createTestToolbox([]),
-      instructions,
-    },
-    async run() {
-      throw new Error('Not used by createAgentEvaluation tests');
-    },
-    createRun() {
-      throw new Error('Not used by createAgentEvaluation tests');
-    },
-  };
 }
 
 describe('createAgentEvaluation', () => {
@@ -279,46 +258,6 @@ describe('createAgentEvaluation', () => {
     await evaluation.run();
 
     expect(capturedSystemMessage).toBe('Case system prompt');
-  });
-
-  it('uses string instructions from an agent definition when no case system prompt is provided', async () => {
-    let capturedSystemMessage = '';
-    const generate: GenerateFunction = async ({ conversation }) => {
-      const systemMessage = conversation.getMessages().find((message) => message.role === 'system');
-      capturedSystemMessage =
-        typeof systemMessage?.content === 'string' ? systemMessage.content : '';
-      return singleResponse('ok');
-    };
-
-    const evaluation = createAgentEvaluation({
-      cases: [{ name: 'agent-definition-string', input: 'test' }],
-      agent: createAgentDefinition(generate, 'Agent instructions'),
-    });
-
-    await evaluation.run();
-
-    expect(capturedSystemMessage).toBe('Agent instructions');
-  });
-
-  it('renders non-string instructions from an agent definition', async () => {
-    let capturedSystemMessage = '';
-    const generate: GenerateFunction = async ({ conversation }) => {
-      const systemMessage = conversation.getMessages().find((message) => message.role === 'system');
-      capturedSystemMessage =
-        typeof systemMessage?.content === 'string' ? systemMessage.content : '';
-      return singleResponse('ok');
-    };
-
-    const evaluation = createAgentEvaluation({
-      cases: [{ name: 'agent-definition-renderable', input: 'test' }],
-      agent: createAgentDefinition(generate, {
-        render: () => 'Rendered instructions',
-      }),
-    });
-
-    await evaluation.run();
-
-    expect(capturedSystemMessage).toBe('Rendered instructions');
   });
 
   it('returns a failed case when semantic matching throws during evaluation', async () => {
@@ -578,27 +517,22 @@ describe('createAgentEvaluation', () => {
     expect(report.cases[0]!.error).toBeUndefined();
   });
 
-  it('works with AgentDefinition input', async () => {
-    const generate = createMockGenerate([singleResponse('Hello from agent!')]);
-    const toolbox = createTestToolbox([]);
-
-    // Simulate an AgentDefinition-shaped object with a `run` method and `options`
-    const agentDefinition = {
+  it('works with RegistryAgent input', async () => {
+    // RegistryAgent path: the agent's run() is called directly with the input string
+    const registryAgent: RegistryAgent = {
       name: 'test-agent',
-      options: { name: 'test-agent', generate, toolbox },
-      run: async () => ({
+      run: async (_input: string) => ({
         conversation: {} as RunResult['conversation'],
         steps: [],
         content: 'Hello from agent!',
         usage: { prompt: 0, completion: 0, total: 0 },
         finishReason: 'stop-condition' as const,
       }),
-      createRun: () => ({}) as never,
     };
 
     const evaluation = createAgentEvaluation({
-      cases: [{ name: 'agent-def', input: 'test', expectedOutput: 'Hello from agent!' }],
-      agent: agentDefinition,
+      cases: [{ name: 'registry-agent', input: 'test', expectedOutput: 'Hello from agent!' }],
+      agent: registryAgent,
     });
 
     const report = await evaluation.run();

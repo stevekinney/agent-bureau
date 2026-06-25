@@ -3,13 +3,13 @@ import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
 
 import { noToolCalls } from '../../src/conditions/predicates';
-import { createRun } from '../../src/create-run';
+import { createActiveRun } from '../../src/create-run';
 import type { GenerateRetryEvent } from '../../src/events';
 import { composeMutators } from '../../src/retry/compose-mutators';
 import type { RetryMutator } from '../../src/retry/types';
-import { run } from '../../src/run';
 import { createRunRecorder } from '../../src/test/index';
 import type { GenerateResponse } from '../../src/types';
+const run = (options: Parameters<typeof createActiveRun>[0]) => createActiveRun(options).result;
 
 function textResponse(content: string): GenerateResponse {
   return { content, toolCalls: [] };
@@ -85,7 +85,7 @@ describe('retry with mutation integration', () => {
       return { ...context, step: 42 };
     };
 
-    const activeRun = createRun({
+    const activeRun = createActiveRun({
       generate,
       toolbox: createTestToolbox([]),
       conversation: new Conversation(),
@@ -112,7 +112,7 @@ describe('retry with mutation integration', () => {
 
     const noopMutator: RetryMutator = () => undefined;
 
-    const activeRun = createRun({
+    const activeRun = createActiveRun({
       generate,
       toolbox: createTestToolbox([]),
       conversation: new Conversation(),

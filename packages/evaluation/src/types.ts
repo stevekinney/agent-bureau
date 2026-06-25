@@ -1,5 +1,5 @@
 import type { Toolbox } from 'armorer';
-import type { AgentDefinition, FinishReason, GenerateFunction, RunResult } from 'operative';
+import type { FinishReason, GenerateFunction, RegistryAgent, RunResult } from 'operative';
 
 /**
  * An expected tool call that the agent should make during evaluation.
@@ -180,7 +180,7 @@ export type EmbedderFunction = (text: string) => Promise<number[]>;
  * Configuration for the agent under evaluation.
  */
 export type EvaluationAgentConfiguration =
-  | AgentDefinition
+  | RegistryAgent
   | { generate: GenerateFunction; toolbox: Toolbox };
 
 /**

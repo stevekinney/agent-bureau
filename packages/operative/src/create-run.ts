@@ -10,6 +10,9 @@ import type { RunOptions, RunResult } from './types';
 
 /**
  * An active, event-emitting agent loop run.
+ *
+ * @deprecated Use AgentRun (B1) instead. This type remains temporarily while
+ * durable/store/instrumentation/scheduler are migrated to the new surface.
  */
 export interface ActiveRun {
   result: Promise<RunResult>;
@@ -49,37 +52,16 @@ export interface ActiveRun {
 }
 
 /**
- * Routing for a durable run. When provided to {@link createRun}, the run is
- * driven through the Weft durable engine — checkpointed and resumable — instead
- * of the in-memory loop. The `ActiveRun` surface is identical either way.
- *
- * Mirrors the `executeLoop(options, emitter?)` convention: durability is an
- * optional second argument, NOT a field on `RunOptions`, so the standalone
- * library signature is unchanged and callers without an engine are unaffected.
- */
-export interface DurableRunRouting extends DurableActiveRunContext {
-  /** Stable id for the run; also the durable workflow id (resume key). */
-  runId: string;
-  /**
-   * The session that owns this run, carried in the durable input so boot recovery
-   * can correlate a recovered handle to its session. Defaults to `runId` for a
-   * headless run with no distinct session (the run is its own session for
-   * recovery-correlation purposes).
-   */
-  sessionId?: string;
-  /** First user message to seed a brand-new run. */
-  prompt?: string;
-}
-
-/**
  * Creates an event-emitting agent loop run.
  *
- * When `durable` is provided (an engine + checkpoint store + runId), the run is
- * driven through the Weft durable engine so it survives a crash and resumes from
- * its last checkpoint. The returned {@link ActiveRun} is identical in both modes.
- * Without `durable`, the in-memory loop runs (the standalone-library default).
+ * Internal helper — NOT part of the public API (createRun() was torn out in B2).
+ * Used by the scheduler and durable adapter until B1 replaces this with AgentRun.
+ *
+ * When `durable` is provided (engine + checkpoint store + runId), the run is
+ * driven through the Weft durable engine so it survives a crash and resumes.
+ * Without `durable`, the in-memory loop runs.
  */
-export function createRun(options: RunOptions, durable?: DurableRunRouting): ActiveRun {
+export function createActiveRun(options: RunOptions, durable?: DurableRunRouting): ActiveRun {
   if (durable) {
     return createDurableActiveRun(
       { engine: durable.engine, checkpointStore: durable.checkpointStore },
@@ -109,7 +91,6 @@ export function createRun(options: RunOptions, durable?: DurableRunRouting): Act
     signal: combinedSignal,
   };
 
-  // Subscribe to toolbox and conversation events, re-emitting with prefixes.
   const cleanups: (() => void)[] = [];
 
   const toolboxForward = forwardEvents(
@@ -126,7 +107,6 @@ export function createRun(options: RunOptions, durable?: DurableRunRouting): Act
   );
   cleanups.push(() => conversationForward.stop());
 
-  // Defer the loop start to the next microtask so callers can attach listeners first.
   const result = Promise.resolve()
     .then(() => executeLoop(loopOptions, emitter))
     .finally(complete);
@@ -158,4 +138,22 @@ export function createRun(options: RunOptions, durable?: DurableRunRouting): Act
       complete();
     },
   };
+}
+
+/**
+ * Routing for a durable run.
+ *
+ * @deprecated Will be replaced by the new AgentRun / bureau session model (B1).
+ */
+export interface DurableRunRouting extends DurableActiveRunContext {
+  /** Stable id for the run; also the durable workflow id (resume key). */
+  runId: string;
+  /**
+   * The session that owns this run, carried in the durable input so boot recovery
+   * can correlate a recovered handle to its session. Defaults to `runId` for a
+   * headless run with no distinct session.
+   */
+  sessionId?: string;
+  /** First user message to seed a brand-new run. */
+  prompt?: string;
 }

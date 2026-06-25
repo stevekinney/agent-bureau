@@ -1,7 +1,7 @@
 import type { ListFilter, ListOptions } from '@lostgradient/weft';
 import { Conversation, createConversationHistory } from 'conversationalist';
 import { CompletableEventTarget } from 'lifecycle';
-import { type ActiveRun, createAgentSession, createRun, type JSONValue } from 'operative';
+import { type ActiveRun, createActiveRun, createAgentSession, type JSONValue } from 'operative';
 import {
   isAgentRunWorkflowInput,
   reattachDurableActiveRun,
@@ -442,7 +442,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       lastUserMessage: request.message,
     });
 
-    const activeRun = createRun(
+    const activeRun = createActiveRun(
       {
         generate: runRuntime.generate,
         toolbox: runRuntime.toolbox,
