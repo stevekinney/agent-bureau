@@ -28,10 +28,18 @@ const DEFAULT_CSP =
   "connect-src 'self' ws: wss:; " +
   "frame-ancestors 'none'";
 
+/** Matches a bare IPv4 address: four decimal octets separated by dots. */
+const IPV4_RE = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
+
 /**
  * Returns true when the given URL targets a loopback or RFC-1918 private address.
  * Used to prevent server-side request forgery (SSRF) from agent-initiated outbound
  * requests that arrive via the `X-Agent-Target-Url` header.
+ *
+ * Numeric range checks are performed only against hosts that are actual IPv4
+ * addresses (four decimal octets). This prevents false positives for legitimate
+ * public hostnames that happen to start with a private-range prefix, such as
+ * `10.example.com` or `127.anything.com`.
  */
 function isPrivateOrLoopback(url: string): boolean {
   let parsed: URL;
@@ -44,19 +52,32 @@ function isPrivateOrLoopback(url: string): boolean {
 
   const host = parsed.hostname;
 
-  // IPv4 loopback
-  if (host === 'localhost' || host.startsWith('127.')) return true;
+  // IPv4 loopback — exact name match only
+  if (host === 'localhost') return true;
   // IPv6 loopback
   if (host === '::1' || host === '[::1]') return true;
-  // IPv4 private ranges (RFC 1918)
-  if (host.startsWith('10.')) return true;
-  if (host.startsWith('192.168.')) return true;
-  if (/^172\.(1[6-9]|2\d|3[0-1])\./.test(host)) return true;
-  // Link-local
-  if (host.startsWith('169.254.')) return true;
+  // Link-local IPv6
   if (host.startsWith('fe80:') || host.startsWith('[fe80:')) return true;
-  // Metadata service (cloud provider IMDS)
-  if (host === '169.254.169.254') return true;
+
+  // For IPv4, extract octets and check numeric ranges so that hostnames like
+  // "10.example.com" or "127.anything.com" are NOT blocked.
+  const ipv4Match = IPV4_RE.exec(host);
+  if (ipv4Match) {
+    const [, a, b] = ipv4Match;
+    const first = Number(a);
+    const second = Number(b);
+
+    // Loopback: 127.0.0.0/8
+    if (first === 127) return true;
+    // RFC 1918: 10.0.0.0/8
+    if (first === 10) return true;
+    // RFC 1918: 192.168.0.0/16
+    if (first === 192 && second === 168) return true;
+    // RFC 1918: 172.16.0.0/12
+    if (first === 172 && second >= 16 && second <= 31) return true;
+    // Link-local: 169.254.0.0/16 (includes cloud IMDS at 169.254.169.254)
+    if (first === 169 && second === 254) return true;
+  }
 
   return false;
 }
