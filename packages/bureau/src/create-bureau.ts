@@ -482,6 +482,11 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         prepareStep: runRuntime.prepareStep,
         onStep: runRuntime.onStep,
         validateResponse: runRuntime.validateResponse,
+        // Thread agentName and runId so curated tool.* bubble events are stamped
+        // with {agentName, runId, step} metadata (C3) and durable launch input
+        // carries the owning agent for audit/recovery attribution (F2).
+        agentName: request.agentName,
+        runId,
       },
       // Route through the durable engine when one was composed (durableExecution
       // + storage). The conversation already carries the seeded user/system
