@@ -3,6 +3,7 @@ import { z } from 'zod';
 
 import { createTool } from '../../src/create-tool';
 import { createToolbox, type Toolbox } from '../../src/create-toolbox';
+import { claimCacheStarted } from '../../src/idempotency/cache-operations';
 import { createToolResultCache } from '../../src/idempotency/create-tool-result-cache';
 import { fullInputKey } from '../../src/idempotency/key-generators';
 import type { ToolResultCache } from '../../src/idempotency/types';
@@ -780,10 +781,16 @@ describe('withToolboxIdempotency', () => {
     expect(idempotentToolbox.tools()).toHaveLength(0);
   });
 
-  it('reports unknown-outcome on retry when a caller-supplied key was started but result was never recorded (crash scenario)', async () => {
-    // Regression for A1: caller supplies an external key; execution crashes between
-    // "started" and "result recorded"; the next call must report unknown-outcome
-    // rather than blindly re-running the side effect.
+  it('reports unknown-outcome on retry when a caller-supplied key is in the durable "started" state with no recorded result', async () => {
+    // Regression for A1 (orphaned-start, the true crash failure mode): the
+    // idempotency layer claims a "started" entry BEFORE running the side effect.
+    // If the process dies after the claim but before a result is recorded, the
+    // entry is left orphaned in "started" state. A retry with the same
+    // caller-supplied key must report unknown-outcome and NOT re-run the side
+    // effect — regardless of HOW the start was orphaned. We drive the cache into
+    // that exact state directly (via claimCacheStarted, the same primitive the
+    // layer uses) rather than depending on a thrown tool error as the setup,
+    // so the test pins the durable-state contract, not the error-category path.
     const sideEffects: number[] = [];
     const chargeTool = createTool({
       name: 'charge',
@@ -791,9 +798,7 @@ describe('withToolboxIdempotency', () => {
       input: z.object({ cents: z.number() }),
       async execute({ cents }) {
         sideEffects.push(cents);
-        // Simulate a provider-side crash: the side effect happened but no result
-        // is returned, leaving the idempotency key in "started" state.
-        throw new Error('provider unavailable after charge');
+        return { charged: cents };
       },
     });
     // Note: chargeTool has NO idempotencyKey; the caller supplies one externally.
@@ -801,18 +806,65 @@ describe('withToolboxIdempotency', () => {
     const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
 
     const callerKey = 'orchestrator-tool-call-id-abc123';
+    const cacheKey = `charge:${callerKey}`;
 
-    // First attempt: crashes after the side effect but before the result is stored.
+    // Simulate a previous attempt that claimed the started entry and then died
+    // before recording any result — the orphaned "started" state.
+    const claim = await claimCacheStarted(cache, cacheKey, {
+      status: 'started',
+      toolName: 'charge',
+      startedAt: Date.now(),
+      ttl: 60_000,
+    });
+    expect(claim.outcome).toBe('claimed');
+
+    // Retry with the same caller-supplied key: must NOT run the charge.
+    const retry = await idempotentToolbox.execute(
+      { id: 'retry-call', name: 'charge', arguments: { cents: 500 } },
+      { idempotencyKey: callerKey },
+    );
+
+    // The side effect must NOT have run — the orphaned start blocks it.
+    expect(sideEffects).toEqual([]);
+    // The result surfaces as unknown-outcome (needs human review before retrying).
+    expect(retry.outcome).toBe('action_required');
+    expect(retry.idempotency).toEqual({
+      key: cacheKey,
+      outcome: 'unknown-outcome',
+    });
+  });
+
+  it('leaves a caller-supplied key orphaned in "started" state when the tool throws an uncategorized error after its side effect', async () => {
+    // Regression for A1 (error-path contract): an uncategorized thrown error
+    // (no validation/permission/not_found/pre-execution-conflict category) is
+    // treated as a possible mid-execution crash — the "started" entry is NOT
+    // cleared, so a retry reports unknown-outcome rather than blindly re-running.
+    // This pins the specific behavior of shouldClearStartedStateForThrownError
+    // for uncategorized errors; the durable-state contract is covered above.
+    const sideEffects: number[] = [];
+    const chargeTool = createTool({
+      name: 'charge',
+      description: 'Charges a payment method',
+      input: z.object({ cents: z.number() }),
+      async execute({ cents }) {
+        sideEffects.push(cents);
+        // Uncategorized error: the side effect happened but no result is
+        // recorded, leaving the idempotency key in "started" state.
+        throw new Error('provider unavailable after charge');
+      },
+    });
+    const toolbox = createToolbox([chargeTool]);
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
+
+    const callerKey = 'orchestrator-tool-call-id-xyz789';
+
     const first = await idempotentToolbox.execute(
       { id: 'call-1', name: 'charge', arguments: { cents: 500 } },
       { idempotencyKey: callerKey },
     );
-
-    // Side effect occurred once; outcome is an error (crash was caught by toolbox).
     expect(first.outcome).toBe('error');
     expect(sideEffects).toEqual([500]);
 
-    // Second attempt with the same caller-supplied key: must NOT re-run the charge.
     const second = await idempotentToolbox.execute(
       { id: 'call-2', name: 'charge', arguments: { cents: 500 } },
       { idempotencyKey: callerKey },
@@ -820,10 +872,9 @@ describe('withToolboxIdempotency', () => {
 
     // The side effect must NOT have run again.
     expect(sideEffects).toEqual([500]);
-    // The result must surface as unknown-outcome (needs human review before retrying).
     expect(second.outcome).toBe('action_required');
     expect(second.idempotency).toEqual({
-      key: 'charge:orchestrator-tool-call-id-abc123',
+      key: 'charge:orchestrator-tool-call-id-xyz789',
       outcome: 'unknown-outcome',
     });
   });

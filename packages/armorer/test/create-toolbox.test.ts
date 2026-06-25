@@ -492,7 +492,7 @@ describe('createToolbox', () => {
     const charges: number[] = [];
     const sharedSecret = 'cross-process-secret';
 
-    function buildToolbox() {
+    function buildToolbox(approvalSecret = sharedSecret) {
       return createToolbox(
         [
           createTool({
@@ -506,7 +506,7 @@ describe('createToolbox', () => {
           }),
         ],
         {
-          approvalSecret: sharedSecret,
+          approvalSecret,
           policy: {
             beforeExecute(context) {
               if (
@@ -558,6 +558,19 @@ describe('createToolbox', () => {
     // Arguments were edited (confirmed: true added), so this flag must be set.
     expect(resumed.executedArgumentsEdited).toBe(true);
     // The charge ran exactly once.
+    expect(charges).toEqual([250]);
+
+    // Negative case: a fresh toolbox with a DIFFERENT secret must reject the same
+    // deserialized descriptor. This proves resumption depends only on the
+    // descriptor + the shared secret (genuine cross-process durability), not on
+    // any process-local pending-approval state keyed by token.
+    const wrongSecretToolbox = buildToolbox('a-different-secret');
+    expect(() =>
+      wrongSecretToolbox.resumeApproval(deserialized, {
+        arguments: { cents: 250, confirmed: true },
+      }),
+    ).toThrow('invalid approval token');
+    // The rejected resume must not have charged again.
     expect(charges).toEqual([250]);
   });
 
