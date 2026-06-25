@@ -35,6 +35,7 @@ import type {
   BureauOptions,
   ConfigurationResponse,
   CreateRunRequest,
+  DurableScheduleDefinition,
   RunSummary,
   ServerFrame,
   SubmitSchedulerTaskRequest,
@@ -1038,6 +1039,99 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     await requireSessionStore().delete(id);
   }
 
+  /**
+   * Look up the current durable run id for a session. Used by signal/update/query
+   * to route the operation to the correct workflow handle.
+   */
+  async function requireSessionRunId(sessionId: string): Promise<string> {
+    const session = await requireSessionStore().load(sessionId);
+    if (!session) {
+      throw new BureauError(`Session not found: ${sessionId}`, 'NOT_FOUND');
+    }
+    const runId = session.metadata['lastRunId'];
+    if (typeof runId !== 'string' || !runId) {
+      throw new BureauError(`Session ${sessionId} has no active run`, 'NOT_FOUND');
+    }
+    return runId;
+  }
+
+  async function signalSession(
+    sessionId: string,
+    name: string,
+    payload?: unknown,
+  ): Promise<void | undefined> {
+    if (!runtime.durable) return undefined;
+    const runId = await requireSessionRunId(sessionId);
+    await runtime.durable.engine.signal(runId, name, payload);
+  }
+
+  async function updateSession(
+    sessionId: string,
+    name: string,
+    payload?: unknown,
+  ): Promise<unknown> {
+    if (!runtime.durable) return undefined;
+    const runId = await requireSessionRunId(sessionId);
+    return runtime.durable.engine.update(runId, name, payload);
+  }
+
+  async function querySession(sessionId: string, name: string, input?: unknown): Promise<unknown> {
+    if (!runtime.durable) return undefined;
+    const runId = await requireSessionRunId(sessionId);
+    return runtime.durable.engine.query(runId, name, input);
+  }
+
+  async function createSchedule(
+    definition: DurableScheduleDefinition,
+  ): Promise<import('@lostgradient/weft').ScheduleSummary | null | undefined> {
+    if (!runtime.durable) return undefined;
+    const handle = await runtime.durable.engine.schedule(
+      'agentRun',
+      {
+        sessionId: definition.sessionId ?? `schedule-${crypto.randomUUID()}`,
+        agentName: definition.agentName,
+        message: definition.input,
+      },
+      definition.spec,
+      {
+        overlap: definition.overlap === 'allow' ? 'allow' : 'skip',
+      },
+    );
+    return runtime.durable.engine.getSchedule(handle.id);
+  }
+
+  async function getSchedule(
+    scheduleId: string,
+  ): Promise<import('@lostgradient/weft').ScheduleSummary | null | undefined> {
+    if (!runtime.durable) return undefined;
+    return runtime.durable.engine.getSchedule(scheduleId);
+  }
+
+  async function listSchedules(
+    filter?: import('@lostgradient/weft').ScheduleFilter,
+  ): Promise<
+    | import('@lostgradient/weft').PaginatedResult<import('@lostgradient/weft').ScheduleSummary>
+    | undefined
+  > {
+    if (!runtime.durable) return undefined;
+    return runtime.durable.engine.listSchedules(filter);
+  }
+
+  async function pauseSchedule(scheduleId: string): Promise<void | undefined> {
+    if (!runtime.durable) return undefined;
+    await runtime.durable.engine.pauseSchedule(scheduleId);
+  }
+
+  async function resumeSchedule(scheduleId: string): Promise<void | undefined> {
+    if (!runtime.durable) return undefined;
+    await runtime.durable.engine.resumeSchedule(scheduleId);
+  }
+
+  async function cancelSchedule(scheduleId: string): Promise<void | undefined> {
+    if (!runtime.durable) return undefined;
+    await runtime.durable.engine.cancelSchedule(scheduleId);
+  }
+
   function getToolSummaries(): ToolSummary[] {
     return runtime.getToolSummaries();
   }
@@ -1174,6 +1268,15 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     listSessions,
     getSession,
     deleteSession,
+    signalSession,
+    updateSession,
+    querySession,
+    createSchedule,
+    getSchedule,
+    listSchedules,
+    pauseSchedule,
+    resumeSchedule,
+    cancelSchedule,
     getConfiguration,
     getTools: getToolSummaries,
     subscribeLiveFrames(listener) {

@@ -49,6 +49,7 @@ export type {
   ConfigurationResponse,
   CreateRunRequest,
   DurableGuardrailsConfiguration,
+  DurableScheduleDefinition,
   IdentityConfiguration,
   LoadedSkill,
   PersistenceOptions,

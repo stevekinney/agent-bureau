@@ -9,6 +9,7 @@ import { LiveFrameBroker } from './live-events';
 import {
   createAuthentication,
   createRateLimiter,
+  createSecurityHeaders,
   errorHandler,
   requestIdentifier,
 } from './middleware';
@@ -79,6 +80,13 @@ export async function createGateway(
   app.use('*', requestIdentifier);
   app.use('*', createAuthentication(options.authToken, apiKeyStore));
   app.use('*', createRateLimiter({ store: bureau.kv }));
+  app.use(
+    '*',
+    createSecurityHeaders({
+      allowedOrigins: options.allowedOrigins,
+      enableCsp: options.enableCsp,
+    }),
+  );
 
   // Mount API routes
   app.route('/', createRoutes({ bureau, broker: liveFrameBroker, apiKeyStore }));

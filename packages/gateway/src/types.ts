@@ -8,6 +8,7 @@ export type {
   BureauOptions,
   ConfigurationResponse,
   CreateRunRequest,
+  DurableScheduleDefinition,
   PersistenceOptions,
   ProviderConfiguration,
   RunDetail,
@@ -35,6 +36,16 @@ export interface GatewayOptions {
   authToken?: string;
   /** Server runtime. Default: auto-detected (`'bun'` when `typeof Bun !== 'undefined'`, `'node'` otherwise). */
   runtime?: 'bun' | 'node';
+  /**
+   * Explicit list of allowed origins for WebSocket upgrade requests. When non-empty,
+   * upgrade requests whose `Origin` header is absent or not in the list are rejected
+   * with 403. When omitted, no origin check is performed.
+   */
+  allowedOrigins?: string[];
+  /**
+   * Emit a `Content-Security-Policy` header on every response. Defaults to `true`.
+   */
+  enableCsp?: boolean;
 }
 
 export interface Gateway {
@@ -82,6 +93,9 @@ export const SCOPE = {
   SESSIONS_WRITE: 'sessions:write',
   CONFIG_READ: 'config:read',
   KEYS_MANAGE: 'keys:manage',
+  HOOKS_WRITE: 'hooks:write',
+  SCHEDULES_READ: 'schedules:read',
+  SCHEDULES_WRITE: 'schedules:write',
 } as const;
 
 export type Scope = (typeof SCOPE)[keyof typeof SCOPE];
