@@ -1,7 +1,7 @@
+import { BureauError } from 'bureau';
 import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 
-import { BureauError } from '../create-bureau';
 import type { Bureau, CreateRunRequest } from '../types';
 
 export function createRunsRoutes(bureau: Bureau) {

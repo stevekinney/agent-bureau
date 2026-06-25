@@ -87,8 +87,8 @@ import type {
   ToolSummary,
 } from './types';
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any -- Toolbox generic variance; gateway never inspects the type parameter
-type GatewayToolbox = Toolbox<any>;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- Toolbox generic variance; bureau never inspects the type parameter
+type BureauToolbox = Toolbox<any>;
 
 /**
  * Discriminate a {@link PersistenceOptions} object from a bare
@@ -426,7 +426,7 @@ const defaultRuntimeCompositionDependencies: RuntimeCompositionDependencies = {
 function createSkillManagementToolbox(
   provider: SkillProvider,
   session: SkillSession,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Toolbox generic variance; gateway never inspects the type parameter
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Toolbox generic variance; bureau never inspects the type parameter
 ): Toolbox<any> {
   return createToolbox([
     createTool({
@@ -524,11 +524,11 @@ function createSkillManagementToolbox(
   ]);
 }
 
-function createUnavailableToolbox(): GatewayToolbox {
+function createUnavailableToolbox(): BureauToolbox {
   const emptyToolbox = createToolbox([], { context: {} });
   const execute = ((
     toolCalls: ToolCallInput | ToolCallInput[],
-    executionOptions?: Parameters<GatewayToolbox['execute']>[1],
+    executionOptions?: Parameters<BureauToolbox['execute']>[1],
   ) => {
     const normalizedToolCalls = Array.isArray(toolCalls) ? toolCalls : [toolCalls];
     if (normalizedToolCalls.length > 0) {
@@ -536,7 +536,7 @@ function createUnavailableToolbox(): GatewayToolbox {
     }
 
     return emptyToolbox.execute([], executionOptions);
-  }) as unknown as GatewayToolbox['execute'];
+  }) as unknown as BureauToolbox['execute'];
 
   return {
     ...emptyToolbox,
@@ -755,16 +755,16 @@ export async function createRuntimeComposition(
   //
   // The resolved provider is typed as `SkillsPackageProvider` (the full skills
   // package interface with `saveResource`/`setEnabled`) so it is accepted by
-  // `createSkillCatalogHook`, which expects the full interface. The gateway's
+  // `createSkillCatalogHook`, which expects the full interface. The bureau's
   // local `SkillProvider` type is a structural subset and is compatible.
   const resolvedSkillProvider: SkillsPackageProvider | undefined =
     (options.skills?.provider as SkillsPackageProvider | undefined) ??
     (options.skills !== undefined && kv !== undefined ? createStorageSkillProvider(kv) : undefined);
 
   const sessionStore = kv ? createSessionStore(kv) : undefined;
-  const baseToolbox: GatewayToolbox = options.toolbox ?? createToolbox([], { context: {} });
+  const baseToolbox: BureauToolbox = options.toolbox ?? createToolbox([], { context: {} });
   const hasSkillTools = options.skills !== undefined && options.skills.includeTools !== false;
-  const fallbackToolbox: GatewayToolbox =
+  const fallbackToolbox: BureauToolbox =
     options.toolbox !== undefined || hasSkillTools ? baseToolbox : createUnavailableToolbox();
 
   const baseProviders =
@@ -878,7 +878,7 @@ export async function createRuntimeComposition(
     schedulerGenerate && options.scheduler?.enabled === true
       ? createScheduler({
           generate: schedulerGenerate,
-          // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment -- GatewayToolbox variance; scheduler does not inspect tool tuple types
+          // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment -- BureauToolbox variance; scheduler does not inspect tool tuple types
           toolbox: fallbackToolbox,
           idleDelay: options.scheduler?.idleDelay ?? 1000,
           // When a durable engine is composed, preemptable scheduler tasks run as
@@ -913,7 +913,7 @@ export async function createRuntimeComposition(
       throw new Error('No generate function configured');
     }
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Toolbox generic variance; gateway never inspects the type parameter
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Toolbox generic variance; bureau never inspects the type parameter
     let toolbox: Toolbox<any> = fallbackToolbox;
     const prepareStep: PrepareStepHook[] = [];
     const onStep: OnStepHook[] = [];

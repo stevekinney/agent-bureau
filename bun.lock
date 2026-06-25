@@ -76,6 +76,42 @@
         "@openai/agents",
       ],
     },
+    "packages/bureau": {
+      "name": "bureau",
+      "version": "0.0.1",
+      "dependencies": {
+        "@lostgradient/weft": "^0.8.0",
+        "armorer": "workspace:*",
+        "conversationalist": "workspace:*",
+        "lifecycle": "workspace:*",
+        "memory": "workspace:*",
+        "operative": "workspace:*",
+        "skills": "workspace:*",
+        "zod": "^4.3.6",
+      },
+      "devDependencies": {
+        "@anthropic-ai/sdk": "^0.71.2",
+        "@eslint/js": "^10.0.1",
+        "@google/generative-ai": "^0.24.1",
+        "@opentelemetry/api": "^1.9.0",
+        "@types/bun": "^1.3.9",
+        "eslint": "^10.0.0",
+        "typescript": "5.9.2",
+        "typescript-eslint": "^8.55.0",
+      },
+      "peerDependencies": {
+        "@anthropic-ai/sdk": ">=0.50.0",
+        "@google/generative-ai": ">=0.20.0",
+        "@opentelemetry/api": "^1.9.0",
+        "openai": ">=4.0.0",
+      },
+      "optionalPeers": [
+        "@anthropic-ai/sdk",
+        "@google/generative-ai",
+        "@opentelemetry/api",
+        "openai",
+      ],
+    },
     "packages/cloudflare": {
       "name": "cloudflare",
       "version": "0.1.0",
@@ -163,6 +199,7 @@
         "@lostgradient/cinder": "^0.3.0",
         "@lostgradient/weft": "^0.8.0",
         "armorer": "workspace:*",
+        "bureau": "workspace:*",
         "conversationalist": "workspace:*",
         "hono": "^4.7.10",
         "lifecycle": "workspace:*",
@@ -788,6 +825,8 @@
     "bun-plugin-svelte": ["bun-plugin-svelte@0.0.6", "", { "peerDependencies": { "svelte": "^5" } }, "sha512-HuEDvOieVwXvhpcHLcASeQIOVgje2GRO3Tu0ypJh3MkjGLkEBOQ1+6FWsMgb54FxfbPw9JP3q0WlBd8SjgrnGQ=="],
 
     "bun-types": ["bun-types@1.3.10", "", { "dependencies": { "@types/node": "*" } }, "sha512-tcpfCCl6XWo6nCVnpcVrxQ+9AYN1iqMIzgrSKYMB/fjLtV2eyAVEg7AxQJuCq/26R6HpKWykQXuSOq/21RYcbg=="],
+
+    "bureau": ["bureau@workspace:packages/bureau"],
 
     "bytes": ["bytes@3.1.2", "", {}, "sha512-/Nf7TyzTx6S3yRJObOAV7956r8cr2+Oj8AC5dt8wSP3BQAoeX58NoHyCU8P8zGkNXStjTSi6fzO6F0pBdcYbEg=="],
 

@@ -23,6 +23,7 @@
     "@lostgradient/cinder": "^0.3.0",
     "@lostgradient/weft": "^0.8.0",
     "armorer": "workspace:*",
+    "bureau": "workspace:*",
     "conversationalist": "workspace:*",
     "hono": "^4.7.10",
     "lifecycle": "workspace:*",
