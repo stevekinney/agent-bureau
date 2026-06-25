@@ -19,7 +19,7 @@
  * durable trail's records after recovery. The `/api/v1/audit` endpoint queries
  * both and returns a merged, chronologically ordered view.
  */
-import { BureauError } from 'bureau';
+import { BureauError, serializeActionDetail } from 'bureau';
 import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 
@@ -154,11 +154,20 @@ export function createAuditRoutes(bureau: Bureau) {
     const auditTrail = bureau.auditTrail;
     const durableRecords = auditTrail ? await auditTrail.query({ since, runId, type, limit }) : [];
 
-    // Layer A — live store actions. Include live actions for runs not yet
-    // present in the durable trail (in-flight runs, or runs on a non-persistent
-    // bureau where Layer B is absent).
+    // Layer A — live store actions. Include live actions whose specific event
+    // is not already present in the durable trail. We deduplicate on the
+    // composite event key (runId + type + sequence) rather than on runId alone
+    // so that in-flight actions for a run that already has some durable records
+    // are not incorrectly suppressed. The durable trail only captures selected
+    // AUDIT_EVENT_TYPES; non-audited event types (e.g. generate.*) are never
+    // in durableRecords and must always pass through from the live store.
     const liveState = bureau.store.getState();
-    const durableRunIds = new Set(durableRecords.map((r: { runId: string }) => r.runId));
+    const durableEventKeys = new Set(
+      durableRecords.map(
+        (r: { runId: string; type: string; sequence: number }) =>
+          `${r.runId}:${r.type}:${r.sequence}`,
+      ),
+    );
 
     const liveRecords: Array<{
       timestamp: string;
@@ -176,9 +185,11 @@ export function createAuditRoutes(bureau: Bureau) {
       if (type !== undefined && action.type !== type) continue;
 
       // Exclude actions already present in the durable trail to avoid
-      // duplicates. When there is no durable trail (no persistence), include
-      // all live actions.
-      if (auditTrail && durableRunIds.has(action.runId)) continue;
+      // duplicates. Match on the composite event key (runId + type + sequence)
+      // so only the exact event is suppressed — not all events for the run.
+      // When there is no durable trail (no persistence), include all live actions.
+      if (auditTrail && durableEventKeys.has(`${action.runId}:${action.type}:${action.sequence}`))
+        continue;
 
       liveRecords.push({
         timestamp: new Date(action.timestamp).toISOString(),
@@ -186,11 +197,13 @@ export function createAuditRoutes(bureau: Bureau) {
         sequence: action.sequence,
         runId: action.runId,
         type: action.type,
-        // The live store's action.detail already went through the
-        // `serializeActionDetail` pipeline in the store's event handler (see
-        // store.ts — it flattens `originalEvent` and the bureau serializes via
-        // ActionEvent). Use it directly; no further transformation needed.
-        detail: action.detail,
+        // Serialize the detail through the same pipeline used by the audit
+        // trail and the WebSocket frame emitter: strips Conversation instances,
+        // serializes Error objects, and removes other non-JSON-safe values so
+        // the record is safe to JSON.stringify. The raw detail from the live
+        // store can contain cyclic Conversation objects on step.completed and
+        // run.completed events, so this step is required.
+        detail: serializeActionDetail(action.type, action.detail),
       });
     }
 
