@@ -1,8 +1,8 @@
+import { createBureau } from 'bureau';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 
 import type { ServerAdapter } from './adapters/types';
-import { createBureau } from './create-bureau';
 import { bootstrapApiKey, createApiKeyStore } from './keys';
 import type { ApiKeyStore } from './keys/types';
 import { LiveFrameBroker } from './live-events';
