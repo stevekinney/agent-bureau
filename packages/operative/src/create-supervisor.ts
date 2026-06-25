@@ -2,8 +2,6 @@ import type { EventMap, ObservableLike, Observer, Subscription } from 'lifecycle
 import { CompletableEventTarget } from 'lifecycle';
 
 import type { AgentRegistry, AgentRegistryEntry } from './create-agent-registry';
-import type { Scratchpad } from './create-scratchpad';
-import { createScratchpadReadTool, createScratchpadWriteTool } from './create-scratchpad';
 import type { RunResult } from './types';
 
 export interface SupervisorTaskResult {
@@ -102,7 +100,6 @@ export interface CreateSupervisorOptions {
   agents: AgentRegistryEntry[] | AgentRegistry;
   routing: RoutingStrategy;
   synthesis?: SynthesisStrategy;
-  scratchpad?: Scratchpad;
   maximumDelegations?: number;
   signal?: AbortSignal;
 }
@@ -165,7 +162,6 @@ export function createSupervisor(options: CreateSupervisorOptions): Supervisor {
     agents: agentSource,
     routing,
     synthesis = defaultSynthesis,
-    scratchpad,
     maximumDelegations = 10,
     signal,
   } = options;
@@ -186,24 +182,7 @@ export function createSupervisor(options: CreateSupervisorOptions): Supervisor {
     }
 
     try {
-      // Scratchpad injection: when a scratchpad is provided, the supervisor
-      // creates a note in the task string so the agent receives context about
-      // available scratch tools. Full scratchpad toolbox wiring is the bureau's
-      // concern (Phase F); for now the agent's own `run` receives a combined prompt.
-      const prompt = scratchpad
-        ? `${task}\n\n[Scratchpad tools are available: read_scratchpad, write_scratchpad]`
-        : task;
-
-      // Scratchpad tools registration is a bureau/F-phase concern. The supervisor
-      // creates the tools here but they need to be wired into the agent's toolbox
-      // via the bureau layer, not inline. Drop the tool creation side-effect for now;
-      // the prompt annotation above keeps the agent aware of the scratchpad.
-      if (scratchpad) {
-        createScratchpadReadTool(scratchpad);
-        createScratchpadWriteTool(scratchpad);
-      }
-
-      const runResult = await entry.agent.run(prompt, { signal: signal ?? undefined });
+      const runResult = await entry.agent.run(task, { signal: signal ?? undefined });
       const result = runResult as import('./types').RunResult;
       events.dispatch(new TaskCompletedEvent(task, agentName, result));
       return { task, agentName, result };
