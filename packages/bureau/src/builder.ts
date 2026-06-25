@@ -167,7 +167,16 @@ function mergeSkillPolicies(
   agent: SkillPolicy | undefined,
 ): SkillPolicy | undefined {
   if (!bureau && !agent) return undefined;
-  const allowList = agent?.allowList ?? bureau?.allowList;
+  // allowList narrows by INTERSECTION: an agent can only further restrict the
+  // bureau's allowed set, never widen it. When both define an allowList, keep only
+  // skills allowed by BOTH; when only one defines it, that one applies.
+  let allowList: string[] | undefined;
+  if (bureau?.allowList && agent?.allowList) {
+    const bureauAllowed = new Set(bureau.allowList);
+    allowList = agent.allowList.filter((skill) => bureauAllowed.has(skill));
+  } else {
+    allowList = agent?.allowList ?? bureau?.allowList;
+  }
   const denyListItems = [...(bureau?.denyList ?? []), ...(agent?.denyList ?? [])];
   const denyList = denyListItems.length > 0 ? denyListItems : undefined;
   return allowList !== undefined || denyList !== undefined

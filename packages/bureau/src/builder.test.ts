@@ -476,6 +476,43 @@ describe('createBureau (builder) — skills()', () => {
     expect(catalog).not.toContain('writing');
   });
 
+  it('intersects bureau and agent allowLists (agent cannot widen the bureau allowance)', async () => {
+    // Regression PRRT_kwDORvupsc6MVia_: mergeSkillPolicies took the agent allowList
+    // wholesale (`agent ?? bureau`) instead of intersecting. An agent could then
+    // surface a skill the bureau never allowed. The bureau allows research+writing;
+    // the agent allows writing+analysis. Only the intersection (writing) must appear —
+    // analysis (agent-only) must NOT, and research (bureau-only) must NOT.
+    const mockProvider = {
+      listSkills: async () => [
+        { name: 'research', description: 'Research skills' },
+        { name: 'writing', description: 'Writing skills' },
+        { name: 'analysis', description: 'Analysis skills' },
+      ],
+      isEnabled: async (_name: string) => true,
+    };
+
+    const { capturingGenerate, capturedMessages } = makeCapturingGenerate();
+    const bureau = createBureau()
+      .skills(mockProvider, { allowList: ['research', 'writing'] })
+      .agent({
+        name: 'a',
+        generate: capturingGenerate,
+        skillPolicy: { allowList: ['writing', 'analysis'] },
+      });
+
+    await bureau.run('a', 'input').result();
+
+    const systemMessages = capturedMessages.filter((m) => m.role === 'system');
+    const catalogMessage = systemMessages.find(
+      (m) => typeof m.content === 'string' && m.content.includes('<available_skills>'),
+    );
+    expect(catalogMessage).toBeDefined();
+    const catalog = catalogMessage?.content as string;
+    expect(catalog).toContain('writing'); // allowed by BOTH
+    expect(catalog).not.toContain('analysis'); // agent-only — must not be widened in
+    expect(catalog).not.toContain('research'); // bureau-only — narrowed out by the agent
+  });
+
   it('skips disabled skills from the catalog', async () => {
     const mockProvider = {
       listSkills: async () => [
