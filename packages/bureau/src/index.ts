@@ -1,3 +1,5 @@
+export type { AuditEventType, AuditQueryOptions, AuditRecord, AuditTrail } from './audit-trail';
+export { AUDIT_EVENT_TYPES, createAuditTrail } from './audit-trail';
 export type {
   AgentBuilder,
   AgentConfig,
@@ -49,6 +51,7 @@ export type {
   ConfigurationResponse,
   CreateRunRequest,
   DurableGuardrailsConfiguration,
+  DurableScheduleDefinition,
   IdentityConfiguration,
   LoadedSkill,
   PersistenceOptions,

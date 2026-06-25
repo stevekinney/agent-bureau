@@ -2,6 +2,19 @@ import type { ServerFrame } from './types';
 
 export const ALL_RUNS_SUBSCRIPTION = '*';
 
+/**
+ * Default heartbeat interval in milliseconds.
+ *
+ * Must be shorter than the reverse-proxy and server idle timeout so the
+ * connection is never silently killed during long silences (e.g. a parked
+ * human-in-the-loop workflow or a slow tool call).
+ *
+ * Bun.serve defaults `idleTimeout` to 10 s; common reverse proxies (nginx,
+ * AWS ALB) default to 60 s. We pick 8 s — safely under both — and expose
+ * `heartbeatIntervalMs` so callers can tune it.
+ */
+const DEFAULT_HEARTBEAT_INTERVAL_MS = 8_000;
+
 type Subscriber = {
   sendFrame: (frame: ServerFrame) => void;
   runIds: Set<string>;
@@ -123,7 +136,7 @@ export class LiveFrameBroker {
   createEventStreamResponse(request: Request, options: EventStreamResponseOptions = {}): Response {
     const streamKey = {};
     const encoder = new TextEncoder();
-    const heartbeatIntervalMs = options.heartbeatIntervalMs ?? 15_000;
+    const heartbeatIntervalMs = options.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
     let heartbeat: ReturnType<typeof setInterval> | undefined;
     let closed = false;
     let controllerForClose: ReadableStreamDefaultController<Uint8Array> | undefined;
@@ -203,9 +216,21 @@ export class LiveFrameBroker {
 
     return new Response(stream, {
       headers: {
-        'cache-control': 'no-cache, no-transform',
-        connection: 'keep-alive',
+        // SSE content type and encoding.
         'content-type': 'text/event-stream; charset=utf-8',
+        // Instruct all caches and CDNs not to buffer or transform this stream.
+        'cache-control': 'no-cache, no-transform',
+        // Ask Nginx (and Nginx-compatible proxies like AWS ALB) to disable its
+        // response buffering for this connection. Without this, Nginx holds
+        // chunks until its buffer fills, which breaks the real-time guarantee.
+        'x-accel-buffering': 'no',
+        // Prevent MIME sniffing. The browser must treat this response as
+        // text/event-stream and not try to interpret it as something else.
+        'x-content-type-options': 'nosniff',
+        // Keep the TCP connection alive between events. Required for HTTP/1.1;
+        // HTTP/2 handles multiplexing at the protocol layer and ignores this
+        // header, so it is safe to include in both cases.
+        connection: 'keep-alive',
       },
     });
   }

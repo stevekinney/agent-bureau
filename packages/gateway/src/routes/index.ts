@@ -5,13 +5,18 @@ import type { LiveFrameBroker } from '../live-events';
 import { createScopeGuard } from '../middleware/scope-guard';
 import type { Bureau } from '../types';
 import { SCOPE } from '../types';
+import { createAuditRoutes, createConversationRoutes, createMemoryRoutes } from './audit';
 import { createConfigurationRoutes } from './configuration';
 import { createEventsRoutes } from './events';
 import { createHealthRoutes } from './health';
+import { createHooksRoutes } from './hooks';
 import { createKeysRoutes } from './keys';
+import { createOpenAICompatRoutes } from './openai-compat';
 import { createRunsRoutes } from './runs';
 import { createSchedulerRoutes } from './scheduler';
+import { createSchedulesRoutes } from './schedules';
 import { createSessionsRoutes } from './sessions';
+import { createUsageRoutes } from './usage';
 
 type CreateRoutesOptions = {
   bureau: Bureau;
@@ -24,6 +29,27 @@ export function createRoutes({ bureau, broker, apiKeyStore }: CreateRoutesOption
 
   app.route('/api/v1/health', createHealthRoutes(bureau));
 
+  // ── Audit glass-box: Layer A + Layer B (G5) ─────────────────────────
+
+  // Layer B: `GET /api/v1/audit` — durable trail + live store merge.
+  const auditRouter = new Hono();
+  auditRouter.get('*', createScopeGuard([SCOPE.SESSIONS_READ]));
+  auditRouter.route('/', createAuditRoutes(bureau));
+  app.route('/api/v1/audit', auditRouter);
+
+  // Layer A: `GET /api/v1/sessions/:id/conversation` — conversation history.
+  // Layered on top of the sessions router (same scope guard applies).
+  const conversationRouter = new Hono();
+  conversationRouter.get('*', createScopeGuard([SCOPE.SESSIONS_READ]));
+  conversationRouter.route('/', createConversationRoutes(bureau));
+  app.route('/api/v1/sessions', conversationRouter);
+
+  // Layer A: `GET /api/v1/memory/:namespace` — memory namespace listing.
+  const memoryRouter = new Hono();
+  memoryRouter.get('*', createScopeGuard([SCOPE.SESSIONS_READ]));
+  memoryRouter.route('/', createMemoryRoutes(bureau));
+  app.route('/api/v1/memory', memoryRouter);
+
   // Runs routes with scope guards
   const runsRouter = new Hono();
   runsRouter.get('*', createScopeGuard([SCOPE.RUNS_READ]));
@@ -35,6 +61,7 @@ export function createRoutes({ bureau, broker, apiKeyStore }: CreateRoutesOption
   // Session routes with scope guards
   const sessionsRouter = new Hono();
   sessionsRouter.get('*', createScopeGuard([SCOPE.SESSIONS_READ]));
+  sessionsRouter.post('*', createScopeGuard([SCOPE.SESSIONS_WRITE]));
   sessionsRouter.delete('*', createScopeGuard([SCOPE.SESSIONS_WRITE]));
   sessionsRouter.route('/', createSessionsRoutes(bureau));
   app.route('/api/v1/sessions', sessionsRouter);
@@ -67,6 +94,36 @@ export function createRoutes({ bureau, broker, apiKeyStore }: CreateRoutesOption
     keysRouter.route('/', createKeysRoutes(apiKeyStore));
     app.route('/api/v1/keys', keysRouter);
   }
+
+  // Webhook ingress — typed dispatch endpoints.
+  // Caller MUST name the agent explicitly via ?agent=<name>; no routing, no
+  // default-agent fallback. The HOOKS_WRITE scope guards these routes.
+  const hooksRouter = new Hono();
+  hooksRouter.post('*', createScopeGuard([SCOPE.HOOKS_WRITE]));
+  hooksRouter.route('/', createHooksRoutes(bureau));
+  app.route('/hooks', hooksRouter);
+
+  // OpenAI-compatible chat completions endpoint.
+  // The `model` field in the request body carries the agent name — typed
+  // dispatch with no routing. Uses the same RUNS_WRITE scope as direct runs.
+  const openaiRouter = new Hono();
+  openaiRouter.post('*', createScopeGuard([SCOPE.RUNS_WRITE]));
+  openaiRouter.route('/', createOpenAICompatRoutes(bureau));
+  app.route('/v1', openaiRouter);
+
+  // Usage/cost accounting (PTDR observability — Layer A live data).
+  const usageRouter = new Hono();
+  usageRouter.get('*', createScopeGuard([SCOPE.RUNS_READ]));
+  usageRouter.route('/', createUsageRoutes(bureau));
+  app.route('/api/v1/usage', usageRouter);
+
+  // Durable schedules management.
+  const schedulesRouter = new Hono();
+  schedulesRouter.get('*', createScopeGuard([SCOPE.SCHEDULES_READ]));
+  schedulesRouter.post('*', createScopeGuard([SCOPE.SCHEDULES_WRITE]));
+  schedulesRouter.delete('*', createScopeGuard([SCOPE.SCHEDULES_WRITE]));
+  schedulesRouter.route('/', createSchedulesRoutes(bureau));
+  app.route('/schedules', schedulesRouter);
 
   return app;
 }

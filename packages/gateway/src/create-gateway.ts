@@ -1,4 +1,4 @@
-import { createBureau } from 'bureau';
+import type { Bureau } from 'bureau';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 
@@ -9,6 +9,7 @@ import { LiveFrameBroker } from './live-events';
 import {
   createAuthentication,
   createRateLimiter,
+  createSecurityHeaders,
   errorHandler,
   requestIdentifier,
 } from './middleware';
@@ -41,13 +42,20 @@ async function resolveAdapter(runtime: 'bun' | 'node'): Promise<ServerAdapter> {
 }
 
 /**
- * Creates a new Gateway instance with the given options.
+ * Creates a new Gateway (HTTP door) over an already-constructed Bureau (brain).
  *
- * This function is async because it initializes storage backends
- * (e.g. vector database adapters) that may require asynchronous setup.
+ * The bureau is the first argument — it owns all agent/run/session logic.
+ * The options object is door-only: port, hostname, authToken, runtime.
+ * Gateway depends only on `bureau` and exposes the bureau's surface over
+ * HTTP transport (run/session verbs → routes; AgentRun stream → WebSocket).
+ *
+ * This function is async because it resolves the server adapter (dynamic import)
+ * and bootstraps the API key store against the bureau's KV backend.
  */
-export async function createGateway(options: GatewayOptions = {}): Promise<Gateway> {
-  const bureau = await createBureau(options);
+export async function createGateway(
+  bureau: Bureau,
+  options: GatewayOptions = {},
+): Promise<Gateway> {
   const port = options.port ?? DEFAULT_PORT;
   const runtime = options.runtime ?? detectRuntime();
   const adapter = await resolveAdapter(runtime);
@@ -72,11 +80,19 @@ export async function createGateway(options: GatewayOptions = {}): Promise<Gatew
   app.use('*', requestIdentifier);
   app.use('*', createAuthentication(options.authToken, apiKeyStore));
   app.use('*', createRateLimiter({ store: bureau.kv }));
+  app.use(
+    '*',
+    createSecurityHeaders({
+      allowedOrigins: options.allowedOrigins,
+      enableCsp: options.enableCsp,
+    }),
+  );
 
   // Mount API routes
   app.route('/', createRoutes({ bureau, broker: liveFrameBroker, apiKeyStore }));
 
-  // Mount SSR pages
+  // Mount SSR pages — configuration (including systemPrompt) is read from
+  // bureau.getConfiguration() so the door does not need to duplicate brain config.
   const configuration = bureau.getConfiguration();
   app.route(
     '/',
@@ -84,7 +100,7 @@ export async function createGateway(options: GatewayOptions = {}): Promise<Gatew
       bureau,
       provider: configuration.provider,
       maximumSteps: configuration.maximumSteps,
-      systemPrompt: options.systemPrompt,
+      systemPrompt: configuration.systemPrompt,
     }),
   );
 
@@ -102,6 +118,7 @@ export async function createGateway(options: GatewayOptions = {}): Promise<Gatew
       hostname: options.hostname,
       wsHandler,
       authToken: options.authToken,
+      idleTimeout: options.idleTimeout,
     });
 
     return {
@@ -109,7 +126,6 @@ export async function createGateway(options: GatewayOptions = {}): Promise<Gatew
         handle.stop();
         wsHandler.dispose();
         unsubscribeLiveFrames();
-        bureau.dispose();
       },
     };
   }

@@ -93,6 +93,36 @@ describe('events routes', () => {
     await reader.cancel();
   });
 
+  it('sets SSE hardening headers: no-cache, no-transform', async () => {
+    const broker = new LiveFrameBroker();
+    const app = new Hono();
+    app.route('/api/v1/events', createEventsRoutes(createBureauStub(), broker));
+
+    const response = await app.request('/api/v1/events?runId=run-1');
+    expect(response.headers.get('cache-control')).toBe('no-cache, no-transform');
+    await response.body?.cancel();
+  });
+
+  it('sets X-Accel-Buffering: no to disable nginx proxy buffering', async () => {
+    const broker = new LiveFrameBroker();
+    const app = new Hono();
+    app.route('/api/v1/events', createEventsRoutes(createBureauStub(), broker));
+
+    const response = await app.request('/api/v1/events?runId=run-1');
+    expect(response.headers.get('x-accel-buffering')).toBe('no');
+    await response.body?.cancel();
+  });
+
+  it('sets X-Content-Type-Options: nosniff to prevent MIME sniffing', async () => {
+    const broker = new LiveFrameBroker();
+    const app = new Hono();
+    app.route('/api/v1/events', createEventsRoutes(createBureauStub(), broker));
+
+    const response = await app.request('/api/v1/events?runId=run-1');
+    expect(response.headers.get('x-content-type-options')).toBe('nosniff');
+    await response.body?.cancel();
+  });
+
   it('includes scheduler state frames when requested', async () => {
     const broker = new LiveFrameBroker();
     const bureau = createBureauStub({

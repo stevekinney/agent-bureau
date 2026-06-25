@@ -8,6 +8,19 @@ export type ServerAdapterOptions = {
   hostname?: string;
   wsHandler?: WebSocketHandler;
   authToken?: string;
+  /**
+   * Number of seconds to wait before closing an idle connection.
+   *
+   * Set this higher than the longest expected silence between SSE events
+   * (e.g. a parked human-in-the-loop workflow). The SSE heartbeat interval
+   * must be configured to fire before this timeout to prevent the connection
+   * from being silently dropped.
+   *
+   * Bun default: 10 s. Common reverse-proxy default: 60–75 s (nginx, ALB).
+   * Pick a value that sits above both heartbeat interval and the max silent
+   * period, then set `heartbeatIntervalMs` below it.
+   */
+  idleTimeout?: number;
 };
 
 /** A handle to a running server that can be stopped. */

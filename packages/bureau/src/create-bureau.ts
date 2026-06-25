@@ -16,6 +16,7 @@ import {
   StoreActionEvent,
 } from 'operative/store';
 
+import { type AuditTrail, createAuditTrail } from './audit-trail';
 import {
   ActionEvent,
   BureauDisposedEvent,
@@ -35,6 +36,7 @@ import type {
   BureauOptions,
   ConfigurationResponse,
   CreateRunRequest,
+  DurableScheduleDefinition,
   RunSummary,
   ServerFrame,
   SubmitSchedulerTaskRequest,
@@ -98,6 +100,16 @@ function validateCreateRunRequest(request: CreateRunRequest): void {
 
     if (request.sessionId.trim().length === 0) {
       toBadRequest('"sessionId" must be a non-empty string');
+    }
+  }
+
+  if (request.agentName !== undefined) {
+    if (typeof request.agentName !== 'string') {
+      toBadRequest('"agentName" must be a string');
+    }
+
+    if (request.agentName.trim().length === 0) {
+      toBadRequest('"agentName" must be a non-empty string');
     }
   }
 }
@@ -1038,6 +1050,99 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     await requireSessionStore().delete(id);
   }
 
+  /**
+   * Look up the current durable run id for a session. Used by signal/update/query
+   * to route the operation to the correct workflow handle.
+   */
+  async function requireSessionRunId(sessionId: string): Promise<string> {
+    const session = await requireSessionStore().load(sessionId);
+    if (!session) {
+      throw new BureauError(`Session not found: ${sessionId}`, 'NOT_FOUND');
+    }
+    const runId = session.metadata['lastRunId'];
+    if (typeof runId !== 'string' || !runId) {
+      throw new BureauError(`Session ${sessionId} has no active run`, 'NOT_FOUND');
+    }
+    return runId;
+  }
+
+  async function signalSession(
+    sessionId: string,
+    name: string,
+    payload?: unknown,
+  ): Promise<void | undefined> {
+    if (!runtime.durable) return undefined;
+    const runId = await requireSessionRunId(sessionId);
+    await runtime.durable.engine.signal(runId, name, payload);
+  }
+
+  async function updateSession(
+    sessionId: string,
+    name: string,
+    payload?: unknown,
+  ): Promise<unknown> {
+    if (!runtime.durable) return undefined;
+    const runId = await requireSessionRunId(sessionId);
+    return runtime.durable.engine.update(runId, name, payload);
+  }
+
+  async function querySession(sessionId: string, name: string, input?: unknown): Promise<unknown> {
+    if (!runtime.durable) return undefined;
+    const runId = await requireSessionRunId(sessionId);
+    return runtime.durable.engine.query(runId, name, input);
+  }
+
+  async function createSchedule(
+    definition: DurableScheduleDefinition,
+  ): Promise<import('@lostgradient/weft').ScheduleSummary | null | undefined> {
+    if (!runtime.durable) return undefined;
+    const handle = await runtime.durable.engine.schedule(
+      'agentRun',
+      {
+        sessionId: definition.sessionId ?? `schedule-${crypto.randomUUID()}`,
+        agentName: definition.agentName,
+        message: definition.input,
+      },
+      definition.spec,
+      {
+        overlap: definition.overlap === 'allow' ? 'allow' : 'skip',
+      },
+    );
+    return runtime.durable.engine.getSchedule(handle.id);
+  }
+
+  async function getSchedule(
+    scheduleId: string,
+  ): Promise<import('@lostgradient/weft').ScheduleSummary | null | undefined> {
+    if (!runtime.durable) return undefined;
+    return runtime.durable.engine.getSchedule(scheduleId);
+  }
+
+  async function listSchedules(
+    filter?: import('@lostgradient/weft').ScheduleFilter,
+  ): Promise<
+    | import('@lostgradient/weft').PaginatedResult<import('@lostgradient/weft').ScheduleSummary>
+    | undefined
+  > {
+    if (!runtime.durable) return undefined;
+    return runtime.durable.engine.listSchedules(filter);
+  }
+
+  async function pauseSchedule(scheduleId: string): Promise<void | undefined> {
+    if (!runtime.durable) return undefined;
+    await runtime.durable.engine.pauseSchedule(scheduleId);
+  }
+
+  async function resumeSchedule(scheduleId: string): Promise<void | undefined> {
+    if (!runtime.durable) return undefined;
+    await runtime.durable.engine.resumeSchedule(scheduleId);
+  }
+
+  async function cancelSchedule(scheduleId: string): Promise<void | undefined> {
+    if (!runtime.durable) return undefined;
+    await runtime.durable.engine.cancelSchedule(scheduleId);
+  }
+
   function getToolSummaries(): ToolSummary[] {
     return runtime.getToolSummaries();
   }
@@ -1083,6 +1188,9 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       }
 
       try {
+        // Dispose the audit trail before emitting bureau.disposed so any
+        // in-flight write callbacks are unsubscribed cleanly.
+        auditTrailInstance?.dispose();
         emitter.dispatch(new BureauDisposedEvent());
         storeSubscription.unsubscribe();
         for (const disposeListener of schedulerCleanup) {
@@ -1154,12 +1262,20 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     );
   }
 
-  return {
+  // Build the bureau object first so the audit trail can subscribe to its
+  // action events via addEventListener. The audit trail is best-effort — a
+  // write failure must never crash a run (handled inside createAuditTrail).
+  let auditTrailInstance: AuditTrail | undefined;
+
+  const bureau: Bureau = {
     store,
     memory: runtime.memory,
     scheduler: runtime.scheduler,
     sessionStore: runtime.sessionStore,
     kv: runtime.kv,
+    get auditTrail(): AuditTrail | undefined {
+      return auditTrailInstance;
+    },
     get ready() {
       return runtime.ready;
     },
@@ -1174,6 +1290,15 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     listSessions,
     getSession,
     deleteSession,
+    signalSession,
+    updateSession,
+    querySession,
+    createSchedule,
+    getSchedule,
+    listSchedules,
+    pauseSchedule,
+    resumeSchedule,
+    cancelSchedule,
     getConfiguration,
     getTools: getToolSummaries,
     subscribeLiveFrames(listener) {
@@ -1201,4 +1326,13 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     },
     dispose,
   } satisfies Bureau;
+
+  // Wire the durable audit trail (Layer B) now that we have a bureau to
+  // subscribe to. Only created when a KV store is available; ephemeral
+  // bureaus have Layer A only.
+  if (runtime.kv) {
+    auditTrailInstance = createAuditTrail(bureau, runtime.kv);
+  }
+
+  return bureau;
 }
