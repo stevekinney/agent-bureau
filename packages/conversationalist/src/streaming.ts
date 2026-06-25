@@ -4,7 +4,13 @@ import {
   isConversationEnvironmentParameter,
   resolveConversationEnvironment,
 } from './environment';
-import type { MultiModalContent } from './multi-modal';
+import type {
+  MultiModalContent,
+  RedactedThinkingContent,
+  ServerToolUseContent,
+  TextContent,
+  ThinkingContent,
+} from './multi-modal';
 import type {
   AssistantMessage,
   ConversationHistory as Conversation,
@@ -200,6 +206,209 @@ export function finalizeStreamingMessage(
       updatedAt: now,
     }),
   );
+}
+
+// ─── Multi-part streaming accumulation ──────────────────────────────────────
+
+/**
+ * Discriminated union representing the accumulated state of one content block
+ * during a streaming response. Each variant maps to an Anthropic block type.
+ */
+export type BlockAccumulatorState =
+  | { type: 'text'; buffer: string }
+  | { type: 'thinking'; buffer: string; signature: string }
+  | { type: 'redacted_thinking'; signature: string }
+  | { type: 'tool_use'; id: string; name: string; inputBuffer: string }
+  | { type: 'server_tool_use'; id: string; name: string; inputBuffer: string };
+
+/**
+ * An accumulator for a single content block within a streaming response.
+ * Call the appropriate `append*` method as deltas arrive, then read `state`
+ * once `content_block_stop` fires.
+ */
+export interface BlockAccumulator {
+  /** Current accumulated state of this block. */
+  readonly state: BlockAccumulatorState;
+  /** Append a text_delta to a text or thinking block. */
+  appendTextDelta(delta: string): void;
+  /** Append a thinking_delta to a thinking block. */
+  appendThinkingDelta(delta: string): void;
+  /** Set the signature on a thinking or redacted_thinking block. */
+  setSignature(signature: string): void;
+  /** Append an input_json_delta to a tool_use or server_tool_use block. */
+  appendInputJsonDelta(delta: string): void;
+}
+
+/**
+ * Accumulates a multi-part streaming response keyed by block index.
+ * Feed events as they arrive; call `finalize()` to build the completed
+ * `MultiModalContent[]` for the finished message.
+ */
+export interface StreamingMessageAccumulator {
+  /**
+   * Open a new content block at the given index.
+   * Call this when a `content_block_start` event arrives.
+   */
+  openBlock(index: number, state: BlockAccumulatorState): BlockAccumulator;
+  /**
+   * Get the accumulator for a block that is already open.
+   * Returns undefined if no block exists at the given index.
+   */
+  getBlock(index: number): BlockAccumulator | undefined;
+  /**
+   * Finalize the accumulated blocks into a `MultiModalContent[]`.
+   * JSON input buffers for tool_use / server_tool_use blocks are parsed at
+   * this point; malformed JSON falls back to an empty object.
+   * Call this when the `message_stop` event arrives.
+   */
+  finalize(): MultiModalContent[];
+}
+
+function createBlockAccumulator(initial: BlockAccumulatorState): BlockAccumulator {
+  let state: BlockAccumulatorState = { ...initial } as BlockAccumulatorState;
+
+  return {
+    get state() {
+      return state;
+    },
+    appendTextDelta(delta: string) {
+      if (state.type === 'text') {
+        state = { type: 'text', buffer: state.buffer + delta };
+      } else if (state.type === 'thinking') {
+        state = { ...state, buffer: state.buffer + delta };
+      }
+    },
+    appendThinkingDelta(delta: string) {
+      if (state.type === 'thinking') {
+        state = { ...state, buffer: state.buffer + delta };
+      }
+    },
+    setSignature(signature: string) {
+      if (state.type === 'thinking') {
+        state = { ...state, signature };
+      } else if (state.type === 'redacted_thinking') {
+        state = { type: 'redacted_thinking', signature };
+      }
+    },
+    appendInputJsonDelta(delta: string) {
+      if (state.type === 'tool_use') {
+        state = { ...state, inputBuffer: state.inputBuffer + delta };
+      } else if (state.type === 'server_tool_use') {
+        state = { ...state, inputBuffer: state.inputBuffer + delta };
+      }
+    },
+  };
+}
+
+/**
+ * Creates a new `StreamingMessageAccumulator` for accumulating a multi-part
+ * streamed Anthropic response.
+ *
+ * @example
+ * ```ts
+ * import { createStreamingAccumulator } from 'conversationalist/streaming';
+ *
+ * const acc = createStreamingAccumulator();
+ *
+ * // On content_block_start for a text block at index 0:
+ * acc.openBlock(0, { type: 'text', buffer: '' });
+ *
+ * // On text_delta:
+ * acc.getBlock(0)?.appendTextDelta(delta.text);
+ *
+ * // On content_block_start for a tool_use block at index 1:
+ * acc.openBlock(1, { type: 'tool_use', id: 'call-1', name: 'my_tool', inputBuffer: '' });
+ *
+ * // On input_json_delta:
+ * acc.getBlock(1)?.appendInputJsonDelta(delta.partial_json);
+ *
+ * // On message_stop:
+ * const content = acc.finalize(); // MultiModalContent[]
+ * ```
+ */
+export function createStreamingAccumulator(): StreamingMessageAccumulator {
+  const blocks = new Map<number, BlockAccumulator>();
+
+  return {
+    openBlock(index: number, state: BlockAccumulatorState): BlockAccumulator {
+      const accumulator = createBlockAccumulator(state);
+      blocks.set(index, accumulator);
+      return accumulator;
+    },
+    getBlock(index: number): BlockAccumulator | undefined {
+      return blocks.get(index);
+    },
+    finalize(): MultiModalContent[] {
+      const result: MultiModalContent[] = [];
+      // Sort by index to preserve block order
+      const sortedIndices = [...blocks.keys()].sort((a, b) => a - b);
+
+      for (const index of sortedIndices) {
+        const block = blocks.get(index);
+        if (!block) continue;
+
+        const { state } = block;
+        switch (state.type) {
+          case 'text': {
+            const textPart: TextContent = { type: 'text', text: state.buffer };
+            result.push(textPart);
+            break;
+          }
+          case 'thinking': {
+            const thinkingPart: ThinkingContent = {
+              type: 'thinking',
+              thinking: state.buffer,
+              signature: state.signature,
+            };
+            result.push(thinkingPart);
+            break;
+          }
+          case 'redacted_thinking': {
+            const redactedPart: RedactedThinkingContent = {
+              type: 'redacted_thinking',
+              signature: state.signature,
+            };
+            result.push(redactedPart);
+            break;
+          }
+          case 'tool_use': {
+            let parsedInput: unknown;
+            try {
+              parsedInput = JSON.parse(state.inputBuffer);
+            } catch {
+              parsedInput = {};
+            }
+            const serverToolPart: ServerToolUseContent = {
+              type: 'server_tool_use',
+              id: state.id,
+              name: state.name,
+              input: parsedInput,
+            };
+            result.push(serverToolPart);
+            break;
+          }
+          case 'server_tool_use': {
+            let parsedInput: unknown;
+            try {
+              parsedInput = JSON.parse(state.inputBuffer);
+            } catch {
+              parsedInput = {};
+            }
+            const serverToolPart: ServerToolUseContent = {
+              type: 'server_tool_use',
+              id: state.id,
+              name: state.name,
+              input: parsedInput,
+            };
+            result.push(serverToolPart);
+            break;
+          }
+        }
+      }
+
+      return result;
+    },
+  };
 }
 
 /**

@@ -4,6 +4,7 @@ import { createConversationHistory as createConversation } from '../src/conversa
 import {
   appendStreamingMessage,
   cancelStreamingMessage,
+  createStreamingAccumulator,
   finalizeStreamingMessage,
   getStreamingMessage,
   isStreamingMessage,
@@ -356,5 +357,104 @@ describe('getStreamingMessage', () => {
 
     const streaming = getStreamingMessage(finalized);
     expect(streaming).toBeUndefined();
+  });
+});
+
+describe('C4 — createStreamingAccumulator (multi-part accumulation)', () => {
+  it('accumulates a single text block', () => {
+    const acc = createStreamingAccumulator();
+    acc.openBlock(0, { type: 'text', buffer: '' });
+    acc.getBlock(0)?.appendTextDelta('Hello');
+    acc.getBlock(0)?.appendTextDelta(', world!');
+
+    const content = acc.finalize();
+    expect(content).toHaveLength(1);
+    expect(content[0]).toEqual({ type: 'text', text: 'Hello, world!' });
+  });
+
+  it('accumulates text + tool_use blocks keyed by index and parses JSON at finalize', () => {
+    const acc = createStreamingAccumulator();
+    // Block 0: text
+    acc.openBlock(0, { type: 'text', buffer: '' });
+    acc.getBlock(0)?.appendTextDelta('Let me search.');
+
+    // Block 1: tool_use with partial JSON deltas
+    acc.openBlock(1, { type: 'tool_use', id: 'call-1', name: 'search', inputBuffer: '' });
+    acc.getBlock(1)?.appendInputJsonDelta('{"q":');
+    acc.getBlock(1)?.appendInputJsonDelta('"cats"}');
+
+    const content = acc.finalize();
+    expect(content).toHaveLength(2);
+    expect(content[0]).toEqual({ type: 'text', text: 'Let me search.' });
+    expect(content[1]).toMatchObject({
+      type: 'server_tool_use',
+      id: 'call-1',
+      name: 'search',
+      input: { q: 'cats' },
+    });
+  });
+
+  it('accumulates a thinking block with thinking_delta and signature', () => {
+    const SIG = 'test-signature-abc==';
+    const acc = createStreamingAccumulator();
+    acc.openBlock(0, { type: 'thinking', buffer: '', signature: '' });
+    acc.getBlock(0)?.appendThinkingDelta('I should think about this.');
+    acc.getBlock(0)?.setSignature(SIG);
+
+    const content = acc.finalize();
+    expect(content).toHaveLength(1);
+    expect(content[0]).toEqual({
+      type: 'thinking',
+      thinking: 'I should think about this.',
+      signature: SIG,
+    });
+  });
+
+  it('accumulates a redacted_thinking block (no thinking_delta, only signature)', () => {
+    const SIG = 'redacted-signature==';
+    const acc = createStreamingAccumulator();
+    acc.openBlock(0, { type: 'redacted_thinking', signature: '' });
+    acc.getBlock(0)?.setSignature(SIG);
+
+    const content = acc.finalize();
+    expect(content).toHaveLength(1);
+    expect(content[0]).toEqual({ type: 'redacted_thinking', signature: SIG });
+  });
+
+  it('preserves block order by index regardless of open order', () => {
+    const acc = createStreamingAccumulator();
+    // Open block 2 first, then 0, then 1
+    acc.openBlock(2, { type: 'text', buffer: '' });
+    acc.getBlock(2)?.appendTextDelta('Third');
+
+    acc.openBlock(0, { type: 'thinking', buffer: '', signature: '' });
+    acc.getBlock(0)?.appendThinkingDelta('First');
+    acc.getBlock(0)?.setSignature('sig==');
+
+    acc.openBlock(1, { type: 'text', buffer: '' });
+    acc.getBlock(1)?.appendTextDelta('Second');
+
+    const content = acc.finalize();
+    expect(content).toHaveLength(3);
+    expect(content[0]?.type).toBe('thinking');
+    expect(content[1]?.type).toBe('text');
+    expect(content[2]?.type).toBe('text');
+    if (content[1]?.type === 'text') expect(content[1].text).toBe('Second');
+    if (content[2]?.type === 'text') expect(content[2].text).toBe('Third');
+  });
+
+  it('falls back to empty object for malformed JSON in tool_use', () => {
+    const acc = createStreamingAccumulator();
+    acc.openBlock(0, { type: 'tool_use', id: 'call-bad', name: 'tool', inputBuffer: '' });
+    acc.getBlock(0)?.appendInputJsonDelta('{invalid json');
+
+    const content = acc.finalize();
+    expect(content).toHaveLength(1);
+    expect(content[0]).toMatchObject({ type: 'server_tool_use', input: {} });
+  });
+
+  it('getBlock returns undefined for a block index that has not been opened', () => {
+    const acc = createStreamingAccumulator();
+    expect(acc.getBlock(99)).toBeUndefined();
   });
 });
