@@ -6,11 +6,16 @@ import { MemoryStorage, type TextValueStore, textValueStore } from '@lostgradien
 import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
 import { createTool, createToolbox } from 'armorer';
 import { createMockTool, createTestToolbox } from 'armorer/test';
-import { afterEach, describe, expect, it, mock } from 'bun:test';
+import { afterEach, describe, expect, it, mock, spyOn } from 'bun:test';
 import { Conversation, getMessages } from 'conversationalist';
 import { createMemory, type Memory } from 'memory';
 import { createInMemoryMemoryRecordStorage, createMockEmbedder } from 'memory/test';
-import type { GenerateFunction, GenerateResponse, Toolbox } from 'operative';
+import type {
+  GenerateFunction,
+  GenerateResponse,
+  ScheduledAgentRunInput,
+  Toolbox,
+} from 'operative';
 import { stopWhen } from 'operative';
 import { SCHEDULER_ORIGIN_TAG, startDurableRunResult } from 'operative/durable';
 import { createStore } from 'operative/store';
@@ -1268,6 +1273,85 @@ describe('createBureau', () => {
       await rm(databasePath, { force: true });
       await rm(`${databasePath}-wal`, { force: true });
       await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
+  it('createSchedule passes the prompt as ScheduledAgentRunInput.input, not a message field (regression PRRT_kwDORvupsc6MUE_p)', async () => {
+    // REGRESSION: createSchedule was building the agentRun workflow payload with a
+    // `message` field (`{ agentName, sessionId, message: definition.input }`) that
+    // exists in neither ScheduledAgentRunInput nor AgentRunWorkflowInput. Every
+    // scheduled fire launched with an empty prompt. The fix maps `definition.input`
+    // to `ScheduledAgentRunInput.input` instead.
+    //
+    // Seam: operative's dist bundle inlines @lostgradient/weft, so the Engine
+    // class the bureau uses is a DIFFERENT object identity than the one exported
+    // from the @lostgradient/weft package. Spying on the external package's
+    // Engine.prototype misses the bureau's calls.
+    //
+    // Fix: build a throwaway probe composition first, extract the Engine
+    // prototype from an ACTUAL instance the bundle produces, spy on THAT prototype,
+    // then build the bureau. Both use the same bundled class → same prototype →
+    // the spy captures the bureau's engine.schedule call.
+    const probe = await createRuntimeComposition({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+
+    // Grab the real Engine prototype from the probe's engine instance.
+    const realEngineProto = Object.getPrototypeOf(probe.durable!.engine) as object;
+
+    // Dispose the probe — we only needed it to resolve the class identity.
+    probe.durable!.engine[Symbol.dispose]?.();
+    probe.disposeStorage?.();
+
+    const scheduleSpy = spyOn(
+      realEngineProto as { schedule: (...args: unknown[]) => unknown },
+      'schedule',
+    ).mockResolvedValue({
+      id: 'spy-schedule-1',
+      pause: async () => {},
+      resume: async () => {},
+      cancel: async () => {},
+      describe: async () => null,
+    } as never);
+
+    try {
+      const bureau = await createBureau({
+        generate: createMockGenerate(),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'memory' },
+        durableExecution: true,
+      });
+
+      try {
+        // getSchedule after schedule may resolve to null since our spy short-circuits
+        // the real engine — that is fine; we only care about the schedule() call args.
+        await bureau
+          .createSchedule({
+            agentName: 'researcher',
+            input: 'Summarize overnight activity',
+            spec: '0 9 * * *',
+            sessionId: 'daily-digest',
+          })
+          .catch(() => undefined);
+
+        expect(scheduleSpy).toHaveBeenCalledTimes(1);
+        const capturedInput = scheduleSpy.mock.calls[0]?.[1] as ScheduledAgentRunInput;
+
+        // Must carry `input` — not `message` — as the prompt field.
+        expect(capturedInput.input).toBe('Summarize overnight activity');
+        // Must NOT carry a stray `message` field that the workflow ignores.
+        expect(capturedInput).not.toHaveProperty('message');
+        // Structural integrity: the required ScheduledAgentRunInput fields are present.
+        expect(capturedInput.agentName).toBe('researcher');
+        expect(capturedInput.sessionId).toBe('daily-digest');
+      } finally {
+        bureau.dispose();
+      }
+    } finally {
+      scheduleSpy.mockRestore();
     }
   });
 });
