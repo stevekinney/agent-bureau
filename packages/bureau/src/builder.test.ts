@@ -362,4 +362,108 @@ describe('createBureau (builder) — skills()', () => {
 
     expect(() => bureau.run('a', 'input')).not.toThrow();
   });
+
+  // ---------------------------------------------------------------------------
+  // Regression: builder.skills() had no effect — the skill catalog was stored
+  // on state but never read by run(). Tests below verify catalog injection.
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Build a capturing generate wrapper: records the messages the loop sees on
+   * step 0, then delegates to the underlying generate. Shared across tests.
+   */
+  function makeCapturingGenerate(text = 'done') {
+    const capturedMessages: Array<{ role: string; content: unknown }> = [];
+    const base = makeGenerate(text);
+    type GenerateContext = Parameters<typeof base>[0];
+    const capturingGenerate = async (context: GenerateContext) => {
+      if (capturedMessages.length === 0) {
+        for (const msg of context.conversation.getMessages()) {
+          capturedMessages.push({ role: msg.role, content: msg.content });
+        }
+      }
+      return base(context);
+    };
+    return { capturingGenerate, capturedMessages };
+  }
+
+  it('injects the skill catalog into the conversation on step 0', async () => {
+    const mockProvider = {
+      listSkills: async () => [
+        { name: 'research', description: 'Research skills' },
+        { name: 'writing', description: 'Writing skills' },
+      ],
+      isEnabled: async (_name: string) => true,
+    };
+
+    const { capturingGenerate, capturedMessages } = makeCapturingGenerate();
+    const bureau = createBureau()
+      .skills(mockProvider)
+      .agent({ name: 'a', generate: capturingGenerate });
+
+    await bureau.run('a', 'summarize').result();
+
+    // At least one system message must contain the skill catalog.
+    const systemMessages = capturedMessages.filter((m) => m.role === 'system');
+    const catalogMessage = systemMessages.find(
+      (m) => typeof m.content === 'string' && m.content.includes('<available_skills>'),
+    );
+    expect(catalogMessage).toBeDefined();
+
+    const catalog = catalogMessage?.content as string;
+    expect(catalog).toContain('research');
+    expect(catalog).toContain('writing');
+  });
+
+  it('skill catalog respects denyList policy', async () => {
+    const mockProvider = {
+      listSkills: async () => [
+        { name: 'research', description: 'Research skills' },
+        { name: 'writing', description: 'Writing skills' },
+      ],
+      isEnabled: async (_name: string) => true,
+    };
+
+    const { capturingGenerate, capturedMessages } = makeCapturingGenerate();
+    const bureau = createBureau()
+      .skills(mockProvider, { denyList: ['writing'] })
+      .agent({ name: 'a', generate: capturingGenerate });
+
+    await bureau.run('a', 'input').result();
+
+    const systemMessages = capturedMessages.filter((m) => m.role === 'system');
+    const catalogMessage = systemMessages.find(
+      (m) => typeof m.content === 'string' && m.content.includes('<available_skills>'),
+    );
+    expect(catalogMessage).toBeDefined();
+    const catalog = catalogMessage?.content as string;
+    expect(catalog).toContain('research');
+    expect(catalog).not.toContain('writing');
+  });
+
+  it('skips disabled skills from the catalog', async () => {
+    const mockProvider = {
+      listSkills: async () => [
+        { name: 'research', description: 'Research skills' },
+        { name: 'disabled-skill', description: 'A disabled skill' },
+      ],
+      isEnabled: async (name: string) => name !== 'disabled-skill',
+    };
+
+    const { capturingGenerate, capturedMessages } = makeCapturingGenerate();
+    const bureau = createBureau()
+      .skills(mockProvider)
+      .agent({ name: 'a', generate: capturingGenerate });
+
+    await bureau.run('a', 'input').result();
+
+    const systemMessages = capturedMessages.filter((m) => m.role === 'system');
+    const catalogMessage = systemMessages.find(
+      (m) => typeof m.content === 'string' && m.content.includes('<available_skills>'),
+    );
+    expect(catalogMessage).toBeDefined();
+    const catalog = catalogMessage?.content as string;
+    expect(catalog).toContain('research');
+    expect(catalog).not.toContain('disabled-skill');
+  });
 });
