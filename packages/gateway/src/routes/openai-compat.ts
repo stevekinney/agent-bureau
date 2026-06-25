@@ -166,7 +166,7 @@ export function createOpenAICompatRoutes(bureau: Bureau) {
       message,
       agentName,
       ...(systemPrompt ? { systemPrompt } : {}),
-      ...(max_tokens ? { maximumSteps: 1 } : {}),
+      ...(max_tokens ? { maximumTokens: max_tokens } : {}),
     };
 
     let summary;

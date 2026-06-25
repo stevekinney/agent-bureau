@@ -70,8 +70,9 @@ export function createGeminiProvider(options: GeminiProviderOptions): GenerateFu
       params['toolConfig'] = toGeminiToolChoice(options.toolChoice);
 
     const generationConfig: Record<string, unknown> = {};
-    if (common.maximumTokens !== undefined)
-      generationConfig['maxOutputTokens'] = common.maximumTokens;
+    const effectiveMaxOutputTokens = context.maximumTokens ?? common.maximumTokens;
+    if (effectiveMaxOutputTokens !== undefined)
+      generationConfig['maxOutputTokens'] = effectiveMaxOutputTokens;
     if (common.temperature !== undefined) generationConfig['temperature'] = common.temperature;
     if (common.topP !== undefined) generationConfig['topP'] = common.topP;
     if (common.stopSequences) generationConfig['stopSequences'] = common.stopSequences;
@@ -179,8 +180,9 @@ export function createGeminiProviderStream(
       params['toolConfig'] = toGeminiToolChoice(options.toolChoice);
 
     const generationConfig: Record<string, unknown> = {};
-    if (common.maximumTokens !== undefined)
-      generationConfig['maxOutputTokens'] = common.maximumTokens;
+    const effectiveMaxOutputTokensStream = context.maximumTokens ?? common.maximumTokens;
+    if (effectiveMaxOutputTokensStream !== undefined)
+      generationConfig['maxOutputTokens'] = effectiveMaxOutputTokensStream;
     if (common.temperature !== undefined) generationConfig['temperature'] = common.temperature;
     if (common.topP !== undefined) generationConfig['topP'] = common.topP;
     if (common.stopSequences) generationConfig['stopSequences'] = common.stopSequences;

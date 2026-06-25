@@ -75,6 +75,7 @@ function toBadRequest(message: string): never {
 function validateMessageRequest(request: {
   message: unknown;
   maximumSteps?: unknown;
+  maximumTokens?: unknown;
   systemPrompt?: unknown;
 }): void {
   if (!request.message || typeof request.message !== 'string') {
@@ -92,6 +93,16 @@ function validateMessageRequest(request: {
       request.maximumSteps <= 0
     ) {
       toBadRequest('"maximumSteps" must be a positive integer');
+    }
+  }
+
+  if (request.maximumTokens !== undefined) {
+    if (
+      typeof request.maximumTokens !== 'number' ||
+      !Number.isInteger(request.maximumTokens) ||
+      request.maximumTokens <= 0
+    ) {
+      toBadRequest('"maximumTokens" must be a positive integer');
     }
   }
 }
@@ -466,6 +477,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         toolbox: runRuntime.toolbox,
         conversation,
         maximumSteps: request.maximumSteps ?? runtime.maximumSteps,
+        maximumTokens: request.maximumTokens,
         stopWhen: options.stopWhen,
         prepareStep: runRuntime.prepareStep,
         onStep: runRuntime.onStep,

@@ -85,6 +85,11 @@ export interface GenerateContext {
   toolbox: Toolbox;
   toolChoice?: ToolChoice;
   responseFormat?: ResponseFormat;
+  /**
+   * Per-request output token cap; overrides the provider's construction-time
+   * maximumTokens for this call.
+   */
+  maximumTokens?: number;
 }
 
 /**
@@ -222,6 +227,11 @@ export interface RunOptions {
   conversation: Conversation | ConversationHistory;
   stopWhen?: StopCondition | StopCondition[];
   maximumSteps?: number;
+  /**
+   * Per-request output token cap; overrides the provider's construction-time
+   * maximumTokens for this call.
+   */
+  maximumTokens?: number;
   prepareStep?: PrepareStepHook | PrepareStepHook[];
   beforeToolExecution?: BeforeToolExecutionHook | BeforeToolExecutionHook[];
   afterToolExecution?: AfterToolExecutionHook | AfterToolExecutionHook[];

@@ -54,6 +54,7 @@ export function buildStepDeps(options: RunOptions): StepDeps {
     contextManagement: options.contextManagement,
     responseSchema: options.responseSchema,
     responseFormat,
+    maximumTokens: options.maximumTokens,
     schemaRetries: options.schemaRetries ?? 0,
     schemaRetryMessage: options.schemaRetryMessage,
     parentContext: options.parentContext,
