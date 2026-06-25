@@ -212,6 +212,109 @@ describe('session.run()', () => {
     // The conversation history should contain at least the user message.
     expect(session!.conversationHistory).toBeDefined();
   });
+
+  // Regression: Finding PRRT_kwDORvupsc6MUE_y — run() always started from an
+  // empty conversation, ignoring the stored conversationHistory. A second run
+  // should see the messages accumulated by the first run.
+  it('F1 regression: second run seeds conversation from first run history', async () => {
+    // Capture the message-id count the generate function sees on each call.
+    const historyLengths: number[] = [];
+
+    const capturingGenerate: GenerateFunction = async (ctx) => {
+      historyLengths.push(ctx.conversation.current.ids.length);
+      return { content: 'reply', toolCalls: [] };
+    };
+
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+    const h = createSessionHandle('f1-regression-session', {
+      store,
+      agentName: 'f1-agent',
+      runOptions: {
+        generate: capturingGenerate,
+        toolbox: createToolbox([]) as unknown as Toolbox,
+        maximumSteps: 1,
+      },
+    });
+
+    // First run: generate sees only the initial user message.
+    await h.run('first message').result();
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+
+    // Second run: generate must see the first run's messages PLUS the new one.
+    await h.run('second message').result();
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+
+    // First call: 1 user message seeded.
+    expect(historyLengths[0]).toBeGreaterThanOrEqual(1);
+    // Second call: should see MORE messages than the first call (history carried
+    // forward). Before the fix, this was also 1 (empty history each time).
+    expect(historyLengths[1]).toBeGreaterThan(historyLengths[0]!);
+  });
+
+  // Regression: Finding PRRT_kwDORvupsc6MUE_1 — run() never routed through the
+  // Weft durable engine even when engine+checkpointStore were present. After the
+  // fix, a new run must start via engine.start() so it is checkpointed and
+  // reachable via signal/update/query/recover().
+  it('F2 regression: run() routes through the Weft engine when engine+checkpointStore are present', async () => {
+    const startedIds: string[] = [];
+
+    // A minimal fake engine that records the ids passed to start().
+    const fakeEngine = {
+      start: async (_type: string, _input: unknown, opts: { id: string; services?: unknown }) => {
+        startedIds.push(opts.id);
+        // Return a minimal handle whose result() rejects so the run terminates.
+        const aborted = AbortSignal.abort();
+        return {
+          id: opts.id,
+          result: () => Promise.reject(new Error('fake engine')),
+          abort: () => {},
+          signal: aborted,
+          addEventListener: () => {},
+          removeEventListener: () => {},
+          [Symbol.asyncIterator]: async function* () {},
+        };
+      },
+      cancel: async () => {},
+      signal: async () => {},
+      update: async () => {},
+      query: async () => {},
+    } as unknown as AnyRunEngine;
+
+    const fakeCheckpointStore = {
+      loadCheckpoint: async (_runId: string) => ({
+        conversation: null,
+        cursor: { totalUsage: {}, lastContent: '', schemaAttempts: 0 },
+        steps: [],
+      }),
+    };
+
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+    const h = createSessionHandle('f2-regression-session', {
+      store,
+      agentName: 'f2-agent',
+      engine: fakeEngine,
+      checkpointStore:
+        fakeCheckpointStore as unknown as import('../durable/checkpoint-store').CheckpointStore,
+      runOptions: {
+        generate: createInstantGenerate(),
+        toolbox: createToolbox([]) as unknown as Toolbox,
+        maximumSteps: 1,
+      },
+    });
+
+    // Start the run and let it settle (the fake engine immediately rejects,
+    // so the result promise will reject too — we swallow that).
+    const run = h.run('durable please');
+    await run.result().catch(() => {});
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+
+    // The durable engine's start() must have been called with the derived id
+    // in `${sessionId}:${sequence}` format.
+    expect(startedIds).toHaveLength(1);
+    expect(startedIds[0]).toBe('f2-regression-session:0');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -278,6 +381,13 @@ describe('session.cancel()', () => {
   it('aborts the current run and clears the in-flight reference', async () => {
     let abortCalled = false;
     let resolveGenerate: (() => void) | undefined;
+    // Resolves once blockingGenerate has been called and the abort listener is
+    // registered. We await this before cancelling so the test is robust to the
+    // async session-load that now precedes run execution.
+    let signalGenerateStarted!: () => void;
+    const generateStarted = new Promise<void>((resolve) => {
+      signalGenerateStarted = resolve;
+    });
 
     const blockingGenerate: GenerateFunction = (_ctx) => {
       return new Promise<{ content: string; toolCalls: [] }>((resolve) => {
@@ -287,6 +397,9 @@ describe('session.cancel()', () => {
             abortCalled = true;
           });
         }
+        // Signal that the generate function is blocking and the abort listener
+        // is now attached, so the test can safely call cancel().
+        signalGenerateStarted();
       });
     };
 
@@ -304,9 +417,10 @@ describe('session.cancel()', () => {
 
     h.run('please stop me');
 
-    // Yield to let the generate function be called and attach the abort listener.
-    await Promise.resolve();
-    await Promise.resolve();
+    // Wait until the generate function is actually being called (which happens
+    // after the session is loaded asynchronously). Only then is the abort
+    // listener attached and cancel() will reliably trigger it.
+    await generateStarted;
 
     expect(await h.recover()).not.toBeNull();
     await h.cancel();
