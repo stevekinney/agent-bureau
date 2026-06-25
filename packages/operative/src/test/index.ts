@@ -16,6 +16,12 @@ export {
   type EngineSpy,
   spyEngine,
 } from './durable-engine';
+export type {
+  ChildRunHandle,
+  CreateDurableMultiAgentHarnessOptions,
+  DurableMultiAgentHarness,
+} from './durable-multi-agent-harness';
+export { createDurableMultiAgentHarness } from './durable-multi-agent-harness';
 export { createStepwiseBlockingGenerate } from './stepwise-generate';
 export { createTestStore } from './store';
 export { type RunLookup, waitForCondition, waitForRunState } from './wait';
