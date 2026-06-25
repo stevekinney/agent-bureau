@@ -1304,6 +1304,41 @@ describe('C5 — Server-tool content blocks (Anthropic adapter)', () => {
     expect(last.text).toBe('Done searching.');
   });
 
+  it('round-trips [thinking, server_tool_use, text] as one ordered assistant message (extended thinking + web search)', () => {
+    // A realistic Anthropic pattern: the model thinks, invokes a server tool,
+    // then answers. All three blocks are groupable, so they must stay together
+    // in one ordered message with the thinking signature intact.
+    const SIG = 'EqoBthinkSig==';
+    const payload: AnthropicConversation = {
+      messages: [
+        { role: 'user', content: 'Find todays news' },
+        {
+          role: 'assistant',
+          content: [
+            { type: 'thinking', thinking: 'I should search the web.', signature: SIG },
+            { type: 'server_tool_use', id: 'stu_z', name: 'web_search', input: { q: 'news' } },
+            { type: 'text', text: 'Let me look.' },
+          ],
+        },
+      ],
+    };
+
+    const conversation = fromAnthropicMessages(payload);
+    const roundTripped = toAnthropicMessages(conversation);
+
+    const assistantMessages = roundTripped.messages.filter((m) => m.role === 'assistant');
+    expect(assistantMessages).toHaveLength(1);
+
+    const blocks = assistantMessages[0]?.content as Array<{ type: string }>;
+    expect(blocks.map((b) => b.type)).toEqual(['thinking', 'server_tool_use', 'text']);
+
+    const thinking = blocks[0] as { type: 'thinking'; thinking: string; signature: string };
+    expect(thinking.thinking).toBe('I should search the web.');
+    // Signature survives the round-trip byte-for-byte even when not followed
+    // immediately by a text block.
+    expect(thinking.signature).toBe(SIG);
+  });
+
   it('keeps a client tool_use interleaved between text blocks in true order across the round-trip', () => {
     // tool_use is role-bearing on import (a tool-call message), but every piece
     // of this turn is assistant-role on export, so toAnthropicMessages merges

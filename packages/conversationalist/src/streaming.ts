@@ -12,7 +12,6 @@ import type {
   ThinkingContent,
   ToolUseContent,
 } from './multi-modal';
-import { jsonValueSchema } from './schemas';
 import type {
   AssistantMessage,
   ConversationHistory as Conversation,
@@ -271,24 +270,22 @@ export interface StreamingMessageAccumulator {
 
 /**
  * Parses a streamed tool-input buffer into a {@link JSONValue}, throwing if the
- * buffer is not valid JSON or does not encode a JSON value. The block name is
- * included in the error to make a corrupt stream diagnosable.
+ * buffer is not valid JSON. An empty buffer (no `input_json_delta` ever arrived)
+ * is itself a sign of a truncated stream and throws here rather than degrading
+ * to an empty-input tool call. The block name is included to make a corrupt
+ * stream diagnosable.
  */
 function parseStreamedToolInput(toolName: string, inputBuffer: string): JSONValue {
-  let parsed: unknown;
   try {
-    parsed = JSON.parse(inputBuffer);
+    // JSON.parse only ever yields a JSON value, so this cast asserts its
+    // documented contract rather than papering over a type-model gap.
+    return JSON.parse(inputBuffer) as JSONValue;
   } catch (cause) {
     throw new Error(
       `Streamed tool input for "${toolName}" is not valid JSON; the stream may be incomplete or corrupt.`,
       { cause },
     );
   }
-  const result = jsonValueSchema.safeParse(parsed);
-  if (!result.success) {
-    throw new Error(`Streamed tool input for "${toolName}" is not a JSON value.`);
-  }
-  return result.data;
 }
 
 function createBlockAccumulator(initial: BlockAccumulatorState): BlockAccumulator {
@@ -318,9 +315,7 @@ function createBlockAccumulator(initial: BlockAccumulatorState): BlockAccumulato
       }
     },
     appendInputJsonDelta(delta: string) {
-      if (state.type === 'tool_use') {
-        state = { ...state, inputBuffer: state.inputBuffer + delta };
-      } else if (state.type === 'server_tool_use') {
+      if (state.type === 'tool_use' || state.type === 'server_tool_use') {
         state = { ...state, inputBuffer: state.inputBuffer + delta };
       }
     },
