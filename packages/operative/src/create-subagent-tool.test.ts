@@ -72,6 +72,62 @@ describe('createSubagentTool', () => {
       expect(String(caughtError)).toContain('error');
     });
 
+    it('throws when the sub-agent finishes with budget-exceeded', async () => {
+      const tool = createSubagentTool({
+        name: 'researcher',
+        description: 'Research a topic',
+        agentName: 'researcher',
+        input: z.object({ topic: z.string() }),
+
+        run: (_input: string, _context: any) =>
+          Promise.resolve({
+            conversation: {} as any,
+            content: '',
+            finishReason: 'budget-exceeded',
+            steps: [],
+            usage: { prompt: 0, completion: 0, total: 0 },
+          } as any),
+      });
+
+      let caughtError: unknown;
+      try {
+        await (tool as unknown as { execute: (p: unknown) => Promise<unknown> }).execute({
+          topic: 'AI',
+        });
+      } catch (error) {
+        caughtError = error;
+      }
+      expect(String(caughtError)).toContain('budget');
+    });
+
+    it('throws when the sub-agent finishes with elicitation-denied', async () => {
+      const tool = createSubagentTool({
+        name: 'researcher',
+        description: 'Research a topic',
+        agentName: 'researcher',
+        input: z.object({ topic: z.string() }),
+
+        run: (_input: string, _context: any) =>
+          Promise.resolve({
+            conversation: {} as any,
+            content: '',
+            finishReason: 'elicitation-denied',
+            steps: [],
+            usage: { prompt: 0, completion: 0, total: 0 },
+          } as any),
+      });
+
+      let caughtError: unknown;
+      try {
+        await (tool as unknown as { execute: (p: unknown) => Promise<unknown> }).execute({
+          topic: 'AI',
+        });
+      } catch (error) {
+        caughtError = error;
+      }
+      expect(String(caughtError)).toContain('elicitation');
+    });
+
     it('does not throw when treatMaximumStepsAsError is false', async () => {
       const tool = createSubagentTool({
         name: 'researcher',
