@@ -22,8 +22,8 @@ const CreateScheduleSchema = z.object({
   sessionId: z.string().optional(),
   /** Overlap policy when a prior fire is still running. Defaults to `'skip'`. */
   overlap: z.enum(['skip', 'allow']).optional(),
-  /** Human-readable label stored on the schedule. */
-  description: z.string().optional(),
+  // NOTE: no `description` — weft 0.8.0 cannot store/surface a schedule label, so
+  // accepting one would silently drop it. Re-add when weft supports it (weft 20a358ef).
 });
 
 /**

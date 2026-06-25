@@ -1657,6 +1657,39 @@ describe('createBureau createSchedule spec normalization (regression PRRT_kwDORv
       bureau.dispose();
     }
   });
+
+  it('createSchedule does not accept a description it cannot persist (regression PRRT_kwDORvupsc6MYplM)', async () => {
+    // REGRESSION: DurableScheduleDefinition + the gateway schema used to accept a
+    // `description`, but weft 0.8.0's ScheduleOptions/ScheduleSummary have nowhere
+    // to store or surface a schedule label — so it was silently dropped. The field
+    // is removed from our API until weft supports it (weft 20a358ef). This test
+    // guards that the type no longer carries `description`: passing one is a
+    // compile error (@ts-expect-error), and a real schedule still works.
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+
+    try {
+      const summary = await bureau.createSchedule({
+        agentName: 'reporter',
+        input: 'generate report',
+        spec: '0 9 * * *',
+        // @ts-expect-error — `description` is intentionally NOT part of
+        // DurableScheduleDefinition (weft cannot persist it; weft 20a358ef).
+        description: 'Daily 9am report',
+      });
+
+      // The schedule itself is still created normally (the extra prop is ignored
+      // at runtime; the type-level guard above is the real assertion).
+      expect(summary).toBeDefined();
+      expect(summary?.cronExpression).toBe('0 9 * * *');
+    } finally {
+      bureau.dispose();
+    }
+  });
 });
 
 describe('createBureau scheduler-origin crash semantics (#25)', () => {
