@@ -157,6 +157,95 @@ function mergeHooks(
   return merged.length > 0 ? merged : undefined;
 }
 
+/**
+ * Merge a bureau-level SkillPolicy and an agent-level SkillPolicy.
+ * Agent's denyList is additive on top of bureau's; agent's allowList narrows
+ * bureau's (intersection). When both are absent, returns undefined.
+ */
+function mergeSkillPolicies(
+  bureau: SkillPolicy | undefined,
+  agent: SkillPolicy | undefined,
+): SkillPolicy | undefined {
+  if (!bureau && !agent) return undefined;
+  const allowList = agent?.allowList ?? bureau?.allowList;
+  const denyListItems = [...(bureau?.denyList ?? []), ...(agent?.denyList ?? [])];
+  const denyList = denyListItems.length > 0 ? denyListItems : undefined;
+  return allowList !== undefined || denyList !== undefined
+    ? {
+        ...(allowList !== undefined ? { allowList } : {}),
+        ...(denyList !== undefined ? { denyList } : {}),
+      }
+    : undefined;
+}
+
+/** Escape XML special characters. */
+function escapeXmlAttr(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+/**
+ * Create a PrepareStepHook that injects the skill catalog as an
+ * `<available_skills>` XML block on step 0 of every run.
+ *
+ * Uses only the `SkillProviderLike` seam (`listSkills` + `isEnabled`), which
+ * keeps `builder.ts` free of a hard `skills` package import.
+ * Degrades gracefully on provider errors so a catalog failure never aborts a run.
+ */
+function createSkillCatalogPrepareStep(
+  provider: SkillProviderLike,
+  effectivePolicy: SkillPolicy | undefined,
+): PrepareStepHook {
+  return async (context) => {
+    if (context.step !== 0) return;
+
+    try {
+      const allSkills = await provider.listSkills();
+
+      // Filter by enabled status.
+      const enabledChecks = await Promise.all(
+        allSkills.map(async (skill) => ({
+          skill,
+          enabled: await provider.isEnabled(skill.name),
+        })),
+      );
+      let filtered = enabledChecks.filter((check) => check.enabled).map((check) => check.skill);
+
+      // Apply allow/deny policy (deny wins).
+      if (effectivePolicy?.allowList) {
+        const allow = new Set(effectivePolicy.allowList);
+        filtered = filtered.filter((s) => allow.has(s.name));
+      }
+      if (effectivePolicy?.denyList) {
+        const deny = new Set(effectivePolicy.denyList);
+        filtered = filtered.filter((s) => !deny.has(s.name));
+      }
+
+      if (filtered.length === 0) return;
+
+      const skillElements = filtered
+        .map(
+          (s) => `<skill name="${escapeXmlAttr(s.name)}">${escapeXmlAttr(s.description)}</skill>`,
+        )
+        .join('\n');
+
+      const catalog =
+        `<available_skills>\n` +
+        `You have the following skills available. Use the activate_skill tool to load a skill's full instructions.\n\n` +
+        `${skillElements}\n` +
+        `</available_skills>`;
+
+      context.conversation.appendSystemMessage(catalog, { _skillCatalogInjected: true });
+    } catch {
+      // Degrade gracefully — provider errors must not abort the run.
+    }
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Runtime bureau handle factory
 // ---------------------------------------------------------------------------
@@ -248,8 +337,16 @@ function makeBureauHandle<
       // Toolbox: agent extends bureau (∪); agent wins on collision.
       const effectiveToolbox = mergeToolboxes(state.bureauToolbox, spec.toolbox);
 
-      // Hooks: bureau-first, additive-only.
-      const effectiveHooks = mergeHooks(state.bureauHooks, spec.hooks);
+      // Skill catalog hook: inject catalog on step 0 when a provider is set.
+      // The effective policy merges bureau + agent policies (agent narrows bureau).
+      const skillHooks: PrepareStepHook[] = [];
+      if (state.skillProvider) {
+        const effectiveSkillPolicy = mergeSkillPolicies(state.skillPolicy, spec.skillPolicy);
+        skillHooks.push(createSkillCatalogPrepareStep(state.skillProvider, effectiveSkillPolicy));
+      }
+
+      // Hooks: skill catalog first, then bureau-level, then agent-level.
+      const effectiveHooks = mergeHooks([...skillHooks, ...state.bureauHooks], spec.hooks);
 
       // Build a fresh Conversation for this run (ephemeral per run).
       const conversation = new Conversation();
