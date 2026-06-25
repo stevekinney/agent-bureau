@@ -1439,6 +1439,77 @@ describe('createBureau durable inspection surface', () => {
   });
 });
 
+describe('createBureau schedule management sentinel (regression PRRT_kwDORvupsc6MXEmg)', () => {
+  // pauseSchedule / resumeSchedule / cancelSchedule previously returned void (i.e.
+  // undefined) on success — indistinguishable from the undefined sentinel meaning
+  // "no durable engine". Routes checking `result === undefined` would therefore
+  // return 501 even when the operation succeeded.
+
+  it('pauseSchedule / resumeSchedule / cancelSchedule return undefined when no durable engine is composed', async () => {
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      // No storage / durableExecution — no engine
+    });
+
+    expect(await bureau.pauseSchedule('sched-1')).toBeUndefined();
+    expect(await bureau.resumeSchedule('sched-1')).toBeUndefined();
+    expect(await bureau.cancelSchedule('sched-1')).toBeUndefined();
+
+    bureau.dispose();
+  });
+
+  it('pauseSchedule / resumeSchedule / cancelSchedule return true when a durable engine is composed', async () => {
+    // Build a throwaway probe so we can reach the bundled Engine prototype.
+    const probe = await createRuntimeComposition({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+    const realEngineProto = Object.getPrototypeOf(probe.durable!.engine) as object;
+    probe.durable!.engine[Symbol.dispose]?.();
+    probe.disposeStorage?.();
+
+    // Spy on the engine-level void methods so we don't need a real schedule in storage.
+    const engineProtoTyped = realEngineProto as {
+      pauseSchedule: (id: string) => Promise<void>;
+      resumeSchedule: (id: string) => Promise<void>;
+      cancelSchedule: (id: string) => Promise<void>;
+    };
+    const pauseSpy = spyOn(engineProtoTyped, 'pauseSchedule').mockResolvedValue(undefined);
+    const resumeSpy = spyOn(engineProtoTyped, 'resumeSchedule').mockResolvedValue(undefined);
+    const cancelSpy = spyOn(engineProtoTyped, 'cancelSchedule').mockResolvedValue(undefined);
+
+    try {
+      const bureau = await createBureau({
+        generate: createMockGenerate(),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'memory' },
+        durableExecution: true,
+      });
+
+      try {
+        // Each method must return true (operation performed), not undefined (no engine).
+        expect(await bureau.pauseSchedule('sched-1')).toBe(true);
+        expect(await bureau.resumeSchedule('sched-1')).toBe(true);
+        expect(await bureau.cancelSchedule('sched-1')).toBe(true);
+
+        // Confirm the engine methods were actually called through.
+        expect(pauseSpy).toHaveBeenCalledWith('sched-1');
+        expect(resumeSpy).toHaveBeenCalledWith('sched-1');
+        expect(cancelSpy).toHaveBeenCalledWith('sched-1');
+      } finally {
+        bureau.dispose();
+      }
+    } finally {
+      pauseSpy.mockRestore();
+      resumeSpy.mockRestore();
+      cancelSpy.mockRestore();
+    }
+  });
+});
+
 describe('createBureau scheduler-origin crash semantics (#25)', () => {
   let schedulerSweepDatabaseCounter = 0;
 

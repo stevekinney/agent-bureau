@@ -1164,19 +1164,22 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     return runtime.durable.engine.listSchedules(filter);
   }
 
-  async function pauseSchedule(scheduleId: string): Promise<void | undefined> {
+  async function pauseSchedule(scheduleId: string): Promise<true | undefined> {
     if (!runtime.durable) return undefined;
     await runtime.durable.engine.pauseSchedule(scheduleId);
+    return true;
   }
 
-  async function resumeSchedule(scheduleId: string): Promise<void | undefined> {
+  async function resumeSchedule(scheduleId: string): Promise<true | undefined> {
     if (!runtime.durable) return undefined;
     await runtime.durable.engine.resumeSchedule(scheduleId);
+    return true;
   }
 
-  async function cancelSchedule(scheduleId: string): Promise<void | undefined> {
+  async function cancelSchedule(scheduleId: string): Promise<true | undefined> {
     if (!runtime.durable) return undefined;
     await runtime.durable.engine.cancelSchedule(scheduleId);
+    return true;
   }
 
   function getToolSummaries(): ToolSummary[] {
