@@ -90,6 +90,7 @@ const multiModalContentUnion = z.discriminatedUnion('type', [
       'code_execution_tool_result',
       'bash_code_execution_tool_result',
       'text_editor_code_execution_tool_result',
+      'web_fetch_tool_result',
     ]),
     tool_use_id: z.string(),
     content: jsonValueSchema,

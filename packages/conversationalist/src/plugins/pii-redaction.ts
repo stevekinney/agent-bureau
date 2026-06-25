@@ -88,8 +88,19 @@ export function createPIIRedactionPlugin(options: PIIRedactionOptions = {}): Mes
         ...input,
         content: input.content.map((part) => {
           switch (part.type) {
-            case 'text':
-              return part.text ? { ...part, text: redact(part.text) } : part;
+            case 'text': {
+              // Redact both the visible text and any citation metadata
+              // (cited_text, titles, urls) which can carry PII.
+              const text = part.text ? redact(part.text) : part.text;
+              if (part.citations === undefined) {
+                return part.text ? { ...part, text } : part;
+              }
+              return {
+                ...part,
+                text,
+                citations: redactJSONValue(part.citations, redact) as typeof part.citations,
+              };
+            }
             case 'thinking':
               // Thinking text is model reasoning that can echo user PII.
               return { ...part, thinking: redact(part.thinking) };

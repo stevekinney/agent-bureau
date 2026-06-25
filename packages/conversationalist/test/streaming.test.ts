@@ -470,6 +470,42 @@ describe('C4 — createStreamingAccumulator (multi-part accumulation)', () => {
     ]);
   });
 
+  it('accumulates citations_delta entries onto a streamed text block', () => {
+    const acc = createStreamingAccumulator();
+    acc.openBlock(0, { type: 'text', buffer: '' });
+    acc.getBlock(0)?.appendTextDelta('The answer is 4.');
+    acc.getBlock(0)?.appendCitationsDelta({ type: 'char_location', cited_text: 'a', start: 0 });
+    acc.getBlock(0)?.appendCitationsDelta({ type: 'char_location', cited_text: 'b', start: 5 });
+
+    expect(contentOf(acc.finalize())).toEqual([
+      {
+        type: 'text',
+        text: 'The answer is 4.',
+        citations: [
+          { type: 'char_location', cited_text: 'a', start: 0 },
+          { type: 'char_location', cited_text: 'b', start: 5 },
+        ],
+      },
+    ]);
+  });
+
+  it('accumulates a streamed web_fetch_tool_result block', () => {
+    const acc = createStreamingAccumulator();
+    acc.openBlock(0, {
+      type: 'web_fetch_tool_result',
+      tool_use_id: 'wf-1',
+      content: { url: 'https://example.com', text: 'page body' },
+    });
+
+    expect(contentOf(acc.finalize())).toEqual([
+      {
+        type: 'web_fetch_tool_result',
+        tool_use_id: 'wf-1',
+        content: { url: 'https://example.com', text: 'page body' },
+      },
+    ]);
+  });
+
   it('accumulates a redacted_thinking block (data seeded at openBlock, no signature)', () => {
     const DATA = 'encrypted-redacted-payload==';
     const acc = createStreamingAccumulator();

@@ -63,7 +63,10 @@ export interface ConversationEnvironment {
 function partCharLength(part: ReturnType<typeof messageParts>[number]): number {
   switch (part.type) {
     case 'text':
-      return part.text.length;
+      return (
+        part.text.length +
+        (part.citations !== undefined ? JSON.stringify(part.citations).length : 0)
+      );
     case 'image':
       return (part.text ?? '').length + (part.url?.length ?? 0);
     case 'thinking':
@@ -77,6 +80,7 @@ function partCharLength(part: ReturnType<typeof messageParts>[number]): number {
     case 'code_execution_tool_result':
     case 'bash_code_execution_tool_result':
     case 'text_editor_code_execution_tool_result':
+    case 'web_fetch_tool_result':
       return JSON.stringify(part.content).length;
     case 'container_upload':
       return part.file_id.length;

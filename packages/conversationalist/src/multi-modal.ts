@@ -65,23 +65,24 @@ export interface WebSearchToolResultContent {
 }
 
 /**
- * Result block types for Anthropic's built-in code-execution server tools.
- * Enumerated explicitly (rather than an open string) so they discriminate
- * cleanly; add a literal here when Anthropic ships a new server-tool result.
+ * Result block types for Anthropic's built-in server tools (code execution and
+ * web fetch). Enumerated explicitly (rather than an open string) so they
+ * discriminate cleanly; add a literal here when Anthropic ships a new
+ * server-tool result block.
  */
-export type CodeExecutionToolResultType =
+export type ServerToolResultType =
   | 'code_execution_tool_result'
   | 'bash_code_execution_tool_result'
-  | 'text_editor_code_execution_tool_result';
+  | 'text_editor_code_execution_tool_result'
+  | 'web_fetch_tool_result';
 
 /**
- * Result block returned by Anthropic's built-in code-execution server tools
- * (`code_execution`, `bash_code_execution`, `text_editor_code_execution`).
- * Preserves stdout, exit codes, file ids, and errors so they round-trip in the
- * conversation history instead of being dropped.
+ * Result block returned by an Anthropic built-in server tool (code execution,
+ * web fetch). Preserves stdout, exit codes, file ids, fetched content, and
+ * errors so they round-trip in the conversation history instead of being dropped.
  */
-export interface CodeExecutionToolResultContent {
-  type: CodeExecutionToolResultType;
+export interface ServerToolResultContent {
+  type: ServerToolResultType;
   tool_use_id: string;
   content: JSONValue;
 }
@@ -103,7 +104,7 @@ export type MultiModalContent =
   | RedactedThinkingContent
   | ServerToolUseContent
   | WebSearchToolResultContent
-  | CodeExecutionToolResultContent
+  | ServerToolResultContent
   | ContainerUploadContent;
 
 /**
@@ -151,7 +152,8 @@ export function copyMultiModalContent(item: MultiModalContent): MultiModalConten
   if (
     item.type === 'code_execution_tool_result' ||
     item.type === 'bash_code_execution_tool_result' ||
-    item.type === 'text_editor_code_execution_tool_result'
+    item.type === 'text_editor_code_execution_tool_result' ||
+    item.type === 'web_fetch_tool_result'
   ) {
     return {
       type: item.type,
@@ -163,7 +165,7 @@ export function copyMultiModalContent(item: MultiModalContent): MultiModalConten
     return { type: 'container_upload', file_id: item.file_id };
   }
   // All non-image variants are handled above. TypeScript cannot fully narrow
-  // `item` to ImageContent here because CodeExecutionToolResultContent's `type`
+  // `item` to ImageContent here because ServerToolResultContent's `type`
   // is itself a union alias, so we assert the exhausted remainder.
   const image = item as ImageContent;
   return {

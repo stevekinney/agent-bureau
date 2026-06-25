@@ -210,7 +210,8 @@ export function finalizeStreamingMessage(
  * during a streaming response. Each variant maps to an Anthropic block type.
  */
 export type BlockAccumulatorState =
-  | { type: 'text'; buffer: string }
+  // A text block may also accumulate citation objects via citations_delta.
+  | { type: 'text'; buffer: string; citations?: JSONValue[] }
   | { type: 'thinking'; buffer: string; signature: string }
   // redacted_thinking carries its encrypted payload in `data` (seeded at
   // content_block_start), not a streamed signature.
@@ -225,7 +226,8 @@ export type BlockAccumulatorState =
       type:
         | 'code_execution_tool_result'
         | 'bash_code_execution_tool_result'
-        | 'text_editor_code_execution_tool_result';
+        | 'text_editor_code_execution_tool_result'
+        | 'web_fetch_tool_result';
       tool_use_id: string;
       content: JSONValue;
     };
@@ -240,6 +242,8 @@ export interface BlockAccumulator {
   readonly state: BlockAccumulatorState;
   /** Append a text_delta to a text or thinking block. */
   appendTextDelta(delta: string): void;
+  /** Append a citations_delta entry to a text block (accumulates citation objects). */
+  appendCitationsDelta(citation: JSONValue): void;
   /** Append a thinking_delta to a thinking block. */
   appendThinkingDelta(delta: string): void;
   /**
@@ -350,9 +354,14 @@ function createBlockAccumulator(initial: BlockAccumulatorState): BlockAccumulato
     },
     appendTextDelta(delta: string) {
       if (state.type === 'text') {
-        state = { type: 'text', buffer: state.buffer + delta };
+        state = { ...state, buffer: state.buffer + delta };
       } else if (state.type === 'thinking') {
         state = { ...state, buffer: state.buffer + delta };
+      }
+    },
+    appendCitationsDelta(citation: JSONValue) {
+      if (state.type === 'text') {
+        state = { ...state, citations: [...(state.citations ?? []), citation] };
       }
     },
     appendThinkingDelta(delta: string) {
@@ -443,7 +452,11 @@ export function createStreamingAccumulator(): StreamingMessageAccumulator {
         const { state } = block;
         switch (state.type) {
           case 'text':
-            currentContent.push({ type: 'text', text: state.buffer });
+            currentContent.push({
+              type: 'text',
+              text: state.buffer,
+              ...(state.citations !== undefined ? { citations: state.citations } : {}),
+            });
             break;
           case 'thinking':
             currentContent.push({
@@ -487,6 +500,7 @@ export function createStreamingAccumulator(): StreamingMessageAccumulator {
           case 'code_execution_tool_result':
           case 'bash_code_execution_tool_result':
           case 'text_editor_code_execution_tool_result':
+          case 'web_fetch_tool_result':
             currentContent.push({
               type: state.type,
               tool_use_id: state.tool_use_id,

@@ -1437,6 +1437,39 @@ describe('C5 — Server-tool content blocks (Anthropic adapter)', () => {
     expect(upload).toBeDefined();
     expect(upload?.file_id).toBe('file_abc123');
   });
+
+  it('round-trips a web_fetch_tool_result block instead of dropping it', () => {
+    const payload: AnthropicConversation = {
+      messages: [
+        { role: 'user', content: 'Fetch it' },
+        {
+          role: 'assistant',
+          content: [
+            {
+              type: 'server_tool_use',
+              id: 'wf',
+              name: 'web_fetch',
+              input: { url: 'https://x.com' },
+            },
+            {
+              type: 'web_fetch_tool_result',
+              tool_use_id: 'wf',
+              content: { url: 'https://x.com', text: 'fetched body' },
+            } as any,
+          ],
+        },
+      ],
+    };
+
+    const conversation = fromAnthropicMessages(payload);
+    const roundTripped = toAnthropicMessages(conversation);
+
+    const assistant = roundTripped.messages.find((m) => m.role === 'assistant');
+    const blocks = assistant?.content as Array<{ type: string; [k: string]: unknown }>;
+    const fetchBlock = blocks.find((b) => b.type === 'web_fetch_tool_result');
+    expect(fetchBlock).toBeDefined();
+    expect(fetchBlock?.content).toEqual({ url: 'https://x.com', text: 'fetched body' });
+  });
 });
 
 describe('C3 — Extended-thinking content blocks (Anthropic adapter)', () => {

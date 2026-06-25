@@ -277,4 +277,21 @@ describe('PII redaction in tool arguments, results, and metadata', () => {
     const part = (result.content as Array<{ type: string; input?: unknown }>)[0];
     expect(JSON.stringify(part?.input)).toContain('[EMAIL_REDACTED]');
   });
+
+  it('redacts PII inside text-block citation metadata', () => {
+    const plugin = createPIIRedactionPlugin();
+    const input: MessageInput = {
+      role: 'assistant',
+      content: [
+        {
+          type: 'text',
+          text: 'See source.',
+          citations: [{ cited_text: 'contact user@example.com', url: 'https://example.com' }],
+        },
+      ],
+    };
+    const result = plugin(input);
+    const part = (result.content as Array<{ type: string; citations?: unknown }>)[0];
+    expect(JSON.stringify(part?.citations)).toContain('[EMAIL_REDACTED]');
+  });
 });

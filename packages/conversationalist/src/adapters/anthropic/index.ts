@@ -104,16 +104,17 @@ export interface AnthropicWebSearchToolResultBlock {
 }
 
 /**
- * Anthropic code-execution server-tool result block — `code_execution`,
- * `bash_code_execution`, and `text_editor_code_execution` each emit their own
- * `*_tool_result` block. Enumerated explicitly so they round-trip instead of
- * being dropped; add a literal when Anthropic ships a new server-tool result.
+ * Anthropic server-tool result block — code execution (`code_execution`,
+ * `bash_code_execution`, `text_editor_code_execution`) and web fetch each emit
+ * their own `*_tool_result` block. Enumerated explicitly so they round-trip
+ * instead of being dropped; add a literal when Anthropic ships a new one.
  */
-export interface AnthropicCodeExecutionToolResultBlock {
+export interface AnthropicServerToolResultBlock {
   type:
     | 'code_execution_tool_result'
     | 'bash_code_execution_tool_result'
-    | 'text_editor_code_execution_tool_result';
+    | 'text_editor_code_execution_tool_result'
+    | 'web_fetch_tool_result';
   tool_use_id: string;
   content: unknown;
 }
@@ -139,7 +140,7 @@ export type AnthropicContentBlock =
   | AnthropicRedactedThinkingBlock
   | AnthropicServerToolUseBlock
   | AnthropicWebSearchToolResultBlock
-  | AnthropicCodeExecutionToolResultBlock
+  | AnthropicServerToolResultBlock
   | AnthropicContainerUploadBlock;
 
 /**
@@ -200,6 +201,7 @@ function toAnthropicContent(
       case 'code_execution_tool_result':
       case 'bash_code_execution_tool_result':
       case 'text_editor_code_execution_tool_result':
+      case 'web_fetch_tool_result':
         blocks.push({
           type: part.type,
           tool_use_id: part.tool_use_id,
@@ -507,7 +509,8 @@ function toGroupableContentPart(block: AnthropicContentBlock): MultiModalContent
     case 'code_execution_tool_result':
     case 'bash_code_execution_tool_result':
     case 'text_editor_code_execution_tool_result':
-      // Preserve code-execution server-tool results instead of dropping them.
+    case 'web_fetch_tool_result':
+      // Preserve server-tool results (code execution, web fetch) instead of dropping them.
       return {
         type: block.type,
         tool_use_id: block.tool_use_id,
