@@ -1,4 +1,3 @@
-import type { BureauOptions } from 'bureau';
 import type { Hono } from 'hono';
 import type { Store } from 'operative/store';
 
@@ -23,9 +22,14 @@ export type {
 } from 'bureau';
 export { DEFAULT_MAXIMUM_STEPS } from 'bureau';
 
-// ── Gateway (HTTP layer wrapping Bureau) ────────────────────────────
+// ── Gateway (HTTP door — door-only config, no brain options) ────────
 
-export interface GatewayOptions extends BureauOptions {
+/**
+ * Door-only configuration for `createGateway`. Does NOT extend
+ * {@link BureauOptions} — the bureau (brain) is constructed by the caller
+ * and passed in as arg 1. This object contains only transport-layer knobs.
+ */
+export interface GatewayOptions {
   port?: number;
   hostname?: string;
   authToken?: string;
