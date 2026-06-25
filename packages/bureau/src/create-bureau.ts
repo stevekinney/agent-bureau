@@ -1053,6 +1053,11 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
   /**
    * Look up the current durable run id for a session. Used by signal/update/query
    * to route the operation to the correct workflow handle.
+   *
+   * Requires that `lastRunStatus` is `'running'`: completed, aborted, and error
+   * sessions retain their `lastRunId` but targeting a terminal workflow with a
+   * signal/update would silently mis-route or surface a low-level engine error
+   * instead of the expected "no active run" response.
    */
   async function requireSessionRunId(sessionId: string): Promise<string> {
     const session = await requireSessionStore().load(sessionId);
@@ -1061,6 +1066,10 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     }
     const runId = session.metadata['lastRunId'];
     if (typeof runId !== 'string' || !runId) {
+      throw new BureauError(`Session ${sessionId} has no active run`, 'NOT_FOUND');
+    }
+    const runStatus = session.metadata['lastRunStatus'];
+    if (runStatus !== 'running') {
       throw new BureauError(`Session ${sessionId} has no active run`, 'NOT_FOUND');
     }
     return runId;
