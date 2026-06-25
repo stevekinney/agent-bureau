@@ -21,10 +21,22 @@
  * A raw callable or object accepted by `.tools({...})`. The key is canonical;
  * the inner `name` field is FORBIDDEN (key disagreement is the #1 authoring
  * bug). Input/output types are inferred via `NormalizeTools<T>`.
+ *
+ * The `name?: never` constraint on the object variant prevents armorer tools
+ * (which carry a `.name` property) from being passed with their `.name` field
+ * — the MAP KEY is the canonical name. If a tool object carries `.name`, the
+ * entry must still be placed under a key; the `.name` field is silently ignored
+ * at runtime, but TypeScript enforces that you do not rely on it.
+ *
+ * Concretely: `{ search: searchTool }` is valid even if `searchTool.name` is
+ * `'web-search'` — the key `'search'` wins. But passing an object with `name`
+ * directly in the entry position is a type error, preventing accidental
+ * authoring of `{ 'web-search': { name: 'search', execute: ... } }` where the
+ * key and name disagree.
  */
 export type ToolEntryInput =
   | ((...arguments_: never[]) => unknown)
-  | { readonly execute: (...arguments_: never[]) => unknown };
+  | { readonly name?: never; readonly execute: (...arguments_: never[]) => unknown };
 
 /** Shape accepted by `.tools({...})`. */
 export type ToolMapInput = Record<string, ToolEntryInput>;
@@ -76,6 +88,47 @@ export type NormalizeTools<T extends ToolMapInput> = {
  * ```
  */
 export type BureauToolNames<T> = keyof BureauTools<T> & string;
+
+// ---------------------------------------------------------------------------
+// Agent tool name helpers — keyof union over inherited + own tools
+// ---------------------------------------------------------------------------
+
+/**
+ * Extract the effective tool map from an `AgentBuilder` value — the union of
+ * both bureau-inherited tools and the agent's own tools.
+ *
+ * Equivalent to `BureauTools<T>` but for the agent's combined toolset. Useful
+ * for hook selectors, policy configs, and autocomplete outside the builder:
+ *
+ * @example
+ * ```ts
+ * const agent = bureau.agent({ name: 'researcher', tools: { scratchpad } });
+ * type Tools = AgentTools<typeof agent>;
+ * //=> { search: ToolEntry<…>; clock: ToolEntry<…>; scratchpad: ToolEntry<…> }
+ * ```
+ */
+export type AgentTools<T> =
+  T extends AgentBuilder<infer TBureauTools, infer TAgentTools>
+    ? TBureauTools & TAgentTools
+    : never;
+
+/**
+ * The union of all tool names available to an agent — both inherited from the
+ * bureau AND added by the agent itself. This is `keyof (bureauTools & agentTools)`
+ * surfaced as a string-literal union for autocomplete.
+ *
+ * This is the type B4 requires: "Agent surfaces only the tool-name union
+ * (`keyof tools`)." The key is ALWAYS canonical; the inner `.name` field on
+ * any tool object is forbidden (see `ToolEntryInput`).
+ *
+ * @example
+ * ```ts
+ * const agent = bureau.agent({ name: 'researcher', tools: { scratchpad } });
+ * type Names = AgentToolNames<typeof agent>;
+ * //=> 'search' | 'clock' | 'scratchpad'
+ * ```
+ */
+export type AgentToolNames<T> = keyof AgentTools<T> & string;
 
 // ---------------------------------------------------------------------------
 // Agent table — bureau registry
@@ -343,3 +396,90 @@ export interface AgentBuilder<
   /** Run the agent with `input`. Returns an `AgentRun` handle. */
   run(input: string): AgentRun;
 }
+
+// ---------------------------------------------------------------------------
+// Standalone agent options bag — createAgent({...})
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// GenerateFunction alias — structural, avoids circular import from types.ts
+// ---------------------------------------------------------------------------
+
+/**
+ * Structural alias for the `GenerateFunction` seam from `./types`. This file
+ * is a pure-type module with no imports; we cannot import from `./types`
+ * without creating a dependency edge. The structural shape is intentionally
+ * identical — the real implementation's `CreateAgentOptions` will accept the
+ * same function.
+ *
+ * The full `GenerateContext` / `GenerateResponse` pair is opaque here (`unknown`
+ * inputs, `Promise<unknown>` output). Callers typing agents via the real
+ * `createAgent` from `./types` will get the concrete types; this alias keeps
+ * the spike self-contained.
+ */
+export type AgentGenerateFunction = (context: unknown) => Promise<unknown>;
+
+/**
+ * Options accepted by `createAgent({...})`. This is the OPTIONS BAG shape —
+ * no chained builder, just a plain object. The design decision from
+ * architecture.md: the agent is an options bag, the chain lives on the bureau.
+ *
+ * `generate` is REQUIRED on a standalone agent because there is no bureau to
+ * inherit a provider from. On a bureau-owned agent (`bureau.agent({...})`),
+ * `generate` is optional (the bureau provides a default).
+ *
+ * `tools` is a NAME-KEYED MAP (`{ search: tool, clock: tool }`). The map key
+ * is canonical; any inner `.name` field on a tool object is forbidden (see
+ * `ToolEntryInput`).
+ *
+ * `name` is REQUIRED for identification (logging, events, session naming).
+ * Unlike the old `defineAgent` shape, there is NO `toolbox` field — tools are
+ * expressed as the name-keyed map and normalized by the factory.
+ */
+export interface CreateAgentOptions<TTools extends ToolMapInput = ToolMapInput> {
+  /** Canonical agent name. Used for events, session IDs, and registry lookup. */
+  name: string;
+  /** System prompt or persona text prepended on step 0. */
+  instructions?: string;
+  /**
+   * The LLM provider. REQUIRED on a standalone agent (no bureau to inherit
+   * from). Use the concrete `GenerateFunction` from `./types` at call sites.
+   */
+  generate: AgentGenerateFunction;
+  /**
+   * Name-keyed tool map. Keys are canonical tool names; the inner `.name`
+   * field (if any) is ignored at runtime — the KEY wins.
+   */
+  tools?: TTools;
+}
+
+/**
+ * Creates a standalone, bureau-less agent. Returns an `AgentBuilder` with
+ * empty bureau-tool slot (`TBureauTools = Record<never, never>`) and the
+ * agent's own tools normalized into `TAgentTools`.
+ *
+ * **Differences from `bureau.agent({...})`:**
+ * - `generate` is **required** (no bureau to inherit from).
+ * - Bureau tools slot is always empty — no inherited toolset.
+ * - In-memory only — no durability, no shared memory, no scheduling.
+ *
+ * **Tools as options bag, not chain:** tools are expressed as a name-keyed map
+ * in the options object, not via a `.tools()` builder call. Further tool
+ * additions are possible via the returned builder's `.tools()` method.
+ *
+ * @example
+ * ```ts
+ * const agent = createAgent({
+ *   name: 'researcher',
+ *   generate: anthropicProvider({ model: 'claude-opus-4-5' }),
+ *   tools: { search: searchTool, clock: clockTool },
+ * });
+ *
+ * const run = agent.run('Summarize the Q3 report.');
+ * for await (const event of run) { ... }
+ * const result = await run.result();
+ * ```
+ */
+export declare function createAgent<TTools extends ToolMapInput = Record<never, never>>(
+  options: CreateAgentOptions<TTools>,
+): AgentBuilder<Record<never, never>, NormalizeTools<TTools>>;

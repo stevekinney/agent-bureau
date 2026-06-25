@@ -1,5 +1,5 @@
 import type { ActiveRun } from '../create-run';
-import { createRun } from '../create-run';
+import { createActiveRun } from '../create-run';
 import type { AnyRunEngine, CheckpointStore } from '../durable';
 import {
   resumeDurableRunResult,
@@ -283,7 +283,7 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
       ? AbortSignal.any([runOptions.signal, abortController.signal])
       : abortController.signal;
 
-    const activeRun = createRun({
+    const activeRun = createActiveRun({
       ...runOptions,
       generate: runOptions.generate ?? generate,
       toolbox: runOptions.toolbox ?? toolbox,

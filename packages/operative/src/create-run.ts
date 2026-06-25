@@ -9,7 +9,12 @@ import { executeLoop } from './loop';
 import type { RunOptions, RunResult } from './types';
 
 /**
- * An active, event-emitting agent loop run.
+ * The internal event-emitting agent loop run. This is the low-level engine
+ * that owns the event emitter and the result Promise. External callers
+ * consume the higher-level `AgentRun` wrapper (from `agent-run.ts`), which
+ * adds async-iteration and enforces the non-thenable contract. Internal
+ * modules (durable, store, instrumentation, scheduler) work directly with
+ * `ActiveRun` because they need the full event surface.
  */
 export interface ActiveRun {
   result: Promise<RunResult>;
@@ -49,37 +54,18 @@ export interface ActiveRun {
 }
 
 /**
- * Routing for a durable run. When provided to {@link createRun}, the run is
- * driven through the Weft durable engine — checkpointed and resumable — instead
- * of the in-memory loop. The `ActiveRun` surface is identical either way.
- *
- * Mirrors the `executeLoop(options, emitter?)` convention: durability is an
- * optional second argument, NOT a field on `RunOptions`, so the standalone
- * library signature is unchanged and callers without an engine are unaffected.
- */
-export interface DurableRunRouting extends DurableActiveRunContext {
-  /** Stable id for the run; also the durable workflow id (resume key). */
-  runId: string;
-  /**
-   * The session that owns this run, carried in the durable input so boot recovery
-   * can correlate a recovered handle to its session. Defaults to `runId` for a
-   * headless run with no distinct session (the run is its own session for
-   * recovery-correlation purposes).
-   */
-  sessionId?: string;
-  /** First user message to seed a brand-new run. */
-  prompt?: string;
-}
-
-/**
  * Creates an event-emitting agent loop run.
  *
- * When `durable` is provided (an engine + checkpoint store + runId), the run is
- * driven through the Weft durable engine so it survives a crash and resumes from
- * its last checkpoint. The returned {@link ActiveRun} is identical in both modes.
- * Without `durable`, the in-memory loop runs (the standalone-library default).
+ * Internal factory — NOT part of the public API. External callers should use
+ * `createAgent` (which wraps this in an `AgentRun`) or `createSessionHandle`
+ * (which also wraps the result). Scheduler and durable adapter consume this
+ * directly because they need the raw event surface.
+ *
+ * When `durable` is provided (engine + checkpoint store + runId), the run is
+ * driven through the Weft durable engine so it survives a crash and resumes.
+ * Without `durable`, the in-memory loop runs.
  */
-export function createRun(options: RunOptions, durable?: DurableRunRouting): ActiveRun {
+export function createActiveRun(options: RunOptions, durable?: DurableRunRouting): ActiveRun {
   if (durable) {
     return createDurableActiveRun(
       { engine: durable.engine, checkpointStore: durable.checkpointStore },
@@ -109,7 +95,6 @@ export function createRun(options: RunOptions, durable?: DurableRunRouting): Act
     signal: combinedSignal,
   };
 
-  // Subscribe to toolbox and conversation events, re-emitting with prefixes.
   const cleanups: (() => void)[] = [];
 
   const toolboxForward = forwardEvents(
@@ -126,7 +111,6 @@ export function createRun(options: RunOptions, durable?: DurableRunRouting): Act
   );
   cleanups.push(() => conversationForward.stop());
 
-  // Defer the loop start to the next microtask so callers can attach listeners first.
   const result = Promise.resolve()
     .then(() => executeLoop(loopOptions, emitter))
     .finally(complete);
@@ -158,4 +142,20 @@ export function createRun(options: RunOptions, durable?: DurableRunRouting): Act
       complete();
     },
   };
+}
+
+/**
+ * Routing for a durable run.
+ */
+export interface DurableRunRouting extends DurableActiveRunContext {
+  /** Stable id for the run; also the durable workflow id (resume key). */
+  runId: string;
+  /**
+   * The session that owns this run, carried in the durable input so boot recovery
+   * can correlate a recovered handle to its session. Defaults to `runId` for a
+   * headless run with no distinct session.
+   */
+  sessionId?: string;
+  /** First user message to seed a brand-new run. */
+  prompt?: string;
 }

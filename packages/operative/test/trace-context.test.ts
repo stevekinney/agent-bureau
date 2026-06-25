@@ -5,10 +5,10 @@ import { Conversation } from 'conversationalist';
 import { z } from 'zod';
 
 import { noToolCalls } from '../src/conditions/predicates.ts';
+import { createActiveRun } from '../src/create-run.ts';
 import { createSubagentTool } from '../src/create-subagent-tool.ts';
-import { defineAgent } from '../src/define-agent.ts';
 import { executeLoop } from '../src/loop.ts';
-import type { AgentRunOptions, GenerateResponse, RunOptions } from '../src/types.ts';
+import type { GenerateResponse, RunOptions } from '../src/types.ts';
 
 function textResponse(content: string): GenerateResponse {
   return { content, toolCalls: [] };
@@ -70,28 +70,23 @@ describe('trace context propagation', () => {
   });
 
   describe('createSubagentTool', () => {
-    it('forwards context.traceContext as parentContext to child agent', async () => {
-      let receivedParentContext: unknown;
-
-      const subAgent = defineAgent({
-        name: 'sub',
-        generate: async () => textResponse('done'),
-        toolbox: createTestToolbox([]),
-        stopWhen: noToolCalls(),
-      });
-
-      const originalRun = subAgent.run.bind(subAgent);
-      (subAgent as { run: typeof subAgent.run }).run = async (input: string | AgentRunOptions) => {
-        if (typeof input !== 'string') {
-          receivedParentContext = input.parentContext;
-        }
-        return originalRun(input);
-      };
+    it('forwards context.traceContext to the run callback', async () => {
+      let receivedTraceContext: unknown;
 
       const subTool = createSubagentTool({
         name: 'delegate',
         description: 'Delegate',
-        agent: subAgent,
+        agentName: 'sub',
+        run: async (_input, context) => {
+          receivedTraceContext = context.traceContext;
+          return {
+            conversation: {} as never,
+            steps: [],
+            content: 'done',
+            usage: { prompt: 0, completion: 0, total: 0 },
+            finishReason: 'stop-condition' as const,
+          };
+        },
         input: z.object({ task: z.string() }),
       });
 
@@ -114,29 +109,26 @@ describe('trace context propagation', () => {
         stopWhen: noToolCalls(),
       });
 
-      expect(receivedParentContext).toEqual(traceContext);
+      expect(receivedTraceContext).toEqual(traceContext);
     });
 
-    it('does not set parentContext when traceContext is not in tool context', async () => {
-      let receivedInput: string | AgentRunOptions | undefined;
-
-      const subAgent = defineAgent({
-        name: 'sub',
-        generate: async () => textResponse('done'),
-        toolbox: createTestToolbox([]),
-        stopWhen: noToolCalls(),
-      });
-
-      const originalRun = subAgent.run.bind(subAgent);
-      (subAgent as { run: typeof subAgent.run }).run = async (input: string | AgentRunOptions) => {
-        receivedInput = input;
-        return originalRun(input);
-      };
+    it('does not forward traceContext when not present in tool context', async () => {
+      let receivedTraceContext: unknown = 'not-set';
 
       const subTool = createSubagentTool({
         name: 'delegate',
         description: 'Delegate',
-        agent: subAgent,
+        agentName: 'sub',
+        run: async (_input, context) => {
+          receivedTraceContext = context.traceContext;
+          return {
+            conversation: {} as never,
+            steps: [],
+            content: 'done',
+            usage: { prompt: 0, completion: 0, total: 0 },
+            finishReason: 'stop-condition' as const,
+          };
+        },
         input: z.object({ task: z.string() }),
       });
 
@@ -156,11 +148,8 @@ describe('trace context propagation', () => {
         stopWhen: noToolCalls(),
       });
 
-      // Without traceContext on the toolbox, parentContext should not be set
-      expect(typeof receivedInput).not.toBe('string');
-      if (typeof receivedInput !== 'string' && receivedInput) {
-        expect(receivedInput.parentContext).toBeUndefined();
-      }
+      // Without traceContext on the toolbox, it should be undefined
+      expect(receivedTraceContext).toBeUndefined();
     });
   });
 
@@ -256,43 +245,45 @@ describe('trace context propagation', () => {
     });
   });
 
-  describe('defineAgent with parentContext', () => {
-    it('passes parentContext through to loop', async () => {
+  describe('createActiveRun with parentContext', () => {
+    it('passes parentContext through to executeLoop via createActiveRun', async () => {
       let receivedParentContext: unknown;
 
-      const agent = defineAgent({
-        name: 'test-agent',
+      const parentContext = { traceId: 'parent-123' };
+      const activeRun = createActiveRun({
         generate: async () => textResponse('done'),
         toolbox: createTestToolbox([]),
+        conversation: new Conversation(),
         stopWhen: noToolCalls(),
+        parentContext,
         withTraceContext: async (ctx, fn) => {
           receivedParentContext = ctx;
           return fn();
         },
       });
 
-      const parentContext = { traceId: 'parent-123' };
-      await agent.run({ parentContext });
+      await activeRun.result;
 
       expect(receivedParentContext).toEqual(parentContext);
     });
 
-    it('AgentRunOptions.parentContext flows end-to-end through defineAgent to executeLoop', async () => {
+    it('parentContext flows end-to-end through createActiveRun to executeLoop', async () => {
       const wrapCalls: unknown[] = [];
 
-      const agent = defineAgent({
-        name: 'e2e-agent',
+      const parentContext = { traceId: 'e2e-trace', spanId: 'e2e-span' };
+      const activeRun = createActiveRun({
         generate: async () => textResponse('done'),
         toolbox: createTestToolbox([]),
+        conversation: new Conversation(),
         stopWhen: noToolCalls(),
+        parentContext,
         withTraceContext: async (ctx, fn) => {
           wrapCalls.push(ctx);
           return fn();
         },
       });
 
-      const parentContext = { traceId: 'e2e-trace', spanId: 'e2e-span' };
-      await agent.run({ parentContext });
+      await activeRun.result;
 
       expect(wrapCalls).toHaveLength(1);
       expect(wrapCalls[0]).toEqual(parentContext);

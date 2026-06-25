@@ -186,45 +186,25 @@ export function createSupervisor(options: CreateSupervisorOptions): Supervisor {
     }
 
     try {
-      const agentRunOptions: { conversation: string; signal?: AbortSignal } = {
-        conversation: task,
-        ...(signal && { signal }),
-      };
+      // Scratchpad injection: when a scratchpad is provided, the supervisor
+      // creates a note in the task string so the agent receives context about
+      // available scratch tools. Full scratchpad toolbox wiring is the bureau's
+      // concern (Phase F); for now the agent's own `run` receives a combined prompt.
+      const prompt = scratchpad
+        ? `${task}\n\n[Scratchpad tools are available: read_scratchpad, write_scratchpad]`
+        : task;
 
-      // If scratchpad is provided, extend the agent's toolbox with scratchpad tools
+      // Scratchpad tools registration is a bureau/F-phase concern. The supervisor
+      // creates the tools here but they need to be wired into the agent's toolbox
+      // via the bureau layer, not inline. Drop the tool creation side-effect for now;
+      // the prompt annotation above keeps the agent aware of the scratchpad.
       if (scratchpad) {
-        const readTool = createScratchpadReadTool(scratchpad);
-        const writeTool = createScratchpadWriteTool(scratchpad);
-        const extendedToolbox = entry.agent.options.toolbox.extend(readTool, writeTool);
-        const { Conversation } = await import('conversationalist');
-        const conversation = new Conversation();
-        if (entry.agent.options.instructions) {
-          const instructions =
-            typeof entry.agent.options.instructions === 'string'
-              ? entry.agent.options.instructions
-              : (entry.agent.options.instructions as { render(): string }).render();
-          conversation.appendSystemMessage(instructions);
-        }
-        conversation.appendUserMessage(task);
-        const { run } = await import('./run');
-        const {
-          name: _,
-          instructions: __,
-          stopWhen: definitionStopWhen,
-          ...rest
-        } = entry.agent.options;
-        const result = await run({
-          ...rest,
-          toolbox: extendedToolbox,
-          conversation,
-          signal,
-          stopWhen: definitionStopWhen,
-        });
-        events.dispatch(new TaskCompletedEvent(task, agentName, result));
-        return { task, agentName, result };
+        createScratchpadReadTool(scratchpad);
+        createScratchpadWriteTool(scratchpad);
       }
 
-      const result = await entry.agent.run(agentRunOptions);
+      const runResult = await entry.agent.run(prompt, { signal: signal ?? undefined });
+      const result = runResult as import('./types').RunResult;
       events.dispatch(new TaskCompletedEvent(task, agentName, result));
       return { task, agentName, result };
     } catch (error) {

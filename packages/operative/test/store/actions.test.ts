@@ -5,7 +5,7 @@ import { Conversation } from 'conversationalist';
 import { z } from 'zod';
 
 import { stopWhen } from '../../src/conditions';
-import { createRun } from '../../src/create-run';
+import { createActiveRun } from '../../src/create-run';
 import { createStore } from '../../src/store';
 import { createMockGenerate } from '../../src/test';
 import type { GenerateResponse } from '../../src/types';
@@ -36,7 +36,7 @@ describe('action log behavior', () => {
     conversation.appendUserMessage('hello');
 
     const generate = createMockGenerate([textResponse('hi there')]);
-    const activeRun = createRun({
+    const activeRun = createActiveRun({
       generate,
       toolbox,
       conversation,
@@ -83,7 +83,7 @@ describe('action log behavior', () => {
       textResponse('It is 72 degrees in Denver.'),
     ]);
 
-    const activeRun = createRun({
+    const activeRun = createActiveRun({
       generate,
       toolbox,
       conversation,
@@ -114,7 +114,7 @@ describe('action log behavior', () => {
     const conversationA = new Conversation();
     conversationA.appendUserMessage('first run');
     const generateA = createMockGenerate([textResponse('response A')]);
-    const activeRunA = createRun({
+    const activeRunA = createActiveRun({
       generate: generateA,
       toolbox: toolboxA,
       conversation: conversationA,
@@ -126,7 +126,7 @@ describe('action log behavior', () => {
     const conversationB = new Conversation();
     conversationB.appendUserMessage('second run');
     const generateB = createMockGenerate([textResponse('response B')]);
-    const activeRunB = createRun({
+    const activeRunB = createActiveRun({
       generate: generateB,
       toolbox: toolboxB,
       conversation: conversationB,
@@ -163,7 +163,7 @@ describe('action log behavior', () => {
     const conversationA = new Conversation();
     conversationA.appendUserMessage('run A');
     const generateA = createMockGenerate([textResponse('A done')]);
-    const activeRunA = createRun({
+    const activeRunA = createActiveRun({
       generate: generateA,
       toolbox: toolboxA,
       conversation: conversationA,
@@ -175,7 +175,7 @@ describe('action log behavior', () => {
     const conversationB = new Conversation();
     conversationB.appendUserMessage('run B');
     const generateB = createMockGenerate([textResponse('B done')]);
-    const activeRunB = createRun({
+    const activeRunB = createActiveRun({
       generate: generateB,
       toolbox: toolboxB,
       conversation: conversationB,
@@ -216,7 +216,7 @@ describe('action log behavior', () => {
       textResponse('It is 72 degrees.'),
     ]);
 
-    const activeRun = createRun({
+    const activeRun = createActiveRun({
       generate,
       toolbox,
       conversation,
@@ -261,7 +261,7 @@ describe('action log behavior', () => {
       textResponse('Done.'),
     ]);
 
-    const activeRun = createRun({
+    const activeRun = createActiveRun({
       generate,
       toolbox,
       conversation,
@@ -305,7 +305,7 @@ describe('action log behavior', () => {
       textResponse('It is 72 degrees in Denver.'),
     ]);
 
-    const activeRun = createRun({
+    const activeRun = createActiveRun({
       generate,
       toolbox,
       conversation,
@@ -337,7 +337,7 @@ describe('action log behavior', () => {
       textResponse('It is 72 degrees in Denver.'),
     ]);
 
-    const activeRun = createRun({
+    const activeRun = createActiveRun({
       generate,
       toolbox,
       conversation,

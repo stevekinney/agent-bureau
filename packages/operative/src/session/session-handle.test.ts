@@ -1,0 +1,878 @@
+import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
+import type { Toolbox } from 'armorer';
+import { createToolbox } from 'armorer';
+import { describe, expect, it, mock } from 'bun:test';
+import { createConversationHistory } from 'conversationalist';
+
+import { createAgentSession } from '../agent-session';
+import type { AnyRunEngine } from '../durable/create-run-engine';
+import type { GenerateFunction } from '../types';
+import { createSessionStore } from './create-session-store';
+import {
+  createSessionHandle,
+  deriveRunId,
+  NoDurableEngineError,
+  NoRunningRunError,
+} from './session-handle';
+
+// ---------------------------------------------------------------------------
+// Shared fixtures
+// ---------------------------------------------------------------------------
+
+/**
+ * A synchronous mock generate function that immediately returns a single
+ * completed response. Used in tests that need a session's `run()` to finish.
+ */
+function createInstantGenerate(content = 'hello'): GenerateFunction {
+  return async () => ({
+    content,
+    toolCalls: [],
+  });
+}
+
+/**
+ * Base run options used across test fixtures. Sets `maximumSteps: 1` so
+ * the instant generate finishes after a single step (avoids 25-step loops).
+ */
+function createTestRunOptions(generate: GenerateFunction = createInstantGenerate()) {
+  return {
+    generate,
+    toolbox: createToolbox([]) as unknown as Toolbox,
+    maximumSteps: 1,
+  };
+}
+
+function createSessionHandleFixture(overrides?: { sessionId?: string; engine?: AnyRunEngine }) {
+  const sessionId = overrides?.sessionId ?? 'test-session';
+  const kv = textValueStore(new MemoryStorage());
+  const store = createSessionStore(kv);
+
+  return {
+    sessionId,
+    store,
+    handle: createSessionHandle(sessionId, {
+      store,
+      agentName: 'test-agent',
+      engine: overrides?.engine,
+      runOptions: createTestRunOptions(),
+    }),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// deriveRunId
+// ---------------------------------------------------------------------------
+
+describe('deriveRunId', () => {
+  it('produces sessionId:sequence format', () => {
+    expect(deriveRunId('user-123', 0)).toBe('user-123:0');
+    expect(deriveRunId('user-123', 5)).toBe('user-123:5');
+  });
+
+  it('is self-describing — session and sequence are both recoverable from the id', () => {
+    const id = deriveRunId('my-session', 3);
+    const [session, seq] = id.split(':');
+    expect(session).toBe('my-session');
+    expect(Number(seq)).toBe(3);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// createSessionHandle — basic structure
+// ---------------------------------------------------------------------------
+
+describe('createSessionHandle', () => {
+  it('exposes the session id on the handle', () => {
+    const { handle, sessionId } = createSessionHandleFixture();
+    expect(handle.id).toBe(sessionId);
+  });
+
+  it('getSession() creates a new session when none exists', async () => {
+    const { handle, sessionId } = createSessionHandleFixture();
+    const session = await handle.getSession();
+    expect(session.id).toBe(sessionId);
+    expect(session.runs).toEqual([]);
+  });
+
+  it('getSession() loads an existing session', async () => {
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+    const existing = createAgentSession({
+      agentName: 'test-agent',
+      conversationHistory: createConversationHistory(),
+      id: 'existing-session',
+    });
+    await store.save(existing);
+
+    const handle = createSessionHandle('existing-session', {
+      store,
+      agentName: 'test-agent',
+      runOptions: {
+        generate: createInstantGenerate(),
+        toolbox: createToolbox([]) as unknown as Toolbox,
+      },
+    });
+
+    const session = await handle.getSession();
+    expect(session.id).toBe('existing-session');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// run() — starts a run and updates session on completion
+// ---------------------------------------------------------------------------
+
+describe('session.run()', () => {
+  it('returns an AgentRun handle immediately (synchronous)', () => {
+    const { handle } = createSessionHandleFixture();
+    const run = handle.run('hello');
+    expect(run).toBeDefined();
+    expect(typeof run.result).toBe('function'); // AgentRun.result() is a method
+    expect(typeof run.abort).toBe('function');
+    expect(typeof run[Symbol.asyncIterator]).toBe('function');
+  });
+
+  it('appends a RunRef to the session when the run completes', async () => {
+    const { handle, store } = createSessionHandleFixture();
+
+    const run = handle.run('say something');
+    const result = await run.result();
+
+    // Give the persistence callback a tick to run.
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+
+    const session = await store.load(handle.id);
+    expect(session).toBeDefined();
+    expect(session!.runs).toHaveLength(1);
+    expect(session!.runs[0]!.sequence).toBe(0);
+    expect(session!.runs[0]!.runId).toBe(`${handle.id}:0`);
+    expect(session!.runs[0]!.status).toBe('completed');
+    expect(result.finishReason).toBe('maximum-steps');
+  });
+
+  it('accumulates multiple runs in sequence', async () => {
+    const { handle, store } = createSessionHandleFixture();
+
+    await handle.run('first').result();
+    // Flush persistence callbacks.
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    await handle.run('second').result();
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+
+    const session = await store.load(handle.id);
+    expect(session!.runs).toHaveLength(2);
+    expect(session!.runs[0]!.sequence).toBe(0);
+    expect(session!.runs[1]!.sequence).toBe(1);
+    expect(session!.runs[1]!.runId).toBe(`${handle.id}:1`);
+  });
+
+  it('updates the session conversation history after each run', async () => {
+    const { handle, store } = createSessionHandleFixture();
+
+    await handle.run('hello world').result();
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+
+    const session = await store.load(handle.id);
+    // The conversation history should contain at least the user message.
+    expect(session!.conversationHistory).toBeDefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// recover() — re-attach to the in-flight run
+// ---------------------------------------------------------------------------
+
+describe('session.recover()', () => {
+  it('returns null when no run is in flight', () => {
+    const { handle } = createSessionHandleFixture();
+    expect(handle.recover()).toBeNull();
+  });
+
+  it('returns the same AgentRun handle while a run is in progress', async () => {
+    // Use a blocking generate to keep the run in-flight.
+    let resolveGenerate: ((r: { content: string; toolCalls: [] }) => void) | undefined;
+    const blockingGenerate: GenerateFunction = () =>
+      new Promise<{ content: string; toolCalls: [] }>((resolve) => {
+        resolveGenerate = resolve;
+      });
+
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+    const blockingHandle = createSessionHandle('blocking-session', {
+      store,
+      agentName: 'test-agent',
+      runOptions: {
+        generate: blockingGenerate,
+        toolbox: createToolbox([]) as unknown as Toolbox,
+        maximumSteps: 1,
+      },
+    });
+
+    const run = blockingHandle.run('hold on');
+    const recovered = blockingHandle.recover();
+
+    // The handle is set synchronously in run().
+    expect(recovered).toBe(run);
+
+    // Yield a tick so the run loop starts and resolveGenerate is assigned.
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+    // Clean up: resolve the blocking generate so the run can finish.
+    resolveGenerate?.({ content: 'done', toolCalls: [] });
+    await run.result();
+  });
+
+  it('returns null after the run completes', async () => {
+    const { handle } = createSessionHandleFixture();
+
+    const run = handle.run('quick run');
+    await run.result();
+    // Allow the `.finally()` callback to clear currentRun.
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+
+    expect(handle.recover()).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// cancel() — abort the in-flight run
+// ---------------------------------------------------------------------------
+
+describe('session.cancel()', () => {
+  it('aborts the current run and clears the in-flight reference', async () => {
+    let abortCalled = false;
+    let resolveGenerate: (() => void) | undefined;
+
+    const blockingGenerate: GenerateFunction = (_ctx) => {
+      return new Promise<{ content: string; toolCalls: [] }>((resolve) => {
+        resolveGenerate = () => resolve({ content: 'done', toolCalls: [] });
+        if (_ctx.signal) {
+          _ctx.signal.addEventListener('abort', () => {
+            abortCalled = true;
+          });
+        }
+      });
+    };
+
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+    const h = createSessionHandle('cancel-session', {
+      store,
+      agentName: 'cancel-agent',
+      runOptions: {
+        generate: blockingGenerate,
+        toolbox: createToolbox([]) as unknown as Toolbox,
+        maximumSteps: 1,
+      },
+    });
+
+    h.run('please stop me');
+
+    // Yield to let the generate function be called and attach the abort listener.
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(h.recover()).not.toBeNull();
+    await h.cancel();
+
+    // The abort signal should have fired.
+    expect(abortCalled).toBe(true);
+    // The handle should be cleared.
+    expect(h.recover()).toBeNull();
+
+    // Allow the run to finish so we don't leave dangling promises.
+    resolveGenerate?.();
+  });
+
+  it('is a no-op when no run is in flight', async () => {
+    const { handle } = createSessionHandleFixture();
+    const result = await handle.cancel();
+    expect(result).toBeUndefined();
+  });
+
+  it('cancels the Weft workflow when an engine is present', async () => {
+    const cancelledIds: string[] = [];
+    const fakeEngine = {
+      cancel: async (id: string) => {
+        cancelledIds.push(id);
+      },
+      signal: async () => {},
+      update: async () => {},
+      query: async () => {},
+    } as unknown as AnyRunEngine;
+
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+
+    // Pre-load a session with a running run.
+    const runningSession = createAgentSession({
+      agentName: 'durable-agent',
+      conversationHistory: createConversationHistory(),
+      id: 'durable-session',
+      runs: [
+        {
+          runId: 'durable-session:0',
+          sequence: 0,
+          status: 'running',
+          startedAt: new Date().toISOString(),
+        },
+      ],
+    });
+    await store.save(runningSession);
+
+    const h = createSessionHandle('durable-session', {
+      store,
+      agentName: 'durable-agent',
+      engine: fakeEngine,
+      runOptions: {
+        generate: createInstantGenerate(),
+        toolbox: createToolbox([]) as unknown as Toolbox,
+      },
+    });
+
+    await h.cancel();
+
+    expect(cancelledIds).toContain('durable-session:0');
+
+    // Verify the session's run status was updated to 'aborted'.
+    const updated = await store.load('durable-session');
+    expect(updated!.runs[0]!.status).toBe('aborted');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// fork() — branch the session
+// ---------------------------------------------------------------------------
+
+describe('session.fork()', () => {
+  it('creates a new session with a different id', async () => {
+    const { handle } = createSessionHandleFixture();
+    await handle.getSession(); // ensure session exists
+
+    const forked = await handle.fork();
+    expect(forked.id).not.toBe(handle.id);
+  });
+
+  it('the forked session starts with an empty runs[]', async () => {
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+
+    const h = createSessionHandle('fork-source', {
+      store,
+      agentName: 'fork-agent',
+      runOptions: createTestRunOptions(),
+    });
+
+    await h.run('first run').result();
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+
+    const forked = await h.fork();
+    const forkedSession = await forked.getSession();
+
+    expect(forkedSession.runs).toHaveLength(0);
+  });
+
+  it('the forked session copies the conversation history', async () => {
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+
+    const h = createSessionHandle('fork-history-source', {
+      store,
+      agentName: 'fork-agent',
+      runOptions: createTestRunOptions(createInstantGenerate('copied')),
+    });
+
+    await h.run('something').result();
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+
+    const sourceSession = await store.load('fork-history-source');
+    const forked = await h.fork();
+    const forkedSession = await forked.getSession();
+
+    // Conversation history should be the same as the source.
+    expect(forkedSession.conversationHistory).toEqual(sourceSession!.conversationHistory);
+  });
+
+  it('the forked handle returns itself from getSession()', async () => {
+    const { handle } = createSessionHandleFixture();
+    await handle.getSession();
+
+    const forked = await handle.fork();
+    const session = await forked.getSession();
+    expect(session.id).toBe(forked.id);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// sleep() — durable pause
+// ---------------------------------------------------------------------------
+
+describe('session.sleep()', () => {
+  it('resolves after the specified milliseconds (in-memory path)', async () => {
+    const { handle } = createSessionHandleFixture();
+    const start = Date.now();
+    await handle.sleep(10);
+    const elapsed = Date.now() - start;
+    expect(elapsed).toBeGreaterThanOrEqual(9);
+  });
+
+  it('parses ISO-8601 PT duration strings', async () => {
+    const { handle } = createSessionHandleFixture();
+    const start = Date.now();
+    await handle.sleep('PT0.01S'); // 10ms
+    const elapsed = Date.now() - start;
+    expect(elapsed).toBeGreaterThanOrEqual(9);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// signal() — fire-and-forget signal
+// ---------------------------------------------------------------------------
+
+describe('session.signal()', () => {
+  it('throws NoDurableEngineError when no engine is present', async () => {
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+
+    // Pre-load a session with a running run.
+    const session = createAgentSession({
+      agentName: 'agent',
+      conversationHistory: createConversationHistory(),
+      id: 'signal-no-engine',
+      runs: [
+        {
+          runId: 'signal-no-engine:0',
+          sequence: 0,
+          status: 'running',
+          startedAt: new Date().toISOString(),
+        },
+      ],
+    });
+    await store.save(session);
+
+    const h = createSessionHandle('signal-no-engine', {
+      store,
+      agentName: 'agent',
+      runOptions: {
+        generate: createInstantGenerate(),
+        toolbox: createToolbox([]) as unknown as Toolbox,
+      },
+    });
+
+    let threw = false;
+    try {
+      await h.signal('approve');
+    } catch (e) {
+      threw = true;
+      expect(e).toBeInstanceOf(NoDurableEngineError);
+    }
+    expect(threw).toBe(true);
+  });
+
+  it('throws NoRunningRunError when the last run is terminal', async () => {
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+
+    const session = createAgentSession({
+      agentName: 'agent',
+      conversationHistory: createConversationHistory(),
+      id: 'signal-terminal',
+      runs: [
+        {
+          runId: 'signal-terminal:0',
+          sequence: 0,
+          status: 'completed',
+          startedAt: new Date().toISOString(),
+        },
+      ],
+    });
+    await store.save(session);
+
+    const fakeEngine = {
+      signal: async () => {},
+    } as unknown as AnyRunEngine;
+
+    const h = createSessionHandle('signal-terminal', {
+      store,
+      agentName: 'agent',
+      engine: fakeEngine,
+      runOptions: {
+        generate: createInstantGenerate(),
+        toolbox: createToolbox([]) as unknown as Toolbox,
+      },
+    });
+
+    let threw = false;
+    try {
+      await h.signal('approve');
+    } catch (e) {
+      threw = true;
+      expect(e).toBeInstanceOf(NoRunningRunError);
+    }
+    expect(threw).toBe(true);
+  });
+
+  it('calls engine.signal with the run id, name, and payload', async () => {
+    const signalCalls: Array<{ id: string; name: string; payload: unknown }> = [];
+
+    const fakeEngine = {
+      signal: async (id: string, name: string, payload: unknown) => {
+        signalCalls.push({ id, name, payload });
+      },
+    } as unknown as AnyRunEngine;
+
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+
+    const session = createAgentSession({
+      agentName: 'agent',
+      conversationHistory: createConversationHistory(),
+      id: 'signal-running',
+      runs: [
+        {
+          runId: 'signal-running:0',
+          sequence: 0,
+          status: 'running',
+          startedAt: new Date().toISOString(),
+        },
+      ],
+    });
+    await store.save(session);
+
+    const h = createSessionHandle('signal-running', {
+      store,
+      agentName: 'agent',
+      engine: fakeEngine,
+      runOptions: {
+        generate: createInstantGenerate(),
+        toolbox: createToolbox([]) as unknown as Toolbox,
+      },
+    });
+
+    await h.signal('human-response', { approved: true });
+
+    expect(signalCalls).toHaveLength(1);
+    expect(signalCalls[0]).toEqual({
+      id: 'signal-running:0',
+      name: 'human-response',
+      payload: { approved: true },
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// update() — validated request/response
+// ---------------------------------------------------------------------------
+
+describe('session.update()', () => {
+  it('throws NoDurableEngineError when no engine is present', async () => {
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+
+    const session = createAgentSession({
+      agentName: 'agent',
+      conversationHistory: createConversationHistory(),
+      id: 'update-no-engine',
+      runs: [
+        {
+          runId: 'update-no-engine:0',
+          sequence: 0,
+          status: 'running',
+          startedAt: new Date().toISOString(),
+        },
+      ],
+    });
+    await store.save(session);
+
+    const h = createSessionHandle('update-no-engine', {
+      store,
+      agentName: 'agent',
+      runOptions: {
+        generate: createInstantGenerate(),
+        toolbox: createToolbox([]) as unknown as Toolbox,
+      },
+    });
+
+    let threw = false;
+    try {
+      await h.update('params', { temp: 0.5 });
+    } catch (e) {
+      threw = true;
+      expect(e).toBeInstanceOf(NoDurableEngineError);
+    }
+    expect(threw).toBe(true);
+  });
+
+  it('calls engine.update and returns the result', async () => {
+    const fakeEngine = {
+      update: mock(async (_id: string, _name: string, _payload: unknown) => ({ ok: true })),
+    } as unknown as AnyRunEngine;
+
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+
+    const session = createAgentSession({
+      agentName: 'agent',
+      conversationHistory: createConversationHistory(),
+      id: 'update-running',
+      runs: [
+        {
+          runId: 'update-running:0',
+          sequence: 0,
+          status: 'running',
+          startedAt: new Date().toISOString(),
+        },
+      ],
+    });
+    await store.save(session);
+
+    const h = createSessionHandle('update-running', {
+      store,
+      agentName: 'agent',
+      engine: fakeEngine,
+      runOptions: {
+        generate: createInstantGenerate(),
+        toolbox: createToolbox([]) as unknown as Toolbox,
+      },
+    });
+
+    const result = await h.update('params', { temp: 0.5 });
+    expect(result).toEqual({ ok: true });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// query() — read-only introspection
+// ---------------------------------------------------------------------------
+
+describe('session.query()', () => {
+  it('throws NoDurableEngineError when no engine is present', async () => {
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+
+    const session = createAgentSession({
+      agentName: 'agent',
+      conversationHistory: createConversationHistory(),
+      id: 'query-no-engine',
+      runs: [
+        {
+          runId: 'query-no-engine:0',
+          sequence: 0,
+          status: 'running',
+          startedAt: new Date().toISOString(),
+        },
+      ],
+    });
+    await store.save(session);
+
+    const h = createSessionHandle('query-no-engine', {
+      store,
+      agentName: 'agent',
+      runOptions: {
+        generate: createInstantGenerate(),
+        toolbox: createToolbox([]) as unknown as Toolbox,
+      },
+    });
+
+    let threw = false;
+    try {
+      await h.query('current-step');
+    } catch (e) {
+      threw = true;
+      expect(e).toBeInstanceOf(NoDurableEngineError);
+    }
+    expect(threw).toBe(true);
+  });
+
+  it('throws NoRunningRunError when the session has no runs', async () => {
+    const fakeEngine = {
+      query: mock(async () => ({})),
+    } as unknown as AnyRunEngine;
+
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+
+    const session = createAgentSession({
+      agentName: 'agent',
+      conversationHistory: createConversationHistory(),
+      id: 'query-no-runs',
+    });
+    await store.save(session);
+
+    const h = createSessionHandle('query-no-runs', {
+      store,
+      agentName: 'agent',
+      engine: fakeEngine,
+      runOptions: {
+        generate: createInstantGenerate(),
+        toolbox: createToolbox([]) as unknown as Toolbox,
+      },
+    });
+
+    let threw = false;
+    try {
+      await h.query('current-step');
+    } catch (e) {
+      threw = true;
+      expect(e).toBeInstanceOf(NoRunningRunError);
+    }
+    expect(threw).toBe(true);
+  });
+
+  it('calls engine.query with the last run id and returns the result', async () => {
+    const fakeEngine = {
+      query: mock(async (_id: string, _name: string) => ({ step: 3 })),
+    } as unknown as AnyRunEngine;
+
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+
+    const session = createAgentSession({
+      agentName: 'agent',
+      conversationHistory: createConversationHistory(),
+      id: 'query-live',
+      runs: [
+        {
+          runId: 'query-live:0',
+          sequence: 0,
+          status: 'running',
+          startedAt: new Date().toISOString(),
+        },
+      ],
+    });
+    await store.save(session);
+
+    const h = createSessionHandle('query-live', {
+      store,
+      agentName: 'agent',
+      engine: fakeEngine,
+      runOptions: {
+        generate: createInstantGenerate(),
+        toolbox: createToolbox([]) as unknown as Toolbox,
+      },
+    });
+
+    const result = await h.query<{ step: number }>('current-step');
+    expect(result).toEqual({ step: 3 });
+  });
+
+  it('works on a terminal run (durable fidelity)', async () => {
+    const fakeEngine = {
+      query: mock(async () => ({ step: 5, status: 'completed' })),
+    } as unknown as AnyRunEngine;
+
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+
+    const session = createAgentSession({
+      agentName: 'agent',
+      conversationHistory: createConversationHistory(),
+      id: 'query-terminal',
+      runs: [
+        {
+          runId: 'query-terminal:0',
+          sequence: 0,
+          status: 'completed', // terminal — not running
+          startedAt: new Date().toISOString(),
+        },
+      ],
+    });
+    await store.save(session);
+
+    const h = createSessionHandle('query-terminal', {
+      store,
+      agentName: 'agent',
+      engine: fakeEngine,
+      runOptions: {
+        generate: createInstantGenerate(),
+        toolbox: createToolbox([]) as unknown as Toolbox,
+      },
+    });
+
+    // query() works on any session, running or not.
+    const result = await h.query('history');
+    expect(result).toBeDefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Full lifecycle: run → recover → cancel
+// ---------------------------------------------------------------------------
+
+describe('session full lifecycle', () => {
+  it('run then recover then cancel follows disconnect-vs-stop model', async () => {
+    let resolveGenerate: (() => void) | undefined;
+    const blockingGenerate: GenerateFunction = () =>
+      new Promise<{ content: string; toolCalls: [] }>((resolve) => {
+        resolveGenerate = () => resolve({ content: 'done', toolCalls: [] });
+      });
+
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+    const h = createSessionHandle('lifecycle-session', {
+      store,
+      agentName: 'lifecycle-agent',
+      runOptions: {
+        generate: blockingGenerate,
+        toolbox: createToolbox([]) as unknown as Toolbox,
+        maximumSteps: 1,
+      },
+    });
+
+    // Start the run.
+    const run = h.run('start');
+    expect(run).toBeDefined();
+
+    // Yield to let the run loop start.
+    await Promise.resolve();
+
+    // A "disconnect" — recover() returns the same handle (keep going).
+    const recovered = h.recover();
+    expect(recovered).toBe(run);
+
+    // A "deliberate stop" — cancel() aborts the run.
+    await h.cancel();
+
+    // After cancel, recover() returns null.
+    expect(h.recover()).toBeNull();
+
+    // Clean up.
+    resolveGenerate?.();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// RunRef sequence invariant
+// ---------------------------------------------------------------------------
+
+describe('RunRef sequence invariant', () => {
+  it('runId is always ${sessionId}:${sequence}', async () => {
+    const { handle, store } = createSessionHandleFixture({ sessionId: 'seq-test' });
+
+    await handle.run('run 0').result();
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    await handle.run('run 1').result();
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    await handle.run('run 2').result();
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+
+    const session = await store.load('seq-test');
+    expect(session!.runs).toHaveLength(3);
+    for (const ref of session!.runs) {
+      expect(ref.runId).toBe(`seq-test:${ref.sequence}`);
+    }
+  });
+
+  it('sequences are monotonically increasing starting from 0', async () => {
+    const { handle, store } = createSessionHandleFixture({ sessionId: 'monotonic-test' });
+
+    await handle.run('a').result();
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    await handle.run('b').result();
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+
+    const session = await store.load('monotonic-test');
+    const sequences = session!.runs.map((r) => r.sequence);
+    expect(sequences).toEqual([0, 1]);
+  });
+});

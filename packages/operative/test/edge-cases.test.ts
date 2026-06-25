@@ -5,10 +5,10 @@ import { Conversation } from 'conversationalist';
 import { z } from 'zod';
 
 import { noToolCalls } from '../src/conditions/predicates';
-import { createRun } from '../src/create-run';
-import { run } from '../src/run';
+import { createActiveRun } from '../src/create-run';
 import { createMockGenerate, createMockGenerateOnce, createRunRecorder } from '../src/test/index';
 import type { GenerateResponse } from '../src/types';
+const run = (options: Parameters<typeof createActiveRun>[0]) => createActiveRun(options).result;
 
 function toolCallResponse(
   toolCalls: GenerateResponse['toolCalls'],
@@ -170,7 +170,7 @@ describe('test utility coverage', () => {
     const conversation = new Conversation();
     const generate = createMockGenerate([{ content: 'Hello', toolCalls: [] }]);
 
-    const activeRun = createRun({
+    const activeRun = createActiveRun({
       generate,
       toolbox,
       conversation,

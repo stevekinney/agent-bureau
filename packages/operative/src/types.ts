@@ -1,20 +1,16 @@
-import type { TextValueStore } from '@lostgradient/weft/storage';
 import type { Toolbox, ToolExecuteOptions, ToolExecutionResult } from 'armorer';
 import type { Conversation, ConversationHistory, TokenUsage } from 'conversationalist';
 import type { JSONValue, ToolCall, ToolCallInput } from 'interoperability';
 import type { HookRegistry } from 'lifecycle';
 import type { ZodType } from 'zod';
 
-import type { AgentSession } from './agent-session';
 import type { BackpressureStrategy } from './backpressure';
-import type { ActiveRun } from './create-run';
 import type { OperativeHookMap } from './hooks';
 import type { RetryMutator } from './retry/types';
 import type { ResponseFormat, ToolChoice } from './structured-output/types';
 
 export type { Toolbox, ToolExecuteOptions, ToolExecutionResult } from 'armorer';
-export type { TokenUsage } from 'conversationalist';
-export type { Conversation, ConversationHistory } from 'conversationalist';
+export type { Conversation, ConversationHistory, TokenUsage } from 'conversationalist';
 export type { JSONValue, ToolCall, ToolCallInput } from 'interoperability';
 
 /**
@@ -218,7 +214,7 @@ export interface RunResult {
 }
 
 /**
- * Options for the run() and createRun() entry points.
+ * Options for the agent loop.
  */
 export interface RunOptions {
   generate: GenerateFunction;
@@ -312,80 +308,3 @@ export interface StreamingHandle {
 export type StreamingGenerateFunction = (
   context: GenerateContext & { streaming: StreamingHandle },
 ) => Promise<GenerateResponse>;
-
-/**
- * Options for defining a reusable agent configuration.
- */
-interface Renderable {
-  render(options?: Record<string, unknown>): string;
-}
-
-export interface DefineAgentOptions {
-  name: string;
-  instructions?: string | Renderable;
-  generate: GenerateFunction;
-  toolbox: Toolbox;
-  stopWhen?: StopCondition | StopCondition[];
-  maximumSteps?: number;
-  prepareStep?: RunOptions['prepareStep'];
-  beforeToolExecution?: RunOptions['beforeToolExecution'];
-  afterToolExecution?: RunOptions['afterToolExecution'];
-  onStep?: RunOptions['onStep'];
-  retry?: RetryOptions;
-  validateResponse?: RunOptions['validateResponse'];
-  validateToolResult?: RunOptions['validateToolResult'];
-  selectTools?: RunOptions['selectTools'];
-  onElicitation?: RunOptions['onElicitation'];
-  hooks?: RunOptions['hooks'];
-  contextManagement?: ContextManagementOptions;
-  responseSchema?: RunOptions['responseSchema'];
-  schemaRetries?: RunOptions['schemaRetries'];
-  schemaRetryMessage?: RunOptions['schemaRetryMessage'];
-  onMaximumSteps?: RunOptions['onMaximumSteps'];
-  executeOptions?: OperativeExecuteOptions;
-  collectAsync?: boolean;
-  withTraceContext?: RunOptions['withTraceContext'];
-  persistence?: TextValueStore;
-  sessionId?: string;
-  onSessionSave?: (session: AgentSession) => Promise<void> | void;
-  onSessionLoad?: (session: AgentSession) => Promise<void> | void;
-  autoSave?: 'step' | 'completion' | false;
-}
-
-/**
- * Options for running a defined agent.
- */
-export interface AgentRunOptions {
-  conversation?: Conversation | ConversationHistory | string;
-  signal?: AbortSignal;
-  stopWhen?: StopCondition | StopCondition[];
-  parentContext?: unknown;
-  hooks?: HookRegistry<OperativeHookMap>;
-}
-
-/**
- * A reusable agent definition returned by defineAgent().
- */
-export interface AgentDefinition {
-  readonly name: string;
-  readonly options: Readonly<DefineAgentOptions>;
-  run(input: string | AgentRunOptions): Promise<RunResult>;
-  createRun(input: string | AgentRunOptions): ActiveRun;
-}
-
-/**
- * Options for creating a subagent tool.
- */
-export interface CreateSubagentToolOptions {
-  name: string;
-  description: string;
-  agent: AgentDefinition;
-  input: ZodType;
-  mapInput?: (input: unknown) => string | AgentRunOptions;
-  mapOutput?: (result: RunResult) => unknown;
-  /**
-   * When true (the default), a sub-agent finishing with `maximum-steps` is
-   * treated as an error and throws. Set to false to accept partial results.
-   */
-  treatMaximumStepsAsError?: boolean;
-}

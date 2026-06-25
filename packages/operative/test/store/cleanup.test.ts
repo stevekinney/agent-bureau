@@ -5,7 +5,7 @@ import { Conversation } from 'conversationalist';
 import { z } from 'zod';
 
 import { stopWhen } from '../../src/conditions';
-import { createRun } from '../../src/create-run';
+import { createActiveRun } from '../../src/create-run';
 import { createStore } from '../../src/store';
 import { createMockGenerate } from '../../src/test';
 import type { GenerateResponse } from '../../src/types';
@@ -28,19 +28,19 @@ const weatherTool = createTool({
   execute: async ({ location }) => ({ temperature: 72, location }),
 });
 
-function createActiveRun(responses: GenerateResponse[] = [textResponse('response')]) {
+function makeTestRun(responses: GenerateResponse[] = [textResponse('response')]) {
   const toolbox = createTestToolbox([weatherTool]);
   const conversation = new Conversation();
   conversation.appendUserMessage('test');
   const generate = createMockGenerate(responses);
-  return createRun({ generate, toolbox, conversation, stopWhen: stopWhen.noToolCalls() });
+  return createActiveRun({ generate, toolbox, conversation, stopWhen: stopWhen.noToolCalls() });
 }
 
 describe('run lifecycle and cleanup', () => {
   describe('completed runs', () => {
     it('sets status to completed after a successful run', async () => {
       const store = createStore();
-      const activeRun = createActiveRun([textResponse('done')]);
+      const activeRun = makeTestRun([textResponse('done')]);
       const id = store.register(activeRun);
 
       await activeRun.result;
@@ -54,7 +54,7 @@ describe('run lifecycle and cleanup', () => {
 
     it('captures finishReason from the run result', async () => {
       const store = createStore();
-      const activeRun = createActiveRun([textResponse('done')]);
+      const activeRun = makeTestRun([textResponse('done')]);
       const id = store.register(activeRun);
 
       await activeRun.result;
@@ -67,7 +67,7 @@ describe('run lifecycle and cleanup', () => {
 
     it('remains in state after completion and is not removed', async () => {
       const store = createStore();
-      const activeRun = createActiveRun([textResponse('done')]);
+      const activeRun = makeTestRun([textResponse('done')]);
       const id = store.register(activeRun);
 
       await activeRun.result;
@@ -84,7 +84,7 @@ describe('run lifecycle and cleanup', () => {
 
     it('captures steps and snapshots for completed runs', async () => {
       const store = createStore();
-      const activeRun = createActiveRun([
+      const activeRun = makeTestRun([
         toolCallResponse([{ name: 'get_weather', arguments: { location: 'Denver' } }]),
         textResponse('The weather is 72F'),
       ]);
@@ -112,7 +112,7 @@ describe('run lifecycle and cleanup', () => {
       const conversation = new Conversation();
       conversation.appendUserMessage('test');
 
-      const activeRun = createRun({
+      const activeRun = createActiveRun({
         generate: failingGenerate,
         toolbox,
         conversation,
@@ -139,7 +139,7 @@ describe('run lifecycle and cleanup', () => {
       const conversation = new Conversation();
       conversation.appendUserMessage('test');
 
-      const activeRun = createRun({
+      const activeRun = createActiveRun({
         generate: failingGenerate,
         toolbox,
         conversation,
@@ -167,7 +167,7 @@ describe('run lifecycle and cleanup', () => {
       const conversation = new Conversation();
       conversation.appendUserMessage('test');
 
-      const activeRun = createRun({
+      const activeRun = createActiveRun({
         generate: failingGenerate,
         toolbox,
         conversation,
@@ -193,7 +193,7 @@ describe('run lifecycle and cleanup', () => {
       const conversation = new Conversation();
       conversation.appendUserMessage('test');
 
-      const activeRun = createRun({
+      const activeRun = createActiveRun({
         generate: failingGenerate,
         toolbox,
         conversation,
@@ -225,7 +225,7 @@ describe('run lifecycle and cleanup', () => {
         textResponse('Done'),
       ]);
 
-      const activeRun = createRun({
+      const activeRun = createActiveRun({
         generate,
         toolbox,
         conversation,
@@ -258,7 +258,7 @@ describe('run lifecycle and cleanup', () => {
         textResponse('Done'),
       ]);
 
-      const activeRun = createRun({
+      const activeRun = createActiveRun({
         generate,
         toolbox,
         conversation,
@@ -288,7 +288,7 @@ describe('run lifecycle and cleanup', () => {
         textResponse('Done'),
       ]);
 
-      const activeRun = createRun({
+      const activeRun = createActiveRun({
         generate,
         toolbox,
         conversation,
@@ -312,7 +312,7 @@ describe('run lifecycle and cleanup', () => {
   describe('deregister', () => {
     it('preserves final state after deregistering a completed run', async () => {
       const store = createStore();
-      const activeRun = createActiveRun([textResponse('preserved')]);
+      const activeRun = makeTestRun([textResponse('preserved')]);
       const id = store.register(activeRun);
 
       await activeRun.result;
@@ -340,7 +340,7 @@ describe('run lifecycle and cleanup', () => {
       const conversation = new Conversation();
       conversation.appendUserMessage('test');
 
-      const activeRun = createRun({
+      const activeRun = createActiveRun({
         generate: failingGenerate,
         toolbox,
         conversation,
@@ -370,7 +370,7 @@ describe('run lifecycle and cleanup', () => {
 
     it('is a no-op when called twice on the same id', async () => {
       const store = createStore();
-      const activeRun = createActiveRun([textResponse('done')]);
+      const activeRun = makeTestRun([textResponse('done')]);
       const id = store.register(activeRun);
 
       await activeRun.result;
@@ -403,7 +403,7 @@ describe('run lifecycle and cleanup', () => {
         return textResponse('final');
       };
 
-      const activeRun = createRun({
+      const activeRun = createActiveRun({
         generate,
         toolbox,
         conversation,
@@ -443,7 +443,7 @@ describe('run lifecycle and cleanup', () => {
 
       const generate = async () => textResponse('after dispose');
 
-      const activeRun = createRun({
+      const activeRun = createActiveRun({
         generate,
         toolbox,
         conversation,
@@ -474,7 +474,7 @@ describe('run lifecycle and cleanup', () => {
         received.push(action.type);
       });
 
-      const activeRunA = createActiveRun([textResponse('first')]);
+      const activeRunA = makeTestRun([textResponse('first')]);
       store.register(activeRunA);
       await activeRunA.result;
 
@@ -484,7 +484,7 @@ describe('run lifecycle and cleanup', () => {
       store.dispose();
 
       // Register a new run after dispose -- listeners should not fire
-      const activeRunB = createActiveRun([textResponse('second')]);
+      const activeRunB = makeTestRun([textResponse('second')]);
       store.register(activeRunB);
       await activeRunB.result;
 
@@ -504,7 +504,7 @@ describe('run lifecycle and cleanup', () => {
 
     it('preserves existing run state snapshots after dispose', async () => {
       const store = createStore();
-      const activeRun = createActiveRun([textResponse('preserved')]);
+      const activeRun = makeTestRun([textResponse('preserved')]);
       const id = store.register(activeRun);
 
       await activeRun.result;
@@ -526,7 +526,7 @@ describe('run lifecycle and cleanup', () => {
   describe('removeRun', () => {
     it('removes a completed run from the runs map', async () => {
       const store = createStore();
-      const activeRun = createActiveRun([textResponse('done')]);
+      const activeRun = makeTestRun([textResponse('done')]);
       const id = store.register(activeRun);
 
       await activeRun.result;
@@ -544,7 +544,7 @@ describe('run lifecycle and cleanup', () => {
 
     it('deregisters the subscription before removing the run', async () => {
       const store = createStore();
-      const activeRun = createActiveRun([textResponse('done')]);
+      const activeRun = makeTestRun([textResponse('done')]);
       const id = store.register(activeRun);
 
       await activeRun.result;
@@ -570,8 +570,8 @@ describe('run lifecycle and cleanup', () => {
 
     it('does not affect other runs when one is removed', async () => {
       const store = createStore();
-      const activeRunA = createActiveRun([textResponse('A')]);
-      const activeRunB = createActiveRun([textResponse('B')]);
+      const activeRunA = makeTestRun([textResponse('A')]);
+      const activeRunB = makeTestRun([textResponse('B')]);
 
       const idA = store.register(activeRunA);
       const idB = store.register(activeRunB);
@@ -592,7 +592,7 @@ describe('run lifecycle and cleanup', () => {
     it('tracks completed and error runs concurrently in the same store', async () => {
       const store = createStore();
 
-      const successRun = createActiveRun([textResponse('success')]);
+      const successRun = makeTestRun([textResponse('success')]);
       const successId = store.register(successRun);
 
       const failingGenerate = async () => {
@@ -601,7 +601,7 @@ describe('run lifecycle and cleanup', () => {
       const toolbox = createTestToolbox([weatherTool]);
       const conversation = new Conversation();
       conversation.appendUserMessage('test');
-      const failureRun = createRun({
+      const failureRun = createActiveRun({
         generate: failingGenerate,
         toolbox,
         conversation,
@@ -621,8 +621,8 @@ describe('run lifecycle and cleanup', () => {
     it('deregistering one run does not affect other runs', async () => {
       const store = createStore();
 
-      const activeRunA = createActiveRun([textResponse('run A')]);
-      const activeRunB = createActiveRun([textResponse('run B')]);
+      const activeRunA = makeTestRun([textResponse('run A')]);
+      const activeRunB = makeTestRun([textResponse('run B')]);
 
       const idA = store.register(activeRunA);
       const idB = store.register(activeRunB);

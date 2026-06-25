@@ -5,9 +5,10 @@ import { Conversation } from 'conversationalist';
 import { z } from 'zod';
 
 import { createEarlyStoppingHandler } from '../src/create-early-stopping-handler';
-import { run } from '../src/run';
+import { createActiveRun } from '../src/create-run';
 import { createMockGenerate } from '../src/test/index';
 import type { GenerateContext, GenerateResponse } from '../src/types';
+const run = (options: Parameters<typeof createActiveRun>[0]) => createActiveRun(options).result;
 
 const weatherTool = createTool({
   name: 'get_weather',

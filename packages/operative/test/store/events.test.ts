@@ -5,7 +5,7 @@ import { Conversation } from 'conversationalist';
 import { z } from 'zod';
 
 import { stopWhen } from '../../src/conditions';
-import { createRun } from '../../src/create-run';
+import { createActiveRun } from '../../src/create-run';
 import { createStore } from '../../src/store';
 import type { StoreActionEvent } from '../../src/store/events';
 import type { Action } from '../../src/store/types';
@@ -23,12 +23,12 @@ const weatherTool = createTool({
   execute: async ({ location }) => ({ temperature: 72, location }),
 });
 
-function createActiveRun(responses: GenerateResponse[] = [textResponse('response')]) {
+function makeTestRun(responses: GenerateResponse[] = [textResponse('response')]) {
   const toolbox = createTestToolbox([weatherTool]);
   const conversation = new Conversation();
   conversation.appendUserMessage('test');
   const generate = createMockGenerate(responses);
-  return createRun({ generate, toolbox, conversation, stopWhen: stopWhen.noToolCalls() });
+  return createActiveRun({ generate, toolbox, conversation, stopWhen: stopWhen.noToolCalls() });
 }
 
 describe('Store events (EventTarget)', () => {
@@ -40,7 +40,7 @@ describe('Store events (EventTarget)', () => {
       received.push(event.action);
     });
 
-    const activeRun = createActiveRun();
+    const activeRun = makeTestRun();
     store.register(activeRun);
     await activeRun.result;
 
@@ -63,7 +63,7 @@ describe('Store events (EventTarget)', () => {
       received.push(event.action);
     });
 
-    const activeRun = createActiveRun();
+    const activeRun = makeTestRun();
     store.register(activeRun);
     await activeRun.result;
 
@@ -80,7 +80,7 @@ describe('Store events (EventTarget)', () => {
       received.push(event.action);
     });
 
-    const activeRun = createActiveRun();
+    const activeRun = makeTestRun();
     store.register(activeRun);
     await activeRun.result;
 
@@ -97,7 +97,7 @@ describe('Store events (EventTarget)', () => {
       types.push(event.type);
     });
 
-    const activeRun = createActiveRun();
+    const activeRun = makeTestRun();
     store.register(activeRun);
     await activeRun.result;
 
@@ -114,7 +114,7 @@ describe('Store events (EventTarget)', () => {
     // Set up the iterator before events fire so it can buffer them
     const iterator = store.events('action');
 
-    const activeRun = createActiveRun();
+    const activeRun = makeTestRun();
     const runId = store.register(activeRun);
     await activeRun.result;
 
@@ -142,7 +142,7 @@ describe('Store events (EventTarget)', () => {
     expect(subscription).toHaveProperty('unsubscribe');
     expect(typeof subscription.unsubscribe).toBe('function');
 
-    const activeRun = createActiveRun();
+    const activeRun = makeTestRun();
     store.register(activeRun);
     await activeRun.result;
 
@@ -151,7 +151,7 @@ describe('Store events (EventTarget)', () => {
 
     subscription.unsubscribe();
 
-    const activeRun2 = createActiveRun();
+    const activeRun2 = makeTestRun();
     store.register(activeRun2);
     await activeRun2.result;
 
@@ -167,7 +167,7 @@ describe('Store events (EventTarget)', () => {
       registered.push(event.runId);
     });
 
-    const activeRun = createActiveRun();
+    const activeRun = makeTestRun();
     const runId = store.register(activeRun);
 
     expect(registered).toContain(runId);
@@ -184,7 +184,7 @@ describe('Store events (EventTarget)', () => {
       removed.push(event.runId);
     });
 
-    const activeRun = createActiveRun();
+    const activeRun = makeTestRun();
     const runId = store.register(activeRun);
     await activeRun.result;
 
@@ -215,7 +215,7 @@ describe('Store events (EventTarget)', () => {
       eventTargetActions.push(event.action);
     });
 
-    const activeRun = createActiveRun();
+    const activeRun = makeTestRun();
     store.register(activeRun);
     await activeRun.result;
 
@@ -238,8 +238,8 @@ describe('Store events (EventTarget)', () => {
       events.push(event);
     });
 
-    const activeRunA = createActiveRun([textResponse('A')]);
-    const activeRunB = createActiveRun([textResponse('B')]);
+    const activeRunA = makeTestRun([textResponse('A')]);
+    const activeRunB = makeTestRun([textResponse('B')]);
 
     const idA = store.register(activeRunA);
     const idB = store.register(activeRunB);

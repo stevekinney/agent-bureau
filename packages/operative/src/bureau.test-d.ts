@@ -14,16 +14,21 @@
 
 import type {
   AgentBuilder,
+  AgentGenerateFunction,
   AgentNameFor,
   AgentRun,
   AgentTable,
+  AgentToolNames,
+  AgentTools,
   BureauToolNames,
   BureauTools,
+  CreateAgentOptions,
   RunResult,
   ToolEntry,
   ToolMap,
+  ToolMapInput,
 } from './bureau-types.ts';
-import { createBureau } from './bureau-types.ts';
+import { createAgent, createBureau } from './bureau-types.ts';
 
 // ---------------------------------------------------------------------------
 // Declare some typed tool stubs.
@@ -304,6 +309,129 @@ void agentWithTools.run('Find relevant docs');
 void standaloneAgent;
 
 // ---------------------------------------------------------------------------
+// ASSERTION B4 — Agent is an options bag; tools as name-keyed map
+//
+// B4 has four sub-assertions:
+//   B4a. Tool entries in a name-keyed map forbid an inner `name` field.
+//        The MAP KEY is canonical; a `.name` on the object disagrees and is
+//        the #1 authoring bug (`{ 'web-search': { name: 'search', execute } }`).
+//   B4b. `AgentTools<T>` extracts the merged bureau + agent tool map.
+//   B4c. `AgentToolNames<T>` surfaces `keyof (bureauTools & agentTools) & string`.
+//   B4d. `createAgent({...})` accepts the options-bag shape with tools-as-map,
+//        `generate` required, and returns a typed `AgentBuilder`.
+// ---------------------------------------------------------------------------
+
+// ---- B4a: Forbid inner `name` field on tool entry objects ----
+//
+// A tool entry's canonical name is the MAP KEY, not an inner `.name` property.
+// `ToolEntryInput` uses `name?: never` on the object variant to enforce this.
+//
+// Valid: a plain `execute` object with no `name` field.
+declare const validToolEntry: { execute: (input: { query: string }) => Promise<string> };
+// This must be accepted by `.tools({...})`. Use a concrete call to prove it.
+const bureauWithValidTool = createBureau().tools({ search: validToolEntry });
+void bureauWithValidTool;
+
+// Invalid: an object WITH an inner `name` field must be a type error.
+// This is the "armorer tool passed directly" pattern — armorer tools carry
+// `.name`, but the key is canonical. Passing a named object in the entry
+// position violates the `name?: never` constraint.
+declare const namedToolEntry: {
+  name: string;
+  execute: (input: { query: string }) => Promise<string>;
+};
+
+// @ts-expect-error — tool entry with inner `name` field is forbidden; key is canonical.
+void createBureau().tools({ search: namedToolEntry });
+
+// ---- B4b: AgentTools<T> extracts the merged tool map ----
+//
+// When a bureau has bureau-level tools AND an agent adds its own tools,
+// `AgentTools<typeof agent>` must surface BOTH sets as a merged map.
+
+const bureauForAgentTools = createBureau().tools({ search: searchTool, clock: clockTool });
+// We can't call bureau.agent() in a type-only context directly here, but we
+// can prove AgentTools via a declared AgentBuilder shape:
+declare const agentBuilderWithBoth: AgentBuilder<
+  { search: ToolEntry<{ query: string }, string>; clock: ToolEntry<void, { iso: string }> },
+  { scratchpad: ToolEntry<{ text: string }, void> }
+>;
+
+type MergedTools = AgentTools<typeof agentBuilderWithBoth>;
+
+// All three tools must appear in the merged type.
+declare const mergedSearch: MergedTools['search'];
+void (mergedSearch satisfies ToolEntry<{ query: string }, string>);
+
+declare const mergedScratchpad: MergedTools['scratchpad'];
+void (mergedScratchpad satisfies ToolEntry<{ text: string }, void>);
+
+// ---- B4c: AgentToolNames<T> surfaces keyof (bureauTools & agentTools) ----
+//
+// The union must include tool names from BOTH bureau and agent tool sets.
+
+type AllToolNames = AgentToolNames<typeof agentBuilderWithBoth>;
+declare const aToolName: AllToolNames;
+// All three names must be in the union.
+void (aToolName satisfies 'search' | 'clock' | 'scratchpad');
+
+// A standalone agent's tool names are just its own tool keys.
+type StandaloneToolNames = AgentToolNames<typeof agentWithTools>;
+declare const aStandaloneName: StandaloneToolNames;
+void (aStandaloneName satisfies 'search');
+
+// ---- B4d: createAgent({...}) — options-bag factory ----
+//
+// `createAgent` accepts a plain options object (NOT a chain). The `generate`
+// field is REQUIRED. Tools are a name-keyed map — NOT a Toolbox instance.
+// The returned builder types its own tool map, bureau slot empty.
+
+declare const mockGenerate: AgentGenerateFunction;
+
+// Valid: all required fields present, tools as map.
+const standaloneCreated = createAgent({
+  name: 'researcher',
+  generate: mockGenerate,
+  tools: { search: searchTool, clock: clockTool },
+});
+
+// The returned builder has no bureau tools (empty slot) and the agent's tools.
+type StandaloneBuilderTools = AgentTools<typeof standaloneCreated>;
+declare const createdSearch: StandaloneBuilderTools['search'];
+void (createdSearch satisfies ToolEntry<{ query: string }, string>);
+
+// AgentToolNames on the created builder surfaces the agent's tool keys.
+type CreatedToolNames = AgentToolNames<typeof standaloneCreated>;
+declare const aCreatedName: CreatedToolNames;
+void (aCreatedName satisfies 'search' | 'clock');
+
+// run() works on the created agent.
+void standaloneCreated.run('Summarize the Q3 report');
+
+// Builder's .tools() method chains correctly onto the created agent.
+const extendedAgent = standaloneCreated.tools({ scratchpad: scratchpadTool });
+type ExtendedToolNames = AgentToolNames<typeof extendedAgent>;
+declare const anExtendedName: ExtendedToolNames;
+void (anExtendedName satisfies 'search' | 'clock' | 'scratchpad');
+
+// `generate` is REQUIRED — omitting it must be a type error.
+// @ts-expect-error — generate is required on createAgent; no bureau to inherit from.
+void createAgent({ name: 'missing-generate', tools: { search: searchTool } });
+
+// `name` is REQUIRED — omitting it must be a type error.
+// @ts-expect-error — name is required on createAgent.
+void createAgent({ generate: mockGenerate });
+
+// CreateAgentOptions verifies the shape contract separately:
+declare const validOptions: CreateAgentOptions<{ search: typeof searchTool }>;
+void (validOptions.name satisfies string);
+void (validOptions.generate satisfies AgentGenerateFunction);
+
+// The `ToolMapInput` constraint is the outer type — ensure it's re-exported.
+declare const _toolMapInput: ToolMapInput;
+void _toolMapInput;
+
+// ---------------------------------------------------------------------------
 // Final void block — satisfy unused-var lint for all bindings used above.
 // ---------------------------------------------------------------------------
 
@@ -324,4 +452,18 @@ void [
   _iterateRun,
   _iterateThenResult,
   bureauForErrors,
+  bureauWithValidTool,
+  agentBuilderWithBoth,
+  mergedSearch,
+  mergedScratchpad,
+  aToolName,
+  aStandaloneName,
+  standaloneCreated,
+  extendedAgent,
+  createdSearch,
+  aCreatedName,
+  anExtendedName,
+  validOptions,
+  _toolMapInput,
+  bureauForAgentTools,
 ];

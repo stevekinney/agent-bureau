@@ -1,4 +1,6 @@
-export type { AgentSession } from './agent-session';
+export type { AgentRun, CreateAgentRunOptions, RunEvent } from './agent-run';
+export { CompletedRunIterationError, createAgentRun } from './agent-run';
+export type { AgentSession, RunRef } from './agent-session';
 export { createAgentSession, loadAgentSession, saveAgentSession } from './agent-session';
 export type {
   AdaptiveBackoffOptions,
@@ -58,12 +60,15 @@ export type {
 export { createCostBudgetMonitor } from './cost-budget-monitor';
 export type { CostEstimate, CostEstimationOptions, ModelPricing } from './cost-estimation';
 export { defaultPricingTable, estimateCost, getModelPricing } from './cost-estimation';
+export type { CreateAgentOptions, StandaloneAgent } from './create-agent';
+export { createAgent } from './create-agent';
 export type {
   AgentRegistry,
   AgentRegistryEntry,
   AgentRegistryEventMap,
   AgentRegistryEvents,
   AgentRegistryQuery,
+  RegistryAgent,
 } from './create-agent-registry';
 export {
   AgentQueriedEvent,
@@ -89,7 +94,7 @@ export type {
 } from './create-policy-enforcement-hook';
 export { createPolicyEnforcementHook } from './create-policy-enforcement-hook';
 export type { ActiveRun, DurableRunRouting } from './create-run';
-export { createRun } from './create-run';
+export { createActiveRun } from './create-run';
 export type {
   CreateScratchpadOptions,
   Scratchpad,
@@ -106,6 +111,7 @@ export {
   EntrySetEvent,
   ScratchpadClearedEvent,
 } from './create-scratchpad';
+export type { CreateSubagentToolOptions } from './create-subagent-tool';
 export { createSubagentTool } from './create-subagent-tool';
 export type {
   CreateSupervisorOptions,
@@ -129,7 +135,6 @@ export {
   TaskFailedEvent,
   TaskRoutedEvent,
 } from './create-supervisor';
-export { defineAgent } from './define-agent';
 export type { ClassifiedError, ErrorCategory } from './errors';
 export { BudgetExceededError, classifyError, ElicitationDeniedError } from './errors';
 export type {
@@ -228,6 +233,14 @@ export type {
   RunStartContext,
 } from './hooks/index';
 export { composeHooks, everyNSteps, onlyOnStep, runOnce, withTimeout } from './hooks/index';
+export type { IdentityInheritanceLayer, MemoryInheritanceSide } from './inheritance';
+export {
+  combineHooks,
+  combineIdentity,
+  combineMemory,
+  combineProvider,
+  combineTools,
+} from './inheritance';
 export type {
   JitterOptions,
   OverflowMutatorOptions,
@@ -243,7 +256,6 @@ export {
   createToolRemovalMutator,
   RETRY_TEMPERATURE_KEY,
 } from './retry/index';
-export { run } from './run';
 export type {
   CreateChunkedTaskOptions,
   CreateDurableHeartbeatOptions,
@@ -288,11 +300,21 @@ export type {
   ResumeSessionOptions,
   ResumeSessionResult,
   SessionCleanupOptions,
+  SessionHandle,
+  SessionHandleContext,
   SessionListOptions,
+  SessionRunOptions,
   SessionStore,
   SessionSummary,
 } from './session/index';
-export { createSessionStore, resumeSession } from './session/index';
+export {
+  createSessionHandle,
+  createSessionStore,
+  deriveRunId,
+  NoDurableEngineError,
+  NoRunningRunError,
+  resumeSession,
+} from './session/index';
 export { withStreaming } from './streaming';
 export type { BackpressureBuffer, BackpressureBufferOptions } from './streaming/index';
 export type {
@@ -316,15 +338,11 @@ export { zodToJsonSchema } from './structured-output/index';
 export type {
   AfterGenerateHook,
   AfterToolExecutionHook,
-  AgentDefinition,
-  AgentRunOptions,
   BeforeGenerateHook,
   BeforeToolExecutionHook,
   ContextManagementOptions,
   Conversation,
   ConversationHistory,
-  CreateSubagentToolOptions,
-  DefineAgentOptions,
   ElicitationRequest,
   ElicitationResponse,
   FinishReason,

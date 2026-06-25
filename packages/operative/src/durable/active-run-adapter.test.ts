@@ -7,16 +7,19 @@ import { HookRegistry } from 'lifecycle';
 import { z } from 'zod';
 
 import { stopWhen } from '../conditions/index';
-import { createRun } from '../create-run';
+import { createActiveRun } from '../create-run';
 import { BudgetExceededError, ElicitationDeniedError } from '../errors';
 import type { OperativeHookMap } from '../hooks';
-import { run } from '../run';
+import { spyEngine } from '../test/durable-engine';
 import type { RunOptions, RunResult } from '../types';
 import { createDurableActiveRun, reattachDurableActiveRun } from './active-run-adapter';
 import { createCheckpointStore } from './checkpoint-store';
 import type { AnyRunEngine } from './create-run-engine';
 import { createRunEngine } from './create-run-engine';
 import { createRunWorkflow } from './run-workflow';
+
+const run = (...args: Parameters<typeof createActiveRun>) => createActiveRun(...args).result;
+const createRun = createActiveRun;
 
 // Drain Weft's deferred inline-launch queue between tests — a pending setTimeout(0)
 // inline-launch left by one durable run can starve a later one under full
@@ -876,5 +879,177 @@ describe('reattachDurableActiveRun', () => {
     } finally {
       context.engine[Symbol.dispose]();
     }
+  });
+});
+
+// -----------------------------------------------------------------------
+// B6 — Abort-into-generate (load-bearing) acceptance tests
+//
+// SPEC: "Seam threads AbortSignal to SDK; cancel()/abort() fire it
+// immediately in parallel with Weft termination."
+//
+// ACCEPTANCE: cancel during streaming → spy.cancels has run id AND the
+// generate abort signal fires AND the run settles within ~1s.
+//
+// The test uses a blocking generate function that only resolves when the
+// AbortSignal fires, proving the signal is the load-bearing link. The
+// spy confirms engine.cancel is called in parallel (the second prong of
+// the two-action abort: signal stops the billing call; engine.cancel
+// stops the next step from starting).
+// -----------------------------------------------------------------------
+describe('B6 — abort-into-generate load-bearing abort', () => {
+  /**
+   * A blocking generate that parks until the AbortSignal fires, then rejects.
+   * This models a real provider SDK streaming call: the network connection
+   * stays open until the signal aborts it. Records whether the signal fired
+   * and what signal was received.
+   */
+  function makeBlockingGenerate(): {
+    generate: RunOptions['generate'];
+    abortFired: { value: boolean };
+    receivedSignal: { value: AbortSignal | undefined };
+  } {
+    const abortFired = { value: false };
+    const receivedSignal: { value: AbortSignal | undefined } = { value: undefined };
+
+    const generate: RunOptions['generate'] = ({ signal }) =>
+      new Promise((_resolve, reject) => {
+        receivedSignal.value = signal;
+        if (signal?.aborted) {
+          abortFired.value = true;
+          reject(new Error('generate already aborted'));
+          return;
+        }
+        signal?.addEventListener(
+          'abort',
+          () => {
+            abortFired.value = true;
+            reject(new Error('generate aborted by signal'));
+          },
+          { once: true },
+        );
+      });
+
+    return { generate, abortFired, receivedSignal };
+  }
+
+  it('abort() fires the generate AbortSignal immediately and calls engine.cancel in parallel (durable path)', async () => {
+    const context = await buildContext();
+    const spy = spyEngine(context.engine);
+    const { generate, abortFired, receivedSignal } = makeBlockingGenerate();
+
+    const runId = 'b6-abort-durable';
+    const activeRun = createDurableActiveRun(
+      { engine: spy.engine, checkpointStore: context.checkpointStore },
+      {
+        runId,
+        sessionId: runId,
+        options: {
+          generate,
+          toolbox: createToolbox([]) as unknown as RunOptions['toolbox'],
+          conversation: createConversationHistory(),
+          stopWhen: stopWhen.noToolCalls(),
+        },
+        prompt: 'Hello',
+      },
+    );
+
+    // Wait for the deferred-microtask drive() to start and the workflow to
+    // register with the engine, then enter the blocking generate call.
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    const abortStart = performance.now();
+    activeRun.abort('cancel during streaming');
+
+    const result = await activeRun.result;
+    const elapsed = performance.now() - abortStart;
+
+    // ACCEPTANCE criterion 1: the generate AbortSignal fired — proving the
+    // signal reaches the in-flight provider call and drops the connection.
+    expect(abortFired.value).toBe(true);
+
+    // ACCEPTANCE criterion 2: spy.cancels has the run id — proving engine.cancel
+    // was called in parallel with the AbortController abort (not sequentially).
+    expect(spy.cancels).toContain(runId);
+
+    // ACCEPTANCE criterion 3: the run settled within ~1 second — proving the
+    // abort is load-bearing (not waiting for Weft's yield* boundary).
+    expect(elapsed).toBeLessThan(1000);
+
+    // The generate AbortSignal was correctly threaded end-to-end.
+    expect(receivedSignal.value).toBeInstanceOf(AbortSignal);
+
+    // Sanity: the run finished as aborted.
+    expect(result.finishReason).toBe('aborted');
+
+    context.engine[Symbol.dispose]();
+  });
+
+  it('abort() before the first microtask fires the AbortSignal without hanging (pre-start abort)', async () => {
+    const context = await buildContext();
+    const spy = spyEngine(context.engine);
+    const { generate, abortFired } = makeBlockingGenerate();
+
+    const runId = 'b6-pre-start-abort';
+    const activeRun = createDurableActiveRun(
+      { engine: spy.engine, checkpointStore: context.checkpointStore },
+      {
+        runId,
+        sessionId: runId,
+        options: {
+          generate,
+          toolbox: createToolbox([]) as unknown as RunOptions['toolbox'],
+          conversation: createConversationHistory(),
+          stopWhen: stopWhen.noToolCalls(),
+        },
+        prompt: 'Hello',
+      },
+    );
+
+    // Abort synchronously — BEFORE the first microtask that starts the workflow.
+    // The AbortController signal fires immediately on the controller.
+    activeRun.abort('immediate pre-start cancel');
+
+    const result = await activeRun.result;
+
+    // The run must settle cleanly (not hang) even when aborted before the workflow
+    // was registered with the engine. The AbortSignal path is sufficient here.
+    expect(['aborted', 'error']).toContain(result.finishReason);
+
+    // runStep detects the pre-aborted signal at its entry check (line: if
+    // (signal?.aborted) return { kind: 'abort' }) and short-circuits WITHOUT
+    // invoking generate() — so abortFired remains false. This is correct:
+    // the signal was already fired on the controller before generate was called.
+    expect(abortFired.value).toBe(false);
+
+    context.engine[Symbol.dispose]();
+  });
+
+  it('abort() on the in-memory path fires the generate AbortSignal and settles within ~1s', async () => {
+    // Proves the signal seam works on the in-memory (non-durable) path too.
+    // Both paths share the same AbortController → combined signal → generate()
+    // channel, so this test documents the seam is wired on both paths.
+    const { generate, abortFired, receivedSignal } = makeBlockingGenerate();
+
+    const activeRun = createRun({
+      generate,
+      toolbox: createToolbox([]) as unknown as RunOptions['toolbox'],
+      conversation: createConversationHistory(),
+      stopWhen: stopWhen.noToolCalls(),
+    });
+
+    // Let the deferred-microtask start fire and the generate call begin.
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    const abortStart = performance.now();
+    activeRun.abort('cancel during streaming in-memory');
+
+    const result = await activeRun.result;
+    const elapsed = performance.now() - abortStart;
+
+    expect(abortFired.value).toBe(true);
+    expect(receivedSignal.value).toBeInstanceOf(AbortSignal);
+    expect(elapsed).toBeLessThan(1000);
+    expect(result.finishReason).toBe('aborted');
   });
 });

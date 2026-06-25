@@ -5,10 +5,10 @@ import { Conversation } from 'conversationalist';
 import { z } from 'zod';
 
 import { noToolCalls } from '../src/conditions/predicates';
-import { createRun } from '../src/create-run';
-import { run } from '../src/run';
+import { createActiveRun } from '../src/create-run';
 import { createMockGenerate, createRunRecorder } from '../src/test/index';
 import type { GenerateResponse, TokenUsage } from '../src/types';
+const run = (options: Parameters<typeof createActiveRun>[0]) => createActiveRun(options).result;
 
 const weatherTool = createTool({
   name: 'get_weather',
@@ -40,7 +40,7 @@ describe('generate lifecycle events', () => {
       textResponse('Done'),
     ]);
 
-    const activeRun = createRun({
+    const activeRun = createActiveRun({
       generate,
       toolbox: createToolbox([weatherTool]),
       conversation: new Conversation(),
@@ -59,7 +59,7 @@ describe('generate lifecycle events', () => {
   it('generate.completed emitted after with correct duration and response', async () => {
     const generate = createMockGenerate([textResponse('Hello')]);
 
-    const activeRun = createRun({
+    const activeRun = createActiveRun({
       generate,
       toolbox: createTestToolbox([]),
       conversation: new Conversation(),
@@ -89,7 +89,7 @@ describe('generate lifecycle events', () => {
       throw new Error('LLM failed');
     };
 
-    const activeRun = createRun({
+    const activeRun = createActiveRun({
       generate,
       toolbox: createTestToolbox([]),
       conversation: new Conversation(),
@@ -117,7 +117,7 @@ describe('generate lifecycle events', () => {
   it('no generate events when prepareStep returns a response', async () => {
     const generate = createMockGenerate([textResponse('Should not be called')]);
 
-    const activeRun = createRun({
+    const activeRun = createActiveRun({
       generate,
       toolbox: createTestToolbox([]),
       conversation: new Conversation(),
@@ -141,7 +141,7 @@ describe('generate lifecycle events', () => {
   it('duration is positive and reasonable', async () => {
     const generate = createMockGenerate([textResponse('Hello')]);
 
-    const activeRun = createRun({
+    const activeRun = createActiveRun({
       generate,
       toolbox: createTestToolbox([]),
       conversation: new Conversation(),
@@ -200,7 +200,7 @@ describe('step metadata', () => {
       },
     ]);
 
-    const activeRun = createRun({
+    const activeRun = createActiveRun({
       generate,
       toolbox: createTestToolbox([]),
       conversation: new Conversation(),
@@ -228,7 +228,7 @@ describe('usage.accumulated event', () => {
       textResponse('Done', { prompt: 80, completion: 30, total: 110 }),
     ]);
 
-    const activeRun = createRun({
+    const activeRun = createActiveRun({
       generate,
       toolbox: createToolbox([weatherTool]),
       conversation: new Conversation(),
@@ -263,7 +263,7 @@ describe('usage.accumulated event', () => {
   it('stepUsage is undefined when generate returns no usage', async () => {
     const generate = createMockGenerate([textResponse('Hello')]);
 
-    const activeRun = createRun({
+    const activeRun = createActiveRun({
       generate,
       toolbox: createTestToolbox([]),
       conversation: new Conversation(),
@@ -291,7 +291,7 @@ describe('usage.accumulated event', () => {
       textResponse('Done', { prompt: 30, completion: 15, total: 45 }),
     ]);
 
-    const activeRun = createRun({
+    const activeRun = createActiveRun({
       generate,
       toolbox: createToolbox([weatherTool]),
       conversation: new Conversation(),

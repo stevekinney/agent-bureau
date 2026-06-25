@@ -5,7 +5,7 @@ import { Conversation } from 'conversationalist';
 import { z } from 'zod';
 
 import { stopWhen } from '../../src/conditions';
-import { createRun } from '../../src/create-run';
+import { createActiveRun } from '../../src/create-run';
 import { createStore } from '../../src/store';
 import type { Action, StoreState } from '../../src/store/types';
 import { createMockGenerate } from '../../src/test';
@@ -23,12 +23,12 @@ const weatherTool = createTool({
   execute: async ({ location }) => ({ temperature: 72, location }),
 });
 
-function createActiveRun(responses: GenerateResponse[] = [textResponse('response')]) {
+function makeTestRun(responses: GenerateResponse[] = [textResponse('response')]) {
   const toolbox = createTestToolbox([weatherTool]);
   const conversation = new Conversation();
   conversation.appendUserMessage('test');
   const generate = createMockGenerate(responses);
-  return createRun({ generate, toolbox, conversation, stopWhen: stopWhen.noToolCalls() });
+  return createActiveRun({ generate, toolbox, conversation, stopWhen: stopWhen.noToolCalls() });
 }
 
 class PrimitiveOriginalEvent extends Event {
@@ -51,7 +51,7 @@ describe('createStore', () => {
 
   it('register returns a run id and adds it to state', async () => {
     const store = createStore();
-    const activeRun = createActiveRun();
+    const activeRun = makeTestRun();
 
     const id = store.register(activeRun);
 
@@ -65,7 +65,7 @@ describe('createStore', () => {
 
   it('register with a custom id uses that id', async () => {
     const store = createStore();
-    const activeRun = createActiveRun();
+    const activeRun = makeTestRun();
 
     const id = store.register(activeRun, 'my-custom-id');
 
@@ -78,8 +78,8 @@ describe('createStore', () => {
 
   it('register auto-generates sequential ids', async () => {
     const store = createStore();
-    const activeRunA = createActiveRun();
-    const activeRunB = createActiveRun();
+    const activeRunA = makeTestRun();
+    const activeRunB = makeTestRun();
 
     const idA = store.register(activeRunA);
     const idB = store.register(activeRunB);
@@ -93,7 +93,7 @@ describe('createStore', () => {
 
   it('getState returns runs map and global actions', async () => {
     const store = createStore();
-    const activeRun = createActiveRun();
+    const activeRun = makeTestRun();
     const id = store.register(activeRun);
 
     await activeRun.result;
@@ -110,7 +110,7 @@ describe('createStore', () => {
 
   it('getRun returns a specific run state', async () => {
     const store = createStore();
-    const activeRun = createActiveRun();
+    const activeRun = makeTestRun();
     const id = store.register(activeRun);
 
     const runState = store.getRun(id);
@@ -138,7 +138,7 @@ describe('createStore', () => {
       received.push({ state, action });
     });
 
-    const activeRun = createActiveRun();
+    const activeRun = makeTestRun();
     const id = store.register(activeRun);
 
     await activeRun.result;
@@ -166,7 +166,7 @@ describe('createStore', () => {
       received.push(action);
     });
 
-    const activeRunA = createActiveRun();
+    const activeRunA = makeTestRun();
     store.register(activeRunA);
     await activeRunA.result;
 
@@ -175,7 +175,7 @@ describe('createStore', () => {
 
     unsubscribe();
 
-    const activeRunB = createActiveRun();
+    const activeRunB = makeTestRun();
     store.register(activeRunB);
     await activeRunB.result;
 
@@ -197,7 +197,7 @@ describe('createStore', () => {
       receivedB.push(action);
     });
 
-    const activeRun = createActiveRun();
+    const activeRun = makeTestRun();
     store.register(activeRun);
 
     await activeRun.result;
@@ -222,7 +222,7 @@ describe('createStore', () => {
       received.push(action);
     });
 
-    const activeRunA = createActiveRun();
+    const activeRunA = makeTestRun();
     store.register(activeRunA);
     await activeRunA.result;
 
@@ -231,7 +231,7 @@ describe('createStore', () => {
 
     store.dispose();
 
-    const activeRunB = createActiveRun();
+    const activeRunB = makeTestRun();
     store.register(activeRunB);
     await activeRunB.result;
 
@@ -243,8 +243,8 @@ describe('createStore', () => {
   it('multiple concurrent runs are tracked independently', async () => {
     const store = createStore();
 
-    const activeRunA = createActiveRun([textResponse('response A')]);
-    const activeRunB = createActiveRun([textResponse('response B')]);
+    const activeRunA = makeTestRun([textResponse('response A')]);
+    const activeRunB = makeTestRun([textResponse('response B')]);
 
     const idA = store.register(activeRunA);
     const idB = store.register(activeRunB);
@@ -325,7 +325,7 @@ describe('createStore', () => {
 describe('createTestStore', () => {
   it('returns action helpers and waits for terminal runs', async () => {
     const { store, getActions, getActionTypes, waitForRun } = createTestStore();
-    const activeRun = createActiveRun();
+    const activeRun = makeTestRun();
     const runId = store.register(activeRun, 'test-store-run');
 
     const finalRun = await waitForRun(runId);

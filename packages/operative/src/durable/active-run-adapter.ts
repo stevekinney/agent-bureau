@@ -194,11 +194,49 @@ export function createDurableActiveRun(
     );
   }
 
+  // Track whether the deferred-microtask drive() call has started. This flag
+  // lets abort() know whether the Weft workflow has been handed to the engine,
+  // so it can fire engine.cancel() in parallel with the AbortController signal.
+  // Before the first microtask fires, only the AbortController abort is needed
+  // (the workflow doesn't exist yet). After it fires, engine.cancel() is also
+  // needed so the next step never starts.
+  let driveStarted = false;
+
   // Deferred-microtask start so callers attach listeners first (createRun contract).
-  const result = Promise.resolve().then(drive).finally(complete);
+  const result = Promise.resolve()
+    .then(() => {
+      driveStarted = true;
+      return drive();
+    })
+    .finally(complete);
 
   function abort(reason?: string): void {
+    // CRITICAL (B6 — "the link that stops the bill"): fire the AbortController
+    // IMMEDIATELY so the in-flight generate() call (inside ctx.memo in the
+    // durable workflow) drops its provider connection NOW. This does NOT wait
+    // for Weft to honor termination at the next yield* boundary — it reaches
+    // the generate() AbortSignal directly and drops the network connection
+    // within ~1s regardless of what Weft does.
     abortController.abort(reason);
+
+    // Also terminate the Weft workflow in parallel. Weft termination is honored
+    // at the next yield* (AFTER the in-flight ctx.memo step). Calling
+    // engine.cancel() here prevents the workflow from starting a second step
+    // once the current step's AbortSignal-aborted generate() resolves. The two
+    // actions are complementary, not redundant:
+    //   AbortController.abort() — stops the current billing call immediately.
+    //   engine.cancel()         — stops the next step from starting.
+    // We only call engine.cancel() after the deferred microtask has fired,
+    // i.e. after drive() was invoked and the workflow was handed to the engine.
+    // Before that, the workflow doesn't exist and engine.cancel() is a no-op.
+    if (driveStarted) {
+      // Fire-and-forget: a failing cancel (run already terminal) is not an
+      // error — the AbortController already dropped the in-flight connection.
+      void context.engine.cancel(runId).catch(() => {
+        // Swallow: run may already be terminal. The AbortController signal is
+        // the load-bearing stop; engine.cancel is belt-and-suspenders.
+      });
+    }
   }
 
   return {
@@ -661,6 +699,26 @@ async function driveDurableRun(
     // caught unknown without `instanceof`.
     if (isWeftErrorLike(error) && error.code === 'EngineDisposedError') {
       return makeInterruptedRunResult(conversation);
+    }
+    // B6 (abort-into-generate): when abort() calls engine.cancel() in parallel
+    // with abortController.abort(), engine.cancel() can win the race and set the
+    // workflow's state to 'cancelled' before the in-flight generate() rejection
+    // has a chance to settle the workflow to 'aborted'. Weft then rejects
+    // handle.result() with a plain Error("Workflow cancelled") — not a WeftError
+    // (no .code) — so isWeftErrorLike won't match it. Detect it by message and
+    // treat it as a clean abort so the terminal lifecycle fires and the session
+    // does not stay stuck 'running'. The abort reason (if any) lives on the
+    // combined signal that was passed into this call.
+    if (error instanceof Error && error.message === 'Workflow cancelled') {
+      return finalizeRunResult({
+        finishReason: 'aborted',
+        runState: emptyRunState(),
+        conversation,
+        hooks,
+        emitter,
+        runStartTime,
+        abortReason: signal.aborted ? String(signal.reason) : undefined,
+      });
     }
     // A `history.maxEvents` circuit-breaker (or a genuine execution-deadline
     // timeout) rejects `handle.result()` with a `WorkflowTimeoutError`. The error
