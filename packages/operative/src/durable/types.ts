@@ -70,6 +70,25 @@ export interface RunCheckpoint {
 type AnyToolbox = Toolbox<any>;
 
 /**
+ * A pending self-wakeup registered by the `scheduleWakeup` tool during a run.
+ * When present after the main step loop exits, the `agentRun` workflow will
+ * `yield* ctx.sleep(duration)` before completing — parking the durable run
+ * until the timer fires.
+ *
+ * The `note` is appended to the conversation on wakeup so the agent knows why
+ * it resumed (e.g. "Wake me up to check the deploy").
+ */
+export interface PendingWakeup {
+  /**
+   * How long to sleep. A Weft {@link Duration}: milliseconds (number) or
+   * ISO-8601 / human-readable string (e.g. `'6h'`, `'PT30M'`, `'500ms'`).
+   */
+  duration: number | string;
+  /** Optional note to surface when the run resumes after sleeping. */
+  note?: string;
+}
+
+/**
  * The non-serializable, per-run behavior a durable workflow needs but cannot
  * checkpoint: the `generate` function, the `toolbox`, the hook registry, the
  * event emitter, and the other closures from {@link RunOptions}. Checkpoints
@@ -90,4 +109,15 @@ export interface DurableRunDeps {
    * with no observable surface.
    */
   emitter?: EventDispatcher;
+  /**
+   * A pending self-wakeup registered during this run by the `scheduleWakeup`
+   * tool. When present after the main step loop exits, the workflow performs
+   * `yield* ctx.sleep(duration)` to park until the timer fires.
+   *
+   * Mutable by the `scheduleWakeup` tool (which runs inside `ctx.memo`). Only
+   * the LAST call wins — calling `scheduleWakeup` multiple times overwrites the
+   * previous request. The workflow reads this exactly once, after the loop, so
+   * it is never checkpointed (tools can safely mutate it in-process).
+   */
+  pendingWakeup?: PendingWakeup;
 }

@@ -651,6 +651,50 @@ export class SessionQueryEvent extends Event {
 }
 
 // ---------------------------------------------------------------------------
+// Scheduling events (D6 — Tier-1 scheduling completeness rule).
+// Every state transition emits an event (C3 / invariant #2 rule).
+// ---------------------------------------------------------------------------
+
+/**
+ * Emitted when a durable agent schedule is registered via `bureau.schedule()`
+ * or the `scheduleSelf` tool.
+ */
+export class AgentScheduledEvent extends Event {
+  static readonly type = 'schedule.created' as const;
+  readonly agentName: string;
+  readonly scheduleId: string;
+  readonly spec: { cron?: string; every?: string | number };
+  readonly sessionId?: string;
+  constructor(data: {
+    agentName: string;
+    scheduleId: string;
+    spec: { cron?: string; every?: string | number };
+    sessionId?: string;
+  }) {
+    super(AgentScheduledEvent.type);
+    this.agentName = data.agentName;
+    this.scheduleId = data.scheduleId;
+    this.spec = data.spec;
+    this.sessionId = data.sessionId;
+  }
+}
+
+/**
+ * Emitted when a running agent calls `scheduleWakeup({in, note})` to park the
+ * current durable run and resume after a delay.
+ */
+export class WakeupScheduledEvent extends Event {
+  static readonly type = 'schedule.wakeup' as const;
+  readonly duration: number | string;
+  readonly note?: string;
+  constructor(duration: number | string, note?: string) {
+    super(WakeupScheduledEvent.type);
+    this.duration = duration;
+    this.note = note;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Event map: maps event type string to the Event subclass instance
 // ---------------------------------------------------------------------------
 
@@ -699,6 +743,9 @@ export interface OperativeEventMap extends EventMap {
   [SessionSignalEvent.type]: SessionSignalEvent;
   [SessionUpdateEvent.type]: SessionUpdateEvent;
   [SessionQueryEvent.type]: SessionQueryEvent;
+  // Scheduling events (D6 completeness rule)
+  [AgentScheduledEvent.type]: AgentScheduledEvent;
+  [WakeupScheduledEvent.type]: WakeupScheduledEvent;
 }
 
 export type OperativeEventType = keyof OperativeEventMap;

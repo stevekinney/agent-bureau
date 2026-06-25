@@ -197,6 +197,33 @@ export {
   SessionSleepEvent,
   SessionUpdateEvent,
 } from './events';
+// D6 — scheduling events
+export type {
+  CreateScheduleSelfToolOptions,
+  ScheduleSelfFn,
+  ScheduleSelfInput,
+  ScheduleSelfResult,
+  ScheduleSelfTool,
+} from './create-schedule-self-tool';
+export { createScheduleSelfTool } from './create-schedule-self-tool';
+export type {
+  CreateScheduleWakeupToolOptions,
+  ScheduleWakeupContext,
+  ScheduleWakeupInput,
+  ScheduleWakeupResult,
+  ScheduleWakeupTool,
+} from './create-schedule-wakeup-tool';
+export { createScheduleWakeupTool } from './create-schedule-wakeup-tool';
+export type {
+  AgentScheduleHandle,
+  AgentScheduleOptions,
+  AgentScheduler,
+  CreateAgentScheduleOptions,
+  ScheduledAgentRunInput,
+  SchedulingEngine,
+} from './durable/schedule-agent';
+export { createAgentSchedule, createAgentScheduler } from './durable/schedule-agent';
+export { AgentScheduledEvent, WakeupScheduledEvent } from './events';
 export { composeGenerate, createFallbackGenerate } from './generate-middleware';
 export type {
   CodeSafetyValidatorOptions,
