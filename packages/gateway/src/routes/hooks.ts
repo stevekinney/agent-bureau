@@ -36,49 +36,50 @@ export function createHooksRoutes(bureau: Bureau) {
     }
 
     // ── Idempotency ────────────────────────────────────────────────────
-    // Only check for duplicates here — we defer the add until after validation
-    // so that a corrected retry with the same key is not spuriously rejected.
+    // Reserve the key synchronously before the first await so that concurrent
+    // requests with the same key cannot both pass the check before either adds
+    // it (TOCTOU race). The key is released in the catch block on any failure,
+    // so a corrected retry with the same key is never spuriously rejected.
     const idempotencyKey = context.req.header('Idempotency-Key');
-    if (idempotencyKey && idempotencyKeys.has(idempotencyKey)) {
-      throw new HTTPException(409, {
-        message: `Duplicate idempotency key: ${idempotencyKey}`,
-      });
-    }
-
-    // ── Request body ───────────────────────────────────────────────────
-    let body: Record<string, unknown>;
-    try {
-      body = await context.req.json<Record<string, unknown>>();
-    } catch {
-      throw new HTTPException(400, { message: 'Invalid JSON body' });
-    }
-
-    const message = body['message'];
-    if (!message || typeof message !== 'string') {
-      throw new HTTPException(400, { message: 'Request body must include a "message" string' });
-    }
-
-    const sessionId = (context.req.query('session') ?? body['sessionId']) as string | undefined;
-
-    const request: CreateRunRequest = {
-      message,
-      agentName: agentName.trim(),
-      ...(sessionId ? { sessionId } : {}),
-      ...(typeof body['systemPrompt'] === 'string' ? { systemPrompt: body['systemPrompt'] } : {}),
-      ...(typeof body['maximumSteps'] === 'number' ? { maximumSteps: body['maximumSteps'] } : {}),
-    };
-
-    // Persist the idempotency key only after the request is fully validated.
-    // This ensures a corrected retry is not blocked by a prior failed attempt.
     if (idempotencyKey) {
+      if (idempotencyKeys.has(idempotencyKey)) {
+        throw new HTTPException(409, {
+          message: `Duplicate idempotency key: ${idempotencyKey}`,
+        });
+      }
       idempotencyKeys.add(idempotencyKey);
     }
 
     try {
+      // ── Request body ─────────────────────────────────────────────────
+      let body: Record<string, unknown>;
+      try {
+        body = await context.req.json<Record<string, unknown>>();
+      } catch {
+        throw new HTTPException(400, { message: 'Invalid JSON body' });
+      }
+
+      const message = body['message'];
+      if (!message || typeof message !== 'string') {
+        throw new HTTPException(400, { message: 'Request body must include a "message" string' });
+      }
+
+      const sessionId = (context.req.query('session') ?? body['sessionId']) as string | undefined;
+
+      const request: CreateRunRequest = {
+        message,
+        agentName: agentName.trim(),
+        ...(sessionId ? { sessionId } : {}),
+        ...(typeof body['systemPrompt'] === 'string' ? { systemPrompt: body['systemPrompt'] } : {}),
+        ...(typeof body['maximumSteps'] === 'number' ? { maximumSteps: body['maximumSteps'] } : {}),
+      };
+
       const summary = await bureau.createRun(request);
       return context.json(summary, 202);
     } catch (error) {
-      // Clean up the idempotency key on failure so the caller can retry.
+      // Release the idempotency key on any failure so the caller can retry with
+      // the same key after correcting the request (invalid body, bad message,
+      // bureau errors, etc.).
       if (idempotencyKey) {
         idempotencyKeys.delete(idempotencyKey);
       }
