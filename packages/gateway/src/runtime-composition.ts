@@ -9,19 +9,6 @@ import {
   type ToolCallInput,
 } from 'armorer';
 import { Conversation } from 'conversationalist';
-import {
-  createAnthropicGenerate,
-  createAnthropicGenerateStream,
-  createComplexityStrategy,
-  createCostAwareStrategy,
-  createFalloverGenerate,
-  createGeminiGenerate,
-  createGeminiGenerateStream,
-  createOpenAIGenerate,
-  createOpenAIGenerateStream,
-  createRoutingGenerate,
-  createStepBasedStrategy,
-} from 'herald';
 import type { ForwardableSource, HookReplayPolicy } from 'lifecycle';
 import { CompletableEventTarget, forwardEvents, TypedEventTarget } from 'lifecycle';
 import type { CreateMemoryOptions, Memory } from 'memory';
@@ -44,6 +31,10 @@ import {
   withCache,
   withEnhancedStreaming,
 } from 'operative';
+import {
+  createAnthropicProvider as createAnthropicGenerate,
+  createAnthropicProviderStream as createAnthropicGenerateStream,
+} from 'operative/anthropic';
 import type {
   AnyRunEngine,
   CheckpointStore,
@@ -58,6 +49,21 @@ import {
   SCHEDULER_ORIGIN_TAG,
   SCHEDULER_RUN_ID_PREFIX,
 } from 'operative/durable';
+import {
+  createGeminiProvider as createGeminiGenerate,
+  createGeminiProviderStream as createGeminiGenerateStream,
+} from 'operative/gemini';
+import {
+  createOpenAIProvider as createOpenAIGenerate,
+  createOpenAIProviderStream as createOpenAIGenerateStream,
+} from 'operative/openai';
+import {
+  createComplexityStrategy,
+  createCostAwareStrategy,
+  createFalloverGenerate,
+  createRoutingGenerate,
+  createStepBasedStrategy,
+} from 'operative/providers';
 import type { SkillSession } from 'skills';
 import { createSkillSession, escapeXml } from 'skills';
 import { z } from 'zod';

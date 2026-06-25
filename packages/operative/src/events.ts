@@ -410,6 +410,247 @@ export class ContextBudgetWarningEvent extends Event {
 }
 
 // ---------------------------------------------------------------------------
+// Curated tool.* events (C3 — bubbled from armorer's toolbox emitter,
+// re-wrapped and stamped with {agentName, runId, step}).
+//
+// These are the CURATED set exposed on the run stream. The raw firehose
+// (stream/log/chunk, ~20 events) stays available by subscribing to the
+// toolbox directly. Enrichment happens at the operative boundary because
+// armorer is correctly agent-blind — the metadata is what makes bubbled
+// events usable in multi-agent topologies.
+// ---------------------------------------------------------------------------
+
+/** Stamp carried by every curated tool.* event on the run stream. */
+export interface ToolEventStamp {
+  readonly agentName: string;
+  readonly runId: string;
+  readonly step: number;
+}
+
+export class ToolStartedBubbleEvent extends Event {
+  static readonly type = 'tool.started' as const;
+  readonly agentName: string;
+  readonly runId: string;
+  readonly step: number;
+  readonly toolName: string;
+  readonly toolCallId: string;
+  readonly params: unknown;
+  readonly startedAt: number;
+  constructor(
+    stamp: ToolEventStamp,
+    detail: { toolName: string; toolCallId: string; params: unknown; startedAt: number },
+  ) {
+    super(ToolStartedBubbleEvent.type);
+    this.agentName = stamp.agentName;
+    this.runId = stamp.runId;
+    this.step = stamp.step;
+    this.toolName = detail.toolName;
+    this.toolCallId = detail.toolCallId;
+    this.params = detail.params;
+    this.startedAt = detail.startedAt;
+  }
+}
+
+export class ToolProgressBubbleEvent extends Event {
+  static readonly type = 'tool.progress' as const;
+  readonly agentName: string;
+  readonly runId: string;
+  readonly step: number;
+  readonly toolName: string;
+  readonly toolCallId: string;
+  readonly percent?: number;
+  readonly message?: string;
+  constructor(
+    stamp: ToolEventStamp,
+    detail: { toolName: string; toolCallId: string; percent?: number; message?: string },
+  ) {
+    super(ToolProgressBubbleEvent.type);
+    this.agentName = stamp.agentName;
+    this.runId = stamp.runId;
+    this.step = stamp.step;
+    this.toolName = detail.toolName;
+    this.toolCallId = detail.toolCallId;
+    this.percent = detail.percent;
+    this.message = detail.message;
+  }
+}
+
+export class ToolSettledBubbleEvent extends Event {
+  static readonly type = 'tool.settled' as const;
+  readonly agentName: string;
+  readonly runId: string;
+  readonly step: number;
+  readonly toolName: string;
+  readonly toolCallId: string;
+  readonly status: 'success' | 'error' | 'denied' | 'cancelled' | 'paused';
+  readonly durationMs?: number;
+  readonly result?: unknown;
+  readonly error?: unknown;
+  constructor(
+    stamp: ToolEventStamp,
+    detail: {
+      toolName: string;
+      toolCallId: string;
+      status: 'success' | 'error' | 'denied' | 'cancelled' | 'paused';
+      durationMs?: number;
+      result?: unknown;
+      error?: unknown;
+    },
+  ) {
+    super(ToolSettledBubbleEvent.type);
+    this.agentName = stamp.agentName;
+    this.runId = stamp.runId;
+    this.step = stamp.step;
+    this.toolName = detail.toolName;
+    this.toolCallId = detail.toolCallId;
+    this.status = detail.status;
+    this.durationMs = detail.durationMs;
+    this.result = detail.result;
+    this.error = detail.error;
+  }
+}
+
+export class ToolErrorBubbleEvent extends Event {
+  static readonly type = 'tool.error' as const;
+  readonly agentName: string;
+  readonly runId: string;
+  readonly step: number;
+  readonly toolName: string;
+  readonly toolCallId: string;
+  readonly error: unknown;
+  constructor(
+    stamp: ToolEventStamp,
+    detail: { toolName: string; toolCallId: string; error: unknown },
+  ) {
+    super(ToolErrorBubbleEvent.type);
+    this.agentName = stamp.agentName;
+    this.runId = stamp.runId;
+    this.step = stamp.step;
+    this.toolName = detail.toolName;
+    this.toolCallId = detail.toolCallId;
+    this.error = detail.error;
+  }
+}
+
+export class ToolPolicyDeniedBubbleEvent extends Event {
+  static readonly type = 'tool.policy-denied' as const;
+  readonly agentName: string;
+  readonly runId: string;
+  readonly step: number;
+  readonly toolName: string;
+  readonly toolCallId: string;
+  readonly reason?: string;
+  constructor(
+    stamp: ToolEventStamp,
+    detail: { toolName: string; toolCallId: string; reason?: string },
+  ) {
+    super(ToolPolicyDeniedBubbleEvent.type);
+    this.agentName = stamp.agentName;
+    this.runId = stamp.runId;
+    this.step = stamp.step;
+    this.toolName = detail.toolName;
+    this.toolCallId = detail.toolCallId;
+    this.reason = detail.reason;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Session verb events (C3 completeness rule — every new state transition
+// emits an event). Covers: recover / cancel / fork / sleep / signal / update / query.
+// Multi-agent transitions (child-workflow-started, handoff-occurred,
+// human-wait-parked) land in Phase F under the same rule.
+// ---------------------------------------------------------------------------
+
+export class SessionRecoverEvent extends Event {
+  static readonly type = 'session.recover' as const;
+  readonly sessionId: string;
+  readonly runId: string | null;
+  constructor(sessionId: string, runId: string | null) {
+    super(SessionRecoverEvent.type);
+    this.sessionId = sessionId;
+    this.runId = runId;
+  }
+}
+
+export class SessionCancelEvent extends Event {
+  static readonly type = 'session.cancel' as const;
+  readonly sessionId: string;
+  readonly runId: string | null;
+  constructor(sessionId: string, runId: string | null) {
+    super(SessionCancelEvent.type);
+    this.sessionId = sessionId;
+    this.runId = runId;
+  }
+}
+
+export class SessionForkEvent extends Event {
+  static readonly type = 'session.fork' as const;
+  readonly sourceSessionId: string;
+  readonly forkedSessionId: string;
+  readonly throughRun?: number;
+  constructor(sourceSessionId: string, forkedSessionId: string, throughRun?: number) {
+    super(SessionForkEvent.type);
+    this.sourceSessionId = sourceSessionId;
+    this.forkedSessionId = forkedSessionId;
+    this.throughRun = throughRun;
+  }
+}
+
+export class SessionSleepEvent extends Event {
+  static readonly type = 'session.sleep' as const;
+  readonly sessionId: string;
+  readonly durationMs: number;
+  constructor(sessionId: string, durationMs: number) {
+    super(SessionSleepEvent.type);
+    this.sessionId = sessionId;
+    this.durationMs = durationMs;
+  }
+}
+
+export class SessionSignalEvent extends Event {
+  static readonly type = 'session.signal' as const;
+  readonly sessionId: string;
+  readonly runId: string;
+  readonly signalName: string;
+  readonly payload: unknown;
+  constructor(sessionId: string, runId: string, signalName: string, payload: unknown) {
+    super(SessionSignalEvent.type);
+    this.sessionId = sessionId;
+    this.runId = runId;
+    this.signalName = signalName;
+    this.payload = payload;
+  }
+}
+
+export class SessionUpdateEvent extends Event {
+  static readonly type = 'session.update' as const;
+  readonly sessionId: string;
+  readonly runId: string;
+  readonly updateName: string;
+  readonly payload: unknown;
+  constructor(sessionId: string, runId: string, updateName: string, payload: unknown) {
+    super(SessionUpdateEvent.type);
+    this.sessionId = sessionId;
+    this.runId = runId;
+    this.updateName = updateName;
+    this.payload = payload;
+  }
+}
+
+export class SessionQueryEvent extends Event {
+  static readonly type = 'session.query' as const;
+  readonly sessionId: string;
+  readonly queryName: string;
+  readonly input: unknown;
+  constructor(sessionId: string, queryName: string, input: unknown) {
+    super(SessionQueryEvent.type);
+    this.sessionId = sessionId;
+    this.queryName = queryName;
+    this.input = input;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Event map: maps event type string to the Event subclass instance
 // ---------------------------------------------------------------------------
 
@@ -444,6 +685,20 @@ export interface OperativeEventMap extends EventMap {
   [SessionCreatedEvent.type]: SessionCreatedEvent;
   [SessionDeletedEvent.type]: SessionDeletedEvent;
   [ContextBudgetWarningEvent.type]: ContextBudgetWarningEvent;
+  // Curated tool.* bubbled events (C3)
+  [ToolStartedBubbleEvent.type]: ToolStartedBubbleEvent;
+  [ToolProgressBubbleEvent.type]: ToolProgressBubbleEvent;
+  [ToolSettledBubbleEvent.type]: ToolSettledBubbleEvent;
+  [ToolErrorBubbleEvent.type]: ToolErrorBubbleEvent;
+  [ToolPolicyDeniedBubbleEvent.type]: ToolPolicyDeniedBubbleEvent;
+  // Session verb events (C3 completeness rule)
+  [SessionRecoverEvent.type]: SessionRecoverEvent;
+  [SessionCancelEvent.type]: SessionCancelEvent;
+  [SessionForkEvent.type]: SessionForkEvent;
+  [SessionSleepEvent.type]: SessionSleepEvent;
+  [SessionSignalEvent.type]: SessionSignalEvent;
+  [SessionUpdateEvent.type]: SessionUpdateEvent;
+  [SessionQueryEvent.type]: SessionQueryEvent;
 }
 
 export type OperativeEventType = keyof OperativeEventMap;

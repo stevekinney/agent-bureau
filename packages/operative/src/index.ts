@@ -178,6 +178,25 @@ export {
   UsageAccumulatedEvent,
 } from './events';
 export { ContextBudgetWarningEvent } from './events';
+// C3 — curated tool.* bubble events
+export type { ToolEventStamp } from './events';
+export {
+  ToolErrorBubbleEvent,
+  ToolPolicyDeniedBubbleEvent,
+  ToolProgressBubbleEvent,
+  ToolSettledBubbleEvent,
+  ToolStartedBubbleEvent,
+} from './events';
+// C3 — session verb events
+export {
+  SessionCancelEvent,
+  SessionForkEvent,
+  SessionQueryEvent,
+  SessionRecoverEvent,
+  SessionSignalEvent,
+  SessionSleepEvent,
+  SessionUpdateEvent,
+} from './events';
 export { composeGenerate, createFallbackGenerate } from './generate-middleware';
 export type {
   CodeSafetyValidatorOptions,

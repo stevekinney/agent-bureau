@@ -1,3 +1,4 @@
+import type { ToolboxEventMap } from 'armorer';
 import { Conversation, isConversation } from 'conversationalist';
 import type { ForwardableSource, ObservableLike, Observer, Subscription } from 'lifecycle';
 import { CompletableEventTarget, forwardEvents } from 'lifecycle';
@@ -5,6 +6,14 @@ import { CompletableEventTarget, forwardEvents } from 'lifecycle';
 import type { DurableActiveRunContext } from './durable/active-run-adapter';
 import { createDurableActiveRun } from './durable/active-run-adapter';
 import type { CombinedOperativeEventMap, CombinedOperativeEventType } from './events';
+import {
+  StepStartedEvent,
+  ToolErrorBubbleEvent,
+  ToolPolicyDeniedBubbleEvent,
+  ToolProgressBubbleEvent,
+  ToolSettledBubbleEvent,
+  ToolStartedBubbleEvent,
+} from './events';
 import { executeLoop } from './loop';
 import type { RunOptions, RunResult } from './types';
 
@@ -110,6 +119,123 @@ export function createActiveRun(options: RunOptions, durable?: DurableRunRouting
     'conversation',
   );
   cleanups.push(() => conversationForward.stop());
+
+  // C3 — curated tool.* bubble events stamped with {agentName, runId, step}.
+  // We track the current step by listening to StepStartedEvent (which fires at
+  // the start of each step). The agentName and runId come from RunOptions
+  // (optional — supplied by bureau.agent / createAgent / SessionHandle).
+  {
+    const agentName = options.agentName ?? '';
+    const runId = options.runId ?? '';
+    let currentStep = 0;
+
+    // Track step number from StepStartedEvents
+    const stepListener = (e: StepStartedEvent) => {
+      currentStep = e.step;
+    };
+    emitter.addEventListener(StepStartedEvent.type, stepListener);
+    cleanups.push(() => emitter.removeEventListener(StepStartedEvent.type, stepListener));
+
+    // Wire the curated toolbox events onto the run emitter.
+    // The toolbox addEventListener returns a cleanup function and also accepts
+    // an AbortSignal for automatic cleanup. We guard against mock/custom toolboxes
+    // that omit addEventListener (e.g. minimal stubs used in tests) — if the method
+    // is absent the bubbling simply does not happen; no exception.
+    const toolbox = options.toolbox as unknown as {
+      addEventListener?: <K extends keyof ToolboxEventMap>(
+        type: K,
+        listener: (e: ToolboxEventMap[K]) => void,
+        options?: AddEventListenerOptions,
+      ) => () => void;
+    };
+
+    // Map 'execute-start' → tool.started (reliably emitted for all tools, regardless of telemetry flag)
+    const onExecuteStart = (e: ToolboxEventMap['execute-start']) => {
+      emitter.dispatchEvent(
+        new ToolStartedBubbleEvent(
+          { agentName, runId, step: currentStep },
+          {
+            toolName: e.call.name,
+            toolCallId: e.call.id,
+            params: e.params,
+            startedAt: Date.now(),
+          },
+        ),
+      );
+    };
+
+    // Map 'settled' → tool.settled (fired after every tool call regardless of outcome)
+    const onSettled = (e: ToolboxEventMap['settled']) => {
+      const hasError = e.error !== undefined;
+      const status: 'success' | 'error' = hasError ? 'error' : 'success';
+      emitter.dispatchEvent(
+        new ToolSettledBubbleEvent(
+          { agentName, runId, step: currentStep },
+          {
+            toolName: e.call.name,
+            toolCallId: e.call.id,
+            status,
+            result: e.result,
+            error: e.error,
+          },
+        ),
+      );
+      // Also emit the dedicated tool.error event for failed tools
+      if (hasError) {
+        emitter.dispatchEvent(
+          new ToolErrorBubbleEvent(
+            { agentName, runId, step: currentStep },
+            {
+              toolName: e.call.name,
+              toolCallId: e.call.id,
+              error: e.error,
+            },
+          ),
+        );
+      }
+    };
+
+    const onToolProgress = (e: ToolboxEventMap['progress']) => {
+      emitter.dispatchEvent(
+        new ToolProgressBubbleEvent(
+          { agentName, runId, step: currentStep },
+          {
+            toolName: e.call.name,
+            toolCallId: e.call.id,
+            percent: e.percent,
+            message: e.message,
+          },
+        ),
+      );
+    };
+
+    const onPolicyDenied = (e: ToolboxEventMap['policy-denied']) => {
+      emitter.dispatchEvent(
+        new ToolPolicyDeniedBubbleEvent(
+          { agentName, runId, step: currentStep },
+          {
+            toolName: e.call.name,
+            toolCallId: e.call.id,
+            reason: e.reason,
+          },
+        ),
+      );
+    };
+
+    // Each call returns a cleanup function; guard against stubs without addEventListener.
+    if (toolbox.addEventListener) {
+      const addListener = toolbox.addEventListener.bind(toolbox);
+      const toolboxCleanups = [
+        addListener('execute-start', onExecuteStart, { signal: abortController.signal }),
+        addListener('settled', onSettled, { signal: abortController.signal }),
+        addListener('progress', onToolProgress, { signal: abortController.signal }),
+        addListener('policy-denied', onPolicyDenied, { signal: abortController.signal }),
+      ];
+      cleanups.push(() => {
+        for (const cleanup of toolboxCleanups) cleanup?.();
+      });
+    }
+  }
 
   const result = Promise.resolve()
     .then(() => executeLoop(loopOptions, emitter))
