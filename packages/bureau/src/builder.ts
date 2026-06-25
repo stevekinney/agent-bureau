@@ -403,10 +403,17 @@ function makeBureauHandle<
       // (the base type). The cast is safe — an empty toolbox is a valid Toolbox.
       const toolboxForRun: Toolbox = effectiveToolbox ?? (createToolbox([]) as unknown as Toolbox);
 
+      // Stamp agentName and runId so curated tool.* bubble events carry
+      // {agentName, runId, step} metadata on builder-driven runs, matching the
+      // behaviour of createBureau().createRun() (create-bureau.ts:488-489).
+      const runId = `run-${crypto.randomUUID()}`;
+
       const runOptions: RunOptions = {
         generate: effectiveGenerate,
         toolbox: toolboxForRun,
         conversation,
+        agentName: spec.name,
+        runId,
         ...(effectiveHooks ? { prepareStep: effectiveHooks } : {}),
       };
 

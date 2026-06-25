@@ -1136,10 +1136,25 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       input: definition.input,
       ...(definition.sessionId ? { sessionId: definition.sessionId } : {}),
     };
+    // Normalize the caller-provided spec string into the discriminated ScheduleSpec
+    // form before calling engine.schedule(). Weft's engine treats a bare string
+    // as a cron expression (routing through normalizeCronSpec → parseCronExpression),
+    // so an interval spec like '6h' or '30s' would throw "Cron expression must have
+    // 5 fields or 6 fields" when forwarded raw. Cron expressions are always 5 or 6
+    // whitespace-delimited fields; any other count is an interval duration string.
+    // This mirrors parseCronExpression's own field-count gate, keeping bureau and
+    // weft consistent without re-implementing weft's duration parser.
+    const trimmedSpec = definition.spec.trim();
+    const fieldCount = trimmedSpec.split(/\s+/).length;
+    const normalizedSpec =
+      fieldCount === 5 || fieldCount === 6
+        ? ({ cron: trimmedSpec } as const)
+        : ({ every: trimmedSpec } as const);
+
     const handle = await runtime.durable.engine.schedule(
       'agentRun',
       scheduledInput,
-      definition.spec,
+      normalizedSpec,
       {
         overlap: definition.overlap === 'allow' ? 'allow' : 'skip',
       },

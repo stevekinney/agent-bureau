@@ -536,6 +536,88 @@ describe('createBureau', () => {
     }
   });
 
+  it('stamps tool.started events with agentName and runId on a RECOVERED run (regression PRRT_kwDORvupsc6MXoT3)', async () => {
+    // REGRESSION: the recovery resolver wired the toolbox-forward but omitted the
+    // C3 stamping block, so tool.* bubble events from a recovered run carried
+    // blank ids ({agentName:'', runId:'', step:0}) instead of the agentName and
+    // runId from the durable input. The fix adds the C3 block to resolveRunServices.
+    const databasePath = join(
+      tmpdir(),
+      `bureau-recovery-c3-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+
+    try {
+      // Bureau A: step 0 commits a tool call, then step 1's generate hangs (crash).
+      let bureauAReachedStep1 = false;
+      const bureauA = await createBureau({
+        generate: async ({ step }) => {
+          if (step === 0) {
+            return { content: 'A step 0', toolCalls: [{ name: 'next', arguments: {} }] };
+          }
+          bureauAReachedStep1 = true;
+          return new Promise<never>(() => {});
+        },
+        toolbox: createToolbox([createNextTool()]) as unknown as Toolbox,
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+        stopWhen: stopWhen.noToolCalls(),
+      });
+
+      const run = await bureauA.createRun({
+        message: 'C3 recovery stamp test',
+        agentName: 'recovery-agent',
+      });
+      await pollUntil(() => bureauAReachedStep1);
+      bureauA.dispose();
+
+      // Bureau B: resumes at step 1, which calls the `next` tool. After recovery
+      // the resolver now wires the C3 block so the tool.started event emitted
+      // during resume carries {agentName:'recovery-agent', runId}.
+      const capturedStamps: Array<{ agentName: string; runId: string }> = [];
+      const bureauB = await createBureau({
+        generate: async ({ step }) => {
+          if (step === 1) {
+            return { content: 'B resume', toolCalls: [{ name: 'next', arguments: {} }] };
+          }
+          return { content: `B step ${step}`, toolCalls: [] };
+        },
+        toolbox: createToolbox([createNextTool()]) as unknown as Toolbox,
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+        stopWhen: stopWhen.noToolCalls(),
+      });
+
+      // Subscribe to tool.started on the reattached ActiveRun BEFORE recovery
+      // events drain. bureauB's createBureau calls recoverDurableRuns synchronously
+      // before returning, so store.getRun may already resolve.
+      const runState = bureauB.store.getRun(run.id);
+      runState?.activeRun.addEventListener('tool.started', (event) => {
+        capturedStamps.push({ agentName: event.agentName, runId: event.runId });
+      });
+
+      try {
+        await pollUntil(async () => {
+          const current = await bureauB.getSession(run.sessionId);
+          return current?.metadata['lastRunStatus'] !== 'running';
+        });
+
+        // At least one tool.started event must have fired (resumed step 1 calls `next`).
+        expect(capturedStamps.length).toBeGreaterThan(0);
+        // Every stamped event must carry the durable input's agentName and the runId.
+        for (const stamp of capturedStamps) {
+          expect(stamp.agentName).toBe('recovery-agent');
+          expect(stamp.runId).toBe(run.id);
+        }
+      } finally {
+        bureauB.dispose();
+      }
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
   it('reconciles an in-flight session to error when recovery cannot rebuild its deps', async () => {
     // The resolver-unavailable path: bureau A crashes mid-run, then bureau B
     // boots over the same SQLite file WITHOUT a generate function. Its recovery
@@ -1506,6 +1588,73 @@ describe('createBureau schedule management sentinel (regression PRRT_kwDORvupsc6
       pauseSpy.mockRestore();
       resumeSpy.mockRestore();
       cancelSpy.mockRestore();
+    }
+  });
+});
+
+describe('createBureau createSchedule spec normalization (regression PRRT_kwDORvupsc6MXbzr)', () => {
+  // REGRESSION: createSchedule forwarded the raw `spec` string directly to
+  // engine.schedule(). Weft treats a bare string as a cron expression
+  // (normalizeCronSpec → parseCronExpression), so a duration spec like '6h'
+  // or '30s' threw "Cron expression must have 5 fields or 6 fields with
+  // seconds" — interval scheduling was completely unreachable through the
+  // string API.
+  //
+  // The fix detects whether the spec is a 5- or 6-field cron expression and
+  // routes it to { cron } or { every } accordingly, then passes the
+  // discriminated ScheduleSpec object to engine.schedule(). These tests
+  // verify against a REAL engine so weft's validation confirms the normalized
+  // form is actually accepted — a spy-only test would pass even if we routed
+  // to a form weft then rejects.
+
+  it('createSchedule accepts a duration spec string and produces a schedule with intervalMs', async () => {
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+
+    try {
+      const summary = await bureau.createSchedule({
+        agentName: 'worker',
+        input: 'do work',
+        spec: '30s',
+      });
+
+      // The real engine accepted the spec; the returned summary must carry
+      // intervalMs (not cronExpression) confirming it was routed as an
+      // interval schedule, not rejected as an invalid cron.
+      expect(summary).toBeDefined();
+      expect(summary?.intervalMs).toBeGreaterThan(0);
+      expect(summary?.cronExpression).toBeUndefined();
+    } finally {
+      bureau.dispose();
+    }
+  });
+
+  it('createSchedule accepts a cron spec string and produces a schedule with cronExpression', async () => {
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+
+    try {
+      const summary = await bureau.createSchedule({
+        agentName: 'reporter',
+        input: 'generate report',
+        spec: '0 9 * * *',
+      });
+
+      // The real engine accepted the spec; cronExpression must be set and
+      // intervalMs must be absent, confirming cron routing.
+      expect(summary).toBeDefined();
+      expect(summary?.cronExpression).toBe('0 9 * * *');
+      expect(summary?.intervalMs).toBeUndefined();
+    } finally {
+      bureau.dispose();
     }
   });
 });

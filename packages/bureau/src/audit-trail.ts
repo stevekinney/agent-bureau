@@ -87,13 +87,23 @@ export interface AuditTrail {
 const PREFIX = 'audit:v1:';
 
 /** Encode a key so chronological sort is lexicographic. */
-function encodeKey(timestampMs: number, sequence: number): string {
+function encodeKey(timestampMs: number, sequence: number, runId: string): string {
   // 16-digit zero-padded timestamp covers dates through year 9999.
-  // Append the sequence number so concurrent events within the same millisecond
-  // are disambiguated and the full key stays unique.
+  // Append the sequence number (within-millisecond tiebreak) and the runId
+  // (cross-process-lifetime tiebreak) so the full key is globally unique.
+  //
+  // Why runId is required: `sequence` is a per-store-lifetime counter that resets
+  // to 0 on every process restart. A clock rewind (NTP step-back, VM snapshot
+  // restore, manual clock set) after restart means a new event can share both
+  // `timestamp` and `sequence` with a previously-persisted record, silently
+  // overwriting it and violating the append-only invariant. Including `runId` —
+  // which is derived from sessionId + run-sequence and thus unique across
+  // restarts — makes collision impossible: two keys can match only if they share
+  // the same runId, which only occurs for the *same* run, whose new events land
+  // at strictly later timestamps due to Weft's replay ordering.
   const ts = timestampMs.toString().padStart(16, '0');
   const seq = sequence.toString().padStart(12, '0');
-  return `${PREFIX}${ts}:${seq}`;
+  return `${PREFIX}${ts}:${seq}:${runId}`;
 }
 
 // ── Audit trail factory ─────────────────────────────────────────────
@@ -136,7 +146,7 @@ export function createAuditTrail(bureau: Bureau, kv: TextValueStore | undefined)
       detail: serializedDetail,
     };
 
-    const key = encodeKey(action.timestamp, action.sequence);
+    const key = encodeKey(action.timestamp, action.sequence, action.runId);
     // Fire-and-forget: a write failure must never crash the run. The audit
     // trail is best-effort — a gap is surfaced by log, never by a crash.
     kv.set(key, JSON.stringify(record)).catch((error: unknown) => {
