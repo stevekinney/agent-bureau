@@ -10,6 +10,12 @@ import { createScratchpad, type Scratchpad } from '../create-scratchpad';
 import type { OperativeEventMap, OperativeEventType } from '../events';
 import type { AgentDefinition, GenerateFunction, GenerateResponse, StepResult } from '../types';
 
+export type {
+  ChildRunHandle,
+  CreateDurableMultiAgentHarnessOptions,
+  DurableMultiAgentHarness,
+} from './durable-multi-agent-harness';
+export { createDurableMultiAgentHarness } from './durable-multi-agent-harness';
 export { createTestStore } from './store';
 
 /**
