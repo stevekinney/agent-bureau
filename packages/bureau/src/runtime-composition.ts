@@ -6,6 +6,7 @@ import {
   createTool,
   createToolbox,
   type Toolbox,
+  type ToolboxEventMap,
   type ToolCallInput,
 } from 'armorer';
 import { Conversation } from 'conversationalist';
@@ -28,6 +29,12 @@ import {
   createIdentityHook,
   createScheduler,
   createSessionStore,
+  StepStartedEvent,
+  ToolErrorBubbleEvent,
+  ToolPolicyDeniedBubbleEvent,
+  ToolProgressBubbleEvent,
+  ToolSettledBubbleEvent,
+  ToolStartedBubbleEvent,
   withCache,
   withEnhancedStreaming,
 } from 'operative';
@@ -1174,9 +1181,127 @@ export async function createRuntimeComposition(
       recoveryEmitter,
       'toolbox',
     );
+
+    // C3 — curated tool.* bubble events stamped with {agentName, runId, step}.
+    // Mirrors the same block in createDurableActiveRun so the audit trail and
+    // operative store receive identical tool.* events regardless of whether the
+    // run is freshly started or durably recovered. Without this, recovered runs
+    // emitted blank-id tool.* events (regression PRRT_kwDORvupsc6MXoT3).
+    //
+    // Wire from HERE (not at reattach) — mirrors the toolboxForward rationale:
+    // a recovered run can fire its first step INSIDE recoverAll before the
+    // bureau's reattach loop runs, so we must capture tool events from the
+    // moment the toolbox exists. Cleanup is bundled into stopToolboxForward so
+    // the subscriptions live exactly as long as the toolbox forwarding.
+    const recoveryC3Cleanups: Array<(() => void) | undefined> = [];
+    {
+      const runId = info.workflowId;
+      const agentName = info.input.agentName;
+      let currentStep = 0;
+
+      const stepListener = (e: StepStartedEvent) => {
+        currentStep = e.step;
+      };
+      recoveryEmitter.addEventListener(StepStartedEvent.type, stepListener);
+      recoveryC3Cleanups.push(() =>
+        recoveryEmitter.removeEventListener(StepStartedEvent.type, stepListener),
+      );
+
+      const toolbox = services.toolbox as unknown as {
+        addEventListener?: <K extends keyof ToolboxEventMap>(
+          type: K,
+          listener: (e: ToolboxEventMap[K]) => void,
+          options?: AddEventListenerOptions,
+        ) => () => void;
+      };
+
+      const onExecuteStart = (e: ToolboxEventMap['execute-start']) => {
+        recoveryEmitter.dispatchEvent(
+          new ToolStartedBubbleEvent(
+            { agentName, runId, step: currentStep },
+            {
+              toolName: e.call.name,
+              toolCallId: e.call.id,
+              params: e.params,
+              startedAt: Date.now(),
+            },
+          ),
+        );
+      };
+
+      const onSettled = (e: ToolboxEventMap['settled']) => {
+        const hasError = e.error !== undefined;
+        const status: 'success' | 'error' = hasError ? 'error' : 'success';
+        recoveryEmitter.dispatchEvent(
+          new ToolSettledBubbleEvent(
+            { agentName, runId, step: currentStep },
+            {
+              toolName: e.call.name,
+              toolCallId: e.call.id,
+              status,
+              result: e.result,
+              error: e.error,
+            },
+          ),
+        );
+        if (hasError) {
+          recoveryEmitter.dispatchEvent(
+            new ToolErrorBubbleEvent(
+              { agentName, runId, step: currentStep },
+              {
+                toolName: e.call.name,
+                toolCallId: e.call.id,
+                error: e.error,
+              },
+            ),
+          );
+        }
+      };
+
+      const onToolProgress = (e: ToolboxEventMap['progress']) => {
+        recoveryEmitter.dispatchEvent(
+          new ToolProgressBubbleEvent(
+            { agentName, runId, step: currentStep },
+            {
+              toolName: e.call.name,
+              toolCallId: e.call.id,
+              percent: e.percent,
+              message: e.message,
+            },
+          ),
+        );
+      };
+
+      const onPolicyDenied = (e: ToolboxEventMap['policy-denied']) => {
+        recoveryEmitter.dispatchEvent(
+          new ToolPolicyDeniedBubbleEvent(
+            { agentName, runId, step: currentStep },
+            {
+              toolName: e.call.name,
+              toolCallId: e.call.id,
+              reason: e.reason,
+            },
+          ),
+        );
+      };
+
+      if (toolbox.addEventListener) {
+        const addListener = toolbox.addEventListener.bind(toolbox);
+        recoveryC3Cleanups.push(
+          addListener('execute-start', onExecuteStart),
+          addListener('settled', onSettled),
+          addListener('progress', onToolProgress),
+          addListener('policy-denied', onPolicyDenied),
+        );
+      }
+    }
+
     pendingRecoveryEmitters.set(info.workflowId, {
       emitter: recoveryEmitter,
-      stopToolboxForward: () => toolboxForward.stop(),
+      stopToolboxForward: () => {
+        toolboxForward.stop();
+        for (const cleanup of recoveryC3Cleanups) cleanup?.();
+      },
     });
     return { status: 'available', services: { ...services, emitter: recoveryEmitter } };
   }
