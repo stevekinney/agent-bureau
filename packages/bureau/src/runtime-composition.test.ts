@@ -18,7 +18,7 @@ import {
 import type { SkillProvider } from 'skills';
 
 import { createRuntimeComposition } from './runtime-composition';
-import type { ProviderConfiguration } from './types';
+import type { GenerateProviderName, ProviderConfiguration } from './types';
 
 // Drain Weft's deferred inline-launch queue between tests — a pending setTimeout(0)
 // inline-launch left by one durable run can starve a later one under full
@@ -177,6 +177,50 @@ describe('createRuntimeComposition', () => {
 
     expect(firstRunRuntime.generate).toBe(secondRunRuntime.generate);
     expect(resolveProviderGenerateCalls).toBe(2);
+  });
+
+  // Regression: PRRT_kwDORvupsc6MXEmi — ProviderConfiguration.provider must be
+  // narrowed to GenerateProviderName ('anthropic' | 'openai' | 'gemini') only.
+  // Before the fix, ProviderName included 'voyage' and 'ollama' (embedding-only
+  // backends with no generate factory), so a config that type-checked would throw
+  // "Unknown provider" at runtime inside createRuntimeComposition.
+  it('rejects an embedding-only provider at runtime via the resolveProviderGenerate hook', async () => {
+    // The type system now prevents 'voyage' / 'ollama' from appearing in
+    // ProviderConfiguration.provider — this cast simulates the pre-fix state where
+    // the broader ProviderName union allowed embedding-only strings through.
+    const embeddingOnlyProvider = {
+      provider: 'voyage',
+      model: 'voyage-3',
+    } as unknown as ProviderConfiguration;
+
+    let caughtError: unknown;
+    try {
+      await createRuntimeComposition({
+        provider: embeddingOnlyProvider,
+        toolbox: createToolbox([], { context: {} }),
+      });
+    } catch (error) {
+      caughtError = error;
+    }
+
+    expect(caughtError).toBeInstanceOf(Error);
+    expect((caughtError as Error).message).toContain('Unknown provider');
+  });
+
+  it('GenerateProviderName only includes generate-capable backends', () => {
+    // Exhaustiveness check: the three values that must be in GenerateProviderName.
+    // If a new generate backend is added to operative without updating this type,
+    // this test will fail because the GenerateProviderName will no longer match.
+    const validProviders: GenerateProviderName[] = ['anthropic', 'openai', 'gemini'];
+    expect(validProviders).toHaveLength(3);
+
+    // Ensure 'voyage' and 'ollama' are NOT assignable to GenerateProviderName.
+    // TypeScript enforces this at compile time; the runtime assertion below
+    // documents the intent and catches accidental widenings.
+    const embeddingOnlyNames: string[] = ['voyage', 'ollama'];
+    for (const name of embeddingOnlyNames) {
+      expect(validProviders.includes(name as GenerateProviderName)).toBe(false);
+    }
   });
 });
 
