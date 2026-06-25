@@ -475,13 +475,23 @@ describe('C4 — createStreamingAccumulator (multi-part accumulation)', () => {
     if (content[2]?.type === 'text') expect(content[2].text).toBe('Third');
   });
 
-  it('throws on malformed JSON in a tool_use block rather than emitting empty input', () => {
+  it('finalizes a zero-argument tool call (no input_json_delta) with input {}', () => {
+    // A no-arg tool streams with no input_json_delta, so inputBuffer stays ''.
+    // That is a legitimate `{}` input, not a corrupt stream — it must NOT throw.
+    const acc = createStreamingAccumulator();
+    acc.openBlock(0, { type: 'tool_use', id: 'call-noarg', name: 'ping', inputBuffer: '' });
+
+    const { toolCalls } = acc.finalize();
+    expect(toolCalls).toEqual([{ id: 'call-noarg', name: 'ping', arguments: {} }]);
+  });
+
+  it('throws on NON-EMPTY malformed JSON in a tool_use block rather than emitting empty input', () => {
     const acc = createStreamingAccumulator();
     acc.openBlock(0, { type: 'tool_use', id: 'call-bad', name: 'pay', inputBuffer: '' });
     acc.getBlock(0)?.appendInputJsonDelta('{invalid json');
 
-    // A corrupt/incomplete stream must not silently become a valid-looking
-    // tool call with empty input — finalize throws, naming the tool.
+    // A corrupt/incomplete (non-empty) stream must not silently become a
+    // valid-looking tool call — finalize throws, naming the tool.
     expect(() => acc.finalize()).toThrow(/Streamed tool input for "pay" is not valid JSON/);
   });
 

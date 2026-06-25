@@ -103,7 +103,10 @@ export function copyMultiModalContent(item: MultiModalContent): MultiModalConten
       type: 'tool_use',
       id: item.id,
       name: item.name,
-      input: item.input,
+      // Deep-copy the JSON payload: copyContent feeds messageToJSON and clone
+      // paths that must return independent values, so a shared object/array
+      // reference would let a mutation of the copy leak into the original.
+      input: structuredClone(item.input),
     };
   }
   if (item.type === 'server_tool_use') {
@@ -111,14 +114,14 @@ export function copyMultiModalContent(item: MultiModalContent): MultiModalConten
       type: 'server_tool_use',
       id: item.id,
       name: item.name,
-      input: item.input,
+      input: structuredClone(item.input),
     };
   }
   if (item.type === 'web_search_tool_result') {
     return {
       type: 'web_search_tool_result',
       tool_use_id: item.tool_use_id,
-      content: item.content,
+      content: structuredClone(item.content),
     };
   }
   return {

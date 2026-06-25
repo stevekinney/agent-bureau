@@ -59,6 +59,45 @@ describe('copyMultiModalContent', () => {
       expect(result).toEqual({ type: 'image' });
     });
   });
+
+  describe('tool blocks deep-copy JSON payloads', () => {
+    it('deep-copies tool_use input so mutating the copy does not affect the original', () => {
+      const input = {
+        type: 'tool_use' as const,
+        id: 'c1',
+        name: 't',
+        input: { nested: { value: 1 }, list: [1, 2] },
+      };
+      const result = copyMultiModalContent(input);
+
+      expect(result).toEqual(input);
+      // The nested payload must be an independent reference.
+      expect((result as typeof input).input).not.toBe(input.input);
+      (result as typeof input).input = { nested: { value: 999 }, list: [9] };
+      expect(input.input).toEqual({ nested: { value: 1 }, list: [1, 2] });
+    });
+
+    it('deep-copies server_tool_use input', () => {
+      const input = {
+        type: 'server_tool_use' as const,
+        id: 's1',
+        name: 'web_search',
+        input: { query: 'x', opts: { deep: true } },
+      };
+      const result = copyMultiModalContent(input);
+      expect((result as typeof input).input).not.toBe(input.input);
+    });
+
+    it('deep-copies web_search_tool_result content', () => {
+      const input = {
+        type: 'web_search_tool_result' as const,
+        tool_use_id: 's1',
+        content: [{ url: 'https://example.com', nested: { a: 1 } }],
+      };
+      const result = copyMultiModalContent(input);
+      expect((result as typeof input).content).not.toBe(input.content);
+    });
+  });
 });
 
 describe('copyContent', () => {

@@ -276,22 +276,29 @@ export interface StreamingMessageAccumulator {
    * Finalize the accumulated blocks into a {@link StreamFinalizeResult}: ordered
    * assistant `content` plus the client `toolCalls` to append as `tool-call`
    * messages. JSON input buffers for tool_use / server_tool_use blocks are parsed
-   * here. A malformed or non-JSON-value buffer throws, because a tool call with
-   * silently-dropped input is indistinguishable from one the model deliberately
-   * invoked with empty input — a dangerous ambiguity for a protocol layer to
-   * paper over. Call this when the `message_stop` event arrives.
+   * here. An empty buffer is a legitimate no-argument tool call and finalizes to
+   * `{}`; a NON-empty but malformed buffer throws, because a truncated tool call
+   * silently degrading to empty input is a dangerous ambiguity for a protocol
+   * layer to paper over. Call this when the `message_stop` event arrives.
    */
   finalize(): StreamFinalizeResult;
 }
 
 /**
- * Parses a streamed tool-input buffer into a {@link JSONValue}, throwing if the
- * buffer is not valid JSON. An empty buffer (no `input_json_delta` ever arrived)
- * is itself a sign of a truncated stream and throws here rather than degrading
- * to an empty-input tool call. The block name is included to make a corrupt
+ * Parses a streamed tool-input buffer into a {@link JSONValue}.
+ *
+ * An empty buffer means no `input_json_delta` arrived, which is exactly how a
+ * zero-argument tool call streams — it finalizes to `{}`. A non-empty buffer
+ * that is not valid JSON throws, because a partial/corrupt buffer must not
+ * silently degrade to empty input. The block name is included to make a corrupt
  * stream diagnosable.
  */
 function parseStreamedToolInput(toolName: string, inputBuffer: string): JSONValue {
+  // A no-argument tool call produces no input_json_delta; treat that as `{}`
+  // rather than throwing on JSON.parse('').
+  if (inputBuffer === '') {
+    return {};
+  }
   try {
     // JSON.parse only ever yields a JSON value, so this cast asserts its
     // documented contract rather than papering over a type-model gap.
