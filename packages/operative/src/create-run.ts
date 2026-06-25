@@ -9,10 +9,12 @@ import { executeLoop } from './loop';
 import type { RunOptions, RunResult } from './types';
 
 /**
- * An active, event-emitting agent loop run.
- *
- * @deprecated Use AgentRun (B1) instead. This type remains temporarily while
- * durable/store/instrumentation/scheduler are migrated to the new surface.
+ * The internal event-emitting agent loop run. This is the low-level engine
+ * that owns the event emitter and the result Promise. External callers
+ * consume the higher-level `AgentRun` wrapper (from `agent-run.ts`), which
+ * adds async-iteration and enforces the non-thenable contract. Internal
+ * modules (durable, store, instrumentation, scheduler) work directly with
+ * `ActiveRun` because they need the full event surface.
  */
 export interface ActiveRun {
   result: Promise<RunResult>;
@@ -54,8 +56,10 @@ export interface ActiveRun {
 /**
  * Creates an event-emitting agent loop run.
  *
- * Internal helper — NOT part of the public API (createRun() was torn out in B2).
- * Used by the scheduler and durable adapter until B1 replaces this with AgentRun.
+ * Internal factory — NOT part of the public API. External callers should use
+ * `createAgent` (which wraps this in an `AgentRun`) or `createSessionHandle`
+ * (which also wraps the result). Scheduler and durable adapter consume this
+ * directly because they need the raw event surface.
  *
  * When `durable` is provided (engine + checkpoint store + runId), the run is
  * driven through the Weft durable engine so it survives a crash and resumes.
@@ -142,8 +146,6 @@ export function createActiveRun(options: RunOptions, durable?: DurableRunRouting
 
 /**
  * Routing for a durable run.
- *
- * @deprecated Will be replaced by the new AgentRun / bureau session model (B1).
  */
 export interface DurableRunRouting extends DurableActiveRunContext {
   /** Stable id for the run; also the durable workflow id (resume key). */

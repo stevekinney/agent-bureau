@@ -116,9 +116,13 @@ export function createAgent(options: CreateAgentOptions): StandaloneAgent {
   const { generate, tools = {}, instructions, ...rest } = options;
 
   // Build a Toolbox from the name-keyed tool map.
-  // The map key is canonical; for now we take the tool values as-is.
-  // Phase B4 will enforce key-wins-over-tool.name at the builder level.
-  const toolEntries = Object.values(tools);
+  // The map key is canonical — override each tool's inner `.name` with the
+  // map key so that the LLM-issued tool call name always matches the key,
+  // regardless of what the tool was originally authored with.
+  const toolEntries = Object.entries(tools).map(([key, tool]) => ({
+    ...tool.configuration,
+    name: key,
+  }));
   const toolbox = createToolbox(toolEntries);
 
   return {

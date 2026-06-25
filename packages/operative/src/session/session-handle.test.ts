@@ -123,19 +123,20 @@ describe('createSessionHandle', () => {
 // ---------------------------------------------------------------------------
 
 describe('session.run()', () => {
-  it('returns an ActiveRun handle immediately (synchronous)', () => {
+  it('returns an AgentRun handle immediately (synchronous)', () => {
     const { handle } = createSessionHandleFixture();
     const run = handle.run('hello');
     expect(run).toBeDefined();
-    expect(typeof run.result).toBe('object'); // Promise
+    expect(typeof run.result).toBe('function'); // AgentRun.result() is a method
     expect(typeof run.abort).toBe('function');
+    expect(typeof run[Symbol.asyncIterator]).toBe('function');
   });
 
   it('appends a RunRef to the session when the run completes', async () => {
     const { handle, store } = createSessionHandleFixture();
 
     const run = handle.run('say something');
-    const result = await run.result;
+    const result = await run.result();
 
     // Give the persistence callback a tick to run.
     await new Promise<void>((resolve) => setTimeout(resolve, 10));
@@ -152,10 +153,10 @@ describe('session.run()', () => {
   it('accumulates multiple runs in sequence', async () => {
     const { handle, store } = createSessionHandleFixture();
 
-    await handle.run('first').result;
+    await handle.run('first').result();
     // Flush persistence callbacks.
     await new Promise<void>((resolve) => setTimeout(resolve, 10));
-    await handle.run('second').result;
+    await handle.run('second').result();
     await new Promise<void>((resolve) => setTimeout(resolve, 10));
 
     const session = await store.load(handle.id);
@@ -168,7 +169,7 @@ describe('session.run()', () => {
   it('updates the session conversation history after each run', async () => {
     const { handle, store } = createSessionHandleFixture();
 
-    await handle.run('hello world').result;
+    await handle.run('hello world').result();
     await new Promise<void>((resolve) => setTimeout(resolve, 10));
 
     const session = await store.load(handle.id);
@@ -187,7 +188,7 @@ describe('session.recover()', () => {
     expect(handle.recover()).toBeNull();
   });
 
-  it('returns the same ActiveRun handle while a run is in progress', async () => {
+  it('returns the same AgentRun handle while a run is in progress', async () => {
     // Use a blocking generate to keep the run in-flight.
     let resolveGenerate: ((r: { content: string; toolCalls: [] }) => void) | undefined;
     const blockingGenerate: GenerateFunction = () =>
@@ -218,14 +219,14 @@ describe('session.recover()', () => {
 
     // Clean up: resolve the blocking generate so the run can finish.
     resolveGenerate?.({ content: 'done', toolCalls: [] });
-    await run.result;
+    await run.result();
   });
 
   it('returns null after the run completes', async () => {
     const { handle } = createSessionHandleFixture();
 
     const run = handle.run('quick run');
-    await run.result;
+    await run.result();
     // Allow the `.finally()` callback to clear currentRun.
     await new Promise<void>((resolve) => setTimeout(resolve, 10));
 
@@ -362,7 +363,7 @@ describe('session.fork()', () => {
       runOptions: createTestRunOptions(),
     });
 
-    await h.run('first run').result;
+    await h.run('first run').result();
     await new Promise<void>((resolve) => setTimeout(resolve, 10));
 
     const forked = await h.fork();
@@ -381,7 +382,7 @@ describe('session.fork()', () => {
       runOptions: createTestRunOptions(createInstantGenerate('copied')),
     });
 
-    await h.run('something').result;
+    await h.run('something').result();
     await new Promise<void>((resolve) => setTimeout(resolve, 10));
 
     const sourceSession = await store.load('fork-history-source');
@@ -848,11 +849,11 @@ describe('RunRef sequence invariant', () => {
   it('runId is always ${sessionId}:${sequence}', async () => {
     const { handle, store } = createSessionHandleFixture({ sessionId: 'seq-test' });
 
-    await handle.run('run 0').result;
+    await handle.run('run 0').result();
     await new Promise<void>((resolve) => setTimeout(resolve, 10));
-    await handle.run('run 1').result;
+    await handle.run('run 1').result();
     await new Promise<void>((resolve) => setTimeout(resolve, 10));
-    await handle.run('run 2').result;
+    await handle.run('run 2').result();
     await new Promise<void>((resolve) => setTimeout(resolve, 10));
 
     const session = await store.load('seq-test');
@@ -865,9 +866,9 @@ describe('RunRef sequence invariant', () => {
   it('sequences are monotonically increasing starting from 0', async () => {
     const { handle, store } = createSessionHandleFixture({ sessionId: 'monotonic-test' });
 
-    await handle.run('a').result;
+    await handle.run('a').result();
     await new Promise<void>((resolve) => setTimeout(resolve, 10));
-    await handle.run('b').result;
+    await handle.run('b').result();
     await new Promise<void>((resolve) => setTimeout(resolve, 10));
 
     const session = await store.load('monotonic-test');

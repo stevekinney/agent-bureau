@@ -272,6 +272,35 @@ describe('createAgent — tools', () => {
     expect(executed).toEqual(['World']);
   });
 
+  it('uses the map key as the tool name, not the tool .name property', async () => {
+    // A tool whose .name disagrees with the map key: the map key must win.
+    const greetTool = createTool({
+      name: 'original_name',
+      description: 'Greet the user',
+      input: z.object({ name: z.string() }),
+      execute: async ({ name }) => `Hello, ${name}!`,
+    });
+
+    let callCount = 0;
+    const agent = createAgent({
+      generate: async () => {
+        callCount++;
+        if (callCount === 1) {
+          // LLM issues a call using the MAP KEY, not the tool's inner .name.
+          return toolCallResponse([{ name: 'canonical_key', arguments: { name: 'World' } }]);
+        }
+        return textResponse('done');
+      },
+      // Map key is 'canonical_key'; tool.name is 'original_name'
+      tools: { canonical_key: greetTool },
+      stopWhen: noToolCalls(),
+    });
+
+    // Should not throw — 'canonical_key' resolves in the toolbox.
+    const result = await agent.run('Say hello').result();
+    expect(result.finishReason).toBe('stop-condition');
+  });
+
   it('works with an empty tools map', async () => {
     const agent = createAgent({
       generate: singleResponse('no tools needed'),

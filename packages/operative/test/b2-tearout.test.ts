@@ -71,11 +71,11 @@ describe('B2 tearout — remaining surface is coherent', () => {
     expect(registry.has('test-agent')).toBe(true);
   });
 
-  it('ActiveRun type is still exported (temporary — until B1 replaces it)', () => {
-    // ActiveRun is kept as a type during migration; it should still be accessible
-    // as a type export. We cannot check a type at runtime, but we can verify
-    // the things that depend on it still compile and work.
-    // createSubagentTool creates a tool — this exercises the full chain.
+  it('ActiveRun is exported as the internal run engine type', () => {
+    // ActiveRun is the internal event-emitting engine; AgentRun is the public wrapper.
+    // Both are exported: ActiveRun for gateway/scheduler/durable internals;
+    // AgentRun for public consumers. We verify the public surface still works
+    // by exercising createSubagentTool which depends on the full chain.
     const tool = operative.createSubagentTool({
       name: 'test-subagent',
       description: 'A subagent tool',

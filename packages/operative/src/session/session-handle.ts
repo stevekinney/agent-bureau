@@ -1,9 +1,10 @@
 import type { ConversationHistory } from 'conversationalist';
 import { Conversation, createConversationHistory } from 'conversationalist';
 
+import type { AgentRun } from '../agent-run';
+import { createAgentRun } from '../agent-run';
 import type { AgentSession, RunRef } from '../agent-session';
 import { createAgentSession } from '../agent-session';
-import type { ActiveRun } from '../create-run';
 import { createActiveRun } from '../create-run';
 import type { AnyRunEngine } from '../durable/create-run-engine';
 import type { RunOptions } from '../types';
@@ -28,11 +29,11 @@ export interface SessionHandle {
   /**
    * Start a new run in the session (conversation continuation). Always appends a
    * new `RunRef` to `runs[]` when it completes. Returns an `AgentRun` handle
-   * (non-thenable — consume via `for await` or `.result`).
+   * (non-thenable — consume via `for await` or `.result()`).
    *
    * `runId` is DERIVED: `${sessionId}:${sequence}` — the caller never supplies it.
    */
-  run(input: string): ActiveRun;
+  run(input: string): AgentRun;
 
   /**
    * Re-attach to the last run IFF it is non-terminal (`status === 'running'`).
@@ -43,7 +44,7 @@ export interface SessionHandle {
    * Over HTTP: a client reconnecting after a network drop calls `recover()` to
    * re-subscribe to the in-flight run's event stream.
    */
-  recover(): ActiveRun | null;
+  recover(): AgentRun | null;
 
   /**
    * Deliberate stop — abort the `generate` `AbortController` IMMEDIATELY (stops the
@@ -214,10 +215,10 @@ export function createSessionHandle(
   const { store, engine, agentName, runOptions } = context;
 
   /**
-   * The currently-in-flight `ActiveRun`, if any. Set at `run()` start, cleared
+   * The currently-in-flight `AgentRun`, if any. Set at `run()` start, cleared
    * when the run settles. Used by `recover()`.
    */
-  let currentRun: ActiveRun | null = null;
+  let currentRun: AgentRun | null = null;
 
   /**
    * Load the session from the store, creating it if absent.
@@ -259,19 +260,21 @@ export function createSessionHandle(
   const handle: SessionHandle = {
     id: sessionId,
 
-    run(input: string): ActiveRun {
+    run(input: string): AgentRun {
       // Seed the conversation with the stored history (we build it lazily via
       // the result promise so `run()` returns synchronously).
       const eagerConversation = new Conversation(createConversationHistory());
       eagerConversation.appendUserMessage(input);
 
-      const run = createActiveRun({ ...runOptions, conversation: eagerConversation.current });
-      currentRun = run;
+      const activeRun = createActiveRun({ ...runOptions, conversation: eagerConversation.current });
+      const agentRun = createAgentRun(activeRun);
+      currentRun = agentRun;
 
       // After the run settles: update the conversation history and append the
       // RunRef to the session's `runs[]`. This is best-effort; callers should
       // not depend on session persistence completing before iterating the run.
-      void run.result
+      void agentRun
+        .result()
         .then(async (result) => {
           const session = await loadOrCreate();
           // Build the conversation from the completed run's history, merged with
@@ -293,16 +296,16 @@ export function createSessionHandle(
         })
         .catch(() => {
           // If result rejects, the session update is skipped. The run's error
-          // propagates to the caller through `run.result`.
+          // propagates to the caller through `agentRun.result()`.
         })
         .finally(() => {
-          if (currentRun === run) currentRun = null;
+          if (currentRun === agentRun) currentRun = null;
         });
 
-      return run;
+      return agentRun;
     },
 
-    recover(): ActiveRun | null {
+    recover(): AgentRun | null {
       return currentRun;
     },
 
