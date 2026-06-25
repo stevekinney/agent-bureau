@@ -5,11 +5,13 @@ import {
   resolveConversationEnvironment,
 } from './environment';
 import type {
+  CodeExecutionToolResultContent,
   MultiModalContent,
   RedactedThinkingContent,
   ServerToolUseContent,
   TextContent,
   ThinkingContent,
+  WebSearchToolResultContent,
 } from './multi-modal';
 import type {
   AssistantMessage,
@@ -220,7 +222,19 @@ export type BlockAccumulatorState =
   | { type: 'thinking'; buffer: string; signature: string }
   | { type: 'redacted_thinking'; signature: string }
   | { type: 'tool_use'; id: string; name: string; inputBuffer: string }
-  | { type: 'server_tool_use'; id: string; name: string; inputBuffer: string };
+  | { type: 'server_tool_use'; id: string; name: string; inputBuffer: string }
+  // Server-tool result blocks (web search, code execution) arrive with their
+  // content in the content_block_start event rather than via deltas, so the
+  // content is seeded at openBlock and carried through unchanged.
+  | { type: 'web_search_tool_result'; tool_use_id: string; content: JSONValue }
+  | {
+      type:
+        | 'code_execution_tool_result'
+        | 'bash_code_execution_tool_result'
+        | 'text_editor_code_execution_tool_result';
+      tool_use_id: string;
+      content: JSONValue;
+    };
 
 /**
  * An accumulator for a single content block within a streaming response.
@@ -441,6 +455,26 @@ export function createStreamingAccumulator(): StreamingMessageAccumulator {
               input: parseStreamedToolInput(state.name, state.inputBuffer),
             };
             content.push(serverToolPart);
+            break;
+          }
+          case 'web_search_tool_result': {
+            const searchResultPart: WebSearchToolResultContent = {
+              type: 'web_search_tool_result',
+              tool_use_id: state.tool_use_id,
+              content: state.content,
+            };
+            content.push(searchResultPart);
+            break;
+          }
+          case 'code_execution_tool_result':
+          case 'bash_code_execution_tool_result':
+          case 'text_editor_code_execution_tool_result': {
+            const codeResultPart: CodeExecutionToolResultContent = {
+              type: state.type,
+              tool_use_id: state.tool_use_id,
+              content: state.content,
+            };
+            content.push(codeResultPart);
             break;
           }
         }

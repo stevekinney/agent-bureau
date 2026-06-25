@@ -66,6 +66,28 @@ export interface WebSearchToolResultContent {
   content: JSONValue;
 }
 
+/**
+ * Result block types for Anthropic's built-in code-execution server tools.
+ * Enumerated explicitly (rather than an open string) so they discriminate
+ * cleanly; add a literal here when Anthropic ships a new server-tool result.
+ */
+export type CodeExecutionToolResultType =
+  | 'code_execution_tool_result'
+  | 'bash_code_execution_tool_result'
+  | 'text_editor_code_execution_tool_result';
+
+/**
+ * Result block returned by Anthropic's built-in code-execution server tools
+ * (`code_execution`, `bash_code_execution`, `text_editor_code_execution`).
+ * Preserves stdout, exit codes, file ids, and errors so they round-trip in the
+ * conversation history instead of being dropped.
+ */
+export interface CodeExecutionToolResultContent {
+  type: CodeExecutionToolResultType;
+  tool_use_id: string;
+  content: JSONValue;
+}
+
 export type MultiModalContent =
   | TextContent
   | ImageContent
@@ -73,7 +95,8 @@ export type MultiModalContent =
   | RedactedThinkingContent
   | ToolUseContent
   | ServerToolUseContent
-  | WebSearchToolResultContent;
+  | WebSearchToolResultContent
+  | CodeExecutionToolResultContent;
 
 /**
  * Creates a shallow copy of a MultiModalContent item.
@@ -124,11 +147,26 @@ export function copyMultiModalContent(item: MultiModalContent): MultiModalConten
       content: structuredClone(item.content),
     };
   }
+  if (
+    item.type === 'code_execution_tool_result' ||
+    item.type === 'bash_code_execution_tool_result' ||
+    item.type === 'text_editor_code_execution_tool_result'
+  ) {
+    return {
+      type: item.type,
+      tool_use_id: item.tool_use_id,
+      content: structuredClone(item.content),
+    };
+  }
+  // All non-image variants are handled above. TypeScript cannot fully narrow
+  // `item` to ImageContent here because CodeExecutionToolResultContent's `type`
+  // is itself a union alias, so we assert the exhausted remainder.
+  const image = item as ImageContent;
   return {
     type: 'image',
-    url: item.url,
-    ...(item.mimeType !== undefined ? { mimeType: item.mimeType } : {}),
-    ...(item.text !== undefined ? { text: item.text } : {}),
+    url: image.url,
+    ...(image.mimeType !== undefined ? { mimeType: image.mimeType } : {}),
+    ...(image.text !== undefined ? { text: image.text } : {}),
   };
 }
 

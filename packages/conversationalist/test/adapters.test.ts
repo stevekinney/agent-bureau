@@ -1379,6 +1379,40 @@ describe('C5 — Server-tool content blocks (Anthropic adapter)', () => {
     expect(mid.input).toEqual({ k: 'v' });
     expect(last.text).toBe('After.');
   });
+
+  it('round-trips a code-execution server-tool result block instead of dropping it', () => {
+    // bash_code_execution_tool_result is an Anthropic code-execution result; it
+    // must survive import → export with its stdout/exit details intact.
+    const payload: AnthropicConversation = {
+      messages: [
+        { role: 'user', content: 'Run ls' },
+        {
+          role: 'assistant',
+          content: [
+            { type: 'server_tool_use', id: 'stu-x', name: 'bash', input: { command: 'ls' } },
+            {
+              type: 'bash_code_execution_tool_result',
+              tool_use_id: 'stu-x',
+              content: { stdout: 'file.txt\n', exit_code: 0 },
+            },
+          ],
+        },
+      ],
+    };
+
+    const conversation = fromAnthropicMessages(payload);
+    const roundTripped = toAnthropicMessages(conversation);
+
+    const assistant = roundTripped.messages.find((m) => m.role === 'assistant');
+    const blocks = assistant?.content as Array<{ type: string; [k: string]: unknown }>;
+    expect(blocks.map((b) => b.type)).toEqual([
+      'server_tool_use',
+      'bash_code_execution_tool_result',
+    ]);
+    const resultBlock = blocks.find((b) => b.type === 'bash_code_execution_tool_result');
+    expect(resultBlock?.tool_use_id).toBe('stu-x');
+    expect(resultBlock?.content).toEqual({ stdout: 'file.txt\n', exit_code: 0 });
+  });
 });
 
 describe('C3 — Extended-thinking content blocks (Anthropic adapter)', () => {

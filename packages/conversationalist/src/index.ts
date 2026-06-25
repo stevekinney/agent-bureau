@@ -133,6 +133,8 @@ export type {
 } from './history';
 export { Conversation } from './history';
 export type {
+  CodeExecutionToolResultContent,
+  CodeExecutionToolResultType,
   ImageContent,
   MultiModalContent,
   RedactedThinkingContent,

@@ -563,4 +563,42 @@ describe('C4 — createStreamingAccumulator (multi-part accumulation)', () => {
       );
     }).not.toThrow();
   });
+
+  it('accumulates a streamed web_search_tool_result block (content seeded at openBlock)', () => {
+    const acc = createStreamingAccumulator();
+    acc.openBlock(0, { type: 'server_tool_use', id: 'stu-1', name: 'web_search', inputBuffer: '' });
+    acc.getBlock(0)?.appendInputJsonDelta('{"query":"news"}');
+    // The search result arrives as its own block with content in the start event.
+    acc.openBlock(1, {
+      type: 'web_search_tool_result',
+      tool_use_id: 'stu-1',
+      content: [{ url: 'https://example.com', title: 'News' }],
+    });
+
+    const { content } = acc.finalize();
+    expect(content.map((c) => c.type)).toEqual(['server_tool_use', 'web_search_tool_result']);
+    expect(content[1]).toEqual({
+      type: 'web_search_tool_result',
+      tool_use_id: 'stu-1',
+      content: [{ url: 'https://example.com', title: 'News' }],
+    });
+  });
+
+  it('accumulates a streamed code-execution result block', () => {
+    const acc = createStreamingAccumulator();
+    acc.openBlock(0, {
+      type: 'bash_code_execution_tool_result',
+      tool_use_id: 'stu-bash',
+      content: { stdout: 'ok', exit_code: 0 },
+    });
+
+    const { content } = acc.finalize();
+    expect(content).toEqual([
+      {
+        type: 'bash_code_execution_tool_result',
+        tool_use_id: 'stu-bash',
+        content: { stdout: 'ok', exit_code: 0 },
+      },
+    ]);
+  });
 });
