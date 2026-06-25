@@ -37,7 +37,6 @@ import type {
   TokenUsage,
 } from 'operative';
 import type { CreateRunEngineOptions } from 'operative/durable';
-import type { ProviderName } from 'operative/providers';
 import type { Store } from 'operative/store';
 
 import type { AuditTrail } from './audit-trail';
@@ -45,8 +44,17 @@ import type { BureauEventMap } from './events';
 
 // ── Provider Configuration ───────────────────────────────────────────
 
+/**
+ * The subset of operative's `ProviderName` union that `createRuntimeComposition`
+ * can resolve to a generative (text/tool-call) backend. `voyage` and `ollama`
+ * exist in `ProviderName` but are embedding-only — no generate factory exists for
+ * them, so accepting them here would produce a runtime "Unknown provider" error
+ * that TypeScript could have caught.
+ */
+export type GenerateProviderName = 'anthropic' | 'openai' | 'gemini';
+
 export interface ProviderConfiguration {
-  provider: ProviderName;
+  provider: GenerateProviderName;
   model: string;
   maximumTokens?: number;
   temperature?: number;
