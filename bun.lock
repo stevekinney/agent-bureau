@@ -28,7 +28,7 @@
     },
     "packages/armorer": {
       "name": "armorer",
-      "version": "0.7.1",
+      "version": "0.8.0",
       "devDependencies": {
         "@anthropic-ai/claude-agent-sdk": "^0.2.39",
         "@eslint/compat": "^2.0.2",
@@ -91,7 +91,7 @@
     },
     "packages/conversationalist": {
       "name": "conversationalist",
-      "version": "0.0.12",
+      "version": "0.1.0",
       "dependencies": {
         "@lostgradient/weft": "^0.8.0",
         "gray-matter": "^4.0.3",
