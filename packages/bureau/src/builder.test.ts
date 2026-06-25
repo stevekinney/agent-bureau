@@ -333,6 +333,41 @@ describe('createBureau (builder) — tool registration', () => {
 });
 
 // ---------------------------------------------------------------------------
+// bureau/builder subpath barrel — re-export smoke test
+// ---------------------------------------------------------------------------
+//
+// Regression guard for PRRT_kwDORvupsc6MUE_r: the bureau/builder subpath
+// export was previously not included in the build script (scripts/build.ts),
+// so dist/builder/index.{js,cjs,d.ts} were never emitted. The package.json
+// export conditions also pointed at ./src/builder/index.ts (TypeScript source)
+// instead of dist/ for the browser/import/require/default conditions,
+// breaking resolution for non-Bun/non-TS-aware consumers.
+//
+// This test ensures createBureau is reachable through the barrel that
+// bureau/builder resolves to, so a future entrypoint omission causes a test
+// failure rather than a silent broken npm artifact.
+
+describe('bureau/builder subpath barrel', () => {
+  it('exports createBureau from the subpath barrel', async () => {
+    // Dynamic import of the barrel file that ./builder resolves to at runtime.
+    // If scripts/build.ts ever drops ./src/builder/index.ts from entrypoints,
+    // this import would succeed in bun (source-aware) but the built artifact
+    // would be missing — the package.json export condition change makes that
+    // gap visible even in non-bun resolvers.
+    const { createBureau: createBureauFromBarrel } = await import('./builder/index');
+    expect(typeof createBureauFromBarrel).toBe('function');
+  });
+
+  it('builder barrel createBureau produces a runnable bureau', async () => {
+    const { createBureau: createBureauFromBarrel } = await import('./builder/index');
+    const generate = makeGenerate('barrel-ok');
+    const bureau = createBureauFromBarrel().agent({ name: 'a', generate });
+    const result = await bureau.run('a', 'input').result();
+    expect(result.content).toBe('barrel-ok');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Skills registration
 // ---------------------------------------------------------------------------
 

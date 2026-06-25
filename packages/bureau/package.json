@@ -33,11 +33,12 @@
       "types": "./dist/index.d.ts"
     },
     "./builder": {
-      "bun": "./src/builder/index.ts",
-      "browser": "./src/builder/index.ts",
-      "import": "./src/builder/index.ts",
-      "default": "./src/builder/index.ts",
-      "types": "./src/builder/index.ts"
+      "bun": "./dist/builder/index.js",
+      "browser": "./dist/builder/index.js",
+      "import": "./dist/builder/index.js",
+      "require": "./dist/builder/index.cjs",
+      "default": "./dist/builder/index.js",
+      "types": "./dist/builder/index.d.ts"
     },
     "./test": {
       "bun": "./dist/test/index.js",
