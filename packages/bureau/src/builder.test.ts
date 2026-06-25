@@ -601,3 +601,68 @@ describe('createBureau (builder) — tool.* bubble event stamping (PRRT_kwDORvup
     expect(typeof toolStartedEvents[0]!.runId).toBe('string');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Regression: PRRT_kwDORvupsc6MX3PQ / PRRT_kwDORvupsc6MYImo
+//   mergeToolboxes() returned the stored bureau toolbox reference when only
+//   one side (bureau OR agent) had tools. Two concurrent run() calls therefore
+//   subscribed to the SAME CompletableEventTarget emitter, causing each run to
+//   receive the other's tool events (cross-run event pollution).
+//
+// Fix: call .extend() on the single non-null toolbox so each run gets its own
+//   fresh emitter, matching the pattern used by createRunRuntime() in
+//   runtime-composition.ts.
+// ---------------------------------------------------------------------------
+
+describe('createBureau (builder) — toolbox isolation for concurrent runs (PRRT_kwDORvupsc6MX3PQ / PRRT_kwDORvupsc6MYImo)', () => {
+  it('concurrent runs on a bureau-only toolbox each see only their own tool.started events', async () => {
+    // Two distinct echo calls — run A uses {text:'alpha'}, run B uses {text:'beta'}.
+    // If the toolbox emitter is shared, run A will see run B's tool.started (and vice versa).
+    const generateA = createMockGenerate([
+      { content: '', toolCalls: [{ name: 'echo', arguments: { text: 'alpha' } }] },
+      { content: 'done-a', toolCalls: [] },
+    ]);
+    const generateB = createMockGenerate([
+      { content: '', toolCalls: [{ name: 'echo', arguments: { text: 'beta' } }] },
+      { content: 'done-b', toolCalls: [] },
+    ]);
+
+    // Both agents share bureau-level tools; neither has agent-level tools.
+    // This exercises the single-sided path in mergeToolboxes().
+    const bureau = createBureau()
+      .tools({ echo: echoTool })
+      .agent({ name: 'agent-a', generate: generateA })
+      .agent({ name: 'agent-b', generate: generateB });
+
+    const runA = bureau.run('agent-a', 'say alpha');
+    const runB = bureau.run('agent-b', 'say beta');
+
+    // Drain both runs concurrently, collecting tool.started events per run.
+    const [eventsA, eventsB] = await Promise.all([
+      (async () => {
+        const collected: ToolStartedBubbleEvent[] = [];
+        for await (const event of runA) {
+          if (event.type === 'tool.started') collected.push(event as ToolStartedBubbleEvent);
+        }
+        return collected;
+      })(),
+      (async () => {
+        const collected: ToolStartedBubbleEvent[] = [];
+        for await (const event of runB) {
+          if (event.type === 'tool.started') collected.push(event as ToolStartedBubbleEvent);
+        }
+        return collected;
+      })(),
+    ]);
+
+    // Each run must see exactly one tool.started event (its own tool call).
+    // Before the fix: the shared emitter routes both tools' events to both runs,
+    // so each run sees 2 events (count > 1) and may see the other's params.
+    expect(eventsA).toHaveLength(1);
+    expect(eventsB).toHaveLength(1);
+
+    // The params in each run's event must match its own tool call, not the sibling's.
+    expect((eventsA[0]!.params as { text: string }).text).toBe('alpha');
+    expect((eventsB[0]!.params as { text: string }).text).toBe('beta');
+  });
+});
