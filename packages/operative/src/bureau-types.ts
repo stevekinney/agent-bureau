@@ -1,17 +1,15 @@
 /**
  * Type-level definitions for the bureau/agent/run architecture.
  *
- * These types prove the design spike described in `architecture.md` Phase A4:
- * the chained bureau builder, name-keyed tool inheritance, the BureauTools<T>
- * extractor utility, the bureau.run() generic, and the non-thenable AgentRun
- * handle. No runtime code lives here — this is a pure-type module consumed
- * only by the `.test-d.ts` spike and eventually by the real bureau package
- * (Phase E).
+ * Originally the Phase A4 type spike (proven in bureau.test-d.ts). Now
+ * consumed directly by the `bureau` package (Phase E) as its type layer.
  *
  * Pattern cribbed from weft's `workflow-builder-helpers.ts` — phantom marker
  * fields carry concrete types through the chain without the runtime entries
  * needing to be parameterised.
  */
+
+import type { GenerateFunction } from './types';
 
 // ---------------------------------------------------------------------------
 // Tool map primitives — name-keyed, phantom-typed
@@ -179,12 +177,19 @@ export interface AgentOptions {
   tools?: ToolMapInput;
   instructions?: string;
   /**
+   * LLM provider for this agent. Optional — when omitted, the agent inherits
+   * the bureau's default provider. REQUIRED when there is no bureau (i.e.
+   * used with standalone `createAgent`). Type is `AgentGenerateFunction` here
+   * to keep bureau-types.ts import-free; callers using the real factory will
+   * supply a concrete `GenerateFunction` from operative.
+   */
+  generate?: AgentGenerateFunction;
+  /**
    * Per-agent skill policy. Restricts the bureau's base skill catalog for
    * this specific agent. The bureau-level catalog is inherited; this policy
    * filters it (allow/deny list). Deny always wins.
    */
   skillPolicy?: SkillPolicy;
-  // More fields will be added in Phase E; these are the spike-minimum.
 }
 
 // ---------------------------------------------------------------------------
@@ -451,22 +456,16 @@ export interface AgentBuilder<
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
-// GenerateFunction alias — structural, avoids circular import from types.ts
+// GenerateFunction alias — imported from types.ts
 // ---------------------------------------------------------------------------
 
 /**
- * Structural alias for the `GenerateFunction` seam from `./types`. This file
- * is a pure-type module with no imports; we cannot import from `./types`
- * without creating a dependency edge. The structural shape is intentionally
- * identical — the real implementation's `CreateAgentOptions` will accept the
- * same function.
- *
- * The full `GenerateContext` / `GenerateResponse` pair is opaque here (`unknown`
- * inputs, `Promise<unknown>` output). Callers typing agents via the real
- * `createAgent` from `./types` will get the concrete types; this alias keeps
- * the spike self-contained.
+ * The LLM provider function type used by agents. This is the same type as
+ * `GenerateFunction` from `./types` — re-exported here as `AgentGenerateFunction`
+ * so bureau consumers can import it from the bureau-types subpath without
+ * needing to import from operative directly.
  */
-export type AgentGenerateFunction = (context: unknown) => Promise<unknown>;
+export type AgentGenerateFunction = GenerateFunction;
 
 /**
  * Options accepted by `createAgent({...})`. This is the OPTIONS BAG shape —

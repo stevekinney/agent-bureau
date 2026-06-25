@@ -41,9 +41,9 @@ import type {
   SubmitSchedulerTaskResponse,
   ToolSummary,
 } from './types';
-import { streamEventToFrame } from './websocket/protocol';
+import { streamEventToFrame } from './websocket-frames';
 
-const GATEWAY_AGENT_NAME = 'gateway';
+const BUREAU_AGENT_NAME = 'bureau';
 const SESSION_PERSISTENCE_MAXIMUM_ATTEMPTS = 3;
 const SESSION_PERSISTENCE_RETRY_DELAY_MILLISECONDS = 10;
 const SCHEDULER_PRIORITIES = ['immediate', 'scheduled', 'background', 'ambient'] as const;
@@ -329,7 +329,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       existingSession ??
       createAgentSession({
         id: sessionId,
-        agentName: GATEWAY_AGENT_NAME,
+        agentName: BUREAU_AGENT_NAME,
         conversationHistory: conversation.current,
       });
 
@@ -368,7 +368,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         }
       }
 
-      console.warn(
+      console.error(
         `[bureau] Failed to persist ${context.status} session state for run ${context.runId} in session ${context.sessionId}: ${serializeUnknownError(lastError)}`,
       );
     })();
@@ -653,7 +653,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
    *
    * Boot returns once `recoverAll()` has STARTED the handles and they are
    * registered, not when they complete: a recovered run that resumes into a long
-   * model call must not hold the gateway hostage. Each adapter awaits its result
+   * model call must not hold the bureau hostage. Each adapter awaits its result
    * detached.
    *
    * Fail-safe: a run whose deps the resolver cannot rebuild is failed terminally
@@ -668,7 +668,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
    * A durable scheduler task (durable scheduler enabled) runs as an `agentRun`
    * workflow in this SAME engine with `sessionId === runId` (a synthetic
    * `scheduler-run-…` id), and the durable run path does NOT write a session
-   * record (only the gateway's interactive `runDurable` path persists sessions).
+   * record (only the bureau's interactive `runDurable` path persists sessions).
    * So if the process crashes with a scheduler run in flight, `recoverAll()`
    * surfaces it here, but `resolveRunServices` finds no session for its synthetic
    * id → returns `unavailable` → the engine fails it clean before replay. The
@@ -763,7 +763,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     // gated on a session store): a hard crash with a preempted scheduler task in
     // `suspended` leaves a workflow that recoverAll() never surfaces (suspended ≠
     // running) and that would otherwise dangle forever. A durable-scheduler-only
-    // deployment (no gateway session store) still needs this. It also clears
+    // deployment (no bureau session store) still needs this. It also clears
     // suspended runs whose ids could collide with a fresh dispatch's reused
     // counter id — onTerminalConflict:'start-new' does NOT cover suspended (only
     // terminal), so the sweep is the sole protection against that collision.

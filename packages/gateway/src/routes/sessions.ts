@@ -1,7 +1,7 @@
+import { BureauError } from 'bureau';
 import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 
-import { BureauError } from '../create-bureau';
 import type { Bureau } from '../types';
 
 export function createSessionsRoutes(bureau: Bureau) {

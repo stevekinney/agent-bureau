@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test';
 
 import {
   createPolicyEnforcementHook,
-  type ToolPolicyLike,
+  type ToolPolicy,
 } from '../src/create-policy-enforcement-hook';
 
 interface MockTool {
@@ -65,7 +65,7 @@ describe('createPolicyEnforcementHook', () => {
   });
 
   it('reflects changes when getActiveSkillToolPolicy returns different values', () => {
-    let skillPolicy: ToolPolicyLike | undefined = { allowList: ['read'] };
+    let skillPolicy: ToolPolicy | undefined = { allowList: ['read'] };
 
     const filter = createPolicyEnforcementHook({
       getActiveSkillToolPolicy: () => skillPolicy,

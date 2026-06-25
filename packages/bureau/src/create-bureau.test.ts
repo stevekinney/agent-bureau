@@ -687,9 +687,9 @@ describe('createBureau', () => {
       },
     };
 
-    const warnSpy = mock(() => {});
-    const originalWarn = console.warn;
-    console.warn = warnSpy;
+    const errorSpy = mock(() => {});
+    const originalError = console.error;
+    console.error = errorSpy;
 
     try {
       const bureau = await createBureau({
@@ -705,19 +705,19 @@ describe('createBureau', () => {
       const run = await bureau.createRun({ message: 'Retry sleep failure' });
       await waitForRunCompletion(bureau, run.id);
       await waitForCondition(
-        () => warnSpy.mock.calls.length === 1,
-        'session persistence warning was not logged after retry sleep failed',
+        () => errorSpy.mock.calls.length === 1,
+        'session persistence error was not logged after retry sleep failed',
       );
 
       expect(sessionSaveCount).toBe(2);
       expect(retrySleepCount).toBe(1);
 
-      const callArgs = warnSpy.mock.calls[0] as unknown[];
-      const warningMessage = String(callArgs[0]);
-      expect(warningMessage).toContain('Failed to persist completed session state');
-      expect(warningMessage).toContain('retry sleep aborted');
+      const callArgs = errorSpy.mock.calls[0] as unknown[];
+      const errorMessage = String(callArgs[0]);
+      expect(errorMessage).toContain('Failed to persist completed session state');
+      expect(errorMessage).toContain('retry sleep aborted');
     } finally {
-      console.warn = originalWarn;
+      console.error = originalError;
     }
   });
 
