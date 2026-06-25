@@ -7,7 +7,13 @@ import { DEFAULT_MAXIMUM_STEPS, runStep } from '../run-step';
 import type { FinishReason } from '../types';
 import type { CheckpointStore } from './checkpoint-store';
 import { createStorageActivities } from './storage-activities';
-import type { DurableRunDeps, RunCursor, StepRecord } from './types';
+import type {
+  DurableRunDeps,
+  PendingHumanWait,
+  PendingWakeup,
+  RunCursor,
+  StepRecord,
+} from './types';
 
 /**
  * The durable agent-run workflow.
@@ -305,6 +311,19 @@ export function createRunWorkflow(checkpointStore: CheckpointStore) {
         let abortReason: string | undefined;
         let schemaValidation: { success: boolean; error?: string } | undefined;
 
+        // === Durable park-request locals (D6 + F3 recovery fix) ===
+        // These accumulate the LAST pending park request (wakeup or human-wait)
+        // from step results. The tool mutations happen inside `ctx.memo` (where
+        // `deps` is live), so the values are captured in the memo return value and
+        // survive a crash+recovery: on replay each memo short-circuits to its
+        // checkpointed result, which carries the park request the tool set. This
+        // is the ONLY source of park state used post-loop — we no longer read
+        // `ctx.services` for this purpose, because services are rebuilt fresh on
+        // recovery (with `pendingWakeup`/`pendingHumanWait` unset). Last-write-wins
+        // matches the in-process tool semantics (multiple wakeup calls overwrite).
+        let pendingWakeup: PendingWakeup | undefined;
+        let pendingHumanWait: PendingHumanWait | undefined;
+
         while (cursor.step < maximumSteps) {
           // === The whole step runs inside `ctx.memo`, keyed by step index. This is
           // what makes the in-process step durable across RECOVERY (not just the
@@ -372,6 +391,18 @@ export function createRunWorkflow(checkpointStore: CheckpointStore) {
             // in-memory `makeErrorResult`. The `schemaValidation` is carried so a
             // durable run produces the SAME `RunResult.schemaValidation` shape as
             // the in-memory loop (its live error is reduced to a message).
+            //
+            // pendingWakeup and pendingHumanWait are read from `deps` HERE (where
+            // the tool's live mutation already landed) and embedded in the memoized
+            // return value. This is critical for recovery correctness: if the process
+            // crashes after this memo commits but before the post-loop park executes,
+            // Weft re-runs the generator and short-circuits this memo to its
+            // checkpointed result — which includes the park request. The post-loop
+            // code reads these from the accumulated step results rather than from the
+            // rebuilt `ctx.services`, which would be freshly constructed (unset) on
+            // recovery. `PendingWakeup`/`PendingHumanWait` are plain, cloneable
+            // objects (duration is number|string, signalName is string), so they
+            // cross the checkpoint boundary safely.
             return {
               outcome: { kind: outcome.kind },
               errorMessage: outcome.kind === 'error' ? serializeError(outcome.error) : undefined,
@@ -395,10 +426,19 @@ export function createRunWorkflow(checkpointStore: CheckpointStore) {
                 lastContent: runState.lastContent,
                 schemaAttempts: runState.schemaAttempts,
               },
+              pendingWakeup: deps.pendingWakeup,
+              pendingHumanWait: deps.pendingHumanWait,
             };
           });
 
           snapshot = stepResult.conversationSnapshot;
+
+          // Accumulate park requests from this step's memoized result. Last-write-
+          // wins across steps, matching the in-process tool semantics (a later
+          // `scheduleWakeup`/`requestHumanInput` call overwrites a prior one).
+          if (stepResult.pendingWakeup !== undefined) pendingWakeup = stepResult.pendingWakeup;
+          if (stepResult.pendingHumanWait !== undefined)
+            pendingHumanWait = stepResult.pendingHumanWait;
 
           // === Durable commits — all plain data. Order: transcript, then the
           // step record (if any), then the advanced cursor last, so a crash
@@ -448,32 +488,23 @@ export function createRunWorkflow(checkpointStore: CheckpointStore) {
         }
 
         // === Durable self-wakeup (D6 — scheduleWakeup tool) ===
-        // If the `scheduleWakeup` tool was called during any step, its
-        // duration is stored in `deps.pendingWakeup` (set inside `ctx.memo`).
-        // We read it here — OUTSIDE `ctx.memo`, in a no-yield* region — and
-        // then `yield* ctx.sleep(duration)` to park the workflow until the
-        // timer fires. The note (if any) is carried in the workflow result so
-        // callers can surface it when the run resumes.
-        //
-        // IMPORTANT: `ctx.services` (deps) must be read inside a no-yield*
-        // region (same invariant as the step body). We capture `pendingWakeup`
-        // and `pendingHumanWait` before any yield, where `ctx.services` is
-        // still in scope.
-        const depsSnapshot = runDepsFrom(ctx.services);
-        const wakeupBeforeSleep = depsSnapshot.pendingWakeup;
-        const humanWaitBeforePark = depsSnapshot.pendingHumanWait;
-
-        if (wakeupBeforeSleep !== undefined) {
-          yield* ctx.sleep(wakeupBeforeSleep.duration);
+        // `pendingWakeup` was accumulated above from step memo results — it is the
+        // checkpointed value, NOT `ctx.services.pendingWakeup`. This is the fix for
+        // the durable-recovery bug: on a crash AFTER the step memo commits but
+        // BEFORE this park executes, Weft replays the generator and short-circuits
+        // each memo to its checkpointed result. `ctx.services` is rebuilt fresh on
+        // recovery (with pendingWakeup/pendingHumanWait unset), so reading from
+        // services here would silently skip the park. Reading from the hoisted
+        // locals (fed from checkpointed step results) survives recovery correctly.
+        if (pendingWakeup !== undefined) {
+          yield* ctx.sleep(pendingWakeup.duration);
         }
 
         // === F3 — HITL human-input gate (requestHumanInput tool) ===
-        // If the `requestHumanInput` tool was called during any step, its
-        // signal name is stored in `deps.pendingHumanWait`. We park the
-        // workflow via `yield* ctx.waitForSignal(signalName)` so it suspends
-        // until the human sends the named signal via `session.signal(...)`.
-        if (humanWaitBeforePark !== undefined) {
-          yield* ctx.waitForSignal(humanWaitBeforePark.signalName);
+        // Same recovery fix: `pendingHumanWait` comes from accumulated step memo
+        // results, not from `ctx.services`. See comment above.
+        if (pendingHumanWait !== undefined) {
+          yield* ctx.waitForSignal(pendingHumanWait.signalName);
         }
 
         ctx.setAttribute('runId', runId);
@@ -486,9 +517,9 @@ export function createRunWorkflow(checkpointStore: CheckpointStore) {
           ...(errorMessage !== undefined ? { errorMessage } : {}),
           ...(abortReason !== undefined ? { abortReason } : {}),
           ...(schemaValidation !== undefined ? { schemaValidation } : {}),
-          ...(wakeupBeforeSleep?.note !== undefined ? { wakeupNote: wakeupBeforeSleep.note } : {}),
-          ...(humanWaitBeforePark !== undefined
-            ? { humanWaitSignal: humanWaitBeforePark.signalName }
+          ...(pendingWakeup?.note !== undefined ? { wakeupNote: pendingWakeup.note } : {}),
+          ...(pendingHumanWait !== undefined
+            ? { humanWaitSignal: pendingHumanWait.signalName }
             : {}),
         } satisfies AgentRunWorkflowResult;
       })

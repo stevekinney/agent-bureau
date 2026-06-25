@@ -105,6 +105,14 @@ export function createSubagentTool(options: CreateSubagentToolOptions) {
         throw new Error(`Sub-agent "${agentName}" was aborted`);
       }
 
+      if (result.finishReason === 'budget-exceeded') {
+        throw new Error(`Sub-agent "${agentName}" exceeded its token budget`);
+      }
+
+      if (result.finishReason === 'elicitation-denied') {
+        throw new Error(`Sub-agent "${agentName}" was denied elicitation`);
+      }
+
       if (result.finishReason === 'maximum-steps' && treatMaximumStepsAsError) {
         throw new Error(`Sub-agent "${agentName}" exceeded maximum steps`);
       }

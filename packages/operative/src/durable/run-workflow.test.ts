@@ -479,6 +479,286 @@ describe('durable agentRun workflow', () => {
     });
   });
 
+  describe('Durable recovery: park requests survive crash-after-memo-commit', () => {
+    /**
+     * REGRESSION TEST for the pendingWakeup/pendingHumanWait recovery bug.
+     *
+     * Bug: `scheduleWakeup` (D6) and `requestHumanInput` (F3) mutate
+     * `deps.pendingWakeup`/`deps.pendingHumanWait` inside `ctx.memo`. The memo
+     * return value did NOT include those fields, so they were NOT checkpointed. On
+     * crash recovery, Weft rebuilds fresh services (both fields unset), short-
+     * circuits the memos (tools never re-run), and the post-loop read of
+     * `ctx.services` saw `undefined` — causing the recovered run to COMPLETE
+     * instead of re-parking.
+     *
+     * Fix: embed `deps.pendingWakeup`/`deps.pendingHumanWait` in the memo return
+     * value, accumulate them into hoisted locals across steps, and use those locals
+     * (not `ctx.services`) for the post-loop park. The checkpointed memo result
+     * carries the park request, so recovery replays correctly.
+     *
+     * The crash is simulated by running engine A until the step memo commits, then
+     * disposing it (mid-flight, before the post-loop `yield* ctx.waitForSignal`
+     * executes). Engine B recovers via `recoverAll()` with FRESH services (no
+     * in-process mutation on B's side) — exactly the real cross-process scenario.
+     */
+    it('re-parks via ctx.waitForSignal after crash-after-memo-commit on recovery (pendingHumanWait)', async () => {
+      const storage = new MemoryStorage();
+
+      // The run ID for this test; use a UUID-shaped string matching the pattern.
+      const runId = 'cccccccc-0000-4000-8000-000000000003';
+      const signalName = 'human-response';
+
+      // Build the HITL tool + toolbox for engine A. The tool sets pendingHumanWait
+      // on the deps object it closes over. Engine A's services carry the live dep ref.
+      const depsA: { ref: DurableRunDeps | undefined } = { ref: undefined };
+      const hitlTool = createTool({
+        name: 'requestHumanInput',
+        description: 'Park waiting for human input',
+        input: z.object({ signalName: z.string() }),
+        execute: async (params) => {
+          if (depsA.ref) {
+            depsA.ref.pendingHumanWait = {
+              signalName: (params as { signalName: string }).signalName,
+            };
+          }
+          return 'parked';
+        },
+      });
+      const hitlToolbox = createToolbox([hitlTool]) as unknown as RegistryToolbox;
+
+      // Engine A: maximumSteps=1 (workflow input), so after step 0 commits the loop
+      // exits and the workflow reaches `yield* ctx.waitForSignal(signalName)`. We
+      // poll until engine A is parked there (status 'running', step committed), then
+      // dispose it — simulating a process crash while parked on the signal.
+      //
+      // THE CRASH WINDOW: after the step-0 memo commits (pendingHumanWait is in the
+      // checkpointed result), the loop exits and the workflow parks. On recovery,
+      // Weft replays the generator. With the BUG: the post-loop code reads
+      // `ctx.services.pendingHumanWait` which is UNSET on B's fresh services →
+      // `waitForSignal` is skipped → run completes. With the FIX: the post-loop code
+      // reads the hoisted local fed from the checkpointed memo result → `waitForSignal`
+      // is called → run parks again.
+      const servicesA: DurableRunDeps = {
+        options: {
+          // Step 0: generate returns the HITL tool call. The tool sets pendingHumanWait.
+          // Outcome is `next` (tool was called), so the loop continues — but maximumSteps=1
+          // is passed in the workflow INPUT (not options), so the while-condition exits
+          // after step 0 completes.
+          generate: async () => ({
+            content: '',
+            toolCalls: [{ name: 'requestHumanInput', arguments: { signalName } }],
+          }),
+          toolbox: hitlToolbox,
+          conversation: createConversationHistory(),
+          stopWhen: noToolCalls(),
+        },
+        toolbox: hitlToolbox,
+      };
+      depsA.ref = servicesA;
+
+      const a = await buildEngine(storage, false);
+      const handleA = await a.engine.start(
+        'agentRun',
+        // Pass maximumSteps=1 via the WORKFLOW INPUT so the loop exits after step 0.
+        // maximumSteps in RunOptions (servicesA.options) is ignored by the durable
+        // workflow; the durable driver reads it from AgentRunWorkflowInput instead.
+        { runId, sessionId: runId, agentName: 'hitl-agent', prompt: 'start', maximumSteps: 1 },
+        { id: runId, services: servicesA },
+      );
+      void handleA.result().catch(() => {}); // parks on waitForSignal; never settles
+
+      // Poll until engine A is parked on ctx.waitForSignal: step 0 committed AND
+      // the workflow is 'running' (parked, not yet completed).
+      let parkedOnA = false;
+      for (let i = 0; i < 100; i++) {
+        await yieldToPortableEventLoop();
+        const snap = await handleA.snapshot();
+        if (snap?.status === 'running') {
+          const cp = await a.checkpointStore.loadCheckpoint(runId);
+          if (cp.steps.length >= 1) {
+            parkedOnA = true;
+            break;
+          }
+        }
+      }
+      expect(parkedOnA).toBe(true);
+
+      // "Crash" engine A: dispose while parked on waitForSignal. This simulates
+      // the crash window where the memo committed but the process died before the
+      // run completed (or, equivalently, between saveCursor and waitForSignal).
+      a.engine[Symbol.dispose]();
+
+      // === FRESH PROCESS: Engine B recovers with brand-new services — the critical
+      // invariant is that pendingHumanWait is NOT set on B's services (fresh deps,
+      // no in-process tool mutation). Without the fix, the generator replays and the
+      // post-loop code reads `ctx.services.pendingHumanWait` === undefined → skips
+      // waitForSignal → run completes. With the fix, it reads the hoisted local fed
+      // from the checkpointed step-0 memo result → waitForSignal → parks.
+      const b = await buildEngine(storage, false, (_info) => ({
+        status: 'available',
+        // Fresh services: pendingHumanWait not set, generate won't be called (memos
+        // short-circuit), toolbox has the hitlTool so Weft's schema resolution doesn't
+        // error on replay.
+        services: (() => {
+          const freshToolbox = createToolbox([hitlTool]) as unknown as RegistryToolbox;
+          const freshServices: DurableRunDeps = {
+            options: {
+              generate: async () => ({ content: 'done after signal', toolCalls: [] }),
+              toolbox: freshToolbox,
+              conversation: createConversationHistory(),
+              stopWhen: noToolCalls(),
+            },
+            toolbox: freshToolbox,
+          };
+          return freshServices;
+        })(),
+      }));
+
+      try {
+        const handles = await b.engine.recoverAll();
+        expect(handles.length).toBe(1);
+        const recoveredHandle = handles[0]!;
+
+        // Poll for the recovered workflow's status. With the FIX, it should be
+        // 'running' (parked on waitForSignal). With the BUG, it should be
+        // 'completed' — the run finished because waitForSignal was skipped.
+        let reParked = false;
+        for (let i = 0; i < 100; i++) {
+          await yieldToPortableEventLoop();
+          const snap = await recoveredHandle.snapshot();
+          if (snap?.status === 'running') {
+            reParked = true;
+            break;
+          }
+          // If it already completed or failed, the bug is present — break and let
+          // the assertion below report it as a failure.
+          if (snap?.status === 'completed' || snap?.status === 'failed') break;
+        }
+
+        // === THE KEY ASSERTION: the recovered run must be parked (still running),
+        // not completed. On the UNFIXED code this assertion FAILS — the run completes
+        // because pendingHumanWait is unset on the fresh services and the post-loop
+        // code skips waitForSignal.
+        expect(reParked).toBe(true);
+
+        // Double-check: status is still running (not racing to complete).
+        const parkSnap = await recoveredHandle.snapshot();
+        expect(parkSnap?.status).toBe('running');
+      } finally {
+        b.engine[Symbol.dispose]();
+      }
+    });
+
+    it('re-parks via ctx.sleep after crash-after-memo-commit on recovery (pendingWakeup)', async () => {
+      // Same crash scenario but for the D6 scheduleWakeup / ctx.sleep path.
+      const storage = new MemoryStorage();
+      const runId = 'dddddddd-0000-4000-8000-000000000004';
+
+      // A tool that sets deps.pendingWakeup (mimics createScheduleWakeupTool).
+      const depsA: { ref: DurableRunDeps | undefined } = { ref: undefined };
+      const wakeupTool = createTool({
+        name: 'scheduleWakeup',
+        description: 'Schedule a wakeup after a duration',
+        input: z.object({ duration: z.number() }),
+        execute: async (params) => {
+          if (depsA.ref) {
+            depsA.ref.pendingWakeup = {
+              duration: (params as { duration: number }).duration,
+              note: 'wakeup note',
+            };
+          }
+          return 'scheduled';
+        },
+      });
+      const wakeupToolbox = createToolbox([wakeupTool]) as unknown as RegistryToolbox;
+
+      const servicesA: DurableRunDeps = {
+        options: {
+          generate: async () => ({
+            content: '',
+            // A very long sleep duration so the workflow stays parked indefinitely
+            // in tests (the scheduler doesn't fire within a test run).
+            toolCalls: [{ name: 'scheduleWakeup', arguments: { duration: 999_999_999 } }],
+          }),
+          toolbox: wakeupToolbox,
+          conversation: createConversationHistory(),
+          stopWhen: noToolCalls(),
+        },
+        toolbox: wakeupToolbox,
+      };
+      depsA.ref = servicesA;
+
+      const a = await buildEngine(storage, false);
+      const handleA = await a.engine.start(
+        'agentRun',
+        { runId, sessionId: runId, agentName: 'wakeup-agent', prompt: 'start', maximumSteps: 1 },
+        { id: runId, services: servicesA },
+      );
+      void handleA.result().catch(() => {});
+
+      // Poll until engine A parks on ctx.sleep (step 0 committed, status=running).
+      let parkedOnA = false;
+      for (let i = 0; i < 100; i++) {
+        await yieldToPortableEventLoop();
+        const snap = await handleA.snapshot();
+        if (snap?.status === 'running') {
+          const cp = await a.checkpointStore.loadCheckpoint(runId);
+          if (cp.steps.length >= 1) {
+            parkedOnA = true;
+            break;
+          }
+        }
+      }
+      expect(parkedOnA).toBe(true);
+
+      // Simulate crash.
+      a.engine[Symbol.dispose]();
+
+      // Engine B with FRESH services (pendingWakeup NOT set).
+      const b = await buildEngine(storage, false, (_info) => ({
+        status: 'available',
+        services: (() => {
+          const freshToolbox = createToolbox([wakeupTool]) as unknown as RegistryToolbox;
+          const freshServices: DurableRunDeps = {
+            options: {
+              generate: async () => ({ content: 'done', toolCalls: [] }),
+              toolbox: freshToolbox,
+              conversation: createConversationHistory(),
+              stopWhen: noToolCalls(),
+            },
+            toolbox: freshToolbox,
+          };
+          return freshServices;
+        })(),
+      }));
+
+      try {
+        const handles = await b.engine.recoverAll();
+        expect(handles.length).toBe(1);
+        const recoveredHandle = handles[0]!;
+
+        // Poll: the recovered run should be 'running' (parked on ctx.sleep).
+        // On the UNFIXED code: 'completed' (sleep was skipped because pendingWakeup
+        // was unset on fresh services).
+        let reParked = false;
+        for (let i = 0; i < 100; i++) {
+          await yieldToPortableEventLoop();
+          const snap = await recoveredHandle.snapshot();
+          if (snap?.status === 'running') {
+            reParked = true;
+            break;
+          }
+          if (snap?.status === 'completed' || snap?.status === 'failed') break;
+        }
+
+        // === THE KEY ASSERTION: must be parked (sleeping), not completed. ===
+        expect(reParked).toBe(true);
+      } finally {
+        b.engine[Symbol.dispose]();
+      }
+    });
+  });
+
   describe('F3 — HITL via requestHumanInput tool (pendingHumanWait + ctx.waitForSignal)', () => {
     /**
      * Proves that setting `deps.pendingHumanWait` in a tool causes the run

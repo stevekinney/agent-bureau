@@ -38,7 +38,9 @@ export function createGeminiProvider(options: GeminiProviderOptions): GenerateFu
     if (!modelPromise) {
       modelPromise = import('@google/generative-ai').then((module) => {
         const GoogleGenerativeAI = module.GoogleGenerativeAI;
-        const apiKey = options.apiKey ?? Bun.env['GOOGLE_API_KEY'];
+        const apiKey =
+          options.apiKey ??
+          (typeof Bun !== 'undefined' ? Bun.env['GOOGLE_API_KEY'] : process.env['GOOGLE_API_KEY']);
         if (!apiKey) {
           throw new ProviderError({
             provider: 'gemini',
@@ -145,7 +147,9 @@ export function createGeminiProviderStream(
     if (!modelPromise) {
       modelPromise = import('@google/generative-ai').then((module) => {
         const GoogleGenerativeAI = module.GoogleGenerativeAI;
-        const apiKey = options.apiKey ?? Bun.env['GOOGLE_API_KEY'];
+        const apiKey =
+          options.apiKey ??
+          (typeof Bun !== 'undefined' ? Bun.env['GOOGLE_API_KEY'] : process.env['GOOGLE_API_KEY']);
         if (!apiKey) {
           throw new ProviderError({
             provider: 'gemini',

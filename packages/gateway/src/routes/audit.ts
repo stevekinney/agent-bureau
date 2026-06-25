@@ -148,6 +148,9 @@ export function createAuditRoutes(bureau: Bureau) {
     }
 
     const limitParsed = limitRaw !== undefined ? parseInt(limitRaw, 10) : 500;
+    if (limitRaw !== undefined && (isNaN(limitParsed) || limitParsed <= 0)) {
+      throw new HTTPException(400, { message: '"limit" must be a positive integer' });
+    }
     const limit = Math.min(isNaN(limitParsed) ? 500 : limitParsed, 1000);
 
     // Layer B — durable trail.
