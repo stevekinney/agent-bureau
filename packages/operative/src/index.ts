@@ -389,6 +389,7 @@ export {
   createSessionHandle,
   createSessionStore,
   deriveRunId,
+  ForkThroughRunError,
   NoDurableEngineError,
   NoRunningRunError,
   resumeSession,
