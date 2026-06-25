@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 
-import { toAnthropicMessages } from '../src/adapters/anthropic';
+import type { AnthropicConversation } from '../src/adapters/anthropic';
+import { fromAnthropicMessages, toAnthropicMessages } from '../src/adapters/anthropic';
 import { toGeminiMessages } from '../src/adapters/gemini';
 import { toOpenAIMessages, toOpenAIMessagesGrouped } from '../src/adapters/openai';
 import { simpleTokenEstimator, truncateToTokenLimit } from '../src/context';
@@ -730,24 +731,28 @@ describe('Anthropic Adapter', () => {
       expect(toolUse.input).toBe('{invalid');
     });
 
-    it('handles data URLs with missing parts', () => {
+    it('preserves a data URL that does not match the base64 shape as a url source (does not silently drop it)', () => {
       let conv = createConversation({ id: 'test' }, testEnvironment);
       conv = appendMessages(
         conv,
         {
           role: 'user',
-          content: [{ type: 'image', url: 'data:image/png;base64' }], // Invalid data URL
+          // `data:` prefix but not a valid `data:<media>;base64,<data>` URL.
+          content: [{ type: 'image', url: 'data:image/png;base64' }],
         },
         testEnvironment,
       );
 
       const { messages } = toAnthropicMessages(conv);
-      // If content becomes empty, the message might be skipped or have empty content
-      if (messages.length > 0) {
-        expect(messages[0].content).toEqual([]);
-      } else {
-        expect(messages).toHaveLength(0);
-      }
+      expect(messages).toHaveLength(1);
+      const blocks = messages[0]?.content as any[];
+      // The image must survive — as a url source — rather than vanishing from
+      // the outgoing Anthropic payload.
+      expect(blocks).toHaveLength(1);
+      expect(blocks[0]).toEqual({
+        type: 'image',
+        source: { type: 'url', url: 'data:image/png;base64' },
+      });
     });
 
     it('rejects unknown roles before adapter formatting', () => {
@@ -1185,5 +1190,508 @@ describe('Streaming message protection in adapters', () => {
     expect(contents).toHaveLength(2);
     expect(contents[0]?.role).toBe('user');
     expect(contents[1]?.role).toBe('model');
+  });
+});
+
+describe('C5 — Server-tool content blocks (Anthropic adapter)', () => {
+  it('round-trips server_tool_use and web_search_tool_result interleaved with text', () => {
+    const payload: AnthropicConversation = {
+      messages: [
+        { role: 'user', content: 'Search for recent news about AI' },
+        {
+          role: 'assistant',
+          content: [
+            { type: 'text', text: 'Let me search for that.' },
+            {
+              type: 'server_tool_use',
+              id: 'stu_123',
+              name: 'web_search',
+              input: { query: 'recent AI news' },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'web_search_tool_result',
+              tool_use_id: 'stu_123',
+              content: [
+                { type: 'web_search_result', url: 'https://example.com', title: 'AI News' },
+              ],
+            },
+          ],
+        },
+        {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'Here is a summary of recent AI news.' }],
+        },
+      ],
+    };
+
+    const conversation = fromAnthropicMessages(payload);
+    const roundTripped = toAnthropicMessages(conversation);
+
+    // Should have user → assistant (server_tool_use) → user (web_search_result) → assistant
+    expect(roundTripped.messages).toHaveLength(4);
+
+    // Find assistant message with server_tool_use
+    const assistantWithServerTool = roundTripped.messages.find(
+      (m) =>
+        m.role === 'assistant' &&
+        Array.isArray(m.content) &&
+        (m.content as any[]).some((b: any) => b.type === 'server_tool_use'),
+    );
+    expect(assistantWithServerTool).toBeDefined();
+
+    const serverToolBlock = (assistantWithServerTool?.content as any[]).find(
+      (b: any) => b.type === 'server_tool_use',
+    );
+    expect(serverToolBlock).toBeDefined();
+    expect(serverToolBlock.id).toBe('stu_123');
+    expect(serverToolBlock.name).toBe('web_search');
+    expect(serverToolBlock.input).toEqual({ query: 'recent AI news' });
+
+    // Find user message with web_search_tool_result
+    const userWithSearchResult = roundTripped.messages.find(
+      (m) =>
+        m.role === 'user' &&
+        Array.isArray(m.content) &&
+        (m.content as any[]).some((b: any) => b.type === 'web_search_tool_result'),
+    );
+    expect(userWithSearchResult).toBeDefined();
+
+    const searchResultBlock = (userWithSearchResult?.content as any[]).find(
+      (b: any) => b.type === 'web_search_tool_result',
+    );
+    expect(searchResultBlock).toBeDefined();
+    expect(searchResultBlock.tool_use_id).toBe('stu_123');
+  });
+
+  it('round-trips [text, server_tool_use, text] as ONE assistant message with blocks in their original order', () => {
+    const payload: AnthropicConversation = {
+      messages: [
+        { role: 'user', content: 'Do a search' },
+        {
+          role: 'assistant',
+          content: [
+            { type: 'text', text: 'Searching now.' },
+            { type: 'server_tool_use', id: 'stu_a', name: 'web_search', input: { q: 'test' } },
+            { type: 'text', text: 'Done searching.' },
+          ],
+        },
+      ],
+    };
+
+    const conversation = fromAnthropicMessages(payload);
+    const roundTripped = toAnthropicMessages(conversation);
+
+    // Groupable blocks of one Anthropic turn must round-trip as a single
+    // assistant message, not be fragmented across multiple messages.
+    const assistantMessages = roundTripped.messages.filter((m) => m.role === 'assistant');
+    expect(assistantMessages).toHaveLength(1);
+
+    const blocks = assistantMessages[0]?.content;
+    expect(Array.isArray(blocks)).toBe(true);
+
+    // Block TYPES must appear in exactly the original order.
+    const typedBlocks = blocks as Array<{ type: string }>;
+    expect(typedBlocks.map((b) => b.type)).toEqual(['text', 'server_tool_use', 'text']);
+
+    // And the actual values must be preserved, not just the shape.
+    const first = typedBlocks[0] as { type: 'text'; text: string };
+    const middle = typedBlocks[1] as { type: 'server_tool_use'; id: string; name: string };
+    const last = typedBlocks[2] as { type: 'text'; text: string };
+    expect(first.text).toBe('Searching now.');
+    expect(middle.id).toBe('stu_a');
+    expect(middle.name).toBe('web_search');
+    expect(last.text).toBe('Done searching.');
+  });
+
+  it('round-trips [thinking, server_tool_use, text] as one ordered assistant message (extended thinking + web search)', () => {
+    // A realistic Anthropic pattern: the model thinks, invokes a server tool,
+    // then answers. All three blocks are groupable, so they must stay together
+    // in one ordered message with the thinking signature intact.
+    const SIG = 'EqoBthinkSig==';
+    const payload: AnthropicConversation = {
+      messages: [
+        { role: 'user', content: 'Find todays news' },
+        {
+          role: 'assistant',
+          content: [
+            { type: 'thinking', thinking: 'I should search the web.', signature: SIG },
+            { type: 'server_tool_use', id: 'stu_z', name: 'web_search', input: { q: 'news' } },
+            { type: 'text', text: 'Let me look.' },
+          ],
+        },
+      ],
+    };
+
+    const conversation = fromAnthropicMessages(payload);
+    const roundTripped = toAnthropicMessages(conversation);
+
+    const assistantMessages = roundTripped.messages.filter((m) => m.role === 'assistant');
+    expect(assistantMessages).toHaveLength(1);
+
+    const blocks = assistantMessages[0]?.content as Array<{ type: string }>;
+    expect(blocks.map((b) => b.type)).toEqual(['thinking', 'server_tool_use', 'text']);
+
+    const thinking = blocks[0] as { type: 'thinking'; thinking: string; signature: string };
+    expect(thinking.thinking).toBe('I should search the web.');
+    // Signature survives the round-trip byte-for-byte even when not followed
+    // immediately by a text block.
+    expect(thinking.signature).toBe(SIG);
+  });
+
+  it('keeps a client tool_use interleaved between text blocks in true order across the round-trip', () => {
+    // tool_use is role-bearing on import (a tool-call message), but every piece
+    // of this turn is assistant-role on export, so toAnthropicMessages merges
+    // the consecutive assistant messages back into one ordered block array.
+    const payload: AnthropicConversation = {
+      messages: [
+        { role: 'user', content: 'Look it up' },
+        {
+          role: 'assistant',
+          content: [
+            { type: 'text', text: 'Before.' },
+            { type: 'tool_use', id: 'call-mid', name: 'lookup', input: { k: 'v' } },
+            { type: 'text', text: 'After.' },
+          ],
+        },
+      ],
+    };
+
+    const conversation = fromAnthropicMessages(payload);
+    const roundTripped = toAnthropicMessages(conversation);
+
+    const assistantMessages = roundTripped.messages.filter((m) => m.role === 'assistant');
+    expect(assistantMessages).toHaveLength(1);
+
+    const blocks = assistantMessages[0]?.content as Array<{ type: string }>;
+    expect(blocks.map((b) => b.type)).toEqual(['text', 'tool_use', 'text']);
+
+    const first = blocks[0] as { type: 'text'; text: string };
+    const mid = blocks[1] as { type: 'tool_use'; id: string; name: string; input: unknown };
+    const last = blocks[2] as { type: 'text'; text: string };
+    expect(first.text).toBe('Before.');
+    expect(mid.id).toBe('call-mid');
+    expect(mid.name).toBe('lookup');
+    expect(mid.input).toEqual({ k: 'v' });
+    expect(last.text).toBe('After.');
+  });
+
+  it('round-trips a code-execution server-tool result block instead of dropping it', () => {
+    // bash_code_execution_tool_result is an Anthropic code-execution result; it
+    // must survive import → export with its stdout/exit details intact.
+    const payload: AnthropicConversation = {
+      messages: [
+        { role: 'user', content: 'Run ls' },
+        {
+          role: 'assistant',
+          content: [
+            { type: 'server_tool_use', id: 'stu-x', name: 'bash', input: { command: 'ls' } },
+            {
+              type: 'bash_code_execution_tool_result',
+              tool_use_id: 'stu-x',
+              content: { stdout: 'file.txt\n', exit_code: 0 },
+            },
+          ],
+        },
+      ],
+    };
+
+    const conversation = fromAnthropicMessages(payload);
+    const roundTripped = toAnthropicMessages(conversation);
+
+    const assistant = roundTripped.messages.find((m) => m.role === 'assistant');
+    const blocks = assistant?.content as Array<{ type: string; [k: string]: unknown }>;
+    expect(blocks.map((b) => b.type)).toEqual([
+      'server_tool_use',
+      'bash_code_execution_tool_result',
+    ]);
+    const resultBlock = blocks.find((b) => b.type === 'bash_code_execution_tool_result');
+    expect(resultBlock?.tool_use_id).toBe('stu-x');
+    expect(resultBlock?.content).toEqual({ stdout: 'file.txt\n', exit_code: 0 });
+  });
+
+  it('round-trips a container_upload block (uploaded-file reference) instead of dropping it', () => {
+    const payload: AnthropicConversation = {
+      messages: [
+        { role: 'user', content: 'Use this file' },
+        {
+          role: 'assistant',
+          content: [
+            { type: 'text', text: 'Got it.' },
+            { type: 'container_upload', file_id: 'file_abc123' } as any,
+          ],
+        },
+      ],
+    };
+
+    const conversation = fromAnthropicMessages(payload);
+    const roundTripped = toAnthropicMessages(conversation);
+
+    const assistant = roundTripped.messages.find((m) => m.role === 'assistant');
+    const blocks = assistant?.content as Array<{ type: string; [k: string]: unknown }>;
+    const upload = blocks.find((b) => b.type === 'container_upload');
+    expect(upload).toBeDefined();
+    expect(upload?.file_id).toBe('file_abc123');
+  });
+
+  it('round-trips a web_fetch_tool_result block instead of dropping it', () => {
+    const payload: AnthropicConversation = {
+      messages: [
+        { role: 'user', content: 'Fetch it' },
+        {
+          role: 'assistant',
+          content: [
+            {
+              type: 'server_tool_use',
+              id: 'wf',
+              name: 'web_fetch',
+              input: { url: 'https://x.com' },
+            },
+            {
+              type: 'web_fetch_tool_result',
+              tool_use_id: 'wf',
+              content: { url: 'https://x.com', text: 'fetched body' },
+            } as any,
+          ],
+        },
+      ],
+    };
+
+    const conversation = fromAnthropicMessages(payload);
+    const roundTripped = toAnthropicMessages(conversation);
+
+    const assistant = roundTripped.messages.find((m) => m.role === 'assistant');
+    const blocks = assistant?.content as Array<{ type: string; [k: string]: unknown }>;
+    const fetchBlock = blocks.find((b) => b.type === 'web_fetch_tool_result');
+    expect(fetchBlock).toBeDefined();
+    expect(fetchBlock?.content).toEqual({ url: 'https://x.com', text: 'fetched body' });
+  });
+});
+
+describe('C3 — Extended-thinking content blocks (Anthropic adapter)', () => {
+  const THINKING_SIGNATURE = 'EqoBCkgIARABGAIiQL8gy6bfP3E5example_signature==';
+  const REDACTED_DATA = 'EqoBCkgIARRedactedData==';
+
+  it('round-trips a thinking block through fromAnthropicMessages → toAnthropicMessages, preserving signature byte-for-byte', () => {
+    const payload: AnthropicConversation = {
+      messages: [
+        { role: 'user', content: 'What is 2+2?' },
+        {
+          role: 'assistant',
+          content: [
+            {
+              type: 'thinking',
+              thinking: 'Let me think... 2+2 is 4',
+              signature: THINKING_SIGNATURE,
+            },
+            { type: 'text', text: 'The answer is 4.' },
+          ],
+        },
+      ],
+    };
+
+    const conversation = fromAnthropicMessages(payload);
+    const roundTripped = toAnthropicMessages(conversation);
+
+    // Should have user and assistant messages
+    expect(roundTripped.messages).toHaveLength(2);
+    const assistantBlocks = roundTripped.messages[1]?.content;
+    expect(Array.isArray(assistantBlocks)).toBe(true);
+
+    const thinkingBlock = (assistantBlocks as any[]).find((b: any) => b.type === 'thinking');
+    expect(thinkingBlock).toBeDefined();
+    expect(thinkingBlock.thinking).toBe('Let me think... 2+2 is 4');
+    // Signature must be byte-for-byte identical
+    expect(thinkingBlock.signature).toBe(THINKING_SIGNATURE);
+
+    const textBlock = (assistantBlocks as any[]).find((b: any) => b.type === 'text');
+    expect(textBlock).toBeDefined();
+    expect(textBlock.text).toBe('The answer is 4.');
+  });
+
+  it('round-trips a redacted_thinking block, preserving data byte-for-byte', () => {
+    const payload: AnthropicConversation = {
+      messages: [
+        { role: 'user', content: 'Tell me something' },
+        {
+          role: 'assistant',
+          content: [
+            { type: 'redacted_thinking', data: REDACTED_DATA },
+            { type: 'text', text: 'Here is my response.' },
+          ],
+        },
+      ],
+    };
+
+    const conversation = fromAnthropicMessages(payload);
+    const roundTripped = toAnthropicMessages(conversation);
+
+    expect(roundTripped.messages).toHaveLength(2);
+    const assistantBlocks = roundTripped.messages[1]?.content;
+    expect(Array.isArray(assistantBlocks)).toBe(true);
+
+    const redactedBlock = (assistantBlocks as any[]).find(
+      (b: any) => b.type === 'redacted_thinking',
+    );
+    expect(redactedBlock).toBeDefined();
+    // Signature must be byte-for-byte identical
+    expect(redactedBlock.data).toBe(REDACTED_DATA);
+  });
+
+  it('preserves block order: thinking → text → tool_use in a round-trip', () => {
+    const payload: AnthropicConversation = {
+      messages: [
+        { role: 'user', content: 'What is the weather?' },
+        {
+          role: 'assistant',
+          content: [
+            { type: 'thinking', thinking: 'I should check weather', signature: THINKING_SIGNATURE },
+            { type: 'text', text: 'Let me look that up.' },
+            { type: 'tool_use', id: 'call-weather', name: 'get_weather', input: { city: 'NYC' } },
+          ],
+        },
+        {
+          role: 'user',
+          content: [{ type: 'tool_result', tool_use_id: 'call-weather', content: '{"temp": 72}' }],
+        },
+        {
+          role: 'assistant',
+          content: 'The weather in NYC is 72°F.',
+        },
+      ],
+    };
+
+    const conversation = fromAnthropicMessages(payload);
+    const roundTripped = toAnthropicMessages(conversation);
+
+    // Find the assistant message that has thinking + text blocks
+    const assistantMsgWithThinking = roundTripped.messages.find(
+      (m) =>
+        m.role === 'assistant' &&
+        Array.isArray(m.content) &&
+        (m.content as any[]).some((b: any) => b.type === 'thinking'),
+    );
+    expect(assistantMsgWithThinking).toBeDefined();
+
+    const blocks = assistantMsgWithThinking?.content as any[];
+    // Block order must be preserved
+    expect(blocks[0]?.type).toBe('thinking');
+    expect(blocks[0]?.signature).toBe(THINKING_SIGNATURE);
+    expect(blocks[1]?.type).toBe('text');
+  });
+
+  it('does not drop thinking blocks during compaction / toAnthropicMessages export', () => {
+    const payload: AnthropicConversation = {
+      messages: [
+        { role: 'user', content: 'Summarize' },
+        {
+          role: 'assistant',
+          content: [
+            {
+              type: 'thinking',
+              thinking: 'Internal reasoning here',
+              signature: THINKING_SIGNATURE,
+            },
+            { type: 'text', text: 'Here is a summary.' },
+          ],
+        },
+      ],
+    };
+
+    const conversation = fromAnthropicMessages(payload);
+    // Re-export should still have the thinking block
+    const exported = toAnthropicMessages(conversation);
+    const assistantContent = exported.messages.find((m) => m.role === 'assistant')?.content;
+    expect(Array.isArray(assistantContent)).toBe(true);
+
+    const thinkingBlock = (assistantContent as any[]).find((b: any) => b.type === 'thinking');
+    expect(thinkingBlock).toBeDefined();
+    expect(thinkingBlock.signature).toBe(THINKING_SIGNATURE);
+  });
+
+  it('preserves a trailing thinking block that has no following text block', () => {
+    // Exercises the flush of accumulated content at the end of a turn: an
+    // assistant message whose only content is a thinking block.
+    const payload: AnthropicConversation = {
+      messages: [
+        { role: 'user', content: 'Think only' },
+        {
+          role: 'assistant',
+          content: [
+            {
+              type: 'thinking',
+              thinking: 'Reasoning, no answer yet',
+              signature: THINKING_SIGNATURE,
+            },
+          ],
+        },
+      ],
+    };
+
+    const conversation = fromAnthropicMessages(payload);
+    const roundTripped = toAnthropicMessages(conversation);
+
+    const assistantContent = roundTripped.messages.find((m) => m.role === 'assistant')?.content;
+    expect(Array.isArray(assistantContent)).toBe(true);
+    const thinkingBlock = (assistantContent as any[]).find((b: any) => b.type === 'thinking');
+    expect(thinkingBlock).toBeDefined();
+    expect(thinkingBlock.thinking).toBe('Reasoning, no answer yet');
+    expect(thinkingBlock.signature).toBe(THINKING_SIGNATURE);
+  });
+
+  it('preserves a trailing redacted_thinking block that has no following text block', () => {
+    const payload: AnthropicConversation = {
+      messages: [
+        { role: 'user', content: 'Redacted only' },
+        {
+          role: 'assistant',
+          content: [{ type: 'redacted_thinking', data: REDACTED_DATA }],
+        },
+      ],
+    };
+
+    const conversation = fromAnthropicMessages(payload);
+    const roundTripped = toAnthropicMessages(conversation);
+
+    const assistantContent = roundTripped.messages.find((m) => m.role === 'assistant')?.content;
+    expect(Array.isArray(assistantContent)).toBe(true);
+    const redactedBlock = (assistantContent as any[]).find(
+      (b: any) => b.type === 'redacted_thinking',
+    );
+    expect(redactedBlock).toBeDefined();
+    expect(redactedBlock.data).toBe(REDACTED_DATA);
+  });
+
+  it('preserves citations on a cited text block through the round-trip', () => {
+    const citations = [
+      { type: 'web_search_result_location', url: 'https://example.com', cited_text: 'fact' },
+    ];
+    const payload: AnthropicConversation = {
+      messages: [
+        { role: 'user', content: 'Cite a source' },
+        {
+          role: 'assistant',
+          // A cited text block carries a citations array Anthropic needs for replay.
+          content: [{ type: 'text', text: 'Here is a fact.', citations } as any],
+        },
+      ],
+    };
+
+    const conversation = fromAnthropicMessages(payload);
+    const roundTripped = toAnthropicMessages(conversation);
+
+    const assistantContent = roundTripped.messages.find((m) => m.role === 'assistant')?.content;
+    // Single cited text block collapses to a multi-part array (citations make it
+    // non-plain); the citations must survive.
+    const textBlock = Array.isArray(assistantContent)
+      ? (assistantContent as any[]).find((b: any) => b.type === 'text')
+      : undefined;
+    expect(textBlock).toBeDefined();
+    expect(textBlock.text).toBe('Here is a fact.');
+    expect(textBlock.citations).toEqual(citations);
   });
 });

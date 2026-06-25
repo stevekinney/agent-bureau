@@ -18,6 +18,8 @@ import { isCanonicalToolResultPayload, parseJSONValue, toJSONValue } from '../sh
 export interface AnthropicTextBlock {
   type: 'text';
   text: string;
+  /** Citation references on cited text (e.g. web-search results); preserved opaquely. */
+  citations?: unknown;
 }
 
 /**
@@ -62,13 +64,84 @@ export interface AnthropicToolResultBlock {
 }
 
 /**
+ * Anthropic extended thinking content block.
+ * The signature must be preserved byte-for-byte for subsequent conversation turns.
+ */
+export interface AnthropicThinkingBlock {
+  type: 'thinking';
+  thinking: string;
+  signature: string;
+}
+
+/**
+ * Anthropic redacted extended thinking content block.
+ * The thinking text is omitted; only the signature is present to verify integrity.
+ * The signature must be preserved byte-for-byte for subsequent conversation turns.
+ */
+export interface AnthropicRedactedThinkingBlock {
+  type: 'redacted_thinking';
+  data: string;
+}
+
+/**
+ * Anthropic server-tool use content block (e.g. built-in tools like web_search).
+ * Input accumulates via input_json_delta during streaming.
+ */
+export interface AnthropicServerToolUseBlock {
+  type: 'server_tool_use';
+  id: string;
+  name: string;
+  input: unknown;
+}
+
+/**
+ * Anthropic web search tool result content block returned by the built-in web_search tool.
+ */
+export interface AnthropicWebSearchToolResultBlock {
+  type: 'web_search_tool_result';
+  tool_use_id: string;
+  content: unknown;
+}
+
+/**
+ * Anthropic server-tool result block — code execution (`code_execution`,
+ * `bash_code_execution`, `text_editor_code_execution`) and web fetch each emit
+ * their own `*_tool_result` block. Enumerated explicitly so they round-trip
+ * instead of being dropped; add a literal when Anthropic ships a new one.
+ */
+export interface AnthropicServerToolResultBlock {
+  type:
+    | 'code_execution_tool_result'
+    | 'bash_code_execution_tool_result'
+    | 'text_editor_code_execution_tool_result'
+    | 'web_fetch_tool_result';
+  tool_use_id: string;
+  content: unknown;
+}
+
+/**
+ * Anthropic container upload block — references a file uploaded into a
+ * code-execution container by id.
+ */
+export interface AnthropicContainerUploadBlock {
+  type: 'container_upload';
+  file_id: string;
+}
+
+/**
  * Anthropic content block union type.
  */
 export type AnthropicContentBlock =
   | AnthropicTextBlock
   | AnthropicImageBlock
   | AnthropicToolUseBlock
-  | AnthropicToolResultBlock;
+  | AnthropicToolResultBlock
+  | AnthropicThinkingBlock
+  | AnthropicRedactedThinkingBlock
+  | AnthropicServerToolUseBlock
+  | AnthropicWebSearchToolResultBlock
+  | AnthropicServerToolResultBlock
+  | AnthropicContainerUploadBlock;
 
 /**
  * Anthropic message format for the Messages API.
@@ -99,38 +172,81 @@ function toAnthropicContent(
 
   const blocks: AnthropicContentBlock[] = [];
   for (const part of content) {
-    if (part.type === 'text') {
-      blocks.push({ type: 'text', text: part.text ?? '' });
-    } else if (part.type === 'image') {
-      // Anthropic supports both URL and base64
-      const url = part.url ?? '';
-      if (url.startsWith('data:')) {
-        // Base64 data URL
-        const matches = url.match(/^data:([^;]+);base64,(.+)$/);
-        if (matches && matches[1] && matches[2]) {
+    switch (part.type) {
+      case 'text':
+        blocks.push({
+          type: 'text',
+          text: part.text ?? '',
+          ...(part.citations !== undefined ? { citations: part.citations } : {}),
+        });
+        break;
+      case 'thinking':
+        // Preserve thinking blocks byte-for-byte (signature is integrity-critical)
+        blocks.push({ type: 'thinking', thinking: part.thinking, signature: part.signature });
+        break;
+      case 'redacted_thinking':
+        // Preserve redacted_thinking blocks byte-for-byte (the encrypted `data` is integrity-critical)
+        blocks.push({ type: 'redacted_thinking', data: part.data });
+        break;
+      case 'server_tool_use':
+        blocks.push({ type: 'server_tool_use', id: part.id, name: part.name, input: part.input });
+        break;
+      case 'web_search_tool_result':
+        blocks.push({
+          type: 'web_search_tool_result',
+          tool_use_id: part.tool_use_id,
+          content: part.content,
+        });
+        break;
+      case 'code_execution_tool_result':
+      case 'bash_code_execution_tool_result':
+      case 'text_editor_code_execution_tool_result':
+      case 'web_fetch_tool_result':
+        blocks.push({
+          type: part.type,
+          tool_use_id: part.tool_use_id,
+          content: part.content,
+        });
+        break;
+      case 'container_upload':
+        blocks.push({ type: 'container_upload', file_id: part.file_id });
+        break;
+      case 'image': {
+        // Anthropic supports both URL and base64. A `data:` URL that matches the
+        // base64 shape becomes a base64 source; anything else (including a `data:`
+        // URL that does not match — e.g. non-base64-encoded) falls through to a
+        // url source rather than being silently dropped from the payload.
+        const url = part.url ?? '';
+        const base64Match = url.startsWith('data:')
+          ? url.match(/^data:([^;]+);base64,(.+)$/)
+          : null;
+        if (base64Match && base64Match[1] && base64Match[2]) {
           blocks.push({
             type: 'image',
             source: {
               type: 'base64',
-              media_type: matches[1],
-              data: matches[2],
+              media_type: base64Match[1],
+              data: base64Match[2],
+            },
+          });
+        } else {
+          blocks.push({
+            type: 'image',
+            source: {
+              type: 'url',
+              url,
             },
           });
         }
-      } else {
-        // Regular URL
-        blocks.push({
-          type: 'image',
-          source: {
-            type: 'url',
-            url,
-          },
-        });
+        break;
       }
     }
   }
 
-  return blocks.length === 1 && blocks[0]?.type === 'text' ? blocks[0].text : blocks;
+  // Collapse a lone plain text block to a string — but NOT one carrying
+  // citations, which would be lost in the string form.
+  const only = blocks.length === 1 ? blocks[0] : undefined;
+  return only?.type === 'text' && only.citations === undefined ? only.text : blocks;
 }
 
 /**
@@ -236,12 +352,11 @@ export function toAnthropicMessages(conversation: Conversation): AnthropicConver
 
   const flushCurrent = () => {
     if (currentRole && currentBlocks.length > 0) {
+      const onlyBlock = currentBlocks.length === 1 ? currentBlocks[0] : undefined;
+      const collapsible = onlyBlock?.type === 'text' && onlyBlock.citations === undefined;
       messages.push({
         role: currentRole,
-        content:
-          currentBlocks.length === 1 && currentBlocks[0]?.type === 'text'
-            ? currentBlocks[0].text
-            : currentBlocks,
+        content: collapsible && onlyBlock?.type === 'text' ? onlyBlock.text : currentBlocks,
       });
       currentBlocks = [];
     }
@@ -332,42 +447,14 @@ function parseToolResultContent(callId: string, content: string, isError?: boole
   };
 }
 
+/**
+ * Maps the role-bearing Anthropic blocks — `tool_use` and `tool_result` — to
+ * their dedicated conversation messages. Groupable content blocks are handled by
+ * {@link toGroupableContentPart}; only `tool_use`/`tool_result` reach here.
+ */
 function toMessageInputFromBlock(
-  role: AnthropicMessage['role'],
-  block: AnthropicContentBlock,
+  block: AnthropicToolUseBlock | AnthropicToolResultBlock,
 ): MessageInput {
-  if (block.type === 'text') {
-    return {
-      role,
-      content: block.text,
-    };
-  }
-
-  if (block.type === 'image') {
-    if (block.source.type === 'url') {
-      return {
-        role,
-        content: [
-          {
-            type: 'image',
-            url: block.source.url,
-          },
-        ],
-      };
-    }
-
-    return {
-      role,
-      content: [
-        {
-          type: 'image',
-          url: `data:${block.source.media_type};base64,${block.source.data}`,
-          mimeType: block.source.media_type,
-        },
-      ],
-    };
-  }
-
   if (block.type === 'tool_use') {
     return {
       role: 'tool-call',
@@ -385,6 +472,65 @@ function toMessageInputFromBlock(
     content: '',
     toolResult: parseToolResultContent(block.tool_use_id, block.content, block.is_error),
   };
+}
+
+/**
+ * Maps an Anthropic content block that can coexist with siblings inside a single
+ * message to its {@link MultiModalContent} part, preserving fields byte-for-byte.
+ * Returns `undefined` for blocks that must become their own message because the
+ * conversation model represents them as distinct roles (`tool_use` →
+ * `tool-call`, `tool_result` → `tool-result`).
+ */
+function toGroupableContentPart(block: AnthropicContentBlock): MultiModalContent | undefined {
+  switch (block.type) {
+    case 'text':
+      return {
+        type: 'text',
+        text: block.text,
+        ...(block.citations !== undefined ? { citations: toJSONValue(block.citations) } : {}),
+      };
+    case 'thinking':
+      return { type: 'thinking', thinking: block.thinking, signature: block.signature };
+    case 'redacted_thinking':
+      return { type: 'redacted_thinking', data: block.data };
+    case 'server_tool_use':
+      return {
+        type: 'server_tool_use',
+        id: block.id,
+        name: block.name,
+        input: toJSONValue(block.input),
+      };
+    case 'web_search_tool_result':
+      return {
+        type: 'web_search_tool_result',
+        tool_use_id: block.tool_use_id,
+        content: toJSONValue(block.content),
+      };
+    case 'code_execution_tool_result':
+    case 'bash_code_execution_tool_result':
+    case 'text_editor_code_execution_tool_result':
+    case 'web_fetch_tool_result':
+      // Preserve server-tool results (code execution, web fetch) instead of dropping them.
+      return {
+        type: block.type,
+        tool_use_id: block.tool_use_id,
+        content: toJSONValue(block.content),
+      };
+    case 'container_upload':
+      // Preserve the uploaded-file reference instead of dropping it.
+      return { type: 'container_upload', file_id: block.file_id };
+    case 'image':
+      return block.source.type === 'url'
+        ? { type: 'image', url: block.source.url }
+        : {
+            type: 'image',
+            url: `data:${block.source.media_type};base64,${block.source.data}`,
+            mimeType: block.source.media_type,
+          };
+    default:
+      // tool_use / tool_result are role-bearing and handled separately.
+      return undefined;
+  }
 }
 
 function toMessageInputs(payload: AnthropicConversation): MessageInput[] {
@@ -406,9 +552,41 @@ function toMessageInputs(payload: AnthropicConversation): MessageInput[] {
       continue;
     }
 
+    // Preserve the original Anthropic block order. Groupable blocks (text,
+    // thinking, redacted_thinking, image, server_tool_use, web_search_tool_result)
+    // accumulate into a single ordered multi-part MessageInput. Role-bearing
+    // blocks (tool_use → tool-call, tool_result → tool-result) are distinct
+    // messages in the conversation model, so they flush the current run and emit
+    // their own message, keeping interleaved sequences like
+    // [text, tool_use, text] in their true order.
+    let pendingParts: MultiModalContent[] = [];
+
+    const flushPending = () => {
+      if (pendingParts.length === 0) return;
+      // A lone PLAIN text part round-trips as a string to match the
+      // one-block-one-string storage convention; a cited text part (or any mixed
+      // run) stays as an array so citations aren't lost.
+      const first = pendingParts[0];
+      if (pendingParts.length === 1 && first?.type === 'text' && first.citations === undefined) {
+        inputs.push({ role: message.role, content: first.text });
+      } else {
+        inputs.push({ role: message.role, content: pendingParts });
+      }
+      pendingParts = [];
+    };
+
     for (const block of message.content) {
-      inputs.push(toMessageInputFromBlock(message.role, block));
+      const part = toGroupableContentPart(block);
+      if (part !== undefined) {
+        pendingParts.push(part);
+      } else if (block.type === 'tool_use' || block.type === 'tool_result') {
+        // Role-bearing block: flush the accumulated run first to preserve order.
+        flushPending();
+        inputs.push(toMessageInputFromBlock(block));
+      }
     }
+
+    flushPending();
   }
 
   return inputs;

@@ -87,13 +87,43 @@ export function createPIIRedactionPlugin(options: PIIRedactionOptions = {}): Mes
       result = {
         ...input,
         content: input.content.map((part) => {
-          if (part.type === 'text' && part.text) {
-            return {
-              ...part,
-              text: redact(part.text),
-            };
+          switch (part.type) {
+            case 'text': {
+              // Redact both the visible text and any citation metadata
+              // (cited_text, titles, urls) which can carry PII.
+              const text = part.text ? redact(part.text) : part.text;
+              if (part.citations === undefined) {
+                return part.text ? { ...part, text } : part;
+              }
+              return {
+                ...part,
+                text,
+                citations: redactJSONValue(part.citations, redact) as typeof part.citations,
+              };
+            }
+            case 'server_tool_use':
+              // Tool input JSON (e.g. a web_search query) can carry PII.
+              return { ...part, input: redactJSONValue(part.input, redact) as typeof part.input };
+            case 'web_search_tool_result':
+            case 'web_fetch_tool_result':
+            case 'code_execution_tool_result':
+            case 'bash_code_execution_tool_result':
+            case 'text_editor_code_execution_tool_result':
+              // Structural tool-result payloads (search snippets, fetched page
+              // text, stdout) can contain emails/keys — redact their string
+              // leaves like role-level tool results.
+              return {
+                ...part,
+                content: redactJSONValue(part.content, redact) as typeof part.content,
+              };
+            default:
+              // image; container_upload (id only); and intentionally `thinking` /
+              // `redacted_thinking`: their text/data is paired byte-for-byte with
+              // a signature for extended-thinking replay, so rewriting it would
+              // break replay. Thinking content is internal reasoning, not
+              // user-facing output, so it is left intact.
+              return part;
           }
-          return part;
         }),
       };
     }

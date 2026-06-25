@@ -259,6 +259,90 @@ describe('summarizer-based compaction', () => {
       const stripped = stripToolResultDetailsBatch(messages);
       expect(stripped[0]).toBe(messages[0]);
     });
+
+    test('strips structural tool-result block content inside assistant content', () => {
+      const messages: Message[] = [
+        {
+          id: 'm-0',
+          role: 'assistant',
+          content: [
+            { type: 'text', text: 'See results.' },
+            {
+              type: 'web_search_tool_result',
+              tool_use_id: 'stu-1',
+              content: [{ snippet: 'a very long search snippet to be stripped' }],
+            },
+          ],
+          position: 0,
+          createdAt: new Date().toISOString(),
+          metadata: {},
+          hidden: false,
+        },
+      ];
+
+      const stripped = stripToolResultDetailsBatch(messages);
+      const parts = stripped[0].content as Array<{
+        type: string;
+        text?: string;
+        content?: unknown;
+      }>;
+      // Text is preserved; the structural result content is replaced.
+      expect(parts[0]).toEqual({ type: 'text', text: 'See results.' });
+      expect(parts[1]?.content).toBe('[tool result]');
+    });
+
+    test('strips citation payloads on cited text parts', () => {
+      const messages: Message[] = [
+        {
+          id: 'm-0',
+          role: 'assistant',
+          content: [
+            {
+              type: 'text',
+              text: 'The answer is 4.',
+              citations: [{ cited_text: 'long cited evidence to strip', url: 'https://e.com' }],
+            },
+          ],
+          position: 0,
+          createdAt: new Date().toISOString(),
+          metadata: {},
+          hidden: false,
+        },
+      ];
+
+      const stripped = stripToolResultDetailsBatch(messages);
+      const part = (
+        stripped[0].content as Array<{ type: string; text?: string; citations?: unknown }>
+      )[0];
+      // Visible text is preserved; the citation FIELD is removed entirely (it must
+      // be structured, so scalarizing it would produce a malformed block).
+      expect(part?.text).toBe('The answer is 4.');
+      expect('citations' in (part as object)).toBe(false);
+    });
+
+    test('drops thinking and redacted_thinking blocks (mutating them would be invalid for re-serialization)', () => {
+      const messages: Message[] = [
+        {
+          id: 'm-0',
+          role: 'assistant',
+          content: [
+            { type: 'thinking', thinking: 'a long private chain of reasoning', signature: 'sig==' },
+            { type: 'redacted_thinking', data: 'encrypted-reasoning-payload' },
+            { type: 'text', text: 'Final answer.' },
+          ],
+          position: 0,
+          createdAt: new Date().toISOString(),
+          metadata: {},
+          hidden: false,
+        },
+      ];
+
+      const stripped = stripToolResultDetailsBatch(messages);
+      const parts = stripped[0].content as Array<{ type: string; text?: string }>;
+      // The thinking blocks are removed entirely; only the answer text remains.
+      expect(parts).toHaveLength(1);
+      expect(parts[0]).toEqual({ type: 'text', text: 'Final answer.' });
+    });
   });
 
   describe('calculateChunkSize', () => {

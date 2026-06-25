@@ -232,4 +232,91 @@ describe('PII redaction in tool arguments, results, and metadata', () => {
     expect(result.metadata!.email).toBe('[EMAIL_REDACTED]');
     expect((result.metadata!.nested as Record<string, unknown>).phone).toBe('[PHONE_REDACTED]');
   });
+
+  it('redacts PII inside structural tool-result content blocks (web_search / web_fetch / code-execution)', () => {
+    const plugin = createPIIRedactionPlugin();
+    const input: MessageInput = {
+      role: 'assistant',
+      content: [
+        { type: 'text', text: 'Here you go.' },
+        {
+          type: 'web_search_tool_result',
+          tool_use_id: 'stu-1',
+          content: [{ snippet: 'reach me at user@example.com' }],
+        },
+        {
+          type: 'web_fetch_tool_result',
+          tool_use_id: 'wf-1',
+          content: { text: 'page says email admin@example.com' },
+        },
+        {
+          type: 'bash_code_execution_tool_result',
+          tool_use_id: 'stu-2',
+          content: { stdout: 'token printed: call 555-123-4567' },
+        },
+      ],
+    };
+
+    const result = plugin(input);
+    const parts = result.content as Array<{ type: string; content?: unknown }>;
+    const search = parts.find((p) => p.type === 'web_search_tool_result');
+    const fetch = parts.find((p) => p.type === 'web_fetch_tool_result');
+    const code = parts.find((p) => p.type === 'bash_code_execution_tool_result');
+    expect(JSON.stringify(search?.content)).toContain('[EMAIL_REDACTED]');
+    expect(JSON.stringify(fetch?.content)).toContain('[EMAIL_REDACTED]');
+    expect(JSON.stringify(code?.content)).toContain('[PHONE_REDACTED]');
+  });
+
+  it('leaves thinking text and signature intact (redaction must not desync the signature)', () => {
+    const plugin = createPIIRedactionPlugin();
+    const input: MessageInput = {
+      role: 'assistant',
+      content: [
+        // The user email here is internal reasoning; rewriting it would break
+        // the byte-for-byte signature pairing required for replay.
+        { type: 'thinking', thinking: 'the user is user@example.com', signature: 'sig==' },
+      ],
+    };
+    const result = plugin(input);
+    const part = (
+      result.content as Array<{ type: string; thinking?: string; signature?: string }>
+    )[0];
+    expect(part?.thinking).toBe('the user is user@example.com');
+    expect(part?.signature).toBe('sig==');
+  });
+
+  it('redacts PII in server_tool_use input', () => {
+    const plugin = createPIIRedactionPlugin();
+    const input: MessageInput = {
+      role: 'assistant',
+      content: [
+        {
+          type: 'server_tool_use',
+          id: 'stu-1',
+          name: 'web_search',
+          input: { query: 'who is user@example.com' },
+        },
+      ],
+    };
+    const result = plugin(input);
+    const part = (result.content as Array<{ type: string; input?: unknown }>)[0];
+    expect(JSON.stringify(part?.input)).toContain('[EMAIL_REDACTED]');
+  });
+
+  it('redacts PII inside text-block citation metadata', () => {
+    const plugin = createPIIRedactionPlugin();
+    const input: MessageInput = {
+      role: 'assistant',
+      content: [
+        {
+          type: 'text',
+          text: 'See source.',
+          citations: [{ cited_text: 'contact user@example.com', url: 'https://example.com' }],
+        },
+      ],
+    };
+    const result = plugin(input);
+    const part = (result.content as Array<{ type: string; citations?: unknown }>)[0];
+    expect(JSON.stringify(part?.citations)).toContain('[EMAIL_REDACTED]');
+  });
 });

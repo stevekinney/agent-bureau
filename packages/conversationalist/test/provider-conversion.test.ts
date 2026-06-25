@@ -407,7 +407,6 @@ describe('provider reverse conversion', () => {
     expect(messages.map((message) => message.role)).toEqual([
       'system',
       'assistant',
-      'assistant',
       'tool-call',
       'tool-call',
       'tool-call',
@@ -416,8 +415,10 @@ describe('provider reverse conversion', () => {
       'tool-result',
       'user',
     ]);
-    expect(messages[1]?.content).toEqual([{ type: 'image', url: 'https://example.com/chart.png' }]);
-    expect(messages[2]?.content).toEqual([
+    // The two consecutive images in one Anthropic message group into a single
+    // ordered multi-part assistant message, preserving block order.
+    expect(messages[1]?.content).toEqual([
+      { type: 'image', url: 'https://example.com/chart.png' },
       {
         type: 'image',
         url: 'data:image/png;base64,YWJjMTIz',
@@ -464,7 +465,7 @@ describe('provider reverse conversion', () => {
       outcome: 'success',
       content: 'plain text fallback',
     });
-    expect(messages[9]?.content).toBe('Please continue.');
+    expect(messages[8]?.content).toBe('Please continue.');
   });
 
   it('reconstructs Gemini function calls and pairs synthetic call IDs', () => {

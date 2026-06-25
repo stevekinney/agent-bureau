@@ -122,15 +122,64 @@ function resolveMarkdownOptions(options: ToMarkdownOptions = {}): ResolvedMarkdo
   };
 }
 
+/**
+ * Replaces the payloads of structural tool blocks inside a content array with
+ * the placeholder, mirroring the role-level redaction options:
+ * - `redactArguments` masks server-tool INPUT (a tool argument, e.g. a web-search
+ *   query), gated like role-level `redactToolArguments`.
+ * - `redactResults` masks server-tool RESULT content (web search/fetch, code
+ *   execution) and citation metadata on text parts (tool-result evidence),
+ *   gated like role-level `redactToolResults`.
+ */
+function redactStructuralToolBlocks(
+  content: string | MultiModalContent[],
+  placeholder: string,
+  redactArguments: boolean,
+  redactResults: boolean,
+): string | MultiModalContent[] {
+  if (typeof content === 'string') return content;
+  return content.map((part) => {
+    switch (part.type) {
+      case 'server_tool_use':
+        return redactArguments ? { ...part, input: placeholder } : part;
+      case 'web_search_tool_result':
+      case 'web_fetch_tool_result':
+      case 'code_execution_tool_result':
+      case 'bash_code_execution_tool_result':
+      case 'text_editor_code_execution_tool_result':
+        return redactResults ? { ...part, content: placeholder } : part;
+      case 'text': {
+        // Citations are tool-result evidence (cited_text, urls, encrypted refs).
+        // Remove the field entirely rather than scalarizing it — `citations` must
+        // be a structured array/object, so a placeholder string would be a
+        // malformed cited-text block.
+        if (!redactResults || part.citations === undefined) return part;
+        const { citations: _citations, ...rest } = part;
+        return rest;
+      }
+      default:
+        return part;
+    }
+  });
+}
+
 function sanitizeMessage(message: Message, options: ResolvedMarkdownOptions): Message {
   const metadata = options.stripTransient
     ? stripTransientFromRecord({ ...message.metadata })
     : { ...message.metadata };
 
+  const copiedContent = copyContent(message.content);
   const content =
     options.redactHiddenContent && message.hidden
       ? options.redactedPlaceholder
-      : copyContent(message.content);
+      : options.redactToolArguments || options.redactToolResults
+        ? redactStructuralToolBlocks(
+            copiedContent,
+            options.redactedPlaceholder,
+            options.redactToolArguments,
+            options.redactToolResults,
+          )
+        : copiedContent;
 
   const toolCall = message.toolCall
     ? {
