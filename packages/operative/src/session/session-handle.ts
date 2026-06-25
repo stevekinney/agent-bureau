@@ -7,6 +7,8 @@ import { createAgentRun } from '../agent-run';
 import type { AgentSession, RunRef } from '../agent-session';
 import { createAgentSession } from '../agent-session';
 import { createActiveRun } from '../create-run';
+import { reattachDurableActiveRun } from '../durable/active-run-adapter';
+import type { CheckpointStore } from '../durable/checkpoint-store';
 import type { AnyRunEngine } from '../durable/create-run-engine';
 import type { OperativeEventMap } from '../events';
 import {
@@ -48,14 +50,26 @@ export interface SessionHandle {
 
   /**
    * Re-attach to the last run IFF it is non-terminal (`status === 'running'`).
-   * Returns the same `AgentRun` handle that is observing the already-running
-   * workflow. Returns `null` when there is no in-flight run to reattach to
-   * (disconnect = keep going; this is NOT "resume from the last message").
+   *
+   * **In-process path (no engine or run is live):** returns the in-process
+   * `AgentRun` handle immediately when a run is currently executing in this
+   * process, otherwise `null`.
+   *
+   * **Durable re-attach path (engine present + last run `status: 'running'` in
+   * the store):** after a crash → restart, the bureau re-creates an engine over
+   * the same store and Weft's `recoverAll()` resumes in-flight workflows on boot.
+   * `recover()` then reads the session's `runs.at(-1)`, derives the `runId`, calls
+   * `engine.resume(runId)` to get the already-running recovered handle, wraps it
+   * in an `AgentRun`, and sets it as the live `currentRun` so subsequent calls
+   * to `recover()` return the same handle without another engine call.
+   *
+   * Returns `null` when there is no in-flight run to reattach to (disconnect =
+   * keep going; this is NOT "resume from the last message").
    *
    * Over HTTP: a client reconnecting after a network drop calls `recover()` to
    * re-subscribe to the in-flight run's event stream.
    */
-  recover(): AgentRun | null;
+  recover(): Promise<AgentRun | null>;
 
   /**
    * Deliberate stop — abort the `generate` `AbortController` IMMEDIATELY (stops the
@@ -126,8 +140,16 @@ export interface SessionHandleContext {
   /**
    * The durable Weft engine, present when the bureau has `.persistence()`.
    * When absent, `signal`/`update`/`query` throw `NoDurableEngineError`.
+   * Required alongside `checkpointStore` for the durable `recover()` re-attach
+   * path (D2).
    */
   engine?: AnyRunEngine;
+  /**
+   * The checkpoint store for reading durable run transcripts. Required for the
+   * durable `recover()` re-attach path (D2) when `engine` is present. If absent
+   * while `engine` is set, `recover()` degrades to in-process-only.
+   */
+  checkpointStore?: CheckpointStore;
   /**
    * The agent name, stored on the session record.
    */
@@ -238,7 +260,7 @@ export function createSessionHandle(
   sessionId: string,
   context: SessionHandleContext,
 ): SessionHandle {
-  const { store, engine, agentName, runOptions } = context;
+  const { store, engine, checkpointStore, agentName, runOptions } = context;
   const emitter = context.emitter ?? new TypedEventTarget<OperativeEventMap>();
 
   /**
@@ -334,12 +356,55 @@ export function createSessionHandle(
       return agentRun;
     },
 
-    recover(): AgentRun | null {
-      // Emit immediately with runId=null: recover() is synchronous and we don't
-      // have the derived run id available without an async store lookup. Null is
-      // the documented "pre-recovery" value per the event class contract.
+    async recover(): Promise<AgentRun | null> {
+      // Fast path: a run is live in this process (same-process disconnect/reconnect).
+      if (currentRun !== null) {
+        emitter.dispatchEvent(new SessionRecoverEvent(sessionId, null));
+        return currentRun;
+      }
+
+      // Durable re-attach path (D2): when an engine AND checkpointStore are
+      // present, check whether the session's last run is still `'running'` in the
+      // durable store. On a crash → restart the bureau re-creates the engine over
+      // the SAME store, Weft's `recoverAll()` resumes in-flight workflows on boot,
+      // and `engine.resume(runId)` gives a handle to the already-running recovered
+      // workflow without starting a new one. Wrap it as an `AgentRun` so the
+      // caller can observe the resumed run normally.
+      if (engine && checkpointStore) {
+        const session = await store.load(sessionId);
+        const last = session?.runs[session.runs.length - 1];
+        if (last && last.status === 'running') {
+          const runId = last.runId;
+          try {
+            const recoveredHandle = await engine.resume(runId);
+            const activeRun = reattachDurableActiveRun(
+              { engine, checkpointStore },
+              {
+                runId,
+                handle: recoveredHandle as {
+                  readonly id: string;
+                  result(): Promise<unknown>;
+                },
+              },
+            );
+            const agentRun = createAgentRun(activeRun);
+            currentRun = agentRun;
+            // Clear currentRun when the recovered run settles.
+            void agentRun.result().finally(() => {
+              if (currentRun === agentRun) currentRun = null;
+            });
+            emitter.dispatchEvent(new SessionRecoverEvent(sessionId, runId));
+            return agentRun;
+          } catch {
+            // engine.resume() throws when the run is already terminal or the
+            // engine doesn't have it. Fall through to null — the run is not
+            // recoverable on this engine.
+          }
+        }
+      }
+
       emitter.dispatchEvent(new SessionRecoverEvent(sessionId, null));
-      return currentRun;
+      return null;
     },
 
     async cancel(): Promise<void> {
