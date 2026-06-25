@@ -12,6 +12,8 @@ export {
   createWeftMemoryRecordStorage,
   DEFAULT_MEMORY_KEY_PREFIX,
 } from './create-weft-memory-record-storage';
+export type { DualNamespaceMemoryOptions } from './dual-namespace-memory';
+export { createDualNamespaceMemory } from './dual-namespace-memory';
 export type { CachedEmbedder, EmbeddingCacheOptions } from './embedding-cache';
 export { withEmbeddingCache } from './embedding-cache';
 export type { RunCaptureHookOptions, StepResultLike } from './experiential';
