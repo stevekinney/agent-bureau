@@ -350,4 +350,44 @@ describe('instrument', () => {
     expect(errorSpan.ended).toBe(true);
     expect(nonRecordingSpan.ended).toBe(false);
   });
+
+  it('creates a root span (no parent context) when no parentContext is supplied', async () => {
+    // Regression for A4: when no parentContext is passed to toolbox.execute(), the
+    // instrument() function must omit the context argument so the OTel SDK creates
+    // a root (top-level) span rather than inheriting any ambient context.
+    const startedSpans: Array<{
+      name: string;
+      options?: SpanOptions;
+      context?: Context;
+    }> = [];
+    const tracer = {
+      startSpan(name: string, options?: SpanOptions, context?: Context) {
+        const span = createSpan();
+        startedSpans.push({ name, options, context });
+        return span;
+      },
+    } as Tracer;
+    const toolbox = createToolbox([
+      createTool({
+        name: 'noop',
+        description: 'Does nothing',
+        input: z.object({}),
+        async execute() {
+          return null;
+        },
+      }),
+    ]);
+
+    const stop = instrument(toolbox, { tracer });
+    // Execute without parentContext or spanLinks.
+    await toolbox.execute({ id: 'root-call', name: 'noop', arguments: {} });
+    stop();
+
+    expect(startedSpans).toHaveLength(1);
+    // When no parent is supplied, the context argument to startSpan must be
+    // undefined so the OTel SDK uses the ambient (root) context.
+    expect(startedSpans[0]?.context).toBeUndefined();
+    // No span links should be forwarded either.
+    expect(startedSpans[0]?.options?.links).toBeUndefined();
+  });
 });

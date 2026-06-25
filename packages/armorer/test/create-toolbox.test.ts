@@ -485,6 +485,82 @@ describe('createToolbox', () => {
     expect(executedValues).toEqual([]);
   });
 
+  it('resumes a durable approval descriptor from a fresh toolbox instance after JSON round-trip (cross-process scenario)', async () => {
+    // Regression for A3: the pending-approval descriptor must be JSON-serializable
+    // and must resume correctly in a fresh toolbox instance (simulating a different
+    // process or worker that persisted and reloaded the descriptor).
+    const charges: number[] = [];
+    const sharedSecret = 'cross-process-secret';
+
+    function buildToolbox() {
+      return createToolbox(
+        [
+          createTool({
+            name: 'charge-card',
+            description: 'Charge a payment card',
+            input: z.object({ cents: z.number(), confirmed: z.boolean().optional() }),
+            async execute({ cents }) {
+              charges.push(cents);
+              return { charged: cents };
+            },
+          }),
+        ],
+        {
+          approvalSecret: sharedSecret,
+          policy: {
+            beforeExecute(context) {
+              if (
+                context.params &&
+                typeof context.params === 'object' &&
+                'confirmed' in context.params &&
+                (context.params as Record<string, unknown>)['confirmed'] === true
+              ) {
+                return { allow: true };
+              }
+              return {
+                allow: false,
+                status: 'needs_approval',
+                reason: 'Operator approval required',
+                action: { message: 'Approve charge' },
+              };
+            },
+          },
+        },
+      );
+    }
+
+    // "Process A": originates the tool call and pauses for approval.
+    const processAToolbox = buildToolbox();
+    const paused = await processAToolbox.execute({
+      id: 'cross-proc-call',
+      name: 'charge-card',
+      arguments: { cents: 250 },
+    });
+
+    expect(paused.outcome).toBe('action_required');
+    expect(paused.pendingApproval?.approvalToken).toBeDefined();
+
+    // Serialize the descriptor to JSON (e.g., to persist in a database or message queue).
+    const serialized = JSON.stringify(paused.pendingApproval);
+    // Deserialize it as if retrieved in a separate process.
+    const deserialized = JSON.parse(serialized) as SignedPendingToolApproval;
+
+    // "Process B": a fresh toolbox instance (no shared memory with process A).
+    const processBToolbox = buildToolbox();
+
+    // Resume with the original arguments — the token must still be valid.
+    const resumed = await processBToolbox.resumeApproval(deserialized, {
+      arguments: { cents: 250, confirmed: true },
+    });
+
+    expect(resumed.outcome).toBe('success');
+    expect(resumed.result).toEqual({ charged: 250 });
+    // Arguments were edited (confirmed: true added), so this flag must be set.
+    expect(resumed.executedArgumentsEdited).toBe(true);
+    // The charge ran exactly once.
+    expect(charges).toEqual([250]);
+  });
+
   it('exports provider tools through lazy toolbox methods', async () => {
     const toolbox = createToolbox([makeConfiguration()]);
 

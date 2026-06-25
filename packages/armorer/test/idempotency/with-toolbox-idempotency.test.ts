@@ -779,4 +779,52 @@ describe('withToolboxIdempotency', () => {
 
     expect(idempotentToolbox.tools()).toHaveLength(0);
   });
+
+  it('reports unknown-outcome on retry when a caller-supplied key was started but result was never recorded (crash scenario)', async () => {
+    // Regression for A1: caller supplies an external key; execution crashes between
+    // "started" and "result recorded"; the next call must report unknown-outcome
+    // rather than blindly re-running the side effect.
+    const sideEffects: number[] = [];
+    const chargeTool = createTool({
+      name: 'charge',
+      description: 'Charges a payment method',
+      input: z.object({ cents: z.number() }),
+      async execute({ cents }) {
+        sideEffects.push(cents);
+        // Simulate a provider-side crash: the side effect happened but no result
+        // is returned, leaving the idempotency key in "started" state.
+        throw new Error('provider unavailable after charge');
+      },
+    });
+    // Note: chargeTool has NO idempotencyKey; the caller supplies one externally.
+    const toolbox = createToolbox([chargeTool]);
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
+
+    const callerKey = 'orchestrator-tool-call-id-abc123';
+
+    // First attempt: crashes after the side effect but before the result is stored.
+    const first = await idempotentToolbox.execute(
+      { id: 'call-1', name: 'charge', arguments: { cents: 500 } },
+      { idempotencyKey: callerKey },
+    );
+
+    // Side effect occurred once; outcome is an error (crash was caught by toolbox).
+    expect(first.outcome).toBe('error');
+    expect(sideEffects).toEqual([500]);
+
+    // Second attempt with the same caller-supplied key: must NOT re-run the charge.
+    const second = await idempotentToolbox.execute(
+      { id: 'call-2', name: 'charge', arguments: { cents: 500 } },
+      { idempotencyKey: callerKey },
+    );
+
+    // The side effect must NOT have run again.
+    expect(sideEffects).toEqual([500]);
+    // The result must surface as unknown-outcome (needs human review before retrying).
+    expect(second.outcome).toBe('action_required');
+    expect(second.idempotency).toEqual({
+      key: 'charge:orchestrator-tool-call-id-abc123',
+      outcome: 'unknown-outcome',
+    });
+  });
 });
