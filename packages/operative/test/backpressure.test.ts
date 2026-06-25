@@ -4,10 +4,10 @@ import { Conversation } from 'conversationalist';
 
 import { createAdaptiveBackoff, createSlidingWindow, createTokenBucket } from '../src/backpressure';
 import { noToolCalls } from '../src/conditions/predicates';
-import { createRun } from '../src/create-run';
-import { run } from '../src/run';
+import { createActiveRun } from '../src/create-run';
 import { createRunRecorder } from '../src/test/index';
 import type { GenerateResponse } from '../src/types';
+const run = (options: Parameters<typeof createActiveRun>[0]) => createActiveRun(options).result;
 
 function textResponse(content: string): GenerateResponse {
   return { content, toolCalls: [] };
@@ -276,7 +276,7 @@ describe('backpressure loop integration', () => {
       },
     };
 
-    const activeRun = createRun({
+    const activeRun = createActiveRun({
       generate: async () => textResponse('Done'),
       toolbox: createTestToolbox([]),
       conversation: new Conversation(),
@@ -299,7 +299,7 @@ describe('backpressure loop integration', () => {
   it('does not emit backpressure events when delay is 0', async () => {
     const strategy = createAdaptiveBackoff();
 
-    const activeRun = createRun({
+    const activeRun = createActiveRun({
       generate: async () => textResponse('Done'),
       toolbox: createTestToolbox([]),
       conversation: new Conversation(),

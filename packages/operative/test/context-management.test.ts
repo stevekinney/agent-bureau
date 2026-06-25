@@ -4,11 +4,11 @@ import { Conversation } from 'conversationalist';
 import { HookRegistry } from 'lifecycle';
 
 import { noToolCalls } from '../src/conditions/predicates';
-import { createRun } from '../src/create-run';
+import { createActiveRun } from '../src/create-run';
 import type { OperativeHookMap } from '../src/hooks';
-import { run } from '../src/run';
 import { createMockGenerate, createRunRecorder } from '../src/test/index';
 import type { GenerateResponse } from '../src/types';
+const run = (options: Parameters<typeof createActiveRun>[0]) => createActiveRun(options).result;
 
 function textResponse(content: string): GenerateResponse {
   return { content, toolCalls: [] };
@@ -97,7 +97,7 @@ describe('context window management', () => {
     let estimateCount = 0;
     const generate = createMockGenerate([textResponse('Done')]);
 
-    const activeRun = createRun({
+    const activeRun = createActiveRun({
       generate,
       toolbox: createTestToolbox([]),
       conversation,

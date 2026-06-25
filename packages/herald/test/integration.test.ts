@@ -2,7 +2,7 @@ import { createTool, createToolbox } from 'armorer';
 import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
 import type { RunResult } from 'operative';
-import { run, stopWhen } from 'operative';
+import { createActiveRun, stopWhen } from 'operative';
 import { z } from 'zod';
 
 import { createAnthropicGenerate } from '../src/anthropic';
@@ -22,6 +22,8 @@ import {
   createMockGeminiModel,
   createMockOpenAIClient,
 } from '../src/test/mock-clients';
+
+const run = (options: Parameters<typeof createActiveRun>[0]) => createActiveRun(options).result;
 
 const weatherTool = createTool({
   name: 'get_weather',

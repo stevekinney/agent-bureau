@@ -4,9 +4,10 @@ import { Conversation } from 'conversationalist';
 
 import { noToolCalls } from '../src/conditions/predicates';
 import { createIdentityHook } from '../src/create-identity-hook';
-import { run } from '../src/run';
+import { createActiveRun } from '../src/create-run';
 import { createMockGenerate } from '../src/test/index';
 import type { GenerateResponse } from '../src/types';
+const run = (options: Parameters<typeof createActiveRun>[0]) => createActiveRun(options).result;
 
 function textResponse(content: string): GenerateResponse {
   return { content, toolCalls: [], usage: undefined };

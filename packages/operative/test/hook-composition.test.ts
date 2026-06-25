@@ -5,10 +5,10 @@ import { Conversation } from 'conversationalist';
 import { z } from 'zod';
 
 import { noToolCalls } from '../src/conditions/predicates';
-import { createRun } from '../src/create-run';
-import { run } from '../src/run';
+import { createActiveRun } from '../src/create-run';
 import { createMockGenerate, createRunRecorder } from '../src/test/index';
 import type { GenerateResponse, Toolbox } from '../src/types';
+const run = (options: Parameters<typeof createActiveRun>[0]) => createActiveRun(options).result;
 
 const tool = createTool({
   name: 'get_weather',
@@ -308,7 +308,7 @@ describe('hook composition (array-valued hooks)', () => {
     it('error in any hook member terminates the loop with run.error', async () => {
       const generate = createMockGenerate([textResponse('Hello')]);
 
-      const activeRun = createRun({
+      const activeRun = createActiveRun({
         generate,
         toolbox: createTestToolbox([]),
         conversation: new Conversation(),

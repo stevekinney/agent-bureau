@@ -2,9 +2,12 @@ import { createTool, createToolbox } from 'armorer';
 import { createTestToolbox, createToolboxRecorder } from 'armorer/test';
 import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
-import { createRun, type GenerateResponse,run, stopWhen, withStreaming } from 'operative';
+import { createActiveRun, type GenerateResponse, stopWhen, withStreaming } from 'operative';
 import { createMockGenerate, createRunRecorder } from 'operative/test';
 import { z } from 'zod';
+
+const run = (options: Parameters<typeof createActiveRun>[0]) => createActiveRun(options).result;
+const createRun = createActiveRun;
 
 const weatherTool = createTool({
   name: 'get_weather',

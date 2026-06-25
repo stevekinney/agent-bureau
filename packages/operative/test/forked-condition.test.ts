@@ -5,10 +5,10 @@ import { Conversation, SessionForkedEvent } from 'conversationalist';
 import { z } from 'zod';
 
 import { forked, noToolCalls, some } from '../src/conditions/predicates';
-import { createRun } from '../src/create-run';
-import { run } from '../src/run';
+import { createActiveRun } from '../src/create-run';
 import { createMockGenerate, createRunRecorder } from '../src/test/index';
 import type { GenerateResponse, StepResult } from '../src/types';
+const run = (options: Parameters<typeof createActiveRun>[0]) => createActiveRun(options).result;
 
 const weatherTool = createTool({
   name: 'get_weather',
@@ -187,7 +187,7 @@ describe('forked', () => {
       textResponse('Done'),
     ]);
 
-    const activeRun = createRun({
+    const activeRun = createActiveRun({
       generate,
       toolbox: createTestToolbox([weatherTool]),
       conversation,

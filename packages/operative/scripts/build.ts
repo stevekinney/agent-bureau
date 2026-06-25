@@ -2,7 +2,6 @@ import { $ } from 'bun';
 
 const entrypoints = [
   './src/index.ts',
-  './src/run.ts',
   './src/create-run.ts',
   './src/loop.ts',
   './src/errors.ts',
@@ -10,7 +9,6 @@ const entrypoints = [
   './src/generate-middleware.ts',
   './src/streaming.ts',
   './src/types.ts',
-  './src/define-agent.ts',
   './src/create-scratchpad.ts',
   './src/create-agent-registry.ts',
   './src/create-supervisor.ts',

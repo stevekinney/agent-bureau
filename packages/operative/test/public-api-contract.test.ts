@@ -24,7 +24,7 @@ import { createTool, createToolbox } from 'armorer';
 import { afterEach, describe, expect, it } from 'bun:test';
 import { createConversationHistory } from 'conversationalist';
 import type { GenerateFunction, RunOptions } from 'operative';
-import { createRun, run } from 'operative';
+import { createActiveRun } from 'operative';
 import { stopWhen } from 'operative/conditions';
 import type { DurableRunDeps } from 'operative/durable';
 import {
@@ -34,6 +34,8 @@ import {
   createRunWorkflow,
 } from 'operative/durable';
 import { z } from 'zod';
+const run = (opts: Parameters<typeof createActiveRun>[0]) => createActiveRun(opts).result;
+const createRun = createActiveRun;
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -135,7 +137,9 @@ describe('loop completion — the agent loop runs to a stop condition', () => {
 
   it('createRun emits run.started then run.completed in that order', async () => {
     const events: string[] = [];
-    const activeRun = createRun(baseRunOptions(async () => ({ content: 'hello', toolCalls: [] })));
+    const activeRun = createActiveRun(
+      baseRunOptions(async () => ({ content: 'hello', toolCalls: [] })),
+    );
 
     activeRun.addEventListener('run.started', () => events.push('run.started'));
     activeRun.addEventListener('run.completed', () => events.push('run.completed'));
@@ -239,7 +243,7 @@ describe('abort propagation — aborting a run finalizes as aborted and stops ge
       allowProceed = resolve;
     });
 
-    const activeRun = createRun(
+    const activeRun = createActiveRun(
       baseRunOptions(async () => {
         await gate;
         return { content: 'should abort before here', toolCalls: [] };

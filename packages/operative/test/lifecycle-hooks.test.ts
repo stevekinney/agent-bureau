@@ -6,6 +6,7 @@ import { HookRegistry } from 'lifecycle';
 import { z } from 'zod';
 
 import { noToolCalls } from '../src/conditions/predicates';
+import { createActiveRun } from '../src/create-run';
 import type { OperativeHookMap } from '../src/hooks';
 import type {
   AfterGenerateContext,
@@ -18,9 +19,9 @@ import type {
   RunErrorContext,
   RunStartContext,
 } from '../src/hooks/types';
-import { run } from '../src/run';
 import { createMockGenerate } from '../src/test/index';
 import type { GenerateContext, GenerateResponse } from '../src/types';
+const run = (options: Parameters<typeof createActiveRun>[0]) => createActiveRun(options).result;
 
 const tool = createTool({
   name: 'get_weather',

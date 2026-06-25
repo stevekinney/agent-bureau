@@ -5,7 +5,7 @@ import { Conversation } from 'conversationalist';
 import { z } from 'zod';
 
 import { stopWhen } from '../../src/conditions';
-import { createRun } from '../../src/create-run';
+import { createActiveRun } from '../../src/create-run';
 import { createStore } from '../../src/store';
 import { createMockGenerate } from '../../src/test';
 import type { GenerateResponse, TokenUsage } from '../../src/types';
@@ -42,7 +42,7 @@ describe('snapshots', () => {
 
     const generate = createMockGenerate([textResponse('It is sunny.')]);
 
-    const activeRun = createRun({
+    const activeRun = createActiveRun({
       generate,
       toolbox,
       conversation,
@@ -66,7 +66,7 @@ describe('snapshots', () => {
 
     const generate = createMockGenerate([textResponse('Hi there.')]);
 
-    const activeRun = createRun({
+    const activeRun = createActiveRun({
       generate,
       toolbox,
       conversation,
@@ -102,7 +102,7 @@ describe('snapshots', () => {
       textResponse('Denver is 72, Seattle is 72.'),
     ]);
 
-    const activeRun = createRun({
+    const activeRun = createActiveRun({
       generate,
       toolbox,
       conversation,
@@ -146,7 +146,7 @@ describe('snapshots', () => {
       textResponse('It is 72 degrees.', { prompt: 20, completion: 10, total: 30 }),
     ]);
 
-    const activeRun = createRun({
+    const activeRun = createActiveRun({
       generate,
       toolbox,
       conversation,
@@ -182,7 +182,7 @@ describe('snapshots', () => {
       textResponse('Both are warm.', { prompt: 30, completion: 15, total: 45 }),
     ]);
 
-    const activeRun = createRun({
+    const activeRun = createActiveRun({
       generate,
       toolbox,
       conversation,
@@ -214,7 +214,7 @@ describe('snapshots', () => {
       textResponse('Denver is 72, Seattle is 72.'),
     ]);
 
-    const activeRun = createRun({
+    const activeRun = createActiveRun({
       generate,
       toolbox,
       conversation,
@@ -248,7 +248,7 @@ describe('snapshots', () => {
       textResponse('Denver is 72, Seattle is 72.'),
     ]);
 
-    const activeRun = createRun({
+    const activeRun = createActiveRun({
       generate,
       toolbox,
       conversation,

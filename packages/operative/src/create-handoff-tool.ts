@@ -1,7 +1,7 @@
 import { createTool } from 'armorer';
 import { z } from 'zod';
 
-import type { AgentDefinition } from './types';
+import type { RegistryAgent } from './create-agent-registry';
 
 /**
  * Marker value embedded in the tool result so callers can extract
@@ -18,7 +18,7 @@ export interface CreateHandoffToolOptions {
   /** Tool description shown to the model. */
   description?: string;
   /** The agent to hand off to. */
-  agent: AgentDefinition;
+  agent: RegistryAgent;
   /** Optional Zod schema for the tool's input. Defaults to an empty object. */
   input?: z.ZodType;
 }

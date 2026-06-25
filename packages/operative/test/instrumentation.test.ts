@@ -7,7 +7,7 @@ import { Conversation } from 'conversationalist';
 import { z } from 'zod';
 
 import { noToolCalls } from '../src/conditions/predicates.ts';
-import { createRun } from '../src/create-run.ts';
+import { createActiveRun } from '../src/create-run.ts';
 import { instrument } from '../src/instrumentation/index.ts';
 import type { GenerateResponse, TokenUsage } from '../src/types.ts';
 
@@ -127,7 +127,7 @@ describe('instrument', () => {
     const tracer = createMockTracer();
     const toolbox = createTestToolbox([]);
 
-    const activeRun = createRun({
+    const activeRun = createActiveRun({
       generate: async () => textResponse('Hello'),
       toolbox,
       conversation: new Conversation(),
@@ -147,7 +147,7 @@ describe('instrument', () => {
     const tracer = createMockTracer();
     const toolbox = createTestToolbox([]);
 
-    const activeRun = createRun({
+    const activeRun = createActiveRun({
       generate: async () => textResponse('Done', { prompt: 10, completion: 20, total: 30 }),
       toolbox,
       conversation: new Conversation(),
@@ -172,7 +172,7 @@ describe('instrument', () => {
     const tracer = createMockTracer();
     const toolbox = createTestToolbox([]);
 
-    const activeRun = createRun({
+    const activeRun = createActiveRun({
       generate: async () => textResponse('Hello'),
       toolbox,
       conversation: new Conversation(),
@@ -195,7 +195,7 @@ describe('instrument', () => {
     const tracer = createMockTracer();
     const toolbox = createTestToolbox([]);
 
-    const activeRun = createRun({
+    const activeRun = createActiveRun({
       generate: async () => textResponse('Hello'),
       toolbox,
       conversation: new Conversation(),
@@ -216,7 +216,7 @@ describe('instrument', () => {
     const tracer = createMockTracer();
     const toolbox = createTestToolbox([]);
 
-    const activeRun = createRun({
+    const activeRun = createActiveRun({
       generate: async () => textResponse('Hello', { prompt: 5, completion: 10, total: 15 }),
       toolbox,
       conversation: new Conversation(),
@@ -239,7 +239,7 @@ describe('instrument', () => {
     const tracer = createMockTracer();
     const toolbox = createTestToolbox([weatherTool]);
 
-    const activeRun = createRun({
+    const activeRun = createActiveRun({
       generate: async (context) => {
         if (context.step === 0) {
           return toolCallResponse([weatherToolCall()]);
@@ -273,7 +273,7 @@ describe('instrument', () => {
     const tracer = createMockTracer();
     const toolbox = createTestToolbox([weatherTool]);
 
-    const activeRun = createRun({
+    const activeRun = createActiveRun({
       generate: async (context) => {
         if (context.step === 0) {
           return toolCallResponse([weatherToolCall()]);
@@ -300,7 +300,7 @@ describe('instrument', () => {
     const tracer = createMockTracer();
     const toolbox = createTestToolbox([weatherTool]);
 
-    const activeRun = createRun({
+    const activeRun = createActiveRun({
       generate: async (context) => {
         if (context.step === 0) {
           return toolCallResponse([weatherToolCall()]);
@@ -326,7 +326,7 @@ describe('instrument', () => {
     const tracer = createMockTracer();
     const toolbox = createTestToolbox([]);
 
-    const activeRun = createRun({
+    const activeRun = createActiveRun({
       generate: async () => textResponse('Hello'),
       toolbox,
       conversation: new Conversation(),
@@ -346,7 +346,7 @@ describe('instrument', () => {
     const tracer = createMockTracer();
     const toolbox = createTestToolbox([weatherTool]);
 
-    const activeRun = createRun({
+    const activeRun = createActiveRun({
       generate: async (context) => {
         if (context.step === 0) {
           return toolCallResponse([weatherToolCall()]);
@@ -385,7 +385,7 @@ describe('instrument', () => {
     const tracer = createMockTracer();
     const toolbox = createTestToolbox([]);
 
-    const activeRun = createRun({
+    const activeRun = createActiveRun({
       generate: async () => {
         throw new Error('LLM service unavailable');
       },
@@ -418,7 +418,7 @@ describe('instrument', () => {
     const generateStarted = Promise.withResolvers<void>();
     const generateCanFinish = Promise.withResolvers<void>();
 
-    const activeRun = createRun({
+    const activeRun = createActiveRun({
       generate: async () => {
         generateStarted.resolve();
         await generateCanFinish.promise;
@@ -471,7 +471,7 @@ describe('instrument', () => {
       throw new Error('toolbox-level crash');
     };
 
-    const activeRun = createRun({
+    const activeRun = createActiveRun({
       generate: async (context) => {
         if (context.step === 0) {
           return toolCallResponse([{ name: 'crash_tool', arguments: {} }]);
@@ -506,7 +506,7 @@ describe('instrument', () => {
     const toolbox = createTestToolbox([]);
     let callCount = 0;
 
-    const activeRun = createRun({
+    const activeRun = createActiveRun({
       generate: async () => {
         callCount++;
         if (callCount === 1) throw new Error('transient');
@@ -534,7 +534,7 @@ describe('instrument', () => {
     const tracer = createMockTracer();
     const toolbox = createTestToolbox([]);
 
-    const activeRun = createRun({
+    const activeRun = createActiveRun({
       generate: async () => textResponse('Hello'),
       toolbox,
       conversation: new Conversation(),
@@ -558,7 +558,7 @@ describe('instrument', () => {
     let resolveGenerate!: (value: GenerateResponse) => void;
     const generateStarted = Promise.withResolvers<void>();
 
-    const activeRun = createRun({
+    const activeRun = createActiveRun({
       generate: async () => {
         generateStarted.resolve();
         return new Promise<GenerateResponse>((resolve) => {
@@ -592,7 +592,7 @@ describe('instrument', () => {
   it('does not throw when called without a tracer option', async () => {
     const toolbox = createTestToolbox([]);
 
-    const activeRun = createRun({
+    const activeRun = createActiveRun({
       generate: async () => textResponse('Hello'),
       toolbox,
       conversation: new Conversation(),

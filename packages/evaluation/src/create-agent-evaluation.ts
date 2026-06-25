@@ -1,6 +1,6 @@
 import { Conversation } from 'conversationalist';
-import type { RunOptions, RunResult } from 'operative';
-import { run, stopWhen } from 'operative';
+import type { RunResult } from 'operative';
+import { createActiveRun, stopWhen } from 'operative';
 
 import { matchOutput } from './matchers';
 import { extractStepCount, extractTokenUsage, matchToolCalls } from './metrics';
@@ -32,49 +32,35 @@ async function runCase(
   const tags = evaluationCase.tags ?? [];
 
   try {
-    const conversation = new Conversation();
-    if (evaluationCase.systemPrompt) {
-      conversation.appendSystemMessage(evaluationCase.systemPrompt);
-    } else if ('run' in options.agent && options.agent.options.instructions) {
-      const instructions =
-        typeof options.agent.options.instructions === 'string'
-          ? options.agent.options.instructions
-          : options.agent.options.instructions.render();
-      conversation.appendSystemMessage(instructions);
-    }
-    conversation.appendUserMessage(evaluationCase.input);
-
     const timeout = evaluationCase.timeout ?? 30_000;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeout);
 
-    let runOptions: RunOptions;
-
-    const baseOptions = {
-      conversation,
-      signal: controller.signal,
-      maximumSteps: evaluationCase.maxSteps ?? 25,
-      stopWhen: stopWhen.noToolCalls(),
-    };
-
-    if ('run' in options.agent) {
-      const agentDef = options.agent;
-      runOptions = {
-        ...baseOptions,
-        generate: agentDef.options.generate,
-        toolbox: agentDef.options.toolbox,
-      };
-    } else {
-      runOptions = {
-        ...baseOptions,
-        generate: options.agent.generate,
-        toolbox: options.agent.toolbox,
-      };
-    }
-
     let runResult: RunResult;
     try {
-      runResult = await run(runOptions);
+      if ('generate' in options.agent) {
+        // Bare generate+toolbox path: build a conversation and run the loop
+        const conversation = new Conversation();
+        if (evaluationCase.systemPrompt) {
+          conversation.appendSystemMessage(evaluationCase.systemPrompt);
+        }
+        conversation.appendUserMessage(evaluationCase.input);
+
+        runResult = await createActiveRun({
+          conversation,
+          signal: controller.signal,
+          maximumSteps: evaluationCase.maxSteps ?? 25,
+          stopWhen: stopWhen.noToolCalls(),
+          generate: options.agent.generate,
+          toolbox: options.agent.toolbox,
+        }).result;
+      } else {
+        // RegistryAgent path: call the agent's run method directly
+        const agentResult = await options.agent.run(evaluationCase.input, {
+          signal: controller.signal,
+        });
+        runResult = agentResult as RunResult;
+      }
     } finally {
       clearTimeout(timer);
     }
