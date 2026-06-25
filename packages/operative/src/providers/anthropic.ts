@@ -52,7 +52,7 @@ export function createAnthropicProvider(options: AnthropicProviderOptions): Gene
     const params: Record<string, unknown> = {
       model,
       messages,
-      max_tokens: maximumTokens,
+      max_tokens: context.maximumTokens ?? maximumTokens,
     };
 
     if (system !== undefined) params['system'] = system;
@@ -148,7 +148,7 @@ export function createAnthropicProviderStream(
     const params: Record<string, unknown> = {
       model,
       messages,
-      max_tokens: maximumTokens,
+      max_tokens: context.maximumTokens ?? maximumTokens,
       stream: true,
     };
 

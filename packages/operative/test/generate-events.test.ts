@@ -310,3 +310,52 @@ describe('usage.accumulated event', () => {
     expect(totals[2]).toEqual({ prompt: 60, completion: 30, total: 90 });
   });
 });
+
+describe('RunOptions.maximumTokens → GenerateContext.maximumTokens', () => {
+  it('threads maximumTokens from RunOptions through to every GenerateContext', async () => {
+    const capturedContexts: import('../src/types').GenerateContext[] = [];
+    const generate = createMockGenerate([textResponse('Done')]);
+    const capturingGenerate = async (
+      ctx: import('../src/types').GenerateContext,
+    ): Promise<GenerateResponse> => {
+      capturedContexts.push(ctx);
+      return generate(ctx);
+    };
+
+    await createActiveRun({
+      generate: capturingGenerate,
+      toolbox: createToolbox([]),
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+      maximumTokens: 512,
+    }).result;
+
+    expect(capturedContexts.length).toBeGreaterThanOrEqual(1);
+    for (const ctx of capturedContexts) {
+      expect(ctx.maximumTokens).toBe(512);
+    }
+  });
+
+  it('passes undefined maximumTokens when RunOptions does not set it', async () => {
+    const capturedContexts: import('../src/types').GenerateContext[] = [];
+    const generate = createMockGenerate([textResponse('Done')]);
+    const capturingGenerate = async (
+      ctx: import('../src/types').GenerateContext,
+    ): Promise<GenerateResponse> => {
+      capturedContexts.push(ctx);
+      return generate(ctx);
+    };
+
+    await createActiveRun({
+      generate: capturingGenerate,
+      toolbox: createToolbox([]),
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+    }).result;
+
+    expect(capturedContexts.length).toBeGreaterThanOrEqual(1);
+    for (const ctx of capturedContexts) {
+      expect(ctx.maximumTokens).toBeUndefined();
+    }
+  });
+});
