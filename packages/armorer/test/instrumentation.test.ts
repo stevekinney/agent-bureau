@@ -350,4 +350,63 @@ describe('instrument', () => {
     expect(errorSpan.ended).toBe(true);
     expect(nonRecordingSpan.ended).toBe(false);
   });
+
+  it('forwards no parent context to startSpan when none is supplied, but forwards the exact parent when one is', async () => {
+    // Regression for A4. instrument() is responsible for ONE thing here: passing
+    // the caller-supplied parentContext through to tracer.startSpan(name, options,
+    // context) as its third argument — and passing nothing (undefined) when the
+    // caller supplies nothing, so the OpenTelemetry SDK applies its own ambient
+    // (root) context rather than a parent we fabricated.
+    //
+    // Asserting `context === undefined` alone would be tautological against a
+    // shallow fake (it could pass even if instrument always passed undefined and
+    // ignored parentContext entirely). So this test pins BOTH halves with the same
+    // tracer: a no-parent call must forward `undefined`, and a sibling call WITH a
+    // distinct sentinel parent must forward THAT EXACT parent by identity. Together
+    // these prove the `undefined` is a real "no parent" decision, not a coincidence.
+    // Single cast (matching the existing supplied-parent test above): we only
+    // need a distinct reference to assert forwarding by identity via `toBe`.
+    const sentinelParent = { __sentinel: 'parent' } as Context;
+    const startedSpans: Array<{
+      name: string;
+      options?: SpanOptions;
+      context?: Context;
+    }> = [];
+    const tracer = {
+      startSpan(name: string, options?: SpanOptions, context?: Context) {
+        const span = createSpan();
+        startedSpans.push({ name, options, context });
+        return span;
+      },
+    } as Tracer;
+    const toolbox = createToolbox([
+      createTool({
+        name: 'noop',
+        description: 'Does nothing',
+        input: z.object({}),
+        async execute() {
+          return null;
+        },
+      }),
+    ]);
+
+    const stop = instrument(toolbox, { tracer });
+    // Call 1: no parentContext, no spanLinks → must forward undefined context.
+    await toolbox.execute({ id: 'root-call', name: 'noop', arguments: {} });
+    // Call 2: an explicit sentinel parentContext → must forward that exact value.
+    await toolbox.execute(
+      { id: 'child-call', name: 'noop', arguments: {} },
+      { parentContext: sentinelParent },
+    );
+    stop();
+
+    expect(startedSpans).toHaveLength(2);
+    // No parent supplied → context argument is strictly undefined (OTel uses
+    // its ambient/root context), and no span links are fabricated.
+    expect(startedSpans[0]?.context).toBeUndefined();
+    expect(startedSpans[0]?.options?.links).toBeUndefined();
+    // Parent supplied → the exact sentinel is forwarded by identity, proving the
+    // undefined above is a genuine "no parent" path and not a shallow default.
+    expect(startedSpans[1]?.context).toBe(sentinelParent);
+  });
 });
