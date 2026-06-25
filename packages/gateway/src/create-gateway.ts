@@ -102,6 +102,7 @@ export async function createGateway(options: GatewayOptions = {}): Promise<Gatew
       hostname: options.hostname,
       wsHandler,
       authToken: options.authToken,
+      idleTimeout: options.idleTimeout,
     });
 
     return {

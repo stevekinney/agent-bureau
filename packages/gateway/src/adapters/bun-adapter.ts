@@ -15,13 +15,18 @@ export function createBunAdapter(): ServerAdapter {
     },
 
     serve(app: Hono, options: ServerAdapterOptions): ServerHandle {
-      const { port, hostname, wsHandler, authToken } = options;
+      const { port, hostname, wsHandler, authToken, idleTimeout } = options;
 
       if (wsHandler) {
         const handler = wsHandler;
         const server = Bun.serve({
           port,
           hostname,
+          // Wire the idle timeout so long-lived SSE connections and parked
+          // human-in-the-loop workflows are not silently dropped. The heartbeat
+          // must fire before this threshold; see DEFAULT_HEARTBEAT_INTERVAL_MS
+          // in live-events.ts.
+          idleTimeout,
           fetch(request, server) {
             const url = new URL(request.url);
 
@@ -62,6 +67,9 @@ export function createBunAdapter(): ServerAdapter {
       const server = Bun.serve({
         port,
         hostname,
+        // Wire the idle timeout so long-lived SSE connections and parked
+        // human-in-the-loop workflows are not silently dropped.
+        idleTimeout,
         fetch(request) {
           return app.fetch(request);
         },

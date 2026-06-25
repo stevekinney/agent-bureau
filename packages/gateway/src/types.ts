@@ -31,6 +31,18 @@ export interface GatewayOptions extends BureauOptions {
   authToken?: string;
   /** Server runtime. Default: auto-detected (`'bun'` when `typeof Bun !== 'undefined'`, `'node'` otherwise). */
   runtime?: 'bun' | 'node';
+  /**
+   * Server idle timeout in seconds. Connections that are silent for longer
+   * than this period are closed by the runtime.
+   *
+   * For SSE streams: the heartbeat must fire before this threshold or the
+   * connection will be silently dropped. The default heartbeat interval
+   * (8 s) is tuned for Bun's 10 s default. Raise both together if your
+   * environment allows longer idle periods (e.g. nginx default: 75 s).
+   *
+   * Bun default: 10 s.
+   */
+  idleTimeout?: number;
 }
 
 export interface Gateway {
