@@ -279,6 +279,19 @@ export interface RunOptions {
    * parent's trace.
    */
   parentContext?: unknown;
+
+  /**
+   * Agent name, used to stamp curated `tool.*` bubble events with
+   * `{agentName, runId, step}` metadata. Optional — only supplied when
+   * running inside a named agent (bureau.agent / createAgent).
+   */
+  agentName?: string;
+
+  /**
+   * Run id, used to stamp curated `tool.*` bubble events. Optional — only
+   * supplied when the run has a stable identity (session-owned runs).
+   */
+  runId?: string;
   /**
    * Callback that runs a function within a parent trace context. When both
    * `parentContext` and `withTraceContext` are provided, the loop wraps

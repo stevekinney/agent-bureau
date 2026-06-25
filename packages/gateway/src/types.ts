@@ -10,7 +10,6 @@ import type { ObservabilityOptions } from '@lostgradient/weft/observability';
 import type { StorageConfiguration, TextValueStore } from '@lostgradient/weft/storage';
 import type { Toolbox } from 'armorer';
 import type { ConversationSnapshot } from 'conversationalist';
-import type { ProviderName } from 'herald';
 import type { Hono } from 'hono';
 import type {
   EventIteratorOptions,
@@ -35,6 +34,7 @@ import type {
   TokenUsage,
 } from 'operative';
 import type { CreateRunEngineOptions } from 'operative/durable';
+import type { ProviderName } from 'operative/providers';
 import type { Store } from 'operative/store';
 
 import type { BureauEventMap } from './events';

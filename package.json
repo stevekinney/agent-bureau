@@ -5,7 +5,7 @@
   "scripts": {
     "build": "turbo run build",
     "check-types": "turbo run check-types",
-    "coverage:check": "turbo run coverage:check --filter=armorer --filter=conversationalist --filter=evaluation --filter=herald --filter=interoperability --filter=lifecycle --filter=memory --filter=operative --filter=skills",
+    "coverage:check": "turbo run coverage:check --filter=armorer --filter=conversationalist --filter=evaluation --filter=interoperability --filter=lifecycle --filter=memory --filter=operative --filter=skills",
     "dev": "turbo run dev",
     "format": "prettier --write \"**/*.{ts,tsx,md}\"",
     "format:check": "turbo run format:check",

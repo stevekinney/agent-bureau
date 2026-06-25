@@ -3,9 +3,20 @@ import type { Toolbox } from 'armorer';
 import { createToolbox } from 'armorer';
 import { describe, expect, it, mock } from 'bun:test';
 import { createConversationHistory } from 'conversationalist';
+import { TypedEventTarget } from 'lifecycle';
 
 import { createAgentSession } from '../agent-session';
 import type { AnyRunEngine } from '../durable/create-run-engine';
+import type {
+  OperativeEventMap,
+  SessionCancelEvent,
+  SessionForkEvent,
+  SessionQueryEvent,
+  SessionRecoverEvent,
+  SessionSignalEvent,
+  SessionSleepEvent,
+  SessionUpdateEvent,
+} from '../events';
 import type { GenerateFunction } from '../types';
 import { createSessionStore } from './create-session-store';
 import {
@@ -874,5 +885,256 @@ describe('RunRef sequence invariant', () => {
     const session = await store.load('monotonic-test');
     const sequences = session!.runs.map((r) => r.sequence);
     expect(sequences).toEqual([0, 1]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Session verb event dispatch (C3 completeness rule — every new state
+// transition emits an event). Verifies that each verb dispatches the
+// corresponding typed event on the handle's emitter.
+// ---------------------------------------------------------------------------
+
+/**
+ * Helper: collect events of a given type from a handle's emitter.
+ */
+function collectEvents<K extends keyof OperativeEventMap & string>(
+  emitter: TypedEventTarget<OperativeEventMap>,
+  type: K,
+): OperativeEventMap[K][] {
+  const collected: OperativeEventMap[K][] = [];
+  emitter.addEventListener(type, (e) => {
+    collected.push(e);
+  });
+  return collected;
+}
+
+describe('session verb event dispatch (C3 completeness rule)', () => {
+  it('recover() dispatches SessionRecoverEvent on the emitter', () => {
+    const emitter = new TypedEventTarget<OperativeEventMap>();
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+    const h = createSessionHandle('recover-event-session', {
+      store,
+      agentName: 'agent',
+      emitter,
+      runOptions: createTestRunOptions(),
+    });
+
+    const events = collectEvents(emitter, 'session.recover');
+    h.recover();
+
+    expect(events).toHaveLength(1);
+    const e = events[0] as SessionRecoverEvent;
+    expect(e.type).toBe('session.recover');
+    expect(e.sessionId).toBe('recover-event-session');
+  });
+
+  it('cancel() dispatches SessionCancelEvent on the emitter', async () => {
+    const emitter = new TypedEventTarget<OperativeEventMap>();
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+    const h = createSessionHandle('cancel-event-session', {
+      store,
+      agentName: 'agent',
+      emitter,
+      runOptions: createTestRunOptions(),
+    });
+
+    const events = collectEvents(emitter, 'session.cancel');
+    await h.cancel();
+
+    expect(events).toHaveLength(1);
+    const e = events[0] as SessionCancelEvent;
+    expect(e.type).toBe('session.cancel');
+    expect(e.sessionId).toBe('cancel-event-session');
+  });
+
+  it('fork() dispatches SessionForkEvent on the emitter after persisting', async () => {
+    const emitter = new TypedEventTarget<OperativeEventMap>();
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+    const h = createSessionHandle('fork-event-session', {
+      store,
+      agentName: 'agent',
+      emitter,
+      runOptions: createTestRunOptions(),
+    });
+    await h.getSession(); // ensure source session exists
+
+    const events = collectEvents(emitter, 'session.fork');
+    const forked = await h.fork({ throughRun: 0 });
+
+    expect(events).toHaveLength(1);
+    const e = events[0] as SessionForkEvent;
+    expect(e.type).toBe('session.fork');
+    expect(e.sourceSessionId).toBe('fork-event-session');
+    expect(e.forkedSessionId).toBe(forked.id);
+    expect(e.throughRun).toBe(0);
+  });
+
+  it('sleep() dispatches SessionSleepEvent before sleeping', async () => {
+    const emitter = new TypedEventTarget<OperativeEventMap>();
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+    const h = createSessionHandle('sleep-event-session', {
+      store,
+      agentName: 'agent',
+      emitter,
+      runOptions: createTestRunOptions(),
+    });
+
+    const events = collectEvents(emitter, 'session.sleep');
+    await h.sleep(5); // 5ms so the test stays fast
+
+    expect(events).toHaveLength(1);
+    const e = events[0] as SessionSleepEvent;
+    expect(e.type).toBe('session.sleep');
+    expect(e.sessionId).toBe('sleep-event-session');
+    expect(e.durationMs).toBe(5);
+  });
+
+  it('signal() dispatches SessionSignalEvent after resolving the run id', async () => {
+    const emitter = new TypedEventTarget<OperativeEventMap>();
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+
+    const session = createAgentSession({
+      agentName: 'agent',
+      conversationHistory: createConversationHistory(),
+      id: 'signal-event-session',
+      runs: [
+        {
+          runId: 'signal-event-session:0',
+          sequence: 0,
+          status: 'running',
+          startedAt: new Date().toISOString(),
+        },
+      ],
+    });
+    await store.save(session);
+
+    const fakeEngine = {
+      signal: mock(async () => {}),
+    } as unknown as AnyRunEngine;
+
+    const h = createSessionHandle('signal-event-session', {
+      store,
+      agentName: 'agent',
+      engine: fakeEngine,
+      emitter,
+      runOptions: createTestRunOptions(),
+    });
+
+    const events = collectEvents(emitter, 'session.signal');
+    await h.signal('approve', { ok: true });
+
+    expect(events).toHaveLength(1);
+    const e = events[0] as SessionSignalEvent;
+    expect(e.type).toBe('session.signal');
+    expect(e.sessionId).toBe('signal-event-session');
+    expect(e.runId).toBe('signal-event-session:0');
+    expect(e.signalName).toBe('approve');
+    expect(e.payload).toEqual({ ok: true });
+  });
+
+  it('update() dispatches SessionUpdateEvent after resolving the run id', async () => {
+    const emitter = new TypedEventTarget<OperativeEventMap>();
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+
+    const session = createAgentSession({
+      agentName: 'agent',
+      conversationHistory: createConversationHistory(),
+      id: 'update-event-session',
+      runs: [
+        {
+          runId: 'update-event-session:0',
+          sequence: 0,
+          status: 'running',
+          startedAt: new Date().toISOString(),
+        },
+      ],
+    });
+    await store.save(session);
+
+    const fakeEngine = {
+      update: mock(async () => ({ ok: true })),
+    } as unknown as AnyRunEngine;
+
+    const h = createSessionHandle('update-event-session', {
+      store,
+      agentName: 'agent',
+      engine: fakeEngine,
+      emitter,
+      runOptions: createTestRunOptions(),
+    });
+
+    const events = collectEvents(emitter, 'session.update');
+    await h.update('params', { temp: 0.7 });
+
+    expect(events).toHaveLength(1);
+    const e = events[0] as SessionUpdateEvent;
+    expect(e.type).toBe('session.update');
+    expect(e.sessionId).toBe('update-event-session');
+    expect(e.runId).toBe('update-event-session:0');
+    expect(e.updateName).toBe('params');
+    expect(e.payload).toEqual({ temp: 0.7 });
+  });
+
+  it('query() dispatches SessionQueryEvent after resolving the last run', async () => {
+    const emitter = new TypedEventTarget<OperativeEventMap>();
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+
+    const session = createAgentSession({
+      agentName: 'agent',
+      conversationHistory: createConversationHistory(),
+      id: 'query-event-session',
+      runs: [
+        {
+          runId: 'query-event-session:0',
+          sequence: 0,
+          status: 'running',
+          startedAt: new Date().toISOString(),
+        },
+      ],
+    });
+    await store.save(session);
+
+    const fakeEngine = {
+      query: mock(async () => ({ step: 3 })),
+    } as unknown as AnyRunEngine;
+
+    const h = createSessionHandle('query-event-session', {
+      store,
+      agentName: 'agent',
+      engine: fakeEngine,
+      emitter,
+      runOptions: createTestRunOptions(),
+    });
+
+    const events = collectEvents(emitter, 'session.query');
+    await h.query('status', { detail: 'full' });
+
+    expect(events).toHaveLength(1);
+    const e = events[0] as SessionQueryEvent;
+    expect(e.type).toBe('session.query');
+    expect(e.sessionId).toBe('query-event-session');
+    expect(e.queryName).toBe('status');
+    expect(e.input).toEqual({ detail: 'full' });
+  });
+
+  it('handle.emitter is accessible for subscribing to session verb events', () => {
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+    const h = createSessionHandle('emitter-access-session', {
+      store,
+      agentName: 'agent',
+      runOptions: createTestRunOptions(),
+    });
+
+    // The emitter is accessible without injecting one.
+    expect(h.emitter).toBeDefined();
+    expect(typeof h.emitter.addEventListener).toBe('function');
   });
 });

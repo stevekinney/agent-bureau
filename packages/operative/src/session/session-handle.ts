@@ -1,5 +1,6 @@
 import type { ConversationHistory } from 'conversationalist';
 import { Conversation, createConversationHistory } from 'conversationalist';
+import { TypedEventTarget } from 'lifecycle';
 
 import type { AgentRun } from '../agent-run';
 import { createAgentRun } from '../agent-run';
@@ -7,6 +8,16 @@ import type { AgentSession, RunRef } from '../agent-session';
 import { createAgentSession } from '../agent-session';
 import { createActiveRun } from '../create-run';
 import type { AnyRunEngine } from '../durable/create-run-engine';
+import type { OperativeEventMap } from '../events';
+import {
+  SessionCancelEvent,
+  SessionForkEvent,
+  SessionQueryEvent,
+  SessionRecoverEvent,
+  SessionSignalEvent,
+  SessionSleepEvent,
+  SessionUpdateEvent,
+} from '../events';
 import type { RunOptions } from '../types';
 import type { SessionStore } from './types';
 
@@ -96,6 +107,14 @@ export interface SessionHandle {
 
   /** Load the persisted session data from the store. */
   getSession(): Promise<AgentSession>;
+
+  /**
+   * The event emitter for session-scoped events (session.recover,
+   * session.cancel, session.fork, session.sleep, session.signal,
+   * session.update, session.query). Subscribe here to observe session
+   * verb transitions without waiting for an active run.
+   */
+  readonly emitter: TypedEventTarget<OperativeEventMap>;
 }
 
 /**
@@ -118,6 +137,13 @@ export interface SessionHandleContext {
    * `run()` call in this session.
    */
   runOptions: SessionRunOptions;
+  /**
+   * Optional event emitter for session-scoped events (session.recover,
+   * session.cancel, session.fork, session.sleep, session.signal,
+   * session.update, session.query). When provided, each verb method
+   * dispatches the corresponding typed event. Created internally if omitted.
+   */
+  emitter?: TypedEventTarget<OperativeEventMap>;
 }
 
 /**
@@ -213,6 +239,7 @@ export function createSessionHandle(
   context: SessionHandleContext,
 ): SessionHandle {
   const { store, engine, agentName, runOptions } = context;
+  const emitter = context.emitter ?? new TypedEventTarget<OperativeEventMap>();
 
   /**
    * The currently-in-flight `AgentRun`, if any. Set at `run()` start, cleared
@@ -260,6 +287,8 @@ export function createSessionHandle(
   const handle: SessionHandle = {
     id: sessionId,
 
+    emitter,
+
     run(input: string): AgentRun {
       // Seed the conversation with the stored history (we build it lazily via
       // the result promise so `run()` returns synchronously).
@@ -306,6 +335,10 @@ export function createSessionHandle(
     },
 
     recover(): AgentRun | null {
+      // Emit immediately with runId=null: recover() is synchronous and we don't
+      // have the derived run id available without an async store lookup. Null is
+      // the documented "pre-recovery" value per the event class contract.
+      emitter.dispatchEvent(new SessionRecoverEvent(sessionId, null));
       return currentRun;
     },
 
@@ -321,29 +354,32 @@ export function createSessionHandle(
 
       // Step 2: Terminate the Weft workflow in parallel (stops the next step).
       // Fire-and-forget — a failure here is non-fatal (we already aborted the
-      // generate signal in step 1).
-      if (engine) {
-        const session = await store.load(sessionId);
-        if (session) {
-          const last = session.runs[session.runs.length - 1];
-          if (last && last.status === 'running') {
-            try {
-              await engine.cancel(last.runId);
-            } catch {
-              // Non-fatal: the generate abort already stopped the work.
-            }
-            // Persist the aborted status.
-            const runs = [...session.runs];
-            const lastIndex = runs.length - 1;
-            if (lastIndex >= 0 && runs[lastIndex]) {
-              runs[lastIndex] = { ...runs[lastIndex], status: 'aborted' };
-            }
-            await store.save({
-              ...session,
-              runs,
-              updatedAt: new Date().toISOString(),
-            });
+      // generate signal in step 1). Load the session once and reuse.
+      const cancelSession = await store.load(sessionId);
+      const lastRunId = cancelSession?.runs[cancelSession.runs.length - 1]?.runId ?? null;
+
+      // Emit the cancel event with the last known run id (null if no runs recorded yet).
+      emitter.dispatchEvent(new SessionCancelEvent(sessionId, lastRunId));
+
+      if (engine && cancelSession) {
+        const last = cancelSession.runs[cancelSession.runs.length - 1];
+        if (last && last.status === 'running') {
+          try {
+            await engine.cancel(last.runId);
+          } catch {
+            // Non-fatal: the generate abort already stopped the work.
           }
+          // Persist the aborted status.
+          const runs = [...cancelSession.runs];
+          const lastIndex = runs.length - 1;
+          if (lastIndex >= 0 && runs[lastIndex]) {
+            runs[lastIndex] = { ...runs[lastIndex], status: 'aborted' };
+          }
+          await store.save({
+            ...cancelSession,
+            runs,
+            updatedAt: new Date().toISOString(),
+          });
         }
       }
 
@@ -374,6 +410,9 @@ export function createSessionHandle(
       // Phase D impl will snapshot conversation at exactly that sequence boundary.
       void throughSequence;
 
+      // Emit after the forked session is persisted so the id is stable.
+      emitter.dispatchEvent(new SessionForkEvent(sessionId, newSessionId, options?.throughRun));
+
       return createSessionHandle(newSessionId, context);
     },
 
@@ -381,18 +420,21 @@ export function createSessionHandle(
       // In-memory path: a simple setTimeout (durable path via ctx.sleep is
       // a Phase D concern when a Weft engine is wired through the session).
       const ms = typeof duration === 'number' ? duration : parseDuration(duration);
+      emitter.dispatchEvent(new SessionSleepEvent(sessionId, ms));
       await new Promise<void>((resolve) => setTimeout(resolve, ms));
     },
 
     async signal(name: string, payload?: unknown): Promise<void> {
       const eng = requireEngine('signal');
       const runId = await requireRunningRunId('signal');
+      emitter.dispatchEvent(new SessionSignalEvent(sessionId, runId, name, payload));
       await eng.signal(runId, name, payload);
     },
 
     async update<TResult = unknown>(name: string, payload?: unknown): Promise<TResult> {
       const eng = requireEngine('update');
       const runId = await requireRunningRunId('update');
+      emitter.dispatchEvent(new SessionUpdateEvent(sessionId, runId, name, payload));
       return eng.update(runId, name, payload) as Promise<TResult>;
     },
 
@@ -406,6 +448,7 @@ export function createSessionHandle(
       if (!last) {
         throw new NoRunningRunError('query', sessionId);
       }
+      emitter.dispatchEvent(new SessionQueryEvent(sessionId, name, input));
       return eng.query(last.runId, name, input) as Promise<TResult>;
     },
 

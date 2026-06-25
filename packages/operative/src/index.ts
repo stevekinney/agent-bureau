@@ -178,6 +178,25 @@ export {
   UsageAccumulatedEvent,
 } from './events';
 export { ContextBudgetWarningEvent } from './events';
+// C3 — curated tool.* bubble events
+export type { ToolEventStamp } from './events';
+export {
+  ToolErrorBubbleEvent,
+  ToolPolicyDeniedBubbleEvent,
+  ToolProgressBubbleEvent,
+  ToolSettledBubbleEvent,
+  ToolStartedBubbleEvent,
+} from './events';
+// C3 — session verb events
+export {
+  SessionCancelEvent,
+  SessionForkEvent,
+  SessionQueryEvent,
+  SessionRecoverEvent,
+  SessionSignalEvent,
+  SessionSleepEvent,
+  SessionUpdateEvent,
+} from './events';
 export { composeGenerate, createFallbackGenerate } from './generate-middleware';
 export type {
   CodeSafetyValidatorOptions,
@@ -219,6 +238,20 @@ export type {
   AfterContextAssemblyHookContext,
   BeforeCompactionHookContext,
   ContextAssemblyHookContext,
+  // Session verb hook context types (C3 completeness rule)
+  SessionCancelHookContext,
+  SessionForkHookContext,
+  SessionQueryHookContext,
+  SessionRecoverHookContext,
+  SessionSignalHookContext,
+  SessionSleepHookContext,
+  SessionUpdateHookContext,
+  // Curated tool.* bubble event hook context types (C3)
+  ToolErrorHookContext,
+  ToolPolicyDeniedHookContext,
+  ToolProgressHookContext,
+  ToolSettledHookContext,
+  ToolStartedHookContext,
 } from './hooks';
 export type {
   AfterGenerateContext,

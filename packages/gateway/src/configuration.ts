@@ -1,30 +1,32 @@
-import { createAnthropicGenerate, createGeminiGenerate, createOpenAIGenerate } from 'herald';
 import type { GenerateFunction } from 'operative';
+import { createAnthropicProvider } from 'operative/anthropic';
+import { createGeminiProvider } from 'operative/gemini';
+import { createOpenAIProvider } from 'operative/openai';
 
 import type { ProviderConfiguration } from './types';
 
 /**
- * Resolves a ProviderConfiguration into a GenerateFunction using herald's
- * factory functions.
+ * Resolves a ProviderConfiguration into a GenerateFunction using the
+ * operative provider subpaths (folded from herald in Phase C).
  */
 export function resolveGenerate(provider: ProviderConfiguration): GenerateFunction {
   switch (provider.provider) {
     case 'anthropic':
-      return createAnthropicGenerate({
+      return createAnthropicProvider({
         model: provider.model,
         maximumTokens: provider.maximumTokens,
         temperature: provider.temperature,
         apiKey: provider.apiKey,
       });
     case 'openai':
-      return createOpenAIGenerate({
+      return createOpenAIProvider({
         model: provider.model,
         maximumTokens: provider.maximumTokens,
         temperature: provider.temperature,
         apiKey: provider.apiKey,
       });
     case 'gemini':
-      return createGeminiGenerate({
+      return createGeminiProvider({
         model: provider.model,
         maximumTokens: provider.maximumTokens,
         temperature: provider.temperature,
