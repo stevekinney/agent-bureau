@@ -165,6 +165,7 @@
         "armorer": "workspace:*",
         "conversationalist": "workspace:*",
         "hono": "^4.7.10",
+        "interoperability": "workspace:*",
         "lifecycle": "workspace:*",
         "lucide-svelte": "^0.503.0",
         "memory": "workspace:*",

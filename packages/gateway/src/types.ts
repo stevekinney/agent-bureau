@@ -12,6 +12,7 @@ import type { StorageConfiguration, TextValueStore } from '@lostgradient/weft/st
 import type { Toolbox } from 'armorer';
 import type { ConversationSnapshot } from 'conversationalist';
 import type { Hono } from 'hono';
+import type { ToolPolicy } from 'interoperability';
 import type {
   EventIteratorOptions,
   EventObservableOptions,
@@ -39,6 +40,8 @@ import type { ProviderName } from 'operative/providers';
 import type { Store } from 'operative/store';
 
 import type { BureauEventMap } from './events';
+
+export type { ToolPolicy };
 
 // ── Provider Configuration ───────────────────────────────────────────
 
@@ -101,11 +104,6 @@ export interface SkillRuntimeConfiguration {
   provider?: SkillProvider;
   includeTools?: boolean;
   skillPolicy?: ToolPolicy;
-}
-
-export interface ToolPolicy {
-  allowList?: string[];
-  denyList?: string[];
 }
 
 export interface SkillCatalogEntry {

@@ -90,7 +90,7 @@ export { createMemoryBridge } from './create-memory-bridge';
 export type {
   CreatePolicyEnforcementHookOptions,
   ToolLike,
-  ToolPolicyLike,
+  ToolPolicy,
 } from './create-policy-enforcement-hook';
 export { createPolicyEnforcementHook } from './create-policy-enforcement-hook';
 export type { ActiveRun, DurableRunRouting } from './create-run';
