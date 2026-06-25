@@ -17,6 +17,7 @@
 
 import { createTool } from 'armorer';
 import { describe, expect, it } from 'bun:test';
+import type { ToolStartedBubbleEvent } from 'operative';
 import { createMockGenerate } from 'operative/test';
 import { z } from 'zod';
 
@@ -556,5 +557,47 @@ describe('createBureau (builder) — skills()', () => {
     const catalog = catalogMessage?.content as string;
     expect(catalog).toContain('research');
     expect(catalog).not.toContain('disabled-skill');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Regression: PRRT_kwDORvupsc6MXoT1 — builder run() omits agentName metadata
+//
+// The builder's run() path was building RunOptions without agentName or runId,
+// so curated tool.* bubble events emitted by createActiveRun were stamped with
+// empty strings instead of the resolved agent's name + a stable run id.
+// ---------------------------------------------------------------------------
+
+describe('createBureau (builder) — tool.* bubble event stamping (PRRT_kwDORvupsc6MXoT1)', () => {
+  it('tool.started events carry the registered agent name in agentName', async () => {
+    // A generate that fires one echo tool call on step 0, then text on step 1.
+    const toolCallGenerate = createMockGenerate([
+      {
+        content: '',
+        toolCalls: [{ name: 'echo', arguments: { text: 'hello' } }],
+      },
+      { content: 'done', toolCalls: [] },
+    ]);
+
+    const bureau = createBureau()
+      .tools({ echo: echoTool })
+      .agent({ name: 'my-agent', generate: toolCallGenerate });
+
+    const run = bureau.run('my-agent', 'say hello');
+
+    // Collect tool.started events from the run's async iterator.
+    const toolStartedEvents: ToolStartedBubbleEvent[] = [];
+    for await (const event of run) {
+      if (event.type === 'tool.started') {
+        toolStartedEvents.push(event as ToolStartedBubbleEvent);
+      }
+    }
+
+    expect(toolStartedEvents.length).toBeGreaterThanOrEqual(1);
+    // Before the fix: agentName was '' (empty). After the fix: 'my-agent'.
+    expect(toolStartedEvents[0]!.agentName).toBe('my-agent');
+    // runId must be a non-empty string.
+    expect(toolStartedEvents[0]!.runId).not.toBe('');
+    expect(typeof toolStartedEvents[0]!.runId).toBe('string');
   });
 });
