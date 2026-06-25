@@ -1,3 +1,5 @@
+export type { AgentRun, CreateAgentRunOptions, RunEvent } from './agent-run';
+export { CompletedRunIterationError, createAgentRun } from './agent-run';
 export type { AgentSession } from './agent-session';
 export { createAgentSession, loadAgentSession, saveAgentSession } from './agent-session';
 export type {
