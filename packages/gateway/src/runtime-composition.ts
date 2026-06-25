@@ -64,8 +64,13 @@ import {
   createRoutingGenerate,
   createStepBasedStrategy,
 } from 'operative/providers';
-import type { SkillSession } from 'skills';
-import { createSkillSession, escapeXml } from 'skills';
+import type { SkillProvider as SkillsPackageProvider, SkillSession } from 'skills';
+import {
+  createSkillCatalogHook,
+  createSkillSession,
+  createStorageSkillProvider,
+  escapeXml,
+} from 'skills';
 import { z } from 'zod';
 
 import type {
@@ -79,7 +84,6 @@ import type {
   RoutingConfiguration,
   SkillCatalogEntry,
   SkillProvider,
-  ToolPolicy,
   ToolSummary,
 } from './types';
 
@@ -419,48 +423,6 @@ const defaultRuntimeCompositionDependencies: RuntimeCompositionDependencies = {
   resolveProviderGenerate,
 };
 
-async function buildSkillCatalog(
-  provider: SkillProvider,
-  skillPolicy: ToolPolicy | undefined,
-): Promise<string | undefined> {
-  let entries = await provider.listSkills();
-
-  const enabledChecks = await Promise.all(
-    entries.map(async (entry) => ({
-      entry,
-      enabled: await provider.isEnabled(entry.name),
-    })),
-  );
-  entries = enabledChecks.filter((entry) => entry.enabled).map((entry) => entry.entry);
-
-  if (skillPolicy?.allowList) {
-    const allowed = new Set(skillPolicy.allowList);
-    entries = entries.filter((entry) => allowed.has(entry.name));
-  }
-
-  if (skillPolicy?.denyList) {
-    const denied = new Set(skillPolicy.denyList);
-    entries = entries.filter((entry) => !denied.has(entry.name));
-  }
-
-  if (entries.length === 0) {
-    return undefined;
-  }
-
-  const skillElements = entries
-    .map(
-      (entry: SkillCatalogEntry) =>
-        `<skill name="${escapeXml(entry.name)}">${escapeXml(entry.description)}</skill>`,
-    )
-    .join('\n');
-
-  return `<available_skills>
-You have the following skills available. Use the activate_skill tool to load a skill's full instructions.
-
-${skillElements}
-</available_skills>`;
-}
-
 function createSkillManagementToolbox(
   provider: SkillProvider,
   session: SkillSession,
@@ -785,6 +747,20 @@ export async function createRuntimeComposition(
     await memory.init();
   }
 
+  // Resolve the SkillProvider from the bureau's persistence store when no
+  // explicit provider is supplied — same store-sharing pattern as memory.
+  // `createStorageSkillProvider` wraps the KV view with the `skill:` prefix
+  // namespace (disjoint from Weft's reserved prefixes and memory's
+  // `app:agent-bureau:memory:v1:` prefix — asserted disjoint by test).
+  //
+  // The resolved provider is typed as `SkillsPackageProvider` (the full skills
+  // package interface with `saveResource`/`setEnabled`) so it is accepted by
+  // `createSkillCatalogHook`, which expects the full interface. The gateway's
+  // local `SkillProvider` type is a structural subset and is compatible.
+  const resolvedSkillProvider: SkillsPackageProvider | undefined =
+    (options.skills?.provider as SkillsPackageProvider | undefined) ??
+    (options.skills !== undefined && kv !== undefined ? createStorageSkillProvider(kv) : undefined);
+
   const sessionStore = kv ? createSessionStore(kv) : undefined;
   const baseToolbox: GatewayToolbox = options.toolbox ?? createToolbox([], { context: {} });
   const hasSkillTools = options.skills !== undefined && options.skills.includeTools !== false;
@@ -952,18 +928,19 @@ export async function createRuntimeComposition(
       onStep.push(createMemoryPersistHook(memory, request.sessionId, request.runId));
     }
 
-    if (options.skills) {
+    if (options.skills && resolvedSkillProvider) {
       const skillSession = createSkillSession();
 
+      // Inject the skill catalog on step 0 — same hook pattern as identity.
+      // `createSkillCatalogHook` from the `skills` package handles enabled-status
+      // filtering, skill policy (allow/deny list), and graceful degradation on
+      // provider errors. The hook caches the catalog for the run (one fetch per run).
+      const catalogHook = createSkillCatalogHook({
+        provider: resolvedSkillProvider,
+        skillPolicy: options.skills.skillPolicy,
+      });
       prepareStep.push(async (context) => {
-        if (context.step !== 0) {
-          return;
-        }
-
-        const catalog = await buildSkillCatalog(
-          options.skills!.provider,
-          options.skills!.skillPolicy,
-        );
+        const catalog = await catalogHook.prepareStep(context);
         if (catalog) {
           context.conversation.appendSystemMessage(catalog, {
             _skillCatalogInjected: true,
@@ -972,7 +949,7 @@ export async function createRuntimeComposition(
       });
 
       if (options.skills.includeTools !== false) {
-        const skillToolbox = createSkillManagementToolbox(options.skills.provider, skillSession);
+        const skillToolbox = createSkillManagementToolbox(resolvedSkillProvider, skillSession);
         toolbox = combineToolboxes(toolbox, skillToolbox);
       }
     }

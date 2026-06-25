@@ -24,6 +24,8 @@ import type {
   BureauTools,
   CreateAgentOptions,
   RunResult,
+  SkillPolicy,
+  SkillProviderLike,
   ToolEntry,
   ToolMap,
   ToolMapInput,
@@ -432,6 +434,65 @@ declare const _toolMapInput: ToolMapInput;
 void _toolMapInput;
 
 // ---------------------------------------------------------------------------
+// ASSERTION D4 — Skills as an inherited bureau capability
+//
+// D4 adds `.skills(provider, policy?)` to the bureau builder. Key requirements:
+//
+//   D4a. `.skills(provider)` accepts a `SkillProviderLike` and returns the SAME
+//        bureau builder type (no widening of TTools/TAgents).
+//   D4b. `.skills(provider, policy)` accepts an optional `SkillPolicy`.
+//   D4c. `.skills()` chains with `.agent()` and `.tools()` without losing types.
+//   D4d. `AgentOptions.skillPolicy` lets agents restrict the base skill catalog.
+//   D4e. `SkillPolicy` and `SkillProviderLike` are exported from bureau-types.
+// ---------------------------------------------------------------------------
+
+// D4e: both types are importable (proven by the import above).
+declare const _skillPolicy: SkillPolicy;
+declare const _skillProviderLike: SkillProviderLike;
+void _skillPolicy;
+void _skillProviderLike;
+
+// A minimal provider stub.
+declare const mockSkillProvider: SkillProviderLike;
+
+// D4a: .skills(provider) returns the SAME BureauBuilder type (tool + agent
+// type params are preserved, not reset).
+const bureauWithSkills = createBureau().tools({ search: searchTool }).skills(mockSkillProvider);
+
+// Tools are still present after .skills() — the phantom types survived.
+type SkillsBureauTools = BureauTools<typeof bureauWithSkills>;
+declare const searchAfterSkills: SkillsBureauTools['search'];
+void (searchAfterSkills satisfies ToolEntry<{ query: string }, string>);
+
+// D4b: .skills(provider, policy) — policy is optional.
+const bureauWithSkillsAndPolicy = createBureau().skills(mockSkillProvider, {
+  allowList: ['research-skill'],
+  denyList: ['dangerous-skill'],
+});
+void bureauWithSkillsAndPolicy;
+
+// D4c: chains with .agent() without losing tool types.
+const bureauChainedWithSkills = createBureau()
+  .tools({ search: searchTool })
+  .skills(mockSkillProvider)
+  .agent({ name: 'researcher' });
+
+// Agent is registered and tools are preserved.
+void bureauChainedWithSkills.run('researcher', 'Summarize');
+type SkillsChainedTools = BureauTools<typeof bureauChainedWithSkills>;
+declare const searchAfterChain: SkillsChainedTools['search'];
+void (searchAfterChain satisfies ToolEntry<{ query: string }, string>);
+
+// D4d: AgentOptions accepts skillPolicy for per-agent skill filtering.
+const bureauWithAgentSkillPolicy = createBureau()
+  .skills(mockSkillProvider)
+  .agent({ name: 'restricted', skillPolicy: { denyList: ['dev-skill'] } });
+void bureauWithAgentSkillPolicy.run('restricted', 'Summarize');
+
+// @ts-expect-error — unregistered agent still errors.
+void bureauWithAgentSkillPolicy.run('nonexistent', 'input');
+
+// ---------------------------------------------------------------------------
 // Final void block — satisfy unused-var lint for all bindings used above.
 // ---------------------------------------------------------------------------
 
@@ -466,4 +527,13 @@ void [
   validOptions,
   _toolMapInput,
   bureauForAgentTools,
+  // D4 assertions
+  _skillPolicy,
+  _skillProviderLike,
+  bureauWithSkills,
+  searchAfterSkills,
+  bureauWithSkillsAndPolicy,
+  bureauChainedWithSkills,
+  searchAfterChain,
+  bureauWithAgentSkillPolicy,
 ];

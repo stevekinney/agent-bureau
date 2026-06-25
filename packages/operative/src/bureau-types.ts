@@ -145,11 +145,45 @@ export interface AgentConfig<TTools extends ToolMap = ToolMap> {
  */
 export type AgentTable = Record<string, AgentConfig>;
 
+// ---------------------------------------------------------------------------
+// Skill policy — allow/deny list for catalog filtering
+// ---------------------------------------------------------------------------
+
+/**
+ * Allow/deny list for skill catalog filtering. Deny always wins over allow.
+ * Used to restrict the bureau's base skill catalog for a specific agent.
+ *
+ * - `allowList` — only these skills are visible (if set).
+ * - `denyList` — these skills are hidden, even if in the allowList.
+ */
+export interface SkillPolicy {
+  /** If set, only these skills are available to the agent. */
+  allowList?: string[];
+  /** These skills are hidden from the agent even if in the allowList. Deny wins. */
+  denyList?: string[];
+}
+
+/**
+ * Minimal skill provider interface accepted by `bureau.skills(provider)`.
+ * Structural match for `skills` package's `SkillProvider` — operative does not
+ * import from `skills` (keeps the dependency direction clean).
+ */
+export interface SkillProviderLike {
+  listSkills(): Promise<Array<{ name: string; description: string }>>;
+  isEnabled(name: string): Promise<boolean>;
+}
+
 /** Input accepted by `bureau.agent({...})` and `createBureau({agents:{...}})`. */
 export interface AgentOptions {
   name: string;
   tools?: ToolMapInput;
   instructions?: string;
+  /**
+   * Per-agent skill policy. Restricts the bureau's base skill catalog for
+   * this specific agent. The bureau-level catalog is inherited; this policy
+   * filters it (allow/deny list). Deny always wins.
+   */
+  skillPolicy?: SkillPolicy;
   // More fields will be added in Phase E; these are the spike-minimum.
 }
 
@@ -269,6 +303,21 @@ export interface BureauBuilder<
    * tools merged into `TTools`.
    */
   tools<TNew extends ToolMapInput>(t: TNew): BureauBuilder<TTools & NormalizeTools<TNew>, TAgents>;
+
+  /**
+   * Set the bureau's base skill catalog. The provider is inherited by all
+   * agents registered on this bureau; individual agents may restrict it via
+   * their own `skillPolicy`.
+   *
+   * The catalog is injected as an `<available_skills>` XML block on step 0 —
+   * the same hook pattern as `.identity()`. The `SkillProviderLike` seam keeps
+   * operative free of a hard `skills` package dependency.
+   *
+   * When the bureau has `.persistence()` configured, pass a storage-backed
+   * provider constructed via `createStorageSkillProvider(kv)` (from the
+   * `skills` package) over the bureau's persistence store.
+   */
+  skills(provider: SkillProviderLike, policy?: SkillPolicy): BureauBuilder<TTools, TAgents>;
 
   /**
    * Register an agent with the bureau. Returns a builder with the agent added
