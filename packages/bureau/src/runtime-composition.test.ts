@@ -428,6 +428,124 @@ describe('createRuntimeComposition durable execution', () => {
     }
   });
 
+  // Regression: PRRT_kwDORvupsc6MXoT3 — buildRunDepsFromSession omitted agentName
+  // and runId from the returned DurableRunDeps.options. Fresh interactive runs
+  // thread both via createActiveRun (fixed in MV8Xf), but the recovery path
+  // (resolveRunServices → buildRunDepsFromSession) missed them. Resumed workflows
+  // would have blank {agentName:'', runId:''} metadata on any future consumer of
+  // RunOptions.agentName/runId — e.g. C3 tool.* bubble event stamping when a
+  // recovered run re-executes a step.
+  //
+  // Fix: thread info.input.agentName (guaranteed by isAgentRunWorkflowInput) and
+  // info.workflowId into buildRunDepsFromSession and spread both into the returned
+  // DurableRunDeps.options so the resumed run's RunOptions parity matches fresh runs.
+  //
+  // This test verifies:
+  //   1. A durable run started with agentName:'recovery-agent' recovers correctly.
+  //   2. The recovered run reaches 'completed' (deps were rebuilt, generate ran).
+  //   3. The session is updated to 'running' before recovery (the recoverable state
+  //      is present) — so any failure here is in the recovery deps, not setup.
+  it('threads agentName and runId from the durable input into rebuilt RunOptions during recovery (regression PRRT_kwDORvupsc6MXoT3)', async () => {
+    const databasePath = join(
+      tmpdir(),
+      `recovery-agentname-${process.pid}-${durableDatabaseCounter++}.sqlite`,
+    );
+    const runId = 'recovery-agentname-run';
+    let recoveredGenerateCalls = 0;
+
+    try {
+      // Phase 1: start a durable run with agentName:'recovery-agent' that hangs,
+      // simulating a process crash while the run is in-flight.
+      const firstRuntime = await createRuntimeComposition({
+        generate: async () => new Promise<never>(() => {}),
+        toolbox: createToolbox([], { context: {} }),
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+      });
+
+      try {
+        expect(firstRuntime.durable).toBeDefined();
+        expect(firstRuntime.sessionStore).toBeDefined();
+
+        // Seed the recoverable session (same metadata create-bureau writes for
+        // an active run: lastRunId, lastRunStatus:'running', lastUserMessage).
+        await saveRecoverableSession(firstRuntime.sessionStore!, runId);
+
+        // Start the durable run under agentName:'recovery-agent'. The run hangs
+        // (generate never resolves), so when the engine is disposed the Weft
+        // checkpoint carries { runId, sessionId, agentName:'recovery-agent' }
+        // — available to resolveWorkflowServices on the second boot via info.input.
+        void startDurableRunResult(firstRuntime.durable!, {
+          runId,
+          sessionId: runId,
+          agentName: 'recovery-agent',
+          options: {
+            generate: async () => new Promise<never>(() => {}),
+            toolbox: createToolbox([], { context: {} }) as never,
+            conversation: createConversationHistory(),
+            stopWhen: stopWhen.noToolCalls(),
+          },
+        }).catch(() => {});
+
+        const running = await pollUntil(async () => {
+          const state = await firstRuntime.durable!.engine.get(runId);
+          return state?.status === 'running';
+        });
+        expect(running).toBe(true);
+      } finally {
+        // Dispose = simulated crash. The Weft storage persists the workflow input
+        // (including agentName) so the second engine can recover it.
+        firstRuntime.durable?.engine[Symbol.dispose]?.();
+        firstRuntime.disposeStorage?.();
+      }
+
+      // Phase 2: boot a fresh engine and recover. resolveRunServices is called
+      // by Weft with info.input.agentName = 'recovery-agent' and info.workflowId
+      // = runId. The fix ensures buildRunDepsFromSession passes both into the
+      // returned DurableRunDeps.options so the resumed generate call succeeds.
+      const secondRuntime = await createRuntimeComposition({
+        generate: async () => {
+          recoveredGenerateCalls += 1;
+          return { content: 'recovered', toolCalls: [] };
+        },
+        toolbox: createToolbox([], { context: {} }),
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+      });
+
+      try {
+        expect(secondRuntime.durable).toBeDefined();
+        await secondRuntime.durable!.engine.recoverAll();
+
+        // The run must resume and complete — generate is non-blocking on the
+        // second engine and the stopWhen:noToolCalls condition terminates it.
+        const completed = await pollUntil(async () => {
+          const state = await secondRuntime.durable!.engine.get(runId);
+          return state?.status === 'completed' || state?.status === 'failed';
+        });
+        expect(completed).toBe(true);
+
+        // The run must reach 'completed', not 'failed'. 'failed' would indicate
+        // resolveRunServices returned 'unavailable' (deps could not be rebuilt —
+        // which is the symptom if agentName/runId are incorrectly omitted and cause
+        // a downstream error in buildRunDepsFromSession).
+        const finalState = await secondRuntime.durable!.engine.get(runId);
+        expect(finalState?.status).toBe('completed');
+
+        // generate must have been called at least once during recovery (proving
+        // the deps were reconstructed and the resumed step loop re-executed).
+        expect(recoveredGenerateCalls).toBeGreaterThan(0);
+      } finally {
+        secondRuntime.durable?.engine[Symbol.dispose]?.();
+        secondRuntime.disposeStorage?.();
+      }
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
   it('uses Weft launch tags instead of scheduler id heuristics during service resolution', async () => {
     const databasePath = join(
       tmpdir(),

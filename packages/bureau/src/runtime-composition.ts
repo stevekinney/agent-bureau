@@ -6,6 +6,7 @@ import {
   createTool,
   createToolbox,
   type Toolbox,
+  type ToolboxEventMap,
   type ToolCallInput,
 } from 'armorer';
 import { Conversation } from 'conversationalist';
@@ -28,6 +29,12 @@ import {
   createIdentityHook,
   createScheduler,
   createSessionStore,
+  StepStartedEvent,
+  ToolErrorBubbleEvent,
+  ToolPolicyDeniedBubbleEvent,
+  ToolProgressBubbleEvent,
+  ToolSettledBubbleEvent,
+  ToolStartedBubbleEvent,
   withCache,
   withEnhancedStreaming,
 } from 'operative';
@@ -994,6 +1001,7 @@ export async function createRuntimeComposition(
   async function buildRunDepsFromSession(
     session: Awaited<ReturnType<NonNullable<typeof sessionStore>['load']>>,
     runId?: string,
+    agentName?: string,
   ): Promise<DurableRunDeps | null> {
     if (!session) return null;
     const message = session.metadata['lastUserMessage'];
@@ -1005,6 +1013,7 @@ export async function createRuntimeComposition(
         // key (`${runId}:${step}`) matches the pre-crash execution — the durable
         // recovery path is exactly where the at-least-once re-fire happens.
         ...(runId !== undefined ? { runId } : {}),
+        ...(agentName !== undefined ? { agentName } : {}),
       },
       { liveStreaming: false },
     );
@@ -1020,6 +1029,11 @@ export async function createRuntimeComposition(
         prepareStep: runRuntime.prepareStep,
         onStep: runRuntime.onStep,
         validateResponse: runRuntime.validateResponse,
+        // Thread agentName and runId so curated tool.* bubble events stamped by
+        // the resumed run carry the same {agentName, runId, step} metadata as the
+        // pre-crash run (C3 parity). Without them, recovered runs emit blank ids.
+        ...(agentName !== undefined ? { agentName } : {}),
+        ...(runId !== undefined ? { runId } : {}),
       },
     };
   }
@@ -1111,7 +1125,9 @@ export async function createRuntimeComposition(
     try {
       // info.workflowId === the run id (pinned at engine.start) — thread it so the
       // recovered run's memory-persist idempotency key matches its pre-crash key.
-      services = await buildRunDepsFromSession(session, info.workflowId);
+      // info.input.agentName is guaranteed non-empty here: isAgentRunWorkflowInput
+      // requires a non-empty string (the guard returned earlier if it's missing).
+      services = await buildRunDepsFromSession(session, info.workflowId, info.input.agentName);
     } catch (error) {
       // The session exists, but its deps cannot be rebuilt on this process (e.g.
       // no `generate`/provider configured here, so `createRunRuntime` throws).
@@ -1165,9 +1181,127 @@ export async function createRuntimeComposition(
       recoveryEmitter,
       'toolbox',
     );
+
+    // C3 — curated tool.* bubble events stamped with {agentName, runId, step}.
+    // Mirrors the same block in createDurableActiveRun so the audit trail and
+    // operative store receive identical tool.* events regardless of whether the
+    // run is freshly started or durably recovered. Without this, recovered runs
+    // emitted blank-id tool.* events (regression PRRT_kwDORvupsc6MXoT3).
+    //
+    // Wire from HERE (not at reattach) — mirrors the toolboxForward rationale:
+    // a recovered run can fire its first step INSIDE recoverAll before the
+    // bureau's reattach loop runs, so we must capture tool events from the
+    // moment the toolbox exists. Cleanup is bundled into stopToolboxForward so
+    // the subscriptions live exactly as long as the toolbox forwarding.
+    const recoveryC3Cleanups: Array<(() => void) | undefined> = [];
+    {
+      const runId = info.workflowId;
+      const agentName = info.input.agentName;
+      let currentStep = 0;
+
+      const stepListener = (e: StepStartedEvent) => {
+        currentStep = e.step;
+      };
+      recoveryEmitter.addEventListener(StepStartedEvent.type, stepListener);
+      recoveryC3Cleanups.push(() =>
+        recoveryEmitter.removeEventListener(StepStartedEvent.type, stepListener),
+      );
+
+      const toolbox = services.toolbox as unknown as {
+        addEventListener?: <K extends keyof ToolboxEventMap>(
+          type: K,
+          listener: (e: ToolboxEventMap[K]) => void,
+          options?: AddEventListenerOptions,
+        ) => () => void;
+      };
+
+      const onExecuteStart = (e: ToolboxEventMap['execute-start']) => {
+        recoveryEmitter.dispatchEvent(
+          new ToolStartedBubbleEvent(
+            { agentName, runId, step: currentStep },
+            {
+              toolName: e.call.name,
+              toolCallId: e.call.id,
+              params: e.params,
+              startedAt: Date.now(),
+            },
+          ),
+        );
+      };
+
+      const onSettled = (e: ToolboxEventMap['settled']) => {
+        const hasError = e.error !== undefined;
+        const status: 'success' | 'error' = hasError ? 'error' : 'success';
+        recoveryEmitter.dispatchEvent(
+          new ToolSettledBubbleEvent(
+            { agentName, runId, step: currentStep },
+            {
+              toolName: e.call.name,
+              toolCallId: e.call.id,
+              status,
+              result: e.result,
+              error: e.error,
+            },
+          ),
+        );
+        if (hasError) {
+          recoveryEmitter.dispatchEvent(
+            new ToolErrorBubbleEvent(
+              { agentName, runId, step: currentStep },
+              {
+                toolName: e.call.name,
+                toolCallId: e.call.id,
+                error: e.error,
+              },
+            ),
+          );
+        }
+      };
+
+      const onToolProgress = (e: ToolboxEventMap['progress']) => {
+        recoveryEmitter.dispatchEvent(
+          new ToolProgressBubbleEvent(
+            { agentName, runId, step: currentStep },
+            {
+              toolName: e.call.name,
+              toolCallId: e.call.id,
+              percent: e.percent,
+              message: e.message,
+            },
+          ),
+        );
+      };
+
+      const onPolicyDenied = (e: ToolboxEventMap['policy-denied']) => {
+        recoveryEmitter.dispatchEvent(
+          new ToolPolicyDeniedBubbleEvent(
+            { agentName, runId, step: currentStep },
+            {
+              toolName: e.call.name,
+              toolCallId: e.call.id,
+              reason: e.reason,
+            },
+          ),
+        );
+      };
+
+      if (toolbox.addEventListener) {
+        const addListener = toolbox.addEventListener.bind(toolbox);
+        recoveryC3Cleanups.push(
+          addListener('execute-start', onExecuteStart),
+          addListener('settled', onSettled),
+          addListener('progress', onToolProgress),
+          addListener('policy-denied', onPolicyDenied),
+        );
+      }
+    }
+
     pendingRecoveryEmitters.set(info.workflowId, {
       emitter: recoveryEmitter,
-      stopToolboxForward: () => toolboxForward.stop(),
+      stopToolboxForward: () => {
+        toolboxForward.stop();
+        for (const cleanup of recoveryC3Cleanups) cleanup?.();
+      },
     });
     return { status: 'available', services: { ...services, emitter: recoveryEmitter } };
   }
