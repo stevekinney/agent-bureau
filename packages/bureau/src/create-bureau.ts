@@ -16,6 +16,7 @@ import {
   StoreActionEvent,
 } from 'operative/store';
 
+import { type AuditTrail, createAuditTrail } from './audit-trail';
 import {
   ActionEvent,
   BureauDisposedEvent,
@@ -1083,6 +1084,9 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       }
 
       try {
+        // Dispose the audit trail before emitting bureau.disposed so any
+        // in-flight write callbacks are unsubscribed cleanly.
+        auditTrailInstance?.dispose();
         emitter.dispatch(new BureauDisposedEvent());
         storeSubscription.unsubscribe();
         for (const disposeListener of schedulerCleanup) {
@@ -1154,12 +1158,20 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     );
   }
 
-  return {
+  // Build the bureau object first so the audit trail can subscribe to its
+  // action events via addEventListener. The audit trail is best-effort — a
+  // write failure must never crash a run (handled inside createAuditTrail).
+  let auditTrailInstance: AuditTrail | undefined;
+
+  const bureau: Bureau = {
     store,
     memory: runtime.memory,
     scheduler: runtime.scheduler,
     sessionStore: runtime.sessionStore,
     kv: runtime.kv,
+    get auditTrail(): AuditTrail | undefined {
+      return auditTrailInstance;
+    },
     get ready() {
       return runtime.ready;
     },
@@ -1201,4 +1213,13 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     },
     dispose,
   } satisfies Bureau;
+
+  // Wire the durable audit trail (Layer B) now that we have a bureau to
+  // subscribe to. Only created when a KV store is available; ephemeral
+  // bureaus have Layer A only.
+  if (runtime.kv) {
+    auditTrailInstance = createAuditTrail(bureau, runtime.kv);
+  }
+
+  return bureau;
 }
