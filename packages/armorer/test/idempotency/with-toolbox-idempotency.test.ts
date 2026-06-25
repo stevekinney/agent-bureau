@@ -834,13 +834,18 @@ describe('withToolboxIdempotency', () => {
     });
   });
 
-  it('leaves a caller-supplied key orphaned in "started" state when the tool throws an uncategorized error after its side effect', async () => {
-    // Regression for A1 (error-path contract): an uncategorized thrown error
-    // (no validation/permission/not_found/pre-execution-conflict category) is
-    // treated as a possible mid-execution crash — the "started" entry is NOT
-    // cleared, so a retry reports unknown-outcome rather than blindly re-running.
-    // This pins the specific behavior of shouldClearStartedStateForThrownError
-    // for uncategorized errors; the durable-state contract is covered above.
+  it('leaves a caller-supplied key orphaned in "started" state when the tool fails with an uncategorized error after its side effect', async () => {
+    // Regression for A1 (error-path contract). The tool's execute throws, but
+    // createToolbox defaults to errorMode: 'collect', so the toolbox converts the
+    // throw into an `outcome: 'error'` RESULT before it reaches the idempotency
+    // wrapper — the wrapper's try/catch never sees a thrown error. So this pins
+    // `shouldClearStartedState(result)` (the error-RESULT path), not
+    // `shouldClearStartedStateForThrownError` (the rethrow path). For an
+    // uncategorized error result the "started" entry is NOT cleared, so a retry
+    // reports unknown-outcome rather than blindly re-running. The durable-state
+    // contract is covered above; the rethrow path that does run
+    // shouldClearStartedStateForThrownError is covered by the failFast
+    // validation-throws test and the 'throws an unknown primitive error' test.
     const sideEffects: number[] = [];
     const chargeTool = createTool({
       name: 'charge',
@@ -848,8 +853,9 @@ describe('withToolboxIdempotency', () => {
       input: z.object({ cents: z.number() }),
       async execute({ cents }) {
         sideEffects.push(cents);
-        // Uncategorized error: the side effect happened but no result is
-        // recorded, leaving the idempotency key in "started" state.
+        // The side effect happened, then the tool fails. Under errorMode 'collect'
+        // this surfaces as an error-outcome result, leaving the idempotency key
+        // in "started" state.
         throw new Error('provider unavailable after charge');
       },
     });
