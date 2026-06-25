@@ -1,6 +1,6 @@
 import { $ } from 'bun';
 
-const entrypoints = ['./src/index.ts', './src/test/index.ts'];
+const entrypoints = ['./src/index.ts', './src/builder/index.ts', './src/test/index.ts'];
 
 const root = './src';
 

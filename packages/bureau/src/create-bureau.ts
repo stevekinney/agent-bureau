@@ -1,7 +1,13 @@
 import type { ListFilter, ListOptions } from '@lostgradient/weft';
 import { Conversation, createConversationHistory } from 'conversationalist';
 import { CompletableEventTarget } from 'lifecycle';
-import { type ActiveRun, createActiveRun, createAgentSession, type JSONValue } from 'operative';
+import {
+  type ActiveRun,
+  createActiveRun,
+  createAgentSession,
+  type JSONValue,
+  type ScheduledAgentRunInput,
+} from 'operative';
 import {
   isAgentRunWorkflowInput,
   reattachDurableActiveRun,
@@ -1053,6 +1059,11 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
   /**
    * Look up the current durable run id for a session. Used by signal/update/query
    * to route the operation to the correct workflow handle.
+   *
+   * Requires that `lastRunStatus` is `'running'`: completed, aborted, and error
+   * sessions retain their `lastRunId` but targeting a terminal workflow with a
+   * signal/update would silently mis-route or surface a low-level engine error
+   * instead of the expected "no active run" response.
    */
   async function requireSessionRunId(sessionId: string): Promise<string> {
     const session = await requireSessionStore().load(sessionId);
@@ -1061,6 +1072,10 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     }
     const runId = session.metadata['lastRunId'];
     if (typeof runId !== 'string' || !runId) {
+      throw new BureauError(`Session ${sessionId} has no active run`, 'NOT_FOUND');
+    }
+    const runStatus = session.metadata['lastRunStatus'];
+    if (runStatus !== 'running') {
       throw new BureauError(`Session ${sessionId} has no active run`, 'NOT_FOUND');
     }
     return runId;
@@ -1096,13 +1111,21 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     definition: DurableScheduleDefinition,
   ): Promise<import('@lostgradient/weft').ScheduleSummary | null | undefined> {
     if (!runtime.durable) return undefined;
+    // The 'agentRun' workflow's scheduled-fire path consumes `ScheduledAgentRunInput`
+    // ({ agentName, input, sessionId? }) — the schedule layer translates `input` to the
+    // workflow's `prompt` and derives the per-fire `runId`. The previous payload wrote a
+    // `message` field that exists in neither `ScheduledAgentRunInput` nor
+    // `AgentRunWorkflowInput`, so every scheduled fire launched with an empty prompt.
+    // When `sessionId` is omitted, each fire starts a fresh standalone session (per the
+    // architecture's scheduling semantics) — so only carry it when explicitly provided.
+    const scheduledInput: ScheduledAgentRunInput = {
+      agentName: definition.agentName,
+      input: definition.input,
+      ...(definition.sessionId ? { sessionId: definition.sessionId } : {}),
+    };
     const handle = await runtime.durable.engine.schedule(
       'agentRun',
-      {
-        sessionId: definition.sessionId ?? `schedule-${crypto.randomUUID()}`,
-        agentName: definition.agentName,
-        message: definition.input,
-      },
+      scheduledInput,
       definition.spec,
       {
         overlap: definition.overlap === 'allow' ? 'allow' : 'skip',

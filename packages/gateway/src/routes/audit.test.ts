@@ -9,8 +9,11 @@
  */
 import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
 import { describe, expect, it } from 'bun:test';
+import { Hono } from 'hono';
 
 import { createTestGateway, requestJSON, waitForRunState } from '../test';
+import type { AuditRecord, AuditTrail, Bureau } from '../types';
+import { createAuditRoutes } from './audit';
 
 const AUTH_TOKEN = 'test-token';
 const authHeaders = { authorization: `Bearer ${AUTH_TOKEN}` };
@@ -343,6 +346,129 @@ describe('GET /api/v1/audit', () => {
         }
       }
     }
+  });
+
+  it('does not suppress live actions for a run that already has some durable records (deduplicates by event key, not by run)', async () => {
+    // Regression test for: deduplication was done on runId alone, meaning once
+    // ANY durable record existed for a run, ALL remaining live-store actions
+    // for that run were silently dropped. The correct behaviour is to suppress
+    // only the exact event (matched on runId + type + sequence) already present
+    // in the durable trail, leaving all other live events visible.
+
+    const runId = 'run-dedup-test';
+    const sharedTimestamp = 1_000_000;
+
+    // One event that IS in the durable trail (run.completed, seq 2).
+    const durableRecord: AuditRecord = {
+      timestamp: new Date(sharedTimestamp).toISOString(),
+      timestampMs: sharedTimestamp,
+      sequence: 2,
+      runId,
+      type: 'run.completed',
+      detail: {},
+    };
+
+    // Stub an AuditTrail that returns the single durable record above.
+    const stubAuditTrail: AuditTrail = {
+      query: async () => [durableRecord],
+      dispose: () => {},
+    };
+
+    // Stub a Store whose live actions list contains:
+    //  - seq 1: step.generated (NOT in AUDIT_EVENT_TYPES → never in durable trail)
+    //  - seq 2: run.completed  (same event as durable record → should be suppressed)
+    const stubStore = {
+      getState: () => ({
+        runs: new Map(),
+        actions: [
+          // Non-audited type — must pass through from live.
+          {
+            sequence: 1,
+            runId,
+            type: 'step.generated',
+            detail: { tokens: 42 },
+            timestamp: sharedTimestamp - 10,
+          },
+          // Exact match of durable record — must be suppressed to avoid duplicate.
+          {
+            sequence: 2,
+            runId,
+            type: 'run.completed',
+            detail: {},
+            timestamp: sharedTimestamp,
+          },
+        ],
+      }),
+    } as unknown as Bureau['store'];
+
+    // Build a minimal Bureau stub.
+    const stubBureau: Bureau = {
+      store: stubStore,
+      auditTrail: stubAuditTrail,
+      memory: undefined,
+      scheduler: undefined,
+      ready: true,
+      createRun: async () => {
+        throw new Error('not implemented');
+      },
+      listRuns: () => [],
+      getRun: () => undefined,
+      abortRun: () => {
+        throw new Error('not implemented');
+      },
+      deleteRun: () => {},
+      listSessions: async () => [],
+      getSession: async () => undefined,
+      deleteSession: async () => {},
+      getConfiguration: () => ({
+        provider: undefined,
+        providers: [],
+        maximumSteps: 10,
+        systemPrompt: undefined,
+        tools: [],
+      }),
+      getTools: () => [],
+      subscribeLiveFrames: () => () => {},
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      on: () => ({ subscribe: () => ({ closed: false, unsubscribe: () => {} }) }),
+      once: () => {},
+      subscribe: () => ({ closed: false, unsubscribe: () => {} }),
+      toObservable: () => ({ subscribe: () => ({ closed: false, unsubscribe: () => {} }) }),
+      events: async function* () {},
+      complete: () => {},
+      completed: false,
+      signal: new AbortController().signal,
+      dispose: () => {},
+      sessionStore: undefined,
+      kv: undefined,
+    } as unknown as Bureau;
+
+    const app = new Hono();
+    app.route('/api/v1/audit', createAuditRoutes(stubBureau));
+
+    const response = await app.request('/api/v1/audit');
+    expect(response.status).toBe(200);
+
+    const records = (await response.json()) as Array<{
+      runId: string;
+      type: string;
+      sequence: number;
+    }>;
+
+    // The durable run.completed record must be present exactly once.
+    const completedRecords = records.filter((r) => r.type === 'run.completed' && r.runId === runId);
+    expect(completedRecords).toHaveLength(1);
+
+    // The live step.generated record must NOT have been suppressed — this was the bug.
+    const stepGeneratedRecords = records.filter(
+      (r) => r.type === 'step.generated' && r.runId === runId,
+    );
+    expect(stepGeneratedRecords).toHaveLength(1);
+    expect(stepGeneratedRecords[0]?.sequence).toBe(1);
+
+    // Total: 2 records (1 durable + 1 live non-audited), not 1 (old buggy behaviour).
+    expect(records.filter((r) => r.runId === runId)).toHaveLength(2);
   });
 
   it('live+durable trail reconcile: events visible in live store are captured in durable trail', async () => {

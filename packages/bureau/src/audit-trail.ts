@@ -160,8 +160,6 @@ export function createAuditTrail(bureau: Bureau, kv: TextValueStore | undefined)
 
       const records: AuditRecord[] = [];
       for (const key of keys) {
-        if (records.length >= limit) break;
-
         const raw = await kv.get(key);
         if (!raw) continue;
 
@@ -177,6 +175,11 @@ export function createAuditTrail(bureau: Bureau, kv: TextValueStore | undefined)
         if (type !== undefined && record.type !== type) continue;
 
         records.push(record);
+
+        // Apply the limit AFTER filtering so we count only records that match all
+        // predicates. Stopping before filtering would cause the loop to break on
+        // non-matching records and miss in-range entries later in the key scan.
+        if (records.length >= limit) break;
       }
 
       return records;

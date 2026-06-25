@@ -115,6 +115,48 @@ describe('webhook ingress routes (POST /hooks/*)', () => {
     expect(second.status).toBe(202);
   });
 
+  it('does not consume the Idempotency-Key when the body is invalid JSON', async () => {
+    const gateway = await createTestGateway({ generate: createMockGenerate() });
+    const key = 'retry-after-bad-json';
+
+    // First attempt: malformed JSON — validation must fail without persisting key.
+    const bad = await requestJSON(gateway, '/hooks/event?agent=bureau', {
+      method: 'POST',
+      headers: { 'Idempotency-Key': key },
+      body: 'not-json',
+    });
+    expect(bad.status).toBe(400);
+
+    // Second attempt: corrected request with the same key — must succeed, not 409.
+    const good = await requestJSON(gateway, '/hooks/event?agent=bureau', {
+      method: 'POST',
+      headers: { 'Idempotency-Key': key },
+      body: JSON.stringify({ message: 'Corrected.' }),
+    });
+    expect(good.status).toBe(202);
+  });
+
+  it('does not consume the Idempotency-Key when message is missing from body', async () => {
+    const gateway = await createTestGateway({ generate: createMockGenerate() });
+    const key = 'retry-after-missing-message';
+
+    // First attempt: missing message field — validation must fail without persisting key.
+    const bad = await requestJSON(gateway, '/hooks/event?agent=bureau', {
+      method: 'POST',
+      headers: { 'Idempotency-Key': key },
+      body: JSON.stringify({}),
+    });
+    expect(bad.status).toBe(400);
+
+    // Second attempt: corrected request with the same key — must succeed, not 409.
+    const good = await requestJSON(gateway, '/hooks/event?agent=bureau', {
+      method: 'POST',
+      headers: { 'Idempotency-Key': key },
+      body: JSON.stringify({ message: 'Now included.' }),
+    });
+    expect(good.status).toBe(202);
+  });
+
   it('routes different paths under /hooks/* to the same handler', async () => {
     const gateway = await createTestGateway({ generate: createMockGenerate() });
 

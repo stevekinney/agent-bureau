@@ -1,16 +1,17 @@
 import type { ConversationHistory } from 'conversationalist';
 import { Conversation, createConversationHistory } from 'conversationalist';
-import { TypedEventTarget } from 'lifecycle';
+import { CompletableEventTarget, TypedEventTarget } from 'lifecycle';
 
 import type { AgentRun } from '../agent-run';
 import { createAgentRun } from '../agent-run';
 import type { AgentSession, RunRef } from '../agent-session';
 import { createAgentSession } from '../agent-session';
+import type { ActiveRun } from '../create-run';
 import { createActiveRun } from '../create-run';
 import { reattachDurableActiveRun } from '../durable/active-run-adapter';
 import type { CheckpointStore } from '../durable/checkpoint-store';
 import type { AnyRunEngine } from '../durable/create-run-engine';
-import type { OperativeEventMap } from '../events';
+import type { CombinedOperativeEventMap, OperativeEventMap } from '../events';
 import {
   SessionCancelEvent,
   SessionForkEvent,
@@ -380,48 +381,130 @@ export function createSessionHandle(
     emitter,
 
     run(input: string): AgentRun {
-      // Seed the conversation with the stored history (we build it lazily via
-      // the result promise so `run()` returns synchronously).
-      const eagerConversation = new Conversation(createConversationHistory());
-      eagerConversation.appendUserMessage(input);
+      // A shared emitter that bridges the outer ActiveRun surface (returned
+      // synchronously) with the real inner run's events (created after session
+      // load). Events dispatched by the inner ActiveRun are forwarded here so
+      // for-await on the returned AgentRun sees them.
+      const outerEmitter = new CompletableEventTarget<CombinedOperativeEventMap>();
 
-      const activeRun = createActiveRun({ ...runOptions, conversation: eagerConversation.current });
-      const agentRun = createAgentRun(activeRun);
-      currentRun = agentRun;
+      // An AbortController created eagerly so abort() works immediately, even
+      // before the inner run is created. Its signal is threaded into RunOptions
+      // so the actual generate call sees it and drops the provider connection
+      // promptly when cancelled. This is the "load-bearing abort" path that
+      // stops billing — it must be synchronous and must not wait for
+      // loadOrCreate() to complete.
+      const abortController = new AbortController();
 
-      // After the run settles: update the conversation history and append the
-      // RunRef to the session's `runs[]`. This is best-effort; callers should
-      // not depend on session persistence completing before iterating the run.
-      void agentRun
-        .result()
-        .then(async (result) => {
-          const session = await loadOrCreate();
-          // Build the conversation from the completed run's history, merged with
-          // the stored history (stored → user input → assistant response).
-          const sequence = session.runs.length;
+      // Load the session eagerly to seed the conversation with the stored
+      // history and derive the run's sequence number for the runId. The session
+      // load is chained before execution so the loop sees the full history.
+      const sessionPromise = loadOrCreate();
+
+      const resultPromise: Promise<RunResult> = sessionPromise.then(async (session) => {
+        const sequence = session.runs.length;
+        const runId = deriveRunId(sessionId, sequence);
+        // Seed the conversation from the stored history so multi-turn sessions
+        // carry all prior messages forward. Then append the user's message.
+        const storedHistory = historyOrEmpty(session.conversationHistory);
+        const seededConversation = new Conversation(storedHistory);
+        seededConversation.appendUserMessage(input);
+
+        // Thread the eager AbortController's signal into the run options so
+        // abort() works immediately — even before the inner run's own
+        // AbortController is created (inside createActiveRun). When the caller
+        // aborts via agentRun.abort(), abortController.abort() fires and the
+        // combinedSignal inside the run loop drops the provider connection.
+        const runOptionsWithSignal = {
+          ...runOptions,
+          agentName,
+          conversation: seededConversation.current,
+          signal: runOptions.signal
+            ? AbortSignal.any([runOptions.signal, abortController.signal])
+            : abortController.signal,
+        };
+
+        // Route through the durable engine when both engine and checkpointStore
+        // are present, so the run is checkpointed and reachable via
+        // signal/update/query/recover() using the derived runId.
+        const innerRun: ActiveRun =
+          engine && checkpointStore
+            ? createActiveRun(runOptionsWithSignal, { engine, checkpointStore, runId, sessionId })
+            : createActiveRun(runOptionsWithSignal);
+
+        // Forward all inner events to the outer emitter so for-await consumers
+        // see the full event stream.
+        const subscription = innerRun.toObservable().subscribe({
+          next: (e) => outerEmitter.dispatchEvent(e),
+          error: () => outerEmitter.complete(),
+          complete: () => outerEmitter.complete(),
+        });
+
+        const innerResult = await innerRun.result;
+        subscription.unsubscribe();
+
+        // Persist the RunRef and updated conversation history after the run
+        // settles. Re-load the session in case a concurrent run completed.
+        const freshSession = await store.load(sessionId);
+        if (freshSession) {
           const ref: RunRef = {
-            runId: deriveRunId(sessionId, sequence),
+            runId,
             sequence,
-            status: finishReasonToStatus(result.finishReason),
+            status: finishReasonToStatus(innerResult.finishReason),
             startedAt: new Date().toISOString(),
             // F2: carry agentName on each RunRef so a session worked by a
-            // SEQUENCE of different agents (via handoff) preserves a full audit
-            // trail of which agent ran each run.
+            // SEQUENCE of different agents (via handoff) preserves a full
+            // audit trail of which agent ran each run.
             agentName,
           };
           const updated: AgentSession = {
-            ...session,
-            conversationHistory: result.conversation.current,
-            runs: [...session.runs, ref],
+            ...freshSession,
+            conversationHistory: innerResult.conversation.current,
+            runs: [...freshSession.runs, ref],
             updatedAt: new Date().toISOString(),
           };
           await store.save(updated);
-        })
+        }
+
+        return innerResult;
+      });
+
+      // Build the ActiveRun surface backed by the outer emitter so createAgentRun
+      // can subscribe to events and abort the run.
+      const activeRunWrapper: ActiveRun = {
+        result: resultPromise,
+        abort(reason?: string): void {
+          abortController.abort(reason);
+        },
+        addEventListener: outerEmitter.addEventListener.bind(
+          outerEmitter,
+        ) as ActiveRun['addEventListener'],
+        removeEventListener: outerEmitter.removeEventListener.bind(
+          outerEmitter,
+        ) as ActiveRun['removeEventListener'],
+        on: outerEmitter.on.bind(outerEmitter) as ActiveRun['on'],
+        once: outerEmitter.once.bind(outerEmitter) as ActiveRun['once'],
+        subscribe: outerEmitter.subscribe.bind(outerEmitter) as ActiveRun['subscribe'],
+        events: outerEmitter.events.bind(outerEmitter) as ActiveRun['events'],
+        toObservable: outerEmitter.toObservable.bind(outerEmitter) as ActiveRun['toObservable'],
+        complete(): void {
+          outerEmitter.complete();
+        },
+        [Symbol.dispose](): void {
+          abortController.abort();
+          outerEmitter.complete();
+        },
+      };
+
+      const agentRun = createAgentRun(activeRunWrapper);
+      currentRun = agentRun;
+
+      // Clear currentRun and complete the outer emitter once the run settles.
+      void resultPromise
         .catch(() => {
-          // If result rejects, the session update is skipped. The run's error
-          // propagates to the caller through `agentRun.result()`.
+          // Result errors propagate to callers through agentRun.result().
         })
         .finally(() => {
+          outerEmitter.complete();
           if (currentRun === agentRun) currentRun = null;
         });
 

@@ -6,11 +6,16 @@ import { MemoryStorage, type TextValueStore, textValueStore } from '@lostgradien
 import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
 import { createTool, createToolbox } from 'armorer';
 import { createMockTool, createTestToolbox } from 'armorer/test';
-import { afterEach, describe, expect, it, mock } from 'bun:test';
+import { afterEach, describe, expect, it, mock, spyOn } from 'bun:test';
 import { Conversation, getMessages } from 'conversationalist';
 import { createMemory, type Memory } from 'memory';
 import { createInMemoryMemoryRecordStorage, createMockEmbedder } from 'memory/test';
-import type { GenerateFunction, GenerateResponse, Toolbox } from 'operative';
+import type {
+  GenerateFunction,
+  GenerateResponse,
+  ScheduledAgentRunInput,
+  Toolbox,
+} from 'operative';
 import { stopWhen } from 'operative';
 import { SCHEDULER_ORIGIN_TAG, startDurableRunResult } from 'operative/durable';
 import { createStore } from 'operative/store';
@@ -1270,6 +1275,85 @@ describe('createBureau', () => {
       await rm(`${databasePath}-shm`, { force: true });
     }
   });
+
+  it('createSchedule passes the prompt as ScheduledAgentRunInput.input, not a message field (regression PRRT_kwDORvupsc6MUE_p)', async () => {
+    // REGRESSION: createSchedule was building the agentRun workflow payload with a
+    // `message` field (`{ agentName, sessionId, message: definition.input }`) that
+    // exists in neither ScheduledAgentRunInput nor AgentRunWorkflowInput. Every
+    // scheduled fire launched with an empty prompt. The fix maps `definition.input`
+    // to `ScheduledAgentRunInput.input` instead.
+    //
+    // Seam: operative's dist bundle inlines @lostgradient/weft, so the Engine
+    // class the bureau uses is a DIFFERENT object identity than the one exported
+    // from the @lostgradient/weft package. Spying on the external package's
+    // Engine.prototype misses the bureau's calls.
+    //
+    // Fix: build a throwaway probe composition first, extract the Engine
+    // prototype from an ACTUAL instance the bundle produces, spy on THAT prototype,
+    // then build the bureau. Both use the same bundled class → same prototype →
+    // the spy captures the bureau's engine.schedule call.
+    const probe = await createRuntimeComposition({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+
+    // Grab the real Engine prototype from the probe's engine instance.
+    const realEngineProto = Object.getPrototypeOf(probe.durable!.engine) as object;
+
+    // Dispose the probe — we only needed it to resolve the class identity.
+    probe.durable!.engine[Symbol.dispose]?.();
+    probe.disposeStorage?.();
+
+    const scheduleSpy = spyOn(
+      realEngineProto as { schedule: (...args: unknown[]) => unknown },
+      'schedule',
+    ).mockResolvedValue({
+      id: 'spy-schedule-1',
+      pause: async () => {},
+      resume: async () => {},
+      cancel: async () => {},
+      describe: async () => null,
+    } as never);
+
+    try {
+      const bureau = await createBureau({
+        generate: createMockGenerate(),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'memory' },
+        durableExecution: true,
+      });
+
+      try {
+        // getSchedule after schedule may resolve to null since our spy short-circuits
+        // the real engine — that is fine; we only care about the schedule() call args.
+        await bureau
+          .createSchedule({
+            agentName: 'researcher',
+            input: 'Summarize overnight activity',
+            spec: '0 9 * * *',
+            sessionId: 'daily-digest',
+          })
+          .catch(() => undefined);
+
+        expect(scheduleSpy).toHaveBeenCalledTimes(1);
+        const capturedInput = scheduleSpy.mock.calls[0]?.[1] as ScheduledAgentRunInput;
+
+        // Must carry `input` — not `message` — as the prompt field.
+        expect(capturedInput.input).toBe('Summarize overnight activity');
+        // Must NOT carry a stray `message` field that the workflow ignores.
+        expect(capturedInput).not.toHaveProperty('message');
+        // Structural integrity: the required ScheduledAgentRunInput fields are present.
+        expect(capturedInput.agentName).toBe('researcher');
+        expect(capturedInput.sessionId).toBe('daily-digest');
+      } finally {
+        bureau.dispose();
+      }
+    } finally {
+      scheduleSpy.mockRestore();
+    }
+  });
 });
 
 describe('createBureau durable inspection surface', () => {
@@ -1629,5 +1713,118 @@ describe('classifyRecoveredRun', () => {
 
   it('skips an owned run when no session store is configured (cannot reattach, must not cancel)', () => {
     expect(classifyRecoveredRun({ ...base, hasSessionStore: false })).toBe('skip');
+  });
+});
+
+describe('createBureau session signal/update/query with terminal sessions', () => {
+  // Regression for findings PRRT_kwDORvupsc6MT46y and PRRT_kwDORvupsc6MUE_7:
+  // requireSessionRunId must check lastRunStatus, not just lastRunId. A completed,
+  // aborted, or errored session retains its lastRunId but has no active workflow
+  // handle — routing signal/update/query to a terminal run yields a low-level engine
+  // error instead of the expected "no active run" NOT_FOUND response.
+
+  it('signalSession throws NOT_FOUND when lastRunStatus is completed (not running)', async () => {
+    // Full-stack regression: in a durable bureau (memory engine + built-in session
+    // store), complete a run, then verify that signalSession throws NOT_FOUND instead
+    // of routing to the now-terminal engine handle.
+    //
+    // `storage: { type: 'memory' }` with `durableExecution: true` gives us both a
+    // durable engine AND a built-in session store (created from the same Memory
+    // storage backend) — the combination required to hit requireSessionRunId.
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+
+    // Complete a run — the session listener writes lastRunStatus: 'completed'.
+    const run = await bureau.createRun({ message: 'Complete me' });
+    await waitForRunCompletion(bureau, run.id);
+
+    // Verify the session is persisted as completed (the guard condition).
+    const session = await bureau.getSession(run.sessionId);
+    expect(session?.metadata['lastRunStatus']).toBe('completed');
+    expect(session?.metadata['lastRunId']).toBe(run.id);
+
+    // signalSession must throw NOT_FOUND (not route to the terminal engine handle).
+    const error = await bureau.signalSession(run.sessionId, 'any-signal').then(
+      () => undefined,
+      (rejection) => rejection,
+    );
+    expect(error).toBeInstanceOf(BureauError);
+    expect((error as BureauError).code).toBe('NOT_FOUND');
+
+    bureau.dispose();
+  });
+
+  it('updateSession throws NOT_FOUND when lastRunStatus is completed (not running)', async () => {
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+
+    const run = await bureau.createRun({ message: 'Complete me' });
+    await waitForRunCompletion(bureau, run.id);
+
+    const error = await bureau.updateSession(run.sessionId, 'any-update').then(
+      () => undefined,
+      (rejection) => rejection,
+    );
+    expect(error).toBeInstanceOf(BureauError);
+    expect((error as BureauError).code).toBe('NOT_FOUND');
+
+    bureau.dispose();
+  });
+
+  it('querySession throws NOT_FOUND when lastRunStatus is completed (not running)', async () => {
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+
+    const run = await bureau.createRun({ message: 'Complete me' });
+    await waitForRunCompletion(bureau, run.id);
+
+    const error = await bureau.querySession(run.sessionId, 'any-query').then(
+      () => undefined,
+      (rejection) => rejection,
+    );
+    expect(error).toBeInstanceOf(BureauError);
+    expect((error as BureauError).code).toBe('NOT_FOUND');
+
+    bureau.dispose();
+  });
+
+  it('signalSession throws NOT_FOUND when lastRunStatus is aborted (not running)', async () => {
+    const generate: GenerateFunction = () => new Promise(() => {});
+    const bureau = await createBureau({
+      generate,
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+
+    const run = await bureau.createRun({ message: 'Abort me' });
+    bureau.abortRun(run.id);
+
+    // Wait for the abort to propagate and the session status to update.
+    await pollUntil(async () => {
+      const current = await bureau.getSession(run.sessionId);
+      return current?.metadata['lastRunStatus'] === 'aborted';
+    });
+
+    const error = await bureau.signalSession(run.sessionId, 'any-signal').then(
+      () => undefined,
+      (rejection) => rejection,
+    );
+    expect(error).toBeInstanceOf(BureauError);
+    expect((error as BureauError).code).toBe('NOT_FOUND');
+
+    bureau.dispose();
   });
 });

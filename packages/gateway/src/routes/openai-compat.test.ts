@@ -149,4 +149,37 @@ describe('OpenAI-compat route (POST /v1/chat/completions)', () => {
     const body = await response.json();
     expect(body.model).toBe('my-custom-agent');
   });
+
+  it('response content reflects the run output, not an empty string (regression: race with async provider loop)', async () => {
+    // Regression: the route previously called bureau.getRun() synchronously
+    // after createRun() returned, before the provider loop completed. This
+    // caused stepDetails to be empty and content to be "" with any real async
+    // provider. The route must await the run's result before reading content.
+    const gateway = await createTestGateway({ generate: createMockGenerate() });
+    const response = await requestJSON(gateway, '/v1/chat/completions', {
+      method: 'POST',
+      body: minimalRequest('bureau', 'What is 2 + 2?'),
+    });
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.choices[0].message.content).toBe('Done.');
+  });
+
+  it('SSE stream content reflects the run output, not an empty string (regression: race with async provider loop)', async () => {
+    // Regression: same race as above but for the SSE path.
+    const gateway = await createTestGateway({ generate: createMockGenerate() });
+    const response = await requestJSON(gateway, '/v1/chat/completions', {
+      method: 'POST',
+      body: JSON.stringify({
+        model: 'bureau',
+        messages: [{ role: 'user', content: 'Stream this' }],
+        stream: true,
+      }),
+    });
+    expect(response.status).toBe(200);
+    const text = await response.text();
+    // The content chunk must contain the actual provider output, not an
+    // empty string produced before the run settled.
+    expect(text).toContain('"Done."');
+  });
 });

@@ -148,5 +148,64 @@ describe('createSecurityHeaders', () => {
       const res = await app.request('/ping');
       expect(res.status).not.toBe(403);
     });
+
+    // Regression: prefix string matching wrongly blocked public hostnames whose
+    // names start with private-range octets (e.g. "10.example.com"). The guard
+    // must check actual IPv4 octets, not hostname string prefixes.
+    it('allows a public hostname that starts with 10.', async () => {
+      const app = buildApp();
+      const res = await app.request('/ping', {
+        headers: { 'x-agent-target-url': 'https://10.example.com/api' },
+      });
+      expect(res.status).not.toBe(403);
+    });
+
+    it('allows a public hostname that starts with 127.', async () => {
+      const app = buildApp();
+      const res = await app.request('/ping', {
+        headers: { 'x-agent-target-url': 'https://127.example.com/api' },
+      });
+      expect(res.status).not.toBe(403);
+    });
+
+    it('allows a public hostname that starts with 192.168.', async () => {
+      const app = buildApp();
+      const res = await app.request('/ping', {
+        headers: { 'x-agent-target-url': 'https://192.168.example.com/api' },
+      });
+      expect(res.status).not.toBe(403);
+    });
+
+    it('allows a public hostname that starts with 172.16.', async () => {
+      const app = buildApp();
+      const res = await app.request('/ping', {
+        headers: { 'x-agent-target-url': 'https://172.16.example.com/api' },
+      });
+      expect(res.status).not.toBe(403);
+    });
+
+    it('still blocks the actual 10.0.0.1 private IP', async () => {
+      const app = buildApp();
+      const res = await app.request('/ping', {
+        headers: { 'x-agent-target-url': 'http://10.0.0.1/internal' },
+      });
+      expect(res.status).toBe(403);
+    });
+
+    it('still blocks the actual 127.0.0.1 loopback IP', async () => {
+      const app = buildApp();
+      const res = await app.request('/ping', {
+        headers: { 'x-agent-target-url': 'http://127.0.0.1/secret' },
+      });
+      expect(res.status).toBe(403);
+    });
+
+    it('still blocks the cloud IMDS address 169.254.169.254', async () => {
+      const app = buildApp();
+      const res = await app.request('/ping', {
+        headers: { 'x-agent-target-url': 'http://169.254.169.254/latest/meta-data' },
+      });
+      expect(res.status).toBe(403);
+    });
   });
 });

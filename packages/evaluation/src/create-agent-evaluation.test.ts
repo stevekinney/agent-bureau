@@ -540,4 +540,38 @@ describe('createAgentEvaluation', () => {
     expect(report.cases[0]!.pass).toBe(true);
     expect(report.cases[0]!.score).toBe(1);
   });
+
+  it('fails with a clear error when RegistryAgent is used with a per-case systemPrompt', async () => {
+    // RegistryAgent.run() has no systemPrompt parameter — its instructions are baked
+    // in at construction time. Silently dropping the override would give misleading
+    // results, so the runner must surface this as an explicit error.
+    const registryAgent: RegistryAgent = {
+      name: 'test-agent',
+      run: async (_input: string) => ({
+        conversation: {} as RunResult['conversation'],
+        steps: [],
+        content: 'ok',
+        usage: { prompt: 0, completion: 0, total: 0 },
+        finishReason: 'stop-condition' as const,
+      }),
+    };
+
+    const evaluation = createAgentEvaluation({
+      cases: [
+        {
+          name: 'registry-agent-with-system-prompt',
+          input: 'test',
+          systemPrompt: 'Override system prompt',
+        },
+      ],
+      agent: registryAgent,
+    });
+
+    const report = await evaluation.run();
+
+    // The case should fail with an actionable error, not silently drop the systemPrompt
+    expect(report.cases[0]!.pass).toBe(false);
+    expect(report.cases[0]!.error).toContain('systemPrompt');
+    expect(report.cases[0]!.error).toContain('RegistryAgent');
+  });
 });

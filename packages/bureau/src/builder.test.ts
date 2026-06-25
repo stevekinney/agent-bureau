@@ -333,6 +333,41 @@ describe('createBureau (builder) — tool registration', () => {
 });
 
 // ---------------------------------------------------------------------------
+// bureau/builder subpath barrel — re-export smoke test
+// ---------------------------------------------------------------------------
+//
+// Regression guard for PRRT_kwDORvupsc6MUE_r: the bureau/builder subpath
+// export was previously not included in the build script (scripts/build.ts),
+// so dist/builder/index.{js,cjs,d.ts} were never emitted. The package.json
+// export conditions also pointed at ./src/builder/index.ts (TypeScript source)
+// instead of dist/ for the browser/import/require/default conditions,
+// breaking resolution for non-Bun/non-TS-aware consumers.
+//
+// This test ensures createBureau is reachable through the barrel that
+// bureau/builder resolves to, so a future entrypoint omission causes a test
+// failure rather than a silent broken npm artifact.
+
+describe('bureau/builder subpath barrel', () => {
+  it('exports createBureau from the subpath barrel', async () => {
+    // Dynamic import of the barrel file that ./builder resolves to at runtime.
+    // If scripts/build.ts ever drops ./src/builder/index.ts from entrypoints,
+    // this import would succeed in bun (source-aware) but the built artifact
+    // would be missing — the package.json export condition change makes that
+    // gap visible even in non-bun resolvers.
+    const { createBureau: createBureauFromBarrel } = await import('./builder/index');
+    expect(typeof createBureauFromBarrel).toBe('function');
+  });
+
+  it('builder barrel createBureau produces a runnable bureau', async () => {
+    const { createBureau: createBureauFromBarrel } = await import('./builder/index');
+    const generate = makeGenerate('barrel-ok');
+    const bureau = createBureauFromBarrel().agent({ name: 'a', generate });
+    const result = await bureau.run('a', 'input').result();
+    expect(result.content).toBe('barrel-ok');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Skills registration
 // ---------------------------------------------------------------------------
 
@@ -361,5 +396,109 @@ describe('createBureau (builder) — skills()', () => {
       .agent({ name: 'a', generate });
 
     expect(() => bureau.run('a', 'input')).not.toThrow();
+  });
+
+  // ---------------------------------------------------------------------------
+  // Regression: builder.skills() had no effect — the skill catalog was stored
+  // on state but never read by run(). Tests below verify catalog injection.
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Build a capturing generate wrapper: records the messages the loop sees on
+   * step 0, then delegates to the underlying generate. Shared across tests.
+   */
+  function makeCapturingGenerate(text = 'done') {
+    const capturedMessages: Array<{ role: string; content: unknown }> = [];
+    const base = makeGenerate(text);
+    type GenerateContext = Parameters<typeof base>[0];
+    const capturingGenerate = async (context: GenerateContext) => {
+      if (capturedMessages.length === 0) {
+        for (const msg of context.conversation.getMessages()) {
+          capturedMessages.push({ role: msg.role, content: msg.content });
+        }
+      }
+      return base(context);
+    };
+    return { capturingGenerate, capturedMessages };
+  }
+
+  it('injects the skill catalog into the conversation on step 0', async () => {
+    const mockProvider = {
+      listSkills: async () => [
+        { name: 'research', description: 'Research skills' },
+        { name: 'writing', description: 'Writing skills' },
+      ],
+      isEnabled: async (_name: string) => true,
+    };
+
+    const { capturingGenerate, capturedMessages } = makeCapturingGenerate();
+    const bureau = createBureau()
+      .skills(mockProvider)
+      .agent({ name: 'a', generate: capturingGenerate });
+
+    await bureau.run('a', 'summarize').result();
+
+    // At least one system message must contain the skill catalog.
+    const systemMessages = capturedMessages.filter((m) => m.role === 'system');
+    const catalogMessage = systemMessages.find(
+      (m) => typeof m.content === 'string' && m.content.includes('<available_skills>'),
+    );
+    expect(catalogMessage).toBeDefined();
+
+    const catalog = catalogMessage?.content as string;
+    expect(catalog).toContain('research');
+    expect(catalog).toContain('writing');
+  });
+
+  it('skill catalog respects denyList policy', async () => {
+    const mockProvider = {
+      listSkills: async () => [
+        { name: 'research', description: 'Research skills' },
+        { name: 'writing', description: 'Writing skills' },
+      ],
+      isEnabled: async (_name: string) => true,
+    };
+
+    const { capturingGenerate, capturedMessages } = makeCapturingGenerate();
+    const bureau = createBureau()
+      .skills(mockProvider, { denyList: ['writing'] })
+      .agent({ name: 'a', generate: capturingGenerate });
+
+    await bureau.run('a', 'input').result();
+
+    const systemMessages = capturedMessages.filter((m) => m.role === 'system');
+    const catalogMessage = systemMessages.find(
+      (m) => typeof m.content === 'string' && m.content.includes('<available_skills>'),
+    );
+    expect(catalogMessage).toBeDefined();
+    const catalog = catalogMessage?.content as string;
+    expect(catalog).toContain('research');
+    expect(catalog).not.toContain('writing');
+  });
+
+  it('skips disabled skills from the catalog', async () => {
+    const mockProvider = {
+      listSkills: async () => [
+        { name: 'research', description: 'Research skills' },
+        { name: 'disabled-skill', description: 'A disabled skill' },
+      ],
+      isEnabled: async (name: string) => name !== 'disabled-skill',
+    };
+
+    const { capturingGenerate, capturedMessages } = makeCapturingGenerate();
+    const bureau = createBureau()
+      .skills(mockProvider)
+      .agent({ name: 'a', generate: capturingGenerate });
+
+    await bureau.run('a', 'input').result();
+
+    const systemMessages = capturedMessages.filter((m) => m.role === 'system');
+    const catalogMessage = systemMessages.find(
+      (m) => typeof m.content === 'string' && m.content.includes('<available_skills>'),
+    );
+    expect(catalogMessage).toBeDefined();
+    const catalog = catalogMessage?.content as string;
+    expect(catalog).toContain('research');
+    expect(catalog).not.toContain('disabled-skill');
   });
 });
