@@ -169,23 +169,24 @@ function toAnthropicContent(
         });
         break;
       case 'image': {
-        // Anthropic supports both URL and base64
+        // Anthropic supports both URL and base64. A `data:` URL that matches the
+        // base64 shape becomes a base64 source; anything else (including a `data:`
+        // URL that does not match — e.g. non-base64-encoded) falls through to a
+        // url source rather than being silently dropped from the payload.
         const url = part.url ?? '';
-        if (url.startsWith('data:')) {
-          // Base64 data URL
-          const matches = url.match(/^data:([^;]+);base64,(.+)$/);
-          if (matches && matches[1] && matches[2]) {
-            blocks.push({
-              type: 'image',
-              source: {
-                type: 'base64',
-                media_type: matches[1],
-                data: matches[2],
-              },
-            });
-          }
+        const base64Match = url.startsWith('data:')
+          ? url.match(/^data:([^;]+);base64,(.+)$/)
+          : null;
+        if (base64Match && base64Match[1] && base64Match[2]) {
+          blocks.push({
+            type: 'image',
+            source: {
+              type: 'base64',
+              media_type: base64Match[1],
+              data: base64Match[2],
+            },
+          });
         } else {
-          // Regular URL
           blocks.push({
             type: 'image',
             source: {

@@ -367,12 +367,13 @@ describe('C4 — createStreamingAccumulator (multi-part accumulation)', () => {
     acc.getBlock(0)?.appendTextDelta('Hello');
     acc.getBlock(0)?.appendTextDelta(', world!');
 
-    const content = acc.finalize();
+    const { content, toolCalls } = acc.finalize();
     expect(content).toHaveLength(1);
     expect(content[0]).toEqual({ type: 'text', text: 'Hello, world!' });
+    expect(toolCalls).toEqual([]);
   });
 
-  it('accumulates text + a client tool_use block keyed by index and parses JSON at finalize', () => {
+  it('returns a client tool_use as a tool-call (in toolCalls, NOT content) so pairing stays intact', () => {
     const acc = createStreamingAccumulator();
     // Block 0: text
     acc.openBlock(0, { type: 'text', buffer: '' });
@@ -383,25 +384,21 @@ describe('C4 — createStreamingAccumulator (multi-part accumulation)', () => {
     acc.getBlock(1)?.appendInputJsonDelta('{"q":');
     acc.getBlock(1)?.appendInputJsonDelta('"cats"}');
 
-    const content = acc.finalize();
-    expect(content).toHaveLength(2);
+    const { content, toolCalls } = acc.finalize();
+    // The client tool call does NOT land in assistant content — it becomes a
+    // tool-call so a later tool-result can pair to it.
+    expect(content).toHaveLength(1);
     expect(content[0]).toEqual({ type: 'text', text: 'Let me search.' });
-    // A client tool_use block finalizes as 'tool_use' — NOT 'server_tool_use'.
-    // The two are distinct Anthropic concepts and must not be conflated.
-    expect(content[1]).toEqual({
-      type: 'tool_use',
-      id: 'call-1',
-      name: 'search',
-      input: { q: 'cats' },
-    });
+    expect(toolCalls).toEqual([{ id: 'call-1', name: 'search', arguments: { q: 'cats' } }]);
   });
 
-  it('accumulates a server_tool_use block as server_tool_use (distinct from client tool_use)', () => {
+  it('accumulates a server_tool_use block as server_tool_use content (distinct from client tool_use)', () => {
     const acc = createStreamingAccumulator();
     acc.openBlock(0, { type: 'server_tool_use', id: 'stu-1', name: 'web_search', inputBuffer: '' });
     acc.getBlock(0)?.appendInputJsonDelta('{"query":"news"}');
 
-    const content = acc.finalize();
+    const { content, toolCalls } = acc.finalize();
+    // Server tool use stays in content; it is part of the assistant turn.
     expect(content).toHaveLength(1);
     expect(content[0]).toEqual({
       type: 'server_tool_use',
@@ -409,6 +406,24 @@ describe('C4 — createStreamingAccumulator (multi-part accumulation)', () => {
       name: 'web_search',
       input: { query: 'news' },
     });
+    expect(toolCalls).toEqual([]);
+  });
+
+  it('separates multiple client tool calls in block order, leaving content untouched', () => {
+    const acc = createStreamingAccumulator();
+    acc.openBlock(0, { type: 'text', buffer: '' });
+    acc.getBlock(0)?.appendTextDelta('Doing two things.');
+    acc.openBlock(1, { type: 'tool_use', id: 'call-a', name: 'first', inputBuffer: '' });
+    acc.getBlock(1)?.appendInputJsonDelta('{"x":1}');
+    acc.openBlock(2, { type: 'tool_use', id: 'call-b', name: 'second', inputBuffer: '' });
+    acc.getBlock(2)?.appendInputJsonDelta('{"y":2}');
+
+    const { content, toolCalls } = acc.finalize();
+    expect(content).toEqual([{ type: 'text', text: 'Doing two things.' }]);
+    expect(toolCalls).toEqual([
+      { id: 'call-a', name: 'first', arguments: { x: 1 } },
+      { id: 'call-b', name: 'second', arguments: { y: 2 } },
+    ]);
   });
 
   it('accumulates a thinking block with thinking_delta and signature', () => {
@@ -418,7 +433,7 @@ describe('C4 — createStreamingAccumulator (multi-part accumulation)', () => {
     acc.getBlock(0)?.appendThinkingDelta('I should think about this.');
     acc.getBlock(0)?.setSignature(SIG);
 
-    const content = acc.finalize();
+    const { content } = acc.finalize();
     expect(content).toHaveLength(1);
     expect(content[0]).toEqual({
       type: 'thinking',
@@ -433,7 +448,7 @@ describe('C4 — createStreamingAccumulator (multi-part accumulation)', () => {
     acc.openBlock(0, { type: 'redacted_thinking', signature: '' });
     acc.getBlock(0)?.setSignature(SIG);
 
-    const content = acc.finalize();
+    const { content } = acc.finalize();
     expect(content).toHaveLength(1);
     expect(content[0]).toEqual({ type: 'redacted_thinking', signature: SIG });
   });
@@ -451,7 +466,7 @@ describe('C4 — createStreamingAccumulator (multi-part accumulation)', () => {
     acc.openBlock(1, { type: 'text', buffer: '' });
     acc.getBlock(1)?.appendTextDelta('Second');
 
-    const content = acc.finalize();
+    const { content } = acc.finalize();
     expect(content).toHaveLength(3);
     expect(content[0]?.type).toBe('thinking');
     expect(content[1]?.type).toBe('text');
@@ -490,7 +505,7 @@ describe('C4 — createStreamingAccumulator (multi-part accumulation)', () => {
     // Only the signature arrives (no thinking_delta).
     acc.getBlock(0)?.setSignature(SIG);
 
-    const content = acc.finalize();
+    const { content } = acc.finalize();
     expect(content).toHaveLength(1);
     expect(content[0]).toEqual({ type: 'thinking', thinking: '', signature: SIG });
   });
@@ -498,5 +513,44 @@ describe('C4 — createStreamingAccumulator (multi-part accumulation)', () => {
   it('getBlock returns undefined for a block index that has not been opened', () => {
     const acc = createStreamingAccumulator();
     expect(acc.getBlock(99)).toBeUndefined();
+  });
+
+  it('round-trips a streamed client tool call into a conversation and pairs its tool-result', async () => {
+    // Regression for the Cursor finding: a streamed client tool_use must produce
+    // a tool-call message so a later tool-result pairs to it. Appending the
+    // assistant content + the tool-call + the matching tool-result must NOT throw
+    // an orphan-tool-result integrity error.
+    const { appendMessages, createConversationHistory } = await import('../src/conversation/index');
+
+    const acc = createStreamingAccumulator();
+    acc.openBlock(0, { type: 'text', buffer: '' });
+    acc.getBlock(0)?.appendTextDelta('Let me pay.');
+    acc.openBlock(1, { type: 'tool_use', id: 'call-pay', name: 'pay', inputBuffer: '' });
+    acc.getBlock(1)?.appendInputJsonDelta('{"amount":5}');
+
+    const { content, toolCalls } = acc.finalize();
+
+    let conversation = createConversationHistory({ id: 'stream-pairing' }, testEnvironment);
+    conversation = appendMessages(conversation, { role: 'assistant', content }, testEnvironment);
+    for (const toolCall of toolCalls) {
+      conversation = appendMessages(
+        conversation,
+        { role: 'tool-call', content: '', toolCall },
+        testEnvironment,
+      );
+    }
+
+    // The matching tool-result pairs cleanly — no throw.
+    expect(() => {
+      appendMessages(
+        conversation,
+        {
+          role: 'tool-result',
+          content: '',
+          toolResult: { callId: 'call-pay', outcome: 'success', content: { ok: true } },
+        },
+        testEnvironment,
+      );
+    }).not.toThrow();
   });
 });

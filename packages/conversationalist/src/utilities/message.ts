@@ -105,26 +105,27 @@ export function messageHasImages(message: Message): boolean {
  * are emitted verbatim and images as markdown image syntax.
  *
  * Non-text structural parts — `thinking`, `redacted_thinking`, `tool_use`,
- * `server_tool_use`, and `web_search_tool_result` — render as the empty string,
- * because they carry no user-facing prose (thinking is private; tool blocks are
- * structured data). As a result this function is **not** a faithful measure of a
- * message's size or content presence: a message composed solely of tool/thinking
- * blocks stringifies to `''`. Do not use it for token estimation or
- * emptiness/presence checks — use the token estimators and the structured parts
- * (`messageParts`) for those.
+ * `server_tool_use`, and `web_search_tool_result` — are **omitted entirely**
+ * (not rendered as empty strings), because they carry no user-facing prose
+ * (thinking is private; tool blocks are structured data). Omitting rather than
+ * blanking means an interleaved message like `[text, tool_use, text]` joins to
+ * `"A\n\nB"`, not `"A\n\n\n\nB"`. As a result this function is **not** a faithful
+ * measure of a message's size or content presence: a message composed solely of
+ * tool/thinking blocks stringifies to `''`. Do not use it for token estimation
+ * or emptiness/presence checks — use the token estimators and the structured
+ * parts (`messageParts`) for those.
  */
 export function messageToString(message: Message): string {
   if (typeof message.content === 'string') return message.content;
   return messageParts(message)
-    .map((part) => {
+    .map((part): string | null => {
       if (part.type === 'text') return part.text;
-      if (part.type === 'thinking') return '';
-      if (part.type === 'redacted_thinking') return '';
-      if (part.type === 'tool_use') return '';
-      if (part.type === 'server_tool_use') return '';
-      if (part.type === 'web_search_tool_result') return '';
-      return `![${part.text ?? ''}](${part.url})`;
+      if (part.type === 'image') return `![${part.text ?? ''}](${part.url})`;
+      // Structural blocks carry no plain-text prose — drop them so they leave
+      // no blank paragraphs in the joined output.
+      return null;
     })
+    .filter((line): line is string => line !== null)
     .join('\n\n');
 }
 

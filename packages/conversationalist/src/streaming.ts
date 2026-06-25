@@ -10,7 +10,6 @@ import type {
   ServerToolUseContent,
   TextContent,
   ThinkingContent,
-  ToolUseContent,
 } from './multi-modal';
 import type {
   AssistantMessage,
@@ -18,6 +17,7 @@ import type {
   JSONValue,
   Message,
   TokenUsage,
+  ToolCall,
 } from './types';
 import { createMessage, isAssistantMessage, toReadonly } from './utilities';
 import { getOrderedMessages, toIdRecord } from './utilities/message-store';
@@ -241,9 +241,25 @@ export interface BlockAccumulator {
 }
 
 /**
+ * The result of finalizing a streamed message. Client `tool_use` blocks are
+ * returned separately as {@link ToolCall}s rather than as assistant content,
+ * because the conversation model represents a client tool call as its own
+ * `tool-call` role message — pairing a later `tool-result` to it relies on that
+ * message existing. The caller appends the assistant `content` message, then one
+ * `tool-call` message per entry in `toolCalls` (in order), preserving the
+ * stream's relative block order. Server tool use (`server_tool_use`) stays in
+ * `content`, since it is genuinely part of the assistant turn's content.
+ */
+export interface StreamFinalizeResult {
+  /** Assistant message content: text, thinking, server-tool, and search-result blocks, in order. */
+  content: MultiModalContent[];
+  /** Client tool calls extracted from the stream, in block order, to append as `tool-call` messages. */
+  toolCalls: ToolCall[];
+}
+
+/**
  * Accumulates a multi-part streaming response keyed by block index.
- * Feed events as they arrive; call `finalize()` to build the completed
- * `MultiModalContent[]` for the finished message.
+ * Feed events as they arrive; call `finalize()` to build the completed message.
  */
 export interface StreamingMessageAccumulator {
   /**
@@ -257,15 +273,15 @@ export interface StreamingMessageAccumulator {
    */
   getBlock(index: number): BlockAccumulator | undefined;
   /**
-   * Finalize the accumulated blocks into a `MultiModalContent[]`.
-   * JSON input buffers for tool_use / server_tool_use blocks are parsed at
-   * this point. A malformed or non-JSON-value buffer throws, because a tool
-   * call with silently-dropped input is indistinguishable from one the model
-   * deliberately invoked with empty input — a dangerous ambiguity for a
-   * protocol layer to paper over.
-   * Call this when the `message_stop` event arrives.
+   * Finalize the accumulated blocks into a {@link StreamFinalizeResult}: ordered
+   * assistant `content` plus the client `toolCalls` to append as `tool-call`
+   * messages. JSON input buffers for tool_use / server_tool_use blocks are parsed
+   * here. A malformed or non-JSON-value buffer throws, because a tool call with
+   * silently-dropped input is indistinguishable from one the model deliberately
+   * invoked with empty input — a dangerous ambiguity for a protocol layer to
+   * paper over. Call this when the `message_stop` event arrives.
    */
-  finalize(): MultiModalContent[];
+  finalize(): StreamFinalizeResult;
 }
 
 /**
@@ -345,7 +361,12 @@ function createBlockAccumulator(initial: BlockAccumulatorState): BlockAccumulato
  * acc.getBlock(1)?.appendInputJsonDelta(delta.partial_json);
  *
  * // On message_stop:
- * const content = acc.finalize(); // MultiModalContent[]
+ * const { content, toolCalls } = acc.finalize();
+ * // Append the assistant content, then one tool-call message per client call:
+ * let conversation = appendMessages(conversation, { role: 'assistant', content });
+ * for (const toolCall of toolCalls) {
+ *   conversation = appendMessages(conversation, { role: 'tool-call', content: '', toolCall });
+ * }
  * ```
  */
 export function createStreamingAccumulator(): StreamingMessageAccumulator {
@@ -360,8 +381,9 @@ export function createStreamingAccumulator(): StreamingMessageAccumulator {
     getBlock(index: number): BlockAccumulator | undefined {
       return blocks.get(index);
     },
-    finalize(): MultiModalContent[] {
-      const result: MultiModalContent[] = [];
+    finalize(): StreamFinalizeResult {
+      const content: MultiModalContent[] = [];
+      const toolCalls: ToolCall[] = [];
       // Sort by index to preserve block order
       const sortedIndices = [...blocks.keys()].sort((a, b) => a - b);
 
@@ -373,7 +395,7 @@ export function createStreamingAccumulator(): StreamingMessageAccumulator {
         switch (state.type) {
           case 'text': {
             const textPart: TextContent = { type: 'text', text: state.buffer };
-            result.push(textPart);
+            content.push(textPart);
             break;
           }
           case 'thinking': {
@@ -382,7 +404,7 @@ export function createStreamingAccumulator(): StreamingMessageAccumulator {
               thinking: state.buffer,
               signature: state.signature,
             };
-            result.push(thinkingPart);
+            content.push(thinkingPart);
             break;
           }
           case 'redacted_thinking': {
@@ -390,17 +412,18 @@ export function createStreamingAccumulator(): StreamingMessageAccumulator {
               type: 'redacted_thinking',
               signature: state.signature,
             };
-            result.push(redactedPart);
+            content.push(redactedPart);
             break;
           }
           case 'tool_use': {
-            const toolPart: ToolUseContent = {
-              type: 'tool_use',
+            // Client tool calls become tool-call role messages, not content —
+            // see StreamFinalizeResult. This keeps tool-call/tool-result pairing
+            // intact when the caller appends the result later.
+            toolCalls.push({
               id: state.id,
               name: state.name,
-              input: parseStreamedToolInput(state.name, state.inputBuffer),
-            };
-            result.push(toolPart);
+              arguments: parseStreamedToolInput(state.name, state.inputBuffer),
+            });
             break;
           }
           case 'server_tool_use': {
@@ -410,13 +433,13 @@ export function createStreamingAccumulator(): StreamingMessageAccumulator {
               name: state.name,
               input: parseStreamedToolInput(state.name, state.inputBuffer),
             };
-            result.push(serverToolPart);
+            content.push(serverToolPart);
             break;
           }
         }
       }
 
-      return result;
+      return { content, toolCalls };
     },
   };
 }

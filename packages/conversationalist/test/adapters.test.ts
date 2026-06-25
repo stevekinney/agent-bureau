@@ -731,24 +731,28 @@ describe('Anthropic Adapter', () => {
       expect(toolUse.input).toBe('{invalid');
     });
 
-    it('handles data URLs with missing parts', () => {
+    it('preserves a data URL that does not match the base64 shape as a url source (does not silently drop it)', () => {
       let conv = createConversation({ id: 'test' }, testEnvironment);
       conv = appendMessages(
         conv,
         {
           role: 'user',
-          content: [{ type: 'image', url: 'data:image/png;base64' }], // Invalid data URL
+          // `data:` prefix but not a valid `data:<media>;base64,<data>` URL.
+          content: [{ type: 'image', url: 'data:image/png;base64' }],
         },
         testEnvironment,
       );
 
       const { messages } = toAnthropicMessages(conv);
-      // If content becomes empty, the message might be skipped or have empty content
-      if (messages.length > 0) {
-        expect(messages[0].content).toEqual([]);
-      } else {
-        expect(messages).toHaveLength(0);
-      }
+      expect(messages).toHaveLength(1);
+      const blocks = messages[0]?.content as any[];
+      // The image must survive — as a url source — rather than vanishing from
+      // the outgoing Anthropic payload.
+      expect(blocks).toHaveLength(1);
+      expect(blocks[0]).toEqual({
+        type: 'image',
+        source: { type: 'url', url: 'data:image/png;base64' },
+      });
     });
 
     it('rejects unknown roles before adapter formatting', () => {

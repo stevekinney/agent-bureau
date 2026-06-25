@@ -67,6 +67,28 @@ describe('message helpers', () => {
     expect(messageToString(msg)).toContain('![');
   });
 
+  test('messageToString omits structural blocks without leaving blank paragraphs', () => {
+    // Regression: structural blocks (tool_use/thinking/etc.) must be dropped, not
+    // rendered as '' and joined — otherwise [text, tool_use, text] would yield
+    // 'A\n\n\n\nB' instead of 'A\n\nB'.
+    const msg = createMessage({
+      id: 'interleaved',
+      role: 'assistant',
+      content: [
+        { type: 'text', text: 'A' },
+        { type: 'thinking', thinking: 'private', signature: 'sig==' },
+        { type: 'tool_use', id: 'c1', name: 't', input: { k: 1 } },
+        { type: 'text', text: 'B' },
+      ],
+      position: 0,
+      createdAt: new Date().toISOString(),
+      metadata: {},
+      hidden: false,
+    });
+
+    expect(messageToString(msg)).toBe('A\n\nB');
+  });
+
   test('utilities module re-exports message helpers', async () => {
     const mod = await import('../src/utilities/message');
     expect(typeof mod.createMessage).toBe('function');
