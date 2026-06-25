@@ -1,4 +1,5 @@
 import { HISTORY_CIRCUIT_BREAKER_REASON, isWeftErrorLike } from '@lostgradient/weft';
+import type { ToolboxEventMap } from 'armorer';
 import { Conversation, isConversation } from 'conversationalist';
 import type { ForwardableSource } from 'lifecycle';
 import { CompletableEventTarget, forwardEvents } from 'lifecycle';
@@ -6,6 +7,14 @@ import { CompletableEventTarget, forwardEvents } from 'lifecycle';
 import type { ActiveRun } from '../create-run';
 import { BudgetExceededError, ElicitationDeniedError } from '../errors';
 import type { CombinedOperativeEventMap } from '../events';
+import {
+  StepStartedEvent,
+  ToolErrorBubbleEvent,
+  ToolPolicyDeniedBubbleEvent,
+  ToolProgressBubbleEvent,
+  ToolSettledBubbleEvent,
+  ToolStartedBubbleEvent,
+} from '../events';
 import { createRunState } from '../loop';
 import {
   makeAbortResult,
@@ -187,6 +196,113 @@ export function createDurableActiveRun(
     'toolbox',
   );
   cleanups.push(() => toolboxForward.stop());
+
+  // C3 — curated tool.* bubble events stamped with {agentName, runId, step}.
+  // Mirrors the same block in createActiveRun (the in-memory path) so the
+  // audit trail and operative store receive identical tool.* events regardless
+  // of whether the run is in-memory or durable. Without this, durable tool
+  // calls were absent from both the curated run stream and /api/v1/audit for
+  // persistent bureaus (PRRT_kwDORvupsc6MV8Xa).
+  {
+    let currentStep = 0;
+
+    const stepListener = (e: StepStartedEvent) => {
+      currentStep = e.step;
+    };
+    emitter.addEventListener(StepStartedEvent.type, stepListener);
+    cleanups.push(() => emitter.removeEventListener(StepStartedEvent.type, stepListener));
+
+    const toolbox = options.toolbox as unknown as {
+      addEventListener?: <K extends keyof ToolboxEventMap>(
+        type: K,
+        listener: (e: ToolboxEventMap[K]) => void,
+        options?: AddEventListenerOptions,
+      ) => () => void;
+    };
+
+    const onExecuteStart = (e: ToolboxEventMap['execute-start']) => {
+      emitter.dispatchEvent(
+        new ToolStartedBubbleEvent(
+          { agentName, runId, step: currentStep },
+          {
+            toolName: e.call.name,
+            toolCallId: e.call.id,
+            params: e.params,
+            startedAt: Date.now(),
+          },
+        ),
+      );
+    };
+
+    const onSettled = (e: ToolboxEventMap['settled']) => {
+      const hasError = e.error !== undefined;
+      const status: 'success' | 'error' = hasError ? 'error' : 'success';
+      emitter.dispatchEvent(
+        new ToolSettledBubbleEvent(
+          { agentName, runId, step: currentStep },
+          {
+            toolName: e.call.name,
+            toolCallId: e.call.id,
+            status,
+            result: e.result,
+            error: e.error,
+          },
+        ),
+      );
+      if (hasError) {
+        emitter.dispatchEvent(
+          new ToolErrorBubbleEvent(
+            { agentName, runId, step: currentStep },
+            {
+              toolName: e.call.name,
+              toolCallId: e.call.id,
+              error: e.error,
+            },
+          ),
+        );
+      }
+    };
+
+    const onToolProgress = (e: ToolboxEventMap['progress']) => {
+      emitter.dispatchEvent(
+        new ToolProgressBubbleEvent(
+          { agentName, runId, step: currentStep },
+          {
+            toolName: e.call.name,
+            toolCallId: e.call.id,
+            percent: e.percent,
+            message: e.message,
+          },
+        ),
+      );
+    };
+
+    const onPolicyDenied = (e: ToolboxEventMap['policy-denied']) => {
+      emitter.dispatchEvent(
+        new ToolPolicyDeniedBubbleEvent(
+          { agentName, runId, step: currentStep },
+          {
+            toolName: e.call.name,
+            toolCallId: e.call.id,
+            reason: e.reason,
+          },
+        ),
+      );
+    };
+
+    if (toolbox.addEventListener) {
+      const addListener = toolbox.addEventListener.bind(toolbox);
+      const toolboxCleanups = [
+        addListener('execute-start', onExecuteStart, { signal: abortController.signal }),
+        addListener('settled', onSettled, { signal: abortController.signal }),
+        addListener('progress', onToolProgress, { signal: abortController.signal }),
+        addListener('policy-denied', onPolicyDenied, { signal: abortController.signal }),
+      ];
+      cleanups.push(() => {
+        for (const cleanup of toolboxCleanups) cleanup?.();
+      });
+    }
+  }
 
   function complete(): void {
     for (const cleanup of cleanups) cleanup();
