@@ -16,7 +16,7 @@ import {
 import { createRoutes } from './routes';
 import { createPages } from './server/pages';
 import type { Gateway, GatewayOptions } from './types';
-import { DEFAULT_PORT } from './types';
+import { DEFAULT_PORT, SCOPE } from './types';
 import { createWebSocketHandler } from './websocket';
 
 /**
@@ -39,6 +39,57 @@ async function resolveAdapter(runtime: 'bun' | 'node'): Promise<ServerAdapter> {
   }
   const { createNodeAdapter } = await import('./adapters/node-adapter');
   return createNodeAdapter();
+}
+
+/**
+ * Builds a WebSocket authentication verifier that mirrors the HTTP
+ * `createAuthentication` middleware precedence:
+ * 1. Managed `ab_live_` keys verified via `ApiKeyStore.verify`.
+ *    The key must carry the `runs:read` scope — matching the scope
+ *    guard on the HTTP `/api/v1/events` route — so that a key
+ *    scoped only for `keys:manage` or `runs:write` cannot subscribe
+ *    to live run frames.
+ *    Keys with an empty scopes list are treated as admin and pass.
+ * 2. Static token comparison. The static `authToken` acts as an
+ *    unrestricted admin credential with no scope requirements.
+ * 3. Pass-through when no auth is configured (returns `undefined`).
+ *
+ * This function is exported for direct unit testing. It is injected
+ * into the server adapter so the `/ws` upgrade path enforces the same
+ * auth + scope rules as the HTTP `/api/v1/events` route without
+ * duplicating the logic.
+ */
+export function buildWsAuthenticate(
+  authToken: string | undefined,
+  store: ApiKeyStore | undefined,
+): ((request: Request) => Promise<boolean>) | undefined {
+  if (!authToken && !store) return undefined;
+
+  return async (request: Request): Promise<boolean> => {
+    const authHeader = request.headers.get('authorization') ?? '';
+    const headerToken = authHeader.toLowerCase().startsWith('bearer ')
+      ? authHeader.slice(7).trim()
+      : undefined;
+    const url = new URL(request.url);
+    const queryToken = url.searchParams.get('token') ?? undefined;
+    const token = headerToken ?? queryToken;
+
+    if (!token) return false;
+
+    if (store && token.startsWith('ab_live_')) {
+      const key = await store.verify(token);
+      if (key) {
+        // Admin keys (empty scopes array) pass all checks.
+        // Scoped keys must carry runs:read to subscribe to live frames.
+        const isAdmin = key.scopes.length === 0;
+        return isAdmin || key.scopes.includes(SCOPE.RUNS_READ);
+      }
+    }
+
+    if (authToken && token === authToken) return true;
+
+    return false;
+  };
 }
 
 /**
@@ -109,44 +160,6 @@ export async function createGateway(
 
   // Global error handler
   app.onError(errorHandler);
-
-  /**
-   * Builds a WebSocket authentication verifier that mirrors the HTTP
-   * `createAuthentication` middleware precedence:
-   * 1. Managed `ab_live_` keys verified via `ApiKeyStore.verify`.
-   * 2. Static token comparison.
-   * 3. Pass-through when no auth is configured.
-   *
-   * This function is injected into the adapter so the `/ws` upgrade
-   * path uses the same logic as the HTTP path without duplicating it.
-   */
-  function buildWsAuthenticate(
-    authToken: string | undefined,
-    store: ApiKeyStore | undefined,
-  ): ((request: Request) => Promise<boolean>) | undefined {
-    if (!authToken && !store) return undefined;
-
-    return async (request: Request): Promise<boolean> => {
-      const authHeader = request.headers.get('authorization') ?? '';
-      const headerToken = authHeader.toLowerCase().startsWith('bearer ')
-        ? authHeader.slice(7).trim()
-        : undefined;
-      const url = new URL(request.url);
-      const queryToken = url.searchParams.get('token') ?? undefined;
-      const token = headerToken ?? queryToken;
-
-      if (!token) return false;
-
-      if (store && token.startsWith('ab_live_')) {
-        const key = await store.verify(token);
-        if (key) return true;
-      }
-
-      if (authToken && token === authToken) return true;
-
-      return false;
-    };
-  }
 
   async function start() {
     const wsHandler = createWebSocketHandler({ broker: liveFrameBroker });

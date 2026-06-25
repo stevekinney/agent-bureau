@@ -3,7 +3,8 @@ import { createBureau } from 'bureau';
 import { createStore } from 'operative/store';
 
 import { createBunAdapter, handleWsUpgrade } from './adapters/bun-adapter';
-import { createGateway } from './create-gateway';
+import { buildWsAuthenticate, createGateway } from './create-gateway';
+import type { ApiKey, ApiKeyStore } from './keys/types';
 import { DEFAULT_PORT } from './types';
 
 describe('createGateway', () => {
@@ -180,5 +181,117 @@ describe('handleWsUpgrade', () => {
       });
       expect(result).toBeUndefined();
     });
+  });
+});
+
+// ── buildWsAuthenticate — WebSocket scope enforcement ────────────────────────
+//
+// The /ws path must require the same runs:read scope as GET /api/v1/events.
+// A managed API key that is valid but scoped only for keys:manage or runs:write
+// must NOT be able to subscribe to live run frames over WebSocket.
+
+describe('buildWsAuthenticate', () => {
+  function makeWsRequest(headers: Record<string, string> = {}, search = ''): Request {
+    return new Request(`http://localhost/ws${search}`, { headers });
+  }
+
+  function makeApiKeyStore(key: ApiKey | null): ApiKeyStore {
+    return {
+      verify: async (_token: string) => key,
+      create: async () => ({ key: key!, plaintext: 'ab_live_test' }),
+      revoke: async () => undefined,
+      list: async () => (key ? [key] : []),
+      rotate: async () => ({ key: key!, plaintext: 'ab_live_rotated' }),
+    };
+  }
+
+  function makeKey(scopes: string[]): ApiKey {
+    return {
+      id: 'key-1',
+      name: 'test',
+      keyHash: 'hash',
+      scopes,
+      createdAt: new Date().toISOString(),
+      active: true,
+    };
+  }
+
+  it('returns undefined when neither authToken nor store is provided', () => {
+    const verifier = buildWsAuthenticate(undefined, undefined);
+    expect(verifier).toBeUndefined();
+  });
+
+  it('allows a managed key with runs:read scope', async () => {
+    const store = makeApiKeyStore(makeKey(['runs:read']));
+    const verifier = buildWsAuthenticate(undefined, store);
+    const request = makeWsRequest({ authorization: 'Bearer ab_live_token' });
+    expect(await verifier!(request)).toBe(true);
+  });
+
+  it('rejects a managed key scoped only for keys:manage (missing runs:read)', async () => {
+    const store = makeApiKeyStore(makeKey(['keys:manage']));
+    const verifier = buildWsAuthenticate(undefined, store);
+    const request = makeWsRequest({ authorization: 'Bearer ab_live_token' });
+    expect(await verifier!(request)).toBe(false);
+  });
+
+  it('rejects a managed key scoped only for runs:write (missing runs:read)', async () => {
+    const store = makeApiKeyStore(makeKey(['runs:write']));
+    const verifier = buildWsAuthenticate(undefined, store);
+    const request = makeWsRequest({ authorization: 'Bearer ab_live_token' });
+    expect(await verifier!(request)).toBe(false);
+  });
+
+  it('allows an admin key with empty scopes array', async () => {
+    const store = makeApiKeyStore(makeKey([]));
+    const verifier = buildWsAuthenticate(undefined, store);
+    const request = makeWsRequest({ authorization: 'Bearer ab_live_token' });
+    expect(await verifier!(request)).toBe(true);
+  });
+
+  it('allows a key with runs:read among multiple scopes', async () => {
+    const store = makeApiKeyStore(makeKey(['runs:read', 'runs:write', 'sessions:read']));
+    const verifier = buildWsAuthenticate(undefined, store);
+    const request = makeWsRequest({ authorization: 'Bearer ab_live_token' });
+    expect(await verifier!(request)).toBe(true);
+  });
+
+  it('rejects an invalid or expired managed key', async () => {
+    const store = makeApiKeyStore(null);
+    const verifier = buildWsAuthenticate(undefined, store);
+    const request = makeWsRequest({ authorization: 'Bearer ab_live_token' });
+    expect(await verifier!(request)).toBe(false);
+  });
+
+  it('allows the static authToken without scope restriction', async () => {
+    const verifier = buildWsAuthenticate('admin-secret', undefined);
+    const request = makeWsRequest({ authorization: 'Bearer admin-secret' });
+    expect(await verifier!(request)).toBe(true);
+  });
+
+  it('rejects a static token mismatch', async () => {
+    const verifier = buildWsAuthenticate('admin-secret', undefined);
+    const request = makeWsRequest({ authorization: 'Bearer wrong-token' });
+    expect(await verifier!(request)).toBe(false);
+  });
+
+  it('accepts a static token via query string', async () => {
+    const verifier = buildWsAuthenticate('admin-secret', undefined);
+    const request = makeWsRequest({}, '?token=admin-secret');
+    expect(await verifier!(request)).toBe(true);
+  });
+
+  it('rejects when no token is provided and auth is configured', async () => {
+    const verifier = buildWsAuthenticate('admin-secret', undefined);
+    const request = makeWsRequest({});
+    expect(await verifier!(request)).toBe(false);
+  });
+
+  it('prefers managed key verification over static token when token starts with ab_live_', async () => {
+    // If the managed key is valid and has runs:read, it wins
+    const store = makeApiKeyStore(makeKey(['runs:read']));
+    const verifier = buildWsAuthenticate('fallback-token', store);
+    const request = makeWsRequest({ authorization: 'Bearer ab_live_token' });
+    expect(await verifier!(request)).toBe(true);
   });
 });
