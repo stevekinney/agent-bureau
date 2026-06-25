@@ -8,14 +8,14 @@ import { SCOPE } from '../types';
 import { createConfigurationRoutes } from './configuration';
 import { createEventsRoutes } from './events';
 import { createHealthRoutes } from './health';
+import { createHooksRoutes } from './hooks';
 import { createKeysRoutes } from './keys';
-import { createOpenAiCompatRoutes } from './openai-compat';
+import { createOpenAICompatRoutes } from './openai-compat';
 import { createRunsRoutes } from './runs';
 import { createSchedulerRoutes } from './scheduler';
 import { createSchedulesRoutes } from './schedules';
 import { createSessionsRoutes } from './sessions';
 import { createUsageRoutes } from './usage';
-import { createWebhookRoutes } from './webhooks';
 
 type CreateRoutesOptions = {
   bureau: Bureau;
@@ -73,19 +73,21 @@ export function createRoutes({ bureau, broker, apiKeyStore }: CreateRoutesOption
     app.route('/api/v1/keys', keysRouter);
   }
 
-  // ── G2 Category-C door features ─────────────────────────────────
-
-  // Webhook ingress: caller names the agent via URL path or x-agent-name header.
+  // Webhook ingress — typed dispatch endpoints.
+  // Caller MUST name the agent explicitly via ?agent=<name>; no routing, no
+  // default-agent fallback. The HOOKS_WRITE scope guards these routes.
   const hooksRouter = new Hono();
   hooksRouter.post('*', createScopeGuard([SCOPE.HOOKS_WRITE]));
-  hooksRouter.route('/', createWebhookRoutes(bureau));
+  hooksRouter.route('/', createHooksRoutes(bureau));
   app.route('/hooks', hooksRouter);
 
-  // OpenAI-compat endpoint: model field = agent name (typed dispatch).
-  const openAiRouter = new Hono();
-  openAiRouter.post('*', createScopeGuard([SCOPE.RUNS_WRITE]));
-  openAiRouter.route('/', createOpenAiCompatRoutes(bureau));
-  app.route('/v1', openAiRouter);
+  // OpenAI-compatible chat completions endpoint.
+  // The `model` field in the request body carries the agent name — typed
+  // dispatch with no routing. Uses the same RUNS_WRITE scope as direct runs.
+  const openaiRouter = new Hono();
+  openaiRouter.post('*', createScopeGuard([SCOPE.RUNS_WRITE]));
+  openaiRouter.route('/', createOpenAICompatRoutes(bureau));
+  app.route('/v1', openaiRouter);
 
   // Usage/cost accounting (PTDR observability — Layer A live data).
   const usageRouter = new Hono();

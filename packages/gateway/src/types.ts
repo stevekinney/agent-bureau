@@ -93,6 +93,7 @@ export const SCOPE = {
   SESSIONS_WRITE: 'sessions:write',
   CONFIG_READ: 'config:read',
   KEYS_MANAGE: 'keys:manage',
+  /** Webhook ingress — typed dispatch endpoints (`POST /hooks/*`). */
   HOOKS_WRITE: 'hooks:write',
   SCHEDULES_READ: 'schedules:read',
   SCHEDULES_WRITE: 'schedules:write',

@@ -1,22 +1,27 @@
 import { BureauError } from 'bureau';
 import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
-import { streamSSE } from 'hono/streaming';
 import { z } from 'zod';
 
-import type { Bureau } from '../types';
+import type { Bureau, CreateRunRequest } from '../types';
 
 /**
- * OpenAI Chat Completions compatible request schema.
+ * An individual message in the OpenAI chat messages array.
+ */
+type ChatMessage = {
+  role: 'system' | 'user' | 'assistant';
+  content: string;
+};
+
+/**
+ * OpenAI-compat chat completions request schema.
  *
- * The `model` field carries the bureau agent name — the gateway routes the
- * request to `bureau.run(model, ...)`. This is the "typed dispatch" pattern:
- * the caller names the agent, the gateway validates and dispatches.
+ * The `model` field carries the agent name — this is the typed dispatch
+ * mechanism. No routing: the caller names the agent directly in the model
+ * field, and the gateway dispatches to that agent verbatim.
  */
 const ChatCompletionRequestSchema = z.object({
-  /** Bureau agent name (maps to OpenAI "model" field). */
-  model: z.string().min(1),
-  /** Conversation messages. At least one `user` message is required. */
+  model: z.string().min(1, 'model field is required and must be a non-empty string'),
   messages: z
     .array(
       z.object({
@@ -24,91 +29,103 @@ const ChatCompletionRequestSchema = z.object({
         content: z.string(),
       }),
     )
-    .min(1),
-  /** Stream the response as SSE. Non-streaming returns a single JSON object. */
-  stream: z.boolean().optional().default(false),
-  /** Maximum tokens in the response (advisory — bureau enforces maximumSteps). */
+    .min(1, 'messages array must contain at least one message'),
   max_tokens: z.number().int().positive().optional(),
-  /** Optional session id for conversation continuity. */
-  session_id: z.string().optional(),
-  /** Override the system prompt for this request. */
-  system: z.string().optional(),
-  /** Maximum number of agent steps. */
-  maximum_steps: z.number().int().positive().optional(),
+  stream: z.boolean().optional(),
 });
 
-type ChatCompletionRequest = z.infer<typeof ChatCompletionRequestSchema>;
-
 /**
- * Build the single-user-message string from the OpenAI `messages` array.
- * Concatenates all `user` messages; system messages are forwarded via
- * `systemPrompt`. The last `user` role message is used as the run input.
+ * Collapse an OpenAI messages array into a single user prompt.
+ *
+ * System messages are prepended as a separate block; assistant turns are
+ * included for context; the last user message is the primary input.
  */
-function extractUserMessage(messages: ChatCompletionRequest['messages']): string {
-  const userMessages = messages.filter((m) => m.role === 'user');
-  const last = userMessages.at(-1);
-  return last?.content ?? '';
+function messagesToPrompt(messages: ChatMessage[]): { message: string; systemPrompt?: string } {
+  const systemMessages = messages.filter((m) => m.role === 'system');
+  const userAndAssistant = messages.filter((m) => m.role !== 'system');
+
+  const systemPrompt =
+    systemMessages.length > 0 ? systemMessages.map((m) => m.content).join('\n\n') : undefined;
+
+  // Use the last user message as the primary input. If a multi-turn context
+  // exists, include prior turns as a flat transcript in the message.
+  const lastUserIndex = [...userAndAssistant].reverse().findIndex((m) => m.role === 'user');
+  if (lastUserIndex === -1) {
+    throw new HTTPException(400, {
+      message: 'messages array must contain at least one user message',
+    });
+  }
+
+  const flattenedIndex = userAndAssistant.length - 1 - lastUserIndex;
+
+  if (flattenedIndex === 0) {
+    // Single user message — send directly.
+    return { message: userAndAssistant[0]!.content, systemPrompt };
+  }
+
+  // Multi-turn: prepend prior context and send the last user message.
+  const priorTurns = userAndAssistant
+    .slice(0, flattenedIndex)
+    .map((m) => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`)
+    .join('\n');
+  const lastMessage = userAndAssistant[flattenedIndex]!.content;
+  const message = `${priorTurns}\n\nUser: ${lastMessage}`;
+  return { message, systemPrompt };
 }
 
-function extractSystemPrompt(
-  messages: ChatCompletionRequest['messages'],
-  systemOverride?: string,
-): string | undefined {
-  if (systemOverride) return systemOverride;
-  const sys = messages.find((m) => m.role === 'system');
-  return sys?.content;
-}
-
 /**
- * Build a minimal OpenAI-compat SSE `data:` chunk.
+ * Format a completed run result as an OpenAI-compat chat completion response.
  */
-function buildStreamChunk(delta: string, finishReason: string | null): string {
-  return JSON.stringify({
-    object: 'chat.completion.chunk',
-    choices: [
-      {
-        delta: { content: delta },
-        finish_reason: finishReason,
-        index: 0,
-      },
-    ],
-  });
-}
-
-/**
- * Build a minimal OpenAI-compat non-streaming completion response.
- */
-function buildCompletionResponse(content: string, promptTokens: number, completionTokens: number) {
+function formatChatCompletion(model: string, content: string): Record<string, unknown> {
   return {
+    id: `chatcmpl-${crypto.randomUUID()}`,
     object: 'chat.completion',
+    created: Math.floor(Date.now() / 1000),
+    model,
     choices: [
       {
         index: 0,
-        message: { role: 'assistant', content },
+        message: {
+          role: 'assistant',
+          content,
+        },
         finish_reason: 'stop',
       },
     ],
-    usage: {
-      prompt_tokens: promptTokens,
-      completion_tokens: completionTokens,
-      total_tokens: promptTokens + completionTokens,
-    },
   };
 }
 
 /**
- * Creates the OpenAI-compat chat completions route.
- *
- * `POST /v1/chat/completions` — accepts an OpenAI chat completions request and
- * routes it to a bureau run. The `model` field carries the agent name.
- *
- * When `stream: true`, the response is Server-Sent Events in the OpenAI chunk
- * format. When `stream: false` (default), returns a single JSON completion.
- *
- * This makes the bureau a drop-in replacement for any client speaking the OpenAI
- * chat API — the only non-standard field is `model` naming an agent, not a model.
+ * Format a run summary as an SSE chunk and final done event.
+ * Returns the SSE data lines to stream.
  */
-export function createOpenAiCompatRoutes(bureau: Bureau) {
+function formatSseChunk(model: string, content: string, isLast: boolean): string {
+  const chunk = {
+    id: `chatcmpl-${crypto.randomUUID()}`,
+    object: 'chat.completion.chunk',
+    created: Math.floor(Date.now() / 1000),
+    model,
+    choices: [
+      {
+        index: 0,
+        delta: isLast ? {} : { role: 'assistant' as const, content },
+        finish_reason: isLast ? 'stop' : null,
+      },
+    ],
+  };
+  return `data: ${JSON.stringify(chunk)}\n\n`;
+}
+
+/**
+ * OpenAI-compatible `POST /v1/chat/completions` route.
+ *
+ * The `model` field in the request body is the agent name — a typed dispatch
+ * mechanism with no routing. The caller names the agent; the gateway dispatches
+ * directly. Missing or unknown model → 422.
+ *
+ * Supports both standard JSON and SSE streaming (`stream: true`) responses.
+ */
+export function createOpenAICompatRoutes(bureau: Bureau) {
   const app = new Hono();
 
   app.post('/chat/completions', async (context) => {
@@ -121,122 +138,81 @@ export function createOpenAiCompatRoutes(bureau: Bureau) {
 
     const parsed = ChatCompletionRequestSchema.safeParse(rawBody);
     if (!parsed.success) {
-      const fieldErrors = parsed.error.flatten().fieldErrors;
-      const message = Object.entries(fieldErrors)
-        .map(([field, errors]) => `${field}: ${errors?.join(', ') ?? 'invalid'}`)
-        .join('; ');
-      throw new HTTPException(400, { message: message || 'Invalid request body' });
+      const messages = parsed.error.issues.map((i) => i.message).join('; ');
+      throw new HTTPException(422, {
+        message: `Invalid request: ${messages}`,
+      });
     }
 
-    const req: ChatCompletionRequest = parsed.data;
-    const userMessage = extractUserMessage(req.messages);
-    if (!userMessage) {
-      throw new HTTPException(400, { message: 'At least one user message is required' });
+    const { model: agentName, messages, max_tokens, stream } = parsed.data;
+
+    // ── Typed dispatch: model field IS the agent name ──────────────────
+    // No routing, no binding table. The caller provides the agent name in the
+    // model field; the gateway dispatches to that agent verbatim. There is no
+    // default agent: a missing or invalid model is rejected here.
+
+    let message: string;
+    let systemPrompt: string | undefined;
+    try {
+      const prompt = messagesToPrompt(messages as ChatMessage[]);
+      message = prompt.message;
+      systemPrompt = prompt.systemPrompt;
+    } catch (error) {
+      if (error instanceof HTTPException) throw error;
+      throw new HTTPException(400, { message: 'Failed to process messages' });
     }
 
-    const systemPrompt = extractSystemPrompt(req.messages, req.system);
+    const request: CreateRunRequest = {
+      message,
+      agentName,
+      ...(systemPrompt ? { systemPrompt } : {}),
+      ...(max_tokens ? { maximumSteps: 1 } : {}),
+    };
 
     let summary;
     try {
-      summary = await bureau.createRun({
-        message: userMessage,
-        sessionId: req.session_id,
-        systemPrompt,
-        maximumSteps: req.maximum_steps,
-      });
+      summary = await bureau.createRun(request);
     } catch (error) {
       if (error instanceof BureauError) {
         if (error.code === 'NOT_CONFIGURED') {
           throw new HTTPException(503, { message: error.message });
         }
         if (error.code === 'BAD_REQUEST') {
-          throw new HTTPException(400, { message: error.message });
+          throw new HTTPException(422, { message: error.message });
+        }
+        if (error.code === 'NOT_FOUND') {
+          throw new HTTPException(404, { message: error.message });
         }
       }
       throw error;
     }
 
-    if (req.stream) {
-      // ── SSE streaming response ───────────────────────────────────
-      return streamSSE(context, async (stream) => {
-        // Poll for run completion and stream intermediate events.
-        // The bureau emits live frames via subscribeLiveFrames; here we wait
-        // for the run to settle and stream the final content as chunks.
-        //
-        // For now we await the run settling (from the store) and emit the
-        // assistant content as a single chunk followed by [DONE]. The store
-        // polling is a simple interval poll against bureau.getRun.
-        //
-        // A future enhancement could subscribe to live frames for real-time
-        // streaming (the bureau already supports this via subscribeLiveFrames
-        // and the WS event surface).
-        const runId = summary.id;
-        const POLL_INTERVAL_MS = 50;
-        const POLL_TIMEOUT_MS = 300_000; // 5 minutes
+    // Get the run's final content. The run starts asynchronously; for the
+    // OpenAI-compat surface we read the last step's content from the run detail.
+    // This is a best-effort synchronous response — streaming clients should
+    // use the WebSocket endpoint for real-time event delivery.
+    const runDetail = bureau.getRun(summary.id);
+    const lastStep = runDetail?.stepDetails.at(-1);
+    const textContent = lastStep?.content ?? '';
 
-        let elapsed = 0;
-        let run = bureau.getRun(runId);
+    if (stream) {
+      // SSE streaming response: send a single content chunk then done.
+      const sse =
+        formatSseChunk(agentName, textContent, false) +
+        formatSseChunk(agentName, '', true) +
+        'data: [DONE]\n\n';
 
-        while (run && run.status === 'running') {
-          if (elapsed >= POLL_TIMEOUT_MS) {
-            await stream.writeSSE({ data: JSON.stringify({ error: 'timeout' }), event: 'error' });
-            await stream.writeSSE({ data: '[DONE]' });
-            return;
-          }
-
-          await new Promise<void>((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
-          elapsed += POLL_INTERVAL_MS;
-          run = bureau.getRun(runId);
-        }
-
-        if (!run) {
-          await stream.writeSSE({
-            data: JSON.stringify({ error: 'run not found' }),
-            event: 'error',
-          });
-          await stream.writeSSE({ data: '[DONE]' });
-          return;
-        }
-
-        // Emit the final content as a chunk.
-        // stepDetails[n].content is always a string per RunStepDetail.
-        const contentText = run.stepDetails?.at(-1)?.content ?? '';
-
-        await stream.writeSSE({ data: buildStreamChunk(contentText, null) });
-        await stream.writeSSE({ data: buildStreamChunk('', 'stop') });
-        await stream.writeSSE({ data: '[DONE]' });
+      return new Response(sse, {
+        status: 200,
+        headers: {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache, no-transform',
+          'X-Accel-Buffering': 'no',
+        },
       });
     }
 
-    // ── Non-streaming response ───────────────────────────────────────
-    // Wait for the run to complete
-    const runId = summary.id;
-    const POLL_INTERVAL_MS = 50;
-    const POLL_TIMEOUT_MS = 300_000;
-
-    let elapsed = 0;
-    let run = bureau.getRun(runId);
-
-    while (run && run.status === 'running') {
-      if (elapsed >= POLL_TIMEOUT_MS) {
-        throw new HTTPException(504, { message: 'Run timed out' });
-      }
-      await new Promise<void>((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
-      elapsed += POLL_INTERVAL_MS;
-      run = bureau.getRun(runId);
-    }
-
-    if (!run) {
-      throw new HTTPException(404, { message: 'Run not found' });
-    }
-
-    // stepDetails[n].content is always a string per RunStepDetail.
-    const contentText = run.stepDetails?.at(-1)?.content ?? '';
-
-    return context.json(
-      buildCompletionResponse(contentText, run.usage?.prompt ?? 0, run.usage?.completion ?? 0),
-      200,
-    );
+    return context.json(formatChatCompletion(agentName, textContent), 200);
   });
 
   return app;
