@@ -1,6 +1,6 @@
 {
   "name": "conversationalist",
-  "version": "0.0.12",
+  "version": "0.1.0",
   "description": "A TypeScript library for managing AI conversation state",
   "keywords": [
     "conversation",
@@ -172,7 +172,7 @@
     "validate": "bun run format:check && bun run lint && bun run check-types && bun run test"
   },
   "dependencies": {
-    "@lostgradient/weft": "^0.7.0",
+    "@lostgradient/weft": "^0.8.0",
     "gray-matter": "^4.0.3"
   },
   "devDependencies": {
