@@ -135,13 +135,13 @@ export { Conversation } from './history';
 export type {
   CodeExecutionToolResultContent,
   CodeExecutionToolResultType,
+  ContainerUploadContent,
   ImageContent,
   MultiModalContent,
   RedactedThinkingContent,
   ServerToolUseContent,
   TextContent,
   ThinkingContent,
-  ToolUseContent,
   WebSearchToolResultContent,
 } from './multi-modal';
 export type {

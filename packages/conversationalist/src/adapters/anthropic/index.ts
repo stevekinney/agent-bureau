@@ -119,6 +119,15 @@ export interface AnthropicCodeExecutionToolResultBlock {
 }
 
 /**
+ * Anthropic container upload block — references a file uploaded into a
+ * code-execution container by id.
+ */
+export interface AnthropicContainerUploadBlock {
+  type: 'container_upload';
+  file_id: string;
+}
+
+/**
  * Anthropic content block union type.
  */
 export type AnthropicContentBlock =
@@ -130,7 +139,8 @@ export type AnthropicContentBlock =
   | AnthropicRedactedThinkingBlock
   | AnthropicServerToolUseBlock
   | AnthropicWebSearchToolResultBlock
-  | AnthropicCodeExecutionToolResultBlock;
+  | AnthropicCodeExecutionToolResultBlock
+  | AnthropicContainerUploadBlock;
 
 /**
  * Anthropic message format for the Messages API.
@@ -177,9 +187,6 @@ function toAnthropicContent(
         // Preserve redacted_thinking blocks byte-for-byte (the encrypted `data` is integrity-critical)
         blocks.push({ type: 'redacted_thinking', data: part.data });
         break;
-      case 'tool_use':
-        blocks.push({ type: 'tool_use', id: part.id, name: part.name, input: part.input });
-        break;
       case 'server_tool_use':
         blocks.push({ type: 'server_tool_use', id: part.id, name: part.name, input: part.input });
         break;
@@ -198,6 +205,9 @@ function toAnthropicContent(
           tool_use_id: part.tool_use_id,
           content: part.content,
         });
+        break;
+      case 'container_upload':
+        blocks.push({ type: 'container_upload', file_id: part.file_id });
         break;
       case 'image': {
         // Anthropic supports both URL and base64. A `data:` URL that matches the
@@ -503,6 +513,9 @@ function toGroupableContentPart(block: AnthropicContentBlock): MultiModalContent
         tool_use_id: block.tool_use_id,
         content: toJSONValue(block.content),
       };
+    case 'container_upload':
+      // Preserve the uploaded-file reference instead of dropping it.
+      return { type: 'container_upload', file_id: block.file_id };
     case 'image':
       return block.source.type === 'url'
         ? { type: 'image', url: block.source.url }

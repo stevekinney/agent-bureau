@@ -1413,6 +1413,30 @@ describe('C5 — Server-tool content blocks (Anthropic adapter)', () => {
     expect(resultBlock?.tool_use_id).toBe('stu-x');
     expect(resultBlock?.content).toEqual({ stdout: 'file.txt\n', exit_code: 0 });
   });
+
+  it('round-trips a container_upload block (uploaded-file reference) instead of dropping it', () => {
+    const payload: AnthropicConversation = {
+      messages: [
+        { role: 'user', content: 'Use this file' },
+        {
+          role: 'assistant',
+          content: [
+            { type: 'text', text: 'Got it.' },
+            { type: 'container_upload', file_id: 'file_abc123' } as any,
+          ],
+        },
+      ],
+    };
+
+    const conversation = fromAnthropicMessages(payload);
+    const roundTripped = toAnthropicMessages(conversation);
+
+    const assistant = roundTripped.messages.find((m) => m.role === 'assistant');
+    const blocks = assistant?.content as Array<{ type: string; [k: string]: unknown }>;
+    const upload = blocks.find((b) => b.type === 'container_upload');
+    expect(upload).toBeDefined();
+    expect(upload?.file_id).toBe('file_abc123');
+  });
 });
 
 describe('C3 — Extended-thinking content blocks (Anthropic adapter)', () => {

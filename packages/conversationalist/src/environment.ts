@@ -70,7 +70,6 @@ function partCharLength(part: ReturnType<typeof messageParts>[number]): number {
       return part.thinking.length + part.signature.length;
     case 'redacted_thinking':
       return part.data.length;
-    case 'tool_use':
     case 'server_tool_use':
       return part.name.length + JSON.stringify(part.input).length;
     case 'web_search_tool_result':
@@ -79,6 +78,8 @@ function partCharLength(part: ReturnType<typeof messageParts>[number]): number {
     case 'bash_code_execution_tool_result':
     case 'text_editor_code_execution_tool_result':
       return JSON.stringify(part.content).length;
+    case 'container_upload':
+      return part.file_id.length;
   }
 }
 

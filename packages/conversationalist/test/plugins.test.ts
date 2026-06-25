@@ -232,4 +232,49 @@ describe('PII redaction in tool arguments, results, and metadata', () => {
     expect(result.metadata!.email).toBe('[EMAIL_REDACTED]');
     expect((result.metadata!.nested as Record<string, unknown>).phone).toBe('[PHONE_REDACTED]');
   });
+
+  it('redacts PII inside structural tool-result content blocks (web_search / code-execution)', () => {
+    const plugin = createPIIRedactionPlugin();
+    const input: MessageInput = {
+      role: 'assistant',
+      content: [
+        { type: 'text', text: 'Here you go.' },
+        {
+          type: 'web_search_tool_result',
+          tool_use_id: 'stu-1',
+          content: [{ snippet: 'reach me at user@example.com' }],
+        },
+        {
+          type: 'bash_code_execution_tool_result',
+          tool_use_id: 'stu-2',
+          content: { stdout: 'token printed: call 555-123-4567' },
+        },
+      ],
+    };
+
+    const result = plugin(input);
+    const parts = result.content as Array<{ type: string; content?: unknown }>;
+    const search = parts.find((p) => p.type === 'web_search_tool_result');
+    const code = parts.find((p) => p.type === 'bash_code_execution_tool_result');
+    expect(JSON.stringify(search?.content)).toContain('[EMAIL_REDACTED]');
+    expect(JSON.stringify(code?.content)).toContain('[PHONE_REDACTED]');
+  });
+
+  it('redacts PII in server_tool_use input', () => {
+    const plugin = createPIIRedactionPlugin();
+    const input: MessageInput = {
+      role: 'assistant',
+      content: [
+        {
+          type: 'server_tool_use',
+          id: 'stu-1',
+          name: 'web_search',
+          input: { query: 'who is user@example.com' },
+        },
+      ],
+    };
+    const result = plugin(input);
+    const part = (result.content as Array<{ type: string; input?: unknown }>)[0];
+    expect(JSON.stringify(part?.input)).toContain('[EMAIL_REDACTED]');
+  });
 });

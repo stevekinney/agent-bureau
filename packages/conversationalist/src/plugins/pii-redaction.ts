@@ -87,13 +87,30 @@ export function createPIIRedactionPlugin(options: PIIRedactionOptions = {}): Mes
       result = {
         ...input,
         content: input.content.map((part) => {
-          if (part.type === 'text' && part.text) {
-            return {
-              ...part,
-              text: redact(part.text),
-            };
+          switch (part.type) {
+            case 'text':
+              return part.text ? { ...part, text: redact(part.text) } : part;
+            case 'thinking':
+              // Thinking text is model reasoning that can echo user PII.
+              return { ...part, thinking: redact(part.thinking) };
+            case 'server_tool_use':
+              // Tool input JSON (e.g. a web_search query) can carry PII.
+              return { ...part, input: redactJSONValue(part.input, redact) as typeof part.input };
+            case 'web_search_tool_result':
+            case 'code_execution_tool_result':
+            case 'bash_code_execution_tool_result':
+            case 'text_editor_code_execution_tool_result':
+              // Structural tool-result payloads (search snippets, stdout) can
+              // contain emails/keys — redact their string leaves like role-level
+              // tool results.
+              return {
+                ...part,
+                content: redactJSONValue(part.content, redact) as typeof part.content,
+              };
+            default:
+              // image, redacted_thinking (opaque encrypted), container_upload (id).
+              return part;
           }
-          return part;
         }),
       };
     }

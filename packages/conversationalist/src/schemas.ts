@@ -75,12 +75,6 @@ const multiModalContentUnion = z.discriminatedUnion('type', [
     data: z.string(),
   }),
   z.object({
-    type: z.literal('tool_use'),
-    id: z.string(),
-    name: z.string(),
-    input: jsonValueSchema,
-  }),
-  z.object({
     type: z.literal('server_tool_use'),
     id: z.string(),
     name: z.string(),
@@ -99,6 +93,10 @@ const multiModalContentUnion = z.discriminatedUnion('type', [
     ]),
     tool_use_id: z.string(),
     content: jsonValueSchema,
+  }),
+  z.object({
+    type: z.literal('container_upload'),
+    file_id: z.string(),
   }),
 ]);
 

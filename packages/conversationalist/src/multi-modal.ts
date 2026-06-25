@@ -40,21 +40,13 @@ export interface RedactedThinkingContent {
 }
 
 /**
- * Client tool-use content block: a call to a caller-defined tool.
- * Distinct from {@link ServerToolUseContent}, which represents Anthropic's
- * built-in server tools. Keeping them as separate types makes it a compile
- * error to emit one where the other is expected.
- */
-export interface ToolUseContent {
-  type: 'tool_use';
-  id: string;
-  name: string;
-  input: JSONValue;
-}
-
-/**
  * Server-side tool use content block (e.g. Anthropic built-in tools such as web_search).
  * Input is the JSON the model produced for the built-in tool.
+ *
+ * Note: there is intentionally NO client-tool-use content block. A client tool
+ * call is represented as a `tool-call` ROLE message (so a later `tool-result`
+ * can pair to it), not as assistant content — putting a client tool call in
+ * content would create an orphaned tool result that integrity rejects.
  */
 export interface ServerToolUseContent {
   type: 'server_tool_use';
@@ -94,15 +86,25 @@ export interface CodeExecutionToolResultContent {
   content: JSONValue;
 }
 
+/**
+ * Container upload content block. Anthropic represents a file uploaded into a
+ * code-execution container as a `container_upload` block referencing the
+ * uploaded file by id; preserved so the reference survives the round-trip.
+ */
+export interface ContainerUploadContent {
+  type: 'container_upload';
+  file_id: string;
+}
+
 export type MultiModalContent =
   | TextContent
   | ImageContent
   | ThinkingContent
   | RedactedThinkingContent
-  | ToolUseContent
   | ServerToolUseContent
   | WebSearchToolResultContent
-  | CodeExecutionToolResultContent;
+  | CodeExecutionToolResultContent
+  | ContainerUploadContent;
 
 /**
  * Creates a shallow copy of a MultiModalContent item.
@@ -128,20 +130,12 @@ export function copyMultiModalContent(item: MultiModalContent): MultiModalConten
       data: item.data,
     };
   }
-  if (item.type === 'tool_use') {
-    return {
-      type: 'tool_use',
-      id: item.id,
-      name: item.name,
-      // Deep-copy the JSON payload: copyContent feeds messageToJSON and clone
-      // paths that must return independent values, so a shared object/array
-      // reference would let a mutation of the copy leak into the original.
-      input: structuredClone(item.input),
-    };
-  }
   if (item.type === 'server_tool_use') {
     return {
       type: 'server_tool_use',
+      // Deep-copy the JSON payload: copyContent feeds messageToJSON and clone
+      // paths that must return independent values, so a shared object/array
+      // reference would let a mutation of the copy leak into the original.
       id: item.id,
       name: item.name,
       input: structuredClone(item.input),
@@ -164,6 +158,9 @@ export function copyMultiModalContent(item: MultiModalContent): MultiModalConten
       tool_use_id: item.tool_use_id,
       content: structuredClone(item.content),
     };
+  }
+  if (item.type === 'container_upload') {
+    return { type: 'container_upload', file_id: item.file_id };
   }
   // All non-image variants are handled above. TypeScript cannot fully narrow
   // `item` to ImageContent here because CodeExecutionToolResultContent's `type`

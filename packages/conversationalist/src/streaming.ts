@@ -242,8 +242,13 @@ export interface BlockAccumulator {
   appendTextDelta(delta: string): void;
   /** Append a thinking_delta to a thinking block. */
   appendThinkingDelta(delta: string): void;
-  /** Set the signature on a thinking or redacted_thinking block. */
-  setSignature(signature: string): void;
+  /**
+   * Append a signature_delta chunk to a thinking block's signature. Anthropic
+   * may split the signature across multiple signature_delta events, so this
+   * accumulates rather than replaces — the full signature must survive
+   * byte-for-byte for extended-thinking replay.
+   */
+  appendSignatureDelta(delta: string): void;
   /** Append an input_json_delta to a tool_use or server_tool_use block. */
   appendInputJsonDelta(delta: string): void;
 }
@@ -355,11 +360,11 @@ function createBlockAccumulator(initial: BlockAccumulatorState): BlockAccumulato
         state = { ...state, buffer: state.buffer + delta };
       }
     },
-    setSignature(signature: string) {
-      // Only thinking blocks receive a streamed signature_delta. A
-      // redacted_thinking block's encrypted `data` is seeded at openBlock.
+    appendSignatureDelta(delta: string) {
+      // Only thinking blocks receive a streamed signature_delta; accumulate the
+      // chunks. A redacted_thinking block's encrypted `data` is seeded at openBlock.
       if (state.type === 'thinking') {
-        state = { ...state, signature };
+        state = { ...state, signature: state.signature + delta };
       }
     },
     appendInputJsonDelta(delta: string) {

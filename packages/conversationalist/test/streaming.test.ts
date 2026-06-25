@@ -447,10 +447,26 @@ describe('C4 — createStreamingAccumulator (multi-part accumulation)', () => {
     const acc = createStreamingAccumulator();
     acc.openBlock(0, { type: 'thinking', buffer: '', signature: '' });
     acc.getBlock(0)?.appendThinkingDelta('I should think about this.');
-    acc.getBlock(0)?.setSignature(SIG);
+    acc.getBlock(0)?.appendSignatureDelta(SIG);
 
     expect(contentOf(acc.finalize())).toEqual([
       { type: 'thinking', thinking: 'I should think about this.', signature: SIG },
+    ]);
+  });
+
+  it('accumulates a signature delivered across multiple signature_delta chunks byte-for-byte', () => {
+    // Anthropic may split the signature across several signature_delta events;
+    // appendSignatureDelta must concatenate, not replace, or the byte-for-byte
+    // signature breaks extended-thinking replay.
+    const acc = createStreamingAccumulator();
+    acc.openBlock(0, { type: 'thinking', buffer: '', signature: '' });
+    acc.getBlock(0)?.appendThinkingDelta('reasoning');
+    acc.getBlock(0)?.appendSignatureDelta('EqoBCkgIA');
+    acc.getBlock(0)?.appendSignatureDelta('RABGAIiQ');
+    acc.getBlock(0)?.appendSignatureDelta('L8gy6==');
+
+    expect(contentOf(acc.finalize())).toEqual([
+      { type: 'thinking', thinking: 'reasoning', signature: 'EqoBCkgIARABGAIiQL8gy6==' },
     ]);
   });
 
@@ -471,7 +487,7 @@ describe('C4 — createStreamingAccumulator (multi-part accumulation)', () => {
 
     acc.openBlock(0, { type: 'thinking', buffer: '', signature: '' });
     acc.getBlock(0)?.appendThinkingDelta('First');
-    acc.getBlock(0)?.setSignature('sig==');
+    acc.getBlock(0)?.appendSignatureDelta('sig==');
 
     acc.openBlock(1, { type: 'text', buffer: '' });
     acc.getBlock(1)?.appendTextDelta('Second');
@@ -524,7 +540,7 @@ describe('C4 — createStreamingAccumulator (multi-part accumulation)', () => {
     const acc = createStreamingAccumulator();
     acc.openBlock(0, { type: 'thinking', buffer: '', signature: '' });
     // Only the signature arrives (no thinking_delta).
-    acc.getBlock(0)?.setSignature(SIG);
+    acc.getBlock(0)?.appendSignatureDelta(SIG);
 
     expect(contentOf(acc.finalize())).toEqual([{ type: 'thinking', thinking: '', signature: SIG }]);
   });

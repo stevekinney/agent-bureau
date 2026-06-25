@@ -61,9 +61,9 @@ describe('copyMultiModalContent', () => {
   });
 
   describe('tool blocks deep-copy JSON payloads', () => {
-    it('deep-copies tool_use input so mutating the copy does not affect the original', () => {
+    it('deep-copies server_tool_use input so mutating the copy does not affect the original', () => {
       const input = {
-        type: 'tool_use' as const,
+        type: 'server_tool_use' as const,
         id: 'c1',
         name: 't',
         input: { nested: { value: 1 }, list: [1, 2] },
@@ -77,7 +77,7 @@ describe('copyMultiModalContent', () => {
       expect(input.input).toEqual({ nested: { value: 1 }, list: [1, 2] });
     });
 
-    it('deep-copies server_tool_use input', () => {
+    it('deep-copies a second server_tool_use input', () => {
       const input = {
         type: 'server_tool_use' as const,
         id: 's1',
