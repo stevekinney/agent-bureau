@@ -2,6 +2,10 @@ import type { Hono } from 'hono';
 import type { Store } from 'operative/store';
 
 export type {
+  AuditEventType,
+  AuditQueryOptions,
+  AuditRecord,
+  AuditTrail,
   Bureau,
   BureauEventMap,
   BureauEventType,

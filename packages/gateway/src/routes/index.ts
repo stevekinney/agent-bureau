@@ -5,6 +5,7 @@ import type { LiveFrameBroker } from '../live-events';
 import { createScopeGuard } from '../middleware/scope-guard';
 import type { Bureau } from '../types';
 import { SCOPE } from '../types';
+import { createAuditRoutes, createConversationRoutes, createMemoryRoutes } from './audit';
 import { createConfigurationRoutes } from './configuration';
 import { createEventsRoutes } from './events';
 import { createHealthRoutes } from './health';
@@ -27,6 +28,27 @@ export function createRoutes({ bureau, broker, apiKeyStore }: CreateRoutesOption
   const app = new Hono();
 
   app.route('/api/v1/health', createHealthRoutes(bureau));
+
+  // ── Audit glass-box: Layer A + Layer B (G5) ─────────────────────────
+
+  // Layer B: `GET /api/v1/audit` — durable trail + live store merge.
+  const auditRouter = new Hono();
+  auditRouter.get('*', createScopeGuard([SCOPE.SESSIONS_READ]));
+  auditRouter.route('/', createAuditRoutes(bureau));
+  app.route('/api/v1/audit', auditRouter);
+
+  // Layer A: `GET /api/v1/sessions/:id/conversation` — conversation history.
+  // Layered on top of the sessions router (same scope guard applies).
+  const conversationRouter = new Hono();
+  conversationRouter.get('*', createScopeGuard([SCOPE.SESSIONS_READ]));
+  conversationRouter.route('/', createConversationRoutes(bureau));
+  app.route('/api/v1/sessions', conversationRouter);
+
+  // Layer A: `GET /api/v1/memory/:namespace` — memory namespace listing.
+  const memoryRouter = new Hono();
+  memoryRouter.get('*', createScopeGuard([SCOPE.SESSIONS_READ]));
+  memoryRouter.route('/', createMemoryRoutes(bureau));
+  app.route('/api/v1/memory', memoryRouter);
 
   // Runs routes with scope guards
   const runsRouter = new Hono();

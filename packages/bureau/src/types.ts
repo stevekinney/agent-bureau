@@ -40,6 +40,7 @@ import type { CreateRunEngineOptions } from 'operative/durable';
 import type { ProviderName } from 'operative/providers';
 import type { Store } from 'operative/store';
 
+import type { AuditTrail } from './audit-trail';
 import type { BureauEventMap } from './events';
 
 // ── Provider Configuration ───────────────────────────────────────────
@@ -451,6 +452,21 @@ export interface Bureau {
 
   readonly sessionStore: SessionStore | undefined;
   readonly kv: TextValueStore | undefined;
+
+  /**
+   * The durable audit trail (Layer B glass-box).
+   *
+   * Present when the bureau has a KV store configured (`.persistence()` or
+   * `storage`). `undefined` when the bureau is ephemeral (no persistence).
+   *
+   * The audit trail sinks `tool.*`, `run.*`, and `step.completed` events into
+   * the KV store as an append-only log. Use `auditTrail.query()` to read them
+   * back with optional `since`, `runId`, and `type` filters.
+   *
+   * Layer A (live) = `store.getState()` + `memory.list()` + `getSession()`.
+   * Layer B (durable) = `auditTrail.query()`.
+   */
+  readonly auditTrail: AuditTrail | undefined;
 }
 
 // ── API Request / Response Types ─────────────────────────────────────
