@@ -110,6 +110,44 @@ export async function createGateway(
   // Global error handler
   app.onError(errorHandler);
 
+  /**
+   * Builds a WebSocket authentication verifier that mirrors the HTTP
+   * `createAuthentication` middleware precedence:
+   * 1. Managed `ab_live_` keys verified via `ApiKeyStore.verify`.
+   * 2. Static token comparison.
+   * 3. Pass-through when no auth is configured.
+   *
+   * This function is injected into the adapter so the `/ws` upgrade
+   * path uses the same logic as the HTTP path without duplicating it.
+   */
+  function buildWsAuthenticate(
+    authToken: string | undefined,
+    store: ApiKeyStore | undefined,
+  ): ((request: Request) => Promise<boolean>) | undefined {
+    if (!authToken && !store) return undefined;
+
+    return async (request: Request): Promise<boolean> => {
+      const authHeader = request.headers.get('authorization') ?? '';
+      const headerToken = authHeader.toLowerCase().startsWith('bearer ')
+        ? authHeader.slice(7).trim()
+        : undefined;
+      const url = new URL(request.url);
+      const queryToken = url.searchParams.get('token') ?? undefined;
+      const token = headerToken ?? queryToken;
+
+      if (!token) return false;
+
+      if (store && token.startsWith('ab_live_')) {
+        const key = await store.verify(token);
+        if (key) return true;
+      }
+
+      if (authToken && token === authToken) return true;
+
+      return false;
+    };
+  }
+
   async function start() {
     const wsHandler = createWebSocketHandler({ broker: liveFrameBroker });
 
@@ -118,6 +156,7 @@ export async function createGateway(
       hostname: options.hostname,
       wsHandler,
       authToken: options.authToken,
+      authenticate: buildWsAuthenticate(options.authToken, apiKeyStore),
       allowedOrigins: options.allowedOrigins,
       idleTimeout: options.idleTimeout,
     });
