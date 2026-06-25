@@ -9,6 +9,16 @@ export type ServerAdapterOptions = {
   wsHandler?: WebSocketHandler;
   authToken?: string;
   /**
+   * Explicit list of allowed origins for WebSocket upgrade requests. When
+   * non-empty, upgrade requests whose `Origin` header is absent or not in
+   * the list are rejected with 403. When omitted or empty, no origin check
+   * is performed.
+   *
+   * For the Bun adapter this must be enforced here (not in Hono middleware)
+   * because Bun intercepts `/ws` upgrades before `app.fetch()` runs.
+   */
+  allowedOrigins?: string[];
+  /**
    * Number of seconds to wait before closing an idle connection.
    *
    * Set this higher than the longest expected silence between SSE events
