@@ -3,6 +3,8 @@ import type {
   ListFilter,
   ListOptions,
   PaginatedResult,
+  ScheduleFilter,
+  ScheduleSummary,
   WorkflowLogRecord,
   WorkflowState,
   WorkflowSummary,
@@ -342,6 +344,65 @@ export interface Bureau {
   getSession(id: string): Promise<AgentSession | undefined>;
   deleteSession(id: string): Promise<void>;
 
+  /**
+   * Deliver a fire-and-forget signal to a session's current in-flight durable run.
+   * Maps to `engine.signal(runId, name, payload)`. Requires a durable engine and a
+   * session store. Returns `undefined` when no durable engine is composed; throws
+   * `BureauError('NOT_FOUND')` when the session has no current run.
+   */
+  signalSession(sessionId: string, name: string, payload?: unknown): Promise<void | undefined>;
+
+  /**
+   * Send a validated, request/response update to a session's current in-flight run.
+   * Maps to `engine.update(runId, name, payload)`. Returns the update result.
+   * Returns `undefined` when no durable engine is composed.
+   */
+  updateSession(sessionId: string, name: string, payload?: unknown): Promise<unknown>;
+
+  /**
+   * Query live state from a session's current in-flight run without mutating it.
+   * Maps to `engine.query(runId, name, input)`. Returns `undefined` when no
+   * durable engine is composed.
+   */
+  querySession(sessionId: string, name: string, input?: unknown): Promise<unknown>;
+
+  /**
+   * Register a durable recurring schedule via `engine.schedule(...)`.
+   * Returns `null` when the schedule was created but could not be immediately
+   * retrieved. Returns `undefined` when no durable engine is composed.
+   */
+  createSchedule(
+    definition: DurableScheduleDefinition,
+  ): Promise<ScheduleSummary | null | undefined>;
+
+  /**
+   * Retrieve a durable schedule by id. Returns `null` when the schedule does not
+   * exist, `undefined` when no durable engine is composed.
+   */
+  getSchedule(scheduleId: string): Promise<ScheduleSummary | null | undefined>;
+
+  /**
+   * List durable schedules, optionally filtered. Returns `undefined` when no
+   * durable engine is composed.
+   */
+  listSchedules(filter?: ScheduleFilter): Promise<PaginatedResult<ScheduleSummary> | undefined>;
+
+  /**
+   * Pause a durable schedule. Returns `undefined` when no durable engine is composed.
+   */
+  pauseSchedule(scheduleId: string): Promise<void | undefined>;
+
+  /**
+   * Resume a paused durable schedule. Returns `undefined` when no durable engine is composed.
+   */
+  resumeSchedule(scheduleId: string): Promise<void | undefined>;
+
+  /**
+   * Cancel and permanently delete a durable schedule. Returns `undefined` when no
+   * durable engine is composed.
+   */
+  cancelSchedule(scheduleId: string): Promise<void | undefined>;
+
   getConfiguration(): ConfigurationResponse;
   getTools(): ToolSummary[];
   subscribeLiveFrames(listener: (frame: ServerFrame) => void): () => void;
@@ -510,3 +571,30 @@ export type ServerFrame =
 // ── Constants ───────────────────────────────────────────────────────
 
 export const DEFAULT_MAXIMUM_STEPS = 10;
+
+// ── Durable Schedule ────────────────────────────────────────────────
+
+/**
+ * Parameters for registering a durable bureau schedule via
+ * {@link Bureau.createSchedule}. The schedule fires the named `agentName`
+ * on the given `spec`; each fire is either a fresh session (no `sessionId`)
+ * or appended to the same persistent session (`sessionId` given).
+ */
+export interface DurableScheduleDefinition {
+  /** Agent name to run on each schedule fire. */
+  agentName: string;
+  /** Input message delivered to the agent each fire. */
+  input: string;
+  /** Cron expression (e.g. `'0 9 * * *'`) or ISO-8601 repeat duration (e.g. `'PT6H'`). */
+  spec: string;
+  /**
+   * When given, each schedule fire appends a run to this session — building a
+   * recurring conversation that accumulates context across fires. When omitted,
+   * each fire is a fresh standalone session.
+   */
+  sessionId?: string;
+  /** Overlap policy when a prior fire is still running. Defaults to `'skip'`. */
+  overlap?: 'skip' | 'allow';
+  /** Human-readable label stored on the schedule. */
+  description?: string;
+}
