@@ -409,6 +409,26 @@ export function createSessionHandle(
         const seededConversation = new Conversation(storedHistory);
         seededConversation.appendUserMessage(input);
 
+        // Persist the 'running' RunRef BEFORE starting the inner run so that
+        // signal()/update()/recover() can find a running ref in the store while
+        // the workflow is in-flight. Without this, the store has no entry until
+        // after completion, making HITL and crash recovery unreachable.
+        const runningRef: RunRef = {
+          runId,
+          sequence,
+          status: 'running',
+          startedAt: new Date().toISOString(),
+          // F2: carry agentName on each RunRef so a session worked by a
+          // SEQUENCE of different agents (via handoff) preserves a full
+          // audit trail of which agent ran each run.
+          agentName,
+        };
+        await store.save({
+          ...session,
+          runs: [...session.runs, runningRef],
+          updatedAt: new Date().toISOString(),
+        });
+
         // Thread the eager AbortController's signal into the run options so
         // abort() works immediately — even before the inner run's own
         // AbortController is created (inside createActiveRun). When the caller
@@ -439,27 +459,42 @@ export function createSessionHandle(
           complete: () => outerEmitter.complete(),
         });
 
-        const innerResult = await innerRun.result;
+        let innerResult: RunResult;
+        try {
+          innerResult = await innerRun.result;
+        } catch (err) {
+          // The inner run threw (e.g. engine rejected). Transition the
+          // persisted ref from 'running' → 'error' so the store is not left
+          // with a permanently-running ref that signal()/recover() would act on
+          // after the run is already dead.
+          subscription.unsubscribe();
+          const freshSession = await store.load(sessionId);
+          if (freshSession) {
+            const errorRef: RunRef = { ...runningRef, status: 'error' };
+            await store.save({
+              ...freshSession,
+              runs: freshSession.runs.map((r) => (r.runId === runId ? errorRef : r)),
+              updatedAt: new Date().toISOString(),
+            });
+          }
+          throw err;
+        }
+
         subscription.unsubscribe();
 
-        // Persist the RunRef and updated conversation history after the run
-        // settles. Re-load the session in case a concurrent run completed.
+        // Replace the 'running' ref with the terminal status. Re-load the
+        // session in case a concurrent run completed, but replace by runId
+        // rather than appending so the runs[] length stays correct.
         const freshSession = await store.load(sessionId);
         if (freshSession) {
-          const ref: RunRef = {
-            runId,
-            sequence,
+          const terminalRef: RunRef = {
+            ...runningRef,
             status: finishReasonToStatus(innerResult.finishReason),
-            startedAt: new Date().toISOString(),
-            // F2: carry agentName on each RunRef so a session worked by a
-            // SEQUENCE of different agents (via handoff) preserves a full
-            // audit trail of which agent ran each run.
-            agentName,
           };
           const updated: AgentSession = {
             ...freshSession,
             conversationHistory: innerResult.conversation.current,
-            runs: [...freshSession.runs, ref],
+            runs: freshSession.runs.map((r) => (r.runId === runId ? terminalRef : r)),
             updatedAt: new Date().toISOString(),
           };
           await store.save(updated);
