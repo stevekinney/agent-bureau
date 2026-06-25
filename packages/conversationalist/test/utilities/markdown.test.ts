@@ -576,7 +576,7 @@ describe('toMarkdown', () => {
       expect(result).toContain('[MASKED]');
     });
 
-    test('redacts cited-text citation metadata under redactToolResults', () => {
+    test('removes cited-text citation metadata under redactToolResults (drops the field, not a scalar)', () => {
       const conversation = createConversation([
         {
           id: 'm1',
@@ -585,7 +585,7 @@ describe('toMarkdown', () => {
             {
               type: 'text',
               text: 'See source.',
-              citations: [{ cited_text: 'leaked-cited-secret', url: 'https://example.com' }],
+              citations: [{ cited_text: 'leaked-cited-secret', url: 'https://leaked.example.com' }],
             },
           ],
           position: 0,
@@ -601,8 +601,13 @@ describe('toMarkdown', () => {
         redactedPlaceholder: '[MASKED]',
       });
 
+      // The citation evidence is gone, and the citations field is removed entirely
+      // (not scalarized to a malformed string) — so no 'citations' key leaks either.
       expect(result).not.toContain('leaked-cited-secret');
-      expect(result).toContain('[MASKED]');
+      expect(result).not.toContain('leaked.example.com');
+      expect(result).not.toContain('citations');
+      // The visible text is preserved.
+      expect(result).toContain('See source.');
     });
   });
 });

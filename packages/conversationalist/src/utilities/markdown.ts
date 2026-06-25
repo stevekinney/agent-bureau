@@ -148,11 +148,15 @@ function redactStructuralToolBlocks(
       case 'bash_code_execution_tool_result':
       case 'text_editor_code_execution_tool_result':
         return redactResults ? { ...part, content: placeholder } : part;
-      case 'text':
+      case 'text': {
         // Citations are tool-result evidence (cited_text, urls, encrypted refs).
-        return redactResults && part.citations !== undefined
-          ? { ...part, citations: placeholder }
-          : part;
+        // Remove the field entirely rather than scalarizing it — `citations` must
+        // be a structured array/object, so a placeholder string would be a
+        // malformed cited-text block.
+        if (!redactResults || part.citations === undefined) return part;
+        const { citations: _citations, ...rest } = part;
+        return rest;
+      }
       default:
         return part;
     }
