@@ -318,6 +318,37 @@ describe('summarizer-based compaction', () => {
       expect(part?.text).toBe('The answer is 4.');
       expect(part?.citations).toBe('[tool result]');
     });
+
+    test('strips thinking and redacted_thinking payloads so internal reasoning is not summarized', () => {
+      const messages: Message[] = [
+        {
+          id: 'm-0',
+          role: 'assistant',
+          content: [
+            { type: 'thinking', thinking: 'a long private chain of reasoning', signature: 'sig==' },
+            { type: 'redacted_thinking', data: 'encrypted-reasoning-payload' },
+            { type: 'text', text: 'Final answer.' },
+          ],
+          position: 0,
+          createdAt: new Date().toISOString(),
+          metadata: {},
+          hidden: false,
+        },
+      ];
+
+      const stripped = stripToolResultDetailsBatch(messages);
+      const parts = stripped[0].content as Array<{
+        type: string;
+        thinking?: string;
+        data?: string;
+        signature?: string;
+        text?: string;
+      }>;
+      expect(parts[0]?.thinking).toBe('[tool result]');
+      expect(parts[0]?.signature).toBe('sig=='); // signature kept; only the bulky text is dropped
+      expect(parts[1]?.data).toBe('[tool result]');
+      expect(parts[2]?.text).toBe('Final answer.');
+    });
   });
 
   describe('calculateChunkSize', () => {

@@ -171,6 +171,13 @@ function stripStructuralToolBlocks(
         // Citation payloads (cited_text, urls, encrypted refs) are tool-result
         // evidence too — strip them so they don't reach the summarizer.
         return part.citations !== undefined ? { ...part, citations: STRIPPED_PLACEHOLDER } : part;
+      case 'thinking':
+        // Internal reasoning can be large and need not go to the summarizer.
+        // (This is the compaction/summarize path — unlike redaction-for-replay,
+        // there is no signature byte-for-byte concern here; the block is discarded.)
+        return { ...part, thinking: STRIPPED_PLACEHOLDER };
+      case 'redacted_thinking':
+        return { ...part, data: STRIPPED_PLACEHOLDER };
       default:
         return part;
     }
