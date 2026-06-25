@@ -322,13 +322,32 @@ describe('createBureau (builder) — tool registration', () => {
     expect(() => bureau.run('a', 'input')).not.toThrow();
   });
 
-  it('rejects non-Tool values in the tools map', () => {
+  it('rejects genuinely invalid values in the tools map (non-function primitives)', () => {
+    const generate = makeGenerate();
+    expect(() =>
+      // Passing 42 forces the unhappy path; cast is required to bypass TypeScript.
+      createBureau()
+        .tools({ bad: 42 as unknown as typeof echoTool })
+        .agent({ name: 'a', generate }),
+    ).toThrow(/not a valid tool entry/);
+  });
+
+  it('accepts a plain { execute } object and normalizes it to an armorer Tool', () => {
     const generate = makeGenerate();
     expect(() =>
       createBureau()
-        .tools({ bad: { execute: () => Promise.resolve('nope') } as unknown as typeof echoTool })
+        .tools({ search: { execute: () => Promise.resolve('ok') } as unknown as typeof echoTool })
         .agent({ name: 'a', generate }),
-    ).toThrow(/not an armorer Tool/);
+    ).not.toThrow();
+  });
+
+  it('accepts a bare function and normalizes it to an armorer Tool', () => {
+    const generate = makeGenerate();
+    expect(() =>
+      createBureau()
+        .tools({ ping: (() => Promise.resolve('pong')) as unknown as typeof echoTool })
+        .agent({ name: 'a', generate }),
+    ).not.toThrow();
   });
 });
 
