@@ -7,18 +7,22 @@ import { createAgentRun } from '../agent-run';
 import type { AgentSession, RunRef } from '../agent-session';
 import { createAgentSession } from '../agent-session';
 import { createActiveRun } from '../create-run';
+import { reattachDurableActiveRun } from '../durable/active-run-adapter';
+import type { CheckpointStore } from '../durable/checkpoint-store';
 import type { AnyRunEngine } from '../durable/create-run-engine';
 import type { OperativeEventMap } from '../events';
 import {
   SessionCancelEvent,
   SessionForkEvent,
+  SessionMonitorDoneEvent,
+  SessionMonitorTickEvent,
   SessionQueryEvent,
   SessionRecoverEvent,
   SessionSignalEvent,
   SessionSleepEvent,
   SessionUpdateEvent,
 } from '../events';
-import type { RunOptions } from '../types';
+import type { RunOptions, RunResult } from '../types';
 import type { SessionStore } from './types';
 
 /**
@@ -27,6 +31,50 @@ import type { SessionStore } from './types';
  * call within the session (the LLM backend, toolbox, hooks, limits, etc.).
  */
 export type SessionRunOptions = Omit<RunOptions, 'conversation'>;
+
+/**
+ * Options for `session.monitor()` — a durable conditional watch loop that runs
+ * the agent on a repeating cadence until a predicate is satisfied or a deadline
+ * is reached.
+ *
+ * Each tick fires a new durable `AgentRun` with `input` as the prompt. The
+ * `until` predicate receives the completed `RunResult` and returns `true` when
+ * the condition is met (ending the loop). If `until` returns `false`, the loop
+ * sleeps for `every` milliseconds and starts the next tick.
+ *
+ * The predicate must NOT be a closure that captures mutable state across ticks
+ * — it is evaluated in-process after each run and cannot cross a durable
+ * checkpoint boundary. It is a pure function of the run's output.
+ */
+export interface MonitorOptions {
+  /**
+   * How long to wait between ticks.
+   * Milliseconds (number) or ISO-8601 duration string (e.g. `'PT5M'`, `'PT1H'`).
+   */
+  every: number | string;
+
+  /**
+   * The prompt sent to the agent on each tick.
+   */
+  input: string;
+
+  /**
+   * Predicate evaluated on the completed `RunResult` of each tick.
+   * Return `true` to end the loop (condition met). Return `false` to sleep and
+   * try again.
+   *
+   * Must be a pure function of the run result — NOT a closure that captures
+   * mutable state across ticks (such state cannot survive a durable checkpoint).
+   */
+  until: (result: RunResult) => boolean;
+
+  /**
+   * Optional deadline guard. The monitor loop will stop and return `false` (not
+   * met) when the total elapsed time exceeds this value.
+   * Milliseconds (number) or ISO-8601 duration string (e.g. `'PT24H'`).
+   */
+  maxDuration?: number | string;
+}
 
 /**
  * The live handle returned by `agent.session(id)` / `bureau.session(id)`.
@@ -48,14 +96,26 @@ export interface SessionHandle {
 
   /**
    * Re-attach to the last run IFF it is non-terminal (`status === 'running'`).
-   * Returns the same `AgentRun` handle that is observing the already-running
-   * workflow. Returns `null` when there is no in-flight run to reattach to
-   * (disconnect = keep going; this is NOT "resume from the last message").
+   *
+   * **In-process path (no engine or run is live):** returns the in-process
+   * `AgentRun` handle immediately when a run is currently executing in this
+   * process, otherwise `null`.
+   *
+   * **Durable re-attach path (engine present + last run `status: 'running'` in
+   * the store):** after a crash → restart, the bureau re-creates an engine over
+   * the same store and Weft's `recoverAll()` resumes in-flight workflows on boot.
+   * `recover()` then reads the session's `runs.at(-1)`, derives the `runId`, calls
+   * `engine.resume(runId)` to get the already-running recovered handle, wraps it
+   * in an `AgentRun`, and sets it as the live `currentRun` so subsequent calls
+   * to `recover()` return the same handle without another engine call.
+   *
+   * Returns `null` when there is no in-flight run to reattach to (disconnect =
+   * keep going; this is NOT "resume from the last message").
    *
    * Over HTTP: a client reconnecting after a network drop calls `recover()` to
    * re-subscribe to the in-flight run's event stream.
    */
-  recover(): AgentRun | null;
+  recover(): Promise<AgentRun | null>;
 
   /**
    * Deliberate stop — abort the `generate` `AbortController` IMMEDIATELY (stops the
@@ -105,6 +165,28 @@ export interface SessionHandle {
    */
   query<TResult = unknown>(name: string, input?: unknown): Promise<TResult>;
 
+  /**
+   * Run the agent on a repeating cadence until a predicate is satisfied or a
+   * deadline is reached.
+   *
+   * Each tick:
+   * 1. Executes a full agent run with `options.input` as the prompt.
+   * 2. Evaluates `options.until(runResult)`.
+   * 3. If `true`, the loop exits and this method resolves `true`.
+   * 4. If `false`, sleeps `options.every` milliseconds, then repeats.
+   *
+   * If `options.maxDuration` is set and the total elapsed time exceeds it
+   * before the predicate is satisfied, the loop exits and this method resolves
+   * `false`.
+   *
+   * Emits `session.monitor.tick` on each tick start and `session.monitor.done`
+   * on completion (C3 completeness rule — every state transition emits an event).
+   *
+   * @returns `true` when the condition was met; `false` when the deadline was
+   * reached before the condition was satisfied.
+   */
+  monitor(options: MonitorOptions): Promise<boolean>;
+
   /** Load the persisted session data from the store. */
   getSession(): Promise<AgentSession>;
 
@@ -126,8 +208,16 @@ export interface SessionHandleContext {
   /**
    * The durable Weft engine, present when the bureau has `.persistence()`.
    * When absent, `signal`/`update`/`query` throw `NoDurableEngineError`.
+   * Required alongside `checkpointStore` for the durable `recover()` re-attach
+   * path (D2).
    */
   engine?: AnyRunEngine;
+  /**
+   * The checkpoint store for reading durable run transcripts. Required for the
+   * durable `recover()` re-attach path (D2) when `engine` is present. If absent
+   * while `engine` is set, `recover()` degrades to in-process-only.
+   */
+  checkpointStore?: CheckpointStore;
   /**
    * The agent name, stored on the session record.
    */
@@ -238,7 +328,7 @@ export function createSessionHandle(
   sessionId: string,
   context: SessionHandleContext,
 ): SessionHandle {
-  const { store, engine, agentName, runOptions } = context;
+  const { store, engine, checkpointStore, agentName, runOptions } = context;
   const emitter = context.emitter ?? new TypedEventTarget<OperativeEventMap>();
 
   /**
@@ -334,12 +424,55 @@ export function createSessionHandle(
       return agentRun;
     },
 
-    recover(): AgentRun | null {
-      // Emit immediately with runId=null: recover() is synchronous and we don't
-      // have the derived run id available without an async store lookup. Null is
-      // the documented "pre-recovery" value per the event class contract.
+    async recover(): Promise<AgentRun | null> {
+      // Fast path: a run is live in this process (same-process disconnect/reconnect).
+      if (currentRun !== null) {
+        emitter.dispatchEvent(new SessionRecoverEvent(sessionId, null));
+        return currentRun;
+      }
+
+      // Durable re-attach path (D2): when an engine AND checkpointStore are
+      // present, check whether the session's last run is still `'running'` in the
+      // durable store. On a crash → restart the bureau re-creates the engine over
+      // the SAME store, Weft's `recoverAll()` resumes in-flight workflows on boot,
+      // and `engine.resume(runId)` gives a handle to the already-running recovered
+      // workflow without starting a new one. Wrap it as an `AgentRun` so the
+      // caller can observe the resumed run normally.
+      if (engine && checkpointStore) {
+        const session = await store.load(sessionId);
+        const last = session?.runs[session.runs.length - 1];
+        if (last && last.status === 'running') {
+          const runId = last.runId;
+          try {
+            const recoveredHandle = await engine.resume(runId);
+            const activeRun = reattachDurableActiveRun(
+              { engine, checkpointStore },
+              {
+                runId,
+                handle: recoveredHandle as {
+                  readonly id: string;
+                  result(): Promise<unknown>;
+                },
+              },
+            );
+            const agentRun = createAgentRun(activeRun);
+            currentRun = agentRun;
+            // Clear currentRun when the recovered run settles.
+            void agentRun.result().finally(() => {
+              if (currentRun === agentRun) currentRun = null;
+            });
+            emitter.dispatchEvent(new SessionRecoverEvent(sessionId, runId));
+            return agentRun;
+          } catch {
+            // engine.resume() throws when the run is already terminal or the
+            // engine doesn't have it. Fall through to null — the run is not
+            // recoverable on this engine.
+          }
+        }
+      }
+
       emitter.dispatchEvent(new SessionRecoverEvent(sessionId, null));
-      return currentRun;
+      return null;
     },
 
     async cancel(): Promise<void> {
@@ -450,6 +583,68 @@ export function createSessionHandle(
       }
       emitter.dispatchEvent(new SessionQueryEvent(sessionId, name, input));
       return eng.query(last.runId, name, input) as Promise<TResult>;
+    },
+
+    async monitor(options: MonitorOptions): Promise<boolean> {
+      const { every, input, until, maxDuration } = options;
+      const everyMs = typeof every === 'number' ? every : parseDuration(every);
+      const maxMs =
+        maxDuration !== undefined
+          ? typeof maxDuration === 'number'
+            ? maxDuration
+            : parseDuration(maxDuration)
+          : undefined;
+
+      const startedAt = Date.now();
+      let tick = 0;
+
+      while (true) {
+        // Deadline guard — check before starting a new tick.
+        if (maxMs !== undefined && Date.now() - startedAt >= maxMs) {
+          emitter.dispatchEvent(new SessionMonitorDoneEvent(sessionId, false, tick));
+          return false;
+        }
+
+        // Emit tick-started (met = null — run hasn't completed yet).
+        emitter.dispatchEvent(new SessionMonitorTickEvent(sessionId, tick, null));
+
+        // Each tick is a full agent run.
+        const run = handle.run(input);
+        let result: RunResult;
+        try {
+          result = await run.result();
+        } catch (err) {
+          // A run error is treated as a non-met tick — we emit done(false) and
+          // propagate. The caller should handle this as an error condition.
+          emitter.dispatchEvent(new SessionMonitorDoneEvent(sessionId, false, tick + 1));
+          throw err;
+        }
+
+        // Evaluate the predicate.
+        const met = until(result);
+        tick += 1;
+
+        // Emit tick-completed with the predicate result.
+        emitter.dispatchEvent(new SessionMonitorTickEvent(sessionId, tick - 1, met));
+
+        if (met) {
+          emitter.dispatchEvent(new SessionMonitorDoneEvent(sessionId, true, tick));
+          return true;
+        }
+
+        // Sleep between ticks — respects the maxDuration deadline (don't sleep
+        // past the deadline; wake up early if needed).
+        const elapsed = Date.now() - startedAt;
+        if (maxMs !== undefined && elapsed >= maxMs) {
+          emitter.dispatchEvent(new SessionMonitorDoneEvent(sessionId, false, tick));
+          return false;
+        }
+        const remainingMs = maxMs !== undefined ? maxMs - elapsed : Infinity;
+        const sleepMs = Math.min(everyMs, remainingMs);
+        if (sleepMs > 0) {
+          await new Promise<void>((resolve) => setTimeout(resolve, sleepMs));
+        }
+      }
     },
 
     async getSession(): Promise<AgentSession> {

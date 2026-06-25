@@ -156,6 +156,13 @@ export interface AgentRunWorkflowResult {
    * best-effort.
    */
   schemaValidation?: { success: boolean; error?: string };
+  /**
+   * The note from a `scheduleWakeup` call, when the agent self-scheduled a
+   * wakeup during this run (D6 — self-scheduling tools). Carries the note the
+   * agent attached to the wakeup request so the next run knows why it resumed.
+   * Absent when no wakeup was scheduled.
+   */
+  wakeupNote?: string;
 }
 
 /** Serialize an unknown error to a stable message string for the checkpoint. */
@@ -420,6 +427,22 @@ export function createRunWorkflow(checkpointStore: CheckpointStore) {
           // `next` / `continue` — loop to the next step.
         }
 
+        // === Durable self-wakeup (D6 — scheduleWakeup tool) ===
+        // If the `scheduleWakeup` tool was called during any step, its
+        // duration is stored in `deps.pendingWakeup` (set inside `ctx.memo`).
+        // We read it here — OUTSIDE `ctx.memo`, in a no-yield* region — and
+        // then `yield* ctx.sleep(duration)` to park the workflow until the
+        // timer fires. The note (if any) is carried in the workflow result so
+        // callers can surface it when the run resumes.
+        //
+        // IMPORTANT: `ctx.services` (deps) must be read inside a no-yield*
+        // region (same invariant as the step body). We capture `pendingWakeup`
+        // before the sleep yield, where `ctx.services` is still in scope.
+        const wakeupBeforeSleep = runDepsFrom(ctx.services).pendingWakeup;
+        if (wakeupBeforeSleep !== undefined) {
+          yield* ctx.sleep(wakeupBeforeSleep.duration);
+        }
+
         ctx.setAttribute('runId', runId);
 
         return {
@@ -430,6 +453,7 @@ export function createRunWorkflow(checkpointStore: CheckpointStore) {
           ...(errorMessage !== undefined ? { errorMessage } : {}),
           ...(abortReason !== undefined ? { abortReason } : {}),
           ...(schemaValidation !== undefined ? { schemaValidation } : {}),
+          ...(wakeupBeforeSleep?.note !== undefined ? { wakeupNote: wakeupBeforeSleep.note } : {}),
         } satisfies AgentRunWorkflowResult;
       })
   );

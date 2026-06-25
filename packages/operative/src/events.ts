@@ -650,6 +650,89 @@ export class SessionQueryEvent extends Event {
   }
 }
 
+/**
+ * Emitted when a `session.monitor()` loop ticks (starts a new poll run).
+ * Carries the tick number (0-based) and whether the predicate was satisfied.
+ * The `met` field is `null` on the tick-started emission (before the run
+ * completes) and `true` / `false` after the predicate is evaluated.
+ */
+export class SessionMonitorTickEvent extends Event {
+  static readonly type = 'session.monitor.tick' as const;
+  readonly sessionId: string;
+  readonly tick: number;
+  /** Whether the `until` predicate was satisfied. `null` before the run finishes. */
+  readonly met: boolean | null;
+  constructor(sessionId: string, tick: number, met: boolean | null) {
+    super(SessionMonitorTickEvent.type);
+    this.sessionId = sessionId;
+    this.tick = tick;
+    this.met = met;
+  }
+}
+
+/**
+ * Emitted when a `session.monitor()` loop completes — either because the
+ * predicate was satisfied or the `maxDuration` deadline was reached.
+ */
+export class SessionMonitorDoneEvent extends Event {
+  static readonly type = 'session.monitor.done' as const;
+  readonly sessionId: string;
+  /** Whether the loop exited because the `until` predicate was satisfied. */
+  readonly met: boolean;
+  /** Total number of ticks executed (including the final one). */
+  readonly ticks: number;
+  constructor(sessionId: string, met: boolean, ticks: number) {
+    super(SessionMonitorDoneEvent.type);
+    this.sessionId = sessionId;
+    this.met = met;
+    this.ticks = ticks;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Scheduling events (D6 — Tier-1 scheduling completeness rule).
+// Every state transition emits an event (C3 / invariant #2 rule).
+// ---------------------------------------------------------------------------
+
+/**
+ * Emitted when a durable agent schedule is registered via `bureau.schedule()`
+ * or the `scheduleSelf` tool.
+ */
+export class AgentScheduledEvent extends Event {
+  static readonly type = 'schedule.created' as const;
+  readonly agentName: string;
+  readonly scheduleId: string;
+  readonly spec: { cron?: string; every?: string | number };
+  readonly sessionId?: string;
+  constructor(data: {
+    agentName: string;
+    scheduleId: string;
+    spec: { cron?: string; every?: string | number };
+    sessionId?: string;
+  }) {
+    super(AgentScheduledEvent.type);
+    this.agentName = data.agentName;
+    this.scheduleId = data.scheduleId;
+    this.spec = data.spec;
+    this.sessionId = data.sessionId;
+  }
+}
+
+/**
+ * Emitted when a running agent calls `scheduleWakeup({in, note})` to park the
+ * current durable run and resume after a delay.
+ */
+export class WakeupScheduledEvent extends Event {
+  static readonly type = 'schedule.wakeup' as const;
+  readonly duration: number | string;
+  readonly note?: string;
+  constructor(duration: number | string, note?: string) {
+    super(WakeupScheduledEvent.type);
+    this.duration = duration;
+    this.note = note;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Event map: maps event type string to the Event subclass instance
 // ---------------------------------------------------------------------------
@@ -699,6 +782,12 @@ export interface OperativeEventMap extends EventMap {
   [SessionSignalEvent.type]: SessionSignalEvent;
   [SessionUpdateEvent.type]: SessionUpdateEvent;
   [SessionQueryEvent.type]: SessionQueryEvent;
+  // Scheduling events (D6 completeness rule)
+  [AgentScheduledEvent.type]: AgentScheduledEvent;
+  [WakeupScheduledEvent.type]: WakeupScheduledEvent;
+  // session.monitor loop events (D7)
+  [SessionMonitorTickEvent.type]: SessionMonitorTickEvent;
+  [SessionMonitorDoneEvent.type]: SessionMonitorDoneEvent;
 }
 
 export type OperativeEventType = keyof OperativeEventMap;

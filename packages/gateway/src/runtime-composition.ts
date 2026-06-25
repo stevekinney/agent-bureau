@@ -1,5 +1,5 @@
 import type { WorkflowServicesResolution, WorkflowServicesResolverInfo } from '@lostgradient/weft';
-import type { Storage, TextValueStore } from '@lostgradient/weft/storage';
+import type { Storage, StorageConfiguration, TextValueStore } from '@lostgradient/weft/storage';
 import { resolveStorage, textValueStore } from '@lostgradient/weft/storage';
 import {
   combineToolboxes,
@@ -64,26 +64,119 @@ import {
   createRoutingGenerate,
   createStepBasedStrategy,
 } from 'operative/providers';
-import type { SkillSession } from 'skills';
-import { createSkillSession, escapeXml } from 'skills';
+import type { SkillProvider as SkillsPackageProvider, SkillSession } from 'skills';
+import {
+  createSkillCatalogHook,
+  createSkillSession,
+  createStorageSkillProvider,
+  escapeXml,
+} from 'skills';
 import { z } from 'zod';
 
 import type {
   BureauOptions,
   CacheConfiguration,
   CreateRunRequest,
+  PersistenceOptions,
   ProviderConfiguration,
   RedactedProviderConfiguration,
   RedactedProviderRouteConfiguration,
   RoutingConfiguration,
   SkillCatalogEntry,
   SkillProvider,
-  ToolPolicy,
   ToolSummary,
 } from './types';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Toolbox generic variance; gateway never inspects the type parameter
 type GatewayToolbox = Toolbox<any>;
+
+/**
+ * Discriminate a {@link PersistenceOptions} object from a bare
+ * `StorageConfiguration` or `TextValueStore`. A `PersistenceOptions` is
+ * identified by the presence of a `store` field that is itself a
+ * `StorageConfiguration` object (has a `type` string discriminant).
+ */
+function isPersistenceOptions(value: BureauOptions['persistence']): value is PersistenceOptions {
+  if (typeof value !== 'object' || value === null) return false;
+  const candidate = value as Record<string, unknown>;
+  return (
+    'store' in candidate &&
+    typeof candidate['store'] === 'object' &&
+    candidate['store'] !== null &&
+    'type' in (candidate['store'] as Record<string, unknown>)
+  );
+}
+
+/**
+ * Discriminate a `StorageConfiguration` object from a `TextValueStore`.
+ * `StorageConfiguration` always carries a `type` string discriminant; a
+ * `TextValueStore` has callable `get`/`set` methods instead.
+ */
+function isStorageConfiguration(
+  value: StorageConfiguration | TextValueStore,
+): value is StorageConfiguration {
+  const candidate = value as Record<string, unknown>;
+  return typeof candidate['type'] === 'string';
+}
+
+/**
+ * Resolve the persistence options into a normalized `StorageConfiguration` (or
+ * `undefined`) and any operational knobs for the durable engine.
+ *
+ * - `PersistenceOptions` → extracts `store` plus `history`/`observability`/`onLog`.
+ * - Bare `StorageConfiguration` → `store` only, no extra knobs.
+ * - `TextValueStore` → KV-only, no durable storage config.
+ * - `undefined` → no persistence.
+ */
+function resolvePersistenceOptions(options: BureauOptions): {
+  storageConfig: StorageConfiguration | undefined;
+  kvStore: TextValueStore | undefined;
+  persistenceHistory: PersistenceOptions['history'];
+  persistenceObservability: PersistenceOptions['observability'];
+  persistenceOnLog: PersistenceOptions['onLog'];
+} {
+  const { persistence } = options;
+
+  if (persistence === undefined) {
+    return {
+      storageConfig: undefined,
+      kvStore: undefined,
+      persistenceHistory: undefined,
+      persistenceObservability: undefined,
+      persistenceOnLog: undefined,
+    };
+  }
+
+  if (isPersistenceOptions(persistence)) {
+    return {
+      storageConfig: persistence.store,
+      kvStore: undefined,
+      persistenceHistory: persistence.history,
+      persistenceObservability: persistence.observability,
+      persistenceOnLog: persistence.onLog,
+    };
+  }
+
+  if (isStorageConfiguration(persistence)) {
+    // Bare StorageConfiguration: same as { store: persistence }
+    return {
+      storageConfig: persistence,
+      kvStore: undefined,
+      persistenceHistory: undefined,
+      persistenceObservability: undefined,
+      persistenceOnLog: undefined,
+    };
+  }
+
+  // TextValueStore: KV-only, no durable storage
+  return {
+    storageConfig: undefined,
+    kvStore: persistence,
+    persistenceHistory: undefined,
+    persistenceObservability: undefined,
+    persistenceOnLog: undefined,
+  };
+}
 
 function isMemoryInstance(value: CreateMemoryOptions | Memory): value is Memory {
   return typeof (value as Memory).remember === 'function';
@@ -330,48 +423,6 @@ const defaultRuntimeCompositionDependencies: RuntimeCompositionDependencies = {
   resolveProviderGenerate,
 };
 
-async function buildSkillCatalog(
-  provider: SkillProvider,
-  skillPolicy: ToolPolicy | undefined,
-): Promise<string | undefined> {
-  let entries = await provider.listSkills();
-
-  const enabledChecks = await Promise.all(
-    entries.map(async (entry) => ({
-      entry,
-      enabled: await provider.isEnabled(entry.name),
-    })),
-  );
-  entries = enabledChecks.filter((entry) => entry.enabled).map((entry) => entry.entry);
-
-  if (skillPolicy?.allowList) {
-    const allowed = new Set(skillPolicy.allowList);
-    entries = entries.filter((entry) => allowed.has(entry.name));
-  }
-
-  if (skillPolicy?.denyList) {
-    const denied = new Set(skillPolicy.denyList);
-    entries = entries.filter((entry) => !denied.has(entry.name));
-  }
-
-  if (entries.length === 0) {
-    return undefined;
-  }
-
-  const skillElements = entries
-    .map(
-      (entry: SkillCatalogEntry) =>
-        `<skill name="${escapeXml(entry.name)}">${escapeXml(entry.description)}</skill>`,
-    )
-    .join('\n');
-
-  return `<available_skills>
-You have the following skills available. Use the activate_skill tool to load a skill's full instructions.
-
-${skillElements}
-</available_skills>`;
-}
-
 function createSkillManagementToolbox(
   provider: SkillProvider,
   session: SkillSession,
@@ -588,53 +639,62 @@ export async function createRuntimeComposition(
   // bureau's reattach loop consumes — see RuntimeComposition.pendingRecoveryEmitters.
   const pendingRecoveryEmitters = new Map<string, PendingRecoveryEvents>();
 
-  let kv: TextValueStore | undefined = options.persistence;
+  // Resolve the `persistence` option into its components. The three forms are:
+  // - PersistenceOptions { store, history?, observability?, onLog? }
+  // - Bare StorageConfiguration (shorthand for { store: config })
+  // - TextValueStore (KV-only, no durable engine)
+  // The legacy `storage` field is still accepted alongside the new forms.
+  const {
+    storageConfig: persistenceStorageConfig,
+    kvStore: persistenceKvStore,
+    persistenceHistory,
+    persistenceObservability,
+    persistenceOnLog,
+  } = resolvePersistenceOptions(options);
+
+  // The effective StorageConfiguration to resolve: prefer the new `persistence`
+  // form over the legacy `storage` field.
+  const effectiveStorageConfig = persistenceStorageConfig ?? options.storage;
+
+  let kv: TextValueStore | undefined = persistenceKvStore;
   // Keep the raw Storage so the durable engine can share the exact backend with
   // the text-value KV view (Weft requires one engine per durable store).
   let durableStorage: Storage | undefined;
-  if (!kv && options.storage) {
-    durableStorage = await resolveStorage(options.storage);
+  if (!kv && effectiveStorageConfig) {
+    durableStorage = await resolveStorage(effectiveStorageConfig);
     kv = textValueStore(durableStorage, { disposeUnderlyingStorage: false });
   }
 
+  // Merge operational knobs from the PersistenceOptions form with the legacy
+  // top-level fields. PersistenceOptions takes precedence when both are set.
+  const effectiveObservability = persistenceObservability ?? options.observability;
+  const effectiveOnLog = persistenceOnLog ?? options.onLog;
+
   // Durable execution is ON BY DEFAULT whenever a PERSISTENT storage backend is
-  // configured AND no custom `persistence` shadows it — a normal `createRun()`
-  // that crashes resumes from its last checkpoint with no opt-in. The default
-  // follows persistence because that is the only place resume is real: `memory`
-  // storage loses its checkpoints with the process, so default-on there would be
-  // pure overhead with zero recovery. The `persistence === undefined` guard keeps
-  // `wantsDurable` ⟺ buildable: a custom `persistence` shadows `storage` (the
-  // block above is skipped, so `durableStorage` is never resolved), and the
-  // engine and session store cannot then share one backend — so the honest
-  // default there is OFF, not a silently-wanted-but-unbuilt engine. The explicit
-  // `durableExecution` flag overrides the default either way — `true` forces the
-  // engine on even for `memory` (so durable behavior is testable locally),
-  // `false` forces it off even for sqlite/lmdb.
+  // configured AND no custom KV-only `persistence` (TextValueStore) shadows it.
+  // The default follows persistence because that is the only place resume is real:
+  // `memory` storage loses its checkpoints with the process, so default-on there
+  // would be pure overhead with zero recovery. The explicit `durableExecution`
+  // flag overrides the default either way.
+  const hasKvOnlyPersistence = persistenceKvStore !== undefined;
   const wantsDurable =
     options.durableExecution ??
-    (options.storage !== undefined &&
-      options.storage.type !== 'memory' &&
-      options.persistence === undefined);
+    (effectiveStorageConfig !== undefined &&
+      effectiveStorageConfig.type !== 'memory' &&
+      !hasKvOnlyPersistence);
 
-  // A custom `persistence` value shadows `storage` entirely (the
-  // `if (!kv && options.storage)` block above is skipped), so no raw `Storage`
-  // is resolved and a durable engine cannot be built on the same backend the
-  // sessions live on. Durable recovery REQUIRES the checkpoint store and the
-  // session store to share one durable backend — the boot reconstructor scans
-  // the SESSION store for `running` runs, so checkpoints in a separate backend
-  // would never be resumed. Therefore `durableExecution: true` + a custom
-  // `persistence` is contradictory: honor it silently and we ship an engine
-  // that looks durable but can't recover. Fail loud at composition instead.
-  // (Flag UNSET + `persistence` is fine — it falls to the documented
-  // default-off, since there was no explicit request to honor.)
-  if (options.durableExecution === true && options.persistence !== undefined) {
+  // A KV-only `persistence` (TextValueStore) value means no raw `Storage` was
+  // resolved and a durable engine cannot be built. Fail loud if `durableExecution:
+  // true` is requested — honor it silently and we ship an engine that looks
+  // durable but can't recover. (Flag UNSET + TextValueStore is the documented
+  // KV-only path — sessions only, no durability.)
+  if (options.durableExecution === true && hasKvOnlyPersistence) {
     throw new Error(
-      'durableExecution: true is incompatible with a custom `persistence` value. ' +
+      'durableExecution: true is incompatible with a TextValueStore `persistence` value. ' +
         'A durable engine must share its backend with the session store, but ' +
-        '`persistence` shadows `storage` — so the engine and sessions would live ' +
-        'on different backends and a recovered run could never be found. Provide ' +
-        '`storage` (sqlite/lmdb) WITHOUT `persistence` to get durable execution, ' +
-        'or drop `durableExecution: true` to use the custom persistence layer ' +
+        'a TextValueStore cannot back a Weft engine. Provide `persistence` as a ' +
+        'StorageConfiguration or PersistenceOptions to get durable execution, ' +
+        'or drop `durableExecution: true` to use the KV-only persistence layer ' +
         'with the in-memory run loop.',
     );
   }
@@ -670,12 +730,14 @@ export async function createRuntimeComposition(
       recover: false,
       startScheduler: true,
       resolveWorkflowServices: resolveRunServices,
-      ...(options.observability !== undefined ? { observability: options.observability } : {}),
-      ...(options.onLog ? { onLog: options.onLog } : {}),
+      ...(effectiveObservability !== undefined ? { observability: effectiveObservability } : {}),
+      ...(effectiveOnLog ? { onLog: effectiveOnLog } : {}),
       // durableGuardrails is a Pick of these exact CreateRunEngineOptions fields, so
       // it spreads straight through; createRunEngine guards each one internally, so
       // passing `undefined` members is harmless.
       ...options.durableGuardrails,
+      // history from PersistenceOptions takes precedence over durableGuardrails.history
+      ...(persistenceHistory !== undefined ? { history: persistenceHistory } : {}),
     });
   }
 
@@ -684,6 +746,20 @@ export async function createRuntimeComposition(
     memory = isMemoryInstance(options.memory) ? options.memory : createMemory(options.memory);
     await memory.init();
   }
+
+  // Resolve the SkillProvider from the bureau's persistence store when no
+  // explicit provider is supplied — same store-sharing pattern as memory.
+  // `createStorageSkillProvider` wraps the KV view with the `skill:` prefix
+  // namespace (disjoint from Weft's reserved prefixes and memory's
+  // `app:agent-bureau:memory:v1:` prefix — asserted disjoint by test).
+  //
+  // The resolved provider is typed as `SkillsPackageProvider` (the full skills
+  // package interface with `saveResource`/`setEnabled`) so it is accepted by
+  // `createSkillCatalogHook`, which expects the full interface. The gateway's
+  // local `SkillProvider` type is a structural subset and is compatible.
+  const resolvedSkillProvider: SkillsPackageProvider | undefined =
+    (options.skills?.provider as SkillsPackageProvider | undefined) ??
+    (options.skills !== undefined && kv !== undefined ? createStorageSkillProvider(kv) : undefined);
 
   const sessionStore = kv ? createSessionStore(kv) : undefined;
   const baseToolbox: GatewayToolbox = options.toolbox ?? createToolbox([], { context: {} });
@@ -852,18 +928,19 @@ export async function createRuntimeComposition(
       onStep.push(createMemoryPersistHook(memory, request.sessionId, request.runId));
     }
 
-    if (options.skills) {
+    if (options.skills && resolvedSkillProvider) {
       const skillSession = createSkillSession();
 
+      // Inject the skill catalog on step 0 — same hook pattern as identity.
+      // `createSkillCatalogHook` from the `skills` package handles enabled-status
+      // filtering, skill policy (allow/deny list), and graceful degradation on
+      // provider errors. The hook caches the catalog for the run (one fetch per run).
+      const catalogHook = createSkillCatalogHook({
+        provider: resolvedSkillProvider,
+        skillPolicy: options.skills.skillPolicy,
+      });
       prepareStep.push(async (context) => {
-        if (context.step !== 0) {
-          return;
-        }
-
-        const catalog = await buildSkillCatalog(
-          options.skills!.provider,
-          options.skills!.skillPolicy,
-        );
+        const catalog = await catalogHook.prepareStep(context);
         if (catalog) {
           context.conversation.appendSystemMessage(catalog, {
             _skillCatalogInjected: true,
@@ -872,7 +949,7 @@ export async function createRuntimeComposition(
       });
 
       if (options.skills.includeTools !== false) {
-        const skillToolbox = createSkillManagementToolbox(options.skills.provider, skillSession);
+        const skillToolbox = createSkillManagementToolbox(resolvedSkillProvider, skillSession);
         toolbox = combineToolboxes(toolbox, skillToolbox);
       }
     }

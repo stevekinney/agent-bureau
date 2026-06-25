@@ -2,6 +2,7 @@ import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import type { StorageConfiguration } from '@lostgradient/weft/storage';
 import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
 import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
 import { createToolbox } from 'armorer';
@@ -14,6 +15,7 @@ import {
   SCHEDULER_ORIGIN_TAG,
   startDurableRunResult,
 } from 'operative/durable';
+import type { SkillProvider } from 'skills';
 
 import { createRuntimeComposition } from './runtime-composition';
 import type { ProviderConfiguration } from './types';
@@ -322,9 +324,7 @@ describe('createRuntimeComposition durable execution', () => {
     );
 
     expect(error).toBeInstanceOf(Error);
-    expect((error as Error).message).toMatch(
-      /durableExecution: true is incompatible with a custom `persistence`/,
-    );
+    expect((error as Error).message).toMatch(/durableExecution: true is incompatible/);
   });
 
   it('stays OFF (no engine) for sqlite + a custom persistence when durableExecution is unset', async () => {
@@ -455,5 +455,352 @@ describe('createRuntimeComposition durable execution', () => {
       await rm(`${databasePath}-wal`, { force: true });
       await rm(`${databasePath}-shm`, { force: true });
     }
+  });
+});
+
+describe('createRuntimeComposition PersistenceOptions form', () => {
+  // D1 acceptance: the options-object form { store, history?, observability?, onLog? }
+  // builds the durable engine with the same result as the legacy storage/durableExecution form.
+
+  it('builds a durable engine from PersistenceOptions with a memory store', async () => {
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'x', toolCalls: [] }),
+      persistence: { store: { type: 'memory' } },
+      // PersistenceOptions with a memory store: durableExecution defaults to OFF
+      // for memory (checkpoints are lost with the process), so explicitly enable.
+      durableExecution: true,
+    });
+    try {
+      expect(runtime.durable).toBeDefined();
+    } finally {
+      runtime.durable?.engine[Symbol.dispose]?.();
+    }
+  });
+
+  it('builds a durable engine from a bare StorageConfiguration in persistence', async () => {
+    // Bare StorageConfiguration is shorthand for PersistenceOptions { store: config }.
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'x', toolCalls: [] }),
+      persistence: { type: 'memory' } as StorageConfiguration,
+      durableExecution: true,
+    });
+    try {
+      expect(runtime.durable).toBeDefined();
+    } finally {
+      runtime.durable?.engine[Symbol.dispose]?.();
+    }
+  });
+
+  it('threads history from PersistenceOptions into the durable engine', async () => {
+    // D1: history is exposed in the options-object form alongside store.
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'x', toolCalls: [] }),
+      persistence: {
+        store: { type: 'memory' },
+        history: { maxEvents: 10_000 },
+      },
+      durableExecution: true,
+    });
+    try {
+      expect(runtime.durable).toBeDefined();
+    } finally {
+      runtime.durable?.engine[Symbol.dispose]?.();
+    }
+  });
+
+  it('threads observability from PersistenceOptions into the durable engine', async () => {
+    // D1: observability is exposed in the options-object form alongside store.
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'x', toolCalls: [] }),
+      persistence: {
+        store: { type: 'memory' },
+        observability: true,
+      },
+      durableExecution: true,
+    });
+    try {
+      expect(runtime.durable).toBeDefined();
+      expect(runtime.durable?.observability).toBeDefined();
+      expect(typeof runtime.durable?.observability?.metrics.snapshot).toBe('function');
+    } finally {
+      runtime.durable?.observability?.dispose();
+      runtime.durable?.engine[Symbol.dispose]?.();
+    }
+  });
+
+  it('threads onLog from PersistenceOptions into the durable engine', async () => {
+    // D1: onLog is exposed in the options-object form alongside store.
+    const logRecords: unknown[] = [];
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'x', toolCalls: [] }),
+      persistence: {
+        store: { type: 'memory' },
+        onLog: (record) => logRecords.push(record),
+      },
+      durableExecution: true,
+    });
+    try {
+      expect(runtime.durable).toBeDefined();
+      // The onLog wiring is accepted without error; actual log records only appear
+      // when a workflow emits ctx.log() calls — not verified here.
+    } finally {
+      runtime.durable?.engine[Symbol.dispose]?.();
+    }
+  });
+
+  it('PersistenceOptions observability takes precedence over top-level observability', async () => {
+    // When both PersistenceOptions.observability and BureauOptions.observability are
+    // set, PersistenceOptions wins (it co-locates the knob with the store).
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'x', toolCalls: [] }),
+      persistence: {
+        store: { type: 'memory' },
+        observability: true,
+      },
+      observability: false, // should be overridden by PersistenceOptions.observability
+      durableExecution: true,
+    });
+    try {
+      expect(runtime.durable).toBeDefined();
+      // PersistenceOptions.observability: true wins → observability handle is present.
+      expect(runtime.durable?.observability).toBeDefined();
+    } finally {
+      runtime.durable?.observability?.dispose();
+      runtime.durable?.engine[Symbol.dispose]?.();
+    }
+  });
+
+  it('throws when durableExecution: true is combined with a TextValueStore persistence', async () => {
+    // A TextValueStore cannot back a Weft engine (needs a raw Storage for
+    // checkpointing). Honoring the contradiction silently would ship an engine
+    // that looks durable but can never recover.
+    const error = await createRuntimeComposition({
+      generate: async () => ({ content: 'x', toolCalls: [] }),
+      durableExecution: true,
+      persistence: textValueStore(new MemoryStorage()),
+    }).then(
+      () => undefined,
+      (rejection: unknown) => rejection,
+    );
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toMatch(/durableExecution: true is incompatible/);
+  });
+
+  it('creates a KV session store from PersistenceOptions store', async () => {
+    // When persistence is a PersistenceOptions, a TextValueStore KV layer is built
+    // over the raw Storage, enabling session persistence.
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'x', toolCalls: [] }),
+      persistence: { store: { type: 'memory' } },
+      durableExecution: true,
+    });
+    try {
+      // The KV view is available for session/cache use.
+      expect(runtime.kv).toBeDefined();
+      // The session store is built over the KV view.
+      expect(runtime.sessionStore).toBeDefined();
+    } finally {
+      runtime.durable?.engine[Symbol.dispose]?.();
+    }
+  });
+});
+
+// ── D4: Skills as an inherited bureau capability ─────────────────────────────
+//
+// These tests cover the catalog-injection hook wired in createRunRuntime:
+//  • explicit provider → catalog injected as a system message on step 0
+//  • no provider + no storage → skills wiring skipped (graceful degradation)
+//  • no provider + storage present → storage-backed provider auto-constructed
+
+/** Extract the text content from a message's content block (string or multi-modal array). */
+function extractMessageText(
+  content: string | ReadonlyArray<{ type?: string; text?: string }>,
+): string {
+  if (typeof content === 'string') return content;
+  return content.map((block) => block.text ?? '').join('');
+}
+
+function createMockSkillProvider(
+  skills: Array<{ name: string; description: string }>,
+): SkillProvider {
+  return {
+    async listSkills() {
+      return skills;
+    },
+    async isEnabled() {
+      return true;
+    },
+    async loadSkill(name) {
+      const skill = skills.find((s) => s.name === name);
+      if (!skill) return undefined;
+      return {
+        metadata: { name: skill.name, description: skill.description },
+        body: `# ${skill.name}\n${skill.description}`,
+      };
+    },
+    async saveSkill() {},
+    async deleteSkill() {},
+    async listResources() {
+      return [];
+    },
+    async loadResource() {
+      return undefined;
+    },
+    async saveResource() {},
+    async setEnabled() {},
+  };
+}
+
+describe('D4: skills catalog injection', () => {
+  it('injects the skill catalog as a system message on step 0 when a provider is given', async () => {
+    const provider = createMockSkillProvider([
+      { name: 'research', description: 'Deep research on any topic' },
+    ]);
+
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'ok', toolCalls: [] }),
+      toolbox: createToolbox([], { context: {} }),
+      skills: { provider },
+    });
+
+    const runRuntime = await runtime.createRunRuntime({
+      message: 'Hello',
+      sessionId: 'skills-step0-session',
+    });
+
+    const conversation = new Conversation();
+    conversation.appendUserMessage('Hello');
+
+    // Fire each prepareStep hook at step 0 with the shared conversation.
+    for (const hook of runRuntime.prepareStep) {
+      await hook({ step: 0, conversation });
+    }
+
+    const systemMessages = conversation
+      .getMessages()
+      .filter((m) => m.role === 'system')
+      .map((m) => extractMessageText(m.content));
+
+    const catalogMessage = systemMessages.find((text) => text.includes('<available_skills>'));
+    expect(catalogMessage).toBeDefined();
+    expect(catalogMessage).toContain('research');
+    expect(catalogMessage).toContain('Deep research on any topic');
+  });
+
+  it('does not inject the skill catalog on steps after step 0', async () => {
+    const provider = createMockSkillProvider([{ name: 'research', description: 'Deep research' }]);
+
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'ok', toolCalls: [] }),
+      toolbox: createToolbox([], { context: {} }),
+      skills: { provider },
+    });
+
+    const runRuntime = await runtime.createRunRuntime({
+      message: 'Hello',
+      sessionId: 'skills-step1-session',
+    });
+
+    const conversation = new Conversation();
+    conversation.appendUserMessage('Hello');
+
+    // Fire at step 1 — catalog must NOT be injected.
+    for (const hook of runRuntime.prepareStep) {
+      await hook({ step: 1, conversation });
+    }
+
+    const systemMessages = conversation.getMessages().filter((m) => m.role === 'system');
+
+    const hasCatalog = systemMessages.some((m) =>
+      extractMessageText(m.content).includes('<available_skills>'),
+    );
+
+    expect(hasCatalog).toBe(false);
+  });
+
+  it('skips skills wiring when no provider and no storage backend is configured', async () => {
+    // No explicit provider + no storage → resolvedSkillProvider is undefined →
+    // no catalog hook is pushed → prepareStep array has no skill hook.
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'ok', toolCalls: [] }),
+      toolbox: createToolbox([], { context: {} }),
+      // options.skills with no provider and no storage → graceful skip
+      skills: {},
+    });
+
+    const runRuntime = await runtime.createRunRuntime({
+      message: 'Hello',
+      sessionId: 'no-skills-session',
+    });
+
+    const conversation = new Conversation();
+    conversation.appendUserMessage('Hello');
+
+    for (const hook of runRuntime.prepareStep) {
+      await hook({ step: 0, conversation });
+    }
+
+    const hasCatalog = conversation
+      .getMessages()
+      .filter((m) => m.role === 'system')
+      .some((m) => extractMessageText(m.content).includes('<available_skills>'));
+
+    expect(hasCatalog).toBe(false);
+  });
+
+  it('auto-constructs a storage-backed skill provider when no explicit provider is given but storage is configured', async () => {
+    // When options.skills has no provider but the bureau has a storage backend,
+    // createStorageSkillProvider(kv) is constructed automatically. Saving a skill
+    // to the same storage and then triggering the catalog hook must return it.
+    const kv = textValueStore(new MemoryStorage());
+
+    // Pre-seed a skill into the storage using the same key scheme the storage
+    // provider writes — we write raw KV entries to avoid coupling to the provider
+    // factory here. The skill-catalog hook reads 'skill:<name>:metadata' and
+    // 'skill:<name>:enabled' keys.
+    await kv.set(
+      'skill:stored-skill:metadata',
+      JSON.stringify({
+        name: 'stored-skill',
+        description: 'A skill seeded directly into KV',
+        version: '1.0.0',
+        tags: [],
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      }),
+    );
+    await kv.set('skill:stored-skill:enabled', 'true');
+
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'ok', toolCalls: [] }),
+      toolbox: createToolbox([], { context: {} }),
+      // No explicit provider — auto-construction should kick in.
+      skills: {},
+      // Provide the pre-seeded KV store as the persistence backend.
+      persistence: kv,
+    });
+
+    const runRuntime = await runtime.createRunRuntime({
+      message: 'Hello',
+      sessionId: 'auto-storage-skills-session',
+    });
+
+    const conversation = new Conversation();
+    conversation.appendUserMessage('Hello');
+
+    for (const hook of runRuntime.prepareStep) {
+      await hook({ step: 0, conversation });
+    }
+
+    const systemMessages = conversation
+      .getMessages()
+      .filter((m) => m.role === 'system')
+      .map((m) => extractMessageText(m.content));
+
+    const catalogMessage = systemMessages.find((text) => text.includes('<available_skills>'));
+    expect(catalogMessage).toBeDefined();
+    expect(catalogMessage).toContain('stored-skill');
+    expect(catalogMessage).toContain('A skill seeded directly into KV');
   });
 });

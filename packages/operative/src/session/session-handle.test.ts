@@ -1,16 +1,22 @@
+import { activity, workflow } from '@lostgradient/weft';
 import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
+import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
 import type { Toolbox } from 'armorer';
 import { createToolbox } from 'armorer';
-import { describe, expect, it, mock } from 'bun:test';
+import { afterEach, describe, expect, it, mock } from 'bun:test';
 import { createConversationHistory } from 'conversationalist';
 import { TypedEventTarget } from 'lifecycle';
 
 import { createAgentSession } from '../agent-session';
+import { createCheckpointStore } from '../durable/checkpoint-store';
 import type { AnyRunEngine } from '../durable/create-run-engine';
+import { createRunEngine } from '../durable/create-run-engine';
 import type {
   OperativeEventMap,
   SessionCancelEvent,
   SessionForkEvent,
+  SessionMonitorDoneEvent,
+  SessionMonitorTickEvent,
   SessionQueryEvent,
   SessionRecoverEvent,
   SessionSignalEvent,
@@ -25,6 +31,12 @@ import {
   NoDurableEngineError,
   NoRunningRunError,
 } from './session-handle';
+
+// Drain Weft's deferred inline-launch queue between tests — prevents one test's
+// pending macrotask from interfering with the next under bun test concurrency.
+afterEach(async () => {
+  await yieldToPortableEventLoop();
+});
 
 // ---------------------------------------------------------------------------
 // Shared fixtures
@@ -194,9 +206,9 @@ describe('session.run()', () => {
 // ---------------------------------------------------------------------------
 
 describe('session.recover()', () => {
-  it('returns null when no run is in flight', () => {
+  it('returns null when no run is in flight', async () => {
     const { handle } = createSessionHandleFixture();
-    expect(handle.recover()).toBeNull();
+    expect(await handle.recover()).toBeNull();
   });
 
   it('returns the same AgentRun handle while a run is in progress', async () => {
@@ -220,9 +232,9 @@ describe('session.recover()', () => {
     });
 
     const run = blockingHandle.run('hold on');
-    const recovered = blockingHandle.recover();
+    const recovered = await blockingHandle.recover();
 
-    // The handle is set synchronously in run().
+    // The handle is set synchronously in run(), recovered after one await tick.
     expect(recovered).toBe(run);
 
     // Yield a tick so the run loop starts and resolveGenerate is assigned.
@@ -241,7 +253,7 @@ describe('session.recover()', () => {
     // Allow the `.finally()` callback to clear currentRun.
     await new Promise<void>((resolve) => setTimeout(resolve, 10));
 
-    expect(handle.recover()).toBeNull();
+    expect(await handle.recover()).toBeNull();
   });
 });
 
@@ -283,13 +295,13 @@ describe('session.cancel()', () => {
     await Promise.resolve();
     await Promise.resolve();
 
-    expect(h.recover()).not.toBeNull();
+    expect(await h.recover()).not.toBeNull();
     await h.cancel();
 
     // The abort signal should have fired.
     expect(abortCalled).toBe(true);
     // The handle should be cleared.
-    expect(h.recover()).toBeNull();
+    expect(await h.recover()).toBeNull();
 
     // Allow the run to finish so we don't leave dangling promises.
     resolveGenerate?.();
@@ -838,14 +850,14 @@ describe('session full lifecycle', () => {
     await Promise.resolve();
 
     // A "disconnect" — recover() returns the same handle (keep going).
-    const recovered = h.recover();
+    const recovered = await h.recover();
     expect(recovered).toBe(run);
 
     // A "deliberate stop" — cancel() aborts the run.
     await h.cancel();
 
     // After cancel, recover() returns null.
-    expect(h.recover()).toBeNull();
+    expect(await h.recover()).toBeNull();
 
     // Clean up.
     resolveGenerate?.();
@@ -909,7 +921,7 @@ function collectEvents<K extends keyof OperativeEventMap & string>(
 }
 
 describe('session verb event dispatch (C3 completeness rule)', () => {
-  it('recover() dispatches SessionRecoverEvent on the emitter', () => {
+  it('recover() dispatches SessionRecoverEvent on the emitter', async () => {
     const emitter = new TypedEventTarget<OperativeEventMap>();
     const kv = textValueStore(new MemoryStorage());
     const store = createSessionStore(kv);
@@ -921,7 +933,7 @@ describe('session verb event dispatch (C3 completeness rule)', () => {
     });
 
     const events = collectEvents(emitter, 'session.recover');
-    h.recover();
+    await h.recover();
 
     expect(events).toHaveLength(1);
     const e = events[0] as SessionRecoverEvent;
@@ -1136,5 +1148,528 @@ describe('session verb event dispatch (C3 completeness rule)', () => {
     // The emitter is accessible without injecting one.
     expect(h.emitter).toBeDefined();
     expect(typeof h.emitter.addEventListener).toBe('function');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// D2 — Recovery-on-boot (recoverAll) — ACCEPTANCE (invariant #4)
+//
+// Crash → restart → rebuild bureau with same store → in-flight runs auto-resume
+// from last checkpoint. Step-granular: completed steps are intact, the in-flight
+// step re-runs on reconnect.
+//
+// The probe workflow is a simple one-step counter that uses a durable sleep to
+// park between steps so we can simulate a crash (dispose the first engine) and
+// verify the second engine picks up where the first left off.
+// ---------------------------------------------------------------------------
+
+/**
+ * A trivial workflow that uses a services-backed activity so the run's deps
+ * can be re-provided on recovery. Named `agentRun` to match the registered
+ * workflow type. The workflow returns `{ steps: 1 }` on completion.
+ */
+function makeProbeWorkflow() {
+  const probe = activity({
+    name: 'probe',
+    execute: async () => ({ ok: true }),
+  });
+  return workflow({ name: 'agentRun' })
+    .activities({ probe })
+    .execute(async function* (ctx) {
+      yield* ctx.run('probe', {});
+      return { runId: '', steps: 1, content: 'done', finishReason: 'stop-condition' as const };
+    });
+}
+
+/**
+ * A workflow that parks on a durable sleep so we can dispose the engine
+ * mid-flight and prove recovery picks it up.
+ */
+function makeParkingWorkflow(sleepMs: number) {
+  return workflow({ name: 'agentRun' }).execute(async function* (ctx) {
+    yield* ctx.sleep(sleepMs);
+    return { runId: '', steps: 1, content: 'resumed', finishReason: 'stop-condition' as const };
+  });
+}
+
+describe('D2 — Recovery-on-boot: session.recover() durable re-attach path', () => {
+  it('returns null when engine is present but session has no running run', async () => {
+    const storage = new MemoryStorage();
+    const kv = textValueStore(storage, { disposeUnderlyingStorage: false });
+    const store = createSessionStore(kv);
+    const { engine, checkpointStore } = await createRunEngine({
+      storage,
+      runWorkflow: makeProbeWorkflow(),
+      recover: false,
+    });
+
+    try {
+      const h = createSessionHandle('no-running-run-session', {
+        store,
+        agentName: 'agent',
+        engine,
+        checkpointStore,
+        runOptions: createTestRunOptions(),
+      });
+
+      // No runs at all — recover() returns null.
+      expect(await h.recover()).toBeNull();
+    } finally {
+      engine[Symbol.dispose]();
+    }
+  });
+
+  it('returns null when engine is present but last run status is completed', async () => {
+    const storage = new MemoryStorage();
+    const kv = textValueStore(storage, { disposeUnderlyingStorage: false });
+    const store = createSessionStore(kv);
+    const { engine, checkpointStore } = await createRunEngine({
+      storage,
+      runWorkflow: makeProbeWorkflow(),
+      recover: false,
+    });
+
+    try {
+      // Pre-load a session with a completed run.
+      const session = createAgentSession({
+        agentName: 'agent',
+        conversationHistory: createConversationHistory(),
+        id: 'completed-run-session',
+        runs: [
+          {
+            runId: 'completed-run-session:0',
+            sequence: 0,
+            status: 'completed',
+            startedAt: new Date().toISOString(),
+          },
+        ],
+      });
+      await store.save(session);
+
+      const h = createSessionHandle('completed-run-session', {
+        store,
+        agentName: 'agent',
+        engine,
+        checkpointStore,
+        runOptions: createTestRunOptions(),
+      });
+
+      expect(await h.recover()).toBeNull();
+    } finally {
+      engine[Symbol.dispose]();
+    }
+  });
+
+  it('reattaches to a recovered durable run after simulated restart (invariant #4)', async () => {
+    // D2 ACCEPTANCE: crash → restart → same store → in-flight run auto-resumes.
+    //
+    // Step 1: Start an engine with a parking workflow and launch a run. The run
+    //         parks on ctx.sleep. "Crash" by disposing the first engine without
+    //         awaiting the run's result (the workflow stays in the store as
+    //         in-progress).
+    //
+    // Step 2: Build a SECOND engine over the same storage with recover:false
+    //         (we own recoverAll), call recoverAll(), then call
+    //         session.recover() to prove it re-attaches to the resumed workflow.
+
+    // Use a short sleep so the test does not wall-clock-wait.
+    const SLEEP_MS = 50;
+    const storage = new MemoryStorage();
+    const sessionId = 'd2-recovery-session';
+    const runId = `${sessionId}:0`;
+
+    // --- First "process" ---
+    const firstKv = textValueStore(storage, { disposeUnderlyingStorage: false });
+    const firstStore = createSessionStore(firstKv);
+
+    const { engine: engine1, checkpointStore: cs1 } = await createRunEngine({
+      storage,
+      runWorkflow: makeParkingWorkflow(SLEEP_MS),
+      recover: false,
+      startScheduler: false, // do NOT arm the poller; the run stays parked
+    });
+
+    // Persist the session with status 'running' (simulates what the session
+    // handle does after run() starts).
+    const session = createAgentSession({
+      agentName: 'agent',
+      conversationHistory: createConversationHistory(),
+      id: sessionId,
+      runs: [
+        {
+          runId,
+          sequence: 0,
+          status: 'running',
+          startedAt: new Date().toISOString(),
+        },
+      ],
+    });
+    await firstStore.save(session);
+    // Suppress unused variable — cs1 is needed to satisfy the typed factory.
+    void cs1;
+
+    // Start the durable workflow under the run's id so recovery can find it.
+    const firstHandle = await engine1.start('agentRun', {}, { id: runId });
+    // Drain the inline launch so the run reaches ctx.sleep before disposal.
+    for (let i = 0; i < 10; i++) {
+      await yieldToPortableEventLoop();
+    }
+    // "Crash": dispose the first engine. The workflow stays in storage as
+    // in-progress (parked on its sleep).
+    engine1[Symbol.dispose]();
+    // Silently swallow the EngineDisposedError so we don't leave an unhandled rejection.
+    void firstHandle.result().catch(() => {});
+
+    // --- Second "process" (restart) ---
+    const secondKv = textValueStore(storage, { disposeUnderlyingStorage: false });
+    const secondStore = createSessionStore(secondKv);
+    const secondCheckpointStore = createCheckpointStore(
+      textValueStore(storage, { disposeUnderlyingStorage: false }),
+    );
+
+    // recover:false so we call recoverAll() ourselves (the bureau owns recovery).
+    // startScheduler:true so the parked ctx.sleep timer fires.
+    const { engine: engine2 } = await createRunEngine({
+      storage,
+      runWorkflow: makeParkingWorkflow(SLEEP_MS),
+      recover: false,
+      startScheduler: true,
+    });
+
+    try {
+      // Boot recovery: resume in-flight workflows.
+      const recoveredHandles = await engine2.recoverAll();
+      expect(recoveredHandles.length).toBeGreaterThanOrEqual(1);
+
+      const h = createSessionHandle(sessionId, {
+        store: secondStore,
+        agentName: 'agent',
+        engine: engine2,
+        checkpointStore: secondCheckpointStore,
+        runOptions: createTestRunOptions(),
+      });
+
+      // D2 ACCEPTANCE: session.recover() re-attaches to the recovered workflow.
+      const reattached = await h.recover();
+      expect(reattached).not.toBeNull();
+
+      // The reattached run settles when the parked ctx.sleep fires.
+      const result = await reattached!.result();
+      // finishReason proves the run completed (not errored, not aborted).
+      expect(result.finishReason).toBe('stop-condition');
+    } finally {
+      engine2[Symbol.dispose]();
+    }
+  });
+
+  it('emits SessionRecoverEvent with the runId on a successful durable reattach', async () => {
+    const storage = new MemoryStorage();
+    const sessionId = 'd2-event-session';
+    const runId = `${sessionId}:0`;
+    const SLEEP_MS = 50;
+
+    // Pre-seed the session as 'running' in the store.
+    const kv = textValueStore(storage, { disposeUnderlyingStorage: false });
+    const store = createSessionStore(kv);
+    const session = createAgentSession({
+      agentName: 'agent',
+      conversationHistory: createConversationHistory(),
+      id: sessionId,
+      runs: [{ runId, sequence: 0, status: 'running', startedAt: new Date().toISOString() }],
+    });
+    await store.save(session);
+
+    // Start the first engine + park a run.
+    const { engine: engine1 } = await createRunEngine({
+      storage,
+      runWorkflow: makeParkingWorkflow(SLEEP_MS),
+      recover: false,
+      startScheduler: false,
+    });
+    const firstHandle = await engine1.start('agentRun', {}, { id: runId });
+    for (let i = 0; i < 10; i++) await yieldToPortableEventLoop();
+    engine1[Symbol.dispose]();
+    void firstHandle.result().catch(() => {});
+
+    // Restart: second engine, recover, build the session handle.
+    const kv2 = textValueStore(storage, { disposeUnderlyingStorage: false });
+    const store2 = createSessionStore(kv2);
+    const cs2 = createCheckpointStore(textValueStore(storage, { disposeUnderlyingStorage: false }));
+    const { engine: engine2 } = await createRunEngine({
+      storage,
+      runWorkflow: makeParkingWorkflow(SLEEP_MS),
+      recover: false,
+      startScheduler: true,
+    });
+
+    try {
+      await engine2.recoverAll();
+
+      const emitter = new TypedEventTarget<OperativeEventMap>();
+      const recoverEvents: SessionRecoverEvent[] = [];
+      emitter.addEventListener('session.recover', (e) => {
+        recoverEvents.push(e);
+      });
+
+      const h = createSessionHandle(sessionId, {
+        store: store2,
+        agentName: 'agent',
+        engine: engine2,
+        checkpointStore: cs2,
+        emitter,
+        runOptions: createTestRunOptions(),
+      });
+
+      const reattached = await h.recover();
+      expect(reattached).not.toBeNull();
+
+      // The event carries the actual runId, not null.
+      expect(recoverEvents).toHaveLength(1);
+      expect(recoverEvents[0]!.sessionId).toBe(sessionId);
+      expect(recoverEvents[0]!.runId).toBe(runId);
+
+      // Let the recovered run finish so no dangling promises.
+      await reattached!.result();
+    } finally {
+      engine2[Symbol.dispose]();
+    }
+  });
+
+  it('returns null (gracefully) when engine.resume() throws for an unknown run', async () => {
+    const storage = new MemoryStorage();
+    const kv = textValueStore(storage, { disposeUnderlyingStorage: false });
+    const store = createSessionStore(kv);
+
+    // Pre-seed a session with a 'running' run that has NO corresponding workflow
+    // in the engine (simulate a run that was never actually started durably).
+    const sessionId = 'd2-unknown-run-session';
+    const session = createAgentSession({
+      agentName: 'agent',
+      conversationHistory: createConversationHistory(),
+      id: sessionId,
+      runs: [
+        {
+          runId: `${sessionId}:0`,
+          sequence: 0,
+          status: 'running',
+          startedAt: new Date().toISOString(),
+        },
+      ],
+    });
+    await store.save(session);
+
+    const { engine, checkpointStore } = await createRunEngine({
+      storage,
+      runWorkflow: makeProbeWorkflow(),
+      recover: false,
+    });
+
+    try {
+      const h = createSessionHandle(sessionId, {
+        store,
+        agentName: 'agent',
+        engine,
+        checkpointStore,
+        runOptions: createTestRunOptions(),
+      });
+
+      // engine.resume() will throw because no workflow with that id exists.
+      // recover() must return null rather than propagating the error.
+      const reattached = await h.recover();
+      expect(reattached).toBeNull();
+    } finally {
+      engine[Symbol.dispose]();
+    }
+  });
+});
+
+// session.monitor() — durable conditional watch loop (D7)
+// ---------------------------------------------------------------------------
+
+describe('session.monitor()', () => {
+  it('returns true when the predicate is satisfied on the first tick', async () => {
+    const { handle } = createSessionHandleFixture();
+    const result = await handle.monitor({
+      every: 5,
+      input: 'check the deploy',
+      until: () => true,
+    });
+    expect(result).toBe(true);
+  });
+
+  it('returns true after multiple ticks when the predicate eventually returns true', async () => {
+    const { handle } = createSessionHandleFixture();
+    let callCount = 0;
+    const result = await handle.monitor({
+      every: 5,
+      input: 'poll',
+      until: () => {
+        callCount += 1;
+        return callCount >= 3;
+      },
+    });
+    expect(result).toBe(true);
+    expect(callCount).toBe(3);
+  });
+
+  it('returns false when the maxDuration deadline is reached before the predicate is met', async () => {
+    const { handle } = createSessionHandleFixture();
+    const result = await handle.monitor({
+      every: 1,
+      input: 'poll',
+      until: () => false,
+      maxDuration: 5, // Only 5ms — ticks take ~1ms each so this will hit the deadline quickly
+    });
+    expect(result).toBe(false);
+  });
+
+  it('accepts ISO-8601 duration strings for every and maxDuration', async () => {
+    const { handle } = createSessionHandleFixture();
+    // 'PT0.01S' = 10ms; maxDuration 'PT0.005S' = 5ms → should expire before the first tick interval
+    const result = await handle.monitor({
+      every: 'PT0.05S', // 50ms between ticks
+      input: 'poll',
+      until: () => false,
+      maxDuration: 'PT0.01S', // 10ms total — less than one full cycle
+    });
+    expect(result).toBe(false);
+  });
+
+  it('each tick executes a full agent run and the predicate receives the RunResult', async () => {
+    const { handle } = createSessionHandleFixture(undefined);
+    const results: string[] = [];
+    await handle.monitor({
+      every: 5,
+      input: 'check status',
+      until: (runResult) => {
+        results.push(runResult.finishReason);
+        return results.length >= 2;
+      },
+    });
+    // Each tick completes a run; finishReason should be populated.
+    expect(results).toHaveLength(2);
+    expect(results[0]).toBeDefined();
+  });
+
+  it('dispatches SessionMonitorTickEvent on each tick', async () => {
+    const emitter = new TypedEventTarget<OperativeEventMap>();
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+    const h = createSessionHandle('monitor-tick-session', {
+      store,
+      agentName: 'agent',
+      emitter,
+      runOptions: createTestRunOptions(),
+    });
+
+    const tickEvents: SessionMonitorTickEvent[] = [];
+    emitter.addEventListener('session.monitor.tick', (e) => {
+      tickEvents.push(e);
+    });
+
+    let count = 0;
+    await h.monitor({
+      every: 5,
+      input: 'tick check',
+      until: () => {
+        count += 1;
+        return count >= 2;
+      },
+    });
+
+    // Each tick emits TWO events: one at tick-started (met=null) and one after
+    // predicate evaluation (met=true|false). With 2 ticks we expect 4 events.
+    expect(tickEvents.length).toBeGreaterThanOrEqual(2);
+    // First event of first tick: met=null (run hasn't completed yet).
+    expect(tickEvents[0]!.sessionId).toBe('monitor-tick-session');
+    expect(tickEvents[0]!.tick).toBe(0);
+    expect(tickEvents[0]!.met).toBeNull();
+    // Second event of first tick: met=false (predicate returned false).
+    expect(tickEvents[1]!.met).toBe(false);
+    // Second tick: met=true (predicate returned true).
+    const lastTickEvent = tickEvents[tickEvents.length - 1];
+    expect(lastTickEvent!.met).toBe(true);
+  });
+
+  it('dispatches SessionMonitorDoneEvent when the condition is met', async () => {
+    const emitter = new TypedEventTarget<OperativeEventMap>();
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+    const h = createSessionHandle('monitor-done-session', {
+      store,
+      agentName: 'agent',
+      emitter,
+      runOptions: createTestRunOptions(),
+    });
+
+    const doneEvents: SessionMonitorDoneEvent[] = [];
+    emitter.addEventListener('session.monitor.done', (e) => {
+      doneEvents.push(e);
+    });
+
+    await h.monitor({
+      every: 5,
+      input: 'check',
+      until: () => true,
+    });
+
+    expect(doneEvents).toHaveLength(1);
+    expect(doneEvents[0]!.sessionId).toBe('monitor-done-session');
+    expect(doneEvents[0]!.met).toBe(true);
+    expect(doneEvents[0]!.ticks).toBe(1);
+  });
+
+  it('dispatches SessionMonitorDoneEvent(met=false) when maxDuration expires', async () => {
+    const emitter = new TypedEventTarget<OperativeEventMap>();
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+    const h = createSessionHandle('monitor-deadline-session', {
+      store,
+      agentName: 'agent',
+      emitter,
+      runOptions: createTestRunOptions(),
+    });
+
+    const doneEvents: SessionMonitorDoneEvent[] = [];
+    emitter.addEventListener('session.monitor.done', (e) => {
+      doneEvents.push(e);
+    });
+
+    await h.monitor({
+      every: 1,
+      input: 'check',
+      until: () => false,
+      maxDuration: 5,
+    });
+
+    expect(doneEvents).toHaveLength(1);
+    expect(doneEvents[0]!.met).toBe(false);
+  });
+
+  it('accumulates runs in the session for each tick', async () => {
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+    const h = createSessionHandle('monitor-runs-session', {
+      store,
+      agentName: 'agent',
+      runOptions: createTestRunOptions(),
+    });
+
+    let count = 0;
+    await h.monitor({
+      every: 5,
+      input: 'poll',
+      until: () => {
+        count += 1;
+        return count >= 2;
+      },
+    });
+
+    // Give persistence callbacks a moment to flush.
+    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+
+    const session = await store.load('monitor-runs-session');
+    // 2 ticks × 1 run each.
+    expect(session!.runs.length).toBeGreaterThanOrEqual(2);
   });
 });

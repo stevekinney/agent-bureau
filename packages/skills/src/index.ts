@@ -51,6 +51,7 @@ export {
   rejectProposal,
   saveProposal,
 } from './self-improvement/proposals';
+export { reflectionSweep } from './self-improvement/reflection-sweep';
 
 // ── Types ─────────────────────────────────────────────────────────────
 export type { CreateSkillCatalogHookOptions } from './create-skill-catalog-hook';
@@ -63,6 +64,14 @@ export type {
   IdentityProviderLike,
   ListProposalsOptions,
 } from './self-improvement/proposals';
+export type {
+  MemorySink,
+  PersonaSink,
+  ReflectionSink,
+  ReflectionSweepOptions,
+  SkillSink,
+  SoulSink,
+} from './self-improvement/reflection-sweep';
 export type {
   ConversationLike,
   CreateSkillMemoryHooksOptions,

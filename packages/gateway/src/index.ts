@@ -15,6 +15,7 @@ export type {
   Gateway,
   GatewayOptions,
   HealthResponse,
+  PersistenceOptions,
   ProviderConfiguration,
   RunDetail,
   RunSummary,
