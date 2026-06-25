@@ -30,7 +30,7 @@
  */
 
 import type { Tool, Toolbox } from 'armorer';
-import { combineToolboxes, createToolbox, isTool } from 'armorer';
+import { combineToolboxes, createTool, createToolbox, isTool } from 'armorer';
 import { Conversation } from 'conversationalist';
 import type { AgentRun, GenerateFunction, PrepareStepHook, RunOptions } from 'operative';
 import { createActiveRun, createAgentRun } from 'operative';
@@ -93,30 +93,63 @@ interface BureauState {
  * Build a `Toolbox` from a name-keyed tool map. The map key is canonical;
  * each tool's inner `.name` property is overridden by the key.
  *
- * At runtime, values must be armorer `Tool` objects (created via `createTool`).
- * The `ToolMapInput` type in bureau-types.ts is a TYPE-LEVEL phantom for
- * inference — at runtime, only proper armorer Tools are accepted.
+ * Three entry shapes are accepted:
+ *  - A full armorer `Tool` (created via `createTool`) — used as-is; the map
+ *    key overrides the inner `.name` when they differ.
+ *  - A plain function `(params) => result` — normalized to a `Tool` using
+ *    `createTool` with the map key as both `name` and `description`.
+ *  - A plain `{ execute }` object — normalized the same way.
  *
- * Note: if a tool's canonical `.name` differs from the map key, the MAP KEY
- * wins. Tools with a matching name are passed through directly; those with a
- * name mismatch are re-configured via `createToolbox` with a name-override entry.
+ * This aligns the runtime with the `ToolEntryInput` type contract exposed in
+ * `bureau-types.ts`, which explicitly accepts plain callables and `{execute}`
+ * objects as first-class tool inputs.
+ *
+ * Note: if an armorer tool's canonical `.name` differs from the map key, the
+ * MAP KEY wins. Tools with a matching name are passed through directly; those
+ * with a name mismatch are re-configured via `createToolbox` with a
+ * name-override entry.
  */
 function toolboxFromMap(toolsMap: Record<string, unknown>): Toolbox {
   const entries: Array<Tool | ({ name: string } & Record<string, unknown>)> = [];
 
   for (const [key, value] of Object.entries(toolsMap)) {
-    if (!isTool(value)) {
-      throw new Error(
-        `bureau.tools(): value at key "${key}" is not an armorer Tool. ` +
-          `Create tools with createTool() from the armorer package.`,
+    if (isTool(value)) {
+      // Full armorer Tool — pass directly, using the map key as canonical name.
+      if (value.configuration.name === key) {
+        entries.push(value);
+      } else {
+        // Override the name: spread the tool configuration with the map key as name.
+        entries.push({ ...value.configuration, name: key });
+      }
+    } else if (typeof value === 'function') {
+      // Plain function: normalize to an armorer Tool. The map key is the name.
+      // Cast is justified: ToolEntryInput's callable variant is typed as
+      // `(...arguments_: never[]) => unknown` for inference only; the real
+      // signature at runtime is compatible with createTool's execute parameter.
+      entries.push(
+        createTool({
+          name: key,
+          description: key,
+          execute: value as (params: Record<string, unknown>) => Promise<unknown>,
+        }),
       );
-    }
-    if (value.configuration.name === key) {
-      // Name already matches the map key — pass directly.
-      entries.push(value);
+    } else if (
+      typeof value === 'object' &&
+      value !== null &&
+      'execute' in value &&
+      typeof (value as { execute: unknown }).execute === 'function'
+    ) {
+      // Plain { execute } object: normalize to an armorer Tool.
+      // Cast is justified: execute is validated as a function above.
+      const { execute } = value as {
+        execute: (params: Record<string, unknown>) => Promise<unknown>;
+      };
+      entries.push(createTool({ name: key, description: key, execute }));
     } else {
-      // Override the name: spread the tool configuration with the map key as name.
-      entries.push({ ...value.configuration, name: key });
+      throw new Error(
+        `bureau.tools(): value at key "${key}" is not a valid tool entry. ` +
+          `Provide an armorer Tool, a plain function, or a plain { execute } object.`,
+      );
     }
   }
 

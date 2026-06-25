@@ -267,4 +267,58 @@ describe('OpenAI-compat route (POST /v1/chat/completions)', () => {
       }
     });
   });
+
+  describe('error run surface (regression: PRRT_kwDORvupsc6MXEmZ)', () => {
+    it('returns 500 when the provider generate function throws, not a 200 with empty content', async () => {
+      // Regression: when the generate function throws (causing the run to
+      // settle with status 'error'), the route must return an HTTP 500 rather
+      // than a 200 chat completion with empty or partial content. OpenAI-
+      // compatible clients treat any 2xx as a successful assistant message.
+      const failingGenerate: GenerateFunction = async () => {
+        throw new Error('Provider unavailable');
+      };
+
+      const gateway = await createTestGateway({ generate: failingGenerate });
+      const response = await requestJSON(gateway, '/v1/chat/completions', {
+        method: 'POST',
+        body: minimalRequest('bureau', 'Hello'),
+      });
+
+      expect(response.status).toBe(500);
+    });
+
+    it('SSE path: returns 500 when the provider generate function throws', async () => {
+      // Same regression on the streaming code path.
+      const failingGenerate: GenerateFunction = async () => {
+        throw new Error('Provider unavailable');
+      };
+
+      const gateway = await createTestGateway({ generate: failingGenerate });
+      const response = await requestJSON(gateway, '/v1/chat/completions', {
+        method: 'POST',
+        body: JSON.stringify({
+          model: 'bureau',
+          messages: [{ role: 'user', content: 'Hello' }],
+          stream: true,
+        }),
+      });
+
+      expect(response.status).toBe(500);
+    });
+
+    it('returns 200 when the run succeeds after a recoverable generate error in an earlier step', async () => {
+      // Ensure the happy path still works when generate succeeds. This
+      // guards against a regression where the status check blocks legitimate
+      // completions from being returned.
+      const gateway = await createTestGateway({ generate: createMockGenerate() });
+      const response = await requestJSON(gateway, '/v1/chat/completions', {
+        method: 'POST',
+        body: minimalRequest('bureau', 'Hello'),
+      });
+
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body.choices[0].message.content).toBe('Done.');
+    });
+  });
 });

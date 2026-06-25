@@ -1439,6 +1439,77 @@ describe('createBureau durable inspection surface', () => {
   });
 });
 
+describe('createBureau schedule management sentinel (regression PRRT_kwDORvupsc6MXEmg)', () => {
+  // pauseSchedule / resumeSchedule / cancelSchedule previously returned void (i.e.
+  // undefined) on success — indistinguishable from the undefined sentinel meaning
+  // "no durable engine". Routes checking `result === undefined` would therefore
+  // return 501 even when the operation succeeded.
+
+  it('pauseSchedule / resumeSchedule / cancelSchedule return undefined when no durable engine is composed', async () => {
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      // No storage / durableExecution — no engine
+    });
+
+    expect(await bureau.pauseSchedule('sched-1')).toBeUndefined();
+    expect(await bureau.resumeSchedule('sched-1')).toBeUndefined();
+    expect(await bureau.cancelSchedule('sched-1')).toBeUndefined();
+
+    bureau.dispose();
+  });
+
+  it('pauseSchedule / resumeSchedule / cancelSchedule return true when a durable engine is composed', async () => {
+    // Build a throwaway probe so we can reach the bundled Engine prototype.
+    const probe = await createRuntimeComposition({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+    const realEngineProto = Object.getPrototypeOf(probe.durable!.engine) as object;
+    probe.durable!.engine[Symbol.dispose]?.();
+    probe.disposeStorage?.();
+
+    // Spy on the engine-level void methods so we don't need a real schedule in storage.
+    const engineProtoTyped = realEngineProto as {
+      pauseSchedule: (id: string) => Promise<void>;
+      resumeSchedule: (id: string) => Promise<void>;
+      cancelSchedule: (id: string) => Promise<void>;
+    };
+    const pauseSpy = spyOn(engineProtoTyped, 'pauseSchedule').mockResolvedValue(undefined);
+    const resumeSpy = spyOn(engineProtoTyped, 'resumeSchedule').mockResolvedValue(undefined);
+    const cancelSpy = spyOn(engineProtoTyped, 'cancelSchedule').mockResolvedValue(undefined);
+
+    try {
+      const bureau = await createBureau({
+        generate: createMockGenerate(),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'memory' },
+        durableExecution: true,
+      });
+
+      try {
+        // Each method must return true (operation performed), not undefined (no engine).
+        expect(await bureau.pauseSchedule('sched-1')).toBe(true);
+        expect(await bureau.resumeSchedule('sched-1')).toBe(true);
+        expect(await bureau.cancelSchedule('sched-1')).toBe(true);
+
+        // Confirm the engine methods were actually called through.
+        expect(pauseSpy).toHaveBeenCalledWith('sched-1');
+        expect(resumeSpy).toHaveBeenCalledWith('sched-1');
+        expect(cancelSpy).toHaveBeenCalledWith('sched-1');
+      } finally {
+        bureau.dispose();
+      }
+    } finally {
+      pauseSpy.mockRestore();
+      resumeSpy.mockRestore();
+      cancelSpy.mockRestore();
+    }
+  });
+});
+
 describe('createBureau scheduler-origin crash semantics (#25)', () => {
   let schedulerSweepDatabaseCounter = 0;
 
@@ -1758,6 +1829,59 @@ describe('classifyRecoveredRun', () => {
 
   it('skips an owned run when no session store is configured (cannot reattach, must not cancel)', () => {
     expect(classifyRecoveredRun({ ...base, hasSessionStore: false })).toBe('skip');
+  });
+});
+
+describe('createBureau session signal/update/query without durable engine', () => {
+  // Regression for findings PRRT_kwDORvupsc6MXEmd and PRRT_kwDORvupsc6MXEmm:
+  // signalSession / updateSession / querySession must throw BureauError('NOT_CONFIGURED')
+  // when no durable engine is composed, not return undefined. Returning undefined was
+  // indistinguishable from a void signal result or a handler that returns undefined,
+  // causing the gateway route to respond 501 even on successful signal delivery.
+
+  it('signalSession throws NOT_CONFIGURED when no durable engine is composed', async () => {
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+    });
+
+    const error = await bureau
+      .signalSession('any-session', 'any-signal')
+      .then(() => null)
+      .catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(BureauError);
+    expect((error as BureauError).code).toBe('NOT_CONFIGURED');
+  });
+
+  it('updateSession throws NOT_CONFIGURED when no durable engine is composed', async () => {
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+    });
+
+    const error = await bureau
+      .updateSession('any-session', 'any-update')
+      .then(() => null)
+      .catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(BureauError);
+    expect((error as BureauError).code).toBe('NOT_CONFIGURED');
+  });
+
+  it('querySession throws NOT_CONFIGURED when no durable engine is composed', async () => {
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+    });
+
+    const error = await bureau
+      .querySession('any-session', 'any-query')
+      .then(() => null)
+      .catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(BureauError);
+    expect((error as BureauError).code).toBe('NOT_CONFIGURED');
   });
 });
 

@@ -1098,12 +1098,8 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     return runId;
   }
 
-  async function signalSession(
-    sessionId: string,
-    name: string,
-    payload?: unknown,
-  ): Promise<void | undefined> {
-    if (!runtime.durable) return undefined;
+  async function signalSession(sessionId: string, name: string, payload?: unknown): Promise<void> {
+    if (!runtime.durable) throw new BureauError('Durable engine not configured', 'NOT_CONFIGURED');
     const runId = await requireSessionRunId(sessionId);
     await runtime.durable.engine.signal(runId, name, payload);
   }
@@ -1113,13 +1109,13 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     name: string,
     payload?: unknown,
   ): Promise<unknown> {
-    if (!runtime.durable) return undefined;
+    if (!runtime.durable) throw new BureauError('Durable engine not configured', 'NOT_CONFIGURED');
     const runId = await requireSessionRunId(sessionId);
     return runtime.durable.engine.update(runId, name, payload);
   }
 
   async function querySession(sessionId: string, name: string, input?: unknown): Promise<unknown> {
-    if (!runtime.durable) return undefined;
+    if (!runtime.durable) throw new BureauError('Durable engine not configured', 'NOT_CONFIGURED');
     const runId = await requireSessionRunId(sessionId);
     return runtime.durable.engine.query(runId, name, input);
   }
@@ -1168,19 +1164,22 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     return runtime.durable.engine.listSchedules(filter);
   }
 
-  async function pauseSchedule(scheduleId: string): Promise<void | undefined> {
+  async function pauseSchedule(scheduleId: string): Promise<true | undefined> {
     if (!runtime.durable) return undefined;
     await runtime.durable.engine.pauseSchedule(scheduleId);
+    return true;
   }
 
-  async function resumeSchedule(scheduleId: string): Promise<void | undefined> {
+  async function resumeSchedule(scheduleId: string): Promise<true | undefined> {
     if (!runtime.durable) return undefined;
     await runtime.durable.engine.resumeSchedule(scheduleId);
+    return true;
   }
 
-  async function cancelSchedule(scheduleId: string): Promise<void | undefined> {
+  async function cancelSchedule(scheduleId: string): Promise<true | undefined> {
     if (!runtime.durable) return undefined;
     await runtime.durable.engine.cancelSchedule(scheduleId);
+    return true;
   }
 
   function getToolSummaries(): ToolSummary[] {

@@ -190,20 +190,36 @@ export function createOpenAICompatRoutes(bureau: Bureau) {
     // createRun() only registers the ActiveRun and returns a RunSummary — the
     // provider loop continues asynchronously. Await the run's result promise
     // before reading stepDetails so the response is never empty with a live provider.
-    // The result promise rejects only when the run errors; handle gracefully.
+    // The loop resolves for all terminal states (completed, error, aborted); the
+    // try/catch guards against unexpected rejections only.
     const runState = bureau.store.getRun(summary.id);
     if (runState) {
       try {
         await runState.activeRun.result;
       } catch {
-        // Run errored: getRun() below will reflect the error state; proceed
-        // to format the response with whatever content was accumulated.
+        // Unexpected rejection — the settled run state is checked below.
       }
     }
 
     // Read the final content from the settled run detail.
     const runDetail = bureau.getRun(summary.id);
-    const lastStep = runDetail?.stepDetails.at(-1);
+
+    if (!runDetail) {
+      throw new HTTPException(500, { message: 'Run result unavailable after settlement' });
+    }
+
+    if (runDetail.status === 'error') {
+      const message = runDetail.error ?? 'Run failed with an unspecified error';
+      throw new HTTPException(500, {
+        message: typeof message === 'string' ? message : 'Run failed',
+      });
+    }
+
+    if (runDetail.status === 'aborted') {
+      throw new HTTPException(500, { message: 'Run was aborted before completion' });
+    }
+
+    const lastStep = runDetail.stepDetails.at(-1);
     const textContent = lastStep?.content ?? '';
 
     if (stream) {

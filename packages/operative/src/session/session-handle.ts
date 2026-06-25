@@ -270,6 +270,29 @@ export class NoRunningRunError extends Error {
 }
 
 /**
+ * Thrown when `fork({ throughRun: n })` is called with a `throughRun` value
+ * that points before the last completed run, making true history truncation
+ * impossible without per-run conversation snapshots. Callers must pass
+ * `throughRun` equal to or after the last run index, or omit it entirely to
+ * fork through the full history.
+ *
+ * Full per-run snapshot support (Phase D) will lift this restriction.
+ */
+export class ForkThroughRunError extends Error {
+  readonly code = 'ForkThroughRunError';
+
+  constructor(throughRun: number, lastRunIndex: number) {
+    super(
+      `session.fork({ throughRun: ${throughRun} }) cannot branch before the last completed run ` +
+        `(index ${lastRunIndex}): per-run conversation snapshots are not yet available, so ` +
+        `forking at an earlier run would include messages from later runs. ` +
+        `Pass throughRun >= ${lastRunIndex} or omit it to fork through the full history.`,
+    );
+    this.name = 'ForkThroughRunError';
+  }
+}
+
+/**
  * Derive the durable run id from a session id and sequence number.
  *
  * Self-describing: `user-123:2` reveals its session (user-123) + sequence (2)
@@ -645,10 +668,21 @@ export function createSessionHandle(
       const session = await loadOrCreate();
 
       // Default: fork through the last run.
-      const throughSequence = options?.throughRun ?? session.runs.length - 1;
+      const lastRunIndex = session.runs.length - 1;
+      const throughSequence = options?.throughRun ?? lastRunIndex;
 
-      // Copy the conversation history. For Phase B, we use the session's stored
-      // history as the authoritative snapshot (it reflects all completed runs).
+      // Guard: without per-run conversation snapshots, forking before the last
+      // run would copy the FULL stored conversationHistory (which reflects all
+      // completed runs), contaminating the branch with messages after the
+      // requested fork point. Reject non-default throughRun values that point
+      // before the last run until Phase D lands per-run snapshots.
+      if (options?.throughRun !== undefined && options.throughRun < lastRunIndex) {
+        throw new ForkThroughRunError(options.throughRun, lastRunIndex);
+      }
+
+      // Copy the conversation history. The session's stored conversationHistory
+      // is the authoritative snapshot of all completed runs. When throughRun is
+      // at (or after) the last run, this is exactly the right history to copy.
       const forkedHistory: ConversationHistory = historyOrEmpty(session.conversationHistory);
 
       // Create the forked session with a new id and empty runs[].
@@ -661,8 +695,9 @@ export function createSessionHandle(
       });
       await store.save(forkedSession);
 
-      // Suppress unused — `throughSequence` is the canonical parameter; a future
-      // Phase D impl will snapshot conversation at exactly that sequence boundary.
+      // throughSequence is used conceptually to bound the fork point; full
+      // per-run snapshot support (Phase D) will use it to reconstruct history
+      // at exactly that boundary. For now it is always === lastRunIndex.
       void throughSequence;
 
       // Emit after the forked session is persisted so the id is stable.

@@ -67,17 +67,13 @@ export function createSessionsRoutes(bureau: Bureau) {
     }
 
     try {
-      const result = await bureau.signalSession(sessionId, body.name, body.payload);
-      if (result === undefined) {
-        return context.json(
-          { error: { code: 'NOT_CONFIGURED', message: 'Durable engine not configured' } },
-          501,
-        );
-      }
+      await bureau.signalSession(sessionId, body.name, body.payload);
       return context.json({ status: 'delivered', sessionId, name: body.name }, 202);
     } catch (error) {
       if (error instanceof BureauError) {
         if (error.code === 'NOT_FOUND') throw new HTTPException(404, { message: error.message });
+        if (error.code === 'NOT_CONFIGURED')
+          return context.json({ error: { code: 'NOT_CONFIGURED', message: error.message } }, 501);
         if (error.code === 'NOT_IMPLEMENTED')
           throw new HTTPException(501, { message: error.message });
       }
@@ -108,16 +104,12 @@ export function createSessionsRoutes(bureau: Bureau) {
 
     try {
       const result = await bureau.updateSession(sessionId, body.name, body.payload);
-      if (result === undefined) {
-        return context.json(
-          { error: { code: 'NOT_CONFIGURED', message: 'Durable engine not configured' } },
-          501,
-        );
-      }
       return context.json({ result }, 200);
     } catch (error) {
       if (error instanceof BureauError) {
         if (error.code === 'NOT_FOUND') throw new HTTPException(404, { message: error.message });
+        if (error.code === 'NOT_CONFIGURED')
+          return context.json({ error: { code: 'NOT_CONFIGURED', message: error.message } }, 501);
         if (error.code === 'NOT_IMPLEMENTED')
           throw new HTTPException(501, { message: error.message });
       }
@@ -154,16 +146,12 @@ export function createSessionsRoutes(bureau: Bureau) {
 
     try {
       const result = await bureau.querySession(sessionId, name, input);
-      if (result === undefined) {
-        return context.json(
-          { error: { code: 'NOT_CONFIGURED', message: 'Durable engine not configured' } },
-          501,
-        );
-      }
       return context.json({ result }, 200);
     } catch (error) {
       if (error instanceof BureauError) {
         if (error.code === 'NOT_FOUND') throw new HTTPException(404, { message: error.message });
+        if (error.code === 'NOT_CONFIGURED')
+          return context.json({ error: { code: 'NOT_CONFIGURED', message: error.message } }, 501);
         if (error.code === 'NOT_IMPLEMENTED')
           throw new HTTPException(501, { message: error.message });
       }

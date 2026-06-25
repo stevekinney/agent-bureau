@@ -2,6 +2,7 @@ import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
 import { describe, expect, it } from 'bun:test';
 
 import { createTestGateway, requestJSON, waitForRunState } from '../test';
+import type { Bureau } from '../types';
 
 const AUTH_TOKEN = 'test-token';
 const authHeaders = { authorization: `Bearer ${AUTH_TOKEN}` };
@@ -163,6 +164,88 @@ describe('sessions routes', () => {
       );
 
       expect(response.status).toBe(400);
+    });
+
+    // Regression tests for PRRT_kwDORvupsc6MXEmd and PRRT_kwDORvupsc6MXEmm:
+    // signalSession / updateSession / querySession used `undefined` as the "not
+    // configured" sentinel, but a successful void signal or a handler that returns
+    // undefined also evaluates to undefined, causing the route to respond 501 even
+    // on a successful operation. The fix: bureau throws BureauError('NOT_CONFIGURED')
+    // when no engine is configured, so the route can distinguish success from absence.
+    //
+    // These tests use a minimal bureau stub that provides the subset of the Bureau
+    // interface consumed by createGateway at construction time, with the target
+    // method (signalSession / updateSession / querySession) resolving successfully.
+
+    /** Minimal Bureau stub with no durable engine methods — only methods consumed by createGateway itself are provided. */
+    function makeStubBureau(overrides: Partial<Record<string, unknown>>): Bureau {
+      return {
+        store: {},
+        kv: undefined,
+        ready: true,
+        dispose: () => undefined,
+        subscribeLiveFrames: () => () => undefined,
+        getConfiguration: () => ({
+          provider: undefined,
+          maximumSteps: 10,
+          systemPrompt: undefined,
+          tools: [],
+        }),
+        ...overrides,
+      } as unknown as Bureau;
+    }
+
+    it('POST /api/v1/sessions/:id/signal returns 202 when signal is delivered (not 501)', async () => {
+      // Build a stub bureau where signalSession resolves (simulating a configured
+      // durable engine that delivered the signal). Before the fix this route would
+      // inspect the void return value, see undefined, and respond 501 NOT_CONFIGURED.
+      const stubBureau = makeStubBureau({ signalSession: async () => undefined });
+      const gateway = await createTestGateway(stubBureau, { authToken: AUTH_TOKEN });
+
+      const response = await requestJSON(gateway, '/api/v1/sessions/my-session/signal', {
+        method: 'POST',
+        headers: sessionWriteHeaders,
+        body: JSON.stringify({ name: 'human-approved', payload: { ok: true } }),
+      });
+
+      expect(response.status).toBe(202);
+      const body = await response.json();
+      expect(body.status).toBe('delivered');
+    });
+
+    it('POST /api/v1/sessions/:id/update returns 200 when handler returns undefined', async () => {
+      // A void update handler that intentionally returns undefined must not be
+      // misidentified as "not configured". Before the fix the route treated any
+      // undefined result as the not-configured sentinel and responded 501.
+      const stubBureau = makeStubBureau({ updateSession: async () => undefined });
+      const gateway = await createTestGateway(stubBureau, { authToken: AUTH_TOKEN });
+
+      const response = await requestJSON(gateway, '/api/v1/sessions/my-session/update', {
+        method: 'POST',
+        headers: sessionWriteHeaders,
+        body: JSON.stringify({ name: 'void-update' }),
+      });
+
+      expect(response.status).toBe(200);
+      // undefined serialises as absent key in JSON — the important thing is 200, not 501.
+      const body = await response.json();
+      expect(body).not.toHaveProperty('error');
+    });
+
+    it('GET /api/v1/sessions/:id/query returns 200 when handler returns undefined', async () => {
+      // A query handler that legitimately returns undefined must not be treated
+      // as "not configured". Before the fix the route responded 501 in this case.
+      const stubBureau = makeStubBureau({ querySession: async () => undefined });
+      const gateway = await createTestGateway(stubBureau, { authToken: AUTH_TOKEN });
+
+      const response = await requestJSON(gateway, '/api/v1/sessions/my-session/query?name=check', {
+        headers: authHeaders,
+      });
+
+      expect(response.status).toBe(200);
+      // undefined serialises as absent key in JSON — the important thing is 200, not 501.
+      const body = await response.json();
+      expect(body).not.toHaveProperty('error');
     });
   });
 

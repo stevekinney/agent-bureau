@@ -37,7 +37,6 @@ import type {
   TokenUsage,
 } from 'operative';
 import type { CreateRunEngineOptions } from 'operative/durable';
-import type { ProviderName } from 'operative/providers';
 import type { Store } from 'operative/store';
 
 import type { AuditTrail } from './audit-trail';
@@ -45,8 +44,17 @@ import type { BureauEventMap } from './events';
 
 // ── Provider Configuration ───────────────────────────────────────────
 
+/**
+ * The subset of operative's `ProviderName` union that `createRuntimeComposition`
+ * can resolve to a generative (text/tool-call) backend. `voyage` and `ollama`
+ * exist in `ProviderName` but are embedding-only — no generate factory exists for
+ * them, so accepting them here would produce a runtime "Unknown provider" error
+ * that TypeScript could have caught.
+ */
+export type GenerateProviderName = 'anthropic' | 'openai' | 'gemini';
+
 export interface ProviderConfiguration {
-  provider: ProviderName;
+  provider: GenerateProviderName;
   model: string;
   maximumTokens?: number;
   temperature?: number;
@@ -348,22 +356,22 @@ export interface Bureau {
   /**
    * Deliver a fire-and-forget signal to a session's current in-flight durable run.
    * Maps to `engine.signal(runId, name, payload)`. Requires a durable engine and a
-   * session store. Returns `undefined` when no durable engine is composed; throws
-   * `BureauError('NOT_FOUND')` when the session has no current run.
+   * session store. Throws `BureauError('NOT_CONFIGURED')` when no durable engine is
+   * composed; throws `BureauError('NOT_FOUND')` when the session has no current run.
    */
-  signalSession(sessionId: string, name: string, payload?: unknown): Promise<void | undefined>;
+  signalSession(sessionId: string, name: string, payload?: unknown): Promise<void>;
 
   /**
    * Send a validated, request/response update to a session's current in-flight run.
    * Maps to `engine.update(runId, name, payload)`. Returns the update result.
-   * Returns `undefined` when no durable engine is composed.
+   * Throws `BureauError('NOT_CONFIGURED')` when no durable engine is composed.
    */
   updateSession(sessionId: string, name: string, payload?: unknown): Promise<unknown>;
 
   /**
    * Query live state from a session's current in-flight run without mutating it.
-   * Maps to `engine.query(runId, name, input)`. Returns `undefined` when no
-   * durable engine is composed.
+   * Maps to `engine.query(runId, name, input)`. Returns the query result.
+   * Throws `BureauError('NOT_CONFIGURED')` when no durable engine is composed.
    */
   querySession(sessionId: string, name: string, input?: unknown): Promise<unknown>;
 
@@ -389,20 +397,22 @@ export interface Bureau {
   listSchedules(filter?: ScheduleFilter): Promise<PaginatedResult<ScheduleSummary> | undefined>;
 
   /**
-   * Pause a durable schedule. Returns `undefined` when no durable engine is composed.
-   */
-  pauseSchedule(scheduleId: string): Promise<void | undefined>;
-
-  /**
-   * Resume a paused durable schedule. Returns `undefined` when no durable engine is composed.
-   */
-  resumeSchedule(scheduleId: string): Promise<void | undefined>;
-
-  /**
-   * Cancel and permanently delete a durable schedule. Returns `undefined` when no
+   * Pause a durable schedule. Returns `true` on success, `undefined` when no
    * durable engine is composed.
    */
-  cancelSchedule(scheduleId: string): Promise<void | undefined>;
+  pauseSchedule(scheduleId: string): Promise<true | undefined>;
+
+  /**
+   * Resume a paused durable schedule. Returns `true` on success, `undefined` when no
+   * durable engine is composed.
+   */
+  resumeSchedule(scheduleId: string): Promise<true | undefined>;
+
+  /**
+   * Cancel and permanently delete a durable schedule. Returns `true` on success,
+   * `undefined` when no durable engine is composed.
+   */
+  cancelSchedule(scheduleId: string): Promise<true | undefined>;
 
   getConfiguration(): ConfigurationResponse;
   getTools(): ToolSummary[];

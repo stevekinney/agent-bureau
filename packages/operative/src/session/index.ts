@@ -8,6 +8,7 @@ export type {
 export {
   createSessionHandle,
   deriveRunId,
+  ForkThroughRunError,
   NoDurableEngineError,
   NoRunningRunError,
 } from './session-handle';
