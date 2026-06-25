@@ -68,7 +68,8 @@ async function seedRecord(
 ): Promise<void> {
   const ts = record.timestampMs.toString().padStart(16, '0');
   const seq = record.sequence.toString().padStart(12, '0');
-  await kv.set(`audit:v1:${ts}:${seq}`, JSON.stringify(record));
+  // Keep in sync with `encodeKey` in audit-trail.ts: audit:v1:<ts>:<seq>:<runId>
+  await kv.set(`audit:v1:${ts}:${seq}:${record.runId}`, JSON.stringify(record));
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────
@@ -279,6 +280,59 @@ describe('createAuditTrail', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(await trail.query()).toHaveLength(0);
+    trail.dispose();
+  });
+
+  /**
+   * Regression for PRRT_kwDORvupsc6MXoT8 — audit keys must be globally unique
+   * across process lifetimes.
+   *
+   * `sequence` is a per-store-lifetime counter that resets to 0 on every process
+   * restart. A clock rewind (NTP step-back, VM snapshot restore) after restart means
+   * a new event can share both `timestamp` and `sequence` with an existing record.
+   * Without `runId` in the key, the newer event silently overwrites the older one,
+   * violating the append-only invariant.
+   *
+   * This test emits two events with identical timestamp and sequence but different
+   * runIds — exactly what happens when two store lifetimes emit seq=0 at the same
+   * wall-clock millisecond. Both records must survive.
+   */
+  it('preserves both records when two events share the same timestamp and sequence but different runIds', async () => {
+    const kv = textValueStore(new MemoryStorage());
+    const { bureau, emit } = createStubBureau();
+    const trail = createAuditTrail(bureau, kv);
+
+    // Same timestamp and sequence — simulates sequence-counter reset after restart
+    // with a clock that did not advance (NTP step-back / VM snapshot restore).
+    const sharedTimestamp = 5000;
+    const sharedSequence = 0;
+
+    const firstLifetimeAction: Action = {
+      type: 'tool.started',
+      timestamp: sharedTimestamp,
+      sequence: sharedSequence,
+      runId: 'session-1:0',
+      detail: null,
+    };
+    const secondLifetimeAction: Action = {
+      type: 'tool.started',
+      timestamp: sharedTimestamp,
+      sequence: sharedSequence,
+      runId: 'session-2:0',
+      detail: null,
+    };
+
+    emit(new ActionEvent(firstLifetimeAction));
+    emit(new ActionEvent(secondLifetimeAction));
+
+    // Both writes are fire-and-forget; yield to let the microtask queue settle.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const records = await trail.query();
+    // Both records must be stored — no silent overwrite.
+    expect(records).toHaveLength(2);
+    const runIds = records.map((r) => r.runId).sort();
+    expect(runIds).toEqual(['session-1:0', 'session-2:0']);
     trail.dispose();
   });
 
