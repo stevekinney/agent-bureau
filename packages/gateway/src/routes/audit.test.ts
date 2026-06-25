@@ -303,6 +303,27 @@ describe('GET /api/v1/audit', () => {
     expect(response.status).toBe(400);
   });
 
+  it('returns 400 for a non-positive limit parameter (negative limit bypasses the 1000-record cap)', async () => {
+    // Regression test for: Math.min(negative, 1000) = negative, so
+    // merged.slice(0, -n) returns nearly all records instead of enforcing the cap.
+    const gateway = await createTestGateway({ authToken: AUTH_TOKEN });
+
+    const negativeResponse = await requestJSON(gateway, '/api/v1/audit?limit=-1', {
+      headers: authHeaders,
+    });
+    expect(negativeResponse.status).toBe(400);
+
+    const zeroResponse = await requestJSON(gateway, '/api/v1/audit?limit=0', {
+      headers: authHeaders,
+    });
+    expect(zeroResponse.status).toBe(400);
+
+    const nanResponse = await requestJSON(gateway, '/api/v1/audit?limit=bad', {
+      headers: authHeaders,
+    });
+    expect(nanResponse.status).toBe(400);
+  });
+
   it('returns records in chronological order (oldest first)', async () => {
     const gateway = await createTestGateway({
       authToken: AUTH_TOKEN,
