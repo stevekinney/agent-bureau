@@ -17,6 +17,7 @@ import { createMemory } from 'memory';
 import type {
   CombinedOperativeEventMap,
   GenerateFunction,
+  JSONValue,
   OnStepHook,
   PrepareStepHook,
   Scheduler,
@@ -62,7 +63,7 @@ import {
   createRoutingGenerate,
   createStepBasedStrategy,
 } from 'operative/providers';
-import type { SkillProvider as SkillsPackageProvider, SkillSession } from 'skills';
+import type { SkillProvider as SkillsPackageProvider, SkillSession, ToolPolicy } from 'skills';
 import {
   createSkillCatalogHook,
   createSkillSession,
@@ -421,6 +422,120 @@ const defaultRuntimeCompositionDependencies: RuntimeCompositionDependencies = {
   resolveProviderGenerate,
 };
 
+/**
+ * A JSON-serializable snapshot of one active skill's name and optional tool policy.
+ * Written to session metadata as `lastActiveSkills` after each step so a recovered
+ * run can seed a fresh {@link SkillSession} with the pre-crash active set.
+ */
+export interface ActiveSkillEntry {
+  name: string;
+  toolPolicy?: ToolPolicy;
+}
+
+/**
+ * Validate that a value is a valid {@link ActiveSkillEntry} array for deserialization
+ * from session metadata.
+ */
+function isActiveSkillEntryArray(value: unknown): value is ActiveSkillEntry[] {
+  if (!Array.isArray(value)) return false;
+  for (const item of value) {
+    if (typeof item !== 'object' || item === null) return false;
+    const candidate = item as Record<string, unknown>;
+    if (typeof candidate['name'] !== 'string') return false;
+    if (candidate['toolPolicy'] !== undefined) {
+      const policy = candidate['toolPolicy'];
+      if (typeof policy !== 'object' || policy === null) return false;
+      const p = policy as Record<string, unknown>;
+      if (p['allowList'] !== undefined && !Array.isArray(p['allowList'])) return false;
+      if (p['denyList'] !== undefined && !Array.isArray(p['denyList'])) return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * A thin wrapper over a {@link SkillSession} that also tracks the per-skill tool
+ * policy passed to {@link SkillSession.activate}. The base `SkillSession` interface
+ * only exposes skill names (via `getActiveSkills`) and the MERGED policy (via
+ * `getActiveToolPolicy`); for durable recovery we need the per-skill policy so we
+ * can reconstruct the exact pre-crash active-skill set.
+ */
+interface TrackedSkillSession extends SkillSession {
+  /**
+   * Returns the current active skills as {@link ActiveSkillEntry} pairs, including
+   * each skill's individual tool policy. Safe to serialize to session metadata.
+   */
+  getActiveEntries(): ActiveSkillEntry[];
+}
+
+/**
+ * Wrap a {@link SkillSession} with per-skill policy tracking. All other methods
+ * delegate unchanged; `activate` and `deactivate` additionally maintain an
+ * internal Map of `name → toolPolicy` so `getActiveEntries()` can return the
+ * full snapshot needed for durable recovery.
+ */
+function createTrackedSkillSession(): TrackedSkillSession {
+  const inner = createSkillSession();
+  const policyMap = new Map<string, ToolPolicy | undefined>();
+
+  return {
+    getActiveSkills: () => inner.getActiveSkills(),
+    isActive: (name) => inner.isActive(name),
+    activate(name, toolPolicy) {
+      policyMap.set(name, toolPolicy);
+      inner.activate(name, toolPolicy);
+    },
+    deactivate(name) {
+      policyMap.delete(name);
+      inner.deactivate(name);
+    },
+    getActiveToolPolicy: () => inner.getActiveToolPolicy(),
+    getActiveEntries(): ActiveSkillEntry[] {
+      return inner.getActiveSkills().map((name) => {
+        const toolPolicy = policyMap.get(name);
+        return toolPolicy !== undefined ? { name, toolPolicy } : { name };
+      });
+    },
+  };
+}
+
+/**
+ * Snapshot the active skill set to session metadata after each completed step.
+ *
+ * EFFECTFUL hook (seam #11): on a durable recovery the crashed in-flight step
+ * re-runs from its boundary, so this hook can fire AGAIN for the same step. The
+ * write is IDEMPOTENT — a re-fire for step N overwrites `lastActiveSkills` with the
+ * same value (completed steps do not re-run their tool executions, so the active-skill
+ * set is unchanged on replay). This is a state snapshot, NOT an append — the last
+ * writer wins (matching the single-source-of-truth model for `lastActiveSkills`).
+ *
+ * Replay classification: `effectful` (writes to external storage) but SAFE across
+ * recovery re-fires because the payload is deterministic for a given step boundary
+ * (completed steps replay identically, producing the same active-skill set).
+ */
+function createSkillStateSnapshotHook(
+  trackedSession: TrackedSkillSession,
+  sessionId: string,
+  store: SessionStore,
+): OnStepHook {
+  return async () => {
+    const entries = trackedSession.getActiveEntries();
+    // Persist as a plain JSON array. SessionStore.updateMetadata accepts
+    // Record<string, JSONValue>; ActiveSkillEntry[] is structurally JSONValue-compatible
+    // (string name, optional ToolPolicy with string[] lists), so the cast is sound —
+    // we are narrowing from our own known-valid type to the library's wider union.
+    try {
+      await store.updateMetadata(sessionId, {
+        lastActiveSkills: entries as unknown as JSONValue,
+      });
+    } catch {
+      // Non-fatal: if we can't snapshot the active skills, recovery falls back to
+      // an empty session (the pre-existing behavior). Don't propagate — a failed
+      // state snapshot must not abort the step.
+    }
+  };
+}
+
 function createSkillManagementToolbox(
   provider: SkillProvider,
   session: SkillSession,
@@ -615,7 +730,11 @@ export interface RuntimeComposition {
   getToolSummaries(): ToolSummary[];
   createRunRuntime(
     request: CreateRunRequest & { sessionId: string; runId?: string },
-    options?: { liveStreaming?: boolean },
+    options?: {
+      liveStreaming?: boolean;
+      /** Active-skill entries to pre-seed the run's SkillSession for durable recovery. */
+      initialActiveSkills?: ReadonlyArray<ActiveSkillEntry>;
+    },
   ): Promise<{
     generate: GenerateFunction;
     toolbox: Toolbox;
@@ -895,7 +1014,18 @@ export async function createRuntimeComposition(
 
   function createRunRuntime(
     request: CreateRunRequest & { sessionId: string; runId?: string },
-    runtimeOptions?: { liveStreaming?: boolean },
+    runtimeOptions?: {
+      liveStreaming?: boolean;
+      /**
+       * Active-skill entries to seed the run's {@link SkillSession} with on
+       * construction. Used by the durable recovery path: when
+       * `buildRunDepsFromSession` rebuilds deps for a recovered run, it reads the
+       * `lastActiveSkills` snapshot from session metadata and passes it here so the
+       * recovered toolbox is aware of skills activated in completed pre-crash steps
+       * (those steps are memoized and do not re-run their `activate_skill` calls).
+       */
+      initialActiveSkills?: ReadonlyArray<ActiveSkillEntry>;
+    },
   ) {
     const liveStreaming = runtimeOptions?.liveStreaming ?? true;
     const streamEventTarget =
@@ -946,7 +1076,23 @@ export async function createRuntimeComposition(
     }
 
     if (options.skills && resolvedSkillProvider) {
-      const skillSession = createSkillSession();
+      // Use a policy-tracking session so getActiveEntries() can reconstruct the
+      // per-skill policy for the durable snapshot hook (see createTrackedSkillSession).
+      const skillSession = createTrackedSkillSession();
+
+      // Seed active skills from a prior checkpoint on durable recovery. Completed
+      // pre-crash steps are memoized by Weft and do not re-run their tool
+      // executions, so a fresh empty session would miss any `activate_skill` calls
+      // made in those steps. `initialActiveSkills` carries the last-known snapshot
+      // (written by createSkillStateSnapshotHook after each step) so the recovered
+      // toolbox reflects the pre-crash active set without replaying the tools.
+      // Replay classification: seam #11 — safe (read-only rehydration from
+      // persisted state; no external side effect on the skill provider).
+      if (runtimeOptions?.initialActiveSkills) {
+        for (const entry of runtimeOptions.initialActiveSkills) {
+          skillSession.activate(entry.name, entry.toolPolicy);
+        }
+      }
 
       // Inject the skill catalog on step 0 — same hook pattern as identity.
       // `createSkillCatalogHook` from the `skills` package handles enabled-status
@@ -968,6 +1114,14 @@ export async function createRuntimeComposition(
       if (options.skills.includeTools !== false) {
         const skillToolbox = createSkillManagementToolbox(resolvedSkillProvider, skillSession);
         toolbox = combineToolboxes(toolbox, skillToolbox);
+      }
+
+      // Snapshot the active skill set to session metadata after each step.
+      // Present only when a session store is configured (durable / KV-backed path).
+      // This is what allows buildRunDepsFromSession to rehydrate the skill set on
+      // a cross-process recovery (see resolveRunServices → buildRunDepsFromSession).
+      if (sessionStore) {
+        onStep.push(createSkillStateSnapshotHook(skillSession, request.sessionId, sessionStore));
       }
     }
 
@@ -1018,6 +1172,16 @@ export async function createRuntimeComposition(
     const maximumStepsRaw = session.metadata['lastMaximumSteps'];
     const recoveredMaximumSteps =
       typeof maximumStepsRaw === 'number' ? maximumStepsRaw : maximumSteps;
+    // Rehydrate the active skill set from the last-written snapshot so the
+    // recovered toolbox is aware of skills activated in completed pre-crash steps.
+    // Completed steps are memoized by Weft and do not re-run their tool executions,
+    // so a fresh SkillSession would be unaware of any `activate_skill` calls made
+    // before the crash. `lastActiveSkills` is written by createSkillStateSnapshotHook
+    // after each step boundary and is validated here before use (PRRT_kwDORvupsc6MZ1Md).
+    const lastActiveSkillsRaw = session.metadata['lastActiveSkills'];
+    const initialActiveSkills = isActiveSkillEntryArray(lastActiveSkillsRaw)
+      ? lastActiveSkillsRaw
+      : undefined;
     const runRuntime = await createRunRuntime(
       {
         message: typeof message === 'string' ? message : '',
@@ -1028,7 +1192,7 @@ export async function createRuntimeComposition(
         ...(runId !== undefined ? { runId } : {}),
         ...(agentName !== undefined ? { agentName } : {}),
       },
-      { liveStreaming: false },
+      { liveStreaming: false, initialActiveSkills },
     );
     return {
       toolbox: runRuntime.toolbox,

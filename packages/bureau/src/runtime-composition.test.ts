@@ -1168,3 +1168,198 @@ describe('createRunRuntime toolbox isolation', () => {
     resolveToolA('done');
   });
 });
+
+// ── Regression: PRRT_kwDORvupsc6MZ1Md — active skill session not preserved across durable recovery ──
+//
+// When a durable run recovers, `buildRunDepsFromSession` calls `createRunRuntime` which
+// creates a fresh empty `SkillSession`. Completed pre-crash steps that called
+// `activate_skill` are memoized by Weft and do NOT re-run, so the recovered toolbox
+// had no knowledge of which skills were active — `list_skills` reported all skills
+// inactive even if the live run had activated them.
+//
+// Fix: after each step, snapshot the active skill set to session metadata
+// (`lastActiveSkills`). On durable recovery, `buildRunDepsFromSession` reads the
+// snapshot and passes it as `initialActiveSkills` to `createRunRuntime`, which seeds
+// the SkillSession before any tool executions so the recovered toolbox reflects the
+// pre-crash active set.
+//
+// These tests verify:
+//   1. Passing `initialActiveSkills` to `createRunRuntime` seeds the SkillSession
+//      so `list_skills` reports the skills as active without `activate_skill` being
+//      called (the recovery seeding path).
+//   2. The `onStep` hooks include a snapshot writer that writes `lastActiveSkills` to
+//      session metadata when the session store is configured — providing the data the
+//      recovery path reads.
+describe('PRRT_kwDORvupsc6MZ1Md: active skill session preserved across durable recovery', () => {
+  it('seeds the SkillSession from initialActiveSkills so recovered toolbox reports skills as active', async () => {
+    const provider = createMockSkillProvider([
+      { name: 'research', description: 'Deep research' },
+      { name: 'writing', description: 'Write documents' },
+    ]);
+
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'ok', toolCalls: [] }),
+      skills: { provider },
+    });
+
+    // Simulate recovery: pass initialActiveSkills as a recovered run would, so the
+    // SkillSession is pre-seeded without calling activate_skill (which would be
+    // memoized away in a real recovery).
+    const runRuntime = await runtime.createRunRuntime(
+      { message: 'Hello', sessionId: 'recovery-skills-session' },
+      { initialActiveSkills: [{ name: 'research' }] },
+    );
+
+    // list_skills must report 'research' as active — without activate_skill being called.
+    const listResult = await runRuntime.toolbox.execute({
+      name: 'list_skills',
+      arguments: {},
+    });
+
+    const result = listResult as { result: { skills: Array<{ name: string; active: boolean }> } };
+    const skills = result.result.skills;
+    const researchEntry = skills.find((s) => s.name === 'research');
+    const writingEntry = skills.find((s) => s.name === 'writing');
+
+    expect(researchEntry).toBeDefined();
+    expect(researchEntry?.active).toBe(true);
+
+    expect(writingEntry).toBeDefined();
+    expect(writingEntry?.active).toBe(false);
+  });
+
+  it('initialActiveSkills includes tool policy so load_skill_resource accepts the pre-seeded skill', async () => {
+    const provider = createMockSkillProvider([{ name: 'coding', description: 'Write code' }]);
+    // Augment the provider to serve a resource for 'coding'.
+    const augmentedProvider: SkillProvider = {
+      ...provider,
+      async listResources(name) {
+        return name === 'coding' ? ['snippets/hello.py'] : [];
+      },
+      async loadResource(name, path) {
+        if (name === 'coding' && path === 'snippets/hello.py') {
+          return 'print("Hello, world!")';
+        }
+        return undefined;
+      },
+    };
+
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'ok', toolCalls: [] }),
+      skills: { provider: augmentedProvider },
+    });
+
+    // Seed the SkillSession via initialActiveSkills (the recovery path).
+    const runRuntime = await runtime.createRunRuntime(
+      { message: 'Hello', sessionId: 'recovery-resource-session' },
+      { initialActiveSkills: [{ name: 'coding' }] },
+    );
+
+    // load_skill_resource must succeed for the pre-seeded skill.
+    const resourceResult = await runRuntime.toolbox.execute({
+      name: 'load_skill_resource',
+      arguments: { skillName: 'coding', path: 'snippets/hello.py' },
+    });
+
+    const result = resourceResult as { result: { content?: string; error?: string } };
+    expect(result.result.error).toBeUndefined();
+    expect(result.result.content).toBe('print("Hello, world!")');
+  });
+
+  it('writes lastActiveSkills to session metadata via the onStep hook after a skill is activated', async () => {
+    const provider = createMockSkillProvider([{ name: 'research', description: 'Deep research' }]);
+    // Use an in-memory KV store so the session store is configured (durable path).
+    const kv = textValueStore(new MemoryStorage());
+    const sessionId = 'snapshot-skills-session';
+
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'ok', toolCalls: [] }),
+      skills: { provider },
+      persistence: kv,
+    });
+
+    const runRuntime = await runtime.createRunRuntime({ message: 'Hello', sessionId });
+
+    // Create a session record so updateMetadata has something to update.
+    await runtime.sessionStore!.save(
+      createAgentSession({
+        id: sessionId,
+        agentName: 'test-agent',
+        conversationHistory: createConversationHistory(),
+        metadata: {},
+      }),
+    );
+
+    // Activate 'research' via the toolbox (simulates an LLM calling activate_skill).
+    await runRuntime.toolbox.execute({
+      name: 'activate_skill',
+      arguments: { name: 'research' },
+    });
+
+    // Fire the onStep hooks — the snapshot hook should write lastActiveSkills.
+    const fakeStepContext = {
+      step: 0,
+      conversation: new Conversation(),
+      content: 'I activated research.',
+      toolCalls: [],
+      results: [],
+      final: true,
+    };
+    for (const hook of runRuntime.onStep) {
+      await hook(fakeStepContext);
+    }
+
+    // Verify that lastActiveSkills was written to session metadata.
+    const session = await runtime.sessionStore!.load(sessionId);
+    expect(session).toBeDefined();
+    const lastActiveSkills = session!.metadata['lastActiveSkills'];
+    expect(Array.isArray(lastActiveSkills)).toBe(true);
+    expect(lastActiveSkills).toHaveLength(1);
+    const entry = (lastActiveSkills as Array<{ name: string }>)[0];
+    expect(entry?.name).toBe('research');
+  });
+
+  it('clears lastActiveSkills from session metadata when all skills are deactivated', async () => {
+    const provider = createMockSkillProvider([{ name: 'research', description: 'Deep research' }]);
+    const kv = textValueStore(new MemoryStorage());
+    const sessionId = 'deactivate-skills-session';
+
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'ok', toolCalls: [] }),
+      skills: { provider },
+      persistence: kv,
+    });
+
+    const runRuntime = await runtime.createRunRuntime({ message: 'Hello', sessionId });
+
+    await runtime.sessionStore!.save(
+      createAgentSession({
+        id: sessionId,
+        agentName: 'test-agent',
+        conversationHistory: createConversationHistory(),
+        metadata: {},
+      }),
+    );
+
+    // Activate then deactivate.
+    await runRuntime.toolbox.execute({ name: 'activate_skill', arguments: { name: 'research' } });
+    await runRuntime.toolbox.execute({ name: 'deactivate_skill', arguments: { name: 'research' } });
+
+    const fakeStepContext = {
+      step: 1,
+      conversation: new Conversation(),
+      content: 'deactivated.',
+      toolCalls: [],
+      results: [],
+      final: true,
+    };
+    for (const hook of runRuntime.onStep) {
+      await hook(fakeStepContext);
+    }
+
+    const session = await runtime.sessionStore!.load(sessionId);
+    const lastActiveSkills = session!.metadata['lastActiveSkills'];
+    expect(Array.isArray(lastActiveSkills)).toBe(true);
+    expect(lastActiveSkills).toHaveLength(0);
+  });
+});
