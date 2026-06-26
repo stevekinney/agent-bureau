@@ -1,8 +1,9 @@
-import { createToolbox } from 'armorer';
+import { createTool, createToolbox } from 'armorer';
 import { describe, expect, it } from 'bun:test';
 import { getMessages } from 'conversationalist';
 import type { GenerateContext, GenerateFunction, Toolbox } from 'operative';
 import { stopWhen } from 'operative';
+import { z } from 'zod';
 
 import { createBureau } from './create-bureau';
 
@@ -161,6 +162,71 @@ describe('D6 scheduled-fire path (#109)', () => {
         const userTurns = messages.filter((message) => message.role === 'user');
         expect(userTurns.length).toBeGreaterThanOrEqual(2);
         expect(messages.filter((message) => message.role === 'system')).toHaveLength(1);
+      } finally {
+        bureau.dispose();
+      }
+    },
+    FIRE_TIMEOUT_MS,
+  );
+
+  it(
+    'persists a fire that ends on maximum-steps (no final step) so the digest is not lost',
+    async () => {
+      // A generate that ALWAYS emits a tool call never satisfies noToolCalls, so the
+      // fire runs until it exhausts maximumSteps — its last StepResult.final is
+      // false. The session-persist hook must still save (it persists on every
+      // completed step, not only the final one), or the fire vanishes from the
+      // recurring digest (review: codex Mn69a).
+      const sessionId = 'maxsteps-digest';
+      const calls: RecordedCall[] = [];
+      const recording = createRecordingGenerate(calls);
+      const bureau = await createBureau({
+        generate: async (context: GenerateContext) => {
+          await recording(context);
+          // Always call the tool → the run never stops on noToolCalls and instead
+          // terminates on maximumSteps.
+          return { content: '', toolCalls: [{ name: 'noop', arguments: {} }] };
+        },
+        toolbox: createToolbox([
+          createTool({
+            name: 'noop',
+            description: 'no-op',
+            input: z.object({}),
+            execute: async () => 'ok',
+          }),
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any -- test toolbox variance
+        ]) as any,
+        storage: { type: 'memory' },
+        durableExecution: true,
+        maximumSteps: 1,
+        stopWhen: stopWhen.noToolCalls(),
+      });
+
+      try {
+        const summary = await bureau.createSchedule({
+          agentName: 'researcher',
+          input: 'maxsteps prompt',
+          spec: '1s',
+          sessionId,
+        });
+        expect(summary).toBeDefined();
+
+        // Wait for at least one fire to have run a step (it will hit maximum-steps).
+        const fired = await waitForReal(
+          () => calls.some((call) => call.conversationId === sessionId),
+          FIRE_TIMEOUT_MS,
+        );
+        await bureau.cancelSchedule(summary!.id);
+        expect(fired).toBe(true);
+
+        // Despite the fire ending on maximum-steps (no final step), its transcript
+        // was persisted to the session — the user turn is durably recorded.
+        const session = await bureau.getSession(sessionId);
+        expect(session).not.toBeNull();
+        const userTurns = getMessages(session!.conversationHistory).filter(
+          (message) => message.role === 'user',
+        );
+        expect(userTurns.some((message) => message.content === 'maxsteps prompt')).toBe(true);
       } finally {
         bureau.dispose();
       }

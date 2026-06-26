@@ -127,6 +127,9 @@ describe('schedules routes with durable engine (regression PRRT_kwDORvupsc6MXEmg
     // surfaces as 201 Created.
     const gateway = await createTestGateway({
       authToken: AUTH_TOKEN,
+      // A generate must be configured: createSchedule rejects NOT_CONFIGURED on a
+      // durable bureau with no generator (a schedule whose every fire would fail).
+      generate: async () => ({ content: 'ok', toolCalls: [] }),
       storage: { type: 'memory' },
       durableExecution: true,
     });
@@ -146,6 +149,27 @@ describe('schedules routes with durable engine (regression PRRT_kwDORvupsc6MXEmg
     expect(body.workflowType).toBe('agentRun');
     expect(body.status).toBe('active');
     expect(typeof body.id).toBe('string');
+    gateway.bureau.dispose();
+  });
+
+  it('POST /schedules returns 501 NOT_CONFIGURED on a durable bureau with no generate', async () => {
+    // createSchedule rejects NOT_CONFIGURED rather than registering a schedule
+    // whose every fire would fail; the route surfaces it as 501.
+    const gateway = await createTestGateway({
+      authToken: AUTH_TOKEN,
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+
+    const response = await requestJSON(gateway, '/schedules', {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({ agentName: 'researcher', input: 'x', spec: '0 9 * * *' }),
+    });
+
+    expect(response.status).toBe(501);
+    const body = await response.json();
+    expect(body.error.code).toBe('NOT_CONFIGURED');
     gateway.bureau.dispose();
   });
 

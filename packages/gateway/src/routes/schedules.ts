@@ -1,3 +1,4 @@
+import { BureauError } from 'bureau';
 import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import { z } from 'zod';
@@ -12,7 +13,8 @@ const CreateScheduleSchema = z.object({
   /**
    * Schedule specification. Accepts:
    * - Cron expression: `'0 9 * * *'`
-   * - ISO-8601 repeat duration: `'PT6H'` (every 6 hours)
+   * - Duration shorthand for a fixed interval: `'6h'`, `'30s'`, `'5 minutes'`
+   *   (weft's duration grammar; ISO-8601 like `'PT6H'` is not supported).
    */
   spec: z.string().min(1),
   /**
@@ -59,7 +61,18 @@ export function createSchedulesRoutes(bureau: Bureau) {
       throw new HTTPException(400, { message: message || 'Invalid request body' });
     }
 
-    const summary = await bureau.createSchedule(parsed.data);
+    let summary;
+    try {
+      summary = await bureau.createSchedule(parsed.data);
+    } catch (error) {
+      // A durable bureau with no generate configured rejects NOT_CONFIGURED rather
+      // than register a schedule whose every fire would fail. Surface it the same
+      // way the no-durable-engine case below does (501 NOT_CONFIGURED).
+      if (error instanceof BureauError && error.code === 'NOT_CONFIGURED') {
+        return context.json({ error: { code: 'NOT_CONFIGURED', message: error.message } }, 501);
+      }
+      throw error;
+    }
     if (summary === undefined) {
       return context.json(
         { error: { code: 'NOT_CONFIGURED', message: 'Durable engine not configured' } },

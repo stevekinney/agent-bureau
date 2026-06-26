@@ -1229,11 +1229,20 @@ export async function createRuntimeComposition(
   }
 
   /**
-   * Persist a scheduled run's conversation back to its session after the FINAL
-   * step. This is what makes the recurring-conversation pattern work: fire N+1
-   * loads the session this hook last wrote, so the agent accumulates context
-   * across fires. For a fresh-per-fire (stateless cron) session it simply records
-   * the single fire's transcript so the run is observable via `getSession`.
+   * Persist a scheduled run's conversation back to its session after EVERY
+   * completed step (last-write-wins, idempotent). This is what makes the
+   * recurring-conversation pattern work: fire N+1 loads the session this hook
+   * last wrote, so the agent accumulates context across fires. For a
+   * fresh-per-fire (stateless cron) session it records the fire's transcript so
+   * the run is observable via `getSession`.
+   *
+   * Persisting on every step (not only `context.final`) is deliberate: a fire that
+   * ends on `maximum-steps` — or any other non-`final` terminal outcome — still did
+   * real work, but its last `StepResult.final` is `false`, so a final-only hook
+   * would silently drop the whole fire from a recurring digest (review: codex
+   * Mn69a). A step that throws before completing never reaches this hook, so a
+   * step-0 failure (no assistant turn produced) is correctly NOT persisted — we
+   * never seed a bare, reply-less user turn that the next fire would build on.
    *
    * Deliberately writes ONLY the conversation (no `lastRunStatus: 'running'`
    * lifecycle metadata): a scheduled fire is not crash-recoverable or
@@ -1246,7 +1255,6 @@ export async function createRuntimeComposition(
     agentName: string,
   ): OnStepHook {
     return async (context) => {
-      if (!context.final) return;
       const existing = await store.load(sessionId);
       const next =
         existing ??

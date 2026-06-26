@@ -67,24 +67,27 @@ function toBadRequest(message: string): never {
   throw new BureauError(message, 'BAD_REQUEST');
 }
 
-/** Duration shorthand weft accepts for an interval spec (e.g. `30s`, `6h`, `1d`). */
-const DURATION_SHORTHAND = /^\d+(ms|s|m|h|d|w)$/;
+/**
+ * The exact duration grammar weft's `parseDuration` accepts: a number (optionally
+ * fractional, optionally space-separated from the unit) followed by a unit, where
+ * the unit is `ms`/`s`/`m`/`h`/`d` or its full word (`seconds`, `minutes`, …).
+ * Kept in lockstep with weft so we never route a string weft would accept as an
+ * interval into the cron branch (and vice-versa). Note: weft does NOT support
+ * weeks or ISO-8601 (`PT6H`) durations.
+ */
+const WEFT_DURATION =
+  /^\d+(?:\.\d+)?\s*(?:ms|milliseconds?|s|seconds?|m|minutes?|h|hours?|d|days?)$/i;
 
 /**
  * Normalize a {@link DurableScheduleDefinition.spec} string into a weft
  * {@link ScheduleSpec}. Weft parses a BARE string as a cron expression
- * (`normalizeCronSpec`), so a duration shorthand like `'6h'` must be wrapped as
- * `{ every }` or it would be misparsed as cron. Heuristic: a single duration
- * token → interval; everything else (multi-field cron, `@macro`) → cron.
- *
- * The interval branch matches a SINGLE-unit token (`30s`, `6h`, `1d`) — exactly
- * the documented shorthands. A compound duration (`'1h30m'`) does not match and
- * falls to the cron branch, where weft raises a clear cron parse error rather
- * than silently misinterpreting it; pass single-unit durations or a cron string.
+ * (`normalizeCronSpec`), so a duration like `'6h'` must be wrapped as `{ every }`
+ * or it would be misparsed as cron. A string matching weft's duration grammar →
+ * interval; everything else (cron expression, `@macro`) → cron.
  */
 function toScheduleSpec(spec: string): ScheduleSpec {
   const trimmed = spec.trim();
-  if (DURATION_SHORTHAND.test(trimmed)) {
+  if (WEFT_DURATION.test(trimmed)) {
     return { every: trimmed };
   }
   return { cron: trimmed };
@@ -1188,6 +1191,14 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     definition: DurableScheduleDefinition,
   ): Promise<import('@lostgradient/weft').ScheduleSummary | null | undefined> {
     if (!runtime.durable) return undefined;
+    // A schedule whose every fire would fail is worse than rejecting up front:
+    // without a configured generate/provider, each tick's `createRunRuntime` throws
+    // `No generate function configured`. Mirror `createRunFromRequest`'s readiness
+    // guard so we surface NOT_CONFIGURED here instead of registering a broken
+    // schedule that returns a healthy-looking summary (review: codex Mn69W).
+    if (!runtime.ready) {
+      throw new BureauError('No generate function configured', 'NOT_CONFIGURED');
+    }
     // Register a native weft schedule that fires the `agentRun` workflow on each
     // tick. The fire path is wired through `resolveRunServices`' scheduled-fire
     // branch (see runtime-composition.ts): each tick builds fresh run deps from

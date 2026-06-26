@@ -1782,9 +1782,62 @@ describe('createBureau', () => {
     }
   });
 
+  it('createSchedule registers a fixed-interval schedule for a weft duration spec', async () => {
+    // A weft duration grammar string (e.g. '6h', '5 minutes') is a fixed interval,
+    // not cron — toScheduleSpec wraps it as { every } so weft parses it as an
+    // interval. ISO-8601 (`PT6H`) is NOT weft duration grammar and stays cron.
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+
+    try {
+      const hourly = await bureau.createSchedule({ agentName: 'a', input: 'x', spec: '6h' });
+      expect(hourly?.intervalMs).toBe(6 * 60 * 60 * 1000);
+      expect(hourly?.cronExpression).toBeUndefined();
+
+      // Multi-word weft durations are intervals too (the prior single-token regex
+      // wrongly routed these to cron).
+      const everyFive = await bureau.createSchedule({
+        agentName: 'a',
+        input: 'x',
+        spec: '5 minutes',
+      });
+      expect(everyFive?.intervalMs).toBe(5 * 60 * 1000);
+      expect(everyFive?.cronExpression).toBeUndefined();
+    } finally {
+      bureau.dispose();
+    }
+  });
+
+  it('createSchedule throws NOT_CONFIGURED on a durable bureau with no generate (codex Mn69W)', async () => {
+    // A durable bureau with no generate/provider would register a schedule whose
+    // every fire throws "No generate function configured" at runtime. Reject up
+    // front rather than hand back a healthy-looking summary for a broken schedule.
+    const bureau = await createBureau({
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+
+    try {
+      const error = await bureau
+        .createSchedule({ agentName: 'a', input: 'x', spec: '0 9 * * *' })
+        .then(
+          () => undefined,
+          (rejection: unknown) => rejection,
+        );
+      expect(error).toBeInstanceOf(BureauError);
+      expect((error as BureauError).code).toBe('NOT_CONFIGURED');
+    } finally {
+      bureau.dispose();
+    }
+  });
+
   it('createSchedule returns undefined (no-op) on a non-durable bureau', async () => {
     // Without a durable engine there is nothing to schedule; the method short-
-    // circuits to undefined BEFORE the NOT_IMPLEMENTED guard, matching the other
+    // circuits to undefined before any registration, matching the other
     // durable-only accessors.
     const bureau = await createBureau({
       generate: createMockGenerate(),
