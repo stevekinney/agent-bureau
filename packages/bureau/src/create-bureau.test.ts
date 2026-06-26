@@ -1751,14 +1751,7 @@ describe('createBureau', () => {
     }
   });
 
-  it('createSchedule throws NOT_IMPLEMENTED on a durable bureau — durable agent scheduling is not yet wired (regression PRRT_kwDORvupsc6MZozn)', async () => {
-    // The durable scheduled-FIRE path is unwired on our side: resolveRunServices
-    // only recovers an existing session and has no branch that builds services for
-    // a native weft schedule fire, so a scheduled `agentRun` would silently never
-    // run. (weft 0.8 DOES expose what's needed — `info.schedule` + a stable per-fire
-    // `info.workflowId` — so this is finishable here, tracked in #109.) Until the
-    // resolver branch lands, createSchedule rejects with NOT_IMPLEMENTED rather than
-    // registering a schedule whose every tick fails.
+  it('createSchedule registers a native schedule and returns its summary on a durable bureau (#109)', async () => {
     const bureau = await createBureau({
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
@@ -1767,20 +1760,122 @@ describe('createBureau', () => {
     });
 
     try {
-      const error = await bureau
+      const summary = await bureau.createSchedule({
+        agentName: 'researcher',
+        input: 'Summarize overnight activity',
+        spec: '0 9 * * *',
+        sessionId: 'daily-digest',
+      });
+
+      expect(summary).toBeDefined();
+      expect(summary?.workflowType).toBe('agentRun');
+      expect(summary?.status).toBe('active');
+      // A bare multi-field string is a cron expression (not duration shorthand).
+      expect(summary?.cronExpression).toBe('0 9 * * *');
+      expect(typeof summary?.id).toBe('string');
+
+      // The schedule is then visible through the read surface.
+      const fetched = await bureau.getSchedule(summary!.id);
+      expect(fetched?.id).toBe(summary!.id);
+    } finally {
+      bureau.dispose();
+    }
+  });
+
+  it('createSchedule registers a fixed-interval schedule for a weft duration spec', async () => {
+    // A weft duration grammar string (e.g. '6h', '5 minutes') is a fixed interval,
+    // not cron — toScheduleSpec wraps it as { every } so weft parses it as an
+    // interval. ISO-8601 (`PT6H`) is NOT weft duration grammar and stays cron.
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+
+    try {
+      const hourly = await bureau.createSchedule({ agentName: 'a', input: 'x', spec: '6h' });
+      expect(hourly?.intervalMs).toBe(6 * 60 * 60 * 1000);
+      expect(hourly?.cronExpression).toBeUndefined();
+
+      // Multi-word weft durations are intervals too (the prior single-token regex
+      // wrongly routed these to cron).
+      const everyFive = await bureau.createSchedule({
+        agentName: 'a',
+        input: 'x',
+        spec: '5 minutes',
+      });
+      expect(everyFive?.intervalMs).toBe(5 * 60 * 1000);
+      expect(everyFive?.cronExpression).toBeUndefined();
+    } finally {
+      bureau.dispose();
+    }
+  });
+
+  it('createSchedule rejects a blank recurring sessionId and overlap:allow with a session (codex)', async () => {
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+
+    try {
+      const blank = await bureau
+        .createSchedule({ agentName: 'a', input: 'x', spec: '0 9 * * *', sessionId: '   ' })
+        .then(
+          () => undefined,
+          (rejection: unknown) => rejection,
+        );
+      expect(blank).toBeInstanceOf(BureauError);
+      expect((blank as BureauError).code).toBe('BAD_REQUEST');
+
+      const overlapping = await bureau
         .createSchedule({
-          agentName: 'researcher',
-          input: 'Summarize overnight activity',
+          agentName: 'a',
+          input: 'x',
           spec: '0 9 * * *',
-          sessionId: 'daily-digest',
+          sessionId: 'digest',
+          overlap: 'allow',
         })
         .then(
           () => undefined,
           (rejection: unknown) => rejection,
         );
+      expect(overlapping).toBeInstanceOf(BureauError);
+      expect((overlapping as BureauError).code).toBe('BAD_REQUEST');
 
+      // overlap:'allow' WITHOUT a session is fine (stateless fires may run concurrently).
+      const ok = await bureau.createSchedule({
+        agentName: 'a',
+        input: 'x',
+        spec: '0 9 * * *',
+        overlap: 'allow',
+      });
+      expect(ok?.status).toBe('active');
+    } finally {
+      bureau.dispose();
+    }
+  });
+
+  it('createSchedule throws NOT_CONFIGURED on a durable bureau with no generate (codex Mn69W)', async () => {
+    // A durable bureau with no generate/provider would register a schedule whose
+    // every fire throws "No generate function configured" at runtime. Reject up
+    // front rather than hand back a healthy-looking summary for a broken schedule.
+    const bureau = await createBureau({
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+
+    try {
+      const error = await bureau
+        .createSchedule({ agentName: 'a', input: 'x', spec: '0 9 * * *' })
+        .then(
+          () => undefined,
+          (rejection: unknown) => rejection,
+        );
       expect(error).toBeInstanceOf(BureauError);
-      expect((error as BureauError).code).toBe('NOT_IMPLEMENTED');
+      expect((error as BureauError).code).toBe('NOT_CONFIGURED');
     } finally {
       bureau.dispose();
     }
@@ -1788,7 +1883,7 @@ describe('createBureau', () => {
 
   it('createSchedule returns undefined (no-op) on a non-durable bureau', async () => {
     // Without a durable engine there is nothing to schedule; the method short-
-    // circuits to undefined BEFORE the NOT_IMPLEMENTED guard, matching the other
+    // circuits to undefined before any registration, matching the other
     // durable-only accessors.
     const bureau = await createBureau({
       generate: createMockGenerate(),

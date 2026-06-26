@@ -1,8 +1,10 @@
-import type { ListFilter, ListOptions } from '@lostgradient/weft';
+import type { ListFilter, ListOptions, ScheduleSpec } from '@lostgradient/weft';
 import { Conversation, createConversationHistory } from 'conversationalist';
 import { CompletableEventTarget } from 'lifecycle';
 import { type ActiveRun, createActiveRun, createAgentSession, type JSONValue } from 'operative';
 import {
+  createAgentScheduler,
+  InvalidScheduleError,
   isAgentRunWorkflowInput,
   reattachDurableActiveRun,
   type RecoveredRunHandle,
@@ -64,6 +66,32 @@ export { BureauError };
 
 function toBadRequest(message: string): never {
   throw new BureauError(message, 'BAD_REQUEST');
+}
+
+/**
+ * The exact duration grammar weft's `parseDuration` accepts: a number (optionally
+ * fractional, optionally space-separated from the unit) followed by a unit, where
+ * the unit is `ms`/`s`/`m`/`h`/`d` or its full word (`seconds`, `minutes`, …).
+ * Kept in lockstep with weft so we never route a string weft would accept as an
+ * interval into the cron branch (and vice-versa). Note: weft does NOT support
+ * weeks or ISO-8601 (`PT6H`) durations.
+ */
+const WEFT_DURATION =
+  /^\d+(?:\.\d+)?\s*(?:ms|milliseconds?|s|seconds?|m|minutes?|h|hours?|d|days?)$/i;
+
+/**
+ * Normalize a {@link DurableScheduleDefinition.spec} string into a weft
+ * {@link ScheduleSpec}. Weft parses a BARE string as a cron expression
+ * (`normalizeCronSpec`), so a duration like `'6h'` must be wrapped as `{ every }`
+ * or it would be misparsed as cron. A string matching weft's duration grammar →
+ * interval; everything else (cron expression, `@macro`) → cron.
+ */
+function toScheduleSpec(spec: string): ScheduleSpec {
+  const trimmed = spec.trim();
+  if (WEFT_DURATION.test(trimmed)) {
+    return { every: trimmed };
+  }
+  return { cron: trimmed };
 }
 
 function validateMessageRequest(request: {
@@ -1160,30 +1188,43 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     return runtime.durable.engine.query(runId, name, input);
   }
 
-  function createSchedule(
-    _definition: DurableScheduleDefinition,
+  async function createSchedule(
+    definition: DurableScheduleDefinition,
   ): Promise<import('@lostgradient/weft').ScheduleSummary | null | undefined> {
-    if (!runtime.durable) return Promise.resolve(undefined);
-    // Durable agent scheduling's FIRE path is not yet wired (D6 was implemented
-    // only as far as registering a schedule). When a native weft schedule tick
-    // fires the `agentRun` workflow, `resolveRunServices` has no branch that
-    // BUILDS services for the fire — it only recovers an existing session — so a
-    // scheduled agent would silently never run. We reject loudly rather than
-    // register a schedule whose every tick fails.
+    if (!runtime.durable) return undefined;
+    // A schedule whose every fire would fail is worse than rejecting up front:
+    // without a configured generate/provider, each tick's `createRunRuntime` throws
+    // `No generate function configured`. Mirror `createRunFromRequest`'s readiness
+    // guard so we surface NOT_CONFIGURED here instead of registering a broken
+    // schedule that returns a healthy-looking summary (review: codex Mn69W).
+    if (!runtime.ready) {
+      throw new BureauError('No generate function configured', 'NOT_CONFIGURED');
+    }
+    // Register a native weft schedule that fires the `agentRun` workflow on each
+    // tick. The fire path is wired through `resolveRunServices`' scheduled-fire
+    // branch (see runtime-composition.ts): each tick builds fresh run deps from
+    // the ScheduledAgentRunInput, seeds the prompt, and runs the agent (#109).
     //
-    // This is finishable on our side (weft 0.8 already exposes per-fire identity
-    // via `info.schedule` + a stable per-occurrence `info.workflowId`); it needs a
-    // scheduler-fire branch in `resolveRunServices` that builds fresh DurableRunDeps
-    // from the ScheduledAgentRunInput, plus an end-to-end test that fires a schedule
-    // and asserts an agent ran. Tracked in #109. Until then, rejecting keeps the
-    // API honest (the prior code silently registered a broken schedule).
-    return Promise.reject(
-      new BureauError(
-        'Durable scheduling of agent runs is not yet wired: the scheduled-fire ' +
-          'path that builds run services per tick is unimplemented (tracked in #109).',
-        'NOT_IMPLEMENTED',
-      ),
-    );
+    // Definition validation (blank recurring session, overlap 'allow' + recurring
+    // session) lives in `createAgentSchedule` — the single chokepoint every caller
+    // (bureau, AgentScheduler, the scheduleSelf tool) routes through — so it cannot
+    // be bypassed. We surface its `InvalidScheduleError` as a BAD_REQUEST (400).
+    const scheduler = createAgentScheduler({ engine: runtime.durable.engine });
+    let handle;
+    try {
+      handle = await scheduler.schedule(definition.agentName, {
+        spec: toScheduleSpec(definition.spec),
+        input: definition.input,
+        ...(definition.sessionId !== undefined ? { session: definition.sessionId } : {}),
+        ...(definition.overlap !== undefined ? { overlap: definition.overlap } : {}),
+      });
+    } catch (error) {
+      if (error instanceof InvalidScheduleError) {
+        toBadRequest(error.message);
+      }
+      throw error;
+    }
+    return handle.describe();
   }
 
   async function getSchedule(

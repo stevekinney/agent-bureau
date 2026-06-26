@@ -121,12 +121,15 @@ describe('schedules routes with durable engine (regression PRRT_kwDORvupsc6MXEmg
   // used to signal "no durable engine". Routes checking `result === undefined` would
   // therefore return 501 even when the durable operation succeeded.
 
-  it('POST /schedules returns 501 even with a durable engine — durable agent scheduling is not yet wired (PRRT_kwDORvupsc6MZozn)', async () => {
-    // createSchedule now rejects with BureauError NOT_IMPLEMENTED (the durable
-    // scheduled-fire path is unwired on our side — #109), so the route maps it to
-    // 501 rather than registering a schedule whose every tick would fail.
+  it('POST /schedules returns 201 with the created summary when a durable engine is configured (#109)', async () => {
+    // The durable scheduled-fire path is now wired (#109): createSchedule registers
+    // a native weft schedule and returns its ScheduleSummary, which the route
+    // surfaces as 201 Created.
     const gateway = await createTestGateway({
       authToken: AUTH_TOKEN,
+      // A generate must be configured: createSchedule rejects NOT_CONFIGURED on a
+      // durable bureau with no generator (a schedule whose every fire would fail).
+      generate: async () => ({ content: 'ok', toolCalls: [] }),
       storage: { type: 'memory' },
       durableExecution: true,
     });
@@ -141,7 +144,58 @@ describe('schedules routes with durable engine (regression PRRT_kwDORvupsc6MXEmg
       }),
     });
 
+    expect(response.status).toBe(201);
+    const body = await response.json();
+    expect(body.workflowType).toBe('agentRun');
+    expect(body.status).toBe('active');
+    expect(typeof body.id).toBe('string');
+    gateway.bureau.dispose();
+  });
+
+  it('POST /schedules returns 400 for overlap:allow with a recurring sessionId', async () => {
+    // Incoherent definition: a recurring session cannot have concurrently
+    // overlapping fires. createSchedule rejects BAD_REQUEST → 400.
+    const gateway = await createTestGateway({
+      authToken: AUTH_TOKEN,
+      generate: async () => ({ content: 'ok', toolCalls: [] }),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+
+    const response = await requestJSON(gateway, '/schedules', {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({
+        agentName: 'a',
+        input: 'x',
+        spec: '0 9 * * *',
+        sessionId: 'digest',
+        overlap: 'allow',
+      }),
+    });
+
+    expect(response.status).toBe(400);
+    gateway.bureau.dispose();
+  });
+
+  it('POST /schedules returns 501 NOT_CONFIGURED on a durable bureau with no generate', async () => {
+    // createSchedule rejects NOT_CONFIGURED rather than registering a schedule
+    // whose every fire would fail; the route surfaces it as 501.
+    const gateway = await createTestGateway({
+      authToken: AUTH_TOKEN,
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+
+    const response = await requestJSON(gateway, '/schedules', {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({ agentName: 'researcher', input: 'x', spec: '0 9 * * *' }),
+    });
+
     expect(response.status).toBe(501);
+    const body = await response.json();
+    expect(body.error.code).toBe('NOT_CONFIGURED');
     gateway.bureau.dispose();
   });
 

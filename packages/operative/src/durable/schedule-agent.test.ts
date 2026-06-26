@@ -8,11 +8,12 @@ import { ScheduleHandle } from '@lostgradient/weft';
 import { describe, expect, it } from 'bun:test';
 
 import type { AnyRunEngine } from './create-run-engine';
-import type { SchedulingEngine } from './schedule-agent';
+import type { ScheduledAgentRunInput, SchedulingEngine } from './schedule-agent';
 import {
   createAgentSchedule,
   createAgentScheduler,
-  UnrunnableScheduleError,
+  InvalidScheduleError,
+  isScheduledAgentRunInput,
 } from './schedule-agent';
 
 // ---------------------------------------------------------------------------
@@ -40,16 +41,21 @@ interface ScheduleCall {
 }
 
 /**
- * Create a fake ScheduleHandle for testing. We need to construct it with the
- * ScheduleHandle class, but only the id matters for the tests here; the other
- * methods are stubs.
+ * Create a fake ScheduleHandle for testing. We construct the real ScheduleHandle
+ * class over a stub engine that records lifecycle calls, so handle-delegation can
+ * be asserted (`pause`/`resume`/`cancel` route to the engine by id).
  */
-function makeFakeHandle(id: string): ScheduleHandle {
-  // ScheduleHandle is a class that needs a ScheduleHandleEngine — we stub it.
+function makeFakeHandle(id: string, recorder?: Record<string, string[]>): ScheduleHandle {
   const stubEngine = {
-    pauseSchedule: async () => {},
-    resumeSchedule: async () => {},
-    cancelSchedule: async () => {},
+    pauseSchedule: async (scheduleId: string) => {
+      recorder?.['pause']?.push(scheduleId);
+    },
+    resumeSchedule: async (scheduleId: string) => {
+      recorder?.['resume']?.push(scheduleId);
+    },
+    cancelSchedule: async (scheduleId: string) => {
+      recorder?.['cancel']?.push(scheduleId);
+    },
     updateSchedule: async () => {},
     getSchedule: async () => mockSummary,
   };
@@ -59,6 +65,7 @@ function makeFakeHandle(id: string): ScheduleHandle {
 function makeSchedulingEngine(options?: {
   scheduleId?: string;
   summaries?: ScheduleSummary[];
+  handleRecorder?: Record<string, string[]>;
 }): SchedulingEngine & { calls: ScheduleCall[] } {
   const scheduleId = options?.scheduleId ?? 'test-sched-1';
   const summaries = options?.summaries ?? [mockSummary];
@@ -73,7 +80,7 @@ function makeSchedulingEngine(options?: {
       opts?: ScheduleOptions,
     ): Promise<ScheduleHandle> {
       calls.push({ type, input, spec, options: opts });
-      return makeFakeHandle(scheduleId);
+      return makeFakeHandle(scheduleId, options?.handleRecorder);
     },
     async getSchedule(): Promise<ScheduleSummary | null> {
       return summaries[0] ?? null;
@@ -93,77 +100,174 @@ function makeSchedulingEngine(options?: {
 }
 
 // ---------------------------------------------------------------------------
+// isScheduledAgentRunInput
+// ---------------------------------------------------------------------------
+
+describe('isScheduledAgentRunInput', () => {
+  it('accepts a well-formed input with and without sessionId', () => {
+    expect(isScheduledAgentRunInput({ agentName: 'a', input: 'hi' })).toBe(true);
+    expect(isScheduledAgentRunInput({ agentName: 'a', input: 'hi', sessionId: 's' })).toBe(true);
+  });
+
+  it('rejects missing/mistyped fields and non-objects', () => {
+    expect(isScheduledAgentRunInput(null)).toBe(false);
+    expect(isScheduledAgentRunInput('nope')).toBe(false);
+    expect(isScheduledAgentRunInput({ input: 'hi' })).toBe(false);
+    expect(isScheduledAgentRunInput({ agentName: 'a' })).toBe(false);
+    expect(isScheduledAgentRunInput({ agentName: 1, input: 'hi' })).toBe(false);
+    expect(isScheduledAgentRunInput({ agentName: 'a', input: 'hi', sessionId: 5 })).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // createAgentSchedule
 //
-// Contract change (PRRT_kwDORvupsc6Mddv7): registering a durable agent schedule
-// is REJECTED until the scheduled-fire path is wired (tracked in #109). A
-// schedule registered today would fire the `agentRun` workflow with a
-// `ScheduledAgentRunInput` it rejects, and there is no fire-time service
-// resolver, so every tick would fail silently. We reject up front — matching
-// `Bureau.createSchedule` — rather than register a broken schedule. These tests
-// assert that honest rejection (they previously asserted successful
-// registration; that behaviour was the bug).
+// Registers a durable agent schedule against the engine. Each fire starts the
+// `agentRun` workflow with a `ScheduledAgentRunInput` ({ agentName, input,
+// sessionId? }); the bureau's run-services resolver builds fresh run deps per
+// fire (#109). These tests assert the registration shape and the returned
+// handle's lifecycle delegation.
 // ---------------------------------------------------------------------------
 
 describe('createAgentSchedule', () => {
-  it('rejects with UnrunnableScheduleError instead of registering a schedule', async () => {
+  it('registers the agentRun workflow with a ScheduledAgentRunInput', async () => {
     const engine = makeSchedulingEngine();
 
-    let caught: unknown;
-    try {
-      await createAgentSchedule({
-        engine: engine as unknown as AnyRunEngine,
-        agentName: 'researcher',
-        spec: { cron: '0 9 * * *' },
-        input: 'Summarize overnight activity',
-      });
-    } catch (err) {
-      caught = err;
-    }
+    const handle = await createAgentSchedule({
+      engine: engine as unknown as AnyRunEngine,
+      agentName: 'researcher',
+      spec: { cron: '0 9 * * *' },
+      input: 'Summarize overnight activity',
+    });
 
-    expect(caught).toBeInstanceOf(UnrunnableScheduleError);
-    expect((caught as Error).message).toMatch(/not yet wired/i);
-    // Crucially: it must NOT have reached the engine — no broken schedule lands.
-    expect(engine.calls).toHaveLength(0);
+    expect(engine.calls).toHaveLength(1);
+    const call = engine.calls[0]!;
+    expect(call.type).toBe('agentRun');
+    expect(call.spec).toEqual({ cron: '0 9 * * *' });
+    const input = call.input as ScheduledAgentRunInput;
+    expect(input.agentName).toBe('researcher');
+    expect(input.input).toBe('Summarize overnight activity');
+    // No session → the scheduled input carries no sessionId (fresh per fire).
+    expect(input.sessionId).toBeUndefined();
+    expect(handle.id).toBe('test-sched-1');
   });
 
-  it('does not register even when a session, overlap, or stable id is supplied', async () => {
-    const engine = makeSchedulingEngine();
+  it('threads session, overlap, and stable id through to the engine', async () => {
+    const engine = makeSchedulingEngine({ scheduleId: 'daily-digest-sched' });
 
-    let caught: unknown;
-    try {
-      await createAgentSchedule({
-        engine: engine as unknown as AnyRunEngine,
-        agentName: 'researcher',
-        spec: { every: '6h' },
-        input: 'hello',
-        session: 'daily-digest',
-        overlap: 'queue',
-        id: 'daily-digest-sched',
-      });
-    } catch (err) {
-      caught = err;
-    }
-    expect(caught).toBeInstanceOf(UnrunnableScheduleError);
-    expect(engine.calls).toHaveLength(0);
+    await createAgentSchedule({
+      engine: engine as unknown as AnyRunEngine,
+      agentName: 'researcher',
+      spec: { every: '6h' },
+      input: 'hello',
+      session: 'daily-digest',
+      overlap: 'queue',
+      id: 'daily-digest-sched',
+    });
+
+    expect(engine.calls).toHaveLength(1);
+    const call = engine.calls[0]!;
+    expect(call.spec).toEqual({ every: '6h' });
+    expect((call.input as ScheduledAgentRunInput).sessionId).toBe('daily-digest');
+    expect(call.options).toEqual({ overlap: 'queue', id: 'daily-digest-sched' });
   });
 
-  it('references the tracking issue in the rejection message', async () => {
+  it('uses a custom workflowType when supplied', async () => {
     const engine = makeSchedulingEngine();
 
+    await createAgentSchedule({
+      engine: engine as unknown as AnyRunEngine,
+      workflowType: 'myRun',
+      agentName: 'researcher',
+      spec: { every: '1h' },
+      input: 'hello',
+    });
+
+    expect(engine.calls[0]!.type).toBe('myRun');
+  });
+
+  it('trims a padded session id before registering', async () => {
+    const engine = makeSchedulingEngine();
+    await createAgentSchedule({
+      engine: engine as unknown as AnyRunEngine,
+      agentName: 'a',
+      spec: { every: '1h' },
+      input: 'x',
+      session: '  daily-digest  ',
+    });
+    expect((engine.calls[0]!.input as ScheduledAgentRunInput).sessionId).toBe('daily-digest');
+  });
+
+  it('rejects a blank session at the chokepoint (before reaching the engine)', async () => {
+    const engine = makeSchedulingEngine();
     let caught: unknown;
     try {
       await createAgentSchedule({
         engine: engine as unknown as AnyRunEngine,
-        agentName: 'researcher',
+        agentName: 'a',
         spec: { every: '1h' },
-        input: 'hello',
+        input: 'x',
+        session: '   ',
       });
     } catch (err) {
       caught = err;
     }
+    expect(caught).toBeInstanceOf(InvalidScheduleError);
+    expect(engine.calls).toHaveLength(0);
+  });
 
-    expect((caught as Error).message).toMatch(/#109/);
+  it("rejects overlap 'allow' combined with a recurring session", async () => {
+    const engine = makeSchedulingEngine();
+    let caught: unknown;
+    try {
+      await createAgentSchedule({
+        engine: engine as unknown as AnyRunEngine,
+        agentName: 'a',
+        spec: { every: '1h' },
+        input: 'x',
+        session: 'digest',
+        overlap: 'allow',
+      });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(InvalidScheduleError);
+    expect(engine.calls).toHaveLength(0);
+  });
+
+  it("allows overlap 'allow' when there is no session (stateless fires)", async () => {
+    const engine = makeSchedulingEngine();
+    const handle = await createAgentSchedule({
+      engine: engine as unknown as AnyRunEngine,
+      agentName: 'a',
+      spec: { every: '1h' },
+      input: 'x',
+      overlap: 'allow',
+    });
+    expect(engine.calls).toHaveLength(1);
+    expect(handle.id).toBe('test-sched-1');
+  });
+
+  it('returns a handle whose lifecycle methods delegate to the engine', async () => {
+    const recorder = { pause: [] as string[], resume: [] as string[], cancel: [] as string[] };
+    const engine = makeSchedulingEngine({ handleRecorder: recorder });
+
+    const handle = await createAgentSchedule({
+      engine: engine as unknown as AnyRunEngine,
+      agentName: 'researcher',
+      spec: { every: '1h' },
+      input: 'hello',
+    });
+
+    await handle.pause();
+    await handle.resume();
+    await handle.cancel();
+    expect(recorder.pause).toContain('test-sched-1');
+    expect(recorder.resume).toContain('test-sched-1');
+    expect(recorder.cancel).toContain('test-sched-1');
+
+    const summary = await handle.describe();
+    expect(summary.id).toBe('test-sched-1');
   });
 });
 
@@ -172,36 +276,31 @@ describe('createAgentSchedule', () => {
 // ---------------------------------------------------------------------------
 
 describe('createAgentScheduler', () => {
-  it('schedule() rejects with UnrunnableScheduleError (routes through createAgentSchedule)', async () => {
+  it('schedule() registers via the engine (routes through createAgentSchedule)', async () => {
     const engine = makeSchedulingEngine();
     const scheduler = createAgentScheduler({ engine });
 
-    let caught: unknown;
-    try {
-      await scheduler.schedule('researcher', {
-        spec: { every: '6h' },
-        input: 'Nightly report',
-      });
-    } catch (err) {
-      caught = err;
-    }
-    expect(caught).toBeInstanceOf(UnrunnableScheduleError);
-    // The unrunnable schedule never reaches the engine.
-    expect(engine.calls).toHaveLength(0);
+    const handle = await scheduler.schedule('researcher', {
+      spec: { every: '6h' },
+      input: 'Nightly report',
+    });
+
+    expect(engine.calls).toHaveLength(1);
+    expect(engine.calls[0]!.type).toBe('agentRun');
+    expect((engine.calls[0]!.input as ScheduledAgentRunInput).agentName).toBe('researcher');
+    expect(handle.id).toBe('test-sched-1');
   });
 
-  it('schedule() rejects regardless of agentName / session', async () => {
+  it('schedule() carries agentName and session into the scheduled input', async () => {
     const engine = makeSchedulingEngine();
     const scheduler = createAgentScheduler({ engine });
 
-    let caught: unknown;
-    try {
-      await scheduler.schedule('writer', { spec: { every: '1h' }, input: 'hello', session: 's1' });
-    } catch (err) {
-      caught = err;
-    }
-    expect(caught).toBeInstanceOf(UnrunnableScheduleError);
-    expect(engine.calls).toHaveLength(0);
+    await scheduler.schedule('writer', { spec: { every: '1h' }, input: 'hello', session: 's1' });
+
+    expect(engine.calls).toHaveLength(1);
+    const input = engine.calls[0]!.input as ScheduledAgentRunInput;
+    expect(input.agentName).toBe('writer');
+    expect(input.sessionId).toBe('s1');
   });
 
   it('getSchedule() delegates to engine.getSchedule', async () => {
@@ -250,18 +349,14 @@ describe('createAgentScheduler', () => {
     expect(cancelled).toContain('my-sched');
   });
 
-  it('schedule() rejects even with a custom workflowType override', async () => {
+  it('schedule() honors a custom workflowType override', async () => {
     const engine = makeSchedulingEngine();
     const scheduler = createAgentScheduler({ engine, workflowType: 'myRun' });
 
-    let caught: unknown;
-    try {
-      await scheduler.schedule('agent', { spec: { every: '1h' }, input: 'x' });
-    } catch (err) {
-      caught = err;
-    }
-    expect(caught).toBeInstanceOf(UnrunnableScheduleError);
-    expect(engine.calls).toHaveLength(0);
+    await scheduler.schedule('agent', { spec: { every: '1h' }, input: 'x' });
+
+    expect(engine.calls).toHaveLength(1);
+    expect(engine.calls[0]!.type).toBe('myRun');
   });
 
   it('listSchedules() can filter by status', async () => {

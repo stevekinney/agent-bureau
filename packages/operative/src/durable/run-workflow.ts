@@ -7,6 +7,7 @@ import { buildStepDeps, createRunState } from '../loop';
 import { DEFAULT_MAXIMUM_STEPS, runStep } from '../run-step';
 import type { FinishReason } from '../types';
 import type { CheckpointStore } from './checkpoint-store';
+import { isScheduledAgentRunInput, type ScheduledAgentRunInput } from './schedule-agent';
 import { createStorageActivities } from './storage-activities';
 import type {
   DurableRunDeps,
@@ -262,9 +263,26 @@ export function createRunWorkflow(checkpointStore: CheckpointStore) {
       // — a bare await would not be checkpointed. So the generator correctly has no
       // own-level `await`; require-await is a false positive for this pattern.
       // eslint-disable-next-line @typescript-eslint/require-await -- Weft durable generator: async work flows through yield*, not a top-level await.
-      .execute(async function* (ctx, input: AgentRunWorkflowInput) {
-        const { runId } = input;
-        const maximumSteps = input.maximumSteps ?? DEFAULT_MAXIMUM_STEPS;
+      .execute(async function* (ctx, input: AgentRunWorkflowInput | ScheduledAgentRunInput) {
+        // The per-fire/per-run id is ALWAYS `ctx.workflowId`. For a normal run
+        // `input.runId === ctx.workflowId` (engine.start pins `{ id: runId }`, and
+        // the resolver's mismatch guard enforces it), so this is behavior-
+        // preserving. For a NATIVE SCHEDULED FIRE the input is a
+        // ScheduledAgentRunInput with NO `runId`: weft mints a fresh `workflowId`
+        // per fire and passes the registered input through unchanged, so the only
+        // per-fire identity the body can read is `ctx.workflowId` (#109). A baked
+        // runId in the input would collide every fire's storage keys.
+        const runId = ctx.workflowId;
+        // A scheduled fire carries no `maximumSteps`/`prompt` on its input — those
+        // come from the resolver-built deps (the conversation is pre-seeded with
+        // the prompt, and the step cap rides on `options.maximumSteps`). Gate the
+        // input-shape-specific reads behind the type guard so a ScheduledAgentRunInput
+        // is never read as if it were an AgentRunWorkflowInput.
+        const scheduled = isScheduledAgentRunInput(input);
+        const maximumSteps =
+          (scheduled ? undefined : input.maximumSteps) ??
+          runDepsFrom(ctx.services).options.maximumSteps ??
+          DEFAULT_MAXIMUM_STEPS;
 
         // CRITICAL: `ctx.services` (via `runDepsFrom`) is read ONLY inside
         // no-`yield*` regions, never held as a local across a yield. The deps hold
@@ -299,7 +317,11 @@ export function createRunWorkflow(checkpointStore: CheckpointStore) {
           const seeded = isConversation(options.conversation)
             ? options.conversation
             : new Conversation(options.conversation);
-          if (input.prompt !== undefined) {
+          // Only a normal run appends `input.prompt` here; a scheduled fire's
+          // prompt is already seeded into `options.conversation` by the resolver
+          // (and ScheduledAgentRunInput has no `prompt` field), so appending again
+          // would duplicate the user turn.
+          if (!scheduled && input.prompt !== undefined) {
             seeded.appendUserMessage(input.prompt);
           }
           return seeded.snapshot();

@@ -13,14 +13,16 @@ const CreateScheduleSchema = z.object({
   /**
    * Schedule specification. Accepts:
    * - Cron expression: `'0 9 * * *'`
-   * - ISO-8601 repeat duration: `'PT6H'` (every 6 hours)
+   * - Duration shorthand for a fixed interval: `'6h'`, `'30s'`, `'5 minutes'`
+   *   (weft's duration grammar; ISO-8601 like `'PT6H'` is not supported).
    */
   spec: z.string().min(1),
   /**
    * Session id for recurring-conversation semantics: each fire appends a run to
-   * this session. When omitted, each fire is a fresh standalone session.
+   * this session. When omitted, each fire is a fresh standalone session. Must be
+   * non-empty when present (a blank id is rejected, not coerced to stateless).
    */
-  sessionId: z.string().optional(),
+  sessionId: z.string().min(1).optional(),
   /** Overlap policy when a prior fire is still running. Defaults to `'skip'`. */
   overlap: z.enum(['skip', 'allow']).optional(),
   // NOTE: no `description` — weft 0.8.0 cannot store/surface a schedule label, so
@@ -64,10 +66,18 @@ export function createSchedulesRoutes(bureau: Bureau) {
     try {
       summary = await bureau.createSchedule(parsed.data);
     } catch (error) {
-      // The durable scheduled-fire path is not yet wired on our side (see #109).
-      // Surface it as 501 Not Implemented rather than a 500.
-      if (error instanceof BureauError && error.code === 'NOT_IMPLEMENTED') {
-        throw new HTTPException(501, { message: error.message });
+      if (error instanceof BureauError) {
+        // A durable bureau with no generate configured rejects NOT_CONFIGURED
+        // rather than register a schedule whose every fire would fail. Surface it
+        // the same way the no-durable-engine case below does (501 NOT_CONFIGURED).
+        if (error.code === 'NOT_CONFIGURED') {
+          return context.json({ error: { code: 'NOT_CONFIGURED', message: error.message } }, 501);
+        }
+        // Incoherent definitions (blank recurring sessionId, overlap 'allow' with a
+        // recurring sessionId) reject BAD_REQUEST → 400, matching the runs route.
+        if (error.code === 'BAD_REQUEST') {
+          throw new HTTPException(400, { message: error.message });
+        }
       }
       throw error;
     }

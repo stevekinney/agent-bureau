@@ -238,7 +238,8 @@ export type {
 export {
   createAgentSchedule,
   createAgentScheduler,
-  UnrunnableScheduleError,
+  InvalidScheduleError,
+  isScheduledAgentRunInput,
 } from './durable/schedule-agent';
 export { AgentScheduledEvent, WakeupScheduledEvent } from './events';
 export { composeGenerate, createFallbackGenerate } from './generate-middleware';
