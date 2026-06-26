@@ -176,10 +176,6 @@ export function serializeActionDetail(eventType: string, detail: unknown): unkno
     return toJsonSafe(stripped);
   }
 
-  if (eventType === 'run.aborted') {
-    return toJsonSafe(stripConversation(record));
-  }
-
   if (
     eventType === 'run.error' ||
     eventType === 'generate.error' ||
