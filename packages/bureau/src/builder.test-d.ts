@@ -24,7 +24,7 @@
 //     type-checked (`tsc --noEmit`) but excluded from build and never executed
 //     by `bun test` (it is `.test-d.ts`, not `.test.ts`).
 
-import type { AgentNameFor, AgentTable } from './builder/index.ts';
+import type { AgentConfig, AgentNameFor, AgentTable } from './builder/index.ts';
 import { createBureau } from './builder/index.ts';
 
 // ---------------------------------------------------------------------------
@@ -70,26 +70,39 @@ void tier1Bureau.run('researcher', 42);
 // ---------------------------------------------------------------------------
 // PROOF 3 — `run<TExtra>` widens, never replaces.
 //
-// Supplying `TExtra` opens `AgentNameFor` to `string` (dynamic/plugin names),
-// but the static `TAgents` table is preserved — registered names stay valid.
-// "Widen, never replace."
+// `TExtra` here is a *narrow* runtime-agent table whose keys do NOT include the
+// static 'researcher' agent. The narrowness is what makes this a real guard: if
+// `TExtra` were `AgentTable`, `keyof TExtra` is already `string`, so a regression
+// that made `run<TExtra>` accept ONLY `keyof TExtra` (REPLACE the static registry
+// instead of widening it) would still accept 'researcher' and slip through. With
+// a finite extra table, the static-name assertion below only compiles when the
+// static `TAgents` registry is preserved.
 // ---------------------------------------------------------------------------
 
-// Dynamic name — accepted only because `TExtra` opens the table.
-void tier1Bureau.run<AgentTable>('plugin-agent', 'Dynamic input');
+// A finite runtime-agent table — the names a caller validated at runtime. It is
+// a valid `TExtra`: it satisfies the `AgentTable` bound that
+// `run<TExtra extends AgentTable>` imposes.
+type RuntimeAgents = { 'plugin-agent': AgentConfig };
+declare const runtimeAgentsTable: RuntimeAgents;
+void (runtimeAgentsTable satisfies AgentTable);
 
-// Static name — STILL accepted under the open table (widen, not replace).
-void tier1Bureau.run<AgentTable>('researcher', 'Static input still works');
+// Dynamic name from the extra table compiles.
+void tier1Bureau.run<RuntimeAgents>('plugin-agent', 'Dynamic input');
 
-// Direct `AgentNameFor` proof: closed table narrows to the literal union;
-// the open table (string-keyed `TExtra`) broadens to `string`.
+// Static agent STILL compiles — widen, never replace. Under a replace regression
+// (`AgentNameFor` resolving to `keyof TExtra & string`) this line would stop
+// compiling, because 'researcher' is not a key of `RuntimeAgents`.
+void tier1Bureau.run<RuntimeAgents>('researcher', 'Static input still works');
+
+// Direct `AgentNameFor` proof: the closed table narrows to the literal union of
+// registered names; supplying any non-empty `TExtra` opens it to `string`.
 type ClosedNames = AgentNameFor<
   { researcher: { tools: Record<never, never> } },
   Record<never, never>
 >;
 void ('' as ClosedNames satisfies 'researcher');
 
-type OpenNames = AgentNameFor<{ researcher: { tools: Record<never, never> } }, AgentTable>;
+type OpenNames = AgentNameFor<{ researcher: { tools: Record<never, never> } }, RuntimeAgents>;
 void ('' as OpenNames satisfies string);
 
 // ---------------------------------------------------------------------------
