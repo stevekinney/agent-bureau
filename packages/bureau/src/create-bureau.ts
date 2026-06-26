@@ -341,6 +341,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     sessionId: string,
     conversation: Conversation,
     metadata: Record<string, JSONValue>,
+    agentName?: string,
   ): Promise<void> {
     const sessionStore = runtime.sessionStore;
     if (!sessionStore) {
@@ -352,12 +353,25 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       existingSession ??
       createAgentSession({
         id: sessionId,
-        agentName: BUREAU_AGENT_NAME,
+        // Stamp the dispatched agent on a brand-new session (falls back to the
+        // house default when no agent was named).
+        agentName: agentName ?? BUREAU_AGENT_NAME,
         conversationHistory: conversation.current,
       });
 
+    // Promote a session still on the default house agent to the named agent on
+    // its first named dispatch, so session APIs/persistence reflect which agent
+    // actually owns it (PRRT_kwDORvupsc6MbUsN — previously the session was always
+    // stamped 'bureau' regardless of request.agentName). Don't overwrite a session
+    // already owned by a specific agent.
+    const resolvedAgentName =
+      agentName !== undefined && nextSession.agentName === BUREAU_AGENT_NAME
+        ? agentName
+        : nextSession.agentName;
+
     await sessionStore.save({
       ...nextSession,
+      agentName: resolvedAgentName,
       conversationHistory: conversation.current,
       metadata: {
         ...nextSession.metadata,
@@ -459,21 +473,28 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       }
     }
 
-    await saveSession(sessionId, conversation, {
-      lastRunId: runId,
-      lastRunStatus: 'running',
-      lastUserMessage: request.message,
-      // Always write these keys (null when absent) so a reused session never
-      // inherits a stale cap from a previous run. A conditional spread would leave
-      // the old value in place when the request omits the field; null is treated as
-      // "unset" by buildRunDepsFromSession (it gates on typeof === 'number'),
-      // so null is a safe sentinel for "caller did not specify a cap" (PRRT_kwDORvupsc6MZ1Mb).
-      lastMaximumTokens: request.maximumTokens ?? null,
-      // Persist the per-request step cap too, so a recovered run honours the
-      // caller's maximumSteps instead of falling back to the bureau default
-      // (PRRT_kwDORvupsc6MZfl5 — mirror of the maximumTokens recovery fix).
-      lastMaximumSteps: request.maximumSteps ?? null,
-    });
+    await saveSession(
+      sessionId,
+      conversation,
+      {
+        lastRunId: runId,
+        lastRunStatus: 'running',
+        lastUserMessage: request.message,
+        // Always write these keys (null when absent) so a reused session never
+        // inherits a stale cap from a previous run. A conditional spread would leave
+        // the old value in place when the request omits the field; null is treated as
+        // "unset" by buildRunDepsFromSession (it gates on typeof === 'number'),
+        // so null is a safe sentinel for "caller did not specify a cap" (PRRT_kwDORvupsc6MZ1Mb).
+        lastMaximumTokens: request.maximumTokens ?? null,
+        // Persist the per-request step cap too, so a recovered run honours the
+        // caller's maximumSteps instead of falling back to the bureau default
+        // (PRRT_kwDORvupsc6MZfl5 — mirror of the maximumTokens recovery fix).
+        lastMaximumSteps: request.maximumSteps ?? null,
+      },
+      // Stamp the session with the dispatched agent (PRRT_kwDORvupsc6MbUsN) so it
+      // is not always recorded as the house default 'bureau'.
+      request.agentName,
+    );
 
     const activeRun = createActiveRun(
       {

@@ -265,6 +265,38 @@ describe('createBureau', () => {
     }
   });
 
+  it('stamps the session record with the dispatched agentName, not always bureau (regression PRRT_kwDORvupsc6MbUsN)', async () => {
+    // Regression: createRunFromRequest stamped the run with request.agentName but
+    // saveSession always created/kept the session as agentName:'bureau', so session
+    // APIs/persistence never reflected the dispatched agent. Now the session is
+    // stamped with (or promoted to) the named agent.
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      persistence: textValueStore(new MemoryStorage()),
+    });
+
+    const run = await bureau.createRun({ message: 'Named dispatch', agentName: 'researcher' });
+    await waitForRunCompletion(bureau, run.id);
+
+    const session = await bureau.getSession(run.sessionId);
+    expect(session?.agentName).toBe('researcher');
+  });
+
+  it('stamps the session with the default bureau agent when no agentName is dispatched', async () => {
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      persistence: textValueStore(new MemoryStorage()),
+    });
+
+    const run = await bureau.createRun({ message: 'Unnamed dispatch' });
+    await waitForRunCompletion(bureau, run.id);
+
+    const session = await bureau.getSession(run.sessionId);
+    expect(session?.agentName).toBe('bureau');
+  });
+
   it('persists and resumes sessions through the session store', async () => {
     const bureau = await createBureau({
       generate: createMockGenerate(),
