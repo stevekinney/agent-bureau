@@ -1,9 +1,8 @@
 // Compile-time guard: bureau-types must not export runtime callable values.
 //
-// The two @ts-expect-error directives below suppress "Namespace has no exported
-// member" errors. If either error disappears, it means createBureau or
-// createAgent has been re-added as a runtime export — which would break
-// consumers that import the types-only subpath at runtime.
+// The two @ts-expect-error directives below suppress "Namespace has no exported member" errors.
+// If either error disappears, it means createBureau/createAgent has been reintroduced as a named export
+// (including as an `export declare` value), which would re-create the type/runtime mismatch this file guards against.
 
 import type * as BureauTypes from './bureau-types.ts';
 
