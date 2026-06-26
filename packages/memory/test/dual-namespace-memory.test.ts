@@ -523,6 +523,69 @@ describe('createDualNamespaceMemory list() — deep pagination regression (PRRT_
   });
 });
 
+// ─── Regression: remember() / rememberOnce() strip caller namespace ──────────
+//
+// PRRT_kwDORvupsc6MaaR3: the dual wrapper forwarded metadata as-is to
+// privateMemory.remember / rememberOnce. createMemory honours
+// `metadata.namespace` over its configured default, so a caller-supplied
+// namespace (e.g. a session namespace from the bureau persist hook, or the
+// 'experiential' namespace from createRunCaptureHook) was used instead of the
+// private namespace — writes landed outside the agent-private scope.
+
+describe('createDualNamespaceMemory remember() / rememberOnce() — namespace isolation regression (PRRT_kwDORvupsc6MaaR3)', () => {
+  /**
+   * Shared storage backend, private and shared Memory instances over it.
+   * This mirrors the production D3 prefix-namespacing topology where the
+   * namespace-override bug is directly observable: writes land in the wrong
+   * scope of the SAME storage.
+   */
+  let sharedStorage: MemoryRecordStorage;
+  let privateMemory: Memory;
+  let sharedMemory: Memory;
+  let dual: Memory;
+
+  beforeEach(async () => {
+    sharedStorage = createInMemoryMemoryRecordStorage();
+    const embedder = createMockEmbedder(DIMENSION);
+    privateMemory = createMemory({ embedder, storage: sharedStorage, namespace: 'agent-private' });
+    sharedMemory = createMemory({ embedder, storage: sharedStorage, namespace: 'bureau-global' });
+    dual = createDualNamespaceMemory(privateMemory, sharedMemory);
+    await dual.init();
+  });
+
+  it('remember() with a caller-supplied shared namespace still writes to private, not shared', async () => {
+    // Simulates the bureau persist hook passing a session/shared namespace.
+    const entry = await dual.remember('Experiential note', { namespace: 'bureau-global' });
+
+    // The entry must land in the private namespace.
+    expect(await privateMemory.count()).toBe(1);
+    expect(await sharedMemory.count()).toBe(0);
+    // The returned entry reflects the private namespace, not the caller's.
+    expect(entry.metadata.namespace).toBe('agent-private');
+  });
+
+  it('remember() with an arbitrary session namespace writes to private only', async () => {
+    // Simulates createRunCaptureHook passing namespace:'experiential' or a
+    // session namespace supplied by the bureau at runtime.
+    const entry = await dual.remember('Session fact', { namespace: 'session-xyz' });
+
+    expect(await privateMemory.count()).toBe(1);
+    expect(await sharedMemory.count()).toBe(0);
+    expect(entry.metadata.namespace).toBe('agent-private');
+  });
+
+  it('rememberOnce() with a caller-supplied namespace still writes to private', async () => {
+    const entry = await dual.rememberOnce('Idempotent experiential note', {
+      dedupeKey: 'run-1',
+      namespace: 'bureau-global',
+    });
+
+    expect(await privateMemory.count()).toBe(1);
+    expect(await sharedMemory.count()).toBe(0);
+    expect(entry.metadata.namespace).toBe('agent-private');
+  });
+});
+
 // ─── Regression: forget() / forgetAll() ignore caller-supplied namespace ─────
 //
 // PRRT_kwDORvupsc6MV8Xi: the original code forwarded `namespace` to

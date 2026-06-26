@@ -59,16 +59,25 @@ export interface DualNamespaceMemoryOptions {
 export function createDualNamespaceMemory(privateMemory: Memory, sharedMemory?: Memory): Memory {
   return {
     async remember(content: string, metadata?: Partial<MemoryMetadata>): Promise<MemoryEntry> {
-      // All writes go to the private namespace only.
-      return privateMemory.remember(content, metadata);
+      // All writes go to the private namespace only. Strip `namespace` from the
+      // caller-supplied metadata so that createMemory cannot be redirected to an
+      // arbitrary or session namespace via the metadata field — the private
+      // memory's configured namespace must always win. Same rationale as the
+      // namespace suppression in forget() / forgetAll() below.
+      const { namespace: _namespace, ...restMetadata } = metadata ?? {};
+      return privateMemory.remember(content, restMetadata);
     },
 
     async rememberOnce(
       content: string,
       metadata: Partial<MemoryMetadata> & { dedupeKey: string },
     ): Promise<MemoryEntry> {
-      // All idempotent writes go to the private namespace only.
-      return privateMemory.rememberOnce(content, metadata);
+      // All idempotent writes go to the private namespace only. Strip `namespace`
+      // for the same reason as remember() — the caller cannot redirect the write
+      // to a non-private namespace by supplying one in metadata. `dedupeKey` is
+      // preserved in `rest` since it is a required lookup key, not a routing key.
+      const { namespace: _namespace, ...rest } = metadata;
+      return privateMemory.rememberOnce(content, rest);
     },
 
     async recall(
