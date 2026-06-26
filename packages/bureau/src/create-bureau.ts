@@ -1,13 +1,7 @@
 import type { ListFilter, ListOptions } from '@lostgradient/weft';
 import { Conversation, createConversationHistory } from 'conversationalist';
 import { CompletableEventTarget } from 'lifecycle';
-import {
-  type ActiveRun,
-  createActiveRun,
-  createAgentSession,
-  type JSONValue,
-  type ScheduledAgentRunInput,
-} from 'operative';
+import { type ActiveRun, createActiveRun, createAgentSession, type JSONValue } from 'operative';
 import {
   isAgentRunWorkflowInput,
   reattachDurableActiveRun,
@@ -1133,46 +1127,30 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     return runtime.durable.engine.query(runId, name, input);
   }
 
-  async function createSchedule(
-    definition: DurableScheduleDefinition,
+  function createSchedule(
+    _definition: DurableScheduleDefinition,
   ): Promise<import('@lostgradient/weft').ScheduleSummary | null | undefined> {
-    if (!runtime.durable) return undefined;
-    // The 'agentRun' workflow's scheduled-fire path consumes `ScheduledAgentRunInput`
-    // ({ agentName, input, sessionId? }) — the schedule layer translates `input` to the
-    // workflow's `prompt` and derives the per-fire `runId`. The previous payload wrote a
-    // `message` field that exists in neither `ScheduledAgentRunInput` nor
-    // `AgentRunWorkflowInput`, so every scheduled fire launched with an empty prompt.
-    // When `sessionId` is omitted, each fire starts a fresh standalone session (per the
-    // architecture's scheduling semantics) — so only carry it when explicitly provided.
-    const scheduledInput: ScheduledAgentRunInput = {
-      agentName: definition.agentName,
-      input: definition.input,
-      ...(definition.sessionId ? { sessionId: definition.sessionId } : {}),
-    };
-    // Normalize the caller-provided spec string into the discriminated ScheduleSpec
-    // form before calling engine.schedule(). Weft's engine treats a bare string
-    // as a cron expression (routing through normalizeCronSpec → parseCronExpression),
-    // so an interval spec like '6h' or '30s' would throw "Cron expression must have
-    // 5 fields or 6 fields" when forwarded raw. Cron expressions are always 5 or 6
-    // whitespace-delimited fields; any other count is an interval duration string.
-    // This mirrors parseCronExpression's own field-count gate, keeping bureau and
-    // weft consistent without re-implementing weft's duration parser.
-    const trimmedSpec = definition.spec.trim();
-    const fieldCount = trimmedSpec.split(/\s+/).length;
-    const normalizedSpec =
-      fieldCount === 5 || fieldCount === 6
-        ? ({ cron: trimmedSpec } as const)
-        : ({ every: trimmedSpec } as const);
-
-    const handle = await runtime.durable.engine.schedule(
-      'agentRun',
-      scheduledInput,
-      normalizedSpec,
-      {
-        overlap: definition.overlap === 'allow' ? 'allow' : 'skip',
-      },
+    if (!runtime.durable) return Promise.resolve(undefined);
+    // Durable agent scheduling's FIRE path is not yet wired (D6 was implemented
+    // only as far as registering a schedule). When a native weft schedule tick
+    // fires the `agentRun` workflow, `resolveRunServices` has no branch that
+    // BUILDS services for the fire — it only recovers an existing session — so a
+    // scheduled agent would silently never run. We reject loudly rather than
+    // register a schedule whose every tick fails.
+    //
+    // This is finishable on our side (weft 0.8 already exposes per-fire identity
+    // via `info.schedule` + a stable per-occurrence `info.workflowId`); it needs a
+    // scheduler-fire branch in `resolveRunServices` that builds fresh DurableRunDeps
+    // from the ScheduledAgentRunInput, plus an end-to-end test that fires a schedule
+    // and asserts an agent ran. Tracked in #109. Until then, rejecting keeps the
+    // API honest (the prior code silently registered a broken schedule).
+    return Promise.reject(
+      new BureauError(
+        'Durable scheduling of agent runs is not yet wired: the scheduled-fire ' +
+          'path that builds run services per tick is unimplemented (tracked in #109).',
+        'NOT_IMPLEMENTED',
+      ),
     );
-    return runtime.durable.engine.getSchedule(handle.id);
   }
 
   async function getSchedule(

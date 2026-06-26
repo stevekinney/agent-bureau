@@ -1,3 +1,4 @@
+import { BureauError } from 'bureau';
 import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import { z } from 'zod';
@@ -59,7 +60,17 @@ export function createSchedulesRoutes(bureau: Bureau) {
       throw new HTTPException(400, { message: message || 'Invalid request body' });
     }
 
-    const summary = await bureau.createSchedule(parsed.data);
+    let summary;
+    try {
+      summary = await bureau.createSchedule(parsed.data);
+    } catch (error) {
+      // The durable scheduled-fire path is not yet wired on our side (see #109).
+      // Surface it as 501 Not Implemented rather than a 500.
+      if (error instanceof BureauError && error.code === 'NOT_IMPLEMENTED') {
+        throw new HTTPException(501, { message: error.message });
+      }
+      throw error;
+    }
     if (summary === undefined) {
       return context.json(
         { error: { code: 'NOT_CONFIGURED', message: 'Durable engine not configured' } },

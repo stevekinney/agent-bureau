@@ -121,6 +121,30 @@ describe('schedules routes with durable engine (regression PRRT_kwDORvupsc6MXEmg
   // used to signal "no durable engine". Routes checking `result === undefined` would
   // therefore return 501 even when the durable operation succeeded.
 
+  it('POST /schedules returns 501 even with a durable engine — durable agent scheduling is not yet wired (PRRT_kwDORvupsc6MZozn)', async () => {
+    // createSchedule now rejects with BureauError NOT_IMPLEMENTED (the durable
+    // scheduled-fire path is unwired on our side — #109), so the route maps it to
+    // 501 rather than registering a schedule whose every tick would fail.
+    const gateway = await createTestGateway({
+      authToken: AUTH_TOKEN,
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+
+    const response = await requestJSON(gateway, '/schedules', {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({
+        agentName: 'researcher',
+        input: 'Daily analysis',
+        spec: '0 9 * * *',
+      }),
+    });
+
+    expect(response.status).toBe(501);
+    gateway.bureau.dispose();
+  });
+
   it('POST /schedules/:id/pause returns 200 when durable engine is configured', async () => {
     // Probe the bundled Engine prototype so we can spy at the engine level —
     // this exercises the real bureau wrapper, which is where the bug lived.

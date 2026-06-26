@@ -10,12 +10,7 @@ import { afterEach, describe, expect, it, mock, spyOn } from 'bun:test';
 import { Conversation, getMessages } from 'conversationalist';
 import { createMemory, type Memory } from 'memory';
 import { createInMemoryMemoryRecordStorage, createMockEmbedder } from 'memory/test';
-import type {
-  GenerateFunction,
-  GenerateResponse,
-  ScheduledAgentRunInput,
-  Toolbox,
-} from 'operative';
+import type { GenerateFunction, GenerateResponse, Toolbox } from 'operative';
 import { stopWhen } from 'operative';
 import { SCHEDULER_ORIGIN_TAG, startDurableRunResult } from 'operative/durable';
 import { createStore } from 'operative/store';
@@ -1566,82 +1561,59 @@ describe('createBureau', () => {
     }
   });
 
-  it('createSchedule passes the prompt as ScheduledAgentRunInput.input, not a message field (regression PRRT_kwDORvupsc6MUE_p)', async () => {
-    // REGRESSION: createSchedule was building the agentRun workflow payload with a
-    // `message` field (`{ agentName, sessionId, message: definition.input }`) that
-    // exists in neither ScheduledAgentRunInput nor AgentRunWorkflowInput. Every
-    // scheduled fire launched with an empty prompt. The fix maps `definition.input`
-    // to `ScheduledAgentRunInput.input` instead.
-    //
-    // Seam: operative's dist bundle inlines @lostgradient/weft, so the Engine
-    // class the bureau uses is a DIFFERENT object identity than the one exported
-    // from the @lostgradient/weft package. Spying on the external package's
-    // Engine.prototype misses the bureau's calls.
-    //
-    // Fix: build a throwaway probe composition first, extract the Engine
-    // prototype from an ACTUAL instance the bundle produces, spy on THAT prototype,
-    // then build the bureau. Both use the same bundled class → same prototype →
-    // the spy captures the bureau's engine.schedule call.
-    const probe = await createRuntimeComposition({
+  it('createSchedule throws NOT_IMPLEMENTED on a durable bureau — durable agent scheduling is not yet wired (regression PRRT_kwDORvupsc6MZozn)', async () => {
+    // The durable scheduled-FIRE path is unwired on our side: resolveRunServices
+    // only recovers an existing session and has no branch that builds services for
+    // a native weft schedule fire, so a scheduled `agentRun` would silently never
+    // run. (weft 0.8 DOES expose what's needed — `info.schedule` + a stable per-fire
+    // `info.workflowId` — so this is finishable here, tracked in #109.) Until the
+    // resolver branch lands, createSchedule rejects with NOT_IMPLEMENTED rather than
+    // registering a schedule whose every tick fails.
+    const bureau = await createBureau({
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
       storage: { type: 'memory' },
       durableExecution: true,
     });
 
-    // Grab the real Engine prototype from the probe's engine instance.
-    const realEngineProto = Object.getPrototypeOf(probe.durable!.engine) as object;
+    try {
+      const error = await bureau
+        .createSchedule({
+          agentName: 'researcher',
+          input: 'Summarize overnight activity',
+          spec: '0 9 * * *',
+          sessionId: 'daily-digest',
+        })
+        .then(
+          () => undefined,
+          (rejection: unknown) => rejection,
+        );
 
-    // Dispose the probe — we only needed it to resolve the class identity.
-    probe.durable!.engine[Symbol.dispose]?.();
-    probe.disposeStorage?.();
+      expect(error).toBeInstanceOf(BureauError);
+      expect((error as BureauError).code).toBe('NOT_IMPLEMENTED');
+    } finally {
+      bureau.dispose();
+    }
+  });
 
-    const scheduleSpy = spyOn(
-      realEngineProto as { schedule: (...args: unknown[]) => unknown },
-      'schedule',
-    ).mockResolvedValue({
-      id: 'spy-schedule-1',
-      pause: async () => {},
-      resume: async () => {},
-      cancel: async () => {},
-      describe: async () => null,
-    } as never);
+  it('createSchedule returns undefined (no-op) on a non-durable bureau', async () => {
+    // Without a durable engine there is nothing to schedule; the method short-
+    // circuits to undefined BEFORE the NOT_IMPLEMENTED guard, matching the other
+    // durable-only accessors.
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+    });
 
     try {
-      const bureau = await createBureau({
-        generate: createMockGenerate(),
-        toolbox: createEmptyToolbox(),
-        storage: { type: 'memory' },
-        durableExecution: true,
+      const result = await bureau.createSchedule({
+        agentName: 'researcher',
+        input: 'noop',
+        spec: '0 9 * * *',
       });
-
-      try {
-        // getSchedule after schedule may resolve to null since our spy short-circuits
-        // the real engine — that is fine; we only care about the schedule() call args.
-        await bureau
-          .createSchedule({
-            agentName: 'researcher',
-            input: 'Summarize overnight activity',
-            spec: '0 9 * * *',
-            sessionId: 'daily-digest',
-          })
-          .catch(() => undefined);
-
-        expect(scheduleSpy).toHaveBeenCalledTimes(1);
-        const capturedInput = scheduleSpy.mock.calls[0]?.[1] as ScheduledAgentRunInput;
-
-        // Must carry `input` — not `message` — as the prompt field.
-        expect(capturedInput.input).toBe('Summarize overnight activity');
-        // Must NOT carry a stray `message` field that the workflow ignores.
-        expect(capturedInput).not.toHaveProperty('message');
-        // Structural integrity: the required ScheduledAgentRunInput fields are present.
-        expect(capturedInput.agentName).toBe('researcher');
-        expect(capturedInput.sessionId).toBe('daily-digest');
-      } finally {
-        bureau.dispose();
-      }
+      expect(result).toBeUndefined();
     } finally {
-      scheduleSpy.mockRestore();
+      bureau.dispose();
     }
   });
 });
@@ -1751,106 +1723,6 @@ describe('createBureau schedule management sentinel (regression PRRT_kwDORvupsc6
       pauseSpy.mockRestore();
       resumeSpy.mockRestore();
       cancelSpy.mockRestore();
-    }
-  });
-});
-
-describe('createBureau createSchedule spec normalization (regression PRRT_kwDORvupsc6MXbzr)', () => {
-  // REGRESSION: createSchedule forwarded the raw `spec` string directly to
-  // engine.schedule(). Weft treats a bare string as a cron expression
-  // (normalizeCronSpec → parseCronExpression), so a duration spec like '6h'
-  // or '30s' threw "Cron expression must have 5 fields or 6 fields with
-  // seconds" — interval scheduling was completely unreachable through the
-  // string API.
-  //
-  // The fix detects whether the spec is a 5- or 6-field cron expression and
-  // routes it to { cron } or { every } accordingly, then passes the
-  // discriminated ScheduleSpec object to engine.schedule(). These tests
-  // verify against a REAL engine so weft's validation confirms the normalized
-  // form is actually accepted — a spy-only test would pass even if we routed
-  // to a form weft then rejects.
-
-  it('createSchedule accepts a duration spec string and produces a schedule with intervalMs', async () => {
-    const bureau = await createBureau({
-      generate: createMockGenerate(),
-      toolbox: createEmptyToolbox(),
-      storage: { type: 'memory' },
-      durableExecution: true,
-    });
-
-    try {
-      const summary = await bureau.createSchedule({
-        agentName: 'worker',
-        input: 'do work',
-        spec: '30s',
-      });
-
-      // The real engine accepted the spec; the returned summary must carry
-      // intervalMs (not cronExpression) confirming it was routed as an
-      // interval schedule, not rejected as an invalid cron.
-      expect(summary).toBeDefined();
-      expect(summary?.intervalMs).toBeGreaterThan(0);
-      expect(summary?.cronExpression).toBeUndefined();
-    } finally {
-      bureau.dispose();
-    }
-  });
-
-  it('createSchedule accepts a cron spec string and produces a schedule with cronExpression', async () => {
-    const bureau = await createBureau({
-      generate: createMockGenerate(),
-      toolbox: createEmptyToolbox(),
-      storage: { type: 'memory' },
-      durableExecution: true,
-    });
-
-    try {
-      const summary = await bureau.createSchedule({
-        agentName: 'reporter',
-        input: 'generate report',
-        spec: '0 9 * * *',
-      });
-
-      // The real engine accepted the spec; cronExpression must be set and
-      // intervalMs must be absent, confirming cron routing.
-      expect(summary).toBeDefined();
-      expect(summary?.cronExpression).toBe('0 9 * * *');
-      expect(summary?.intervalMs).toBeUndefined();
-    } finally {
-      bureau.dispose();
-    }
-  });
-
-  it('createSchedule does not accept a description it cannot persist (regression PRRT_kwDORvupsc6MYplM)', async () => {
-    // REGRESSION: DurableScheduleDefinition + the gateway schema used to accept a
-    // `description`, but weft 0.8.0's ScheduleOptions/ScheduleSummary have nowhere
-    // to store or surface a schedule label — so it was silently dropped. The field
-    // is removed from our API until weft supports it (weft 20a358ef). This test
-    // guards that the type no longer carries `description`: passing one is a
-    // compile error (@ts-expect-error), and a real schedule still works.
-    const bureau = await createBureau({
-      generate: createMockGenerate(),
-      toolbox: createEmptyToolbox(),
-      storage: { type: 'memory' },
-      durableExecution: true,
-    });
-
-    try {
-      const summary = await bureau.createSchedule({
-        agentName: 'reporter',
-        input: 'generate report',
-        spec: '0 9 * * *',
-        // @ts-expect-error — `description` is intentionally NOT part of
-        // DurableScheduleDefinition (weft cannot persist it; weft 20a358ef).
-        description: 'Daily 9am report',
-      });
-
-      // The schedule itself is still created normally (the extra prop is ignored
-      // at runtime; the type-level guard above is the real assertion).
-      expect(summary).toBeDefined();
-      expect(summary?.cronExpression).toBe('0 9 * * *');
-    } finally {
-      bureau.dispose();
     }
   });
 });
