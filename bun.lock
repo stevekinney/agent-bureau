@@ -28,7 +28,7 @@
     },
     "packages/armorer": {
       "name": "armorer",
-      "version": "0.8.0",
+      "version": "0.8.1",
       "devDependencies": {
         "@anthropic-ai/claude-agent-sdk": "^0.2.39",
         "@eslint/compat": "^2.0.2",
@@ -55,8 +55,8 @@
         "eslint-plugin-unicorn": "^63.0.0",
         "eslint-plugin-unused-imports": "^4.4.1",
         "globals": "^17.3.0",
-        "interoperability": "workspace:*",
-        "lifecycle": "workspace:*",
+        "interoperability": "0.0.1",
+        "lifecycle": "0.0.1",
         "remark": "^15.0.1",
         "remark-parse": "^11.0.0",
         "remark-stringify": "^11.0.0",
@@ -128,7 +128,7 @@
     },
     "packages/conversationalist": {
       "name": "conversationalist",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "dependencies": {
         "@lostgradient/weft": "^0.8.0",
         "gray-matter": "^4.0.3",
@@ -154,8 +154,8 @@
         "eslint-plugin-unicorn": "^62.0.0",
         "eslint-plugin-unused-imports": "^4.3.0",
         "globals": "^16.5.0",
-        "interoperability": "workspace:*",
-        "lifecycle": "workspace:*",
+        "interoperability": "0.0.1",
+        "lifecycle": "0.0.1",
         "openai": "^6.15.0",
         "typescript-eslint": "^8.50.0",
         "zod": "^4.2.1",

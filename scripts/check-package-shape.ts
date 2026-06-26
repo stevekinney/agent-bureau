@@ -12,10 +12,12 @@
  *   3. Every other bare import in shipped code is either a Node/Bun builtin, a self-reference to
  *      this package, or declared in `dependencies`/`peerDependencies`. Catches a real external
  *      left undeclared (the same `Cannot find module` failure class as a foundation leak).
- *   4. No `package.json` lifecycle script (`prepack`/`prepare`/`prepublishOnly`/`publish`/
+ *   4. No dependency field in the shipped manifest uses a workspace-only protocol such as
+ *      `workspace:*`, because external consumers cannot resolve the monorepo.
+ *   5. No `package.json` lifecycle script (`prepack`/`prepare`/`prepublishOnly`/`publish`/
  *      `postpack`/`postpublish`) can mutate the publish payload — so the bytes `npm pack` validated
  *      are the bytes `npm publish` ships.
- *   5. Expected `README`/`LICENSE`/`dist` present; no source `.ts` accidentally shipped.
+ *   6. Expected `README`/`LICENSE`/`dist` present; no source `.ts` accidentally shipped.
  *
  * The import scan strips comments first and matches only real module specifiers, avoiding the
  * false-positive classes observed during the tsdown migration: tsdown `//#region` markers, object
@@ -57,6 +59,7 @@ type PackageManifest = {
   typesVersions?: Record<string, Record<string, string[]>>;
   exports?: Record<string, Record<string, string> | string>;
   dependencies?: Record<string, string>;
+  optionalDependencies?: Record<string, string>;
   peerDependencies?: Record<string, string>;
   devDependencies?: Record<string, string>;
   scripts?: Record<string, string>;
@@ -69,6 +72,18 @@ const failures: Failure[] = [];
 
 function fail(packageName: string, gate: string, detail: string): void {
   failures.push({ package: packageName, gate, detail });
+}
+
+function dependencySections(manifest: PackageManifest): Array<{
+  name: string;
+  dependencies: Record<string, string>;
+}> {
+  return [
+    { name: 'dependencies', dependencies: manifest.dependencies ?? {} },
+    { name: 'optionalDependencies', dependencies: manifest.optionalDependencies ?? {} },
+    { name: 'peerDependencies', dependencies: manifest.peerDependencies ?? {} },
+    { name: 'devDependencies', dependencies: manifest.devDependencies ?? {} },
+  ];
 }
 
 /** Strip block and line comments so doc-comment and region markers never read as imports. */
@@ -215,11 +230,12 @@ async function checkPackage(packageName: string): Promise<void> {
 
   // npm tarballs extract under a top-level `package/` directory.
   const packageRoot = join(extractDirectory, 'package');
+  const packedManifest = (await Bun.file(join(packageRoot, 'package.json')).json()) as PackageManifest;
   const shippedFiles = await listFiles(packageRoot);
   const shippedSet = new Set(shippedFiles);
 
   // Gate 1: every file-referencing manifest field resolves inside the tarball.
-  for (const target of collectManifestFileTargets(manifest)) {
+  for (const target of collectManifestFileTargets(packedManifest)) {
     const normalized = target.replace(/^\.\//, '');
     if (!shippedSet.has(normalized)) {
       fail(
@@ -230,10 +246,23 @@ async function checkPackage(packageName: string): Promise<void> {
     }
   }
 
+  // Gate 4: no workspace-only dependency specifiers in the shipped manifest.
+  for (const { name, dependencies } of dependencySections(packedManifest)) {
+    for (const [dependencyName, versionRange] of Object.entries(dependencies)) {
+      if (versionRange.startsWith('workspace:')) {
+        fail(
+          packageName,
+          'workspace-dependency',
+          `${name}.${dependencyName} uses "${versionRange}" in the shipped package.json; publishable packages must not require monorepo workspace resolution`,
+        );
+      }
+    }
+  }
+
   // Gates 2 + 3: import audit over shipped code only.
   const declared = new Set([
-    ...Object.keys(manifest.dependencies ?? {}),
-    ...Object.keys(manifest.peerDependencies ?? {}),
+    ...Object.keys(packedManifest.dependencies ?? {}),
+    ...Object.keys(packedManifest.peerDependencies ?? {}),
   ]);
 
   for (const relativePath of shippedFiles) {

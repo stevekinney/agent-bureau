@@ -45,7 +45,7 @@ bun run format            # Format all files with Prettier
 
 ### Workspace Relationship
 
-`armorer` is listed as a `devDependency` with `"armorer": "workspace:*"`. It is not imported in this package's source or tests — the reference is a development-time declaration only.
+`conversationalist` imports `interoperability` and `lifecycle` from monorepo workspaces during source builds. The tsdown build inlines those foundation packages, and the root package-shape gate verifies no workspace dependency ranges or foundation-package imports leak into the published tarball.
 
 ## Development Patterns
 
