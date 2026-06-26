@@ -460,6 +460,12 @@ export function createSessionHandle(
         const runOptionsWithSignal = {
           ...runOptions,
           agentName,
+          // Stamp the derived runId so tool.* bubble events (ToolStartedBubbleEvent,
+          // ToolSettledBubbleEvent, etc.) carry the session run's stable id on the
+          // in-memory path. Without this, createActiveRun falls back to runId=''
+          // because options.runId is undefined (the durable path gets runId via
+          // DurableRunRouting instead, so this is safe to include on both paths).
+          runId,
           conversation: seededConversation.current,
           signal: runOptions.signal
             ? AbortSignal.any([runOptions.signal, abortController.signal])
@@ -602,10 +608,48 @@ export function createSessionHandle(
             );
             const agentRun = createAgentRun(activeRun);
             currentRun = agentRun;
-            // Clear currentRun when the recovered run settles.
-            void agentRun.result().finally(() => {
-              if (currentRun === agentRun) currentRun = null;
-            });
+            // Persist terminal state when the recovered run settles, mirroring
+            // the store.save path in run(). Without this the persisted RunRef
+            // stays 'running' after a recovered run completes, causing
+            // subsequent recover()/signal() calls to target a terminal workflow
+            // and leaving conversation history un-updated in the session store.
+            void (async () => {
+              let terminalStatus: RunRef['status'] = 'error';
+              let terminalConversation: ConversationHistory | undefined;
+              try {
+                const settled = await agentRun.result();
+                terminalStatus = finishReasonToStatus(settled.finishReason);
+                terminalConversation = settled.conversation.current;
+              } catch {
+                // Recovered run rejected (e.g. engine failure). Leave status 'error';
+                // no conversation update — the run never produced a clean result.
+              } finally {
+                if (currentRun === agentRun) currentRun = null;
+                // Reload the session (may have been updated by concurrent activity)
+                // and replace the RunRef with its terminal status.
+                try {
+                  const freshSession = await store.load(sessionId);
+                  if (freshSession) {
+                    const terminalRef: RunRef = {
+                      ...last,
+                      status: terminalStatus,
+                    };
+                    const updated: AgentSession = {
+                      ...freshSession,
+                      ...(terminalConversation !== undefined
+                        ? { conversationHistory: terminalConversation }
+                        : {}),
+                      runs: freshSession.runs.map((r) => (r.runId === runId ? terminalRef : r)),
+                      updatedAt: new Date().toISOString(),
+                    };
+                    await store.save(updated);
+                  }
+                } catch {
+                  // Store failure is non-fatal: the in-process state (currentRun=null)
+                  // is correct; a stale 'running' ref is tolerable vs. crashing the handle.
+                }
+              }
+            })();
             emitter.dispatchEvent(new SessionRecoverEvent(sessionId, runId));
             return agentRun;
           } catch {
