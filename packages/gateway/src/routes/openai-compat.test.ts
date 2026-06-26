@@ -508,4 +508,162 @@ describe('OpenAI-compat route (POST /v1/chat/completions)', () => {
       gateway.bureau.dispose();
     });
   });
+
+  describe('SSE streaming: run already settled before listeners attach (regression: PRRT_kwDORvupsc6MddwF)', () => {
+    // For very fast `stream: true` requests, createRun() can schedule and
+    // complete the run BEFORE the ReadableStream.start() callback attaches the
+    // run.completed/run.aborted listeners. In that case run.completed already
+    // fired and never fires again, so the client received only heartbeats — no
+    // content, no [DONE]. The fix re-reads the store in start() and emits the
+    // final result immediately when the run is already terminal.
+    //
+    // We force the race deterministically by wrapping a real bureau so the
+    // streamed run id maps to an ALREADY-TERMINAL store entry whose activeRun's
+    // event listeners are no-ops (the events already fired). Timing-based tests
+    // can't reliably reproduce the settle-before-start ordering, so we model the
+    // terminal store state directly.
+    function gatewayWithPreSettledRun(terminal: {
+      status: 'completed' | 'error' | 'aborted';
+      finishReason: string;
+      content?: string;
+      error?: unknown;
+    }) {
+      // A no-op activeRun: its add/removeEventListener never invoke the listener,
+      // exactly as a run whose terminal events already fired would behave.
+      const activeRun = {
+        result: Promise.resolve({}),
+        abort: () => {},
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      };
+      const runState = {
+        id: 'pre-settled-run',
+        status: terminal.status,
+        steps: terminal.content !== undefined ? [{ content: terminal.content }] : [],
+        usage: { prompt: 0, completion: 0, total: 0 },
+        finishReason: terminal.finishReason,
+        error: terminal.error,
+        snapshots: [],
+        actions: [],
+        activeRun,
+      };
+      return { runState };
+    }
+
+    it('emits the final content and [DONE] when a successful run settled before subscribe', async () => {
+      const realGateway = await createTestGateway({ generate: createMockGenerate() });
+      const { runState } = gatewayWithPreSettledRun({
+        status: 'completed',
+        finishReason: 'stop-condition',
+        content: 'Settled fast.',
+      });
+
+      // Wrap the real bureau: createRun returns the sentinel id, and store.getRun
+      // returns the already-terminal RunState for it.
+      const fakeBureau = {
+        ...realGateway.bureau,
+        createRun: async () => ({ id: 'pre-settled-run', sessionId: 'sess-1' }),
+        store: {
+          ...realGateway.bureau.store,
+          getRun: (id: string) =>
+            id === 'pre-settled-run' ? runState : realGateway.bureau.store.getRun(id),
+        },
+      } as unknown as typeof realGateway.bureau;
+
+      const gateway = await createTestGateway(fakeBureau);
+      const response = await requestJSON(gateway, '/v1/chat/completions', {
+        method: 'POST',
+        body: JSON.stringify({
+          model: 'bureau',
+          messages: [{ role: 'user', content: 'Fast one' }],
+          stream: true,
+        }),
+      });
+
+      expect(response.status).toBe(200);
+      const text = await response.text();
+      // Without the fix the body would contain only `: connected`/heartbeats.
+      expect(text).toContain('"Settled fast."');
+      expect(text).toContain('[DONE]');
+
+      realGateway.bureau.dispose();
+    });
+
+    it('emits an in-band error chunk when an errored run settled before subscribe', async () => {
+      const realGateway = await createTestGateway({ generate: createMockGenerate() });
+      const { runState } = gatewayWithPreSettledRun({
+        status: 'error',
+        finishReason: 'error',
+        error: new Error('settled with error'),
+      });
+
+      const fakeBureau = {
+        ...realGateway.bureau,
+        createRun: async () => ({ id: 'pre-settled-run', sessionId: 'sess-1' }),
+        store: {
+          ...realGateway.bureau.store,
+          getRun: (id: string) =>
+            id === 'pre-settled-run' ? runState : realGateway.bureau.store.getRun(id),
+        },
+      } as unknown as typeof realGateway.bureau;
+
+      const gateway = await createTestGateway(fakeBureau);
+      const response = await requestJSON(gateway, '/v1/chat/completions', {
+        method: 'POST',
+        body: JSON.stringify({
+          model: 'bureau',
+          messages: [{ role: 'user', content: 'Fast fail' }],
+          stream: true,
+        }),
+      });
+
+      expect(response.status).toBe(200);
+      const text = await response.text();
+      expect(text).toContain('"error"');
+      expect(text).toContain('settled with error');
+      expect(text).toContain('[DONE]');
+
+      realGateway.bureau.dispose();
+    });
+
+    it('classifies a budget-exceeded run (store status completed) as an error, not success', async () => {
+      // A budget-exceeded run lands in the store as status 'completed' but
+      // finishReason 'budget-exceeded'. The immediate path must discriminate by
+      // finishReason (mirroring the run.completed listener), not status — else it
+      // would emit a content chunk where the listener emits an error chunk.
+      const realGateway = await createTestGateway({ generate: createMockGenerate() });
+      const { runState } = gatewayWithPreSettledRun({
+        status: 'completed',
+        finishReason: 'budget-exceeded',
+        content: 'partial',
+      });
+
+      const fakeBureau = {
+        ...realGateway.bureau,
+        createRun: async () => ({ id: 'pre-settled-run', sessionId: 'sess-1' }),
+        store: {
+          ...realGateway.bureau.store,
+          getRun: (id: string) =>
+            id === 'pre-settled-run' ? runState : realGateway.bureau.store.getRun(id),
+        },
+      } as unknown as typeof realGateway.bureau;
+
+      const gateway = await createTestGateway(fakeBureau);
+      const response = await requestJSON(gateway, '/v1/chat/completions', {
+        method: 'POST',
+        body: JSON.stringify({
+          model: 'bureau',
+          messages: [{ role: 'user', content: 'Over budget' }],
+          stream: true,
+        }),
+      });
+
+      expect(response.status).toBe(200);
+      const text = await response.text();
+      expect(text).toContain('"error"');
+      expect(text).toContain('[DONE]');
+
+      realGateway.bureau.dispose();
+    });
+  });
 });

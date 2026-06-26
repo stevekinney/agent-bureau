@@ -8,8 +8,12 @@ import { ScheduleHandle } from '@lostgradient/weft';
 import { describe, expect, it } from 'bun:test';
 
 import type { AnyRunEngine } from './create-run-engine';
-import type { ScheduledAgentRunInput, SchedulingEngine } from './schedule-agent';
-import { createAgentSchedule, createAgentScheduler } from './schedule-agent';
+import type { SchedulingEngine } from './schedule-agent';
+import {
+  createAgentSchedule,
+  createAgentScheduler,
+  UnrunnableScheduleError,
+} from './schedule-agent';
 
 // ---------------------------------------------------------------------------
 // Minimal stubs
@@ -90,151 +94,76 @@ function makeSchedulingEngine(options?: {
 
 // ---------------------------------------------------------------------------
 // createAgentSchedule
+//
+// Contract change (PRRT_kwDORvupsc6Mddv7): registering a durable agent schedule
+// is REJECTED until the scheduled-fire path is wired (tracked in #109). A
+// schedule registered today would fire the `agentRun` workflow with a
+// `ScheduledAgentRunInput` it rejects, and there is no fire-time service
+// resolver, so every tick would fail silently. We reject up front — matching
+// `Bureau.createSchedule` — rather than register a broken schedule. These tests
+// assert that honest rejection (they previously asserted successful
+// registration; that behaviour was the bug).
 // ---------------------------------------------------------------------------
 
 describe('createAgentSchedule', () => {
-  it('calls engine.schedule with the agentRun workflow type', async () => {
+  it('rejects with UnrunnableScheduleError instead of registering a schedule', async () => {
     const engine = makeSchedulingEngine();
-    await createAgentSchedule({
-      engine: engine as unknown as AnyRunEngine,
-      agentName: 'researcher',
-      spec: { cron: '0 9 * * *' },
-      input: 'Summarize overnight activity',
-    });
 
-    expect(engine.calls).toHaveLength(1);
-    expect(engine.calls[0]?.type).toBe('agentRun');
+    let caught: unknown;
+    try {
+      await createAgentSchedule({
+        engine: engine as unknown as AnyRunEngine,
+        agentName: 'researcher',
+        spec: { cron: '0 9 * * *' },
+        input: 'Summarize overnight activity',
+      });
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(caught).toBeInstanceOf(UnrunnableScheduleError);
+    expect((caught as Error).message).toMatch(/not yet wired/i);
+    // Crucially: it must NOT have reached the engine — no broken schedule lands.
+    expect(engine.calls).toHaveLength(0);
   });
 
-  it('accepts a custom workflowType override', async () => {
+  it('does not register even when a session, overlap, or stable id is supplied', async () => {
     const engine = makeSchedulingEngine();
-    await createAgentSchedule({
-      engine: engine as unknown as AnyRunEngine,
-      workflowType: 'customRun',
-      agentName: 'researcher',
-      spec: { cron: '0 9 * * *' },
-      input: 'hello',
-    });
 
-    expect(engine.calls[0]?.type).toBe('customRun');
+    let caught: unknown;
+    try {
+      await createAgentSchedule({
+        engine: engine as unknown as AnyRunEngine,
+        agentName: 'researcher',
+        spec: { every: '6h' },
+        input: 'hello',
+        session: 'daily-digest',
+        overlap: 'queue',
+        id: 'daily-digest-sched',
+      });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(UnrunnableScheduleError);
+    expect(engine.calls).toHaveLength(0);
   });
 
-  it('passes agentName and input in the workflow input', async () => {
+  it('references the tracking issue in the rejection message', async () => {
     const engine = makeSchedulingEngine();
-    await createAgentSchedule({
-      engine: engine as unknown as AnyRunEngine,
-      agentName: 'researcher',
-      spec: { every: '6h' },
-      input: 'Daily summary',
-    });
 
-    const input = engine.calls[0]?.input as ScheduledAgentRunInput;
-    expect(input.agentName).toBe('researcher');
-    expect(input.input).toBe('Daily summary');
-  });
+    let caught: unknown;
+    try {
+      await createAgentSchedule({
+        engine: engine as unknown as AnyRunEngine,
+        agentName: 'researcher',
+        spec: { every: '1h' },
+        input: 'hello',
+      });
+    } catch (err) {
+      caught = err;
+    }
 
-  it('passes sessionId when session is provided', async () => {
-    const engine = makeSchedulingEngine();
-    await createAgentSchedule({
-      engine: engine as unknown as AnyRunEngine,
-      agentName: 'researcher',
-      spec: { cron: '0 9 * * *' },
-      input: 'hello',
-      session: 'daily-digest',
-    });
-
-    const input = engine.calls[0]?.input as ScheduledAgentRunInput;
-    expect(input.sessionId).toBe('daily-digest');
-  });
-
-  it('does not include sessionId when session is absent', async () => {
-    const engine = makeSchedulingEngine();
-    await createAgentSchedule({
-      engine: engine as unknown as AnyRunEngine,
-      agentName: 'researcher',
-      spec: { cron: '0 9 * * *' },
-      input: 'hello',
-    });
-
-    const input = engine.calls[0]?.input as ScheduledAgentRunInput;
-    expect(input.sessionId).toBeUndefined();
-  });
-
-  it("defaults overlap to 'skip'", async () => {
-    const engine = makeSchedulingEngine();
-    await createAgentSchedule({
-      engine: engine as unknown as AnyRunEngine,
-      agentName: 'researcher',
-      spec: { every: '6h' },
-      input: 'hello',
-    });
-
-    expect(engine.calls[0]?.options?.overlap).toBe('skip');
-  });
-
-  it('passes a custom overlap policy', async () => {
-    const engine = makeSchedulingEngine();
-    await createAgentSchedule({
-      engine: engine as unknown as AnyRunEngine,
-      agentName: 'researcher',
-      spec: { every: '6h' },
-      input: 'hello',
-      overlap: 'queue',
-    });
-
-    expect(engine.calls[0]?.options?.overlap).toBe('queue');
-  });
-
-  it('passes a stable schedule id when provided', async () => {
-    const engine = makeSchedulingEngine({ scheduleId: 'daily-digest-sched' });
-    await createAgentSchedule({
-      engine: engine as unknown as AnyRunEngine,
-      agentName: 'researcher',
-      spec: { cron: '0 9 * * *' },
-      input: 'hello',
-      id: 'daily-digest-sched',
-    });
-
-    expect(engine.calls[0]?.options?.id).toBe('daily-digest-sched');
-  });
-
-  it('returns a handle with the schedule id from the engine', async () => {
-    const engine = makeSchedulingEngine({ scheduleId: 'my-schedule' });
-    const handle = await createAgentSchedule({
-      engine: engine as unknown as AnyRunEngine,
-      agentName: 'researcher',
-      spec: { every: '1h' },
-      input: 'hello',
-    });
-
-    expect(handle.id).toBe('my-schedule');
-  });
-
-  it('returns a handle with pause/resume/cancel/describe methods', async () => {
-    const engine = makeSchedulingEngine();
-    const handle = await createAgentSchedule({
-      engine: engine as unknown as AnyRunEngine,
-      agentName: 'researcher',
-      spec: { every: '1h' },
-      input: 'hello',
-    });
-
-    expect(typeof handle.pause).toBe('function');
-    expect(typeof handle.resume).toBe('function');
-    expect(typeof handle.cancel).toBe('function');
-    expect(typeof handle.describe).toBe('function');
-  });
-
-  it('passing the spec through to the engine', async () => {
-    const engine = makeSchedulingEngine();
-    await createAgentSchedule({
-      engine: engine as unknown as AnyRunEngine,
-      agentName: 'researcher',
-      spec: { cron: '0 9 * * *' },
-      input: 'hello',
-    });
-
-    expect(engine.calls[0]?.spec).toEqual({ cron: '0 9 * * *' });
+    expect((caught as Error).message).toMatch(/#109/);
   });
 });
 
@@ -243,39 +172,36 @@ describe('createAgentSchedule', () => {
 // ---------------------------------------------------------------------------
 
 describe('createAgentScheduler', () => {
-  it('schedule() calls engine.schedule with the agentRun type', async () => {
+  it('schedule() rejects with UnrunnableScheduleError (routes through createAgentSchedule)', async () => {
     const engine = makeSchedulingEngine();
     const scheduler = createAgentScheduler({ engine });
 
-    await scheduler.schedule('researcher', {
-      spec: { every: '6h' },
-      input: 'Nightly report',
-    });
-
-    expect(engine.calls).toHaveLength(1);
-    expect(engine.calls[0]?.type).toBe('agentRun');
+    let caught: unknown;
+    try {
+      await scheduler.schedule('researcher', {
+        spec: { every: '6h' },
+        input: 'Nightly report',
+      });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(UnrunnableScheduleError);
+    // The unrunnable schedule never reaches the engine.
+    expect(engine.calls).toHaveLength(0);
   });
 
-  it('schedule() passes agentName in the workflow input', async () => {
+  it('schedule() rejects regardless of agentName / session', async () => {
     const engine = makeSchedulingEngine();
     const scheduler = createAgentScheduler({ engine });
 
-    await scheduler.schedule('writer', { spec: { every: '1h' }, input: 'hello' });
-
-    const input = engine.calls[0]?.input as ScheduledAgentRunInput;
-    expect(input.agentName).toBe('writer');
-  });
-
-  it('schedule() returns an AgentScheduleHandle', async () => {
-    const engine = makeSchedulingEngine({ scheduleId: 'abc-123' });
-    const scheduler = createAgentScheduler({ engine });
-
-    const handle = await scheduler.schedule('researcher', {
-      spec: { every: '1h' },
-      input: 'hello',
-    });
-
-    expect(handle.id).toBe('abc-123');
+    let caught: unknown;
+    try {
+      await scheduler.schedule('writer', { spec: { every: '1h' }, input: 'hello', session: 's1' });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(UnrunnableScheduleError);
+    expect(engine.calls).toHaveLength(0);
   });
 
   it('getSchedule() delegates to engine.getSchedule', async () => {
@@ -324,13 +250,18 @@ describe('createAgentScheduler', () => {
     expect(cancelled).toContain('my-sched');
   });
 
-  it('respects a custom workflowType override', async () => {
+  it('schedule() rejects even with a custom workflowType override', async () => {
     const engine = makeSchedulingEngine();
     const scheduler = createAgentScheduler({ engine, workflowType: 'myRun' });
 
-    await scheduler.schedule('agent', { spec: { every: '1h' }, input: 'x' });
-
-    expect(engine.calls[0]?.type).toBe('myRun');
+    let caught: unknown;
+    try {
+      await scheduler.schedule('agent', { spec: { every: '1h' }, input: 'x' });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(UnrunnableScheduleError);
+    expect(engine.calls).toHaveLength(0);
   });
 
   it('listSchedules() can filter by status', async () => {

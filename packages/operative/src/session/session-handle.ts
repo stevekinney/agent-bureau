@@ -23,8 +23,20 @@ import {
   SessionSleepEvent,
   SessionUpdateEvent,
 } from '../events';
-import type { RunOptions, RunResult } from '../types';
+import type { FinishReason, RunOptions, RunResult } from '../types';
 import type { SessionStore } from './types';
+
+/**
+ * Terminal finish reasons that represent a FAILED run. `run.result()` resolves
+ * (rather than throws) for these, so monitor must check for them explicitly
+ * before evaluating its predicate (PRRT_kwDORvupsc6MddwB).
+ */
+const FAILURE_FINISH_REASONS: ReadonlySet<FinishReason> = new Set([
+  'error',
+  'aborted',
+  'budget-exceeded',
+  'elicitation-denied',
+]);
 
 /**
  * Options passed to `createSessionHandle` that define the agent's run behavior.
@@ -844,6 +856,22 @@ export function createSessionHandle(
         );
       }
 
+      // Reject non-positive / non-finite NUMERIC intervals — the string guard
+      // above only covers strings. A numeric `every` of 0, a negative value, or
+      // NaN/Infinity flows through as `everyMs <= 0` (or non-finite); the
+      // inter-tick sleep below is `Math.min(everyMs, remainingMs)` gated on
+      // `sleepMs > 0`, so it is skipped entirely and the loop spins through
+      // back-to-back agent runs and provider calls with no pause until the
+      // predicate or maxDuration stops it. Require a positive, finite interval
+      // (PRRT_kwDORvupsc6Mddv9).
+      if (typeof every === 'number' && !(everyMs > 0 && Number.isFinite(everyMs))) {
+        throw new Error(
+          `monitor({ every }) received an invalid numeric interval: ${every}. ` +
+            `Use a positive, finite number of milliseconds (e.g. 5000) or an ISO-8601 ` +
+            `PT duration such as 'PT5M'.`,
+        );
+      }
+
       const maxMs =
         maxDuration !== undefined
           ? typeof maxDuration === 'number'
@@ -885,6 +913,26 @@ export function createSessionHandle(
           // propagate. The caller should handle this as an error condition.
           emitter.dispatchEvent(new SessionMonitorDoneEvent(sessionId, false, tick + 1));
           throw err;
+        }
+
+        // Surface terminal run FAILURES as errors instead of feeding them to the
+        // predicate. `run.result()` resolves (it does not throw) for normal
+        // operative failures — `error`, `aborted`, `budget-exceeded`,
+        // `elicitation-denied` — so the catch above never runs for these. Without
+        // this check a predicate that returns false would keep sleeping and
+        // re-running after a provider/tool failure instead of surfacing it, the
+        // same way the catch block does for thrown errors (PRRT_kwDORvupsc6MddwB).
+        if (FAILURE_FINISH_REASONS.has(result.finishReason)) {
+          emitter.dispatchEvent(new SessionMonitorDoneEvent(sessionId, false, tick + 1));
+          // Prefer the run's own error; otherwise synthesize one naming the
+          // finish reason ('aborted'/'budget-exceeded'/'elicitation-denied'
+          // typically carry no `error`).
+          throw result.error instanceof Error
+            ? result.error
+            : new Error(
+                `monitor tick ended with finishReason '${result.finishReason}' before the ` +
+                  `predicate could be evaluated.`,
+              );
         }
 
         // Evaluate the predicate.

@@ -235,7 +235,11 @@ export type {
   ScheduledAgentRunInput,
   SchedulingEngine,
 } from './durable/schedule-agent';
-export { createAgentSchedule, createAgentScheduler } from './durable/schedule-agent';
+export {
+  createAgentSchedule,
+  createAgentScheduler,
+  UnrunnableScheduleError,
+} from './durable/schedule-agent';
 export { AgentScheduledEvent, WakeupScheduledEvent } from './events';
 export { composeGenerate, createFallbackGenerate } from './generate-middleware';
 export type {

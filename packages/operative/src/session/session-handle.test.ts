@@ -2358,6 +2358,137 @@ describe('regression: monitor() rejects invalid duration strings instead of spin
 });
 
 // ---------------------------------------------------------------------------
+// Regression: PRRT_kwDORvupsc6Mddv9 — monitor() rejects non-positive numeric
+// intervals (the string guard above only covered strings; a numeric `every` of
+// 0 / negative / non-finite flowed through as everyMs<=0 → no inter-tick sleep
+// → tight spin of back-to-back agent runs).
+// ---------------------------------------------------------------------------
+
+describe('regression: monitor() rejects non-positive numeric intervals (PRRT_kwDORvupsc6Mddv9)', () => {
+  it('throws immediately for every: 0 without running a single tick', async () => {
+    const { handle } = createSessionHandleFixture();
+
+    let tickCount = 0;
+    let caught: unknown;
+    try {
+      await handle.monitor({
+        every: 0,
+        input: 'check',
+        until: () => {
+          tickCount += 1;
+          return false; // never met — a spin loop would run forever
+        },
+      });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toMatch(/invalid numeric interval/i);
+    // The throw happens before the loop starts — no tick (and no agent run) ran.
+    expect(tickCount).toBe(0);
+  });
+
+  it('throws for a negative numeric interval', async () => {
+    const { handle } = createSessionHandleFixture();
+
+    let caught: unknown;
+    try {
+      await handle.monitor({ every: -5, input: 'check', until: () => false });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toMatch(/invalid numeric interval/i);
+  });
+
+  it('throws for a non-finite numeric interval (Infinity / NaN)', async () => {
+    const { handle } = createSessionHandleFixture();
+
+    for (const bad of [Number.POSITIVE_INFINITY, Number.NaN]) {
+      let caught: unknown;
+      try {
+        await handle.monitor({ every: bad, input: 'check', until: () => false });
+      } catch (err) {
+        caught = err;
+      }
+      expect(caught).toBeInstanceOf(Error);
+      expect((caught as Error).message).toMatch(/invalid numeric interval/i);
+    }
+  });
+
+  it('accepts a positive numeric interval without throwing', async () => {
+    const { handle } = createSessionHandleFixture();
+
+    // every: 5 is valid; predicate met on first tick → returns true.
+    const result = await handle.monitor({ every: 5, input: 'check', until: () => true });
+    expect(result).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Regression: PRRT_kwDORvupsc6MddwB — monitor() stops on a failed tick instead
+// of feeding the failure RunResult to the predicate. `run.result()` RESOLVES
+// (does not throw) for normal operative failures, so the catch block never ran
+// and a predicate returning false kept re-running after provider/tool failures.
+// ---------------------------------------------------------------------------
+
+describe('regression: monitor() surfaces failed tick finish reasons (PRRT_kwDORvupsc6MddwB)', () => {
+  it("throws (does not call until) when a tick's run finishes with finishReason 'error'", async () => {
+    // A generate that throws makes the loop resolve a RunResult with
+    // finishReason 'error' (the loop catches the throw internally — run.result()
+    // resolves rather than rejects), exactly the case the predicate must not see.
+    const failingGenerate: GenerateFunction = async () => {
+      throw new Error('provider exploded');
+    };
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+    const handle = createSessionHandle('monitor-fail-session', {
+      store,
+      agentName: 'test-agent',
+      runOptions: createTestRunOptions(failingGenerate),
+    });
+
+    let predicateCalls = 0;
+    let caught: unknown;
+    try {
+      await handle.monitor({
+        every: 5,
+        input: 'check',
+        until: () => {
+          predicateCalls += 1;
+          return false; // a spin loop would re-run forever after the failure
+        },
+      });
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(caught).toBeInstanceOf(Error);
+    // The original run error is surfaced, not swallowed.
+    expect((caught as Error).message).toMatch(/provider exploded/i);
+    // The predicate must NEVER see a failed tick.
+    expect(predicateCalls).toBe(0);
+  });
+
+  it('still evaluates the predicate normally on a successful tick', async () => {
+    // Sanity: a healthy run (finishReason 'maximum-steps') is NOT treated as a
+    // failure — the predicate runs as before.
+    const { handle } = createSessionHandleFixture();
+    let predicateCalls = 0;
+    const result = await handle.monitor({
+      every: 5,
+      input: 'check',
+      until: () => {
+        predicateCalls += 1;
+        return true;
+      },
+    });
+    expect(result).toBe(true);
+    expect(predicateCalls).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Regression: PRRT_kwDORvupsc6MZozl — tool.* bubble events carry derived runId
 // ---------------------------------------------------------------------------
 

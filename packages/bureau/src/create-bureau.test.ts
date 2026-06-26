@@ -11,7 +11,7 @@ import { Conversation, getMessages } from 'conversationalist';
 import { createMemory, type Memory } from 'memory';
 import { createInMemoryMemoryRecordStorage, createMockEmbedder } from 'memory/test';
 import type { GenerateFunction, GenerateResponse, Toolbox } from 'operative';
-import { stopWhen } from 'operative';
+import { createSessionStore, stopWhen } from 'operative';
 import { SCHEDULER_ORIGIN_TAG, startDurableRunResult } from 'operative/durable';
 import { createStore } from 'operative/store';
 import { createMockGenerate as createSequentialGenerate } from 'operative/test';
@@ -480,6 +480,64 @@ describe('createBureau', () => {
     const sessionAfterRun2 = await bureau.getSession(run1.sessionId);
     // Must be null (explicitly cleared), not 3
     expect(sessionAfterRun2?.metadata['lastMaximumSteps']).toBeNull();
+  });
+
+  // Regression: PRRT_kwDORvupsc6Mddv3 — a reused session was carrying its PREVIOUS
+  // run's lastActiveSkills snapshot into the start of a new run. The snapshot is
+  // otherwise written only after the new run's first onStep boundary, so a crash
+  // before that first snapshot let durable recovery seed the new run's
+  // SkillSession with stale skills (load_skill_resource/list_skills treating
+  // skills as active that a fresh run would not have). The start-of-run
+  // saveSession now writes lastActiveSkills: null to clear it.
+  it('clears stale lastActiveSkills at the start of a follow-up run on a reused session (regression PRRT_kwDORvupsc6Mddv3)', async () => {
+    const persistence = textValueStore(new MemoryStorage());
+
+    // Run 1 succeeds (to create the session); run 2 FAILS before completing a
+    // step. This is the exact window the fix protects: the start-of-run
+    // saveSession null-write lands (it runs before createActiveRun), then the run
+    // crashes before the first onStep boundary — so createSkillStateSnapshotHook
+    // never fires to overwrite the null. A successful run 2 would instead
+    // overwrite the null with the snapshot hook's empty-set value, and the
+    // assertion would pass identically with the fix reverted (testing the hook,
+    // not the start-of-run reset).
+    let call = 0;
+    const failOnSecondRun: GenerateFunction = async () => {
+      call += 1;
+      if (call === 1) return { content: 'Done.', toolCalls: [] };
+      throw new Error('provider crashed before first step');
+    };
+
+    const bureau = await createBureau({
+      generate: failOnSecondRun,
+      toolbox: createEmptyToolbox(),
+      persistence,
+    });
+
+    // Run 1: creates the session.
+    const run1 = await bureau.createRun({ message: 'First run' });
+    await waitForRunCompletion(bureau, run1.id);
+
+    // Simulate a prior run having recorded an active-skill snapshot: write a
+    // stale lastActiveSkills array directly to the session metadata (the same
+    // shape createSkillStateSnapshotHook writes).
+    const seedStore = createSessionStore(persistence);
+    await seedStore.updateMetadata(run1.sessionId, {
+      lastActiveSkills: [{ name: 'researcher-skill' }],
+    });
+    const seeded = await bureau.getSession(run1.sessionId);
+    expect(seeded?.metadata['lastActiveSkills']).toEqual([{ name: 'researcher-skill' }]);
+
+    // Run 2: on the SAME session, fails before its first onStep snapshot. The
+    // start-of-run metadata write must have already reset lastActiveSkills so a
+    // crash-before-first-snapshot recovery starts with NO active skills, exactly
+    // as a fresh run would.
+    const run2 = await bureau.createRun({ message: 'Follow-up run', sessionId: run1.sessionId });
+    await waitForRunCompletion(bureau, run2.id);
+
+    const sessionAfterRun2 = await bureau.getSession(run1.sessionId);
+    // Must be null (explicitly cleared at start-of-run), not the stale
+    // ['researcher-skill'] and not overwritten by a snapshot hook that never ran.
+    expect(sessionAfterRun2?.metadata['lastActiveSkills']).toBeNull();
   });
 
   it('retries terminal session persistence after a transient save failure', async () => {

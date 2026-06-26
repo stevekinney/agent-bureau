@@ -289,6 +289,33 @@ export function createOpenAICompatRoutes(bureau: Bureau) {
             return;
           }
 
+          // Emit the run's terminal outcome exactly once, then close. Shared by
+          // the `run.completed`/`run.aborted` listeners AND the already-settled
+          // fast path below so success/error/abort discrimination can never drift
+          // between them. `settled` guards against a double-emit if a listener
+          // and the fast path both reach here (they can't enqueue into a closed
+          // stream, but the guard keeps the contract explicit).
+          let settled = false;
+          const emitTerminal = (
+            outcome:
+              | { kind: 'success'; content: string }
+              | { kind: 'error'; message: string }
+              | { kind: 'aborted' },
+          ): void => {
+            if (settled) return;
+            settled = true;
+            if (outcome.kind === 'success') {
+              enqueue(formatSseChunk(agentName, outcome.content, false));
+              enqueue(formatSseChunk(agentName, '', true));
+            } else if (outcome.kind === 'error') {
+              enqueue(formatSseErrorChunk(agentName, outcome.message));
+            } else {
+              enqueue(formatSseErrorChunk(agentName, 'Run was aborted before completion'));
+            }
+            enqueue('data: [DONE]\n\n');
+            close();
+          };
+
           // `run.completed` fires in ALL terminal cases (success, error, or
           // budget-exceeded). The `finishReason` field discriminates:
           //   - 'stop-condition' / 'maximum-steps' — success → send content chunk
@@ -306,24 +333,21 @@ export function createOpenAICompatRoutes(bureau: Bureau) {
               event.finishReason === 'budget-exceeded' ||
               event.finishReason === 'elicitation-denied';
             if (isError) {
-              const errorMessage =
-                event.error instanceof Error ? event.error.message : 'Run failed with an error';
-              enqueue(formatSseErrorChunk(agentName, errorMessage));
+              emitTerminal({
+                kind: 'error',
+                message:
+                  event.error instanceof Error ? event.error.message : 'Run failed with an error',
+              });
             } else {
-              enqueue(formatSseChunk(agentName, event.content, false));
-              enqueue(formatSseChunk(agentName, '', true));
+              emitTerminal({ kind: 'success', content: event.content });
             }
-            enqueue('data: [DONE]\n\n');
-            close();
           };
           runState.activeRun.addEventListener('run.completed', onCompleted);
 
           // `run.aborted` fires when the run is aborted (no `run.completed`
           // counterpart is dispatched on the abort path).
           const onAborted = (): void => {
-            enqueue(formatSseErrorChunk(agentName, 'Run was aborted before completion'));
-            enqueue('data: [DONE]\n\n');
-            close();
+            emitTerminal({ kind: 'aborted' });
           };
           runState.activeRun.addEventListener('run.aborted', onAborted);
 
@@ -331,6 +355,43 @@ export function createOpenAICompatRoutes(bureau: Bureau) {
             runState.activeRun.removeEventListener('run.completed', onCompleted);
             runState.activeRun.removeEventListener('run.aborted', onAborted);
           };
+
+          // Already-settled fast path. For very fast `stream: true` requests the
+          // run can schedule and reach a terminal state BEFORE this start()
+          // callback attaches the listeners above (the active run starts on a
+          // microtask, ahead of the awaited handler continuation). In that case
+          // `run.completed`/`run.aborted` already fired and will never fire again,
+          // so the client would receive only heartbeats — no content, no [DONE].
+          // The store synchronously records the terminal RunState as the run's
+          // events pass through it (its subscription is wired at register() time,
+          // before this callback runs), so re-read it now and emit the final
+          // result directly if the run has already settled (PRRT_kwDORvupsc6MddwF).
+          const settledState = bureau.store.getRun(summary.id);
+          if (settledState && settledState.status !== 'running') {
+            // Discriminate by finishReason, MIRRORING the run.completed listener
+            // above — not by store status. A 'budget-exceeded'/'elicitation-denied'
+            // run lands in the store as status 'completed' (the store only marks
+            // 'error' when status was already error), so a status-based branch
+            // would emit a content chunk where the listener emits an error chunk.
+            const isError =
+              settledState.finishReason === 'error' ||
+              settledState.finishReason === 'budget-exceeded' ||
+              settledState.finishReason === 'elicitation-denied';
+            if (settledState.status === 'aborted') {
+              emitTerminal({ kind: 'aborted' });
+            } else if (isError) {
+              const error = settledState.error;
+              emitTerminal({
+                kind: 'error',
+                message: error instanceof Error ? error.message : 'Run failed with an error',
+              });
+            } else {
+              emitTerminal({
+                kind: 'success',
+                content: settledState.steps.at(-1)?.content ?? '',
+              });
+            }
+          }
         },
 
         // Fired when the consumer cancels the stream — i.e. the HTTP client

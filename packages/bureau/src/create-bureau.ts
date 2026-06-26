@@ -490,6 +490,18 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         // caller's maximumSteps instead of falling back to the bureau default
         // (PRRT_kwDORvupsc6MZfl5 — mirror of the maximumTokens recovery fix).
         lastMaximumSteps: request.maximumSteps ?? null,
+        // Reset the active-skill snapshot at the start of every run so a reused
+        // session never seeds a fresh run with the PREVIOUS run's active skills.
+        // The snapshot is otherwise written only by createSkillStateSnapshotHook
+        // after the run's first onStep boundary; if the durable process crashes
+        // before that first snapshot, recovery would read this session's stale
+        // lastActiveSkills and pre-seed the new run's SkillSession with skills a
+        // live fresh run would not have — making load_skill_resource/list_skills
+        // treat stale skills as active. null clears it: buildRunDepsFromSession
+        // runs lastActiveSkills through isActiveSkillEntryArray, which rejects
+        // null → initialActiveSkills undefined → the recovered run starts empty,
+        // exactly as a fresh run would (PRRT_kwDORvupsc6Mddv3).
+        lastActiveSkills: null,
       },
       // Stamp the session with the dispatched agent (PRRT_kwDORvupsc6MbUsN) so it
       // is not always recorded as the house default 'bureau'.
