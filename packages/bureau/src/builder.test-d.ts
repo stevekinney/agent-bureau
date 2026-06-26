@@ -9,10 +9,12 @@
 //
 // The A4 spike (`operative/src/bureau.test-d.ts`) asserts this against
 // operative's INTERNAL `createBureau`. This file guards the SAME boundary at the
-// public surface consumers actually import — `bureau/builder`'s `createBureau`
-// (`./builder`). If that wiring drifts (the exported `createBureau` loses its
-// generic, or `BureauBuilder.run`'s signature changes), this file fails to
-// type-check and catches the regression.
+// public surface consumers actually import — the `bureau/builder` subpath
+// (`./builder/index.ts`, mapped to `exports["./builder"]`). Importing through
+// the entrypoint means a regression is caught whether it lands in the
+// implementation (`createBureau` losing its generic, `BureauBuilder.run`'s
+// signature changing) OR in the re-export wiring (a dropped export in
+// `builder/index.ts`). Either way, this file fails to type-check.
 //
 // Conventions (cribbed from the A4 spike):
 //   - `satisfies` asserts a value resolves to exactly the expected type.
@@ -22,8 +24,8 @@
 //     type-checked (`tsc --noEmit`) but excluded from build and never executed
 //     by `bun test` (it is `.test-d.ts`, not `.test.ts`).
 
-import { createBureau } from './builder.ts';
-import type { AgentNameFor, AgentTable } from './builder-types.ts';
+import type { AgentNameFor, AgentTable } from './builder/index.ts';
+import { createBureau } from './builder/index.ts';
 
 // ---------------------------------------------------------------------------
 // PROOF 1 — Closed registry rejects unknown agent names.
