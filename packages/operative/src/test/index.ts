@@ -1,16 +1,29 @@
-import { createTestToolbox } from 'armorer/test';
-
 import {
   type AgentRegistry,
   type AgentRegistryEntry,
   createAgentRegistry,
+  type RegistryAgent,
 } from '../create-agent-registry';
 import type { ActiveRun } from '../create-run';
 import { createScratchpad, type Scratchpad } from '../create-scratchpad';
 import type { OperativeEventMap, OperativeEventType } from '../events';
-import type { AgentDefinition, GenerateFunction, GenerateResponse, StepResult } from '../types';
+import type { GenerateFunction, GenerateResponse, RunResult, StepResult } from '../types';
 
+export {
+  createManualCheckpointStore,
+  createManualDurableEngine,
+  type EngineSpy,
+  spyEngine,
+} from './durable-engine';
+export type {
+  ChildRunHandle,
+  CreateDurableMultiAgentHarnessOptions,
+  DurableMultiAgentHarness,
+} from './durable-multi-agent-harness';
+export { createDurableMultiAgentHarness } from './durable-multi-agent-harness';
+export { createStepwiseBlockingGenerate } from './stepwise-generate';
 export { createTestStore } from './store';
+export { type RunLookup, waitForCondition, waitForRunState } from './wait';
 
 /**
  * Creates a mock generate function that returns responses in sequence.
@@ -79,25 +92,23 @@ export function createMockScratchpad(initialValues?: Record<string, unknown>): S
   return createScratchpad({ initialValues });
 }
 
-export function createMockAgentDefinition(
+/**
+ * Creates a minimal mock agent for registry-based tests.
+ */
+export function createMockRegistryAgent(
   name: string,
-  overrides: Partial<AgentDefinition> = {},
-): AgentDefinition {
+  overrides: Partial<RegistryAgent> = {},
+): RegistryAgent {
+  const mockResult: RunResult = {
+    conversation: {} as never,
+    steps: [],
+    content: `Mock response from ${name}`,
+    usage: { prompt: 0, completion: 0, total: 0 },
+    finishReason: 'stop-condition' as const,
+  };
   return {
     name,
-    options: {
-      name,
-      generate: async () => ({ content: `Mock response from ${name}`, toolCalls: [] }),
-      toolbox: createTestToolbox([]),
-    },
-    run: async () => ({
-      conversation: {} as never,
-      steps: [],
-      content: `Mock response from ${name}`,
-      usage: { prompt: 0, completion: 0, total: 0 },
-      finishReason: 'stop-condition' as const,
-    }),
-    createRun: () => ({}) as never,
+    run: async () => mockResult,
     ...overrides,
   };
 }

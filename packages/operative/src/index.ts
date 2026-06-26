@@ -1,4 +1,6 @@
-export type { AgentSession } from './agent-session';
+export type { AgentRun, CreateAgentRunOptions, RunEvent } from './agent-run';
+export { CompletedRunIterationError, createAgentRun } from './agent-run';
+export type { AgentSession, RunRef } from './agent-session';
 export { createAgentSession, loadAgentSession, saveAgentSession } from './agent-session';
 export type {
   AdaptiveBackoffOptions,
@@ -58,12 +60,15 @@ export type {
 export { createCostBudgetMonitor } from './cost-budget-monitor';
 export type { CostEstimate, CostEstimationOptions, ModelPricing } from './cost-estimation';
 export { defaultPricingTable, estimateCost, getModelPricing } from './cost-estimation';
+export type { CreateAgentOptions, StandaloneAgent } from './create-agent';
+export { createAgent } from './create-agent';
 export type {
   AgentRegistry,
   AgentRegistryEntry,
   AgentRegistryEventMap,
   AgentRegistryEvents,
   AgentRegistryQuery,
+  RegistryAgent,
 } from './create-agent-registry';
 export {
   AgentQueriedEvent,
@@ -85,11 +90,11 @@ export { createMemoryBridge } from './create-memory-bridge';
 export type {
   CreatePolicyEnforcementHookOptions,
   ToolLike,
-  ToolPolicyLike,
+  ToolPolicy,
 } from './create-policy-enforcement-hook';
 export { createPolicyEnforcementHook } from './create-policy-enforcement-hook';
 export type { ActiveRun, DurableRunRouting } from './create-run';
-export { createRun } from './create-run';
+export { createActiveRun } from './create-run';
 export type {
   CreateScratchpadOptions,
   Scratchpad,
@@ -106,6 +111,7 @@ export {
   EntrySetEvent,
   ScratchpadClearedEvent,
 } from './create-scratchpad';
+export type { CreateSubagentToolOptions } from './create-subagent-tool';
 export { createSubagentTool } from './create-subagent-tool';
 export type {
   CreateSupervisorOptions,
@@ -129,7 +135,6 @@ export {
   TaskFailedEvent,
   TaskRoutedEvent,
 } from './create-supervisor';
-export { defineAgent } from './define-agent';
 export type { ClassifiedError, ErrorCategory } from './errors';
 export { BudgetExceededError, classifyError, ElicitationDeniedError } from './errors';
 export type {
@@ -173,6 +178,69 @@ export {
   UsageAccumulatedEvent,
 } from './events';
 export { ContextBudgetWarningEvent } from './events';
+// C3 — curated tool.* bubble events
+export type { ToolEventStamp } from './events';
+export {
+  ToolErrorBubbleEvent,
+  ToolPolicyDeniedBubbleEvent,
+  ToolProgressBubbleEvent,
+  ToolSettledBubbleEvent,
+  ToolStartedBubbleEvent,
+} from './events';
+// C3 — session verb events
+export {
+  SessionCancelEvent,
+  SessionForkEvent,
+  SessionMonitorDoneEvent,
+  SessionMonitorTickEvent,
+  SessionQueryEvent,
+  SessionRecoverEvent,
+  SessionSignalEvent,
+  SessionSleepEvent,
+  SessionUpdateEvent,
+} from './events';
+// F1/F2/F3 — durable multi-agent transition events
+export { ChildWorkflowStartedEvent, HandoffOccurredEvent, HumanWaitParkedEvent } from './events';
+// D6 — scheduling events
+export type {
+  CreateScheduleSelfToolOptions,
+  ScheduleSelfFn,
+  ScheduleSelfInput,
+  ScheduleSelfResult,
+  ScheduleSelfTool,
+} from './create-schedule-self-tool';
+export { createScheduleSelfTool } from './create-schedule-self-tool';
+export type {
+  CreateScheduleWakeupToolOptions,
+  ScheduleWakeupContext,
+  ScheduleWakeupInput,
+  ScheduleWakeupResult,
+  ScheduleWakeupTool,
+} from './create-schedule-wakeup-tool';
+export { createScheduleWakeupTool } from './create-schedule-wakeup-tool';
+// F3 — HITL human-input gate
+export type {
+  CreateRequestHumanInputToolOptions,
+  RequestHumanInputContext,
+  RequestHumanInputInput,
+  RequestHumanInputResult,
+  RequestHumanInputTool,
+} from './create-request-human-input-tool';
+export { createRequestHumanInputTool } from './create-request-human-input-tool';
+export type {
+  AgentScheduleHandle,
+  AgentScheduleOptions,
+  AgentScheduler,
+  CreateAgentScheduleOptions,
+  ScheduledAgentRunInput,
+  SchedulingEngine,
+} from './durable/schedule-agent';
+export {
+  createAgentSchedule,
+  createAgentScheduler,
+  UnrunnableScheduleError,
+} from './durable/schedule-agent';
+export { AgentScheduledEvent, WakeupScheduledEvent } from './events';
 export { composeGenerate, createFallbackGenerate } from './generate-middleware';
 export type {
   CodeSafetyValidatorOptions,
@@ -213,7 +281,25 @@ export type {
   AfterCompactionHookContext,
   AfterContextAssemblyHookContext,
   BeforeCompactionHookContext,
+  // Phase F — durable multi-agent hook context types (C3 completeness rule)
+  ChildWorkflowStartedHookContext,
   ContextAssemblyHookContext,
+  HandoffOccurredHookContext,
+  HumanWaitParkedHookContext,
+  // Session verb hook context types (C3 completeness rule)
+  SessionCancelHookContext,
+  SessionForkHookContext,
+  SessionQueryHookContext,
+  SessionRecoverHookContext,
+  SessionSignalHookContext,
+  SessionSleepHookContext,
+  SessionUpdateHookContext,
+  // Curated tool.* bubble event hook context types (C3)
+  ToolErrorHookContext,
+  ToolPolicyDeniedHookContext,
+  ToolProgressHookContext,
+  ToolSettledHookContext,
+  ToolStartedHookContext,
 } from './hooks';
 export type {
   AfterGenerateContext,
@@ -228,6 +314,14 @@ export type {
   RunStartContext,
 } from './hooks/index';
 export { composeHooks, everyNSteps, onlyOnStep, runOnce, withTimeout } from './hooks/index';
+export type { IdentityInheritanceLayer, MemoryInheritanceSide } from './inheritance';
+export {
+  combineHooks,
+  combineIdentity,
+  combineMemory,
+  combineProvider,
+  combineTools,
+} from './inheritance';
 export type {
   JitterOptions,
   OverflowMutatorOptions,
@@ -243,7 +337,6 @@ export {
   createToolRemovalMutator,
   RETRY_TEMPERATURE_KEY,
 } from './retry/index';
-export { run } from './run';
 export type {
   CreateChunkedTaskOptions,
   CreateDurableHeartbeatOptions,
@@ -285,14 +378,26 @@ export {
   TaskQueuedEvent,
 } from './scheduler/index';
 export type {
+  MonitorOptions,
   ResumeSessionOptions,
   ResumeSessionResult,
   SessionCleanupOptions,
+  SessionHandle,
+  SessionHandleContext,
   SessionListOptions,
+  SessionRunOptions,
   SessionStore,
   SessionSummary,
 } from './session/index';
-export { createSessionStore, resumeSession } from './session/index';
+export {
+  createSessionHandle,
+  createSessionStore,
+  deriveRunId,
+  ForkThroughRunError,
+  NoDurableEngineError,
+  NoRunningRunError,
+  resumeSession,
+} from './session/index';
 export { withStreaming } from './streaming';
 export type { BackpressureBuffer, BackpressureBufferOptions } from './streaming/index';
 export type {
@@ -316,15 +421,11 @@ export { zodToJsonSchema } from './structured-output/index';
 export type {
   AfterGenerateHook,
   AfterToolExecutionHook,
-  AgentDefinition,
-  AgentRunOptions,
   BeforeGenerateHook,
   BeforeToolExecutionHook,
   ContextManagementOptions,
   Conversation,
   ConversationHistory,
-  CreateSubagentToolOptions,
-  DefineAgentOptions,
   ElicitationRequest,
   ElicitationResponse,
   FinishReason,

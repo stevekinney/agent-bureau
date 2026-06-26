@@ -1,3 +1,4 @@
+import type { ToolboxEventMap } from 'armorer';
 import { Conversation, isConversation } from 'conversationalist';
 import type { ForwardableSource, ObservableLike, Observer, Subscription } from 'lifecycle';
 import { CompletableEventTarget, forwardEvents } from 'lifecycle';
@@ -5,11 +6,24 @@ import { CompletableEventTarget, forwardEvents } from 'lifecycle';
 import type { DurableActiveRunContext } from './durable/active-run-adapter';
 import { createDurableActiveRun } from './durable/active-run-adapter';
 import type { CombinedOperativeEventMap, CombinedOperativeEventType } from './events';
+import {
+  StepStartedEvent,
+  ToolErrorBubbleEvent,
+  ToolPolicyDeniedBubbleEvent,
+  ToolProgressBubbleEvent,
+  ToolSettledBubbleEvent,
+  ToolStartedBubbleEvent,
+} from './events';
 import { executeLoop } from './loop';
 import type { RunOptions, RunResult } from './types';
 
 /**
- * An active, event-emitting agent loop run.
+ * The internal event-emitting agent loop run. This is the low-level engine
+ * that owns the event emitter and the result Promise. External callers
+ * consume the higher-level `AgentRun` wrapper (from `agent-run.ts`), which
+ * adds async-iteration and enforces the non-thenable contract. Internal
+ * modules (durable, store, instrumentation, scheduler) work directly with
+ * `ActiveRun` because they need the full event surface.
  */
 export interface ActiveRun {
   result: Promise<RunResult>;
@@ -49,43 +63,27 @@ export interface ActiveRun {
 }
 
 /**
- * Routing for a durable run. When provided to {@link createRun}, the run is
- * driven through the Weft durable engine — checkpointed and resumable — instead
- * of the in-memory loop. The `ActiveRun` surface is identical either way.
- *
- * Mirrors the `executeLoop(options, emitter?)` convention: durability is an
- * optional second argument, NOT a field on `RunOptions`, so the standalone
- * library signature is unchanged and callers without an engine are unaffected.
- */
-export interface DurableRunRouting extends DurableActiveRunContext {
-  /** Stable id for the run; also the durable workflow id (resume key). */
-  runId: string;
-  /**
-   * The session that owns this run, carried in the durable input so boot recovery
-   * can correlate a recovered handle to its session. Defaults to `runId` for a
-   * headless run with no distinct session (the run is its own session for
-   * recovery-correlation purposes).
-   */
-  sessionId?: string;
-  /** First user message to seed a brand-new run. */
-  prompt?: string;
-}
-
-/**
  * Creates an event-emitting agent loop run.
  *
- * When `durable` is provided (an engine + checkpoint store + runId), the run is
- * driven through the Weft durable engine so it survives a crash and resumes from
- * its last checkpoint. The returned {@link ActiveRun} is identical in both modes.
- * Without `durable`, the in-memory loop runs (the standalone-library default).
+ * Internal factory — NOT part of the public API. External callers should use
+ * `createAgent` (which wraps this in an `AgentRun`) or `createSessionHandle`
+ * (which also wraps the result). Scheduler and durable adapter consume this
+ * directly because they need the raw event surface.
+ *
+ * When `durable` is provided (engine + checkpoint store + runId), the run is
+ * driven through the Weft durable engine so it survives a crash and resumes.
+ * Without `durable`, the in-memory loop runs.
  */
-export function createRun(options: RunOptions, durable?: DurableRunRouting): ActiveRun {
+export function createActiveRun(options: RunOptions, durable?: DurableRunRouting): ActiveRun {
   if (durable) {
     return createDurableActiveRun(
       { engine: durable.engine, checkpointStore: durable.checkpointStore },
       {
         runId: durable.runId,
         sessionId: durable.sessionId ?? durable.runId,
+        // F2: thread agentName from RunOptions into the durable input. Falls
+        // back to '' inside createDurableActiveRun if undefined here.
+        agentName: options.agentName,
         options,
         prompt: durable.prompt,
       },
@@ -109,7 +107,6 @@ export function createRun(options: RunOptions, durable?: DurableRunRouting): Act
     signal: combinedSignal,
   };
 
-  // Subscribe to toolbox and conversation events, re-emitting with prefixes.
   const cleanups: (() => void)[] = [];
 
   const toolboxForward = forwardEvents(
@@ -126,7 +123,123 @@ export function createRun(options: RunOptions, durable?: DurableRunRouting): Act
   );
   cleanups.push(() => conversationForward.stop());
 
-  // Defer the loop start to the next microtask so callers can attach listeners first.
+  // C3 — curated tool.* bubble events stamped with {agentName, runId, step}.
+  // We track the current step by listening to StepStartedEvent (which fires at
+  // the start of each step). The agentName and runId come from RunOptions
+  // (optional — supplied by bureau.agent / createAgent / SessionHandle).
+  {
+    const agentName = options.agentName ?? '';
+    const runId = options.runId ?? '';
+    let currentStep = 0;
+
+    // Track step number from StepStartedEvents
+    const stepListener = (e: StepStartedEvent) => {
+      currentStep = e.step;
+    };
+    emitter.addEventListener(StepStartedEvent.type, stepListener);
+    cleanups.push(() => emitter.removeEventListener(StepStartedEvent.type, stepListener));
+
+    // Wire the curated toolbox events onto the run emitter.
+    // The toolbox addEventListener returns a cleanup function and also accepts
+    // an AbortSignal for automatic cleanup. We guard against mock/custom toolboxes
+    // that omit addEventListener (e.g. minimal stubs used in tests) — if the method
+    // is absent the bubbling simply does not happen; no exception.
+    const toolbox = options.toolbox as unknown as {
+      addEventListener?: <K extends keyof ToolboxEventMap>(
+        type: K,
+        listener: (e: ToolboxEventMap[K]) => void,
+        options?: AddEventListenerOptions,
+      ) => () => void;
+    };
+
+    // Map 'execute-start' → tool.started (reliably emitted for all tools, regardless of telemetry flag)
+    const onExecuteStart = (e: ToolboxEventMap['execute-start']) => {
+      emitter.dispatchEvent(
+        new ToolStartedBubbleEvent(
+          { agentName, runId, step: currentStep },
+          {
+            toolName: e.call.name,
+            toolCallId: e.call.id,
+            params: e.params,
+            startedAt: Date.now(),
+          },
+        ),
+      );
+    };
+
+    // Map 'settled' → tool.settled (fired after every tool call regardless of outcome)
+    const onSettled = (e: ToolboxEventMap['settled']) => {
+      const hasError = e.error !== undefined;
+      const status: 'success' | 'error' = hasError ? 'error' : 'success';
+      emitter.dispatchEvent(
+        new ToolSettledBubbleEvent(
+          { agentName, runId, step: currentStep },
+          {
+            toolName: e.call.name,
+            toolCallId: e.call.id,
+            status,
+            result: e.result,
+            error: e.error,
+          },
+        ),
+      );
+      // Also emit the dedicated tool.error event for failed tools
+      if (hasError) {
+        emitter.dispatchEvent(
+          new ToolErrorBubbleEvent(
+            { agentName, runId, step: currentStep },
+            {
+              toolName: e.call.name,
+              toolCallId: e.call.id,
+              error: e.error,
+            },
+          ),
+        );
+      }
+    };
+
+    const onToolProgress = (e: ToolboxEventMap['progress']) => {
+      emitter.dispatchEvent(
+        new ToolProgressBubbleEvent(
+          { agentName, runId, step: currentStep },
+          {
+            toolName: e.call.name,
+            toolCallId: e.call.id,
+            percent: e.percent,
+            message: e.message,
+          },
+        ),
+      );
+    };
+
+    const onPolicyDenied = (e: ToolboxEventMap['policy-denied']) => {
+      emitter.dispatchEvent(
+        new ToolPolicyDeniedBubbleEvent(
+          { agentName, runId, step: currentStep },
+          {
+            toolName: e.call.name,
+            toolCallId: e.call.id,
+            reason: e.reason,
+          },
+        ),
+      );
+    };
+
+    // Each call returns a cleanup function; guard against stubs without addEventListener.
+    if (toolbox.addEventListener) {
+      const addListener = toolbox.addEventListener.bind(toolbox);
+      const toolboxCleanups = [
+        addListener('execute-start', onExecuteStart, { signal: abortController.signal }),
+        addListener('settled', onSettled, { signal: abortController.signal }),
+        addListener('progress', onToolProgress, { signal: abortController.signal }),
+        addListener('policy-denied', onPolicyDenied, { signal: abortController.signal }),
+      ];
+      cleanups.push(() => {
+        for (const cleanup of toolboxCleanups) cleanup?.();
+      });
+    }
+  }
+
   const result = Promise.resolve()
     .then(() => executeLoop(loopOptions, emitter))
     .finally(complete);
@@ -158,4 +271,20 @@ export function createRun(options: RunOptions, durable?: DurableRunRouting): Act
       complete();
     },
   };
+}
+
+/**
+ * Routing for a durable run.
+ */
+export interface DurableRunRouting extends DurableActiveRunContext {
+  /** Stable id for the run; also the durable workflow id (resume key). */
+  runId: string;
+  /**
+   * The session that owns this run, carried in the durable input so boot recovery
+   * can correlate a recovered handle to its session. Defaults to `runId` for a
+   * headless run with no distinct session.
+   */
+  sessionId?: string;
+  /** First user message to seed a brand-new run. */
+  prompt?: string;
 }

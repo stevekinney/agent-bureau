@@ -48,10 +48,14 @@ function statusToCode(status: number): string {
       return 'NOT_FOUND';
     case 409:
       return 'CONFLICT';
+    case 422:
+      return 'UNPROCESSABLE_ENTITY';
     case 429:
       return 'RATE_LIMITED';
     case 501:
       return 'NOT_IMPLEMENTED';
+    case 503:
+      return 'SERVICE_UNAVAILABLE';
     default:
       return 'INTERNAL_ERROR';
   }

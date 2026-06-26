@@ -1,345 +1,78 @@
-import type {
-  ListFilter,
-  ListOptions,
-  PaginatedResult,
-  WorkflowLogRecord,
-  WorkflowState,
-  WorkflowSummary,
-} from '@lostgradient/weft';
-import type { ObservabilityOptions } from '@lostgradient/weft/observability';
-import type { StorageConfiguration, TextValueStore } from '@lostgradient/weft/storage';
-import type { Toolbox } from 'armorer';
-import type { ConversationSnapshot } from 'conversationalist';
-import type { ProviderName } from 'herald';
 import type { Hono } from 'hono';
-import type {
-  EventIteratorOptions,
-  EventObservableOptions,
-  ObservableLike,
-  Observer,
-  Subscription,
-} from 'lifecycle';
-import type { CreateMemoryOptions, Memory } from 'memory';
-import type {
-  AgentSession,
-  CacheOptions,
-  EnhancedStreamingOptions,
-  GenerateFunction,
-  GuardrailsOptions,
-  Scheduler,
-  SchedulerPriority,
-  SchedulerState,
-  SessionStore,
-  SessionSummary,
-  StopCondition,
-  TokenUsage,
-} from 'operative';
-import type { CreateRunEngineOptions } from 'operative/durable';
 import type { Store } from 'operative/store';
 
-import type { BureauEventMap } from './events';
+export type {
+  AuditEventType,
+  AuditQueryOptions,
+  AuditRecord,
+  AuditTrail,
+  Bureau,
+  BureauEventMap,
+  BureauEventType,
+  BureauOptions,
+  ConfigurationResponse,
+  CreateRunRequest,
+  DurableScheduleDefinition,
+  PersistenceOptions,
+  ProviderConfiguration,
+  RunDetail,
+  RunEventRecord,
+  RunStepDetail,
+  RunSummary,
+  ServerFrame,
+  SubmitSchedulerTaskRequest,
+  SubmitSchedulerTaskResponse,
+  ToolPolicy,
+  ToolSummary,
+} from 'bureau';
+export { DEFAULT_MAXIMUM_STEPS } from 'bureau';
 
-// ── Provider Configuration ───────────────────────────────────────────
-
-export interface ProviderConfiguration {
-  provider: ProviderName;
-  model: string;
-  maximumTokens?: number;
-  temperature?: number;
-  apiKey?: string;
-}
-
-export interface ProviderRouteConfiguration {
-  name: string;
-  provider: ProviderConfiguration;
-  budgetRatio?: number;
-}
-
-export type RedactedProviderConfiguration = Omit<ProviderConfiguration, 'apiKey'>;
-
-export type RedactedProviderRouteConfiguration = Omit<ProviderRouteConfiguration, 'provider'> & {
-  provider: RedactedProviderConfiguration;
-};
-
-export type RoutingConfiguration =
-  | {
-      type: 'step-based';
-      first: string;
-      middle: string;
-      last?: string;
-      middleAfterStep?: number;
-    }
-  | {
-      type: 'complexity';
-      simple: string;
-      complex: string;
-      frontier?: string;
-      simpleMaxTools?: number;
-      simpleMaxLength?: number;
-    }
-  | {
-      type: 'cost-aware';
-      cheap: string;
-      expensive: string;
-      budget: number;
-      thresholdRatio?: number;
-    };
-
-export interface IdentityConfiguration {
-  resolve: () => Promise<string>;
-  warn?: (message: string) => void;
-}
-
-export interface SkillRuntimeConfiguration {
-  provider: SkillProvider;
-  includeTools?: boolean;
-  skillPolicy?: ToolPolicy;
-}
-
-export interface ToolPolicy {
-  allowList?: string[];
-  denyList?: string[];
-}
-
-export interface SkillCatalogEntry {
-  name: string;
-  description: string;
-}
-
-export interface LoadedSkill {
-  metadata: {
-    name: string;
-    description: string;
-    toolPolicy?: ToolPolicy;
-  };
-  body: string;
-}
-
-export interface SkillProvider {
-  listSkills(): Promise<SkillCatalogEntry[]>;
-  loadSkill(name: string): Promise<LoadedSkill | undefined>;
-  saveSkill?(name: string, skill: LoadedSkill): Promise<void>;
-  deleteSkill?(name: string): Promise<void>;
-  listResources(name: string): Promise<string[]>;
-  loadResource(name: string, path: string): Promise<string | undefined>;
-  isEnabled(name: string): Promise<boolean>;
-}
-
-export interface CacheConfiguration extends Omit<CacheOptions, 'store'> {
-  enabled?: boolean;
-  store?: TextValueStore;
-}
-
-export interface StreamingConfiguration extends Pick<EnhancedStreamingOptions, 'onTextDelta'> {
-  enabled?: boolean;
-}
-
-export interface SchedulerConfiguration {
-  enabled?: boolean;
-  idleDelay?: number;
-}
-
-// ── Bureau (headless, no HTTP) ──────────────────────────────────────
-
-export interface BureauOptions {
-  generate?: GenerateFunction;
-  provider?: ProviderConfiguration;
-  providers?: ProviderRouteConfiguration[];
-  routing?: RoutingConfiguration;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  toolbox?: Toolbox<any>;
-  store?: Store;
-  persistence?: TextValueStore;
-  storage?: StorageConfiguration;
-  /**
-   * Override for Weft-backed durable execution. Durable execution is **on by
-   * default whenever a persistent `storage` backend (`sqlite`/`lmdb`) is
-   * configured** — every `createRun()` is then checkpointed on the same backend
-   * and resumes from its last completed step after a crash, with the standard
-   * `run()`/`createRun()` event surface unchanged.
-   *
-   * The default follows persistence because that is the only place resume is
-   * real: a `memory` backend loses its checkpoints with the process, so it stays
-   * OFF by default. Set this explicitly to override the default either way —
-   * `true` forces the engine on (incl. for `memory`, so durable behavior is
-   * testable locally); `false` forces it off even for a persistent backend.
-   * Has no effect without any `storage` (a durable engine needs a backend).
-   *
-   * `durableExecution: true` is rejected when combined with a custom
-   * `persistence` value: `persistence` shadows `storage`, so the engine and the
-   * session store would live on different backends and a recovered run could
-   * never be found. Provide `storage` WITHOUT `persistence` for durable runs.
-   *
-   * Known limitation (seam #5b): a run RESUMED after a process restart (via
-   * boot recovery) persists its terminal SESSION status — observable through
-   * {@link Bureau.getSession} — but is not re-registered with the run store, so
-   * {@link Bureau.getRun} and live event subscribers do not see that recovered
-   * run individually. Use `getSession` to confirm a recovered run's outcome.
-   */
-  durableExecution?: boolean;
-  memory?: CreateMemoryOptions | Memory;
-  cache?: CacheConfiguration;
-  guardrails?: GuardrailsOptions;
-  identity?: IdentityConfiguration;
-  skills?: SkillRuntimeConfiguration;
-  streaming?: StreamingConfiguration;
-  scheduler?: SchedulerConfiguration;
-  stopWhen?: StopCondition | StopCondition[];
-  sessionPersistenceRetryDelayMilliseconds?: number;
-  sessionPersistenceSleep?: (milliseconds: number) => Promise<void>;
-  maximumSteps?: number;
-  systemPrompt?: string;
-  /**
-   * Opt into OpenTelemetry spans + metrics for durable runs. `true` enables the
-   * default interceptor; pass an {@link ObservabilityOptions} (minus `eventTarget`,
-   * which the engine supplies) to customize. Has effect only when a durable engine
-   * is composed. `@opentelemetry/api` is an optional peer — without it spans are
-   * no-ops, so enabling this is safe before any telemetry backend exists.
-   */
-  observability?: boolean | Omit<ObservabilityOptions, 'eventTarget'>;
-  /**
-   * Host sink for `ctx.log` records emitted by durable workflows (Weft 0.4.0
-   * structured logging). Has effect only when a durable engine is composed.
-   */
-  onLog?: (record: WorkflowLogRecord) => void;
-  /**
-   * History/checkpoint guardrails for durable runs. `history.maxEvents` is a
-   * circuit breaker (a breach terminates the run as an error, classified
-   * distinctly from a deadline timeout); `checkpointSizeWarningThreshold` arms an
-   * early-warning event observed via {@link onCheckpointSizeWarning}. Has effect
-   * only when a durable engine is composed.
-   */
-  durableGuardrails?: DurableGuardrailsConfiguration;
-}
+// ── Gateway (HTTP door — door-only config, no brain options) ────────
 
 /**
- * Durable history/checkpoint guardrail configuration surfaced on
- * {@link BureauOptions.durableGuardrails}. A direct `Pick` of the matching
- * {@link CreateRunEngineOptions} fields — no duplicated field declarations, so the
- * single source of truth stays on the engine options and the composition spreads
- * this straight through.
+ * Door-only configuration for `createGateway`. Does NOT extend
+ * {@link BureauOptions} — the bureau (brain) is constructed by the caller
+ * and passed in as arg 1. This object contains only transport-layer knobs.
  */
-export type DurableGuardrailsConfiguration = Pick<
-  CreateRunEngineOptions,
-  | 'history'
-  | 'checkpointSizeWarningThreshold'
-  | 'checkpointHistory'
-  | 'payloadSize'
-  | 'onCheckpointSizeWarning'
->;
-
-export type BureauEventType = keyof BureauEventMap & string;
-
-export interface Bureau {
-  readonly store: Store;
-  readonly memory: Memory | undefined;
-  readonly scheduler: Scheduler | undefined;
-  readonly ready: boolean;
-
-  createRun(request: CreateRunRequest): Promise<RunSummary>;
-  submitSchedulerTask(request: SubmitSchedulerTaskRequest): Promise<SubmitSchedulerTaskResponse>;
-  listRuns(status?: string): RunSummary[];
-  getRun(id: string): RunDetail | undefined;
-  abortRun(id: string): RunSummary;
-  deleteRun(id: string): void;
-
-  /**
-   * Read the durable engine's view of a run: its full {@link WorkflowState}
-   * (status, step cursor, failure category, termination reason, timestamps).
-   * Backed by `engine.get(runId)`. Returns `null` when the run is unknown to the
-   * engine and `undefined` when no durable engine is composed. This is the only
-   * way to see a run's durable status mid-flight — session metadata is written
-   * only at terminal transitions, and a recovered run is otherwise opaque.
-   */
-  getDurableRun(runId: string): Promise<WorkflowState | null | undefined>;
-
-  /**
-   * List durable runs from the engine, optionally filtered (status, type, tags).
-   * Backed by `engine.list(filter, options)`. Returns `undefined` when no durable
-   * engine is composed. Note the engine internally types the filter as a
-   * `TypedListFilter`; the plain {@link ListFilter} accepted here is structurally
-   * compatible as long as `attributes` is omitted. A scan-cap breach from the
-   * engine surfaces as a thrown weft fault (catch generically — the cap error is
-   * not on the public barrel).
-   */
-  listDurableRuns(
-    filter?: ListFilter,
-    options?: ListOptions,
-  ): Promise<PaginatedResult<WorkflowSummary> | undefined>;
-
-  listSessions(): Promise<SessionSummary[]>;
-  getSession(id: string): Promise<AgentSession | undefined>;
-  deleteSession(id: string): Promise<void>;
-
-  getConfiguration(): ConfigurationResponse;
-  getTools(): ToolSummary[];
-  subscribeLiveFrames(listener: (frame: ServerFrame) => void): () => void;
-
-  addEventListener<K extends keyof BureauEventMap & string>(
-    type: K,
-    listener: (event: BureauEventMap[K]) => void,
-    options?: boolean | AddEventListenerOptions,
-  ): void;
-
-  removeEventListener<K extends keyof BureauEventMap & string>(
-    type: K,
-    listener: (event: BureauEventMap[K]) => void,
-    options?: boolean | EventListenerOptions,
-  ): void;
-
-  on<K extends keyof BureauEventMap & string>(
-    type: K,
-    options?: EventObservableOptions,
-  ): ObservableLike<BureauEventMap[K]>;
-
-  once<K extends keyof BureauEventMap & string>(
-    type: K,
-    listener: (event: BureauEventMap[K]) => void,
-  ): void;
-
-  subscribe<K extends keyof BureauEventMap & string>(
-    type: K,
-    observerOrNext?: Observer<BureauEventMap[K]> | ((value: BureauEventMap[K]) => void),
-    error?: (err: unknown) => void,
-    complete?: () => void,
-  ): Subscription;
-
-  toObservable(): ObservableLike<BureauEventMap[keyof BureauEventMap]>;
-
-  events<K extends keyof BureauEventMap & string>(
-    type: K,
-    options?: EventIteratorOptions,
-  ): AsyncIterableIterator<BureauEventMap[K]>;
-
-  complete(): void;
-  readonly completed: boolean;
-  readonly signal: AbortSignal;
-
-  dispose(): void;
-
-  readonly sessionStore: SessionStore | undefined;
-  readonly kv: TextValueStore | undefined;
-}
-
-// ── Gateway (HTTP layer wrapping Bureau) ────────────────────────────
-
-export interface GatewayOptions extends BureauOptions {
+export interface GatewayOptions {
   port?: number;
   hostname?: string;
   authToken?: string;
   /** Server runtime. Default: auto-detected (`'bun'` when `typeof Bun !== 'undefined'`, `'node'` otherwise). */
   runtime?: 'bun' | 'node';
+  /**
+   * Explicit list of allowed origins for WebSocket upgrade requests. When non-empty,
+   * upgrade requests whose `Origin` header is absent or not in the list are rejected
+   * with 403. When omitted, no origin check is performed.
+   */
+  allowedOrigins?: string[];
+  /**
+   * Emit a `Content-Security-Policy` header on every response. Defaults to `true`.
+   */
+  enableCsp?: boolean;
+  /**
+   * Server idle timeout in seconds. Connections that are silent for longer
+   * than this period are closed by the runtime.
+   *
+   * For SSE streams: the heartbeat must fire before this threshold or the
+   * connection will be silently dropped. The default heartbeat interval
+   * (8 s) is tuned for Bun's 10 s default. Raise both together if your
+   * environment allows longer idle periods (e.g. nginx default: 75 s).
+   *
+   * Bun default: 10 s.
+   */
+  idleTimeout?: number;
 }
 
 export interface Gateway {
   readonly app: Hono;
-  readonly bureau: Bureau;
+  readonly bureau: import('bureau').Bureau;
   readonly store: Store;
   readonly port: number;
   start(): Promise<{ stop(): void }>;
 }
 
-// ── API Response Types ──────────────────────────────────────────────
+// ── API Response Types (door-only) ──────────────────────────────────
 
 export interface ApiErrorResponse {
   error: {
@@ -349,123 +82,12 @@ export interface ApiErrorResponse {
   };
 }
 
-export interface RunSummary {
-  id: string;
-  sessionId: string;
-  status: string;
-  steps: number;
-  usage: { prompt: number; completion: number; total: number };
-  finishReason: string | undefined;
-  error: string | undefined;
-  actionCount: number;
-}
-
-export interface RunStepDetail {
-  step: number;
-  content: string;
-  final: boolean;
-  usage?: TokenUsage;
-  toolCalls: readonly {
-    id?: string;
-    name: string;
-    arguments?: unknown;
-  }[];
-  results: readonly {
-    toolName: string;
-    result: unknown;
-    error?: string;
-  }[];
-}
-
-export interface RunEventRecord {
-  sequence: number;
-  runId: string;
-  event: string;
-  detail: unknown;
-  timestamp: number;
-}
-
-export interface RunDetail extends RunSummary {
-  events: RunEventRecord[];
-  stepDetails: RunStepDetail[];
-  latestSnapshot: ConversationSnapshot | undefined;
-}
-
-export interface CreateRunRequest {
-  message: string;
-  sessionId?: string;
-  systemPrompt?: string;
-  maximumSteps?: number;
-}
-
-export interface SubmitSchedulerTaskRequest {
-  message: string;
-  maximumSteps?: number;
-  metadata?: Record<string, unknown>;
-  priority?: SchedulerPriority;
-  requeue?: boolean;
-  systemPrompt?: string;
-}
-
-export interface SubmitSchedulerTaskResponse {
-  taskId: string;
-  priority: SchedulerPriority;
-  status: 'queued';
-}
-
-export interface ConfigurationResponse {
-  provider: RedactedProviderConfiguration | undefined;
-  providers: RedactedProviderRouteConfiguration[];
-  maximumSteps: number;
-  systemPrompt: string | undefined;
-  tools: ToolSummary[];
-}
-
-export interface ToolSummary {
-  name: string;
-  description: string;
-}
-
-// ── WebSocket Frame Types ───────────────────────────────────────────
+// ── WebSocket Frame Types (door-only client frames) ─────────────────
 
 export type ClientFrame =
   | { type: 'subscribe'; runId: string }
   | { type: 'unsubscribe'; runId: string }
   | { type: 'ping' };
-
-export type ServerFrame =
-  | {
-      type: 'event';
-      runId: string;
-      event: string;
-      detail: unknown;
-      sequence: number;
-      timestamp: number;
-    }
-  | { type: 'subscribed'; runId: string }
-  | { type: 'unsubscribed'; runId: string }
-  | { type: 'error'; code: string; message: string }
-  | { type: 'pong' }
-  | { type: 'scheduler.state'; state: SchedulerState }
-  | { type: 'scheduler.task.preempted'; taskId: string; reason: string; state: SchedulerState }
-  | { type: 'stream:text-delta'; runId: string; content: string; accumulated: string }
-  | { type: 'stream:tool-call-start'; runId: string; toolName: string; blockId: string }
-  | {
-      type: 'stream:tool-call-delta';
-      runId: string;
-      toolName: string;
-      blockId: string;
-      partialArgs: string;
-    }
-  | {
-      type: 'stream:tool-call-complete';
-      runId: string;
-      toolName: string;
-      blockId: string;
-      arguments: unknown;
-    }
-  | { type: 'stream:complete'; runId: string; state: unknown }
-  | { type: 'stream:error'; runId: string; error: string };
 
 // ── Health Types ────────────────────────────────────────────────────
 
@@ -476,7 +98,6 @@ export interface HealthResponse {
 // ── Constants ───────────────────────────────────────────────────────
 
 export const DEFAULT_PORT = 5555;
-export const DEFAULT_MAXIMUM_STEPS = 10;
 
 // ── API Key Scopes ─────────────────────────────────────────────────
 
@@ -488,6 +109,10 @@ export const SCOPE = {
   SESSIONS_WRITE: 'sessions:write',
   CONFIG_READ: 'config:read',
   KEYS_MANAGE: 'keys:manage',
+  /** Webhook ingress — typed dispatch endpoints (`POST /hooks/*`). */
+  HOOKS_WRITE: 'hooks:write',
+  SCHEDULES_READ: 'schedules:read',
+  SCHEDULES_WRITE: 'schedules:write',
 } as const;
 
 export type Scope = (typeof SCOPE)[keyof typeof SCOPE];

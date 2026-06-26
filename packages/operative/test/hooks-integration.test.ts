@@ -6,10 +6,25 @@ import { HookRegistry } from 'lifecycle';
 import { z } from 'zod';
 
 import { noToolCalls } from '../src/conditions/predicates';
-import type { OperativeHookMap } from '../src/hooks';
-import { run } from '../src/run';
+import { createActiveRun } from '../src/create-run';
+import type {
+  OperativeHookMap,
+  SessionCancelHookContext,
+  SessionForkHookContext,
+  SessionQueryHookContext,
+  SessionRecoverHookContext,
+  SessionSignalHookContext,
+  SessionSleepHookContext,
+  SessionUpdateHookContext,
+  ToolErrorHookContext,
+  ToolPolicyDeniedHookContext,
+  ToolProgressHookContext,
+  ToolSettledHookContext,
+  ToolStartedHookContext,
+} from '../src/hooks';
 import { createMockGenerate } from '../src/test/index';
 import type { GenerateResponse } from '../src/types';
+const run = (options: Parameters<typeof createActiveRun>[0]) => createActiveRun(options).result;
 
 const tool = createTool({
   name: 'get_weather',
@@ -560,6 +575,126 @@ describe('HookRegistry integration', () => {
 
       expect(result.finishReason).toBe('error');
       expect(result.error).toBeInstanceOf(Error);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// C3 hook map completeness — verify every new hook key is registerable on
+// OperativeHookMap. These are structural type checks: if the key doesn't exist
+// in OperativeHookMap, HookRegistry.on() would throw at runtime (unknown key).
+// ---------------------------------------------------------------------------
+
+describe('OperativeHookMap completeness (C3)', () => {
+  describe('curated tool.* bubble event hooks', () => {
+    it('onToolStarted is a valid hook key accepting ToolStartedHookContext', () => {
+      const hooks = new HookRegistry<OperativeHookMap>();
+      const calls: ToolStartedHookContext[] = [];
+      hooks.on('onToolStarted', async (ctx) => {
+        calls.push(ctx);
+      });
+      expect(typeof hooks.run).toBe('function');
+    });
+
+    it('onToolSettled is a valid hook key accepting ToolSettledHookContext', () => {
+      const hooks = new HookRegistry<OperativeHookMap>();
+      const calls: ToolSettledHookContext[] = [];
+      hooks.on('onToolSettled', async (ctx) => {
+        calls.push(ctx);
+      });
+      expect(typeof hooks.run).toBe('function');
+    });
+
+    it('onToolError is a valid hook key accepting ToolErrorHookContext', () => {
+      const hooks = new HookRegistry<OperativeHookMap>();
+      const calls: ToolErrorHookContext[] = [];
+      hooks.on('onToolError', async (ctx) => {
+        calls.push(ctx);
+      });
+      expect(typeof hooks.run).toBe('function');
+    });
+
+    it('onToolProgress is a valid hook key accepting ToolProgressHookContext', () => {
+      const hooks = new HookRegistry<OperativeHookMap>();
+      const calls: ToolProgressHookContext[] = [];
+      hooks.on('onToolProgress', async (ctx) => {
+        calls.push(ctx);
+      });
+      expect(typeof hooks.run).toBe('function');
+    });
+
+    it('onToolPolicyDenied is a valid hook key accepting ToolPolicyDeniedHookContext', () => {
+      const hooks = new HookRegistry<OperativeHookMap>();
+      const calls: ToolPolicyDeniedHookContext[] = [];
+      hooks.on('onToolPolicyDenied', async (ctx) => {
+        calls.push(ctx);
+      });
+      expect(typeof hooks.run).toBe('function');
+    });
+  });
+
+  describe('session verb hooks', () => {
+    it('onSessionRecover is a valid hook key accepting SessionRecoverHookContext', () => {
+      const hooks = new HookRegistry<OperativeHookMap>();
+      const calls: SessionRecoverHookContext[] = [];
+      hooks.on('onSessionRecover', async (ctx) => {
+        calls.push(ctx);
+      });
+      expect(typeof hooks.run).toBe('function');
+    });
+
+    it('onSessionCancel is a valid hook key accepting SessionCancelHookContext', () => {
+      const hooks = new HookRegistry<OperativeHookMap>();
+      const calls: SessionCancelHookContext[] = [];
+      hooks.on('onSessionCancel', async (ctx) => {
+        calls.push(ctx);
+      });
+      expect(typeof hooks.run).toBe('function');
+    });
+
+    it('onSessionFork is a valid hook key accepting SessionForkHookContext', () => {
+      const hooks = new HookRegistry<OperativeHookMap>();
+      const calls: SessionForkHookContext[] = [];
+      hooks.on('onSessionFork', async (ctx) => {
+        calls.push(ctx);
+      });
+      expect(typeof hooks.run).toBe('function');
+    });
+
+    it('onSessionSleep is a valid hook key accepting SessionSleepHookContext', () => {
+      const hooks = new HookRegistry<OperativeHookMap>();
+      const calls: SessionSleepHookContext[] = [];
+      hooks.on('onSessionSleep', async (ctx) => {
+        calls.push(ctx);
+      });
+      expect(typeof hooks.run).toBe('function');
+    });
+
+    it('onSessionSignal is a valid hook key accepting SessionSignalHookContext', () => {
+      const hooks = new HookRegistry<OperativeHookMap>();
+      const calls: SessionSignalHookContext[] = [];
+      hooks.on('onSessionSignal', async (ctx) => {
+        calls.push(ctx);
+      });
+      expect(typeof hooks.run).toBe('function');
+    });
+
+    it('onSessionUpdate is a valid hook key accepting SessionUpdateHookContext', () => {
+      const hooks = new HookRegistry<OperativeHookMap>();
+      const calls: SessionUpdateHookContext[] = [];
+      hooks.on('onSessionUpdate', async (ctx) => {
+        calls.push(ctx);
+      });
+      expect(typeof hooks.run).toBe('function');
+    });
+
+    it('onSessionQuery is a valid hook key accepting SessionQueryHookContext', () => {
+      const hooks = new HookRegistry<OperativeHookMap>();
+      const calls: SessionQueryHookContext[] = [];
+      hooks.on('onSessionQuery', async (ctx) => {
+        calls.push(ctx);
+      });
+      expect(typeof hooks.run).toBe('function');
     });
   });
 });

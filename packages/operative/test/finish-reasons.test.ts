@@ -3,11 +3,11 @@ import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
 
 import { noToolCalls } from '../src/conditions/predicates';
-import { createRun } from '../src/create-run';
+import { createActiveRun } from '../src/create-run';
 import { BudgetExceededError, ElicitationDeniedError } from '../src/errors';
-import { run } from '../src/run';
 import { createRunRecorder } from '../src/test/index';
 import type { GenerateResponse } from '../src/types';
+const run = (options: Parameters<typeof createActiveRun>[0]) => createActiveRun(options).result;
 
 function textResponse(content: string): GenerateResponse {
   return { content, toolCalls: [] };
@@ -52,7 +52,7 @@ describe('expanded finish reasons', () => {
   });
 
   it('run.completed event includes specialized finish reason', async () => {
-    const activeRun = createRun({
+    const activeRun = createActiveRun({
       generate: async () => textResponse('Hello'),
       toolbox: createTestToolbox([]),
       conversation: new Conversation(),

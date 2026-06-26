@@ -4,6 +4,72 @@ import { serveStatic } from 'hono/bun';
 import type { ServerAdapter, ServerAdapterOptions, ServerHandle } from './types';
 
 /**
+ * Handles an incoming `/ws` upgrade request for the Bun adapter, enforcing
+ * authentication and origin checks before handing off to `server.upgrade`.
+ *
+ * This logic is extracted so it can be tested independently of `Bun.serve`.
+ *
+ * Authentication is resolved in priority order:
+ * 1. `authenticate` — injected async verifier built from the same precedence
+ *    as the HTTP middleware (managed `ab_live_` keys, then static token).
+ *    Used when an `ApiKeyStore` is configured.
+ * 2. `authToken` — static token fallback for backwards compatibility when no
+ *    `ApiKeyStore` is present.
+ * 3. No-op — when neither is provided, all upgrades are accepted (no-auth).
+ *
+ * Returns a `Response` when the request should be rejected, or calls
+ * `upgrade(request)` and returns `undefined` (cast as Response to satisfy
+ * Bun's fetch signature) when the upgrade is accepted.
+ */
+export async function handleWsUpgrade(
+  request: Request,
+  url: URL,
+  upgrade: (request: Request) => boolean,
+  options: {
+    authToken?: string;
+    authenticate?: (request: Request) => Promise<boolean>;
+    allowedOrigins?: string[];
+  },
+): Promise<Response | undefined> {
+  const { authToken, authenticate, allowedOrigins = [] } = options;
+
+  if (authenticate) {
+    // Delegate to the injected verifier, which mirrors the HTTP auth middleware.
+    const allowed = await authenticate(request);
+    if (!allowed) {
+      return new Response('Unauthorized', { status: 401 });
+    }
+  } else if (authToken) {
+    // Static-token fallback for backwards compatibility (no ApiKeyStore).
+    const authHeader = request.headers.get('authorization') ?? '';
+    const headerToken = authHeader.toLowerCase().startsWith('bearer ')
+      ? authHeader.slice(7).trim()
+      : undefined;
+    const queryToken = url.searchParams.get('token') ?? undefined;
+    const token = headerToken ?? queryToken;
+
+    if (!token || token !== authToken) {
+      return new Response('Unauthorized', { status: 401 });
+    }
+  }
+
+  // Enforce allowedOrigins on WebSocket upgrades. The Bun adapter
+  // intercepts /ws before app.fetch() runs, so the Hono
+  // createSecurityHeaders middleware never sees this request.
+  // We must enforce the origin check here directly.
+  if (allowedOrigins.length > 0) {
+    const origin = request.headers.get('origin') ?? '';
+    if (!allowedOrigins.includes(origin)) {
+      return new Response('Origin not allowed for WebSocket upgrade', { status: 403 });
+    }
+  }
+
+  const upgraded = upgrade(request);
+  if (upgraded) return undefined;
+  return new Response('WebSocket upgrade failed', { status: 400 });
+}
+
+/**
  * Creates a server adapter that uses Bun.serve() for HTTP handling
  * and hono/bun for static file serving. Supports WebSocket upgrade
  * when a wsHandler is provided.
@@ -15,33 +81,43 @@ export function createBunAdapter(): ServerAdapter {
     },
 
     serve(app: Hono, options: ServerAdapterOptions): ServerHandle {
-      const { port, hostname, wsHandler, authToken } = options;
+      const {
+        port,
+        hostname,
+        wsHandler,
+        authToken,
+        authenticate,
+        allowedOrigins = [],
+        idleTimeout,
+      } = options;
 
       if (wsHandler) {
         const handler = wsHandler;
         const server = Bun.serve({
           port,
           hostname,
-          fetch(request, server) {
+          // Wire the idle timeout so long-lived SSE connections and parked
+          // human-in-the-loop workflows are not silently dropped. The heartbeat
+          // must fire before this threshold; see DEFAULT_HEARTBEAT_INTERVAL_MS
+          // in live-events.ts.
+          idleTimeout,
+          async fetch(request, server) {
             const url = new URL(request.url);
 
             if (url.pathname === '/ws') {
-              if (authToken) {
-                const authHeader = request.headers.get('authorization') ?? '';
-                const headerToken = authHeader.toLowerCase().startsWith('bearer ')
-                  ? authHeader.slice(7).trim()
-                  : undefined;
-                const queryToken = url.searchParams.get('token') ?? undefined;
-                const token = headerToken ?? queryToken;
-
-                if (!token || token !== authToken) {
-                  return new Response('Unauthorized', { status: 401 });
-                }
-              }
-
-              const upgraded = server.upgrade(request, { data: undefined });
-              if (upgraded) return undefined as unknown as Response;
-              return new Response('WebSocket upgrade failed', { status: 400 });
+              const result = await handleWsUpgrade(
+                request,
+                url,
+                (r) => server.upgrade(r, { data: undefined }),
+                {
+                  authToken,
+                  authenticate,
+                  allowedOrigins,
+                },
+              );
+              // When upgrade succeeds, handleWsUpgrade returns undefined.
+              // Bun's fetch signature requires Response | undefined here.
+              return result;
             }
             return app.fetch(request);
           },
@@ -62,6 +138,9 @@ export function createBunAdapter(): ServerAdapter {
       const server = Bun.serve({
         port,
         hostname,
+        // Wire the idle timeout so long-lived SSE connections and parked
+        // human-in-the-loop workflows are not silently dropped.
+        idleTimeout,
         fetch(request) {
           return app.fetch(request);
         },

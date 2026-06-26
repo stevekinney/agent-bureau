@@ -3,10 +3,22 @@ import type { EventMap, ObservableLike, Observer, Subscription } from 'lifecycle
 import { CompletableEventTarget } from 'lifecycle';
 import { z } from 'zod';
 
-import type { AgentDefinition } from './types';
+/**
+ * Minimal agent shape stored in the registry — enough to identify and dispatch
+ * to an agent. The full AgentBuilder / bureau agent API (B3+) will supersede
+ * this once the new surface is in place.
+ */
+export interface RegistryAgent {
+  readonly name: string;
+  /** Execute the agent with a string prompt and optional execution context. */
+  run: (
+    input: string,
+    context?: { signal?: AbortSignal; traceContext?: unknown },
+  ) => Promise<unknown>;
+}
 
 export interface AgentRegistryEntry {
-  agent: AgentDefinition;
+  agent: RegistryAgent;
   description: string;
   capabilities: string[];
   tags?: string[];

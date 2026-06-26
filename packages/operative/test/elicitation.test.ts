@@ -5,10 +5,10 @@ import { Conversation } from 'conversationalist';
 import { z } from 'zod';
 
 import { noToolCalls } from '../src/conditions/predicates';
-import { createRun } from '../src/create-run';
-import { run } from '../src/run';
+import { createActiveRun } from '../src/create-run';
 import { createRunRecorder } from '../src/test/index';
 import type { ElicitationRequest, GenerateResponse } from '../src/types';
+const run = (options: Parameters<typeof createActiveRun>[0]) => createActiveRun(options).result;
 
 const weatherTool = createTool({
   name: 'get_weather',
@@ -107,7 +107,7 @@ describe('elicitation', () => {
   it('emits elicitation.requested and elicitation.resolved events', async () => {
     const confirmationSchema = z.object({ confirmed: z.boolean() });
 
-    const activeRun = createRun({
+    const activeRun = createActiveRun({
       generate: async () => textResponse('Done'),
       toolbox: createTestToolbox([]),
       conversation: new Conversation(),
@@ -140,7 +140,7 @@ describe('elicitation', () => {
   it('emits elicitation.resolved with accepted false when declined', async () => {
     const confirmationSchema = z.object({ confirmed: z.boolean() });
 
-    const activeRun = createRun({
+    const activeRun = createActiveRun({
       generate: async () => textResponse('Done'),
       toolbox: createTestToolbox([]),
       conversation: new Conversation(),

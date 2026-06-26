@@ -1,7 +1,7 @@
 import { createToolbox } from 'armorer';
 import { describe, expect, it } from 'bun:test';
+import { createBureau } from 'bureau';
 
-import { createBureau } from '../create-bureau';
 import { LiveFrameBroker } from '../live-events';
 import { createRoutes } from './index';
 

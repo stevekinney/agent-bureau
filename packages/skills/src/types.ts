@@ -1,16 +1,6 @@
-// ── Reusable Policy ──────────────────────────────────────────────────
+import type { ToolPolicy } from 'interoperability';
 
-/**
- * Reusable allow/deny list for both tools and skills.
- * Used by persona tool policies, persona skill policies, and skill tool policies.
- * Deny always wins over allow.
- */
-export interface ToolPolicy {
-  /** If set, ONLY these are available. */
-  allowList?: string[];
-  /** These are never available, even if in the allowList. Deny wins. */
-  denyList?: string[];
-}
+export type { ToolPolicy };
 
 // ── Skill Metadata and Content ───────────────────────────────────────
 

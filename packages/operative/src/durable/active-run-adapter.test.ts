@@ -1,22 +1,27 @@
 import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
 import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
-import { createToolbox } from 'armorer';
+import { createTool, createToolbox } from 'armorer';
 import { afterEach, describe, expect, it } from 'bun:test';
 import { createConversationHistory } from 'conversationalist';
 import { HookRegistry } from 'lifecycle';
 import { z } from 'zod';
 
 import { stopWhen } from '../conditions/index';
-import { createRun } from '../create-run';
+import { createActiveRun } from '../create-run';
 import { BudgetExceededError, ElicitationDeniedError } from '../errors';
+import { ToolErrorBubbleEvent, ToolSettledBubbleEvent, ToolStartedBubbleEvent } from '../events';
 import type { OperativeHookMap } from '../hooks';
-import { run } from '../run';
+import { createManualDurableEngine, spyEngine } from '../test/durable-engine';
+import { createMockGenerate } from '../test/index';
 import type { RunOptions, RunResult } from '../types';
 import { createDurableActiveRun, reattachDurableActiveRun } from './active-run-adapter';
 import { createCheckpointStore } from './checkpoint-store';
 import type { AnyRunEngine } from './create-run-engine';
 import { createRunEngine } from './create-run-engine';
 import { createRunWorkflow } from './run-workflow';
+
+const run = (...args: Parameters<typeof createActiveRun>) => createActiveRun(...args).result;
+const createRun = createActiveRun;
 
 // Drain Weft's deferred inline-launch queue between tests — a pending setTimeout(0)
 // inline-launch left by one durable run can starve a later one under full
@@ -562,6 +567,262 @@ describe('createRun with durable routing', () => {
       context.engine[Symbol.dispose]();
     }
   });
+
+  // Regression: PRRT_kwDORvupsc6MV8Xa — durable path was missing the C3 curated
+  // tool.* bubble events; only raw toolbox:* events were forwarded. The audit trail
+  // sinks tool.started / tool.settled / tool.error, so durable tool calls were
+  // absent from the curated run stream and /api/v1/audit for persistent bureaus.
+  it('emits curated tool.started and tool.settled events on the durable path', async () => {
+    const context = await buildContext();
+    try {
+      const echoTool = createTool({
+        name: 'echo',
+        description: 'Echo the input',
+        input: z.object({ message: z.string() }),
+        execute: async ({ message }: { message: string }) => message,
+      });
+
+      const toolbox = createToolbox([echoTool]) as unknown as RunOptions['toolbox'];
+
+      const generate = createMockGenerate([
+        { content: '', toolCalls: [{ name: 'echo', arguments: { message: 'hi' } }] },
+        { content: 'done', toolCalls: [] },
+      ]);
+
+      const activeRun = createRun(
+        {
+          generate,
+          toolbox,
+          conversation: createConversationHistory(),
+          stopWhen: stopWhen.noToolCalls(),
+          agentName: 'durable-agent',
+          runId: 'durable-tool-run',
+        },
+        { ...context, runId: 'durable-tool-run', prompt: 'Start' },
+      );
+
+      const started: ToolStartedBubbleEvent[] = [];
+      const settled: ToolSettledBubbleEvent[] = [];
+      activeRun.addEventListener('tool.started', (e) => started.push(e));
+      activeRun.addEventListener('tool.settled', (e) => settled.push(e));
+
+      await activeRun.result;
+
+      expect(started).toHaveLength(1);
+      expect(started[0]).toBeInstanceOf(ToolStartedBubbleEvent);
+      expect(started[0]?.toolName).toBe('echo');
+      expect(started[0]?.agentName).toBe('durable-agent');
+      expect(started[0]?.runId).toBe('durable-tool-run');
+      // step stamp must be a non-negative integer — confirms StepStartedEvent fired
+      // on the durable emitter before execute-start (not stuck at default 0 from a
+      // missing listener, which would also be 0 for step 0, so assert type).
+      expect(typeof started[0]?.step).toBe('number');
+      expect(started[0]?.step).toBe(0); // tool runs on step 0
+
+      expect(settled).toHaveLength(1);
+      expect(settled[0]).toBeInstanceOf(ToolSettledBubbleEvent);
+      expect(settled[0]?.toolName).toBe('echo');
+      expect(settled[0]?.status).toBe('success');
+      expect(settled[0]?.step).toBe(0);
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+
+  it('emits tool.error on the durable path when a tool throws', async () => {
+    const context = await buildContext();
+    try {
+      const failingTool = createTool({
+        name: 'fail',
+        description: 'Always fails',
+        input: z.object({}),
+        execute: async () => {
+          throw new Error('deliberate durable failure');
+        },
+      });
+
+      const toolbox = createToolbox([failingTool]) as unknown as RunOptions['toolbox'];
+
+      const generate = createMockGenerate([
+        { content: '', toolCalls: [{ name: 'fail', arguments: {} }] },
+        { content: 'done', toolCalls: [] },
+      ]);
+
+      const activeRun = createRun(
+        {
+          generate,
+          toolbox,
+          conversation: createConversationHistory(),
+          stopWhen: stopWhen.noToolCalls(),
+          agentName: 'durable-agent',
+          runId: 'durable-error-run',
+        },
+        { ...context, runId: 'durable-error-run', prompt: 'Start' },
+      );
+
+      const errors: ToolErrorBubbleEvent[] = [];
+      const settled: ToolSettledBubbleEvent[] = [];
+      activeRun.addEventListener('tool.error', (e) => errors.push(e));
+      activeRun.addEventListener('tool.settled', (e) => settled.push(e));
+
+      await activeRun.result;
+
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toBeInstanceOf(ToolErrorBubbleEvent);
+      expect(errors[0]?.toolName).toBe('fail');
+      expect(errors[0]?.agentName).toBe('durable-agent');
+      expect(errors[0]?.error).toBeDefined();
+      expect(errors[0]?.step).toBe(0); // tool runs on step 0
+
+      expect(settled[0]?.status).toBe('error');
+      expect(settled[0]?.step).toBe(0);
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+
+  it('stamps tool events with the correct step index across multiple steps on the durable path', async () => {
+    const context = await buildContext();
+    try {
+      const echoTool = createTool({
+        name: 'echo',
+        description: 'Echo the input',
+        input: z.object({ message: z.string() }),
+        execute: async ({ message }: { message: string }) => message,
+      });
+
+      const toolbox = createToolbox([echoTool]) as unknown as RunOptions['toolbox'];
+
+      // Step 0: tool call, Step 1: tool call again, Step 2: stop
+      const generate = createMockGenerate([
+        { content: '', toolCalls: [{ name: 'echo', arguments: { message: 'step-zero' } }] },
+        { content: '', toolCalls: [{ name: 'echo', arguments: { message: 'step-one' } }] },
+        { content: 'done', toolCalls: [] },
+      ]);
+
+      const activeRun = createRun(
+        {
+          generate,
+          toolbox,
+          conversation: createConversationHistory(),
+          stopWhen: stopWhen.noToolCalls(),
+          agentName: 'durable-agent',
+          runId: 'durable-step-stamp-run',
+        },
+        { ...context, runId: 'durable-step-stamp-run', prompt: 'Start' },
+      );
+
+      const started: ToolStartedBubbleEvent[] = [];
+      activeRun.addEventListener('tool.started', (e) => started.push(e));
+
+      await activeRun.result;
+
+      expect(started).toHaveLength(2);
+      // First tool call happens on step 0
+      expect(started[0]?.step).toBe(0);
+      // Second tool call happens on step 1 — proves the step listener updated currentStep
+      expect(started[1]?.step).toBe(1);
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+
+  // Regression: PRRT_kwDORvupsc6MZ-vs — when engine.cancel() wins the B6 abort
+  // race (handle.result() rejects with "Workflow cancelled"), the abort result was
+  // built from an empty run state and the original seed conversation, losing any
+  // steps the durable workflow had already checkpointed. The fix loads the
+  // checkpoint before finalizing the abort, matching the normal durable summary path.
+  it('preserves checkpointed steps and usage when cancel wins the B6 abort race', async () => {
+    const storage = new MemoryStorage();
+    const checkpointStore = createCheckpointStore(
+      textValueStore(storage, { disposeUnderlyingStorage: false }),
+    );
+    const { engine } = createManualDurableEngine();
+
+    const runId = 'b6-cancel-wins-with-checkpoint';
+
+    // Pre-populate the checkpoint store with a completed step and usage —
+    // simulating a multi-step run that checkpointed before cancel() won.
+    await checkpointStore.saveCursor(runId, {
+      step: 1,
+      totalUsage: { prompt: 42, completion: 17, total: 59 },
+      lastContent: 'step 0 content',
+      schemaAttempts: 0,
+    });
+    await checkpointStore.saveStep(runId, {
+      step: 0,
+      content: 'step 0 content',
+      toolCalls: [],
+      results: [],
+      usage: { prompt: 42, completion: 17, total: 59 },
+      final: true,
+    });
+
+    const activeRun = createDurableActiveRun(
+      { engine, checkpointStore },
+      {
+        runId,
+        sessionId: runId,
+        options: runOptions(async () => ({ content: 'unused', toolCalls: [] })),
+        prompt: 'Hello',
+      },
+    );
+
+    let abortFired = false;
+    activeRun.addEventListener('run.aborted', () => {
+      abortFired = true;
+    });
+
+    // Trigger cancel() which rejects the handle with 'Workflow cancelled'
+    await Promise.resolve();
+    activeRun.abort();
+
+    const result = await activeRun.result;
+
+    // The abort lifecycle fired
+    expect(result.finishReason).toBe('aborted');
+    expect(abortFired).toBe(true);
+
+    // Checkpointed steps and usage are preserved — not an empty runState
+    expect(result.steps).toHaveLength(1);
+    expect(result.steps[0]?.content).toBe('step 0 content');
+    expect(result.usage).toEqual({ prompt: 42, completion: 17, total: 59 });
+  });
+
+  it('falls back to empty state when checkpoint is unavailable after cancel wins the abort race', async () => {
+    // If loadCheckpoint throws (storage unavailable), the abort result still
+    // settles cleanly — falling back to the seed conversation + empty run state.
+    const { engine } = createManualDurableEngine();
+
+    const brokenCheckpointStore = {
+      ...createCheckpointStore(
+        textValueStore(new MemoryStorage(), { disposeUnderlyingStorage: false }),
+      ),
+      loadCheckpoint: async () => {
+        throw new Error('checkpoint storage unavailable');
+      },
+    } as ReturnType<typeof createCheckpointStore>;
+
+    const runId = 'b6-cancel-wins-no-checkpoint';
+    const activeRun = createDurableActiveRun(
+      { engine, checkpointStore: brokenCheckpointStore },
+      {
+        runId,
+        sessionId: runId,
+        options: runOptions(async () => ({ content: 'unused', toolCalls: [] })),
+        prompt: 'Hello',
+      },
+    );
+
+    await Promise.resolve();
+    activeRun.abort();
+
+    const result = await activeRun.result;
+
+    // Falls back gracefully — no throw, result still reflects the abort
+    expect(result.finishReason).toBe('aborted');
+    expect(result.steps).toHaveLength(0);
+  });
 });
 
 describe('reattachDurableActiveRun', () => {
@@ -876,5 +1137,240 @@ describe('reattachDurableActiveRun', () => {
     } finally {
       context.engine[Symbol.dispose]();
     }
+  });
+
+  // Regression (Codex re-review of 7b910a15): disposing a reattached/recovered
+  // run must cancel it at the engine — not just complete the local emitter.
+  // Otherwise `using`/[Symbol.dispose]() makes the caller stop observing while
+  // the workflow keeps executing and BILLING under Weft.
+  it('cancels the durable run at the engine when disposed (PRRT_kwDORvupsc6Mddw...)', async () => {
+    let rejectResult: ((error: unknown) => void) | undefined;
+    const handle = {
+      id: 'reattach-dispose',
+      result: () => new Promise<unknown>((_resolve, reject) => (rejectResult = reject)),
+    };
+    const cancelled: string[] = [];
+    const engine = {
+      cancel: async (id: string) => {
+        cancelled.push(id);
+        rejectResult?.(new Error('cancelled'));
+      },
+    } as unknown as AnyRunEngine;
+
+    const recoveredRun = reattachDurableActiveRun(
+      { engine, checkpointStore: {} as never },
+      { runId: 'reattach-dispose', handle },
+    );
+
+    // Let the adapter start driving (wires rejectResult) before disposing, same
+    // ordering as the abort() tests above.
+    await Promise.resolve();
+    recoveredRun[Symbol.dispose]();
+    const result = await recoveredRun.result;
+
+    // Dispose terminalized the run via engine.cancel (the workflow is stopped,
+    // not left billing), and the result settles as aborted.
+    expect(cancelled).toEqual(['reattach-dispose']);
+    expect(result.finishReason).toBe('aborted');
+  });
+
+  it('does not double-cancel when abort() is followed by dispose() (idempotent)', async () => {
+    let rejectResult: ((error: unknown) => void) | undefined;
+    const handle = {
+      id: 'reattach-abort-then-dispose',
+      result: () => new Promise<unknown>((_resolve, reject) => (rejectResult = reject)),
+    };
+    const cancelled: string[] = [];
+    const engine = {
+      cancel: async (id: string) => {
+        cancelled.push(id);
+        rejectResult?.(new Error('cancelled'));
+      },
+    } as unknown as AnyRunEngine;
+
+    const recoveredRun = reattachDurableActiveRun(
+      { engine, checkpointStore: {} as never },
+      { runId: 'reattach-abort-then-dispose', handle },
+    );
+
+    await Promise.resolve();
+    recoveredRun.abort();
+    recoveredRun[Symbol.dispose]();
+    await recoveredRun.result;
+
+    // engine.cancel ran exactly once despite both abort() and dispose().
+    expect(cancelled).toEqual(['reattach-abort-then-dispose']);
+  });
+});
+
+// -----------------------------------------------------------------------
+// B6 — Abort-into-generate (load-bearing) acceptance tests
+//
+// SPEC: "Seam threads AbortSignal to SDK; cancel()/abort() fire it
+// immediately in parallel with Weft termination."
+//
+// ACCEPTANCE: cancel during streaming → spy.cancels has run id AND the
+// generate abort signal fires AND the run settles within ~1s.
+//
+// The test uses a blocking generate function that only resolves when the
+// AbortSignal fires, proving the signal is the load-bearing link. The
+// spy confirms engine.cancel is called in parallel (the second prong of
+// the two-action abort: signal stops the billing call; engine.cancel
+// stops the next step from starting).
+// -----------------------------------------------------------------------
+describe('B6 — abort-into-generate load-bearing abort', () => {
+  /**
+   * A blocking generate that parks until the AbortSignal fires, then rejects.
+   * This models a real provider SDK streaming call: the network connection
+   * stays open until the signal aborts it. Records whether the signal fired
+   * and what signal was received.
+   */
+  function makeBlockingGenerate(): {
+    generate: RunOptions['generate'];
+    abortFired: { value: boolean };
+    receivedSignal: { value: AbortSignal | undefined };
+  } {
+    const abortFired = { value: false };
+    const receivedSignal: { value: AbortSignal | undefined } = { value: undefined };
+
+    const generate: RunOptions['generate'] = ({ signal }) =>
+      new Promise((_resolve, reject) => {
+        receivedSignal.value = signal;
+        if (signal?.aborted) {
+          abortFired.value = true;
+          reject(new Error('generate already aborted'));
+          return;
+        }
+        signal?.addEventListener(
+          'abort',
+          () => {
+            abortFired.value = true;
+            reject(new Error('generate aborted by signal'));
+          },
+          { once: true },
+        );
+      });
+
+    return { generate, abortFired, receivedSignal };
+  }
+
+  it('abort() fires the generate AbortSignal immediately and calls engine.cancel in parallel (durable path)', async () => {
+    const context = await buildContext();
+    const spy = spyEngine(context.engine);
+    const { generate, abortFired, receivedSignal } = makeBlockingGenerate();
+
+    const runId = 'b6-abort-durable';
+    const activeRun = createDurableActiveRun(
+      { engine: spy.engine, checkpointStore: context.checkpointStore },
+      {
+        runId,
+        sessionId: runId,
+        options: {
+          generate,
+          toolbox: createToolbox([]) as unknown as RunOptions['toolbox'],
+          conversation: createConversationHistory(),
+          stopWhen: stopWhen.noToolCalls(),
+        },
+        prompt: 'Hello',
+      },
+    );
+
+    // Wait for the deferred-microtask drive() to start and the workflow to
+    // register with the engine, then enter the blocking generate call.
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    const abortStart = performance.now();
+    activeRun.abort('cancel during streaming');
+
+    const result = await activeRun.result;
+    const elapsed = performance.now() - abortStart;
+
+    // ACCEPTANCE criterion 1: the generate AbortSignal fired — proving the
+    // signal reaches the in-flight provider call and drops the connection.
+    expect(abortFired.value).toBe(true);
+
+    // ACCEPTANCE criterion 2: spy.cancels has the run id — proving engine.cancel
+    // was called in parallel with the AbortController abort (not sequentially).
+    expect(spy.cancels).toContain(runId);
+
+    // ACCEPTANCE criterion 3: the run settled within ~1 second — proving the
+    // abort is load-bearing (not waiting for Weft's yield* boundary).
+    expect(elapsed).toBeLessThan(1000);
+
+    // The generate AbortSignal was correctly threaded end-to-end.
+    expect(receivedSignal.value).toBeInstanceOf(AbortSignal);
+
+    // Sanity: the run finished as aborted.
+    expect(result.finishReason).toBe('aborted');
+
+    context.engine[Symbol.dispose]();
+  });
+
+  it('abort() before the first microtask fires the AbortSignal without hanging (pre-start abort)', async () => {
+    const context = await buildContext();
+    const spy = spyEngine(context.engine);
+    const { generate, abortFired } = makeBlockingGenerate();
+
+    const runId = 'b6-pre-start-abort';
+    const activeRun = createDurableActiveRun(
+      { engine: spy.engine, checkpointStore: context.checkpointStore },
+      {
+        runId,
+        sessionId: runId,
+        options: {
+          generate,
+          toolbox: createToolbox([]) as unknown as RunOptions['toolbox'],
+          conversation: createConversationHistory(),
+          stopWhen: stopWhen.noToolCalls(),
+        },
+        prompt: 'Hello',
+      },
+    );
+
+    // Abort synchronously — BEFORE the first microtask that starts the workflow.
+    // The AbortController signal fires immediately on the controller.
+    activeRun.abort('immediate pre-start cancel');
+
+    const result = await activeRun.result;
+
+    // The run must settle cleanly (not hang) even when aborted before the workflow
+    // was registered with the engine. The AbortSignal path is sufficient here.
+    expect(['aborted', 'error']).toContain(result.finishReason);
+
+    // runStep detects the pre-aborted signal at its entry check (line: if
+    // (signal?.aborted) return { kind: 'abort' }) and short-circuits WITHOUT
+    // invoking generate() — so abortFired remains false. This is correct:
+    // the signal was already fired on the controller before generate was called.
+    expect(abortFired.value).toBe(false);
+
+    context.engine[Symbol.dispose]();
+  });
+
+  it('abort() on the in-memory path fires the generate AbortSignal and settles within ~1s', async () => {
+    // Proves the signal seam works on the in-memory (non-durable) path too.
+    // Both paths share the same AbortController → combined signal → generate()
+    // channel, so this test documents the seam is wired on both paths.
+    const { generate, abortFired, receivedSignal } = makeBlockingGenerate();
+
+    const activeRun = createRun({
+      generate,
+      toolbox: createToolbox([]) as unknown as RunOptions['toolbox'],
+      conversation: createConversationHistory(),
+      stopWhen: stopWhen.noToolCalls(),
+    });
+
+    // Let the deferred-microtask start fire and the generate call begin.
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    const abortStart = performance.now();
+    activeRun.abort('cancel during streaming in-memory');
+
+    const result = await activeRun.result;
+    const elapsed = performance.now() - abortStart;
+
+    expect(abortFired.value).toBe(true);
+    expect(receivedSignal.value).toBeInstanceOf(AbortSignal);
+    expect(elapsed).toBeLessThan(1000);
+    expect(result.finishReason).toBe('aborted');
   });
 });

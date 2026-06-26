@@ -84,6 +84,8 @@ export interface StepDeps {
   readonly contextManagement: ContextManagementOptions | undefined;
   readonly responseSchema: ZodType | undefined;
   readonly responseFormat: GenerateContext['responseFormat'];
+  /** Per-request output token cap passed through to every GenerateContext. */
+  readonly maximumTokens: number | undefined;
   readonly schemaRetries: number;
   readonly schemaRetryMessage: RunOptions['schemaRetryMessage'];
   readonly parentContext: unknown;
@@ -491,6 +493,7 @@ export async function runStep(
           toolbox: stepToolbox,
           toolChoice: stepToolChoice,
           responseFormat: deps.responseFormat,
+          maximumTokens: deps.maximumTokens,
         };
 
         if (hooks?.has('beforeGenerate')) {

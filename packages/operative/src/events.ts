@@ -410,6 +410,428 @@ export class ContextBudgetWarningEvent extends Event {
 }
 
 // ---------------------------------------------------------------------------
+// Curated tool.* events (C3 — bubbled from armorer's toolbox emitter,
+// re-wrapped and stamped with {agentName, runId, step}).
+//
+// These are the CURATED set exposed on the run stream. The raw firehose
+// (stream/log/chunk, ~20 events) stays available by subscribing to the
+// toolbox directly. Enrichment happens at the operative boundary because
+// armorer is correctly agent-blind — the metadata is what makes bubbled
+// events usable in multi-agent topologies.
+// ---------------------------------------------------------------------------
+
+/** Stamp carried by every curated tool.* event on the run stream. */
+export interface ToolEventStamp {
+  readonly agentName: string;
+  readonly runId: string;
+  readonly step: number;
+}
+
+export class ToolStartedBubbleEvent extends Event {
+  static readonly type = 'tool.started' as const;
+  readonly agentName: string;
+  readonly runId: string;
+  readonly step: number;
+  readonly toolName: string;
+  readonly toolCallId: string;
+  readonly params: unknown;
+  readonly startedAt: number;
+  constructor(
+    stamp: ToolEventStamp,
+    detail: { toolName: string; toolCallId: string; params: unknown; startedAt: number },
+  ) {
+    super(ToolStartedBubbleEvent.type);
+    this.agentName = stamp.agentName;
+    this.runId = stamp.runId;
+    this.step = stamp.step;
+    this.toolName = detail.toolName;
+    this.toolCallId = detail.toolCallId;
+    this.params = detail.params;
+    this.startedAt = detail.startedAt;
+  }
+}
+
+export class ToolProgressBubbleEvent extends Event {
+  static readonly type = 'tool.progress' as const;
+  readonly agentName: string;
+  readonly runId: string;
+  readonly step: number;
+  readonly toolName: string;
+  readonly toolCallId: string;
+  readonly percent?: number;
+  readonly message?: string;
+  constructor(
+    stamp: ToolEventStamp,
+    detail: { toolName: string; toolCallId: string; percent?: number; message?: string },
+  ) {
+    super(ToolProgressBubbleEvent.type);
+    this.agentName = stamp.agentName;
+    this.runId = stamp.runId;
+    this.step = stamp.step;
+    this.toolName = detail.toolName;
+    this.toolCallId = detail.toolCallId;
+    this.percent = detail.percent;
+    this.message = detail.message;
+  }
+}
+
+export class ToolSettledBubbleEvent extends Event {
+  static readonly type = 'tool.settled' as const;
+  readonly agentName: string;
+  readonly runId: string;
+  readonly step: number;
+  readonly toolName: string;
+  readonly toolCallId: string;
+  readonly status: 'success' | 'error' | 'denied' | 'cancelled' | 'paused';
+  readonly durationMs?: number;
+  readonly result?: unknown;
+  readonly error?: unknown;
+  constructor(
+    stamp: ToolEventStamp,
+    detail: {
+      toolName: string;
+      toolCallId: string;
+      status: 'success' | 'error' | 'denied' | 'cancelled' | 'paused';
+      durationMs?: number;
+      result?: unknown;
+      error?: unknown;
+    },
+  ) {
+    super(ToolSettledBubbleEvent.type);
+    this.agentName = stamp.agentName;
+    this.runId = stamp.runId;
+    this.step = stamp.step;
+    this.toolName = detail.toolName;
+    this.toolCallId = detail.toolCallId;
+    this.status = detail.status;
+    this.durationMs = detail.durationMs;
+    this.result = detail.result;
+    this.error = detail.error;
+  }
+}
+
+export class ToolErrorBubbleEvent extends Event {
+  static readonly type = 'tool.error' as const;
+  readonly agentName: string;
+  readonly runId: string;
+  readonly step: number;
+  readonly toolName: string;
+  readonly toolCallId: string;
+  readonly error: unknown;
+  constructor(
+    stamp: ToolEventStamp,
+    detail: { toolName: string; toolCallId: string; error: unknown },
+  ) {
+    super(ToolErrorBubbleEvent.type);
+    this.agentName = stamp.agentName;
+    this.runId = stamp.runId;
+    this.step = stamp.step;
+    this.toolName = detail.toolName;
+    this.toolCallId = detail.toolCallId;
+    this.error = detail.error;
+  }
+}
+
+export class ToolPolicyDeniedBubbleEvent extends Event {
+  static readonly type = 'tool.policy-denied' as const;
+  readonly agentName: string;
+  readonly runId: string;
+  readonly step: number;
+  readonly toolName: string;
+  readonly toolCallId: string;
+  readonly reason?: string;
+  constructor(
+    stamp: ToolEventStamp,
+    detail: { toolName: string; toolCallId: string; reason?: string },
+  ) {
+    super(ToolPolicyDeniedBubbleEvent.type);
+    this.agentName = stamp.agentName;
+    this.runId = stamp.runId;
+    this.step = stamp.step;
+    this.toolName = detail.toolName;
+    this.toolCallId = detail.toolCallId;
+    this.reason = detail.reason;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Session verb events (C3 completeness rule — every new state transition
+// emits an event). Covers: recover / cancel / fork / sleep / signal / update / query.
+// Multi-agent transitions (child-workflow-started, handoff-occurred,
+// human-wait-parked) are implemented below in the Phase F section.
+// ---------------------------------------------------------------------------
+
+export class SessionRecoverEvent extends Event {
+  static readonly type = 'session.recover' as const;
+  readonly sessionId: string;
+  readonly runId: string | null;
+  constructor(sessionId: string, runId: string | null) {
+    super(SessionRecoverEvent.type);
+    this.sessionId = sessionId;
+    this.runId = runId;
+  }
+}
+
+export class SessionCancelEvent extends Event {
+  static readonly type = 'session.cancel' as const;
+  readonly sessionId: string;
+  readonly runId: string | null;
+  constructor(sessionId: string, runId: string | null) {
+    super(SessionCancelEvent.type);
+    this.sessionId = sessionId;
+    this.runId = runId;
+  }
+}
+
+export class SessionForkEvent extends Event {
+  static readonly type = 'session.fork' as const;
+  readonly sourceSessionId: string;
+  readonly forkedSessionId: string;
+  readonly throughRun?: number;
+  constructor(sourceSessionId: string, forkedSessionId: string, throughRun?: number) {
+    super(SessionForkEvent.type);
+    this.sourceSessionId = sourceSessionId;
+    this.forkedSessionId = forkedSessionId;
+    this.throughRun = throughRun;
+  }
+}
+
+export class SessionSleepEvent extends Event {
+  static readonly type = 'session.sleep' as const;
+  readonly sessionId: string;
+  readonly durationMs: number;
+  constructor(sessionId: string, durationMs: number) {
+    super(SessionSleepEvent.type);
+    this.sessionId = sessionId;
+    this.durationMs = durationMs;
+  }
+}
+
+export class SessionSignalEvent extends Event {
+  static readonly type = 'session.signal' as const;
+  readonly sessionId: string;
+  readonly runId: string;
+  readonly signalName: string;
+  readonly payload: unknown;
+  constructor(sessionId: string, runId: string, signalName: string, payload: unknown) {
+    super(SessionSignalEvent.type);
+    this.sessionId = sessionId;
+    this.runId = runId;
+    this.signalName = signalName;
+    this.payload = payload;
+  }
+}
+
+export class SessionUpdateEvent extends Event {
+  static readonly type = 'session.update' as const;
+  readonly sessionId: string;
+  readonly runId: string;
+  readonly updateName: string;
+  readonly payload: unknown;
+  constructor(sessionId: string, runId: string, updateName: string, payload: unknown) {
+    super(SessionUpdateEvent.type);
+    this.sessionId = sessionId;
+    this.runId = runId;
+    this.updateName = updateName;
+    this.payload = payload;
+  }
+}
+
+export class SessionQueryEvent extends Event {
+  static readonly type = 'session.query' as const;
+  readonly sessionId: string;
+  readonly queryName: string;
+  readonly input: unknown;
+  constructor(sessionId: string, queryName: string, input: unknown) {
+    super(SessionQueryEvent.type);
+    this.sessionId = sessionId;
+    this.queryName = queryName;
+    this.input = input;
+  }
+}
+
+/**
+ * Emitted when a `session.monitor()` loop ticks (starts a new poll run).
+ * Carries the tick number (0-based) and whether the predicate was satisfied.
+ * The `met` field is `null` on the tick-started emission (before the run
+ * completes) and `true` / `false` after the predicate is evaluated.
+ */
+export class SessionMonitorTickEvent extends Event {
+  static readonly type = 'session.monitor.tick' as const;
+  readonly sessionId: string;
+  readonly tick: number;
+  /** Whether the `until` predicate was satisfied. `null` before the run finishes. */
+  readonly met: boolean | null;
+  constructor(sessionId: string, tick: number, met: boolean | null) {
+    super(SessionMonitorTickEvent.type);
+    this.sessionId = sessionId;
+    this.tick = tick;
+    this.met = met;
+  }
+}
+
+/**
+ * Emitted when a `session.monitor()` loop completes — either because the
+ * predicate was satisfied or the `maxDuration` deadline was reached.
+ */
+export class SessionMonitorDoneEvent extends Event {
+  static readonly type = 'session.monitor.done' as const;
+  readonly sessionId: string;
+  /** Whether the loop exited because the `until` predicate was satisfied. */
+  readonly met: boolean;
+  /** Total number of ticks executed (including the final one). */
+  readonly ticks: number;
+  constructor(sessionId: string, met: boolean, ticks: number) {
+    super(SessionMonitorDoneEvent.type);
+    this.sessionId = sessionId;
+    this.met = met;
+    this.ticks = ticks;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Phase F — Durable multi-agent transition events (C3 / invariant #2 rule).
+// Every multi-agent state transition emits an event and exposes a hook.
+// ---------------------------------------------------------------------------
+
+/**
+ * Emitted when a subagent tool starts executing a child run.
+ *
+ * On the in-memory path the child run is a plain async call. On the durable
+ * path (when `.persistence()` is set on the bureau) it is a child workflow
+ * launched via the Weft engine. Either way this event fires at the point the
+ * delegation begins, carrying enough context to reconstruct the multi-agent tree
+ * (parent agent + run, child agent, request).
+ */
+export class ChildWorkflowStartedEvent extends Event {
+  static readonly type = 'multiagent.child-workflow.started' as const;
+  /** The agent name delegating to the subagent. */
+  readonly parentAgentName: string;
+  /** The parent run id (derived as `${sessionId}:${sequence}`). */
+  readonly parentRunId: string;
+  /** The subagent's name. */
+  readonly childAgentName: string;
+  /** The prompt sent to the subagent. */
+  readonly input: string;
+  /** True when the child is a durable Weft child workflow; false for in-process. */
+  readonly durable: boolean;
+
+  constructor(data: {
+    parentAgentName: string;
+    parentRunId: string;
+    childAgentName: string;
+    input: string;
+    durable: boolean;
+  }) {
+    super(ChildWorkflowStartedEvent.type);
+    this.parentAgentName = data.parentAgentName;
+    this.parentRunId = data.parentRunId;
+    this.childAgentName = data.childAgentName;
+    this.input = data.input;
+    this.durable = data.durable;
+  }
+}
+
+/**
+ * Emitted when a handoff tool transfers control to another agent.
+ *
+ * On the in-process path the handoff embeds a `HANDOFF_MARKER` in the result
+ * and the caller re-dispatches. On the durable session-continuation path
+ * (F2) the handoff creates a new run in the same session bound to the target
+ * agent — the session is worked by a sequence of agents over time.
+ */
+export class HandoffOccurredEvent extends Event {
+  static readonly type = 'multiagent.handoff.occurred' as const;
+  /** The agent that is handing off. */
+  readonly sourceAgentName: string;
+  /** The agent receiving the handoff. */
+  readonly targetAgentName: string;
+  /** The session id (if the handoff is session-scoped). */
+  readonly sessionId?: string;
+
+  constructor(data: { sourceAgentName: string; targetAgentName: string; sessionId?: string }) {
+    super(HandoffOccurredEvent.type);
+    this.sourceAgentName = data.sourceAgentName;
+    this.targetAgentName = data.targetAgentName;
+    this.sessionId = data.sessionId;
+  }
+}
+
+/**
+ * Emitted when a durable run parks on `ctx.waitForSignal` waiting for a
+ * human-in-the-loop approval (or any external event delivered via
+ * `session.signal()`).
+ *
+ * The parked run costs nothing (no active compute, no timer threads) and
+ * survives restarts. It is resumed by delivering the named signal via
+ * `session.signal(signalName, payload)`.
+ */
+export class HumanWaitParkedEvent extends Event {
+  static readonly type = 'multiagent.human-wait.parked' as const;
+  /** The signal name the run is parked on (e.g. `'human-response'`). */
+  readonly signalName: string;
+  /** The run id of the parked workflow. */
+  readonly runId: string;
+  /**
+   * The prompt to surface to the human reviewer, if one was supplied to
+   * `requestHumanInput`. Lets event-stream/UI consumers show what approval or
+   * input is being requested without subscribing to the tool result.
+   */
+  readonly prompt: string | undefined;
+
+  constructor(signalName: string, runId: string, prompt?: string) {
+    super(HumanWaitParkedEvent.type);
+    this.signalName = signalName;
+    this.runId = runId;
+    this.prompt = prompt;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Scheduling events (D6 — Tier-1 scheduling completeness rule).
+// Every state transition emits an event (C3 / invariant #2 rule).
+// ---------------------------------------------------------------------------
+
+/**
+ * Emitted when a durable agent schedule is registered via `bureau.schedule()`
+ * or the `scheduleSelf` tool.
+ */
+export class AgentScheduledEvent extends Event {
+  static readonly type = 'schedule.created' as const;
+  readonly agentName: string;
+  readonly scheduleId: string;
+  readonly spec: { cron?: string; every?: string | number };
+  readonly sessionId?: string;
+  constructor(data: {
+    agentName: string;
+    scheduleId: string;
+    spec: { cron?: string; every?: string | number };
+    sessionId?: string;
+  }) {
+    super(AgentScheduledEvent.type);
+    this.agentName = data.agentName;
+    this.scheduleId = data.scheduleId;
+    this.spec = data.spec;
+    this.sessionId = data.sessionId;
+  }
+}
+
+/**
+ * Emitted when a running agent calls `scheduleWakeup({in, note})` to park the
+ * current durable run and resume after a delay.
+ */
+export class WakeupScheduledEvent extends Event {
+  static readonly type = 'schedule.wakeup' as const;
+  readonly duration: number | string;
+  readonly note?: string;
+  constructor(duration: number | string, note?: string) {
+    super(WakeupScheduledEvent.type);
+    this.duration = duration;
+    this.note = note;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Event map: maps event type string to the Event subclass instance
 // ---------------------------------------------------------------------------
 
@@ -444,6 +866,30 @@ export interface OperativeEventMap extends EventMap {
   [SessionCreatedEvent.type]: SessionCreatedEvent;
   [SessionDeletedEvent.type]: SessionDeletedEvent;
   [ContextBudgetWarningEvent.type]: ContextBudgetWarningEvent;
+  // Curated tool.* bubbled events (C3)
+  [ToolStartedBubbleEvent.type]: ToolStartedBubbleEvent;
+  [ToolProgressBubbleEvent.type]: ToolProgressBubbleEvent;
+  [ToolSettledBubbleEvent.type]: ToolSettledBubbleEvent;
+  [ToolErrorBubbleEvent.type]: ToolErrorBubbleEvent;
+  [ToolPolicyDeniedBubbleEvent.type]: ToolPolicyDeniedBubbleEvent;
+  // Session verb events (C3 completeness rule)
+  [SessionRecoverEvent.type]: SessionRecoverEvent;
+  [SessionCancelEvent.type]: SessionCancelEvent;
+  [SessionForkEvent.type]: SessionForkEvent;
+  [SessionSleepEvent.type]: SessionSleepEvent;
+  [SessionSignalEvent.type]: SessionSignalEvent;
+  [SessionUpdateEvent.type]: SessionUpdateEvent;
+  [SessionQueryEvent.type]: SessionQueryEvent;
+  // Scheduling events (D6 completeness rule)
+  [AgentScheduledEvent.type]: AgentScheduledEvent;
+  [WakeupScheduledEvent.type]: WakeupScheduledEvent;
+  // session.monitor loop events (D7)
+  [SessionMonitorTickEvent.type]: SessionMonitorTickEvent;
+  [SessionMonitorDoneEvent.type]: SessionMonitorDoneEvent;
+  // Phase F — durable multi-agent transition events (C3 completeness rule)
+  [ChildWorkflowStartedEvent.type]: ChildWorkflowStartedEvent;
+  [HandoffOccurredEvent.type]: HandoffOccurredEvent;
+  [HumanWaitParkedEvent.type]: HumanWaitParkedEvent;
 }
 
 export type OperativeEventType = keyof OperativeEventMap;

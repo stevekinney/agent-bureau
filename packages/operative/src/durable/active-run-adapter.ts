@@ -1,4 +1,5 @@
 import { HISTORY_CIRCUIT_BREAKER_REASON, isWeftErrorLike } from '@lostgradient/weft';
+import type { ToolboxEventMap } from 'armorer';
 import { Conversation, isConversation } from 'conversationalist';
 import type { ForwardableSource } from 'lifecycle';
 import { CompletableEventTarget, forwardEvents } from 'lifecycle';
@@ -6,6 +7,14 @@ import { CompletableEventTarget, forwardEvents } from 'lifecycle';
 import type { ActiveRun } from '../create-run';
 import { BudgetExceededError, ElicitationDeniedError } from '../errors';
 import type { CombinedOperativeEventMap } from '../events';
+import {
+  StepStartedEvent,
+  ToolErrorBubbleEvent,
+  ToolPolicyDeniedBubbleEvent,
+  ToolProgressBubbleEvent,
+  ToolSettledBubbleEvent,
+  ToolStartedBubbleEvent,
+} from '../events';
 import { createRunState } from '../loop';
 import {
   makeAbortResult,
@@ -58,6 +67,16 @@ export interface DurableActiveRunOptions {
    * from the durable input alone (see {@link AgentRunWorkflowInput.sessionId}).
    */
   sessionId: string;
+  /**
+   * The name of the agent that owns this run (F2 — RunRef.agentName).
+   *
+   * Threaded into the durable workflow input so boot recovery can identify which
+   * agent ran a given workflow without reading the session store. Defaults to
+   * `options.agentName ?? ''` when not explicitly supplied. A session worked by
+   * a SEQUENCE of different agents (via handoff) stores one agentName per run,
+   * giving a full audit trail of which agent handled each run.
+   */
+  agentName?: string;
   /** The run behavior (generate fn, toolbox, conversation, hooks, stopWhen). */
   options: RunOptions;
   /** First user message to seed a brand-new run. Ignored when resuming. */
@@ -147,6 +166,8 @@ export function createDurableActiveRun(
   durableRun: DurableActiveRunOptions,
 ): ActiveRun {
   const { runId, options } = durableRun;
+  // F2: resolve agentName — explicit > RunOptions.agentName > empty string.
+  const agentName = durableRun.agentName ?? options.agentName ?? '';
   const emitter = new CompletableEventTarget<CombinedOperativeEventMap>();
   const abortController = new AbortController();
 
@@ -176,6 +197,113 @@ export function createDurableActiveRun(
   );
   cleanups.push(() => toolboxForward.stop());
 
+  // C3 — curated tool.* bubble events stamped with {agentName, runId, step}.
+  // Mirrors the same block in createActiveRun (the in-memory path) so the
+  // audit trail and operative store receive identical tool.* events regardless
+  // of whether the run is in-memory or durable. Without this, durable tool
+  // calls were absent from both the curated run stream and /api/v1/audit for
+  // persistent bureaus (PRRT_kwDORvupsc6MV8Xa).
+  {
+    let currentStep = 0;
+
+    const stepListener = (e: StepStartedEvent) => {
+      currentStep = e.step;
+    };
+    emitter.addEventListener(StepStartedEvent.type, stepListener);
+    cleanups.push(() => emitter.removeEventListener(StepStartedEvent.type, stepListener));
+
+    const toolbox = options.toolbox as unknown as {
+      addEventListener?: <K extends keyof ToolboxEventMap>(
+        type: K,
+        listener: (e: ToolboxEventMap[K]) => void,
+        options?: AddEventListenerOptions,
+      ) => () => void;
+    };
+
+    const onExecuteStart = (e: ToolboxEventMap['execute-start']) => {
+      emitter.dispatchEvent(
+        new ToolStartedBubbleEvent(
+          { agentName, runId, step: currentStep },
+          {
+            toolName: e.call.name,
+            toolCallId: e.call.id,
+            params: e.params,
+            startedAt: Date.now(),
+          },
+        ),
+      );
+    };
+
+    const onSettled = (e: ToolboxEventMap['settled']) => {
+      const hasError = e.error !== undefined;
+      const status: 'success' | 'error' = hasError ? 'error' : 'success';
+      emitter.dispatchEvent(
+        new ToolSettledBubbleEvent(
+          { agentName, runId, step: currentStep },
+          {
+            toolName: e.call.name,
+            toolCallId: e.call.id,
+            status,
+            result: e.result,
+            error: e.error,
+          },
+        ),
+      );
+      if (hasError) {
+        emitter.dispatchEvent(
+          new ToolErrorBubbleEvent(
+            { agentName, runId, step: currentStep },
+            {
+              toolName: e.call.name,
+              toolCallId: e.call.id,
+              error: e.error,
+            },
+          ),
+        );
+      }
+    };
+
+    const onToolProgress = (e: ToolboxEventMap['progress']) => {
+      emitter.dispatchEvent(
+        new ToolProgressBubbleEvent(
+          { agentName, runId, step: currentStep },
+          {
+            toolName: e.call.name,
+            toolCallId: e.call.id,
+            percent: e.percent,
+            message: e.message,
+          },
+        ),
+      );
+    };
+
+    const onPolicyDenied = (e: ToolboxEventMap['policy-denied']) => {
+      emitter.dispatchEvent(
+        new ToolPolicyDeniedBubbleEvent(
+          { agentName, runId, step: currentStep },
+          {
+            toolName: e.call.name,
+            toolCallId: e.call.id,
+            reason: e.reason,
+          },
+        ),
+      );
+    };
+
+    if (toolbox.addEventListener) {
+      const addListener = toolbox.addEventListener.bind(toolbox);
+      const toolboxCleanups = [
+        addListener('execute-start', onExecuteStart, { signal: abortController.signal }),
+        addListener('settled', onSettled, { signal: abortController.signal }),
+        addListener('progress', onToolProgress, { signal: abortController.signal }),
+        addListener('policy-denied', onPolicyDenied, { signal: abortController.signal }),
+      ];
+      cleanups.push(() => {
+        for (const cleanup of toolboxCleanups) cleanup?.();
+      });
+    }
+  }
+
   function complete(): void {
     for (const cleanup of cleanups) cleanup();
     emitter.complete();
@@ -186,6 +314,7 @@ export function createDurableActiveRun(
       context,
       runId,
       durableRun.sessionId,
+      agentName,
       options,
       conversation,
       combinedSignal,
@@ -194,11 +323,49 @@ export function createDurableActiveRun(
     );
   }
 
+  // Track whether the deferred-microtask drive() call has started. This flag
+  // lets abort() know whether the Weft workflow has been handed to the engine,
+  // so it can fire engine.cancel() in parallel with the AbortController signal.
+  // Before the first microtask fires, only the AbortController abort is needed
+  // (the workflow doesn't exist yet). After it fires, engine.cancel() is also
+  // needed so the next step never starts.
+  let driveStarted = false;
+
   // Deferred-microtask start so callers attach listeners first (createRun contract).
-  const result = Promise.resolve().then(drive).finally(complete);
+  const result = Promise.resolve()
+    .then(() => {
+      driveStarted = true;
+      return drive();
+    })
+    .finally(complete);
 
   function abort(reason?: string): void {
+    // CRITICAL (B6 — "the link that stops the bill"): fire the AbortController
+    // IMMEDIATELY so the in-flight generate() call (inside ctx.memo in the
+    // durable workflow) drops its provider connection NOW. This does NOT wait
+    // for Weft to honor termination at the next yield* boundary — it reaches
+    // the generate() AbortSignal directly and drops the network connection
+    // within ~1s regardless of what Weft does.
     abortController.abort(reason);
+
+    // Also terminate the Weft workflow in parallel. Weft termination is honored
+    // at the next yield* (AFTER the in-flight ctx.memo step). Calling
+    // engine.cancel() here prevents the workflow from starting a second step
+    // once the current step's AbortSignal-aborted generate() resolves. The two
+    // actions are complementary, not redundant:
+    //   AbortController.abort() — stops the current billing call immediately.
+    //   engine.cancel()         — stops the next step from starting.
+    // We only call engine.cancel() after the deferred microtask has fired,
+    // i.e. after drive() was invoked and the workflow was handed to the engine.
+    // Before that, the workflow doesn't exist and engine.cancel() is a no-op.
+    if (driveStarted) {
+      // Fire-and-forget: a failing cancel (run already terminal) is not an
+      // error — the AbortController already dropped the in-flight connection.
+      void context.engine.cancel(runId).catch(() => {
+        // Swallow: run may already be terminal. The AbortController signal is
+        // the load-bearing stop; engine.cancel is belt-and-suspenders.
+      });
+    }
   }
 
   return {
@@ -333,6 +500,20 @@ export function reattachDurableActiveRun(
     return false;
   }
 
+  // A reattached run has no abort SIGNAL (the recovered generator runs under the
+  // engine, not this adapter's controller), so abort cancels the run at the
+  // engine instead (committee MF-3): a recovered run is now visible via
+  // `getRun(runId)`, so `bureau.abortRun(runId)` must actually stop it rather
+  // than silently no-op. `engine.cancel` terminalizes the run and rejects its
+  // result waiter; the rejection is translated into a real `run.aborted`
+  // lifecycle (so gateway persists `aborted`) — but ONLY if the cancel actually
+  // succeeded (abortCancelled resolves true), distinguishing this abort from a
+  // resolver/teardown failure that merely raced an abort() call. Idempotent via
+  // `abortCancelled ??=`, so a later dispose() that also aborts is a no-op.
+  function abort(): void {
+    abortCancelled ??= context.engine.cancel(runId).then(cancelSucceeded, cancelFailed);
+  }
+
   // Deferred-microtask start — REQUIRED for the registration ordering invariant:
   // the caller (`recoverDurableRuns`) must finish `store.register` +
   // `runSessionIdentifiers.set` in its synchronous turn BEFORE any terminal event
@@ -342,18 +523,7 @@ export function reattachDurableActiveRun(
 
   return {
     result,
-    // A reattached run has no abort SIGNAL (the recovered generator runs under the
-    // engine, not this adapter's controller), so abort cancels the run at the
-    // engine instead (committee MF-3): a recovered run is now visible via
-    // `getRun(runId)`, so `bureau.abortRun(runId)` must actually stop it rather
-    // than silently no-op. `engine.cancel` terminalizes the run and rejects its
-    // result waiter; the rejection is translated into a real `run.aborted`
-    // lifecycle (so gateway persists `aborted`) — but ONLY if the cancel actually
-    // succeeded (abortCancelled resolves true), distinguishing this abort from a
-    // resolver/teardown failure that merely raced an abort() call.
-    abort(): void {
-      abortCancelled ??= context.engine.cancel(runId).then(cancelSucceeded, cancelFailed);
-    },
+    abort,
     addEventListener: emitter.addEventListener.bind(emitter) as ActiveRun['addEventListener'],
     removeEventListener: emitter.removeEventListener.bind(
       emitter,
@@ -365,6 +535,15 @@ export function reattachDurableActiveRun(
     toObservable: emitter.toObservable.bind(emitter) as ActiveRun['toObservable'],
     complete,
     [Symbol.dispose](): void {
+      // Cancel the durable run at the engine BEFORE completing the local emitter,
+      // mirroring the live createActiveRun dispose. A reattached/recovered run
+      // (session.recover() / boot reattach) keeps executing — and billing — under
+      // the Weft engine, not this adapter's controller. Disposing the public
+      // AgentRun must therefore stop the workflow, not just make the caller stop
+      // observing it. abort() is idempotent (abortCancelled ??=), so a prior
+      // explicit abort() + dispose() does not double-cancel (PRRT — Codex
+      // re-review of 7b910a15).
+      abort();
       complete();
     },
   };
@@ -398,6 +577,11 @@ export interface StartDurableRunResultOptions {
   runId: string;
   /** The owning session id, carried in the durable input for boot recovery. */
   sessionId: string;
+  /**
+   * The name of the agent running this workflow (F2 — RunRef.agentName).
+   * Defaults to `options.agentName ?? ''` when omitted.
+   */
+  agentName?: string;
   /** The run behavior (generate, toolbox, hooks, stopWhen, …). */
   options: RunOptions;
   /** First user message to seed a brand-new run. */
@@ -440,6 +624,8 @@ export async function startDurableRunResult(
   durableRun: StartDurableRunResultOptions,
 ): Promise<RunResult> {
   const { runId, sessionId, options, prompt, signal, tags } = durableRun;
+  // F2: resolve agentName for durable input — explicit > RunOptions.agentName > ''.
+  const agentName = durableRun.agentName ?? options.agentName ?? '';
 
   // 'start-new' is a DATA-LOSS policy (it purges a prior terminal run under the
   // same id) and must be scoped to runs that legitimately reuse an id — i.e.
@@ -454,7 +640,7 @@ export async function startDurableRunResult(
 
   const handle = await context.engine.start(
     'agentRun',
-    { runId, sessionId, prompt, maximumSteps: options.maximumSteps },
+    { runId, sessionId, agentName, prompt, maximumSteps: options.maximumSteps },
     {
       id: runId,
       ...(tags ? { tags } : {}),
@@ -593,6 +779,7 @@ async function driveDurableRun(
   context: DurableActiveRunContext,
   runId: string,
   sessionId: string,
+  agentName: string,
   options: RunOptions,
   conversation: Conversation,
   signal: AbortSignal,
@@ -630,6 +817,9 @@ async function driveDurableRun(
     {
       runId,
       sessionId,
+      // F2: thread agentName into the durable input so boot recovery can
+      // identify which agent ran this workflow without reading the session store.
+      agentName,
       prompt,
       maximumSteps: options.maximumSteps,
     },
@@ -661,6 +851,46 @@ async function driveDurableRun(
     // caught unknown without `instanceof`.
     if (isWeftErrorLike(error) && error.code === 'EngineDisposedError') {
       return makeInterruptedRunResult(conversation);
+    }
+    // B6 (abort-into-generate): when abort() calls engine.cancel() in parallel
+    // with abortController.abort(), engine.cancel() can win the race and set the
+    // workflow's state to 'cancelled' before the in-flight generate() rejection
+    // has a chance to settle the workflow to 'aborted'. Weft then rejects
+    // handle.result() with a plain Error("Workflow cancelled") — not a WeftError
+    // (no .code) — so isWeftErrorLike won't match it. Detect it by message and
+    // treat it as a clean abort so the terminal lifecycle fires and the session
+    // does not stay stuck 'running'. The abort reason (if any) lives on the
+    // combined signal that was passed into this call.
+    //
+    // Reconstruct from the checkpoint so any steps completed before cancel() won
+    // the race are preserved in the abort result — matching the normal durable
+    // completion path. Fall back to an empty run state if the checkpoint is
+    // unavailable (e.g. aborted before any step committed).
+    if (error instanceof Error && error.message === 'Workflow cancelled') {
+      let cancelledRunState = emptyRunState();
+      let cancelledConversation = conversation;
+      try {
+        const reconstructed = await reconstructRunResult(context, runId, {
+          runId,
+          steps: 0,
+          content: '',
+          finishReason: 'aborted',
+        });
+        cancelledRunState = reconstructed.runState;
+        cancelledConversation = reconstructed.conversation;
+      } catch {
+        // Checkpoint unavailable — fall back to the seed conversation and an
+        // empty run state (no steps committed before cancel won the race).
+      }
+      return finalizeRunResult({
+        finishReason: 'aborted',
+        runState: cancelledRunState,
+        conversation: cancelledConversation,
+        hooks,
+        emitter,
+        runStartTime,
+        abortReason: signal.aborted ? String(signal.reason) : undefined,
+      });
     }
     // A `history.maxEvents` circuit-breaker (or a genuine execution-deadline
     // timeout) rejects `handle.result()` with a `WorkflowTimeoutError`. The error

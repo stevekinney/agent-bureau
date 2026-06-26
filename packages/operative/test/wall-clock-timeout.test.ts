@@ -5,8 +5,9 @@ import { Conversation } from 'conversationalist';
 import { z } from 'zod';
 
 import { wallClockTimeout } from '../src/conditions/predicates';
-import { run } from '../src/run';
+import { createActiveRun } from '../src/create-run';
 import type { GenerateResponse, StepResult } from '../src/types';
+const run = (options: Parameters<typeof createActiveRun>[0]) => createActiveRun(options).result;
 
 let currentTime = 0;
 

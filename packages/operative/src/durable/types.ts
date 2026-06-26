@@ -70,6 +70,42 @@ export interface RunCheckpoint {
 type AnyToolbox = Toolbox<any>;
 
 /**
+ * A pending self-wakeup registered by the `scheduleWakeup` tool during a run.
+ * When present after the main step loop exits, the `agentRun` workflow will
+ * `yield* ctx.sleep(duration)` before completing — parking the durable run
+ * until the timer fires.
+ *
+ * The `note` is appended to the conversation on wakeup so the agent knows why
+ * it resumed (e.g. "Wake me up to check the deploy").
+ */
+export interface PendingWakeup {
+  /**
+   * How long to sleep. A Weft {@link Duration}: milliseconds (number) or
+   * ISO-8601 / human-readable string (e.g. `'6h'`, `'PT30M'`, `'500ms'`).
+   */
+  duration: number | string;
+  /** Optional note to surface when the run resumes after sleeping. */
+  note?: string;
+}
+
+/**
+ * A pending human-input gate registered by the `requestHumanInput` tool during
+ * a run (F3 — HITL). When present after the main step loop exits, the
+ * `agentRun` workflow will `yield* ctx.waitForSignal(signalName)` before
+ * continuing — parking the durable run until a human sends the named signal via
+ * `session.signal(runId, signalName, payload)`.
+ */
+export interface PendingHumanWait {
+  /**
+   * The signal name the run parks on. The human sends the same name when
+   * releasing the run (e.g. `'human-response'`).
+   */
+  signalName: string;
+  /** Optional prompt to surface to the human reviewer. */
+  prompt?: string;
+}
+
+/**
  * The non-serializable, per-run behavior a durable workflow needs but cannot
  * checkpoint: the `generate` function, the `toolbox`, the hook registry, the
  * event emitter, and the other closures from {@link RunOptions}. Checkpoints
@@ -90,4 +126,26 @@ export interface DurableRunDeps {
    * with no observable surface.
    */
   emitter?: EventDispatcher;
+  /**
+   * A pending self-wakeup registered during this run by the `scheduleWakeup`
+   * tool. When present after the main step loop exits, the workflow performs
+   * `yield* ctx.sleep(duration)` to park until the timer fires.
+   *
+   * Mutable by the `scheduleWakeup` tool (which runs inside `ctx.memo`). Only
+   * the LAST call wins — calling `scheduleWakeup` multiple times overwrites the
+   * previous request. The workflow reads this exactly once, after the loop, so
+   * it is never checkpointed (tools can safely mutate it in-process).
+   */
+  pendingWakeup?: PendingWakeup;
+  /**
+   * F3 — A pending human-input gate registered by the `requestHumanInput` tool.
+   * When present after the main step loop exits, the workflow performs
+   * `yield* ctx.waitForSignal(signalName)` to park until a human sends the
+   * signal via `session.signal(runId, signalName, payload)`.
+   *
+   * Mutually exclusive with `pendingWakeup`; only the LAST assignment (either
+   * wakeup or human-wait) governs parking. Mutable by the `requestHumanInput`
+   * tool inside `ctx.memo`.
+   */
+  pendingHumanWait?: PendingHumanWait;
 }

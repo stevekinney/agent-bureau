@@ -2,9 +2,38 @@ import type { EventMap, ObservableLike, Observer, Subscription } from 'lifecycle
 import { CompletableEventTarget } from 'lifecycle';
 
 import type { AgentRegistry, AgentRegistryEntry } from './create-agent-registry';
-import type { Scratchpad } from './create-scratchpad';
-import { createScratchpadReadTool, createScratchpadWriteTool } from './create-scratchpad';
-import type { RunResult } from './types';
+import type { FinishReason, RunResult } from './types';
+
+/**
+ * The subset of FinishReason values that indicate the agent did not complete
+ * successfully. A RunResult with one of these reasons is treated as a failure
+ * by the supervisor, dispatching TaskFailedEvent rather than TaskCompletedEvent.
+ */
+const FAILURE_FINISH_REASONS: ReadonlySet<FinishReason> = new Set<FinishReason>([
+  'error',
+  'aborted',
+  'budget-exceeded',
+  'elicitation-denied',
+]);
+
+/** Returns true when a RunResult's finishReason indicates the agent failed. */
+function isFailureResult(result: RunResult): boolean {
+  return FAILURE_FINISH_REASONS.has(result.finishReason);
+}
+
+/**
+ * Narrows an unknown value to RunResult using structural checks.
+ * RegistryAgent.run() is typed as Promise<unknown>, so we must narrow before
+ * reading finishReason instead of relying on an unchecked cast.
+ */
+function isRunResult(value: unknown): value is RunResult {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'finishReason' in value &&
+    typeof (value as Record<string, unknown>)['finishReason'] === 'string'
+  );
+}
 
 export interface SupervisorTaskResult {
   task: string;
@@ -102,7 +131,6 @@ export interface CreateSupervisorOptions {
   agents: AgentRegistryEntry[] | AgentRegistry;
   routing: RoutingStrategy;
   synthesis?: SynthesisStrategy;
-  scratchpad?: Scratchpad;
   maximumDelegations?: number;
   signal?: AbortSignal;
 }
@@ -165,7 +193,6 @@ export function createSupervisor(options: CreateSupervisorOptions): Supervisor {
     agents: agentSource,
     routing,
     synthesis = defaultSynthesis,
-    scratchpad,
     maximumDelegations = 10,
     signal,
   } = options;
@@ -186,47 +213,30 @@ export function createSupervisor(options: CreateSupervisorOptions): Supervisor {
     }
 
     try {
-      const agentRunOptions: { conversation: string; signal?: AbortSignal } = {
-        conversation: task,
-        ...(signal && { signal }),
-      };
-
-      // If scratchpad is provided, extend the agent's toolbox with scratchpad tools
-      if (scratchpad) {
-        const readTool = createScratchpadReadTool(scratchpad);
-        const writeTool = createScratchpadWriteTool(scratchpad);
-        const extendedToolbox = entry.agent.options.toolbox.extend(readTool, writeTool);
-        const { Conversation } = await import('conversationalist');
-        const conversation = new Conversation();
-        if (entry.agent.options.instructions) {
-          const instructions =
-            typeof entry.agent.options.instructions === 'string'
-              ? entry.agent.options.instructions
-              : (entry.agent.options.instructions as { render(): string }).render();
-          conversation.appendSystemMessage(instructions);
-        }
-        conversation.appendUserMessage(task);
-        const { run } = await import('./run');
-        const {
-          name: _,
-          instructions: __,
-          stopWhen: definitionStopWhen,
-          ...rest
-        } = entry.agent.options;
-        const result = await run({
-          ...rest,
-          toolbox: extendedToolbox,
-          conversation,
-          signal,
-          stopWhen: definitionStopWhen,
-        });
-        events.dispatch(new TaskCompletedEvent(task, agentName, result));
-        return { task, agentName, result };
+      const runResult = await entry.agent.run(task, { signal: signal ?? undefined });
+      // RegistryAgent.run() is typed as Promise<unknown>; narrow before use.
+      if (!isRunResult(runResult)) {
+        const error = new Error(
+          `Agent "${agentName}" returned an unexpected result shape (missing finishReason)`,
+        );
+        events.dispatch(new TaskFailedEvent(task, agentName, error));
+        return { task, agentName, error };
       }
-
-      const result = await entry.agent.run(agentRunOptions);
-      events.dispatch(new TaskCompletedEvent(task, agentName, result));
-      return { task, agentName, result };
+      // A RunResult with a failure finish reason is a supervisor-level failure,
+      // not just an exception. Treat it the same way: dispatch TaskFailedEvent
+      // and surface an error in SupervisorTaskResult so synthesis and the
+      // pipeline short-circuit correctly.
+      if (isFailureResult(runResult)) {
+        const error =
+          runResult.error instanceof Error
+            ? runResult.error
+            : new Error(`Agent "${agentName}" finished with reason "${runResult.finishReason}"`);
+        events.dispatch(new TaskFailedEvent(task, agentName, error));
+        // Keep `result` so callers can still inspect partial content/usage.
+        return { task, agentName, result: runResult, error };
+      }
+      events.dispatch(new TaskCompletedEvent(task, agentName, runResult));
+      return { task, agentName, result: runResult };
     } catch (error) {
       events.dispatch(new TaskFailedEvent(task, agentName, error));
       return { task, agentName, error };

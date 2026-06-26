@@ -1,21 +1,22 @@
+import type { Bureau } from 'bureau';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 
 import type { ServerAdapter } from './adapters/types';
-import { createBureau } from './create-bureau';
 import { bootstrapApiKey, createApiKeyStore } from './keys';
 import type { ApiKeyStore } from './keys/types';
 import { LiveFrameBroker } from './live-events';
 import {
   createAuthentication,
   createRateLimiter,
+  createSecurityHeaders,
   errorHandler,
   requestIdentifier,
 } from './middleware';
 import { createRoutes } from './routes';
 import { createPages } from './server/pages';
 import type { Gateway, GatewayOptions } from './types';
-import { DEFAULT_PORT } from './types';
+import { DEFAULT_PORT, SCOPE } from './types';
 import { createWebSocketHandler } from './websocket';
 
 /**
@@ -41,13 +42,71 @@ async function resolveAdapter(runtime: 'bun' | 'node'): Promise<ServerAdapter> {
 }
 
 /**
- * Creates a new Gateway instance with the given options.
+ * Builds a WebSocket authentication verifier that mirrors the HTTP
+ * `createAuthentication` middleware precedence:
+ * 1. Managed `ab_live_` keys verified via `ApiKeyStore.verify`.
+ *    The key must carry the `runs:read` scope — matching the scope
+ *    guard on the HTTP `/api/v1/events` route — so that a key
+ *    scoped only for `keys:manage` or `runs:write` cannot subscribe
+ *    to live run frames.
+ *    Keys with an empty scopes list are treated as admin and pass.
+ * 2. Static token comparison. The static `authToken` acts as an
+ *    unrestricted admin credential with no scope requirements.
+ * 3. Pass-through when no auth is configured (returns `undefined`).
  *
- * This function is async because it initializes storage backends
- * (e.g. vector database adapters) that may require asynchronous setup.
+ * This function is exported for direct unit testing. It is injected
+ * into the server adapter so the `/ws` upgrade path enforces the same
+ * auth + scope rules as the HTTP `/api/v1/events` route without
+ * duplicating the logic.
  */
-export async function createGateway(options: GatewayOptions = {}): Promise<Gateway> {
-  const bureau = await createBureau(options);
+export function buildWsAuthenticate(
+  authToken: string | undefined,
+  store: ApiKeyStore | undefined,
+): ((request: Request) => Promise<boolean>) | undefined {
+  if (!authToken && !store) return undefined;
+
+  return async (request: Request): Promise<boolean> => {
+    const authHeader = request.headers.get('authorization') ?? '';
+    const headerToken = authHeader.toLowerCase().startsWith('bearer ')
+      ? authHeader.slice(7).trim()
+      : undefined;
+    const url = new URL(request.url);
+    const queryToken = url.searchParams.get('token') ?? undefined;
+    const token = headerToken ?? queryToken;
+
+    if (!token) return false;
+
+    if (store && token.startsWith('ab_live_')) {
+      const key = await store.verify(token);
+      if (key) {
+        // Admin keys (empty scopes array) pass all checks.
+        // Scoped keys must carry runs:read to subscribe to live frames.
+        const isAdmin = key.scopes.length === 0;
+        return isAdmin || key.scopes.includes(SCOPE.RUNS_READ);
+      }
+    }
+
+    if (authToken && token === authToken) return true;
+
+    return false;
+  };
+}
+
+/**
+ * Creates a new Gateway (HTTP door) over an already-constructed Bureau (brain).
+ *
+ * The bureau is the first argument — it owns all agent/run/session logic.
+ * The options object is door-only: port, hostname, authToken, runtime.
+ * Gateway depends only on `bureau` and exposes the bureau's surface over
+ * HTTP transport (run/session verbs → routes; AgentRun stream → WebSocket).
+ *
+ * This function is async because it resolves the server adapter (dynamic import)
+ * and bootstraps the API key store against the bureau's KV backend.
+ */
+export async function createGateway(
+  bureau: Bureau,
+  options: GatewayOptions = {},
+): Promise<Gateway> {
   const port = options.port ?? DEFAULT_PORT;
   const runtime = options.runtime ?? detectRuntime();
   const adapter = await resolveAdapter(runtime);
@@ -72,11 +131,19 @@ export async function createGateway(options: GatewayOptions = {}): Promise<Gatew
   app.use('*', requestIdentifier);
   app.use('*', createAuthentication(options.authToken, apiKeyStore));
   app.use('*', createRateLimiter({ store: bureau.kv }));
+  app.use(
+    '*',
+    createSecurityHeaders({
+      allowedOrigins: options.allowedOrigins,
+      enableCsp: options.enableCsp,
+    }),
+  );
 
   // Mount API routes
   app.route('/', createRoutes({ bureau, broker: liveFrameBroker, apiKeyStore }));
 
-  // Mount SSR pages
+  // Mount SSR pages — configuration (including systemPrompt) is read from
+  // bureau.getConfiguration() so the door does not need to duplicate brain config.
   const configuration = bureau.getConfiguration();
   app.route(
     '/',
@@ -84,7 +151,7 @@ export async function createGateway(options: GatewayOptions = {}): Promise<Gatew
       bureau,
       provider: configuration.provider,
       maximumSteps: configuration.maximumSteps,
-      systemPrompt: options.systemPrompt,
+      systemPrompt: configuration.systemPrompt,
     }),
   );
 
@@ -102,6 +169,9 @@ export async function createGateway(options: GatewayOptions = {}): Promise<Gatew
       hostname: options.hostname,
       wsHandler,
       authToken: options.authToken,
+      authenticate: buildWsAuthenticate(options.authToken, apiKeyStore),
+      allowedOrigins: options.allowedOrigins,
+      idleTimeout: options.idleTimeout,
     });
 
     return {
@@ -109,7 +179,6 @@ export async function createGateway(options: GatewayOptions = {}): Promise<Gatew
         handle.stop();
         wsHandler.dispose();
         unsubscribeLiveFrames();
-        bureau.dispose();
       },
     };
   }
