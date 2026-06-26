@@ -1077,6 +1077,74 @@ describe('D4: skills catalog injection', () => {
     expect(catalogMessage).toContain('stored-skill');
     expect(catalogMessage).toContain('A skill seeded directly into KV');
   });
+
+  // ── Regression: PRRT_kwDORvupsc6MZ-vj — catalog injected even when includeTools:false ──
+  //
+  // When `skills.includeTools === false`, the skill management toolbox is NOT wired
+  // (no `activate_skill`, `deactivate_skill`, `load_skill_resource`, `list_skills`
+  // tools). However the catalog injection hook was unconditional, meaning the model
+  // received a "<available_skills>" message saying to "Use the activate_skill tool" —
+  // but that tool was unavailable. A model following this instruction would call an
+  // unavailable tool and fail.
+  //
+  // Fix: suppress the catalog hook when `includeTools === false` so the three skill-tool
+  // surfaces (toolbox, tool summaries, catalog) are all consistently absent.
+  it('does not inject the skill catalog when includeTools is false (PRRT_kwDORvupsc6MZ-vj)', async () => {
+    const provider = createMockSkillProvider([
+      { name: 'research', description: 'Deep research on any topic' },
+    ]);
+
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'ok', toolCalls: [] }),
+      toolbox: createToolbox([], { context: {} }),
+      skills: { provider, includeTools: false },
+    });
+
+    const runRuntime = await runtime.createRunRuntime({
+      message: 'Hello',
+      sessionId: 'no-tools-skills-session',
+    });
+
+    const conversation = new Conversation();
+    conversation.appendUserMessage('Hello');
+
+    for (const hook of runRuntime.prepareStep) {
+      await hook({ step: 0, conversation });
+    }
+
+    const systemMessages = conversation
+      .getMessages()
+      .filter((m) => m.role === 'system')
+      .map((m) => extractMessageText(m.content));
+
+    // No <available_skills> block should be injected — the catalog tells the model
+    // to use activate_skill, which is not wired when includeTools is false.
+    const hasCatalog = systemMessages.some((text) => text.includes('<available_skills>'));
+    expect(hasCatalog).toBe(false);
+  });
+
+  it('does not include activate_skill in the toolbox when includeTools is false', async () => {
+    const provider = createMockSkillProvider([
+      { name: 'research', description: 'Deep research on any topic' },
+    ]);
+
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'ok', toolCalls: [] }),
+      skills: { provider, includeTools: false },
+    });
+
+    const runRuntime = await runtime.createRunRuntime({
+      message: 'Hello',
+      sessionId: 'no-tools-activate-session',
+    });
+
+    // The toolbox must not expose activate_skill — it was not wired.
+    const toolNames = runRuntime.toolbox.inspect('summary').tools.map((t) => t.name);
+    expect(toolNames).not.toContain('activate_skill');
+    expect(toolNames).not.toContain('deactivate_skill');
+    expect(toolNames).not.toContain('list_skills');
+    expect(toolNames).not.toContain('load_skill_resource');
+  });
 });
 
 // ── Toolbox isolation across concurrent runs ──────────────────────────────────

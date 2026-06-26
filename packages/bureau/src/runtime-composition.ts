@@ -1094,24 +1094,31 @@ export async function createRuntimeComposition(
         }
       }
 
-      // Inject the skill catalog on step 0 — same hook pattern as identity.
-      // `createSkillCatalogHook` from the `skills` package handles enabled-status
-      // filtering, skill policy (allow/deny list), and graceful degradation on
-      // provider errors. The hook caches the catalog for the run (one fetch per run).
-      const catalogHook = createSkillCatalogHook({
-        provider: resolvedSkillProvider,
-        skillPolicy: options.skills.skillPolicy,
-      });
-      prepareStep.push(async (context) => {
-        const catalog = await catalogHook.prepareStep(context);
-        if (catalog) {
-          context.conversation.appendSystemMessage(catalog, {
-            _skillCatalogInjected: true,
-          });
-        }
-      });
-
       if (options.skills.includeTools !== false) {
+        // Inject the skill catalog on step 0 — same hook pattern as identity.
+        // `createSkillCatalogHook` from the `skills` package handles enabled-status
+        // filtering, skill policy (allow/deny list), and graceful degradation on
+        // provider errors. The hook caches the catalog for the run (one fetch per run).
+        //
+        // The catalog is gated on `includeTools !== false` because its text directs
+        // the model to call `activate_skill`. When tools are disabled, that tool is
+        // not wired and a model following the catalog instruction would call an
+        // unavailable tool and fail. All three skill-tool surfaces (toolbox, tool
+        // summaries, and catalog) must be consistently absent when tools are off.
+        // (PRRT_kwDORvupsc6MZ-vj)
+        const catalogHook = createSkillCatalogHook({
+          provider: resolvedSkillProvider,
+          skillPolicy: options.skills.skillPolicy,
+        });
+        prepareStep.push(async (context) => {
+          const catalog = await catalogHook.prepareStep(context);
+          if (catalog) {
+            context.conversation.appendSystemMessage(catalog, {
+              _skillCatalogInjected: true,
+            });
+          }
+        });
+
         const skillToolbox = createSkillManagementToolbox(resolvedSkillProvider, skillSession);
         toolbox = combineToolboxes(toolbox, skillToolbox);
       }
