@@ -342,44 +342,78 @@ describe('createBureau (builder) — tool registration', () => {
     ).not.toThrow();
   });
 
-  it('accepts a bare function and normalizes it to an armorer Tool', () => {
+  // ---------------------------------------------------------------------------
+  // Regression: PRRT_kwDORvupsc6MbhQA + PRRT_kwDORvupsc6MclwB — bare functions
+  // cannot carry a Zod `input` schema, so Armorer normalises their missing
+  // schema to z.object({}) and strips every LLM-supplied argument before
+  // execute() runs.
+  //
+  // The original MbhQA guard rejected bare functions only when `Function.length
+  // > 0`. MclwB found the hole: a default/optional/rest parameter ALSO reports
+  // length 0, so `(input = {}) => …` and `(...args) => …` passed the guard,
+  // registered schema-free, and silently dropped their arguments — the exact
+  // failure mode the guard existed to prevent.
+  //
+  // `Function.length` cannot soundly detect whether a function consumes
+  // arguments (default/rest params → 0; a zero-arity body can still read
+  // `arguments[0]`), and `Function.prototype.toString` parsing breaks under
+  // minification. Intent is only expressible by FORM: the `{ execute, input }`
+  // object declares the schema; a bare function cannot. The fix rejects the
+  // bare-function form entirely and directs callers to `{ execute }` (no args)
+  // or `{ execute, input }` (args). This loses no capability —
+  // `{ ping: () => 'pong' }` becomes `{ ping: { execute: () => 'pong' } }`.
+  // ---------------------------------------------------------------------------
+
+  it('rejects a bare function and directs the caller to the { execute } form (PRRT_kwDORvupsc6MbhQA)', () => {
     const generate = makeGenerate();
     expect(() =>
       createBureau()
         .tools({ ping: (() => Promise.resolve('pong')) as unknown as typeof echoTool })
         .agent({ name: 'a', generate }),
-    ).not.toThrow();
+    ).toThrow(/bare function.*execute/is);
   });
 
-  // ---------------------------------------------------------------------------
-  // Regression: PRRT_kwDORvupsc6MbhQA — plain callable tools with parameters
-  // silently strip LLM-supplied arguments because the builder passes no `input`
-  // schema to createTool, causing Armorer to normalise to z.object({}).
-  //
-  // Fix: reject parameterized plain functions at normalisation time with a clear
-  // error message directing callers to the { execute, input } form. Zero-param
-  // functions are fine (they accept no arguments) and continue to work.
-  // ---------------------------------------------------------------------------
-
-  it('rejects a plain function with parameters and directs the caller to the { execute, input } form (PRRT_kwDORvupsc6MbhQA)', () => {
+  it('rejects a bare function with declared parameters (PRRT_kwDORvupsc6MbhQA)', () => {
     const generate = makeGenerate();
-    // A bare function with one or more declared parameters — Armorer would strip
-    // all LLM-supplied arguments because there is no schema to pass to createTool.
     const parameterizedFn = (params: { a: number; b: number }) =>
       Promise.resolve(params.a + params.b);
     expect(() =>
       createBureau()
         .tools({ add: parameterizedFn as unknown as typeof echoTool })
         .agent({ name: 'a', generate }),
-    ).toThrow(/plain function.*parameter.*execute.*input/is);
+    ).toThrow(/bare function.*execute/is);
   });
 
-  it('zero-param plain functions are still accepted (no schema needed when execute takes no args)', () => {
+  it('rejects a bare function with a default parameter that reports Function.length 0 (PRRT_kwDORvupsc6MclwB)', () => {
     const generate = makeGenerate();
-    // () => result — no parameters, no schema needed.
+    // A default parameter makes Function.length report 0 even though the
+    // function consumes an argument. The old `length > 0` guard let this
+    // through, registering it schema-free and stripping LLM arguments.
+    const defaultParamFn = (input = {}) => Promise.resolve(input);
+    expect(defaultParamFn.length).toBe(0); // documents the trap the guard missed
     expect(() =>
       createBureau()
-        .tools({ ping: (() => Promise.resolve('pong')) as unknown as typeof echoTool })
+        .tools({ identity: defaultParamFn as unknown as typeof echoTool })
+        .agent({ name: 'a', generate }),
+    ).toThrow(/bare function.*execute/is);
+  });
+
+  it('rejects a bare function with a rest parameter that reports Function.length 0 (PRRT_kwDORvupsc6MclwB)', () => {
+    const generate = makeGenerate();
+    const restParamFn = (...args: unknown[]) => Promise.resolve(args);
+    expect(restParamFn.length).toBe(0); // documents the trap the guard missed
+    expect(() =>
+      createBureau()
+        .tools({ collect: restParamFn as unknown as typeof echoTool })
+        .agent({ name: 'a', generate }),
+    ).toThrow(/bare function.*execute/is);
+  });
+
+  it('a no-arg tool works via the { execute } form (the supported replacement for a bare function)', () => {
+    const generate = makeGenerate();
+    expect(() =>
+      createBureau()
+        .tools({ ping: { execute: () => Promise.resolve('pong') } as unknown as typeof echoTool })
         .agent({ name: 'a', generate }),
     ).not.toThrow();
   });

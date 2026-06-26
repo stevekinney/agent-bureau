@@ -93,16 +93,18 @@ interface BureauState {
  * Build a `Toolbox` from a name-keyed tool map. The map key is canonical;
  * each tool's inner `.name` property is overridden by the key.
  *
- * Three entry shapes are accepted:
+ * Two entry shapes are accepted:
  *  - A full armorer `Tool` (created via `createTool`) — used as-is; the map
  *    key overrides the inner `.name` when they differ.
- *  - A plain function `(params) => result` — normalized to a `Tool` using
- *    `createTool` with the map key as both `name` and `description`.
- *  - A plain `{ execute }` object — normalized the same way.
+ *  - A plain `{ execute }` (or `{ execute, input }`) object — normalized to a
+ *    `Tool` via `createTool` with the map key as both `name` and `description`,
+ *    forwarding `input` when present so LLM arguments are not stripped.
  *
- * This aligns the runtime with the `ToolEntryInput` type contract exposed in
- * `bureau-types.ts`, which explicitly accepts plain callables and `{execute}`
- * objects as first-class tool inputs.
+ * A bare function is rejected: it cannot declare an `input` schema, so Armorer
+ * would normalize the missing schema to `z.object({})` and strip every
+ * LLM-supplied argument before `execute` runs (PRRT_kwDORvupsc6MclwB). This
+ * aligns the runtime with the `ToolEntryInput` type contract in
+ * `bureau-types.ts`, which is object-only.
  *
  * Note: if an armorer tool's canonical `.name` differs from the map key, the
  * MAP KEY wins. Tools with a matching name are passed through directly; those
@@ -122,30 +124,26 @@ function toolboxFromMap(toolsMap: Record<string, unknown>): Toolbox {
         entries.push({ ...value.configuration, name: key });
       }
     } else if (typeof value === 'function') {
-      // Plain function: only accepted when it declares zero parameters.
-      // A plain callable with declared parameters would be registered without
-      // a Zod schema, causing Armorer to normalise the missing schema to
-      // z.object({}) which strips every LLM-supplied argument before execute
-      // is called. Callers must supply the { execute, input } object form so
-      // the schema is explicit and arguments are not silently lost.
-      if (value.length > 0) {
-        throw new Error(
-          `bureau.tools(): plain function at key "${key}" declares ${value.length} parameter(s). ` +
-            `Armorer cannot infer a schema from a bare function — LLM-supplied arguments ` +
-            `would be silently stripped. Use the { execute, input } form instead:\n` +
-            `  { ${key}: { execute: yourFn, input: z.object({ ... }) } }`,
-        );
-      }
-      // Zero-param function: safe to normalise — no arguments to lose.
-      // Cast is justified: ToolEntryInput's callable variant is typed as
-      // `(...arguments_: never[]) => unknown` for inference only; the real
-      // signature at runtime is compatible with createTool's execute parameter.
-      entries.push(
-        createTool({
-          name: key,
-          description: key,
-          execute: value as (params: Record<string, unknown>) => Promise<unknown>,
-        }),
+      // Bare functions are rejected: a function cannot declare a Zod `input`
+      // schema, so Armorer normalises its missing schema to z.object({}), which
+      // strips every LLM-supplied argument before execute() is called.
+      //
+      // There is no sound runtime test for whether a function consumes
+      // arguments: `Function.length` reports 0 for default, optional, and rest
+      // parameters (so `(input = {}) => …` and `(...args) => …` would slip past
+      // an arity guard and silently lose their arguments — PRRT_kwDORvupsc6MclwB),
+      // a zero-arity body can still read `arguments[0]`, and
+      // `Function.prototype.toString` parsing breaks under minification.
+      // Intent is only expressible by FORM, so callers must use the object form:
+      // `{ execute }` for a no-argument tool, or `{ execute, input }` to declare
+      // a schema. This loses no capability — `{ ping: () => 'pong' }` becomes
+      // `{ ping: { execute: () => 'pong' } }`.
+      throw new Error(
+        `bureau.tools(): value at key "${key}" is a bare function. ` +
+          `Armorer cannot infer a schema from a bare function — LLM-supplied arguments ` +
+          `would be silently stripped. Use the { execute } object form instead:\n` +
+          `  { ${key}: { execute: yourFn } }                       // no arguments\n` +
+          `  { ${key}: { execute: yourFn, input: z.object({ ... }) } } // with arguments`,
       );
     } else if (
       typeof value === 'object' &&
@@ -175,7 +173,7 @@ function toolboxFromMap(toolsMap: Record<string, unknown>): Toolbox {
     } else {
       throw new Error(
         `bureau.tools(): value at key "${key}" is not a valid tool entry. ` +
-          `Provide an armorer Tool, a plain function, or a plain { execute } object.`,
+          `Provide an armorer Tool or a plain { execute } (or { execute, input }) object.`,
       );
     }
   }

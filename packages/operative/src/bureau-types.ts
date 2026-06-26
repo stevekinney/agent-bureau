@@ -9,16 +9,30 @@
  * needing to be parameterised.
  */
 
+import type { Tool } from 'armorer';
+
 import type { GenerateFunction } from './types';
+
+/**
+ * Any armorer Tool, regardless of its concrete schema/event parameters. The
+ * default type arguments on `Tool` widen each slot to its base, matching
+ * armorer's internal `AnyTool` (which is not re-exported from the package
+ * entry). Used as a constraint, not for inference.
+ */
+type AnyTool = Tool;
 
 // ---------------------------------------------------------------------------
 // Tool map primitives — name-keyed, phantom-typed
 // ---------------------------------------------------------------------------
 
 /**
- * A raw callable or object accepted by `.tools({...})`. The key is canonical;
- * the inner `name` field is FORBIDDEN (key disagreement is the #1 authoring
- * bug). Input/output types are inferred via `NormalizeTools<T>`.
+ * A tool entry accepted by `.tools({...})`. Always the object form
+ * (`{ execute }` or `{ execute, input }`) — a bare function is rejected because
+ * it cannot declare an `input` schema, so Armorer would normalise its missing
+ * schema to `z.object({})` and strip every LLM-supplied argument before
+ * `execute` runs (PRRT_kwDORvupsc6MclwB). The key is canonical; the inner
+ * `name` field is FORBIDDEN (key disagreement is the #1 authoring bug).
+ * Input/output types are inferred via `NormalizeTools<T>`.
  *
  * The `name?: never` constraint on the object variant prevents armorer tools
  * (which carry a `.name` property) from being passed with their `.name` field
@@ -40,7 +54,13 @@ import type { GenerateFunction } from './types';
  * `toolboxFromMap` forwards it directly to armorer's `createTool({ input })`.
  */
 export type ToolEntryInput =
-  | ((...arguments_: never[]) => unknown)
+  // A full armorer Tool (created via `createTool`) — used as-is; the map key
+  // overrides its `.name`. A Tool is callable but carries required structural
+  // properties (`configuration`, `run`, `addEventListener`, …) that a bare
+  // function lacks, so this admits Tools without re-admitting bare functions.
+  | AnyTool
+  // A plain `{ execute }` (or `{ execute, input }`) object. A bare function is
+  // rejected because it cannot declare an `input` schema (see the type doc).
   | {
       readonly name?: never;
       readonly execute: (...arguments_: never[]) => unknown;
@@ -67,15 +87,12 @@ export interface ToolEntry<TInput = unknown, TOutput = unknown> {
 export type ToolMap = Record<string, ToolEntry>;
 
 /** Infer concrete `ToolEntry` from a raw `ToolEntryInput`. */
-type NormalizeToolEntry<T extends ToolEntryInput> = T extends {
-  execute: (input: infer TInput) => infer TOutput;
-}
-  ? ToolEntry<TInput, Awaited<TOutput>>
-  : T extends () => infer TOutput
-    ? ToolEntry<void, Awaited<TOutput>>
-    : T extends (input: infer TInput) => infer TOutput
-      ? ToolEntry<TInput, Awaited<TOutput>>
-      : ToolEntry;
+type NormalizeToolEntry<T extends ToolEntryInput> = T extends AnyTool
+  ? // A full armorer Tool — recover its output type from the call signature.
+    ToolEntry<unknown, Awaited<ReturnType<T>>>
+  : T extends { execute: (input: infer TInput) => infer TOutput }
+    ? ToolEntry<TInput, Awaited<TOutput>>
+    : ToolEntry;
 
 /** Map each entry in a `ToolMapInput` to a `ToolEntry`. */
 export type NormalizeTools<T extends ToolMapInput> = {
