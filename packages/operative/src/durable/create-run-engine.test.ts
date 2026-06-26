@@ -1,13 +1,13 @@
 import {
   activity,
-  DEFAULT_POLL_INTERVAL_MS,
+  Scheduler,
   workflow,
   type WorkflowLogRecord,
   type WorkflowStatus,
 } from '@lostgradient/weft';
 import { MemoryStorage } from '@lostgradient/weft/storage';
 import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
-import { afterEach, describe, expect, it } from 'bun:test';
+import { afterEach, describe, expect, it, spyOn } from 'bun:test';
 
 import { createCheckpointStore } from './checkpoint-store';
 import { type AnyRunEngine, createRunEngine } from './create-run-engine';
@@ -82,17 +82,27 @@ function makeRecoverableServicesWorkflow(sleepMilliseconds: number) {
     });
 }
 
-// Weft's durable-timer poller ticks on its default real-time interval. A sleep
-// due comfortably inside one poll cycle but
-// past the inline-launch drain window is the discriminator: an ARMED poller fires
-// it within a cycle, while an UNARMED poller never does. Kept short so a poller
-// that DID arm cannot be mistaken for "just not due yet".
+// Weft's durable-timer poller fires due `ctx.sleep` timers when the scheduler is
+// armed. The positive (`startScheduler:true`) and recovery tests use a short sleep
+// so an armed poller drives the run to completion promptly; they await `result()`,
+// so a starved poller delays the test rather than failing it falsely.
 const DURABLE_SLEEP_MILLISECONDS = 50;
-// Wait past a full poll cycle (plus margin) before asserting a run stayed parked,
-// so an armed poller would provably have fired by now. The poll is a real-time
-// setInterval, not the inline-launch macrotask queue, so this interval is
-// reliable and not subject to the bun-test starvation this file otherwise guards.
-const POLL_CYCLE_WAIT_MILLISECONDS = DEFAULT_POLL_INTERVAL_MS + 500;
+// Sleep duration used by the negative (unarmed-poller) tests: short enough that
+// a real-time poller WOULD fire it within POLLER_DETECTION_WINDOW_MS, making those
+// tests falsifiable — they fail if createRunEngine accidentally arms the scheduler.
+const PARKED_SLEEP_MILLISECONDS = DURABLE_SLEEP_MILLISECONDS;
+// Scheduler poll interval injected into negative-test engines so that an
+// accidentally armed poller fires expired timers within a few milliseconds,
+// well inside POLLER_DETECTION_WINDOW_MS.
+const DETECTION_SCHEDULER_POLL_INTERVAL_MS = 1;
+// Window (ms) to wait after the run parks before asserting it is still
+// non-terminal. Must be > PARKED_SLEEP_MILLISECONDS + several
+// DETECTION_SCHEDULER_POLL_INTERVAL_MS cycles so a misfiring poller would have
+// fired the now-expired timer before the assertion runs.
+const POLLER_DETECTION_WINDOW_MS = PARKED_SLEEP_MILLISECONDS * 3 + 50;
+// Margin added past a parked timer's deadline when ticking the scheduler manually,
+// so the now-due timer is unambiguously expired regardless of small clock drift.
+const TICK_DEADLINE_MARGIN_MILLISECONDS = 60_000;
 
 // Logged by makeSleepingWorkflow on the step BEFORE ctx.sleep. Observing it via
 // the onLog sink is positive proof the generator actually reached the sleep —
@@ -103,9 +113,10 @@ const REACHED_SLEEP_MARKER = 'reached sleep';
 /**
  * A probe workflow that parks on a durable `ctx.sleep` before finishing. It logs
  * {@link REACHED_SLEEP_MARKER} on the step immediately before the sleep, so a test
- * can prove the generator reached the timer. The sleep only resolves if the
- * engine's durable-timer poller is armed, so this workflow's completion is a
- * direct observation of whether `startScheduler` took effect (the #590 seam).
+ * can prove the generator reached the timer. The sleep only resolves when the
+ * engine's durable-timer scheduler runs (its armed poller, or an explicit
+ * `engine.scheduler.tick(...)`), so this workflow's completion is a direct
+ * observation of whether the scheduler drove the timer (the #590 seam).
  */
 function makeSleepingWorkflow(sleepMilliseconds: number) {
   return workflow({ name: 'agentRun' }).execute(async function* (ctx, input: { value: number }) {
@@ -115,15 +126,38 @@ function makeSleepingWorkflow(sleepMilliseconds: number) {
   });
 }
 
+// Generously-bounded poll: yield the portable event loop until `predicate` holds.
+// The bound exists only to turn a genuine hang into a clear failure; it sits far
+// above what any non-hung durable transition needs, so loaded-CI scheduling jitter
+// and the inline-launch starvation this file otherwise guards against cannot turn a
+// passing run red. It is a backstop, NOT a tuned timing value.
+const POLL_UNTIL_MAX_ATTEMPTS = 1000;
+async function pollUntil(predicate: () => boolean | Promise<boolean>): Promise<void> {
+  for (let attempt = 0; attempt < POLL_UNTIL_MAX_ATTEMPTS; attempt++) {
+    if (await predicate()) return;
+    await yieldToPortableEventLoop();
+  }
+  throw new Error('pollUntil exceeded its attempt bound before the condition held');
+}
+
 /**
- * Assert a run stays parked on its durable `ctx.sleep` because the poller is NOT
- * armed. Discriminating and deterministic:
- *  1. drain the inline launch until the pre-sleep marker arrives (proof the
- *     generator reached the sleep, not that it merely never started);
- *  2. wait past one full poll cycle — an ARMED poller would have fired the
- *     now-due {@link DURABLE_SLEEP_MILLISECONDS} timer and driven the run
- *     terminal by now;
- *  3. assert the run is still non-terminal — only an unarmed poller leaves it so.
+ * Assert a run parks on its durable `ctx.sleep` because nothing drives the
+ * scheduler, then fires the moment the scheduler is driven explicitly. Falsifiable
+ * and deterministic — it asserts scheduler STATE in three steps:
+ *  1. Poll the inline launch until the pre-sleep marker arrives AND the run is
+ *     `running` (proof the generator reached the sleep and the durable timer is
+ *     persisted, not that the run merely never started) — generously bounded so
+ *     inline-launch starvation under full bun-test concurrency cannot turn it red.
+ *  2. Wait a real-time detection window ({@link POLLER_DETECTION_WINDOW_MS}) and
+ *     then assert the run is non-terminal. The caller must create the engine with
+ *     `schedulerPollIntervalMs: DETECTION_SCHEDULER_POLL_INTERVAL_MS` (1ms) and
+ *     `PARKED_SLEEP_MILLISECONDS` sleep so that an accidentally-armed poller fires
+ *     the now-expired timer well before the window closes — making the test fail
+ *     when `createRunEngine` inadvertently enables the scheduler.
+ *  3. Tick the scheduler directly past the deadline (the deterministic seam the
+ *     durable-heartbeat tests use) and assert the now-due timer fires the run to
+ *     `completed` — proof the run was genuinely parked on the durable timer and
+ *     only advances when the scheduler runs, never on its own while unarmed.
  * `result()` is never awaited, so engine disposal has no pending promise to reject.
  */
 async function assertRunStaysParkedWhenPollerUnarmed(
@@ -131,22 +165,38 @@ async function assertRunStaysParkedWhenPollerUnarmed(
   reachedSleepMarkers: readonly WorkflowLogRecord[],
 ) {
   const handle = await engine.start('agentRun', { value: 21 });
-  // Drain Weft's deferred inline launch until the generator has provably reached
-  // ctx.sleep (its pre-sleep marker logged). A single drain is not always enough
-  // for the inline start to advance, so loop with a bounded cap — the marker is
-  // emitted synchronously as the generator runs, so 2-3 yields suffice in practice.
-  // The cap (50, far above that) turns a genuine hang into a clear assertion
-  // failure rather than an infinite spin; it is a backstop, not a tuned value.
-  for (let attempt = 0; attempt < 50 && reachedSleepMarkers.length === 0; attempt++) {
-    await yieldToPortableEventLoop();
-  }
+  // Drive the deferred inline launch until the generator has provably reached
+  // ctx.sleep (its pre-sleep marker logged) and parked (`running`, so the durable
+  // timer is persisted and tickable below).
+  await pollUntil(async () => {
+    if (reachedSleepMarkers.length < 1) return false;
+    const snapshot = await handle.snapshot();
+    return snapshot?.status === 'running';
+  });
   expect(reachedSleepMarkers.length).toBe(1);
-  // Give an armed poller more than a full cycle to fire the now-due timer.
-  await new Promise((resolve) => setTimeout(resolve, POLL_CYCLE_WAIT_MILLISECONDS));
-  // Still non-terminal ⇒ no poller fired the due timer ⇒ the poller is unarmed.
-  const snapshot = await handle.snapshot();
-  expect(snapshot).not.toBeNull();
-  expect(TERMINAL_STATUSES.has(snapshot!.status)).toBe(false);
+  // Give a real-time poller adequate opportunity to fire the due timer. The
+  // engine under test uses DETECTION_SCHEDULER_POLL_INTERVAL_MS (1ms), so if
+  // startScheduler is accidentally enabled, the poller fires many times and the
+  // now-expired sleep completes the run before this window closes. Asserting
+  // non-terminal here is the falsifiable gate: it fails when the poller misfires.
+  await new Promise<void>((resolve) => setTimeout(resolve, POLLER_DETECTION_WINDOW_MS));
+  const parkedSnapshot = await handle.snapshot();
+  expect(parkedSnapshot).not.toBeNull();
+  expect(TERMINAL_STATUSES.has(parkedSnapshot!.status)).toBe(false);
+  // Drive the scheduler directly past the timer's deadline. The durable sleep is
+  // real, so the now-due timer fires and the run completes — proving it was parked
+  // on the timer (not stalled for another reason) and only advances when the
+  // scheduler runs, which never happened on its own while the poller was unarmed.
+  await engine.scheduler.tick(
+    Date.now() + PARKED_SLEEP_MILLISECONDS + TICK_DEADLINE_MARGIN_MILLISECONDS,
+  );
+  await pollUntil(async () => {
+    const snapshot = await handle.snapshot();
+    return snapshot !== null && TERMINAL_STATUSES.has(snapshot.status);
+  });
+  const firedSnapshot = await handle.snapshot();
+  expect(firedSnapshot).not.toBeNull();
+  expect(firedSnapshot!.status).toBe('completed');
 }
 
 describe('createRunEngine', () => {
@@ -470,24 +520,36 @@ describe('createRunEngine', () => {
   });
 
   it('leaves durable ctx.sleep timers parked under recover:false without startScheduler (#590)', async () => {
-    // The inverse: with the poller unarmed (the recover:false default), the
-    // durable sleep never elapses, so the run parks on the timer forever. Proven
-    // deterministically (not a wall-clock race): the run reaches the sleep (the
-    // pre-sleep marker arrives) and stays non-terminal (a day-long timer cannot
-    // fire on its own, and an unarmed poller cannot drive it terminal).
+    // The inverse: with the poller unarmed (the recover:false default), nothing
+    // drives the durable sleep, so the run parks on the timer. Falsifiable and
+    // deterministic: the run reaches the sleep (pre-sleep marker arrives), stays
+    // non-terminal through the POLLER_DETECTION_WINDOW_MS window (an accidentally-
+    // armed poller with DETECTION_SCHEDULER_POLL_INTERVAL_MS interval would fire the
+    // now-expired PARKED_SLEEP_MILLISECONDS sleep before the window closes), then
+    // only completes when the scheduler is ticked explicitly.
+    //
+    // The spy is placed BEFORE engine creation so any accidental Scheduler.start()
+    // call inside Engine.create is captured — directly proving the poller is never
+    // armed, not merely that it hasn't fired yet.
+    const schedulerStartSpy = spyOn(Scheduler.prototype, 'start');
     const reachedSleep: WorkflowLogRecord[] = [];
     const { engine } = await createRunEngine({
       storage: new MemoryStorage(),
-      runWorkflow: makeSleepingWorkflow(DURABLE_SLEEP_MILLISECONDS),
+      runWorkflow: makeSleepingWorkflow(PARKED_SLEEP_MILLISECONDS),
       recover: false,
+      schedulerPollIntervalMs: DETECTION_SCHEDULER_POLL_INTERVAL_MS,
       onLog: (record) => {
         if (record.message === REACHED_SLEEP_MARKER) reachedSleep.push(record);
       },
     });
 
     try {
+      // Direct proof: recover:false with no startScheduler must never call
+      // Scheduler.start(), so the real-time polling interval is never set up.
+      expect(schedulerStartSpy).not.toHaveBeenCalled();
       await assertRunStaysParkedWhenPollerUnarmed(engine, reachedSleep);
     } finally {
+      schedulerStartSpy.mockRestore();
       engine[Symbol.dispose]();
     }
   });
@@ -496,22 +558,33 @@ describe('createRunEngine', () => {
     // The full cross-product: startScheduler:false suppresses the poller even
     // though recovery runs (recover:true). This exercises the branch where the
     // option is explicitly forwarded to override Weft's `recover !== false`
-    // default, so the durable sleep stays parked. Same deterministic proof as the
-    // recover:false case (reached-sleep marker + non-terminal status).
+    // default, so the durable sleep stays parked. Same falsifiable proof as the
+    // recover:false case (reached-sleep marker, non-terminal through detection
+    // window, then fires on an explicit scheduler tick).
+    //
+    // The spy is placed BEFORE engine creation so any accidental Scheduler.start()
+    // call inside Engine.create is captured — directly proving the poller is never
+    // armed even when recovery itself runs.
+    const schedulerStartSpy = spyOn(Scheduler.prototype, 'start');
     const reachedSleep: WorkflowLogRecord[] = [];
     const { engine } = await createRunEngine({
       storage: new MemoryStorage(),
-      runWorkflow: makeSleepingWorkflow(DURABLE_SLEEP_MILLISECONDS),
+      runWorkflow: makeSleepingWorkflow(PARKED_SLEEP_MILLISECONDS),
       recover: true,
       startScheduler: false,
+      schedulerPollIntervalMs: DETECTION_SCHEDULER_POLL_INTERVAL_MS,
       onLog: (record) => {
         if (record.message === REACHED_SLEEP_MARKER) reachedSleep.push(record);
       },
     });
 
     try {
+      // Direct proof: startScheduler:false must suppress the call even when
+      // recover:true — Scheduler.start() must never be invoked.
+      expect(schedulerStartSpy).not.toHaveBeenCalled();
       await assertRunStaysParkedWhenPollerUnarmed(engine, reachedSleep);
     } finally {
+      schedulerStartSpy.mockRestore();
       engine[Symbol.dispose]();
     }
   });

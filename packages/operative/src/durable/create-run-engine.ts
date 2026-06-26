@@ -141,6 +141,14 @@ export interface CreateRunEngineOptions {
    * {@link checkpointSizeWarningThreshold}.
    */
   onCheckpointSizeWarning?: (event: CheckpointSizeWarningEvent) => void;
+
+  /**
+   * Override the durable-timer scheduler's poll interval in milliseconds.
+   * Defaults to the Weft Engine default (1000ms). Useful in tests that need to
+   * detect whether the scheduler is inadvertently armed: a short interval ensures
+   * a real-time poller fires an expired timer within a tight observation window.
+   */
+  schedulerPollIntervalMs?: number;
 }
 
 /**
@@ -237,6 +245,9 @@ export async function createRunEngine(options: CreateRunEngineOptions): Promise<
     storage: options.storage,
     recover: options.recover ?? true,
     ...(options.startScheduler !== undefined ? { startScheduler: options.startScheduler } : {}),
+    ...(options.schedulerPollIntervalMs !== undefined
+      ? { schedulerPollIntervalMs: options.schedulerPollIntervalMs }
+      : {}),
     resolveWorkflowServices,
     ...(options.onLog ? { onLog: options.onLog } : {}),
     ...(options.history ? { history: options.history } : {}),
