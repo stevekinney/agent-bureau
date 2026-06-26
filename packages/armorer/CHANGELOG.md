@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.8.1
+
+### Patch Changes
+
+- edaedae: Add regression test for durable cross-process approval round-trip: serializes a signed pending-approval descriptor to JSON, deserializes it in a fresh toolbox instance (simulating a separate process), and verifies the resume executes correctly with re-validation.
+- edaedae: Add regression tests for externally-supplied idempotency keys with crash recovery, pinning the at-least-once executor safety contract: a caller-supplied key left in the durable "started" state (driven directly via the cache primitive, decoupled from any thrown-error path) reports unknown-outcome on retry rather than blindly re-running the side effect. A second test pins the thrown-uncategorized-error orphaned-start path explicitly.
+- edaedae: Add regression test for OpenTelemetry parent context injection: with a single tracer it pins both halves of the contract — a call with no parentContext forwards `undefined` to `startSpan` (so the OTel SDK applies its own ambient/root context) while a sibling call with a sentinel parentContext forwards that exact value by identity, proving the `undefined` path is a genuine "no parent" decision rather than a shallow default.
+
 ## 0.8.0
 
 ### Minor Changes
