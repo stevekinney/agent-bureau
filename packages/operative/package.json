@@ -33,10 +33,6 @@
       "types": "./dist/index.d.ts"
     },
     "./bureau-types": {
-      "bun": "./src/bureau-types.ts",
-      "browser": "./src/bureau-types.ts",
-      "import": "./src/bureau-types.ts",
-      "default": "./src/bureau-types.ts",
       "types": "./src/bureau-types.ts"
     },
     "./conditions": {
@@ -182,6 +178,46 @@
       "require": "./dist/providers/embeddings/index.cjs",
       "default": "./dist/providers/embeddings/index.js",
       "types": "./dist/providers/embeddings/index.d.ts"
+    },
+    "./providers/embeddings/openai": {
+      "bun": "./dist/providers/embeddings/openai.js",
+      "browser": "./dist/providers/embeddings/openai.js",
+      "import": "./dist/providers/embeddings/openai.js",
+      "require": "./dist/providers/embeddings/openai.cjs",
+      "default": "./dist/providers/embeddings/openai.js",
+      "types": "./dist/providers/embeddings/openai.d.ts"
+    },
+    "./providers/embeddings/gemini": {
+      "bun": "./dist/providers/embeddings/gemini.js",
+      "browser": "./dist/providers/embeddings/gemini.js",
+      "import": "./dist/providers/embeddings/gemini.js",
+      "require": "./dist/providers/embeddings/gemini.cjs",
+      "default": "./dist/providers/embeddings/gemini.js",
+      "types": "./dist/providers/embeddings/gemini.d.ts"
+    },
+    "./providers/embeddings/voyage": {
+      "bun": "./dist/providers/embeddings/voyage.js",
+      "browser": "./dist/providers/embeddings/voyage.js",
+      "import": "./dist/providers/embeddings/voyage.js",
+      "require": "./dist/providers/embeddings/voyage.cjs",
+      "default": "./dist/providers/embeddings/voyage.js",
+      "types": "./dist/providers/embeddings/voyage.d.ts"
+    },
+    "./providers/embeddings/ollama": {
+      "bun": "./dist/providers/embeddings/ollama.js",
+      "browser": "./dist/providers/embeddings/ollama.js",
+      "import": "./dist/providers/embeddings/ollama.js",
+      "require": "./dist/providers/embeddings/ollama.cjs",
+      "default": "./dist/providers/embeddings/ollama.js",
+      "types": "./dist/providers/embeddings/ollama.d.ts"
+    },
+    "./providers/instrumentation": {
+      "bun": "./dist/providers/instrumentation/index.js",
+      "browser": "./dist/providers/instrumentation/index.js",
+      "import": "./dist/providers/instrumentation/index.js",
+      "require": "./dist/providers/instrumentation/index.cjs",
+      "default": "./dist/providers/instrumentation/index.js",
+      "types": "./dist/providers/instrumentation/index.d.ts"
     },
     "./providers/test": {
       "bun": "./dist/providers/test/index.js",
