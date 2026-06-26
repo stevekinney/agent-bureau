@@ -143,6 +143,9 @@ function serializeError(record: Record<string, unknown>): Record<string, unknown
  * Strips non-serializable properties (e.g. Conversation instances, Error
  * objects) from action detail objects before they are sent over WebSocket.
  *
+ * For `step.completed` and `run.aborted`, this strips the top-level
+ * `conversation` field.
+ *
  * For `run.completed`, this strips the top-level `conversation` as well as
  * the nested `conversation` inside each element of the `steps` array
  * (each step is a `StepResult` which also holds a `Conversation` instance).
@@ -156,7 +159,7 @@ export function serializeActionDetail(eventType: string, detail: unknown): unkno
 
   const record = detail as Record<string, unknown>;
 
-  if (eventType === 'step.completed') {
+  if (eventType === 'step.completed' || eventType === 'run.aborted') {
     return toJsonSafe(stripConversation(record));
   }
 

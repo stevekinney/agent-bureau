@@ -698,13 +698,12 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         // The reattach adapter reconstructs the abort RunResult from the run's
         // final checkpoint and threads it into RunAbortedEvent.conversation, so
         // use that directly instead of re-fetching the checkpoint snapshot.
-        async () => {
-          await saveSession(sessionId, event.conversation, {
+        () =>
+          saveSession(sessionId, event.conversation, {
             lastRunId: runId,
             lastRunStatus: 'aborted',
             lastFinishReason: 'aborted',
-          });
-        },
+          }),
         { runId, sessionId, status: 'aborted' },
       );
     });
