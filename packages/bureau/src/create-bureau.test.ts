@@ -344,7 +344,9 @@ describe('createBureau', () => {
     expect(session?.metadata['lastMaximumTokens']).toBe(128);
   });
 
-  it('does not write lastMaximumTokens to session metadata when maximumTokens is absent', async () => {
+  it('writes null for lastMaximumTokens in session metadata when maximumTokens is absent (clears any stale cap)', async () => {
+    // The field is always written — null when absent — so a reused session never
+    // inherits a previous run's cap (PRRT_kwDORvupsc6MZ1Mb).
     const bureau = await createBureau({
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
@@ -355,7 +357,7 @@ describe('createBureau', () => {
     await waitForRunCompletion(bureau, run.id);
 
     const session = await bureau.getSession(run.sessionId);
-    expect(session?.metadata['lastMaximumTokens']).toBeUndefined();
+    expect(session?.metadata['lastMaximumTokens']).toBeNull();
   });
 
   it('persists maximumSteps as lastMaximumSteps in session metadata when a run is created with a step cap (regression PRRT_kwDORvupsc6MZfl5)', async () => {
@@ -377,7 +379,9 @@ describe('createBureau', () => {
     expect(session?.metadata['lastMaximumSteps']).toBe(3);
   });
 
-  it('does not write lastMaximumSteps to session metadata when maximumSteps is absent', async () => {
+  it('writes null for lastMaximumSteps in session metadata when maximumSteps is absent (clears any stale cap)', async () => {
+    // The field is always written — null when absent — so a reused session never
+    // inherits a previous run's step cap (PRRT_kwDORvupsc6MZ1Mb).
     const bureau = await createBureau({
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
@@ -388,7 +392,67 @@ describe('createBureau', () => {
     await waitForRunCompletion(bureau, run.id);
 
     const session = await bureau.getSession(run.sessionId);
-    expect(session?.metadata['lastMaximumSteps']).toBeUndefined();
+    expect(session?.metadata['lastMaximumSteps']).toBeNull();
+  });
+
+  // Regression: PRRT_kwDORvupsc6MZ1Mb — a reused session was inheriting stale
+  // lastMaximumTokens / lastMaximumSteps from a previous run when the new run
+  // omitted those caps. The saveSession merge used conditional spreads that
+  // contributed nothing when the field was absent, leaving the old numeric value
+  // in place. buildRunDepsFromSession then read it back during recovery and applied
+  // the previous run's limit to the new run.
+  it('clears stale cap metadata when a follow-up run omits maximumTokens (regression PRRT_kwDORvupsc6MZ1Mb)', async () => {
+    const persistence = textValueStore(new MemoryStorage());
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      persistence,
+    });
+
+    // Run 1: explicitly capped
+    const run1 = await bureau.createRun({ message: 'Capped run', maximumTokens: 512 });
+    await waitForRunCompletion(bureau, run1.id);
+
+    const sessionAfterRun1 = await bureau.getSession(run1.sessionId);
+    expect(sessionAfterRun1?.metadata['lastMaximumTokens']).toBe(512);
+
+    // Run 2: on the same session, no cap — previous cap must NOT be inherited
+    const run2 = await bureau.createRun({
+      message: 'Follow-up, no cap',
+      sessionId: run1.sessionId,
+    });
+    await waitForRunCompletion(bureau, run2.id);
+
+    const sessionAfterRun2 = await bureau.getSession(run1.sessionId);
+    // Must be null (explicitly cleared), not 512
+    expect(sessionAfterRun2?.metadata['lastMaximumTokens']).toBeNull();
+  });
+
+  it('clears stale step cap metadata when a follow-up run omits maximumSteps (regression PRRT_kwDORvupsc6MZ1Mb)', async () => {
+    const persistence = textValueStore(new MemoryStorage());
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      persistence,
+    });
+
+    // Run 1: explicitly capped at 3 steps
+    const run1 = await bureau.createRun({ message: 'Capped run', maximumSteps: 3 });
+    await waitForRunCompletion(bureau, run1.id);
+
+    const sessionAfterRun1 = await bureau.getSession(run1.sessionId);
+    expect(sessionAfterRun1?.metadata['lastMaximumSteps']).toBe(3);
+
+    // Run 2: on the same session, no step cap — previous cap must NOT be inherited
+    const run2 = await bureau.createRun({
+      message: 'Follow-up, no cap',
+      sessionId: run1.sessionId,
+    });
+    await waitForRunCompletion(bureau, run2.id);
+
+    const sessionAfterRun2 = await bureau.getSession(run1.sessionId);
+    // Must be null (explicitly cleared), not 3
+    expect(sessionAfterRun2?.metadata['lastMaximumSteps']).toBeNull();
   });
 
   it('retries terminal session persistence after a transient save failure', async () => {
