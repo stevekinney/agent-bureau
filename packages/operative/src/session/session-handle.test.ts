@@ -2346,12 +2346,71 @@ describe('regression: monitor() rejects invalid duration strings instead of spin
     const { handle } = createSessionHandleFixture();
 
     // maxDuration: 0 (number) means "already expired" — returns false immediately.
-    // This must NOT throw: the string-only guard should not fire here.
+    // This must NOT throw: neither the string guard nor the numeric guard (0 is a
+    // valid non-negative finite value) should fire here.
     const result = await handle.monitor({
       every: 1,
       input: 'check',
       until: () => true,
       maxDuration: 0,
+    });
+    expect(result).toBe(false);
+  });
+
+  // Regression: PRRT_kwDORvupsc6MkjBe (Cursor Bugbot) — numeric maxDuration was
+  // accepted as-is, so NaN/Infinity/negative made the deadline check
+  // `Date.now() - startedAt >= maxMs` ALWAYS false → no effective time cap (the
+  // loop runs until the predicate passes or a tick throws). The symmetric gap to
+  // the numeric `every` guard above.
+  it('throws for a non-finite numeric maxDuration (Infinity / NaN) without running unbounded', async () => {
+    const { handle } = createSessionHandleFixture();
+
+    for (const bad of [Number.POSITIVE_INFINITY, Number.NaN]) {
+      let tickCount = 0;
+      let caught: unknown;
+      try {
+        await handle.monitor({
+          every: 1,
+          input: 'check',
+          until: () => {
+            tickCount += 1;
+            return false; // never met — an unbounded loop would run forever
+          },
+          maxDuration: bad,
+        });
+      } catch (err) {
+        caught = err;
+      }
+      expect(caught).toBeInstanceOf(Error);
+      expect((caught as Error).message).toMatch(/invalid numeric value/i);
+      // The throw happens before the loop starts — no tick ran.
+      expect(tickCount).toBe(0);
+    }
+  });
+
+  it('throws for a negative numeric maxDuration', async () => {
+    const { handle } = createSessionHandleFixture();
+
+    let caught: unknown;
+    try {
+      await handle.monitor({ every: 1, input: 'check', until: () => false, maxDuration: -5 });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toMatch(/invalid numeric value/i);
+  });
+
+  it('accepts a positive finite numeric maxDuration without throwing', async () => {
+    const { handle } = createSessionHandleFixture();
+
+    // 5ms cap with 1ms ticks and a never-met predicate → returns false at the
+    // deadline. Proves a valid numeric maxDuration is not rejected.
+    const result = await handle.monitor({
+      every: 1,
+      input: 'check',
+      until: () => false,
+      maxDuration: 5,
     });
     expect(result).toBe(false);
   });

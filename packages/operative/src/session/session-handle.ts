@@ -890,6 +890,26 @@ export function createSessionHandle(
         );
       }
 
+      // Reject non-finite / negative NUMERIC maxDuration — the string guard above
+      // only covers strings. A numeric `maxDuration` of NaN or Infinity is
+      // accepted as-is and lands in `maxMs`; the deadline check
+      // `Date.now() - startedAt >= maxMs` is then ALWAYS false (every comparison
+      // with NaN is false; nothing is >= Infinity), so the loop runs with no
+      // effective time cap until the predicate passes or a tick throws. Unlike
+      // `every`, a numeric `maxDuration` of 0 is VALID — it means "already
+      // expired" (return false on the first deadline check) — so the bound is
+      // `>= 0 && finite`, not `> 0` (PRRT_kwDORvupsc6MkjBe).
+      if (
+        typeof maxDuration === 'number' &&
+        !(maxMs !== undefined && maxMs >= 0 && Number.isFinite(maxMs))
+      ) {
+        throw new Error(
+          `monitor({ maxDuration }) received an invalid numeric value: ${maxDuration}. ` +
+            `Use a non-negative, finite number of milliseconds (e.g. 60000) or an ISO-8601 ` +
+            `PT duration such as 'PT24H'.`,
+        );
+      }
+
       const startedAt = Date.now();
       let tick = 0;
 
