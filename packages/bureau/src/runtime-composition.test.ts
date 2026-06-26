@@ -565,7 +565,9 @@ describe('createRuntimeComposition durable execution', () => {
     );
     const runId = 'recovery-maximum-tokens-run';
     const expectedMaximumTokens = 42;
-    let capturedMaximumTokens: number | undefined = undefined;
+    // Object capture avoids TypeScript's let-closure narrowing to `undefined` on
+    // a variable written inside an async callback.
+    const captured: { maximumTokens?: number } = {};
 
     try {
       // Phase 1: start a durable run that hangs (simulating a process crash).
@@ -621,7 +623,7 @@ describe('createRuntimeComposition durable execution', () => {
       // receive the maximumTokens that were persisted in the session metadata.
       const secondRuntime = await createRuntimeComposition({
         generate: async (context) => {
-          capturedMaximumTokens = context.maximumTokens;
+          captured.maximumTokens = context.maximumTokens;
           return { content: 'recovered', toolCalls: [] };
         },
         toolbox: createToolbox([], { context: {} }),
@@ -644,10 +646,7 @@ describe('createRuntimeComposition durable execution', () => {
 
         // The key assertion: the recovered generate must see the same
         // maximumTokens that were saved to session metadata before the crash.
-        // Cast via any: TypeScript cannot track that the async generate callback
-        // writes capturedMaximumTokens, so it keeps the narrowed type as undefined.
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        expect(capturedMaximumTokens as any).toBe(expectedMaximumTokens);
+        expect(captured.maximumTokens).toBe(expectedMaximumTokens);
       } finally {
         secondRuntime.durable?.engine[Symbol.dispose]?.();
         secondRuntime.disposeStorage?.();
