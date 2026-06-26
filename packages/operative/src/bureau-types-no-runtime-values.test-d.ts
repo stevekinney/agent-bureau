@@ -9,10 +9,10 @@
 import type * as BureauTypes from './bureau-types.ts';
 
 // @ts-expect-error — 'createBureau' must not be a named export; use CreateBureauFn instead
-declare const _createBureau: BureauTypes.createBureau;
+declare const _createBureau: typeof BureauTypes.createBureau;
 
 // @ts-expect-error — 'createAgent' must not be a named export; use CreateAgentFn instead
-declare const _createAgent: BureauTypes.createAgent;
+declare const _createAgent: typeof BureauTypes.createAgent;
 
 // Suppress "declared but never used" without triggering verbatimModuleSyntax concerns.
 void _createBureau;
