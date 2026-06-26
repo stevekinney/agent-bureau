@@ -39,7 +39,9 @@ async function waitForReal(
 interface RecordedCall {
   conversationId: string;
   messageCount: number;
+  roles: string[];
   userPrompts: string[];
+  systemPrompts: string[];
 }
 
 /**
@@ -52,8 +54,12 @@ function createRecordingGenerate(calls: RecordedCall[]): GenerateFunction {
     calls.push({
       conversationId: context.conversation.current.id,
       messageCount: messages.length,
+      roles: messages.map((message) => message.role),
       userPrompts: messages
         .filter((message) => message.role === 'user' && typeof message.content === 'string')
+        .map((message) => message.content as string),
+      systemPrompts: messages
+        .filter((message) => message.role === 'system' && typeof message.content === 'string')
         .map((message) => message.content as string),
     });
     return { content: 'acknowledged', toolCalls: [] };
@@ -66,7 +72,7 @@ function createEmptyToolbox(): Toolbox {
 
 describe('D6 scheduled-fire path (#109)', () => {
   it(
-    'fires a stateless cron schedule and runs the agent with a fresh session per fire',
+    'fires a stateless interval schedule and runs the agent with a fresh session per fire',
     async () => {
       const calls: RecordedCall[] = [];
       const bureau = await createBureau({
@@ -74,10 +80,13 @@ describe('D6 scheduled-fire path (#109)', () => {
         toolbox: createEmptyToolbox(),
         storage: { type: 'memory' },
         durableExecution: true,
+        systemPrompt: 'You are a scheduled agent.',
         stopWhen: stopWhen.noToolCalls(),
       });
 
       try {
+        // A bare duration shorthand ('1s') is registered as an interval
+        // ({ every: '1s' }), not cron — see toScheduleSpec.
         const summary = await bureau.createSchedule({
           agentName: 'researcher',
           input: 'stateless tick prompt',
@@ -92,8 +101,10 @@ describe('D6 scheduled-fire path (#109)', () => {
         expect(fired).toBe(true);
         // The agent body actually ran with the scheduled prompt.
         expect(calls[0]!.userPrompts).toContain('stateless tick prompt');
-        // No prior history was seeded — a fresh per-fire (stateless) conversation.
-        expect(calls[0]!.messageCount).toBe(1);
+        // A fresh per-fire session still seeds the bureau systemPrompt, exactly as
+        // a normal run into a new session does: [system, user].
+        expect(calls[0]!.systemPrompts).toContain('You are a scheduled agent.');
+        expect(calls[0]!.roles).toEqual(['system', 'user']);
         // Each stateless fire mints its own session id, so no two fires collide.
         const ids = calls.map((call) => call.conversationId);
         expect(new Set(ids).size).toBe(ids.length);
@@ -115,6 +126,7 @@ describe('D6 scheduled-fire path (#109)', () => {
         toolbox: createEmptyToolbox(),
         storage: { type: 'memory' },
         durableExecution: true,
+        systemPrompt: 'You are a scheduled agent.',
         stopWhen: stopWhen.noToolCalls(),
       });
 
@@ -133,18 +145,22 @@ describe('D6 scheduled-fire path (#109)', () => {
 
         expect(firedTwice).toBe(true);
 
+        // The FIRST fire into a not-yet-existing recurring session seeds the bureau
+        // systemPrompt, exactly as a normal run into a new session does.
+        const fires = recurringCalls();
+        expect(fires[0]!.systemPrompts).toContain('You are a scheduled agent.');
         // Fire 2's agent body saw fire 1's turn — context accumulated, proving the
         // recurring (session-given) semantics, not a fresh session per fire.
-        const fires = recurringCalls();
         expect(fires[1]!.messageCount).toBeGreaterThan(fires[0]!.messageCount);
 
-        // The durable proof: the session itself accumulated both fires' user turns.
+        // The durable proof: the session itself accumulated both fires' user turns,
+        // and the systemPrompt was seeded ONCE (not re-appended on the second fire).
         const session = await bureau.getSession(sessionId);
         expect(session).not.toBeNull();
-        const userTurns = getMessages(session!.conversationHistory).filter(
-          (message) => message.role === 'user',
-        );
+        const messages = getMessages(session!.conversationHistory);
+        const userTurns = messages.filter((message) => message.role === 'user');
         expect(userTurns.length).toBeGreaterThanOrEqual(2);
+        expect(messages.filter((message) => message.role === 'system')).toHaveLength(1);
       } finally {
         bureau.dispose();
       }

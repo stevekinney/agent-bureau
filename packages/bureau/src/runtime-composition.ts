@@ -1297,12 +1297,16 @@ export async function createRuntimeComposition(
     const sessionId =
       scheduledInput.sessionId ?? `sched-${info.schedule?.id ?? 'unknown'}-${runId}`;
 
+    // A recurring fire continues its stored session; a fresh-per-fire (stateless)
+    // session never exists yet. A recurring schedule's FIRST fire into a new
+    // sessionId also has no stored session — that case must seed the systemPrompt
+    // too, exactly as createRunFromRequest does for any new session (a recurring
+    // session that already exists already carries the prompt from its first fire,
+    // so it is not re-seeded).
+    const existing = recurring ? await store.load(sessionId) : undefined;
     let conversation: Conversation;
-    if (recurring) {
-      const existing = await store.load(sessionId);
-      conversation = existing
-        ? new Conversation(existing.conversationHistory)
-        : new Conversation(createConversationHistory({ id: sessionId }));
+    if (existing) {
+      conversation = new Conversation(existing.conversationHistory);
     } else {
       conversation = new Conversation(createConversationHistory({ id: sessionId }));
       if (systemPrompt) {
