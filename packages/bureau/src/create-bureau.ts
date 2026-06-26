@@ -484,8 +484,11 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         validateResponse: runRuntime.validateResponse,
         // Thread agentName and runId so curated tool.* bubble events are stamped
         // with {agentName, runId, step} metadata (C3) and durable launch input
-        // carries the owning agent for audit/recovery attribution (F2).
-        agentName: request.agentName,
+        // carries the owning agent for audit/recovery attribution (F2). Fall back
+        // to BUREAU_AGENT_NAME when the request omits it, matching the agent the
+        // session is stamped with — otherwise the durable input + tool events
+        // carry an empty agentName while the session says 'bureau'.
+        agentName: request.agentName ?? BUREAU_AGENT_NAME,
         runId,
       },
       // Route through the durable engine when one was composed (durableExecution

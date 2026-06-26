@@ -235,6 +235,41 @@ describe('createBureau', () => {
     }
   });
 
+  it('stamps tool.started events with the default bureau agent when agentName is omitted (regression PRRT_kwDORvupsc6MY2xf)', async () => {
+    // REGRESSION: a request WITHOUT agentName passed `agentName: request.agentName`
+    // (undefined → empty string in createActiveRun) into the run, while the session
+    // is stamped with the default 'bureau'. So tool.* events + durable input carried
+    // a blank agent while the session said 'bureau' — mismatched attribution. The
+    // fix falls back to BUREAU_AGENT_NAME ('bureau') when the request omits agentName.
+    const capturedStamps: Array<{ agentName: string; runId: string }> = [];
+
+    const bureau = await createBureau({
+      generate: async ({ step }) =>
+        step === 0
+          ? { content: 'calling', toolCalls: [{ name: 'next', arguments: {} }] }
+          : { content: 'done', toolCalls: [] },
+      toolbox: createToolbox([createNextTool()]) as unknown as Toolbox,
+      stopWhen: stopWhen.noToolCalls(),
+    });
+
+    // No agentName on the request — the common interactive path.
+    const summary = await bureau.createRun({ message: 'Stamp test, no agent' });
+
+    const runState = bureau.store.getRun(summary.id);
+    runState?.activeRun.addEventListener('tool.started', (event) => {
+      capturedStamps.push({ agentName: event.agentName, runId: event.runId });
+    });
+
+    await waitForRunCompletion(bureau, summary.id);
+
+    expect(capturedStamps.length).toBeGreaterThan(0);
+    // Must stamp 'bureau' (the session default), NOT an empty string.
+    for (const stamp of capturedStamps) {
+      expect(stamp.agentName).toBe('bureau');
+      expect(stamp.runId).toBe(summary.id);
+    }
+  });
+
   it('persists and resumes sessions through the session store', async () => {
     const bureau = await createBureau({
       generate: createMockGenerate(),
