@@ -469,6 +469,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       lastRunId: runId,
       lastRunStatus: 'running',
       lastUserMessage: request.message,
+      ...(request.maximumTokens !== undefined ? { lastMaximumTokens: request.maximumTokens } : {}),
     });
 
     const activeRun = createActiveRun(

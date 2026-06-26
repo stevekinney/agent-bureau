@@ -327,6 +327,37 @@ describe('createBureau', () => {
     expect(session?.metadata['lastRunStatus']).toBe('completed');
   });
 
+  // Regression: PRRT_kwDORvupsc6MZEri — createRunFromRequest did not persist
+  // maximumTokens to session metadata, so recovery (buildRunDepsFromSession) could
+  // not restore it and recovered generate calls silently received undefined.
+  it('persists maximumTokens as lastMaximumTokens in session metadata when a run is created with a token cap', async () => {
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      persistence: textValueStore(new MemoryStorage()),
+    });
+
+    const run = await bureau.createRun({ message: 'Capped run', maximumTokens: 128 });
+    await waitForRunCompletion(bureau, run.id);
+
+    const session = await bureau.getSession(run.sessionId);
+    expect(session?.metadata['lastMaximumTokens']).toBe(128);
+  });
+
+  it('does not write lastMaximumTokens to session metadata when maximumTokens is absent', async () => {
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      persistence: textValueStore(new MemoryStorage()),
+    });
+
+    const run = await bureau.createRun({ message: 'Uncapped run' });
+    await waitForRunCompletion(bureau, run.id);
+
+    const session = await bureau.getSession(run.sessionId);
+    expect(session?.metadata['lastMaximumTokens']).toBeUndefined();
+  });
+
   it('retries terminal session persistence after a transient save failure', async () => {
     const backingStore = textValueStore(new MemoryStorage());
     let sessionSaveCount = 0;

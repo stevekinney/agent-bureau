@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, mock } from 'bun:test';
 
 import type { IdentityProviderLike } from '../../src/self-improvement/proposals';
-import { getProposal, listProposals } from '../../src/self-improvement/proposals';
+import { getProposal, listProposals, rejectProposal } from '../../src/self-improvement/proposals';
 import { reflectionSweep } from '../../src/self-improvement/reflection-sweep';
 import type { StepResultLike } from '../../src/skill-memory';
 import { createMockKeyValueStore, createMockSkillProvider } from '../../src/test';
@@ -382,6 +382,112 @@ describe('reflectionSweep — shouldReflect predicate (cross-sink)', () => {
 
     expect(reflect).not.toHaveBeenCalled();
     expect(await listProposals(storage)).toHaveLength(0);
+  });
+});
+
+// ── rejected pattern suppression ─────────────────────────────────────────────
+//
+// Regression for: PRRT_kwDORvupsc6MZErm
+// rejectProposal() records a content hash to prevent re-proposal, but
+// reflectionSweep did not check isRejectedPattern() before writing a fresh
+// pending proposal. This section verifies the guard holds.
+
+describe('reflectionSweep — rejected pattern suppression', () => {
+  it('skill sink: does not re-create a proposal when content was previously rejected', async () => {
+    const storage = createMockKeyValueStore();
+    const skillProvider = createMockSkillProvider();
+    const content = '---\nname: recurring-skill\ndescription: Recurring\n---\n\nDo the thing.';
+    const reflect = mock(async () => content);
+
+    const { onStep } = reflectionSweep({
+      sink: { type: 'skill', storage, skillProvider },
+      reflect,
+    });
+
+    // First sweep: proposal created.
+    await onStep(createStepResult());
+    const firstBatch = await listProposals(storage);
+    expect(firstBatch).toHaveLength(1);
+
+    // Human rejects the proposal.
+    await rejectProposal(storage, firstBatch[0]!.id, 'Not relevant');
+
+    // Second sweep with identical content: should be suppressed.
+    await onStep(createStepResult());
+    const secondBatch = await listProposals(storage);
+    // Pending count must remain 0 — the rejected proposal is status:'rejected', not pending.
+    expect(secondBatch).toHaveLength(0);
+  });
+
+  it('soul sink: does not re-create a proposal when content was previously rejected', async () => {
+    const storage = createMockKeyValueStore();
+    const identityProvider = createMockIdentityProvider();
+    const content = JSON.stringify([{ id: 'item-1', content: 'Be concise' }]);
+    const reflect = mock(async () => content);
+
+    const { onStep } = reflectionSweep({
+      sink: { type: 'soul', storage, identityProvider },
+      reflect,
+    });
+
+    await onStep(createStepResult());
+    const firstBatch = await listProposals(storage);
+    expect(firstBatch).toHaveLength(1);
+
+    await rejectProposal(storage, firstBatch[0]!.id);
+
+    await onStep(createStepResult());
+    const secondBatch = await listProposals(storage);
+    expect(secondBatch).toHaveLength(0);
+  });
+
+  it('persona sink: does not re-create a proposal when content was previously rejected', async () => {
+    const storage = createMockKeyValueStore();
+    const identityProvider = createMockIdentityProvider();
+    const content = 'You are a concise assistant.';
+    const reflect = mock(async () => content);
+
+    const { onStep } = reflectionSweep({
+      sink: { type: 'persona', storage, identityProvider, agentId: 'agent-x' },
+      reflect,
+    });
+
+    await onStep(createStepResult());
+    const firstBatch = await listProposals(storage);
+    expect(firstBatch).toHaveLength(1);
+
+    await rejectProposal(storage, firstBatch[0]!.id);
+
+    await onStep(createStepResult());
+    const secondBatch = await listProposals(storage);
+    expect(secondBatch).toHaveLength(0);
+  });
+
+  it('allows a new proposal when the reflected content differs from the rejected hash', async () => {
+    const storage = createMockKeyValueStore();
+    const skillProvider = createMockSkillProvider();
+    let callCount = 0;
+    const reflect = mock(async () => {
+      callCount++;
+      return `content-${callCount}`;
+    });
+
+    const { onStep } = reflectionSweep({
+      sink: { type: 'skill', storage, skillProvider },
+      reflect,
+    });
+
+    // First sweep: proposal with 'content-1'.
+    await onStep(createStepResult());
+    const firstBatch = await listProposals(storage);
+    expect(firstBatch).toHaveLength(1);
+    await rejectProposal(storage, firstBatch[0]!.id);
+
+    // Second sweep: different content ('content-2') must still be proposed.
+    await onStep(createStepResult());
+    const secondBatch = await listProposals(storage);
+    expect(secondBatch).toHaveLength(1);
+    expect(secondBatch[0]!.content).toBe('content-2');
   });
 });
 

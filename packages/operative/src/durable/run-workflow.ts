@@ -2,6 +2,7 @@ import { workflow } from '@lostgradient/weft';
 import { Conversation, isConversation } from 'conversationalist';
 
 import { BudgetExceededError, ElicitationDeniedError } from '../errors';
+import { RunErrorEvent } from '../events';
 import { buildStepDeps, createRunState } from '../loop';
 import { DEFAULT_MAXIMUM_STEPS, runStep } from '../run-step';
 import type { FinishReason } from '../types';
@@ -310,6 +311,10 @@ export function createRunWorkflow(checkpointStore: CheckpointStore) {
         let errorMessage: string | undefined;
         let abortReason: string | undefined;
         let schemaValidation: { success: boolean; error?: string } | undefined;
+        // True when a terminal outcome (stop/abort/error) broke the loop early.
+        // False means the loop exhausted `maximumSteps` naturally — the only case
+        // where `onMaximumSteps` should run, mirroring `executeLoop` exactly.
+        let stoppedEarly = false;
 
         // === Durable park-request locals (D6 + F3 recovery fix) ===
         // These accumulate the LAST pending park request (wakeup or human-wait)
@@ -468,11 +473,13 @@ export function createRunWorkflow(checkpointStore: CheckpointStore) {
           if (outcome.kind === 'stop') {
             finishReason = stepResult.stopFinishReason ?? 'stop-condition';
             schemaValidation = stepResult.schemaValidation;
+            stoppedEarly = true;
             break;
           }
           if (outcome.kind === 'abort') {
             finishReason = 'aborted';
             abortReason = stepResult.abortReason;
+            stoppedEarly = true;
             break;
           }
           if (outcome.kind === 'error') {
@@ -482,9 +489,60 @@ export function createRunWorkflow(checkpointStore: CheckpointStore) {
             // the in-memory loop.
             finishReason = stepResult.errorFinishReason ?? 'error';
             errorMessage = stepResult.errorMessage;
+            stoppedEarly = true;
             break;
           }
           // `next` / `continue` — loop to the next step.
+        }
+
+        // === onMaximumSteps tail — parity with executeLoop ===
+        // When the loop exhausted `maximumSteps` without a terminal outcome (stop
+        // / abort / error), call `options.onMaximumSteps` exactly once, mirroring
+        // executeLoop lines 141-158. Wrapped in `ctx.memo` so a crash-then-
+        // recover does NOT re-charge the LLM call: Weft short-circuits the memo
+        // to its checkpointed result on replay, just as it does for per-step
+        // memos. `finishReason` stays `'maximum-steps'` regardless of the handler
+        // return value — matching the in-memory path. On error, dispatch
+        // RunErrorEvent (parity with executeLoop) and short-circuit the return.
+        if (!stoppedEarly) {
+          const finalStep = cursor.step;
+          const tail = yield* ctx.memo('on-maximum-steps', async () => {
+            const deps = runDepsFrom(ctx.services);
+            const handler = deps.options.onMaximumSteps;
+            if (!handler) return { kind: 'noop' as const };
+            const conversation = Conversation.from(snapshot);
+            try {
+              const finalContent = await handler({
+                conversation,
+                step: finalStep,
+                signal: deps.options.signal,
+              });
+              if (typeof finalContent !== 'string') return { kind: 'noop' as const };
+              conversation.appendAssistantMessage(finalContent);
+              return {
+                kind: 'content' as const,
+                finalContent,
+                conversationSnapshot: conversation.snapshot(),
+              };
+            } catch (error) {
+              deps.emitter?.dispatch(new RunErrorEvent(finalStep, error));
+              return {
+                kind: 'error' as const,
+                errorMessage: serializeError(error),
+                errorFinishReason: classifyErrorFinishReason(error),
+              };
+            }
+          });
+
+          if (tail.kind === 'content') {
+            snapshot = tail.conversationSnapshot;
+            cursor = { ...cursor, lastContent: tail.finalContent };
+            yield* ctx.run('saveConversation', { runId, snapshot });
+            yield* ctx.run('saveCursor', { runId, cursor });
+          } else if (tail.kind === 'error') {
+            finishReason = tail.errorFinishReason;
+            errorMessage = tail.errorMessage;
+          }
         }
 
         // === Durable self-wakeup (D6 — scheduleWakeup tool) ===
