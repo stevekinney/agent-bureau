@@ -490,8 +490,12 @@ export function createSessionHandle(
             : createActiveRun(runOptionsWithSignal);
 
         // Expose the inner run so `activeRunWrapper.abort()` can forward to it.
-        // Must be set before `await innerRun.result` so any abort() that races
-        // with session load still reaches the inner run once it is live.
+        // Set here (after inner run creation, before awaiting its result) so
+        // that any abort() called while the run is in progress reaches the
+        // inner run and triggers engine.cancel(). An abort() that races with
+        // loadOrCreate (before this assignment) still fires the AbortController
+        // (stopping the in-flight generate), but engine.cancel is only
+        // reachable once this reference is live.
         activeInnerRun = innerRun;
 
         // Forward all inner events to the outer emitter so for-await consumers
