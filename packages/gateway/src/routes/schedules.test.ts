@@ -152,6 +152,32 @@ describe('schedules routes with durable engine (regression PRRT_kwDORvupsc6MXEmg
     gateway.bureau.dispose();
   });
 
+  it('POST /schedules returns 400 for overlap:allow with a recurring sessionId', async () => {
+    // Incoherent definition: a recurring session cannot have concurrently
+    // overlapping fires. createSchedule rejects BAD_REQUEST → 400.
+    const gateway = await createTestGateway({
+      authToken: AUTH_TOKEN,
+      generate: async () => ({ content: 'ok', toolCalls: [] }),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+
+    const response = await requestJSON(gateway, '/schedules', {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({
+        agentName: 'a',
+        input: 'x',
+        spec: '0 9 * * *',
+        sessionId: 'digest',
+        overlap: 'allow',
+      }),
+    });
+
+    expect(response.status).toBe(400);
+    gateway.bureau.dispose();
+  });
+
   it('POST /schedules returns 501 NOT_CONFIGURED on a durable bureau with no generate', async () => {
     // createSchedule rejects NOT_CONFIGURED rather than registering a schedule
     // whose every fire would fail; the route surfaces it as 501.

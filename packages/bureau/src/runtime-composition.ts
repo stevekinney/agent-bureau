@@ -755,6 +755,16 @@ export async function createRuntimeComposition(
   const maximumSteps = options.maximumSteps ?? 10;
   const systemPrompt = options.systemPrompt;
 
+  // Gate the resolver until the whole composition is assembled. `createRunEngine`
+  // is constructed with `startScheduler: true` BELOW, before later consts
+  // (`sessionStore`, the `createRunRuntime` closure deps) are initialized — so a
+  // persisted schedule's poller tick could fire `resolveRunServices` mid-build and
+  // hit a not-yet-initialized binding (review: codex). This flag, declared before
+  // the engine and flipped true just before we return, lets the resolver bail out
+  // cleanly (the fire fails terminally and the next tick — once ready — succeeds).
+  // Recovery is unaffected: the bureau calls `recoverAll()` only after this returns.
+  let compositionReady = false;
+
   // #28: per-recovered-run emitter+toolbox the resolver pre-allocates and the
   // bureau's reattach loop consumes — see RuntimeComposition.pendingRecoveryEmitters.
   const pendingRecoveryEmitters = new Map<string, PendingRecoveryEvents>();
@@ -1385,6 +1395,14 @@ export async function createRuntimeComposition(
   async function resolveRunServices(
     info: WorkflowServicesResolverInfo,
   ): Promise<WorkflowServicesResolution> {
+    // The scheduler poller is armed at engine construction, before this closure's
+    // later dependencies (sessionStore, createRunRuntime deps) are initialized. If
+    // a persisted schedule fires a tick mid-construction, bail out cleanly — the
+    // fire fails terminally and the next tick (once ready) succeeds. (Accessing a
+    // not-yet-initialized `const` below would otherwise throw a TDZ error.)
+    if (!compositionReady) {
+      return { status: 'unavailable', reason: `run ${info.workflowId}: composition not ready` };
+    }
     if (!sessionStore) {
       return { status: 'unavailable', reason: 'no session store configured' };
     }
@@ -1636,6 +1654,10 @@ export async function createRuntimeComposition(
     });
     return { status: 'available', services: { ...services, emitter: recoveryEmitter } };
   }
+
+  // Every closure dependency the resolver reads is now initialized; open the gate
+  // so scheduler-poller ticks (and the bureau's subsequent `recoverAll()`) resolve.
+  compositionReady = true;
 
   return {
     kv,

@@ -1812,6 +1812,52 @@ describe('createBureau', () => {
     }
   });
 
+  it('createSchedule rejects a blank recurring sessionId and overlap:allow with a session (codex)', async () => {
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+
+    try {
+      const blank = await bureau
+        .createSchedule({ agentName: 'a', input: 'x', spec: '0 9 * * *', sessionId: '   ' })
+        .then(
+          () => undefined,
+          (rejection: unknown) => rejection,
+        );
+      expect(blank).toBeInstanceOf(BureauError);
+      expect((blank as BureauError).code).toBe('BAD_REQUEST');
+
+      const overlapping = await bureau
+        .createSchedule({
+          agentName: 'a',
+          input: 'x',
+          spec: '0 9 * * *',
+          sessionId: 'digest',
+          overlap: 'allow',
+        })
+        .then(
+          () => undefined,
+          (rejection: unknown) => rejection,
+        );
+      expect(overlapping).toBeInstanceOf(BureauError);
+      expect((overlapping as BureauError).code).toBe('BAD_REQUEST');
+
+      // overlap:'allow' WITHOUT a session is fine (stateless fires may run concurrently).
+      const ok = await bureau.createSchedule({
+        agentName: 'a',
+        input: 'x',
+        spec: '0 9 * * *',
+        overlap: 'allow',
+      });
+      expect(ok?.status).toBe('active');
+    } finally {
+      bureau.dispose();
+    }
+  });
+
   it('createSchedule throws NOT_CONFIGURED on a durable bureau with no generate (codex Mn69W)', async () => {
     // A durable bureau with no generate/provider would register a schedule whose
     // every fire throws "No generate function configured" at runtime. Reject up
