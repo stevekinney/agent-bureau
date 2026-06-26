@@ -636,6 +636,7 @@ export interface DurableScheduleDefinition {
   sessionId?: string;
   /** Overlap policy when a prior fire is still running. Defaults to `'skip'`. */
   overlap?: 'skip' | 'allow';
-  /** Human-readable label stored on the schedule. */
-  description?: string;
+  // NOTE: no `description` field. Weft 0.8.0's ScheduleOptions/ScheduleSummary have
+  // nowhere to store or surface a schedule label, so accepting one would silently
+  // drop it. Re-add once weft supports it (filed: weft 20a358ef).
 }
