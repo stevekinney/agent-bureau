@@ -397,6 +397,60 @@ describe('OpenAI-compat route (POST /v1/chat/completions)', () => {
     });
   });
 
+  describe('SSE streaming: keep-alive heartbeat prevents idle-timeout disconnects (regression: PRRT_kwDORvupsc6MbhP8)', () => {
+    it('sends a connected comment immediately when the stream opens, before the run settles', async () => {
+      // Regression: the old SSE path emitted no bytes until run.completed fired.
+      // Standard HTTP reverse proxies (nginx default 60 s, AWS ALB 60 s) and
+      // Bun.serve (default 10 s idleTimeout) close idle connections before a
+      // long agent run finishes. The fix adds:
+      //   (1) an immediate `: connected\n\n` SSE comment on stream open, and
+      //   (2) a `: heartbeat\n\n` comment every 8 s thereafter.
+      // This test gates `generate` on a promise, verifies the `: connected`
+      // comment appears in the final body (proving it was sent before the run
+      // settled), then releases the gate so the test completes normally.
+      let releaseGenerate!: () => void;
+      const generateGate = new Promise<void>((resolve) => {
+        releaseGenerate = resolve;
+      });
+
+      const generate: GenerateFunction = async () => {
+        await generateGate;
+        return { content: 'Heartbeat test complete.', toolCalls: [] };
+      };
+
+      const gateway = await createTestGateway({ generate });
+
+      const responsePromise = requestJSON(gateway, '/v1/chat/completions', {
+        method: 'POST',
+        body: JSON.stringify({
+          model: 'bureau',
+          messages: [{ role: 'user', content: 'Heartbeat test' }],
+          stream: true,
+        }),
+      });
+
+      // Yield enough microtasks for the streaming path to open the
+      // ReadableStream and enqueue the initial `: connected` comment before
+      // the generate gate releases.
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      // Release the gate so the run can complete and the response body closes.
+      releaseGenerate();
+      const response = await responsePromise;
+
+      expect(response.status).toBe(200);
+      const text = await response.text();
+
+      // The initial connected comment must be present regardless of run duration.
+      expect(text).toContain(': connected');
+      // The run must still complete normally.
+      expect(text).toContain('"Heartbeat test complete."');
+      expect(text).toContain('[DONE]');
+    });
+  });
+
   describe('SSE streaming: client disconnect aborts the run (regression: PRRT_kwDORvupsc6MarAf)', () => {
     it('aborts the active run when the client cancels the stream', async () => {
       // Regression: with the SSE response opened before the run settles, a client

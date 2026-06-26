@@ -140,6 +140,18 @@ function formatSseErrorChunk(model: string, message: string): string {
 }
 
 /**
+ * SSE heartbeat interval in milliseconds.
+ *
+ * Must be shorter than the reverse-proxy and server idle timeout so the
+ * connection is never silently killed during long silences (e.g. a parked
+ * human-in-the-loop workflow or a slow tool call).
+ *
+ * Bun.serve defaults `idleTimeout` to 10 s; common reverse proxies (nginx,
+ * AWS ALB) default to 60 s. We pick 8 s — safely under both.
+ */
+const SSE_HEARTBEAT_INTERVAL_MS = 8_000;
+
+/**
  * OpenAI-compatible `POST /v1/chat/completions` route.
  *
  * The `model` field in the request body is the agent name — a typed dispatch
@@ -221,12 +233,13 @@ export function createOpenAICompatRoutes(bureau: Bureau) {
     if (stream) {
       const runState = bureau.store.getRun(summary.id);
 
-      // A no-arg cleanup captured from start() so the stream's cancel() and the
-      // terminal close() can detach the run listeners — without this, a client
-      // disconnect (cancel) would leave the run.completed/run.aborted listeners
-      // attached and, worse, the run executing (and billing provider tokens) with
-      // nothing reading its output.
+      // No-arg cleanups captured from start() so the stream's cancel() and the
+      // terminal close() can detach the run listeners and stop the heartbeat
+      // timer — without this, a client disconnect would leave the listeners
+      // attached and the run executing (and billing provider tokens) for an
+      // audience that has left.
       let detachRunListeners: () => void = () => {};
+      let stopHeartbeat: () => void = () => {};
 
       const body = new ReadableStream<Uint8Array>({
         start(controller) {
@@ -237,6 +250,7 @@ export function createOpenAICompatRoutes(bureau: Bureau) {
           }
 
           function close(): void {
+            stopHeartbeat();
             detachRunListeners();
             try {
               controller.close();
@@ -244,6 +258,26 @@ export function createOpenAICompatRoutes(bureau: Bureau) {
               // Already closed — ignore.
             }
           }
+
+          // Send an initial comment so the connection is known-open immediately.
+          enqueue(': connected\n\n');
+
+          // Heartbeat timer: sends SSE comment lines at a fixed cadence so that
+          // reverse proxies and HTTP clients do not close the connection during
+          // long silences (e.g. slow tool calls, parked human-in-the-loop runs).
+          // SSE comment lines (`:<text>\n\n`) are ignored by compliant clients.
+          const heartbeatId = setInterval(() => {
+            try {
+              enqueue(': heartbeat\n\n');
+            } catch {
+              close();
+            }
+          }, SSE_HEARTBEAT_INTERVAL_MS);
+
+          stopHeartbeat = (): void => {
+            clearInterval(heartbeatId);
+            stopHeartbeat = () => {};
+          };
 
           if (!runState) {
             // No active run state — run may have already settled synchronously.
@@ -303,8 +337,10 @@ export function createOpenAICompatRoutes(bureau: Bureau) {
         // disconnected (or an intermediary timed out). Stop the bill: abort the
         // active run so the agent loop drops its in-flight provider call instead
         // of running to completion for an audience that has left. Detach our
-        // listeners so the now-orphaned stream controller is never touched again.
+        // listeners and stop the heartbeat so the now-orphaned stream controller
+        // is never touched again.
         cancel() {
+          stopHeartbeat();
           detachRunListeners();
           runState?.activeRun.abort('client disconnected from SSE stream');
         },
