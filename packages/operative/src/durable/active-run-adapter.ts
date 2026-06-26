@@ -500,6 +500,20 @@ export function reattachDurableActiveRun(
     return false;
   }
 
+  // A reattached run has no abort SIGNAL (the recovered generator runs under the
+  // engine, not this adapter's controller), so abort cancels the run at the
+  // engine instead (committee MF-3): a recovered run is now visible via
+  // `getRun(runId)`, so `bureau.abortRun(runId)` must actually stop it rather
+  // than silently no-op. `engine.cancel` terminalizes the run and rejects its
+  // result waiter; the rejection is translated into a real `run.aborted`
+  // lifecycle (so gateway persists `aborted`) — but ONLY if the cancel actually
+  // succeeded (abortCancelled resolves true), distinguishing this abort from a
+  // resolver/teardown failure that merely raced an abort() call. Idempotent via
+  // `abortCancelled ??=`, so a later dispose() that also aborts is a no-op.
+  function abort(): void {
+    abortCancelled ??= context.engine.cancel(runId).then(cancelSucceeded, cancelFailed);
+  }
+
   // Deferred-microtask start — REQUIRED for the registration ordering invariant:
   // the caller (`recoverDurableRuns`) must finish `store.register` +
   // `runSessionIdentifiers.set` in its synchronous turn BEFORE any terminal event
@@ -509,18 +523,7 @@ export function reattachDurableActiveRun(
 
   return {
     result,
-    // A reattached run has no abort SIGNAL (the recovered generator runs under the
-    // engine, not this adapter's controller), so abort cancels the run at the
-    // engine instead (committee MF-3): a recovered run is now visible via
-    // `getRun(runId)`, so `bureau.abortRun(runId)` must actually stop it rather
-    // than silently no-op. `engine.cancel` terminalizes the run and rejects its
-    // result waiter; the rejection is translated into a real `run.aborted`
-    // lifecycle (so gateway persists `aborted`) — but ONLY if the cancel actually
-    // succeeded (abortCancelled resolves true), distinguishing this abort from a
-    // resolver/teardown failure that merely raced an abort() call.
-    abort(): void {
-      abortCancelled ??= context.engine.cancel(runId).then(cancelSucceeded, cancelFailed);
-    },
+    abort,
     addEventListener: emitter.addEventListener.bind(emitter) as ActiveRun['addEventListener'],
     removeEventListener: emitter.removeEventListener.bind(
       emitter,
@@ -532,6 +535,15 @@ export function reattachDurableActiveRun(
     toObservable: emitter.toObservable.bind(emitter) as ActiveRun['toObservable'],
     complete,
     [Symbol.dispose](): void {
+      // Cancel the durable run at the engine BEFORE completing the local emitter,
+      // mirroring the live createActiveRun dispose. A reattached/recovered run
+      // (session.recover() / boot reattach) keeps executing — and billing — under
+      // the Weft engine, not this adapter's controller. Disposing the public
+      // AgentRun must therefore stop the workflow, not just make the caller stop
+      // observing it. abort() is idempotent (abortCancelled ??=), so a prior
+      // explicit abort() + dispose() does not double-cancel (PRRT — Codex
+      // re-review of 7b910a15).
+      abort();
       complete();
     },
   };

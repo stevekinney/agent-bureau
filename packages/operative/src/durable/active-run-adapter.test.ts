@@ -1138,6 +1138,69 @@ describe('reattachDurableActiveRun', () => {
       context.engine[Symbol.dispose]();
     }
   });
+
+  // Regression (Codex re-review of 7b910a15): disposing a reattached/recovered
+  // run must cancel it at the engine — not just complete the local emitter.
+  // Otherwise `using`/[Symbol.dispose]() makes the caller stop observing while
+  // the workflow keeps executing and BILLING under Weft.
+  it('cancels the durable run at the engine when disposed (PRRT_kwDORvupsc6Mddw...)', async () => {
+    let rejectResult: ((error: unknown) => void) | undefined;
+    const handle = {
+      id: 'reattach-dispose',
+      result: () => new Promise<unknown>((_resolve, reject) => (rejectResult = reject)),
+    };
+    const cancelled: string[] = [];
+    const engine = {
+      cancel: async (id: string) => {
+        cancelled.push(id);
+        rejectResult?.(new Error('cancelled'));
+      },
+    } as unknown as AnyRunEngine;
+
+    const recoveredRun = reattachDurableActiveRun(
+      { engine, checkpointStore: {} as never },
+      { runId: 'reattach-dispose', handle },
+    );
+
+    // Let the adapter start driving (wires rejectResult) before disposing, same
+    // ordering as the abort() tests above.
+    await Promise.resolve();
+    recoveredRun[Symbol.dispose]();
+    const result = await recoveredRun.result;
+
+    // Dispose terminalized the run via engine.cancel (the workflow is stopped,
+    // not left billing), and the result settles as aborted.
+    expect(cancelled).toEqual(['reattach-dispose']);
+    expect(result.finishReason).toBe('aborted');
+  });
+
+  it('does not double-cancel when abort() is followed by dispose() (idempotent)', async () => {
+    let rejectResult: ((error: unknown) => void) | undefined;
+    const handle = {
+      id: 'reattach-abort-then-dispose',
+      result: () => new Promise<unknown>((_resolve, reject) => (rejectResult = reject)),
+    };
+    const cancelled: string[] = [];
+    const engine = {
+      cancel: async (id: string) => {
+        cancelled.push(id);
+        rejectResult?.(new Error('cancelled'));
+      },
+    } as unknown as AnyRunEngine;
+
+    const recoveredRun = reattachDurableActiveRun(
+      { engine, checkpointStore: {} as never },
+      { runId: 'reattach-abort-then-dispose', handle },
+    );
+
+    await Promise.resolve();
+    recoveredRun.abort();
+    recoveredRun[Symbol.dispose]();
+    await recoveredRun.result;
+
+    // engine.cancel ran exactly once despite both abort() and dispose().
+    expect(cancelled).toEqual(['reattach-abort-then-dispose']);
+  });
 });
 
 // -----------------------------------------------------------------------
