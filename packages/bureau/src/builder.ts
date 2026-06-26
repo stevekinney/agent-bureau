@@ -122,7 +122,21 @@ function toolboxFromMap(toolsMap: Record<string, unknown>): Toolbox {
         entries.push({ ...value.configuration, name: key });
       }
     } else if (typeof value === 'function') {
-      // Plain function: normalize to an armorer Tool. The map key is the name.
+      // Plain function: only accepted when it declares zero parameters.
+      // A plain callable with declared parameters would be registered without
+      // a Zod schema, causing Armorer to normalise the missing schema to
+      // z.object({}) which strips every LLM-supplied argument before execute
+      // is called. Callers must supply the { execute, input } object form so
+      // the schema is explicit and arguments are not silently lost.
+      if (value.length > 0) {
+        throw new Error(
+          `bureau.tools(): plain function at key "${key}" declares ${value.length} parameter(s). ` +
+            `Armorer cannot infer a schema from a bare function — LLM-supplied arguments ` +
+            `would be silently stripped. Use the { execute, input } form instead:\n` +
+            `  { ${key}: { execute: yourFn, input: z.object({ ... }) } }`,
+        );
+      }
+      // Zero-param function: safe to normalise — no arguments to lose.
       // Cast is justified: ToolEntryInput's callable variant is typed as
       // `(...arguments_: never[]) => unknown` for inference only; the real
       // signature at runtime is compatible with createTool's execute parameter.

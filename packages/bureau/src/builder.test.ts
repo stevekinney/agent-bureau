@@ -352,6 +352,64 @@ describe('createBureau (builder) — tool registration', () => {
   });
 
   // ---------------------------------------------------------------------------
+  // Regression: PRRT_kwDORvupsc6MbhQA — plain callable tools with parameters
+  // silently strip LLM-supplied arguments because the builder passes no `input`
+  // schema to createTool, causing Armorer to normalise to z.object({}).
+  //
+  // Fix: reject parameterized plain functions at normalisation time with a clear
+  // error message directing callers to the { execute, input } form. Zero-param
+  // functions are fine (they accept no arguments) and continue to work.
+  // ---------------------------------------------------------------------------
+
+  it('rejects a plain function with parameters and directs the caller to the { execute, input } form (PRRT_kwDORvupsc6MbhQA)', () => {
+    const generate = makeGenerate();
+    // A bare function with one or more declared parameters — Armorer would strip
+    // all LLM-supplied arguments because there is no schema to pass to createTool.
+    const parameterizedFn = (params: { a: number; b: number }) =>
+      Promise.resolve(params.a + params.b);
+    expect(() =>
+      createBureau()
+        .tools({ add: parameterizedFn as unknown as typeof echoTool })
+        .agent({ name: 'a', generate }),
+    ).toThrow(/plain function.*parameter.*execute.*input/is);
+  });
+
+  it('zero-param plain functions are still accepted (no schema needed when execute takes no args)', () => {
+    const generate = makeGenerate();
+    // () => result — no parameters, no schema needed.
+    expect(() =>
+      createBureau()
+        .tools({ ping: (() => Promise.resolve('pong')) as unknown as typeof echoTool })
+        .agent({ name: 'a', generate }),
+    ).not.toThrow();
+  });
+
+  it('parameterized callable tool passes args through intact when wrapped in { execute, input } form (PRRT_kwDORvupsc6MbhQA)', async () => {
+    let capturedArgs: Record<string, unknown> | undefined;
+
+    const generate = createMockGenerate([
+      { content: '', toolCalls: [{ name: 'add', arguments: { a: 5, b: 3 } }] },
+      { content: 'done', toolCalls: [] },
+    ]);
+
+    // The correct form for a parameterized tool: { execute, input }.
+    const bureau = createBureau()
+      .tools({
+        add: {
+          execute: async (params: { a: number; b: number }) => {
+            capturedArgs = params as Record<string, unknown>;
+            return params.a + params.b;
+          },
+          input: z.object({ a: z.number(), b: z.number() }),
+        } as unknown as typeof echoTool,
+      })
+      .agent({ name: 'calc', generate });
+
+    await bureau.run('calc', 'add 5 and 3').result();
+    expect(capturedArgs).toEqual({ a: 5, b: 3 });
+  });
+
+  // ---------------------------------------------------------------------------
   // Regression: PRRT_kwDORvupsc6MaaR1 — plain { execute } tools without an
   // input schema caused Armorer to normalize missing schemas to z.object({}),
   // which strips all LLM-provided arguments before execute() is called.

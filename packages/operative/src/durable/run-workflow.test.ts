@@ -1075,6 +1075,269 @@ describe('durable agentRun workflow', () => {
     });
   });
 
+  describe('Skip durable parking after terminal failures (PRRT_kwDORvupsc6MbhP0)', () => {
+    /**
+     * REGRESSION TESTS for the unconditional durable park after error/abort.
+     *
+     * Bug: the post-loop park block (`if (pendingWakeup !== undefined) {
+     * yield* ctx.sleep(...) }` / `else if (pendingHumanWait !== undefined) {
+     * yield* ctx.waitForSignal(...) }`) ran unconditionally. If a step called
+     * `scheduleWakeup` or `requestHumanInput` and a SUBSEQUENT step (or the same
+     * step, via another failing tool) terminated with `error` or `aborted`, the
+     * loop broke early setting `stoppedEarly = true` and the failure finish reason —
+     * but `pendingWakeup`/`pendingHumanWait` were never cleared. The park block
+     * then fired anyway, leaving an errored/aborted session parked as `running`
+     * until the timer/signal arrived, hiding the real outcome from callers.
+     *
+     * Fix: gate the park block (and the result park-metadata fields) on
+     * `!isFailureOutcome`, where `isFailureOutcome` checks `finishReason` against
+     * the failure set (`error`, `aborted`, `elicitation-denied`, `budget-exceeded`).
+     * This covers both failing steps and a failing `onMaximumSteps` handler,
+     * because both update `finishReason` before reaching the park section.
+     */
+
+    it('returns the error result immediately without parking when a step errors after scheduleWakeup', async () => {
+      // Step 0: call scheduleWakeup (very long duration so if the park fires the
+      //         test hangs). `pendingWakeup` is set in deps.
+      // Step 1: generate throws → outcome.kind === 'error', finishReason = 'error'.
+      // Expected: run completes with finishReason: 'error', no wakeupNote, no park.
+      const { engine } = await buildEngine(new MemoryStorage(), false);
+
+      const depsContainer: { ref: DurableRunDeps | undefined } = { ref: undefined };
+      const wakeupTool = createTool({
+        name: 'scheduleWakeup',
+        description: 'Schedule a wakeup',
+        input: z.object({ duration: z.number() }),
+        execute: async (params) => {
+          if (depsContainer.ref) {
+            depsContainer.ref.pendingWakeup = {
+              duration: (params as { duration: number }).duration,
+              note: 'check later',
+            };
+          }
+          return 'scheduled';
+        },
+      });
+      const toolbox = createToolbox([wakeupTool, nextTool]) as unknown as RegistryToolbox;
+
+      let call = 0;
+      const services: DurableRunDeps = {
+        options: {
+          generate: async () => {
+            const c = call++;
+            if (c === 0) {
+              return {
+                content: '',
+                toolCalls: [{ name: 'scheduleWakeup', arguments: { duration: 999_999_999 } }],
+              };
+            }
+            throw new Error('generate failed after wakeup');
+          },
+          toolbox,
+          conversation: createConversationHistory(),
+          stopWhen: noToolCalls(),
+        },
+        toolbox,
+      };
+      depsContainer.ref = services;
+
+      try {
+        const result = await runToCompletion(
+          engine,
+          { runId: 'park-skip-error', prompt: 'Go', maximumSteps: 5 },
+          services,
+        );
+
+        // Must complete immediately as an error — NOT park on ctx.sleep.
+        expect(result.finishReason).toBe('error');
+        expect(result.errorMessage).toBe('generate failed after wakeup');
+        // Park metadata must be absent — the run did not park.
+        expect(result.wakeupNote).toBeUndefined();
+        expect(result.humanWaitSignal).toBeUndefined();
+      } finally {
+        engine[Symbol.dispose]();
+      }
+    });
+
+    it('returns the abort result immediately without parking when a step aborts after scheduleWakeup', async () => {
+      // Step 0: call scheduleWakeup (very long duration). `pendingWakeup` is set.
+      // Then abort the run via the AbortController signal.
+      // Expected: run completes with finishReason: 'aborted', no park.
+      const { engine } = await buildEngine(new MemoryStorage(), false);
+
+      const controller = new AbortController();
+      const depsContainer: { ref: DurableRunDeps | undefined } = { ref: undefined };
+      const wakeupTool = createTool({
+        name: 'scheduleWakeup',
+        description: 'Schedule a wakeup',
+        input: z.object({ duration: z.number() }),
+        execute: async (params) => {
+          if (depsContainer.ref) {
+            depsContainer.ref.pendingWakeup = {
+              duration: (params as { duration: number }).duration,
+              note: 'check later',
+            };
+          }
+          // Trigger the abort signal after the wakeup tool runs.
+          controller.abort('manual-abort');
+          return 'scheduled';
+        },
+      });
+      const toolbox = createToolbox([wakeupTool]) as unknown as RegistryToolbox;
+
+      const services: DurableRunDeps = {
+        options: {
+          generate: async () => ({
+            content: '',
+            toolCalls: [{ name: 'scheduleWakeup', arguments: { duration: 999_999_999 } }],
+          }),
+          toolbox,
+          conversation: createConversationHistory(),
+          stopWhen: noToolCalls(),
+          signal: controller.signal,
+        },
+        toolbox,
+      };
+      depsContainer.ref = services;
+
+      try {
+        const result = await runToCompletion(
+          engine,
+          { runId: 'park-skip-abort', prompt: 'Go', maximumSteps: 5 },
+          services,
+        );
+
+        // Must complete as aborted — NOT park on ctx.sleep.
+        expect(result.finishReason).toBe('aborted');
+        // Park metadata must be absent — the run did not park.
+        expect(result.wakeupNote).toBeUndefined();
+        expect(result.humanWaitSignal).toBeUndefined();
+      } finally {
+        engine[Symbol.dispose]();
+      }
+    });
+
+    it('returns the error result immediately without parking when requestHumanInput was called but a later step errors', async () => {
+      // Step 0: call requestHumanInput → pendingHumanWait is set.
+      // Step 1: generate throws → outcome.kind === 'error'.
+      // Expected: run completes with finishReason: 'error', no humanWaitSignal, no park.
+      const { engine } = await buildEngine(new MemoryStorage(), false);
+
+      const depsContainer: { ref: DurableRunDeps | undefined } = { ref: undefined };
+      const hitlTool = createTool({
+        name: 'requestHumanInput',
+        description: 'Park waiting for human input',
+        input: z.object({ signalName: z.string() }),
+        execute: async (params) => {
+          if (depsContainer.ref) {
+            depsContainer.ref.pendingHumanWait = {
+              signalName: (params as { signalName: string }).signalName,
+            };
+          }
+          return 'parked';
+        },
+      });
+      const toolbox = createToolbox([hitlTool, nextTool]) as unknown as RegistryToolbox;
+
+      let call = 0;
+      const services: DurableRunDeps = {
+        options: {
+          generate: async () => {
+            const c = call++;
+            if (c === 0) {
+              return {
+                content: '',
+                toolCalls: [{ name: 'requestHumanInput', arguments: { signalName: 'approval' } }],
+              };
+            }
+            throw new Error('step 1 failed after hitl request');
+          },
+          toolbox,
+          conversation: createConversationHistory(),
+          stopWhen: noToolCalls(),
+        },
+        toolbox,
+      };
+      depsContainer.ref = services;
+
+      try {
+        const result = await runToCompletion(
+          engine,
+          { runId: 'park-skip-hitl-error', prompt: 'Go', maximumSteps: 5 },
+          services,
+        );
+
+        // Must complete immediately as an error — NOT park on ctx.waitForSignal.
+        expect(result.finishReason).toBe('error');
+        expect(result.errorMessage).toBe('step 1 failed after hitl request');
+        // Park metadata must be absent — the run did not park.
+        expect(result.humanWaitSignal).toBeUndefined();
+        expect(result.wakeupNote).toBeUndefined();
+      } finally {
+        engine[Symbol.dispose]();
+      }
+    });
+
+    it('returns the error result immediately without parking when onMaximumSteps handler errors after scheduleWakeup', async () => {
+      // The loop exhausts maximumSteps (no early exit), so stoppedEarly stays false.
+      // Step 0: scheduleWakeup sets pendingWakeup.
+      // onMaximumSteps handler throws → finishReason = 'error'.
+      // Expected: run completes with finishReason: 'error', no park, no wakeupNote.
+      const { engine } = await buildEngine(new MemoryStorage(), false);
+
+      const depsContainer: { ref: DurableRunDeps | undefined } = { ref: undefined };
+      const wakeupTool = createTool({
+        name: 'scheduleWakeup',
+        description: 'Schedule a wakeup',
+        input: z.object({ duration: z.number() }),
+        execute: async (params) => {
+          if (depsContainer.ref) {
+            depsContainer.ref.pendingWakeup = {
+              duration: (params as { duration: number }).duration,
+              note: 'wake me later',
+            };
+          }
+          return 'scheduled';
+        },
+      });
+      const toolbox = createToolbox([wakeupTool]) as unknown as RegistryToolbox;
+
+      const services: DurableRunDeps = {
+        options: {
+          generate: async () => ({
+            content: '',
+            toolCalls: [{ name: 'scheduleWakeup', arguments: { duration: 999_999_999 } }],
+          }),
+          toolbox,
+          conversation: createConversationHistory(),
+          stopWhen: noToolCalls(),
+          onMaximumSteps: async () => {
+            throw new Error('handler exploded after wakeup scheduled');
+          },
+        },
+        toolbox,
+      };
+      depsContainer.ref = services;
+
+      try {
+        const result = await runToCompletion(
+          engine,
+          { runId: 'park-skip-oms-error', prompt: 'Go', maximumSteps: 1 },
+          services,
+        );
+
+        // Must complete as an error — NOT park on ctx.sleep despite pendingWakeup being set.
+        expect(result.finishReason).toBe('error');
+        expect(result.errorMessage).toBe('handler exploded after wakeup scheduled');
+        // Park metadata must be absent.
+        expect(result.wakeupNote).toBeUndefined();
+        expect(result.humanWaitSignal).toBeUndefined();
+      } finally {
+        engine[Symbol.dispose]();
+      }
+    });
+  });
+
   describe('onMaximumSteps handler (PRRT_kwDORvupsc6MZErk)', () => {
     /**
      * REGRESSION TESTS for the missing `onMaximumSteps` invocation on the durable

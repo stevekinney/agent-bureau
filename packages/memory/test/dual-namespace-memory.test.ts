@@ -267,6 +267,28 @@ describe('createDualNamespaceMemory — merged-read / private-write', () => {
         expect(page1Ids.has(id)).toBe(false);
       }
     });
+
+    it('strips a caller-supplied namespace so list() still reads private ∪ shared (regression PRRT_kwDORvupsc6MbhPw)', async () => {
+      // The gateway memory route calls memory.list({ namespace, limit, offset }).
+      // createMemory.list gives options.namespace precedence over each memory's
+      // configured namespace, so forwarding it would redirect both underlying
+      // list() calls to the caller namespace (e.g. a session id) instead of the
+      // configured private and shared namespaces — returning empty or wrong
+      // records even though recall() was already fixed to strip this.
+      await privateMemory.remember('Private namespace list entry');
+      await sharedMemory.remember('Shared namespace list entry');
+
+      // Simulate the gateway passing a caller/session namespace.
+      const results = await dualMemory.list({ namespace: 'some-session-id', limit: 10 });
+
+      // Without the strip, both underlying list() calls target 'some-session-id'
+      // (empty) and return []. With the strip, the configured private/shared
+      // namespaces are read and merged as usual.
+      expect(results.length).toBe(2);
+      const namespaces = results.map((r) => r.metadata.namespace);
+      expect(namespaces).toContain('agent-researcher');
+      expect(namespaces).toContain('bureau-global');
+    });
   });
 
   // ── delete path ─────────────────────────────────────────────────────────
