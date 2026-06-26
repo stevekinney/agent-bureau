@@ -558,6 +558,45 @@ describe('createBureau (builder) — skills()', () => {
     expect(catalog).toContain('research');
     expect(catalog).not.toContain('disabled-skill');
   });
+
+  // ---------------------------------------------------------------------------
+  // Regression: PRRT_kwDORvupsc6MZozd — catalog advertises activate_skill tool
+  // that the builder never adds to the run toolbox.
+  //
+  // The builder path uses SkillProviderLike (listSkills + isEnabled only), which
+  // does NOT expose loadSkill/listResources/loadResource. The activate_skill
+  // tool requires those methods to function. Since the builder never wires the
+  // activate_skill tool into the run toolbox, the catalog must NOT instruct the
+  // model to call it — doing so would cause the model to emit an unavailable
+  // tool call and fail.
+  //
+  // Per plan.md D4, the builder path provides "catalog injection on step 0"
+  // only (the same hook pattern as identity), not full activation tooling.
+  // ---------------------------------------------------------------------------
+
+  it('skill catalog does not instruct the model to call activate_skill (tool not wired)', async () => {
+    const mockProvider = {
+      listSkills: async () => [{ name: 'research', description: 'Research skills' }],
+      isEnabled: async (_name: string) => true,
+    };
+
+    const { capturingGenerate, capturedMessages } = makeCapturingGenerate();
+    const bureau = createBureau()
+      .skills(mockProvider)
+      .agent({ name: 'a', generate: capturingGenerate });
+
+    await bureau.run('a', 'input').result();
+
+    const systemMessages = capturedMessages.filter((m) => m.role === 'system');
+    const catalogMessage = systemMessages.find(
+      (m) => typeof m.content === 'string' && m.content.includes('<available_skills>'),
+    );
+    expect(catalogMessage).toBeDefined();
+    const catalog = catalogMessage?.content as string;
+    // The catalog must NOT reference activate_skill — the builder never wires
+    // that tool, so advertising it would cause the model to call a non-existent tool.
+    expect(catalog).not.toContain('activate_skill');
+  });
 });
 
 // ---------------------------------------------------------------------------
