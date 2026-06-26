@@ -9,8 +9,11 @@ const packageRoot = join(import.meta.dir, '..');
 
 const exports = packageJson.exports as Record<string, Record<string, string> | string>;
 
+const distDir = join(packageRoot, 'dist');
+const distExists = existsSync(distDir);
+
 describe('operative package exports', () => {
-  it('all dist-referencing exports map entries point to existing files', () => {
+  it.skipIf(!distExists)('all dist-referencing exports map entries point to existing files', () => {
     const missing: string[] = [];
 
     for (const [subpath, conditions] of Object.entries(exports)) {
