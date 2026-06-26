@@ -3,7 +3,7 @@ import type { TextValueStore } from '@lostgradient/weft/storage';
 import type { MemoryLike, StepResultLike } from '../skill-memory';
 import type { SkillProvider } from '../types';
 import type { IdentityProviderLike } from './proposals';
-import { saveProposal } from './proposals';
+import { isRejectedPattern, saveProposal } from './proposals';
 
 // ── Sink Definitions ────────────────────────────────────────────────────────
 
@@ -175,6 +175,10 @@ async function routeToProposal(
   result: StepResultLike,
   proposalSummary?: (runSummary: string, content: string) => string,
 ): Promise<void> {
+  // Do not resurrect proposals the human has already rejected.
+  // rejectProposal() records the content hash precisely to prevent this.
+  if (await isRejectedPattern(storage, content)) return;
+
   const runSummary = summarizeStep(result);
   const defaultSummary = proposalSummary
     ? proposalSummary(runSummary, content)
