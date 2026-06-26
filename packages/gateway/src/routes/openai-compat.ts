@@ -96,8 +96,11 @@ function formatChatCompletion(model: string, content: string): Record<string, un
 }
 
 /**
- * Format a run summary as an SSE chunk and final done event.
- * Returns the SSE data lines to stream.
+ * Format a run result as an OpenAI-compat SSE content chunk.
+ *
+ * When `isLast` is true the delta is empty and `finish_reason` is `'stop'`
+ * (the sentinel chunk that closes the assistant turn). When false, `content`
+ * is the assistant text and `finish_reason` is `null`.
  */
 function formatSseChunk(model: string, content: string, isLast: boolean): string {
   const chunk = {
@@ -112,6 +115,26 @@ function formatSseChunk(model: string, content: string, isLast: boolean): string
         finish_reason: isLast ? 'stop' : null,
       },
     ],
+  };
+  return `data: ${JSON.stringify(chunk)}\n\n`;
+}
+
+/**
+ * Format a run failure as an in-band SSE error event.
+ *
+ * Once the SSE stream body has started (status 200 is committed), HTTP-level
+ * error codes can no longer be sent. OpenAI-compatible clients expect errors
+ * on the streaming path to arrive as `{"error":{...}}` SSE events — this
+ * matches the wire format used by the OpenAI API itself.
+ */
+function formatSseErrorChunk(model: string, message: string): string {
+  const chunk = {
+    id: `chatcmpl-${crypto.randomUUID()}`,
+    object: 'chat.completion.chunk',
+    created: Math.floor(Date.now() / 1000),
+    model,
+    error: { message, type: 'server_error' },
+    choices: [],
   };
   return `data: ${JSON.stringify(chunk)}\n\n`;
 }
@@ -187,11 +210,92 @@ export function createOpenAICompatRoutes(bureau: Bureau) {
       throw error;
     }
 
-    // createRun() only registers the ActiveRun and returns a RunSummary — the
-    // provider loop continues asynchronously. Await the run's result promise
-    // before reading stepDetails so the response is never empty with a live provider.
-    // The loop resolves for all terminal states (completed, error, aborted); the
-    // try/catch guards against unexpected rejections only.
+    // ── SSE streaming path ───────────────────────────────────────────────────
+    // Return the Response immediately — before the run settles — so the HTTP
+    // connection opens and the client receives headers right away. The run
+    // loop continues asynchronously; events feed into the ReadableStream.
+    //
+    // Errors that occur AFTER the stream opens are delivered in-band as an
+    // OpenAI-compat error chunk (the HTTP status is already committed to 200 at
+    // this point; returning a 500 is impossible once the body has started).
+    if (stream) {
+      const runState = bureau.store.getRun(summary.id);
+
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          const encoder = new TextEncoder();
+
+          function enqueue(chunk: string): void {
+            controller.enqueue(encoder.encode(chunk));
+          }
+
+          function close(): void {
+            try {
+              controller.close();
+            } catch {
+              // Already closed — ignore.
+            }
+          }
+
+          if (!runState) {
+            // No active run state — run may have already settled synchronously.
+            // Emit a single empty content chunk and close.
+            enqueue(formatSseChunk(agentName, '', false));
+            enqueue(formatSseChunk(agentName, '', true));
+            enqueue('data: [DONE]\n\n');
+            close();
+            return;
+          }
+
+          // `run.completed` fires in ALL terminal cases (success, error, or
+          // budget-exceeded). The `finishReason` field discriminates:
+          //   - 'stop-condition' / 'maximum-steps' — success → send content chunk
+          //   - 'error' / 'elicitation-denied' / 'budget-exceeded' — failure → send error chunk
+          // Note: the loop also dispatches `run.error` BEFORE `run.completed` on
+          // the error path. We listen only to `run.completed` so we never enqueue
+          // into an already-closed stream.
+          runState.activeRun.addEventListener('run.completed', (event) => {
+            const isError =
+              event.finishReason === 'error' ||
+              event.finishReason === 'budget-exceeded' ||
+              event.finishReason === 'elicitation-denied';
+            if (isError) {
+              const errorMessage =
+                event.error instanceof Error ? event.error.message : 'Run failed with an error';
+              enqueue(formatSseErrorChunk(agentName, errorMessage));
+            } else {
+              enqueue(formatSseChunk(agentName, event.content, false));
+              enqueue(formatSseChunk(agentName, '', true));
+            }
+            enqueue('data: [DONE]\n\n');
+            close();
+          });
+
+          // `run.aborted` fires when the run is aborted (no `run.completed`
+          // counterpart is dispatched on the abort path).
+          runState.activeRun.addEventListener('run.aborted', () => {
+            enqueue(formatSseErrorChunk(agentName, 'Run was aborted before completion'));
+            enqueue('data: [DONE]\n\n');
+            close();
+          });
+        },
+      });
+
+      return new Response(body, {
+        status: 200,
+        headers: {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache, no-transform',
+          'X-Accel-Buffering': 'no',
+        },
+      });
+    }
+
+    // ── Non-streaming path ───────────────────────────────────────────────────
+    // Await the run's result promise before reading stepDetails so the response
+    // is never empty with a live provider. The loop resolves for all terminal
+    // states (completed, error, aborted); the try/catch guards against
+    // unexpected rejections only.
     const runState = bureau.store.getRun(summary.id);
     if (runState) {
       try {
@@ -221,23 +325,6 @@ export function createOpenAICompatRoutes(bureau: Bureau) {
 
     const lastStep = runDetail.stepDetails.at(-1);
     const textContent = lastStep?.content ?? '';
-
-    if (stream) {
-      // SSE streaming response: send a single content chunk then done.
-      const sse =
-        formatSseChunk(agentName, textContent, false) +
-        formatSseChunk(agentName, '', true) +
-        'data: [DONE]\n\n';
-
-      return new Response(sse, {
-        status: 200,
-        headers: {
-          'Content-Type': 'text/event-stream',
-          'Cache-Control': 'no-cache, no-transform',
-          'X-Accel-Buffering': 'no',
-        },
-      });
-    }
 
     return context.json(formatChatCompletion(agentName, textContent), 200);
   });
