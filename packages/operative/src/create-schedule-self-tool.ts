@@ -1,4 +1,5 @@
 import type { ScheduleOverlapPolicy, ScheduleSpec } from '@lostgradient/weft';
+import { z } from 'zod';
 
 import type { AgentScheduleHandle } from './durable/schedule-agent';
 
@@ -140,6 +141,45 @@ export function createScheduleSelfTool(options: CreateScheduleSelfToolOptions) {
       "Register a recurring schedule for this agent's own name. " +
       'Provide a cron expression or interval (e.g. every 6h). ' +
       'Supply a session id to accumulate runs into an ongoing conversation.',
+
+    /**
+     * Zod schema for the tool's input arguments. Armorer's `createToolbox`
+     * calls `normalizeSchema` on this field; without it the schema defaults to
+     * `z.object({})` which strips `spec`, `input`, `session`, and `overlap`
+     * before `execute` receives them, causing the tool to fail with undefined
+     * values.
+     */
+    input: z.object({
+      spec: z
+        .union([
+          z.object({ cron: z.string(), every: z.never().optional() }).describe('Cron schedule'),
+          z
+            .object({ every: z.union([z.number(), z.string()]), cron: z.never().optional() })
+            .describe('Fixed interval'),
+        ])
+        .describe(
+          'The recurrence specification. Provide either cron (a cron expression) or ' +
+            'every (a fixed interval such as "6h", "30m", or milliseconds as a number).',
+        ),
+      input: z
+        .string()
+        .describe('The prompt or input to inject into each scheduled fire of this agent.'),
+      session: z
+        .string()
+        .optional()
+        .describe(
+          'Optional session id to accumulate all scheduled fires into. When present, ' +
+            'each fire appends a new run to this session. When absent, each fire starts ' +
+            'a fresh standalone session.',
+        ),
+      overlap: z
+        .enum(['skip', 'queue', 'cancel-running', 'allow'])
+        .optional()
+        .describe(
+          'How to handle a tick that fires while a previous run is still in progress. ' +
+            'Defaults to skip.',
+        ),
+    }),
 
     /**
      * Execute the `scheduleSelf` tool. Registers a durable Weft schedule for
