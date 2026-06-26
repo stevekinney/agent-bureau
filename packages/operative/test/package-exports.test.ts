@@ -6,11 +6,16 @@ import { describe, expect, it } from 'bun:test';
 import packageJson from '../package.json';
 
 const packageRoot = join(import.meta.dir, '..');
+const distDir = join(packageRoot, 'dist');
+const distBuilt = existsSync(distDir);
 
 const exports = packageJson.exports as Record<string, Record<string, string> | string>;
 
 describe('operative package exports', () => {
-  it('all dist-referencing exports map entries point to existing files', () => {
+  // This assertion requires a prior build. It passes when run via `turbo run test`
+  // (which declares "build" as a dependency) but is skipped on a clean checkout
+  // where dist/ has not yet been produced.
+  it.skipIf(!distBuilt)('all dist-referencing exports map entries point to existing files', () => {
     const missing: string[] = [];
 
     for (const [subpath, conditions] of Object.entries(exports)) {
