@@ -84,17 +84,25 @@ export function createDualNamespaceMemory(privateMemory: Memory, sharedMemory?: 
       query: string,
       searchOptions?: MemorySearchOptions,
     ): Promise<MemorySearchResult[]> {
+      // Strip a caller-supplied `namespace` from the search options. createMemory's
+      // recall gives `options.namespace` precedence over each memory's configured
+      // private/shared namespace, so forwarding it would redirect the underlying
+      // reads away from the intended pools (and usually return nothing). Each
+      // underlying memory must read its own configured namespace. Same rationale
+      // as the namespace suppression in remember()/rememberOnce()/forget().
+      const { namespace: _namespace, ...recallOptions } = searchOptions ?? {};
+
       if (sharedMemory === undefined) {
         // Standalone agent: no shared pool, recall private only.
-        return privateMemory.recall(query, searchOptions);
+        return privateMemory.recall(query, recallOptions);
       }
 
-      const limit = searchOptions?.limit ?? 10;
+      const limit = recallOptions.limit ?? 10;
       // Over-fetch from each namespace so that after merging we can still
       // return a full `limit` of high-quality results. A 2× multiplier gives
       // each side room without materialising the full corpus.
       const fetchLimit = limit * 2;
-      const mergedOptions = { ...searchOptions, limit: fetchLimit };
+      const mergedOptions = { ...recallOptions, limit: fetchLimit };
 
       const [privateResults, sharedResults] = await Promise.all([
         privateMemory.recall(query, mergedOptions),

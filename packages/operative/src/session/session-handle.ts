@@ -577,7 +577,11 @@ export function createSessionHandle(
           outerEmitter.complete();
         },
         [Symbol.dispose](): void {
+          // Mirror abort(): fire the outer AbortController (stops billing) and
+          // forward to the inner run so engine.cancel() is also triggered for
+          // workflows parked in ctx.sleep or ctx.waitForSignal.
           abortController.abort();
+          activeInnerRun?.abort();
           outerEmitter.complete();
         },
       };
@@ -834,6 +838,17 @@ export function createSessionHandle(
             ? maxDuration
             : parseDuration(maxDuration)
           : undefined;
+
+      // Reject string maxDuration values that parsed to 0 ms — same guard as
+      // `every`. parseDuration returns 0 for unrecognised strings (e.g. '24h'
+      // instead of 'PT24H'), which would make the deadline check fire before the
+      // first tick ever runs, silently skipping the entire monitor loop.
+      if (typeof maxDuration === 'string' && maxMs === 0) {
+        throw new Error(
+          `monitor({ maxDuration }) received an invalid duration string: "${maxDuration}". ` +
+            `Use a number (milliseconds) or an ISO-8601 PT duration such as 'PT24H' or 'PT1H30M'.`,
+        );
+      }
 
       const startedAt = Date.now();
       let tick = 0;

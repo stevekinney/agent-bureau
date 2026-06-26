@@ -154,6 +154,28 @@ describe('createDualNamespaceMemory — merged-read / private-write', () => {
       expect(namespaces).toContain('bureau-global');
     });
 
+    it('strips a caller-supplied namespace so recall still reads private ∪ shared (regression PRRT_kwDORvupsc6Ma-Dx)', async () => {
+      // The bureau memory hook calls recall(query, { namespace: sessionId }).
+      // createMemory.recall gives options.namespace precedence over each memory's
+      // configured namespace, so forwarding it would redirect both underlying
+      // reads to the (empty) caller namespace and return nothing. recall() must
+      // strip it, mirroring remember()/rememberOnce()/forget().
+      await privateMemory.remember('Namespace isolation in recall');
+      await sharedMemory.remember('Namespace isolation shared note');
+
+      const results = await dualMemory.recall('namespace isolation', {
+        namespace: 'some-session-id',
+      });
+
+      // Without the strip, both underlying recalls would target 'some-session-id'
+      // (empty) and return []. With the strip, the configured private/shared
+      // namespaces are read as usual.
+      expect(results.length).toBeGreaterThanOrEqual(2);
+      const namespaces = results.map((r) => r.metadata.namespace);
+      expect(namespaces).toContain('agent-researcher');
+      expect(namespaces).toContain('bureau-global');
+    });
+
     it('results are sorted by score descending across both namespaces', async () => {
       await privateMemory.remember('TypeScript type inference guide');
       await sharedMemory.remember('TypeScript generics deep dive');

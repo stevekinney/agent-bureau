@@ -2061,6 +2061,97 @@ describe('regression: abort() forwards to the durable inner run (PRRT_kwDORvupsc
 });
 
 // ---------------------------------------------------------------------------
+// Regression: PRRT_kwDORvupsc6Ma-Dr — [Symbol.dispose]() forwards to the inner
+// durable run so engine.cancel() is called for parked workflows
+// ---------------------------------------------------------------------------
+
+describe('regression: [Symbol.dispose]() forwards to the durable inner run (PRRT_kwDORvupsc6Ma-Dr)', () => {
+  it('calls engine.cancel() on the durable run when AgentRun[Symbol.dispose]() is called', async () => {
+    const cancelledIds: string[] = [];
+
+    // Signal from inside engine.start() so we know activeInnerRun is set.
+    let signalStarted!: () => void;
+    const engineStarted = new Promise<void>((resolve) => {
+      signalStarted = resolve;
+    });
+
+    // cancel() resolves this so the blocked handle.result() can reject and the
+    // run can terminate after the assertion.
+    let rejectHandle!: (err: Error) => void;
+    const handleResult = new Promise<never>((_resolve, reject) => {
+      rejectHandle = reject;
+    });
+
+    // Fake engine: start() signals the test and blocks; cancel() records the id.
+    const fakeEngine = {
+      start: async (_type: string, _input: unknown, opts: { id: string; services?: unknown }) => {
+        signalStarted();
+        return {
+          id: opts.id,
+          result: () => handleResult,
+          abort: () => {},
+          signal: AbortSignal.abort(),
+          addEventListener: () => {},
+          removeEventListener: () => {},
+          [Symbol.asyncIterator]: async function* () {},
+        };
+      },
+      cancel: async (id: string) => {
+        cancelledIds.push(id);
+        rejectHandle(new Error('cancelled by dispose'));
+      },
+      signal: async () => {},
+      update: async () => {},
+      query: async () => {},
+    } as unknown as AnyRunEngine;
+
+    const fakeCheckpointStore = {
+      loadCheckpoint: async (_runId: string) => ({
+        conversation: null,
+        cursor: { totalUsage: {}, lastContent: '', schemaAttempts: 0 },
+        steps: [],
+      }),
+    };
+
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+    const sessionId = 'dispose-forward-session';
+
+    const h = createSessionHandle(sessionId, {
+      store,
+      agentName: 'dispose-agent',
+      engine: fakeEngine,
+      checkpointStore:
+        fakeCheckpointStore as unknown as import('../durable/checkpoint-store').CheckpointStore,
+      runOptions: {
+        generate: createInstantGenerate(),
+        toolbox: createToolbox([]) as unknown as Toolbox,
+        maximumSteps: 1,
+      },
+    });
+
+    const agentRun = h.run('go');
+
+    // Wait until engine.start() has been called — activeInnerRun is now set.
+    await engineStarted;
+
+    // Dispose the outer AgentRun handle (the public API named in the finding).
+    agentRun[Symbol.dispose]();
+
+    // Allow disposal to propagate through the promise chain.
+    await yieldToPortableEventLoop();
+
+    // engine.cancel() must have been called, proving [Symbol.dispose]() forwarded
+    // through activeInnerRun to the Weft engine — not just firing the AbortController.
+    // Before the fix, cancel() was never called, leaving parked workflows running.
+    expect(cancelledIds).toContain(`${sessionId}:0`);
+
+    // Swallow the result promise to avoid unhandled rejection.
+    await agentRun.result().catch(() => {});
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Regression: PRRT_kwDORvupsc6MZ-vp — only mark session aborted when cancel succeeds
 // ---------------------------------------------------------------------------
 
@@ -2164,6 +2255,80 @@ describe('regression: monitor() rejects invalid duration strings instead of spin
     });
     // maxDuration expires before the first inter-tick sleep, returning false.
     expect(typeof result).toBe('boolean');
+  });
+
+  // Regression: PRRT_kwDORvupsc6Ma-Dt — invalid string maxDuration silently
+  // skips all ticks. parseDuration('5m') = 0, so Date.now()-startedAt >= 0 is
+  // immediately true → returns false before the first tick runs.
+  it('throws immediately when maxDuration is a non-ISO-8601 duration string', async () => {
+    const { handle } = createSessionHandleFixture();
+
+    let tickCount = 0;
+    let caught: unknown;
+    try {
+      await handle.monitor({
+        every: 1,
+        input: 'check',
+        until: () => {
+          tickCount += 1;
+          return false;
+        },
+        maxDuration: '5m', // non-ISO-8601 — parseDuration returns 0
+      });
+    } catch (err) {
+      caught = err;
+    }
+    // Must throw, not silently return false.
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toMatch(/invalid duration string/i);
+    // No tick should have run before the throw.
+    expect(tickCount).toBe(0);
+  });
+
+  it('throws for other common mis-formatted maxDuration strings', async () => {
+    const { handle } = createSessionHandleFixture();
+
+    let caught: unknown;
+    try {
+      await handle.monitor({
+        every: 1,
+        input: 'check',
+        until: () => false,
+        maxDuration: '24h', // should be 'PT24H'
+      });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toMatch(/invalid duration string/i);
+  });
+
+  it('accepts a valid ISO-8601 string for maxDuration without throwing', async () => {
+    const { handle } = createSessionHandleFixture();
+
+    // 'PT0.01S' = 10ms. The first tick runs, then the deadline check fires.
+    const result = await handle.monitor({
+      every: 1,
+      input: 'check',
+      until: () => false,
+      maxDuration: 'PT0.01S', // valid ISO-8601
+    });
+    // Deadline expired before predicate was met.
+    expect(result).toBe(false);
+  });
+
+  it('accepts numeric 0 for maxDuration (zero budget is valid, not an error)', async () => {
+    const { handle } = createSessionHandleFixture();
+
+    // maxDuration: 0 (number) means "already expired" — returns false immediately.
+    // This must NOT throw: the string-only guard should not fire here.
+    const result = await handle.monitor({
+      every: 1,
+      input: 'check',
+      until: () => true,
+      maxDuration: 0,
+    });
+    expect(result).toBe(false);
   });
 });
 
