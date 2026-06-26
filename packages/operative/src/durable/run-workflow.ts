@@ -574,9 +574,23 @@ export function createRunWorkflow(checkpointStore: CheckpointStore) {
         // setting one clears the other. The `else if` below is defense-in-depth —
         // it guarantees exactly one park primitive fires regardless of accumulation
         // state, so the workflow cannot sleep AND then wait for a signal in sequence.
-        if (pendingWakeup !== undefined) {
+        //
+        // CRITICAL: Only park on successful / maximum-steps outcomes. A terminal
+        // failure (`error`, `aborted`, `elicitation-denied`, `budget-exceeded`) must
+        // return immediately — parking on a failed/aborted run would leave the Weft
+        // workflow status as `running` until the sleep/signal fires, hiding the real
+        // outcome and blocking the caller from seeing the error result. This covers
+        // both a failing step (outcome.kind === 'abort' | 'error') and a failing
+        // `onMaximumSteps` handler (tail.kind === 'error'), because both update
+        // `finishReason` before we reach this point.
+        const isFailureOutcome =
+          finishReason === 'error' ||
+          finishReason === 'aborted' ||
+          finishReason === 'elicitation-denied' ||
+          finishReason === 'budget-exceeded';
+        if (!isFailureOutcome && pendingWakeup !== undefined) {
           yield* ctx.sleep(pendingWakeup.duration);
-        } else if (pendingHumanWait !== undefined) {
+        } else if (!isFailureOutcome && pendingHumanWait !== undefined) {
           // === F3 — HITL human-input gate (requestHumanInput tool) ===
           yield* ctx.waitForSignal(pendingHumanWait.signalName);
         }
@@ -591,8 +605,13 @@ export function createRunWorkflow(checkpointStore: CheckpointStore) {
           ...(errorMessage !== undefined ? { errorMessage } : {}),
           ...(abortReason !== undefined ? { abortReason } : {}),
           ...(schemaValidation !== undefined ? { schemaValidation } : {}),
-          ...(pendingWakeup?.note !== undefined ? { wakeupNote: pendingWakeup.note } : {}),
-          ...(pendingHumanWait !== undefined
+          // Only include park metadata on non-failure outcomes: a failed/aborted run
+          // never actually parks (the park block above is gated on !isFailureOutcome),
+          // so surfacing stale park state in the result would mislead callers.
+          ...(!isFailureOutcome && pendingWakeup?.note !== undefined
+            ? { wakeupNote: pendingWakeup.note }
+            : {}),
+          ...(!isFailureOutcome && pendingHumanWait !== undefined
             ? { humanWaitSignal: pendingHumanWait.signalName }
             : {}),
         } satisfies AgentRunWorkflowResult;
