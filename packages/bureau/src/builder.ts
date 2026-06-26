@@ -324,6 +324,13 @@ function makeBureauHandle<
       return makeBureauHandle(state);
     },
 
+    // ----- generate() -----------------------------------------------------
+
+    generate(generateFunction: GenerateFunction): BureauBuilder<TTools, TAgents> {
+      state.bureauGenerate = generateFunction;
+      return makeBureauHandle<TTools, TAgents>(state);
+    },
+
     // ----- skills() -------------------------------------------------------
 
     skills(provider: SkillProviderLike, policy?: SkillPolicy): BureauBuilder<TTools, TAgents> {
