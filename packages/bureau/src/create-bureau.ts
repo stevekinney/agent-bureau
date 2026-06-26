@@ -1330,16 +1330,6 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     }
   }
 
-  // Resume any durable runs a previous process left in flight. Best-effort: a
-  // recovery failure is logged but never blocks bringing the bureau up.
-  try {
-    await recoverDurableRuns();
-  } catch (error) {
-    console.error(
-      `[bureau] Durable run recovery failed during boot: ${serializeUnknownError(error)}`,
-    );
-  }
-
   // Build the bureau object first so the audit trail can subscribe to its
   // action events via addEventListener. The audit trail is best-effort — a
   // write failure must never crash a run (handled inside createAuditTrail).
@@ -1408,8 +1398,23 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
   // Wire the durable audit trail (Layer B) now that we have a bureau to
   // subscribe to. Only created when a KV store is available; ephemeral
   // bureaus have Layer A only.
+  //
+  // The trail is subscribed BEFORE durable run recovery so that actions
+  // emitted by recovered/reattached runs — including handles that are already
+  // settled, or settle during the awaits inside recoverDurableRuns() — are
+  // captured in the durable trail rather than landing only in the live store.
   if (runtime.kv) {
     auditTrailInstance = createAuditTrail(bureau, runtime.kv);
+  }
+
+  // Resume any durable runs a previous process left in flight. Best-effort: a
+  // recovery failure is logged but never blocks bringing the bureau up.
+  try {
+    await recoverDurableRuns();
+  } catch (error) {
+    console.error(
+      `[bureau] Durable run recovery failed during boot: ${serializeUnknownError(error)}`,
+    );
   }
 
   return bureau;
