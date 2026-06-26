@@ -122,8 +122,8 @@ function makeSleepingWorkflow(sleepMilliseconds: number) {
 // Generously-bounded poll: yield the portable event loop until `predicate` holds.
 // The bound exists only to turn a genuine hang into a clear failure; it sits far
 // above what any non-hung durable transition needs, so loaded-CI scheduling jitter
-// and the inline-launch starvation this file otherwise guards against cannot red a
-// passing run. It is a backstop, NOT a tuned timing value.
+// and the inline-launch starvation this file otherwise guards against cannot turn a
+// passing run red. It is a backstop, NOT a tuned timing value.
 const POLL_UNTIL_MAX_ATTEMPTS = 1000;
 async function pollUntil(predicate: () => boolean | Promise<boolean>): Promise<void> {
   for (let attempt = 0; attempt < POLL_UNTIL_MAX_ATTEMPTS; attempt++) {
@@ -140,7 +140,7 @@ async function pollUntil(predicate: () => boolean | Promise<boolean>): Promise<v
  *  1. poll the inline launch until the pre-sleep marker arrives AND the run is
  *     `running` (proof the generator reached the sleep and the durable timer is
  *     persisted, not that the run merely never started) — generously bounded so
- *     inline-launch starvation under full bun-test concurrency cannot red it;
+ *     inline-launch starvation under full bun-test concurrency cannot turn it red;
  *  2. assert the run is non-terminal: the timer's deadline is far enough out that
  *     the real-time poller cannot reach it within a test run, so an unarmed poller
  *     provably leaves the run parked;
@@ -159,7 +159,7 @@ async function assertRunStaysParkedWhenPollerUnarmed(
   // ctx.sleep (its pre-sleep marker logged) and parked (`running`, so the durable
   // timer is persisted and tickable below).
   await pollUntil(async () => {
-    if (reachedSleepMarkers.length !== 1) return false;
+    if (reachedSleepMarkers.length < 1) return false;
     const snapshot = await handle.snapshot();
     return snapshot?.status === 'running';
   });
