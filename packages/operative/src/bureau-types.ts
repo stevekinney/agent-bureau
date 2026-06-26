@@ -310,6 +310,16 @@ export interface BureauBuilder<
   tools<TNew extends ToolMapInput>(t: TNew): BureauBuilder<TTools & NormalizeTools<TNew>, TAgents>;
 
   /**
+   * Set the bureau-level default LLM provider. All agents registered on this
+   * bureau inherit this provider and may override it with their own `generate`
+   * option. The bureau default is the fallback used when `run()` is called on
+   * an agent that does not have its own `generate`.
+   *
+   * Calling `.generate()` multiple times replaces the current default.
+   */
+  generate(generate: AgentGenerateFunction): BureauBuilder<TTools, TAgents>;
+
+  /**
    * Set the bureau's base skill catalog. The provider is inherited by all
    * agents registered on this bureau; individual agents may restrict it via
    * their own `skillPolicy`.
