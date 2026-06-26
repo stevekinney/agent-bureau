@@ -5,20 +5,33 @@ import {
   createFanOutRouting,
   createRoundRobinRouting,
   createSupervisor,
+  TaskCompletedEvent,
+  TaskFailedEvent,
 } from '../src/create-supervisor';
-import type { RunResult } from '../src/types';
+import type { FinishReason, RunResult } from '../src/types';
 
 // ---------------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------------
 
-function makeRunResult(content: string): RunResult {
+function makeRunResult(content: string, finishReason: FinishReason = 'stop-condition'): RunResult {
   return {
     content,
     steps: [],
     conversation: {} as never,
     usage: { inputTokens: 0, outputTokens: 0 },
-    finishReason: 'stop-condition',
+    finishReason,
+  };
+}
+
+function makeFailedRunResult(finishReason: FinishReason, error?: Error, content = ''): RunResult {
+  return {
+    content,
+    steps: [],
+    conversation: {} as never,
+    usage: { inputTokens: 0, outputTokens: 0 },
+    finishReason,
+    error,
   };
 }
 
@@ -95,6 +108,171 @@ describe('createSupervisor', () => {
 
       await supervisor.delegate('first');
       await expect(supervisor.delegate('second')).rejects.toThrow('Maximum delegations');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Regression: PRRT_kwDORvupsc6Ma-Du
+  // A RunResult with a failure finishReason was dispatched as TaskCompletedEvent
+  // and returned as a success result, so supervisors continued as if the
+  // delegated agent succeeded. All failure finish reasons must map to
+  // TaskFailedEvent / result.error before synthesis.
+  // -------------------------------------------------------------------------
+
+  describe('failed agent RunResult (regression PRRT_kwDORvupsc6Ma-Du)', () => {
+    const FAILURE_REASONS: FinishReason[] = [
+      'error',
+      'aborted',
+      'budget-exceeded',
+      'elicitation-denied',
+    ];
+
+    for (const reason of FAILURE_REASONS) {
+      it(`dispatches TaskFailedEvent (not TaskCompletedEvent) when finishReason is "${reason}"`, async () => {
+        const originalError = new Error(`agent failed: ${reason}`);
+        const agent: RegistryAgent = {
+          name: 'worker',
+          async run() {
+            return makeFailedRunResult(reason, originalError);
+          },
+        };
+        const supervisor = createSupervisor({
+          agents: [makeEntry(agent)],
+          routing: () => 'worker',
+        });
+
+        const completedEvents: TaskCompletedEvent[] = [];
+        const failedEvents: TaskFailedEvent[] = [];
+        supervisor.addEventListener(TaskCompletedEvent.type, (e) => completedEvents.push(e));
+        supervisor.addEventListener(TaskFailedEvent.type, (e) => failedEvents.push(e));
+
+        const result = await supervisor.delegate('do something');
+
+        // Must fire TaskFailedEvent, never TaskCompletedEvent
+        expect(failedEvents).toHaveLength(1);
+        expect(completedEvents).toHaveLength(0);
+
+        // The error should be surfaced on the agentResult
+        const agentResult = result.agentResults[0];
+        expect(agentResult?.error).toBe(originalError);
+
+        // Partial RunResult should still be available for introspection
+        expect(agentResult?.result?.finishReason).toBe(reason);
+      });
+    }
+
+    it('surfaces a synthetic Error when RunResult has a failure reason but no .error property', async () => {
+      const agent: RegistryAgent = {
+        name: 'worker',
+        async run() {
+          // budget-exceeded with no attached Error object
+          return makeFailedRunResult('budget-exceeded');
+        },
+      };
+      const supervisor = createSupervisor({
+        agents: [makeEntry(agent)],
+        routing: () => 'worker',
+      });
+
+      const result = await supervisor.delegate('do something');
+      const agentResult = result.agentResults[0];
+      expect(agentResult?.error).toBeInstanceOf(Error);
+      expect((agentResult?.error as Error).message).toContain('budget-exceeded');
+    });
+
+    it('includes the failure in the default synthesis output', async () => {
+      const agent: RegistryAgent = {
+        name: 'worker',
+        async run() {
+          return makeFailedRunResult('error', new Error('something broke'));
+        },
+      };
+      const supervisor = createSupervisor({
+        agents: [makeEntry(agent)],
+        routing: () => 'worker',
+      });
+
+      const result = await supervisor.delegate('do something');
+      expect(result.synthesis).toContain('Error:');
+      expect(result.synthesis).toContain('something broke');
+    });
+
+    it('does not short-circuit synthesis for stop-condition (success)', async () => {
+      const agent: RegistryAgent = {
+        name: 'worker',
+        async run() {
+          return makeRunResult('all done', 'stop-condition');
+        },
+      };
+      const supervisor = createSupervisor({
+        agents: [makeEntry(agent)],
+        routing: () => 'worker',
+      });
+
+      const completedEvents: TaskCompletedEvent[] = [];
+      const failedEvents: TaskFailedEvent[] = [];
+      supervisor.addEventListener(TaskCompletedEvent.type, (e) => completedEvents.push(e));
+      supervisor.addEventListener(TaskFailedEvent.type, (e) => failedEvents.push(e));
+
+      const result = await supervisor.delegate('do something');
+      expect(completedEvents).toHaveLength(1);
+      expect(failedEvents).toHaveLength(0);
+      expect(result.agentResults[0]?.error).toBeUndefined();
+    });
+
+    it('does not treat maximum-steps as a failure', async () => {
+      const agent: RegistryAgent = {
+        name: 'worker',
+        async run() {
+          return makeRunResult('partial output', 'maximum-steps');
+        },
+      };
+      const supervisor = createSupervisor({
+        agents: [makeEntry(agent)],
+        routing: () => 'worker',
+      });
+
+      const completedEvents: TaskCompletedEvent[] = [];
+      const failedEvents: TaskFailedEvent[] = [];
+      supervisor.addEventListener(TaskCompletedEvent.type, (e) => completedEvents.push(e));
+      supervisor.addEventListener(TaskFailedEvent.type, (e) => failedEvents.push(e));
+
+      const result = await supervisor.delegate('do something');
+      expect(completedEvents).toHaveLength(1);
+      expect(failedEvents).toHaveLength(0);
+      expect(result.agentResults[0]?.error).toBeUndefined();
+    });
+  });
+
+  describe('pipeline with failed agent stage (regression PRRT_kwDORvupsc6Ma-Du)', () => {
+    it('short-circuits the pipeline when a stage returns a failure finishReason', async () => {
+      const receivedInputsB: string[] = [];
+      const agentA: RegistryAgent = {
+        name: 'a',
+        async run() {
+          return makeFailedRunResult('error', new Error('stage A failed'));
+        },
+      };
+      const agentB: RegistryAgent = {
+        name: 'b',
+        async run(input) {
+          receivedInputsB.push(input);
+          return makeRunResult(`b: ${input}`);
+        },
+      };
+
+      const supervisor = createSupervisor({
+        agents: [makeEntry(agentA), makeEntry(agentB)],
+        routing: () => 'a',
+      });
+
+      const result = await supervisor.pipeline('initial', [{ agentName: 'a' }, { agentName: 'b' }]);
+
+      // Stage B must NOT have run
+      expect(receivedInputsB).toHaveLength(0);
+      // Only stage A's result should be in agentResults
+      expect(result.agentResults).toHaveLength(1);
+      expect(result.agentResults[0]?.error).toBeInstanceOf(Error);
     });
   });
 
