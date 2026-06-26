@@ -861,4 +861,171 @@ describe('durable agentRun workflow', () => {
       }
     });
   });
+
+  describe('onMaximumSteps handler (PRRT_kwDORvupsc6MZErk)', () => {
+    /**
+     * REGRESSION TESTS for the missing `onMaximumSteps` invocation on the durable
+     * path. Bug: when the step loop exhausted `maximumSteps`, the durable workflow
+     * returned immediately with `finishReason: 'maximum-steps'` and never called
+     * `options.onMaximumSteps`. The in-memory `executeLoop` calls the handler to let
+     * agents synthesize a final answer (e.g. via `createEarlyStoppingHandler`).
+     *
+     * Fix: after the while loop, if no terminal outcome broke early (`!stoppedEarly`),
+     * the handler runs inside `ctx.memo('on-maximum-steps')` so crash-recovery never
+     * re-charges the handler's LLM call. `cursor.lastContent` and the transcript are
+     * updated and persisted when the handler returns a string.
+     */
+
+    /** Build services with an agent that always emits a tool call (never settles). */
+    function makeNeverSettlingServices(
+      options?: Partial<DurableRunDeps['options']>,
+    ): DurableRunDeps {
+      const toolbox = continuingToolbox();
+      return {
+        toolbox,
+        options: {
+          generate: async ({ step }) => ({
+            content: `step ${step}`,
+            toolCalls: [{ name: 'next', arguments: {} }],
+          }),
+          toolbox,
+          conversation: createConversationHistory(),
+          stopWhen: noToolCalls(),
+          ...options,
+        },
+      };
+    }
+
+    it('invokes the handler and propagates its content to the result when the cap is reached', async () => {
+      const { engine } = await buildEngine(new MemoryStorage(), false);
+      let handlerCalled = false;
+
+      const services = makeNeverSettlingServices({
+        onMaximumSteps: async () => {
+          handlerCalled = true;
+          return 'Forced final answer';
+        },
+      });
+
+      try {
+        const result = await runToCompletion(
+          engine,
+          { runId: 'oms-happy', prompt: 'Go', maximumSteps: 2 },
+          services,
+        );
+
+        expect(handlerCalled).toBe(true);
+        expect(result.finishReason).toBe('maximum-steps');
+        expect(result.content).toBe('Forced final answer');
+      } finally {
+        engine[Symbol.dispose]();
+      }
+    });
+
+    it('does not invoke the handler when the loop exits via a stop condition', async () => {
+      const { engine } = await buildEngine(new MemoryStorage(), false);
+      let handlerCalled = false;
+
+      const services = makeNeverSettlingServices({
+        // Override generate to return no tool calls on step 0 → triggers noToolCalls() stop
+        generate: async () => ({ content: 'done', toolCalls: [] }),
+        onMaximumSteps: async () => {
+          handlerCalled = true;
+          return 'Should not appear';
+        },
+      });
+
+      try {
+        const result = await runToCompletion(
+          engine,
+          { runId: 'oms-no-call', prompt: 'Hi', maximumSteps: 10 },
+          services,
+        );
+
+        expect(handlerCalled).toBe(false);
+        expect(result.finishReason).toBe('stop-condition');
+        expect(result.content).toBe('done');
+      } finally {
+        engine[Symbol.dispose]();
+      }
+    });
+
+    it('converts a handler error to finishReason error and propagates its message', async () => {
+      const { engine } = await buildEngine(new MemoryStorage(), false);
+
+      const services = makeNeverSettlingServices({
+        onMaximumSteps: async () => {
+          throw new Error('handler exploded');
+        },
+      });
+
+      try {
+        const result = await runToCompletion(
+          engine,
+          { runId: 'oms-error', prompt: 'Go', maximumSteps: 1 },
+          services,
+        );
+
+        expect(result.finishReason).toBe('error');
+        expect(result.errorMessage).toBe('handler exploded');
+      } finally {
+        engine[Symbol.dispose]();
+      }
+    });
+
+    it('memo short-circuits the handler on recovery — it is not re-invoked', async () => {
+      // Verifies that `ctx.memo('on-maximum-steps')` makes the handler idempotent:
+      // after engine A completes the handler and then crashes (simulated by dispose),
+      // engine B recovering via recoverAll() replays the memo from the checkpoint
+      // instead of re-running the handler. Handler invocation count must be 1.
+      const storage = new MemoryStorage();
+      const runId = 'oms-recovery-memo';
+
+      let handlerCallCount = 0;
+
+      // Engine A: reaches maximumSteps, calls the handler, then is disposed.
+      const a = await buildEngine(storage, false);
+      try {
+        const servicesA: DurableRunDeps = makeNeverSettlingServices({
+          onMaximumSteps: async () => {
+            handlerCallCount++;
+            return 'final answer from A';
+          },
+        });
+
+        await runToCompletion(a.engine, { runId, prompt: 'Go', maximumSteps: 2 }, servicesA);
+      } finally {
+        a.engine[Symbol.dispose]();
+      }
+
+      // The handler ran exactly once during engine A.
+      expect(handlerCallCount).toBe(1);
+
+      // Engine B: recovers the run. The run is already completed (terminal), so
+      // recoverAll finds no non-terminal runs to resume. Confirm the final content
+      // is the one the handler produced (proving it was checkpointed by the memo).
+      const b = await buildEngine(storage, false, async () => ({
+        status: 'available',
+        services: makeNeverSettlingServices({
+          onMaximumSteps: async () => {
+            handlerCallCount++;
+            return 'should not be called on B';
+          },
+        }),
+      }));
+      try {
+        const handles = await b.engine.recoverAll();
+        // The run completed on A, so it is terminal — recoverAll should find
+        // nothing to resume. The handler count stays at 1.
+        expect(handles.length).toBe(0);
+        expect(handlerCallCount).toBe(1);
+
+        // The checkpoint cursor reflects the final content written by engine A.
+        const checkpoint = await b.checkpointStore.loadCheckpoint(runId);
+        expect(checkpoint.cursor.lastContent).toBe('final answer from A');
+      } finally {
+        b.engine[Symbol.dispose]();
+      }
+    });
+  });
 });
