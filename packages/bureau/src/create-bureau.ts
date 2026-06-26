@@ -469,11 +469,16 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       lastRunId: runId,
       lastRunStatus: 'running',
       lastUserMessage: request.message,
-      ...(request.maximumTokens !== undefined ? { lastMaximumTokens: request.maximumTokens } : {}),
+      // Always write these keys (null when absent) so a reused session never
+      // inherits a stale cap from a previous run. A conditional spread would leave
+      // the old value in place when the request omits the field; null is treated as
+      // "unset" by buildRunDepsFromSession (it gates on typeof === 'number'),
+      // so null is a safe sentinel for "caller did not specify a cap" (PRRT_kwDORvupsc6MZ1Mb).
+      lastMaximumTokens: request.maximumTokens ?? null,
       // Persist the per-request step cap too, so a recovered run honours the
       // caller's maximumSteps instead of falling back to the bureau default
       // (PRRT_kwDORvupsc6MZfl5 — mirror of the maximumTokens recovery fix).
-      ...(request.maximumSteps !== undefined ? { lastMaximumSteps: request.maximumSteps } : {}),
+      lastMaximumSteps: request.maximumSteps ?? null,
     });
 
     const activeRun = createActiveRun(

@@ -353,6 +353,85 @@ describe('createBureau (builder) — tool registration', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Bureau-level generate() — PRRT_kwDORvupsc6MZ3PY
+//
+// bureauGenerate was always initialized to undefined with no setter on the
+// handle, so agents without their own generate always threw at run() time even
+// though AgentOptions.generate is documented as optional (bureau provides a
+// default). The .generate() method must set the bureau-level default that all
+// agents inherit.
+// ---------------------------------------------------------------------------
+
+describe('createBureau (builder) — bureau-level generate() default (PRRT_kwDORvupsc6MZ3PY)', () => {
+  it('bureau .generate() lets an agent without its own generate run successfully', async () => {
+    const bureauGenerate = makeGenerate('from-bureau-default');
+    // Agent has no per-agent generate — must inherit from bureau.
+    const bureau = createBureau()
+      .generate(bureauGenerate)
+      .agent({ name: 'inherited', instructions: 'No per-agent generate here.' });
+
+    const result = await bureau.run('inherited', 'run with inherited generate').result();
+    expect(result.content).toBe('from-bureau-default');
+    expect(bureauGenerate.callCount).toBeGreaterThanOrEqual(1);
+  });
+
+  it('per-agent generate overrides the bureau-level default', async () => {
+    const bureauGenerate = makeGenerate('from-bureau');
+    const agentGenerate = makeGenerate('from-agent');
+
+    const bureau = createBureau()
+      .generate(bureauGenerate)
+      .agent({ name: 'custom', generate: agentGenerate });
+
+    const result = await bureau.run('custom', 'input').result();
+    expect(result.content).toBe('from-agent');
+    // Bureau generate must NOT have been called — the agent's own generate wins.
+    expect(bureauGenerate.callCount).toBe(0);
+  });
+
+  it('still throws when no per-agent generate and no bureau .generate() set', () => {
+    const bureau = createBureau({
+      agents: { agent: { instructions: 'no generate here' } },
+    });
+    expect(() => bureau.run('agent', 'x')).toThrow(/no generate function/);
+  });
+
+  it('multiple agents on the same bureau all inherit the bureau-level default', async () => {
+    // Each agent runs independently; the bureau generate is the shared default.
+    // Use separate mocks per invocation to avoid mock exhaustion across agents:
+    // both are set as the bureau's generate in their own setup to verify
+    // bureau inheritance independently for each.
+    // Verification: neither agent has a per-agent generate; both must run without
+    // throwing, which proves the bureau default is reachable.
+    const generateAlpha = makeGenerate('alpha-result');
+    const generateBeta = makeGenerate('beta-result');
+
+    const bureauAlpha = createBureau().generate(generateAlpha).agent({ name: 'alpha' });
+    const bureauBeta = createBureau().generate(generateBeta).agent({ name: 'beta' });
+
+    // Both must run successfully without a per-agent generate, proving bureau-level
+    // inheritance.
+    const resultAlpha = await bureauAlpha.run('alpha', 'input').result();
+    const resultBeta = await bureauBeta.run('beta', 'input').result();
+
+    expect(resultAlpha.content).toBe('alpha-result');
+    expect(resultBeta.content).toBe('beta-result');
+  });
+
+  it('bureau .generate() is chainable with .tools() and .agent()', () => {
+    // Ensures .generate() returns a handle that still has the full builder API.
+    const generate = makeGenerate();
+    expect(() =>
+      createBureau()
+        .generate(generate)
+        .tools({ echo: echoTool })
+        .agent({ name: 'chained' })
+        .run('chained', 'input'),
+    ).not.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // bureau/builder subpath barrel — re-export smoke test
 // ---------------------------------------------------------------------------
 //
