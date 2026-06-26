@@ -396,4 +396,62 @@ describe('OpenAI-compat route (POST /v1/chat/completions)', () => {
       expect(text).toContain('[DONE]');
     });
   });
+
+  describe('SSE streaming: client disconnect aborts the run (regression: PRRT_kwDORvupsc6MarAf)', () => {
+    it('aborts the active run when the client cancels the stream', async () => {
+      // Regression: with the SSE response opened before the run settles, a client
+      // disconnect (stream cancel) left the agent run executing — and billing
+      // provider tokens — with no reader. The fix wires the ReadableStream's
+      // cancel() to runState.activeRun.abort(). Here we gate generate on a promise
+      // that never resolves so the run stays in-flight, then cancel the response
+      // body and assert the run was aborted.
+      // A realistic provider call: it hangs until its abort signal fires, then
+      // rejects with an abort error — exactly how a real streaming provider drops
+      // when the run is aborted. Without the fix's cancel()→abort() wiring, the
+      // signal never fires and this generate hangs forever.
+      const generate: GenerateFunction = (context) =>
+        new Promise((_resolve, reject) => {
+          context.signal?.addEventListener('abort', () => {
+            reject(new Error('aborted'));
+          });
+        });
+
+      const gateway = await createTestGateway({ generate });
+
+      const response = await requestJSON(gateway, '/v1/chat/completions', {
+        method: 'POST',
+        body: JSON.stringify({
+          model: 'bureau',
+          messages: [{ role: 'user', content: 'Disconnect test' }],
+          stream: true,
+        }),
+      });
+
+      expect(response.status).toBe(200);
+      expect(response.body).not.toBeNull();
+
+      // The run is registered and running (generate is gated forever).
+      const runs = [...gateway.bureau.store.getState().runs.values()];
+      const runState = runs[0];
+      expect(runState).toBeDefined();
+
+      let aborted = false;
+      runState!.activeRun.addEventListener('run.aborted', () => {
+        aborted = true;
+      });
+
+      // Simulate the client disconnecting: cancel the response body stream.
+      await response.body!.cancel();
+      // Let the abort propagate through the run loop's event dispatch.
+      await Promise.resolve();
+      await Promise.resolve();
+
+      // The stream's cancel() must have aborted the active run, which fires
+      // `run.aborted`. (Pre-fix, the stream had no cancel() handler, so the run
+      // kept executing and this event never fired.)
+      expect(aborted).toBe(true);
+
+      gateway.bureau.dispose();
+    });
+  });
 });
