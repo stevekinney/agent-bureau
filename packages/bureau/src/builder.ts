@@ -141,10 +141,23 @@ function toolboxFromMap(toolsMap: Record<string, unknown>): Toolbox {
     ) {
       // Plain { execute } object: normalize to an armorer Tool.
       // Cast is justified: execute is validated as a function above.
-      const { execute } = value as {
+      // Forward `input` when provided so LLM arguments are not stripped.
+      const { execute, input } = value as {
         execute: (params: Record<string, unknown>) => Promise<unknown>;
+        input?: unknown;
       };
-      entries.push(createTool({ name: key, description: key, execute }));
+      entries.push(
+        createTool({
+          name: key,
+          description: key,
+          execute,
+          // Forward the caller's Zod schema (or raw shape) so Armorer uses it
+          // instead of normalizing to z.object({}) which would strip all args.
+          ...(input !== undefined && {
+            input: input as Parameters<typeof createTool>[0]['input'],
+          }),
+        }),
+      );
     } else {
       throw new Error(
         `bureau.tools(): value at key "${key}" is not a valid tool entry. ` +

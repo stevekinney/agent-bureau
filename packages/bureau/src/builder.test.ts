@@ -350,6 +350,46 @@ describe('createBureau (builder) — tool registration', () => {
         .agent({ name: 'a', generate }),
     ).not.toThrow();
   });
+
+  // ---------------------------------------------------------------------------
+  // Regression: PRRT_kwDORvupsc6MaaR1 — plain { execute } tools without an
+  // input schema caused Armorer to normalize missing schemas to z.object({}),
+  // which strips all LLM-provided arguments before execute() is called.
+  //
+  // Fix: forward the `input` schema from the { execute, input } entry to
+  // createTool so Armorer uses the caller-supplied schema and arguments pass
+  // through intact.
+  // ---------------------------------------------------------------------------
+
+  it('forwards the input schema from a { execute, input } entry so LLM arguments are not stripped (PRRT_kwDORvupsc6MaaR1)', async () => {
+    let capturedArgs: Record<string, unknown> | undefined;
+
+    // Step 1: model emits a tool call with { a: 5, b: 3 }
+    // Step 2: model receives the result and responds with no further tool calls
+    const generate = createMockGenerate([
+      { content: '', toolCalls: [{ name: 'add', arguments: { a: 5, b: 3 } }] },
+      { content: 'done', toolCalls: [] },
+    ]);
+
+    const bureau = createBureau()
+      .tools({
+        add: {
+          execute: async (params: { a: number; b: number }) => {
+            capturedArgs = params as Record<string, unknown>;
+            return params.a + params.b;
+          },
+          input: z.object({ a: z.number(), b: z.number() }),
+        } as unknown as typeof echoTool, // cast required: ToolMapInput types are phantom-only
+      })
+      .agent({ name: 'calc', generate });
+
+    await bureau.run('calc', 'add 5 and 3').result();
+
+    // Before the fix, capturedArgs was {} because Armorer stripped args via
+    // z.object({}).parse(). After the fix, the schema is forwarded and args
+    // pass through intact.
+    expect(capturedArgs).toEqual({ a: 5, b: 3 });
+  });
 });
 
 // ---------------------------------------------------------------------------
