@@ -11,7 +11,7 @@ import { createActiveRun } from '../create-run';
 import { BudgetExceededError, ElicitationDeniedError } from '../errors';
 import { ToolErrorBubbleEvent, ToolSettledBubbleEvent, ToolStartedBubbleEvent } from '../events';
 import type { OperativeHookMap } from '../hooks';
-import { spyEngine } from '../test/durable-engine';
+import { createManualDurableEngine, spyEngine } from '../test/durable-engine';
 import { createMockGenerate } from '../test/index';
 import type { RunOptions, RunResult } from '../types';
 import { createDurableActiveRun, reattachDurableActiveRun } from './active-run-adapter';
@@ -725,6 +725,103 @@ describe('createRun with durable routing', () => {
     } finally {
       context.engine[Symbol.dispose]();
     }
+  });
+
+  // Regression: PRRT_kwDORvupsc6MZ-vs — when engine.cancel() wins the B6 abort
+  // race (handle.result() rejects with "Workflow cancelled"), the abort result was
+  // built from an empty run state and the original seed conversation, losing any
+  // steps the durable workflow had already checkpointed. The fix loads the
+  // checkpoint before finalizing the abort, matching the normal durable summary path.
+  it('preserves checkpointed steps and usage when cancel wins the B6 abort race', async () => {
+    const storage = new MemoryStorage();
+    const checkpointStore = createCheckpointStore(
+      textValueStore(storage, { disposeUnderlyingStorage: false }),
+    );
+    const { engine } = createManualDurableEngine();
+
+    const runId = 'b6-cancel-wins-with-checkpoint';
+
+    // Pre-populate the checkpoint store with a completed step and usage —
+    // simulating a multi-step run that checkpointed before cancel() won.
+    await checkpointStore.saveCursor(runId, {
+      step: 1,
+      totalUsage: { prompt: 42, completion: 17, total: 59 },
+      lastContent: 'step 0 content',
+      schemaAttempts: 0,
+    });
+    await checkpointStore.saveStep(runId, {
+      step: 0,
+      content: 'step 0 content',
+      toolCalls: [],
+      results: [],
+      usage: { prompt: 42, completion: 17, total: 59 },
+      final: true,
+    });
+
+    const activeRun = createDurableActiveRun(
+      { engine, checkpointStore },
+      {
+        runId,
+        sessionId: runId,
+        options: runOptions(async () => ({ content: 'unused', toolCalls: [] })),
+        prompt: 'Hello',
+      },
+    );
+
+    let abortFired = false;
+    activeRun.addEventListener('run.aborted', () => {
+      abortFired = true;
+    });
+
+    // Trigger cancel() which rejects the handle with 'Workflow cancelled'
+    await Promise.resolve();
+    activeRun.abort();
+
+    const result = await activeRun.result;
+
+    // The abort lifecycle fired
+    expect(result.finishReason).toBe('aborted');
+    expect(abortFired).toBe(true);
+
+    // Checkpointed steps and usage are preserved — not an empty runState
+    expect(result.steps).toHaveLength(1);
+    expect(result.steps[0]?.content).toBe('step 0 content');
+    expect(result.usage).toEqual({ prompt: 42, completion: 17, total: 59 });
+  });
+
+  it('falls back to empty state when checkpoint is unavailable after cancel wins the abort race', async () => {
+    // If loadCheckpoint throws (storage unavailable), the abort result still
+    // settles cleanly — falling back to the seed conversation + empty run state.
+    const { engine } = createManualDurableEngine();
+
+    const brokenCheckpointStore = {
+      ...createCheckpointStore(
+        textValueStore(new MemoryStorage(), { disposeUnderlyingStorage: false }),
+      ),
+      loadCheckpoint: async () => {
+        throw new Error('checkpoint storage unavailable');
+      },
+    } as ReturnType<typeof createCheckpointStore>;
+
+    const runId = 'b6-cancel-wins-no-checkpoint';
+    const activeRun = createDurableActiveRun(
+      { engine, checkpointStore: brokenCheckpointStore },
+      {
+        runId,
+        sessionId: runId,
+        options: runOptions(async () => ({ content: 'unused', toolCalls: [] })),
+        prompt: 'Hello',
+      },
+    );
+
+    await Promise.resolve();
+    activeRun.abort();
+
+    const result = await activeRun.result;
+
+    // Falls back gracefully — no throw, result still reflects the abort
+    expect(result.finishReason).toBe('aborted');
+    expect(result.steps).toHaveLength(0);
   });
 });
 

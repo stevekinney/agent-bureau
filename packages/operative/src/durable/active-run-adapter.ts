@@ -849,11 +849,31 @@ async function driveDurableRun(
     // treat it as a clean abort so the terminal lifecycle fires and the session
     // does not stay stuck 'running'. The abort reason (if any) lives on the
     // combined signal that was passed into this call.
+    //
+    // Reconstruct from the checkpoint so any steps completed before cancel() won
+    // the race are preserved in the abort result — matching the normal durable
+    // completion path. Fall back to an empty run state if the checkpoint is
+    // unavailable (e.g. aborted before any step committed).
     if (error instanceof Error && error.message === 'Workflow cancelled') {
+      let cancelledRunState = emptyRunState();
+      let cancelledConversation = conversation;
+      try {
+        const reconstructed = await reconstructRunResult(context, runId, {
+          runId,
+          steps: 0,
+          content: '',
+          finishReason: 'aborted',
+        });
+        cancelledRunState = reconstructed.runState;
+        cancelledConversation = reconstructed.conversation;
+      } catch {
+        // Checkpoint unavailable — fall back to the seed conversation and an
+        // empty run state (no steps committed before cancel won the race).
+      }
       return finalizeRunResult({
         finishReason: 'aborted',
-        runState: emptyRunState(),
-        conversation,
+        runState: cancelledRunState,
+        conversation: cancelledConversation,
         hooks,
         emitter,
         runStartTime,
