@@ -1,4 +1,5 @@
 import type { CompletableEventTarget } from 'lifecycle';
+import { z } from 'zod';
 
 import type { PendingHumanWait } from './durable/types';
 import type { CombinedOperativeEventMap } from './events';
@@ -113,6 +114,29 @@ export function createRequestHumanInputTool(options: CreateRequestHumanInputTool
     description:
       'Request human input: park this run until a human sends the named signal. ' +
       'Use when the agent needs explicit human approval or a human decision before continuing.',
+
+    /**
+     * Zod schema for the tool's input arguments. Armorer's `createToolbox`
+     * calls `normalizeSchema` on this field; without it the schema defaults to
+     * `z.object({})` which strips `signalName` and `prompt` before `execute`
+     * receives them, causing `pendingHumanWait.signalName` to be `undefined`
+     * and the durable run to park on an unreachable signal.
+     */
+    input: z.object({
+      signalName: z
+        .string()
+        .describe(
+          'The signal name the run will park on. The human sends the same name when ' +
+            'releasing the run (e.g. "human-response").',
+        ),
+      prompt: z
+        .string()
+        .optional()
+        .describe(
+          'Optional prompt to surface to the human reviewer. Returned in the tool ' +
+            'result and in the HumanWaitParkedEvent so callers can display it.',
+        ),
+    }),
 
     execute(input: RequestHumanInputInput): RequestHumanInputResult {
       context.pendingHumanWait = {
