@@ -418,6 +418,15 @@ export function createSessionHandle(
       // loadOrCreate() to complete.
       const abortController = new AbortController();
 
+      // Captured once `innerRun` is created inside `resultPromise`. Used by
+      // `activeRunWrapper.abort()` to forward the abort to the inner run so
+      // that, on the durable path, `engine.cancel()` is also called — which is
+      // the only way to stop a workflow that is parked in `ctx.sleep` or
+      // `ctx.waitForSignal`. The abort signal alone is insufficient because Weft
+      // only sees the signal on the *next yield*, not while the workflow is
+      // suspended at a durable step.
+      let activeInnerRun: ActiveRun | null = null;
+
       // Load the session eagerly to seed the conversation with the stored
       // history and derive the run's sequence number for the runId. The session
       // load is chained before execution so the loop sees the full history.
@@ -480,6 +489,15 @@ export function createSessionHandle(
             ? createActiveRun(runOptionsWithSignal, { engine, checkpointStore, runId, sessionId })
             : createActiveRun(runOptionsWithSignal);
 
+        // Expose the inner run so `activeRunWrapper.abort()` can forward to it.
+        // Set here (after inner run creation, before awaiting its result) so
+        // that any abort() called while the run is in progress reaches the
+        // inner run and triggers engine.cancel(). An abort() that races with
+        // loadOrCreate (before this assignment) still fires the AbortController
+        // (stopping the in-flight generate), but engine.cancel is only
+        // reachable once this reference is live.
+        activeInnerRun = innerRun;
+
         // Forward all inner events to the outer emitter so for-await consumers
         // see the full event stream.
         const subscription = innerRun.toObservable().subscribe({
@@ -537,7 +555,12 @@ export function createSessionHandle(
       const activeRunWrapper: ActiveRun = {
         result: resultPromise,
         abort(reason?: string): void {
+          // Always fire the outer AbortController — this cancels the in-flight
+          // generate call (stops billing). Then forward to the inner run so that
+          // on the durable path `engine.cancel()` is also triggered, stopping
+          // any workflow parked in `ctx.sleep` or `ctx.waitForSignal`.
           abortController.abort(reason);
+          activeInnerRun?.abort(reason);
         },
         addEventListener: outerEmitter.addEventListener.bind(
           outerEmitter,
@@ -688,20 +711,24 @@ export function createSessionHandle(
         if (last && last.status === 'running') {
           try {
             await engine.cancel(last.runId);
+            // Persist the aborted status only after the durable cancel succeeds.
+            // If engine.cancel() throws (e.g. storage fault or stale engine), the
+            // Weft workflow may still be running, so marking the session 'aborted'
+            // would be incorrect — leave the store in its current state and let
+            // the non-fatal catch below swallow the error.
+            const runs = [...cancelSession.runs];
+            const lastIndex = runs.length - 1;
+            if (lastIndex >= 0 && runs[lastIndex]) {
+              runs[lastIndex] = { ...runs[lastIndex], status: 'aborted' };
+            }
+            await store.save({
+              ...cancelSession,
+              runs,
+              updatedAt: new Date().toISOString(),
+            });
           } catch {
             // Non-fatal: the generate abort already stopped the work.
           }
-          // Persist the aborted status.
-          const runs = [...cancelSession.runs];
-          const lastIndex = runs.length - 1;
-          if (lastIndex >= 0 && runs[lastIndex]) {
-            runs[lastIndex] = { ...runs[lastIndex], status: 'aborted' };
-          }
-          await store.save({
-            ...cancelSession,
-            runs,
-            updatedAt: new Date().toISOString(),
-          });
         }
       }
 
@@ -789,6 +816,18 @@ export function createSessionHandle(
     async monitor(options: MonitorOptions): Promise<boolean> {
       const { every, input, until, maxDuration } = options;
       const everyMs = typeof every === 'number' ? every : parseDuration(every);
+
+      // Reject string durations that parsed to 0 ms — this means the string
+      // was not a recognised ISO-8601 PT duration (e.g. '5m' instead of 'PT5M').
+      // Silently treating 0 ms as valid would cause a tight spin loop that issues
+      // LLM calls as fast as the network allows with no inter-tick sleep.
+      if (typeof every === 'string' && everyMs === 0) {
+        throw new Error(
+          `monitor({ every }) received an invalid duration string: "${every}". ` +
+            `Use a number (milliseconds) or an ISO-8601 PT duration such as 'PT5M' or 'PT1H30M'.`,
+        );
+      }
+
       const maxMs =
         maxDuration !== undefined
           ? typeof maxDuration === 'number'

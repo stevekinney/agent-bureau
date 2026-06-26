@@ -1961,6 +1961,213 @@ describe('session.monitor()', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Regression: PRRT_kwDORvupsc6MZ-vl — abort() forwards to the durable inner run
+// ---------------------------------------------------------------------------
+
+describe('regression: abort() forwards to the durable inner run (PRRT_kwDORvupsc6MZ-vl)', () => {
+  it('calls engine.cancel() on the durable run when AgentRun.abort() is called', async () => {
+    const cancelledIds: string[] = [];
+
+    // Signal from inside engine.start() so the test knows driveStarted=true and
+    // the inner ActiveRun is live. Using start() rather than generate() because
+    // the generate is called by the Weft workflow body, which is never reached
+    // with a fake engine — start() is called synchronously in the microtask
+    // immediately after driveStarted becomes true.
+    let signalStarted!: () => void;
+    const engineStarted = new Promise<void>((resolve) => {
+      signalStarted = resolve;
+    });
+
+    // cancel() resolves this so the blocked handle.result() can reject and the
+    // run can terminate after the assertion.
+    let rejectHandle!: (err: Error) => void;
+    const handleResult = new Promise<never>((_resolve, reject) => {
+      rejectHandle = reject;
+    });
+
+    // Fake engine that:
+    //   start() — signals the test, then returns a handle that blocks on result()
+    //   cancel() — records the runId (assertion target) and unblocks the handle
+    const fakeEngine = {
+      start: async (_type: string, _input: unknown, opts: { id: string; services?: unknown }) => {
+        signalStarted();
+        return {
+          id: opts.id,
+          result: () => handleResult,
+          abort: () => {},
+          signal: AbortSignal.abort(),
+          addEventListener: () => {},
+          removeEventListener: () => {},
+          [Symbol.asyncIterator]: async function* () {},
+        };
+      },
+      cancel: async (id: string) => {
+        cancelledIds.push(id);
+        // Unblock the handle so driveDurableRun can complete and the run settles.
+        rejectHandle(new Error('cancelled by test'));
+      },
+      signal: async () => {},
+      update: async () => {},
+      query: async () => {},
+    } as unknown as AnyRunEngine;
+
+    const fakeCheckpointStore = {
+      loadCheckpoint: async (_runId: string) => ({
+        conversation: null,
+        cursor: { totalUsage: {}, lastContent: '', schemaAttempts: 0 },
+        steps: [],
+      }),
+    };
+
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+    const sessionId = 'abort-forward-session';
+
+    const h = createSessionHandle(sessionId, {
+      store,
+      agentName: 'abort-agent',
+      engine: fakeEngine,
+      checkpointStore:
+        fakeCheckpointStore as unknown as import('../durable/checkpoint-store').CheckpointStore,
+      runOptions: {
+        generate: createInstantGenerate(),
+        toolbox: createToolbox([]) as unknown as Toolbox,
+        maximumSteps: 1,
+      },
+    });
+
+    const agentRun = h.run('go');
+
+    // Wait until engine.start() has been called — at this point driveStarted is
+    // true and `activeInnerRun` is set, so abort() will forward to the inner run.
+    await engineStarted;
+
+    // Abort the outer AgentRun.
+    agentRun.abort('test-abort');
+
+    // Allow the abort to propagate through the promise chain.
+    await yieldToPortableEventLoop();
+
+    // engine.cancel() must have been called, proving the abort was forwarded
+    // through the inner durable ActiveRun to the Weft engine. Without the fix
+    // only the AbortController signal fires and any parked Weft workflow is
+    // never cancelled.
+    expect(cancelledIds).toContain(`${sessionId}:0`);
+
+    // Swallow the result promise to avoid unhandled rejection (the fake engine's
+    // start() returns a never-settling handle, so result() never resolves).
+    await agentRun.result().catch(() => {});
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Regression: PRRT_kwDORvupsc6MZ-vp — only mark session aborted when cancel succeeds
+// ---------------------------------------------------------------------------
+
+describe('regression: cancel() only persists aborted status when engine.cancel() succeeds (PRRT_kwDORvupsc6MZ-vp)', () => {
+  it('does not update the session store to aborted when engine.cancel() throws', async () => {
+    const fakeEngine = {
+      cancel: async (_id: string) => {
+        throw new Error('storage fault');
+      },
+      signal: async () => {},
+      update: async () => {},
+      query: async () => {},
+    } as unknown as AnyRunEngine;
+
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+
+    // Pre-load a session with a running run ref so cancel() has something to act on.
+    const runningSession = createAgentSession({
+      agentName: 'durable-agent',
+      conversationHistory: createConversationHistory(),
+      id: 'cancel-throws-session',
+      runs: [
+        {
+          runId: 'cancel-throws-session:0',
+          sequence: 0,
+          status: 'running',
+          startedAt: new Date().toISOString(),
+          agentName: 'durable-agent',
+        },
+      ],
+    });
+    await store.save(runningSession);
+
+    const h = createSessionHandle('cancel-throws-session', {
+      store,
+      agentName: 'durable-agent',
+      engine: fakeEngine,
+      runOptions: {
+        generate: createInstantGenerate(),
+        toolbox: createToolbox([]) as unknown as Toolbox,
+      },
+    });
+
+    // cancel() must not reject even when engine.cancel() throws — the error is
+    // non-fatal per the architecture comment. `await h.cancel()` would throw if
+    // the rejection propagated; passing here proves it is swallowed correctly.
+    const cancelResult = await h.cancel();
+    expect(cancelResult).toBeUndefined();
+
+    // The session must NOT be marked 'aborted' because the durable workflow
+    // cancel failed — its actual status is still 'running' in Weft's store.
+    const updated = await store.load('cancel-throws-session');
+    expect(updated!.runs[0]!.status).toBe('running');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Regression: PRRT_kwDORvupsc6MZ-vv — monitor() rejects invalid duration strings
+// ---------------------------------------------------------------------------
+
+describe('regression: monitor() rejects invalid duration strings instead of spinning (PRRT_kwDORvupsc6MZ-vv)', () => {
+  it('throws immediately when every is a non-ISO-8601 duration string', async () => {
+    const { handle } = createSessionHandleFixture();
+
+    // '5m', '1hour', 'five minutes' etc. are NOT valid ISO-8601 PT durations.
+    // parseDuration() returns 0 for them, which previously caused a tight spin
+    // loop. The fix throws an Error instead of silently treating 0 as valid.
+    let caught: unknown;
+    try {
+      await handle.monitor({ every: '5m', input: 'check', until: () => true });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toMatch(/invalid duration string/i);
+  });
+
+  it('throws for other common mis-formatted duration strings', async () => {
+    const { handle } = createSessionHandleFixture();
+
+    let caught: unknown;
+    try {
+      await handle.monitor({ every: '1hour', input: 'check', until: () => true });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toMatch(/invalid duration string/i);
+  });
+
+  it('accepts valid ISO-8601 PT duration strings without throwing', async () => {
+    const { handle } = createSessionHandleFixture();
+
+    // 'PT5M' is valid — parseDuration returns 300_000, no throw.
+    const result = await handle.monitor({
+      every: 'PT5M',
+      input: 'check',
+      until: () => true,
+      maxDuration: 1, // 1ms cap so the test finishes instantly
+    });
+    // maxDuration expires before the first inter-tick sleep, returning false.
+    expect(typeof result).toBe('boolean');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Regression: PRRT_kwDORvupsc6MZozl — tool.* bubble events carry derived runId
 // ---------------------------------------------------------------------------
 

@@ -862,6 +862,219 @@ describe('durable agentRun workflow', () => {
     });
   });
 
+  describe('Park request mutual exclusivity (PRRT_kwDORvupsc6MZ-vk)', () => {
+    /**
+     * REGRESSION TESTS for the "pick only one durable park request" finding.
+     *
+     * Bug: when a durable run accumulated BOTH `pendingWakeup` (from a
+     * `scheduleWakeup` tool call in one step) AND `pendingHumanWait` (from a
+     * `requestHumanInput` tool call in a later step), the post-loop park code had
+     * two INDEPENDENT `if` branches — so the workflow would `ctx.sleep(duration)`
+     * AND THEN `ctx.waitForSignal(signalName)` in sequence.  That violates the
+     * `DurableRunDeps` contract: the two park types are mutually exclusive and only
+     * the last-set one governs parking.
+     *
+     * Fix: the accumulation loop now clears the OTHER local whenever one is updated
+     * (last-write-wins, cross-step mutual exclusivity).  The post-loop parking
+     * section uses `else if` as defense-in-depth so the two primitives can never
+     * both execute.
+     */
+
+    it('only parks on ctx.waitForSignal when requestHumanInput overrides an earlier scheduleWakeup (cross-step)', async () => {
+      // Step 0: emit a scheduleWakeup tool call (sets deps.pendingWakeup).
+      // Step 1 (same run, maximumSteps=2): emit a requestHumanInput tool call
+      //   (sets deps.pendingHumanWait).
+      //
+      // After the loop, pendingHumanWait was set LAST → it must be the governing
+      // park.  The workflow should park on ctx.waitForSignal, NOT ctx.sleep.
+      //
+      // Without the fix: both locals are non-undefined, the two independent `if`
+      // branches fire, the workflow sleeps (very long) and then waits for signal —
+      // observable as a crash or extremely long test timeout.
+      // With the fix: the wakeup local is cleared when humanWait is accumulated,
+      // so only waitForSignal fires, the run parks (status='running'), and a
+      // subsequent engine.signal releases it to 'completed'.
+
+      const storage = new MemoryStorage();
+      const runId = 'eeeeeeee-0000-4000-8000-000000000005';
+      const signalName = 'human-approval';
+
+      const depsContainer: { ref: DurableRunDeps | undefined } = { ref: undefined };
+
+      // Tool that sets pendingWakeup — mimics createScheduleWakeupTool.
+      const wakeupTool = createTool({
+        name: 'scheduleWakeup',
+        description: 'Schedule a wakeup',
+        input: z.object({ duration: z.number() }),
+        execute: async (params) => {
+          if (depsContainer.ref) {
+            depsContainer.ref.pendingWakeup = {
+              duration: (params as { duration: number }).duration,
+            };
+          }
+          return 'scheduled';
+        },
+      });
+
+      // Tool that sets pendingHumanWait — mimics createRequestHumanInputTool.
+      const hitlTool = createTool({
+        name: 'requestHumanInput',
+        description: 'Request human input',
+        input: z.object({ signalName: z.string() }),
+        execute: async (params) => {
+          if (depsContainer.ref) {
+            depsContainer.ref.pendingHumanWait = {
+              signalName: (params as { signalName: string }).signalName,
+            };
+          }
+          return 'parked';
+        },
+      });
+
+      const toolbox = createToolbox([wakeupTool, hitlTool]) as unknown as RegistryToolbox;
+
+      let stepCallCount = 0;
+      const services: DurableRunDeps = {
+        options: {
+          generate: async () => {
+            const call = stepCallCount++;
+            if (call === 0) {
+              // Step 0: schedule a very long wakeup (so if ctx.sleep fires, the test hangs).
+              return {
+                content: '',
+                toolCalls: [{ name: 'scheduleWakeup', arguments: { duration: 999_999_999 } }],
+              };
+            }
+            // Step 1: override with human-input request.
+            return {
+              content: '',
+              toolCalls: [{ name: 'requestHumanInput', arguments: { signalName } }],
+            };
+          },
+          toolbox,
+          conversation: createConversationHistory(),
+          // noToolCalls() would stop the run after the first tool-free step; both
+          // steps here emit tool calls, so the run exits via maximumSteps (=2).
+          stopWhen: noToolCalls(),
+          maximumSteps: 5,
+        },
+        toolbox,
+      };
+      depsContainer.ref = services;
+
+      const { engine } = await buildEngine(storage, false);
+      try {
+        const handle = await engine.start(
+          'agentRun',
+          // maximumSteps=2 in workflow input: step 0 (wakeup) + step 1 (hitl) exit the loop.
+          { runId, sessionId: runId, agentName: 'test-agent', prompt: 'start', maximumSteps: 2 },
+          { id: runId, services },
+        );
+
+        // Poll for the run to park on ctx.waitForSignal (status='running').
+        // With the BUG: the run would sleep for 999_999_999 units before reaching
+        // waitForSignal — observable as the test hanging or timing out.
+        // With the FIX: only ctx.waitForSignal fires; the run parks immediately.
+        let parked = false;
+        for (let i = 0; i < 100; i++) {
+          await yieldToPortableEventLoop();
+          const snap = await handle.snapshot();
+          if (snap?.status === 'running') {
+            parked = true;
+            break;
+          }
+          if (snap?.status === 'completed' || snap?.status === 'failed') break;
+        }
+
+        // The run must be parked on the signal, not sleeping.
+        expect(parked).toBe(true);
+
+        // Send the human signal to release the parked run.
+        await engine.signal(runId, signalName, { approved: true });
+
+        // The released run re-enters the step loop (maximumSteps not exhausted yet
+        // relative to where we are — the run should complete via maximum-steps or
+        // stop-condition depending on the next generate).  Either way it should reach
+        // 'completed' without hanging on ctx.sleep.
+        const result = await handle.result();
+        expect(['stop-condition', 'maximum-steps']).toContain(result.finishReason);
+
+        // Crucially: humanWaitSignal is present and wakeupNote is absent — only the
+        // human-wait path fired.
+        expect(result.humanWaitSignal).toBe(signalName);
+        expect(result.wakeupNote).toBeUndefined();
+      } finally {
+        engine[Symbol.dispose]();
+      }
+    });
+
+    it('only parks on ctx.sleep when scheduleWakeup is the only park request set', async () => {
+      // Sanity check: a run that only calls scheduleWakeup (no requestHumanInput)
+      // still parks on ctx.sleep — the fix must not break the single-park-type case.
+      const storage = new MemoryStorage();
+      const runId = 'ffffffff-0000-4000-8000-000000000006';
+
+      const depsContainer: { ref: DurableRunDeps | undefined } = { ref: undefined };
+      const wakeupTool = createTool({
+        name: 'scheduleWakeup',
+        description: 'Schedule a wakeup',
+        input: z.object({ duration: z.number() }),
+        execute: async (params) => {
+          if (depsContainer.ref) {
+            depsContainer.ref.pendingWakeup = {
+              duration: (params as { duration: number }).duration,
+              note: 'check later',
+            };
+          }
+          return 'scheduled';
+        },
+      });
+
+      const toolbox = createToolbox([wakeupTool]) as unknown as RegistryToolbox;
+
+      const services: DurableRunDeps = {
+        options: {
+          generate: async () => ({
+            content: '',
+            toolCalls: [{ name: 'scheduleWakeup', arguments: { duration: 999_999_999 } }],
+          }),
+          toolbox,
+          conversation: createConversationHistory(),
+          stopWhen: noToolCalls(),
+        },
+        toolbox,
+      };
+      depsContainer.ref = services;
+
+      const { engine } = await buildEngine(storage, false);
+      try {
+        const handle = await engine.start(
+          'agentRun',
+          { runId, sessionId: runId, agentName: 'wakeup-agent', prompt: 'start', maximumSteps: 1 },
+          { id: runId, services },
+        );
+        void handle.result().catch(() => {});
+
+        // Poll until parked on ctx.sleep (status='running', step committed).
+        let parked = false;
+        for (let i = 0; i < 100; i++) {
+          await yieldToPortableEventLoop();
+          const snap = await handle.snapshot();
+          if (snap?.status === 'running') {
+            const cp = await engine.get(runId);
+            if (cp) {
+              parked = true;
+              break;
+            }
+          }
+        }
+        expect(parked).toBe(true);
+      } finally {
+        engine[Symbol.dispose]();
+      }
+    });
+  });
+
   describe('onMaximumSteps handler (PRRT_kwDORvupsc6MZErk)', () => {
     /**
      * REGRESSION TESTS for the missing `onMaximumSteps` invocation on the durable
