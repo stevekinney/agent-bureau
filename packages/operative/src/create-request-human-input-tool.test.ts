@@ -168,4 +168,42 @@ describe('createRequestHumanInputTool', () => {
       expect(context.pendingHumanWait?.signalName).toBe('human-response');
     });
   });
+
+  describe('input schema', () => {
+    it('exposes an input Zod schema so armorer does not strip arguments', () => {
+      const tool = createRequestHumanInputTool({ context: makeContext() });
+
+      // The tool MUST have an `input` schema. Without it, armorer's
+      // normalizeSchema(undefined) returns z.object({}) which strips every
+      // field before execute() is called (Zod strips unknown keys by default),
+      // causing pendingHumanWait.signalName to be undefined so the durable run
+      // can never be released by the intended human signal.
+      expect(tool.input).toBeDefined();
+    });
+
+    it('input schema preserves signalName and prompt when parsed', () => {
+      const tool = createRequestHumanInputTool({ context: makeContext() });
+
+      const parsed = tool.input.parse({ signalName: 'human-response', prompt: 'Approve this?' });
+
+      // Both fields must survive schema parsing — no stripping.
+      expect(parsed.signalName).toBe('human-response');
+      expect(parsed.prompt).toBe('Approve this?');
+    });
+
+    it('input schema treats prompt as optional', () => {
+      const tool = createRequestHumanInputTool({ context: makeContext() });
+
+      const parsed = tool.input.parse({ signalName: 'human-response' });
+
+      expect(parsed.signalName).toBe('human-response');
+      expect(parsed.prompt).toBeUndefined();
+    });
+
+    it('input schema rejects calls with no signalName field', () => {
+      const tool = createRequestHumanInputTool({ context: makeContext() });
+
+      expect(() => tool.input.parse({ prompt: 'oops' })).toThrow();
+    });
+  });
 });

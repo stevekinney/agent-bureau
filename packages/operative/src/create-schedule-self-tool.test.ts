@@ -183,4 +183,108 @@ describe('createScheduleSelfTool', () => {
     }
     expect(caught?.message).toBe('No engine available');
   });
+
+  describe('input schema', () => {
+    it('exposes an input Zod schema so armorer does not strip arguments', () => {
+      const tool = createScheduleSelfTool({
+        agentName: 'x',
+        schedule: async () => makeHandle(),
+      });
+
+      // Without an `input` schema, armorer's normalizeSchema(undefined) returns
+      // z.object({}) which strips every field — spec, input, session, overlap —
+      // before execute() is called, causing undefined-access errors at runtime.
+      expect(tool.input).toBeDefined();
+    });
+
+    it('input schema preserves spec and input when parsed through cron path', () => {
+      const tool = createScheduleSelfTool({
+        agentName: 'x',
+        schedule: async () => makeHandle(),
+      });
+
+      const parsed = tool.input.parse({ spec: { cron: '0 9 * * *' }, input: 'Morning brief' });
+
+      expect(parsed.spec).toEqual({ cron: '0 9 * * *' });
+      expect(parsed.input).toBe('Morning brief');
+    });
+
+    it('input schema preserves spec and input when parsed through every path', () => {
+      const tool = createScheduleSelfTool({
+        agentName: 'x',
+        schedule: async () => makeHandle(),
+      });
+
+      const parsed = tool.input.parse({ spec: { every: '6h' }, input: 'Poll' });
+
+      expect(parsed.spec).toEqual({ every: '6h' });
+      expect(parsed.input).toBe('Poll');
+    });
+
+    it('input schema preserves session when provided', () => {
+      const tool = createScheduleSelfTool({
+        agentName: 'x',
+        schedule: async () => makeHandle(),
+      });
+
+      const parsed = tool.input.parse({
+        spec: { every: '1h' },
+        input: 'Heartbeat',
+        session: 'daily-digest',
+      });
+
+      expect(parsed.session).toBe('daily-digest');
+    });
+
+    it('input schema treats session as optional', () => {
+      const tool = createScheduleSelfTool({
+        agentName: 'x',
+        schedule: async () => makeHandle(),
+      });
+
+      const parsed = tool.input.parse({ spec: { every: '1h' }, input: 'Heartbeat' });
+
+      expect(parsed.session).toBeUndefined();
+    });
+
+    it('input schema preserves overlap when provided', () => {
+      const tool = createScheduleSelfTool({
+        agentName: 'x',
+        schedule: async () => makeHandle(),
+      });
+
+      const parsed = tool.input.parse({ spec: { every: '1h' }, input: 'test', overlap: 'queue' });
+
+      expect(parsed.overlap).toBe('queue');
+    });
+
+    it('input schema treats overlap as optional', () => {
+      const tool = createScheduleSelfTool({
+        agentName: 'x',
+        schedule: async () => makeHandle(),
+      });
+
+      const parsed = tool.input.parse({ spec: { every: '1h' }, input: 'test' });
+
+      expect(parsed.overlap).toBeUndefined();
+    });
+
+    it('input schema rejects calls with no spec field', () => {
+      const tool = createScheduleSelfTool({
+        agentName: 'x',
+        schedule: async () => makeHandle(),
+      });
+
+      expect(() => tool.input.parse({ input: 'Missing spec' })).toThrow();
+    });
+
+    it('input schema rejects calls with no input field', () => {
+      const tool = createScheduleSelfTool({
+        agentName: 'x',
+        schedule: async () => makeHandle(),
+      });
+
+      expect(() => tool.input.parse({ spec: { every: '1h' } })).toThrow();
+    });
+  });
 });
