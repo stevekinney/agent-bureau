@@ -1,12 +1,13 @@
 import {
   activity,
+  Scheduler,
   workflow,
   type WorkflowLogRecord,
   type WorkflowStatus,
 } from '@lostgradient/weft';
 import { MemoryStorage } from '@lostgradient/weft/storage';
 import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
-import { afterEach, describe, expect, it } from 'bun:test';
+import { afterEach, describe, expect, it, spyOn } from 'bun:test';
 
 import { createCheckpointStore } from './checkpoint-store';
 import { type AnyRunEngine, createRunEngine } from './create-run-engine';
@@ -511,6 +512,11 @@ describe('createRunEngine', () => {
     // deterministically (not a wall-clock race): the run reaches the sleep (the
     // pre-sleep marker arrives), stays non-terminal (the far-future timer cannot
     // fire on its own), and only completes when the scheduler is ticked explicitly.
+    //
+    // The spy is placed BEFORE engine creation so any accidental Scheduler.start()
+    // call inside Engine.create is captured — directly proving the poller is never
+    // armed, not merely that it hasn't fired yet.
+    const schedulerStartSpy = spyOn(Scheduler.prototype, 'start');
     const reachedSleep: WorkflowLogRecord[] = [];
     const { engine } = await createRunEngine({
       storage: new MemoryStorage(),
@@ -522,8 +528,12 @@ describe('createRunEngine', () => {
     });
 
     try {
+      // Direct proof: recover:false with no startScheduler must never call
+      // Scheduler.start(), so the real-time polling interval is never set up.
+      expect(schedulerStartSpy).not.toHaveBeenCalled();
       await assertRunStaysParkedWhenPollerUnarmed(engine, reachedSleep);
     } finally {
+      schedulerStartSpy.mockRestore();
       engine[Symbol.dispose]();
     }
   });
@@ -535,6 +545,11 @@ describe('createRunEngine', () => {
     // default, so the durable sleep stays parked. Same deterministic proof as the
     // recover:false case (reached-sleep marker, non-terminal, then fires on an
     // explicit scheduler tick).
+    //
+    // The spy is placed BEFORE engine creation so any accidental Scheduler.start()
+    // call inside Engine.create is captured — directly proving the poller is never
+    // armed even when recovery itself runs.
+    const schedulerStartSpy = spyOn(Scheduler.prototype, 'start');
     const reachedSleep: WorkflowLogRecord[] = [];
     const { engine } = await createRunEngine({
       storage: new MemoryStorage(),
@@ -547,8 +562,12 @@ describe('createRunEngine', () => {
     });
 
     try {
+      // Direct proof: startScheduler:false must suppress the call even when
+      // recover:true — Scheduler.start() must never be invoked.
+      expect(schedulerStartSpy).not.toHaveBeenCalled();
       await assertRunStaysParkedWhenPollerUnarmed(engine, reachedSleep);
     } finally {
+      schedulerStartSpy.mockRestore();
       engine[Symbol.dispose]();
     }
   });
