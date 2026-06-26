@@ -46,6 +46,7 @@ import type {
   ToolMap,
   ToolMapInput,
 } from 'operative/bureau-types';
+import { z } from 'zod';
 
 // ---------------------------------------------------------------------------
 // Internal runtime types
@@ -153,7 +154,6 @@ function toolboxFromMap(toolsMap: Record<string, unknown>): Toolbox {
     ) {
       // Plain { execute } object: normalize to an armorer Tool.
       // Cast is justified: execute is validated as a function above.
-      // Forward `input` when provided so LLM arguments are not stripped.
       const { execute, input } = value as {
         execute: (params: Record<string, unknown>) => Promise<unknown>;
         input?: unknown;
@@ -163,11 +163,18 @@ function toolboxFromMap(toolsMap: Record<string, unknown>): Toolbox {
           name: key,
           description: key,
           execute,
-          // Forward the caller's Zod schema (or raw shape) so Armorer uses it
-          // instead of normalizing to z.object({}) which would strip all args.
-          ...(input !== undefined && {
-            input: input as Parameters<typeof createTool>[0]['input'],
-          }),
+          // Forward the caller's Zod schema when provided. When it is omitted,
+          // forward a passthrough object schema instead of letting Armorer
+          // normalize the missing schema to `z.object({})`, which STRIPS every
+          // LLM-supplied argument before execute runs (PRRT_kwDORvupsc6Mc3gP).
+          // `Function.length` cannot soundly detect whether `execute` consumes
+          // arguments (default/rest params report 0), so we never inspect arity:
+          // a passthrough schema preserves args for parameterized executes and
+          // is a no-op for genuinely argument-free ones.
+          input:
+            input !== undefined
+              ? (input as Parameters<typeof createTool>[0]['input'])
+              : z.object({}).passthrough(),
         }),
       );
     } else {

@@ -145,8 +145,12 @@ export function createRequestHumanInputTool(options: CreateRequestHumanInputTool
       };
 
       // F3 / C3 — emit HumanWaitParkedEvent so observers see the transition.
+      // Thread the prompt through so UI/event-stream consumers can display what
+      // approval or input is being requested (as the schema doc promises).
       if (emitter) {
-        emitter.dispatchEvent(new HumanWaitParkedEvent(input.signalName, context.runId ?? ''));
+        emitter.dispatchEvent(
+          new HumanWaitParkedEvent(input.signalName, context.runId ?? '', input.prompt),
+        );
       }
 
       const message = input.prompt

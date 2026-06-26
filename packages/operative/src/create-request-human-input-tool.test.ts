@@ -167,6 +167,39 @@ describe('createRequestHumanInputTool', () => {
 
       expect(context.pendingHumanWait?.signalName).toBe('human-response');
     });
+
+    // Regression: PRRT_kwDORvupsc6Mc3gW — the schema doc promises the prompt is
+    // surfaced in the HumanWaitParkedEvent, but the dispatch dropped it, so UI /
+    // event-stream consumers could not show what input was being requested.
+    it('threads the prompt into the emitted event when provided (PRRT_kwDORvupsc6Mc3gW)', () => {
+      const context = makeContext('run-7');
+      const emitter = makeEmitter();
+      const tool = createRequestHumanInputTool({ context, emitter });
+
+      let capturedPrompt: string | undefined;
+      emitter.addEventListener(HumanWaitParkedEvent.type, (event) => {
+        capturedPrompt = event.prompt;
+      });
+
+      tool.execute({ signalName: 'human-response', prompt: 'Approve this deployment?' });
+
+      expect(capturedPrompt).toBe('Approve this deployment?');
+    });
+
+    it('leaves the event prompt undefined when no prompt is provided (PRRT_kwDORvupsc6Mc3gW)', () => {
+      const context = makeContext('run-8');
+      const emitter = makeEmitter();
+      const tool = createRequestHumanInputTool({ context, emitter });
+
+      const received: HumanWaitParkedEvent[] = [];
+      emitter.addEventListener(HumanWaitParkedEvent.type, (event) => {
+        received.push(event);
+      });
+
+      tool.execute({ signalName: 'human-response' });
+
+      expect(received[0]?.prompt).toBeUndefined();
+    });
   });
 
   describe('input schema', () => {
