@@ -31,10 +31,22 @@ import type { GenerateFunction } from './types';
  * directly in the entry position is a type error, preventing accidental
  * authoring of `{ 'web-search': { name: 'search', execute: ... } }` where the
  * key and name disagree.
+ *
+ * **`input` schema for parameterized tools**: When the `execute` function
+ * accepts parameters, supply a Zod schema (or raw Zod shape) via `input`.
+ * Without it, Armorer normalizes the missing schema to `z.object({})`, which
+ * strips every LLM-provided argument before `execute` is called. The `input`
+ * field is typed as `unknown` here to keep this file import-free; at runtime
+ * `toolboxFromMap` forwards it directly to armorer's `createTool({ input })`.
  */
 export type ToolEntryInput =
   | ((...arguments_: never[]) => unknown)
-  | { readonly name?: never; readonly execute: (...arguments_: never[]) => unknown };
+  | {
+      readonly name?: never;
+      readonly execute: (...arguments_: never[]) => unknown;
+      /** Zod schema (or raw Zod shape) describing the tool's input parameters. */
+      readonly input?: unknown;
+    };
 
 /** Shape accepted by `.tools({...})`. */
 export type ToolMapInput = Record<string, ToolEntryInput>;
