@@ -1,8 +1,9 @@
-import type { ListFilter, ListOptions } from '@lostgradient/weft';
+import type { ListFilter, ListOptions, ScheduleSpec } from '@lostgradient/weft';
 import { Conversation, createConversationHistory } from 'conversationalist';
 import { CompletableEventTarget } from 'lifecycle';
 import { type ActiveRun, createActiveRun, createAgentSession, type JSONValue } from 'operative';
 import {
+  createAgentScheduler,
   isAgentRunWorkflowInput,
   reattachDurableActiveRun,
   type RecoveredRunHandle,
@@ -64,6 +65,29 @@ export { BureauError };
 
 function toBadRequest(message: string): never {
   throw new BureauError(message, 'BAD_REQUEST');
+}
+
+/** Duration shorthand weft accepts for an interval spec (e.g. `30s`, `6h`, `1d`). */
+const DURATION_SHORTHAND = /^\d+(ms|s|m|h|d|w)$/;
+
+/**
+ * Normalize a {@link DurableScheduleDefinition.spec} string into a weft
+ * {@link ScheduleSpec}. Weft parses a BARE string as a cron expression
+ * (`normalizeCronSpec`), so a duration shorthand like `'6h'` must be wrapped as
+ * `{ every }` or it would be misparsed as cron. Heuristic: a single duration
+ * token → interval; everything else (multi-field cron, `@macro`) → cron.
+ *
+ * The interval branch matches a SINGLE-unit token (`30s`, `6h`, `1d`) — exactly
+ * the documented shorthands. A compound duration (`'1h30m'`) does not match and
+ * falls to the cron branch, where weft raises a clear cron parse error rather
+ * than silently misinterpreting it; pass single-unit durations or a cron string.
+ */
+function toScheduleSpec(spec: string): ScheduleSpec {
+  const trimmed = spec.trim();
+  if (DURATION_SHORTHAND.test(trimmed)) {
+    return { every: trimmed };
+  }
+  return { cron: trimmed };
 }
 
 function validateMessageRequest(request: {
@@ -1160,30 +1184,22 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     return runtime.durable.engine.query(runId, name, input);
   }
 
-  function createSchedule(
-    _definition: DurableScheduleDefinition,
+  async function createSchedule(
+    definition: DurableScheduleDefinition,
   ): Promise<import('@lostgradient/weft').ScheduleSummary | null | undefined> {
-    if (!runtime.durable) return Promise.resolve(undefined);
-    // Durable agent scheduling's FIRE path is not yet wired (D6 was implemented
-    // only as far as registering a schedule). When a native weft schedule tick
-    // fires the `agentRun` workflow, `resolveRunServices` has no branch that
-    // BUILDS services for the fire — it only recovers an existing session — so a
-    // scheduled agent would silently never run. We reject loudly rather than
-    // register a schedule whose every tick fails.
-    //
-    // This is finishable on our side (weft 0.8 already exposes per-fire identity
-    // via `info.schedule` + a stable per-occurrence `info.workflowId`); it needs a
-    // scheduler-fire branch in `resolveRunServices` that builds fresh DurableRunDeps
-    // from the ScheduledAgentRunInput, plus an end-to-end test that fires a schedule
-    // and asserts an agent ran. Tracked in #109. Until then, rejecting keeps the
-    // API honest (the prior code silently registered a broken schedule).
-    return Promise.reject(
-      new BureauError(
-        'Durable scheduling of agent runs is not yet wired: the scheduled-fire ' +
-          'path that builds run services per tick is unimplemented (tracked in #109).',
-        'NOT_IMPLEMENTED',
-      ),
-    );
+    if (!runtime.durable) return undefined;
+    // Register a native weft schedule that fires the `agentRun` workflow on each
+    // tick. The fire path is wired through `resolveRunServices`' scheduled-fire
+    // branch (see runtime-composition.ts): each tick builds fresh run deps from
+    // the ScheduledAgentRunInput, seeds the prompt, and runs the agent (#109).
+    const scheduler = createAgentScheduler({ engine: runtime.durable.engine });
+    const handle = await scheduler.schedule(definition.agentName, {
+      spec: toScheduleSpec(definition.spec),
+      input: definition.input,
+      ...(definition.sessionId !== undefined ? { session: definition.sessionId } : {}),
+      ...(definition.overlap !== undefined ? { overlap: definition.overlap } : {}),
+    });
+    return handle.describe();
   }
 
   async function getSchedule(

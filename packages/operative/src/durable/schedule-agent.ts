@@ -34,6 +34,25 @@ export interface ScheduledAgentRunInput {
 }
 
 /**
+ * Narrow an `unknown` durable input to a {@link ScheduledAgentRunInput}. Used by
+ * the bureau's run-services resolver when `info.schedule !== undefined` already
+ * proves a native scheduled fire — this guard only confirms the payload is a
+ * well-formed `{ agentName, input, sessionId? }` before it is trusted. It does
+ * NOT need to discriminate against {@link AgentRunWorkflowInput}; the schedule
+ * origin is established by weft's `info.schedule`, not by the payload shape.
+ */
+export function isScheduledAgentRunInput(value: unknown): value is ScheduledAgentRunInput {
+  if (typeof value !== 'object' || value === null) return false;
+  const candidate = value as Record<string, unknown>;
+  if (typeof candidate['agentName'] !== 'string' || typeof candidate['input'] !== 'string') {
+    return false;
+  }
+  const sessionId = candidate['sessionId'];
+  if (sessionId !== undefined && typeof sessionId !== 'string') return false;
+  return true;
+}
+
+/**
  * Options for `createAgentSchedule`. Maps the bureau scheduling surface
  * (`spec`, `session`, `overlap`) onto the underlying Weft `engine.schedule`
  * call.
@@ -179,58 +198,46 @@ export interface AgentScheduleOptions {
 }
 
 /**
- * Thrown by {@link createAgentSchedule} (and therefore
- * {@link createAgentScheduler}'s `schedule` and the `scheduleSelf` tool, which
- * route through it) because the scheduled-fire path is not yet wired.
- *
- * Registering a schedule that fails on every fire is worse than rejecting up
- * front: the schedule looks healthy in `listSchedules`/`getSchedule` but every
- * tick silently dies. See {@link createAgentSchedule} for the full rationale.
- */
-export class UnrunnableScheduleError extends Error {
-  constructor(message?: string) {
-    super(message);
-    this.name = 'UnrunnableScheduleError';
-  }
-}
-
-/**
  * Register a single recurring durable agent schedule against the given Weft
  * engine. Called by `AgentScheduler.schedule(...)` and (in production) the
  * `scheduleSelf` tool.
  *
- * REJECTS until the scheduled-fire path is wired. Two things make a registered
- * schedule unrunnable today:
+ * Each fire starts the registered `agentRun` workflow with a
+ * {@link ScheduledAgentRunInput} (`{ agentName, input, sessionId? }`). Weft mints
+ * a fresh per-fire `workflowId` and passes this input through unchanged; the
+ * bureau's run-services resolver discriminates the fire by `info.schedule`, then
+ * builds fresh run deps from the input (the workflow body derives its `runId`
+ * from `ctx.workflowId`, not from this input). See #109.
  *
- *  1. **Input-shape mismatch.** This helper registers the `agentRun` workflow
- *     with a {@link ScheduledAgentRunInput} (`{ agentName, input, sessionId? }`),
- *     but the only `agentRun` workflow expects an `AgentRunWorkflowInput`
- *     (`{ runId, sessionId, agentName, ... }`). Its `isAgentRunWorkflowInput`
- *     guard rejects the scheduled input (no `runId`, `input` ≠ `prompt`), so the
- *     workflow throws the moment a tick fires.
- *  2. **No fire-time service resolution.** Even with a matching input shape, the
- *     run-services resolver has no branch that BUILDS fresh run deps for a
- *     scheduled fire — it only recovers an existing session — so a scheduled
- *     agent would never actually run.
- *
- * This mirrors `Bureau.createSchedule`, which already rejects for the same
- * reason. Both are finishable on our side and tracked in #109; until then we
- * reject loudly rather than register a broken schedule
- * (PRRT_kwDORvupsc6Mddv7).
- *
- * @throws {UnrunnableScheduleError} always, until #109 lands.
+ * Session semantics: `session` present → each fire continues that session's
+ * conversation (recurring); absent → each fire is a fresh standalone session.
  */
 export async function createAgentSchedule(
-  _options: CreateAgentScheduleOptions,
+  options: CreateAgentScheduleOptions,
 ): Promise<AgentScheduleHandle> {
-  return Promise.reject(
-    new UnrunnableScheduleError(
-      'Durable scheduling of agent runs is not yet wired: a scheduled tick fires ' +
-        'the agentRun workflow with a ScheduledAgentRunInput it rejects, and the ' +
-        'fire-time service resolver builds no run deps per tick (tracked in #109). ' +
-        'Registering would create a schedule that fails on every fire.',
-    ),
-  );
+  const { engine, agentName, spec, input, session, overlap, id } = options;
+  const workflowType = options.workflowType ?? 'agentRun';
+
+  const scheduledInput: ScheduledAgentRunInput = {
+    agentName,
+    input,
+    ...(session !== undefined ? { sessionId: session } : {}),
+  };
+
+  const scheduleOptions: ScheduleOptions = {
+    ...(overlap !== undefined ? { overlap } : {}),
+    ...(id !== undefined ? { id } : {}),
+  };
+
+  const handle = await engine.schedule(workflowType, scheduledInput, spec, scheduleOptions);
+
+  return {
+    id: handle.id,
+    pause: () => handle.pause(),
+    resume: () => handle.resume(),
+    cancel: () => handle.cancel(),
+    describe: () => handle.describe(),
+  };
 }
 
 /**

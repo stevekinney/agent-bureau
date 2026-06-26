@@ -34,7 +34,7 @@ export type {
 export {
   createAgentSchedule,
   createAgentScheduler,
-  UnrunnableScheduleError,
+  isScheduledAgentRunInput,
 } from './schedule-agent';
 export { createStorageActivities } from './storage-activities';
 export type { DurableRunDeps, PendingWakeup, RunCheckpoint, RunCursor, StepRecord } from './types';

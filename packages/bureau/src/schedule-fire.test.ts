@@ -1,0 +1,154 @@
+import { createToolbox } from 'armorer';
+import { describe, expect, it } from 'bun:test';
+import { getMessages } from 'conversationalist';
+import type { GenerateContext, GenerateFunction, Toolbox } from 'operative';
+import { stopWhen } from 'operative';
+
+import { createBureau } from './create-bureau';
+
+// ---------------------------------------------------------------------------
+// D6 scheduled-fire E2E (#109)
+//
+// These are the assertions that were missing: every prior scheduling test only
+// checked that a schedule was *registered*, never that a native timer tick
+// actually *ran an agent*. Here we register a real weft schedule, let the engine
+// poller fire it on real elapsed time, and assert an `agentRun` body executed
+// with the right prompt and the right session semantics.
+//
+// TIMING: weft's scheduler poll interval defaults to 1000ms and there is no
+// fake-timer path for `engine.schedule` ticks — the poller runs on real wall
+// clock. So these tests use a real-time poll and a raised per-test timeout. This
+// is real elapsed time, NOT a masked hang.
+// ---------------------------------------------------------------------------
+
+const FIRE_TIMEOUT_MS = 20_000;
+
+/** Real-wall-clock poll — `engine.schedule` ticks fire on actual elapsed time. */
+async function waitForReal(
+  condition: () => boolean | Promise<boolean>,
+  timeoutMs: number,
+): Promise<boolean> {
+  const start = performance.now();
+  while (performance.now() - start < timeoutMs) {
+    if (await condition()) return true;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  return condition();
+}
+
+interface RecordedCall {
+  conversationId: string;
+  messageCount: number;
+  userPrompts: string[];
+}
+
+/**
+ * A generate that records what each fire's agent body saw (conversation id +
+ * messages), then returns a final assistant turn so the run stops at step 0.
+ */
+function createRecordingGenerate(calls: RecordedCall[]): GenerateFunction {
+  return async (context: GenerateContext) => {
+    const messages = context.conversation.getMessages();
+    calls.push({
+      conversationId: context.conversation.current.id,
+      messageCount: messages.length,
+      userPrompts: messages
+        .filter((message) => message.role === 'user' && typeof message.content === 'string')
+        .map((message) => message.content as string),
+    });
+    return { content: 'acknowledged', toolCalls: [] };
+  };
+}
+
+function createEmptyToolbox(): Toolbox {
+  return createToolbox([], { context: {} }) as unknown as Toolbox;
+}
+
+describe('D6 scheduled-fire path (#109)', () => {
+  it(
+    'fires a stateless cron schedule and runs the agent with a fresh session per fire',
+    async () => {
+      const calls: RecordedCall[] = [];
+      const bureau = await createBureau({
+        generate: createRecordingGenerate(calls),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'memory' },
+        durableExecution: true,
+        stopWhen: stopWhen.noToolCalls(),
+      });
+
+      try {
+        const summary = await bureau.createSchedule({
+          agentName: 'researcher',
+          input: 'stateless tick prompt',
+          spec: '1s',
+        });
+        expect(summary).toBeDefined();
+
+        const fired = await waitForReal(() => calls.length >= 1, FIRE_TIMEOUT_MS);
+        // Stop further fires before asserting so the count is stable.
+        await bureau.cancelSchedule(summary!.id);
+
+        expect(fired).toBe(true);
+        // The agent body actually ran with the scheduled prompt.
+        expect(calls[0]!.userPrompts).toContain('stateless tick prompt');
+        // No prior history was seeded — a fresh per-fire (stateless) conversation.
+        expect(calls[0]!.messageCount).toBe(1);
+        // Each stateless fire mints its own session id, so no two fires collide.
+        const ids = calls.map((call) => call.conversationId);
+        expect(new Set(ids).size).toBe(ids.length);
+        expect(ids[0]!.startsWith('sched-')).toBe(true);
+      } finally {
+        bureau.dispose();
+      }
+    },
+    FIRE_TIMEOUT_MS,
+  );
+
+  it(
+    'fires a recurring schedule into a fixed session and accumulates conversation across fires',
+    async () => {
+      const sessionId = 'daily-digest';
+      const calls: RecordedCall[] = [];
+      const bureau = await createBureau({
+        generate: createRecordingGenerate(calls),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'memory' },
+        durableExecution: true,
+        stopWhen: stopWhen.noToolCalls(),
+      });
+
+      try {
+        const summary = await bureau.createSchedule({
+          agentName: 'researcher',
+          input: 'digest prompt',
+          spec: '1s',
+          sessionId,
+        });
+        expect(summary).toBeDefined();
+
+        const recurringCalls = () => calls.filter((call) => call.conversationId === sessionId);
+        const firedTwice = await waitForReal(() => recurringCalls().length >= 2, FIRE_TIMEOUT_MS);
+        await bureau.cancelSchedule(summary!.id);
+
+        expect(firedTwice).toBe(true);
+
+        // Fire 2's agent body saw fire 1's turn — context accumulated, proving the
+        // recurring (session-given) semantics, not a fresh session per fire.
+        const fires = recurringCalls();
+        expect(fires[1]!.messageCount).toBeGreaterThan(fires[0]!.messageCount);
+
+        // The durable proof: the session itself accumulated both fires' user turns.
+        const session = await bureau.getSession(sessionId);
+        expect(session).not.toBeNull();
+        const userTurns = getMessages(session!.conversationHistory).filter(
+          (message) => message.role === 'user',
+        );
+        expect(userTurns.length).toBeGreaterThanOrEqual(2);
+      } finally {
+        bureau.dispose();
+      }
+    },
+    FIRE_TIMEOUT_MS,
+  );
+});

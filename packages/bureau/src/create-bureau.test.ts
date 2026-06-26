@@ -1751,14 +1751,7 @@ describe('createBureau', () => {
     }
   });
 
-  it('createSchedule throws NOT_IMPLEMENTED on a durable bureau — durable agent scheduling is not yet wired (regression PRRT_kwDORvupsc6MZozn)', async () => {
-    // The durable scheduled-FIRE path is unwired on our side: resolveRunServices
-    // only recovers an existing session and has no branch that builds services for
-    // a native weft schedule fire, so a scheduled `agentRun` would silently never
-    // run. (weft 0.8 DOES expose what's needed — `info.schedule` + a stable per-fire
-    // `info.workflowId` — so this is finishable here, tracked in #109.) Until the
-    // resolver branch lands, createSchedule rejects with NOT_IMPLEMENTED rather than
-    // registering a schedule whose every tick fails.
+  it('createSchedule registers a native schedule and returns its summary on a durable bureau (#109)', async () => {
     const bureau = await createBureau({
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
@@ -1767,20 +1760,23 @@ describe('createBureau', () => {
     });
 
     try {
-      const error = await bureau
-        .createSchedule({
-          agentName: 'researcher',
-          input: 'Summarize overnight activity',
-          spec: '0 9 * * *',
-          sessionId: 'daily-digest',
-        })
-        .then(
-          () => undefined,
-          (rejection: unknown) => rejection,
-        );
+      const summary = await bureau.createSchedule({
+        agentName: 'researcher',
+        input: 'Summarize overnight activity',
+        spec: '0 9 * * *',
+        sessionId: 'daily-digest',
+      });
 
-      expect(error).toBeInstanceOf(BureauError);
-      expect((error as BureauError).code).toBe('NOT_IMPLEMENTED');
+      expect(summary).toBeDefined();
+      expect(summary?.workflowType).toBe('agentRun');
+      expect(summary?.status).toBe('active');
+      // A bare multi-field string is a cron expression (not duration shorthand).
+      expect(summary?.cronExpression).toBe('0 9 * * *');
+      expect(typeof summary?.id).toBe('string');
+
+      // The schedule is then visible through the read surface.
+      const fetched = await bureau.getSchedule(summary!.id);
+      expect(fetched?.id).toBe(summary!.id);
     } finally {
       bureau.dispose();
     }

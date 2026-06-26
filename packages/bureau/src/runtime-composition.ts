@@ -9,7 +9,7 @@ import {
   type ToolboxEventMap,
   type ToolCallInput,
 } from 'armorer';
-import { Conversation } from 'conversationalist';
+import { Conversation, createConversationHistory } from 'conversationalist';
 import type { ForwardableSource, HookReplayPolicy } from 'lifecycle';
 import { CompletableEventTarget, forwardEvents, TypedEventTarget } from 'lifecycle';
 import type { CreateMemoryOptions, Memory } from 'memory';
@@ -26,6 +26,7 @@ import type {
   ValidateResponseHook,
 } from 'operative';
 import {
+  createAgentSession,
   createGuardrails,
   createIdentityHook,
   createScheduler,
@@ -45,12 +46,14 @@ import type {
   CheckpointStore,
   DurableRunDeps,
   RunEngineObservability,
+  ScheduledAgentRunInput,
 } from 'operative/durable';
 import {
   createCheckpointStore,
   createRunEngine,
   createRunWorkflow,
   isAgentRunWorkflowInput,
+  isScheduledAgentRunInput,
   SCHEDULER_ORIGIN_TAG,
   SCHEDULER_RUN_ID_PREFIX,
 } from 'operative/durable';
@@ -1226,6 +1229,127 @@ export async function createRuntimeComposition(
   }
 
   /**
+   * Persist a scheduled run's conversation back to its session after the FINAL
+   * step. This is what makes the recurring-conversation pattern work: fire N+1
+   * loads the session this hook last wrote, so the agent accumulates context
+   * across fires. For a fresh-per-fire (stateless cron) session it simply records
+   * the single fire's transcript so the run is observable via `getSession`.
+   *
+   * Deliberately writes ONLY the conversation (no `lastRunStatus: 'running'`
+   * lifecycle metadata): a scheduled fire is not crash-recoverable or
+   * signal-targeted, so a `running` marker would only create stale-`running`
+   * sessions on a crashed fire and race any interactive run sharing the session.
+   */
+  function createScheduledSessionPersistHook(
+    store: SessionStore,
+    sessionId: string,
+    agentName: string,
+  ): OnStepHook {
+    return async (context) => {
+      if (!context.final) return;
+      const existing = await store.load(sessionId);
+      const next =
+        existing ??
+        createAgentSession({
+          id: sessionId,
+          agentName,
+          conversationHistory: context.conversation.current,
+        });
+      await store.save({
+        ...next,
+        conversationHistory: context.conversation.current,
+      });
+    };
+  }
+
+  /**
+   * Build fresh {@link DurableRunDeps} for a NATIVE WEFT SCHEDULE FIRE (#109).
+   *
+   * Discriminated upstream by `info.schedule !== undefined` (only native
+   * scheduled fires carry it). Unlike the recovery path this does NOT recover an
+   * existing run — it constructs a brand-new run exactly as a fresh `createRun`
+   * would, seeding the conversation with the `ScheduledAgentRunInput.input` prompt
+   * and using `info.workflowId` (the per-fire id weft minted) as the runId. The
+   * workflow body reads that same id back as `ctx.workflowId`.
+   *
+   * Session semantics (D6): `sessionId` present → continue that session's
+   * conversation (recurring); absent → a fresh per-fire session (stateless cron).
+   */
+  async function buildScheduledRunServices(
+    info: WorkflowServicesResolverInfo,
+    store: SessionStore,
+  ): Promise<WorkflowServicesResolution> {
+    if (info.workflowType !== 'agentRun' || !isScheduledAgentRunInput(info.input)) {
+      return {
+        status: 'unavailable',
+        reason: `scheduled fire ${info.workflowId} has an unrecognized workflow type or input`,
+      };
+    }
+
+    const scheduledInput: ScheduledAgentRunInput = info.input;
+    const runId = info.workflowId;
+    const agentName = scheduledInput.agentName;
+
+    // sessionId present → recurring conversation; absent → fresh per-fire session.
+    // The fresh id is derived from the schedule id + per-fire runId so each fire
+    // is observable as its own session and two fires never collide.
+    const recurring = scheduledInput.sessionId !== undefined;
+    const sessionId =
+      scheduledInput.sessionId ?? `sched-${info.schedule?.id ?? 'unknown'}-${runId}`;
+
+    let conversation: Conversation;
+    if (recurring) {
+      const existing = await store.load(sessionId);
+      conversation = existing
+        ? new Conversation(existing.conversationHistory)
+        : new Conversation(createConversationHistory({ id: sessionId }));
+    } else {
+      conversation = new Conversation(createConversationHistory({ id: sessionId }));
+      if (systemPrompt) {
+        conversation.appendSystemMessage(systemPrompt);
+      }
+    }
+    conversation.appendUserMessage(scheduledInput.input);
+
+    // Same runtime a normal run builds (generate/toolbox/memory/skills/guardrails),
+    // wired to this fire's session + per-fire runId, with live streaming off (no
+    // ActiveRun surface for a scheduled fire).
+    const runRuntime = await createRunRuntime(
+      { message: scheduledInput.input, sessionId, runId, agentName },
+      { liveStreaming: false },
+    );
+
+    const services: DurableRunDeps = {
+      toolbox: runRuntime.toolbox,
+      options: {
+        generate: runRuntime.generate,
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment -- Toolbox generic variance; the durable layer never inspects the tool-tuple type parameter (matches createRunRuntime's internal Toolbox<any>).
+        toolbox: runRuntime.toolbox,
+        conversation,
+        maximumSteps,
+        stopWhen: options.stopWhen,
+        prepareStep: runRuntime.prepareStep,
+        // Append the session write-back hook so recurring fires accumulate and a
+        // stateless fire is observable; runs AFTER the runtime's own onStep hooks.
+        onStep: [
+          ...runRuntime.onStep,
+          createScheduledSessionPersistHook(store, sessionId, agentName),
+        ],
+        validateResponse: runRuntime.validateResponse,
+        agentName,
+        runId,
+      },
+    };
+
+    // Plain available services — no `emitter`, and intentionally NOT registered in
+    // `pendingRecoveryEmitters` and NOT wrapped in the C3 tool-bubble forwarding.
+    // Those exist so the bureau's reattach loop can consume them for a recovered
+    // ActiveRun; a scheduled fire has no reattach behind it, so wiring them would
+    // leak a Map entry + toolbox subscription per fire.
+    return { status: 'available', services };
+  }
+
+  /**
    * Weft's `resolveWorkflowServices` resolver: re-provide a recovered run's deps
    * on a fresh-process resume. Weft fires it (per recovered inline run that was
    * launched with `services`) BEFORE the generator advances, passing the run's
@@ -1251,6 +1375,14 @@ export async function createRuntimeComposition(
   ): Promise<WorkflowServicesResolution> {
     if (!sessionStore) {
       return { status: 'unavailable', reason: 'no session store configured' };
+    }
+    // NATIVE SCHEDULED FIRE (#109): weft sets `info.schedule` only for a native
+    // schedule tick. This is a FRESH run, not a recovery — build new deps from the
+    // ScheduledAgentRunInput rather than recovering a session. Ordered first, ahead
+    // of the recovery guards below (which reject a ScheduledAgentRunInput because it
+    // has no `runId`).
+    if (info.schedule !== undefined) {
+      return buildScheduledRunServices(info, sessionStore);
     }
     // The owning session id rides in the run's durable input (Weft passes the
     // persisted `input` to the resolver on recovery — see #2), so load the
