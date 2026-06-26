@@ -693,15 +693,13 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       );
     });
 
-    recoveredRun.once('run.aborted', () => {
+    recoveredRun.once('run.aborted', (event) => {
       persistSessionUpdate(
         // The reattach adapter reconstructs the abort RunResult from the run's
-        // final checkpoint, so load the same checkpoint transcript here — the
-        // checkpoint-preferred conversation the old settleRecoveredRun persisted.
+        // final checkpoint and threads it into RunAbortedEvent.conversation, so
+        // use that directly instead of re-fetching the checkpoint snapshot.
         async () => {
-          const snapshot = await runtime.durable?.checkpointStore.loadConversation(runId);
-          const conversation = snapshot ? Conversation.from(snapshot) : new Conversation();
-          await saveSession(sessionId, conversation, {
+          await saveSession(sessionId, event.conversation, {
             lastRunId: runId,
             lastRunStatus: 'aborted',
             lastFinishReason: 'aborted',

@@ -223,6 +223,19 @@ describe('serializeActionDetail', () => {
     expect(() => JSON.stringify(result)).not.toThrow();
   });
 
+  it('strips conversation from run.aborted details', () => {
+    const detail = {
+      step: 2,
+      conversation: { snapshot: () => ({}) },
+      reason: 'cancelled',
+    };
+
+    const result = serializeActionDetail('run.aborted', detail) as Record<string, unknown>;
+    expect(result).not.toHaveProperty('conversation');
+    expect(result['step']).toBe(2);
+    expect(result['reason']).toBe('cancelled');
+  });
+
   it('passes through other event types unchanged', () => {
     const detail = { some: 'data' };
     const result = serializeActionDetail('run.started', detail);
