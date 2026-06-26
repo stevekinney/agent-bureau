@@ -38,9 +38,13 @@ import { createAgent, createBureau } from './bureau-types.ts';
 // so the phantom-type machinery has concrete in/out types to carry.
 // ---------------------------------------------------------------------------
 
-declare const searchTool: (input: { query: string }) => Promise<string>;
-declare const clockTool: () => Promise<{ iso: string }>;
-declare const scratchpadTool: (input: { text: string }) => Promise<void>;
+// Tool entries are always the object form: `{ execute }` (or `{ execute, input }`).
+// A bare function is rejected by `ToolEntryInput` because it cannot declare an
+// `input` schema (PRRT_kwDORvupsc6MclwB) — see `toolboxFromMap` in
+// `bureau/src/builder.ts`.
+declare const searchTool: { execute: (input: { query: string }) => Promise<string> };
+declare const clockTool: { execute: () => Promise<{ iso: string }> };
+declare const scratchpadTool: { execute: (input: { text: string }) => Promise<void> };
 
 // ---------------------------------------------------------------------------
 // ASSERTION 1 — Broken-chain + reassignment across 3 files
@@ -88,9 +92,10 @@ type ExtractedTools = BureauTools<typeof bureauWithTools>;
 declare const searchEntry: ExtractedTools['search'];
 void (searchEntry satisfies ToolEntry<{ query: string }, string>);
 
-// 'clock' must carry its concrete types too.
+// 'clock' must carry its concrete types too. A no-argument `{ execute }` has no
+// parameter to infer, so the input phantom is `unknown` (not `void`).
 declare const clockEntry: ExtractedTools['clock'];
-void (clockEntry satisfies ToolEntry<void, { iso: string }>);
+void (clockEntry satisfies ToolEntry<unknown, { iso: string }>);
 
 // BureauToolNames must surface the union of all tool keys.
 type ToolNames = BureauToolNames<typeof bureauWithTools>;
