@@ -73,6 +73,7 @@ export function createWebhookRoutes(bureau: Bureau) {
     try {
       const summary = await bureau.createRun({
         message: body.message,
+        agentName,
         sessionId: idempotencyKey ?? undefined,
         systemPrompt: body.systemPrompt,
         maximumSteps: body.maximumSteps,

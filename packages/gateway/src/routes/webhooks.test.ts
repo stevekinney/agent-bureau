@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'bun:test';
+import { Hono } from 'hono';
 import type { GenerateFunction } from 'operative';
 
 import { createTestGateway, requestJSON } from '../test';
+import type { Bureau, CreateRunRequest, RunSummary } from '../types';
+import { createWebhookRoutes } from './webhooks';
 
 // These tests validate the createWebhookRoutes path-param dispatch behavior
 // via the webhooks.ts module. Note: the live gateway routes to createHooksRoutes
@@ -11,6 +14,30 @@ import { createTestGateway, requestJSON } from '../test';
 
 function createMockGenerate(): GenerateFunction {
   return async () => ({ content: 'Done.', toolCalls: [] });
+}
+
+/**
+ * Minimal Bureau stub for testing createWebhookRoutes in isolation.
+ * Only `createRun` is exercised by the route handler; all other members are
+ * unused. Test files may use `any` to satisfy the full interface without
+ * implementing every method.
+ */
+function createStubBureau(createRun: (req: CreateRunRequest) => Promise<RunSummary>): Bureau {
+  return { createRun } as any as Bureau;
+}
+
+function makeRunSummary(overrides?: Partial<RunSummary>): RunSummary {
+  return {
+    id: 'run-1',
+    sessionId: 'session-1',
+    status: 'completed',
+    steps: 1,
+    usage: { prompt: 10, completion: 5, total: 15 },
+    finishReason: 'end_turn',
+    error: undefined,
+    actionCount: 0,
+    ...overrides,
+  };
 }
 
 describe('webhook ingress routes', () => {
@@ -128,5 +155,55 @@ describe('webhook ingress routes', () => {
     });
 
     expect(response.status).toBe(202);
+  });
+});
+
+describe('createWebhookRoutes — direct mount', () => {
+  // These tests mount createWebhookRoutes directly on a Hono app with a
+  // stub Bureau so we can assert on the exact request passed to createRun.
+
+  it('passes agentName from path param to bureau.createRun', async () => {
+    const capturedRequests: CreateRunRequest[] = [];
+    const bureau = createStubBureau(async (req) => {
+      capturedRequests.push(req);
+      return makeRunSummary();
+    });
+
+    const app = new Hono();
+    app.route('/', createWebhookRoutes(bureau));
+
+    const response = await app.request('/analyst', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ message: 'Hello' }),
+    });
+
+    expect(response.status).toBe(202);
+    expect(capturedRequests).toHaveLength(1);
+    expect(capturedRequests[0]?.agentName).toBe('analyst');
+  });
+
+  it('passes agentName from x-agent-name header (header takes precedence over path param)', async () => {
+    const capturedRequests: CreateRunRequest[] = [];
+    const bureau = createStubBureau(async (req) => {
+      capturedRequests.push(req);
+      return makeRunSummary();
+    });
+
+    const app = new Hono();
+    app.route('/', createWebhookRoutes(bureau));
+
+    const response = await app.request('/fallback-agent', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-agent-name': 'header-agent',
+      },
+      body: JSON.stringify({ message: 'Hello from header dispatch' }),
+    });
+
+    expect(response.status).toBe(202);
+    expect(capturedRequests).toHaveLength(1);
+    expect(capturedRequests[0]?.agentName).toBe('header-agent');
   });
 });
