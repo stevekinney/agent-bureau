@@ -358,6 +358,39 @@ describe('createBureau', () => {
     expect(session?.metadata['lastMaximumTokens']).toBeUndefined();
   });
 
+  it('persists maximumSteps as lastMaximumSteps in session metadata when a run is created with a step cap (regression PRRT_kwDORvupsc6MZfl5)', async () => {
+    // REGRESSION: the per-request maximumSteps cap was not persisted to session
+    // metadata, so a recovered run fell back to the bureau default and could
+    // exceed the caller's step limit. saveSession now writes lastMaximumSteps,
+    // and buildRunDepsFromSession reads it back during recovery (mirroring the
+    // lastMaximumTokens recovery fix).
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      persistence: textValueStore(new MemoryStorage()),
+    });
+
+    const run = await bureau.createRun({ message: 'Capped run', maximumSteps: 3 });
+    await waitForRunCompletion(bureau, run.id);
+
+    const session = await bureau.getSession(run.sessionId);
+    expect(session?.metadata['lastMaximumSteps']).toBe(3);
+  });
+
+  it('does not write lastMaximumSteps to session metadata when maximumSteps is absent', async () => {
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      persistence: textValueStore(new MemoryStorage()),
+    });
+
+    const run = await bureau.createRun({ message: 'Uncapped run' });
+    await waitForRunCompletion(bureau, run.id);
+
+    const session = await bureau.getSession(run.sessionId);
+    expect(session?.metadata['lastMaximumSteps']).toBeUndefined();
+  });
+
   it('retries terminal session persistence after a transient save failure', async () => {
     const backingStore = textValueStore(new MemoryStorage());
     let sessionSaveCount = 0;

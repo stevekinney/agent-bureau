@@ -1011,6 +1011,13 @@ export async function createRuntimeComposition(
     // cost and output length after a process crash (PRRT_kwDORvupsc6MZEri).
     const maximumTokensRaw = session.metadata['lastMaximumTokens'];
     const maximumTokens = typeof maximumTokensRaw === 'number' ? maximumTokensRaw : undefined;
+    // Restore the per-request step cap from session metadata so a recovered run
+    // honours the caller's original maximumSteps rather than the bureau default
+    // (PRRT_kwDORvupsc6MZfl5). Falls back to the default `maximumSteps` closure
+    // value when the run was created without an explicit cap.
+    const maximumStepsRaw = session.metadata['lastMaximumSteps'];
+    const recoveredMaximumSteps =
+      typeof maximumStepsRaw === 'number' ? maximumStepsRaw : maximumSteps;
     const runRuntime = await createRunRuntime(
       {
         message: typeof message === 'string' ? message : '',
@@ -1030,7 +1037,7 @@ export async function createRuntimeComposition(
         // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment -- Toolbox generic variance; the durable layer never inspects the tool-tuple type parameter (matches createRunRuntime's internal Toolbox<any>).
         toolbox: runRuntime.toolbox,
         conversation: new Conversation(session.conversationHistory),
-        maximumSteps,
+        maximumSteps: recoveredMaximumSteps,
         stopWhen: options.stopWhen,
         prepareStep: runRuntime.prepareStep,
         onStep: runRuntime.onStep,

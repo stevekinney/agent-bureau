@@ -470,6 +470,10 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       lastRunStatus: 'running',
       lastUserMessage: request.message,
       ...(request.maximumTokens !== undefined ? { lastMaximumTokens: request.maximumTokens } : {}),
+      // Persist the per-request step cap too, so a recovered run honours the
+      // caller's maximumSteps instead of falling back to the bureau default
+      // (PRRT_kwDORvupsc6MZfl5 — mirror of the maximumTokens recovery fix).
+      ...(request.maximumSteps !== undefined ? { lastMaximumSteps: request.maximumSteps } : {}),
     });
 
     const activeRun = createActiveRun(
