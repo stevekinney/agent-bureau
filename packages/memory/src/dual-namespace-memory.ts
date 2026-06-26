@@ -135,12 +135,21 @@ export function createDualNamespaceMemory(privateMemory: Memory, sharedMemory?: 
     },
 
     async list(listOptions?: MemoryListOptions): Promise<MemorySearchResult[]> {
+      // Strip a caller-supplied `namespace` from the list options so that each
+      // underlying memory reads its own configured namespace. createMemory.list
+      // gives `options.namespace` precedence over the memory's configured
+      // namespace, so forwarding it would redirect both underlying list() calls
+      // to the caller namespace (typically a session id) instead of the private
+      // and shared pools — returning empty or wrong records. Same rationale as
+      // the namespace suppression in recall() / remember() / rememberOnce().
+      const { namespace: _namespace, ...listOptionsWithoutNamespace } = listOptions ?? {};
+
       if (sharedMemory === undefined) {
-        return privateMemory.list(listOptions);
+        return privateMemory.list(listOptionsWithoutNamespace);
       }
 
-      const limit = listOptions?.limit ?? 100;
-      const offset = listOptions?.offset ?? 0;
+      const limit = listOptionsWithoutNamespace.limit ?? 100;
+      const offset = listOptionsWithoutNamespace.offset ?? 0;
 
       // We must fetch at least (offset + limit) records from each namespace so
       // that after merge + sort we can always slice the correct page. Passing
@@ -151,8 +160,8 @@ export function createDualNamespaceMemory(privateMemory: Memory, sharedMemory?: 
 
       // No offset push-down across two sources — merge first, then paginate.
       const [privateEntries, sharedEntries] = await Promise.all([
-        privateMemory.list({ ...listOptions, limit: fetchLimit, offset: 0 }),
-        sharedMemory.list({ ...listOptions, limit: fetchLimit, offset: 0 }),
+        privateMemory.list({ ...listOptionsWithoutNamespace, limit: fetchLimit, offset: 0 }),
+        sharedMemory.list({ ...listOptionsWithoutNamespace, limit: fetchLimit, offset: 0 }),
       ]);
 
       const seen = new Set<string>();
