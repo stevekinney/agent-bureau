@@ -546,6 +546,119 @@ describe('createRuntimeComposition durable execution', () => {
     }
   });
 
+  // Regression: PRRT_kwDORvupsc6MZEri — buildRunDepsFromSession did not recover the
+  // per-request maximumTokens cap. fresh runs persist it to session metadata via
+  // create-bureau saveSession, but the recovered options were built without reading it
+  // back. After a process crash, resumed generate calls received maximumTokens:undefined,
+  // silently dropping the client's cap and changing cost and output length.
+  //
+  // Fix: persist 'lastMaximumTokens' in saveSession and read it back in
+  // buildRunDepsFromSession, spreading it into the returned DurableRunDeps.options
+  // exactly as agentName/runId are spread.
+  //
+  // This test verifies that a durable run whose recoverable session carries a
+  // lastMaximumTokens value passes it through to generate on recovery.
+  it('threads maximumTokens from session metadata into rebuilt RunOptions during recovery (regression PRRT_kwDORvupsc6MZEri)', async () => {
+    const databasePath = join(
+      tmpdir(),
+      `recovery-maximum-tokens-${process.pid}-${durableDatabaseCounter++}.sqlite`,
+    );
+    const runId = 'recovery-maximum-tokens-run';
+    const expectedMaximumTokens = 42;
+    let capturedMaximumTokens: number | undefined = undefined;
+
+    try {
+      // Phase 1: start a durable run that hangs (simulating a process crash).
+      const firstRuntime = await createRuntimeComposition({
+        generate: async () => new Promise<never>(() => {}),
+        toolbox: createToolbox([], { context: {} }),
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+      });
+
+      try {
+        expect(firstRuntime.durable).toBeDefined();
+        expect(firstRuntime.sessionStore).toBeDefined();
+
+        // Seed the recoverable session with lastMaximumTokens — mirroring what
+        // create-bureau's saveSession writes for a run started with maximumTokens.
+        await firstRuntime.sessionStore!.save(
+          createAgentSession({
+            id: runId,
+            agentName: 'test-agent',
+            conversationHistory: createConversationHistory(),
+            metadata: {
+              lastRunId: runId,
+              lastRunStatus: 'running',
+              lastUserMessage: 'recover this session',
+              lastMaximumTokens: expectedMaximumTokens,
+            },
+          }),
+        );
+
+        void startDurableRunResult(firstRuntime.durable!, {
+          runId,
+          sessionId: runId,
+          options: {
+            generate: async () => new Promise<never>(() => {}),
+            toolbox: createToolbox([], { context: {} }) as never,
+            conversation: createConversationHistory(),
+            stopWhen: stopWhen.noToolCalls(),
+          },
+        }).catch(() => {});
+
+        const running = await pollUntil(async () => {
+          const state = await firstRuntime.durable!.engine.get(runId);
+          return state?.status === 'running';
+        });
+        expect(running).toBe(true);
+      } finally {
+        firstRuntime.durable?.engine[Symbol.dispose]?.();
+        firstRuntime.disposeStorage?.();
+      }
+
+      // Phase 2: boot a fresh engine and recover. The recovered generate must
+      // receive the maximumTokens that were persisted in the session metadata.
+      const secondRuntime = await createRuntimeComposition({
+        generate: async (context) => {
+          capturedMaximumTokens = context.maximumTokens;
+          return { content: 'recovered', toolCalls: [] };
+        },
+        toolbox: createToolbox([], { context: {} }),
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+      });
+
+      try {
+        expect(secondRuntime.durable).toBeDefined();
+        await secondRuntime.durable!.engine.recoverAll();
+
+        const completed = await pollUntil(async () => {
+          const state = await secondRuntime.durable!.engine.get(runId);
+          return state?.status === 'completed' || state?.status === 'failed';
+        });
+        expect(completed).toBe(true);
+
+        const finalState = await secondRuntime.durable!.engine.get(runId);
+        expect(finalState?.status).toBe('completed');
+
+        // The key assertion: the recovered generate must see the same
+        // maximumTokens that were saved to session metadata before the crash.
+        // Cast via any: TypeScript cannot track that the async generate callback
+        // writes capturedMaximumTokens, so it keeps the narrowed type as undefined.
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        expect(capturedMaximumTokens as any).toBe(expectedMaximumTokens);
+      } finally {
+        secondRuntime.durable?.engine[Symbol.dispose]?.();
+        secondRuntime.disposeStorage?.();
+      }
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
   it('uses Weft launch tags instead of scheduler id heuristics during service resolution', async () => {
     const databasePath = join(
       tmpdir(),
