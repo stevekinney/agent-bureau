@@ -568,12 +568,20 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       );
     });
 
-    activeRun.once('run.aborted', () => {
+    activeRun.once('run.aborted', (event) => {
       disposeRegisteredStreamListeners(disposeStreamListeners);
 
       persistSessionUpdate(
         () =>
-          saveSession(sessionId, conversation, {
+          // Persist the conversation carried on the abort event, NOT the
+          // launch-time `conversation` closure. On the durable path the workflow
+          // mutates per-step checkpoint snapshots, so a run that aborts after
+          // checkpointed steps (e.g. when engine.cancel() wins the abort race)
+          // reconstructs its abort RunResult from the checkpoint — the event's
+          // conversation reflects those steps, whereas the closure still holds
+          // only the seed transcript. For the in-memory loop the event carries
+          // the same mutated instance, so this is correct on both paths.
+          saveSession(sessionId, event.conversation, {
             lastRunId: runId,
             lastRunStatus: 'aborted',
             // Write lastFinishReason too so an aborted session's metadata is
@@ -687,8 +695,8 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
 
     recoveredRun.once('run.aborted', () => {
       persistSessionUpdate(
-        // RunAbortedEvent carries no conversation (unlike run.completed), so load
-        // the transcript from the run's final checkpoint — the same
+        // The reattach adapter reconstructs the abort RunResult from the run's
+        // final checkpoint, so load the same checkpoint transcript here — the
         // checkpoint-preferred conversation the old settleRecoveredRun persisted.
         async () => {
           const snapshot = await runtime.durable?.checkpointStore.loadConversation(runId);

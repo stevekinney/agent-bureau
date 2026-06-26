@@ -137,9 +137,15 @@ export class RunAbortedEvent extends Event {
   static readonly type = 'run.aborted' as const;
   readonly step: number;
   readonly reason?: string;
-  constructor(step: number, reason?: string) {
+  // The conversation as it stood when the run aborted. On the durable path the
+  // workflow mutates per-step checkpoint snapshots, never the launch-time input
+  // instance, so listeners MUST persist this conversation (the reconstructed /
+  // checkpoint transcript) rather than the seed they captured at launch.
+  readonly conversation: Conversation;
+  constructor(step: number, conversation: Conversation, reason?: string) {
     super(RunAbortedEvent.type);
     this.step = step;
+    this.conversation = conversation;
     this.reason = reason;
   }
 }

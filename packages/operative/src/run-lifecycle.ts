@@ -66,7 +66,7 @@ export function makeAbortResult(
   step: number,
   reason?: string,
 ): RunResult {
-  emitter?.dispatch(new RunAbortedEvent(step, reason));
+  emitter?.dispatch(new RunAbortedEvent(step, conversation, reason));
   runHookSilently(hooks, 'onRunAbort', {
     reason,
     partialSteps: [...runState.steps],
