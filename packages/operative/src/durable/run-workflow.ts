@@ -441,9 +441,24 @@ export function createRunWorkflow(checkpointStore: CheckpointStore) {
           // Accumulate park requests from this step's memoized result. Last-write-
           // wins across steps, matching the in-process tool semantics (a later
           // `scheduleWakeup`/`requestHumanInput` call overwrites a prior one).
-          if (stepResult.pendingWakeup !== undefined) pendingWakeup = stepResult.pendingWakeup;
-          if (stepResult.pendingHumanWait !== undefined)
+          //
+          // MUTUAL EXCLUSIVITY INVARIANT: `pendingWakeup` and `pendingHumanWait`
+          // are mutually exclusive — only one park type governs after the loop
+          // (DurableRunDeps contract). Enforced here by clearing the OTHER local
+          // whenever one is set, so the last-set value wins even across steps.
+          // Within a single step's memo result, both could be present if the agent
+          // called both tools (an unusual but valid sequence); the `pendingHumanWait`
+          // check runs second, so it clears a same-step `pendingWakeup`, matching
+          // the reasonable user expectation that an explicit human-input request
+          // supersedes an autonomous wakeup schedule.
+          if (stepResult.pendingWakeup !== undefined) {
+            pendingWakeup = stepResult.pendingWakeup;
+            pendingHumanWait = undefined;
+          }
+          if (stepResult.pendingHumanWait !== undefined) {
             pendingHumanWait = stepResult.pendingHumanWait;
+            pendingWakeup = undefined;
+          }
 
           // === Durable commits — all plain data. Order: transcript, then the
           // step record (if any), then the advanced cursor last, so a crash
@@ -545,23 +560,24 @@ export function createRunWorkflow(checkpointStore: CheckpointStore) {
           }
         }
 
-        // === Durable self-wakeup (D6 — scheduleWakeup tool) ===
-        // `pendingWakeup` was accumulated above from step memo results — it is the
-        // checkpointed value, NOT `ctx.services.pendingWakeup`. This is the fix for
-        // the durable-recovery bug: on a crash AFTER the step memo commits but
-        // BEFORE this park executes, Weft replays the generator and short-circuits
+        // === Durable park — exactly one of wakeup or human-wait fires (never both). ===
+        // `pendingWakeup` / `pendingHumanWait` were accumulated above from step memo
+        // results — they are checkpointed values, NOT `ctx.services` fields. This is
+        // the fix for the durable-recovery bug: on a crash AFTER the step memo commits
+        // but BEFORE this park executes, Weft replays the generator and short-circuits
         // each memo to its checkpointed result. `ctx.services` is rebuilt fresh on
-        // recovery (with pendingWakeup/pendingHumanWait unset), so reading from
-        // services here would silently skip the park. Reading from the hoisted
-        // locals (fed from checkpointed step results) survives recovery correctly.
+        // recovery (with both fields unset), so reading from services here would
+        // silently skip the park. Reading from the hoisted locals (fed from
+        // checkpointed step results) survives recovery correctly.
+        //
+        // The two locals are kept MUTUALLY EXCLUSIVE by the accumulation loop above:
+        // setting one clears the other. The `else if` below is defense-in-depth —
+        // it guarantees exactly one park primitive fires regardless of accumulation
+        // state, so the workflow cannot sleep AND then wait for a signal in sequence.
         if (pendingWakeup !== undefined) {
           yield* ctx.sleep(pendingWakeup.duration);
-        }
-
-        // === F3 — HITL human-input gate (requestHumanInput tool) ===
-        // Same recovery fix: `pendingHumanWait` comes from accumulated step memo
-        // results, not from `ctx.services`. See comment above.
-        if (pendingHumanWait !== undefined) {
+        } else if (pendingHumanWait !== undefined) {
+          // === F3 — HITL human-input gate (requestHumanInput tool) ===
           yield* ctx.waitForSignal(pendingHumanWait.signalName);
         }
 
