@@ -20,6 +20,58 @@ function getFailureMessage(runResult: RunResult): string {
     : `Run ended with finish reason: ${runResult.finishReason}`;
 }
 
+/** Sentinel used by {@link runWithTimeout} so a real timeout is distinguishable. */
+class EvaluationTimeoutError extends Error {
+  constructor(name: string, timeoutMs: number) {
+    super(`Evaluation case "${name}" timed out after ${timeoutMs}ms.`);
+    this.name = 'EvaluationTimeoutError';
+  }
+}
+
+/**
+ * Race a promise against a hard timeout. `controller.abort()` alone cannot bound
+ * a `RegistryAgent.run()` that ignores its signal or hangs before observing it,
+ * which would block the suite's concurrency slot past `EvaluationCase.timeout`.
+ * This guarantees the await returns within `timeoutMs` even for an uncooperative
+ * agent (PRRT_kwDORvupsc6MlG1u).
+ */
+function runWithTimeout<T>(promise: Promise<T>, timeoutMs: number, caseName: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new EvaluationTimeoutError(caseName, timeoutMs)), timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+/** All known {@link RunResult.finishReason} values — the validation gate below. */
+const VALID_FINISH_REASONS: ReadonlySet<RunResult['finishReason']> = new Set([
+  'stop-condition',
+  'maximum-steps',
+  'aborted',
+  'error',
+  'elicitation-denied',
+  'budget-exceeded',
+]);
+
+/**
+ * Validate a `RegistryAgent.run()` return value (typed `Promise<unknown>`) is a
+ * real {@link RunResult} before it is scored. Without this, a miswired agent
+ * returning a plain object with no valid `finishReason` would slip past the
+ * failure guard below and pass by default on a case with no output assertion
+ * (PRRT_kwDORvupsc6MlG1z). Checks exactly the fields the evaluator reads:
+ * `finishReason` (a known literal), `steps` (an array — `extractStepCount` reads
+ * `.length`), and `content` (a string — used for output matching).
+ */
+function isRunResult(value: unknown): value is RunResult {
+  if (typeof value !== 'object' || value === null) return false;
+  const candidate = value as Record<string, unknown>;
+  return (
+    VALID_FINISH_REASONS.has(candidate['finishReason'] as RunResult['finishReason']) &&
+    Array.isArray(candidate['steps']) &&
+    typeof candidate['content'] === 'string'
+  );
+}
+
 /**
  * Runs a single evaluation case against the configured agent, producing a case result
  * with pass/fail status, score, and collected metrics.
@@ -74,10 +126,25 @@ async function runCase(
             `Evaluation case "${evaluationCase.name}" specifies maxSteps, but RegistryAgent does not support a per-case step cap (its run() accepts only { signal }). Remove maxSteps from the case or use the generate+toolbox agent shape instead.`,
           );
         }
-        const agentResult = await options.agent.run(evaluationCase.input, {
-          signal: controller.signal,
-        });
-        runResult = agentResult as RunResult;
+        // Race the agent's run against a hard timeout (in addition to passing the
+        // abort signal) so an uncooperative RegistryAgent cannot hang the worker
+        // past the case timeout (PRRT_kwDORvupsc6MlG1u).
+        const agentResult = await runWithTimeout(
+          options.agent.run(evaluationCase.input, { signal: controller.signal }),
+          timeout,
+          evaluationCase.name,
+        );
+        // RegistryAgent.run() is typed Promise<unknown>; validate before scoring
+        // so malformed output cannot bypass the failure guard and pass by default
+        // (PRRT_kwDORvupsc6MlG1z).
+        if (!isRunResult(agentResult)) {
+          throw new Error(
+            `Evaluation case "${evaluationCase.name}": RegistryAgent.run() returned a value ` +
+              `that is not a RunResult (missing a valid finishReason / steps / content). ` +
+              `The agent is likely miswired.`,
+          );
+        }
+        runResult = agentResult;
       }
     } finally {
       clearTimeout(timer);

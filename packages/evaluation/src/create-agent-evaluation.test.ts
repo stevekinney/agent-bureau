@@ -541,6 +541,50 @@ describe('createAgentEvaluation', () => {
     expect(report.cases[0]!.score).toBe(1);
   });
 
+  it('times out a RegistryAgent that hangs past the case timeout (PRRT_kwDORvupsc6MlG1u)', async () => {
+    // An agent that ignores its abort signal and never resolves. Without the
+    // hard timeout race, the worker would await this forever; with it, the case
+    // fails after `timeout` ms.
+    const hangingAgent: RegistryAgent = {
+      name: 'hanging-agent',
+      run: () => new Promise<never>(() => {}), // never resolves, ignores signal
+    };
+
+    const evaluation = createAgentEvaluation({
+      cases: [{ name: 'hangs', input: 'test', timeout: 30 }],
+      agent: hangingAgent,
+    });
+
+    const report = await evaluation.run();
+
+    expect(report.cases[0]!.pass).toBe(false);
+    expect(report.cases[0]!.score).toBe(0);
+    expect(report.cases[0]!.error).toMatch(/timed out/i);
+  });
+
+  it('fails (does not pass by default) when a RegistryAgent returns a non-RunResult (PRRT_kwDORvupsc6MlG1z)', async () => {
+    // A miswired agent: returns a plain object with `steps` but no valid
+    // finishReason. Previously the `as RunResult` cast let this flow through; the
+    // failure guard never triggered, and a case with no output assertion passed
+    // by default. The validation guard now rejects it as a failed case.
+    const miswiredAgent = {
+      name: 'miswired-agent',
+      run: async (_input: string) => ({ steps: [], somethingElse: true }),
+    } as unknown as RegistryAgent;
+
+    const evaluation = createAgentEvaluation({
+      // No expectedOutput — this is exactly the case that would pass by default.
+      cases: [{ name: 'miswired', input: 'test' }],
+      agent: miswiredAgent,
+    });
+
+    const report = await evaluation.run();
+
+    expect(report.cases[0]!.pass).toBe(false);
+    expect(report.cases[0]!.score).toBe(0);
+    expect(report.cases[0]!.error).toMatch(/not a RunResult/i);
+  });
+
   it.each(['budget-exceeded', 'elicitation-denied'] as const)(
     'fails the case (not a false-positive pass) when finishReason is %s even if content matches',
     async (finishReason) => {
