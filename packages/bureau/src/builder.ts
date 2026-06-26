@@ -285,7 +285,7 @@ function createSkillCatalogPrepareStep(
 
       const catalog =
         `<available_skills>\n` +
-        `You have the following skills available. Use the activate_skill tool to load a skill's full instructions.\n\n` +
+        `You have the following skills available.\n\n` +
         `${skillElements}\n` +
         `</available_skills>`;
 
