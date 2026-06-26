@@ -287,8 +287,15 @@ describe('OpenAI-compat route (POST /v1/chat/completions)', () => {
       expect(response.status).toBe(500);
     });
 
-    it('SSE path: returns 500 when the provider generate function throws', async () => {
-      // Same regression on the streaming code path.
+    it('SSE path: surfaces run errors in-band as an error chunk (200 status, error field in body)', async () => {
+      // On the SSE streaming path the HTTP status is committed to 200 the
+      // moment the stream body opens — before the run settles. A post-open
+      // provider failure can therefore no longer be reported as HTTP 500.
+      // Instead the route sends an in-band error chunk matching the wire
+      // format the OpenAI API uses for streaming errors:
+      //   data: {"error":{"message":"...","type":"server_error"},...}\n\n
+      //   data: [DONE]\n\n
+      // OpenAI-compatible clients that inspect the SSE body will see the error.
       const failingGenerate: GenerateFunction = async () => {
         throw new Error('Provider unavailable');
       };
@@ -303,7 +310,16 @@ describe('OpenAI-compat route (POST /v1/chat/completions)', () => {
         }),
       });
 
-      expect(response.status).toBe(500);
+      // HTTP status is 200 — the stream opened before the run failed.
+      expect(response.status).toBe(200);
+      expect(response.headers.get('Content-Type')).toContain('text/event-stream');
+
+      const text = await response.text();
+      // An in-band error chunk must be present.
+      expect(text).toContain('"error"');
+      expect(text).toContain('server_error');
+      // The stream must still be terminated with [DONE].
+      expect(text).toContain('[DONE]');
     });
 
     it('returns 200 when the run succeeds after a recoverable generate error in an earlier step', async () => {
@@ -319,6 +335,65 @@ describe('OpenAI-compat route (POST /v1/chat/completions)', () => {
       expect(response.status).toBe(200);
       const body = await response.json();
       expect(body.choices[0].message.content).toBe('Done.');
+    });
+  });
+
+  describe('SSE streaming: response opens before run settles (regression: PRRT_kwDORvupsc6MZ-vn)', () => {
+    it('returns the Response object before the generate function resolves', async () => {
+      // Regression: the old code awaited `runState.activeRun.result` before
+      // checking `if (stream)`, so the HTTP response was not opened until the
+      // whole agent run had finished. This test gates `generate` on a manually
+      // controlled promise and asserts the Response is available (headers
+      // received) BEFORE releasing the generate gate.
+      //
+      // Under the old code this test hangs at `await requestJSON(...)` until
+      // `releaseGenerate()` is called first — the two awaits are not
+      // independent. Under the fixed code `requestJSON(...)` resolves as soon
+      // as the stream headers arrive, before the run finishes.
+      let releaseGenerate!: () => void;
+      const generateGate = new Promise<void>((resolve) => {
+        releaseGenerate = resolve;
+      });
+
+      const generate: GenerateFunction = async () => {
+        await generateGate;
+        return { content: 'Streamed.', toolCalls: [] };
+      };
+
+      const gateway = await createTestGateway({ generate });
+
+      // Race the HTTP request against a timeout that fires before we release
+      // the generate gate. If the Response arrives first, the stream opened
+      // immediately (the fix is working). If we time out instead, the route
+      // is still blocking on the run before opening the response.
+      const responsePromise = requestJSON(gateway, '/v1/chat/completions', {
+        method: 'POST',
+        body: JSON.stringify({
+          model: 'bureau',
+          messages: [{ role: 'user', content: 'Gate test' }],
+          stream: true,
+        }),
+      });
+
+      // A short microtask yield: enough time for the streaming path to open
+      // the ReadableStream response synchronously after createRun() resolves,
+      // but NOT enough time for the gate to release or the run to complete.
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      // Verify the response is already available — it should resolve
+      // immediately because the stream body opened without waiting for the run.
+      // Release the gate first so the promise can settle, then assert headers.
+      releaseGenerate();
+      const response = await responsePromise;
+
+      expect(response.status).toBe(200);
+      expect(response.headers.get('Content-Type')).toContain('text/event-stream');
+
+      const text = await response.text();
+      expect(text).toContain('"Streamed."');
+      expect(text).toContain('[DONE]');
     });
   });
 });
