@@ -246,10 +246,13 @@ export async function createAgentSchedule(
     );
   }
 
+  // Trim the session id so a padded value ('  digest  ') persists under the same
+  // key the caller means, matching `createRunFromRequest`'s `sessionId.trim()`
+  // (review: cursor). The blank check above already rejected a whitespace-only id.
   const scheduledInput: ScheduledAgentRunInput = {
     agentName,
     input,
-    ...(session !== undefined ? { sessionId: session } : {}),
+    ...(session !== undefined ? { sessionId: session.trim() } : {}),
   };
 
   const scheduleOptions: ScheduleOptions = {

@@ -186,6 +186,18 @@ describe('createAgentSchedule', () => {
     expect(engine.calls[0]!.type).toBe('myRun');
   });
 
+  it('trims a padded session id before registering', async () => {
+    const engine = makeSchedulingEngine();
+    await createAgentSchedule({
+      engine: engine as unknown as AnyRunEngine,
+      agentName: 'a',
+      spec: { every: '1h' },
+      input: 'x',
+      session: '  daily-digest  ',
+    });
+    expect((engine.calls[0]!.input as ScheduledAgentRunInput).sessionId).toBe('daily-digest');
+  });
+
   it('rejects a blank session at the chokepoint (before reaching the engine)', async () => {
     const engine = makeSchedulingEngine();
     let caught: unknown;
