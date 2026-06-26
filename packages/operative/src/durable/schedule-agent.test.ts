@@ -12,6 +12,7 @@ import type { ScheduledAgentRunInput, SchedulingEngine } from './schedule-agent'
 import {
   createAgentSchedule,
   createAgentScheduler,
+  InvalidScheduleError,
   isScheduledAgentRunInput,
 } from './schedule-agent';
 
@@ -183,6 +184,56 @@ describe('createAgentSchedule', () => {
     });
 
     expect(engine.calls[0]!.type).toBe('myRun');
+  });
+
+  it('rejects a blank session at the chokepoint (before reaching the engine)', async () => {
+    const engine = makeSchedulingEngine();
+    let caught: unknown;
+    try {
+      await createAgentSchedule({
+        engine: engine as unknown as AnyRunEngine,
+        agentName: 'a',
+        spec: { every: '1h' },
+        input: 'x',
+        session: '   ',
+      });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(InvalidScheduleError);
+    expect(engine.calls).toHaveLength(0);
+  });
+
+  it("rejects overlap 'allow' combined with a recurring session", async () => {
+    const engine = makeSchedulingEngine();
+    let caught: unknown;
+    try {
+      await createAgentSchedule({
+        engine: engine as unknown as AnyRunEngine,
+        agentName: 'a',
+        spec: { every: '1h' },
+        input: 'x',
+        session: 'digest',
+        overlap: 'allow',
+      });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(InvalidScheduleError);
+    expect(engine.calls).toHaveLength(0);
+  });
+
+  it("allows overlap 'allow' when there is no session (stateless fires)", async () => {
+    const engine = makeSchedulingEngine();
+    const handle = await createAgentSchedule({
+      engine: engine as unknown as AnyRunEngine,
+      agentName: 'a',
+      spec: { every: '1h' },
+      input: 'x',
+      overlap: 'allow',
+    });
+    expect(engine.calls).toHaveLength(1);
+    expect(handle.id).toBe('test-sched-1');
   });
 
   it('returns a handle whose lifecycle methods delegate to the engine', async () => {

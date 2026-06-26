@@ -4,6 +4,7 @@ import { CompletableEventTarget } from 'lifecycle';
 import { type ActiveRun, createActiveRun, createAgentSession, type JSONValue } from 'operative';
 import {
   createAgentScheduler,
+  InvalidScheduleError,
   isAgentRunWorkflowInput,
   reattachDurableActiveRun,
   type RecoveredRunHandle,
@@ -1199,35 +1200,30 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     if (!runtime.ready) {
       throw new BureauError('No generate function configured', 'NOT_CONFIGURED');
     }
-    // A recurring schedule's session id, when present, must be a non-empty string:
-    // an empty/whitespace id would persist fires under a junk session, mirroring
-    // the same guard `validateCreateRunRequest` applies to `sessionId` (review:
-    // codex). A blank id is rejected rather than silently coerced to a fresh
-    // per-fire session, so the caller's intent is never quietly changed.
-    if (definition.sessionId !== undefined && definition.sessionId.trim().length === 0) {
-      toBadRequest('"sessionId" must be a non-empty string');
-    }
-    // A recurring conversation is inherently sequential — two fires appending to
-    // one linear session concurrently would interleave turns and race the
-    // session-persist read-modify-write. `overlap: 'allow'` permits exactly that,
-    // so it is incompatible with a recurring `sessionId` (review: codex). `'skip'`
-    // (the default) already serializes fires per session.
-    if (definition.sessionId !== undefined && definition.overlap === 'allow') {
-      toBadRequest(
-        "overlap 'allow' is incompatible with a recurring sessionId (fires must serialize)",
-      );
-    }
     // Register a native weft schedule that fires the `agentRun` workflow on each
     // tick. The fire path is wired through `resolveRunServices`' scheduled-fire
     // branch (see runtime-composition.ts): each tick builds fresh run deps from
     // the ScheduledAgentRunInput, seeds the prompt, and runs the agent (#109).
+    //
+    // Definition validation (blank recurring session, overlap 'allow' + recurring
+    // session) lives in `createAgentSchedule` — the single chokepoint every caller
+    // (bureau, AgentScheduler, the scheduleSelf tool) routes through — so it cannot
+    // be bypassed. We surface its `InvalidScheduleError` as a BAD_REQUEST (400).
     const scheduler = createAgentScheduler({ engine: runtime.durable.engine });
-    const handle = await scheduler.schedule(definition.agentName, {
-      spec: toScheduleSpec(definition.spec),
-      input: definition.input,
-      ...(definition.sessionId !== undefined ? { session: definition.sessionId } : {}),
-      ...(definition.overlap !== undefined ? { overlap: definition.overlap } : {}),
-    });
+    let handle;
+    try {
+      handle = await scheduler.schedule(definition.agentName, {
+        spec: toScheduleSpec(definition.spec),
+        input: definition.input,
+        ...(definition.sessionId !== undefined ? { session: definition.sessionId } : {}),
+        ...(definition.overlap !== undefined ? { overlap: definition.overlap } : {}),
+      });
+    } catch (error) {
+      if (error instanceof InvalidScheduleError) {
+        toBadRequest(error.message);
+      }
+      throw error;
+    }
     return handle.describe();
   }
 

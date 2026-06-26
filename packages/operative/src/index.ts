@@ -238,6 +238,7 @@ export type {
 export {
   createAgentSchedule,
   createAgentScheduler,
+  InvalidScheduleError,
   isScheduledAgentRunInput,
 } from './durable/schedule-agent';
 export { AgentScheduledEvent, WakeupScheduledEvent } from './events';

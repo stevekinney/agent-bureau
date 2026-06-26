@@ -198,6 +198,21 @@ export interface AgentScheduleOptions {
 }
 
 /**
+ * Thrown by {@link createAgentSchedule} when a schedule definition is internally
+ * incoherent (a blank recurring session id, or `overlap: 'allow'` combined with a
+ * recurring session). Validating here — the single registration chokepoint that
+ * `Bureau.createSchedule`, `AgentScheduler.schedule`, and the `scheduleSelf` tool
+ * all route through — protects every caller, not just the bureau HTTP surface.
+ * The bureau maps this to a `BAD_REQUEST` (HTTP 400).
+ */
+export class InvalidScheduleError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'InvalidScheduleError';
+  }
+}
+
+/**
  * Register a single recurring durable agent schedule against the given Weft
  * engine. Called by `AgentScheduler.schedule(...)` and (in production) the
  * `scheduleSelf` tool.
@@ -211,12 +226,25 @@ export interface AgentScheduleOptions {
  *
  * Session semantics: `session` present → each fire continues that session's
  * conversation (recurring); absent → each fire is a fresh standalone session.
+ *
+ * @throws {InvalidScheduleError} when `session` is blank, or `overlap: 'allow'`
+ * is combined with a recurring `session` (a recurring conversation is sequential,
+ * so overlapping fires would interleave turns and race the session write-back).
  */
 export async function createAgentSchedule(
   options: CreateAgentScheduleOptions,
 ): Promise<AgentScheduleHandle> {
   const { engine, agentName, spec, input, session, overlap, id } = options;
   const workflowType = options.workflowType ?? 'agentRun';
+
+  if (session !== undefined && session.trim().length === 0) {
+    throw new InvalidScheduleError('schedule session must be a non-empty string');
+  }
+  if (session !== undefined && overlap === 'allow') {
+    throw new InvalidScheduleError(
+      "overlap 'allow' is incompatible with a recurring session (fires must serialize)",
+    );
+  }
 
   const scheduledInput: ScheduledAgentRunInput = {
     agentName,

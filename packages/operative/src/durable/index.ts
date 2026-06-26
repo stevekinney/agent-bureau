@@ -34,6 +34,7 @@ export type {
 export {
   createAgentSchedule,
   createAgentScheduler,
+  InvalidScheduleError,
   isScheduledAgentRunInput,
 } from './schedule-agent';
 export { createStorageActivities } from './storage-activities';
