@@ -17,6 +17,8 @@ import { createStore } from 'operative/store';
 import { createMockGenerate as createSequentialGenerate } from 'operative/test';
 import { z } from 'zod';
 
+import type { AuditRecord } from './audit-trail';
+import * as auditTrailModule from './audit-trail';
 import { BureauError, classifyRecoveredRun, createBureau } from './create-bureau';
 import { createMemoryPersistHook, createRuntimeComposition } from './runtime-composition';
 import { waitForCondition, waitForRunState } from './test';
@@ -703,6 +705,104 @@ describe('createBureau', () => {
           (m) => typeof m.content === 'string' && m.content.includes('B recovered step 1'),
         );
         expect(hasBStep1).toBe(true);
+      } finally {
+        bureauB.dispose();
+      }
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
+  it('captures a recovered run that settles during boot in the durable audit trail (regression #114)', async () => {
+    // REGRESSION (#114): the durable audit trail (Layer B) must be subscribed
+    // BEFORE `recoverDurableRuns()` runs, not after. If recovery reattaches a run
+    // whose handle is already settled — or one that settles during the awaits
+    // inside recovery — its terminal `run.completed` / tool actions are dispatched
+    // through the store before the trail subscribes, so they land only in the live
+    // store and never reach the KV-backed trail. The recovered run then disappears
+    // from durable `/api/v1/audit` after a restart. Wiring the trail ahead of
+    // recovery guarantees those actions are persisted.
+    const databasePath = join(
+      tmpdir(),
+      `bureau-recovery-audit-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+
+    try {
+      // Bureau A: step 0 commits a tool call, then step 1's generate hangs (crash),
+      // leaving a non-terminal durable workflow for recoverAll to pick up.
+      let bureauAReachedStep1 = false;
+      const bureauA = await createBureau({
+        generate: async ({ step }) => {
+          if (step === 0) {
+            return { content: 'A step 0', toolCalls: [{ name: 'next', arguments: {} }] };
+          }
+          bureauAReachedStep1 = true;
+          return new Promise<never>(() => {});
+        },
+        toolbox: createToolbox([createNextTool()]) as unknown as Toolbox,
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+        stopWhen: stopWhen.noToolCalls(),
+      });
+
+      const run = await bureauA.createRun({ message: 'Recover into the audit trail' });
+      await pollUntil(() => bureauAReachedStep1);
+      bureauA.dispose();
+
+      // Observe boot ordering via a spy on `createAuditTrail`. Recovery REATTACHES
+      // each recovered run and `store.register`s it SYNCHRONOUSLY inside
+      // `recoverDurableRuns()` (so `getRun(runId)` resolves the moment recovery
+      // returns). Therefore, if the recovered run is already visible at the instant
+      // `createAuditTrail` runs, the trail subscribed too late — exactly the window
+      // in which recovered-run actions are lost. The fix creates the trail first,
+      // so the recovered run must NOT yet be registered when the spy fires.
+      const realCreateAuditTrail = auditTrailModule.createAuditTrail;
+      let recoveredRunVisibleWhenAuditCreated: boolean | undefined;
+      const auditTrailSpy = spyOn(auditTrailModule, 'createAuditTrail').mockImplementation(
+        (observedBureau, kv) => {
+          recoveredRunVisibleWhenAuditCreated = observedBureau.getRun(run.id) !== undefined;
+          return realCreateAuditTrail(observedBureau, kv);
+        },
+      );
+
+      let bureauB: Bureau;
+      try {
+        // Bureau B: a wholly separate bureau over the same SQLite file. On boot it
+        // recovers the run, which resumes at step 1 and settles.
+        bureauB = await createBureau({
+          generate: async ({ step }) => ({ content: `B recovered step ${step}`, toolCalls: [] }),
+          toolbox: createToolbox([createNextTool()]) as unknown as Toolbox,
+          storage: { type: 'sqlite', path: databasePath },
+          durableExecution: true,
+          stopWhen: stopWhen.noToolCalls(),
+        });
+      } finally {
+        auditTrailSpy.mockRestore();
+      }
+
+      try {
+        // ORDERING: the audit trail was created before recovery reattached the run.
+        expect(recoveredRunVisibleWhenAuditCreated).toBe(false);
+
+        // Wait until the recovered run reaches a terminal session status.
+        await pollUntil(async () => {
+          const current = await bureauB.getSession(run.sessionId);
+          return current?.metadata['lastRunStatus'] !== 'running';
+        });
+
+        // DURABILITY: the recovered run's terminal transition is persisted in the
+        // KV-backed trail (written fire-and-forget after the terminal event fires),
+        // so it survives the restart and is queryable from the durable trail.
+        let auditRecords: AuditRecord[] = [];
+        await pollUntil(async () => {
+          auditRecords = (await bureauB.auditTrail?.query({ runId: run.id })) ?? [];
+          return auditRecords.some((record) => record.type === 'run.completed');
+        });
+        const completed = auditRecords.filter((record) => record.type === 'run.completed');
+        expect(completed.length).toBeGreaterThan(0);
+        expect(completed.every((record) => record.runId === run.id)).toBe(true);
       } finally {
         bureauB.dispose();
       }
