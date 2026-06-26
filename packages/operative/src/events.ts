@@ -772,11 +772,18 @@ export class HumanWaitParkedEvent extends Event {
   readonly signalName: string;
   /** The run id of the parked workflow. */
   readonly runId: string;
+  /**
+   * The prompt to surface to the human reviewer, if one was supplied to
+   * `requestHumanInput`. Lets event-stream/UI consumers show what approval or
+   * input is being requested without subscribing to the tool result.
+   */
+  readonly prompt: string | undefined;
 
-  constructor(signalName: string, runId: string) {
+  constructor(signalName: string, runId: string, prompt?: string) {
     super(HumanWaitParkedEvent.type);
     this.signalName = signalName;
     this.runId = runId;
+    this.prompt = prompt;
   }
 }
 

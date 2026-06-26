@@ -482,6 +482,71 @@ describe('createBureau (builder) — tool registration', () => {
     // pass through intact.
     expect(capturedArgs).toEqual({ a: 5, b: 3 });
   });
+
+  // ---------------------------------------------------------------------------
+  // Regression: PRRT_kwDORvupsc6Mc3gP — the object form sibling of the
+  // bare-function arg-stripping bug. A parameterized { execute } WITHOUT an
+  // `input` schema let Armorer normalize the missing schema to z.object({}),
+  // stripping every LLM-supplied argument — the same failure as a bare
+  // function, just via the object form.
+  //
+  // `Function.length` cannot soundly detect whether `execute` consumes
+  // arguments (default/optional/rest params report 0), so rather than inspect
+  // arity we forward a passthrough object schema when `input` is absent. Args
+  // reach a parameterized execute; an argument-free execute is unaffected.
+  // ---------------------------------------------------------------------------
+
+  it('passes LLM arguments through a parameterized { execute } with no input schema (PRRT_kwDORvupsc6Mc3gP)', async () => {
+    let capturedArgs: Record<string, unknown> | undefined;
+
+    const generate = createMockGenerate([
+      { content: '', toolCalls: [{ name: 'add', arguments: { a: 5, b: 3 } }] },
+      { content: 'done', toolCalls: [] },
+    ]);
+
+    // No `input` schema — before the fix, Armorer normalized this to
+    // z.object({}) and stripped { a, b } before execute ran.
+    const bureau = createBureau()
+      .tools({
+        add: {
+          execute: async (params: { a: number; b: number }) => {
+            capturedArgs = params as Record<string, unknown>;
+            return params.a + params.b;
+          },
+        } as unknown as typeof echoTool,
+      })
+      .agent({ name: 'calc', generate });
+
+    await bureau.run('calc', 'add 5 and 3').result();
+
+    expect(capturedArgs).toEqual({ a: 5, b: 3 });
+  });
+
+  it('passes LLM arguments through an execute with a default parameter and no input schema (PRRT_kwDORvupsc6Mc3gP)', async () => {
+    let capturedArgs: Record<string, unknown> | undefined;
+
+    const generate = createMockGenerate([
+      { content: '', toolCalls: [{ name: 'echoArgs', arguments: { value: 42 } }] },
+      { content: 'done', toolCalls: [] },
+    ]);
+
+    // A default parameter makes execute.length report 0 — the unsound arity
+    // signal. The passthrough schema must still forward the arguments.
+    const bureau = createBureau()
+      .tools({
+        echoArgs: {
+          execute: async (params: Record<string, unknown> = {}) => {
+            capturedArgs = params;
+            return params;
+          },
+        } as unknown as typeof echoTool,
+      })
+      .agent({ name: 'echoer', generate });
+
+    await bureau.run('echoer', 'echo 42').result();
+
+    expect(capturedArgs).toEqual({ value: 42 });
+  });
 });
 
 // ---------------------------------------------------------------------------

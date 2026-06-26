@@ -785,6 +785,18 @@ export function createSessionHandle(
       // In-memory path: a simple setTimeout (durable path via ctx.sleep is
       // a Phase D concern when a Weft engine is wired through the session).
       const ms = typeof duration === 'number' ? duration : parseDuration(duration);
+
+      // Reject string durations that parsed to 0 ms — same guard as
+      // `monitor({ every })`. parseDuration returns 0 for unrecognised strings
+      // (e.g. '5m' instead of 'PT5M'); silently sleeping 0 ms would resume the
+      // session immediately instead of pausing for the caller's intended delay.
+      if (typeof duration === 'string' && ms === 0) {
+        throw new Error(
+          `session.sleep() received an invalid duration string: "${duration}". ` +
+            `Use a number (milliseconds) or an ISO-8601 PT duration such as 'PT5M' or 'PT1H30M'.`,
+        );
+      }
+
       emitter.dispatchEvent(new SessionSleepEvent(sessionId, ms));
       await new Promise<void>((resolve) => setTimeout(resolve, ms));
     },

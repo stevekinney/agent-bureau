@@ -574,4 +574,40 @@ describe('createAgentEvaluation', () => {
     expect(report.cases[0]!.error).toContain('systemPrompt');
     expect(report.cases[0]!.error).toContain('RegistryAgent');
   });
+
+  // Regression: PRRT_kwDORvupsc6Mc3gT — RegistryAgent.run() accepts only
+  // { signal, traceContext } and has no per-case step cap. Silently ignoring a
+  // case's maxSteps would let cases meant to catch looping run under the agent's
+  // own/default limit, so the runner must reject maxSteps for RegistryAgent
+  // cases the same way it rejects systemPrompt.
+  it('fails with a clear error when RegistryAgent is used with a per-case maxSteps (PRRT_kwDORvupsc6Mc3gT)', async () => {
+    const registryAgent: RegistryAgent = {
+      name: 'test-agent',
+      run: async (_input: string) => ({
+        conversation: {} as RunResult['conversation'],
+        steps: [],
+        content: 'ok',
+        usage: { prompt: 0, completion: 0, total: 0 },
+        finishReason: 'stop-condition' as const,
+      }),
+    };
+
+    const evaluation = createAgentEvaluation({
+      cases: [
+        {
+          name: 'registry-agent-with-max-steps',
+          input: 'test',
+          maxSteps: 3,
+        },
+      ],
+      agent: registryAgent,
+    });
+
+    const report = await evaluation.run();
+
+    // The case should fail with an actionable error, not silently drop maxSteps.
+    expect(report.cases[0]!.pass).toBe(false);
+    expect(report.cases[0]!.error).toContain('maxSteps');
+    expect(report.cases[0]!.error).toContain('RegistryAgent');
+  });
 });

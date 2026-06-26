@@ -64,6 +64,16 @@ async function runCase(
             `Evaluation case "${evaluationCase.name}" specifies systemPrompt, but RegistryAgent does not support per-case system prompt overrides. Remove the systemPrompt from the case or use the generate+toolbox agent shape instead.`,
           );
         }
+
+        // RegistryAgent.run() accepts only { signal, traceContext } — there is no
+        // per-case step cap. Silently ignoring maxSteps would let cases meant to
+        // catch looping/excessive tool use run under the agent's own/default
+        // limit. Fail loudly, mirroring the systemPrompt rejection above.
+        if (evaluationCase.maxSteps !== undefined) {
+          throw new Error(
+            `Evaluation case "${evaluationCase.name}" specifies maxSteps, but RegistryAgent does not support a per-case step cap (its run() accepts only { signal }). Remove maxSteps from the case or use the generate+toolbox agent shape instead.`,
+          );
+        }
         const agentResult = await options.agent.run(evaluationCase.input, {
           signal: controller.signal,
         });

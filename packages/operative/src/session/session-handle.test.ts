@@ -710,6 +710,31 @@ describe('session.sleep()', () => {
     const elapsed = Date.now() - start;
     expect(elapsed).toBeGreaterThanOrEqual(9);
   });
+
+  // Regression: PRRT_kwDORvupsc6Mc3gS — sleep() must reject non-ISO-8601
+  // duration strings the same way monitor({ every }) does. parseDuration()
+  // returns 0 for unrecognised strings (e.g. '5m' instead of 'PT5M'), which
+  // previously made the session resume immediately instead of pausing.
+  it('throws when given a non-ISO-8601 duration string (PRRT_kwDORvupsc6Mc3gS)', async () => {
+    const { handle } = createSessionHandleFixture();
+
+    let caught: unknown;
+    try {
+      await handle.sleep('5m'); // not 'PT5M' — parseDuration returns 0
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toMatch(/invalid duration string/i);
+  });
+
+  it('does not throw for an explicit numeric 0 (zero is a valid millisecond value)', async () => {
+    const { handle } = createSessionHandleFixture();
+    // A numeric 0 is a deliberate no-delay sleep — only string parse-to-0 is rejected.
+    await handle.sleep(0);
+    // Reaching here without throwing is the assertion.
+    expect(true).toBe(true);
+  });
 });
 
 // ---------------------------------------------------------------------------
