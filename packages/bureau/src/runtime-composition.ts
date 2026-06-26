@@ -1005,6 +1005,12 @@ export async function createRuntimeComposition(
   ): Promise<DurableRunDeps | null> {
     if (!session) return null;
     const message = session.metadata['lastUserMessage'];
+    // Recover the per-request token cap persisted by create-bureau's saveSession
+    // call. Without this, recovered generate calls receive maximumTokens:undefined
+    // and may produce more output than the original client cap allowed, changing
+    // cost and output length after a process crash (PRRT_kwDORvupsc6MZEri).
+    const maximumTokensRaw = session.metadata['lastMaximumTokens'];
+    const maximumTokens = typeof maximumTokensRaw === 'number' ? maximumTokensRaw : undefined;
     const runRuntime = await createRunRuntime(
       {
         message: typeof message === 'string' ? message : '',
@@ -1034,6 +1040,9 @@ export async function createRuntimeComposition(
         // pre-crash run (C3 parity). Without them, recovered runs emit blank ids.
         ...(agentName !== undefined ? { agentName } : {}),
         ...(runId !== undefined ? { runId } : {}),
+        // Restore the per-request token cap so recovered steps honour the same
+        // maximumTokens constraint as the original run (PRRT_kwDORvupsc6MZEri).
+        ...(maximumTokens !== undefined ? { maximumTokens } : {}),
       },
     };
   }
