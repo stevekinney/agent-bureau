@@ -87,7 +87,19 @@ async function runCase(
     const usage = extractTokenUsage(runResult);
     const steps = extractStepCount(runResult);
 
-    if (runResult.finishReason === 'error' || runResult.finishReason === 'aborted') {
+    // Treat the FULL failure set as an evaluation failure, not just
+    // error/aborted. A run that ends with 'budget-exceeded' or
+    // 'elicitation-denied' is a normal operative failure state; falling through
+    // to output/tool matching can mark such a case as passed if the partial
+    // content happens to match, so evaluations meant to catch budget/elicitation
+    // failures would report false positives. getFailureMessage() already renders
+    // non-'error' reasons (PRRT — Codex re-review of 7b910a15).
+    if (
+      runResult.finishReason === 'error' ||
+      runResult.finishReason === 'aborted' ||
+      runResult.finishReason === 'budget-exceeded' ||
+      runResult.finishReason === 'elicitation-denied'
+    ) {
       return {
         name: evaluationCase.name,
         tags,

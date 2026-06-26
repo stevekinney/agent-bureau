@@ -541,6 +541,48 @@ describe('createAgentEvaluation', () => {
     expect(report.cases[0]!.score).toBe(1);
   });
 
+  it.each(['budget-exceeded', 'elicitation-denied'] as const)(
+    'fails the case (not a false-positive pass) when finishReason is %s even if content matches',
+    async (finishReason) => {
+      // Regression (Codex re-review of 7b910a15): a run that ends with
+      // 'budget-exceeded'/'elicitation-denied' is a normal operative FAILURE.
+      // Previously the failure branch only covered 'error'/'aborted', so such a
+      // run fell through to output matching and could PASS if its partial content
+      // happened to match expectedOutput — a false positive for evaluations meant
+      // to catch budget/elicitation failures.
+      const registryAgent: RegistryAgent = {
+        name: 'failing-agent',
+        run: async (_input: string) => ({
+          conversation: {} as RunResult['conversation'],
+          steps: [],
+          // Content deliberately MATCHES expectedOutput below to prove the
+          // failure short-circuits BEFORE output matching.
+          content: 'the expected answer',
+          usage: { prompt: 0, completion: 0, total: 0 },
+          finishReason,
+        }),
+      };
+
+      const evaluation = createAgentEvaluation({
+        cases: [
+          {
+            name: `failure-${finishReason}`,
+            input: 'test',
+            expectedOutput: 'the expected answer',
+          },
+        ],
+        agent: registryAgent,
+      });
+
+      const report = await evaluation.run();
+
+      expect(report.cases[0]!.pass).toBe(false);
+      expect(report.cases[0]!.score).toBe(0);
+      expect(report.cases[0]!.metrics.finishReason).toBe(finishReason);
+      expect(report.cases[0]!.error).toContain(finishReason);
+    },
+  );
+
   it('fails with a clear error when RegistryAgent is used with a per-case systemPrompt', async () => {
     // RegistryAgent.run() has no systemPrompt parameter — its instructions are baked
     // in at construction time. Silently dropping the override would give misleading

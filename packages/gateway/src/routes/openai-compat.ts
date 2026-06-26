@@ -438,15 +438,26 @@ export function createOpenAICompatRoutes(bureau: Bureau) {
       throw new HTTPException(500, { message: 'Run result unavailable after settlement' });
     }
 
-    if (runDetail.status === 'error') {
+    if (runDetail.status === 'aborted') {
+      throw new HTTPException(500, { message: 'Run was aborted before completion' });
+    }
+
+    // Reject ALL failure finish reasons, not just store status 'error'. A run
+    // that fails with 'budget-exceeded' or 'elicitation-denied' arrives via
+    // run.completed and lands in the store as status 'completed' (the store only
+    // marks 'error' when status was already error), so a status-only check would
+    // return a 200 chat completion with partial content. Discriminate by
+    // finishReason — mirroring the streaming branch (PRRT_kwDORvupsc6MkTtu).
+    const isFailure =
+      runDetail.status === 'error' ||
+      runDetail.finishReason === 'error' ||
+      runDetail.finishReason === 'budget-exceeded' ||
+      runDetail.finishReason === 'elicitation-denied';
+    if (isFailure) {
       const message = runDetail.error ?? 'Run failed with an unspecified error';
       throw new HTTPException(500, {
         message: typeof message === 'string' ? message : 'Run failed',
       });
-    }
-
-    if (runDetail.status === 'aborted') {
-      throw new HTTPException(500, { message: 'Run was aborted before completion' });
     }
 
     const lastStep = runDetail.stepDetails.at(-1);

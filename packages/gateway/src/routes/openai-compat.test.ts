@@ -336,6 +336,67 @@ describe('OpenAI-compat route (POST /v1/chat/completions)', () => {
       const body = await response.json();
       expect(body.choices[0].message.content).toBe('Done.');
     });
+
+    it('non-stream: returns 500 for a budget-exceeded run (store status completed) instead of a 200 with partial content (regression: PRRT_kwDORvupsc6MkTtu)', async () => {
+      // A run that fails with 'budget-exceeded'/'elicitation-denied' arrives via
+      // run.completed and lands in the store as status 'completed' but with a
+      // failure finishReason. The non-streaming path must reject the full failure
+      // set by finishReason, not just store status 'error' — otherwise it returns
+      // a 200 chat completion with partial content. We model the terminal detail
+      // directly via a fake bureau (these finish reasons are hard to force
+      // through a stub generate).
+      const realGateway = await createTestGateway({ generate: createMockGenerate() });
+      const terminalRunState = {
+        id: 'budget-run',
+        status: 'completed',
+        steps: [],
+        usage: { prompt: 0, completion: 0, total: 0 },
+        finishReason: 'budget-exceeded',
+        error: undefined,
+        snapshots: [],
+        actions: [],
+        activeRun: {
+          result: Promise.resolve({}),
+          abort: () => {},
+          addEventListener: () => {},
+          removeEventListener: () => {},
+        },
+      };
+      const runDetail = {
+        id: 'budget-run',
+        sessionId: 'sess-1',
+        status: 'completed',
+        steps: 1,
+        usage: { prompt: 0, completion: 0, total: 0 },
+        finishReason: 'budget-exceeded',
+        error: undefined,
+        actionCount: 0,
+        events: [],
+        stepDetails: [{ content: 'partial output' }],
+        latestSnapshot: undefined,
+      };
+      const fakeBureau = {
+        ...realGateway.bureau,
+        createRun: async () => ({ id: 'budget-run', sessionId: 'sess-1' }),
+        store: {
+          ...realGateway.bureau.store,
+          getRun: (id: string) =>
+            id === 'budget-run' ? terminalRunState : realGateway.bureau.store.getRun(id),
+        },
+        getRun: (id: string) => (id === 'budget-run' ? runDetail : realGateway.bureau.getRun(id)),
+      } as unknown as typeof realGateway.bureau;
+
+      const gateway = await createTestGateway(fakeBureau);
+      const response = await requestJSON(gateway, '/v1/chat/completions', {
+        method: 'POST',
+        body: minimalRequest('bureau', 'Over budget'),
+      });
+
+      // Must be 500, not a 200 with the partial content.
+      expect(response.status).toBe(500);
+
+      realGateway.bureau.dispose();
+    });
   });
 
   describe('SSE streaming: response opens before run settles (regression: PRRT_kwDORvupsc6MZ-vn)', () => {
