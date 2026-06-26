@@ -221,6 +221,13 @@ export function createOpenAICompatRoutes(bureau: Bureau) {
     if (stream) {
       const runState = bureau.store.getRun(summary.id);
 
+      // A no-arg cleanup captured from start() so the stream's cancel() and the
+      // terminal close() can detach the run listeners — without this, a client
+      // disconnect (cancel) would leave the run.completed/run.aborted listeners
+      // attached and, worse, the run executing (and billing provider tokens) with
+      // nothing reading its output.
+      let detachRunListeners: () => void = () => {};
+
       const body = new ReadableStream<Uint8Array>({
         start(controller) {
           const encoder = new TextEncoder();
@@ -230,6 +237,7 @@ export function createOpenAICompatRoutes(bureau: Bureau) {
           }
 
           function close(): void {
+            detachRunListeners();
             try {
               controller.close();
             } catch {
@@ -254,7 +262,11 @@ export function createOpenAICompatRoutes(bureau: Bureau) {
           // Note: the loop also dispatches `run.error` BEFORE `run.completed` on
           // the error path. We listen only to `run.completed` so we never enqueue
           // into an already-closed stream.
-          runState.activeRun.addEventListener('run.completed', (event) => {
+          const onCompleted = (event: {
+            finishReason: string;
+            error?: unknown;
+            content: string;
+          }): void => {
             const isError =
               event.finishReason === 'error' ||
               event.finishReason === 'budget-exceeded' ||
@@ -269,15 +281,32 @@ export function createOpenAICompatRoutes(bureau: Bureau) {
             }
             enqueue('data: [DONE]\n\n');
             close();
-          });
+          };
+          runState.activeRun.addEventListener('run.completed', onCompleted);
 
           // `run.aborted` fires when the run is aborted (no `run.completed`
           // counterpart is dispatched on the abort path).
-          runState.activeRun.addEventListener('run.aborted', () => {
+          const onAborted = (): void => {
             enqueue(formatSseErrorChunk(agentName, 'Run was aborted before completion'));
             enqueue('data: [DONE]\n\n');
             close();
-          });
+          };
+          runState.activeRun.addEventListener('run.aborted', onAborted);
+
+          detachRunListeners = (): void => {
+            runState.activeRun.removeEventListener('run.completed', onCompleted);
+            runState.activeRun.removeEventListener('run.aborted', onAborted);
+          };
+        },
+
+        // Fired when the consumer cancels the stream — i.e. the HTTP client
+        // disconnected (or an intermediary timed out). Stop the bill: abort the
+        // active run so the agent loop drops its in-flight provider call instead
+        // of running to completion for an audience that has left. Detach our
+        // listeners so the now-orphaned stream controller is never touched again.
+        cancel() {
+          detachRunListeners();
+          runState?.activeRun.abort('client disconnected from SSE stream');
         },
       });
 
