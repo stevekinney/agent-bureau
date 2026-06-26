@@ -459,11 +459,11 @@ export type NormalizeAgents<TTools extends ToolMap, TIn extends BureauAgentsInpu
  * bureau2.run('researcher', '...'); // still typechecks
  * ```
  */
-export declare function createBureau<
-  TAgentsInput extends BureauAgentsInput = Record<never, never>,
->(options?: {
-  agents?: TAgentsInput;
-}): BureauBuilder<Record<never, never>, NormalizeAgents<Record<never, never>, TAgentsInput>>;
+export interface CreateBureauFn {
+  <TAgentsInput extends BureauAgentsInput = Record<never, never>>(options?: {
+    agents?: TAgentsInput;
+  }): BureauBuilder<Record<never, never>, NormalizeAgents<Record<never, never>, TAgentsInput>>;
+}
 
 // ---------------------------------------------------------------------------
 // AgentBuilder — the standalone agent builder (bureau-less)
@@ -567,6 +567,8 @@ export interface CreateAgentOptions<TTools extends ToolMapInput = ToolMapInput> 
  * const result = await run.result();
  * ```
  */
-export declare function createAgent<TTools extends ToolMapInput = Record<never, never>>(
-  options: CreateAgentOptions<TTools>,
-): AgentBuilder<Record<never, never>, NormalizeTools<TTools>>;
+export interface CreateAgentFn {
+  <TTools extends ToolMapInput = Record<never, never>>(
+    options: CreateAgentOptions<TTools>,
+  ): AgentBuilder<Record<never, never>, NormalizeTools<TTools>>;
+}

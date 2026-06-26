@@ -22,7 +22,9 @@ import type {
   AgentTools,
   BureauToolNames,
   BureauTools,
+  CreateAgentFn,
   CreateAgentOptions,
+  CreateBureauFn,
   RunResult,
   SkillPolicy,
   SkillProviderLike,
@@ -30,7 +32,6 @@ import type {
   ToolMap,
   ToolMapInput,
 } from './bureau-types.ts';
-import { createAgent, createBureau } from './bureau-types.ts';
 
 // ---------------------------------------------------------------------------
 // Declare some typed tool stubs.
@@ -45,6 +46,8 @@ import { createAgent, createBureau } from './bureau-types.ts';
 declare const searchTool: { execute: (input: { query: string }) => Promise<string> };
 declare const clockTool: { execute: () => Promise<{ iso: string }> };
 declare const scratchpadTool: { execute: (input: { text: string }) => Promise<void> };
+declare const createBureau: CreateBureauFn;
+declare const createAgent: CreateAgentFn;
 
 // ---------------------------------------------------------------------------
 // ASSERTION 1 — Broken-chain + reassignment across 3 files
