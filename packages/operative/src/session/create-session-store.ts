@@ -72,7 +72,20 @@ function parseSession(raw: string | null): AgentSession | undefined {
 function mergeConversationHistory(
   current: ConversationHistory,
   candidate: ConversationHistory,
+  candidateIsFresh: boolean,
 ): ConversationHistory {
+  if (candidateIsFresh) {
+    const messages = { ...candidate.messages };
+    for (const [position, id] of candidate.ids.entries()) {
+      const message = messages[id];
+      if (message) messages[id] = { ...message, position };
+    }
+    return {
+      ...candidate,
+      messages,
+    };
+  }
+
   const currentIds = new Set(current.ids);
   const candidateOnlyIds = candidate.ids.filter((id) => !currentIds.has(id));
   const ids = [...current.ids, ...candidateOnlyIds];
@@ -94,10 +107,9 @@ function mergeConversationHistory(
 
   return {
     ...current,
-    ...candidate,
     metadata: {
-      ...current.metadata,
       ...candidate.metadata,
+      ...current.metadata,
     },
     ids,
     messages,
@@ -117,7 +129,7 @@ function mergeSessions(current: AgentSession, candidate: AgentSession): AgentSes
     ...candidate.runs.filter((run) => !currentRunIds.has(run.runId)),
   ];
   const metadata = candidateIsFresh
-    ? { ...current.metadata, ...candidate.metadata }
+    ? candidate.metadata
     : {
         ...candidate.metadata,
         ...current.metadata,
@@ -130,6 +142,7 @@ function mergeSessions(current: AgentSession, candidate: AgentSession): AgentSes
     conversationHistory: mergeConversationHistory(
       current.conversationHistory,
       candidate.conversationHistory,
+      candidateIsFresh,
     ),
     runs: mergedRuns,
     metadata,

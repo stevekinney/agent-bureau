@@ -34,6 +34,7 @@ import {
   NoDurableEngineError,
   NoRunningRunError,
 } from './session-handle';
+import type { SessionStore } from './types';
 
 // Drain Weft's deferred inline-launch queue between tests — prevents one test's
 // pending macrotask from interfering with the next under bun test concurrency.
@@ -82,6 +83,29 @@ function createSessionHandleFixture(overrides?: { sessionId?: string; engine?: A
       engine: overrides?.engine,
       runOptions: createTestRunOptions(),
     }),
+  };
+}
+
+function createUpdateGate(store: SessionStore): {
+  readonly store: SessionStore;
+  readonly release: () => void;
+} {
+  let releaseUpdate: (() => void) | undefined;
+  const updateGate = new Promise<void>((resolve) => {
+    releaseUpdate = resolve;
+  });
+
+  return {
+    store: {
+      ...store,
+      async update(...args) {
+        await updateGate;
+        return store.update(...args);
+      },
+    },
+    release() {
+      releaseUpdate?.();
+    },
   };
 }
 
@@ -651,6 +675,54 @@ describe('session.cancel()', () => {
     resolveGenerate[1]?.();
     await Promise.allSettled([firstRun.result(), secondRun.result()]);
   });
+
+  it('does not cancel another run while this handle is reserving a run id', async () => {
+    const cancelledIds: string[] = [];
+    const fakeEngine = {
+      cancel: async (id: string) => {
+        cancelledIds.push(id);
+      },
+      signal: async () => {},
+      update: async () => {},
+      query: async () => {},
+    } as unknown as AnyRunEngine;
+
+    const baseStore = createSessionStore(textValueStore(new MemoryStorage()));
+    const session = createAgentSession({
+      agentName: 'agent',
+      conversationHistory: createConversationHistory(),
+      id: 'pending-reservation-cancel-session',
+      runs: [
+        {
+          runId: 'pending-reservation-cancel-session:0',
+          sequence: 0,
+          status: 'running',
+          startedAt: new Date().toISOString(),
+          agentName: 'agent',
+        },
+      ],
+    });
+    await baseStore.save(session);
+    const gate = createUpdateGate(baseStore);
+    const handle = createSessionHandle('pending-reservation-cancel-session', {
+      store: gate.store,
+      agentName: 'agent',
+      engine: fakeEngine,
+      runOptions: createTestRunOptions(),
+    });
+
+    const run = handle.run('new run');
+    void run.result().catch(() => {});
+
+    await handle.cancel();
+
+    expect(cancelledIds).toEqual([]);
+    const loadedBeforeRelease = await baseStore.load('pending-reservation-cancel-session');
+    expect(loadedBeforeRelease!.runs[0]!.status).toBe('running');
+
+    gate.release();
+    await Promise.allSettled([run.result()]);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1130,6 +1202,69 @@ describe('session.update()', () => {
     resolveGenerate[0]?.();
     resolveGenerate[1]?.();
     await Promise.allSettled([firstRun.result(), secondRun.result()]);
+  });
+
+  it('does not fall back to another run while this handle is reserving a run id', async () => {
+    const targetedIds: Array<{ verb: string; id: string }> = [];
+    const fakeEngine = {
+      signal: async (id: string) => {
+        targetedIds.push({ verb: 'signal', id });
+      },
+      update: async (id: string) => {
+        targetedIds.push({ verb: 'update', id });
+        return { ok: true };
+      },
+      query: async (id: string) => {
+        targetedIds.push({ verb: 'query', id });
+        return { ok: true };
+      },
+    } as unknown as AnyRunEngine;
+
+    const baseStore = createSessionStore(textValueStore(new MemoryStorage()));
+    const session = createAgentSession({
+      agentName: 'agent',
+      conversationHistory: createConversationHistory(),
+      id: 'pending-reservation-hitl-session',
+      runs: [
+        {
+          runId: 'pending-reservation-hitl-session:0',
+          sequence: 0,
+          status: 'running',
+          startedAt: new Date().toISOString(),
+          agentName: 'agent',
+        },
+      ],
+    });
+    await baseStore.save(session);
+    const gate = createUpdateGate(baseStore);
+    const handle = createSessionHandle('pending-reservation-hitl-session', {
+      store: gate.store,
+      agentName: 'agent',
+      engine: fakeEngine,
+      runOptions: createTestRunOptions(),
+    });
+
+    const run = handle.run('new run');
+    void run.result().catch(() => {});
+
+    for (const operation of [
+      () => handle.signal('approve'),
+      () => handle.update('params'),
+      () => handle.query('state'),
+    ]) {
+      let threw = false;
+      try {
+        await operation();
+      } catch (error) {
+        threw = true;
+        expect(error).toBeInstanceOf(NoRunningRunError);
+      }
+      expect(threw).toBe(true);
+    }
+
+    expect(targetedIds).toEqual([]);
+    gate.release();
+    await Promise.allSettled([run.result()]);
   });
 });
 
@@ -1793,6 +1928,68 @@ describe('D2 — Recovery-on-boot: session.recover() durable re-attach path', ()
 
     expect(recovered).not.toBeNull();
     expect(resumedIds).toEqual(['earlier-running-session:0']);
+  });
+
+  it('tries older running refs when the newest running ref cannot resume', async () => {
+    const resumedIds: string[] = [];
+    const fakeEngine = {
+      resume: async (id: string) => {
+        resumedIds.push(id);
+        if (id === 'fallback-running-session:1') {
+          throw new Error('stale workflow');
+        }
+        return {
+          id,
+          result: () => new Promise<unknown>(() => {}),
+        };
+      },
+    } as unknown as AnyRunEngine;
+    const fakeCheckpointStore = {
+      loadCheckpoint: async (_runId: string) => ({
+        conversation: null,
+        cursor: { totalUsage: {}, lastContent: '', schemaAttempts: 0 },
+        steps: [],
+      }),
+    };
+
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+    const session = createAgentSession({
+      agentName: 'agent',
+      conversationHistory: createConversationHistory(),
+      id: 'fallback-running-session',
+      runs: [
+        {
+          runId: 'fallback-running-session:0',
+          sequence: 0,
+          status: 'running',
+          startedAt: new Date().toISOString(),
+          agentName: '',
+        },
+        {
+          runId: 'fallback-running-session:1',
+          sequence: 1,
+          status: 'running',
+          startedAt: new Date().toISOString(),
+          agentName: '',
+        },
+      ],
+    });
+    await store.save(session);
+
+    const h = createSessionHandle('fallback-running-session', {
+      store,
+      agentName: 'agent',
+      engine: fakeEngine,
+      checkpointStore:
+        fakeCheckpointStore as unknown as import('../durable/checkpoint-store').CheckpointStore,
+      runOptions: createTestRunOptions(),
+    });
+
+    const recovered = await h.recover();
+
+    expect(recovered).not.toBeNull();
+    expect(resumedIds).toEqual(['fallback-running-session:1', 'fallback-running-session:0']);
   });
 
   it('reattaches to a recovered durable run after simulated restart (invariant #4)', async () => {

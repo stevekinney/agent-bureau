@@ -10,7 +10,11 @@ import {
   type ToolboxEventMap,
   type ToolCallInput,
 } from 'armorer';
-import { Conversation, createConversationHistory } from 'conversationalist';
+import {
+  Conversation,
+  type ConversationHistory,
+  createConversationHistory,
+} from 'conversationalist';
 import type { ForwardableSource, HookReplayPolicy } from 'lifecycle';
 import { CompletableEventTarget, forwardEvents, TypedEventTarget } from 'lifecycle';
 import type { CreateMemoryOptions, Memory } from 'memory';
@@ -425,6 +429,42 @@ type RuntimeCompositionDependencies = {
 const defaultRuntimeCompositionDependencies: RuntimeCompositionDependencies = {
   resolveProviderGenerate,
 };
+
+function appendConversationMessages(
+  current: ConversationHistory,
+  candidate: ConversationHistory,
+): ConversationHistory {
+  const currentIds = new Set(current.ids);
+  const candidateOnlyIds = candidate.ids.filter((id) => !currentIds.has(id));
+  const ids = [...current.ids, ...candidateOnlyIds];
+  const messages = {
+    ...current.messages,
+    ...candidateOnlyIds.reduce<Record<string, ConversationHistory['messages'][string]>>(
+      (accumulator, id) => {
+        const message = candidate.messages[id];
+        if (message) accumulator[id] = message;
+        return accumulator;
+      },
+      {},
+    ),
+  };
+
+  for (const [position, id] of ids.entries()) {
+    const message = messages[id];
+    if (message) messages[id] = { ...message, position };
+  }
+
+  return {
+    ...current,
+    metadata: {
+      ...current.metadata,
+      ...candidate.metadata,
+    },
+    ids,
+    messages,
+    updatedAt: candidate.updatedAt,
+  };
+}
 
 /**
  * A JSON-serializable snapshot of one active skill's name and optional tool policy.
@@ -1276,7 +1316,9 @@ export async function createRuntimeComposition(
           });
         return {
           ...next,
-          conversationHistory: context.conversation.current,
+          conversationHistory: existing
+            ? appendConversationMessages(existing.conversationHistory, context.conversation.current)
+            : context.conversation.current,
         };
       });
     };

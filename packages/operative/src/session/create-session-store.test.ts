@@ -129,6 +129,92 @@ describe('createSessionStore', () => {
     expect(loaded!.metadata).toEqual({ status: 'new', staleOnly: true });
   });
 
+  it('lets fresh saves remove metadata keys', async () => {
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
+    const session = makeSession({ id: 'fresh-metadata-delete-session' });
+    session.metadata = { keep: true, remove: true };
+    await store.save(session);
+
+    const freshWriter = await store.load(session.id);
+    expect(freshWriter).toBeDefined();
+
+    await store.save({
+      ...freshWriter!,
+      metadata: { keep: true },
+    });
+
+    const loaded = await store.load(session.id);
+    expect(loaded!.metadata).toEqual({ keep: true });
+  });
+
+  it('lets fresh saves replace existing conversation messages', async () => {
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
+    const session = makeSession({ id: 'fresh-conversation-edit-session' });
+    const conversation = new Conversation(session.conversationHistory);
+    conversation.appendUserMessage('original');
+    session.conversationHistory = conversation.current;
+    await store.save(session);
+
+    const freshWriter = await store.load(session.id);
+    expect(freshWriter).toBeDefined();
+    const messageId = freshWriter!.conversationHistory.ids[0]!;
+
+    await store.save({
+      ...freshWriter!,
+      conversationHistory: {
+        ...freshWriter!.conversationHistory,
+        messages: {
+          ...freshWriter!.conversationHistory.messages,
+          [messageId]: {
+            ...freshWriter!.conversationHistory.messages[messageId]!,
+            content: 'redacted',
+          },
+        },
+      },
+    });
+
+    const loaded = await store.load(session.id);
+    expect(loaded!.conversationHistory.messages[messageId]!.content).toBe('redacted');
+  });
+
+  it('does not let stale saves revert conversation metadata keys', async () => {
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
+    const session = makeSession({ id: 'stale-conversation-metadata-session' });
+    session.conversationHistory = {
+      ...session.conversationHistory,
+      metadata: { status: 'old' },
+    };
+    await store.save(session);
+
+    const staleWriter = await store.load(session.id);
+    expect(staleWriter).toBeDefined();
+
+    await store.update(session.id, (latestSession) =>
+      latestSession
+        ? {
+            ...latestSession,
+            conversationHistory: {
+              ...latestSession.conversationHistory,
+              metadata: { status: 'new' },
+            },
+          }
+        : undefined,
+    );
+
+    const conversation = new Conversation(staleWriter!.conversationHistory);
+    conversation.appendUserMessage('stale writer');
+    await store.save({
+      ...staleWriter!,
+      conversationHistory: {
+        ...conversation.current,
+        metadata: { ...conversation.current.metadata, staleOnly: true },
+      },
+    });
+
+    const loaded = await store.load(session.id);
+    expect(loaded!.conversationHistory.metadata).toEqual({ status: 'new', staleOnly: true });
+  });
+
   it('does not let stale saves revert current run statuses', async () => {
     const store = createSessionStore(textValueStore(new MemoryStorage()));
     const session = makeSession({ id: 'stale-run-session' });

@@ -1,5 +1,9 @@
 import type { ListFilter, ListOptions, ScheduleSpec } from '@lostgradient/weft';
-import { Conversation, createConversationHistory } from 'conversationalist';
+import {
+  Conversation,
+  type ConversationHistory,
+  createConversationHistory,
+} from 'conversationalist';
 import { CompletableEventTarget } from 'lifecycle';
 import { type ActiveRun, createActiveRun, createAgentSession, type JSONValue } from 'operative';
 import {
@@ -51,6 +55,42 @@ const BUREAU_AGENT_NAME = 'bureau';
 const SESSION_PERSISTENCE_MAXIMUM_ATTEMPTS = 3;
 const SESSION_PERSISTENCE_RETRY_DELAY_MILLISECONDS = 10;
 const SCHEDULER_PRIORITIES = ['immediate', 'scheduled', 'background', 'ambient'] as const;
+
+function appendConversationMessages(
+  current: ConversationHistory,
+  candidate: ConversationHistory,
+): ConversationHistory {
+  const currentIds = new Set(current.ids);
+  const candidateOnlyIds = candidate.ids.filter((id) => !currentIds.has(id));
+  const ids = [...current.ids, ...candidateOnlyIds];
+  const messages = {
+    ...current.messages,
+    ...candidateOnlyIds.reduce<Record<string, ConversationHistory['messages'][string]>>(
+      (accumulator, id) => {
+        const message = candidate.messages[id];
+        if (message) accumulator[id] = message;
+        return accumulator;
+      },
+      {},
+    ),
+  };
+
+  for (const [position, id] of ids.entries()) {
+    const message = messages[id];
+    if (message) messages[id] = { ...message, position };
+  }
+
+  return {
+    ...current,
+    metadata: {
+      ...current.metadata,
+      ...candidate.metadata,
+    },
+    ids,
+    messages,
+    updatedAt: candidate.updatedAt,
+  };
+}
 
 class BureauError extends Error {
   constructor(
@@ -400,7 +440,9 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       return {
         ...nextSession,
         agentName: resolvedAgentName,
-        conversationHistory: conversation.current,
+        conversationHistory: existingSession
+          ? appendConversationMessages(existingSession.conversationHistory, conversation.current)
+          : conversation.current,
         metadata: {
           ...nextSession.metadata,
           ...metadata,

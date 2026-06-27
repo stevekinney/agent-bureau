@@ -323,6 +323,42 @@ function historyOrEmpty(history: ConversationHistory | undefined): ConversationH
   return history ?? createConversationHistory();
 }
 
+function appendConversationMessages(
+  current: ConversationHistory,
+  candidate: ConversationHistory,
+): ConversationHistory {
+  const currentIds = new Set(current.ids);
+  const candidateOnlyIds = candidate.ids.filter((id) => !currentIds.has(id));
+  const ids = [...current.ids, ...candidateOnlyIds];
+  const messages = {
+    ...current.messages,
+    ...candidateOnlyIds.reduce<Record<string, ConversationHistory['messages'][string]>>(
+      (accumulator, id) => {
+        const message = candidate.messages[id];
+        if (message) accumulator[id] = message;
+        return accumulator;
+      },
+      {},
+    ),
+  };
+
+  for (const [position, id] of ids.entries()) {
+    const message = messages[id];
+    if (message) messages[id] = { ...message, position };
+  }
+
+  return {
+    ...current,
+    metadata: {
+      ...current.metadata,
+      ...candidate.metadata,
+    },
+    ids,
+    messages,
+    updatedAt: candidate.updatedAt,
+  };
+}
+
 /**
  * Map a `finishReason` to a `RunRef.status`.
  */
@@ -408,6 +444,9 @@ export function createSessionHandle(
    */
   async function requireRunningRunId(verb: string): Promise<string> {
     const session = await store.load(sessionId);
+    if (currentRun !== null && currentRunId === null) {
+      throw new NoRunningRunError(verb, sessionId);
+    }
     const target = currentRunId
       ? session?.runs.find((runRef) => runRef.runId === currentRunId)
       : session?.runs[session.runs.length - 1];
@@ -571,7 +610,10 @@ export function createSessionHandle(
           };
           return {
             ...freshSession,
-            conversationHistory: innerResult.conversation.current,
+            conversationHistory: appendConversationMessages(
+              freshSession.conversationHistory,
+              innerResult.conversation.current,
+            ),
             runs: freshSession.runs.map((r) => (r.runId === runId ? terminalRef : r)),
           };
         });
@@ -650,10 +692,10 @@ export function createSessionHandle(
       // caller can observe the resumed run normally.
       if (engine && checkpointStore) {
         const session = await store.load(sessionId);
-        const runningRef = [...(session?.runs ?? [])]
+        const runningRefs = [...(session?.runs ?? [])]
           .reverse()
-          .find((runRef) => runRef.status === 'running');
-        if (runningRef) {
+          .filter((runRef) => runRef.status === 'running');
+        for (const runningRef of runningRefs) {
           const runId = runningRef.runId;
           try {
             const recoveredHandle = await engine.resume(runId);
@@ -702,7 +744,12 @@ export function createSessionHandle(
                     return {
                       ...freshSession,
                       ...(terminalConversation !== undefined
-                        ? { conversationHistory: terminalConversation }
+                        ? {
+                            conversationHistory: appendConversationMessages(
+                              freshSession.conversationHistory,
+                              terminalConversation,
+                            ),
+                          }
                         : {}),
                       runs: freshSession.runs.map((r) => (r.runId === runId ? terminalRef : r)),
                     };
@@ -717,8 +764,7 @@ export function createSessionHandle(
             return agentRun;
           } catch {
             // engine.resume() throws when the run is already terminal or the
-            // engine doesn't have it. Fall through to null — the run is not
-            // recoverable on this engine.
+            // engine doesn't have it. Try older running refs before giving up.
           }
         }
       }
@@ -744,7 +790,9 @@ export function createSessionHandle(
       const cancelSession = await store.load(sessionId);
       const targetRun = targetRunId
         ? cancelSession?.runs.find((runRef) => runRef.runId === targetRunId)
-        : cancelSession?.runs[cancelSession.runs.length - 1];
+        : run
+          ? undefined
+          : cancelSession?.runs[cancelSession.runs.length - 1];
       const cancelRunId = targetRun?.runId ?? targetRunId;
 
       // Emit the cancel event with the targeted run id (null if no runs recorded yet).
@@ -862,6 +910,9 @@ export function createSessionHandle(
       // durable fidelity from the checkpoint otherwise). Prefer this handle's
       // attached run; fall back to the last run when no run is attached.
       const session = await store.load(sessionId);
+      if (currentRun !== null && currentRunId === null) {
+        throw new NoRunningRunError('query', sessionId);
+      }
       const target = currentRunId
         ? session?.runs.find((runRef) => runRef.runId === currentRunId)
         : session?.runs[session.runs.length - 1];
