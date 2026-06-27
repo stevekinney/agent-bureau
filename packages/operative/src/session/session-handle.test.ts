@@ -205,6 +205,39 @@ describe('session.run()', () => {
     expect(session!.runs[1]!.runId).toBe(`${handle.id}:1`);
   });
 
+  it('concurrent handles reserve unique run sequences and preserve both conversations', async () => {
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+    const firstHandle = createSessionHandle('concurrent-run-session', {
+      store,
+      agentName: 'test-agent',
+      runOptions: createTestRunOptions(createInstantGenerate('first reply')),
+    });
+    const secondHandle = createSessionHandle('concurrent-run-session', {
+      store,
+      agentName: 'test-agent',
+      runOptions: createTestRunOptions(createInstantGenerate('second reply')),
+    });
+
+    await Promise.all([
+      firstHandle.run('first concurrent message').result(),
+      secondHandle.run('second concurrent message').result(),
+    ]);
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+
+    const session = await store.load('concurrent-run-session');
+    expect(session).toBeDefined();
+    expect(session!.runs).toHaveLength(2);
+    expect(session!.runs.map((run) => run.sequence).sort()).toEqual([0, 1]);
+    expect(new Set(session!.runs.map((run) => run.runId)).size).toBe(2);
+
+    const contents = session!.conversationHistory.ids.map(
+      (id) => session!.conversationHistory.messages[id]!.content,
+    );
+    expect(contents).toContain('first concurrent message');
+    expect(contents).toContain('second concurrent message');
+  });
+
   it('updates the session conversation history after each run', async () => {
     const { handle, store } = createSessionHandleFixture();
 

@@ -1,6 +1,6 @@
 import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
 import { describe, expect, it } from 'bun:test';
-import { createConversationHistory } from 'conversationalist';
+import { Conversation, createConversationHistory } from 'conversationalist';
 
 import { createAgentSession } from '../agent-session';
 import { createSessionStore } from './create-session-store';
@@ -35,6 +35,67 @@ describe('createSessionStore', () => {
     expect(loaded!.id).toBe(session.id);
     expect(loaded!.agentName).toBe('round-trip-agent');
     expect(loaded!.conversationHistory).toEqual(session.conversationHistory);
+    expect(loaded!.revision).toBe(1);
+  });
+
+  it('merges stale concurrent conversation writers instead of dropping turns', async () => {
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
+    const session = makeSession({ id: 'concurrent-session' });
+    await store.save(session);
+
+    const firstWriter = await store.load(session.id);
+    const secondWriter = await store.load(session.id);
+    expect(firstWriter).toBeDefined();
+    expect(secondWriter).toBeDefined();
+
+    const firstConversation = new Conversation(firstWriter!.conversationHistory);
+    firstConversation.appendUserMessage('first writer');
+    const secondConversation = new Conversation(secondWriter!.conversationHistory);
+    secondConversation.appendUserMessage('second writer');
+
+    await store.save({
+      ...firstWriter!,
+      conversationHistory: firstConversation.current,
+    });
+    await store.save({
+      ...secondWriter!,
+      conversationHistory: secondConversation.current,
+    });
+
+    const loaded = await store.load(session.id);
+    expect(loaded).toBeDefined();
+    expect(loaded!.revision).toBe(3);
+    const contents = loaded!.conversationHistory.ids.map(
+      (id) => loaded!.conversationHistory.messages[id]!.content,
+    );
+    expect(contents).toContain('first writer');
+    expect(contents).toContain('second writer');
+  });
+
+  it('preserves metadata and conversation updates that interleave', async () => {
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
+    const session = makeSession({ id: 'metadata-conversation-session' });
+    session.metadata = { existing: 'value' };
+    await store.save(session);
+
+    const conversationWriter = await store.load(session.id);
+    expect(conversationWriter).toBeDefined();
+    const conversation = new Conversation(conversationWriter!.conversationHistory);
+    conversation.appendUserMessage('conversation update');
+
+    await store.updateMetadata(session.id, { newKey: 'newValue' });
+    await store.save({
+      ...conversationWriter!,
+      conversationHistory: conversation.current,
+    });
+
+    const loaded = await store.load(session.id);
+    expect(loaded).toBeDefined();
+    expect(loaded!.metadata).toEqual({ existing: 'value', newKey: 'newValue' });
+    const contents = loaded!.conversationHistory.ids.map(
+      (id) => loaded!.conversationHistory.messages[id]!.content,
+    );
+    expect(contents).toContain('conversation update');
   });
 
   it('load returns undefined for nonexistent session', async () => {
@@ -61,6 +122,18 @@ describe('createSessionStore', () => {
       }),
     );
     expect(await store.load('broken')).toBeUndefined();
+  });
+
+  it('reads legacy sessions without revision as revision 0', async () => {
+    const rawStore = textValueStore(new MemoryStorage());
+    const store = createSessionStore(rawStore);
+    const legacySession = makeSession({ id: 'legacy-session' });
+    const { revision: _revision, ...legacyPayload } = legacySession;
+    await rawStore.set('agent-session:legacy-session', JSON.stringify(legacyPayload));
+
+    const loaded = await store.load('legacy-session');
+    expect(loaded).toBeDefined();
+    expect(loaded!.revision).toBe(0);
   });
 
   it('delete removes a session', async () => {

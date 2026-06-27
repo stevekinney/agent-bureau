@@ -376,35 +376,36 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       return;
     }
 
-    const existingSession = await sessionStore.load(sessionId);
-    const nextSession =
-      existingSession ??
-      createAgentSession({
-        id: sessionId,
-        // Stamp the dispatched agent on a brand-new session (falls back to the
-        // house default when no agent was named).
-        agentName: agentName ?? BUREAU_AGENT_NAME,
+    await sessionStore.update(sessionId, (existingSession) => {
+      const nextSession =
+        existingSession ??
+        createAgentSession({
+          id: sessionId,
+          // Stamp the dispatched agent on a brand-new session (falls back to the
+          // house default when no agent was named).
+          agentName: agentName ?? BUREAU_AGENT_NAME,
+          conversationHistory: conversation.current,
+        });
+
+      // Promote a session still on the default house agent to the named agent on
+      // its first named dispatch, so session APIs/persistence reflect which agent
+      // actually owns it (PRRT_kwDORvupsc6MbUsN — previously the session was always
+      // stamped 'bureau' regardless of request.agentName). Don't overwrite a session
+      // already owned by a specific agent.
+      const resolvedAgentName =
+        agentName !== undefined && nextSession.agentName === BUREAU_AGENT_NAME
+          ? agentName
+          : nextSession.agentName;
+
+      return {
+        ...nextSession,
+        agentName: resolvedAgentName,
         conversationHistory: conversation.current,
-      });
-
-    // Promote a session still on the default house agent to the named agent on
-    // its first named dispatch, so session APIs/persistence reflect which agent
-    // actually owns it (PRRT_kwDORvupsc6MbUsN — previously the session was always
-    // stamped 'bureau' regardless of request.agentName). Don't overwrite a session
-    // already owned by a specific agent.
-    const resolvedAgentName =
-      agentName !== undefined && nextSession.agentName === BUREAU_AGENT_NAME
-        ? agentName
-        : nextSession.agentName;
-
-    await sessionStore.save({
-      ...nextSession,
-      agentName: resolvedAgentName,
-      conversationHistory: conversation.current,
-      metadata: {
-        ...nextSession.metadata,
-        ...metadata,
-      },
+        metadata: {
+          ...nextSession.metadata,
+          ...metadata,
+        },
+      };
     });
   }
 

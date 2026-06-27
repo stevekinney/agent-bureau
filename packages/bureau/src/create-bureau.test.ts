@@ -2,7 +2,8 @@ import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { MemoryStorage, type TextValueStore, textValueStore } from '@lostgradient/weft/storage';
+import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
+import type { ConditionalTextValueStore } from '@lostgradient/weft/storage/text-value-store';
 import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
 import { createTool, createToolbox } from 'armorer';
 import { createMockTool, createTestToolbox } from 'armorer/test';
@@ -30,6 +31,24 @@ import {
 } from './types';
 
 let recoveryDatabaseCounter = 0;
+
+function createTextStoreProxy(
+  backingStore: ConditionalTextValueStore,
+  overrides: Partial<ConditionalTextValueStore> = {},
+): ConditionalTextValueStore {
+  return {
+    get: overrides.get ?? ((key) => backingStore.get(key)),
+    set: overrides.set ?? ((key, value) => backingStore.set(key, value)),
+    delete: overrides.delete ?? ((key) => backingStore.delete(key)),
+    list: overrides.list ?? ((prefix) => backingStore.list(prefix)),
+    has: overrides.has ?? ((key) => backingStore.has(key)),
+    deletePrefix: overrides.deletePrefix ?? ((prefix) => backingStore.deletePrefix(prefix)),
+    close: overrides.close ?? (() => backingStore.close()),
+    conditionalBatch:
+      overrides.conditionalBatch ??
+      ((conditions, operations) => backingStore.conditionalBatch(conditions, operations)),
+  };
+}
 
 /** A no-op `next` tool that lets a run take multiple steps. */
 function createNextTool() {
@@ -322,6 +341,32 @@ describe('createBureau', () => {
     expect(session?.conversationHistory.ids.length).toBeGreaterThanOrEqual(4);
   });
 
+  it('preserves both turns from concurrent createRun writers on one session', async () => {
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      persistence: textValueStore(new MemoryStorage()),
+    });
+    const sessionId = 'concurrent-bureau-session';
+
+    const [firstRun, secondRun] = await Promise.all([
+      bureau.createRun({ message: 'First concurrent bureau message', sessionId }),
+      bureau.createRun({ message: 'Second concurrent bureau message', sessionId }),
+    ]);
+    await Promise.all([
+      waitForRunCompletion(bureau, firstRun.id),
+      waitForRunCompletion(bureau, secondRun.id),
+    ]);
+
+    const session = await bureau.getSession(sessionId);
+    expect(session).toBeDefined();
+    const contents = session!.conversationHistory.ids.map(
+      (id) => session!.conversationHistory.messages[id]!.content,
+    );
+    expect(contents).toContain('First concurrent bureau message');
+    expect(contents).toContain('Second concurrent bureau message');
+  });
+
   it('aligns a new session history identifier with the requested session identifier', async () => {
     const bureau = await createBureau({
       generate: createMockGenerate(),
@@ -546,36 +591,21 @@ describe('createBureau', () => {
     const backingStore = textValueStore(new MemoryStorage());
     let sessionSaveCount = 0;
 
-    const flakyStore: TextValueStore = {
-      async get(key) {
-        return backingStore.get(key);
-      },
-      async set(key, value) {
-        if (key.startsWith('agent-session:')) {
+    const flakyStore = createTextStoreProxy(backingStore, {
+      async conditionalBatch(conditions, operations) {
+        if (
+          conditions.some((condition) => condition.key.startsWith('agent-session:')) ||
+          operations.some((operation) => operation.key.startsWith('agent-session:'))
+        ) {
           sessionSaveCount += 1;
           if (sessionSaveCount === 2) {
             throw new Error('temporary persistence failure');
           }
         }
 
-        await backingStore.set(key, value);
+        return backingStore.conditionalBatch(conditions, operations);
       },
-      async delete(key) {
-        await backingStore.delete(key);
-      },
-      async list(prefix) {
-        return backingStore.list(prefix);
-      },
-      has(key) {
-        return backingStore.has(key);
-      },
-      deletePrefix(prefix) {
-        return backingStore.deletePrefix(prefix);
-      },
-      close() {
-        return backingStore.close();
-      },
-    };
+    });
 
     const bureau = await createBureau({
       generate: createMockGenerate(),
@@ -1136,36 +1166,21 @@ describe('createBureau', () => {
     let sessionSaveCount = 0;
     let retrySleepCount = 0;
 
-    const flakyStore: TextValueStore = {
-      async get(key) {
-        return backingStore.get(key);
-      },
-      async set(key, value) {
-        if (key.startsWith('agent-session:')) {
+    const flakyStore = createTextStoreProxy(backingStore, {
+      async conditionalBatch(conditions, operations) {
+        if (
+          conditions.some((condition) => condition.key.startsWith('agent-session:')) ||
+          operations.some((operation) => operation.key.startsWith('agent-session:'))
+        ) {
           sessionSaveCount += 1;
           if (sessionSaveCount === 2) {
             throw new Error('temporary persistence failure');
           }
         }
 
-        await backingStore.set(key, value);
+        return backingStore.conditionalBatch(conditions, operations);
       },
-      async delete(key) {
-        await backingStore.delete(key);
-      },
-      async list(prefix) {
-        return backingStore.list(prefix);
-      },
-      has(key) {
-        return backingStore.has(key);
-      },
-      deletePrefix(prefix) {
-        return backingStore.deletePrefix(prefix);
-      },
-      close() {
-        return backingStore.close();
-      },
-    };
+    });
 
     const errorSpy = mock(() => {});
     const originalError = console.error;
@@ -1203,33 +1218,18 @@ describe('createBureau', () => {
 
   it('does not register a run when initial session persistence fails', async () => {
     const backingStore = textValueStore(new MemoryStorage());
-    const failingStore: TextValueStore = {
-      async get(key) {
-        return backingStore.get(key);
-      },
-      async set(key, value) {
-        if (key.startsWith('agent-session:')) {
+    const failingStore = createTextStoreProxy(backingStore, {
+      async conditionalBatch(conditions, operations) {
+        if (
+          conditions.some((condition) => condition.key.startsWith('agent-session:')) ||
+          operations.some((operation) => operation.key.startsWith('agent-session:'))
+        ) {
           throw new Error('persistence failed');
         }
 
-        await backingStore.set(key, value);
+        return backingStore.conditionalBatch(conditions, operations);
       },
-      async delete(key) {
-        await backingStore.delete(key);
-      },
-      async list(prefix) {
-        return backingStore.list(prefix);
-      },
-      has(key) {
-        return backingStore.has(key);
-      },
-      deletePrefix(prefix) {
-        return backingStore.deletePrefix(prefix);
-      },
-      close() {
-        return backingStore.close();
-      },
-    };
+    });
 
     const bureau = await createBureau({
       generate: createMockGenerate(),
@@ -1271,33 +1271,18 @@ describe('createBureau', () => {
     const backingStore = textValueStore(new MemoryStorage());
     let sessionSaveCount = 0;
 
-    const trackingStore: TextValueStore = {
-      async get(key) {
-        return backingStore.get(key);
-      },
-      async set(key, value) {
-        if (key.startsWith('agent-session:')) {
+    const trackingStore = createTextStoreProxy(backingStore, {
+      async conditionalBatch(conditions, operations) {
+        if (
+          conditions.some((condition) => condition.key.startsWith('agent-session:')) ||
+          operations.some((operation) => operation.key.startsWith('agent-session:'))
+        ) {
           sessionSaveCount += 1;
         }
 
-        await backingStore.set(key, value);
+        return backingStore.conditionalBatch(conditions, operations);
       },
-      async delete(key) {
-        await backingStore.delete(key);
-      },
-      async list(prefix) {
-        return backingStore.list(prefix);
-      },
-      has(key) {
-        return backingStore.has(key);
-      },
-      deletePrefix(prefix) {
-        return backingStore.deletePrefix(prefix);
-      },
-      close() {
-        return backingStore.close();
-      },
-    };
+    });
 
     const generate: GenerateFunction = async () => {
       throw new Error('Explode once');

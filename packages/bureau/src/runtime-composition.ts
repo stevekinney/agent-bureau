@@ -1,6 +1,7 @@
 import type { WorkflowServicesResolution, WorkflowServicesResolverInfo } from '@lostgradient/weft';
 import type { Storage, StorageConfiguration, TextValueStore } from '@lostgradient/weft/storage';
 import { resolveStorage, textValueStore } from '@lostgradient/weft/storage';
+import type { ConditionalTextValueStore } from '@lostgradient/weft/storage/text-value-store';
 import {
   combineToolboxes,
   createTool,
@@ -94,7 +95,7 @@ type BureauToolbox = Toolbox<any>;
 
 /**
  * Discriminate a {@link PersistenceOptions} object from a bare
- * `StorageConfiguration` or `TextValueStore`. A `PersistenceOptions` is
+ * `StorageConfiguration` or `ConditionalTextValueStore`. A `PersistenceOptions` is
  * identified by the presence of a `store` field that is itself a
  * `StorageConfiguration` object (has a `type` string discriminant).
  */
@@ -110,12 +111,12 @@ function isPersistenceOptions(value: BureauOptions['persistence']): value is Per
 }
 
 /**
- * Discriminate a `StorageConfiguration` object from a `TextValueStore`.
+ * Discriminate a `StorageConfiguration` object from a `ConditionalTextValueStore`.
  * `StorageConfiguration` always carries a `type` string discriminant; a
- * `TextValueStore` has callable `get`/`set` methods instead.
+ * `ConditionalTextValueStore` has callable `get`/`set` methods instead.
  */
 function isStorageConfiguration(
-  value: StorageConfiguration | TextValueStore,
+  value: StorageConfiguration | ConditionalTextValueStore,
 ): value is StorageConfiguration {
   const candidate = value as Record<string, unknown>;
   return typeof candidate['type'] === 'string';
@@ -127,12 +128,12 @@ function isStorageConfiguration(
  *
  * - `PersistenceOptions` → extracts `store` plus `history`/`observability`/`onLog`.
  * - Bare `StorageConfiguration` → `store` only, no extra knobs.
- * - `TextValueStore` → KV-only, no durable storage config.
+ * - `ConditionalTextValueStore` → KV-only, no durable storage config.
  * - `undefined` → no persistence.
  */
 function resolvePersistenceOptions(options: BureauOptions): {
   storageConfig: StorageConfiguration | undefined;
-  kvStore: TextValueStore | undefined;
+  kvStore: ConditionalTextValueStore | undefined;
   persistenceHistory: PersistenceOptions['history'];
   persistenceObservability: PersistenceOptions['observability'];
   persistenceOnLog: PersistenceOptions['onLog'];
@@ -170,7 +171,7 @@ function resolvePersistenceOptions(options: BureauOptions): {
     };
   }
 
-  // TextValueStore: KV-only, no durable storage
+  // ConditionalTextValueStore: KV-only, no durable storage
   return {
     storageConfig: undefined,
     kvStore: persistence,
@@ -691,7 +692,7 @@ export interface PendingRecoveryEvents {
 }
 
 export interface RuntimeComposition {
-  kv: TextValueStore | undefined;
+  kv: ConditionalTextValueStore | undefined;
   /**
    * The durable run engine + checkpoint store, present whenever durable
    * execution resolves on (by default: a persistent `storage` backend is
@@ -772,7 +773,7 @@ export async function createRuntimeComposition(
   // Resolve the `persistence` option into its components. The three forms are:
   // - PersistenceOptions { store, history?, observability?, onLog? }
   // - Bare StorageConfiguration (shorthand for { store: config })
-  // - TextValueStore (KV-only, no durable engine)
+  // - ConditionalTextValueStore (KV-only, no durable engine)
   // The legacy `storage` field is still accepted alongside the new forms.
   const {
     storageConfig: persistenceStorageConfig,
@@ -786,7 +787,7 @@ export async function createRuntimeComposition(
   // form over the legacy `storage` field.
   const effectiveStorageConfig = persistenceStorageConfig ?? options.storage;
 
-  let kv: TextValueStore | undefined = persistenceKvStore;
+  let kv: ConditionalTextValueStore | undefined = persistenceKvStore;
   // Keep the raw Storage so the durable engine can share the exact backend with
   // the text-value KV view (Weft requires one engine per durable store).
   let durableStorage: Storage | undefined;
@@ -801,7 +802,7 @@ export async function createRuntimeComposition(
   const effectiveOnLog = persistenceOnLog ?? options.onLog;
 
   // Durable execution is ON BY DEFAULT whenever a PERSISTENT storage backend is
-  // configured AND no custom KV-only `persistence` (TextValueStore) shadows it.
+  // configured AND no custom KV-only `persistence` (ConditionalTextValueStore) shadows it.
   // The default follows persistence because that is the only place resume is real:
   // `memory` storage loses its checkpoints with the process, so default-on there
   // would be pure overhead with zero recovery. The explicit `durableExecution`
@@ -813,16 +814,16 @@ export async function createRuntimeComposition(
       effectiveStorageConfig.type !== 'memory' &&
       !hasKvOnlyPersistence);
 
-  // A KV-only `persistence` (TextValueStore) value means no raw `Storage` was
+  // A KV-only `persistence` (ConditionalTextValueStore) value means no raw `Storage` was
   // resolved and a durable engine cannot be built. Fail loud if `durableExecution:
   // true` is requested — honor it silently and we ship an engine that looks
-  // durable but can't recover. (Flag UNSET + TextValueStore is the documented
+  // durable but can't recover. (Flag UNSET + ConditionalTextValueStore is the documented
   // KV-only path — sessions only, no durability.)
   if (options.durableExecution === true && hasKvOnlyPersistence) {
     throw new Error(
-      'durableExecution: true is incompatible with a TextValueStore `persistence` value. ' +
+      'durableExecution: true is incompatible with a ConditionalTextValueStore `persistence` value. ' +
         'A durable engine must share its backend with the session store, but ' +
-        'a TextValueStore cannot back a Weft engine. Provide `persistence` as a ' +
+        'a ConditionalTextValueStore cannot back a Weft engine. Provide `persistence` as a ' +
         'StorageConfiguration or PersistenceOptions to get durable execution, ' +
         'or drop `durableExecution: true` to use the KV-only persistence layer ' +
         'with the in-memory run loop.',
@@ -1265,17 +1266,18 @@ export async function createRuntimeComposition(
     agentName: string,
   ): OnStepHook {
     return async (context) => {
-      const existing = await store.load(sessionId);
-      const next =
-        existing ??
-        createAgentSession({
-          id: sessionId,
-          agentName,
+      await store.update(sessionId, (existing) => {
+        const next =
+          existing ??
+          createAgentSession({
+            id: sessionId,
+            agentName,
+            conversationHistory: context.conversation.current,
+          });
+        return {
+          ...next,
           conversationHistory: context.conversation.current,
-        });
-      await store.save({
-        ...next,
-        conversationHistory: context.conversation.current,
+        };
       });
     };
   }

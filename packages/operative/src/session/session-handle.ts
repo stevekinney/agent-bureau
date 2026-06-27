@@ -380,13 +380,16 @@ export function createSessionHandle(
     const existing = await store.load(sessionId);
     if (existing) return existing;
 
-    const fresh = createAgentSession({
-      agentName,
-      conversationHistory: createConversationHistory(),
-      id: sessionId,
-    });
-    await store.save(fresh);
-    return fresh;
+    return (await store.update(
+      sessionId,
+      (latest) =>
+        latest ??
+        createAgentSession({
+          agentName,
+          conversationHistory: createConversationHistory(),
+          id: sessionId,
+        }),
+    )) as AgentSession;
   }
 
   /**
@@ -439,39 +442,51 @@ export function createSessionHandle(
       // suspended at a durable step.
       let activeInnerRun: ActiveRun | null = null;
 
-      // Load the session eagerly to seed the conversation with the stored
-      // history and derive the run's sequence number for the runId. The session
-      // load is chained before execution so the loop sees the full history.
-      const sessionPromise = loadOrCreate();
+      const resultPromise: Promise<RunResult> = (async () => {
+        let reservation:
+          | {
+              runId: string;
+              runningRef: RunRef;
+              seededConversation: Conversation;
+            }
+          | undefined;
 
-      const resultPromise: Promise<RunResult> = sessionPromise.then(async (session) => {
-        const sequence = session.runs.length;
-        const runId = deriveRunId(sessionId, sequence);
-        // Seed the conversation from the stored history so multi-turn sessions
-        // carry all prior messages forward. Then append the user's message.
-        const storedHistory = historyOrEmpty(session.conversationHistory);
-        const seededConversation = new Conversation(storedHistory);
-        seededConversation.appendUserMessage(input);
+        // Reserve the sequence/runId and persist the 'running' RunRef in one
+        // conflict-aware update. This is the point where concurrent handles must
+        // serialize so they cannot both choose the same sequence number.
+        await store.update(sessionId, (existing) => {
+          const session =
+            existing ??
+            createAgentSession({
+              agentName,
+              conversationHistory: createConversationHistory(),
+              id: sessionId,
+            });
+          const sequence = session.runs.length;
+          const runId = deriveRunId(sessionId, sequence);
+          const seededConversation = new Conversation(historyOrEmpty(session.conversationHistory));
+          seededConversation.appendUserMessage(input);
+          const runningRef: RunRef = {
+            runId,
+            sequence,
+            status: 'running',
+            startedAt: new Date().toISOString(),
+            agentName,
+          };
 
-        // Persist the 'running' RunRef BEFORE starting the inner run so that
-        // signal()/update()/recover() can find a running ref in the store while
-        // the workflow is in-flight. Without this, the store has no entry until
-        // after completion, making HITL and crash recovery unreachable.
-        const runningRef: RunRef = {
-          runId,
-          sequence,
-          status: 'running',
-          startedAt: new Date().toISOString(),
-          // F2: carry agentName on each RunRef so a session worked by a
-          // SEQUENCE of different agents (via handoff) preserves a full
-          // audit trail of which agent ran each run.
-          agentName,
-        };
-        await store.save({
-          ...session,
-          runs: [...session.runs, runningRef],
-          updatedAt: new Date().toISOString(),
+          reservation = { runId, runningRef, seededConversation };
+
+          return {
+            ...session,
+            runs: [...session.runs, runningRef],
+          };
         });
+
+        if (!reservation) {
+          throw new Error(`Failed to reserve a run for session "${sessionId}".`);
+        }
+
+        const { runId, runningRef, seededConversation } = reservation;
 
         // Thread the eager AbortController's signal into the run options so
         // abort() works immediately — even before the inner run's own
@@ -527,15 +542,14 @@ export function createSessionHandle(
           // with a permanently-running ref that signal()/recover() would act on
           // after the run is already dead.
           subscription.unsubscribe();
-          const freshSession = await store.load(sessionId);
-          if (freshSession) {
+          await store.update(sessionId, (freshSession) => {
+            if (!freshSession) return undefined;
             const errorRef: RunRef = { ...runningRef, status: 'error' };
-            await store.save({
+            return {
               ...freshSession,
               runs: freshSession.runs.map((r) => (r.runId === runId ? errorRef : r)),
-              updatedAt: new Date().toISOString(),
-            });
-          }
+            };
+          });
           throw err;
         }
 
@@ -544,23 +558,21 @@ export function createSessionHandle(
         // Replace the 'running' ref with the terminal status. Re-load the
         // session in case a concurrent run completed, but replace by runId
         // rather than appending so the runs[] length stays correct.
-        const freshSession = await store.load(sessionId);
-        if (freshSession) {
+        await store.update(sessionId, (freshSession) => {
+          if (!freshSession) return undefined;
           const terminalRef: RunRef = {
             ...runningRef,
             status: finishReasonToStatus(innerResult.finishReason),
           };
-          const updated: AgentSession = {
+          return {
             ...freshSession,
             conversationHistory: innerResult.conversation.current,
             runs: freshSession.runs.map((r) => (r.runId === runId ? terminalRef : r)),
-            updatedAt: new Date().toISOString(),
           };
-          await store.save(updated);
-        }
+        });
 
         return innerResult;
-      });
+      })();
 
       // Build the ActiveRun surface backed by the outer emitter so createAgentRun
       // can subscribe to events and abort the run.
@@ -648,7 +660,7 @@ export function createSessionHandle(
             const agentRun = createAgentRun(activeRun);
             currentRun = agentRun;
             // Persist terminal state when the recovered run settles, mirroring
-            // the store.save path in run(). Without this the persisted RunRef
+            // the conflict-aware update path in run(). Without this the persisted RunRef
             // stays 'running' after a recovered run completes, causing
             // subsequent recover()/signal() calls to target a terminal workflow
             // and leaving conversation history un-updated in the session store.
@@ -667,22 +679,20 @@ export function createSessionHandle(
                 // Reload the session (may have been updated by concurrent activity)
                 // and replace the RunRef with its terminal status.
                 try {
-                  const freshSession = await store.load(sessionId);
-                  if (freshSession) {
+                  await store.update(sessionId, (freshSession) => {
+                    if (!freshSession) return undefined;
                     const terminalRef: RunRef = {
                       ...last,
                       status: terminalStatus,
                     };
-                    const updated: AgentSession = {
+                    return {
                       ...freshSession,
                       ...(terminalConversation !== undefined
                         ? { conversationHistory: terminalConversation }
                         : {}),
                       runs: freshSession.runs.map((r) => (r.runId === runId ? terminalRef : r)),
-                      updatedAt: new Date().toISOString(),
                     };
-                    await store.save(updated);
-                  }
+                  });
                 } catch {
                   // Store failure is non-fatal: the in-process state (currentRun=null)
                   // is correct; a stale 'running' ref is tolerable vs. crashing the handle.
@@ -732,15 +742,16 @@ export function createSessionHandle(
             // Weft workflow may still be running, so marking the session 'aborted'
             // would be incorrect — leave the store in its current state and let
             // the non-fatal catch below swallow the error.
-            const runs = [...cancelSession.runs];
-            const lastIndex = runs.length - 1;
-            if (lastIndex >= 0 && runs[lastIndex]) {
-              runs[lastIndex] = { ...runs[lastIndex], status: 'aborted' };
-            }
-            await store.save({
-              ...cancelSession,
-              runs,
-              updatedAt: new Date().toISOString(),
+            await store.update(sessionId, (latestSession) => {
+              if (!latestSession) return undefined;
+              const runs = [...latestSession.runs];
+              const runIndex = runs.findIndex((runRef) => runRef.runId === last.runId);
+              if (runIndex < 0 || !runs[runIndex]) return latestSession;
+              runs[runIndex] = { ...runs[runIndex], status: 'aborted' };
+              return {
+                ...latestSession,
+                runs,
+              };
             });
           } catch {
             // Non-fatal: the generate abort already stopped the work.

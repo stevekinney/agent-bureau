@@ -844,8 +844,8 @@ describe('createRuntimeComposition PersistenceOptions form', () => {
     }
   });
 
-  it('throws when durableExecution: true is combined with a TextValueStore persistence', async () => {
-    // A TextValueStore cannot back a Weft engine (needs a raw Storage for
+  it('throws when durableExecution: true is combined with conditional text-store persistence', async () => {
+    // A conditional text store cannot back a Weft engine (needs a raw Storage for
     // checkpointing). Honoring the contradiction silently would ship an engine
     // that looks durable but can never recover.
     const error = await createRuntimeComposition({
@@ -862,7 +862,7 @@ describe('createRuntimeComposition PersistenceOptions form', () => {
   });
 
   it('creates a KV session store from PersistenceOptions store', async () => {
-    // When persistence is a PersistenceOptions, a TextValueStore KV layer is built
+    // When persistence is a PersistenceOptions, a conditional text-store KV layer is built
     // over the raw Storage, enabling session persistence.
     const runtime = await createRuntimeComposition({
       generate: async () => ({ content: 'x', toolCalls: [] }),

@@ -194,7 +194,6 @@ describe('D6 scheduled-fire path (#109)', () => {
             input: z.object({}),
             execute: async () => 'ok',
           }),
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any -- test toolbox variance
         ]) as any,
         storage: { type: 'memory' },
         durableExecution: true,

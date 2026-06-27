@@ -144,7 +144,7 @@ await activeRun.result;
 | `contextManagement`   | `ContextManagementOptions`                             | Automatic context compaction.             |
 | `responseSchema`      | `ZodType`                                              | Structured output schema with retry.      |
 | `hooks`               | `HookRegistry<OperativeHookMap>`                       | Typed priority-ordered hook registry.     |
-| `persistence`         | `TextValueStore`                                       | Session persistence backend.              |
+| `persistence`         | Conditional text-value store                           | Session persistence backend.              |
 | `sessionId`           | `string`                                               | Session key for persistence.              |
 | `autoSave`            | `'step' \| 'completion' \| false`                      | When to flush to `persistence`.           |
 
@@ -256,8 +256,8 @@ In production, `herald` provides ready-made generate functions for Anthropic, Op
 The main entry point exposes session helpers for direct session management without a `SessionStore`:
 
 - **`createAgentSession(options)`**: Creates a new `AgentSession` object.
-- **`loadAgentSession(persistence, sessionId)`**: Loads an `AgentSession` from a `TextValueStore`.
-- **`saveAgentSession(persistence, session)`**: Persists an `AgentSession` to a `TextValueStore`.
+- **`loadAgentSession(persistence, sessionId)`**: Loads an `AgentSession` from a conditional text-value store.
+- **`saveAgentSession(persistence, session)`**: Persists an `AgentSession` through conflict-aware session storage.
 
 ```typescript
 import { createAgentSession, loadAgentSession, saveAgentSession } from 'operative';
@@ -280,7 +280,7 @@ For richer session management, `createSessionStore()` and `resumeSession()` are 
 ```typescript
 import { createSessionStore, resumeSession } from 'operative';
 
-// createSessionStore wraps any TextValueStore (e.g. Weft's KV storage)
+// createSessionStore wraps Weft's conditional TextValueStore.
 const sessions = createSessionStore(kvStore);
 
 await sessions.save(session);
@@ -301,15 +301,22 @@ const result = await agent.run({ conversation });
 
 **`SessionStore` interface:**
 
-| Method                         | Description                                        |
-| ------------------------------ | -------------------------------------------------- |
-| `save(session)`                | Persist a session.                                 |
-| `load(id)`                     | Load by id; returns `undefined` if not found.      |
-| `delete(id)`                   | Remove a session.                                  |
-| `exists(id)`                   | Check existence.                                   |
-| `list(options?)`               | Paginated list of `SessionSummary` objects.        |
-| `updateMetadata(id, metadata)` | Merge metadata without rewriting the conversation. |
-| `cleanup(options)`             | Delete sessions older than `options.olderThan` ms. |
+| Method                         | Description                                                 |
+| ------------------------------ | ----------------------------------------------------------- |
+| `save(session)`                | Persist a session with conflict-aware merging.              |
+| `update(id, updater)`          | Read-modify-write a session through optimistic concurrency. |
+| `load(id)`                     | Load by id; returns `undefined` if not found.               |
+| `delete(id)`                   | Remove a session.                                           |
+| `exists(id)`                   | Check existence.                                            |
+| `list(options?)`               | Paginated list of `SessionSummary` objects.                 |
+| `updateMetadata(id, metadata)` | Merge metadata without rewriting the conversation.          |
+| `cleanup(options)`             | Delete sessions older than `options.olderThan` ms.          |
+
+Sessions include a persisted `revision` number. New `AgentSession` objects start
+at revision `0`; successful `SessionStore` writes increment the stored revision.
+When concurrent writers save stale copies of the same session, the store retries
+with Weft's conditional batch primitive and merges conversation messages, run
+references, and metadata instead of silently dropping one writer's turns.
 
 #### Hooks
 
