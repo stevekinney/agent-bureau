@@ -1,6 +1,16 @@
-import type { WorkflowServicesResolution, WorkflowServicesResolverInfo } from '@lostgradient/weft';
-import type { Storage, StorageConfiguration, TextValueStore } from '@lostgradient/weft/storage';
-import { resolveStorage, textValueStore } from '@lostgradient/weft/storage';
+import {
+  decode,
+  type WorkflowServicesResolution,
+  type WorkflowServicesResolverInfo,
+} from '@lostgradient/weft';
+import {
+  KEYS,
+  resolveStorage,
+  type Storage,
+  type StorageConfiguration,
+  type TextValueStore,
+  textValueStore,
+} from '@lostgradient/weft/storage';
 import type { ConditionalTextValueStore } from '@lostgradient/weft/storage/text-value-store';
 import {
   combineToolboxes,
@@ -80,6 +90,7 @@ import {
 } from 'skills';
 import { z } from 'zod';
 
+import { serializeUnknownError } from './serialization';
 import type {
   BureauOptions,
   CacheConfiguration,
@@ -187,6 +198,66 @@ function resolvePersistenceOptions(options: BureauOptions): {
 
 function isMemoryInstance(value: CreateMemoryOptions | Memory): value is Memory {
   return typeof (value as Memory).remember === 'function';
+}
+
+function persistedScheduleMarker(input: ScheduledAgentRunInput): string | undefined {
+  if (typeof input.scheduleId !== 'string') return undefined;
+  const scheduleId = input.scheduleId.trim();
+  return scheduleId.length > 0 ? scheduleId : undefined;
+}
+
+function hasPersistedScheduleMarker(input: ScheduledAgentRunInput): boolean {
+  return persistedScheduleMarker(input) !== undefined;
+}
+
+type RecoveredScheduleMarker =
+  | { status: 'found'; scheduleId: string }
+  | { status: 'missing'; sessionId?: string }
+  | { status: 'read-error'; error: unknown; sessionId?: string };
+
+function recoveredMarkerSessionId(marker: RecoveredScheduleMarker | undefined): string | undefined {
+  return marker?.status === 'found' ? undefined : marker?.sessionId;
+}
+
+function lastScheduledFirePromptIndex(history: ConversationHistory, runId: string): number {
+  for (let index = history.ids.length - 1; index >= 0; index -= 1) {
+    const message = history.messages[history.ids[index]!];
+    if (message?.role === 'user' && message.metadata['scheduledFireRunId'] === runId) {
+      return index;
+    }
+  }
+  return -1;
+}
+
+function removeConversationIndexRange(
+  history: ConversationHistory,
+  startIndex: number,
+  endIndex: number,
+): ConversationHistory {
+  const ids = history.ids.filter((_, index) => index < startIndex || index > endIndex);
+  const messages: Record<string, ConversationHistory['messages'][string]> = {};
+  for (const [position, id] of ids.entries()) {
+    const message = history.messages[id];
+    if (message) messages[id] = { ...message, position };
+  }
+  return { ...history, ids, messages };
+}
+
+function removeLastScheduledFireTranscript(
+  history: ConversationHistory,
+  runId: string,
+): ConversationHistory {
+  const promptIndex = lastScheduledFirePromptIndex(history, runId);
+  if (promptIndex === -1) return history;
+  const nextUserIndex = history.ids.findIndex((id, index) => {
+    if (index <= promptIndex) return false;
+    return history.messages[id]?.role === 'user';
+  });
+  return removeConversationIndexRange(
+    history,
+    promptIndex,
+    nextUserIndex === -1 ? history.ids.length - 1 : nextUserIndex - 1,
+  );
 }
 
 function redactProvider(provider: ProviderConfiguration): RedactedProviderConfiguration {
@@ -798,6 +869,7 @@ export interface RuntimeComposition {
     onStep: OnStepHook[];
     validateResponse: ValidateResponseHook[];
     streamEventTarget: TypedEventTarget<StreamEventMap> | undefined;
+    getActiveSkillEntries: () => ActiveSkillEntry[];
   }>;
 }
 
@@ -1131,6 +1203,7 @@ export async function createRuntimeComposition(
     const prepareStep: PrepareStepHook[] = [];
     const onStep: OnStepHook[] = [];
     const validateResponse: ValidateResponseHook[] = [];
+    let getActiveSkillEntries = (): ActiveSkillEntry[] => [];
 
     if (options.identity) {
       prepareStep.push(createIdentityHook(options.identity));
@@ -1159,6 +1232,7 @@ export async function createRuntimeComposition(
           skillSession.activate(entry.name, entry.toolPolicy);
         }
       }
+      getActiveSkillEntries = () => skillSession.getActiveEntries();
 
       if (options.skills.includeTools !== false) {
         // Inject the skill catalog on step 0 — same hook pattern as identity.
@@ -1211,6 +1285,7 @@ export async function createRuntimeComposition(
       onStep,
       validateResponse,
       streamEventTarget,
+      getActiveSkillEntries,
     });
   }
 
@@ -1308,18 +1383,26 @@ export async function createRuntimeComposition(
    * never seed a bare, reply-less user turn that the next fire would build on.
    *
    * Deliberately writes ONLY the conversation (no `lastRunStatus: 'running'`
-   * lifecycle metadata): a scheduled fire is not crash-recoverable or
-   * signal-targeted, so a `running` marker would only create stale-`running`
-   * sessions on a crashed fire and race any interactive run sharing the session.
+   * lifecycle metadata): scheduled fires recover through Weft's handle monitor
+   * rather than the bureau's interactive session ownership path, so a `running`
+   * marker would only race any interactive run sharing the session.
    */
   function createScheduledSessionPersistHook(
     store: SessionStore,
     sessionId: string,
     agentName: string,
     baseConversationHistory: ConversationHistory,
+    runId: string,
+    replaceCurrentFireTranscript: boolean,
+    getActiveSkillEntries: () => ActiveSkillEntry[],
   ): OnStepHook {
     return async (context) => {
       await store.update(sessionId, (existing) => {
+        const activeSkillEntries = getActiveSkillEntries();
+        const sessionOwnedByAnotherRunningRun =
+          existing?.metadata['lastRunStatus'] === 'running' &&
+          typeof existing.metadata['lastRunId'] === 'string' &&
+          existing.metadata['lastRunId'] !== runId;
         const next =
           existing ??
           createAgentSession({
@@ -1327,11 +1410,22 @@ export async function createRuntimeComposition(
             agentName,
             conversationHistory: context.conversation.current,
           });
+        const existingConversationHistory =
+          replaceCurrentFireTranscript && existing
+            ? removeLastScheduledFireTranscript(existing.conversationHistory, runId)
+            : existing?.conversationHistory;
         return {
           ...next,
-          conversationHistory: existing
+          metadata: {
+            ...next.metadata,
+            lastScheduledFireRunId: runId,
+            ...(sessionOwnedByAnotherRunningRun
+              ? {}
+              : { lastActiveSkills: activeSkillEntries as unknown as JSONValue }),
+          },
+          conversationHistory: existingConversationHistory
             ? appendConversationMessages(
-                existing.conversationHistory,
+                existingConversationHistory,
                 context.conversation.current,
                 baseConversationHistory,
               )
@@ -1341,14 +1435,56 @@ export async function createRuntimeComposition(
     };
   }
 
+  async function loadScheduleIdForRecoveredRun(
+    workflowId: string,
+  ): Promise<RecoveredScheduleMarker> {
+    if (!durableStorage) return { status: 'missing' };
+    try {
+      const value = await durableStorage.get(KEYS.scheduleRun(workflowId));
+      if (!value) return { status: 'missing' };
+      const decoded = decode(value);
+      return typeof decoded === 'string' && decoded.trim().length > 0
+        ? { status: 'found', scheduleId: decoded }
+        : { status: 'missing' };
+    } catch (error) {
+      return { status: 'read-error', error };
+    }
+  }
+
+  async function loadExistingStatelessScheduledSessionId(
+    store: SessionStore,
+    runId: string,
+  ): Promise<string | undefined> {
+    const sessions = await store.list();
+    return sessions.find(
+      (session) =>
+        session.id.startsWith('sched-') &&
+        session.id.endsWith(`-${runId}`) &&
+        session.metadata['lastScheduledFireRunId'] === runId,
+    )?.id;
+  }
+
+  async function loadExistingScheduledSessionId(
+    store: SessionStore,
+    input: ScheduledAgentRunInput,
+    runId: string,
+  ): Promise<string | undefined> {
+    if (input.sessionId !== undefined) {
+      const session = await store.load(input.sessionId);
+      return session?.metadata['lastScheduledFireRunId'] === runId ? input.sessionId : undefined;
+    }
+    return loadExistingStatelessScheduledSessionId(store, runId);
+  }
+
   /**
    * Build fresh {@link DurableRunDeps} for a NATIVE WEFT SCHEDULE FIRE (#109).
    *
-   * Discriminated upstream by `info.schedule !== undefined` (only native
-   * scheduled fires carry it). Unlike the recovery path this does NOT recover an
-   * existing run — it constructs a brand-new run exactly as a fresh `createRun`
-   * would, seeding the conversation with the `ScheduledAgentRunInput.input` prompt
-   * and using `info.workflowId` (the per-fire id weft minted) as the runId. The
+   * Discriminated by `info.schedule !== undefined` on a live timer tick, or by a
+   * persisted `ScheduledAgentRunInput` that carries the schedule marker written by
+   * `createAgentSchedule()` during `recoverAll()` (Weft does not currently include
+   * `info.schedule` on recovered scheduled fires). It builds deps exactly as a
+   * fresh `createRun` would, seeding the conversation with the scheduled prompt
+   * and using `info.workflowId` (the per-fire id Weft minted) as the runId. The
    * workflow body reads that same id back as `ctx.workflowId`.
    *
    * Session semantics (D6): `sessionId` present → continue that session's
@@ -1357,6 +1493,7 @@ export async function createRuntimeComposition(
   async function buildScheduledRunServices(
     info: WorkflowServicesResolverInfo,
     store: SessionStore,
+    recoveredScheduleMarker?: RecoveredScheduleMarker,
   ): Promise<WorkflowServicesResolution> {
     if (info.workflowType !== 'agentRun' || !isScheduledAgentRunInput(info.input)) {
       return {
@@ -1366,6 +1503,18 @@ export async function createRuntimeComposition(
     }
 
     const scheduledInput: ScheduledAgentRunInput = info.input;
+    if (
+      info.schedule === undefined &&
+      !hasPersistedScheduleMarker(scheduledInput) &&
+      recoveredScheduleMarker?.status !== 'found' &&
+      recoveredMarkerSessionId(recoveredScheduleMarker) === undefined
+    ) {
+      return {
+        status: 'unavailable',
+        reason: `scheduled fire ${info.workflowId} is missing a persisted schedule marker`,
+      };
+    }
+
     const runId = info.workflowId;
     const agentName = scheduledInput.agentName;
 
@@ -1373,8 +1522,20 @@ export async function createRuntimeComposition(
     // The fresh id is derived from the schedule id + per-fire runId so each fire
     // is observable as its own session and two fires never collide.
     const recurring = scheduledInput.sessionId !== undefined;
+    const recoveredScheduleId =
+      persistedScheduleMarker(scheduledInput) ??
+      info.schedule?.id ??
+      (recoveredScheduleMarker?.status === 'found'
+        ? recoveredScheduleMarker.scheduleId
+        : undefined);
+    const existingStatelessSessionId =
+      !recurring && recoveredScheduleId === undefined
+        ? recoveredMarkerSessionId(recoveredScheduleMarker)
+        : undefined;
     const sessionId =
-      scheduledInput.sessionId ?? `sched-${info.schedule?.id ?? 'unknown'}-${runId}`;
+      scheduledInput.sessionId ??
+      existingStatelessSessionId ??
+      `sched-${recoveredScheduleId ?? 'unknown'}-${runId}`;
 
     // A recurring fire continues its stored session; a fresh-per-fire (stateless)
     // session never exists yet. A recurring schedule's FIRST fire into a new
@@ -1382,10 +1543,17 @@ export async function createRuntimeComposition(
     // too, exactly as createRunFromRequest does for any new session (a recurring
     // session that already exists already carries the prompt from its first fire,
     // so it is not re-seeded).
-    const existing = recurring ? await store.load(sessionId) : undefined;
+    const existing =
+      recurring || info.schedule === undefined ? await store.load(sessionId) : undefined;
+    const replaceCurrentFireTranscript =
+      info.schedule === undefined && existing?.metadata['lastScheduledFireRunId'] === runId;
     let conversation: Conversation;
     if (existing) {
-      conversation = new Conversation(existing.conversationHistory);
+      conversation = new Conversation(
+        replaceCurrentFireTranscript
+          ? removeLastScheduledFireTranscript(existing.conversationHistory, runId)
+          : existing.conversationHistory,
+      );
     } else {
       conversation = new Conversation(createConversationHistory({ id: sessionId }));
       if (systemPrompt) {
@@ -1393,14 +1561,22 @@ export async function createRuntimeComposition(
       }
     }
     const baseConversationHistory = conversation.current;
-    conversation.appendUserMessage(scheduledInput.input);
+    conversation.appendUserMessage(scheduledInput.input, { scheduledFireRunId: runId });
 
     // Same runtime a normal run builds (generate/toolbox/memory/skills/guardrails),
     // wired to this fire's session + per-fire runId, with live streaming off (no
     // ActiveRun surface for a scheduled fire).
+    const lastActiveSkillsRaw = existing?.metadata['lastActiveSkills'];
+    const initialActiveSkills =
+      info.schedule === undefined &&
+      existing?.metadata['lastScheduledFireRunId'] === runId &&
+      isActiveSkillEntryArray(lastActiveSkillsRaw)
+        ? lastActiveSkillsRaw
+        : undefined;
+
     const runRuntime = await createRunRuntime(
       { message: scheduledInput.input, sessionId, runId, agentName },
-      { liveStreaming: false },
+      { liveStreaming: false, initialActiveSkills },
     );
 
     const services: DurableRunDeps = {
@@ -1417,7 +1593,15 @@ export async function createRuntimeComposition(
         // stateless fire is observable; runs AFTER the runtime's own onStep hooks.
         onStep: [
           ...runRuntime.onStep,
-          createScheduledSessionPersistHook(store, sessionId, agentName, baseConversationHistory),
+          createScheduledSessionPersistHook(
+            store,
+            sessionId,
+            agentName,
+            baseConversationHistory,
+            runId,
+            replaceCurrentFireTranscript,
+            runRuntime.getActiveSkillEntries,
+          ),
         ],
         validateResponse: runRuntime.validateResponse,
         agentName,
@@ -1468,13 +1652,44 @@ export async function createRuntimeComposition(
     if (!sessionStore) {
       return { status: 'unavailable', reason: 'no session store configured' };
     }
-    // NATIVE SCHEDULED FIRE (#109): weft sets `info.schedule` only for a native
-    // schedule tick. This is a FRESH run, not a recovery — build new deps from the
-    // ScheduledAgentRunInput rather than recovering a session. Ordered first, ahead
-    // of the recovery guards below (which reject a ScheduledAgentRunInput because it
-    // has no `runId`).
-    if (info.schedule !== undefined) {
-      return buildScheduledRunServices(info, sessionStore);
+    // NATIVE SCHEDULED FIRE (#109/#126): Weft sets `info.schedule` for a live
+    // schedule tick, but recovered scheduled fires may only carry the persisted
+    // ScheduledAgentRunInput. Recovery must also see the persisted schedule marker
+    // written by createAgentSchedule(); the broad `{ agentName, input }` shape alone
+    // is not enough to bypass the interactive session-ownership guards below.
+    let recoveredScheduleMarker =
+      info.schedule === undefined &&
+      isScheduledAgentRunInput(info.input) &&
+      !hasPersistedScheduleMarker(info.input)
+        ? await loadScheduleIdForRecoveredRun(info.workflowId)
+        : undefined;
+    if (
+      recoveredScheduleMarker !== undefined &&
+      recoveredScheduleMarker.status !== 'found' &&
+      isScheduledAgentRunInput(info.input)
+    ) {
+      try {
+        const sessionId = await loadExistingScheduledSessionId(
+          sessionStore,
+          info.input,
+          info.workflowId,
+        );
+        if (sessionId !== undefined)
+          recoveredScheduleMarker = { ...recoveredScheduleMarker, sessionId };
+      } catch (error) {
+        console.error(
+          `[bureau] Could not inspect scheduled session proof for recovered run "${info.workflowId}"; continuing without scheduled-fire classification: ${serializeUnknownError(error)}`,
+        );
+      }
+    }
+    if (
+      info.schedule !== undefined ||
+      (isScheduledAgentRunInput(info.input) &&
+        (hasPersistedScheduleMarker(info.input) ||
+          recoveredScheduleMarker?.status === 'found' ||
+          recoveredMarkerSessionId(recoveredScheduleMarker) !== undefined))
+    ) {
+      return buildScheduledRunServices(info, sessionStore, recoveredScheduleMarker);
     }
     // The owning session id rides in the run's durable input (Weft passes the
     // persisted `input` to the resolver on recovery — see #2), so load the

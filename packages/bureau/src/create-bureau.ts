@@ -1,17 +1,26 @@
-import type { ListFilter, ListOptions, ScheduleSpec } from '@lostgradient/weft';
+import { decode, type ListFilter, type ListOptions, type ScheduleSpec } from '@lostgradient/weft';
+import { KEYS } from '@lostgradient/weft/storage';
 import {
   Conversation,
   type ConversationHistory,
   createConversationHistory,
 } from 'conversationalist';
 import { CompletableEventTarget } from 'lifecycle';
-import { type ActiveRun, createActiveRun, createAgentSession, type JSONValue } from 'operative';
+import {
+  type ActiveRun,
+  createActiveRun,
+  createAgentSession,
+  type JSONValue,
+  type SessionStore,
+} from 'operative';
 import {
   createAgentScheduler,
   InvalidScheduleError,
   isAgentRunWorkflowInput,
+  isScheduledAgentRunInput,
   reattachDurableActiveRun,
   type RecoveredRunHandle,
+  type ScheduledAgentRunInput,
   SCHEDULER_RUN_ID_PREFIX,
 } from 'operative/durable';
 import {
@@ -245,6 +254,9 @@ export type SessionLoadOutcome = { ok: true; session: RecoveredRunSessionMetadat
  *
  * - `reattach` — bureau-owned, in-flight, session-confirmed: wrap it in a live
  *   ActiveRun and register it.
+ * - `monitor` — native scheduled fire: leave the recovered Weft workflow running
+ *   and attach a detached result monitor, but do not register an ActiveRun because
+ *   scheduled fires intentionally have no interactive session ownership.
  * - `cancel` — POSITIVELY not a reattachable bureau-owned in-flight run (bad/
  *   missing launch metadata, foreign run id, or a session that is absent / owns a
  *   different run / is already terminal). `engine.cancel` terminalizes it so it
@@ -265,6 +277,8 @@ export type SessionLoadOutcome = { ok: true; session: RecoveredRunSessionMetadat
  */
 export function classifyRecoveredRun(args: {
   handleId: string;
+  /** Whether the launch metadata identifies a native scheduled fire. */
+  scheduledFire: boolean;
   /** The narrowed agentRun input when the launch metadata is bureau-owned, else `undefined`. */
   ownedSessionId: string | undefined;
   /** Whether reading the handle's launch metadata threw. */
@@ -273,12 +287,18 @@ export function classifyRecoveredRun(args: {
   hasSessionStore: boolean;
   /** The session-load outcome; only meaningful when `ownedSessionId` is set + `hasSessionStore`. */
   sessionLoad: SessionLoadOutcome;
-}): 'reattach' | 'cancel' | 'skip' {
+}): 'reattach' | 'monitor' | 'cancel' | 'skip' {
   // A failed metadata read means we cannot even identify the run — but it WAS
   // resumed by recoverAll, so cancel it rather than leave it unowned.
   if (args.metadataReadFailed) return 'cancel';
-  // Not a bureau-owned agentRun (foreign run id / non-agentRun input) — cancel.
-  if (args.ownedSessionId === undefined) return 'cancel';
+  if (args.ownedSessionId === undefined) {
+    // A scheduled fire has no interactive session ownership to confirm. Weft has
+    // already resumed it via the scheduled-fire resolver branch, so monitor its
+    // result without registering it as an ActiveRun or cancelling it as foreign.
+    if (args.scheduledFire) return 'monitor';
+    // Not a bureau-owned agentRun (foreign run id / non-agentRun input) — cancel.
+    return 'cancel';
+  }
   // Owned input but no session store to confirm against / reattach into — skip.
   if (!args.hasSessionStore) return 'skip';
   // Transient session-load failure — ownership UNKNOWN, never cancel; skip.
@@ -289,6 +309,77 @@ export function classifyRecoveredRun(args: {
     return 'cancel';
   }
   return 'reattach';
+}
+
+export function isRecoverableScheduledFireInput(input: unknown): input is ScheduledAgentRunInput {
+  return (
+    isScheduledAgentRunInput(input) &&
+    typeof input.scheduleId === 'string' &&
+    input.scheduleId.trim().length > 0
+  );
+}
+
+async function loadScheduleIdForRecoveredRun(
+  engine: { storage: { get(key: string): Promise<Uint8Array | null> } },
+  workflowId: string,
+): Promise<
+  | { status: 'found'; scheduleId: string }
+  | { status: 'missing' }
+  | { status: 'read-error'; error: unknown }
+> {
+  try {
+    const value = await engine.storage.get(KEYS.scheduleRun(workflowId));
+    if (!value) return { status: 'missing' };
+    const decoded = decode(value);
+    return typeof decoded === 'string' && decoded.trim().length > 0
+      ? { status: 'found', scheduleId: decoded }
+      : { status: 'missing' };
+  } catch (error) {
+    return { status: 'read-error', error };
+  }
+}
+
+async function loadExistingScheduledSessionId(
+  store: SessionStore,
+  input: ScheduledAgentRunInput,
+  runId: string,
+): Promise<string | undefined> {
+  if (input.sessionId !== undefined) {
+    const session = await store.load(input.sessionId);
+    return session?.metadata['lastScheduledFireRunId'] === runId ? input.sessionId : undefined;
+  }
+  const sessions = await store.list();
+  return sessions.find(
+    (session) =>
+      session.id.startsWith('sched-') &&
+      session.id.endsWith(`-${runId}`) &&
+      session.metadata['lastScheduledFireRunId'] === runId,
+  )?.id;
+}
+
+export async function monitorRecoveredScheduledFire(handle: RecoveredRunHandle): Promise<void> {
+  try {
+    const result = await handle.result();
+    if (
+      typeof result === 'object' &&
+      result !== null &&
+      'finishReason' in result &&
+      result.finishReason !== 'stop-condition' &&
+      result.finishReason !== 'maximum-steps'
+    ) {
+      const errorMessage =
+        'errorMessage' in result && typeof result.errorMessage === 'string'
+          ? `: ${result.errorMessage}`
+          : '';
+      console.error(
+        `[bureau] Recovered scheduled fire "${handle.id}" finished with ${String(result.finishReason)}${errorMessage}`,
+      );
+    }
+  } catch (error) {
+    console.error(
+      `[bureau] Recovered scheduled fire "${handle.id}" failed: ${serializeUnknownError(error)}`,
+    );
+  }
 }
 
 export async function createBureau(options: BureauOptions = {}): Promise<Bureau> {
@@ -638,7 +729,8 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     activeRun.once('run.completed', (event) => {
       disposeRegisteredStreamListeners(disposeStreamListeners);
 
-      const lastRunStatus = event.finishReason === 'error' ? 'error' : 'completed';
+      const finishReason = event.finishReason;
+      const lastRunStatus = finishReason === 'error' ? 'error' : 'completed';
 
       persistSessionUpdate(
         () =>
@@ -780,28 +872,30 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     // adapter stays write-free for those and the resolver/teardown owns the
     // session status; so these listeners only run for a genuinely settled run.
     recoveredRun.once('run.completed', (event) => {
-      const lastRunStatus = event.finishReason === 'error' ? 'error' : 'completed';
+      const completedConversation = event.conversation;
+      const finishReason = event.finishReason;
+      const lastRunStatus = finishReason === 'error' ? 'error' : 'completed';
+      const lastError = finishReason === 'error' ? event.error : undefined;
       persistSessionUpdate(
         () =>
-          saveSession(sessionId, event.conversation, {
+          saveSession(sessionId, completedConversation, {
             lastRunId: runId,
             lastRunStatus,
-            lastFinishReason: event.finishReason,
-            ...(event.finishReason === 'error'
-              ? { lastError: serializeUnknownError(event.error) }
-              : {}),
+            lastFinishReason: finishReason,
+            ...(finishReason === 'error' ? { lastError: serializeUnknownError(lastError) } : {}),
           }),
         { runId, sessionId, status: lastRunStatus },
       );
     });
 
     recoveredRun.once('run.aborted', (event) => {
+      const abortedConversation = event.conversation;
       persistSessionUpdate(
         // The reattach adapter reconstructs the abort RunResult from the run's
         // final checkpoint and threads it into RunAbortedEvent.conversation, so
         // use that directly instead of re-fetching the checkpoint snapshot.
         () =>
-          saveSession(sessionId, event.conversation, {
+          saveSession(sessionId, abortedConversation, {
             lastRunId: runId,
             lastRunStatus: 'aborted',
             lastFinishReason: 'aborted',
@@ -817,7 +911,9 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
   /**
    * Boot-time recovery for durable runs (seams #2, #3/#5b, #5). Resumes any
    * `agentRun` workflows a previous process left in flight via
-   * `engine.recoverAll()` and REATTACHES each as a live `ActiveRun`.
+   * `engine.recoverAll()`. Interactive bureau-owned runs reattach as live
+   * `ActiveRun`s; native scheduled fires stay monitor-only because they have no
+   * interactive session ownership or live run surface.
    *
    * #2 — no side table. Each recovered run's owning session is read from the
    * handle's own launch metadata (`handle.getLaunchMetadata().input.sessionId`,
@@ -842,9 +938,15 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
    * by the engine BEFORE replay (the resolver reconciles its session to `error`
    * synchronously, with the sessionId in hand); its reattached handle then rejects
    * and the adapter stays write-free, so the resolver's status is authoritative.
-   * A run whose launch metadata lacks a `sessionId` (checkpointed before #2, or
-   * not bureau-owned) is skipped — there is no compatibility fallback for
-   * cross-upgrade in-flight runs.
+   * A scheduled fire whose launch metadata narrows to a marker-bearing
+   * `ScheduledAgentRunInput` is not cancelled for lacking `runId` / `sessionId`
+   * ownership. Its services are rebuilt by `resolveRunServices`'s scheduled
+   * branch, and its scheduled session write-back hook owns transcript persistence.
+   * Recovery attaches only a detached result monitor so failures are visible.
+   *
+   * A non-scheduled run whose launch metadata lacks a `sessionId` (checkpointed
+   * before #2, or not bureau-owned) is skipped — there is no compatibility
+   * fallback for cross-upgrade in-flight runs.
    *
    * KNOWN SEAM — durable scheduler runs (#7b) are NOT cross-process recoverable.
    * A durable scheduler task (durable scheduler enabled) runs as an `agentRun`
@@ -962,10 +1064,6 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       );
     }
 
-    // The reattach loop below correlates recovered runs to bureau SESSIONS, so it
-    // is meaningless without a session store. The sweep above already ran.
-    if (!runtime.sessionStore) return;
-
     // recoverAll resumes the in-flight workflows (firing the services resolver per
     // run before each generator advances); if it throws, the boot try/catch logs
     // and continues.
@@ -1009,6 +1107,42 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
           ? metadata.input.sessionId
           : undefined;
 
+      const recoveredScheduleMarker =
+        readError === undefined &&
+        metadata != null &&
+        !isAgentRunWorkflowInput(metadata.input) &&
+        isScheduledAgentRunInput(metadata.input) &&
+        !isRecoverableScheduledFireInput(metadata.input)
+          ? await loadScheduleIdForRecoveredRun(durable.engine, handle.id)
+          : undefined;
+      let recoveredScheduledSessionId: string | undefined;
+      if (
+        recoveredScheduleMarker !== undefined &&
+        recoveredScheduleMarker.status !== 'found' &&
+        sessionStore &&
+        metadata != null &&
+        isScheduledAgentRunInput(metadata.input)
+      ) {
+        try {
+          recoveredScheduledSessionId = await loadExistingScheduledSessionId(
+            sessionStore,
+            metadata.input,
+            handle.id,
+          );
+        } catch (error) {
+          console.error(
+            `[bureau] Could not inspect scheduled session proof for recovered run "${handle.id}"; continuing without scheduled-fire classification: ${serializeUnknownError(error)}`,
+          );
+        }
+      }
+      const scheduledFire =
+        readError === undefined &&
+        metadata != null &&
+        !isAgentRunWorkflowInput(metadata.input) &&
+        (isRecoverableScheduledFireInput(metadata.input) ||
+          recoveredScheduleMarker?.status === 'found' ||
+          recoveredScheduledSessionId !== undefined);
+
       // Load the owning session (only meaningful for an owned run with a store).
       // A throw leaves ownership UNKNOWN — classifyRecoveredRun then skips rather
       // than cancels, so a transient read blip never terminates a legitimately
@@ -1028,6 +1162,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
 
       const verdict = classifyRecoveredRun({
         handleId: handle.id,
+        scheduledFire,
         ownedSessionId,
         metadataReadFailed: readError !== undefined,
         hasSessionStore: sessionStore !== undefined,
@@ -1038,6 +1173,16 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         // ownedSessionId is defined when the verdict is 'reattach'. reattach
         // consumes-and-deletes any pending recovery emitter for this run.
         reattachRecoveredRun(handle.id, ownedSessionId!, handle);
+      } else if (verdict === 'monitor') {
+        // Scheduled fires have no ActiveRun surface, but the recovered Weft handle
+        // still needs a detached result monitor so failures are visible. Drain a
+        // pending emitter defensively; the scheduled resolver branch should not
+        // create one because there is no reattach owner for it.
+        const orphan = runtime.pendingRecoveryEmitters.get(handle.id);
+        runtime.pendingRecoveryEmitters.delete(handle.id);
+        orphan?.stopToolboxForward();
+
+        void monitorRecoveredScheduledFire(handle);
       } else {
         // 'cancel' or 'skip': this run will NOT be reattached, so drain its pending
         // recovery entry (#28) and stop its toolbox forwarding — the resolver may

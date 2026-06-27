@@ -10,6 +10,31 @@ import { parseDuration, ScheduleHandle } from '@lostgradient/weft';
 
 import type { AnyRunEngine } from './create-run-engine';
 
+type ScheduleIdCrypto = {
+  randomUUID?: () => string;
+  getRandomValues?: <T extends Uint8Array>(array: T) => T;
+};
+
+function createScheduleId(): string {
+  const crypto = (globalThis as { crypto?: ScheduleIdCrypto }).crypto;
+  const randomUUID = crypto?.randomUUID;
+  if (randomUUID) return randomUUID.call(crypto);
+
+  const bytes = new Uint8Array(16);
+  if (crypto?.getRandomValues) {
+    crypto.getRandomValues(bytes);
+  } else {
+    for (let index = 0; index < bytes.length; index += 1) {
+      bytes[index] = Math.floor(Math.random() * 256);
+    }
+  }
+
+  bytes[6] = (bytes[6]! & 0x0f) | 0x40;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0'));
+  return `${hex.slice(0, 4).join('')}-${hex.slice(4, 6).join('')}-${hex.slice(6, 8).join('')}-${hex.slice(8, 10).join('')}-${hex.slice(10).join('')}`;
+}
+
 /**
  * The input injected into the `agentRun` workflow when started by a durable
  * schedule. Carries the agent name, the prompt, and the optional session that
@@ -31,6 +56,13 @@ export interface ScheduledAgentRunInput {
    * fire starts a FRESH standalone session.
    */
   sessionId?: string;
+  /**
+   * Stable schedule id that launched this fire. Persisted in the input because
+   * Weft does not include `info.schedule` when a scheduled fire is recovered
+   * through `recoverAll()`, but stateless fires need the schedule id to rebuild
+   * the same per-fire session id after a crash.
+   */
+  scheduleId?: string;
 }
 
 /**
@@ -49,6 +81,8 @@ export function isScheduledAgentRunInput(value: unknown): value is ScheduledAgen
   }
   const sessionId = candidate['sessionId'];
   if (sessionId !== undefined && typeof sessionId !== 'string') return false;
+  const scheduleId = candidate['scheduleId'];
+  if (scheduleId !== undefined && typeof scheduleId !== 'string') return false;
   return true;
 }
 
@@ -292,9 +326,10 @@ function assertCompatibleAgentSchedule(
  * Session semantics: `session` present → each fire continues that session's
  * conversation (recurring); absent → each fire is a fresh standalone session.
  *
- * @throws {InvalidScheduleError} when `session` is blank, or `overlap: 'allow'`
- * is combined with a recurring `session` (a recurring conversation is sequential,
- * so overlapping fires would interleave turns and race the session write-back).
+ * @throws {InvalidScheduleError} when `session` or `id` is blank, or
+ * `overlap: 'allow'` is combined with a recurring `session` (a recurring
+ * conversation is sequential, so overlapping fires would interleave turns and
+ * race the session write-back).
  */
 export async function createAgentSchedule(
   options: CreateAgentScheduleOptions,
@@ -305,11 +340,15 @@ export async function createAgentSchedule(
   if (session !== undefined && session.trim().length === 0) {
     throw new InvalidScheduleError('schedule session must be a non-empty string');
   }
+  if (id !== undefined && id.trim().length === 0) {
+    throw new InvalidScheduleError('schedule id must be a non-empty string');
+  }
   if (session !== undefined && overlap === 'allow') {
     throw new InvalidScheduleError(
       "overlap 'allow' is incompatible with a recurring session (fires must serialize)",
     );
   }
+  const scheduleId = id?.trim() ?? createScheduleId();
 
   // Trim the session id so a padded value ('  digest  ') persists under the same
   // key the caller means, matching `createRunFromRequest`'s `sessionId.trim()`
@@ -317,19 +356,20 @@ export async function createAgentSchedule(
   const scheduledInput: ScheduledAgentRunInput = {
     agentName,
     input,
+    scheduleId,
     ...(session !== undefined ? { sessionId: session.trim() } : {}),
   };
 
   const scheduleOptions: ScheduleOptions = {
     ...(overlap !== undefined ? { overlap } : {}),
-    ...(id !== undefined ? { id } : {}),
+    id: scheduleId,
   };
 
   if (id !== undefined && idempotent === true) {
-    const existingSchedule = await engine.getSchedule(id);
+    const existingSchedule = await engine.getSchedule(scheduleId);
     if (existingSchedule) {
-      assertCompatibleAgentSchedule(existingSchedule, id, workflowType, spec, overlap);
-      return scheduleHandleFromEngine(engine, id);
+      assertCompatibleAgentSchedule(existingSchedule, scheduleId, workflowType, spec, overlap);
+      return scheduleHandleFromEngine(engine, scheduleId);
     }
   }
 
@@ -338,10 +378,10 @@ export async function createAgentSchedule(
     handle = await engine.schedule(workflowType, scheduledInput, spec, scheduleOptions);
   } catch (error) {
     if (id !== undefined && idempotent === true) {
-      const existingSchedule = await engine.getSchedule(id);
+      const existingSchedule = await engine.getSchedule(scheduleId);
       if (existingSchedule) {
-        assertCompatibleAgentSchedule(existingSchedule, id, workflowType, spec, overlap);
-        return scheduleHandleFromEngine(engine, id);
+        assertCompatibleAgentSchedule(existingSchedule, scheduleId, workflowType, spec, overlap);
+        return scheduleHandleFromEngine(engine, scheduleId);
       }
     }
     throw error;

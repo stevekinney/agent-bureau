@@ -2,16 +2,18 @@ import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import { encode } from '@lostgradient/weft';
 import type { StorageConfiguration } from '@lostgradient/weft/storage';
-import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
+import { KEYS, MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
 import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
 import { createToolbox } from 'armorer';
 import { afterEach, describe, expect, it } from 'bun:test';
-import { Conversation, createConversationHistory } from 'conversationalist';
+import { Conversation, createConversationHistory, getMessages } from 'conversationalist';
 import type { GenerateFunction, SessionStore } from 'operative';
 import { createAgentSession, stopWhen } from 'operative';
 import {
   createDurableActiveRun,
+  type DurableRunDeps,
   SCHEDULER_ORIGIN_TAG,
   startDurableRunResult,
 } from 'operative/durable';
@@ -720,6 +722,876 @@ describe('createRuntimeComposition durable execution', () => {
         });
         expect(failedWithoutReplayingSession).toBe(true);
         expect(recoveredGenerateCalls).toBe(0);
+      } finally {
+        secondRuntime.durable?.engine[Symbol.dispose]?.();
+        secondRuntime.disposeStorage?.();
+      }
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
+  it('does not recover shape-only scheduled inputs without a persisted schedule marker', async () => {
+    const databasePath = join(
+      tmpdir(),
+      `shape-only-scheduled-input-${process.pid}-${durableDatabaseCounter++}.sqlite`,
+    );
+    const runId = 'shape-only-scheduled-input-run';
+    let recoveredGenerateCalls = 0;
+
+    try {
+      const firstRuntime = await createRuntimeComposition({
+        generate: async () => new Promise<never>(() => {}),
+        toolbox: createToolbox([], { context: {} }),
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+      });
+
+      try {
+        expect(firstRuntime.durable).toBeDefined();
+        const toolbox = createToolbox([], { context: {} });
+        const services: DurableRunDeps = {
+          toolbox,
+          options: {
+            generate: async () => new Promise<never>(() => {}),
+            toolbox: toolbox as never,
+            conversation: createConversationHistory(),
+            stopWhen: stopWhen.noToolCalls(),
+          },
+        };
+
+        const handle = await firstRuntime.durable!.engine.start(
+          'agentRun',
+          { agentName: 'researcher', input: 'foreign recovered row' },
+          { id: runId, services },
+        );
+        void handle.result().catch(() => {});
+
+        const running = await pollUntil(async () => {
+          const state = await firstRuntime.durable!.engine.get(runId);
+          return state?.status === 'running';
+        });
+        expect(running).toBe(true);
+      } finally {
+        firstRuntime.durable?.engine[Symbol.dispose]?.();
+        firstRuntime.disposeStorage?.();
+      }
+
+      const secondRuntime = await createRuntimeComposition({
+        generate: async () => {
+          recoveredGenerateCalls += 1;
+          return { content: 'must not run as scheduled fire', toolCalls: [] };
+        },
+        toolbox: createToolbox([], { context: {} }),
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+      });
+
+      try {
+        expect(secondRuntime.durable).toBeDefined();
+        const originalGet = secondRuntime.durable!.engine.storage.get.bind(
+          secondRuntime.durable!.engine.storage,
+        );
+        secondRuntime.durable!.engine.storage.get = async (key) => {
+          if (key === KEYS.scheduleRun(runId)) {
+            throw new Error('transient schedule marker read failure');
+          }
+          return originalGet(key);
+        };
+        await secondRuntime.durable!.engine.recoverAll();
+
+        const failedWithoutGenerate = await pollUntil(async () => {
+          const state = await secondRuntime.durable!.engine.get(runId);
+          return state?.status === 'failed' && recoveredGenerateCalls === 0;
+        });
+        expect(failedWithoutGenerate).toBe(true);
+        expect(recoveredGenerateCalls).toBe(0);
+        const sessions = await secondRuntime.sessionStore!.list();
+        expect(sessions.some((session) => session.id.startsWith('sched-'))).toBe(false);
+      } finally {
+        secondRuntime.durable?.engine[Symbol.dispose]?.();
+        secondRuntime.disposeStorage?.();
+      }
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
+  it('recovers markerless scheduled fires when Weft has a schedule-run marker and replaces replayed transcript suffixes', async () => {
+    const databasePath = join(
+      tmpdir(),
+      `legacy-scheduled-input-${process.pid}-${durableDatabaseCounter++}.sqlite`,
+    );
+    const runId = 'legacy-scheduled-fire-run';
+    const scheduleId = 'legacy-digest-schedule';
+    const sessionId = 'legacy-digest-session';
+    const scheduledPrompt = 'digest prompt';
+    const partialAssistantContent = 'old partial assistant turn';
+    const recoveredAssistantContent = 'recovered assistant turn';
+    const concurrentAssistantContent = 'concurrent assistant update';
+    let recoveredUserPromptCount = 0;
+    let recoveredSawOldPartial = false;
+    let saveConcurrentUpdate: () => Promise<void> = async () => {
+      throw new Error('concurrent update writer was not initialized');
+    };
+
+    try {
+      const firstRuntime = await createRuntimeComposition({
+        generate: async () => new Promise<never>(() => {}),
+        toolbox: createToolbox([], { context: {} }),
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+      });
+
+      try {
+        expect(firstRuntime.durable).toBeDefined();
+        const partialConversation = new Conversation(createConversationHistory({ id: sessionId }));
+        partialConversation.appendUserMessage(scheduledPrompt);
+        partialConversation.appendAssistantMessage('prior completed fire');
+        partialConversation.appendUserMessage(scheduledPrompt, { scheduledFireRunId: runId });
+        partialConversation.appendAssistantMessage(partialAssistantContent);
+        await firstRuntime.sessionStore!.save(
+          createAgentSession({
+            id: sessionId,
+            agentName: 'researcher',
+            conversationHistory: partialConversation.current,
+            metadata: { lastScheduledFireRunId: runId },
+          }),
+        );
+
+        const toolbox = createToolbox([], { context: {} });
+        const services: DurableRunDeps = {
+          toolbox,
+          options: {
+            generate: async () => new Promise<never>(() => {}),
+            toolbox: toolbox as never,
+            conversation: createConversationHistory(),
+            stopWhen: stopWhen.noToolCalls(),
+          },
+        };
+
+        const handle = await firstRuntime.durable!.engine.start(
+          'agentRun',
+          { agentName: 'researcher', input: scheduledPrompt, sessionId },
+          { id: runId, services },
+        );
+        void handle.result().catch(() => {});
+        await firstRuntime.durable!.engine.storage.put(KEYS.scheduleRun(runId), encode(scheduleId));
+
+        const running = await pollUntil(async () => {
+          const state = await firstRuntime.durable!.engine.get(runId);
+          return state?.status === 'running';
+        });
+        expect(running).toBe(true);
+      } finally {
+        firstRuntime.durable?.engine[Symbol.dispose]?.();
+        firstRuntime.disposeStorage?.();
+      }
+
+      const secondRuntime = await createRuntimeComposition({
+        generate: async ({ conversation }) => {
+          const messages = conversation.getMessages();
+          recoveredUserPromptCount = messages.filter(
+            (message) => message.role === 'user' && message.content === scheduledPrompt,
+          ).length;
+          recoveredSawOldPartial = messages.some(
+            (message) => message.content === partialAssistantContent,
+          );
+          await saveConcurrentUpdate();
+          return { content: recoveredAssistantContent, toolCalls: [] };
+        },
+        toolbox: createToolbox([], { context: {} }),
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+        stopWhen: stopWhen.noToolCalls(),
+      });
+      saveConcurrentUpdate = async () => {
+        await secondRuntime.sessionStore!.update(sessionId, (existing) => {
+          const updated = new Conversation(existing!.conversationHistory);
+          updated.appendUserMessage(scheduledPrompt);
+          updated.appendAssistantMessage(concurrentAssistantContent);
+          return { ...existing!, conversationHistory: updated.current };
+        });
+      };
+
+      try {
+        expect(secondRuntime.durable).toBeDefined();
+        await secondRuntime.durable!.engine.recoverAll();
+
+        const completed = await pollUntil(async () => {
+          const state = await secondRuntime.durable!.engine.get(runId);
+          return state?.status === 'completed';
+        });
+        expect(completed).toBe(true);
+        expect(recoveredUserPromptCount).toBe(2);
+        expect(recoveredSawOldPartial).toBe(false);
+
+        const session = await secondRuntime.sessionStore!.load(sessionId);
+        expect(session).toBeDefined();
+        const messages = getMessages(session!.conversationHistory);
+        expect(messages.some((message) => message.content === partialAssistantContent)).toBe(false);
+        expect(messages.filter((message) => message.content === scheduledPrompt)).toHaveLength(3);
+        expect(messages.some((message) => message.content === concurrentAssistantContent)).toBe(
+          true,
+        );
+        expect(messages.some((message) => message.content === recoveredAssistantContent)).toBe(
+          true,
+        );
+      } finally {
+        secondRuntime.durable?.engine[Symbol.dispose]?.();
+        secondRuntime.disposeStorage?.();
+      }
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
+  it('recovers markerless scheduled fires when the session proves the scheduled fire', async () => {
+    const databasePath = join(
+      tmpdir(),
+      `scheduled-session-proof-${process.pid}-${durableDatabaseCounter++}.sqlite`,
+    );
+    const runId = 'scheduled-session-proof-run';
+    const sessionId = `sched-session-proof-${runId}`;
+    const scheduledPrompt = 'session proof scheduled prompt';
+    const recoveredAssistantContent = 'session proof scheduled recovery completed';
+
+    try {
+      const firstRuntime = await createRuntimeComposition({
+        generate: async () => new Promise<never>(() => {}),
+        toolbox: createToolbox([], { context: {} }),
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+      });
+
+      try {
+        expect(firstRuntime.durable).toBeDefined();
+        const partialConversation = new Conversation(createConversationHistory({ id: sessionId }));
+        partialConversation.appendUserMessage(scheduledPrompt, { scheduledFireRunId: runId });
+        await firstRuntime.sessionStore!.save(
+          createAgentSession({
+            id: sessionId,
+            agentName: 'researcher',
+            conversationHistory: partialConversation.current,
+            metadata: { lastScheduledFireRunId: runId },
+          }),
+        );
+
+        const toolbox = createToolbox([], { context: {} });
+        const services: DurableRunDeps = {
+          toolbox,
+          options: {
+            generate: async () => new Promise<never>(() => {}),
+            toolbox: toolbox as never,
+            conversation: createConversationHistory(),
+            stopWhen: stopWhen.noToolCalls(),
+          },
+        };
+
+        const handle = await firstRuntime.durable!.engine.start(
+          'agentRun',
+          { agentName: 'researcher', input: scheduledPrompt },
+          { id: runId, services },
+        );
+        void handle.result().catch(() => {});
+
+        const running = await pollUntil(async () => {
+          const state = await firstRuntime.durable!.engine.get(runId);
+          return state?.status === 'running';
+        });
+        expect(running).toBe(true);
+      } finally {
+        firstRuntime.durable?.engine[Symbol.dispose]?.();
+        firstRuntime.disposeStorage?.();
+      }
+
+      const secondRuntime = await createRuntimeComposition({
+        generate: async () => ({ content: recoveredAssistantContent, toolCalls: [] }),
+        toolbox: createToolbox([], { context: {} }),
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+        stopWhen: stopWhen.noToolCalls(),
+      });
+
+      try {
+        expect(secondRuntime.durable).toBeDefined();
+        await secondRuntime.durable!.engine.recoverAll();
+
+        const completed = await pollUntil(async () => {
+          const state = await secondRuntime.durable!.engine.get(runId);
+          return state?.status === 'completed';
+        });
+        expect(completed).toBe(true);
+
+        const session = await secondRuntime.sessionStore!.load(sessionId);
+        expect(session).toBeDefined();
+        const messages = getMessages(session!.conversationHistory);
+        expect(messages.some((message) => message.content === scheduledPrompt)).toBe(true);
+        expect(messages.some((message) => message.content === recoveredAssistantContent)).toBe(
+          true,
+        );
+        const unknownSession = await secondRuntime.sessionStore!.load(`sched-unknown-${runId}`);
+        expect(unknownSession).toBeUndefined();
+      } finally {
+        secondRuntime.durable?.engine[Symbol.dispose]?.();
+        secondRuntime.disposeStorage?.();
+      }
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
+  it('replaces replayed transcript suffixes for stateless scheduled-fire sessions', async () => {
+    const databasePath = join(
+      tmpdir(),
+      `stateless-scheduled-replay-${process.pid}-${durableDatabaseCounter++}.sqlite`,
+    );
+    const runId = 'stateless-scheduled-fire-run';
+    const scheduleId = 'stateless-digest-schedule';
+    const sessionId = `sched-${scheduleId}-${runId}`;
+    const scheduledPrompt = 'stateless digest prompt';
+    const partialAssistantContent = 'old stateless partial';
+    const recoveredAssistantContent = 'recovered stateless assistant';
+    let recoveredUserPromptCount = 0;
+
+    try {
+      const firstRuntime = await createRuntimeComposition({
+        generate: async () => new Promise<never>(() => {}),
+        toolbox: createToolbox([], { context: {} }),
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+      });
+
+      try {
+        expect(firstRuntime.durable).toBeDefined();
+        const partialConversation = new Conversation(createConversationHistory({ id: sessionId }));
+        partialConversation.appendUserMessage(scheduledPrompt, { scheduledFireRunId: runId });
+        partialConversation.appendAssistantMessage(partialAssistantContent);
+        await firstRuntime.sessionStore!.save(
+          createAgentSession({
+            id: sessionId,
+            agentName: 'researcher',
+            conversationHistory: partialConversation.current,
+            metadata: { lastScheduledFireRunId: runId },
+          }),
+        );
+
+        const toolbox = createToolbox([], { context: {} });
+        const services: DurableRunDeps = {
+          toolbox,
+          options: {
+            generate: async () => new Promise<never>(() => {}),
+            toolbox: toolbox as never,
+            conversation: createConversationHistory(),
+            stopWhen: stopWhen.noToolCalls(),
+          },
+        };
+
+        const handle = await firstRuntime.durable!.engine.start(
+          'agentRun',
+          { agentName: 'researcher', input: scheduledPrompt, scheduleId: '   ' },
+          { id: runId, services },
+        );
+        void handle.result().catch(() => {});
+        await firstRuntime.durable!.engine.storage.put(KEYS.scheduleRun(runId), encode(scheduleId));
+
+        const running = await pollUntil(async () => {
+          const state = await firstRuntime.durable!.engine.get(runId);
+          return state?.status === 'running';
+        });
+        expect(running).toBe(true);
+      } finally {
+        firstRuntime.durable?.engine[Symbol.dispose]?.();
+        firstRuntime.disposeStorage?.();
+      }
+
+      const secondRuntime = await createRuntimeComposition({
+        generate: async ({ conversation }) => {
+          const messages = conversation.getMessages();
+          recoveredUserPromptCount = messages.filter(
+            (message) => message.role === 'user' && message.content === scheduledPrompt,
+          ).length;
+          return { content: recoveredAssistantContent, toolCalls: [] };
+        },
+        toolbox: createToolbox([], { context: {} }),
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+        stopWhen: stopWhen.noToolCalls(),
+      });
+
+      try {
+        expect(secondRuntime.durable).toBeDefined();
+        await secondRuntime.durable!.engine.recoverAll();
+
+        const completed = await pollUntil(async () => {
+          const state = await secondRuntime.durable!.engine.get(runId);
+          return state?.status === 'completed';
+        });
+        expect(completed).toBe(true);
+        expect(recoveredUserPromptCount).toBe(1);
+
+        const session = await secondRuntime.sessionStore!.load(sessionId);
+        expect(session).toBeDefined();
+        const messages = getMessages(session!.conversationHistory);
+        expect(messages.filter((message) => message.content === scheduledPrompt)).toHaveLength(1);
+        expect(messages.some((message) => message.content === partialAssistantContent)).toBe(false);
+        expect(messages.some((message) => message.content === recoveredAssistantContent)).toBe(
+          true,
+        );
+      } finally {
+        secondRuntime.durable?.engine[Symbol.dispose]?.();
+        secondRuntime.disposeStorage?.();
+      }
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
+  it('recovers markerless scheduled fires when the schedule marker read fails transiently', async () => {
+    const databasePath = join(
+      tmpdir(),
+      `scheduled-marker-read-error-${process.pid}-${durableDatabaseCounter++}.sqlite`,
+    );
+    const runId = 'scheduled-marker-read-error-run';
+    const scheduleId = 'unreadable-digest-schedule';
+    const recoveredSessionId = `sched-${scheduleId}-${runId}`;
+    const unknownSessionId = `sched-unknown-${runId}`;
+    const scheduledPrompt = 'digest prompt with unreadable schedule marker';
+    const partialAssistantContent = 'old unreadable-marker partial';
+    const recoveredAssistantContent = 'recovered despite marker read failure';
+    let recoveredGenerateCalls = 0;
+
+    try {
+      const firstRuntime = await createRuntimeComposition({
+        generate: async () => new Promise<never>(() => {}),
+        toolbox: createToolbox([], { context: {} }),
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+      });
+
+      try {
+        expect(firstRuntime.durable).toBeDefined();
+        const partialConversation = new Conversation(
+          createConversationHistory({ id: recoveredSessionId }),
+        );
+        partialConversation.appendUserMessage(scheduledPrompt, { scheduledFireRunId: runId });
+        partialConversation.appendAssistantMessage(partialAssistantContent);
+        await firstRuntime.sessionStore!.save(
+          createAgentSession({
+            id: recoveredSessionId,
+            agentName: 'researcher',
+            conversationHistory: partialConversation.current,
+            metadata: { lastScheduledFireRunId: runId },
+          }),
+        );
+
+        const toolbox = createToolbox([], { context: {} });
+        const services: DurableRunDeps = {
+          toolbox,
+          options: {
+            generate: async () => new Promise<never>(() => {}),
+            toolbox: toolbox as never,
+            conversation: createConversationHistory(),
+            stopWhen: stopWhen.noToolCalls(),
+          },
+        };
+
+        const handle = await firstRuntime.durable!.engine.start(
+          'agentRun',
+          { agentName: 'researcher', input: scheduledPrompt },
+          { id: runId, services },
+        );
+        void handle.result().catch(() => {});
+        await firstRuntime.durable!.engine.storage.put(KEYS.scheduleRun(runId), encode(scheduleId));
+
+        const running = await pollUntil(async () => {
+          const state = await firstRuntime.durable!.engine.get(runId);
+          return state?.status === 'running';
+        });
+        expect(running).toBe(true);
+      } finally {
+        firstRuntime.durable?.engine[Symbol.dispose]?.();
+        firstRuntime.disposeStorage?.();
+      }
+
+      const secondRuntime = await createRuntimeComposition({
+        generate: async () => {
+          recoveredGenerateCalls += 1;
+          return { content: recoveredAssistantContent, toolCalls: [] };
+        },
+        toolbox: createToolbox([], { context: {} }),
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+        stopWhen: stopWhen.noToolCalls(),
+      });
+
+      try {
+        expect(secondRuntime.durable).toBeDefined();
+        if (!secondRuntime.durable) throw new Error('durable engine was not configured');
+        const { engine } = secondRuntime.durable;
+        const storageWithPatchedGet = engine.storage as typeof engine.storage & {
+          get: (key: string) => Promise<Uint8Array | null>;
+        };
+        const originalGet = storageWithPatchedGet.get.bind(storageWithPatchedGet);
+        storageWithPatchedGet.get = async (key) => {
+          if (key === KEYS.scheduleRun(runId)) {
+            throw new Error('transient schedule marker read failure');
+          }
+          return originalGet(key);
+        };
+
+        await engine.recoverAll();
+
+        const completed = await pollUntil(async () => {
+          const state = await engine.get(runId);
+          return state?.status === 'completed';
+        });
+        expect(completed).toBe(true);
+        expect(recoveredGenerateCalls).toBe(1);
+
+        const session = await secondRuntime.sessionStore!.load(recoveredSessionId);
+        expect(session).toBeDefined();
+        const messages = getMessages(session!.conversationHistory);
+        expect(messages.some((message) => message.content === partialAssistantContent)).toBe(false);
+        expect(messages.some((message) => message.content === scheduledPrompt)).toBe(true);
+        expect(messages.some((message) => message.content === recoveredAssistantContent)).toBe(
+          true,
+        );
+        const unknownSession = await secondRuntime.sessionStore!.load(unknownSessionId);
+        expect(unknownSession).toBeUndefined();
+      } finally {
+        secondRuntime.durable?.engine[Symbol.dispose]?.();
+        secondRuntime.disposeStorage?.();
+      }
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
+  it('preserves an interactive run skill snapshot when a scheduled fire shares its session', async () => {
+    const databasePath = join(
+      tmpdir(),
+      `scheduled-shared-session-skill-${process.pid}-${durableDatabaseCounter++}.sqlite`,
+    );
+    const scheduledRunId = 'scheduled-shared-session-fire-run';
+    const interactiveRunId = 'interactive-shared-session-run';
+    const scheduleId = 'scheduled-shared-session-schedule';
+    const sessionId = 'shared-session-with-interactive-run';
+    const scheduledPrompt = 'scheduled prompt sharing an interactive session';
+
+    try {
+      const firstRuntime = await createRuntimeComposition({
+        generate: async () => new Promise<never>(() => {}),
+        toolbox: createToolbox([], { context: {} }),
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+      });
+
+      try {
+        expect(firstRuntime.durable).toBeDefined();
+        await firstRuntime.sessionStore!.save(
+          createAgentSession({
+            id: sessionId,
+            agentName: 'researcher',
+            conversationHistory: createConversationHistory({ id: sessionId }),
+            metadata: {
+              lastRunId: interactiveRunId,
+              lastRunStatus: 'running',
+              lastActiveSkills: [{ name: 'coding' }],
+            },
+          }),
+        );
+
+        const toolbox = createToolbox([], { context: {} });
+        const services: DurableRunDeps = {
+          toolbox,
+          options: {
+            generate: async () => new Promise<never>(() => {}),
+            toolbox: toolbox as never,
+            conversation: createConversationHistory(),
+            stopWhen: stopWhen.noToolCalls(),
+          },
+        };
+
+        const handle = await firstRuntime.durable!.engine.start(
+          'agentRun',
+          { agentName: 'researcher', input: scheduledPrompt, sessionId },
+          { id: scheduledRunId, services },
+        );
+        void handle.result().catch(() => {});
+        await firstRuntime.durable!.engine.storage.put(
+          KEYS.scheduleRun(scheduledRunId),
+          encode(scheduleId),
+        );
+
+        const running = await pollUntil(async () => {
+          const state = await firstRuntime.durable!.engine.get(scheduledRunId);
+          return state?.status === 'running';
+        });
+        expect(running).toBe(true);
+      } finally {
+        firstRuntime.durable?.engine[Symbol.dispose]?.();
+        firstRuntime.disposeStorage?.();
+      }
+
+      const secondRuntime = await createRuntimeComposition({
+        generate: async () => ({ content: 'scheduled fire completed', toolCalls: [] }),
+        toolbox: createToolbox([], { context: {} }),
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+        stopWhen: stopWhen.noToolCalls(),
+      });
+
+      try {
+        expect(secondRuntime.durable).toBeDefined();
+        await secondRuntime.durable!.engine.recoverAll();
+
+        const completed = await pollUntil(async () => {
+          const state = await secondRuntime.durable!.engine.get(scheduledRunId);
+          return state?.status === 'completed';
+        });
+        expect(completed).toBe(true);
+
+        const session = await secondRuntime.sessionStore!.load(sessionId);
+        expect(session?.metadata['lastRunId']).toBe(interactiveRunId);
+        expect(session?.metadata['lastRunStatus']).toBe('running');
+        expect(session?.metadata['lastActiveSkills']).toEqual([{ name: 'coding' }]);
+        expect(session?.metadata['lastScheduledFireRunId']).toBe(scheduledRunId);
+      } finally {
+        secondRuntime.durable?.engine[Symbol.dispose]?.();
+        secondRuntime.disposeStorage?.();
+      }
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
+  it('rehydrates active skills for recovered scheduled fires', async () => {
+    const databasePath = join(
+      tmpdir(),
+      `scheduled-skill-recovery-${process.pid}-${durableDatabaseCounter++}.sqlite`,
+    );
+    const runId = 'scheduled-skill-fire-run';
+    const scheduleId = 'scheduled-skill-schedule';
+    const sessionId = 'scheduled-skill-session';
+    const scheduledPrompt = 'use the coding skill';
+    let loadedSkillResource: string | undefined;
+    let skillResourceError: string | undefined;
+
+    const provider = createMockSkillProvider([{ name: 'coding', description: 'Write code' }]);
+    const skillProvider: SkillProvider = {
+      ...provider,
+      async listResources(name) {
+        return name === 'coding' ? ['snippets/hello.py'] : [];
+      },
+      async loadResource(name, path) {
+        if (name === 'coding' && path === 'snippets/hello.py') return 'print("Hello")';
+        return undefined;
+      },
+    };
+
+    try {
+      const firstRuntime = await createRuntimeComposition({
+        generate: async () => new Promise<never>(() => {}),
+        toolbox: createToolbox([], { context: {} }),
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+      });
+
+      try {
+        expect(firstRuntime.durable).toBeDefined();
+        await firstRuntime.sessionStore!.save(
+          createAgentSession({
+            id: sessionId,
+            agentName: 'researcher',
+            conversationHistory: createConversationHistory({ id: sessionId }),
+            metadata: {
+              lastScheduledFireRunId: runId,
+              lastActiveSkills: [{ name: 'coding' }],
+            },
+          }),
+        );
+
+        const toolbox = createToolbox([], { context: {} });
+        const services: DurableRunDeps = {
+          toolbox,
+          options: {
+            generate: async () => new Promise<never>(() => {}),
+            toolbox: toolbox as never,
+            conversation: createConversationHistory(),
+            stopWhen: stopWhen.noToolCalls(),
+          },
+        };
+
+        const handle = await firstRuntime.durable!.engine.start(
+          'agentRun',
+          { agentName: 'researcher', input: scheduledPrompt, sessionId },
+          { id: runId, services },
+        );
+        void handle.result().catch(() => {});
+        await firstRuntime.durable!.engine.storage.put(KEYS.scheduleRun(runId), encode(scheduleId));
+
+        const running = await pollUntil(async () => {
+          const state = await firstRuntime.durable!.engine.get(runId);
+          return state?.status === 'running';
+        });
+        expect(running).toBe(true);
+      } finally {
+        firstRuntime.durable?.engine[Symbol.dispose]?.();
+        firstRuntime.disposeStorage?.();
+      }
+
+      const secondRuntime = await createRuntimeComposition({
+        generate: async ({ toolbox }) => {
+          const resourceResult = (await toolbox.execute({
+            name: 'load_skill_resource',
+            arguments: { skillName: 'coding', path: 'snippets/hello.py' },
+          })) as { result: { content?: string; error?: string } };
+          loadedSkillResource = resourceResult.result.content;
+          skillResourceError = resourceResult.result.error;
+          return { content: 'used recovered skill', toolCalls: [] };
+        },
+        toolbox: createToolbox([], { context: {} }),
+        skills: { provider: skillProvider },
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+        stopWhen: stopWhen.noToolCalls(),
+      });
+
+      try {
+        expect(secondRuntime.durable).toBeDefined();
+        await secondRuntime.durable!.engine.recoverAll();
+
+        const completed = await pollUntil(async () => {
+          const state = await secondRuntime.durable!.engine.get(runId);
+          return state?.status === 'completed';
+        });
+        expect(completed).toBe(true);
+        expect(skillResourceError).toBeUndefined();
+        expect(loadedSkillResource).toBe('print("Hello")');
+      } finally {
+        secondRuntime.durable?.engine[Symbol.dispose]?.();
+        secondRuntime.disposeStorage?.();
+      }
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
+  it('does not rehydrate stale skills from prior scheduled fires', async () => {
+    const databasePath = join(
+      tmpdir(),
+      `scheduled-stale-skill-${process.pid}-${durableDatabaseCounter++}.sqlite`,
+    );
+    const runId = 'scheduled-stale-skill-fire-run';
+    const scheduleId = 'scheduled-stale-skill-schedule';
+    const sessionId = 'scheduled-stale-skill-session';
+    let skillResourceError: string | undefined;
+
+    const provider = createMockSkillProvider([{ name: 'coding', description: 'Write code' }]);
+    const skillProvider: SkillProvider = {
+      ...provider,
+      async listResources(name) {
+        return name === 'coding' ? ['snippets/hello.py'] : [];
+      },
+      async loadResource(name, path) {
+        if (name === 'coding' && path === 'snippets/hello.py') return 'print("Hello")';
+        return undefined;
+      },
+    };
+
+    try {
+      const firstRuntime = await createRuntimeComposition({
+        generate: async () => new Promise<never>(() => {}),
+        toolbox: createToolbox([], { context: {} }),
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+      });
+
+      try {
+        expect(firstRuntime.durable).toBeDefined();
+        await firstRuntime.sessionStore!.save(
+          createAgentSession({
+            id: sessionId,
+            agentName: 'researcher',
+            conversationHistory: createConversationHistory({ id: sessionId }),
+            metadata: {
+              lastActiveSkills: [{ name: 'coding' }],
+            },
+          }),
+        );
+
+        const toolbox = createToolbox([], { context: {} });
+        const services: DurableRunDeps = {
+          toolbox,
+          options: {
+            generate: async () => new Promise<never>(() => {}),
+            toolbox: toolbox as never,
+            conversation: createConversationHistory(),
+            stopWhen: stopWhen.noToolCalls(),
+          },
+        };
+
+        const handle = await firstRuntime.durable!.engine.start(
+          'agentRun',
+          { agentName: 'researcher', input: 'do not inherit stale skills', sessionId },
+          { id: runId, services },
+        );
+        void handle.result().catch(() => {});
+        await firstRuntime.durable!.engine.storage.put(KEYS.scheduleRun(runId), encode(scheduleId));
+
+        const running = await pollUntil(async () => {
+          const state = await firstRuntime.durable!.engine.get(runId);
+          return state?.status === 'running';
+        });
+        expect(running).toBe(true);
+      } finally {
+        firstRuntime.durable?.engine[Symbol.dispose]?.();
+        firstRuntime.disposeStorage?.();
+      }
+
+      const secondRuntime = await createRuntimeComposition({
+        generate: async ({ toolbox }) => {
+          const resourceResult = (await toolbox.execute({
+            name: 'load_skill_resource',
+            arguments: { skillName: 'coding', path: 'snippets/hello.py' },
+          })) as { result: { content?: string; error?: string } };
+          skillResourceError = resourceResult.result.error;
+          return { content: 'did not use stale skill', toolCalls: [] };
+        },
+        toolbox: createToolbox([], { context: {} }),
+        skills: { provider: skillProvider },
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+        stopWhen: stopWhen.noToolCalls(),
+      });
+
+      try {
+        expect(secondRuntime.durable).toBeDefined();
+        await secondRuntime.durable!.engine.recoverAll();
+
+        const completed = await pollUntil(async () => {
+          const state = await secondRuntime.durable!.engine.get(runId);
+          return state?.status === 'completed';
+        });
+        expect(completed).toBe(true);
+        expect(skillResourceError).toBe('Skill is not active');
       } finally {
         secondRuntime.durable?.engine[Symbol.dispose]?.();
         secondRuntime.disposeStorage?.();

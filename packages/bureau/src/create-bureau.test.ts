@@ -2,25 +2,36 @@ import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
+import { encode } from '@lostgradient/weft';
+import { KEYS, MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
 import type { ConditionalTextValueStore } from '@lostgradient/weft/storage/text-value-store';
 import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
 import { createTool, createToolbox } from 'armorer';
 import { createMockTool, createTestToolbox } from 'armorer/test';
 import { afterEach, describe, expect, it, mock, spyOn } from 'bun:test';
-import { Conversation, getMessages } from 'conversationalist';
+import { Conversation, createConversationHistory, getMessages } from 'conversationalist';
 import { createMemory, type Memory } from 'memory';
 import { createInMemoryMemoryRecordStorage, createMockEmbedder } from 'memory/test';
 import type { GenerateFunction, GenerateResponse, Toolbox } from 'operative';
 import { createSessionStore, stopWhen } from 'operative';
-import { SCHEDULER_ORIGIN_TAG, startDurableRunResult } from 'operative/durable';
+import {
+  type DurableRunDeps,
+  SCHEDULER_ORIGIN_TAG,
+  startDurableRunResult,
+} from 'operative/durable';
 import { createStore } from 'operative/store';
 import { createMockGenerate as createSequentialGenerate } from 'operative/test';
 import { z } from 'zod';
 
 import type { AuditRecord } from './audit-trail';
 import * as auditTrailModule from './audit-trail';
-import { BureauError, classifyRecoveredRun, createBureau } from './create-bureau';
+import {
+  BureauError,
+  classifyRecoveredRun,
+  createBureau,
+  isRecoverableScheduledFireInput,
+  monitorRecoveredScheduledFire,
+} from './create-bureau';
 import { createMemoryPersistHook, createRuntimeComposition } from './runtime-composition';
 import { waitForCondition, waitForRunState } from './test';
 import {
@@ -788,6 +799,128 @@ describe('createBureau', () => {
         expect(hasBStep1).toBe(true);
       } finally {
         bureauB.dispose();
+      }
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
+  it('cancels a recovered handle with undefined launch metadata without aborting boot', async () => {
+    const probe = await createRuntimeComposition({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+    const enginePrototype = Object.getPrototypeOf(probe.durable!.engine) as {
+      recoverAll: () => Promise<unknown[]>;
+      cancel: (runId: string) => Promise<void>;
+    };
+    probe.durable!.engine[Symbol.dispose]?.();
+    probe.disposeStorage?.();
+
+    const recoverAllSpy = spyOn(enginePrototype, 'recoverAll').mockResolvedValue([
+      {
+        id: 'undefined-metadata-run',
+        getLaunchMetadata: async () => undefined,
+      },
+    ]);
+    const cancelSpy = spyOn(enginePrototype, 'cancel').mockResolvedValue(undefined);
+
+    try {
+      const bureau = await createBureau({
+        generate: createMockGenerate(),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'memory' },
+        durableExecution: true,
+      });
+
+      try {
+        await pollUntil(() => cancelSpy.mock.calls.length === 1);
+        expect(cancelSpy).toHaveBeenCalledWith('undefined-metadata-run');
+      } finally {
+        bureau.dispose();
+      }
+    } finally {
+      recoverAllSpy.mockRestore();
+      cancelSpy.mockRestore();
+    }
+  });
+
+  it('monitors markerless legacy scheduled fires when Weft has a schedule-run marker', async () => {
+    const databasePath = join(
+      tmpdir(),
+      `bureau-legacy-scheduled-fire-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const runId = 'legacy-scheduled-fire-run';
+    const scheduleId = 'legacy-digest-schedule';
+    const sessionId = `sched-${scheduleId}-${runId}`;
+
+    try {
+      const firstRuntime = await createRuntimeComposition({
+        generate: async () => new Promise<never>(() => {}),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+      });
+
+      try {
+        expect(firstRuntime.durable).toBeDefined();
+        const toolbox = createEmptyToolbox();
+        const services: DurableRunDeps = {
+          toolbox,
+          options: {
+            generate: async () => new Promise<never>(() => {}),
+            toolbox: toolbox as never,
+            conversation: createConversationHistory(),
+            stopWhen: stopWhen.noToolCalls(),
+          },
+        };
+
+        const handle = await firstRuntime.durable!.engine.start(
+          'agentRun',
+          { agentName: 'researcher', input: 'legacy scheduled prompt' },
+          { id: runId, services },
+        );
+        void handle.result().catch(() => {});
+        await firstRuntime.durable!.engine.storage.put(KEYS.scheduleRun(runId), encode(scheduleId));
+
+        const running = await pollUntil(async () => {
+          const state = await firstRuntime.durable!.engine.get(runId);
+          return state?.status === 'running';
+        });
+        expect(running).toBe(true);
+      } finally {
+        firstRuntime.durable?.engine[Symbol.dispose]?.();
+        firstRuntime.disposeStorage?.();
+      }
+
+      const bureau = await createBureau({
+        generate: async () => ({ content: 'legacy scheduled recovery completed', toolCalls: [] }),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+        stopWhen: stopWhen.noToolCalls(),
+      });
+
+      try {
+        const completed = await pollUntil(async () => {
+          const state = await bureau.getDurableRun(runId);
+          return state?.status === 'completed';
+        });
+        expect(completed).toBe(true);
+
+        const session = await bureau.getSession(sessionId);
+        expect(session).not.toBeNull();
+        expect(
+          getMessages(session!.conversationHistory).some(
+            (message) => message.content === 'legacy scheduled recovery completed',
+          ),
+        ).toBe(true);
+      } finally {
+        bureau.dispose();
       }
     } finally {
       await rm(databasePath, { force: true });
@@ -2365,6 +2498,7 @@ describe('createBureau effectful hook idempotency (#27)', () => {
 describe('classifyRecoveredRun', () => {
   const base = {
     handleId: 'run-1',
+    scheduledFire: false,
     ownedSessionId: 'session-1' as string | undefined,
     metadataReadFailed: false,
     hasSessionStore: true,
@@ -2373,6 +2507,21 @@ describe('classifyRecoveredRun', () => {
 
   it('reattaches an owned, in-flight run whose session confirms ownership', () => {
     expect(classifyRecoveredRun(base)).toBe('reattach');
+  });
+
+  it('monitors a scheduled fire without cancelling or reattaching it', () => {
+    expect(
+      classifyRecoveredRun({
+        ...base,
+        scheduledFire: true,
+        ownedSessionId: undefined,
+        sessionLoad: { ok: true, session: null },
+      }),
+    ).toBe('monitor');
+  });
+
+  it('prefers confirmed interactive ownership over a scheduled-fire flag', () => {
+    expect(classifyRecoveredRun({ ...base, scheduledFire: true })).toBe('reattach');
   });
 
   it('reattaches even when the engine-finished-fast run still shows running in its session', () => {
@@ -2426,6 +2575,61 @@ describe('classifyRecoveredRun', () => {
 
   it('skips an owned run when no session store is configured (cannot reattach, must not cancel)', () => {
     expect(classifyRecoveredRun({ ...base, hasSessionStore: false })).toBe('skip');
+  });
+});
+
+describe('isRecoverableScheduledFireInput', () => {
+  it('requires the scheduled input shape and a non-empty persisted schedule marker', () => {
+    expect(
+      isRecoverableScheduledFireInput({
+        agentName: 'researcher',
+        input: 'scheduled prompt',
+        scheduleId: 'daily-digest',
+      }),
+    ).toBe(true);
+    expect(
+      isRecoverableScheduledFireInput({
+        agentName: 'researcher',
+        input: 'scheduled prompt',
+      }),
+    ).toBe(false);
+    expect(
+      isRecoverableScheduledFireInput({
+        agentName: 'researcher',
+        input: 'scheduled prompt',
+        scheduleId: '   ',
+      }),
+    ).toBe(false);
+  });
+});
+
+describe('monitorRecoveredScheduledFire', () => {
+  it('logs resolved error finish reasons from recovered scheduled fires', async () => {
+    const originalError = console.error;
+    const messages: string[] = [];
+    console.error = (...args: unknown[]) => {
+      messages.push(args.map(String).join(' '));
+    };
+
+    try {
+      await monitorRecoveredScheduledFire({
+        id: 'scheduled-fire-1',
+        result: async () => ({
+          runId: 'scheduled-fire-1',
+          steps: 0,
+          content: '',
+          finishReason: 'error',
+          errorMessage: 'generate failed',
+        }),
+      });
+    } finally {
+      console.error = originalError;
+    }
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toContain('scheduled-fire-1');
+    expect(messages[0]).toContain('finished with error');
+    expect(messages[0]).toContain('generate failed');
   });
 });
 

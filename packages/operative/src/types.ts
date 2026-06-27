@@ -16,11 +16,12 @@ export type { JSONValue, ToolCall, ToolCallInput } from 'interoperability';
 /**
  * Options passed to toolbox.execute() within the loop.
  */
-export interface OperativeExecuteOptions extends ToolExecuteOptions {
+export type OperativeExecuteOptions = Omit<ToolExecuteOptions, 'durableOperationKey'> & {
   concurrency?: number;
   mode?: 'parallel' | 'sequential';
   errorMode?: 'failFast' | 'collect';
-}
+  durableOperationKey?: string | ((call: ToolCall, index: number) => string | undefined);
+};
 
 export interface ElicitationRequest<T = unknown> {
   message: string;
