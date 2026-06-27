@@ -194,7 +194,7 @@ describe('D6 scheduled-fire path (#109)', () => {
             input: z.object({}),
             execute: async () => 'ok',
           }),
-        ]) as any,
+        ]) as unknown as Toolbox,
         storage: { type: 'memory' },
         durableExecution: true,
         maximumSteps: 1,

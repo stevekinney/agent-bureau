@@ -11,6 +11,7 @@ import type {
 } from '@lostgradient/weft';
 import type { ObservabilityOptions } from '@lostgradient/weft/observability';
 import type { StorageConfiguration, TextValueStore } from '@lostgradient/weft/storage';
+import type { ConditionalTextValueStore } from '@lostgradient/weft/storage/text-value-store';
 import type { Toolbox } from 'armorer';
 import type { ConversationSnapshot } from 'conversationalist';
 import type { ToolPolicy } from 'interoperability';
@@ -161,7 +162,7 @@ export interface SchedulerConfiguration {
  *
  * Pass `.persistence({ store, history, observability, onLog })` to co-locate the
  * storage backend with its operational knobs. The bureau builds one Weft engine
- * over `store` — the engine handles durable run checkpointing; a `TextValueStore`
+ * over `store` — the engine handles durable run checkpointing; a `ConditionalTextValueStore`
  * view of the same backend is used for sessions, cache, and memory.
  *
  * Only `store` is required. `history` and `observability` are the two operational
@@ -172,7 +173,7 @@ export interface SchedulerConfiguration {
 export interface PersistenceOptions {
   /**
    * The Weft storage backend config. The bureau resolves this to a raw `Storage`
-   * and builds both the durable engine AND the `TextValueStore` KV layer from it.
+   * and builds both the durable engine AND the `ConditionalTextValueStore` KV layer from it.
    * One config → one backend → one engine (the Weft invariant: one engine per
    * durable store).
    */
@@ -225,13 +226,13 @@ export interface BureauOptions {
    *   `lmdb`) and off by default for `memory` (which loses checkpoints with the
    *   process). Use `storage` field or `durableExecution` override if needed.
    *
-   * - **`TextValueStore`** — KV-only (no durable engine). Used for session/cache
+   * - **`ConditionalTextValueStore`** — KV-only (no durable engine). Used for session/cache
    *   persistence without durability. Cannot be combined with `durableExecution:
    *   true` (a durable engine needs a raw `Storage` to checkpoint against).
    *
    * When omitted, runs are ephemeral (in-memory loop, no sessions persisted).
    */
-  persistence?: PersistenceOptions | StorageConfiguration | TextValueStore;
+  persistence?: PersistenceOptions | StorageConfiguration | ConditionalTextValueStore;
   storage?: StorageConfiguration;
   /**
    * Override for Weft-backed durable execution. Durable execution is **on by
@@ -461,7 +462,7 @@ export interface Bureau {
   dispose(): void;
 
   readonly sessionStore: SessionStore | undefined;
-  readonly kv: TextValueStore | undefined;
+  readonly kv: ConditionalTextValueStore | undefined;
 
   /**
    * The durable audit trail (Layer B glass-box).

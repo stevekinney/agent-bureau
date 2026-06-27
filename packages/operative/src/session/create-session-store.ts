@@ -1,4 +1,5 @@
-import type { TextValueStore } from '@lostgradient/weft/storage';
+import type { ConditionalTextValueStore } from '@lostgradient/weft/storage/text-value-store';
+import type { ConversationHistory } from 'conversationalist';
 import type { JSONValue } from 'interoperability';
 
 import type { AgentSession } from '../agent-session';
@@ -10,6 +11,16 @@ import type {
 } from './types';
 
 const KEY_PREFIX = 'agent-session:';
+const MAXIMUM_SAVE_ATTEMPTS = 5;
+
+export class SessionConflictError extends Error {
+  readonly code = 'SessionConflictError';
+
+  constructor(sessionId: string) {
+    super(`Session "${sessionId}" could not be saved after ${MAXIMUM_SAVE_ATTEMPTS} conflicts.`);
+    this.name = 'SessionConflictError';
+  }
+}
 
 /** Returns true if the value is a string that parses to a valid Date. */
 function isValidDate(value: unknown): boolean {
@@ -25,6 +36,7 @@ function parseSession(raw: string | null): AgentSession | undefined {
   if (!raw) return undefined;
   try {
     const parsed: unknown = JSON.parse(raw);
+    const record = parsed as Record<string, unknown>;
     if (
       typeof parsed === 'object' &&
       parsed !== null &&
@@ -36,12 +48,104 @@ function parseSession(raw: string | null): AgentSession | undefined {
       isValidDate((parsed as Record<string, unknown>)['createdAt']) &&
       isValidDate((parsed as Record<string, unknown>)['updatedAt'])
     ) {
-      return parsed as AgentSession;
+      return {
+        ...(parsed as AgentSession),
+        metadata:
+          typeof record['metadata'] === 'object' &&
+          record['metadata'] !== null &&
+          !Array.isArray(record['metadata'])
+            ? (record['metadata'] as Record<string, JSONValue>)
+            : {},
+        revision:
+          typeof record['revision'] === 'number'
+            ? ((record as Record<string, number>)['revision'] ?? 0)
+            : 0,
+        runs: Array.isArray(record['runs']) ? (record['runs'] as AgentSession['runs']) : [],
+      };
     }
     return undefined;
   } catch {
     return undefined;
   }
+}
+
+function mergeConversationHistory(
+  current: ConversationHistory,
+  candidate: ConversationHistory,
+  candidateIsFresh: boolean,
+): ConversationHistory {
+  if (candidateIsFresh) {
+    const messages = { ...candidate.messages };
+    for (const [position, id] of candidate.ids.entries()) {
+      const message = messages[id];
+      if (message) messages[id] = { ...message, position };
+    }
+    return {
+      ...candidate,
+      messages,
+    };
+  }
+
+  const currentIds = new Set(current.ids);
+  const candidateOnlyIds = candidate.ids.filter((id) => !currentIds.has(id));
+  const ids = [...current.ids, ...candidateOnlyIds];
+  const messages = {
+    ...candidateOnlyIds.reduce<Record<string, ConversationHistory['messages'][string]>>(
+      (accumulator, id) => {
+        const message = candidate.messages[id];
+        if (message) accumulator[id] = message;
+        return accumulator;
+      },
+      { ...current.messages },
+    ),
+  };
+
+  for (const [position, id] of ids.entries()) {
+    const message = messages[id];
+    if (message) messages[id] = { ...message, position };
+  }
+
+  return {
+    ...current,
+    metadata: {
+      ...candidate.metadata,
+      ...current.metadata,
+    },
+    ids,
+    messages,
+    createdAt: current.createdAt,
+    updatedAt: candidate.updatedAt,
+  };
+}
+
+function mergeSessions(current: AgentSession, candidate: AgentSession): AgentSession {
+  const candidateIsFresh = candidate.revision >= current.revision;
+  const currentRunIds = new Set(current.runs.map((run) => run.runId));
+  const mergedRuns = candidateIsFresh
+    ? candidate.runs
+    : [...current.runs, ...candidate.runs.filter((run) => !currentRunIds.has(run.runId))];
+  const metadata = candidateIsFresh
+    ? candidate.metadata
+    : {
+        ...candidate.metadata,
+        ...current.metadata,
+      };
+
+  return {
+    ...current,
+    ...(candidateIsFresh ? candidate : {}),
+    agentName: candidateIsFresh ? candidate.agentName : current.agentName,
+    conversationHistory: mergeConversationHistory(
+      current.conversationHistory,
+      candidate.conversationHistory,
+      candidateIsFresh,
+    ),
+    runs: mergedRuns,
+    metadata,
+    createdAt: current.createdAt,
+    revision: current.revision,
+    updatedAt: candidate.updatedAt,
+  };
 }
 
 /**
@@ -63,19 +167,72 @@ function toSummary(session: AgentSession): SessionSummary {
 }
 
 /**
- * Creates a SessionStore backed by the given TextValueStore.
+ * Creates a SessionStore backed by the given ConditionalTextValueStore.
  *
  * All keys are prefixed with `agent-session:` so session data can coexist
  * with other data in the same store.
  */
-export function createSessionStore(store: TextValueStore): SessionStore {
+export function createSessionStore(store: ConditionalTextValueStore): SessionStore {
+  if (typeof store.conditionalBatch !== 'function') {
+    throw new TypeError('createSessionStore requires a ConditionalTextValueStore.');
+  }
+
   function keyFor(id: string): string {
     return `${KEY_PREFIX}${id}`;
   }
 
+  async function commit(
+    session: AgentSession,
+    expectedValue: string | null,
+    currentRevision: number,
+    refreshUpdatedAt: boolean,
+  ): Promise<AgentSession | undefined> {
+    const next: AgentSession = {
+      ...session,
+      revision: currentRevision + 1,
+      updatedAt: refreshUpdatedAt ? new Date().toISOString() : session.updatedAt,
+    };
+    const committed = await store.conditionalBatch(
+      [{ key: keyFor(next.id), expectedValue }],
+      [{ type: 'set', key: keyFor(next.id), value: JSON.stringify(next) }],
+    );
+    return committed ? next : undefined;
+  }
+
   const sessionStore: SessionStore = {
     async save(session: AgentSession): Promise<void> {
-      await store.set(keyFor(session.id), JSON.stringify(session));
+      for (let attempt = 1; attempt <= MAXIMUM_SAVE_ATTEMPTS; attempt += 1) {
+        const raw = await store.get(keyFor(session.id));
+        const current = parseSession(raw);
+        const candidate = current ? mergeSessions(current, session) : session;
+        const committed = await commit(candidate, raw, current?.revision ?? 0, true);
+        if (committed) {
+          Object.assign(session, committed);
+          return;
+        }
+      }
+
+      throw new SessionConflictError(session.id);
+    },
+
+    async update(
+      id: string,
+      updater: (
+        session: AgentSession | undefined,
+      ) => AgentSession | undefined | Promise<AgentSession | undefined>,
+    ): Promise<AgentSession | undefined> {
+      for (let attempt = 1; attempt <= MAXIMUM_SAVE_ATTEMPTS; attempt += 1) {
+        const raw = await store.get(keyFor(id));
+        const current = parseSession(raw);
+        const candidate = await updater(current);
+        if (!candidate) return undefined;
+
+        const next = current ? mergeSessions(current, candidate) : candidate;
+        const committed = await commit(next, raw, current?.revision ?? 0, true);
+        if (committed) return committed;
+      }
+
+      throw new SessionConflictError(id);
     },
 
     async load(id: string): Promise<AgentSession | undefined> {
@@ -126,15 +283,14 @@ export function createSessionStore(store: TextValueStore): SessionStore {
     },
 
     async updateMetadata(id: string, metadata: Record<string, JSONValue>): Promise<void> {
-      const session = await sessionStore.load(id);
-      if (!session) return;
-
-      const updated: AgentSession = {
-        ...session,
-        metadata: { ...session.metadata, ...metadata },
-        updatedAt: new Date().toISOString(),
-      };
-      await sessionStore.save(updated);
+      await sessionStore.update(id, (session) =>
+        session
+          ? {
+              ...session,
+              metadata: { ...session.metadata, ...metadata },
+            }
+          : undefined,
+      );
     },
 
     async cleanup(options: SessionCleanupOptions): Promise<number> {

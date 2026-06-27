@@ -14,7 +14,7 @@ The important mental model is simple: `Conversation` still knows how to persist 
 The current implementation centers on these files:
 
 - `packages/operative/src/agent-session.ts`: canonical session shape plus `createAgentSession()`, `saveAgentSession()`, and `loadAgentSession()`
-- `packages/operative/src/session/create-session-store.ts`: `SessionStore` factory backed by `KeyValueStore`
+- `packages/operative/src/session/create-session-store.ts`: `SessionStore` factory backed by Weft's conditional text-value store
 - `packages/operative/src/session/session-resume.ts`: session resume helper
 - `packages/gateway/src/create-bureau.ts`: session-backed run creation, resume, listing, and deletion
 - `packages/gateway/src/routes/sessions.ts`: session HTTP routes
@@ -35,6 +35,12 @@ The older conversation-route model is intentionally gone from the gateway produc
 
 **Persist**: Session updates are written through the session store during run lifecycle handling. That keeps session summaries, timestamps, and conversation state aligned with what the gateway exposes over HTTP.
 
+**Conflict handling**: `AgentSession` carries a persisted `revision`. The
+session store writes with Weft's conditional batch primitive and retries
+conflicts by merging the latest stored session with the writer's candidate
+session. Conversation messages are preserved by message id, run references are
+preserved by `runId`, and candidate metadata wins only for keys it writes.
+
 **List and inspect**: The gateway never reconstructs sessions from `Conversation` storage. It reads the canonical summaries and session payloads from `SessionStore`.
 
 **Delete**: Removing a session deletes the product-level persisted record. There is no compatibility layer for the old conversation routes or `conversationId`.
@@ -45,6 +51,7 @@ Some choices here are deliberate:
 
 - **No compatibility shim**: `sessionId` replaced `conversationId` in the gateway API. The branch does not keep both names alive.
 - **One source of truth**: `SessionStore` is the gateway persistence boundary. `Conversation` persistence remains available to lower-level library consumers, but it is no longer the gateway contract.
+- **No blind overwrites**: session writers must go through `SessionStore.save()` or `SessionStore.update()` so cross-writer changes merge instead of reverting to last-write-wins.
 - **Durability is separate from sessions**: This shipped work gives you resumable sessions at run and step boundaries. Exact mid-step crash recovery still belongs to the future durable-execution work in [`durable-execution.md`](durable-execution.md).
 
 ## What This Unlocked

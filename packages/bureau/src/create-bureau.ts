@@ -1,5 +1,9 @@
 import type { ListFilter, ListOptions, ScheduleSpec } from '@lostgradient/weft';
-import { Conversation, createConversationHistory } from 'conversationalist';
+import {
+  Conversation,
+  type ConversationHistory,
+  createConversationHistory,
+} from 'conversationalist';
 import { CompletableEventTarget } from 'lifecycle';
 import { type ActiveRun, createActiveRun, createAgentSession, type JSONValue } from 'operative';
 import {
@@ -51,6 +55,54 @@ const BUREAU_AGENT_NAME = 'bureau';
 const SESSION_PERSISTENCE_MAXIMUM_ATTEMPTS = 3;
 const SESSION_PERSISTENCE_RETRY_DELAY_MILLISECONDS = 10;
 const SCHEDULER_PRIORITIES = ['immediate', 'scheduled', 'background', 'ambient'] as const;
+
+function messagesAreEqual(
+  left: ConversationHistory['messages'][string],
+  right: ConversationHistory['messages'][string],
+): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function appendConversationMessages(
+  current: ConversationHistory,
+  candidate: ConversationHistory,
+  base: ConversationHistory,
+): ConversationHistory {
+  const baseIds = new Set(base.ids);
+  const candidateIds = new Set(candidate.ids);
+  const currentIds = new Set(current.ids);
+  const currentPreservedIds = current.ids.filter((id) => candidateIds.has(id) || !baseIds.has(id));
+  const candidateOnlyIds = candidate.ids.filter((id) => !currentIds.has(id));
+  const ids = [...currentPreservedIds, ...candidateOnlyIds];
+  const messages: Record<string, ConversationHistory['messages'][string]> = {};
+
+  for (const id of ids) {
+    const candidateMessage = candidate.messages[id];
+    const baseMessage = base.messages[id];
+    const message =
+      candidateMessage &&
+      (!baseMessage || !messagesAreEqual(candidateMessage, baseMessage) || !current.messages[id])
+        ? candidateMessage
+        : (current.messages[id] ?? candidateMessage);
+    if (message) messages[id] = message;
+  }
+
+  for (const [position, id] of ids.entries()) {
+    const message = messages[id];
+    if (message) messages[id] = { ...message, position };
+  }
+
+  return {
+    ...current,
+    metadata: {
+      ...current.metadata,
+      ...candidate.metadata,
+    },
+    ids,
+    messages,
+    updatedAt: candidate.updatedAt,
+  };
+}
 
 class BureauError extends Error {
   constructor(
@@ -370,41 +422,49 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     conversation: Conversation,
     metadata: Record<string, JSONValue>,
     agentName?: string,
+    baseConversationHistory: ConversationHistory = conversation.current,
   ): Promise<void> {
     const sessionStore = runtime.sessionStore;
     if (!sessionStore) {
       return;
     }
 
-    const existingSession = await sessionStore.load(sessionId);
-    const nextSession =
-      existingSession ??
-      createAgentSession({
-        id: sessionId,
-        // Stamp the dispatched agent on a brand-new session (falls back to the
-        // house default when no agent was named).
-        agentName: agentName ?? BUREAU_AGENT_NAME,
-        conversationHistory: conversation.current,
-      });
+    await sessionStore.update(sessionId, (existingSession) => {
+      const nextSession =
+        existingSession ??
+        createAgentSession({
+          id: sessionId,
+          // Stamp the dispatched agent on a brand-new session (falls back to the
+          // house default when no agent was named).
+          agentName: agentName ?? BUREAU_AGENT_NAME,
+          conversationHistory: conversation.current,
+        });
 
-    // Promote a session still on the default house agent to the named agent on
-    // its first named dispatch, so session APIs/persistence reflect which agent
-    // actually owns it (PRRT_kwDORvupsc6MbUsN — previously the session was always
-    // stamped 'bureau' regardless of request.agentName). Don't overwrite a session
-    // already owned by a specific agent.
-    const resolvedAgentName =
-      agentName !== undefined && nextSession.agentName === BUREAU_AGENT_NAME
-        ? agentName
-        : nextSession.agentName;
+      // Promote a session still on the default house agent to the named agent on
+      // its first named dispatch, so session APIs/persistence reflect which agent
+      // actually owns it (PRRT_kwDORvupsc6MbUsN — previously the session was always
+      // stamped 'bureau' regardless of request.agentName). Don't overwrite a session
+      // already owned by a specific agent.
+      const resolvedAgentName =
+        agentName !== undefined && nextSession.agentName === BUREAU_AGENT_NAME
+          ? agentName
+          : nextSession.agentName;
 
-    await sessionStore.save({
-      ...nextSession,
-      agentName: resolvedAgentName,
-      conversationHistory: conversation.current,
-      metadata: {
-        ...nextSession.metadata,
-        ...metadata,
-      },
+      return {
+        ...nextSession,
+        agentName: resolvedAgentName,
+        conversationHistory: existingSession
+          ? appendConversationMessages(
+              existingSession.conversationHistory,
+              conversation.current,
+              baseConversationHistory,
+            )
+          : conversation.current,
+        metadata: {
+          ...nextSession.metadata,
+          ...metadata,
+        },
+      };
     });
   }
 
@@ -455,6 +515,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
 
     const sessionId = request.sessionId?.trim() ?? crypto.randomUUID();
     const { session, conversation } = await loadConversation(sessionId);
+    const baseConversationHistory = conversation.current;
 
     if (!session) {
       const prompt = request.systemPrompt ?? runtime.systemPrompt;
@@ -534,6 +595,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       // Stamp the session with the dispatched agent (PRRT_kwDORvupsc6MbUsN) so it
       // is not always recorded as the house default 'bureau'.
       request.agentName,
+      baseConversationHistory,
     );
 
     const activeRun = createActiveRun(
@@ -580,14 +642,20 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
 
       persistSessionUpdate(
         () =>
-          saveSession(sessionId, event.conversation, {
-            lastRunId: runId,
-            lastRunStatus,
-            lastFinishReason: event.finishReason,
-            ...(event.finishReason === 'error'
-              ? { lastError: serializeUnknownError(event.error) }
-              : {}),
-          }),
+          saveSession(
+            sessionId,
+            event.conversation,
+            {
+              lastRunId: runId,
+              lastRunStatus,
+              lastFinishReason: event.finishReason,
+              ...(event.finishReason === 'error'
+                ? { lastError: serializeUnknownError(event.error) }
+                : {}),
+            },
+            request.agentName,
+            baseConversationHistory,
+          ),
         {
           runId,
           sessionId,
@@ -609,17 +677,23 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
           // conversation reflects those steps, whereas the closure still holds
           // only the seed transcript. For the in-memory loop the event carries
           // the same mutated instance, so this is correct on both paths.
-          saveSession(sessionId, event.conversation, {
-            lastRunId: runId,
-            lastRunStatus: 'aborted',
-            // Write lastFinishReason too so an aborted session's metadata is
-            // internally consistent (status + finishReason agree) and a prior
-            // run's stale lastFinishReason on the same session can't linger. This
-            // is also what boot recovery now relies on: a recovered run that
-            // aborts settles through THIS listener (settleRecoveredRun is gone),
-            // so the field must be written here, not only on the old recovery path.
-            lastFinishReason: 'aborted',
-          }),
+          saveSession(
+            sessionId,
+            event.conversation,
+            {
+              lastRunId: runId,
+              lastRunStatus: 'aborted',
+              // Write lastFinishReason too so an aborted session's metadata is
+              // internally consistent (status + finishReason agree) and a prior
+              // run's stale lastFinishReason on the same session can't linger. This
+              // is also what boot recovery now relies on: a recovered run that
+              // aborts settles through THIS listener (settleRecoveredRun is gone),
+              // so the field must be written here, not only on the old recovery path.
+              lastFinishReason: 'aborted',
+            },
+            request.agentName,
+            baseConversationHistory,
+          ),
         {
           runId,
           sessionId,

@@ -37,15 +37,26 @@ export interface SessionCleanupOptions {
 }
 
 /**
- * A high-level store for agent sessions, built on top of TextValueStore.
+ * A high-level store for agent sessions, built on top of ConditionalTextValueStore.
  *
  * Provides CRUD operations plus listing, filtering, metadata updates,
  * and time-based cleanup. All keys are namespaced under `agent-session:`
  * in the underlying store.
  */
 export interface SessionStore {
-  /** Persist a session, overwriting any existing session with the same id. */
+  /** Persist a session, merging on optimistic-concurrency conflicts. */
   save(session: AgentSession): Promise<void>;
+
+  /**
+   * Load the latest session and persist the updater result with optimistic
+   * concurrency. Returning undefined leaves the session unchanged.
+   */
+  update(
+    id: string,
+    updater: (
+      session: AgentSession | undefined,
+    ) => AgentSession | undefined | Promise<AgentSession | undefined>,
+  ): Promise<AgentSession | undefined>;
 
   /** Load a session by id. Returns undefined when no session exists. */
   load(id: string): Promise<AgentSession | undefined>;

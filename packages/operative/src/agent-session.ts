@@ -1,6 +1,8 @@
-import type { TextValueStore } from '@lostgradient/weft/storage';
+import type { ConditionalTextValueStore } from '@lostgradient/weft/storage/text-value-store';
 import type { ConversationHistory } from 'conversationalist';
 import type { JSONValue } from 'interoperability';
+
+import { createSessionStore } from './session/create-session-store';
 
 /**
  * A lightweight reference to one run within a session.
@@ -39,6 +41,11 @@ export interface AgentSession {
   agentName: string;
   conversationHistory: ConversationHistory;
   /**
+   * Optimistic-concurrency revision. New in-memory sessions start at 0; each
+   * successful SessionStore write increments the persisted revision.
+   */
+  revision: number;
+  /**
    * Ordered sequence of run references. Each `run(input)` appends a new entry;
    * the session is the durable aggregate, runs are the ordered sequence within it.
    * `runId = ${sessionId}:${sequence}` — derived, never supplied by the caller.
@@ -65,6 +72,7 @@ export function createAgentSession(options: {
     id: options.id ?? crypto.randomUUID(),
     agentName: options.agentName,
     conversationHistory: options.conversationHistory,
+    revision: 0,
     runs: options.runs ?? [],
     metadata: options.metadata ?? {},
     createdAt: now,
@@ -73,17 +81,13 @@ export function createAgentSession(options: {
 }
 
 /**
- * Saves an agent session by serializing it directly to the key-value store.
+ * Saves an agent session through the conflict-aware SessionStore path.
  */
 export async function saveAgentSession(
-  store: TextValueStore,
+  store: ConditionalTextValueStore,
   session: AgentSession,
 ): Promise<void> {
-  const data = {
-    ...session,
-    updatedAt: new Date().toISOString(),
-  };
-  await store.set(`agent-session:${session.id}`, JSON.stringify(data));
+  await createSessionStore(store).save(session);
 }
 
 /**
@@ -91,13 +95,14 @@ export async function saveAgentSession(
  * undefined if no session is found.
  */
 export async function loadAgentSession(
-  store: TextValueStore,
+  store: ConditionalTextValueStore,
   id: string,
 ): Promise<AgentSession | undefined> {
   const raw = await store.get(`agent-session:${id}`);
   if (!raw) return undefined;
   try {
     const parsed: unknown = JSON.parse(raw);
+    const record = parsed as Record<string, unknown>;
     if (
       typeof parsed === 'object' &&
       parsed !== null &&
@@ -105,7 +110,20 @@ export async function loadAgentSession(
       'agentName' in parsed &&
       'conversationHistory' in parsed
     ) {
-      return parsed as AgentSession;
+      return {
+        ...(parsed as AgentSession),
+        metadata:
+          typeof record['metadata'] === 'object' &&
+          record['metadata'] !== null &&
+          !Array.isArray(record['metadata'])
+            ? (record['metadata'] as Record<string, JSONValue>)
+            : {},
+        revision:
+          typeof record['revision'] === 'number'
+            ? ((record as Record<string, number>)['revision'] ?? 0)
+            : 0,
+        runs: Array.isArray(record['runs']) ? (record['runs'] as RunRef[]) : [],
+      };
     }
     return undefined;
   } catch {

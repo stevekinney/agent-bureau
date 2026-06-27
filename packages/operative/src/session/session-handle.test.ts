@@ -4,7 +4,7 @@ import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
 import type { Toolbox } from 'armorer';
 import { createTool, createToolbox } from 'armorer';
 import { afterEach, describe, expect, it, mock } from 'bun:test';
-import { createConversationHistory } from 'conversationalist';
+import { Conversation, createConversationHistory } from 'conversationalist';
 import { TypedEventTarget } from 'lifecycle';
 import { z } from 'zod';
 
@@ -34,6 +34,7 @@ import {
   NoDurableEngineError,
   NoRunningRunError,
 } from './session-handle';
+import type { SessionStore } from './types';
 
 // Drain Weft's deferred inline-launch queue between tests — prevents one test's
 // pending macrotask from interfering with the next under bun test concurrency.
@@ -82,6 +83,29 @@ function createSessionHandleFixture(overrides?: { sessionId?: string; engine?: A
       engine: overrides?.engine,
       runOptions: createTestRunOptions(),
     }),
+  };
+}
+
+function createUpdateGate(store: SessionStore): {
+  readonly store: SessionStore;
+  readonly release: () => void;
+} {
+  let releaseUpdate: (() => void) | undefined;
+  const updateGate = new Promise<void>((resolve) => {
+    releaseUpdate = resolve;
+  });
+
+  return {
+    store: {
+      ...store,
+      async update(...args) {
+        await updateGate;
+        return store.update(...args);
+      },
+    },
+    release() {
+      releaseUpdate?.();
+    },
   };
 }
 
@@ -203,6 +227,83 @@ describe('session.run()', () => {
     expect(session!.runs[0]!.sequence).toBe(0);
     expect(session!.runs[1]!.sequence).toBe(1);
     expect(session!.runs[1]!.runId).toBe(`${handle.id}:1`);
+  });
+
+  it('concurrent handles reserve unique run sequences and preserve both conversations', async () => {
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+    const firstHandle = createSessionHandle('concurrent-run-session', {
+      store,
+      agentName: 'test-agent',
+      runOptions: createTestRunOptions(createInstantGenerate('first reply')),
+    });
+    const secondHandle = createSessionHandle('concurrent-run-session', {
+      store,
+      agentName: 'test-agent',
+      runOptions: createTestRunOptions(createInstantGenerate('second reply')),
+    });
+
+    await Promise.all([
+      firstHandle.run('first concurrent message').result(),
+      secondHandle.run('second concurrent message').result(),
+    ]);
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+
+    const session = await store.load('concurrent-run-session');
+    expect(session).toBeDefined();
+    expect(session!.runs).toHaveLength(2);
+    expect(session!.runs.map((run) => run.sequence).sort()).toEqual([0, 1]);
+    expect(new Set(session!.runs.map((run) => run.runId)).size).toBe(2);
+
+    const contents = session!.conversationHistory.ids.map(
+      (id) => session!.conversationHistory.messages[id]!.content,
+    );
+    expect(contents).toContain('first concurrent message');
+    expect(contents).toContain('second concurrent message');
+  });
+
+  it('preserves message edits from one concurrent run without dropping another run', async () => {
+    const sessionId = 'concurrent-redaction-session';
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+    const baseConversation = new Conversation(createConversationHistory({ id: sessionId }));
+    baseConversation.appendUserMessage('sensitive original');
+    await store.save(
+      createAgentSession({
+        id: sessionId,
+        agentName: 'test-agent',
+        conversationHistory: baseConversation.current,
+      }),
+    );
+
+    const redactingHandle = createSessionHandle(sessionId, {
+      store,
+      agentName: 'test-agent',
+      runOptions: createTestRunOptions(async (context) => {
+        context.conversation.redactMessageAtPosition(0, 'redacted original');
+        return { content: 'redacted reply', toolCalls: [] };
+      }),
+    });
+    const appendingHandle = createSessionHandle(sessionId, {
+      store,
+      agentName: 'test-agent',
+      runOptions: createTestRunOptions(createInstantGenerate('appended reply')),
+    });
+
+    await Promise.all([
+      redactingHandle.run('redact request').result(),
+      appendingHandle.run('append request').result(),
+    ]);
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+
+    const session = await store.load(sessionId);
+    expect(session).toBeDefined();
+    const contents = session!.conversationHistory.ids.map(
+      (id) => session!.conversationHistory.messages[id]!.content,
+    );
+    expect(contents).toContain('redacted original');
+    expect(contents).not.toContain('sensitive original');
+    expect(contents).toContain('append request');
   });
 
   it('updates the session conversation history after each run', async () => {
@@ -550,6 +651,122 @@ describe('session.cancel()', () => {
     const updated = await store.load('durable-session');
     expect(updated!.runs[0]!.status).toBe('aborted');
   });
+
+  it('cancels the current handle run instead of the last session run', async () => {
+    const cancelledIds: string[] = [];
+    const fakeEngine = {
+      cancel: async (id: string) => {
+        cancelledIds.push(id);
+      },
+      signal: async () => {},
+      update: async () => {},
+      query: async () => {},
+    } as unknown as AnyRunEngine;
+
+    const generateStartedResolvers: Array<() => void> = [];
+    const generateStarted = [0, 1].map(
+      (index) =>
+        new Promise<void>((resolve) => {
+          generateStartedResolvers[index] = resolve;
+        }),
+    );
+    const resolveGenerate: Array<() => void> = [];
+    let generateCallIndex = 0;
+    const blockingGenerate: GenerateFunction = () => {
+      const index = generateCallIndex++;
+      return new Promise<{ content: string; toolCalls: [] }>((resolve) => {
+        resolveGenerate[index] = () => resolve({ content: `done ${index}`, toolCalls: [] });
+        generateStartedResolvers[index]?.();
+      });
+    };
+
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+    const runOptions = {
+      generate: blockingGenerate,
+      toolbox: createToolbox([]) as unknown as Toolbox,
+      maximumSteps: 1,
+    };
+    const firstHandle = createSessionHandle('shared-cancel-session', {
+      store,
+      agentName: 'cancel-agent',
+      engine: fakeEngine,
+      runOptions,
+    });
+    const secondHandle = createSessionHandle('shared-cancel-session', {
+      store,
+      agentName: 'cancel-agent',
+      engine: fakeEngine,
+      runOptions,
+    });
+
+    const firstRun = firstHandle.run('first');
+    const secondRun = secondHandle.run('second');
+    void firstRun.result().catch(() => {});
+    void secondRun.result().catch(() => {});
+    await Promise.all(generateStarted);
+
+    await firstHandle.cancel();
+
+    expect(cancelledIds).toEqual(['shared-cancel-session:0']);
+    const updated = await store.load('shared-cancel-session');
+    expect(updated!.runs.map((run) => [run.runId, run.status])).toEqual([
+      ['shared-cancel-session:0', 'aborted'],
+      ['shared-cancel-session:1', 'running'],
+    ]);
+
+    resolveGenerate[0]?.();
+    resolveGenerate[1]?.();
+    await Promise.allSettled([firstRun.result(), secondRun.result()]);
+  });
+
+  it('does not cancel another run while this handle is reserving a run id', async () => {
+    const cancelledIds: string[] = [];
+    const fakeEngine = {
+      cancel: async (id: string) => {
+        cancelledIds.push(id);
+      },
+      signal: async () => {},
+      update: async () => {},
+      query: async () => {},
+    } as unknown as AnyRunEngine;
+
+    const baseStore = createSessionStore(textValueStore(new MemoryStorage()));
+    const session = createAgentSession({
+      agentName: 'agent',
+      conversationHistory: createConversationHistory(),
+      id: 'pending-reservation-cancel-session',
+      runs: [
+        {
+          runId: 'pending-reservation-cancel-session:0',
+          sequence: 0,
+          status: 'running',
+          startedAt: new Date().toISOString(),
+          agentName: 'agent',
+        },
+      ],
+    });
+    await baseStore.save(session);
+    const gate = createUpdateGate(baseStore);
+    const handle = createSessionHandle('pending-reservation-cancel-session', {
+      store: gate.store,
+      agentName: 'agent',
+      engine: fakeEngine,
+      runOptions: createTestRunOptions(),
+    });
+
+    const run = handle.run('new run');
+    void run.result().catch(() => {});
+
+    await handle.cancel();
+
+    expect(cancelledIds).toEqual([]);
+    const loadedBeforeRelease = await baseStore.load('pending-reservation-cancel-session');
+    expect(loadedBeforeRelease!.runs[0]!.status).toBe('running');
+
+    gate.release();
+    await Promise.allSettled([run.result()]);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -873,6 +1090,61 @@ describe('session.signal()', () => {
       payload: { approved: true },
     });
   });
+
+  it('targets the newest running ref when the last run is terminal', async () => {
+    const signalCalls: Array<{ id: string; name: string; payload: unknown }> = [];
+
+    const fakeEngine = {
+      signal: async (id: string, name: string, payload: unknown) => {
+        signalCalls.push({ id, name, payload });
+      },
+    } as unknown as AnyRunEngine;
+
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+    const session = createAgentSession({
+      agentName: 'agent',
+      conversationHistory: createConversationHistory(),
+      id: 'signal-newest-running',
+      runs: [
+        {
+          runId: 'signal-newest-running:0',
+          sequence: 0,
+          status: 'running',
+          startedAt: new Date().toISOString(),
+          agentName: '',
+        },
+        {
+          runId: 'signal-newest-running:1',
+          sequence: 1,
+          status: 'completed',
+          startedAt: new Date().toISOString(),
+          agentName: '',
+        },
+      ],
+    });
+    await store.save(session);
+
+    const h = createSessionHandle('signal-newest-running', {
+      store,
+      agentName: 'agent',
+      engine: fakeEngine,
+      runOptions: {
+        generate: createInstantGenerate(),
+        toolbox: createToolbox([]) as unknown as Toolbox,
+      },
+    });
+
+    await h.signal('human-response', { approved: true });
+
+    expect(signalCalls).toEqual([
+      {
+        id: 'signal-newest-running:0',
+        name: 'human-response',
+        payload: { approved: true },
+      },
+    ]);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -955,6 +1227,143 @@ describe('session.update()', () => {
 
     const result = await h.update('params', { temp: 0.5 });
     expect(result).toEqual({ ok: true });
+  });
+
+  it('targets this handle run for signal, update, and query when another run is later', async () => {
+    const targetedIds: Array<{ verb: string; id: string }> = [];
+    const fakeEngine = {
+      signal: async (id: string) => {
+        targetedIds.push({ verb: 'signal', id });
+      },
+      update: async (id: string) => {
+        targetedIds.push({ verb: 'update', id });
+        return { ok: true };
+      },
+      query: async (id: string) => {
+        targetedIds.push({ verb: 'query', id });
+        return { ok: true };
+      },
+    } as unknown as AnyRunEngine;
+
+    const generateStartedResolvers: Array<() => void> = [];
+    const generateStarted = [0, 1].map(
+      (index) =>
+        new Promise<void>((resolve) => {
+          generateStartedResolvers[index] = resolve;
+        }),
+    );
+    const resolveGenerate: Array<() => void> = [];
+    let generateCallIndex = 0;
+    const blockingGenerate: GenerateFunction = () => {
+      const index = generateCallIndex++;
+      return new Promise<{ content: string; toolCalls: [] }>((resolve) => {
+        resolveGenerate[index] = () => resolve({ content: `done ${index}`, toolCalls: [] });
+        generateStartedResolvers[index]?.();
+      });
+    };
+
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+    const runOptions = {
+      generate: blockingGenerate,
+      toolbox: createToolbox([]) as unknown as Toolbox,
+      maximumSteps: 1,
+    };
+    const firstHandle = createSessionHandle('shared-hitl-session', {
+      store,
+      agentName: 'hitl-agent',
+      engine: fakeEngine,
+      runOptions,
+    });
+    const secondHandle = createSessionHandle('shared-hitl-session', {
+      store,
+      agentName: 'hitl-agent',
+      engine: fakeEngine,
+      runOptions,
+    });
+
+    const firstRun = firstHandle.run('first');
+    const secondRun = secondHandle.run('second');
+    void firstRun.result().catch(() => {});
+    void secondRun.result().catch(() => {});
+    await Promise.all(generateStarted);
+
+    await firstHandle.signal('approve');
+    await firstHandle.update('params');
+    await firstHandle.query('state');
+
+    expect(targetedIds).toEqual([
+      { verb: 'signal', id: 'shared-hitl-session:0' },
+      { verb: 'update', id: 'shared-hitl-session:0' },
+      { verb: 'query', id: 'shared-hitl-session:0' },
+    ]);
+
+    resolveGenerate[0]?.();
+    resolveGenerate[1]?.();
+    await Promise.allSettled([firstRun.result(), secondRun.result()]);
+  });
+
+  it('does not fall back to another run while this handle is reserving a run id', async () => {
+    const targetedIds: Array<{ verb: string; id: string }> = [];
+    const fakeEngine = {
+      signal: async (id: string) => {
+        targetedIds.push({ verb: 'signal', id });
+      },
+      update: async (id: string) => {
+        targetedIds.push({ verb: 'update', id });
+        return { ok: true };
+      },
+      query: async (id: string) => {
+        targetedIds.push({ verb: 'query', id });
+        return { ok: true };
+      },
+    } as unknown as AnyRunEngine;
+
+    const baseStore = createSessionStore(textValueStore(new MemoryStorage()));
+    const session = createAgentSession({
+      agentName: 'agent',
+      conversationHistory: createConversationHistory(),
+      id: 'pending-reservation-hitl-session',
+      runs: [
+        {
+          runId: 'pending-reservation-hitl-session:0',
+          sequence: 0,
+          status: 'running',
+          startedAt: new Date().toISOString(),
+          agentName: 'agent',
+        },
+      ],
+    });
+    await baseStore.save(session);
+    const gate = createUpdateGate(baseStore);
+    const handle = createSessionHandle('pending-reservation-hitl-session', {
+      store: gate.store,
+      agentName: 'agent',
+      engine: fakeEngine,
+      runOptions: createTestRunOptions(),
+    });
+
+    const run = handle.run('new run');
+    void run.result().catch(() => {});
+
+    for (const operation of [
+      () => handle.signal('approve'),
+      () => handle.update('params'),
+      () => handle.query('state'),
+    ]) {
+      let threw = false;
+      try {
+        await operation();
+      } catch (error) {
+        threw = true;
+        expect(error).toBeInstanceOf(NoRunningRunError);
+      }
+      expect(threw).toBe(true);
+    }
+
+    expect(targetedIds).toEqual([]);
+    gate.release();
+    await Promise.allSettled([run.result()]);
   });
 });
 
@@ -1519,7 +1928,7 @@ describe('D2 — Recovery-on-boot: session.recover() durable re-attach path', ()
     }
   });
 
-  it('returns null when engine is present but last run status is completed', async () => {
+  it('returns null when engine is present but no run is running', async () => {
     const storage = new MemoryStorage();
     const kv = textValueStore(storage, { disposeUnderlyingStorage: false });
     const store = createSessionStore(kv);
@@ -1559,6 +1968,127 @@ describe('D2 — Recovery-on-boot: session.recover() durable re-attach path', ()
     } finally {
       engine[Symbol.dispose]();
     }
+  });
+
+  it('reattaches to a running run even when a later run is terminal', async () => {
+    const resumedIds: string[] = [];
+    const fakeEngine = {
+      resume: async (id: string) => {
+        resumedIds.push(id);
+        return {
+          id,
+          result: () => new Promise<unknown>(() => {}),
+        };
+      },
+    } as unknown as AnyRunEngine;
+    const fakeCheckpointStore = {
+      loadCheckpoint: async (_runId: string) => ({
+        conversation: null,
+        cursor: { totalUsage: {}, lastContent: '', schemaAttempts: 0 },
+        steps: [],
+      }),
+    };
+
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+    const session = createAgentSession({
+      agentName: 'agent',
+      conversationHistory: createConversationHistory(),
+      id: 'earlier-running-session',
+      runs: [
+        {
+          runId: 'earlier-running-session:0',
+          sequence: 0,
+          status: 'running',
+          startedAt: new Date().toISOString(),
+          agentName: '',
+        },
+        {
+          runId: 'earlier-running-session:1',
+          sequence: 1,
+          status: 'completed',
+          startedAt: new Date().toISOString(),
+          agentName: '',
+        },
+      ],
+    });
+    await store.save(session);
+
+    const h = createSessionHandle('earlier-running-session', {
+      store,
+      agentName: 'agent',
+      engine: fakeEngine,
+      checkpointStore:
+        fakeCheckpointStore as unknown as import('../durable/checkpoint-store').CheckpointStore,
+      runOptions: createTestRunOptions(),
+    });
+
+    const recovered = await h.recover();
+
+    expect(recovered).not.toBeNull();
+    expect(resumedIds).toEqual(['earlier-running-session:0']);
+  });
+
+  it('tries older running refs when the newest running ref cannot resume', async () => {
+    const resumedIds: string[] = [];
+    const fakeEngine = {
+      resume: async (id: string) => {
+        resumedIds.push(id);
+        if (id === 'fallback-running-session:1') {
+          throw new Error('stale workflow');
+        }
+        return {
+          id,
+          result: () => new Promise<unknown>(() => {}),
+        };
+      },
+    } as unknown as AnyRunEngine;
+    const fakeCheckpointStore = {
+      loadCheckpoint: async (_runId: string) => ({
+        conversation: null,
+        cursor: { totalUsage: {}, lastContent: '', schemaAttempts: 0 },
+        steps: [],
+      }),
+    };
+
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+    const session = createAgentSession({
+      agentName: 'agent',
+      conversationHistory: createConversationHistory(),
+      id: 'fallback-running-session',
+      runs: [
+        {
+          runId: 'fallback-running-session:0',
+          sequence: 0,
+          status: 'running',
+          startedAt: new Date().toISOString(),
+          agentName: '',
+        },
+        {
+          runId: 'fallback-running-session:1',
+          sequence: 1,
+          status: 'running',
+          startedAt: new Date().toISOString(),
+          agentName: '',
+        },
+      ],
+    });
+    await store.save(session);
+
+    const h = createSessionHandle('fallback-running-session', {
+      store,
+      agentName: 'agent',
+      engine: fakeEngine,
+      checkpointStore:
+        fakeCheckpointStore as unknown as import('../durable/checkpoint-store').CheckpointStore,
+      runOptions: createTestRunOptions(),
+    });
+
+    const recovered = await h.recover();
+
+    expect(recovered).not.toBeNull();
+    expect(resumedIds).toEqual(['fallback-running-session:1', 'fallback-running-session:0']);
   });
 
   it('reattaches to a recovered durable run after simulated restart (invariant #4)', async () => {
