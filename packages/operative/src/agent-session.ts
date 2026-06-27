@@ -102,6 +102,7 @@ export async function loadAgentSession(
   if (!raw) return undefined;
   try {
     const parsed: unknown = JSON.parse(raw);
+    const record = parsed as Record<string, unknown>;
     if (
       typeof parsed === 'object' &&
       parsed !== null &&
@@ -111,10 +112,17 @@ export async function loadAgentSession(
     ) {
       return {
         ...(parsed as AgentSession),
+        metadata:
+          typeof record['metadata'] === 'object' &&
+          record['metadata'] !== null &&
+          !Array.isArray(record['metadata'])
+            ? (record['metadata'] as Record<string, JSONValue>)
+            : {},
         revision:
-          typeof (parsed as Record<string, unknown>)['revision'] === 'number'
-            ? ((parsed as Record<string, number>)['revision'] ?? 0)
+          typeof record['revision'] === 'number'
+            ? ((record as Record<string, number>)['revision'] ?? 0)
             : 0,
+        runs: Array.isArray(record['runs']) ? (record['runs'] as RunRef[]) : [],
       };
     }
     return undefined;
