@@ -120,14 +120,10 @@ function mergeConversationHistory(
 
 function mergeSessions(current: AgentSession, candidate: AgentSession): AgentSession {
   const candidateIsFresh = candidate.revision >= current.revision;
-  const candidateRunsById = new Map(candidate.runs.map((run) => [run.runId, run]));
   const currentRunIds = new Set(current.runs.map((run) => run.runId));
-  const mergedRuns = [
-    ...current.runs.map((run) =>
-      candidateIsFresh ? (candidateRunsById.get(run.runId) ?? run) : run,
-    ),
-    ...candidate.runs.filter((run) => !currentRunIds.has(run.runId)),
-  ];
+  const mergedRuns = candidateIsFresh
+    ? candidate.runs
+    : [...current.runs, ...candidate.runs.filter((run) => !currentRunIds.has(run.runId))];
   const metadata = candidateIsFresh
     ? candidate.metadata
     : {
@@ -210,7 +206,10 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
         const current = parseSession(raw);
         const candidate = current ? mergeSessions(current, session) : session;
         const committed = await commit(candidate, raw, current?.revision ?? 0, true);
-        if (committed) return;
+        if (committed) {
+          Object.assign(session, committed);
+          return;
+        }
       }
 
       throw new SessionConflictError(session.id);

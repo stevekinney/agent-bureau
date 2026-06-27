@@ -371,6 +371,10 @@ function appendConversationMessages(
   };
 }
 
+function newestRunningRunRef(session: AgentSession | undefined): RunRef | undefined {
+  return [...(session?.runs ?? [])].reverse().find((runRef) => runRef.status === 'running');
+}
+
 /**
  * Map a `finishReason` to a `RunRef.status`.
  */
@@ -461,7 +465,7 @@ export function createSessionHandle(
     }
     const target = currentRunId
       ? session?.runs.find((runRef) => runRef.runId === currentRunId)
-      : session?.runs[session.runs.length - 1];
+      : newestRunningRunRef(session);
     if (!target || target.status !== 'running') {
       throw new NoRunningRunError(verb, sessionId);
     }
@@ -808,7 +812,7 @@ export function createSessionHandle(
         ? cancelSession?.runs.find((runRef) => runRef.runId === targetRunId)
         : run
           ? undefined
-          : cancelSession?.runs[cancelSession.runs.length - 1];
+          : newestRunningRunRef(cancelSession);
       const cancelRunId = targetRun?.runId ?? targetRunId;
 
       // Emit the cancel event with the targeted run id (null if no runs recorded yet).
@@ -931,7 +935,7 @@ export function createSessionHandle(
       }
       const target = currentRunId
         ? session?.runs.find((runRef) => runRef.runId === currentRunId)
-        : session?.runs[session.runs.length - 1];
+        : (newestRunningRunRef(session) ?? session?.runs[session.runs.length - 1]);
       if (!target) {
         throw new NoRunningRunError('query', sessionId);
       }

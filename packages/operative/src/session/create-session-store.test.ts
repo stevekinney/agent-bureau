@@ -147,6 +147,53 @@ describe('createSessionStore', () => {
     expect(loaded!.metadata).toEqual({ keep: true });
   });
 
+  it('keeps a saved session object fresh for a later save', async () => {
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
+    const session = makeSession({ id: 'save-resave-session' });
+    session.metadata = { status: 'first' };
+    await store.save(session);
+
+    session.metadata = { status: 'second' };
+    await store.save(session);
+
+    const loaded = await store.load(session.id);
+    expect(session.revision).toBe(2);
+    expect(loaded!.revision).toBe(2);
+    expect(loaded!.metadata).toEqual({ status: 'second' });
+  });
+
+  it('lets fresh saves remove run refs', async () => {
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
+    const session = makeSession({ id: 'fresh-run-delete-session' });
+    session.runs = [
+      {
+        runId: 'fresh-run-delete-session:0',
+        sequence: 0,
+        status: 'completed',
+        startedAt: '2025-01-01T00:00:00.000Z',
+        agentName: 'test-agent',
+      },
+      {
+        runId: 'fresh-run-delete-session:1',
+        sequence: 1,
+        status: 'completed',
+        startedAt: '2025-01-01T00:00:01.000Z',
+        agentName: 'test-agent',
+      },
+    ];
+    await store.save(session);
+
+    const freshWriter = await store.load(session.id);
+    expect(freshWriter).toBeDefined();
+    await store.save({
+      ...freshWriter!,
+      runs: [freshWriter!.runs[1]!],
+    });
+
+    const loaded = await store.load(session.id);
+    expect(loaded!.runs.map((run) => run.runId)).toEqual(['fresh-run-delete-session:1']);
+  });
+
   it('lets fresh saves replace existing conversation messages', async () => {
     const store = createSessionStore(textValueStore(new MemoryStorage()));
     const session = makeSession({ id: 'fresh-conversation-edit-session' });

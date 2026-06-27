@@ -1090,6 +1090,61 @@ describe('session.signal()', () => {
       payload: { approved: true },
     });
   });
+
+  it('targets the newest running ref when the last run is terminal', async () => {
+    const signalCalls: Array<{ id: string; name: string; payload: unknown }> = [];
+
+    const fakeEngine = {
+      signal: async (id: string, name: string, payload: unknown) => {
+        signalCalls.push({ id, name, payload });
+      },
+    } as unknown as AnyRunEngine;
+
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+    const session = createAgentSession({
+      agentName: 'agent',
+      conversationHistory: createConversationHistory(),
+      id: 'signal-newest-running',
+      runs: [
+        {
+          runId: 'signal-newest-running:0',
+          sequence: 0,
+          status: 'running',
+          startedAt: new Date().toISOString(),
+          agentName: '',
+        },
+        {
+          runId: 'signal-newest-running:1',
+          sequence: 1,
+          status: 'completed',
+          startedAt: new Date().toISOString(),
+          agentName: '',
+        },
+      ],
+    });
+    await store.save(session);
+
+    const h = createSessionHandle('signal-newest-running', {
+      store,
+      agentName: 'agent',
+      engine: fakeEngine,
+      runOptions: {
+        generate: createInstantGenerate(),
+        toolbox: createToolbox([]) as unknown as Toolbox,
+      },
+    });
+
+    await h.signal('human-response', { approved: true });
+
+    expect(signalCalls).toEqual([
+      {
+        id: 'signal-newest-running:0',
+        name: 'human-response',
+        payload: { approved: true },
+      },
+    ]);
+  });
 });
 
 // ---------------------------------------------------------------------------
