@@ -1694,7 +1694,7 @@ describe('D2 — Recovery-on-boot: session.recover() durable re-attach path', ()
     }
   });
 
-  it('returns null when engine is present but last run status is completed', async () => {
+  it('returns null when engine is present but no run is running', async () => {
     const storage = new MemoryStorage();
     const kv = textValueStore(storage, { disposeUnderlyingStorage: false });
     const store = createSessionStore(kv);
@@ -1734,6 +1734,65 @@ describe('D2 — Recovery-on-boot: session.recover() durable re-attach path', ()
     } finally {
       engine[Symbol.dispose]();
     }
+  });
+
+  it('reattaches to a running run even when a later run is terminal', async () => {
+    const resumedIds: string[] = [];
+    const fakeEngine = {
+      resume: async (id: string) => {
+        resumedIds.push(id);
+        return {
+          id,
+          result: () => new Promise<unknown>(() => {}),
+        };
+      },
+    } as unknown as AnyRunEngine;
+    const fakeCheckpointStore = {
+      loadCheckpoint: async (_runId: string) => ({
+        conversation: null,
+        cursor: { totalUsage: {}, lastContent: '', schemaAttempts: 0 },
+        steps: [],
+      }),
+    };
+
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+    const session = createAgentSession({
+      agentName: 'agent',
+      conversationHistory: createConversationHistory(),
+      id: 'earlier-running-session',
+      runs: [
+        {
+          runId: 'earlier-running-session:0',
+          sequence: 0,
+          status: 'running',
+          startedAt: new Date().toISOString(),
+          agentName: '',
+        },
+        {
+          runId: 'earlier-running-session:1',
+          sequence: 1,
+          status: 'completed',
+          startedAt: new Date().toISOString(),
+          agentName: '',
+        },
+      ],
+    });
+    await store.save(session);
+
+    const h = createSessionHandle('earlier-running-session', {
+      store,
+      agentName: 'agent',
+      engine: fakeEngine,
+      checkpointStore:
+        fakeCheckpointStore as unknown as import('../durable/checkpoint-store').CheckpointStore,
+      runOptions: createTestRunOptions(),
+    });
+
+    const recovered = await h.recover();
+
+    expect(recovered).not.toBeNull();
+    expect(resumedIds).toEqual(['earlier-running-session:0']);
   });
 
   it('reattaches to a recovered durable run after simulated restart (invariant #4)', async () => {

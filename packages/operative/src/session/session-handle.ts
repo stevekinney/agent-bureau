@@ -642,7 +642,7 @@ export function createSessionHandle(
       }
 
       // Durable re-attach path (D2): when an engine AND checkpointStore are
-      // present, check whether the session's last run is still `'running'` in the
+      // present, check whether any session run is still `'running'` in the
       // durable store. On a crash → restart the bureau re-creates the engine over
       // the SAME store, Weft's `recoverAll()` resumes in-flight workflows on boot,
       // and `engine.resume(runId)` gives a handle to the already-running recovered
@@ -650,9 +650,11 @@ export function createSessionHandle(
       // caller can observe the resumed run normally.
       if (engine && checkpointStore) {
         const session = await store.load(sessionId);
-        const last = session?.runs[session.runs.length - 1];
-        if (last && last.status === 'running') {
-          const runId = last.runId;
+        const runningRef = [...(session?.runs ?? [])]
+          .reverse()
+          .find((runRef) => runRef.status === 'running');
+        if (runningRef) {
+          const runId = runningRef.runId;
           try {
             const recoveredHandle = await engine.resume(runId);
             const activeRun = reattachDurableActiveRun(
@@ -694,7 +696,7 @@ export function createSessionHandle(
                   await store.update(sessionId, (freshSession) => {
                     if (!freshSession) return undefined;
                     const terminalRef: RunRef = {
-                      ...last,
+                      ...runningRef,
                       status: terminalStatus,
                     };
                     return {
