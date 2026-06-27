@@ -267,4 +267,44 @@ describe('loop helper coverage', () => {
     expect(result.usage).toEqual({ prompt: 3, completion: 2, total: 5 });
     expect(result.content).toBe('final');
   });
+
+  it('passes stable ordinal durable operation keys to tool context', async () => {
+    const durableOperationKeys: Array<string | undefined> = [];
+    const recordKeyTool = createTool({
+      name: 'record_key',
+      description: 'Record the durable operation key.',
+      input: z.object({}),
+      execute: async (_input, context) => {
+        durableOperationKeys.push(context.durableOperationKey);
+        return { ok: true };
+      },
+    });
+    let generateCalls = 0;
+
+    const result = await executeLoop({
+      generate: async () => {
+        generateCalls++;
+        if (generateCalls === 1) {
+          return {
+            content: '',
+            toolCalls: [
+              { id: 'provider-call-a', name: 'record_key', arguments: {} },
+              { id: 'provider-call-b', name: 'record_key', arguments: {} },
+            ],
+          };
+        }
+        return textResponse('done');
+      },
+      toolbox: createTestToolbox([recordKeyTool]),
+      conversation: new Conversation(),
+      runId: 'durable-run-1',
+      stopWhen: noToolCalls(),
+    });
+
+    expect(result.finishReason).toBe('stop-condition');
+    expect(durableOperationKeys).toEqual([
+      'schedule-safe:durable-run-1:step-0:tool-0:record_key',
+      'schedule-safe:durable-run-1:step-0:tool-1:record_key',
+    ]);
+  });
 });

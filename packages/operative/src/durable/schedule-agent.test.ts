@@ -269,6 +269,171 @@ describe('createAgentSchedule', () => {
     const summary = await handle.describe();
     expect(summary.id).toBe('test-sched-1');
   });
+
+  it('reuses an existing compatible schedule when idempotent registration is requested', async () => {
+    const existingSummary: ScheduleSummary = {
+      ...mockSummary,
+      id: 'schedule-self-run-step',
+      intervalMs: 3_600_000,
+    };
+    const engine = makeSchedulingEngine({ summaries: [existingSummary] });
+
+    const handle = await createAgentSchedule({
+      engine: engine as unknown as AnyRunEngine,
+      agentName: 'researcher',
+      spec: { every: '1h' },
+      input: 'hello',
+      id: 'schedule-self-run-step',
+      idempotent: true,
+    });
+
+    expect(engine.calls).toHaveLength(0);
+    expect(handle.id).toBe('schedule-self-run-step');
+    await handle.pause();
+    const summary = await handle.describe();
+    expect(summary.id).toBe('schedule-self-run-step');
+  });
+
+  it('treats a duplicate-id schedule race as success when the existing schedule is compatible', async () => {
+    const existingSummary: ScheduleSummary = {
+      ...mockSummary,
+      id: 'schedule-race',
+      cronExpression: '0 9 * * *',
+    };
+    const engine = makeSchedulingEngine({ summaries: [] });
+    let getScheduleCalls = 0;
+    engine.getSchedule = async () => {
+      getScheduleCalls++;
+      return getScheduleCalls === 1 ? null : existingSummary;
+    };
+    engine.schedule = async (
+      type: string,
+      input: unknown,
+      spec: string | ScheduleSpec,
+      options?: ScheduleOptions,
+    ) => {
+      engine.calls.push({ type, input, spec, options });
+      throw new Error('Schedule with id "schedule-race" already exists');
+    };
+
+    const handle = await createAgentSchedule({
+      engine: engine as unknown as AnyRunEngine,
+      agentName: 'researcher',
+      spec: { cron: '0 9 * * *' },
+      input: 'hello',
+      id: 'schedule-race',
+      idempotent: true,
+    });
+
+    expect(engine.calls).toHaveLength(1);
+    expect(handle.id).toBe('schedule-race');
+  });
+
+  it('rejects an existing incompatible schedule when idempotent registration is requested', async () => {
+    const engine = makeSchedulingEngine({
+      summaries: [{ ...mockSummary, id: 'schedule-collision', workflowType: 'otherWorkflow' }],
+    });
+
+    let caught: unknown;
+    try {
+      await createAgentSchedule({
+        engine: engine as unknown as AnyRunEngine,
+        agentName: 'researcher',
+        spec: { every: '1h' },
+        input: 'hello',
+        id: 'schedule-collision',
+        idempotent: true,
+      });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toBe(
+      'Schedule schedule-collision already exists for workflow otherWorkflow; expected agentRun.',
+    );
+    expect(engine.calls).toHaveLength(0);
+  });
+
+  it('rejects an existing cancelled schedule when idempotent registration is requested', async () => {
+    const engine = makeSchedulingEngine({
+      summaries: [{ ...mockSummary, id: 'schedule-collision', status: 'cancelled' }],
+    });
+
+    let caught: unknown;
+    try {
+      await createAgentSchedule({
+        engine: engine as unknown as AnyRunEngine,
+        agentName: 'researcher',
+        spec: { every: '1h' },
+        input: 'hello',
+        id: 'schedule-collision',
+        idempotent: true,
+      });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toBe(
+      'Schedule schedule-collision already exists but is cancelled.',
+    );
+    expect(engine.calls).toHaveLength(0);
+  });
+
+  it('rejects an existing schedule with a different interval when idempotent registration is requested', async () => {
+    const engine = makeSchedulingEngine({
+      summaries: [{ ...mockSummary, id: 'schedule-collision', intervalMs: 1_800_000 }],
+    });
+
+    let caught: unknown;
+    try {
+      await createAgentSchedule({
+        engine: engine as unknown as AnyRunEngine,
+        agentName: 'researcher',
+        spec: { every: '1h' },
+        input: 'hello',
+        id: 'schedule-collision',
+        idempotent: true,
+      });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toBe(
+      'Schedule schedule-collision already exists with a different interval spec.',
+    );
+    expect(engine.calls).toHaveLength(0);
+  });
+
+  it('rejects an existing schedule with a different overlap policy when idempotent registration is requested', async () => {
+    const engine = makeSchedulingEngine({
+      summaries: [
+        { ...mockSummary, id: 'schedule-collision', intervalMs: 3_600_000, overlap: 'queue' },
+      ],
+    });
+
+    let caught: unknown;
+    try {
+      await createAgentSchedule({
+        engine: engine as unknown as AnyRunEngine,
+        agentName: 'researcher',
+        spec: { every: '1h' },
+        input: 'hello',
+        id: 'schedule-collision',
+        idempotent: true,
+      });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toBe(
+      'Schedule schedule-collision already exists with overlap queue; expected skip.',
+    );
+    expect(engine.calls).toHaveLength(0);
+  });
 });
 
 // ---------------------------------------------------------------------------

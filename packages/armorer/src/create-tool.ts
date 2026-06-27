@@ -815,6 +815,9 @@ export function createTool<
         meta,
         toolCall: typedToolCall,
         configuration,
+        ...(options.durableOperationKey !== undefined
+          ? { durableOperationKey: options.durableOperationKey }
+          : {}),
         ...(options.signal ? { signal: options.signal } : {}),
         ...(options.timeout !== undefined ? { timeout: options.timeout } : {}),
         ...(options.stream !== undefined ? { stream: options.stream } : {}),

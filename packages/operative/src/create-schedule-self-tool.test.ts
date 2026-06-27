@@ -1,9 +1,11 @@
-import type { ScheduleSummary } from '@lostgradient/weft';
+import type { ScheduleOptions, ScheduleSpec, ScheduleSummary } from '@lostgradient/weft';
+import { ScheduleHandle } from '@lostgradient/weft';
 import { describe, expect, it } from 'bun:test';
 
 import type { ScheduleSelfFn } from './create-schedule-self-tool';
 import { createScheduleSelfTool } from './create-schedule-self-tool';
-import type { AgentScheduleHandle } from './durable/schedule-agent';
+import type { AgentScheduleHandle, SchedulingEngine } from './durable/schedule-agent';
+import { createAgentScheduler } from './durable/schedule-agent';
 
 const mockSummary: ScheduleSummary = {
   id: 'sched-1',
@@ -27,6 +29,8 @@ function makeHandle(id = 'sched-1'): AgentScheduleHandle {
     describe: async () => mockSummary,
   };
 }
+
+type ScheduleSelfOptions = Parameters<ScheduleSelfFn>[1];
 
 describe('createScheduleSelfTool', () => {
   it('calls schedule with the agent name and spec', async () => {
@@ -98,6 +102,116 @@ describe('createScheduleSelfTool', () => {
     await tool.execute({ spec: { every: '1h' }, input: 'test', overlap: 'queue' });
 
     expect(captured?.overlap).toBe('queue');
+  });
+
+  it('passes a deterministic idempotent schedule id when durable operation context is present', async () => {
+    let captured: ScheduleSelfOptions | undefined;
+    const schedule: ScheduleSelfFn = async (_, options) => {
+      captured = options;
+      return makeHandle(options.id);
+    };
+    const tool = createScheduleSelfTool({ agentName: 'agent', schedule });
+
+    await tool.execute(
+      { spec: { every: '1h' }, input: 'test' },
+      { durableOperationKey: 'schedule-safe:run-1:step-0:tool-0:scheduleSelf' },
+    );
+
+    expect(captured?.id).toBe('schedule-self:schedule-safe:run-1:step-0:tool-0:scheduleSelf');
+    expect(captured?.idempotent).toBe(true);
+  });
+
+  it('preserves no-id behavior when durable operation context is absent', async () => {
+    let captured: ScheduleSelfOptions | undefined;
+    const schedule: ScheduleSelfFn = async (_, options) => {
+      captured = options;
+      return makeHandle();
+    };
+    const tool = createScheduleSelfTool({ agentName: 'agent', schedule });
+
+    await tool.execute({ spec: { every: '1h' }, input: 'test' });
+
+    expect(captured?.id).toBeUndefined();
+    expect(captured?.idempotent).toBeUndefined();
+  });
+
+  it('uses an explicit schedule id factory when provided', async () => {
+    let captured: ScheduleSelfOptions | undefined;
+    const schedule: ScheduleSelfFn = async (_, options) => {
+      captured = options;
+      return makeHandle(options.id);
+    };
+    const tool = createScheduleSelfTool({
+      agentName: 'agent',
+      schedule,
+      scheduleId: ({ agentName }) => `custom-${agentName}`,
+    });
+
+    await tool.execute(
+      { spec: { every: '1h' }, input: 'test' },
+      { durableOperationKey: 'schedule-safe:ignored' },
+    );
+
+    expect(captured?.id).toBe('custom-agent');
+    expect(captured?.idempotent).toBe(true);
+  });
+
+  it('collapses repeated durable scheduleSelf registration to one stored schedule', async () => {
+    const schedules = new Map<string, ScheduleSummary>();
+    const engine: SchedulingEngine = {
+      async schedule(
+        type: string,
+        _input: unknown,
+        spec: string | ScheduleSpec,
+        options?: ScheduleOptions,
+      ): Promise<ScheduleHandle> {
+        const scheduleId = options?.id ?? `generated-${schedules.size + 1}`;
+        if (schedules.has(scheduleId)) {
+          throw new Error(`Schedule with id "${scheduleId}" already exists`);
+        }
+        const requestedSpec = typeof spec === 'string' ? { cron: spec } : spec;
+        schedules.set(scheduleId, {
+          ...mockSummary,
+          id: scheduleId,
+          workflowType: type,
+          ...('every' in requestedSpec ? { intervalMs: 3_600_000 } : {}),
+          ...('cron' in requestedSpec ? { cronExpression: requestedSpec.cron } : {}),
+          overlap: options?.overlap ?? 'skip',
+        });
+        return new ScheduleHandle(scheduleId, {
+          pauseSchedule: async () => {},
+          resumeSchedule: async () => {},
+          cancelSchedule: async () => {},
+          updateSchedule: async () => {},
+          getSchedule: async () => schedules.get(scheduleId) ?? null,
+        });
+      },
+      async getSchedule(scheduleId: string): Promise<ScheduleSummary | null> {
+        return schedules.get(scheduleId) ?? null;
+      },
+      async listSchedules() {
+        const items = [...schedules.values()];
+        return { items, total: items.length, offset: 0, limit: 100 };
+      },
+      async pauseSchedule(): Promise<void> {},
+      async resumeSchedule(): Promise<void> {},
+      async cancelSchedule(): Promise<void> {},
+    };
+    const scheduler = createAgentScheduler({ engine });
+    const tool = createScheduleSelfTool({
+      agentName: 'agent',
+      schedule: scheduler.schedule.bind(scheduler),
+    });
+    const context = { durableOperationKey: 'schedule-safe:run-1:step-0:tool-0:scheduleSelf' };
+
+    await tool.execute({ spec: { every: '1h' }, input: 'test' }, context);
+    await tool.execute({ spec: { every: '1h' }, input: 'test' }, context);
+
+    const result = await scheduler.listSchedules();
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0]?.id).toBe(
+      'schedule-self:schedule-safe:run-1:step-0:tool-0:scheduleSelf',
+    );
   });
 
   it('returns scheduled:true with the schedule id from the handle', async () => {

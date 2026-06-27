@@ -59,6 +59,7 @@ export function buildStepDeps(options: RunOptions): StepDeps {
     schemaRetryMessage: options.schemaRetryMessage,
     parentContext: options.parentContext,
     withTraceContext: options.withTraceContext,
+    runId: options.runId,
     defaultToolChoice: options.toolChoice,
     stopConditions,
     prepareStepHooks: normalizeToArray(options.prepareStep),
