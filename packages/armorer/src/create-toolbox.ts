@@ -110,6 +110,7 @@ export type ToolboxRuntimeContext<Ctx extends ToolboxContext = ToolboxContext> =
   dispatchEvent: ToolboxEventDispatcher;
   configuration: ToolConfiguration;
   toolCall: ToolCall;
+  durableOperationKey?: string;
   signal?: MinimalAbortSignal;
   /** Execution timeout in milliseconds. */
   timeout?: number;
@@ -324,12 +325,13 @@ type ToolboxEventType = Extract<keyof ToolboxEvents, string>;
 
 export type ToolboxEventDispatcher = (event: Event) => boolean;
 
-export interface ToolboxExecuteOptions extends ToolExecuteOptions {
+export interface ToolboxExecuteOptions extends Omit<ToolExecuteOptions, 'durableOperationKey'> {
   concurrency?: number;
   mode?: 'parallel' | 'sequential';
   errorMode?: 'failFast' | 'collect';
   parentContext?: OpenTelemetryContext;
   spanLinks?: OpenTelemetrySpanLink[];
+  durableOperationKey?: string | ((call: ToolCall, index: number) => string | undefined);
   idempotencyKey?: string | ((call: ToolCall) => string | undefined);
   /**
    * Retry an idempotent call after a human has reviewed a prior unknown outcome.
@@ -782,7 +784,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
     const runTask = <T>(task: () => Promise<T>) => (limiter ? limiter.run(task) : task());
 
     // Map calls to tasks
-    const tasks = calls.map((call) => async () => {
+    const tasks = calls.map((call, callIndex) => async () => {
       let toolCall = normalizeToolCall(call);
       let tool = getTool(toolCall.name) as Tool | undefined; // toolCall.name might be ID
       if (!tool && resolutionEnabled) {
@@ -972,12 +974,18 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
       }
 
       try {
+        const durableOperationKey =
+          typeof options?.durableOperationKey === 'function'
+            ? options.durableOperationKey(toolCall, callIndex)
+            : options?.durableOperationKey;
         const executeOptions: ToolExecuteOptions =
           options?.signal ||
           options?.timeout !== undefined ||
           options?.stream !== undefined ||
+          durableOperationKey !== undefined ||
           (options !== undefined && approvalResumeSymbol in options)
             ? {
+                ...(durableOperationKey !== undefined ? { durableOperationKey } : {}),
                 ...(options?.signal ? { signal: options.signal } : {}),
                 ...(options?.timeout !== undefined ? { timeout: options.timeout } : {}),
                 ...(options?.stream !== undefined ? { stream: options.stream } : {}),
@@ -1417,6 +1425,9 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
           emit,
           configuration: toolContext.configuration,
           toolCall: toolContext.toolCall,
+          ...(toolContext.durableOperationKey !== undefined
+            ? { durableOperationKey: toolContext.durableOperationKey }
+            : {}),
           signal: toolContext.signal,
           timeout: toolContext.timeout,
           stream: toolContext.stream,

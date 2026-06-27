@@ -69,8 +69,14 @@ export type ScheduleSelfFn = (
     input: string;
     session?: string;
     overlap?: ScheduleOverlapPolicy;
+    id?: string;
+    idempotent?: boolean;
   },
 ) => Promise<AgentScheduleHandle>;
+
+export interface ScheduleSelfExecutionContext {
+  durableOperationKey?: string;
+}
 
 /**
  * Options for {@link createScheduleSelfTool}.
@@ -87,6 +93,16 @@ export interface CreateScheduleSelfToolOptions {
    * tests, pass a spy function.
    */
   schedule: ScheduleSelfFn;
+  /**
+   * Optional factory for hosts that already have a deterministic schedule
+   * operation id. When omitted, durable runs use the per-call operation key
+   * supplied by the run loop.
+   */
+  scheduleId?: (context: {
+    agentName: string;
+    input: ScheduleSelfInput;
+    durableOperationKey?: string;
+  }) => string | undefined;
 }
 
 /**
@@ -133,7 +149,7 @@ export interface CreateScheduleSelfToolOptions {
  * ```
  */
 export function createScheduleSelfTool(options: CreateScheduleSelfToolOptions) {
-  const { agentName, schedule } = options;
+  const { agentName, schedule, scheduleId } = options;
 
   return {
     name: 'scheduleSelf',
@@ -188,12 +204,28 @@ export function createScheduleSelfTool(options: CreateScheduleSelfToolOptions) {
      * @param input - `spec`, `input`, optional `session`, optional `overlap`.
      * @returns A confirmation with the assigned `scheduleId`.
      */
-    async execute(input: ScheduleSelfInput): Promise<ScheduleSelfResult> {
+    async execute(
+      input: ScheduleSelfInput,
+      context?: ScheduleSelfExecutionContext,
+    ): Promise<ScheduleSelfResult> {
+      const resolvedScheduleId =
+        scheduleId?.({
+          agentName,
+          input,
+          ...(context?.durableOperationKey !== undefined
+            ? { durableOperationKey: context.durableOperationKey }
+            : {}),
+        }) ??
+        (context?.durableOperationKey !== undefined
+          ? `schedule-self:${context.durableOperationKey}`
+          : undefined);
+
       const handle = await schedule(agentName, {
         spec: input.spec,
         input: input.input,
         ...(input.session !== undefined ? { session: input.session } : {}),
         ...(input.overlap !== undefined ? { overlap: input.overlap } : {}),
+        ...(resolvedScheduleId !== undefined ? { id: resolvedScheduleId, idempotent: true } : {}),
       });
 
       const specLabel =

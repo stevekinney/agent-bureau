@@ -303,6 +303,14 @@ export interface RunOptions {
    */
   runId?: string;
   /**
+   * Enables replay-safe durable operation keys for tool calls. This is distinct
+   * from `runId`, because in-memory session-owned runs also have stable run ids
+   * for event stamping but should not make effectful tools idempotent.
+   *
+   * @internal
+   */
+  durableOperationKeys?: boolean;
+  /**
    * Callback that runs a function within a parent trace context. When both
    * `parentContext` and `withTraceContext` are provided, the loop wraps
    * generate and tool-execution calls so child spans nest correctly.

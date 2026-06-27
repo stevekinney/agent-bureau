@@ -205,6 +205,7 @@ export interface RuntimeToolContext extends CoreToolContext {
   meta?: { toolName: string; callId?: string };
   toolCall: ToolCallWithArguments;
   configuration: ToolConfiguration;
+  durableOperationKey?: string;
   signal?: MinimalAbortSignal;
   /** Execution timeout in milliseconds. */
   timeout?: number;
@@ -215,6 +216,7 @@ export type ToolContext<_E extends ToolEventsMap = DefaultToolEvents> = RuntimeT
 
 export interface ToolExecuteOptions {
   clearTimeoutFunction?: ClearScheduledTimeout;
+  durableOperationKey?: string;
   now?: () => number;
   signal?: MinimalAbortSignal;
   setTimeoutFunction?: ScheduleTimeout;
