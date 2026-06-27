@@ -323,24 +323,36 @@ function historyOrEmpty(history: ConversationHistory | undefined): ConversationH
   return history ?? createConversationHistory();
 }
 
+function messagesAreEqual(
+  left: ConversationHistory['messages'][string],
+  right: ConversationHistory['messages'][string],
+): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
 function appendConversationMessages(
   current: ConversationHistory,
   candidate: ConversationHistory,
+  base: ConversationHistory,
 ): ConversationHistory {
+  const baseIds = new Set(base.ids);
+  const candidateIds = new Set(candidate.ids);
   const currentIds = new Set(current.ids);
+  const currentPreservedIds = current.ids.filter((id) => candidateIds.has(id) || !baseIds.has(id));
   const candidateOnlyIds = candidate.ids.filter((id) => !currentIds.has(id));
-  const ids = [...current.ids, ...candidateOnlyIds];
-  const messages = {
-    ...current.messages,
-    ...candidateOnlyIds.reduce<Record<string, ConversationHistory['messages'][string]>>(
-      (accumulator, id) => {
-        const message = candidate.messages[id];
-        if (message) accumulator[id] = message;
-        return accumulator;
-      },
-      {},
-    ),
-  };
+  const ids = [...currentPreservedIds, ...candidateOnlyIds];
+  const messages: Record<string, ConversationHistory['messages'][string]> = {};
+
+  for (const id of ids) {
+    const candidateMessage = candidate.messages[id];
+    const baseMessage = base.messages[id];
+    const message =
+      candidateMessage &&
+      (!baseMessage || !messagesAreEqual(candidateMessage, baseMessage) || !current.messages[id])
+        ? candidateMessage
+        : (current.messages[id] ?? candidateMessage);
+    if (message) messages[id] = message;
+  }
 
   for (const [position, id] of ids.entries()) {
     const message = messages[id];
@@ -490,6 +502,7 @@ export function createSessionHandle(
           | {
               runId: string;
               runningRef: RunRef;
+              baseConversationHistory: ConversationHistory;
               seededConversation: Conversation;
             }
           | undefined;
@@ -507,6 +520,7 @@ export function createSessionHandle(
             });
           const sequence = session.runs.length;
           const runId = deriveRunId(sessionId, sequence);
+          const baseConversationHistory = session.conversationHistory;
           const seededConversation = new Conversation(historyOrEmpty(session.conversationHistory));
           seededConversation.appendUserMessage(input);
           const runningRef: RunRef = {
@@ -517,7 +531,7 @@ export function createSessionHandle(
             agentName,
           };
 
-          reservation = { runId, runningRef, seededConversation };
+          reservation = { runId, runningRef, baseConversationHistory, seededConversation };
 
           return {
             ...session,
@@ -529,7 +543,7 @@ export function createSessionHandle(
           throw new Error(`Failed to reserve a run for session "${sessionId}".`);
         }
 
-        const { runId, runningRef, seededConversation } = reservation;
+        const { runId, runningRef, baseConversationHistory, seededConversation } = reservation;
         currentRunId = runId;
 
         // Thread the eager AbortController's signal into the run options so
@@ -613,6 +627,7 @@ export function createSessionHandle(
             conversationHistory: appendConversationMessages(
               freshSession.conversationHistory,
               innerResult.conversation.current,
+              baseConversationHistory,
             ),
             runs: freshSession.runs.map((r) => (r.runId === runId ? terminalRef : r)),
           };
@@ -747,6 +762,7 @@ export function createSessionHandle(
                         ? {
                             conversationHistory: appendConversationMessages(
                               freshSession.conversationHistory,
+                              terminalConversation,
                               terminalConversation,
                             ),
                           }

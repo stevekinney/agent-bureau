@@ -4,7 +4,7 @@ import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
 import type { Toolbox } from 'armorer';
 import { createTool, createToolbox } from 'armorer';
 import { afterEach, describe, expect, it, mock } from 'bun:test';
-import { createConversationHistory } from 'conversationalist';
+import { Conversation, createConversationHistory } from 'conversationalist';
 import { TypedEventTarget } from 'lifecycle';
 import { z } from 'zod';
 
@@ -260,6 +260,50 @@ describe('session.run()', () => {
     );
     expect(contents).toContain('first concurrent message');
     expect(contents).toContain('second concurrent message');
+  });
+
+  it('preserves message edits from one concurrent run without dropping another run', async () => {
+    const sessionId = 'concurrent-redaction-session';
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+    const baseConversation = new Conversation(createConversationHistory({ id: sessionId }));
+    baseConversation.appendUserMessage('sensitive original');
+    await store.save(
+      createAgentSession({
+        id: sessionId,
+        agentName: 'test-agent',
+        conversationHistory: baseConversation.current,
+      }),
+    );
+
+    const redactingHandle = createSessionHandle(sessionId, {
+      store,
+      agentName: 'test-agent',
+      runOptions: createTestRunOptions(async (context) => {
+        context.conversation.redactMessageAtPosition(0, 'redacted original');
+        return { content: 'redacted reply', toolCalls: [] };
+      }),
+    });
+    const appendingHandle = createSessionHandle(sessionId, {
+      store,
+      agentName: 'test-agent',
+      runOptions: createTestRunOptions(createInstantGenerate('appended reply')),
+    });
+
+    await Promise.all([
+      redactingHandle.run('redact request').result(),
+      appendingHandle.run('append request').result(),
+    ]);
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+
+    const session = await store.load(sessionId);
+    expect(session).toBeDefined();
+    const contents = session!.conversationHistory.ids.map(
+      (id) => session!.conversationHistory.messages[id]!.content,
+    );
+    expect(contents).toContain('redacted original');
+    expect(contents).not.toContain('sensitive original');
+    expect(contents).toContain('append request');
   });
 
   it('updates the session conversation history after each run', async () => {

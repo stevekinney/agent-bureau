@@ -367,6 +367,57 @@ describe('createBureau', () => {
     expect(contents).toContain('Second concurrent bureau message');
   });
 
+  it('preserves conversation edits from one concurrent createRun without dropping another turn', async () => {
+    const persistence = textValueStore(new MemoryStorage());
+    const sessionStore = createSessionStore(persistence);
+    const sessionId = 'concurrent-bureau-redaction-session';
+    const baseConversation = new Conversation();
+    baseConversation.appendUserMessage('sensitive bureau original');
+    await sessionStore.save({
+      id: sessionId,
+      agentName: 'bureau',
+      conversationHistory: baseConversation.current,
+      runs: [],
+      metadata: {},
+      revision: 0,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+
+    const bureau = await createBureau({
+      generate: async (context) => {
+        if (
+          context.conversation
+            .getMessages()
+            .some((message) => message.content === 'Redact concurrent bureau message')
+        ) {
+          context.conversation.redactMessageAtPosition(0, 'redacted bureau original');
+        }
+        return { content: 'Done.', toolCalls: [] };
+      },
+      toolbox: createEmptyToolbox(),
+      persistence,
+    });
+
+    const [redactingRun, appendingRun] = await Promise.all([
+      bureau.createRun({ message: 'Redact concurrent bureau message', sessionId }),
+      bureau.createRun({ message: 'Append concurrent bureau message', sessionId }),
+    ]);
+    await Promise.all([
+      waitForRunCompletion(bureau, redactingRun.id),
+      waitForRunCompletion(bureau, appendingRun.id),
+    ]);
+
+    const session = await bureau.getSession(sessionId);
+    expect(session).toBeDefined();
+    const contents = session!.conversationHistory.ids.map(
+      (id) => session!.conversationHistory.messages[id]!.content,
+    );
+    expect(contents).toContain('redacted bureau original');
+    expect(contents).not.toContain('sensitive bureau original');
+    expect(contents).toContain('Append concurrent bureau message');
+  });
+
   it('aligns a new session history identifier with the requested session identifier', async () => {
     const bureau = await createBureau({
       generate: createMockGenerate(),

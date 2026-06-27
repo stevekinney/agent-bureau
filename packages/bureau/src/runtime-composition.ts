@@ -430,24 +430,36 @@ const defaultRuntimeCompositionDependencies: RuntimeCompositionDependencies = {
   resolveProviderGenerate,
 };
 
+function messagesAreEqual(
+  left: ConversationHistory['messages'][string],
+  right: ConversationHistory['messages'][string],
+): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
 function appendConversationMessages(
   current: ConversationHistory,
   candidate: ConversationHistory,
+  base: ConversationHistory,
 ): ConversationHistory {
+  const baseIds = new Set(base.ids);
+  const candidateIds = new Set(candidate.ids);
   const currentIds = new Set(current.ids);
+  const currentPreservedIds = current.ids.filter((id) => candidateIds.has(id) || !baseIds.has(id));
   const candidateOnlyIds = candidate.ids.filter((id) => !currentIds.has(id));
-  const ids = [...current.ids, ...candidateOnlyIds];
-  const messages = {
-    ...current.messages,
-    ...candidateOnlyIds.reduce<Record<string, ConversationHistory['messages'][string]>>(
-      (accumulator, id) => {
-        const message = candidate.messages[id];
-        if (message) accumulator[id] = message;
-        return accumulator;
-      },
-      {},
-    ),
-  };
+  const ids = [...currentPreservedIds, ...candidateOnlyIds];
+  const messages: Record<string, ConversationHistory['messages'][string]> = {};
+
+  for (const id of ids) {
+    const candidateMessage = candidate.messages[id];
+    const baseMessage = base.messages[id];
+    const message =
+      candidateMessage &&
+      (!baseMessage || !messagesAreEqual(candidateMessage, baseMessage) || !current.messages[id])
+        ? candidateMessage
+        : (current.messages[id] ?? candidateMessage);
+    if (message) messages[id] = message;
+  }
 
   for (const [position, id] of ids.entries()) {
     const message = messages[id];
@@ -1304,6 +1316,7 @@ export async function createRuntimeComposition(
     store: SessionStore,
     sessionId: string,
     agentName: string,
+    baseConversationHistory: ConversationHistory,
   ): OnStepHook {
     return async (context) => {
       await store.update(sessionId, (existing) => {
@@ -1317,7 +1330,11 @@ export async function createRuntimeComposition(
         return {
           ...next,
           conversationHistory: existing
-            ? appendConversationMessages(existing.conversationHistory, context.conversation.current)
+            ? appendConversationMessages(
+                existing.conversationHistory,
+                context.conversation.current,
+                baseConversationHistory,
+              )
             : context.conversation.current,
         };
       });
@@ -1375,6 +1392,7 @@ export async function createRuntimeComposition(
         conversation.appendSystemMessage(systemPrompt);
       }
     }
+    const baseConversationHistory = conversation.current;
     conversation.appendUserMessage(scheduledInput.input);
 
     // Same runtime a normal run builds (generate/toolbox/memory/skills/guardrails),
@@ -1399,7 +1417,7 @@ export async function createRuntimeComposition(
         // stateless fire is observable; runs AFTER the runtime's own onStep hooks.
         onStep: [
           ...runRuntime.onStep,
-          createScheduledSessionPersistHook(store, sessionId, agentName),
+          createScheduledSessionPersistHook(store, sessionId, agentName, baseConversationHistory),
         ],
         validateResponse: runRuntime.validateResponse,
         agentName,
