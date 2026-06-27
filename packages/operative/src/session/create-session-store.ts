@@ -67,6 +67,22 @@ function mergeConversationHistory(
 ): ConversationHistory {
   const currentIds = new Set(current.ids);
   const candidateOnlyIds = candidate.ids.filter((id) => !currentIds.has(id));
+  const ids = [...current.ids, ...candidateOnlyIds];
+  const messages = {
+    ...candidateOnlyIds.reduce<Record<string, ConversationHistory['messages'][string]>>(
+      (accumulator, id) => {
+        const message = candidate.messages[id];
+        if (message) accumulator[id] = message;
+        return accumulator;
+      },
+      { ...current.messages },
+    ),
+  };
+
+  for (const [position, id] of ids.entries()) {
+    const message = messages[id];
+    if (message) messages[id] = { ...message, position };
+  }
 
   return {
     ...current,
@@ -75,36 +91,40 @@ function mergeConversationHistory(
       ...current.metadata,
       ...candidate.metadata,
     },
-    ids: [...current.ids, ...candidateOnlyIds],
-    messages: {
-      ...current.messages,
-      ...candidate.messages,
-    },
+    ids,
+    messages,
     createdAt: current.createdAt,
     updatedAt: candidate.updatedAt,
   };
 }
 
 function mergeSessions(current: AgentSession, candidate: AgentSession): AgentSession {
+  const candidateIsFresh = candidate.revision >= current.revision;
   const candidateRunsById = new Map(candidate.runs.map((run) => [run.runId, run]));
   const currentRunIds = new Set(current.runs.map((run) => run.runId));
   const mergedRuns = [
-    ...current.runs.map((run) => candidateRunsById.get(run.runId) ?? run),
+    ...current.runs.map((run) =>
+      candidateIsFresh ? (candidateRunsById.get(run.runId) ?? run) : run,
+    ),
     ...candidate.runs.filter((run) => !currentRunIds.has(run.runId)),
   ];
+  const metadata = candidateIsFresh
+    ? { ...current.metadata, ...candidate.metadata }
+    : {
+        ...candidate.metadata,
+        ...current.metadata,
+      };
 
   return {
     ...current,
-    ...candidate,
+    ...(candidateIsFresh ? candidate : {}),
+    agentName: candidateIsFresh ? candidate.agentName : current.agentName,
     conversationHistory: mergeConversationHistory(
       current.conversationHistory,
       candidate.conversationHistory,
     ),
     runs: mergedRuns,
-    metadata: {
-      ...current.metadata,
-      ...candidate.metadata,
-    },
+    metadata,
     createdAt: current.createdAt,
     revision: current.revision,
     updatedAt: candidate.updatedAt,
@@ -168,7 +188,7 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
         const raw = await store.get(keyFor(session.id));
         const current = parseSession(raw);
         const candidate = current ? mergeSessions(current, session) : session;
-        const committed = await commit(candidate, raw, current?.revision ?? 0, false);
+        const committed = await commit(candidate, raw, current?.revision ?? 0, true);
         if (committed) return;
       }
 

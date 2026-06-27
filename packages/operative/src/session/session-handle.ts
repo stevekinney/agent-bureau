@@ -402,16 +402,19 @@ export function createSessionHandle(
   }
 
   /**
-   * Load the session and return the last `RunRef` iff it is `'running'`,
-   * otherwise throw `NoRunningRunError`.
+   * Load the session and return this handle's run when attached, otherwise the
+   * last run. Signal/update must not target a later concurrent run owned by
+   * another handle.
    */
   async function requireRunningRunId(verb: string): Promise<string> {
     const session = await store.load(sessionId);
-    const last = session?.runs[session.runs.length - 1];
-    if (!last || last.status !== 'running') {
+    const target = currentRunId
+      ? session?.runs.find((runRef) => runRef.runId === currentRunId)
+      : session?.runs[session.runs.length - 1];
+    if (!target || target.status !== 'running') {
       throw new NoRunningRunError(verb, sessionId);
     }
-    return last.runId;
+    return target.runId;
   }
 
   const handle: SessionHandle = {
@@ -758,7 +761,7 @@ export function createSessionHandle(
               if (!latestSession) return undefined;
               const runs = [...latestSession.runs];
               const runIndex = runs.findIndex((runRef) => runRef.runId === targetRun.runId);
-              if (runIndex < 0 || !runs[runIndex]) return latestSession;
+              if (runIndex < 0 || !runs[runIndex]) return undefined;
               runs[runIndex] = { ...runs[runIndex], status: 'aborted' };
               return {
                 ...latestSession,
@@ -854,15 +857,17 @@ export function createSessionHandle(
     async query<TResult = unknown>(name: string, input?: unknown): Promise<TResult> {
       const eng = requireEngine('query');
       // `query` works on any session (full fidelity when a live run is attached,
-      // durable fidelity from the checkpoint otherwise). We use the last run's id
-      // regardless of status.
+      // durable fidelity from the checkpoint otherwise). Prefer this handle's
+      // attached run; fall back to the last run when no run is attached.
       const session = await store.load(sessionId);
-      const last = session?.runs[session.runs.length - 1];
-      if (!last) {
+      const target = currentRunId
+        ? session?.runs.find((runRef) => runRef.runId === currentRunId)
+        : session?.runs[session.runs.length - 1];
+      if (!target) {
         throw new NoRunningRunError('query', sessionId);
       }
       emitter.dispatchEvent(new SessionQueryEvent(sessionId, name, input));
-      return eng.query(last.runId, name, input) as Promise<TResult>;
+      return eng.query(target.runId, name, input) as Promise<TResult>;
     },
 
     async monitor(options: MonitorOptions): Promise<boolean> {

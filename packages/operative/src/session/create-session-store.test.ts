@@ -23,6 +23,13 @@ function makeSession(overrides: {
   return session;
 }
 
+async function seedStoredSession(
+  store: ReturnType<typeof textValueStore>,
+  session: ReturnType<typeof makeSession>,
+): Promise<void> {
+  await store.set(`agent-session:${session.id}`, JSON.stringify(session));
+}
+
 describe('createSessionStore', () => {
   it('save/load round trip preserves session data', async () => {
     const store = createSessionStore(textValueStore(new MemoryStorage()));
@@ -70,6 +77,11 @@ describe('createSessionStore', () => {
     );
     expect(contents).toContain('first writer');
     expect(contents).toContain('second writer');
+    expect(
+      loaded!.conversationHistory.ids.map(
+        (id, index) => loaded!.conversationHistory.messages[id]!.position === index,
+      ),
+    ).toEqual([true, true]);
   });
 
   it('preserves metadata and conversation updates that interleave', async () => {
@@ -96,6 +108,92 @@ describe('createSessionStore', () => {
       (id) => loaded!.conversationHistory.messages[id]!.content,
     );
     expect(contents).toContain('conversation update');
+  });
+
+  it('does not let stale saves revert existing metadata keys', async () => {
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
+    const session = makeSession({ id: 'stale-metadata-session' });
+    session.metadata = { status: 'old' };
+    await store.save(session);
+
+    const staleWriter = await store.load(session.id);
+    expect(staleWriter).toBeDefined();
+
+    await store.updateMetadata(session.id, { status: 'new' });
+    await store.save({
+      ...staleWriter!,
+      metadata: { ...staleWriter!.metadata, staleOnly: true },
+    });
+
+    const loaded = await store.load(session.id);
+    expect(loaded!.metadata).toEqual({ status: 'new', staleOnly: true });
+  });
+
+  it('does not let stale saves revert current run statuses', async () => {
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
+    const session = makeSession({ id: 'stale-run-session' });
+    session.runs = [
+      {
+        runId: 'stale-run-session:0',
+        sequence: 0,
+        status: 'running',
+        startedAt: '2025-01-01T00:00:00.000Z',
+        agentName: 'test-agent',
+      },
+    ];
+    await store.save(session);
+
+    const staleWriter = await store.load(session.id);
+    expect(staleWriter).toBeDefined();
+
+    await store.update(session.id, (latestSession) =>
+      latestSession
+        ? {
+            ...latestSession,
+            runs: latestSession.runs.map((run) =>
+              run.runId === 'stale-run-session:0' ? { ...run, status: 'completed' } : run,
+            ),
+          }
+        : undefined,
+    );
+    await store.save({
+      ...staleWriter!,
+      metadata: { staleOnly: true },
+    });
+
+    const loaded = await store.load(session.id);
+    expect(loaded!.runs[0]!.status).toBe('completed');
+    expect(loaded!.metadata).toEqual({ staleOnly: true });
+  });
+
+  it('does not let stale saves revert the current agent name', async () => {
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
+    const session = makeSession({ id: 'stale-agent-session', agentName: 'old-agent' });
+    await store.save(session);
+
+    const staleWriter = await store.load(session.id);
+    expect(staleWriter).toBeDefined();
+
+    await store.update(session.id, (latestSession) =>
+      latestSession ? { ...latestSession, agentName: 'new-agent' } : undefined,
+    );
+    await store.save(staleWriter!);
+
+    const loaded = await store.load(session.id);
+    expect(loaded!.agentName).toBe('new-agent');
+  });
+
+  it('refreshes updatedAt on save', async () => {
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
+    const session = makeSession({
+      id: 'save-timestamp-session',
+      updatedAt: '2025-01-01T00:00:00.000Z',
+    });
+
+    await store.save(session);
+
+    const loaded = await store.load(session.id);
+    expect(loaded!.updatedAt).not.toBe('2025-01-01T00:00:00.000Z');
   });
 
   it('load returns undefined for nonexistent session', async () => {
@@ -167,7 +265,8 @@ describe('createSessionStore', () => {
   });
 
   it('list returns sorted summaries by updatedAt descending by default', async () => {
-    const store = createSessionStore(textValueStore(new MemoryStorage()));
+    const rawStore = textValueStore(new MemoryStorage());
+    const store = createSessionStore(rawStore);
 
     const s1 = makeSession({
       id: 'session-1',
@@ -188,9 +287,9 @@ describe('createSessionStore', () => {
       updatedAt: '2025-01-02T00:00:00.000Z',
     });
 
-    await store.save(s1);
-    await store.save(s2);
-    await store.save(s3);
+    await seedStoredSession(rawStore, s1);
+    await seedStoredSession(rawStore, s2);
+    await seedStoredSession(rawStore, s3);
 
     const summaries = await store.list();
 
@@ -276,7 +375,8 @@ describe('createSessionStore', () => {
   });
 
   it('cleanup deletes old sessions and returns count', async () => {
-    const store = createSessionStore(textValueStore(new MemoryStorage()));
+    const rawStore = textValueStore(new MemoryStorage());
+    const store = createSessionStore(rawStore);
 
     const old = makeSession({
       id: 'old-session',
@@ -287,8 +387,8 @@ describe('createSessionStore', () => {
       updatedAt: new Date().toISOString(),
     });
 
-    await store.save(old);
-    await store.save(recent);
+    await seedStoredSession(rawStore, old);
+    await seedStoredSession(rawStore, recent);
 
     // Delete sessions older than 1 day
     const deleted = await store.cleanup({ olderThan: 24 * 60 * 60 * 1000 });
@@ -299,7 +399,8 @@ describe('createSessionStore', () => {
   });
 
   it('cleanup filters by agentName', async () => {
-    const store = createSessionStore(textValueStore(new MemoryStorage()));
+    const rawStore = textValueStore(new MemoryStorage());
+    const store = createSessionStore(rawStore);
 
     const oldA = makeSession({
       id: 'old-a',
@@ -312,8 +413,8 @@ describe('createSessionStore', () => {
       updatedAt: '2024-01-01T00:00:00.000Z',
     });
 
-    await store.save(oldA);
-    await store.save(oldB);
+    await seedStoredSession(rawStore, oldA);
+    await seedStoredSession(rawStore, oldB);
 
     const deleted = await store.cleanup({
       olderThan: 24 * 60 * 60 * 1000,

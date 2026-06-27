@@ -1057,6 +1057,80 @@ describe('session.update()', () => {
     const result = await h.update('params', { temp: 0.5 });
     expect(result).toEqual({ ok: true });
   });
+
+  it('targets this handle run for signal, update, and query when another run is later', async () => {
+    const targetedIds: Array<{ verb: string; id: string }> = [];
+    const fakeEngine = {
+      signal: async (id: string) => {
+        targetedIds.push({ verb: 'signal', id });
+      },
+      update: async (id: string) => {
+        targetedIds.push({ verb: 'update', id });
+        return { ok: true };
+      },
+      query: async (id: string) => {
+        targetedIds.push({ verb: 'query', id });
+        return { ok: true };
+      },
+    } as unknown as AnyRunEngine;
+
+    const generateStartedResolvers: Array<() => void> = [];
+    const generateStarted = [0, 1].map(
+      (index) =>
+        new Promise<void>((resolve) => {
+          generateStartedResolvers[index] = resolve;
+        }),
+    );
+    const resolveGenerate: Array<() => void> = [];
+    let generateCallIndex = 0;
+    const blockingGenerate: GenerateFunction = () => {
+      const index = generateCallIndex++;
+      return new Promise<{ content: string; toolCalls: [] }>((resolve) => {
+        resolveGenerate[index] = () => resolve({ content: `done ${index}`, toolCalls: [] });
+        generateStartedResolvers[index]?.();
+      });
+    };
+
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+    const runOptions = {
+      generate: blockingGenerate,
+      toolbox: createToolbox([]) as unknown as Toolbox,
+      maximumSteps: 1,
+    };
+    const firstHandle = createSessionHandle('shared-hitl-session', {
+      store,
+      agentName: 'hitl-agent',
+      engine: fakeEngine,
+      runOptions,
+    });
+    const secondHandle = createSessionHandle('shared-hitl-session', {
+      store,
+      agentName: 'hitl-agent',
+      engine: fakeEngine,
+      runOptions,
+    });
+
+    const firstRun = firstHandle.run('first');
+    const secondRun = secondHandle.run('second');
+    void firstRun.result().catch(() => {});
+    void secondRun.result().catch(() => {});
+    await Promise.all(generateStarted);
+
+    await firstHandle.signal('approve');
+    await firstHandle.update('params');
+    await firstHandle.query('state');
+
+    expect(targetedIds).toEqual([
+      { verb: 'signal', id: 'shared-hitl-session:0' },
+      { verb: 'update', id: 'shared-hitl-session:0' },
+      { verb: 'query', id: 'shared-hitl-session:0' },
+    ]);
+
+    resolveGenerate[0]?.();
+    resolveGenerate[1]?.();
+    await Promise.allSettled([firstRun.result(), secondRun.result()]);
+  });
 });
 
 // ---------------------------------------------------------------------------

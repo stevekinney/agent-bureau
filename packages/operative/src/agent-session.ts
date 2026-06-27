@@ -81,7 +81,7 @@ export function createAgentSession(options: {
 }
 
 /**
- * Saves an agent session by serializing it directly to the key-value store.
+ * Saves an agent session through the conflict-aware SessionStore path.
  */
 export async function saveAgentSession(
   store: ConditionalTextValueStore,
