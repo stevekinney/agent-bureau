@@ -372,6 +372,7 @@ export function createSessionHandle(
    * when the run settles. Used by `recover()`.
    */
   let currentRun: AgentRun | null = null;
+  let currentRunId: string | null = null;
 
   /**
    * Load the session from the store, creating it if absent.
@@ -487,6 +488,7 @@ export function createSessionHandle(
         }
 
         const { runId, runningRef, seededConversation } = reservation;
+        currentRunId = runId;
 
         // Thread the eager AbortController's signal into the run options so
         // abort() works immediately — even before the inner run's own
@@ -620,7 +622,10 @@ export function createSessionHandle(
         })
         .finally(() => {
           outerEmitter.complete();
-          if (currentRun === agentRun) currentRun = null;
+          if (currentRun === agentRun) {
+            currentRun = null;
+            currentRunId = null;
+          }
         });
 
       return agentRun;
@@ -659,6 +664,7 @@ export function createSessionHandle(
             );
             const agentRun = createAgentRun(activeRun);
             currentRun = agentRun;
+            currentRunId = runId;
             // Persist terminal state when the recovered run settles, mirroring
             // the conflict-aware update path in run(). Without this the persisted RunRef
             // stays 'running' after a recovered run completes, causing
@@ -675,7 +681,10 @@ export function createSessionHandle(
                 // Recovered run rejected (e.g. engine failure). Leave status 'error';
                 // no conversation update — the run never produced a clean result.
               } finally {
-                if (currentRun === agentRun) currentRun = null;
+                if (currentRun === agentRun) {
+                  currentRun = null;
+                  currentRunId = null;
+                }
                 // Reload the session (may have been updated by concurrent activity)
                 // and replace the RunRef with its terminal status.
                 try {
@@ -719,6 +728,7 @@ export function createSessionHandle(
       // path from architecture.md: we do NOT rely on Weft termination reaching
       // the in-flight call, because Weft only honors cancel at the next `yield*`.
       const run = currentRun;
+      const targetRunId = currentRunId;
       if (run) {
         run.abort('cancelled');
       }
@@ -727,16 +737,18 @@ export function createSessionHandle(
       // Fire-and-forget — a failure here is non-fatal (we already aborted the
       // generate signal in step 1). Load the session once and reuse.
       const cancelSession = await store.load(sessionId);
-      const lastRunId = cancelSession?.runs[cancelSession.runs.length - 1]?.runId ?? null;
+      const targetRun = targetRunId
+        ? cancelSession?.runs.find((runRef) => runRef.runId === targetRunId)
+        : cancelSession?.runs[cancelSession.runs.length - 1];
+      const cancelRunId = targetRun?.runId ?? targetRunId;
 
-      // Emit the cancel event with the last known run id (null if no runs recorded yet).
-      emitter.dispatchEvent(new SessionCancelEvent(sessionId, lastRunId));
+      // Emit the cancel event with the targeted run id (null if no runs recorded yet).
+      emitter.dispatchEvent(new SessionCancelEvent(sessionId, cancelRunId ?? null));
 
       if (engine && cancelSession) {
-        const last = cancelSession.runs[cancelSession.runs.length - 1];
-        if (last && last.status === 'running') {
+        if (targetRun && targetRun.status === 'running') {
           try {
-            await engine.cancel(last.runId);
+            await engine.cancel(targetRun.runId);
             // Persist the aborted status only after the durable cancel succeeds.
             // If engine.cancel() throws (e.g. storage fault or stale engine), the
             // Weft workflow may still be running, so marking the session 'aborted'
@@ -745,7 +757,7 @@ export function createSessionHandle(
             await store.update(sessionId, (latestSession) => {
               if (!latestSession) return undefined;
               const runs = [...latestSession.runs];
-              const runIndex = runs.findIndex((runRef) => runRef.runId === last.runId);
+              const runIndex = runs.findIndex((runRef) => runRef.runId === targetRun.runId);
               if (runIndex < 0 || !runs[runIndex]) return latestSession;
               runs[runIndex] = { ...runs[runIndex], status: 'aborted' };
               return {
@@ -760,6 +772,7 @@ export function createSessionHandle(
       }
 
       currentRun = null;
+      currentRunId = null;
     },
 
     async fork(options?: { throughRun?: number }): Promise<SessionHandle> {

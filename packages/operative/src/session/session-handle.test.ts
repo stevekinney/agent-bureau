@@ -583,6 +583,74 @@ describe('session.cancel()', () => {
     const updated = await store.load('durable-session');
     expect(updated!.runs[0]!.status).toBe('aborted');
   });
+
+  it('cancels the current handle run instead of the last session run', async () => {
+    const cancelledIds: string[] = [];
+    const fakeEngine = {
+      cancel: async (id: string) => {
+        cancelledIds.push(id);
+      },
+      signal: async () => {},
+      update: async () => {},
+      query: async () => {},
+    } as unknown as AnyRunEngine;
+
+    const generateStartedResolvers: Array<() => void> = [];
+    const generateStarted = [0, 1].map(
+      (index) =>
+        new Promise<void>((resolve) => {
+          generateStartedResolvers[index] = resolve;
+        }),
+    );
+    const resolveGenerate: Array<() => void> = [];
+    let generateCallIndex = 0;
+    const blockingGenerate: GenerateFunction = () => {
+      const index = generateCallIndex++;
+      return new Promise<{ content: string; toolCalls: [] }>((resolve) => {
+        resolveGenerate[index] = () => resolve({ content: `done ${index}`, toolCalls: [] });
+        generateStartedResolvers[index]?.();
+      });
+    };
+
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+    const runOptions = {
+      generate: blockingGenerate,
+      toolbox: createToolbox([]) as unknown as Toolbox,
+      maximumSteps: 1,
+    };
+    const firstHandle = createSessionHandle('shared-cancel-session', {
+      store,
+      agentName: 'cancel-agent',
+      engine: fakeEngine,
+      runOptions,
+    });
+    const secondHandle = createSessionHandle('shared-cancel-session', {
+      store,
+      agentName: 'cancel-agent',
+      engine: fakeEngine,
+      runOptions,
+    });
+
+    const firstRun = firstHandle.run('first');
+    const secondRun = secondHandle.run('second');
+    void firstRun.result().catch(() => {});
+    void secondRun.result().catch(() => {});
+    await Promise.all(generateStarted);
+
+    await firstHandle.cancel();
+
+    expect(cancelledIds).toEqual(['shared-cancel-session:0']);
+    const updated = await store.load('shared-cancel-session');
+    expect(updated!.runs.map((run) => [run.runId, run.status])).toEqual([
+      ['shared-cancel-session:0', 'aborted'],
+      ['shared-cancel-session:1', 'running'],
+    ]);
+
+    resolveGenerate[0]?.();
+    resolveGenerate[1]?.();
+    await Promise.allSettled([firstRun.result(), secondRun.result()]);
+  });
 });
 
 // ---------------------------------------------------------------------------
