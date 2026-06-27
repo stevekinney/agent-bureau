@@ -766,7 +766,9 @@ export async function runStep(
                   {
                     ...deps.executeOptions,
                     signal: stepSignal,
-                    ...(deps.durableOperationKeys && deps.runId !== undefined
+                    ...(deps.durableOperationKeys &&
+                    deps.runId !== undefined &&
+                    deps.executeOptions?.durableOperationKey === undefined
                       ? {
                           durableOperationKey: (call: ToolCall, index: number) =>
                             `schedule-safe:${deps.runId}:step-${step}:tool-${index}:${call.name}`,
@@ -780,7 +782,9 @@ export async function runStep(
                 {
                   ...deps.executeOptions,
                   signal: stepSignal,
-                  ...(deps.durableOperationKeys && deps.runId !== undefined
+                  ...(deps.durableOperationKeys &&
+                  deps.runId !== undefined &&
+                  deps.executeOptions?.durableOperationKey === undefined
                     ? {
                         durableOperationKey: (call: ToolCall, index: number) =>
                           `schedule-safe:${deps.runId}:step-${step}:tool-${index}:${call.name}`,

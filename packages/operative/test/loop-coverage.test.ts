@@ -342,4 +342,40 @@ describe('loop helper coverage', () => {
     expect(result.finishReason).toBe('stop-condition');
     expect(durableOperationKeys).toEqual([undefined]);
   });
+
+  it('preserves explicit durable operation keys from execute options', async () => {
+    const durableOperationKeys: Array<string | undefined> = [];
+    const recordKeyTool = createTool({
+      name: 'record_key',
+      description: 'Record the durable operation key.',
+      input: z.object({}),
+      execute: async (_input, context) => {
+        durableOperationKeys.push(context.durableOperationKey);
+        return { ok: true };
+      },
+    });
+    let generateCalls = 0;
+
+    const result = await executeLoop({
+      generate: async () => {
+        generateCalls++;
+        if (generateCalls === 1) {
+          return {
+            content: '',
+            toolCalls: [{ id: 'provider-call-a', name: 'record_key', arguments: {} }],
+          };
+        }
+        return textResponse('done');
+      },
+      toolbox: createTestToolbox([recordKeyTool]),
+      conversation: new Conversation(),
+      executeOptions: { durableOperationKey: 'host-provided-key' },
+      runId: 'durable-run-1',
+      durableOperationKeys: true,
+      stopWhen: noToolCalls(),
+    });
+
+    expect(result.finishReason).toBe('stop-condition');
+    expect(durableOperationKeys).toEqual(['host-provided-key']);
+  });
 });
