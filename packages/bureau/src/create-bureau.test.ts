@@ -1417,6 +1417,65 @@ describe('createBureau', () => {
     expect(session?.metadata['lastFinishReason']).toBe('aborted');
   });
 
+  it('persists the checkpointed conversation when a durable run is aborted after a checkpoint (regression PRRT_kwDORvupsc6Mddv3 / #113)', async () => {
+    // On the durable path the workflow mutates per-step checkpoint SNAPSHOTS, not
+    // the launch-time `Conversation` the run was created with. So a durable run
+    // that aborts AFTER checkpointed steps — e.g. when engine.cancel() wins the
+    // abort race — reconstructs its abort RunResult from the checkpoint. The
+    // run.aborted listener must persist THAT conversation (carried on the abort
+    // event), not the launch-time seed; otherwise the session history is clobbered
+    // back to just the seed message and the checkpointed steps are lost.
+    let reachedStep1 = false;
+    const bureau = await createBureau({
+      generate: async ({ step }) => {
+        if (step === 0) {
+          // Step 0 commits a tool call so the workflow checkpoints it before
+          // looping into step 1 (saveConversation/recordStep/saveCursor).
+          return { content: 'checkpointed step 0', toolCalls: [{ name: 'next', arguments: {} }] };
+        }
+        // Entering step 1's generate proves step 0 is durably checkpointed (its
+        // saveCursor yield resolved). Hang here, ignoring the abort signal, so the
+        // ONLY way to terminate is engine.cancel() winning the abort race — the
+        // post-checkpoint durable abort the regression is about.
+        reachedStep1 = true;
+        return new Promise<never>(() => {});
+      },
+      toolbox: createToolbox([createNextTool()]) as unknown as Toolbox,
+      storage: { type: 'memory' },
+      durableExecution: true,
+      stopWhen: stopWhen.noToolCalls(),
+    });
+
+    try {
+      const run = await bureau.createRun({ message: 'Abort me after a checkpoint' });
+      await pollUntil(() => reachedStep1);
+      expect(reachedStep1).toBe(true);
+
+      // engine.cancel() terminalizes the workflow; its result rejects and the
+      // abort RunResult is reconstructed from the checkpoint, carrying step 0.
+      bureau.abortRun(run.id);
+
+      await pollUntil(async () => {
+        const current = await bureau.getSession(run.sessionId);
+        return current?.metadata['lastRunStatus'] === 'aborted';
+      });
+
+      const session = await bureau.getSession(run.sessionId);
+      expect(session?.metadata['lastRunStatus']).toBe('aborted');
+
+      // The persisted history must include the checkpointed step 0, not just the
+      // launch-time seed. Before the fix the listener wrote the seed `conversation`
+      // closure (only the user message), so this content was absent.
+      const messages = session?.conversationHistory ? getMessages(session.conversationHistory) : [];
+      const hasCheckpointedStep = messages.some(
+        (m) => typeof m.content === 'string' && m.content.includes('checkpointed step 0'),
+      );
+      expect(hasCheckpointedStep).toBe(true);
+    } finally {
+      bureau.dispose();
+    }
+  });
+
   it('throws CONFLICT when deleting a running run', async () => {
     const generate: GenerateFunction = () => new Promise(() => {});
     const bureau = await createBureau({ generate, toolbox: createEmptyToolbox() });
