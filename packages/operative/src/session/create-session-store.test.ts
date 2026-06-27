@@ -234,6 +234,35 @@ describe('createSessionStore', () => {
     expect(loaded!.revision).toBe(0);
   });
 
+  it('merges saves for legacy sessions without runs', async () => {
+    const rawStore = textValueStore(new MemoryStorage());
+    const store = createSessionStore(rawStore);
+    const legacySession = makeSession({ id: 'legacy-session-without-runs' });
+    const { revision: _revision, runs: _runs, ...legacyPayload } = legacySession;
+    await rawStore.set('agent-session:legacy-session-without-runs', JSON.stringify(legacyPayload));
+
+    const loaded = await store.load('legacy-session-without-runs');
+    expect(loaded).toBeDefined();
+    expect(loaded!.revision).toBe(0);
+    expect(loaded!.runs).toEqual([]);
+
+    const conversation = new Conversation(loaded!.conversationHistory);
+    conversation.appendUserMessage('legacy writer');
+
+    await store.save({
+      ...loaded!,
+      conversationHistory: conversation.current,
+    });
+
+    const saved = await store.load('legacy-session-without-runs');
+    expect(saved).toBeDefined();
+    expect(saved!.revision).toBe(1);
+    expect(saved!.runs).toEqual([]);
+    expect(
+      saved!.conversationHistory.ids.map((id) => saved!.conversationHistory.messages[id]!.content),
+    ).toEqual(['legacy writer']);
+  });
+
   it('delete removes a session', async () => {
     const store = createSessionStore(textValueStore(new MemoryStorage()));
     const session = makeSession({});
