@@ -298,6 +298,7 @@ describe('loop helper coverage', () => {
       toolbox: createTestToolbox([recordKeyTool]),
       conversation: new Conversation(),
       runId: 'durable-run-1',
+      durableOperationKeys: true,
       stopWhen: noToolCalls(),
     });
 
@@ -306,5 +307,39 @@ describe('loop helper coverage', () => {
       'schedule-safe:durable-run-1:step-0:tool-0:record_key',
       'schedule-safe:durable-run-1:step-0:tool-1:record_key',
     ]);
+  });
+
+  it('does not pass durable operation keys for in-memory runs with runId only', async () => {
+    const durableOperationKeys: Array<string | undefined> = [];
+    const recordKeyTool = createTool({
+      name: 'record_key',
+      description: 'Record the durable operation key.',
+      input: z.object({}),
+      execute: async (_input, context) => {
+        durableOperationKeys.push(context.durableOperationKey);
+        return { ok: true };
+      },
+    });
+    let generateCalls = 0;
+
+    const result = await executeLoop({
+      generate: async () => {
+        generateCalls++;
+        if (generateCalls === 1) {
+          return {
+            content: '',
+            toolCalls: [{ id: 'provider-call-a', name: 'record_key', arguments: {} }],
+          };
+        }
+        return textResponse('done');
+      },
+      toolbox: createTestToolbox([recordKeyTool]),
+      conversation: new Conversation(),
+      runId: 'in-memory-run-1',
+      stopWhen: noToolCalls(),
+    });
+
+    expect(result.finishReason).toBe('stop-condition');
+    expect(durableOperationKeys).toEqual([undefined]);
   });
 });

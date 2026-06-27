@@ -91,6 +91,7 @@ export interface StepDeps {
   readonly parentContext: unknown;
   readonly withTraceContext: RunOptions['withTraceContext'];
   readonly runId: string | undefined;
+  readonly durableOperationKeys: boolean;
   readonly defaultToolChoice: ToolChoice | undefined;
   readonly stopConditions: StopCondition[];
   readonly prepareStepHooks: PrepareStepHook[];
@@ -765,7 +766,7 @@ export async function runStep(
                   {
                     ...deps.executeOptions,
                     signal: stepSignal,
-                    ...(deps.runId !== undefined
+                    ...(deps.durableOperationKeys && deps.runId !== undefined
                       ? {
                           durableOperationKey: (call: ToolCall, index: number) =>
                             `schedule-safe:${deps.runId}:step-${step}:tool-${index}:${call.name}`,
@@ -779,7 +780,7 @@ export async function runStep(
                 {
                   ...deps.executeOptions,
                   signal: stepSignal,
-                  ...(deps.runId !== undefined
+                  ...(deps.durableOperationKeys && deps.runId !== undefined
                     ? {
                         durableOperationKey: (call: ToolCall, index: number) =>
                           `schedule-safe:${deps.runId}:step-${step}:tool-${index}:${call.name}`,

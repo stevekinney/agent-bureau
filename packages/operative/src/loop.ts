@@ -60,6 +60,7 @@ export function buildStepDeps(options: RunOptions): StepDeps {
     parentContext: options.parentContext,
     withTraceContext: options.withTraceContext,
     runId: options.runId,
+    durableOperationKeys: options.durableOperationKeys ?? false,
     defaultToolChoice: options.toolChoice,
     stopConditions,
     prepareStepHooks: normalizeToArray(options.prepareStep),

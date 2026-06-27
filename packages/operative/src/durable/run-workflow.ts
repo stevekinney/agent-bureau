@@ -377,6 +377,8 @@ export function createRunWorkflow(checkpointStore: CheckpointStore) {
             const stepDeps = {
               ...buildStepDeps(deps.options),
               toolbox: deps.toolbox,
+              runId,
+              durableOperationKeys: true,
             };
             // Carry the accumulators forward; start `steps` empty so this iteration
             // accumulates exactly the one StepResult it produces (and nothing that
