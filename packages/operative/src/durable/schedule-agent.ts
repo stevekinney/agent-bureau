@@ -6,7 +6,7 @@ import type {
   ScheduleSpec,
   ScheduleSummary,
 } from '@lostgradient/weft';
-import { ScheduleHandle } from '@lostgradient/weft';
+import { parseDuration, ScheduleHandle } from '@lostgradient/weft';
 
 import type { AnyRunEngine } from './create-run-engine';
 
@@ -101,6 +101,11 @@ export interface CreateAgentScheduleOptions {
    * etc.). Defaults to a uuid assigned by Weft.
    */
   id?: string;
+  /**
+   * When true with a stable `id`, an existing compatible schedule is treated as
+   * success. This is for durable replay of effectful schedule registration.
+   */
+  idempotent?: boolean;
 }
 
 /**
@@ -195,6 +200,11 @@ export interface AgentScheduleOptions {
   overlap?: ScheduleOverlapPolicy;
   /** Optional stable schedule id (defaults to Weft-assigned uuid). */
   id?: string;
+  /**
+   * When true with a stable `id`, an existing compatible schedule is treated as
+   * success. Used by `scheduleSelf` during durable step replay.
+   */
+  idempotent?: boolean;
 }
 
 /**
@@ -209,6 +219,61 @@ export class InvalidScheduleError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'InvalidScheduleError';
+  }
+}
+
+function scheduleHandleFromEngine(
+  engine: SchedulingEngine,
+  scheduleId: string,
+): AgentScheduleHandle {
+  return {
+    id: scheduleId,
+    pause: () => engine.pauseSchedule(scheduleId),
+    resume: () => engine.resumeSchedule(scheduleId),
+    cancel: () => engine.cancelSchedule(scheduleId),
+    async describe(): Promise<ScheduleSummary> {
+      const schedule = await engine.getSchedule(scheduleId);
+      if (!schedule) {
+        throw new Error(`Schedule ${scheduleId} no longer exists.`);
+      }
+      return schedule;
+    },
+  };
+}
+
+function assertCompatibleAgentSchedule(
+  schedule: ScheduleSummary,
+  scheduleId: string,
+  workflowType: string,
+  spec: ScheduleSpec,
+  overlap: ScheduleOverlapPolicy | undefined,
+): void {
+  if (schedule.status === 'cancelled') {
+    throw new Error(`Schedule ${scheduleId} already exists but is cancelled.`);
+  }
+
+  if (schedule.workflowType !== workflowType) {
+    throw new Error(
+      `Schedule ${scheduleId} already exists for workflow ${schedule.workflowType}; expected ${workflowType}.`,
+    );
+  }
+
+  const expectedOverlap = overlap ?? 'skip';
+  if (schedule.overlap !== expectedOverlap) {
+    throw new Error(
+      `Schedule ${scheduleId} already exists with overlap ${schedule.overlap}; expected ${expectedOverlap}.`,
+    );
+  }
+
+  if ('cron' in spec) {
+    if (schedule.cronExpression !== spec.cron) {
+      throw new Error(`Schedule ${scheduleId} already exists with a different cron spec.`);
+    }
+    return;
+  }
+
+  if (schedule.intervalMs !== parseDuration(spec.every)) {
+    throw new Error(`Schedule ${scheduleId} already exists with a different interval spec.`);
   }
 }
 
@@ -234,7 +299,7 @@ export class InvalidScheduleError extends Error {
 export async function createAgentSchedule(
   options: CreateAgentScheduleOptions,
 ): Promise<AgentScheduleHandle> {
-  const { engine, agentName, spec, input, session, overlap, id } = options;
+  const { engine, agentName, spec, input, session, overlap, id, idempotent } = options;
   const workflowType = options.workflowType ?? 'agentRun';
 
   if (session !== undefined && session.trim().length === 0) {
@@ -260,7 +325,27 @@ export async function createAgentSchedule(
     ...(id !== undefined ? { id } : {}),
   };
 
-  const handle = await engine.schedule(workflowType, scheduledInput, spec, scheduleOptions);
+  if (id !== undefined && idempotent === true) {
+    const existingSchedule = await engine.getSchedule(id);
+    if (existingSchedule) {
+      assertCompatibleAgentSchedule(existingSchedule, id, workflowType, spec, overlap);
+      return scheduleHandleFromEngine(engine, id);
+    }
+  }
+
+  let handle: ScheduleHandle;
+  try {
+    handle = await engine.schedule(workflowType, scheduledInput, spec, scheduleOptions);
+  } catch (error) {
+    if (id !== undefined && idempotent === true) {
+      const existingSchedule = await engine.getSchedule(id);
+      if (existingSchedule) {
+        assertCompatibleAgentSchedule(existingSchedule, id, workflowType, spec, overlap);
+        return scheduleHandleFromEngine(engine, id);
+      }
+    }
+    throw error;
+  }
 
   return {
     id: handle.id,

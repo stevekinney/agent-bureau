@@ -90,6 +90,8 @@ export interface StepDeps {
   readonly schemaRetryMessage: RunOptions['schemaRetryMessage'];
   readonly parentContext: unknown;
   readonly withTraceContext: RunOptions['withTraceContext'];
+  readonly runId: string | undefined;
+  readonly durableOperationKeys: boolean;
   readonly defaultToolChoice: ToolChoice | undefined;
   readonly stopConditions: StopCondition[];
   readonly prepareStepHooks: PrepareStepHook[];
@@ -761,16 +763,34 @@ export async function runStep(
             ? await deps.withTraceContext(deps.parentContext, () =>
                 stepToolbox.execute(
                   callsToExecute as Parameters<typeof stepToolbox.execute>[0],
-                  { ...deps.executeOptions, signal: stepSignal } as Parameters<
-                    typeof stepToolbox.execute
-                  >[1],
+                  {
+                    ...deps.executeOptions,
+                    signal: stepSignal,
+                    ...(deps.durableOperationKeys &&
+                    deps.runId !== undefined &&
+                    deps.executeOptions?.durableOperationKey === undefined
+                      ? {
+                          durableOperationKey: (call: ToolCall, index: number) =>
+                            `schedule-safe:${deps.runId}:step-${step}:tool-${index}:${call.name}`,
+                        }
+                      : {}),
+                  } as Parameters<typeof stepToolbox.execute>[1],
                 ),
               )
             : await stepToolbox.execute(
                 callsToExecute as Parameters<typeof stepToolbox.execute>[0],
-                { ...deps.executeOptions, signal: stepSignal } as Parameters<
-                  typeof stepToolbox.execute
-                >[1],
+                {
+                  ...deps.executeOptions,
+                  signal: stepSignal,
+                  ...(deps.durableOperationKeys &&
+                  deps.runId !== undefined &&
+                  deps.executeOptions?.durableOperationKey === undefined
+                    ? {
+                        durableOperationKey: (call: ToolCall, index: number) =>
+                          `schedule-safe:${deps.runId}:step-${step}:tool-${index}:${call.name}`,
+                      }
+                    : {}),
+                } as Parameters<typeof stepToolbox.execute>[1],
               );
 
         results = Array.isArray(executeResult) ? executeResult : [executeResult];
