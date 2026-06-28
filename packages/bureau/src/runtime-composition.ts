@@ -562,6 +562,25 @@ export interface ActiveSkillEntry {
 }
 
 const activeSkillsStepMetadataKey = '__bureauActiveSkills';
+const activeSkillsStepMetadataVersion = 1;
+
+function activeSkillsStepMetadata(entries: ActiveSkillEntry[]): JSONValue {
+  return {
+    version: activeSkillsStepMetadataVersion,
+    entries: entries as unknown as JSONValue,
+  };
+}
+
+function activeSkillsFromStepMetadata(
+  metadata: StepRecord['metadata'],
+): ActiveSkillEntry[] | undefined {
+  const raw = metadata?.[activeSkillsStepMetadataKey];
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined;
+  const snapshot = raw as Record<string, unknown>;
+  if (snapshot['version'] !== activeSkillsStepMetadataVersion) return undefined;
+  const entries = snapshot['entries'];
+  return isActiveSkillEntryArray(entries) ? entries : undefined;
+}
 
 /**
  * Validate that a value is a valid {@link ActiveSkillEntry} array for deserialization
@@ -1402,7 +1421,7 @@ export async function createRuntimeComposition(
     return {
       toolbox: runRuntime.toolbox,
       getStepMetadata: () => ({
-        [activeSkillsStepMetadataKey]: runRuntime.getActiveSkillEntries() as unknown as JSONValue,
+        [activeSkillsStepMetadataKey]: activeSkillsStepMetadata(runRuntime.getActiveSkillEntries()),
       }),
       options: {
         generate: runRuntime.generate,
@@ -1572,11 +1591,10 @@ export async function createRuntimeComposition(
       const latestCommittedStep = committedStepRecords
         .filter((step) => step.step <= lastActiveSkillsStep)
         .sort((a, b) => b.step - a.step)
-        .find((step) => isActiveSkillEntryArray(step.metadata?.[activeSkillsStepMetadataKey]));
+        .find((step) => activeSkillsFromStepMetadata(step.metadata) !== undefined);
 
       if (latestCommittedStep !== undefined) {
-        const activeSkills = latestCommittedStep.metadata?.[activeSkillsStepMetadataKey];
-        return isActiveSkillEntryArray(activeSkills) ? activeSkills : undefined;
+        return activeSkillsFromStepMetadata(latestCommittedStep.metadata);
       }
 
       if (
@@ -1703,7 +1721,7 @@ export async function createRuntimeComposition(
     const services: DurableRunDeps = {
       toolbox: runRuntime.toolbox,
       getStepMetadata: () => ({
-        [activeSkillsStepMetadataKey]: runRuntime.getActiveSkillEntries() as unknown as JSONValue,
+        [activeSkillsStepMetadataKey]: activeSkillsStepMetadata(runRuntime.getActiveSkillEntries()),
       }),
       options: {
         generate: runRuntime.generate,
