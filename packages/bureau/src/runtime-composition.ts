@@ -644,8 +644,9 @@ function createSkillStateSnapshotHook(
   trackedSession: TrackedSkillSession,
   sessionId: string,
   store: SessionStore,
+  runId?: string,
 ): OnStepHook {
-  return async () => {
+  return async (context) => {
     const entries = trackedSession.getActiveEntries();
     // Persist as a plain JSON array. SessionStore.updateMetadata accepts
     // Record<string, JSONValue>; ActiveSkillEntry[] is structurally JSONValue-compatible
@@ -654,6 +655,12 @@ function createSkillStateSnapshotHook(
     try {
       await store.updateMetadata(sessionId, {
         lastActiveSkills: entries as unknown as JSONValue,
+        ...(runId !== undefined
+          ? {
+              lastActiveSkillsRunId: runId,
+              lastActiveSkillsStep: context.step,
+            }
+          : {}),
       });
     } catch {
       // Non-fatal: if we can't snapshot the active skills, recovery falls back to
@@ -1268,7 +1275,14 @@ export async function createRuntimeComposition(
       // This is what allows buildRunDepsFromSession to rehydrate the skill set on
       // a cross-process recovery (see resolveRunServices → buildRunDepsFromSession).
       if (sessionStore) {
-        onStep.push(createSkillStateSnapshotHook(skillSession, request.sessionId, sessionStore));
+        onStep.push(
+          createSkillStateSnapshotHook(
+            skillSession,
+            request.sessionId,
+            sessionStore,
+            request.runId,
+          ),
+        );
       }
     }
 
@@ -1421,7 +1435,11 @@ export async function createRuntimeComposition(
             lastScheduledFireRunId: runId,
             ...(sessionOwnedByAnotherRunningRun
               ? {}
-              : { lastActiveSkills: activeSkillEntries as unknown as JSONValue }),
+              : {
+                  lastActiveSkills: activeSkillEntries as unknown as JSONValue,
+                  lastActiveSkillsRunId: runId,
+                  lastActiveSkillsStep: context.step,
+                }),
           },
           conversationHistory: existingConversationHistory
             ? appendConversationMessages(
@@ -1474,6 +1492,44 @@ export async function createRuntimeComposition(
       return session?.metadata['lastScheduledFireRunId'] === runId ? input.sessionId : undefined;
     }
     return loadExistingStatelessScheduledSessionId(store, runId);
+  }
+
+  async function loadCommittedScheduledActiveSkills(
+    session: Awaited<ReturnType<SessionStore['load']>> | undefined,
+    runId: string,
+    recovering: boolean,
+  ): Promise<ActiveSkillEntry[] | undefined> {
+    if (!recovering || !session) return undefined;
+
+    const metadata = session.metadata;
+    const lastActiveSkillsRaw = metadata['lastActiveSkills'];
+    const lastActiveSkillsStep = metadata['lastActiveSkillsStep'];
+    if (
+      metadata['lastScheduledFireRunId'] !== runId ||
+      metadata['lastActiveSkillsRunId'] !== runId ||
+      typeof lastActiveSkillsStep !== 'number' ||
+      !Number.isInteger(lastActiveSkillsStep) ||
+      lastActiveSkillsStep < 0 ||
+      !isActiveSkillEntryArray(lastActiveSkillsRaw)
+    ) {
+      return undefined;
+    }
+
+    try {
+      const checkpoint = await durable?.checkpointStore.loadCheckpoint(runId);
+      return checkpoint?.steps.some((step) => step.step === lastActiveSkillsStep)
+        ? lastActiveSkillsRaw
+        : undefined;
+    } catch (error) {
+      options.onLog?.({
+        workflowId: runId,
+        workflowType: 'agentRun',
+        timestamp: Date.now(),
+        level: 'warn',
+        message: `Unable to verify scheduled fire skill snapshot checkpoint for run "${runId}": ${serializeUnknownError(error)}`,
+      });
+      return undefined;
+    }
   }
 
   /**
@@ -1566,13 +1622,11 @@ export async function createRuntimeComposition(
     // Same runtime a normal run builds (generate/toolbox/memory/skills/guardrails),
     // wired to this fire's session + per-fire runId, with live streaming off (no
     // ActiveRun surface for a scheduled fire).
-    const lastActiveSkillsRaw = existing?.metadata['lastActiveSkills'];
-    const initialActiveSkills =
-      info.schedule === undefined &&
-      existing?.metadata['lastScheduledFireRunId'] === runId &&
-      isActiveSkillEntryArray(lastActiveSkillsRaw)
-        ? lastActiveSkillsRaw
-        : undefined;
+    const initialActiveSkills = await loadCommittedScheduledActiveSkills(
+      existing,
+      runId,
+      info.schedule === undefined,
+    );
 
     const runRuntime = await createRunRuntime(
       { message: scheduledInput.input, sessionId, runId, agentName },
