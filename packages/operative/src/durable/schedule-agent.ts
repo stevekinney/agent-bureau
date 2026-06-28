@@ -118,6 +118,8 @@ export interface CreateAgentScheduleOptions {
    * `ScheduledAgentRunInput.input`).
    */
   input: string;
+  /** Human-readable operator description stored with the schedule. */
+  description?: string;
   /**
    * Optional session id. When supplied, each fire APPENDS a run to this session
    * → the agent accumulates context across fires (the "recurring conversation"
@@ -224,6 +226,8 @@ export interface AgentScheduleOptions {
   spec: ScheduleSpec;
   /** Prompt injected into each scheduled run. */
   input: string;
+  /** Human-readable operator description stored with the schedule. */
+  description?: string;
   /**
    * Optional session id. Present → recurring conversation; absent → fresh session
    * per fire. See architecture.md § External schedule (caller-chosen session
@@ -334,7 +338,7 @@ function assertCompatibleAgentSchedule(
 export async function createAgentSchedule(
   options: CreateAgentScheduleOptions,
 ): Promise<AgentScheduleHandle> {
-  const { engine, agentName, spec, input, session, overlap, id, idempotent } = options;
+  const { engine, agentName, spec, input, description, session, overlap, id, idempotent } = options;
   const workflowType = options.workflowType ?? 'agentRun';
 
   if (session !== undefined && session.trim().length === 0) {
@@ -361,6 +365,7 @@ export async function createAgentSchedule(
   };
 
   const scheduleOptions: ScheduleOptions = {
+    ...(description !== undefined ? { description } : {}),
     ...(overlap !== undefined ? { overlap } : {}),
     id: scheduleId,
   };

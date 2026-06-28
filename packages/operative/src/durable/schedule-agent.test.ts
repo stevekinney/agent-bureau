@@ -157,7 +157,7 @@ describe('createAgentSchedule', () => {
     expect(call.options?.id).toBe(handle.id);
   });
 
-  it('threads session, overlap, and stable id through to the engine', async () => {
+  it('threads description, session, overlap, and stable id through to the engine', async () => {
     const engine = makeSchedulingEngine({ scheduleId: 'daily-digest-sched' });
 
     await createAgentSchedule({
@@ -165,6 +165,7 @@ describe('createAgentSchedule', () => {
       agentName: 'researcher',
       spec: { every: '6h' },
       input: 'hello',
+      description: 'Daily digest',
       session: 'daily-digest',
       overlap: 'queue',
       id: 'daily-digest-sched',
@@ -175,7 +176,11 @@ describe('createAgentSchedule', () => {
     expect(call.spec).toEqual({ every: '6h' });
     expect((call.input as ScheduledAgentRunInput).scheduleId).toBe('daily-digest-sched');
     expect((call.input as ScheduledAgentRunInput).sessionId).toBe('daily-digest');
-    expect(call.options).toEqual({ overlap: 'queue', id: 'daily-digest-sched' });
+    expect(call.options).toEqual({
+      description: 'Daily digest',
+      overlap: 'queue',
+      id: 'daily-digest-sched',
+    });
   });
 
   it('trims a padded schedule id before registering', async () => {
