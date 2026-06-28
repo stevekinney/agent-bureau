@@ -148,4 +148,10 @@ export interface DurableRunDeps {
    * tool inside `ctx.memo`.
    */
   pendingHumanWait?: PendingHumanWait;
+  /**
+   * Optional plain metadata to persist with the committed step record after
+   * `runStep` finishes. This runs immediately before `recordStep`, so the
+   * returned data shares the step record's commit boundary.
+   */
+  getStepMetadata?: () => Record<string, JSONValue> | undefined;
 }

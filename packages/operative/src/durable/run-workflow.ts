@@ -400,6 +400,12 @@ export function createRunWorkflow(checkpointStore: CheckpointStore) {
             // dropping the live Conversation instance — and re-snapshot the
             // transcript. Everything returned here is plain and cloneable.
             const pushed = runState.steps[runState.steps.length - 1];
+            const stepMetadata = pushed
+              ? {
+                  ...(pushed.metadata ?? {}),
+                  ...(deps.getStepMetadata?.() ?? {}),
+                }
+              : undefined;
             const record: StepRecord | null = pushed
               ? {
                   step: pushed.step,
@@ -407,7 +413,9 @@ export function createRunWorkflow(checkpointStore: CheckpointStore) {
                   toolCalls: pushed.toolCalls,
                   results: pushed.results,
                   ...(pushed.usage ? { usage: pushed.usage } : {}),
-                  ...(pushed.metadata ? { metadata: pushed.metadata } : {}),
+                  ...(stepMetadata && Object.keys(stepMetadata).length > 0
+                    ? { metadata: stepMetadata }
+                    : {}),
                   final: pushed.final,
                 }
               : null;

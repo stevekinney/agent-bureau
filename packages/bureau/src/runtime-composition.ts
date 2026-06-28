@@ -63,6 +63,7 @@ import type {
   DurableRunDeps,
   RunEngineObservability,
   ScheduledAgentRunInput,
+  StepRecord,
 } from 'operative/durable';
 import {
   createCheckpointStore,
@@ -560,6 +561,27 @@ export interface ActiveSkillEntry {
   toolPolicy?: ToolPolicy;
 }
 
+const activeSkillsStepMetadataKey = '__bureauActiveSkills';
+const activeSkillsStepMetadataVersion = 1;
+
+function activeSkillsStepMetadata(entries: ActiveSkillEntry[]): JSONValue {
+  return {
+    version: activeSkillsStepMetadataVersion,
+    entries: entries as unknown as JSONValue,
+  };
+}
+
+function activeSkillsFromStepMetadata(
+  metadata: StepRecord['metadata'],
+): ActiveSkillEntry[] | undefined {
+  const raw = metadata?.[activeSkillsStepMetadataKey];
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined;
+  const snapshot = raw as Record<string, unknown>;
+  if (snapshot['version'] !== activeSkillsStepMetadataVersion) return undefined;
+  const entries = snapshot['entries'];
+  return isActiveSkillEntryArray(entries) ? entries : undefined;
+}
+
 /**
  * Validate that a value is a valid {@link ActiveSkillEntry} array for deserialization
  * from session metadata.
@@ -581,21 +603,52 @@ function isActiveSkillEntryArray(value: unknown): value is ActiveSkillEntry[] {
   return true;
 }
 
-function isRecordedAgentStep(value: unknown, step: number): boolean {
-  if (typeof value !== 'object' || value === null) return false;
+function activeSkillSessionMetadataForStep(
+  entries: ActiveSkillEntry[],
+  step: number,
+  runId?: string,
+): Record<string, JSONValue> {
+  return {
+    lastActiveSkills: entries as unknown as JSONValue,
+    ...(runId !== undefined
+      ? {
+          lastActiveSkillsRunId: runId,
+          lastActiveSkillsStep: step,
+        }
+      : {}),
+  };
+}
+
+function recordedAgentStep(value: unknown): StepRecord | undefined {
+  if (typeof value !== 'object' || value === null) return undefined;
   const candidate = value as Record<string, unknown>;
   if (
     typeof candidate['conversationSnapshot'] !== 'object' ||
     candidate['conversationSnapshot'] === null
   ) {
-    return false;
+    return undefined;
   }
   if (typeof candidate['nextAccumulators'] !== 'object' || candidate['nextAccumulators'] === null) {
-    return false;
+    return undefined;
   }
   const record = candidate['record'];
-  if (typeof record !== 'object' || record === null) return false;
-  return (record as Record<string, unknown>)['step'] === step;
+  if (typeof record !== 'object' || record === null) return undefined;
+  const stepRecord = record as Record<string, unknown>;
+  const step = stepRecord['step'];
+  if (!Number.isInteger(step) || (step as number) < 0) return undefined;
+  if (typeof stepRecord['content'] !== 'string') return undefined;
+  if (!Array.isArray(stepRecord['toolCalls'])) return undefined;
+  if (!Array.isArray(stepRecord['results'])) return undefined;
+  if (typeof stepRecord['final'] !== 'boolean') return undefined;
+  if (
+    stepRecord['metadata'] !== undefined &&
+    (typeof stepRecord['metadata'] !== 'object' ||
+      stepRecord['metadata'] === null ||
+      Array.isArray(stepRecord['metadata']))
+  ) {
+    return undefined;
+  }
+  return record as StepRecord;
 }
 
 /**
@@ -666,20 +719,11 @@ function createSkillStateSnapshotHook(
 ): OnStepHook {
   return async (context) => {
     const entries = trackedSession.getActiveEntries();
-    // Persist as a plain JSON array. SessionStore.updateMetadata accepts
-    // Record<string, JSONValue>; ActiveSkillEntry[] is structurally JSONValue-compatible
-    // (string name, optional ToolPolicy with string[] lists), so the cast is sound —
-    // we are narrowing from our own known-valid type to the library's wider union.
     try {
-      await store.updateMetadata(sessionId, {
-        lastActiveSkills: entries as unknown as JSONValue,
-        ...(runId !== undefined
-          ? {
-              lastActiveSkillsRunId: runId,
-              lastActiveSkillsStep: context.step,
-            }
-          : {}),
-      });
+      await store.updateMetadata(
+        sessionId,
+        activeSkillSessionMetadataForStep(entries, context.step, runId),
+      );
     } catch {
       // Non-fatal: if we can't snapshot the active skills, recovery falls back to
       // an empty session (the pre-existing behavior). Don't propagate — a failed
@@ -1376,6 +1420,9 @@ export async function createRuntimeComposition(
     );
     return {
       toolbox: runRuntime.toolbox,
+      getStepMetadata: () => ({
+        [activeSkillsStepMetadataKey]: activeSkillsStepMetadata(runRuntime.getActiveSkillEntries()),
+      }),
       options: {
         generate: runRuntime.generate,
         // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment -- Toolbox generic variance; the durable layer never inspects the tool-tuple type parameter (matches createRunRuntime's internal Toolbox<any>).
@@ -1453,11 +1500,7 @@ export async function createRuntimeComposition(
             lastScheduledFireRunId: runId,
             ...(sessionOwnedByAnotherRunningRun
               ? {}
-              : {
-                  lastActiveSkills: activeSkillEntries as unknown as JSONValue,
-                  lastActiveSkillsRunId: runId,
-                  lastActiveSkillsStep: context.step,
-                }),
+              : activeSkillSessionMetadataForStep(activeSkillEntries, context.step, runId)),
           },
           conversationHistory: existingConversationHistory
             ? appendConversationMessages(
@@ -1527,28 +1570,38 @@ export async function createRuntimeComposition(
       metadata['lastActiveSkillsRunId'] !== runId ||
       typeof lastActiveSkillsStep !== 'number' ||
       !Number.isInteger(lastActiveSkillsStep) ||
-      lastActiveSkillsStep < 0 ||
-      !isActiveSkillEntryArray(lastActiveSkillsRaw)
+      lastActiveSkillsStep < 0
     ) {
       return undefined;
     }
 
     try {
       const checkpoint = await durable?.checkpointStore.loadCheckpoint(runId);
-      if (checkpoint?.steps.some((step) => step.step === lastActiveSkillsStep)) {
-        return lastActiveSkillsRaw;
-      }
+      const committedStepRecords = [...(checkpoint?.steps ?? [])];
 
       const checkpointBytes = await durable?.engine.storage.get(KEYS.checkpoint(runId));
       if (checkpointBytes) {
         const weftCheckpoint = deserializeCheckpoint(checkpointBytes);
-        if (
-          weftCheckpoint.accumulatedResults.some(([, value]) =>
-            isRecordedAgentStep(value, lastActiveSkillsStep),
-          )
-        ) {
-          return lastActiveSkillsRaw;
+        for (const [, value] of weftCheckpoint.accumulatedResults) {
+          const record = recordedAgentStep(value);
+          if (record) committedStepRecords.push(record);
         }
+      }
+
+      const latestCommittedStep = committedStepRecords
+        .filter((step) => step.step <= lastActiveSkillsStep)
+        .sort((a, b) => b.step - a.step)
+        .find((step) => activeSkillsFromStepMetadata(step.metadata) !== undefined);
+
+      if (latestCommittedStep !== undefined) {
+        return activeSkillsFromStepMetadata(latestCommittedStep.metadata);
+      }
+
+      if (
+        committedStepRecords.some((step) => step.step === lastActiveSkillsStep) &&
+        isActiveSkillEntryArray(lastActiveSkillsRaw)
+      ) {
+        return lastActiveSkillsRaw;
       }
 
       return undefined;
@@ -1667,6 +1720,9 @@ export async function createRuntimeComposition(
 
     const services: DurableRunDeps = {
       toolbox: runRuntime.toolbox,
+      getStepMetadata: () => ({
+        [activeSkillsStepMetadataKey]: activeSkillsStepMetadata(runRuntime.getActiveSkillEntries()),
+      }),
       options: {
         generate: runRuntime.generate,
         // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment -- Toolbox generic variance; the durable layer never inspects the tool-tuple type parameter (matches createRunRuntime's internal Toolbox<any>).
