@@ -80,7 +80,7 @@ function makeSchedulingEngine(options?: {
       opts?: ScheduleOptions,
     ): Promise<ScheduleHandle> {
       calls.push({ type, input, spec, options: opts });
-      return makeFakeHandle(scheduleId, options?.handleRecorder);
+      return makeFakeHandle(opts?.id ?? scheduleId, options?.handleRecorder);
     },
     async getSchedule(): Promise<ScheduleSummary | null> {
       return summaries[0] ?? null;
@@ -107,6 +107,9 @@ describe('isScheduledAgentRunInput', () => {
   it('accepts a well-formed input with and without sessionId', () => {
     expect(isScheduledAgentRunInput({ agentName: 'a', input: 'hi' })).toBe(true);
     expect(isScheduledAgentRunInput({ agentName: 'a', input: 'hi', sessionId: 's' })).toBe(true);
+    expect(isScheduledAgentRunInput({ agentName: 'a', input: 'hi', scheduleId: 'sched-1' })).toBe(
+      true,
+    );
   });
 
   it('rejects missing/mistyped fields and non-objects', () => {
@@ -116,6 +119,7 @@ describe('isScheduledAgentRunInput', () => {
     expect(isScheduledAgentRunInput({ agentName: 'a' })).toBe(false);
     expect(isScheduledAgentRunInput({ agentName: 1, input: 'hi' })).toBe(false);
     expect(isScheduledAgentRunInput({ agentName: 'a', input: 'hi', sessionId: 5 })).toBe(false);
+    expect(isScheduledAgentRunInput({ agentName: 'a', input: 'hi', scheduleId: 5 })).toBe(false);
   });
 });
 
@@ -124,9 +128,9 @@ describe('isScheduledAgentRunInput', () => {
 //
 // Registers a durable agent schedule against the engine. Each fire starts the
 // `agentRun` workflow with a `ScheduledAgentRunInput` ({ agentName, input,
-// sessionId? }); the bureau's run-services resolver builds fresh run deps per
-// fire (#109). These tests assert the registration shape and the returned
-// handle's lifecycle delegation.
+// scheduleId, sessionId? }); the bureau's run-services resolver builds fresh run
+// deps per fire (#109). These tests assert the registration shape and the
+// returned handle's lifecycle delegation.
 // ---------------------------------------------------------------------------
 
 describe('createAgentSchedule', () => {
@@ -147,9 +151,10 @@ describe('createAgentSchedule', () => {
     const input = call.input as ScheduledAgentRunInput;
     expect(input.agentName).toBe('researcher');
     expect(input.input).toBe('Summarize overnight activity');
+    expect(input.scheduleId).toBe(handle.id);
     // No session → the scheduled input carries no sessionId (fresh per fire).
     expect(input.sessionId).toBeUndefined();
-    expect(handle.id).toBe('test-sched-1');
+    expect(call.options?.id).toBe(handle.id);
   });
 
   it('threads session, overlap, and stable id through to the engine', async () => {
@@ -168,8 +173,25 @@ describe('createAgentSchedule', () => {
     expect(engine.calls).toHaveLength(1);
     const call = engine.calls[0]!;
     expect(call.spec).toEqual({ every: '6h' });
+    expect((call.input as ScheduledAgentRunInput).scheduleId).toBe('daily-digest-sched');
     expect((call.input as ScheduledAgentRunInput).sessionId).toBe('daily-digest');
     expect(call.options).toEqual({ overlap: 'queue', id: 'daily-digest-sched' });
+  });
+
+  it('trims a padded schedule id before registering', async () => {
+    const engine = makeSchedulingEngine();
+
+    await createAgentSchedule({
+      engine: engine as unknown as AnyRunEngine,
+      agentName: 'researcher',
+      spec: { every: '6h' },
+      input: 'hello',
+      id: '  daily-digest-sched  ',
+    });
+
+    const call = engine.calls[0]!;
+    expect((call.input as ScheduledAgentRunInput).scheduleId).toBe('daily-digest-sched');
+    expect(call.options).toEqual({ id: 'daily-digest-sched' });
   });
 
   it('uses a custom workflowType when supplied', async () => {
@@ -216,6 +238,24 @@ describe('createAgentSchedule', () => {
     expect(engine.calls).toHaveLength(0);
   });
 
+  it('rejects a blank schedule id at the chokepoint (before reaching the engine)', async () => {
+    const engine = makeSchedulingEngine();
+    let caught: unknown;
+    try {
+      await createAgentSchedule({
+        engine: engine as unknown as AnyRunEngine,
+        agentName: 'a',
+        spec: { every: '1h' },
+        input: 'x',
+        id: '   ',
+      });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(InvalidScheduleError);
+    expect(engine.calls).toHaveLength(0);
+  });
+
   it("rejects overlap 'allow' combined with a recurring session", async () => {
     const engine = makeSchedulingEngine();
     let caught: unknown;
@@ -245,7 +285,7 @@ describe('createAgentSchedule', () => {
       overlap: 'allow',
     });
     expect(engine.calls).toHaveLength(1);
-    expect(handle.id).toBe('test-sched-1');
+    expect((engine.calls[0]!.input as ScheduledAgentRunInput).scheduleId).toBe(handle.id);
   });
 
   it('returns a handle whose lifecycle methods delegate to the engine', async () => {
@@ -262,9 +302,9 @@ describe('createAgentSchedule', () => {
     await handle.pause();
     await handle.resume();
     await handle.cancel();
-    expect(recorder.pause).toContain('test-sched-1');
-    expect(recorder.resume).toContain('test-sched-1');
-    expect(recorder.cancel).toContain('test-sched-1');
+    expect(recorder.pause).toContain(handle.id);
+    expect(recorder.resume).toContain(handle.id);
+    expect(recorder.cancel).toContain(handle.id);
 
     const summary = await handle.describe();
     expect(summary.id).toBe('test-sched-1');
@@ -292,6 +332,33 @@ describe('createAgentSchedule', () => {
     await handle.pause();
     const summary = await handle.describe();
     expect(summary.id).toBe('schedule-self-run-step');
+  });
+
+  it('uses the trimmed schedule id when reusing an existing idempotent schedule', async () => {
+    const existingSummary: ScheduleSummary = {
+      ...mockSummary,
+      id: 'schedule-self-run-step',
+      intervalMs: 3_600_000,
+    };
+    const engine = makeSchedulingEngine({ summaries: [] });
+    const getScheduleCalls: string[] = [];
+    engine.getSchedule = async (scheduleId: string) => {
+      getScheduleCalls.push(scheduleId);
+      return scheduleId === existingSummary.id ? existingSummary : null;
+    };
+
+    const handle = await createAgentSchedule({
+      engine: engine as unknown as AnyRunEngine,
+      agentName: 'researcher',
+      spec: { every: '1h' },
+      input: 'hello',
+      id: '  schedule-self-run-step  ',
+      idempotent: true,
+    });
+
+    expect(getScheduleCalls).toEqual(['schedule-self-run-step']);
+    expect(engine.calls).toHaveLength(0);
+    expect(handle.id).toBe('schedule-self-run-step');
   });
 
   it('treats a duplicate-id schedule race as success when the existing schedule is compatible', async () => {
@@ -453,7 +520,7 @@ describe('createAgentScheduler', () => {
     expect(engine.calls).toHaveLength(1);
     expect(engine.calls[0]!.type).toBe('agentRun');
     expect((engine.calls[0]!.input as ScheduledAgentRunInput).agentName).toBe('researcher');
-    expect(handle.id).toBe('test-sched-1');
+    expect((engine.calls[0]!.input as ScheduledAgentRunInput).scheduleId).toBe(handle.id);
   });
 
   it('schedule() carries agentName and session into the scheduled input', async () => {
