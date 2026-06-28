@@ -506,6 +506,40 @@ describe('createAgentSchedule', () => {
     );
     expect(engine.calls).toHaveLength(0);
   });
+
+  it('rejects an existing schedule with a different description when idempotent registration is requested', async () => {
+    const engine = makeSchedulingEngine({
+      summaries: [
+        {
+          ...mockSummary,
+          id: 'schedule-collision',
+          description: 'Existing digest',
+          intervalMs: 3_600_000,
+        },
+      ],
+    });
+
+    let caught: unknown;
+    try {
+      await createAgentSchedule({
+        engine: engine as unknown as AnyRunEngine,
+        agentName: 'researcher',
+        spec: { every: '1h' },
+        input: 'hello',
+        description: 'Requested digest',
+        id: 'schedule-collision',
+        idempotent: true,
+      });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toBe(
+      'Schedule schedule-collision already exists with a different description.',
+    );
+    expect(engine.calls).toHaveLength(0);
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -285,6 +285,7 @@ function assertCompatibleAgentSchedule(
   workflowType: string,
   spec: ScheduleSpec,
   overlap: ScheduleOverlapPolicy | undefined,
+  description: string | undefined,
 ): void {
   if (schedule.status === 'cancelled') {
     throw new Error(`Schedule ${scheduleId} already exists but is cancelled.`);
@@ -301,6 +302,10 @@ function assertCompatibleAgentSchedule(
     throw new Error(
       `Schedule ${scheduleId} already exists with overlap ${schedule.overlap}; expected ${expectedOverlap}.`,
     );
+  }
+
+  if (schedule.description !== description) {
+    throw new Error(`Schedule ${scheduleId} already exists with a different description.`);
   }
 
   if ('cron' in spec) {
@@ -373,7 +378,14 @@ export async function createAgentSchedule(
   if (id !== undefined && idempotent === true) {
     const existingSchedule = await engine.getSchedule(scheduleId);
     if (existingSchedule) {
-      assertCompatibleAgentSchedule(existingSchedule, scheduleId, workflowType, spec, overlap);
+      assertCompatibleAgentSchedule(
+        existingSchedule,
+        scheduleId,
+        workflowType,
+        spec,
+        overlap,
+        description,
+      );
       return scheduleHandleFromEngine(engine, scheduleId);
     }
   }
@@ -385,7 +397,14 @@ export async function createAgentSchedule(
     if (id !== undefined && idempotent === true) {
       const existingSchedule = await engine.getSchedule(scheduleId);
       if (existingSchedule) {
-        assertCompatibleAgentSchedule(existingSchedule, scheduleId, workflowType, spec, overlap);
+        assertCompatibleAgentSchedule(
+          existingSchedule,
+          scheduleId,
+          workflowType,
+          spec,
+          overlap,
+          description,
+        );
         return scheduleHandleFromEngine(engine, scheduleId);
       }
     }
