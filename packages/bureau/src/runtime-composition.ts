@@ -561,7 +561,7 @@ export interface ActiveSkillEntry {
   toolPolicy?: ToolPolicy;
 }
 
-const activeSkillsStepMetadataKey = 'activeSkills';
+const activeSkillsStepMetadataKey = '__bureauActiveSkills';
 
 /**
  * Validate that a value is a valid {@link ActiveSkillEntry} array for deserialization
@@ -614,8 +614,22 @@ function recordedAgentStep(value: unknown): StepRecord | undefined {
   }
   const record = candidate['record'];
   if (typeof record !== 'object' || record === null) return undefined;
-  const step = (record as Record<string, unknown>)['step'];
-  return typeof step === 'number' ? (record as StepRecord) : undefined;
+  const stepRecord = record as Record<string, unknown>;
+  const step = stepRecord['step'];
+  if (!Number.isInteger(step) || (step as number) < 0) return undefined;
+  if (typeof stepRecord['content'] !== 'string') return undefined;
+  if (!Array.isArray(stepRecord['toolCalls'])) return undefined;
+  if (!Array.isArray(stepRecord['results'])) return undefined;
+  if (typeof stepRecord['final'] !== 'boolean') return undefined;
+  if (
+    stepRecord['metadata'] !== undefined &&
+    (typeof stepRecord['metadata'] !== 'object' ||
+      stepRecord['metadata'] === null ||
+      Array.isArray(stepRecord['metadata']))
+  ) {
+    return undefined;
+  }
+  return record as StepRecord;
 }
 
 /**
@@ -1537,8 +1551,7 @@ export async function createRuntimeComposition(
       metadata['lastActiveSkillsRunId'] !== runId ||
       typeof lastActiveSkillsStep !== 'number' ||
       !Number.isInteger(lastActiveSkillsStep) ||
-      lastActiveSkillsStep < 0 ||
-      !isActiveSkillEntryArray(lastActiveSkillsRaw)
+      lastActiveSkillsStep < 0
     ) {
       return undefined;
     }
@@ -1566,7 +1579,10 @@ export async function createRuntimeComposition(
         return isActiveSkillEntryArray(activeSkills) ? activeSkills : undefined;
       }
 
-      if (committedStepRecords.some((step) => step.step === lastActiveSkillsStep)) {
+      if (
+        committedStepRecords.some((step) => step.step === lastActiveSkillsStep) &&
+        isActiveSkillEntryArray(lastActiveSkillsRaw)
+      ) {
         return lastActiveSkillsRaw;
       }
 

@@ -1493,7 +1493,9 @@ describe('createRuntimeComposition durable execution', () => {
         expect(skillResourceError).toBeUndefined();
         expect(loadedSkillResource).toBe('print("Hello")');
         const checkpoint = await secondRuntime.durable!.checkpointStore.loadCheckpoint(runId);
-        expect(checkpoint.steps.at(-1)?.metadata?.['activeSkills']).toEqual([{ name: 'coding' }]);
+        expect(checkpoint.steps.at(-1)?.metadata?.['__bureauActiveSkills']).toEqual([
+          { name: 'coding' },
+        ]);
       } finally {
         secondRuntime.durable?.engine[Symbol.dispose]?.();
         secondRuntime.disposeStorage?.();
@@ -1582,7 +1584,131 @@ describe('createRuntimeComposition durable execution', () => {
           content: 'activated coding',
           toolCalls: [],
           results: [],
-          metadata: { activeSkills: [{ name: 'coding' }] },
+          metadata: { __bureauActiveSkills: [{ name: 'coding' }] },
+          final: false,
+        });
+      } finally {
+        firstRuntime.durable?.engine[Symbol.dispose]?.();
+        firstRuntime.disposeStorage?.();
+      }
+
+      const secondRuntime = await createRuntimeComposition({
+        generate: async ({ toolbox }) => {
+          const resourceResult = (await toolbox.execute({
+            name: 'load_skill_resource',
+            arguments: { skillName: 'coding', path: 'snippets/hello.py' },
+          })) as { result: { content?: string; error?: string } };
+          loadedSkillResource = resourceResult.result.content;
+          skillResourceError = resourceResult.result.error;
+          return { content: 'used committed recovered skill', toolCalls: [] };
+        },
+        toolbox: createToolbox([], { context: {} }),
+        skills: { provider: skillProvider },
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+        stopWhen: stopWhen.noToolCalls(),
+      });
+
+      try {
+        expect(secondRuntime.durable).toBeDefined();
+        await secondRuntime.durable!.engine.recoverAll();
+
+        const completed = await pollUntil(async () => {
+          const state = await secondRuntime.durable!.engine.get(runId);
+          return state?.status === 'completed';
+        });
+        expect(completed).toBe(true);
+        expect(skillResourceError).toBeUndefined();
+        expect(loadedSkillResource).toBe('print("Hello")');
+      } finally {
+        secondRuntime.durable?.engine[Symbol.dispose]?.();
+        secondRuntime.disposeStorage?.();
+      }
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
+  it('recovers committed scheduled skill snapshots when session lastActiveSkills is malformed', async () => {
+    const databasePath = join(
+      tmpdir(),
+      `scheduled-malformed-session-skill-${process.pid}-${durableDatabaseCounter++}.sqlite`,
+    );
+    const runId = 'scheduled-malformed-session-skill-run';
+    const scheduleId = 'scheduled-malformed-session-skill-schedule';
+    const sessionId = 'scheduled-malformed-session-skill-session';
+    let loadedSkillResource: string | undefined;
+    let skillResourceError: string | undefined;
+
+    const provider = createMockSkillProvider([{ name: 'coding', description: 'Write code' }]);
+    const skillProvider: SkillProvider = {
+      ...provider,
+      async listResources(name) {
+        return name === 'coding' ? ['snippets/hello.py'] : [];
+      },
+      async loadResource(name, path) {
+        if (name === 'coding' && path === 'snippets/hello.py') return 'print("Hello")';
+        return undefined;
+      },
+    };
+
+    try {
+      const firstRuntime = await createRuntimeComposition({
+        generate: async () => new Promise<never>(() => {}),
+        toolbox: createToolbox([], { context: {} }),
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+      });
+
+      try {
+        expect(firstRuntime.durable).toBeDefined();
+        await firstRuntime.sessionStore!.save(
+          createAgentSession({
+            id: sessionId,
+            agentName: 'researcher',
+            conversationHistory: createConversationHistory({ id: sessionId }),
+            metadata: {
+              lastScheduledFireRunId: runId,
+              lastActiveSkills: 'malformed',
+              lastActiveSkillsRunId: runId,
+              lastActiveSkillsStep: 0,
+            },
+          }),
+        );
+
+        const toolbox = createToolbox([], { context: {} });
+        const services: DurableRunDeps = {
+          toolbox,
+          options: {
+            generate: async () => new Promise<never>(() => {}),
+            toolbox: toolbox as never,
+            conversation: createConversationHistory(),
+            stopWhen: stopWhen.noToolCalls(),
+          },
+        };
+
+        const handle = await firstRuntime.durable!.engine.start(
+          'agentRun',
+          { agentName: 'researcher', input: 'recover committed skills only', sessionId },
+          { id: runId, services },
+        );
+        void handle.result().catch(() => {});
+        await firstRuntime.durable!.engine.storage.put(KEYS.scheduleRun(runId), encode(scheduleId));
+
+        const running = await pollUntil(async () => {
+          const state = await firstRuntime.durable!.engine.get(runId);
+          return state?.status === 'running';
+        });
+        expect(running).toBe(true);
+
+        await firstRuntime.durable!.checkpointStore.saveStep(runId, {
+          step: 0,
+          content: 'activated coding',
+          toolCalls: [],
+          results: [],
+          metadata: { __bureauActiveSkills: [{ name: 'coding' }] },
           final: false,
         });
       } finally {
