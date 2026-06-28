@@ -1,5 +1,6 @@
 import {
   decode,
+  deserializeCheckpoint,
   type WorkflowServicesResolution,
   type WorkflowServicesResolverInfo,
 } from '@lostgradient/weft';
@@ -578,6 +579,23 @@ function isActiveSkillEntryArray(value: unknown): value is ActiveSkillEntry[] {
     }
   }
   return true;
+}
+
+function isRecordedAgentStep(value: unknown, step: number): boolean {
+  if (typeof value !== 'object' || value === null) return false;
+  const candidate = value as Record<string, unknown>;
+  if (
+    typeof candidate['conversationSnapshot'] !== 'object' ||
+    candidate['conversationSnapshot'] === null
+  ) {
+    return false;
+  }
+  if (typeof candidate['nextAccumulators'] !== 'object' || candidate['nextAccumulators'] === null) {
+    return false;
+  }
+  const record = candidate['record'];
+  if (typeof record !== 'object' || record === null) return false;
+  return (record as Record<string, unknown>)['step'] === step;
 }
 
 /**
@@ -1517,9 +1535,23 @@ export async function createRuntimeComposition(
 
     try {
       const checkpoint = await durable?.checkpointStore.loadCheckpoint(runId);
-      return checkpoint?.steps.some((step) => step.step === lastActiveSkillsStep)
-        ? lastActiveSkillsRaw
-        : undefined;
+      if (checkpoint?.steps.some((step) => step.step === lastActiveSkillsStep)) {
+        return lastActiveSkillsRaw;
+      }
+
+      const checkpointBytes = await durable?.engine.storage.get(KEYS.checkpoint(runId));
+      if (checkpointBytes) {
+        const weftCheckpoint = deserializeCheckpoint(checkpointBytes);
+        if (
+          weftCheckpoint.accumulatedResults.some(([, value]) =>
+            isRecordedAgentStep(value, lastActiveSkillsStep),
+          )
+        ) {
+          return lastActiveSkillsRaw;
+        }
+      }
+
+      return undefined;
     } catch (error) {
       options.onLog?.({
         workflowId: runId,

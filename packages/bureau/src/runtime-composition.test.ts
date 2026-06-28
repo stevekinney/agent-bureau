@@ -1427,14 +1427,6 @@ describe('createRuntimeComposition durable execution', () => {
             },
           }),
         );
-        await firstRuntime.durable!.checkpointStore.saveStep(runId, {
-          step: 0,
-          content: 'activated coding',
-          toolCalls: [],
-          results: [],
-          final: false,
-        });
-
         const toolbox = createToolbox([], { context: {} });
         const services: DurableRunDeps = {
           toolbox,
@@ -1459,6 +1451,14 @@ describe('createRuntimeComposition durable execution', () => {
           return state?.status === 'running';
         });
         expect(running).toBe(true);
+
+        await firstRuntime.durable!.checkpointStore.saveStep(runId, {
+          step: 0,
+          content: 'activated coding',
+          toolCalls: [],
+          results: [],
+          final: false,
+        });
       } finally {
         firstRuntime.durable?.engine[Symbol.dispose]?.();
         firstRuntime.disposeStorage?.();
