@@ -857,6 +857,10 @@ describe('truncateToTokenLimit', () => {
     expect(isConversationEnvironmentParameter(options)).toBe(false);
   });
 
+  it('identifies maxHistoryDepth-only objects as an environment', () => {
+    expect(isConversationEnvironmentParameter({ maxHistoryDepth: 5 })).toBe(true);
+  });
+
   it('correctly uses environment when passed as 3rd argument with an estimator', () => {
     let conv = createConversation({ id: 'test' });
     conv = appendMessages(conv, { role: 'user', content: 'Hello' });

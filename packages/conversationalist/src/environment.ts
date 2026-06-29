@@ -128,7 +128,8 @@ export function isConversationEnvironmentParameter(
     typeof candidate['now'] === 'function' ||
     typeof candidate['randomId'] === 'function' ||
     typeof candidate['estimateTokens'] === 'function' ||
-    (Array.isArray(candidate['plugins']) && candidate['plugins'].length > 0)
+    (Array.isArray(candidate['plugins']) && candidate['plugins'].length > 0) ||
+    typeof candidate['maxHistoryDepth'] === 'number'
   );
 }
 
