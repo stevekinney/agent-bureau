@@ -139,7 +139,7 @@ export function appendToolResults(
 }
 
 /**
- * Appends a tool-result message, collecting streaming payloads before persistence.
+ * Appends a tool-result message, collecting streaming payloads before the history changes.
  */
 export async function appendToolResultAsync(
   conversation: Conversation,
@@ -158,7 +158,7 @@ export async function appendToolResultAsync(
 }
 
 /**
- * Appends multiple tool-result messages, collecting streaming payloads before persistence.
+ * Appends multiple tool-result messages, collecting streaming payloads before the history changes.
  */
 export async function appendToolResultsAsync(
   conversation: Conversation,

@@ -188,15 +188,6 @@ export class SessionRenamedEvent extends ConversationEvent {
   }
 }
 
-export class PersistenceErrorEvent extends Event {
-  static readonly type = 'persistence.error' as const;
-  readonly error: unknown;
-  constructor(error: unknown) {
-    super(PersistenceErrorEvent.type);
-    this.error = error;
-  }
-}
-
 /**
  * Maps event type strings to their corresponding Event subclasses.
  */
@@ -221,7 +212,6 @@ export interface ConversationEventMap {
   [SessionForkedEvent.type]: SessionForkedEvent;
   [SessionTaggedEvent.type]: SessionTaggedEvent;
   [SessionRenamedEvent.type]: SessionRenamedEvent;
-  [PersistenceErrorEvent.type]: PersistenceErrorEvent;
 }
 
 export type ConversationEventType = Extract<keyof ConversationEventMap, string>;

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 
 import { createConversationHistory } from '../src/conversation/index';
+import { toSessionInfo } from '../src/environment';
 import { Conversation, type ConversationEvent } from '../src/history';
 import { createTestConversation, createTestConversationEnvironment } from '../src/test/index';
 
@@ -295,5 +296,40 @@ describe('Conversation.rename', () => {
     conversation.rename('Same Title');
 
     expect(conversation.current).toBe(before);
+  });
+});
+
+describe('toSessionInfo', () => {
+  it('derives a lightweight session summary from conversation state', () => {
+    const conversation = createTestConversation(
+      createConversationHistory({
+        id: 'info-test',
+        title: 'Info Test',
+        metadata: { _tags: ['important'] },
+      }),
+    );
+    conversation.appendUserMessage('Hello');
+    conversation.appendAssistantMessage('Hi');
+
+    expect(toSessionInfo(conversation.current)).toEqual({
+      id: 'info-test',
+      title: 'Info Test',
+      tags: ['important'],
+      createdAt: conversation.current.createdAt,
+      updatedAt: conversation.current.updatedAt,
+      messageCount: 2,
+    });
+  });
+
+  it('uses an empty tag list when metadata has no tags', () => {
+    const conversation = createConversationHistory({ id: 'untagged' });
+
+    expect(toSessionInfo(conversation)).toEqual({
+      id: 'untagged',
+      tags: [],
+      createdAt: conversation.createdAt,
+      updatedAt: conversation.updatedAt,
+      messageCount: 0,
+    });
   });
 });

@@ -100,7 +100,6 @@ export {
   MessagesAppendedEvent,
   MessagesRemovedEvent,
   MessagesUpdatedEvent,
-  PersistenceErrorEvent,
   SessionForkedEvent,
   SessionRenamedEvent,
   SessionTaggedEvent,
