@@ -6,6 +6,8 @@ import { z } from 'zod';
 import type { Bureau } from '../types';
 
 const CreateScheduleSchema = z.object({
+  /** Human-readable operator label stored with the schedule. */
+  description: z.string().min(1).optional(),
   /** Bureau agent name to run on each schedule fire. */
   agentName: z.string().min(1),
   /** Input message delivered to the agent each fire. */
@@ -25,8 +27,6 @@ const CreateScheduleSchema = z.object({
   sessionId: z.string().min(1).optional(),
   /** Overlap policy when a prior fire is still running. Defaults to `'skip'`. */
   overlap: z.enum(['skip', 'allow']).optional(),
-  // NOTE: no `description` — weft 0.8.0 cannot store/surface a schedule label, so
-  // accepting one would silently drop it. Re-add when weft supports it (weft 20a358ef).
 });
 
 /**

@@ -157,7 +157,7 @@ describe('createAgentSchedule', () => {
     expect(call.options?.id).toBe(handle.id);
   });
 
-  it('threads session, overlap, and stable id through to the engine', async () => {
+  it('threads description, session, overlap, and stable id through to the engine', async () => {
     const engine = makeSchedulingEngine({ scheduleId: 'daily-digest-sched' });
 
     await createAgentSchedule({
@@ -165,6 +165,7 @@ describe('createAgentSchedule', () => {
       agentName: 'researcher',
       spec: { every: '6h' },
       input: 'hello',
+      description: 'Daily digest',
       session: 'daily-digest',
       overlap: 'queue',
       id: 'daily-digest-sched',
@@ -175,7 +176,11 @@ describe('createAgentSchedule', () => {
     expect(call.spec).toEqual({ every: '6h' });
     expect((call.input as ScheduledAgentRunInput).scheduleId).toBe('daily-digest-sched');
     expect((call.input as ScheduledAgentRunInput).sessionId).toBe('daily-digest');
-    expect(call.options).toEqual({ overlap: 'queue', id: 'daily-digest-sched' });
+    expect(call.options).toEqual({
+      description: 'Daily digest',
+      overlap: 'queue',
+      id: 'daily-digest-sched',
+    });
   });
 
   it('trims a padded schedule id before registering', async () => {
@@ -498,6 +503,40 @@ describe('createAgentSchedule', () => {
     expect(caught).toBeInstanceOf(Error);
     expect((caught as Error).message).toBe(
       'Schedule schedule-collision already exists with overlap queue; expected skip.',
+    );
+    expect(engine.calls).toHaveLength(0);
+  });
+
+  it('rejects an existing schedule with a different description when idempotent registration is requested', async () => {
+    const engine = makeSchedulingEngine({
+      summaries: [
+        {
+          ...mockSummary,
+          id: 'schedule-collision',
+          description: 'Existing digest',
+          intervalMs: 3_600_000,
+        },
+      ],
+    });
+
+    let caught: unknown;
+    try {
+      await createAgentSchedule({
+        engine: engine as unknown as AnyRunEngine,
+        agentName: 'researcher',
+        spec: { every: '1h' },
+        input: 'hello',
+        description: 'Requested digest',
+        id: 'schedule-collision',
+        idempotent: true,
+      });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toBe(
+      'Schedule schedule-collision already exists with a different description.',
     );
     expect(engine.calls).toHaveLength(0);
   });

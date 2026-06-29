@@ -623,6 +623,8 @@ export const DEFAULT_MAXIMUM_STEPS = 10;
  * or appended to the same persistent session (`sessionId` given).
  */
 export interface DurableScheduleDefinition {
+  /** Human-readable operator description stored with the schedule. */
+  description?: string;
   /** Agent name to run on each schedule fire. */
   agentName: string;
   /** Input message delivered to the agent each fire. */
@@ -637,7 +639,4 @@ export interface DurableScheduleDefinition {
   sessionId?: string;
   /** Overlap policy when a prior fire is still running. Defaults to `'skip'`. */
   overlap?: 'skip' | 'allow';
-  // NOTE: no `description` field. Weft 0.8.0's ScheduleOptions/ScheduleSummary have
-  // nowhere to store or surface a schedule label, so accepting one would silently
-  // drop it. Re-add once weft supports it (filed: weft 20a358ef).
 }

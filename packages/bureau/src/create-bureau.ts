@@ -1439,6 +1439,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       handle = await scheduler.schedule(definition.agentName, {
         spec: toScheduleSpec(definition.spec),
         input: definition.input,
+        ...(definition.description !== undefined ? { description: definition.description } : {}),
         ...(definition.sessionId !== undefined ? { session: definition.sessionId } : {}),
         ...(definition.overlap !== undefined ? { overlap: definition.overlap } : {}),
       });

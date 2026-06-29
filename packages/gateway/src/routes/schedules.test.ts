@@ -138,6 +138,7 @@ describe('schedules routes with durable engine (regression PRRT_kwDORvupsc6MXEmg
       method: 'POST',
       headers: authHeaders,
       body: JSON.stringify({
+        description: 'Daily research digest',
         agentName: 'researcher',
         input: 'Daily analysis',
         spec: '0 9 * * *',
@@ -147,8 +148,25 @@ describe('schedules routes with durable engine (regression PRRT_kwDORvupsc6MXEmg
     expect(response.status).toBe(201);
     const body = await response.json();
     expect(body.workflowType).toBe('agentRun');
+    expect(body.description).toBe('Daily research digest');
     expect(body.status).toBe('active');
     expect(typeof body.id).toBe('string');
+
+    const getResponse = await requestJSON(gateway, `/schedules/${body.id}`, {
+      headers: authHeaders,
+    });
+    expect(getResponse.status).toBe(200);
+    const getBody = await getResponse.json();
+    expect(getBody.description).toBe('Daily research digest');
+
+    const listResponse = await requestJSON(gateway, '/schedules', {
+      headers: authHeaders,
+    });
+    expect(listResponse.status).toBe(200);
+    const listBody = await listResponse.json();
+    expect(listBody.items).toContainEqual(
+      expect.objectContaining({ description: 'Daily research digest' }),
+    );
     gateway.bureau.dispose();
   });
 
