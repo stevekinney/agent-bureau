@@ -54,23 +54,14 @@ import {
   toChatMessages,
 } from './conversation/index';
 import { ensureConversationSafe } from './conversation/validation';
-import {
-  type ConversationEnvironment,
-  resolveConversationEnvironment,
-  type TimeoutHandle,
-  toSessionInfo,
-} from './environment';
+import { type ConversationEnvironment, resolveConversationEnvironment } from './environment';
 import type {
   ConversationActionType,
   ConversationEventDetail,
   ConversationEventMap,
   ConversationEventType,
 } from './events';
-import {
-  ConversationChangeEvent,
-  conversationEventConstructors,
-  PersistenceErrorEvent,
-} from './events';
+import { ConversationChangeEvent, conversationEventConstructors } from './events';
 import {
   appendStreamingMessage,
   cancelStreamingMessage,
@@ -220,40 +211,6 @@ export class Conversation {
       parent: null,
       children: [],
     };
-
-    if (this.environment.persistence) {
-      const store = this.environment.persistence;
-      const setTimeoutFunction =
-        this.environment.setTimeoutFunction ??
-        ((callback, milliseconds) =>
-          setTimeout(() => {
-            void callback();
-          }, milliseconds));
-      const clearTimeoutFunction =
-        this.environment.clearTimeoutFunction ??
-        ((handle) => clearTimeout(handle as ReturnType<typeof setTimeout>));
-      const debounceMilliseconds = this.environment.persistenceDebounceMilliseconds ?? 100;
-      let debounceTimer: TimeoutHandle;
-      let hasDebounceTimer = false;
-      this.addEventListener('change', () => {
-        if (hasDebounceTimer) clearTimeoutFunction(debounceTimer);
-        debounceTimer = setTimeoutFunction(() => {
-          const conversation = this.current;
-          return Promise.all([
-            store.set(`session:${conversation.id}`, JSON.stringify(conversation)),
-            store.set(
-              `session-info:${conversation.id}`,
-              JSON.stringify(toSessionInfo(conversation)),
-            ),
-          ])
-            .then(() => undefined)
-            .catch((error: unknown) => {
-              this.emitter.dispatchEvent(new PersistenceErrorEvent(error));
-            });
-        }, debounceMilliseconds);
-        hasDebounceTimer = true;
-      });
-    }
   }
 
   private buildEventDetail(

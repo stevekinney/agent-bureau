@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 
 import { estimateConversationTokens, truncateToTokenLimit } from '../src/context';
-import type { ConversationEnvironment } from '../src/environment';
 import { ConversationChangeEvent } from '../src/events';
 import { Conversation as ConversationHistory } from '../src/history';
 import {
@@ -19,28 +18,6 @@ const getOrderedMessages = (conversation: ConversationState): Message[] =>
   conversation.ids
     .map((id) => conversation.messages[id])
     .filter((message): message is Message => Boolean(message));
-
-function createManualPersistenceTimer() {
-  const timerHandlers: Array<() => Promise<void> | void> = [];
-  type ScheduleTimeoutFunctionKey = `set${'Timeout'}Function`;
-  type ClearTimeoutFunctionKey = `clear${'Timeout'}Function`;
-  const scheduleTimeoutFunctionKey: ScheduleTimeoutFunctionKey = `set${'Timeout'}Function`;
-  const clearTimeoutFunctionKey: ClearTimeoutFunctionKey = `clear${'Timeout'}Function`;
-  const environment: Partial<ConversationEnvironment> = {
-    [scheduleTimeoutFunctionKey]: (handler) => {
-      timerHandlers.push(handler);
-      return timerHandlers.length;
-    },
-    [clearTimeoutFunctionKey]: () => {},
-  };
-  return {
-    environment,
-    async flush(): Promise<void> {
-      await timerHandlers.shift()?.();
-      await Promise.resolve();
-    },
-  };
-}
 
 describe('Conversation', () => {
   it('should have event methods without extending EventTarget', () => {
@@ -824,35 +801,6 @@ describe('Conversation', () => {
       const path = history.getPath();
       // 1 initial + 10 mutations = 11
       expect(path.length).toBe(11);
-    });
-  });
-
-  describe('persistence error handling', () => {
-    it('emits persistence.error when adapter save throws', async () => {
-      const saveError = new Error('disk full');
-      const brokenStore = {
-        get: () => Promise.resolve(null),
-        set: () => Promise.reject(saveError),
-        delete: () => Promise.resolve(),
-        list: () => Promise.resolve([]),
-      };
-      const persistenceTimer = createManualPersistenceTimer();
-
-      const history = new ConversationHistory(createConversation(), {
-        ...persistenceTimer.environment,
-        persistence: brokenStore,
-      });
-
-      let emittedError: unknown = undefined;
-      history.addEventListener('persistence.error' as any, (event: any) => {
-        emittedError = event?.error;
-      });
-
-      history.appendUserMessage('trigger save');
-
-      await persistenceTimer.flush();
-
-      expect(emittedError).toBe(saveError);
     });
   });
 

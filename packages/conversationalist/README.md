@@ -794,7 +794,6 @@ Event types include:
 - `session.forked`
 - `session.renamed`
 - `session.tagged`
-- `persistence.error`
 
 Streaming messages (those with `metadata.__streaming === true`) are automatically protected from compaction, truncation, and adapter export. They are preserved in `partitionMessages`, locked in `truncateToTokenLimit` and `truncateFromPosition`, and excluded from provider adapters so that incomplete content is never sent to an API.
 

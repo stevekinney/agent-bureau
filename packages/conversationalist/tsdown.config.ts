@@ -45,5 +45,7 @@ export default defineConfig({
   tsconfig: './tsconfig.build.json',
   // Real externals: the peer dependency and the genuine runtime deps. The foundation workspace
   // packages are deliberately NOT listed, so tsdown inlines them into the JS and the declarations.
-  external: ['zod', 'gray-matter', /^bun(:|$)/, /^node:/],
+  deps: {
+    neverBundle: ['zod', 'gray-matter', /^bun(:|$)/, /^node:/],
+  },
 });

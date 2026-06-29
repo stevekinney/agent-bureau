@@ -1,5 +1,3 @@
-import type { TextValueStore } from '@lostgradient/weft/storage';
-
 import type { ConversationHistory, Message, MessagePlugin, TokenEstimator } from './types';
 import { messageParts } from './utilities';
 
@@ -11,13 +9,6 @@ export interface SessionInfo {
   updatedAt: string;
   messageCount: number;
 }
-
-export type TimeoutHandle = unknown;
-export type ScheduleTimeout = (
-  callback: () => Promise<void> | void,
-  milliseconds?: number,
-) => TimeoutHandle;
-export type ClearScheduledTimeout = (handle: TimeoutHandle) => void;
 
 /**
  * Extracts a lightweight SessionInfo summary from a ConversationHistory.
@@ -42,13 +33,6 @@ export interface ConversationEnvironment {
   randomId: () => string;
   estimateTokens: TokenEstimator;
   plugins: MessagePlugin[];
-  persistence?: TextValueStore;
-  /** Debounce duration for persistence saves. Defaults to 100ms. */
-  persistenceDebounceMilliseconds?: number;
-  /** Injectable timer for persistence debounce tests. */
-  setTimeoutFunction?: ScheduleTimeout;
-  /** Injectable timer cleanup for persistence debounce tests. */
-  clearTimeoutFunction?: ClearScheduledTimeout;
   /** Maximum depth of the undo/redo history tree. When exceeded, the oldest ancestor is pruned. */
   maxHistoryDepth?: number;
 }
@@ -123,16 +107,6 @@ export function resolveConversationEnvironment(
     randomId: environment?.randomId ?? defaultConversationEnvironment.randomId,
     estimateTokens: environment?.estimateTokens ?? defaultConversationEnvironment.estimateTokens,
     plugins: [...(environment?.plugins ?? defaultConversationEnvironment.plugins)],
-    ...(environment?.persistence ? { persistence: environment.persistence } : {}),
-    ...(environment?.persistenceDebounceMilliseconds !== undefined
-      ? { persistenceDebounceMilliseconds: environment.persistenceDebounceMilliseconds }
-      : {}),
-    ...(environment?.setTimeoutFunction
-      ? { setTimeoutFunction: environment.setTimeoutFunction }
-      : {}),
-    ...(environment?.clearTimeoutFunction
-      ? { clearTimeoutFunction: environment.clearTimeoutFunction }
-      : {}),
     ...(environment?.maxHistoryDepth !== undefined
       ? { maxHistoryDepth: environment.maxHistoryDepth }
       : {}),
@@ -154,8 +128,7 @@ export function isConversationEnvironmentParameter(
     typeof candidate['now'] === 'function' ||
     typeof candidate['randomId'] === 'function' ||
     typeof candidate['estimateTokens'] === 'function' ||
-    (Array.isArray(candidate['plugins']) && candidate['plugins'].length > 0) ||
-    (typeof candidate['persistence'] === 'object' && candidate['persistence'] !== null)
+    (Array.isArray(candidate['plugins']) && candidate['plugins'].length > 0)
   );
 }
 
