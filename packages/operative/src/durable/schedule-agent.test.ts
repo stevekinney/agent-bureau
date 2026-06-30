@@ -293,6 +293,97 @@ describe('createAgentSchedule', () => {
     expect((engine.calls[0]!.input as ScheduledAgentRunInput).scheduleId).toBe(handle.id);
   });
 
+  it('generates a schedule id without crypto helpers when none is supplied', async () => {
+    const originalCrypto = globalThis.crypto;
+    Object.defineProperty(globalThis, 'crypto', {
+      configurable: true,
+      value: {},
+    });
+    const engine = makeSchedulingEngine({ scheduleId: 'ignored' });
+
+    try {
+      const handle = await createAgentSchedule({
+        engine: engine as unknown as AnyRunEngine,
+        agentName: 'a',
+        spec: { every: '1h' },
+        input: 'x',
+      });
+
+      expect(handle.id).toMatch(/^[\da-f]{8}-[\da-f]{4}-4[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/);
+      expect((engine.calls[0]!.input as ScheduledAgentRunInput).scheduleId).toBe(handle.id);
+    } finally {
+      Object.defineProperty(globalThis, 'crypto', {
+        configurable: true,
+        value: originalCrypto,
+      });
+    }
+  });
+
+  it('generates a schedule id with crypto.getRandomValues when randomUUID is absent', async () => {
+    const originalCrypto = globalThis.crypto;
+    let nextByte = 0;
+    Object.defineProperty(globalThis, 'crypto', {
+      configurable: true,
+      value: {
+        getRandomValues(array: Uint8Array) {
+          for (let index = 0; index < array.length; index += 1) {
+            array[index] = nextByte;
+            nextByte += 1;
+          }
+          return array;
+        },
+      },
+    });
+    const engine = makeSchedulingEngine({ scheduleId: 'ignored' });
+
+    try {
+      const handle = await createAgentSchedule({
+        engine: engine as unknown as AnyRunEngine,
+        agentName: 'a',
+        spec: { every: '1h' },
+        input: 'x',
+      });
+
+      expect(handle.id).toMatch(/^[\da-f]{8}-[\da-f]{4}-4[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/);
+      expect((engine.calls[0]!.input as ScheduledAgentRunInput).scheduleId).toBe(handle.id);
+    } finally {
+      Object.defineProperty(globalThis, 'crypto', {
+        configurable: true,
+        value: originalCrypto,
+      });
+    }
+  });
+
+  it('generates a schedule id with crypto.randomUUID when available', async () => {
+    const originalCrypto = globalThis.crypto;
+    Object.defineProperty(globalThis, 'crypto', {
+      configurable: true,
+      value: {
+        randomUUID() {
+          return '123e4567-e89b-42d3-a456-426614174000';
+        },
+      },
+    });
+    const engine = makeSchedulingEngine({ scheduleId: 'ignored' });
+
+    try {
+      const handle = await createAgentSchedule({
+        engine: engine as unknown as AnyRunEngine,
+        agentName: 'a',
+        spec: { every: '1h' },
+        input: 'x',
+      });
+
+      expect(handle.id).toBe('123e4567-e89b-42d3-a456-426614174000');
+      expect((engine.calls[0]!.input as ScheduledAgentRunInput).scheduleId).toBe(handle.id);
+    } finally {
+      Object.defineProperty(globalThis, 'crypto', {
+        configurable: true,
+        value: originalCrypto,
+      });
+    }
+  });
+
   it('returns a handle whose lifecycle methods delegate to the engine', async () => {
     const recorder = { pause: [] as string[], resume: [] as string[], cancel: [] as string[] };
     const engine = makeSchedulingEngine({ handleRecorder: recorder });
@@ -335,6 +426,8 @@ describe('createAgentSchedule', () => {
     expect(engine.calls).toHaveLength(0);
     expect(handle.id).toBe('schedule-self-run-step');
     await handle.pause();
+    await handle.resume();
+    await handle.cancel();
     const summary = await handle.describe();
     expect(summary.id).toBe('schedule-self-run-step');
   });
@@ -364,6 +457,37 @@ describe('createAgentSchedule', () => {
     expect(getScheduleCalls).toEqual(['schedule-self-run-step']);
     expect(engine.calls).toHaveLength(0);
     expect(handle.id).toBe('schedule-self-run-step');
+  });
+
+  it('idempotent schedule handles throw when the reused schedule disappears before describe', async () => {
+    const existingSummary: ScheduleSummary = {
+      ...mockSummary,
+      id: 'vanishing-schedule',
+      intervalMs: 3_600_000,
+    };
+    const engine = makeSchedulingEngine({ summaries: [existingSummary] });
+    let calls = 0;
+    engine.getSchedule = async () => {
+      calls++;
+      return calls === 1 ? existingSummary : null;
+    };
+
+    const handle = await createAgentSchedule({
+      engine: engine as unknown as AnyRunEngine,
+      agentName: 'researcher',
+      spec: { every: '1h' },
+      input: 'hello',
+      id: 'vanishing-schedule',
+      idempotent: true,
+    });
+
+    try {
+      await handle.describe();
+      throw new Error('expected describe to reject');
+    } catch (error) {
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toContain('vanishing-schedule no longer exists');
+    }
   });
 
   it('treats a duplicate-id schedule race as success when the existing schedule is compatible', async () => {
@@ -425,6 +549,55 @@ describe('createAgentSchedule', () => {
       'Schedule schedule-collision already exists for workflow otherWorkflow; expected agentRun.',
     );
     expect(engine.calls).toHaveLength(0);
+  });
+
+  it('rejects an existing schedule with a different cron spec when idempotent registration is requested', async () => {
+    const engine = makeSchedulingEngine({
+      summaries: [
+        {
+          ...mockSummary,
+          id: 'schedule-collision',
+          cronExpression: '0 10 * * *',
+        },
+      ],
+    });
+
+    try {
+      await createAgentSchedule({
+        engine: engine as unknown as AnyRunEngine,
+        agentName: 'researcher',
+        spec: { cron: '0 9 * * *' },
+        input: 'hello',
+        id: 'schedule-collision',
+        idempotent: true,
+      });
+      throw new Error('expected createAgentSchedule to reject');
+    } catch (error) {
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toContain('different cron spec');
+    }
+  });
+
+  it('rethrows a duplicate-id schedule race when no existing schedule can be read back', async () => {
+    const engine = makeSchedulingEngine({ summaries: [] });
+    engine.schedule = async () => {
+      throw new Error('Schedule with id "schedule-race" already exists');
+    };
+
+    try {
+      await createAgentSchedule({
+        engine: engine as unknown as AnyRunEngine,
+        agentName: 'researcher',
+        spec: { every: '1h' },
+        input: 'hello',
+        id: 'schedule-race',
+        idempotent: true,
+      });
+      throw new Error('expected createAgentSchedule to reject');
+    } catch (error) {
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toContain('schedule-race');
+    }
   });
 
   it('rejects an existing cancelled schedule when idempotent registration is requested', async () => {

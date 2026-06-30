@@ -115,13 +115,13 @@ function summarizeStep(result: StepResultLike): string {
   const messages = result.conversation.getMessages();
 
   // First user message → initial query
-  let initialQuery = '(unknown)';
-  for (const message of messages) {
-    if (message.role === 'user' && typeof message.content === 'string') {
-      initialQuery = message.content;
-      break;
-    }
-  }
+  const initialUserMessage = messages.find(
+    (message) => message.role === 'user' && typeof message.content === 'string',
+  );
+  const initialQuery =
+    initialUserMessage && typeof initialUserMessage.content === 'string'
+      ? initialUserMessage.content
+      : '(unknown)';
 
   // First few assistant messages → approach
   const assistantMessages: string[] = [];

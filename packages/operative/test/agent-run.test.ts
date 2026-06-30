@@ -13,7 +13,7 @@ import { Conversation } from 'conversationalist';
 
 import { CompletedRunIterationError, createAgentRun } from '../src/agent-run';
 import { noToolCalls } from '../src/conditions/predicates';
-import { createActiveRun as createRun } from '../src/create-run';
+import { type ActiveRun, createActiveRun as createRun } from '../src/create-run';
 import { createMockGenerate } from '../src/test/index';
 import type { GenerateResponse } from '../src/types';
 
@@ -87,6 +87,150 @@ describe('AgentRun.result()', () => {
 // ---------------------------------------------------------------------------
 
 describe('AgentRun[Symbol.asyncIterator]()', () => {
+  it('returns an empty iterator for a concurrent second iteration when configured', async () => {
+    const generate = async () => {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      return textResponse('slow');
+    };
+    const activeRun = createRun({
+      generate,
+      toolbox: createTestToolbox([]),
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+    });
+    const run = createAgentRun(activeRun, { onCompletedIteration: 'empty' });
+
+    const firstIterator = run[Symbol.asyncIterator]();
+    const secondIterator = run[Symbol.asyncIterator]();
+
+    expect(await secondIterator.next()).toEqual({ value: undefined, done: true });
+    await firstIterator.return?.();
+    await activeRun.result;
+  });
+
+  it('throws for a concurrent second iteration by default', async () => {
+    const generate = async () => {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      return textResponse('slow');
+    };
+    const activeRun = createRun({
+      generate,
+      toolbox: createTestToolbox([]),
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+    });
+    const run = createAgentRun(activeRun);
+    const firstIterator = run[Symbol.asyncIterator]();
+
+    expect(() => run[Symbol.asyncIterator]()).toThrow(CompletedRunIterationError);
+    await firstIterator.return?.();
+    await activeRun.result;
+  });
+
+  it('completes iteration when the run settles before the observable completes', async () => {
+    const activeRun = {
+      result: Promise.resolve({
+        content: 'done',
+        conversation: {} as never,
+        finishReason: 'stop-condition',
+        steps: [],
+        usage: { prompt: 0, completion: 0, total: 0 },
+      }),
+      abort: () => undefined,
+      [Symbol.dispose]: () => undefined,
+      toObservable: () => ({
+        subscribe() {
+          return { unsubscribe: () => undefined };
+        },
+      }),
+    } as unknown as ActiveRun;
+    const run = createAgentRun(activeRun);
+    const iterator = run[Symbol.asyncIterator]();
+
+    expect(await iterator.next()).toEqual({ value: undefined, done: true });
+  });
+
+  it('surfaces observable errors while an iterator is waiting', async () => {
+    let observer: { error: (error: unknown) => void } | undefined;
+    const activeRun = {
+      result: new Promise(() => undefined),
+      abort: () => undefined,
+      [Symbol.dispose]: () => undefined,
+      toObservable: () => ({
+        subscribe(nextObserver: { error: (error: unknown) => void }) {
+          observer = nextObserver;
+          return { unsubscribe: () => undefined };
+        },
+      }),
+    } as unknown as ActiveRun;
+    const run = createAgentRun(activeRun);
+    const iterator = run[Symbol.asyncIterator]();
+    const next = iterator.next();
+
+    observer?.error('stream failed');
+
+    await expect(next).rejects.toThrow('stream failed');
+  });
+
+  it('surfaces buffered observable errors on the next pull', async () => {
+    const activeRun = {
+      result: new Promise(() => undefined),
+      abort: () => undefined,
+      [Symbol.dispose]: () => undefined,
+      toObservable: () => ({
+        subscribe(observer: { error: (error: unknown) => void }) {
+          observer.error('buffered failure');
+          return { unsubscribe: () => undefined };
+        },
+      }),
+    } as unknown as ActiveRun;
+    const run = createAgentRun(activeRun);
+    const iterator = run[Symbol.asyncIterator]();
+
+    await expect(iterator.next()).rejects.toThrow('buffered failure');
+  });
+
+  it('resolves a waiting iterator when the observable completes', async () => {
+    let observer: { complete: () => void } | undefined;
+    const activeRun = {
+      result: new Promise(() => undefined),
+      abort: () => undefined,
+      [Symbol.dispose]: () => undefined,
+      toObservable: () => ({
+        subscribe(nextObserver: { complete: () => void }) {
+          observer = nextObserver;
+          return { unsubscribe: () => undefined };
+        },
+      }),
+    } as unknown as ActiveRun;
+    const run = createAgentRun(activeRun);
+    const iterator = run[Symbol.asyncIterator]();
+    const next = iterator.next();
+
+    observer?.complete();
+
+    expect(await next).toEqual({ value: undefined, done: true });
+  });
+
+  it('cleans up the subscription when iteration returns early', async () => {
+    let unsubscribed = false;
+    const activeRun = {
+      result: new Promise(() => undefined),
+      abort: () => undefined,
+      [Symbol.dispose]: () => undefined,
+      toObservable: () => ({
+        subscribe() {
+          return { unsubscribe: () => (unsubscribed = true) };
+        },
+      }),
+    } as unknown as ActiveRun;
+    const run = createAgentRun(activeRun);
+    const iterator = run[Symbol.asyncIterator]();
+
+    expect(await iterator.return?.()).toEqual({ value: undefined, done: true });
+    expect(unsubscribed).toBe(true);
+  });
+
   it('yields run events during iteration', async () => {
     const run = makeRun([textResponse('streaming')]);
     const types: string[] = [];

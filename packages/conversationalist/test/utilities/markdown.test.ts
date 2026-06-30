@@ -609,6 +609,37 @@ describe('toMarkdown', () => {
       // The visible text is preserved.
       expect(result).toContain('See source.');
     });
+
+    test('preserves cited text and non-tool multimodal blocks when tool-result redaction is disabled', () => {
+      const conversation = createConversation([
+        {
+          id: 'm1',
+          role: 'assistant',
+          content: [
+            {
+              type: 'text',
+              text: 'See source.',
+              citations: [{ cited_text: 'visible citation', url: 'https://visible.example.com' }],
+            },
+            { type: 'container_upload', file_id: 'file-1' },
+          ],
+          position: 0,
+          createdAt: '2024-01-15T10:00:00.000Z',
+          metadata: {},
+          hidden: false,
+        },
+      ]);
+
+      const result = toMarkdown(conversation, {
+        includeMetadata: true,
+        redactToolArguments: true,
+        redactToolResults: false,
+      });
+
+      expect(result).toContain('visible citation');
+      expect(result).toContain('container_upload');
+      expect(result).toContain('file-1');
+    });
   });
 });
 

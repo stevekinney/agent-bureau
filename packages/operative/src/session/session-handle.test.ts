@@ -414,6 +414,86 @@ describe('session.run()', () => {
     expect(final!.runs[0]!.runId).toBe('running-ref-session:0');
   });
 
+  it('surfaces persistence failures after the inner run resolves', async () => {
+    const kv = textValueStore(new MemoryStorage());
+    const baseStore = createSessionStore(kv);
+    let updateCalls = 0;
+    const store: SessionStore = {
+      ...baseStore,
+      async update(...args) {
+        updateCalls += 1;
+        if (updateCalls === 2) {
+          throw new Error('failed to persist terminal run');
+        }
+        return baseStore.update(...args);
+      },
+    };
+    const handle = createSessionHandle('terminal-persist-fails', {
+      store,
+      agentName: 'agent',
+      runOptions: createTestRunOptions(createInstantGenerate('done')),
+    });
+
+    const run = handle.run('hello');
+
+    try {
+      await run.result();
+      throw new Error('expected run result to reject');
+    } catch (error) {
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toContain('failed to persist terminal run');
+    }
+    await yieldToPortableEventLoop();
+    expect(updateCalls).toBe(2);
+  });
+
+  it('streams run events when iterating a session run', async () => {
+    const { handle } = createSessionHandleFixture();
+    const agentRun = handle.run('stream events');
+    const eventTypes: string[] = [];
+
+    for await (const event of agentRun) {
+      eventTypes.push(event.type);
+    }
+
+    expect(eventTypes).toContain('run.started');
+    expect(eventTypes).toContain('run.completed');
+    const result = await agentRun.result();
+    expect(result).toMatchObject({ finishReason: 'maximum-steps' });
+  });
+
+  it('aborts a running session run through the AgentRun handle', async () => {
+    let signalGenerateStarted!: () => void;
+    const generateStarted = new Promise<void>((resolve) => {
+      signalGenerateStarted = resolve;
+    });
+    const blockingGenerate: GenerateFunction = async ({ signal }) => {
+      signalGenerateStarted();
+      await new Promise<never>((_resolve, reject) => {
+        signal?.addEventListener('abort', () => reject(new Error('session run aborted')), {
+          once: true,
+        });
+      });
+      throw new Error('abort signal was not delivered');
+    };
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+    const handle = createSessionHandle('abort-agent-run-session', {
+      store,
+      agentName: 'agent',
+      runOptions: createTestRunOptions(blockingGenerate),
+    });
+
+    const agentRun = handle.run('abort me');
+    await generateStarted;
+    agentRun.abort('user stopped it');
+
+    const result = await agentRun.result();
+    expect(result).toMatchObject({
+      finishReason: 'aborted',
+    });
+  });
+
   // Regression: Finding PRRT_kwDORvupsc6MUE_1 — run() never routed through the
   // Weft durable engine even when engine+checkpointStore were present. After the
   // fix, a new run must start via engine.start() so it is checkpointed and

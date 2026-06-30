@@ -309,6 +309,49 @@ describe('loop helper coverage', () => {
     ]);
   });
 
+  it('passes stable durable operation keys through traced tool execution', async () => {
+    const durableOperationKeys: Array<string | undefined> = [];
+    const tracedContexts: unknown[] = [];
+    const recordKeyTool = createTool({
+      name: 'record_key',
+      description: 'Record the durable operation key.',
+      input: z.object({}),
+      execute: async (_input, context) => {
+        durableOperationKeys.push(context.durableOperationKey);
+        return { ok: true };
+      },
+    });
+    let generateCalls = 0;
+
+    const result = await executeLoop({
+      generate: async () => {
+        generateCalls++;
+        if (generateCalls === 1) {
+          return {
+            content: '',
+            toolCalls: [{ id: 'provider-call-a', name: 'record_key', arguments: {} }],
+          };
+        }
+        return textResponse('done');
+      },
+      toolbox: createTestToolbox([recordKeyTool]),
+      conversation: new Conversation(),
+      parentContext: { traceId: 'trace-1' } as never,
+      withTraceContext: async (context, run) => {
+        tracedContexts.push(context);
+        return run();
+      },
+      runId: 'durable-run-1',
+      durableOperationKeys: true,
+      stopWhen: noToolCalls(),
+    });
+
+    expect(result.finishReason).toBe('stop-condition');
+    expect(tracedContexts).toContainEqual({ traceId: 'trace-1' });
+    expect(tracedContexts.length).toBeGreaterThan(1);
+    expect(durableOperationKeys).toEqual(['schedule-safe:durable-run-1:step-0:tool-0:record_key']);
+  });
+
   it('does not pass durable operation keys for in-memory runs with runId only', async () => {
     const durableOperationKeys: Array<string | undefined> = [];
     const recordKeyTool = createTool({

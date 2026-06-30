@@ -765,6 +765,40 @@ describe('truncateToTokenLimit', () => {
     ]);
   });
 
+  it('returns unchanged with a conversation-level estimator when under the token limit', () => {
+    let conv = createConversation({ id: 'test' }, testEnvironment);
+    conv = appendMessages(conv, { role: 'user', content: 'Small' }, testEnvironment);
+
+    const truncated = truncateToTokenLimit(conv, 10, {
+      estimateConversationTokens: () => 1,
+    });
+
+    expect(truncated).toBe(conv);
+  });
+
+  it('keeps only locked messages when a conversation-level estimator says locked content fills the budget', () => {
+    let conv = createConversation({ id: 'test' }, testEnvironment);
+    conv = appendMessages(
+      conv,
+      { role: 'system', content: 'System' },
+      { role: 'user', content: 'Old' },
+      { role: 'assistant', content: 'Protected' },
+      testEnvironment,
+    );
+
+    const truncated = truncateToTokenLimit(conv, 2, {
+      estimateConversationTokens(messages) {
+        return messages.length;
+      },
+      preserveLastN: 1,
+    });
+
+    expect(getOrderedMessages(truncated).map((message) => message.content)).toEqual([
+      'System',
+      'Protected',
+    ]);
+  });
+
   it('counts each retained candidate as a full conversation for provider-style estimators', () => {
     let conv = createConversation({ id: 'test' }, testEnvironment);
     conv = appendMessages(
@@ -785,6 +819,42 @@ describe('truncateToTokenLimit', () => {
       'Middle',
       'New',
     ]);
+  });
+
+  it('returns only locked blocks when the first async conversation-estimator candidate is too large', async () => {
+    let conv = createConversation({ id: 'test' }, testEnvironment);
+    conv = appendMessages(
+      conv,
+      { role: 'user', content: 'Old' },
+      { role: 'assistant', content: 'New' },
+      testEnvironment,
+    );
+
+    const truncated = await truncateToTokenLimit(conv, 0, {
+      async estimateConversationTokens(messages) {
+        return messages.length;
+      },
+    });
+
+    expect(getOrderedMessages(truncated)).toEqual([]);
+  });
+
+  it('returns no messages when the first async conversation-estimator candidate exceeds a positive budget', async () => {
+    let conv = createConversation({ id: 'test' }, testEnvironment);
+    conv = appendMessages(
+      conv,
+      { role: 'user', content: 'Old' },
+      { role: 'assistant', content: 'New' },
+      testEnvironment,
+    );
+
+    const truncated = await truncateToTokenLimit(conv, 1, {
+      async estimateConversationTokens(messages) {
+        return messages.length * 2;
+      },
+    });
+
+    expect(getOrderedMessages(truncated)).toEqual([]);
   });
 
   it('accepts an async conversation-level estimator in options', async () => {

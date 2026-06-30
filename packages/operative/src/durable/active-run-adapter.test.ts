@@ -303,6 +303,43 @@ describe('createRun with durable routing', () => {
     }
   });
 
+  it('still settles when engine.cancel rejects during durable abort cleanup', async () => {
+    const context = await buildContext();
+    const originalCancel = context.engine.cancel.bind(context.engine);
+    try {
+      context.engine.cancel = async () => {
+        throw new Error('cancel failed after abort signal fired');
+      };
+
+      const activeRun = createRun(
+        {
+          generate: ({ signal }) =>
+            new Promise((_resolve, reject) => {
+              signal?.addEventListener(
+                'abort',
+                () => reject(new Error('aborted despite cancel failure')),
+                { once: true },
+              );
+            }),
+          toolbox: createToolbox([]) as unknown as RunOptions['toolbox'],
+          conversation: createConversationHistory(),
+          stopWhen: stopWhen.noToolCalls(),
+        },
+        { ...context, runId: 'cancel-rejects-run', prompt: 'Hello' },
+      );
+
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      activeRun.abort('cancel can fail independently');
+
+      const result = await activeRun.result;
+
+      expect(result.finishReason).toBe('aborted');
+    } finally {
+      context.engine.cancel = originalCancel;
+      context.engine[Symbol.dispose]();
+    }
+  });
+
   it('disposes a durable active run by aborting and completing the event surface', async () => {
     const context = await buildContext();
     try {
@@ -681,6 +718,63 @@ describe('createRun with durable routing', () => {
     }
   });
 
+  it('forwards toolbox progress and policy-denied events on the durable path', async () => {
+    const context = await buildContext();
+    let resolveGenerate: ((response: { content: string; toolCalls: [] }) => void) | undefined;
+    let markGenerateStarted: (() => void) | undefined;
+    const generateStarted = new Promise<void>((resolve) => {
+      markGenerateStarted = resolve;
+    });
+    const toolbox = createToolbox([]);
+
+    try {
+      const activeRun = createRun(
+        {
+          generate: () =>
+            new Promise((resolve) => {
+              resolveGenerate = resolve;
+              markGenerateStarted?.();
+            }),
+          toolbox: toolbox as unknown as RunOptions['toolbox'],
+          conversation: createConversationHistory(),
+          stopWhen: stopWhen.noToolCalls(),
+        },
+        { ...context, runId: 'durable-forwarded-tool-events', prompt: 'Hello' },
+      );
+      const events: string[] = [];
+      activeRun.toObservable().subscribe({
+        next(event) {
+          events.push(event.type);
+        },
+      });
+
+      await generateStarted;
+      toolbox.emit(
+        'progress' as never,
+        {
+          call: { id: 'call-1', name: 'durable_tool' },
+          percent: 25,
+          message: 'started',
+        } as never,
+      );
+      toolbox.emit(
+        'policy-denied' as never,
+        {
+          call: { id: 'call-1', name: 'durable_tool' },
+          reason: 'blocked',
+        } as never,
+      );
+      resolveGenerate?.({ content: 'done', toolCalls: [] });
+
+      await activeRun.result;
+
+      expect(events).toContain('tool.progress');
+      expect(events).toContain('tool.policy-denied');
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+
   it('stamps tool events with the correct step index across multiple steps on the durable path', async () => {
     const context = await buildContext();
     try {
@@ -867,6 +961,62 @@ describe('reattachDurableActiveRun', () => {
       expect(cancelled).toEqual(['reattach-abort']);
       expect(events).toEqual(['run.aborted']);
       expect(result.finishReason).toBe('aborted');
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+
+  it('exposes the full reattached active-run event facade', async () => {
+    const context = await buildContext();
+    try {
+      const handle = {
+        id: 'reattach-event-facade',
+        result: () =>
+          Promise.resolve({
+            runId: 'reattach-event-facade',
+            steps: 0,
+            content: 'reattached',
+            finishReason: 'stop-condition',
+          }),
+      };
+      const engine = {
+        cancel: async () => {},
+      } as unknown as AnyRunEngine;
+
+      const recoveredRun = reattachDurableActiveRun(
+        { engine, checkpointStore: context.checkpointStore },
+        { runId: 'reattach-event-facade', handle },
+      );
+      const collected: string[] = [];
+      const removedListener = () => collected.push('removed');
+      const iterator = recoveredRun.events('run.completed');
+      const observableSubscription = recoveredRun.toObservable().subscribe({
+        next(event) {
+          if (event.type === 'run.completed') collected.push('observable');
+        },
+      });
+
+      recoveredRun.addEventListener('run.completed', removedListener);
+      recoveredRun.removeEventListener('run.completed', removedListener);
+      recoveredRun.on('run.completed').subscribe({
+        next() {
+          collected.push('on');
+        },
+      });
+      recoveredRun.once('run.completed', () => collected.push('once'));
+      recoveredRun.subscribe('run.completed', () => collected.push('subscribe'));
+
+      const result = await recoveredRun.result;
+      const iteratorResult = await iterator.next();
+      observableSubscription.unsubscribe();
+
+      expect(result.finishReason).toBe('stop-condition');
+      expect(iteratorResult.value.finishReason).toBe('stop-condition');
+      expect(collected).toContain('on');
+      expect(collected).toContain('once');
+      expect(collected).toContain('subscribe');
+      expect(collected).toContain('observable');
+      expect(collected).not.toContain('removed');
     } finally {
       context.engine[Symbol.dispose]();
     }

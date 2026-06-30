@@ -454,6 +454,17 @@ describe('C4 — createStreamingAccumulator (multi-part accumulation)', () => {
     ]);
   });
 
+  it('also accepts text deltas for thinking blocks', () => {
+    const acc = createStreamingAccumulator();
+    acc.openBlock(0, { type: 'thinking', buffer: '', signature: '' });
+    acc.getBlock(0)?.appendTextDelta('thinking as text delta');
+    acc.getBlock(0)?.appendSignatureDelta('sig==');
+
+    expect(contentOf(acc.finalize())).toEqual([
+      { type: 'thinking', thinking: 'thinking as text delta', signature: 'sig==' },
+    ]);
+  });
+
   it('accumulates a signature delivered across multiple signature_delta chunks byte-for-byte', () => {
     // Anthropic may split the signature across several signature_delta events;
     // appendSignatureDelta must concatenate, not replace, or the byte-for-byte

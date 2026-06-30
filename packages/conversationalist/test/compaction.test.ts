@@ -291,6 +291,38 @@ describe('summarizer-based compaction', () => {
       expect(parts[1]?.content).toBe('[tool result]');
     });
 
+    test('strips server tool use input while preserving unrelated structural blocks', () => {
+      const messages: Message[] = [
+        {
+          id: 'm-0',
+          role: 'assistant',
+          content: [
+            {
+              type: 'server_tool_use',
+              id: 'server-tool-1',
+              name: 'web_search',
+              input: { query: 'long private query' },
+            },
+            { type: 'container_upload', file_id: 'file-1' },
+          ],
+          position: 0,
+          createdAt: new Date().toISOString(),
+          metadata: {},
+          hidden: false,
+        },
+      ];
+
+      const stripped = stripToolResultDetailsBatch(messages);
+      const parts = stripped[0].content as Array<{
+        type: string;
+        input?: unknown;
+        file_id?: string;
+      }>;
+
+      expect(parts[0]?.input).toBe('[tool result]');
+      expect(parts[1]).toEqual({ type: 'container_upload', file_id: 'file-1' });
+    });
+
     test('strips citation payloads on cited text parts', () => {
       const messages: Message[] = [
         {
