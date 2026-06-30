@@ -99,6 +99,22 @@ function makeSchedulingEngine(options?: {
   };
 }
 
+function replaceGlobalCrypto(value: unknown): () => void {
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'crypto');
+  Object.defineProperty(globalThis, 'crypto', {
+    configurable: true,
+    value,
+  });
+
+  return () => {
+    if (descriptor) {
+      Object.defineProperty(globalThis, 'crypto', descriptor);
+    } else {
+      Reflect.deleteProperty(globalThis, 'crypto');
+    }
+  };
+}
+
 // ---------------------------------------------------------------------------
 // isScheduledAgentRunInput
 // ---------------------------------------------------------------------------
@@ -294,11 +310,7 @@ describe('createAgentSchedule', () => {
   });
 
   it('generates a schedule id without crypto helpers when none is supplied', async () => {
-    const originalCrypto = globalThis.crypto;
-    Object.defineProperty(globalThis, 'crypto', {
-      configurable: true,
-      value: {},
-    });
+    const restoreCrypto = replaceGlobalCrypto({});
     const engine = makeSchedulingEngine({ scheduleId: 'ignored' });
 
     try {
@@ -312,26 +324,19 @@ describe('createAgentSchedule', () => {
       expect(handle.id).toMatch(/^[\da-f]{8}-[\da-f]{4}-4[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/);
       expect((engine.calls[0]!.input as ScheduledAgentRunInput).scheduleId).toBe(handle.id);
     } finally {
-      Object.defineProperty(globalThis, 'crypto', {
-        configurable: true,
-        value: originalCrypto,
-      });
+      restoreCrypto();
     }
   });
 
   it('generates a schedule id with crypto.getRandomValues when randomUUID is absent', async () => {
-    const originalCrypto = globalThis.crypto;
     let nextByte = 0;
-    Object.defineProperty(globalThis, 'crypto', {
-      configurable: true,
-      value: {
-        getRandomValues(array: Uint8Array) {
-          for (let index = 0; index < array.length; index += 1) {
-            array[index] = nextByte;
-            nextByte += 1;
-          }
-          return array;
-        },
+    const restoreCrypto = replaceGlobalCrypto({
+      getRandomValues(array: Uint8Array) {
+        for (let index = 0; index < array.length; index += 1) {
+          array[index] = nextByte;
+          nextByte += 1;
+        }
+        return array;
       },
     });
     const engine = makeSchedulingEngine({ scheduleId: 'ignored' });
@@ -347,21 +352,14 @@ describe('createAgentSchedule', () => {
       expect(handle.id).toMatch(/^[\da-f]{8}-[\da-f]{4}-4[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/);
       expect((engine.calls[0]!.input as ScheduledAgentRunInput).scheduleId).toBe(handle.id);
     } finally {
-      Object.defineProperty(globalThis, 'crypto', {
-        configurable: true,
-        value: originalCrypto,
-      });
+      restoreCrypto();
     }
   });
 
   it('generates a schedule id with crypto.randomUUID when available', async () => {
-    const originalCrypto = globalThis.crypto;
-    Object.defineProperty(globalThis, 'crypto', {
-      configurable: true,
-      value: {
-        randomUUID() {
-          return '123e4567-e89b-42d3-a456-426614174000';
-        },
+    const restoreCrypto = replaceGlobalCrypto({
+      randomUUID() {
+        return '123e4567-e89b-42d3-a456-426614174000';
       },
     });
     const engine = makeSchedulingEngine({ scheduleId: 'ignored' });
@@ -377,10 +375,7 @@ describe('createAgentSchedule', () => {
       expect(handle.id).toBe('123e4567-e89b-42d3-a456-426614174000');
       expect((engine.calls[0]!.input as ScheduledAgentRunInput).scheduleId).toBe(handle.id);
     } finally {
-      Object.defineProperty(globalThis, 'crypto', {
-        configurable: true,
-        value: originalCrypto,
-      });
+      restoreCrypto();
     }
   });
 
