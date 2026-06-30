@@ -171,7 +171,7 @@ async function assertRunStaysParkedWhenPollerUnarmed(
   await pollUntil(async () => {
     if (reachedSleepMarkers.length < 1) return false;
     const snapshot = await handle.snapshot();
-    return snapshot?.status === 'running';
+    return snapshot !== null && !TERMINAL_STATUSES.has(snapshot.status);
   });
   expect(reachedSleepMarkers.length).toBe(1);
   // Give a real-time poller adequate opportunity to fire the due timer. The

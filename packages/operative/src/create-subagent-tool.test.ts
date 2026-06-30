@@ -72,6 +72,34 @@ describe('createSubagentTool', () => {
       expect(String(caughtError)).toContain('error');
     });
 
+    it('throws when the sub-agent is aborted', async () => {
+      const tool = createSubagentTool({
+        name: 'researcher',
+        description: 'Research a topic',
+        agentName: 'researcher',
+        input: z.object({ topic: z.string() }),
+
+        run: (_input: string, _context: any) =>
+          Promise.resolve({
+            conversation: {} as any,
+            content: '',
+            finishReason: 'aborted',
+            steps: [],
+            usage: { prompt: 0, completion: 0, total: 0 },
+          } as any),
+      });
+
+      try {
+        await (tool as unknown as { execute: (p: unknown) => Promise<unknown> }).execute({
+          topic: 'AI',
+        });
+        throw new Error('expected sub-agent execution to reject');
+      } catch (error) {
+        expect(error).toBeInstanceOf(Error);
+        expect((error as Error).message).toContain('aborted');
+      }
+    });
+
     it('throws when the sub-agent finishes with budget-exceeded', async () => {
       const tool = createSubagentTool({
         name: 'researcher',
@@ -126,6 +154,35 @@ describe('createSubagentTool', () => {
         caughtError = error;
       }
       expect(String(caughtError)).toContain('elicitation');
+    });
+
+    it('throws when maximum-steps is treated as an error', async () => {
+      const tool = createSubagentTool({
+        name: 'researcher',
+        description: 'Research a topic',
+        agentName: 'researcher',
+        input: z.object({ topic: z.string() }),
+        treatMaximumStepsAsError: true,
+
+        run: (_input: string, _context: any) =>
+          Promise.resolve({
+            conversation: {} as any,
+            content: '',
+            finishReason: 'maximum-steps',
+            steps: [],
+            usage: { prompt: 0, completion: 0, total: 0 },
+          } as any),
+      });
+
+      try {
+        await (tool as unknown as { execute: (p: unknown) => Promise<unknown> }).execute({
+          topic: 'AI',
+        });
+        throw new Error('expected sub-agent execution to reject');
+      } catch (error) {
+        expect(error).toBeInstanceOf(Error);
+        expect((error as Error).message).toContain('maximum steps');
+      }
     });
 
     it('does not throw when treatMaximumStepsAsError is false', async () => {

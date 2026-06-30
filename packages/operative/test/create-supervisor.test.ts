@@ -2,6 +2,7 @@ import { describe, expect, it } from 'bun:test';
 
 import type { AgentRegistryEntry, RegistryAgent } from '../src/create-agent-registry';
 import {
+  createCapabilityRouting,
   createFanOutRouting,
   createRoundRobinRouting,
   createSupervisor,
@@ -108,6 +109,63 @@ describe('createSupervisor', () => {
 
       await supervisor.delegate('first');
       await expect(supervisor.delegate('second')).rejects.toThrow('Maximum delegations');
+    });
+
+    it('exposes all event facade methods on delegated runs', async () => {
+      const agent = makeAgent('worker');
+      const supervisor = createSupervisor({
+        agents: [makeEntry(agent)],
+        routing: () => 'worker',
+      });
+      const events: string[] = [];
+      const removedListener = () => events.push('removed');
+      const onSubscription = supervisor.on('synthesis.completed').subscribe({
+        next() {
+          events.push('on');
+        },
+      });
+      const observableSubscription = supervisor.toObservable().subscribe({
+        next(event) {
+          if (event.type === 'synthesis.completed') events.push('observable');
+        },
+      });
+
+      supervisor.addEventListener('task.routed', removedListener);
+      supervisor.removeEventListener('task.routed', removedListener);
+      supervisor.once('task.completed', () => events.push('once'));
+      const subscription = supervisor.subscribe('synthesis.completed', () => {
+        events.push('subscribe');
+      });
+
+      await supervisor.delegate('facade task');
+
+      onSubscription.unsubscribe();
+      observableSubscription.unsubscribe();
+      subscription.unsubscribe();
+
+      expect(events).toContain('once');
+      expect(events).toContain('subscribe');
+      expect(events).toContain('observable');
+      expect(events).toContain('on');
+      expect(events).not.toContain('removed');
+    });
+
+    it('delegates one task to every routed agent when routing returns multiple names', async () => {
+      const writer = makeAgent('writer');
+      const reviewer = makeAgent('reviewer');
+      const supervisor = createSupervisor({
+        agents: [makeEntry(writer), makeEntry(reviewer)],
+        routing: () => ['writer', 'reviewer'],
+      });
+
+      const result = await supervisor.delegate('ship it');
+
+      expect(writer.receivedInputs).toEqual(['ship it']);
+      expect(reviewer.receivedInputs).toEqual(['ship it']);
+      expect(result.agentResults.map((agentResult) => agentResult.agentName).sort()).toEqual([
+        'reviewer',
+        'writer',
+      ]);
     });
   });
 
@@ -425,5 +483,29 @@ describe('createFanOutRouting', () => {
   it('returns empty array when pool is empty', () => {
     const routing = createFanOutRouting();
     expect(routing('task', [])).toEqual([]);
+  });
+});
+
+describe('createCapabilityRouting', () => {
+  it('routes to the agent with the strongest capability overlap', () => {
+    const routing = createCapabilityRouting();
+    const writer = makeEntry(makeAgent('writer'), ['write', 'draft']);
+    const researcher = makeEntry(makeAgent('researcher'), ['research', 'summarize']);
+
+    expect(routing('please research this', [writer, researcher])).toBe('researcher');
+  });
+
+  it('uses a custom capability extractor when provided', () => {
+    const routing = createCapabilityRouting(() => ['special']);
+    const generalist = makeEntry(makeAgent('generalist'), ['general']);
+    const specialist = makeEntry(makeAgent('specialist'), ['special']);
+
+    expect(routing('anything', [generalist, specialist])).toBe('specialist');
+  });
+
+  it('throws when there are no agents to route to', () => {
+    const routing = createCapabilityRouting();
+
+    expect(() => routing('research', [])).toThrow('No agents available for routing');
   });
 });

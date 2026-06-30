@@ -173,25 +173,6 @@ const buildMessageBlocks = (
   return { blocks: filteredBlocks, messageToBlock };
 };
 
-const buildMessageBlocksAsync = async (
-  messages: ReadonlyArray<Message>,
-  estimateBlockTokens: (messages: ReadonlyArray<Message>) => MaybePromise<number>,
-  preserveToolPairs: boolean,
-): Promise<{
-  blocks: MessageBlock[];
-  messageToBlock: Map<string, MessageBlock>;
-}> => {
-  const { blocks, messageToBlock } = buildMessageBlocks(messages, () => 0, preserveToolPairs);
-
-  await Promise.all(
-    blocks.map(async (block) => {
-      block.tokenCount = await estimateBlockTokens(block.messages);
-    }),
-  );
-
-  return { blocks, messageToBlock };
-};
-
 const estimateBlocksAsConversation = (
   blocks: ReadonlyArray<MessageBlock>,
   options: EstimateOptions,
@@ -328,17 +309,12 @@ type ResolvedTruncateOptions = TruncateOptions | AsyncTruncateOptions;
 const truncateToTokenLimitFromBlocks = (
   conversation: Conversation,
   maxTokens: number,
-  currentTokens: number,
   orderedMessages: ReadonlyArray<Message>,
   blocks: ReadonlyArray<MessageBlock>,
   messageToBlock: Map<string, MessageBlock>,
   options: ResolvedTruncateOptions,
   environment: ConversationEnvironment,
 ): Conversation => {
-  if (currentTokens <= maxTokens) {
-    return conversation;
-  }
-
   const now = environment.now();
   const preserveSystem = options.preserveSystemMessages ?? true;
   const preserveLastN = options.preserveLastN ?? 0;
@@ -591,34 +567,11 @@ export function truncateToTokenLimit(
     );
   }
 
-  const estimateBlockTokens = (messages: ReadonlyArray<Message>) =>
-    estimateMessageBlockTokens(messages, options, resolvedEnvironment);
+  const estimateBlockTokens = (messages: ReadonlyArray<Message>): number =>
+    estimateMessageBlockTokens(messages, options, resolvedEnvironment) as number;
 
   // Calculate current token count
   const currentTokens = estimateBlockTokens(orderedMessages);
-  if (isPromiseLike(currentTokens)) {
-    return currentTokens.then(async (resolvedCurrentTokens) => {
-      if (resolvedCurrentTokens <= maxTokens) {
-        return conversation;
-      }
-
-      const { blocks, messageToBlock } = await buildMessageBlocksAsync(
-        orderedMessages,
-        estimateBlockTokens,
-        preserveToolPairs,
-      );
-      return truncateToTokenLimitFromBlocks(
-        conversation,
-        maxTokens,
-        resolvedCurrentTokens,
-        orderedMessages,
-        blocks,
-        messageToBlock,
-        options,
-        resolvedEnvironment,
-      );
-    });
-  }
 
   if (currentTokens <= maxTokens) {
     return conversation;
@@ -626,13 +579,12 @@ export function truncateToTokenLimit(
 
   const { blocks, messageToBlock } = buildMessageBlocks(
     orderedMessages,
-    (messages) => estimateMessageBlockTokens(messages, options, resolvedEnvironment) as number,
+    estimateBlockTokens,
     preserveToolPairs,
   );
   return truncateToTokenLimitFromBlocks(
     conversation,
     maxTokens,
-    currentTokens,
     orderedMessages,
     blocks,
     messageToBlock,

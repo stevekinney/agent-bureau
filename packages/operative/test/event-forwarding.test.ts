@@ -230,4 +230,57 @@ describe('event forwarding', () => {
     expect(forwarded.originalEvent).toHaveProperty('tool');
     expect(forwarded.originalEvent).toHaveProperty('call');
   });
+
+  it('forwards manual toolbox progress and policy-denied events while a run is active', async () => {
+    let resolveGenerate: ((response: GenerateResponse) => void) | undefined;
+    let markGenerateStarted: (() => void) | undefined;
+    const generateStarted = new Promise<void>((resolve) => {
+      markGenerateStarted = resolve;
+    });
+    const generate = () =>
+      new Promise<GenerateResponse>((resolve) => {
+        resolveGenerate = resolve;
+        markGenerateStarted?.();
+      });
+    const toolbox = createToolbox([weatherTool]);
+    const conversation = new Conversation();
+    const activeRun = createActiveRun({
+      agentName: 'agent-a',
+      runId: 'run-a',
+      generate,
+      toolbox,
+      conversation,
+      stopWhen: noToolCalls(),
+    });
+    const events: string[] = [];
+
+    activeRun.toObservable().subscribe({
+      next(event) {
+        events.push(event.type);
+      },
+    });
+
+    await generateStarted;
+    toolbox.emit(
+      'progress' as never,
+      {
+        call: { id: 'call-1', name: 'get_weather' },
+        percent: 50,
+        message: 'halfway',
+      } as never,
+    );
+    toolbox.emit(
+      'policy-denied' as never,
+      {
+        call: { id: 'call-1', name: 'get_weather' },
+        reason: 'blocked',
+      } as never,
+    );
+    resolveGenerate?.(textResponse('Done.'));
+
+    await activeRun.result;
+
+    expect(events).toContain('tool.progress');
+    expect(events).toContain('tool.policy-denied');
+  });
 });

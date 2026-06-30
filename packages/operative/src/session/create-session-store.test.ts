@@ -3,7 +3,7 @@ import { describe, expect, it } from 'bun:test';
 import { Conversation, createConversationHistory } from 'conversationalist';
 
 import { createAgentSession } from '../agent-session';
-import { createSessionStore } from './create-session-store';
+import { createSessionStore, SessionConflictError } from './create-session-store';
 
 function makeSession(overrides: {
   agentName?: string;
@@ -31,6 +31,14 @@ async function seedStoredSession(
 }
 
 describe('createSessionStore', () => {
+  it('exposes a specific error for repeated session save conflicts', () => {
+    const error = new SessionConflictError('session-1');
+
+    expect(error.name).toBe('SessionConflictError');
+    expect(error.code).toBe('SessionConflictError');
+    expect(error.message).toContain('session-1');
+  });
+
   it('save/load round trip preserves session data', async () => {
     const store = createSessionStore(textValueStore(new MemoryStorage()));
     const session = makeSession({ agentName: 'round-trip-agent' });

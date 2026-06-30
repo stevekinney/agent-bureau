@@ -61,6 +61,22 @@ describe('copyMultiModalContent', () => {
   });
 
   describe('tool blocks deep-copy JSON payloads', () => {
+    it('copies thinking content', () => {
+      const input = { type: 'thinking' as const, thinking: 'reasoning', signature: 'sig' };
+      const result = copyMultiModalContent(input);
+
+      expect(result).toEqual(input);
+      expect(result).not.toBe(input);
+    });
+
+    it('copies redacted thinking content', () => {
+      const input = { type: 'redacted_thinking' as const, data: 'encrypted' };
+      const result = copyMultiModalContent(input);
+
+      expect(result).toEqual(input);
+      expect(result).not.toBe(input);
+    });
+
     it('deep-copies server_tool_use input so mutating the copy does not affect the original', () => {
       const input = {
         type: 'server_tool_use' as const,
@@ -96,6 +112,34 @@ describe('copyMultiModalContent', () => {
       };
       const result = copyMultiModalContent(input);
       expect((result as typeof input).content).not.toBe(input.content);
+    });
+
+    it('deep-copies server tool result content variants', () => {
+      const variants = [
+        'code_execution_tool_result',
+        'bash_code_execution_tool_result',
+        'text_editor_code_execution_tool_result',
+        'web_fetch_tool_result',
+      ] as const;
+
+      for (const type of variants) {
+        const input = {
+          type,
+          tool_use_id: `${type}-1`,
+          content: { nested: { value: type } },
+        };
+        const result = copyMultiModalContent(input);
+        expect(result).toEqual(input);
+        expect((result as typeof input).content).not.toBe(input.content);
+      }
+    });
+
+    it('copies container upload content', () => {
+      const input = { type: 'container_upload' as const, file_id: 'file-1' };
+      const result = copyMultiModalContent(input);
+
+      expect(result).toEqual(input);
+      expect(result).not.toBe(input);
     });
   });
 });

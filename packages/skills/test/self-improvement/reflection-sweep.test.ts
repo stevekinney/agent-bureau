@@ -83,6 +83,25 @@ describe('reflectionSweep — memory sink', () => {
     expect(calledWith).toContain('Initial query:');
   });
 
+  it('uses an unknown initial query when there is no string user message', async () => {
+    const reflect = mock(async () => 'insight');
+    const { onStep } = reflectionSweep({
+      sink: { type: 'memory', memory },
+      reflect,
+    });
+
+    await onStep(
+      createStepResult({
+        conversation: createMockConversation([
+          { role: 'system', content: 'Follow the runbook.' },
+          { role: 'assistant', content: 'I checked the runbook.' },
+        ]),
+      }),
+    );
+
+    expect(reflect.mock.calls[0]![0]).toContain('Initial query: (unknown)');
+  });
+
   it('writes the insight to memory with experiential metadata', async () => {
     const reflect = mock(async () => 'Always run integration tests before refactoring auth.');
     const { onStep } = reflectionSweep({

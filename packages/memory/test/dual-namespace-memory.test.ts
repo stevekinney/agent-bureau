@@ -103,6 +103,51 @@ describe('createDualNamespaceMemory — merged-read / private-write', () => {
     await dualMemory.init();
   });
 
+  describe('lifecycle', () => {
+    it('initializes both private and shared memories', async () => {
+      const privateMemory = makeMemory('lifecycle-private');
+      const sharedMemory = makeMemory('lifecycle-shared');
+      let privateInitCount = 0;
+      let sharedInitCount = 0;
+      const originalPrivateInit = privateMemory.init.bind(privateMemory);
+      const originalSharedInit = sharedMemory.init.bind(sharedMemory);
+      privateMemory.init = async () => {
+        privateInitCount++;
+        await originalPrivateInit();
+      };
+      sharedMemory.init = async () => {
+        sharedInitCount++;
+        await originalSharedInit();
+      };
+      const dualMemory = createDualNamespaceMemory(privateMemory, sharedMemory);
+
+      await dualMemory.init();
+
+      expect(privateInitCount).toBe(1);
+      expect(sharedInitCount).toBe(1);
+    });
+
+    it('closes both private and shared memories', async () => {
+      let privateCloseCount = 0;
+      let sharedCloseCount = 0;
+      const originalPrivateClose = privateMemory.close.bind(privateMemory);
+      const originalSharedClose = sharedMemory.close.bind(sharedMemory);
+      privateMemory.close = async () => {
+        privateCloseCount++;
+        await originalPrivateClose();
+      };
+      sharedMemory.close = async () => {
+        sharedCloseCount++;
+        await originalSharedClose();
+      };
+
+      await dualMemory.close();
+
+      expect(privateCloseCount).toBe(1);
+      expect(sharedCloseCount).toBe(1);
+    });
+  });
+
   // ── write path ──────────────────────────────────────────────────────────
 
   describe('remember() — private-write', () => {

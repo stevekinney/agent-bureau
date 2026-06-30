@@ -589,10 +589,11 @@ export function createSessionHandle(
 
         // Forward all inner events to the outer emitter so for-await consumers
         // see the full event stream.
+        const completeOuterEmitter = outerEmitter.complete.bind(outerEmitter);
         const subscription = innerRun.toObservable().subscribe({
           next: (e) => outerEmitter.dispatchEvent(e),
-          error: () => outerEmitter.complete(),
-          complete: () => outerEmitter.complete(),
+          error: completeOuterEmitter,
+          complete: completeOuterEmitter,
         });
 
         let innerResult: RunResult;
@@ -663,9 +664,7 @@ export function createSessionHandle(
         subscribe: outerEmitter.subscribe.bind(outerEmitter) as ActiveRun['subscribe'],
         events: outerEmitter.events.bind(outerEmitter) as ActiveRun['events'],
         toObservable: outerEmitter.toObservable.bind(outerEmitter) as ActiveRun['toObservable'],
-        complete(): void {
-          outerEmitter.complete();
-        },
+        complete: outerEmitter.complete.bind(outerEmitter) as ActiveRun['complete'],
         [Symbol.dispose](): void {
           // Mirror abort(): fire the outer AbortController (stops billing) and
           // forward to the inner run so engine.cancel() is also triggered for

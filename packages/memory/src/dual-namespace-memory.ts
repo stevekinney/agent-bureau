@@ -214,17 +214,19 @@ export function createDualNamespaceMemory(privateMemory: Memory, sharedMemory?: 
     },
 
     async init(): Promise<void> {
-      await privateMemory.init();
+      const initOperations = [privateMemory.init()];
       if (sharedMemory !== undefined) {
-        await sharedMemory.init();
+        initOperations.push(sharedMemory.init());
       }
+      await Promise.all(initOperations);
     },
 
     async close(): Promise<void> {
-      await privateMemory.close();
+      const closeOperations = [privateMemory.close()];
       if (sharedMemory !== undefined) {
-        await sharedMemory.close();
+        closeOperations.push(sharedMemory.close());
       }
+      await Promise.all(closeOperations);
     },
   };
 }

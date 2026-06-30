@@ -6,6 +6,7 @@ import { z } from 'zod';
 import { noToolCalls } from '../src/conditions/predicates';
 import { createActiveRun } from '../src/create-run';
 import {
+  AgentScheduledEvent,
   BudgetExceededEvent,
   BudgetThresholdEvent,
   type OperativeEventType,
@@ -13,6 +14,7 @@ import {
   SessionDeletedEvent,
   SessionLoadedEvent,
   SessionSavedEvent,
+  WakeupScheduledEvent,
 } from '../src/events';
 import { createMockGenerate, createRunRecorder } from '../src/test/index';
 import type { GenerateResponse } from '../src/types';
@@ -248,5 +250,24 @@ describe('events', () => {
     expect(loaded.sessionId).toBe('session-1');
     expect(created.type).toBe('session.created');
     expect(deleted.type).toBe('session.deleted');
+  });
+
+  it('constructs scheduling events with the expected payload', () => {
+    const scheduled = new AgentScheduledEvent({
+      agentName: 'assistant',
+      scheduleId: 'schedule-1',
+      spec: { every: '1h' },
+      sessionId: 'session-1',
+    });
+    const wakeup = new WakeupScheduledEvent(5000, 'resume work');
+
+    expect(scheduled.type).toBe('schedule.created');
+    expect(scheduled.agentName).toBe('assistant');
+    expect(scheduled.scheduleId).toBe('schedule-1');
+    expect(scheduled.spec).toEqual({ every: '1h' });
+    expect(scheduled.sessionId).toBe('session-1');
+    expect(wakeup.type).toBe('schedule.wakeup');
+    expect(wakeup.duration).toBe(5000);
+    expect(wakeup.note).toBe('resume work');
   });
 });
