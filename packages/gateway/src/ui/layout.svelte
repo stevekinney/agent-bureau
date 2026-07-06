@@ -89,29 +89,31 @@
       <Menu size={18} aria-hidden="true" />
     </Button>
   </div>
-  <Sidebar bind:collapsed={sidebarCollapsed} label="Agent Bureau" class="sidebar">
-    {#snippet brand()}
-      <div class="sidebar-title">Agent Bureau</div>
-    {/snippet}
+  <div class="sidebar-shell">
+    <Sidebar bind:collapsed={sidebarCollapsed} label="Agent Bureau" class="sidebar">
+      {#snippet brand()}
+        <div class="sidebar-title">Agent Bureau</div>
+      {/snippet}
 
-    {#snippet navigation()}
-      <SideNavigation ariaLabel="Primary navigation">
-        {#each navigationLinks as link (link.href)}
-          <SideNavigationItem
-            href={link.href}
-            active={isActive(link.href)}
-            onclick={closeSidebarOnMobile}
-          >
-            {link.label}
-          </SideNavigationItem>
-        {/each}
-      </SideNavigation>
-    {/snippet}
+      {#snippet navigation()}
+        <SideNavigation ariaLabel="Primary navigation">
+          {#each navigationLinks as link (link.href)}
+            <SideNavigationItem
+              href={link.href}
+              active={isActive(link.href)}
+              onclick={closeSidebarOnMobile}
+            >
+              {link.label}
+            </SideNavigationItem>
+          {/each}
+        </SideNavigation>
+      {/snippet}
 
-    {#snippet footer()}
-      <StatusDot connectionState={connectionStatus} />
-    {/snippet}
-  </Sidebar>
+      {#snippet footer()}
+        <StatusDot connectionState={connectionStatus} />
+      {/snippet}
+    </Sidebar>
+  </div>
   <div id="main-content" class="main-content" tabindex="-1">
     {@render children()}
   </div>
