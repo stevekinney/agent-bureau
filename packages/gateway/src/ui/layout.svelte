@@ -22,6 +22,9 @@
     { href: '/chat', label: 'Chat' },
     { href: '/configuration', label: 'Configuration' },
   ];
+  const sidebarBreakpointQuery = '(max-width: 47.99rem)';
+  const isMobileSidebarViewport = () =>
+    typeof window !== 'undefined' && window.matchMedia(sidebarBreakpointQuery).matches;
 
   let {
     children,
@@ -33,21 +36,22 @@
     pathname: string;
   } = $props();
 
-  let sidebarCollapsed = $state(false);
-  let mobileSidebar = $state(false);
+  const initialMobileSidebar = isMobileSidebarViewport();
+  let mobileSidebar = $state(initialMobileSidebar);
+  let sidebarCollapsed = $state(initialMobileSidebar);
 
   const openSidebar = () => {
     sidebarCollapsed = false;
   };
 
   const closeSidebarOnMobile = () => {
-    if (mobileSidebar) {
+    if (isMobileSidebarViewport()) {
       sidebarCollapsed = true;
     }
   };
 
   onMount(() => {
-    const mediaQuery = window.matchMedia('(max-width: 47.99rem)');
+    const mediaQuery = window.matchMedia(sidebarBreakpointQuery);
     const syncSidebarState = () => {
       mobileSidebar = mediaQuery.matches;
       sidebarCollapsed = mediaQuery.matches;
