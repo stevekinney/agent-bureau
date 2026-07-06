@@ -12,6 +12,7 @@ import '@lostgradient/cinder/description-list/styles';
 import '@lostgradient/cinder/empty-state/styles';
 import '@lostgradient/cinder/event-stream-viewer/styles';
 import '@lostgradient/cinder/link/styles';
+import '@lostgradient/cinder/navigation-item/styles';
 import '@lostgradient/cinder/payload-inspector/styles';
 import '@lostgradient/cinder/run-step-timeline/styles';
 import '@lostgradient/cinder/section-heading/styles';
