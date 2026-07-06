@@ -1,10 +1,14 @@
 .layout {
   display: grid;
-  grid-template-columns: 220px 1fr;
+  grid-template-columns: 16rem 1fr;
   /* A definite viewport height so the content pane (and a full-height Chat) can
      resolve `height: 100%` against a sized row. `min-height` would leave the
      row content-sized, collapsing Chat's `height: 100%` to zero. */
   height: 100dvh;
+}
+
+.mobile-navigation-toggle {
+  display: none;
 }
 
 .sidebar {
@@ -24,4 +28,24 @@
      and allow a flex-height child (the chat page) to size against this pane. */
   min-height: 0;
   overflow-y: auto;
+}
+
+@media (max-width: 47.99rem) {
+  .layout {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto 1fr;
+  }
+
+  .mobile-navigation-toggle {
+    display: flex;
+    align-items: center;
+    padding-block: var(--cinder-space-3);
+    padding-inline: var(--cinder-space-4);
+    border-block-end: 1px solid var(--cinder-border);
+    background: var(--cinder-surface);
+  }
+
+  .main-content {
+    padding: 1rem;
+  }
 }

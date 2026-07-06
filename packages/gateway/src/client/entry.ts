@@ -4,6 +4,7 @@
 // and the same stylesheet is linked in the SSR shell for a styled first paint.
 import '@lostgradient/cinder/styles';
 import '@lostgradient/cinder/badge/styles';
+import '@lostgradient/cinder/button/styles';
 import '@lostgradient/cinder/callout/styles';
 import '@lostgradient/cinder/chat/styles';
 import '@lostgradient/cinder/code-block/styles';
