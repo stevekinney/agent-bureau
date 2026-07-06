@@ -3,9 +3,10 @@
 
   import { SideNavigation } from '@lostgradient/cinder/side-navigation';
   import { SideNavigationItem } from '@lostgradient/cinder/side-navigation-item';
+  import { Sidebar } from '@lostgradient/cinder/sidebar';
   import { SkipLink } from '@lostgradient/cinder/skip-link';
+  import { StatusDot } from '@lostgradient/cinder/status-dot';
 
-  import ConnectionIndicator from './components/connection-indicator.svelte';
   import type { ConnectionStatus } from './hooks/use-websocket.svelte';
 
   type NavigationLink = {
@@ -45,17 +46,25 @@
 
 <div class="layout">
   <SkipLink target="main-content" />
-  <SideNavigation ariaLabel="Primary navigation" class="sidebar">
-    <li class="sidebar-title">Agent Bureau</li>
-    {#each navigationLinks as link (link.href)}
-      <SideNavigationItem href={link.href} active={isActive(link.href)}>
-        {link.label}
-      </SideNavigationItem>
-    {/each}
-    <li class="sidebar-footer">
-      <ConnectionIndicator status={connectionStatus} />
-    </li>
-  </SideNavigation>
+  <Sidebar label="Agent Bureau" class="sidebar">
+    {#snippet brand()}
+      <div class="sidebar-title">Agent Bureau</div>
+    {/snippet}
+
+    {#snippet navigation()}
+      <SideNavigation ariaLabel="Primary navigation">
+        {#each navigationLinks as link (link.href)}
+          <SideNavigationItem href={link.href} active={isActive(link.href)}>
+            {link.label}
+          </SideNavigationItem>
+        {/each}
+      </SideNavigation>
+    {/snippet}
+
+    {#snippet footer()}
+      <StatusDot connectionState={connectionStatus} />
+    {/snippet}
+  </Sidebar>
   <div id="main-content" class="main-content" tabindex="-1">
     {@render children()}
   </div>

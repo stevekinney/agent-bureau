@@ -27,7 +27,7 @@ export interface CreateChatStoreOptions {
  *
  * The React `ChatMessage[]` becomes a cinder {@link ConversationHistory}
  * snapshot built with the chat builders, so it feeds the `Chat` component's
- * `conversation` prop directly. Streaming text feeds `Chat.isStreaming` /
+ * `conversation` prop directly. Streaming text feeds `Chat.streaming` /
  * `streamingStatus`. The React `runIdRef`/`sessionIdRef`/`streamingContentRef`
  * mirrors collapse: `runId`/`sessionId` are `$state` (UI-facing) read directly
  * inside `handleMessage`; `streamingContent` is a plain local since it never

@@ -1,11 +1,3 @@
-/*
- * App-shell layout glue. Cinder provides no two-column shell primitive, so the
- * gateway owns the grid, the sidebar chrome, and the content pane sizing. Every
- * color/spacing value resolves to a cinder design token (--cinder-*) so the
- * shell stays consistent with the cinder-rendered components inside it and
- * tracks the active color-scheme (dark, via data-theme on <html>).
- */
-
 .layout {
   display: grid;
   grid-template-columns: 220px 1fr;
@@ -16,22 +8,13 @@
 }
 
 .sidebar {
-  background: var(--cinder-surface);
-  border-right: 1px solid var(--cinder-border);
-  padding: 1.5rem 1rem;
-  display: flex;
-  flex-direction: column;
+  height: 100%;
 }
 
 .sidebar-title {
   font-size: 1rem;
-  margin-bottom: 1.5rem;
+  font-weight: 600;
   color: var(--cinder-text);
-}
-
-.sidebar-footer {
-  margin-top: auto;
-  padding-top: 1rem;
 }
 
 .main-content {

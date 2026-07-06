@@ -1,10 +1,32 @@
-// Cinder is import-order-sensitive: this base layer declares the @layer
-// order and pulls tokens + foundation + every component's CSS + utilities,
-// so it MUST be imported exactly once, FIRST, before the app. The client
+// Cinder is import-order-sensitive: import the base layer once, FIRST, then
+// import styles for the components Gateway actually renders. The client
 // bundle's CSS output is concatenated into /public/styles.css by the build,
-// and the same stylesheet is linked in the SSR shell for a styled first
-// paint.
-import '@lostgradient/cinder/styles/all';
+// and the same stylesheet is linked in the SSR shell for a styled first paint.
+import '@lostgradient/cinder/styles';
+import '@lostgradient/cinder/badge/styles';
+import '@lostgradient/cinder/callout/styles';
+import '@lostgradient/cinder/chat/styles';
+import '@lostgradient/cinder/code-block/styles';
+import '@lostgradient/cinder/data-list/styles';
+import '@lostgradient/cinder/description-list/styles';
+import '@lostgradient/cinder/empty-state/styles';
+import '@lostgradient/cinder/event-stream-viewer/styles';
+import '@lostgradient/cinder/link/styles';
+import '@lostgradient/cinder/payload-inspector/styles';
+import '@lostgradient/cinder/run-step-timeline/styles';
+import '@lostgradient/cinder/section-heading/styles';
+import '@lostgradient/cinder/side-navigation/styles';
+import '@lostgradient/cinder/sidebar/styles';
+import '@lostgradient/cinder/stacked-list-item/styles';
+import '@lostgradient/cinder/stat/styles';
+import '@lostgradient/cinder/stat-group/styles';
+import '@lostgradient/cinder/status-dot/styles';
+import '@lostgradient/cinder/table/styles';
+import '@lostgradient/cinder/table-body/styles';
+import '@lostgradient/cinder/table-cell/styles';
+import '@lostgradient/cinder/table-header/styles';
+import '@lostgradient/cinder/table-header-cell/styles';
+import '@lostgradient/cinder/table-row/styles';
 
 import { hydrate } from 'svelte';
 
