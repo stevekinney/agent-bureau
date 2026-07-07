@@ -1,37 +1,29 @@
-/*
- * App-shell layout glue. Cinder provides no two-column shell primitive, so the
- * gateway owns the grid, the sidebar chrome, and the content pane sizing. Every
- * color/spacing value resolves to a cinder design token (--cinder-*) so the
- * shell stays consistent with the cinder-rendered components inside it and
- * tracks the active color-scheme (dark, via data-theme on <html>).
- */
-
 .layout {
   display: grid;
-  grid-template-columns: 220px 1fr;
+  grid-template-columns: 16rem 1fr;
   /* A definite viewport height so the content pane (and a full-height Chat) can
      resolve `height: 100%` against a sized row. `min-height` would leave the
      row content-sized, collapsing Chat's `height: 100%` to zero. */
   height: 100dvh;
 }
 
+.mobile-navigation-toggle {
+  display: none;
+}
+
+.sidebar-shell {
+  min-height: 0;
+  height: 100%;
+}
+
 .sidebar {
-  background: var(--cinder-surface);
-  border-right: 1px solid var(--cinder-border);
-  padding: 1.5rem 1rem;
-  display: flex;
-  flex-direction: column;
+  height: 100%;
 }
 
 .sidebar-title {
   font-size: 1rem;
-  margin-bottom: 1.5rem;
+  font-weight: 600;
   color: var(--cinder-text);
-}
-
-.sidebar-footer {
-  margin-top: auto;
-  padding-top: 1rem;
 }
 
 .main-content {
@@ -41,4 +33,32 @@
      and allow a flex-height child (the chat page) to size against this pane. */
   min-height: 0;
   overflow-y: auto;
+}
+
+@media (max-width: 47.99rem) {
+  .layout {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto 1fr;
+  }
+
+  .mobile-navigation-toggle {
+    display: flex;
+    align-items: center;
+    grid-row: 1;
+    padding-block: var(--cinder-space-3);
+    padding-inline: var(--cinder-space-4);
+    border-block-end: 1px solid var(--cinder-border);
+    background: var(--cinder-surface);
+  }
+
+  .sidebar-shell {
+    grid-row: 1;
+    height: 0;
+    overflow: visible;
+  }
+
+  .main-content {
+    grid-row: 2;
+    padding: 1rem;
+  }
 }

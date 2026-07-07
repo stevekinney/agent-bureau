@@ -2,7 +2,6 @@ import { createMockTool, createTestToolbox } from 'armorer/test';
 import { describe, expect, it } from 'bun:test';
 import type { GenerateFunction, GenerateResponse, RegistryAgent, RunResult } from 'operative';
 import { createMockGenerate } from 'operative/test';
-import { z } from 'zod';
 
 import { createAgentEvaluation } from './create-agent-evaluation';
 import type { EvaluationCase } from './types';
@@ -491,7 +490,6 @@ describe('createAgentEvaluation', () => {
     const toolbox = createTestToolbox([
       createMockTool({
         name: 'noop',
-        input: z.object({}),
         impl: async () => 'done',
       }),
     ]);

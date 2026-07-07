@@ -48,10 +48,11 @@
 
   <Chat
     id="gateway-chat"
+    class="gateway-chat-surface"
     conversation={chat.conversation}
-    {isStreaming}
+    streaming={isStreaming}
     streamingStatus={isStreaming ? 'Generating response…' : undefined}
-    allowAttachments={false}
+    capabilities={{ attachments: false }}
     onsubmit={handleSubmit}
     emptyPrompts={['Ask the agent to do something…']}
   />
@@ -70,12 +71,10 @@
 
 <style>
   /*
-   * Cinder's <Chat> root (.chat-container) is `height: 100%`, so it needs a
+   * Cinder's <Chat> root is `height: 100%`, so it needs a
    * definite-height parent or it collapses to its content. Make the page a
    * full-height flex column and let the chat fill the remaining space below the
-   * heading. `:global(.chat-container)` targets cinder's documented root class
-   * (the same element its `class` prop forwards to) — the supported way to size
-   * a library component from its consumer.
+   * heading.
    */
   .page-chat {
     display: flex;
@@ -84,7 +83,7 @@
     height: 100%;
   }
 
-  .page-chat > :global(.chat-container) {
+  .page-chat > :global(.gateway-chat-surface) {
     flex: 1;
     min-height: 0;
   }

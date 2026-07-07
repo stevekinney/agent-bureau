@@ -39,7 +39,7 @@
   "dependencies": {
     "interoperability": "workspace:*",
     "memory": "workspace:*",
-    "zod": "^4.3.6"
+    "zod": "^4.4.1"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260606.1",

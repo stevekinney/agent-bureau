@@ -9,7 +9,7 @@
   let { run }: { run: RunSummary } = $props();
 </script>
 
-<TableRow class="run-row">
+<TableRow>
   <TableCell>
     <Link href={`/runs/${run.id}`}>{run.id}</Link>
   </TableCell>
