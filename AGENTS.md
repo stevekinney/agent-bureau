@@ -10,7 +10,7 @@ This applies to everything: compiler warnings, ESLint violations, TypeScript err
 
 ## Filing Work in Upstream Dependencies (weft, cinder)
 
-This monorepo consumes **weft** (`@lostgradient/weft`, currently `^0.2.1`) and will soon consume **cinder** as published npm packages. Both live in sibling repositories: `../weft` and `../cinder`. When you hit a bug, missing feature, or needed change that belongs *in one of those libraries* — not in our consuming code — file a ticket against that repository instead of working around it here.
+This monorepo consumes **weft** (`@lostgradient/weft`) and **cinder** (`@lostgradient/cinder`) as published npm packages. Both live in sibling repositories: `../weft` and `../cinder`. When you hit a bug, missing feature, or needed change that belongs _in one of those libraries_ — not in our consuming code — file a ticket against that repository instead of working around it here.
 
 **Decide whose problem it is first.** Is the defect in the dependency's published surface, or in how we consume it? If ours, fix it here. If theirs, file a ticket. Do not patch `node_modules/@lostgradient/weft`, vendor a copy, or build a shim layer to route around an upstream bug — those are exactly the compatibility-bridge patterns we don't allow.
 
@@ -19,7 +19,7 @@ This monorepo consumes **weft** (`@lostgradient/weft`, currently `^0.2.1`) and w
 ```bash
 tasks create --project weft \
   --title "Engine.recoverAll throws on duplicate run id" \
-  --description "Consumed from agent-bureau via @lostgradient/weft@^0.2.1.
+  --description "Consumed from agent-bureau via the @lostgradient/weft version declared in package.json.
 
 Repro: ...
 Expected: ...
