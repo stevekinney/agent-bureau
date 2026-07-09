@@ -10,6 +10,7 @@ import { resolveCommonParameters } from './shared/resolve-common-parameters.ts';
 import { toAnthropicToolChoice } from './structured-output/tool-choice-adapters.ts';
 import type {
   AnthropicClient,
+  AnthropicMessageResponse,
   AnthropicProviderOptions,
   AnthropicStreamingClient,
   GenerateContext,
@@ -18,6 +19,30 @@ import type {
   StreamingGenerateFunction,
   StreamingHandle,
 } from './types.ts';
+
+/**
+ * Build a provider-neutral {@link TokenUsage} from an Anthropic `usage` payload.
+ *
+ * Anthropic's `input_tokens` already EXCLUDES cache activity — it,
+ * `cache_creation_input_tokens`, and `cache_read_input_tokens` are three
+ * disjoint buckets. `cacheCreationTokens`/`cacheReadTokens` are only set when
+ * the API actually reported the field; they are never fabricated as `0`.
+ */
+function buildAnthropicUsage(
+  usage: NonNullable<AnthropicMessageResponse['usage']>,
+): GenerateResponse['usage'] {
+  return {
+    prompt: usage.input_tokens ?? 0,
+    completion: usage.output_tokens ?? 0,
+    total: (usage.input_tokens ?? 0) + (usage.output_tokens ?? 0),
+    ...(usage.cache_creation_input_tokens !== undefined
+      ? { cacheCreationTokens: usage.cache_creation_input_tokens }
+      : {}),
+    ...(usage.cache_read_input_tokens !== undefined
+      ? { cacheReadTokens: usage.cache_read_input_tokens }
+      : {}),
+  };
+}
 
 /**
  * Creates a GenerateFunction backed by the Anthropic Messages API.
@@ -96,13 +121,7 @@ export function createAnthropicProvider(options: AnthropicProviderOptions): Gene
         response.content as unknown as AnthropicContentBlock[],
       );
 
-      const usage = response.usage
-        ? {
-            prompt: response.usage.input_tokens ?? 0,
-            completion: response.usage.output_tokens ?? 0,
-            total: (response.usage.input_tokens ?? 0) + (response.usage.output_tokens ?? 0),
-          }
-        : undefined;
+      const usage = response.usage ? buildAnthropicUsage(response.usage) : undefined;
 
       return {
         content: textParts.join(''),
@@ -195,6 +214,8 @@ export function createAnthropicProviderStream(
       let accumulatedText = '';
       let inputTokens: number | undefined;
       let outputTokens: number | undefined;
+      let cacheCreationTokens: number | undefined;
+      let cacheReadTokens: number | undefined;
 
       // Track in-progress tool calls by content block index
       const pendingToolCalls: Map<number, { id?: string; name: string; partialJson: string }> =
@@ -205,6 +226,8 @@ export function createAnthropicProviderStream(
         switch (event.type) {
           case 'message_start': {
             inputTokens = event.message?.usage?.input_tokens;
+            cacheCreationTokens = event.message?.usage?.cache_creation_input_tokens;
+            cacheReadTokens = event.message?.usage?.cache_read_input_tokens;
             break;
           }
 
@@ -263,6 +286,8 @@ export function createAnthropicProviderStream(
               prompt: inputTokens ?? 0,
               completion: outputTokens ?? 0,
               total: (inputTokens ?? 0) + (outputTokens ?? 0),
+              ...(cacheCreationTokens !== undefined ? { cacheCreationTokens } : {}),
+              ...(cacheReadTokens !== undefined ? { cacheReadTokens } : {}),
             }
           : undefined;
 

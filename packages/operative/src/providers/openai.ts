@@ -12,12 +12,37 @@ import type {
   GenerateContext,
   GenerateFunction,
   GenerateResponse,
+  OpenAIChatCompletion,
   OpenAIClient,
   OpenAIProviderOptions,
   OpenAIStreamingClient,
   StreamingGenerateFunction,
   StreamingHandle,
 } from './types.ts';
+
+/**
+ * Build a provider-neutral {@link TokenUsage} from an OpenAI `usage` payload.
+ *
+ * OpenAI's `prompt_tokens` INCLUDES cached tokens — `prompt_tokens_details.
+ * cached_tokens` is a subset of it, not a disjoint bucket like Anthropic's
+ * cache fields. To keep `TokenUsage.prompt` meaning "fresh, non-cached input"
+ * across providers, cached tokens are subtracted out of `prompt` here.
+ * `cacheReadTokens` is only set when the API actually reported the field —
+ * never fabricated as `0`. OpenAI has no cache-write counterpart, so
+ * `cacheCreationTokens` is always absent for this provider.
+ */
+function buildOpenAIUsage(
+  usage: NonNullable<OpenAIChatCompletion['usage']>,
+): GenerateResponse['usage'] {
+  const promptTokens = usage.prompt_tokens ?? 0;
+  const cachedTokens = usage.prompt_tokens_details?.cached_tokens;
+  return {
+    prompt: cachedTokens !== undefined ? promptTokens - cachedTokens : promptTokens,
+    completion: usage.completion_tokens ?? 0,
+    total: usage.total_tokens ?? promptTokens + (usage.completion_tokens ?? 0),
+    ...(cachedTokens !== undefined ? { cacheReadTokens: cachedTokens } : {}),
+  };
+}
 
 /**
  * Creates a GenerateFunction backed by the OpenAI Chat Completions API.
@@ -86,15 +111,7 @@ export function createOpenAIProvider(options: OpenAIProviderOptions): GenerateFu
       const content = choice?.message.content ?? '';
       const toolCalls = parseOpenAIToolCalls(choice?.message.tool_calls);
 
-      const usage = response.usage
-        ? {
-            prompt: response.usage.prompt_tokens ?? 0,
-            completion: response.usage.completion_tokens ?? 0,
-            total:
-              response.usage.total_tokens ??
-              (response.usage.prompt_tokens ?? 0) + (response.usage.completion_tokens ?? 0),
-          }
-        : undefined;
+      const usage = response.usage ? buildOpenAIUsage(response.usage) : undefined;
 
       return {
         content,
@@ -223,13 +240,7 @@ export function createOpenAIProviderStream(
 
         // Extract usage from the final chunk
         if (chunk.usage) {
-          usage = {
-            prompt: chunk.usage.prompt_tokens ?? 0,
-            completion: chunk.usage.completion_tokens ?? 0,
-            total:
-              chunk.usage.total_tokens ??
-              (chunk.usage.prompt_tokens ?? 0) + (chunk.usage.completion_tokens ?? 0),
-          };
+          usage = buildOpenAIUsage(chunk.usage);
         }
       }
 

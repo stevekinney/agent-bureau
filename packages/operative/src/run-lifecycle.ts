@@ -1,5 +1,6 @@
 import type { Conversation } from 'conversationalist';
 
+import { estimateCost, getModelPricing } from './cost-estimation';
 import { BudgetExceededError, ElicitationDeniedError } from './errors';
 import { RunAbortedEvent, RunCompletedEvent, RunErrorEvent, RunStartedEvent } from './events';
 import {
@@ -8,7 +9,22 @@ import {
   runHookSilently,
   type RunState,
 } from './run-step';
-import type { FinishReason, RunOptions, RunResult } from './types';
+import type { FinishReason, RunOptions, RunResult, TokenUsage } from './types';
+
+/**
+ * Compute a terminal result's `costEstimate` from `RunOptions.costEstimation`.
+ * Returns `undefined` — never a fabricated estimate — when no `costEstimation`
+ * was supplied, or when its model has no resolvable pricing (checked via
+ * `getModelPricing` up front so `estimateCost`'s throw is never reached).
+ */
+function computeCostEstimate(
+  usage: TokenUsage,
+  costEstimation: RunOptions['costEstimation'],
+): RunResult['costEstimate'] {
+  if (!costEstimation) return undefined;
+  if (!getModelPricing(costEstimation.model, costEstimation.pricing)) return undefined;
+  return estimateCost(usage, costEstimation.model, costEstimation.pricing);
+}
 
 /**
  * The run-level lifecycle, factored out of `executeLoop` so the durable
@@ -65,6 +81,7 @@ export function makeAbortResult(
   emitter: EventDispatcher | undefined,
   step: number,
   reason?: string,
+  costEstimation?: RunOptions['costEstimation'],
 ): RunResult {
   emitter?.dispatch(new RunAbortedEvent(step, conversation, reason));
   runHookSilently(hooks, 'onRunAbort', {
@@ -72,11 +89,13 @@ export function makeAbortResult(
     partialSteps: [...runState.steps],
     conversation,
   });
+  const costEstimate = computeCostEstimate(runState.totalUsage, costEstimation);
   return {
     conversation,
     steps: runState.steps,
     content: runState.lastContent,
     usage: runState.totalUsage,
+    ...(costEstimate ? { costEstimate } : {}),
     finishReason: 'aborted',
   };
 }
@@ -93,6 +112,7 @@ export function makeErrorResult(
   hooks: RunOptions['hooks'],
   emitter: EventDispatcher | undefined,
   error: unknown,
+  costEstimation?: RunOptions['costEstimation'],
 ): RunResult {
   runHookSilently(hooks, 'onRunError', {
     error,
@@ -107,11 +127,13 @@ export function makeErrorResult(
         ? 'budget-exceeded'
         : 'error';
 
+  const costEstimate = computeCostEstimate(runState.totalUsage, costEstimation);
   const result: RunResult = {
     conversation,
     steps: runState.steps,
     content: runState.lastContent,
     usage: runState.totalUsage,
+    ...(costEstimate ? { costEstimate } : {}),
     finishReason,
     error,
   };
@@ -133,12 +155,15 @@ export function makeCompletedResult(
   finishReason: Extract<FinishReason, 'stop-condition' | 'maximum-steps'>,
   runStartTime: number,
   schemaValidation?: { success: boolean; error?: unknown },
+  costEstimation?: RunOptions['costEstimation'],
 ): RunResult {
+  const costEstimate = computeCostEstimate(runState.totalUsage, costEstimation);
   const result: RunResult = {
     conversation,
     steps: runState.steps,
     content: runState.lastContent,
     usage: runState.totalUsage,
+    ...(costEstimate ? { costEstimate } : {}),
     finishReason,
     ...(schemaValidation ? { schemaValidation } : {}),
   };

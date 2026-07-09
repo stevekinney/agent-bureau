@@ -705,6 +705,18 @@ export async function runStep(
     runState.totalUsage.prompt += usage.prompt;
     runState.totalUsage.completion += usage.completion;
     runState.totalUsage.total += usage.total;
+    // Cache fields are provider-neutral but not universally reported. Only
+    // accumulate when this step's usage actually carried the field, and only
+    // materialize it on the run total once a step has reported it — an
+    // absent field must never be fabricated as `0`.
+    if (usage.cacheCreationTokens !== undefined) {
+      runState.totalUsage.cacheCreationTokens =
+        (runState.totalUsage.cacheCreationTokens ?? 0) + usage.cacheCreationTokens;
+    }
+    if (usage.cacheReadTokens !== undefined) {
+      runState.totalUsage.cacheReadTokens =
+        (runState.totalUsage.cacheReadTokens ?? 0) + usage.cacheReadTokens;
+    }
   }
   emitter?.dispatch(new UsageAccumulatedEvent(step, { ...runState.totalUsage }, usage));
 

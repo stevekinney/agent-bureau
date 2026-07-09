@@ -309,6 +309,64 @@ describe('usage.accumulated event', () => {
     expect(totals[1]).toEqual({ prompt: 30, completion: 15, total: 45 });
     expect(totals[2]).toEqual({ prompt: 60, completion: 30, total: 90 });
   });
+
+  it('accumulates cacheCreationTokens/cacheReadTokens across steps without fabricating them when absent', async () => {
+    const generate = createMockGenerate([
+      toolCallResponse([weatherToolCall()], '', {
+        prompt: 10,
+        completion: 5,
+        total: 15,
+        cacheCreationTokens: 100,
+        cacheReadTokens: 0,
+      }),
+      // A step whose provider reported no cache fields at all.
+      toolCallResponse([weatherToolCall()], '', { prompt: 20, completion: 10, total: 30 }),
+      textResponse('Done', {
+        prompt: 30,
+        completion: 15,
+        total: 45,
+        cacheReadTokens: 200,
+      }),
+    ]);
+
+    const activeRun = createActiveRun({
+      generate,
+      toolbox: createToolbox([weatherTool]),
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+    });
+
+    const recorder = createRunRecorder(activeRun);
+    const result = await activeRun.result;
+
+    const usageEvents = recorder.events.filter((e) => e.type === 'usage.accumulated');
+    const totals = usageEvents.map((e) => (e.detail as { totalUsage: TokenUsage }).totalUsage);
+
+    expect(totals[0]).toEqual({
+      prompt: 10,
+      completion: 5,
+      total: 15,
+      cacheCreationTokens: 100,
+      cacheReadTokens: 0,
+    });
+    // Step 2 reported no cache fields — the run total carries forward
+    // unchanged rather than being reset or fabricated.
+    expect(totals[1]).toEqual({
+      prompt: 30,
+      completion: 15,
+      total: 45,
+      cacheCreationTokens: 100,
+      cacheReadTokens: 0,
+    });
+    expect(totals[2]).toEqual({
+      prompt: 60,
+      completion: 30,
+      total: 90,
+      cacheCreationTokens: 100,
+      cacheReadTokens: 200,
+    });
+    expect(result.usage).toEqual(totals[2]!);
+  });
 });
 
 describe('RunOptions.maximumTokens → GenerateContext.maximumTokens', () => {
