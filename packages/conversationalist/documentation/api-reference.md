@@ -322,11 +322,14 @@ This document tracks the published export map in [package.json](/Users/stevekinn
 ## `conversationalist/streaming`
 
 - `appendStreamingMessage`
+- `appendUnsafeStreamingMessage`
 - `cancelStreamingMessage`
 - `finalizeStreamingMessage`
+- `finalizeUnsafeStreamingMessage`
 - `getStreamingMessage`
 - `isStreamingMessage`
 - `updateStreamingMessage`
+- `updateUnsafeStreamingMessage`
 
 ### Streaming safety
 

@@ -1,16 +1,24 @@
 import { describe, expect, it } from 'bun:test';
 
-import { createConversationHistory as createConversation } from '../src/conversation/index';
+import {
+  appendUnsafeMessage,
+  createConversationHistory as createConversation,
+  type IntegrityIssue,
+} from '../src/conversation/index';
+import { ConversationalistError } from '../src/errors';
 import {
   appendStreamingMessage,
+  appendUnsafeStreamingMessage,
   cancelStreamingMessage,
   contentOf,
   createStreamingAccumulator,
   finalizeStreamingMessage,
+  finalizeUnsafeStreamingMessage,
   getStreamingMessage,
   isStreamingMessage,
   toolCallsOf,
   updateStreamingMessage,
+  updateUnsafeStreamingMessage,
 } from '../src/streaming';
 import type { ConversationHistory as Conversation, Message } from '../src/types';
 
@@ -60,6 +68,61 @@ describe('appendStreamingMessage', () => {
     );
 
     expect(getOrderedMessages(conversation)[0]?.metadata.custom).toBe('value');
+  });
+});
+
+describe('unsafe streaming primitives', () => {
+  it('updates and finalizes streaming messages on render-side conversations with orphan tool-results', () => {
+    const withApprovalPlaceholder = appendUnsafeMessage(
+      createConversation({ id: 'test' }, testEnvironment),
+      {
+        role: 'tool-result',
+        content: 'Approval required: shell.exec',
+        toolResult: {
+          callId: 'apr-1',
+          outcome: 'action_required',
+          content: 'Waiting for approval',
+        },
+      },
+      testEnvironment,
+    );
+
+    try {
+      appendStreamingMessage(withApprovalPlaceholder, 'assistant', undefined, testEnvironment);
+      throw new Error('Expected appendStreamingMessage to reject the orphan tool-result');
+    } catch (error) {
+      expect(error).toBeInstanceOf(ConversationalistError);
+      expect((error as ConversationalistError).code).toBe('error:integrity');
+      expect(
+        ((error as ConversationalistError).context?.issues as IntegrityIssue[]).some(
+          (issue) => issue.code === 'integrity:orphan-tool-result',
+        ),
+      ).toBe(true);
+    }
+
+    const { conversation, messageId } = appendUnsafeStreamingMessage(
+      withApprovalPlaceholder,
+      'assistant',
+      undefined,
+      testEnvironment,
+    );
+    const updated = updateUnsafeStreamingMessage(
+      conversation,
+      messageId,
+      'Approved. Running command.',
+      testEnvironment,
+    );
+    const finalized = finalizeUnsafeStreamingMessage(
+      updated,
+      messageId,
+      { metadata: { rendered: true } },
+      testEnvironment,
+    );
+
+    const streamingMessage = finalized.messages[messageId];
+    expect(streamingMessage?.content).toBe('Approved. Running command.');
+    expect(streamingMessage?.metadata.rendered).toBe(true);
+    expect(streamingMessage && isStreamingMessage(streamingMessage)).toBe(false);
   });
 });
 

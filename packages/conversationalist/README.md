@@ -342,10 +342,13 @@ Streaming-message helpers for building real-time assistant responses token by to
 ```typescript
 import {
   appendStreamingMessage,
+  appendUnsafeStreamingMessage,
   cancelStreamingMessage,
+  finalizeUnsafeStreamingMessage,
   finalizeStreamingMessage,
   getStreamingMessage,
   isStreamingMessage,
+  updateUnsafeStreamingMessage,
   updateStreamingMessage,
 } from 'conversationalist/streaming';
 
@@ -366,9 +369,10 @@ conversation = finalizeStreamingMessage(conversation, messageId, {
 conversation = cancelStreamingMessage(conversation, messageId);
 ```
 
-**Key exports:** `appendStreamingMessage`, `updateStreamingMessage`, `finalizeStreamingMessage`, `cancelStreamingMessage`, `isStreamingMessage`, `getStreamingMessage`.
+**Key exports:** `appendStreamingMessage`, `appendUnsafeStreamingMessage`, `updateStreamingMessage`, `updateUnsafeStreamingMessage`, `finalizeStreamingMessage`, `finalizeUnsafeStreamingMessage`, `cancelStreamingMessage`, `isStreamingMessage`, `getStreamingMessage`.
 
 Streaming messages (those with `metadata.__streaming === true`) are automatically protected from compaction, truncation, and adapter export until finalized.
+Use the unsafe variants only for render-side projections that may contain incomplete tool-call/tool-result pairs, such as partial transcript windows or approval placeholders.
 
 ---
 
