@@ -117,6 +117,80 @@ async function runTwoStepStreamingLoop(
   await generate({ ...makeContext(conversation), streaming: makeStreamingHandle() });
 }
 
+describe('CI diagnostic — direct SDK probe (temporary)', () => {
+  it('probes the real Anthropic SDK against the recording proxy directly', async () => {
+    const requests: RecordedRequest[] = [];
+    const server = Bun.serve({
+      port: 0,
+      hostname: '127.0.0.1',
+      fetch(request) {
+        const url = new URL(request.url);
+        requests.push({
+          method: request.method,
+          path: url.pathname,
+          query: url.search,
+          headers: Object.fromEntries(request.headers.entries()),
+        });
+        return new Response(
+          JSON.stringify({
+            id: 'msg_diag',
+            type: 'message',
+            role: 'assistant',
+            content: [{ type: 'text', text: 'diag' }],
+            model: 'claude-3-5-sonnet-20241022',
+            stop_reason: 'end_turn',
+            usage: { input_tokens: 1, output_tokens: 1 },
+          }),
+          { headers: { 'content-type': 'application/json' } },
+        );
+      },
+    });
+
+    try {
+      const module = await import('@anthropic-ai/sdk');
+      const Anthropic =
+        (module as { default?: unknown; Anthropic?: unknown }).default ??
+        (module as { default?: unknown; Anthropic?: unknown }).Anthropic;
+      console.log('[DIAG] module keys:', Object.keys(module));
+      console.log(
+        '[DIAG] Anthropic ctor:',
+        typeof Anthropic,
+        (Anthropic as { name?: string })?.name,
+      );
+
+      const AnthropicCtor = Anthropic as new (options: Record<string, unknown>) => {
+        messages: { create: (params: Record<string, unknown>) => Promise<unknown> };
+      };
+      const client = new AnthropicCtor({
+        apiKey: PLACEHOLDER_TOKEN,
+        baseURL: `http://127.0.0.1:${server.port}`,
+      });
+      console.log('[DIAG] client keys:', Object.keys(client));
+
+      let response: unknown;
+      let caught: unknown;
+      try {
+        response = await client.messages.create({
+          model: 'claude-3-5-sonnet-20241022',
+          max_tokens: 100,
+          messages: [{ role: 'user', content: 'hi' }],
+        });
+      } catch (error) {
+        caught = error;
+      }
+
+      console.log('[DIAG] requests received:', JSON.stringify(requests));
+      console.log('[DIAG] response:', JSON.stringify(response));
+      console.log(
+        '[DIAG] caught error:',
+        caught instanceof Error ? caught.stack : JSON.stringify(caught),
+      );
+    } finally {
+      server.stop();
+    }
+  });
+});
+
 describe('Anthropic provider behind a proxy', () => {
   const anthropicResponseBody = {
     id: 'msg_proxy_test',
