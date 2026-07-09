@@ -270,6 +270,12 @@ describe('provider helper coverage', () => {
 describe('OpenAI provider coverage', () => {
   it('constructs a dynamic SDK client when no client is injected', async () => {
     const calls: Array<Record<string, unknown>> = [];
+    // mock.module mutates Bun's process-global module registry — it is
+    // never auto-restored between test FILES (only mock() spies are).
+    // Left unrestored, this would leak the stub into every later file that
+    // dynamically imports 'openai', silently swallowing their real network
+    // calls. Capture the real module and re-mock it back in `finally`.
+    const realOpenAI = await import('openai');
 
     mock.module('openai', () => ({
       default: class MockOpenAI {
@@ -288,18 +294,22 @@ describe('OpenAI provider coverage', () => {
       },
     }));
 
-    const generate = createOpenAIProvider({
-      model: 'gpt-4o',
-      apiKey: 'test-key',
-      baseURL: 'https://example.test',
-    });
+    try {
+      const generate = createOpenAIProvider({
+        model: 'gpt-4o',
+        apiKey: 'test-key',
+        baseURL: 'https://example.test',
+      });
 
-    await expect(generate(makeContext())).resolves.toMatchObject({
-      content: 'Hello from OpenAI!',
-    });
-    expect(calls[0]).toEqual({
-      constructorOptions: { apiKey: 'test-key', baseURL: 'https://example.test' },
-    });
+      await expect(generate(makeContext())).resolves.toMatchObject({
+        content: 'Hello from OpenAI!',
+      });
+      expect(calls[0]).toEqual({
+        constructorOptions: { apiKey: 'test-key', baseURL: 'https://example.test' },
+      });
+    } finally {
+      mock.module('openai', () => realOpenAI);
+    }
   });
 
   it('maps text, tool calls, usage fallbacks, request options, and errors', async () => {
@@ -439,6 +449,7 @@ describe('OpenAI provider coverage', () => {
 
   it('constructs a dynamic streaming SDK client when no client is injected', async () => {
     const calls: Array<Record<string, unknown>> = [];
+    const realOpenAI = await import('openai');
 
     mock.module('openai', () => ({
       default: class MockOpenAI {
@@ -459,26 +470,33 @@ describe('OpenAI provider coverage', () => {
       },
     }));
 
-    const generate = createOpenAIProviderStream({
-      model: 'gpt-4o',
-      apiKey: 'test-key',
-      baseURL: 'https://example.test',
-    });
+    try {
+      const generate = createOpenAIProviderStream({
+        model: 'gpt-4o',
+        apiKey: 'test-key',
+        baseURL: 'https://example.test',
+      });
 
-    await expect(
-      generate({ ...makeContext(), streaming: makeStreamingHandle() }),
-    ).resolves.toMatchObject({
-      content: 'Hello from OpenAI!',
-    });
-    expect(calls[0]).toEqual({
-      constructorOptions: { apiKey: 'test-key', baseURL: 'https://example.test' },
-    });
+      await expect(
+        generate({ ...makeContext(), streaming: makeStreamingHandle() }),
+      ).resolves.toMatchObject({
+        content: 'Hello from OpenAI!',
+      });
+      expect(calls[0]).toEqual({
+        constructorOptions: { apiKey: 'test-key', baseURL: 'https://example.test' },
+      });
+    } finally {
+      mock.module('openai', () => realOpenAI);
+    }
   });
 });
 
 describe('Anthropic provider coverage', () => {
   it('constructs a dynamic SDK client when no client is injected', async () => {
     const calls: Array<Record<string, unknown>> = [];
+    // See the matching comment in the OpenAI coverage block above:
+    // mock.module leaks across test files unless explicitly restored.
+    const realAnthropic = await import('@anthropic-ai/sdk');
 
     mock.module('@anthropic-ai/sdk', () => ({
       default: class MockAnthropic {
@@ -495,15 +513,19 @@ describe('Anthropic provider coverage', () => {
       },
     }));
 
-    const generate = createAnthropicProvider({
-      model: 'claude-3-5-sonnet-20241022',
-      apiKey: 'test-key',
-    });
+    try {
+      const generate = createAnthropicProvider({
+        model: 'claude-3-5-sonnet-20241022',
+        apiKey: 'test-key',
+      });
 
-    await expect(generate(makeContext())).resolves.toMatchObject({
-      content: 'Hello from Anthropic!',
-    });
-    expect(calls[0]).toEqual({ constructorOptions: { apiKey: 'test-key' } });
+      await expect(generate(makeContext())).resolves.toMatchObject({
+        content: 'Hello from Anthropic!',
+      });
+      expect(calls[0]).toEqual({ constructorOptions: { apiKey: 'test-key' } });
+    } finally {
+      mock.module('@anthropic-ai/sdk', () => realAnthropic);
+    }
   });
 
   it('maps text, tool calls, usage fallbacks, request options, and errors', async () => {
@@ -661,6 +683,7 @@ describe('Anthropic provider coverage', () => {
 
   it('constructs a dynamic streaming SDK client when no client is injected', async () => {
     const calls: Array<Record<string, unknown>> = [];
+    const realAnthropic = await import('@anthropic-ai/sdk');
 
     mock.module('@anthropic-ai/sdk', () => ({
       default: class MockAnthropic {
@@ -679,23 +702,28 @@ describe('Anthropic provider coverage', () => {
       },
     }));
 
-    const generate = createAnthropicProviderStream({
-      model: 'claude-3-5-sonnet-20241022',
-      apiKey: 'test-key',
-    });
+    try {
+      const generate = createAnthropicProviderStream({
+        model: 'claude-3-5-sonnet-20241022',
+        apiKey: 'test-key',
+      });
 
-    await expect(
-      generate({ ...makeContext(), streaming: makeStreamingHandle() }),
-    ).resolves.toMatchObject({
-      content: 'Hello from Anthropic!',
-    });
-    expect(calls[0]).toEqual({ constructorOptions: { apiKey: 'test-key' } });
+      await expect(
+        generate({ ...makeContext(), streaming: makeStreamingHandle() }),
+      ).resolves.toMatchObject({
+        content: 'Hello from Anthropic!',
+      });
+      expect(calls[0]).toEqual({ constructorOptions: { apiKey: 'test-key' } });
+    } finally {
+      mock.module('@anthropic-ai/sdk', () => realAnthropic);
+    }
   });
 });
 
 describe('Gemini provider coverage', () => {
   it('constructs dynamic SDK clients when no client is injected', async () => {
     const calls: Array<Record<string, unknown>> = [];
+    const realGenerativeAI = await import('@google/generative-ai');
 
     mock.module('@google/generative-ai', () => ({
       GoogleGenerativeAI: class MockGoogleGenerativeAI {
@@ -717,15 +745,24 @@ describe('Gemini provider coverage', () => {
       },
     }));
 
-    const generate = createGeminiProvider({ model: 'gemini-pro', apiKey: 'test-key' });
-    const streamGenerate = createGeminiProviderStream({ model: 'gemini-pro', apiKey: 'test-key' });
+    try {
+      const generate = createGeminiProvider({ model: 'gemini-pro', apiKey: 'test-key' });
+      const streamGenerate = createGeminiProviderStream({
+        model: 'gemini-pro',
+        apiKey: 'test-key',
+      });
 
-    await expect(generate(makeContext())).resolves.toMatchObject({ content: 'Hello from Gemini!' });
-    await expect(
-      streamGenerate({ ...makeContext(), streaming: makeStreamingHandle() }),
-    ).resolves.toMatchObject({ content: 'Hello from Gemini!' });
-    expect(calls).toContainEqual({ apiKey: 'test-key' });
-    expect(calls).toContainEqual({ model: 'gemini-pro' });
+      await expect(generate(makeContext())).resolves.toMatchObject({
+        content: 'Hello from Gemini!',
+      });
+      await expect(
+        streamGenerate({ ...makeContext(), streaming: makeStreamingHandle() }),
+      ).resolves.toMatchObject({ content: 'Hello from Gemini!' });
+      expect(calls).toContainEqual({ apiKey: 'test-key' });
+      expect(calls).toContainEqual({ model: 'gemini-pro' });
+    } finally {
+      mock.module('@google/generative-ai', () => realGenerativeAI);
+    }
   });
 
   it('maps text, function calls, usage fallbacks, request options, and errors', async () => {
