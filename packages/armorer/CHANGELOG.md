@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.9.0
+
+### Minor Changes
+
+- d3ec2a6: Add runtime availability hooks for Armorer tools and propagate the new unavailable tool error category through shared tool-result schemas.
+- 9e86328: Add first-class untrusted-output risk tagging and fencing middleware for tool results.
+
 ## 0.8.2
 
 ### Patch Changes
