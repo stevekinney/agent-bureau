@@ -91,6 +91,7 @@ export type RiskFilter = {
   readOnly?: boolean;
   mutates?: boolean;
   dangerous?: boolean;
+  untrustedOutput?: boolean;
   permissions?: readonly string[];
 };
 
@@ -2328,6 +2329,12 @@ function riskMatches(risk: ToolRisk | undefined, filter: RiskFilter): boolean {
     return false;
   }
   if (filter.dangerous !== undefined && (risk.dangerous === true) !== filter.dangerous) {
+    return false;
+  }
+  if (
+    filter.untrustedOutput !== undefined &&
+    (risk.untrustedOutput === true) !== filter.untrustedOutput
+  ) {
     return false;
   }
   return true;

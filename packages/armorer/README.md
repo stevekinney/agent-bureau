@@ -460,12 +460,14 @@ import {
   createCacheMiddleware,
   createRateLimitMiddleware,
   createTruncationMiddleware,
+  createUntrustedOutputFencingMiddleware,
 } from 'armorer/middleware';
 
 const toolbox = createToolbox([], {
   middleware: [
     createCacheMiddleware({ ttlMs: 60000 }),
     createRateLimitMiddleware({ limit: 100, windowMs: 60000 }),
+    createUntrustedOutputFencingMiddleware(),
     createTruncationMiddleware({ maxCharacters: 2000 }),
   ],
 });
@@ -506,6 +508,37 @@ if (excerpt.truncated) {
 ```
 
 The structured result is `{ head, tail, originalSize, omittedBytes, truncated }`. Byte counts use UTF-8 size after base64 payload replacement, and the excerpts avoid splitting UTF-16 surrogate pairs.
+
+### Untrusted Tool Output
+
+Tools that return third-party text can carry prompt-injection instructions inside otherwise useful data. Mark those tools with `risk.untrustedOutput: true`, then add the fencing middleware before truncation so the model receives a clear data boundary.
+
+```ts
+import { createToolbox, createTool } from 'armorer';
+import { createUntrustedOutputFencingMiddleware } from 'armorer/middleware';
+import { queryTools } from 'armorer/query';
+import { z } from 'zod';
+
+const fetchPage = createTool({
+  name: 'web.fetch',
+  description: 'Fetch a web page',
+  input: z.object({ url: z.string().url() }),
+  risk: { untrustedOutput: true },
+  async execute({ url }) {
+    return await fetch(url).then((response) => response.text());
+  },
+});
+
+const toolbox = createToolbox([fetchPage], {
+  middleware: [createUntrustedOutputFencingMiddleware()],
+});
+
+const untrustedTools = queryTools(toolbox, {
+  risk: { untrustedOutput: true },
+});
+```
+
+The middleware leaves unflagged tools unchanged. For flagged tools, string results and object `content` fields are wrapped in configurable delimiters with a preamble that tells the model to treat the fenced text as data, not instructions. The risk flag is also queryable, so consumers can write tests that every web, browser, or document-ingestion tool carries `risk.untrustedOutput: true`.
 
 ## Idempotency
 
@@ -648,6 +681,10 @@ Metadata keys with built-in enforcement:
 - `metadata.readOnly: true` marks a tool as read-only
 - `metadata.dangerous: true` marks a tool as dangerous
 - `metadata.concurrency: number` sets a per-tool concurrency limit
+
+Risk flags with built-in query and tag support:
+
+- `risk.untrustedOutput: true` marks a tool whose output may contain third-party instructions and adds the `untrusted-output` tag
 
 Registry options for enforcement:
 

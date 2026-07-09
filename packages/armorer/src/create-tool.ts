@@ -1236,6 +1236,7 @@ export function createTool<
     [Symbol.toPrimitive]: () => configuration.identity.name,
     tags: configuration.tags,
     metadata: configuration.metadata,
+    risk: configuration.risk,
     ...(idempotencyKey !== undefined ? { idempotencyKey } : {}),
   };
 
@@ -1752,6 +1753,9 @@ function buildTagsFromRisk(baseTags: string[], risk: ToolRisk | undefined): stri
   }
   if (risk?.dangerous === true) {
     merged.add('dangerous');
+  }
+  if (risk?.untrustedOutput === true) {
+    merged.add('untrusted-output');
   }
   return Array.from(merged);
 }
