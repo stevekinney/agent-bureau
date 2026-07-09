@@ -13,6 +13,7 @@
 - [Quick Start](#quick-start)
 - [Safety, Policy, and Metadata](#safety-policy-and-metadata)
 - [Creating Tools](#creating-tools)
+- [Coding Toolbox (Read-Only)](#coding-toolbox-read-only)
 - [TypeScript](#typescript)
 - [Documentation](#documentation)
 - [License](#license)
@@ -1031,6 +1032,30 @@ The search tool:
 - **Supports semantic search** when embeddings are configured on the toolbox
 
 See [Search Tool documentation](documentation/search-tool.md) for filtering by tags, configuration options, and agentic workflow examples.
+
+## Coding Toolbox (Read-Only)
+
+`armorer/coding` is a first-party, read-only toolbox for letting an agent inspect a codebase: `read-file`, `grep`, and `glob`, all constrained to a single root directory by a path jail.
+
+```typescript
+import { createToolbox } from 'armorer';
+import { createCodingTools } from 'armorer/coding';
+
+const { readFile, grep, glob, jail } = createCodingTools({ root: process.cwd() });
+const toolbox = createToolbox([readFile, grep, glob]);
+
+// Or skip the intermediate object and get the three tools as an array:
+// const toolbox = createToolbox(createCodingToolbox({ root: process.cwd() }));
+```
+
+- **`root` is mandatory.** Every path the three tools touch is resolved through a jail anchored to `root`. Absolute paths, `..` traversal, and symlinks (at any path segment, including the leaf) that dereference outside `root` are rejected with a `PathTraversalError`.
+- **`read-file`** supports `offset`/`limit` line windows and caps the underlying read at `maxBytes` (default 256 KiB), reporting `truncated`/`truncatedReason` rather than silently dropping data.
+- **`grep`** runs an in-process regular expression (never `child_process` or a system `grep`) against files enumerated by `Bun.Glob`, optionally narrowed with a `glob` filter, and caps matches at `maxMatches` (default 200).
+- **`glob`** accepts repository-relative glob patterns only and caps results at `maxResults` (default 500).
+- All three report an explicit `truncated: boolean` marker whenever a cap was hit.
+- All three carry `metadata: { readOnly: true, mutates: false, dangerous: false }` and a `readonly` tag.
+
+**Non-goal:** this toolbox is deliberately read-only. It does not include write, edit, or shell/bash tools — those are gated on the sandboxing decision tracked as AB-42, and will land as a separate toolbox once that decision is made.
 
 ## TypeScript
 
