@@ -30,6 +30,12 @@ import type {
  * `cacheReadTokens` is only set when the API actually reported the field —
  * never fabricated as `0`. OpenAI has no cache-write counterpart, so
  * `cacheCreationTokens` is always absent for this provider.
+ *
+ * `prompt` is clamped at `0`: a malformed or inconsistent response (e.g.
+ * `cached_tokens` exceeding `prompt_tokens`, or `prompt_tokens` missing while
+ * `cached_tokens` is present) must never surface as a negative prompt count,
+ * which would violate `TokenUsage`'s non-negative contract and corrupt any
+ * downstream cost estimate.
  */
 function buildOpenAIUsage(
   usage: NonNullable<OpenAIChatCompletion['usage']>,
@@ -37,7 +43,7 @@ function buildOpenAIUsage(
   const promptTokens = usage.prompt_tokens ?? 0;
   const cachedTokens = usage.prompt_tokens_details?.cached_tokens;
   return {
-    prompt: cachedTokens !== undefined ? promptTokens - cachedTokens : promptTokens,
+    prompt: cachedTokens !== undefined ? Math.max(promptTokens - cachedTokens, 0) : promptTokens,
     completion: usage.completion_tokens ?? 0,
     total: usage.total_tokens ?? promptTokens + (usage.completion_tokens ?? 0),
     ...(cachedTokens !== undefined ? { cacheReadTokens: cachedTokens } : {}),

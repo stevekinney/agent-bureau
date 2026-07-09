@@ -147,6 +147,26 @@ describe('OpenAI provider cache token accounting', () => {
     expect(response.usage).not.toHaveProperty('cacheReadTokens');
   });
 
+  it('clamps prompt at 0 rather than going negative when cached_tokens exceeds prompt_tokens', async () => {
+    const client = createMockOpenAIClient([
+      {
+        choices: [{ message: { content: 'hi' }, finish_reason: 'stop' }],
+        usage: {
+          prompt_tokens: 10,
+          completion_tokens: 5,
+          total_tokens: 15,
+          prompt_tokens_details: { cached_tokens: 999 },
+        },
+      },
+    ]);
+    const generate = createOpenAIProvider({ model: 'gpt-4o', client });
+
+    const response = await generate(makeContext());
+
+    expect(response.usage!.prompt).toBe(0);
+    expect(response.usage!.cacheReadTokens).toBe(999);
+  });
+
   it('streams cacheReadTokens from the final chunk and nets cached tokens out of prompt', async () => {
     const client = createMockOpenAIStreamingClient([
       [
