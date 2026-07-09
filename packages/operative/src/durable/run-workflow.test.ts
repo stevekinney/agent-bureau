@@ -5,9 +5,11 @@ import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
 import { createTool, createToolbox } from 'armorer';
 import { afterEach, describe, expect, it } from 'bun:test';
 import { Conversation, createConversationHistory } from 'conversationalist';
+import { HookRegistry } from 'lifecycle';
 import { z } from 'zod';
 
 import { noToolCalls } from '../conditions/predicates';
+import type { OperativeHookMap } from '../hooks';
 import type { GenerateFunction } from '../types';
 import { createCheckpointStore } from './checkpoint-store';
 import { createRunWorkflow, isAgentRunWorkflowInput } from './run-workflow';
@@ -77,6 +79,37 @@ function makeServices(generate: GenerateFunction): DurableRunDeps {
       // only when a configured stopWhen fires. `noToolCalls` is the standard
       // "agent settled" condition a real caller supplies.
       stopWhen: noToolCalls(),
+    },
+  };
+}
+
+/**
+ * Same as {@link makeServices} but with an `afterToolExecution` hook wired in
+ * (seam #11 — hook replay policy). The hook is `replay: 'effectful'`: it
+ * performs an external side effect (`onEffect`) that a real hook would need to
+ * be idempotent for, exactly like `createMemoryPersistHook`.
+ */
+function makeServicesWithEffectfulHook(
+  generate: GenerateFunction,
+  onEffect: () => void,
+): DurableRunDeps {
+  const toolbox = continuingToolbox();
+  const hooks = new HookRegistry<OperativeHookMap>();
+  hooks.on(
+    'afterToolExecution',
+    async () => {
+      onEffect();
+    },
+    { replay: 'effectful' },
+  );
+  return {
+    toolbox,
+    options: {
+      generate,
+      toolbox,
+      conversation: createConversationHistory(),
+      stopWhen: noToolCalls(),
+      hooks,
     },
   };
 }
@@ -380,6 +413,77 @@ describe('durable agentRun workflow', () => {
         // The recovered transcript carries step 0 from engine A plus step 1.
         const checkpoint = await b.checkpointStore.loadCheckpoint(aRunId);
         expect(checkpoint.steps.map((s) => s.content)).toEqual(['A step 0', 'recovered step 1']);
+      } finally {
+        b.engine[Symbol.dispose]();
+      }
+    });
+
+    it('fires an effectful step-level hook exactly once across a crash/recover cycle (seam #11)', async () => {
+      // Whole-step memoization (`ctx.memo` in run-workflow.ts) is what keeps a
+      // hook's replay policy sound WITHOUT gating on it: `runStep` — and every
+      // hook it invokes — runs entirely inside the step's memo, so a checkpointed
+      // step's hooks are never re-invoked on recovery; only the in-flight
+      // (un-memoized) step's hooks fire again. This proves that contract for an
+      // `afterToolExecution` hook marked `replay: 'effectful'`.
+      const storage = new MemoryStorage();
+      const runId = 'cccccccc-0000-4000-8000-000000000003';
+
+      // A side effect shared across both "processes" — modelling an external
+      // store an effectful hook writes to (e.g. `createMemoryPersistHook`).
+      let effectCount = 0;
+
+      // Step 0 emits a tool call (the hook fires — effectCount -> 1), then step 1
+      // hangs mid-generate so we can "crash" before it commits.
+      const servicesA = makeServicesWithEffectfulHook(
+        async ({ step }) =>
+          step === 0
+            ? { content: 'A step 0', toolCalls: [{ name: 'next', arguments: {} }] }
+            : new Promise<never>(() => {}),
+        () => {
+          effectCount += 1;
+        },
+      );
+
+      const a = await buildEngine(storage, false);
+      const handle = await startRun(a.engine, { runId, prompt: 'Start' }, servicesA);
+      void handle.result().catch(() => {});
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      // Confirm step 0 actually COMMITTED (its ctx.memo resolved and checkpointed)
+      // before "crashing" — otherwise a hook firing ahead of the checkpoint write
+      // would make this assertion pass for the wrong reason (scheduling variance,
+      // not the memoization contract under test).
+      const afterCrash = await a.checkpointStore.loadCheckpoint(runId);
+      expect(afterCrash.steps).toHaveLength(1);
+      expect(effectCount).toBe(1);
+      a.engine[Symbol.dispose]();
+
+      // FRESH PROCESS: a new engine + a new HookRegistry closure, but the SAME
+      // external effect target — recovery re-provides services via the resolver,
+      // never any in-process registry. Step 1 is the FINAL step (no tool call),
+      // so its own `afterToolExecution` never fires — isolating the assertion to
+      // whether step 0's already-checkpointed hook re-fires.
+      const b = await buildEngine(storage, false, async () => ({
+        status: 'available',
+        services: makeServicesWithEffectfulHook(
+          async () => ({ content: 'recovered', toolCalls: [] }),
+          () => {
+            effectCount += 1;
+          },
+        ),
+      }));
+      try {
+        const handles = await b.engine.recoverAll();
+        expect(handles.length).toBe(1);
+        const result = (await handles[0]!.result()) as { steps: number; finishReason: string };
+
+        expect(result.steps).toBe(2);
+        expect(result.finishReason).toBe('stop-condition');
+
+        // The step-0 hook did NOT re-fire on recovery — ctx.memo short-circuited
+        // the whole step (generate + tools + hooks) to its checkpointed result.
+        // Step 1 never called the tool, so its hook never fired either.
+        expect(effectCount).toBe(1);
       } finally {
         b.engine[Symbol.dispose]();
       }

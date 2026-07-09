@@ -157,9 +157,13 @@ async function reconstructRunResult(
  * outcome and the workflow finishes with `finishReason: 'aborted'` — a clean
  * in-band stop, no Weft-level `handle.cancel()` needed for the common case.
  *
- * TODO(weft-integration): #11 on a cross-process resume the run-level lifecycle
- *   re-fires (it is not checkpointed); classify hooks by side-effect-ness before
- *   re-emitting. For in-process default-on (no crash) the lifecycle fires once.
+ * Seam #11 (hook replay on recovery) is RESOLVED, not open here: this function
+ * is only ever invoked to START a fresh run (see `create-run.ts`); a
+ * cross-process resume goes through {@link reattachDurableActiveRun} instead,
+ * whose docblock documents why the run-level lifecycle does not re-fire
+ * (`hooks: undefined`, no `startRunLifecycle` call). Step-level hooks are
+ * protected by `ctx.memo` wrapping the whole step in run-workflow.ts — see its
+ * "#11 hook side-effect-ness on resume" remark for the full resolution.
  */
 export function createDurableActiveRun(
   context: DurableActiveRunContext,
