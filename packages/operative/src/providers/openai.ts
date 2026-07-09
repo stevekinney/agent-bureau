@@ -3,6 +3,8 @@ import { toOpenAIMessagesGrouped } from 'conversationalist/adapters/openai';
 import type { ToolCallInput } from 'interoperability';
 
 import { ProviderError } from './errors.ts';
+import { resolveOpenAIEffort } from './shared/effort.ts';
+import { resolveOpenAIModel } from './shared/model-registry.ts';
 import { resolveCommonParameters } from './shared/resolve-common-parameters.ts';
 import { toOpenAIResponseFormat } from './structured-output/response-format-adapters.ts';
 import { toOpenAIToolChoice } from './structured-output/tool-choice-adapters.ts';
@@ -29,7 +31,11 @@ import type {
  * function that produces a `GenerateResponse` — not an SDK provider object.
  */
 export function createOpenAIProvider(options: OpenAIProviderOptions): GenerateFunction {
-  const { model, baseURL } = options;
+  const { baseURL } = options;
+  const resolvedModel = resolveOpenAIModel(options.model);
+  const resolvedEffort = options.effort
+    ? resolveOpenAIEffort(options.effort, resolvedModel)
+    : undefined;
   const common = resolveCommonParameters(options);
   let clientPromise: Promise<OpenAIClient> | undefined;
 
@@ -54,12 +60,13 @@ export function createOpenAIProvider(options: OpenAIProviderOptions): GenerateFu
     const hasTools = tools.length > 0;
 
     const params: Record<string, unknown> = {
-      model,
+      model: resolvedModel,
       messages,
     };
 
     const effectiveMaxTokens = context.maximumTokens ?? common.maximumTokens;
     if (effectiveMaxTokens !== undefined) params['max_tokens'] = effectiveMaxTokens;
+    if (resolvedEffort !== undefined) params['reasoning_effort'] = resolvedEffort;
     if (hasTools && options.toolChoice !== 'none') params['tools'] = tools;
     if (hasTools && options.toolChoice && options.toolChoice !== 'none')
       params['tool_choice'] = toOpenAIToolChoice(options.toolChoice);
@@ -93,6 +100,10 @@ export function createOpenAIProvider(options: OpenAIProviderOptions): GenerateFu
         content,
         toolCalls,
         usage,
+        metadata: {
+          effectiveModel: resolvedModel,
+          effectiveEffort: resolvedEffort ?? 'none',
+        },
       };
     } catch (error) {
       throw new ProviderError({ provider: 'openai', cause: error });
@@ -114,7 +125,11 @@ export function createOpenAIProvider(options: OpenAIProviderOptions): GenerateFu
 export function createOpenAIProviderStream(
   options: Omit<OpenAIProviderOptions, 'client'> & { client?: OpenAIStreamingClient },
 ): StreamingGenerateFunction {
-  const { model, baseURL } = options;
+  const { baseURL } = options;
+  const resolvedModel = resolveOpenAIModel(options.model);
+  const resolvedEffort = options.effort
+    ? resolveOpenAIEffort(options.effort, resolvedModel)
+    : undefined;
   const common = resolveCommonParameters(options);
   let clientPromise: Promise<OpenAIStreamingClient> | undefined;
 
@@ -142,7 +157,7 @@ export function createOpenAIProviderStream(
     const hasTools = tools.length > 0;
 
     const params: Record<string, unknown> = {
-      model,
+      model: resolvedModel,
       messages,
       stream: true,
       stream_options: { include_usage: true },
@@ -150,6 +165,7 @@ export function createOpenAIProviderStream(
 
     const effectiveMaxTokensStream = context.maximumTokens ?? common.maximumTokens;
     if (effectiveMaxTokensStream !== undefined) params['max_tokens'] = effectiveMaxTokensStream;
+    if (resolvedEffort !== undefined) params['reasoning_effort'] = resolvedEffort;
     if (hasTools && options.toolChoice !== 'none') params['tools'] = tools;
     if (hasTools && options.toolChoice && options.toolChoice !== 'none')
       params['tool_choice'] = toOpenAIToolChoice(options.toolChoice);
@@ -234,6 +250,10 @@ export function createOpenAIProviderStream(
         content: accumulatedText,
         toolCalls,
         usage,
+        metadata: {
+          effectiveModel: resolvedModel,
+          effectiveEffort: resolvedEffort ?? 'none',
+        },
       };
     } catch (error) {
       throw new ProviderError({ provider: 'openai', cause: error });
