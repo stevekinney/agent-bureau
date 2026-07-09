@@ -4,6 +4,7 @@ import type { ToolCall } from 'interoperability';
 import type { EventMap, ForwardedEvent } from 'lifecycle';
 
 import type { CostBudgetExceededEvent, CostBudgetThresholdEvent } from './cost-budget-monitor';
+import { estimateCacheHitRate } from './cost-estimation';
 import type { GenerateResponse, RunResult, StepResult, TokenUsage } from './types';
 
 // ---------------------------------------------------------------------------
@@ -322,11 +323,24 @@ export class UsageAccumulatedEvent extends Event {
   readonly step: number;
   readonly stepUsage?: TokenUsage;
   readonly totalUsage: TokenUsage;
+  /**
+   * Prompt-cache hit rate for this step, from {@link estimateCacheHitRate}
+   * applied to `stepUsage`. `undefined` when this step's response carried no
+   * cache signal (provider didn't report `cacheReadTokens`/`cacheCreationTokens`,
+   * or there was no usage at all).
+   */
+  readonly stepCacheHitRate?: number;
+  /** Prompt-cache hit rate across the run so far, from `totalUsage`. */
+  readonly totalCacheHitRate?: number;
   constructor(step: number, totalUsage: TokenUsage, stepUsage?: TokenUsage) {
     super(UsageAccumulatedEvent.type);
     this.step = step;
     this.stepUsage = stepUsage;
     this.totalUsage = totalUsage;
+    const stepCacheHitRate = stepUsage ? estimateCacheHitRate(stepUsage) : undefined;
+    const totalCacheHitRate = estimateCacheHitRate(totalUsage);
+    if (stepCacheHitRate !== undefined) this.stepCacheHitRate = stepCacheHitRate;
+    if (totalCacheHitRate !== undefined) this.totalCacheHitRate = totalCacheHitRate;
   }
 }
 

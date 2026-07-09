@@ -59,6 +59,8 @@ export function createContextAssembler(): ContextAssembler {
       retrievedBudgetRatio = 0.15,
       retrievedMessages = [],
       tokenEstimator = budget.estimate?.bind(budget) ?? defaultEstimator,
+      stablePrefix = false,
+      pinnedMessages = [],
     } = options;
 
     const allMessages = conversation.getMessages();
@@ -66,7 +68,11 @@ export function createContextAssembler(): ContextAssembler {
     // Filter out hidden messages
     const visibleMessages = allMessages.filter((m) => !m.hidden);
 
-    if (visibleMessages.length === 0 && retrievedMessages.length === 0) {
+    if (
+      visibleMessages.length === 0 &&
+      retrievedMessages.length === 0 &&
+      pinnedMessages.length === 0
+    ) {
       return {
         messages: [],
         budgetReport: {
@@ -113,14 +119,45 @@ export function createContextAssembler(): ContextAssembler {
       mustIncludeIds.add(m.id);
     }
 
-    // Assemble system messages within budget
+    // Assemble system messages. In stable-prefix mode the system prompt is
+    // never budget-truncated — a stable prefix that could silently drop its
+    // own instructions on a token squeeze is not actually stable, it's
+    // unreliable. Default mode keeps the original budget-capped behavior.
     const assembledSystem: Message[] = [];
     let systemTokens = 0;
     for (const msg of systemMessages) {
       const tokens = estimateMessageTokens(msg, tokenEstimator);
-      if (systemTokens + tokens <= systemBudget || assembledSystem.length === 0) {
+      if (stablePrefix || systemTokens + tokens <= systemBudget || assembledSystem.length === 0) {
         assembledSystem.push(msg);
         systemTokens += tokens;
+      }
+    }
+
+    // In stable-prefix mode, pinned messages are always included in full,
+    // verbatim and in order, immediately after system messages. Their tokens
+    // are folded into the system budget slice of the report.
+    const assembledPinned: Message[] = [];
+    if (stablePrefix) {
+      for (const msg of pinnedMessages) {
+        if (msg.hidden) continue;
+        assembledPinned.push(msg);
+        systemTokens += estimateMessageTokens(msg, tokenEstimator);
+      }
+    }
+
+    // The stable prefix is system messages + pinned messages, in that order.
+    // Everything else (retrieved, history) is assembled and appended after
+    // it, unaffected by stable-prefix mode. Mark the LAST message of the
+    // stable prefix with `cacheBoundary: true` — a shallow copy, so the
+    // underlying conversation is never mutated — so a provider adapter can
+    // lower it to a native prompt-cache checkpoint (e.g. Anthropic's
+    // `cache_control`). Only meaningful when the prefix is non-empty.
+    const stableFront: Message[] = [...assembledSystem, ...assembledPinned];
+    if (stablePrefix && stableFront.length > 0) {
+      const lastIndex = stableFront.length - 1;
+      const boundaryMessage = stableFront[lastIndex];
+      if (boundaryMessage) {
+        stableFront[lastIndex] = { ...boundaryMessage, cacheBoundary: true };
       }
     }
 
@@ -165,9 +202,10 @@ export function createContextAssembler(): ContextAssembler {
       }
     }
 
-    // Combine all assembled messages in order:
-    // system first, then retrieved (injected before history), then history
-    const combined: Message[] = [...assembledSystem, ...assembledRetrieved, ...assembledHistory];
+    // Combine all assembled messages in order: stable prefix (system, then
+    // pinned in stable-prefix mode) first, then retrieved (injected before
+    // history), then history.
+    const combined: Message[] = [...stableFront, ...assembledRetrieved, ...assembledHistory];
 
     const totalTokens = systemTokens + historyTokens + retrievedTokens;
 

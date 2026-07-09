@@ -25,6 +25,27 @@ export interface AssemblyOptions {
   retrievedMessages?: ReadonlyArray<Message>;
   /** Override the per-text token estimator. */
   tokenEstimator?: (text: string) => number;
+  /**
+   * Enables prompt-cache-aware assembly. When `true`, system messages and
+   * `pinnedMessages` are assembled into a stable prefix that stays
+   * byte-identical across calls as the conversation grows — no budget
+   * truncation, no re-ranking — and the last message of that prefix is
+   * returned with `cacheBoundary: true` so a provider adapter (e.g.
+   * `toAnthropicMessages`) can lower it to a `cache_control` breakpoint.
+   * History and `retrievedMessages` are unaffected: they are assembled
+   * exactly as in the default mode and appended AFTER the stable prefix, so
+   * their per-step re-ranking never touches the cached region.
+   * Default: `false`.
+   */
+  stablePrefix?: boolean;
+  /**
+   * Messages always included, verbatim and in order, immediately after the
+   * system messages and before conversation history. Unlike
+   * `retrievedMessages`, these are never re-ranked or dropped by budget
+   * pressure — they are part of the stable prefix (e.g. pinned reference
+   * material). Only consulted when `stablePrefix` is `true`.
+   */
+  pinnedMessages?: ReadonlyArray<Message>;
 }
 
 /** Breakdown of token usage across context slices. */

@@ -367,6 +367,69 @@ describe('usage.accumulated event', () => {
     });
     expect(result.usage).toEqual(totals[2]!);
   });
+
+  it('exposes a cache hit rate on usage.accumulated, computed from cacheReadTokens/cacheCreationTokens/prompt', async () => {
+    const generate = createMockGenerate([
+      // First step: a cold cache write — every prompt token is fresh, none served from cache.
+      // Includes a tool call so the run doesn't stop before the second step.
+      toolCallResponse([weatherToolCall()], '', {
+        prompt: 0,
+        completion: 5,
+        total: 5,
+        cacheCreationTokens: 100,
+      }),
+      // Second step: the whole prior prefix is served from cache.
+      textResponse('Second', { prompt: 10, completion: 5, total: 15, cacheReadTokens: 100 }),
+    ]);
+
+    const activeRun = createActiveRun({
+      generate,
+      toolbox: createToolbox([weatherTool]),
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+    });
+
+    const recorder = createRunRecorder(activeRun);
+    await activeRun.result;
+
+    const usageEvents = recorder.events.filter((e) => e.type === 'usage.accumulated');
+    const rates = usageEvents.map(
+      (e) => e.detail as { stepCacheHitRate?: number; totalCacheHitRate?: number },
+    );
+
+    // Step 1: cacheReadTokens absent, cacheCreationTokens=100, prompt=0 → 0 / (0 + 100 + 0) = 0.
+    expect(rates[0]?.stepCacheHitRate).toBe(0);
+    expect(rates[0]?.totalCacheHitRate).toBe(0);
+    // Step 2: cacheReadTokens=100, prompt=10 → 100 / (100 + 0 + 10).
+    expect(rates[1]?.stepCacheHitRate).toBeCloseTo(100 / 110, 10);
+    // Running total across both steps: cacheReadTokens=100, cacheCreationTokens=100, prompt=10.
+    expect(rates[1]?.totalCacheHitRate).toBeCloseTo(100 / 210, 10);
+  });
+
+  it('leaves cacheHitRate absent when the step reported no cache signal at all', async () => {
+    const generate = createMockGenerate([
+      textResponse('Done', { prompt: 10, completion: 5, total: 15 }),
+    ]);
+
+    const activeRun = createActiveRun({
+      generate,
+      toolbox: createToolbox([]),
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+    });
+
+    const recorder = createRunRecorder(activeRun);
+    await activeRun.result;
+
+    const usageEvents = recorder.events.filter((e) => e.type === 'usage.accumulated');
+    const detail = usageEvents[0]?.detail as {
+      stepCacheHitRate?: number;
+      totalCacheHitRate?: number;
+    };
+
+    expect(detail.stepCacheHitRate).toBeUndefined();
+    expect(detail.totalCacheHitRate).toBeUndefined();
+  });
 });
 
 describe('RunOptions.maximumTokens → GenerateContext.maximumTokens', () => {

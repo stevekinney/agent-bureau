@@ -133,6 +133,30 @@ export const defaultPricingTable: Readonly<Record<string, ModelPricing>> = Objec
   'gemini-2.0-flash': { promptCostPerMillionTokens: 0.1, completionCostPerMillionTokens: 0.4 },
 });
 
+/**
+ * Estimate a prompt-cache hit rate from a {@link TokenUsage}.
+ *
+ * `cacheReadTokens / (cacheReadTokens + cacheCreationTokens + prompt)` — the
+ * fraction of this request's non-completion input that was served from the
+ * cache rather than written fresh or sent uncached. Returns `undefined` when
+ * the usage carries no cache signal at all (`cacheReadTokens` and
+ * `cacheCreationTokens` both absent), so "no data" is never confused with
+ * "0% hit rate". A request that only ever writes to the cache (first turn,
+ * `cacheReadTokens` absent, `cacheCreationTokens` present) correctly reports
+ * `0`.
+ */
+export function estimateCacheHitRate(usage: TokenUsage): number | undefined {
+  if (usage.cacheReadTokens === undefined && usage.cacheCreationTokens === undefined) {
+    return undefined;
+  }
+
+  const cacheReadTokens = usage.cacheReadTokens ?? 0;
+  const cacheCreationTokens = usage.cacheCreationTokens ?? 0;
+  const denominator = cacheReadTokens + cacheCreationTokens + usage.prompt;
+
+  return denominator === 0 ? 0 : cacheReadTokens / denominator;
+}
+
 export function getModelPricing(
   model: string,
   options?: CostEstimationOptions,
