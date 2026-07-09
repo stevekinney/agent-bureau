@@ -258,6 +258,44 @@ describe('createRun with durable routing', () => {
     }
   });
 
+  it('an errored durable run carries accumulated usage and costEstimate (AB-92 parity with the in-memory loop)', async () => {
+    const context = await buildContext();
+    try {
+      let calls = 0;
+      const activeRun = createRun(
+        {
+          generate: async () => {
+            calls++;
+            if (calls === 1) {
+              return {
+                content: 'partial',
+                toolCalls: [],
+                usage: { prompt: 100, completion: 50, total: 150 },
+              };
+            }
+            throw new Error('boom');
+          },
+          toolbox: createToolbox([]) as unknown as RunOptions['toolbox'],
+          conversation: createConversationHistory(),
+          costEstimation: { model: 'gpt-4o' },
+        },
+        { ...context, runId: 'error-cost-run', prompt: 'Hello' },
+      );
+
+      const result = await activeRun.result;
+
+      expect(result.finishReason).toBe('error');
+      expect(result.usage).toEqual({ prompt: 100, completion: 50, total: 150 });
+      expect(result.costEstimate).toBeDefined();
+      expect(result.costEstimate!.totalCost).toBeCloseTo(
+        (100 / 1_000_000) * 2.5 + (50 / 1_000_000) * 10,
+        10,
+      );
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+
   it('aborts a running durable run and propagates the abort reason', async () => {
     const context = await buildContext();
     try {
@@ -298,6 +336,53 @@ describe('createRun with durable routing', () => {
       expect(aborted).toBe(true);
       // The real abort reason survives the workflow→adapter boundary.
       expect(abortedReason).toBe('user requested stop');
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+
+  it('an aborted durable run carries accumulated usage and costEstimate (AB-92 parity with the in-memory loop)', async () => {
+    const context = await buildContext();
+    try {
+      // First step completes with usage; second step blocks until abort, then rejects.
+      const activeRun = createRun(
+        {
+          generate: ({ signal, step }) => {
+            if (step === 0) {
+              return Promise.resolve({
+                content: 'first',
+                toolCalls: [],
+                usage: { prompt: 200, completion: 20, total: 220 },
+              });
+            }
+            return new Promise((_resolve, reject) => {
+              signal?.addEventListener(
+                'abort',
+                () => reject(new Error('aborted during generate')),
+                { once: true },
+              );
+            });
+          },
+          toolbox: createToolbox([]) as unknown as RunOptions['toolbox'],
+          conversation: createConversationHistory(),
+          costEstimation: { model: 'gpt-4o' },
+        },
+        { ...context, runId: 'abort-cost-run', prompt: 'Hello' },
+      );
+
+      // Let the first step complete before aborting.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      activeRun.abort('user requested stop');
+
+      const result = await activeRun.result;
+
+      expect(result.finishReason).toBe('aborted');
+      expect(result.usage).toEqual({ prompt: 200, completion: 20, total: 220 });
+      expect(result.costEstimate).toBeDefined();
+      expect(result.costEstimate!.totalCost).toBeCloseTo(
+        (200 / 1_000_000) * 2.5 + (20 / 1_000_000) * 10,
+        10,
+      );
     } finally {
       context.engine[Symbol.dispose]();
     }

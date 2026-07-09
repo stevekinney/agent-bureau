@@ -101,6 +101,64 @@ describe('estimateCost', () => {
     expect(result.completionCost).toBe(0);
     expect(result.totalCost).toBe(0);
   });
+
+  it('prices Anthropic cache writes at 1.25x and cache reads at 0.1x the prompt rate', () => {
+    // claude-sonnet-4-20250514: prompt=$3/M → write=$3.75/M, read=$0.30/M
+    const result = estimateCost(
+      {
+        prompt: 1000,
+        completion: 0,
+        total: 1000,
+        cacheCreationTokens: 2000,
+        cacheReadTokens: 5000,
+      },
+      'claude-sonnet-4-20250514',
+    );
+
+    expect(result.cacheWriteCost).toBeCloseTo((2000 / 1_000_000) * 3.75, 10);
+    expect(result.cacheReadCost).toBeCloseTo((5000 / 1_000_000) * 0.3, 10);
+    expect(result.totalCost).toBeCloseTo(
+      result.promptCost + result.completionCost + result.cacheWriteCost + result.cacheReadCost,
+      10,
+    );
+  });
+
+  it('prices OpenAI cache reads at 0.5x the prompt rate with no cache-write charge', () => {
+    // gpt-4o: prompt=$2.50/M → read=$1.25/M; no cache-write pricing defined.
+    const result = estimateCost(
+      { prompt: 1000, completion: 0, total: 1000, cacheReadTokens: 4000 },
+      'gpt-4o',
+    );
+
+    expect(result.cacheReadCost).toBeCloseTo((4000 / 1_000_000) * 1.25, 10);
+    expect(result.cacheWriteCost).toBe(0);
+  });
+
+  it('prices cache tokens at 0 when the usage reports them but the model has no cache pricing', () => {
+    const result = estimateCost(
+      { prompt: 1000, completion: 0, total: 1000, cacheCreationTokens: 500, cacheReadTokens: 500 },
+      'my-unpriced-cache-model',
+      {
+        customPricing: {
+          'my-unpriced-cache-model': {
+            promptCostPerMillionTokens: 1,
+            completionCostPerMillionTokens: 2,
+          },
+        },
+      },
+    );
+
+    expect(result.cacheWriteCost).toBe(0);
+    expect(result.cacheReadCost).toBe(0);
+    expect(result.totalCost).toBe(result.promptCost + result.completionCost);
+  });
+
+  it('omits cache cost entirely (cost 0) when usage has no cache token fields', () => {
+    const result = estimateCost({ prompt: 1000, completion: 500, total: 1500 }, 'gpt-4o');
+
+    expect(result.cacheWriteCost).toBe(0);
+    expect(result.cacheReadCost).toBe(0);
+  });
 });
 
 describe('getModelPricing', () => {
@@ -137,5 +195,45 @@ describe('getModelPricing', () => {
 describe('defaultPricingTable', () => {
   it('is frozen', () => {
     expect(Object.isFrozen(defaultPricingTable)).toBe(true);
+  });
+
+  it('gives every Claude model both cache-write and cache-read pricing', () => {
+    for (const [model, pricing] of Object.entries(defaultPricingTable)) {
+      if (!model.startsWith('claude-')) continue;
+      expect(pricing.cacheWriteCostPerMillionTokens).toBe(
+        pricing.promptCostPerMillionTokens * 1.25,
+      );
+      expect(pricing.cacheReadCostPerMillionTokens).toBe(pricing.promptCostPerMillionTokens * 0.1);
+    }
+  });
+
+  it('gives every OpenAI GPT/o-series model cache-read pricing but no cache-write pricing', () => {
+    const openAIModels = [
+      'gpt-4o',
+      'gpt-4o-mini',
+      'gpt-4.1',
+      'gpt-4.1-mini',
+      'gpt-4.1-nano',
+      'o3',
+      'o3-mini',
+      'o4-mini',
+    ];
+    for (const model of openAIModels) {
+      const pricing = defaultPricingTable[model];
+      expect(pricing).toBeDefined();
+      expect(pricing!.cacheReadCostPerMillionTokens).toBe(
+        pricing!.promptCostPerMillionTokens * 0.5,
+      );
+      expect(pricing!.cacheWriteCostPerMillionTokens).toBeUndefined();
+    }
+  });
+
+  it('gives Gemini models no cache pricing', () => {
+    for (const model of ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.0-flash']) {
+      const pricing = defaultPricingTable[model];
+      expect(pricing).toBeDefined();
+      expect(pricing!.cacheReadCostPerMillionTokens).toBeUndefined();
+      expect(pricing!.cacheWriteCostPerMillionTokens).toBeUndefined();
+    }
   });
 });

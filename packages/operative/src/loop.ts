@@ -98,7 +98,7 @@ export async function executeLoop(
   options: RunOptions,
   emitter?: EventDispatcher,
 ): Promise<RunResult> {
-  const { maximumSteps = DEFAULT_MAXIMUM_STEPS, hooks, onMaximumSteps } = options;
+  const { maximumSteps = DEFAULT_MAXIMUM_STEPS, hooks, onMaximumSteps, costEstimation } = options;
 
   const conversation = isConversation(options.conversation)
     ? options.conversation
@@ -112,17 +112,25 @@ export async function executeLoop(
   // RunStartedEvent + onRunStart (error aborts the run). Shared with the adapter.
   const startError = await startRunLifecycle(options, conversation, emitter);
   if (startError !== undefined) {
-    return makeErrorResult(runState, conversation, hooks, emitter, startError);
+    return makeErrorResult(runState, conversation, hooks, emitter, startError, costEstimation);
   }
 
   for (let step = 0; step < maximumSteps; step++) {
     const outcome = await runStep(deps, runState, conversation, step, emitter);
 
     if (outcome.kind === 'abort') {
-      return makeAbortResult(runState, conversation, hooks, emitter, step, outcome.reason);
+      return makeAbortResult(
+        runState,
+        conversation,
+        hooks,
+        emitter,
+        step,
+        outcome.reason,
+        costEstimation,
+      );
     }
     if (outcome.kind === 'error') {
-      return makeErrorResult(runState, conversation, hooks, emitter, outcome.error);
+      return makeErrorResult(runState, conversation, hooks, emitter, outcome.error, costEstimation);
     }
     if (outcome.kind === 'continue') {
       continue;
@@ -136,6 +144,7 @@ export async function executeLoop(
         outcome.finishReason,
         runStartTime,
         outcome.schemaValidation,
+        costEstimation,
       );
     }
     // outcome.kind === 'next' — proceed to the next step
@@ -154,9 +163,18 @@ export async function executeLoop(
       }
     } catch (error) {
       emitter?.dispatch(new RunErrorEvent(runState.steps.length, error));
-      return makeErrorResult(runState, conversation, hooks, emitter, error);
+      return makeErrorResult(runState, conversation, hooks, emitter, error, costEstimation);
     }
   }
 
-  return makeCompletedResult(runState, conversation, hooks, emitter, 'maximum-steps', runStartTime);
+  return makeCompletedResult(
+    runState,
+    conversation,
+    hooks,
+    emitter,
+    'maximum-steps',
+    runStartTime,
+    undefined,
+    costEstimation,
+  );
 }

@@ -796,7 +796,14 @@ async function driveDurableRun(
   // RunStartedEvent + onRunStart (an onRunStart error aborts the run).
   const startError = await startRunLifecycle(options, conversation, emitter);
   if (startError !== undefined) {
-    return makeErrorResult(emptyRunState(), conversation, hooks, emitter, startError);
+    return makeErrorResult(
+      emptyRunState(),
+      conversation,
+      hooks,
+      emitter,
+      startError,
+      options.costEstimation,
+    );
   }
 
   // Pin the Weft workflow id to `runId` so `handle.id === runId`. This makes the
@@ -894,6 +901,7 @@ async function driveDurableRun(
         emitter,
         runStartTime,
         abortReason: signal.aborted ? String(signal.reason) : undefined,
+        costEstimation: options.costEstimation,
       });
     }
     // A `history.maxEvents` circuit-breaker (or a genuine execution-deadline
@@ -917,6 +925,7 @@ async function driveDurableRun(
       emitter,
       runStartTime,
       errorMessage: message,
+      costEstimation: options.costEstimation,
     });
   }
 
@@ -946,6 +955,7 @@ async function driveDurableRun(
     errorMessage: summary.errorMessage,
     abortReason: summary.abortReason,
     schemaValidation: summary.schemaValidation,
+    costEstimation: options.costEstimation,
   });
 }
 
@@ -1015,6 +1025,9 @@ interface FinalizeArgs {
    * loop. Its serialized error message is rebuilt into an `Error` for parity.
    */
   schemaValidation?: { success: boolean; error?: string };
+  /** Forwarded from `RunOptions.costEstimation` so a durable run's terminal
+   * `RunResult.costEstimate` matches the in-memory loop's. */
+  costEstimation?: RunOptions['costEstimation'];
 }
 
 /**
@@ -1035,6 +1048,7 @@ function finalizeRunResult(args: FinalizeArgs): RunResult {
       emitter,
       lastStep ? lastStep.step + 1 : 0,
       args.abortReason,
+      args.costEstimation,
     );
   }
   if (
@@ -1055,7 +1069,7 @@ function finalizeRunResult(args: FinalizeArgs): RunResult {
         : finishReason === 'budget-exceeded'
           ? new BudgetExceededError(message)
           : new Error(message);
-    return makeErrorResult(runState, conversation, hooks, emitter, error);
+    return makeErrorResult(runState, conversation, hooks, emitter, error, args.costEstimation);
   }
   const schemaValidation = args.schemaValidation
     ? {
@@ -1074,5 +1088,6 @@ function finalizeRunResult(args: FinalizeArgs): RunResult {
     finishReason === 'stop-condition' ? 'stop-condition' : 'maximum-steps',
     runStartTime,
     schemaValidation,
+    args.costEstimation,
   );
 }

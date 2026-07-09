@@ -65,7 +65,12 @@ export interface AnthropicClient {
  */
 export interface AnthropicMessageResponse {
   content: Array<{ type: string; text?: string; id?: string; name?: string; input?: unknown }>;
-  usage?: { input_tokens?: number; output_tokens?: number };
+  usage?: {
+    input_tokens?: number;
+    output_tokens?: number;
+    cache_creation_input_tokens?: number;
+    cache_read_input_tokens?: number;
+  };
   stop_reason?: string;
 }
 
@@ -103,7 +108,12 @@ export interface OpenAIChatCompletion {
     };
     finish_reason?: string;
   }>;
-  usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    total_tokens?: number;
+    prompt_tokens_details?: { cached_tokens?: number };
+  };
 }
 
 /**
@@ -165,7 +175,12 @@ export interface AnthropicStreamEvent {
     | 'message_delta'
     | 'message_stop';
   message?: {
-    usage?: { input_tokens?: number; output_tokens?: number };
+    usage?: {
+      input_tokens?: number;
+      output_tokens?: number;
+      cache_creation_input_tokens?: number;
+      cache_read_input_tokens?: number;
+    };
   };
   index?: number;
   content_block?: { type: string; id?: string; name?: string; text?: string };
@@ -196,7 +211,12 @@ export interface OpenAIChatCompletionChunk {
     };
     finish_reason?: string | null;
   }>;
-  usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } | null;
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    total_tokens?: number;
+    prompt_tokens_details?: { cached_tokens?: number };
+  } | null;
 }
 
 /**

@@ -5,6 +5,7 @@ import type { HookRegistry } from 'lifecycle';
 import type { ZodType } from 'zod';
 
 import type { BackpressureStrategy } from './backpressure';
+import type { CostEstimate, CostEstimationOptions } from './cost-estimation';
 import type { OperativeHookMap } from './hooks';
 import type { RetryMutator } from './retry/types';
 import type { ResponseFormat, ToolChoice } from './structured-output/types';
@@ -214,6 +215,17 @@ export interface RunResult {
   steps: readonly StepResult[];
   content: string;
   usage: TokenUsage;
+  /**
+   * Cost estimate for `usage`, computed from `RunOptions.costEstimation` when
+   * provided. Present on every terminal result — stop-condition, maximum-steps,
+   * abort, and error alike — so a budget-triggered or errored run still
+   * reports what it spent. Absent (never `0`) when `costEstimation` wasn't
+   * supplied or its model has no resolvable pricing.
+   *
+   * This is an in-loop budgeting estimate, not a billing figure — see
+   * {@link estimateCost}'s doc comment.
+   */
+  costEstimate?: CostEstimate;
   finishReason: FinishReason;
   error?: unknown;
   schemaValidation?: { success: boolean; error?: unknown };
@@ -324,6 +336,15 @@ export interface RunOptions {
    * by the `selectToolChoice` hook.
    */
   toolChoice?: ToolChoice;
+  /**
+   * When set, every terminal `RunResult` (stop-condition, maximum-steps,
+   * abort, or error) carries a `costEstimate` computed from the run's
+   * accumulated `usage` at this model's pricing. `pricing` overrides
+   * `defaultPricingTable` the same way `estimateCost`'s options do. Omit to
+   * leave `costEstimate` absent — no estimate is fabricated without an
+   * explicit model.
+   */
+  costEstimation?: { model: string; pricing?: CostEstimationOptions };
 }
 
 /**

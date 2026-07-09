@@ -86,11 +86,23 @@ export type ToolResultInput = SharedToolResultInput;
 
 /**
  * Token usage accounting for a message.
+ *
+ * `cacheReadTokens` and `cacheCreationTokens` are provider-neutral counters for
+ * prompt-cache activity (Anthropic's `cache_read_input_tokens` /
+ * `cache_creation_input_tokens`, OpenAI's `prompt_tokens_details.cached_tokens`
+ * split into a read count with no creation counterpart). A provider that has no
+ * native concept of cache tokens — or a response that didn't report them —
+ * leaves these fields `undefined`. They are never fabricated as `0`; callers
+ * must treat "absent" and "zero" as distinct.
  */
 export interface TokenUsage {
   prompt: number;
   completion: number;
   total: number;
+  /** Tokens written to the prompt cache on this request. Anthropic only. */
+  cacheCreationTokens?: number | undefined;
+  /** Tokens served from the prompt cache on this request. */
+  cacheReadTokens?: number | undefined;
 }
 
 /**

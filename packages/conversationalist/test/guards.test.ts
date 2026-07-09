@@ -75,6 +75,16 @@ describe('type guards', () => {
     expect(isConversationStatus('unknown')).toBeFalse();
     expect(isTokenUsage({ prompt: 1, completion: 2, total: 3 })).toBeTrue();
     expect(isTokenUsage({ prompt: 1 })).toBeFalse();
+    expect(
+      isTokenUsage({
+        prompt: 1,
+        completion: 2,
+        total: 3,
+        cacheCreationTokens: 5,
+        cacheReadTokens: 10,
+      }),
+    ).toBeTrue();
+    expect(isTokenUsage({ prompt: 1, completion: 2, total: 3, cacheReadTokens: -1 })).toBeFalse();
     expect(isMultiModalContent({ type: 'text', text: 'hello' })).toBeTrue();
     expect(isMultiModalContent({ type: 'image' })).toBeFalse();
     expect(isJSONValue({ ok: [true, 1, 'two'] })).toBeTrue();

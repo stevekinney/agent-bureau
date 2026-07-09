@@ -234,6 +234,8 @@ export const tokenUsageSchema = z.object({
   prompt: z.number().int().min(0),
   completion: z.number().int().min(0),
   total: z.number().int().min(0),
+  cacheCreationTokens: z.number().int().min(0).optional(),
+  cacheReadTokens: z.number().int().min(0).optional(),
 }) satisfies z.ZodType<TokenUsage>;
 
 /**
