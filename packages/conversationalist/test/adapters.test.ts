@@ -854,6 +854,42 @@ describe('Anthropic Adapter', () => {
       expect(messages[1]?.role).toBe('user');
       expect(messages[1]?.cacheBoundary).toBe(true);
     });
+
+    it('splits the run at a cache_control block instead of extending the boundary to later blocks in the same Anthropic message', () => {
+      // toAnthropicMessages merges consecutive same-role messages, so a
+      // single Anthropic message can contain a cache_control block followed
+      // by MORE blocks that came from a later, unmarked ConversationHistory
+      // message. Decoding must not fold that trailing content into the
+      // cache-boundary-marked message — cache_control means "up to and
+      // including THIS block," not "the rest of this Anthropic message."
+      const payload: AnthropicConversation = {
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: 'Before the boundary' },
+              {
+                type: 'text',
+                text: 'The stable prefix',
+                cache_control: { type: 'ephemeral' },
+              },
+              { type: 'text', text: 'After the boundary' },
+            ],
+          },
+        ],
+      };
+
+      const conversation = fromAnthropicMessages(payload);
+      const messages = getOrderedMessages(conversation);
+
+      expect(messages).toHaveLength(3);
+      expect(messages[0]?.content).toBe('Before the boundary');
+      expect(messages[0]?.cacheBoundary).toBeUndefined();
+      expect(messages[1]?.content).toBe('The stable prefix');
+      expect(messages[1]?.cacheBoundary).toBe(true);
+      expect(messages[2]?.content).toBe('After the boundary');
+      expect(messages[2]?.cacheBoundary).toBeUndefined();
+    });
   });
 });
 

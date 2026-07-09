@@ -748,9 +748,22 @@ function toMessageInputs(payload: AnthropicConversation): MessageInput[] {
     for (const block of message.content) {
       const part = toGroupableContentPart(block);
       if (part !== undefined) {
-        pendingParts.push(part);
         if (block.cache_control !== undefined) {
+          // `cache_control` marks "everything up to and including THIS
+          // block" as the stable prefix — and ONLY this block, since encode
+          // attaches it to the last block a specific ConversationHistory
+          // message contributed. Flush whatever preceded it as its own
+          // (un-marked) message first, then this block as its own
+          // boundary-marked message, so a later block in the same Anthropic
+          // message (possible after `toAnthropicMessages` merges
+          // consecutive same-role messages) neither absorbs the boundary
+          // nor gets folded into it.
+          flushPending();
+          pendingParts.push(part);
           pendingCacheBoundary = true;
+          flushPending();
+        } else {
+          pendingParts.push(part);
         }
       } else if (block.type === 'tool_use' || block.type === 'tool_result') {
         // Role-bearing block: flush the accumulated run first to preserve order.
