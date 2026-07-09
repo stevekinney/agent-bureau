@@ -91,6 +91,7 @@ export type RiskFilter = {
   readOnly?: boolean;
   mutates?: boolean;
   dangerous?: boolean;
+  untrustedOutput?: boolean;
   permissions?: readonly string[];
 };
 
@@ -2320,15 +2321,26 @@ function normalizeSchemaKeys(keys: readonly string[]): string[] {
 }
 
 function riskMatches(risk: ToolRisk | undefined, filter: RiskFilter): boolean {
-  if (!risk) return false;
-  if (filter.readOnly !== undefined && (risk.readOnly === true) !== filter.readOnly) {
+  if (filter.readOnly !== undefined && (risk?.readOnly === true) !== filter.readOnly) {
     return false;
   }
-  if (filter.mutates !== undefined && (risk.mutates === true) !== filter.mutates) {
+  if (filter.mutates !== undefined && (risk?.mutates === true) !== filter.mutates) {
     return false;
   }
-  if (filter.dangerous !== undefined && (risk.dangerous === true) !== filter.dangerous) {
+  if (filter.dangerous !== undefined && (risk?.dangerous === true) !== filter.dangerous) {
     return false;
+  }
+  if (
+    filter.untrustedOutput !== undefined &&
+    (risk?.untrustedOutput === true) !== filter.untrustedOutput
+  ) {
+    return false;
+  }
+  if (filter.permissions?.length) {
+    if (!risk?.permissions) return false;
+    for (const permission of filter.permissions) {
+      if (!risk.permissions.includes(permission)) return false;
+    }
   }
   return true;
 }

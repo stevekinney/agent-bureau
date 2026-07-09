@@ -3,7 +3,7 @@ import { CompletableEventTarget } from 'lifecycle';
 import { z } from 'zod';
 
 import type { ToolError, ToolErrorCategory } from './core/errors';
-import type { ToolRisk } from './core/risk';
+import { buildTagsFromRisk, type ToolRisk } from './core/risk';
 import { serializeToolDefinition } from './core/serialization';
 import { assertJsonValue, type JsonValue, stableStringifyJson } from './core/serialization/json';
 import { assertKebabCaseTag, type NormalizeTagsOption, uniqTags } from './core/tag-utilities';
@@ -1236,6 +1236,7 @@ export function createTool<
     [Symbol.toPrimitive]: () => configuration.identity.name,
     tags: configuration.tags,
     metadata: configuration.metadata,
+    risk: configuration.risk,
     ...(idempotencyKey !== undefined ? { idempotencyKey } : {}),
   };
 
@@ -1740,20 +1741,6 @@ function normalizeTagsWithRisk(
   }
   const baseTags = uniqTags(tags.map((tag) => assertKebabCaseTag(tag, `Tool "${toolName}"`)));
   return buildTagsFromRisk(baseTags, risk);
-}
-
-function buildTagsFromRisk(baseTags: string[], risk: ToolRisk | undefined): string[] {
-  const merged = new Set(baseTags);
-  if (risk?.mutates === true) {
-    merged.add('mutating');
-  }
-  if (risk?.readOnly === true) {
-    merged.add('readonly');
-  }
-  if (risk?.dangerous === true) {
-    merged.add('dangerous');
-  }
-  return Array.from(merged);
 }
 
 function isStringArray(value: unknown): value is string[] {

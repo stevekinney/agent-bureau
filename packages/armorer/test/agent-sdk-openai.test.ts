@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -10,15 +11,27 @@ import { createTool } from '../src/create-tool';
 import { createToolbox } from '../src/create-toolbox';
 import { createMCP } from '../src/integrations/mcp';
 
-const sourceFixtureCode = () => {
+const resolveFixtureModule = (builtPath: string[], sourcePath: string[]) => {
   const currentDir = dirname(fileURLToPath(import.meta.url));
-  const createToolModule = pathToFileURL(join(currentDir, '..', 'src', 'create-tool.ts')).href;
-  const createToolboxModule = pathToFileURL(
-    join(currentDir, '..', 'src', 'create-toolbox.ts'),
-  ).href;
-  const mcpModule = pathToFileURL(
-    join(currentDir, '..', 'src', 'integrations', 'mcp', 'index.ts'),
-  ).href;
+  const builtModulePath = join(currentDir, '..', ...builtPath);
+  const sourceModulePath = join(currentDir, '..', ...sourcePath);
+  return pathToFileURL(existsSync(builtModulePath) ? builtModulePath : sourceModulePath).href;
+};
+
+const fixtureCode = () => {
+  const createToolModule = resolveFixtureModule(
+    ['dist', 'create-tool.js'],
+    ['src', 'create-tool.ts'],
+  );
+  const createToolboxModule = resolveFixtureModule(
+    ['dist', 'create-toolbox.js'],
+    ['src', 'create-toolbox.ts'],
+  );
+  const mcpModule = resolveFixtureModule(
+    ['dist', 'integrations', 'mcp', 'index.js'],
+    ['src', 'integrations', 'mcp', 'index.ts'],
+  );
+
   return `
     import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
     import { z } from 'zod';
@@ -53,7 +66,7 @@ describe('OpenAI Agents SDK MCP integration', () => {
   it('lists tools over stdio', async () => {
     const server = new MCPServerStdio({
       command: 'bun',
-      args: ['--eval', sourceFixtureCode()],
+      args: ['--eval', fixtureCode()],
       cwd: packagePath(),
       name: 'toolbox-tools',
       cacheToolsList: true,
