@@ -210,6 +210,7 @@ export function collapseSystemMessages(
       toolCall: message.toolCall,
       toolResult: message.toolResult,
       tokenUsage: message.tokenUsage,
+      cacheBoundary: message.cacheBoundary,
     });
   });
 

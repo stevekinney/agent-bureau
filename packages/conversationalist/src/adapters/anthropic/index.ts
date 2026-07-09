@@ -222,6 +222,116 @@ export interface AnthropicConversation {
 }
 
 /**
+ * Anthropic's documented limit on explicit `cache_control` breakpoints per
+ * request — a request with more than this many marked blocks is rejected.
+ * See https://platform.claude.com/docs/en/build-with-claude/prompt-caching.
+ */
+const MAX_CACHE_BREAKPOINTS = 4;
+
+/**
+ * Anthropic cannot cache a `thinking`/`redacted_thinking` block (the
+ * signature covers the whole block, so marking it is meaningless) or a text
+ * block with no content (there is nothing to cache).
+ */
+function isCacheableAnthropicBlock(block: AnthropicContentBlock): boolean {
+  if (block.type === 'thinking' || block.type === 'redacted_thinking') return false;
+  if (block.type === 'text' && block.text === '') return false;
+  return true;
+}
+
+/**
+ * Finds the last block in a run that Anthropic can actually attach
+ * `cache_control` to, walking backward from the end. Returns -1 if none of
+ * the blocks are cacheable.
+ */
+function lastCacheableBlockIndex(blocks: ReadonlyArray<AnthropicContentBlock>): number {
+  for (let index = blocks.length - 1; index >= 0; index--) {
+    if (isCacheableAnthropicBlock(blocks[index]!)) return index;
+  }
+  return -1;
+}
+
+function stripCacheControl<T extends { cache_control?: AnthropicCacheControl }>(block: T): T {
+  if (block.cache_control === undefined) return block;
+  const { cache_control: _cacheControl, ...rest } = block;
+  return rest as T;
+}
+
+/**
+ * Enforces Anthropic's 4-breakpoint-per-request cap. When more than 4 blocks
+ * carry `cache_control`, strips it from the EARLIEST excess ones and keeps
+ * only the last {@link MAX_CACHE_BREAKPOINTS} in document order (system
+ * blocks first, then messages in order). Anthropic's caching is
+ * prefix-cumulative, so a later breakpoint still covers everything an
+ * earlier, now-unmarked one would have — dropping the oldest marks loses
+ * their own distinct cache-hit granularity, not their coverage.
+ */
+function capCacheBreakpoints(result: AnthropicConversation): AnthropicConversation {
+  type Location =
+    | { kind: 'system'; index: number }
+    | { kind: 'message'; messageIndex: number; blockIndex: number };
+
+  const locations: Location[] = [];
+
+  if (Array.isArray(result.system)) {
+    result.system.forEach((block, index) => {
+      if (block.cache_control !== undefined) locations.push({ kind: 'system', index });
+    });
+  }
+
+  result.messages.forEach((message, messageIndex) => {
+    if (!Array.isArray(message.content)) return;
+    message.content.forEach((block, blockIndex) => {
+      if (block.cache_control !== undefined) {
+        locations.push({ kind: 'message', messageIndex, blockIndex });
+      }
+    });
+  });
+
+  if (locations.length <= MAX_CACHE_BREAKPOINTS) return result;
+
+  const toStrip = locations.slice(0, locations.length - MAX_CACHE_BREAKPOINTS);
+  const stripSystemIndices = new Set(
+    toStrip
+      .filter(
+        (location): location is Extract<Location, { kind: 'system' }> => location.kind === 'system',
+      )
+      .map((location) => location.index),
+  );
+  const stripMessageBlocks = new Map<number, Set<number>>();
+  for (const location of toStrip) {
+    if (location.kind === 'message') {
+      const set = stripMessageBlocks.get(location.messageIndex) ?? new Set<number>();
+      set.add(location.blockIndex);
+      stripMessageBlocks.set(location.messageIndex, set);
+    }
+  }
+
+  const system = Array.isArray(result.system)
+    ? result.system.map((block, index) =>
+        stripSystemIndices.has(index) ? stripCacheControl(block) : block,
+      )
+    : result.system;
+
+  const messages = result.messages.map((message, messageIndex) => {
+    const blockIndicesToStrip = stripMessageBlocks.get(messageIndex);
+    if (!blockIndicesToStrip || !Array.isArray(message.content)) return message;
+    return {
+      ...message,
+      content: message.content.map((block, blockIndex) =>
+        blockIndicesToStrip.has(blockIndex) ? stripCacheControl(block) : block,
+      ),
+    };
+  });
+
+  const capped: AnthropicConversation = { messages };
+  if (system !== undefined) {
+    capped.system = system;
+  }
+  return capped;
+}
+
+/**
  * Converts internal multi-modal content to Anthropic content blocks.
  */
 function toAnthropicContent(
@@ -427,11 +537,16 @@ function extractSystemPrompt(
     return systemMessages.map((m) => systemMessageText(m)).join('\n\n');
   }
 
-  return systemMessages.map((m) => ({
-    type: 'text' as const,
-    text: systemMessageText(m),
-    ...(m.cacheBoundary ? { cache_control: { type: 'ephemeral' as const } } : {}),
-  }));
+  return systemMessages.map((m) => {
+    const text = systemMessageText(m);
+    // Anthropic cannot cache an empty text block — there is nothing to cache.
+    const canCache = m.cacheBoundary && text !== '';
+    return {
+      type: 'text' as const,
+      text,
+      ...(canCache ? { cache_control: { type: 'ephemeral' as const } } : {}),
+    };
+  });
 }
 
 /**
@@ -525,14 +640,21 @@ export function toAnthropicMessages(conversation: Conversation): AnthropicConver
     // A cache boundary marks everything up to and including THIS message as
     // cacheable, so the breakpoint lands on the last block this specific
     // message contributed (not the last block of the merged Anthropic
-    // message, which may span several ConversationHistory messages).
+    // message, which may span several ConversationHistory messages). Anthropic
+    // cannot cache a `thinking`/`redacted_thinking` block or an empty text
+    // block, so walk backward to the last block that CAN carry the mark;
+    // if none exists, the boundary is silently not lowered for this message
+    // rather than producing an invalid breakpoint.
     if (message.cacheBoundary && blocks.length > 0) {
-      const lastIndex = blocks.length - 1;
-      const lastBlock = blocks[lastIndex]!;
-      blocks = [
-        ...blocks.slice(0, lastIndex),
-        { ...lastBlock, cache_control: { type: 'ephemeral' } },
-      ];
+      const index = lastCacheableBlockIndex(blocks);
+      if (index !== -1) {
+        const target = blocks[index]!;
+        blocks = [
+          ...blocks.slice(0, index),
+          { ...target, cache_control: { type: 'ephemeral' } },
+          ...blocks.slice(index + 1),
+        ];
+      }
     }
 
     // Merge with current or start new
@@ -551,7 +673,7 @@ export function toAnthropicMessages(conversation: Conversation): AnthropicConver
   if (system !== undefined) {
     result.system = system;
   }
-  return result;
+  return capCacheBreakpoints(result);
 }
 
 function parseToolResultContent(callId: string, content: string, isError?: boolean): ToolResult {

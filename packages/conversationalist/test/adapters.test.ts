@@ -890,6 +890,76 @@ describe('Anthropic Adapter', () => {
       expect(messages[2]?.content).toBe('After the boundary');
       expect(messages[2]?.cacheBoundary).toBeUndefined();
     });
+
+    it('walks back past a trailing thinking block to find a cacheable block for the boundary', () => {
+      let conv = createConversation({ id: 'test' }, testEnvironment);
+      conv = appendMessages(
+        conv,
+        {
+          role: 'assistant',
+          content: [
+            { type: 'text', text: 'Visible answer' },
+            { type: 'thinking', thinking: 'internal reasoning', signature: 'sig' },
+          ],
+          cacheBoundary: true,
+        },
+        testEnvironment,
+      );
+
+      const { messages } = toAnthropicMessages(conv);
+      const blocks = messages[0]?.content as any[];
+
+      const thinkingBlock = blocks.find((b: any) => b.type === 'thinking');
+      const textBlock = blocks.find((b: any) => b.type === 'text');
+      expect(thinkingBlock.cache_control).toBeUndefined();
+      expect(textBlock.cache_control).toEqual({ type: 'ephemeral' });
+    });
+
+    it('does not attach cache_control when every block in the message is non-cacheable', () => {
+      let conv = createConversation({ id: 'test' }, testEnvironment);
+      conv = appendMessages(
+        conv,
+        {
+          role: 'assistant',
+          content: [{ type: 'thinking', thinking: 'internal reasoning', signature: 'sig' }],
+          cacheBoundary: true,
+        },
+        testEnvironment,
+      );
+
+      const { messages } = toAnthropicMessages(conv);
+      const blocks = messages[0]?.content as any[];
+      expect(blocks.every((b: any) => b.cache_control === undefined)).toBe(true);
+    });
+
+    it('caps explicit cache breakpoints at 4, stripping the earliest excess ones', () => {
+      let conv = createConversation({ id: 'test' }, testEnvironment);
+      conv = appendMessages(
+        conv,
+        { role: 'system', content: 'Segment 1', cacheBoundary: true },
+        { role: 'system', content: 'Segment 2', cacheBoundary: true },
+        { role: 'user', content: 'Segment 3', cacheBoundary: true },
+        { role: 'assistant', content: 'Segment 4', cacheBoundary: true },
+        { role: 'user', content: 'Segment 5', cacheBoundary: true },
+        testEnvironment,
+      );
+
+      const { system, messages } = toAnthropicMessages(conv);
+
+      const systemBlocks = system as unknown as Array<Record<string, unknown>>;
+      const allBlocks = [
+        ...systemBlocks,
+        ...messages.flatMap((m) => (Array.isArray(m.content) ? m.content : [])),
+      ];
+      const withBreakpoints = allBlocks.filter(
+        (block) => (block as { cache_control?: unknown }).cache_control !== undefined,
+      );
+
+      // "Segment 1" (the earliest mark) is stripped; the other 4 survive.
+      expect(withBreakpoints).toHaveLength(4);
+      expect(systemBlocks[0]?.['cache_control']).toBeUndefined();
+      expect(systemBlocks[1]?.['cache_control']).toEqual({ type: 'ephemeral' });
+    });
   });
 });
 
