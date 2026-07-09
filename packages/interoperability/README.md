@@ -23,7 +23,7 @@ The materializers normalize caller input at package boundaries. They fill genera
 
 ## Project Role
 
-`interoperability` is the contract layer below the tool and conversation packages. `armorer` executes tools with these types, `conversationalist` records tool interactions with the same types, `memory` and `herald` reuse the embedding helpers, and `integration` verifies that those contracts remain consumable from package entry points.
+`interoperability` is the contract layer below the tool and conversation packages. `armorer` executes tools with these types, `conversationalist` records tool interactions with the same types, `memory` and `operative` (its provider embedding factories) reuse the embedding helpers, and `integration` verifies that those contracts remain consumable from package entry points.
 
 ## Public API
 
@@ -103,7 +103,7 @@ type ToolAction = {
 
 **`EmbeddingVectorLike`**: `ArrayLike<number>`—widens to `Float32Array` and other typed arrays as well as `number[]`. Functions that only _read_ a vector accept this type.
 
-**`Embedder`**: `(texts: string[]) => EmbeddingVector[] | Promise<EmbeddingVector[]>`. The standard async-compatible embedding function signature consumed by `memory` and `herald`.
+**`Embedder`**: `(texts: string[]) => EmbeddingVector[] | Promise<EmbeddingVector[]>`. The standard async-compatible embedding function signature consumed by `memory` and `operative`'s embedding provider factories.
 
 **`IsEmbeddingVectorOptions`**: Options for `isEmbeddingVector`.
 

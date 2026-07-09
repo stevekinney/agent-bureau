@@ -18,28 +18,30 @@ At a high level, Agent Bureau separates the agent loop from the provider, tool, 
 
 ```mermaid
 flowchart TD
-  gateway["gateway\nHTTP API, browser UI, live transport"] --> operative["operative\nagent loop, sessions, scheduler"]
-  gateway --> operative_store["operative/store\nrun state and action log"]
-  operative --> herald["herald\nprovider generate functions"]
-  operative --> armorer["armorer\ntools and toolboxes"]
-  operative --> conversationalist["conversationalist\nconversation state"]
-  operative --> memory["memory\nrecall and persistence"]
-  operative --> skills["skills\nSKILL.md catalog and tools"]
-  memory --> cloudflare["cloudflare\nWorkers memory storage"]
-  armorer --> interoperability["interoperability\nshared tool contracts"]
-  conversationalist --> interoperability
+  gateway["gateway\nHTTP API, browser UI, live transport"] --> bureau["bureau\ncreateBureau(), fleet composition, durability"]
+  bureau --> operative["operative\nagent loop, sessions, scheduler, providers"]
+  bureau --> armorer["armorer\ntools and toolboxes"]
+  bureau --> conversationalist["conversationalist\nconversation state"]
+  bureau --> memory["memory\nrecall and persistence"]
+  bureau --> skills["skills\nSKILL.md catalog and tools"]
+  operative --> armorer
+  operative --> conversationalist
+  operative --> interoperability["interoperability\nshared tool contracts"]
   operative --> lifecycle["lifecycle\nevents and hooks"]
-  operative_store --> lifecycle
+  memory --> cloudflare["cloudflare\nWorkers memory storage"]
+  armorer --> interoperability
+  conversationalist --> interoperability
   evaluation["evaluation\nbehavior checks"] --> operative
   integration["integration\nworkspace contract tests"] --> armorer
   integration --> operative
-  integration --> operative_store
+  integration --> conversationalist
 ```
 
 - **Shared contracts**: `interoperability` defines JSON-safe tool and embedding contracts, while `lifecycle` supplies typed events, observables, and hooks used across the runtime.
 - **State and action layers**: `conversationalist` owns conversation history, `armorer` owns validated tools, and `operative/store` records run state and action history from live runs.
-- **Runtime layer**: `operative` is the provider-agnostic agent loop. It takes a `GenerateFunction`, runs the conversation and tool cycle, emits lifecycle events, persists sessions, and coordinates scheduler and durable-run behavior.
-- **Provider and knowledge layers**: `herald` adapts OpenAI, Anthropic, Gemini, and embedding providers into runtime functions; `memory` and `skills` add persistent recall and reusable procedural knowledge.
+- **Runtime layer**: `operative` is the provider-agnostic agent loop. It takes a `GenerateFunction`, runs the conversation and tool cycle, emits lifecycle events, persists sessions, and coordinates scheduler and durable-run behavior. It also carries the provider factories (`operative/anthropic`, `operative/openai`, `operative/gemini`, plus fallover, routing, streaming, and embeddings under `operative/providers/*`) that adapt OpenAI, Anthropic, Gemini, and embedding providers into runtime functions.
+- **Composition layer**: `bureau` is `createBureau()` — the fleet-level composition point. It assembles providers, tools, memory, skills, session persistence, durable execution (crash-and-resume runs and schedules), and multi-agent orchestration into one runtime, and exposes an audit trail and typed builder API on top.
+- **Knowledge layers**: `memory` and `skills` add persistent recall and reusable procedural knowledge.
 - **Product and platform layers**: `gateway` exposes the composed runtime through Hono routes, live transport, and Svelte UI pages. `cloudflare` supplies a Workers-ready memory storage backend.
 - **Verification layers**: `evaluation` tests agent behavior, and `integration` verifies that the packages work together from consumer-style import paths and runtimes.
 
@@ -90,20 +92,20 @@ Use an explicit SQLite path like the example above when you want sessions to sur
 
 Each workspace package has a package-level README with its local API, internal model, and project role.
 
-| Package                                                     | Role                                                                                                                                                 |
-| ----------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [`armorer`](packages/armorer/README.md)                     | Validated tools, toolboxes, execution, provider adapters, MCP adapters, middleware, and test helpers.                                                |
-| [`cloudflare`](packages/cloudflare/README.md)               | Cloudflare Workers memory storage backed by Durable Object SQLite plus Vectorize.                                                                    |
-| [`conversationalist`](packages/conversationalist/README.md) | Immutable conversation state, runtime history management, provider message adapters, compaction, and serialization.                                  |
-| [`evaluation`](packages/evaluation/README.md)               | Behavior evaluation suites, matchers, metrics, large language model judges, and report comparison.                                                   |
-| [`gateway`](packages/gateway/README.md)                     | Hono HTTP gateway, browser UI, session APIs, live transport, scheduler routes, and runtime composition.                                              |
-| [`herald`](packages/herald/README.md)                       | Provider factories, fallover, routing, streaming normalization, structured-output adapters, and embeddings.                                          |
-| [`integration`](packages/integration/README.md)             | Cross-package validation for consumer imports, runtime compatibility, and package boundary behavior.                                                 |
-| [`interoperability`](packages/interoperability/README.md)   | Shared JSON-safe tool-call, tool-result, embedding, and hashing contracts.                                                                           |
-| [`lifecycle`](packages/lifecycle/README.md)                 | Typed event targets, async event iterators, observables, event forwarding, and hook registries.                                                      |
-| [`memory`](packages/memory/README.md)                       | Memory storage contracts, embedding-backed recall, BM25 search, hybrid retrieval, hooks, identity, and memory tools.                                 |
-| [`operative`](packages/operative/README.md)                 | Provider-agnostic agent loop, sessions, scheduler, durable runs, context assembly, guardrails, retry, streaming, and `operative/store` run tracking. |
-| [`skills`](packages/skills/README.md)                       | `SKILL.md` parsing, skill providers, catalog injection, skill tools, storage, and proposal workflows.                                                |
+| Package                                                     | Role                                                                                                                                                                                       |
+| ----------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| [`armorer`](packages/armorer/README.md)                     | Validated tools, toolboxes, execution, provider adapters, MCP adapters, middleware, and test helpers.                                                                                      |
+| [`bureau`](packages/bureau/README.md)                       | `createBureau()` fleet composition: providers, tools, memory, skills, session persistence, durable execution and recovery, the typed multi-agent builder API, and the durable audit trail. |
+| [`cloudflare`](packages/cloudflare/README.md)               | Cloudflare Workers memory storage backed by Durable Object SQLite plus Vectorize.                                                                                                          |
+| [`conversationalist`](packages/conversationalist/README.md) | Immutable conversation state, runtime history management, provider message adapters, compaction, and serialization.                                                                        |
+| [`evaluation`](packages/evaluation/README.md)               | Behavior evaluation suites, matchers, metrics, large language model judges, and report comparison.                                                                                         |
+| [`gateway`](packages/gateway/README.md)                     | Hono HTTP gateway, browser UI, session APIs, live transport, scheduler routes, and runtime composition.                                                                                    |
+| [`integration`](packages/integration/README.md)             | Cross-package validation for consumer imports, runtime compatibility, and package boundary behavior.                                                                                       |
+| [`interoperability`](packages/interoperability/README.md)   | Shared JSON-safe tool-call, tool-result, embedding, and hashing contracts.                                                                                                                 |
+| [`lifecycle`](packages/lifecycle/README.md)                 | Typed event targets, async event iterators, observables, event forwarding, and hook registries.                                                                                            |
+| [`memory`](packages/memory/README.md)                       | Memory storage contracts, embedding-backed recall, BM25 search, hybrid retrieval, hooks, identity, and memory tools.                                                                       |
+| [`operative`](packages/operative/README.md)                 | Provider-agnostic agent loop, sessions, scheduler, durable runs, context assembly, guardrails, retry, streaming, provider factories, and `operative/store` run tracking.                   |
+| [`skills`](packages/skills/README.md)                       | `SKILL.md` parsing, skill providers, catalog injection, skill tools, storage, and proposal workflows.                                                                                      |
 
 Key-value persistence (sessions, identity, skills, proposals, rate-limit and API-key state) is backed by [Weft](https://www.npmjs.com/package/@lostgradient/weft)'s durable storage, consumed through its `textValueStore` surface.
 
@@ -123,4 +125,4 @@ bun run validate
 
 ## Roadmap
 
-The current release roadmap lives in [`ROADMAP.md`](ROADMAP.md). Deferred next-generation tracks are documented under [`reference/future/`](reference/future/).
+The current release roadmap, including genuinely deferred tracks, lives in [`ROADMAP.md`](ROADMAP.md).

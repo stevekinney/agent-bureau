@@ -15,7 +15,7 @@
 
 `createGateway()` is the outer composition point. It calls `createBureau()`, creates a live-frame broker, mounts Hono middleware, attaches API routes, renders UI pages, serves built assets, and chooses a Bun or Node server adapter at runtime.
 
-`createBureau()` is the runtime composition point behind the gateway. It resolves providers through `herald`, tools through `armorer`, conversation state through `conversationalist`, run execution through `operative`, state tracking through `operative/store`, memory through `memory`, and skills through `skills`. It also owns session persistence and recovered-run classification when durable execution is configured.
+`createBureau()`, imported from the `bureau` package, is the runtime composition point behind the gateway. It resolves providers through `operative`'s provider factories (`operative/anthropic`, `operative/openai`, `operative/gemini`, plus fallover, routing, and embeddings under `operative/providers/*`), tools through `armorer`, conversation state through `conversationalist`, run execution through `operative`, state tracking through `operative/store`, memory through `memory`, and skills through `skills`. It also owns session persistence and recovered-run classification when durable execution is configured.
 
 ## Project Role
 
@@ -192,7 +192,7 @@ Key `Bureau` methods:
 
 ### `resolveGenerate(configuration): GenerateFunction`
 
-Maps a `ProviderConfiguration` to a generate function from `herald`. Supports `'anthropic'`, `'openai'`, `'gemini'`, `'voyage'`, and `'ollama'` (herald's full `ProviderName` set).
+Maps a `ProviderConfiguration` to a generate function from `operative`'s provider factories. Supports `'anthropic'`, `'openai'`, `'gemini'`, `'voyage'`, and `'ollama'` (`operative`'s full `ProviderName` set).
 
 ```typescript
 interface ProviderConfiguration {
