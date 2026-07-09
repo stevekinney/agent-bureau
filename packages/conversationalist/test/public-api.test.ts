@@ -15,6 +15,7 @@ describe('public API export map', () => {
     expect(exportsMap['./conversation']).toBeDefined();
     expect(exportsMap['./context']).toBeDefined();
     expect(exportsMap['./streaming']).toBeDefined();
+    expect(exportsMap['./projection']).toBeDefined();
     expect(exportsMap['./history']).toBeDefined();
     expect(exportsMap['./message']).toBeDefined();
     expect(exportsMap['./utilities']).toBeDefined();
@@ -47,6 +48,8 @@ describe('public API export map', () => {
     expect(root.materializeToolResultsAsync).toBeDefined();
     expect(root.withConversationHistory).toBeDefined();
     expect(root.pipeConversationHistory).toBeDefined();
+    expect(root.createProjection).toBeDefined();
+    expect(root.isProjectionPrefixExtension).toBeDefined();
 
     expect('ConversationHistory' in root).toBeFalse();
     expect('createConversation' in root).toBeFalse();

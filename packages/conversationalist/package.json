@@ -50,6 +50,13 @@
       "default": "./dist/streaming.js",
       "types": "./dist/streaming.d.ts"
     },
+    "./projection": {
+      "bun": "./dist/projection.js",
+      "browser": "./dist/projection.js",
+      "import": "./dist/projection.js",
+      "default": "./dist/projection.js",
+      "types": "./dist/projection.d.ts"
+    },
     "./history": {
       "bun": "./dist/history.js",
       "browser": "./dist/history.js",
