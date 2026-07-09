@@ -105,6 +105,7 @@ export function createOpenAIProvider(options: OpenAIProviderOptions): GenerateFu
       const adapted = toOpenAIResponseFormat(options.responseFormat);
       if (adapted !== undefined) params['response_format'] = adapted;
     }
+    if (options.requestMetadata) params['metadata'] = options.requestMetadata;
     if (common.temperature !== undefined) params['temperature'] = common.temperature;
     if (common.topP !== undefined) params['top_p'] = common.topP;
     if (common.stopSequences) params['stop'] = common.stopSequences;
@@ -196,6 +197,7 @@ export function createOpenAIProviderStream(
       const adapted = toOpenAIResponseFormat(options.responseFormat);
       if (adapted !== undefined) params['response_format'] = adapted;
     }
+    if (options.requestMetadata) params['metadata'] = options.requestMetadata;
     if (common.temperature !== undefined) params['temperature'] = common.temperature;
     if (common.topP !== undefined) params['top_p'] = common.topP;
     if (common.stopSequences) params['stop'] = common.stopSequences;

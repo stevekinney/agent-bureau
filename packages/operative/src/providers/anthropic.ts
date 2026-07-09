@@ -130,7 +130,9 @@ export function createAnthropicProvider(options: AnthropicProviderOptions): Gene
     if (!clientPromise) {
       clientPromise = import('@anthropic-ai/sdk').then((module) => {
         const Anthropic = module.default ?? module.Anthropic;
-        return new Anthropic({ apiKey: options.apiKey }) as unknown as AnthropicClient;
+        const clientOptions: Record<string, unknown> = { apiKey: options.apiKey };
+        if (options.baseURL) clientOptions['baseURL'] = options.baseURL;
+        return new Anthropic(clientOptions) as unknown as AnthropicClient;
       });
     }
     return clientPromise;
@@ -141,7 +143,10 @@ export function createAnthropicProvider(options: AnthropicProviderOptions): Gene
     const conversationForRequest = cacheAwareAssembly
       ? cacheAwareAssembly(context)
       : context.conversation.current;
-    const { system, messages } = toAnthropicMessages(conversationForRequest);
+    const { system, messages } = toAnthropicMessages(
+      conversationForRequest,
+      options.extendedCacheTtl ? { extendedCacheTtl: true } : undefined,
+    );
     const tools = await context.toolbox.toAnthropicTools();
     const hasTools = tools.length > 0;
 
@@ -153,6 +158,7 @@ export function createAnthropicProvider(options: AnthropicProviderOptions): Gene
 
     if (system !== undefined) params['system'] = system;
     if (resolvedEffort !== undefined) params['output_config'] = { effort: resolvedEffort };
+    if (options.requestMetadata) params['metadata'] = options.requestMetadata;
 
     // Tool choice: when 'none', omit tools entirely; otherwise set tool_choice
     if (options.toolChoice === 'none') {
@@ -233,7 +239,9 @@ export function createAnthropicProviderStream(
     if (!clientPromise) {
       clientPromise = import('@anthropic-ai/sdk').then((module) => {
         const Anthropic = module.default ?? module.Anthropic;
-        return new Anthropic({ apiKey: options.apiKey }) as unknown as AnthropicStreamingClient;
+        const clientOptions: Record<string, unknown> = { apiKey: options.apiKey };
+        if (options.baseURL) clientOptions['baseURL'] = options.baseURL;
+        return new Anthropic(clientOptions) as unknown as AnthropicStreamingClient;
       });
     }
     return clientPromise;
@@ -247,7 +255,10 @@ export function createAnthropicProviderStream(
     const conversationForRequest = cacheAwareAssembly
       ? cacheAwareAssembly(context)
       : context.conversation.current;
-    const { system, messages } = toAnthropicMessages(conversationForRequest);
+    const { system, messages } = toAnthropicMessages(
+      conversationForRequest,
+      options.extendedCacheTtl ? { extendedCacheTtl: true } : undefined,
+    );
     const tools = await context.toolbox.toAnthropicTools();
     const hasTools = tools.length > 0;
 
@@ -260,6 +271,7 @@ export function createAnthropicProviderStream(
 
     if (system !== undefined) params['system'] = system;
     if (resolvedEffort !== undefined) params['output_config'] = { effort: resolvedEffort };
+    if (options.requestMetadata) params['metadata'] = options.requestMetadata;
 
     // Tool choice: when 'none', omit tools entirely; otherwise set tool_choice
     if (options.toolChoice === 'none') {

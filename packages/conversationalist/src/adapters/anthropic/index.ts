@@ -170,6 +170,12 @@ export interface AnthropicContainerUploadBlock {
  */
 export interface AnthropicCacheControl {
   type: 'ephemeral';
+  /**
+   * Cache breakpoint lifetime. Anthropic defaults to a 5-minute TTL when
+   * omitted; `'1h'` opts into the extended one-hour cache
+   * (see https://platform.claude.com/docs/en/build-with-claude/prompt-caching#1-hour-cache-duration).
+   */
+  ttl?: '5m' | '1h';
 }
 
 /**
@@ -523,6 +529,7 @@ function systemMessageText(message: Message): string {
  */
 function extractSystemPrompt(
   messages: ReadonlyArray<Message>,
+  extendedCacheTtl: boolean,
 ): string | AnthropicSystemBlock[] | undefined {
   const systemMessages = messages.filter(
     (m) => (m.role === 'system' || m.role === 'developer') && !m.hidden && !isStreamingMessage(m),
@@ -544,9 +551,29 @@ function extractSystemPrompt(
     return {
       type: 'text' as const,
       text,
-      ...(canCache ? { cache_control: { type: 'ephemeral' as const } } : {}),
+      ...(canCache
+        ? {
+            cache_control: {
+              type: 'ephemeral' as const,
+              ...(extendedCacheTtl ? { ttl: '1h' as const } : {}),
+            },
+          }
+        : {}),
     };
   });
+}
+
+/**
+ * Options for {@link toAnthropicMessages}.
+ */
+export interface ToAnthropicMessagesOptions {
+  /**
+   * When `true`, every `cache_control` breakpoint lowered from a
+   * `cacheBoundary` mark opts into Anthropic's extended one-hour cache TTL
+   * (`ttl: '1h'`) instead of the default 5-minute one. No effect on
+   * conversations with no cache boundaries.
+   */
+  extendedCacheTtl?: boolean;
 }
 
 /**
@@ -566,10 +593,14 @@ function extractSystemPrompt(
  * });
  * ```
  */
-export function toAnthropicMessages(conversation: Conversation): AnthropicConversation {
+export function toAnthropicMessages(
+  conversation: Conversation,
+  options?: ToAnthropicMessagesOptions,
+): AnthropicConversation {
   assertConversationSafe(conversation);
+  const extendedCacheTtl = options?.extendedCacheTtl ?? false;
   const ordered = getOrderedMessages(conversation);
-  const system = extractSystemPrompt(ordered);
+  const system = extractSystemPrompt(ordered, extendedCacheTtl);
   const messages: AnthropicMessage[] = [];
 
   // Track pending content blocks to merge consecutive same-role messages
@@ -651,7 +682,10 @@ export function toAnthropicMessages(conversation: Conversation): AnthropicConver
         const target = blocks[index]!;
         blocks = [
           ...blocks.slice(0, index),
-          { ...target, cache_control: { type: 'ephemeral' } },
+          {
+            ...target,
+            cache_control: { type: 'ephemeral', ...(extendedCacheTtl ? { ttl: '1h' } : {}) },
+          },
           ...blocks.slice(index + 1),
         ];
       }

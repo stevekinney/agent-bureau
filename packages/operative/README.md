@@ -473,6 +473,68 @@ hit rate is exposed per step and cumulatively on `usage.accumulated`
 these numbers end to end against the mock Anthropic client (no live API
 calls) — see it for the worked example.
 
+**Extended (1-hour) cache TTL.** Anthropic's cache breakpoints default to a
+5-minute TTL. Passing `extendedCacheTtl: true` to `createAnthropicProvider` /
+`createAnthropicProviderStream` opts every `cache_control` breakpoint lowered
+from a `cacheBoundary` mark into the extended one-hour TTL instead
+(`cache_control: { type: 'ephemeral', ttl: '1h' }`), which Anthropic bills at
+a higher cache-write rate in exchange for a longer-lived cache. It only takes
+effect on requests that actually have a cache boundary (i.e. `assembler` +
+`contextBudget`, or an already-marked conversation). OpenAI and Gemini use
+implicit, non-configurable prompt caching — there's no checkpoint metadata to
+interpret, so this option doesn't apply to `createOpenAIProvider` /
+`createGeminiProvider`.
+
+#### Providers Behind a Proxy
+
+Every shipped provider (`createAnthropicProvider`, `createOpenAIProvider`,
+`createGeminiProvider`, and their streaming counterparts) accepts a
+`baseURL` override and an arbitrary `apiKey` string with no shape
+validation — both pass straight to the underlying SDK client, so a
+credential-injecting proxy can sit in front of the real provider and swap in
+the real key server-side:
+
+```typescript
+const generate = createAnthropicProvider({
+  model: 'claude-sonnet-4-20250514',
+  apiKey: 'placeholder-token', // never a real key — the proxy injects it
+  baseURL: 'https://llm-proxy.internal.example.com',
+});
+```
+
+**Per-provider endpoint allowlist.** Each provider issues requests to exactly
+one endpoint per generate call — the set below is pinned by
+`test/provider-proxy-contract.test.ts`, which runs each provider through a
+real SDK client against a local `Bun.serve` mock and asserts the exact
+`(method, path)` set observed over a multi-step run. Use it to build a proxy
+allowlist:
+
+| Provider  | Method | Path                                     | Auth header                     |
+| --------- | ------ | ---------------------------------------- | ------------------------------- |
+| Anthropic | POST   | `/v1/messages`                           | `x-api-key`                     |
+| OpenAI    | POST   | `/chat/completions`                      | `authorization: Bearer <token>` |
+| Gemini    | POST   | `/v1beta/models/{model}:generateContent` | `x-goog-api-key`                |
+
+No provider issues a token-counting, models-list, or beta/experimental
+endpoint call as part of a normal generate step.
+
+**Per-run request metadata.** `requestMetadata` (a `Record<string, string>`)
+attaches to every generate request of a run:
+
+```typescript
+const generate = createAnthropicProvider({
+  model: 'claude-sonnet-4-20250514',
+  requestMetadata: { requestId: 'run-42', tenant: 'acme' },
+});
+```
+
+It's mapped to each provider's native field: Anthropic Messages `metadata`
+(officially only reads `user_id`, but the whole object is forwarded so a
+proxy can inspect it for routing/logging), OpenAI Chat Completions `metadata`
+(native string-keyed map, up to 16 keys). Gemini's `generateContent` API has
+no request-level metadata field, so `requestMetadata` is an explicit no-op
+for `createGeminiProvider` / `createGeminiProviderStream`.
+
 #### Backpressure
 
 ```typescript

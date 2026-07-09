@@ -53,6 +53,16 @@ export interface BaseProviderOptions {
   stopSequences?: string[];
   toolChoice?: ToolChoice;
   responseFormat?: ResponseFormat;
+  /**
+   * Provider-neutral per-run request metadata, attached to every generate
+   * request of the run. Mapped to each provider's native field: Anthropic
+   * Messages `metadata` (officially reads only `user_id`, but the whole
+   * object is forwarded so an embedder's proxy can inspect it); OpenAI Chat
+   * Completions `metadata` (native string-keyed map, up to 16 keys). Gemini
+   * has no request-level metadata field in its API — this option is an
+   * explicit no-op for {@link createGeminiProvider}.
+   */
+  requestMetadata?: Record<string, string>;
 }
 
 /**
@@ -84,6 +94,19 @@ export interface AnthropicMessageResponse {
 export interface AnthropicProviderOptions extends BaseProviderOptions {
   client?: AnthropicClient;
   apiKey?: string;
+  /**
+   * Overrides the Anthropic SDK's default base URL. Accepts any string —
+   * including a credential-injecting proxy origin — with no shape
+   * validation. Passed straight to the `Anthropic` client constructor.
+   */
+  baseURL?: string;
+  /**
+   * Opts every `cache_control` breakpoint lowered from a conversation
+   * `cacheBoundary` into Anthropic's extended one-hour cache TTL instead of
+   * the default 5-minute one. No effect unless `assembler`/`contextBudget`
+   * (or an already-marked conversation) actually produce a cache boundary.
+   */
+  extendedCacheTtl?: boolean;
   /**
    * Enables prompt-cache-aware context assembly. When set (together with
    * {@link AnthropicProviderOptions.contextBudget}), each call runs
@@ -140,6 +163,11 @@ export interface OpenAIChatCompletion {
 export interface OpenAIProviderOptions extends BaseProviderOptions {
   client?: OpenAIClient;
   apiKey?: string;
+  /**
+   * Overrides the OpenAI SDK's default base URL. Accepts any string —
+   * including a credential-injecting proxy origin — with no shape
+   * validation. Enables LM Studio, Ollama, Groq, etc.
+   */
   baseURL?: string;
 }
 
@@ -177,6 +205,12 @@ export interface GeminiGenerateContentResult {
 export interface GeminiProviderOptions extends BaseProviderOptions {
   client?: GeminiGenerativeModel;
   apiKey?: string;
+  /**
+   * Overrides the Gemini SDK's default base URL (`RequestOptions.baseUrl`).
+   * Accepts any string — including a credential-injecting proxy origin —
+   * with no shape validation.
+   */
+  baseURL?: string;
 }
 
 // ── Streaming Types ─────────────────────────────────────────────────

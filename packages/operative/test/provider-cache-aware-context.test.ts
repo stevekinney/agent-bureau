@@ -145,6 +145,75 @@ describe('Anthropic provider cache-aware context assembly', () => {
     }
   });
 
+  it('opts cache_control into the extended 1-hour TTL when extendedCacheTtl is set', async () => {
+    const conversation = new Conversation();
+    conversation.appendSystemMessage('You are a helpful assistant.');
+    conversation.appendUserMessage('Hello');
+
+    const client = createMockAnthropicClient([textResponse()]);
+    const generate = createAnthropicProvider({
+      model: 'claude-3-5-sonnet-20241022',
+      client,
+      assembler: createContextAssembler(),
+      contextBudget: createTokenBudget({ maxTokens: 100000 }),
+      extendedCacheTtl: true,
+    });
+
+    await generate(makeContext(conversation));
+
+    const call = client._calls[0];
+    expect(call?.['system']).toEqual([
+      {
+        type: 'text',
+        text: 'You are a helpful assistant.',
+        cache_control: { type: 'ephemeral', ttl: '1h' },
+      },
+    ]);
+  });
+
+  it('sends an identical extended-TTL cache_control prefix on consecutive calls of a stable-prefix run', async () => {
+    // Runner-shaped: system + shared context first (the stable prefix),
+    // variable per-step content last.
+    const conversation = new Conversation();
+    conversation.appendSystemMessage('You are a helpful assistant.');
+    conversation.appendUserMessage('Turn 1');
+
+    const client = createMockAnthropicClient([textResponse(), textResponse(), textResponse()]);
+    const generate = createAnthropicProvider({
+      model: 'claude-3-5-sonnet-20241022',
+      client,
+      assembler: createContextAssembler(),
+      contextBudget: createTokenBudget({ maxTokens: 100000 }),
+      extendedCacheTtl: true,
+    });
+
+    await generate(makeContext(conversation));
+    conversation.appendAssistantMessage('Reply 1');
+    conversation.appendUserMessage('Turn 2');
+    await generate(makeContext(conversation));
+    conversation.appendAssistantMessage('Reply 2');
+    conversation.appendUserMessage('Turn 3');
+    await generate(makeContext(conversation));
+
+    expect(client._calls).toHaveLength(3);
+    const expectedPrefix = [
+      {
+        type: 'text',
+        text: 'You are a helpful assistant.',
+        cache_control: { type: 'ephemeral', ttl: '1h' },
+      },
+    ];
+    for (const call of client._calls) {
+      expect(call['system']).toEqual(expectedPrefix);
+    }
+    // Every call's system block deep-equals every other call's — the stable
+    // prefix (and its cache_control marker) is byte-identical across steps.
+    const [first, ...rest] = client._calls;
+    for (const call of rest) {
+      expect(call['system']).toEqual(first?.['system']);
+    }
+  });
+
   it('streams with the same cache-aware assembly as the non-streaming provider', async () => {
     const conversation = new Conversation();
     conversation.appendSystemMessage('You are a helpful assistant.');
