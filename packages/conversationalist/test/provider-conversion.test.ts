@@ -53,6 +53,18 @@ describe('provider reverse conversion', () => {
           mimeType: 'text/markdown',
           source: { kind: 'reference', uri: 'sandbox:/workspace/notes.md' },
         },
+        {
+          type: 'document',
+          name: 'hosted.pdf',
+          mimeType: 'application/pdf',
+          source: { kind: 'reference', uri: 'https://example.com/hosted.pdf' },
+        },
+        {
+          type: 'document',
+          name: 'uploaded.pdf',
+          mimeType: 'application/pdf',
+          source: { kind: 'reference', uri: 'file:file_123' },
+        },
       ],
     });
 
@@ -72,6 +84,22 @@ describe('provider reverse conversion', () => {
           {
             type: 'text',
             text: '[Document: workspace-notes.md (text/markdown) at sandbox:/workspace/notes.md]',
+          },
+          {
+            type: 'document',
+            title: 'hosted.pdf',
+            source: {
+              type: 'url',
+              url: 'https://example.com/hosted.pdf',
+            },
+          },
+          {
+            type: 'document',
+            title: 'uploaded.pdf',
+            source: {
+              type: 'file',
+              file_id: 'file_123',
+            },
           },
         ],
       },

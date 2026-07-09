@@ -257,6 +257,27 @@ function toAnthropicContent(
               data: part.source.data,
             },
           });
+        } else if (
+          part.source.uri.startsWith('http://') ||
+          part.source.uri.startsWith('https://')
+        ) {
+          blocks.push({
+            type: 'document',
+            title: part.name,
+            source: {
+              type: 'url',
+              url: part.source.uri,
+            },
+          });
+        } else if (part.source.uri.startsWith('file:')) {
+          blocks.push({
+            type: 'document',
+            title: part.name,
+            source: {
+              type: 'file',
+              file_id: part.source.uri.slice('file:'.length),
+            },
+          });
         } else {
           blocks.push({ type: 'text', text: renderDocumentReferenceText(part) });
         }

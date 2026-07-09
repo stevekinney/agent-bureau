@@ -201,6 +201,32 @@ describe('toMarkdown', () => {
       expect(result).toContain('![image](https://example.com/photo.jpg)');
     });
 
+    test('renders document reference fallbacks', () => {
+      const conversation = createConversation([
+        {
+          id: 'msg-1',
+          role: 'user',
+          content: [
+            {
+              type: 'document',
+              name: 'notes.md',
+              mimeType: 'text/markdown',
+              source: { kind: 'reference', uri: 'sandbox:/workspace/notes.md' },
+            },
+          ],
+          position: 0,
+          createdAt: '2024-01-15T10:00:00.000Z',
+          metadata: {},
+          hidden: false,
+        },
+      ]);
+
+      const result = toMarkdown(conversation);
+      expect(result).toContain(
+        '[Document: notes.md (text/markdown) at sandbox:/workspace/notes.md]',
+      );
+    });
+
     test('skips empty text parts', () => {
       const conversation = createConversation([
         {

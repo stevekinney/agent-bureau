@@ -2,7 +2,7 @@ import matter from 'gray-matter';
 
 import { assertConversationSafe } from '../conversation/validation';
 import type { MultiModalContent } from '../multi-modal';
-import { copyContent } from '../multi-modal';
+import { copyContent, renderDocumentReferenceText } from '../multi-modal';
 import type {
   AssistantMessage,
   ConversationHistory as Conversation,
@@ -263,6 +263,8 @@ function formatMessageContent(message: Message): string {
       const imageUrl = (part as { url: string }).url;
       const altText = part.text ?? 'image';
       lines.push(`![${altText}](${imageUrl})`);
+    } else if (part.type === 'document') {
+      lines.push(renderDocumentReferenceText(part));
     }
   }
 
