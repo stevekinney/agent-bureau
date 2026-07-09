@@ -449,6 +449,12 @@ describe('durable agentRun workflow', () => {
       void handle.result().catch(() => {});
       await new Promise((resolve) => setTimeout(resolve, 100));
 
+      // Confirm step 0 actually COMMITTED (its ctx.memo resolved and checkpointed)
+      // before "crashing" — otherwise a hook firing ahead of the checkpoint write
+      // would make this assertion pass for the wrong reason (scheduling variance,
+      // not the memoization contract under test).
+      const afterCrash = await a.checkpointStore.loadCheckpoint(runId);
+      expect(afterCrash.steps).toHaveLength(1);
       expect(effectCount).toBe(1);
       a.engine[Symbol.dispose]();
 
