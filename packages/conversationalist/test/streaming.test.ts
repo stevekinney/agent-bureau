@@ -3,7 +3,9 @@ import { describe, expect, it } from 'bun:test';
 import {
   appendUnsafeMessage,
   createConversationHistory as createConversation,
+  type IntegrityIssue,
 } from '../src/conversation/index';
+import { ConversationalistError } from '../src/errors';
 import {
   appendStreamingMessage,
   appendUnsafeStreamingMessage,
@@ -85,9 +87,18 @@ describe('unsafe streaming primitives', () => {
       testEnvironment,
     );
 
-    expect(() =>
-      appendStreamingMessage(withApprovalPlaceholder, 'assistant', undefined, testEnvironment),
-    ).toThrow(/conversation integrity check failed/);
+    try {
+      appendStreamingMessage(withApprovalPlaceholder, 'assistant', undefined, testEnvironment);
+      throw new Error('Expected appendStreamingMessage to reject the orphan tool-result');
+    } catch (error) {
+      expect(error).toBeInstanceOf(ConversationalistError);
+      expect((error as ConversationalistError).code).toBe('error:integrity');
+      expect(
+        ((error as ConversationalistError).context?.issues as IntegrityIssue[]).some(
+          (issue) => issue.code === 'integrity:orphan-tool-result',
+        ),
+      ).toBe(true);
+    }
 
     const { conversation, messageId } = appendUnsafeStreamingMessage(
       withApprovalPlaceholder,
