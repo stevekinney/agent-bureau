@@ -30,6 +30,46 @@ describe('schemas', () => {
     expect(ok.success).toBeTrue();
   });
 
+  test('multiModalContentSchema accepts document base64 and reference sources', () => {
+    expect(
+      multiModalContentSchema.safeParse({
+        type: 'document',
+        name: 'requirements.pdf',
+        mimeType: 'application/pdf',
+        source: { kind: 'base64', data: 'cGRm' },
+      }).success,
+    ).toBeTrue();
+
+    expect(
+      multiModalContentSchema.safeParse({
+        type: 'document',
+        name: 'notes.md',
+        mimeType: 'text/markdown',
+        source: { kind: 'reference', uri: 'sandbox:/workspace/notes.md' },
+      }).success,
+    ).toBeTrue();
+  });
+
+  test('multiModalContentSchema rejects empty document fields', () => {
+    expect(
+      multiModalContentSchema.safeParse({
+        type: 'document',
+        name: '',
+        mimeType: 'application/pdf',
+        source: { kind: 'base64', data: 'cGRm' },
+      }).success,
+    ).toBeFalse();
+
+    expect(
+      multiModalContentSchema.safeParse({
+        type: 'document',
+        name: 'empty.pdf',
+        mimeType: 'application/pdf',
+        source: { kind: 'reference', uri: '' },
+      }).success,
+    ).toBeFalse();
+  });
+
   test('jsonValueSchema rejects non-JSON values', () => {
     expect(jsonValueSchema.safeParse(new Date()).success).toBeFalse();
     expect(jsonValueSchema.safeParse(Number.POSITIVE_INFINITY).success).toBeFalse();

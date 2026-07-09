@@ -3,7 +3,7 @@ import { getMessages } from '../conversation/index';
 import { ensureConversationSafe } from '../conversation/validation';
 import type { ConversationEnvironment } from '../environment';
 import { resolveConversationEnvironment, simpleTokenEstimator } from '../environment';
-import type { MultiModalContent } from '../multi-modal';
+import { type MultiModalContent, renderDocumentReferenceText } from '../multi-modal';
 import { isStreamingMessage } from '../streaming';
 import type { ConversationHistory, Message, MessageInput } from '../types';
 import { CURRENT_SCHEMA_VERSION } from '../types';
@@ -184,6 +184,8 @@ function stripStructuralToolBlocks(
         const { citations: _citations, ...rest } = part;
         return [rest];
       }
+      case 'document':
+        return [{ type: 'text', text: renderDocumentReferenceText(part) }];
       case 'thinking':
       case 'redacted_thinking':
         // Drop the block — a mutated thinking/redacted block is an invalid

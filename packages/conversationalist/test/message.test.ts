@@ -67,6 +67,29 @@ describe('message helpers', () => {
     expect(messageToString(msg)).toContain('![');
   });
 
+  test('messageToString renders document reference fallbacks', () => {
+    const msg = createMessage({
+      id: 'document-only',
+      role: 'user',
+      content: [
+        {
+          type: 'document',
+          name: 'notes.md',
+          mimeType: 'text/markdown',
+          source: { kind: 'reference', uri: 'sandbox:/workspace/notes.md' },
+        },
+      ],
+      position: 0,
+      createdAt: new Date().toISOString(),
+      metadata: {},
+      hidden: false,
+    });
+
+    expect(messageToString(msg)).toBe(
+      '[Document: notes.md (text/markdown) at sandbox:/workspace/notes.md]',
+    );
+  });
+
   test('messageToString omits structural blocks without leaving blank paragraphs', () => {
     // Regression: structural blocks (tool_use/thinking/etc.) must be dropped, not
     // rendered as '' and joined — otherwise [text, tool_use, text] would yield

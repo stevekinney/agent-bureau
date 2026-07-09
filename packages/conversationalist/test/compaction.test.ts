@@ -352,6 +352,45 @@ describe('summarizer-based compaction', () => {
       expect('citations' in (part as object)).toBe(false);
     });
 
+    test('replaces document payloads with text references before summarization', () => {
+      const messages: Message[] = [
+        {
+          id: 'm-0',
+          role: 'user',
+          content: [
+            {
+              type: 'document',
+              name: 'requirements.pdf',
+              mimeType: 'application/pdf',
+              source: { kind: 'base64', data: 'A'.repeat(10_000) },
+            },
+            {
+              type: 'document',
+              name: 'workspace-notes.md',
+              mimeType: 'text/markdown',
+              source: { kind: 'reference', uri: 'sandbox:/workspace/notes.md' },
+            },
+          ],
+          position: 0,
+          createdAt: new Date().toISOString(),
+          metadata: {},
+          hidden: false,
+        },
+      ];
+
+      const stripped = stripToolResultDetailsBatch(messages);
+      expect(stripped[0].content).toEqual([
+        {
+          type: 'text',
+          text: '[Document: requirements.pdf (application/pdf); base64 data omitted]',
+        },
+        {
+          type: 'text',
+          text: '[Document: workspace-notes.md (text/markdown) at sandbox:/workspace/notes.md]',
+        },
+      ]);
+    });
+
     test('drops thinking and redacted_thinking blocks (mutating them would be invalid for re-serialization)', () => {
       const messages: Message[] = [
         {

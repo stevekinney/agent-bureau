@@ -66,6 +66,21 @@ const multiModalContentUnion = z.discriminatedUnion('type', [
     text: z.string().optional(),
   }),
   z.object({
+    type: z.literal('document'),
+    name: z.string().min(1),
+    mimeType: z.string().min(1),
+    source: z.discriminatedUnion('kind', [
+      z.object({
+        kind: z.literal('base64'),
+        data: z.string().min(1),
+      }),
+      z.object({
+        kind: z.literal('reference'),
+        uri: z.string().min(1),
+      }),
+    ]),
+  }),
+  z.object({
     type: z.literal('thinking'),
     thinking: z.string(),
     signature: z.string(),
@@ -102,7 +117,7 @@ const multiModalContentUnion = z.discriminatedUnion('type', [
 ]);
 
 /**
- * Zod schema for multi-modal content parts (text, image, thinking,
+ * Zod schema for multi-modal content parts (text, image, document, thinking,
  * redacted_thinking, tool_use, server_tool_use, web_search_tool_result, and
  * code-execution result blocks).
  *

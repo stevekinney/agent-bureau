@@ -53,6 +53,12 @@ function partCharLength(part: ReturnType<typeof messageParts>[number]): number {
       );
     case 'image':
       return (part.text ?? '').length + (part.url?.length ?? 0);
+    case 'document':
+      return (
+        part.name.length +
+        part.mimeType.length +
+        (part.source.kind === 'base64' ? part.source.data.length : part.source.uri.length)
+      );
     case 'thinking':
       return part.thinking.length + part.signature.length;
     case 'redacted_thinking':

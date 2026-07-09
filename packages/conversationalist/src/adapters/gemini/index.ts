@@ -1,6 +1,6 @@
 import { appendMessages, createConversationHistory } from '../../conversation/index';
 import { assertConversationSafe } from '../../conversation/validation';
-import type { MultiModalContent } from '../../multi-modal';
+import { type MultiModalContent, renderDocumentReferenceText } from '../../multi-modal';
 import { isStreamingMessage } from '../../streaming';
 import type {
   ConversationHistory as Conversation,
@@ -141,30 +141,37 @@ function toGeminiParts(content: string | ReadonlyArray<MultiModalContent>): Gemi
 
   const parts: GeminiPart[] = [];
   for (const part of content) {
-    if (part.type === 'text') {
-      if (part.text) {
-        parts.push({ text: part.text });
-      }
-    } else if (part.type === 'image') {
-      const url = part.url ?? '';
-      if (url.startsWith('data:')) {
-        // Base64 data URL
-        const matches = url.match(/^data:([^;]+);base64,(.+)$/);
-        if (matches) {
-          parts.push({
-            inlineData: {
-              mimeType: matches[1]!,
-              data: matches[2]!,
-            },
-          });
+    switch (part.type) {
+      case 'text':
+        if (part.text) {
+          parts.push({ text: part.text });
         }
-      } else {
-        // File URI
-        const fileData: GeminiFileDataPart['fileData'] = {
-          fileUri: url,
-          mimeType: resolveMimeType(url, part.mimeType),
-        };
-        parts.push({ fileData });
+        break;
+      case 'document':
+        parts.push({ text: renderDocumentReferenceText(part) });
+        break;
+      case 'image': {
+        const url = part.url ?? '';
+        if (url.startsWith('data:')) {
+          // Base64 data URL
+          const matches = url.match(/^data:([^;]+);base64,(.+)$/);
+          if (matches) {
+            parts.push({
+              inlineData: {
+                mimeType: matches[1]!,
+                data: matches[2]!,
+              },
+            });
+          }
+        } else {
+          // File URI
+          const fileData: GeminiFileDataPart['fileData'] = {
+            fileUri: url,
+            mimeType: resolveMimeType(url, part.mimeType),
+          };
+          parts.push({ fileData });
+        }
+        break;
       }
     }
   }

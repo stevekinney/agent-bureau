@@ -18,7 +18,7 @@ import type { MultiModalContent } from './multi-modal';
  * Current schema version for serialized conversation data.
  * Increment when making breaking changes to the schema.
  */
-export const CURRENT_SCHEMA_VERSION = 4;
+export const CURRENT_SCHEMA_VERSION = 5;
 
 /**
  * JSON-serializable value types.

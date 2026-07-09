@@ -49,6 +49,45 @@ describe('conversation (functional)', () => {
     expect(external[0]!.role).toBe('user');
   });
 
+  test('serialize and deserialize document multimodal content', () => {
+    let c = createConversation();
+    c = appendMessages(c, {
+      role: 'user',
+      content: [
+        {
+          type: 'document',
+          name: 'requirements.pdf',
+          mimeType: 'application/pdf',
+          source: { kind: 'base64', data: 'cGRm' },
+        },
+        {
+          type: 'document',
+          name: 'workspace-notes.md',
+          mimeType: 'text/markdown',
+          source: { kind: 'reference', uri: 'sandbox:/workspace/notes.md' },
+        },
+      ],
+    });
+
+    const restored = deserializeConversation(JSON.parse(JSON.stringify(c)));
+
+    expect(restored.schemaVersion).toBe(5);
+    expect(getOrderedMessages(restored)[0]?.content).toEqual([
+      {
+        type: 'document',
+        name: 'requirements.pdf',
+        mimeType: 'application/pdf',
+        source: { kind: 'base64', data: 'cGRm' },
+      },
+      {
+        type: 'document',
+        name: 'workspace-notes.md',
+        mimeType: 'text/markdown',
+        source: { kind: 'reference', uri: 'sandbox:/workspace/notes.md' },
+      },
+    ]);
+  });
+
   test('redact message by position', () => {
     let c = createConversation();
     c = appendUserMessage(c, 'secret');
@@ -338,7 +377,7 @@ describe('conversation (functional)', () => {
 
     const now = new Date().toISOString();
     const malformed = {
-      schemaVersion: 4,
+      schemaVersion: 5,
       id: 'malformed',
       status: 'active' as const,
       metadata: {},

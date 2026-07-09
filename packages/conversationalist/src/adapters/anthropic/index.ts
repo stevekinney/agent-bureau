@@ -1,6 +1,6 @@
 import { appendMessages, createConversationHistory } from '../../conversation/index';
 import { assertConversationSafe } from '../../conversation/validation';
-import type { MultiModalContent } from '../../multi-modal';
+import { type MultiModalContent, renderDocumentReferenceText } from '../../multi-modal';
 import { isStreamingMessage } from '../../streaming';
 import type {
   ConversationHistory as Conversation,
@@ -41,6 +41,40 @@ export type AnthropicImageSource = AnthropicBase64ImageSource | AnthropicUrlImag
 export interface AnthropicImageBlock {
   type: 'image';
   source: AnthropicImageSource;
+}
+
+export interface AnthropicBase64DocumentSource {
+  type: 'base64';
+  media_type: string;
+  data: string;
+}
+
+export interface AnthropicTextDocumentSource {
+  type: 'text';
+  media_type: string;
+  data: string;
+}
+
+export interface AnthropicUrlDocumentSource {
+  type: 'url';
+  url: string;
+}
+
+export interface AnthropicFileDocumentSource {
+  type: 'file';
+  file_id: string;
+}
+
+export type AnthropicDocumentSource =
+  | AnthropicBase64DocumentSource
+  | AnthropicTextDocumentSource
+  | AnthropicUrlDocumentSource
+  | AnthropicFileDocumentSource;
+
+export interface AnthropicDocumentBlock {
+  type: 'document';
+  source: AnthropicDocumentSource;
+  title?: string;
 }
 
 /**
@@ -134,6 +168,7 @@ export interface AnthropicContainerUploadBlock {
 export type AnthropicContentBlock =
   | AnthropicTextBlock
   | AnthropicImageBlock
+  | AnthropicDocumentBlock
   | AnthropicToolUseBlock
   | AnthropicToolResultBlock
   | AnthropicThinkingBlock
@@ -210,6 +245,42 @@ function toAnthropicContent(
         break;
       case 'container_upload':
         blocks.push({ type: 'container_upload', file_id: part.file_id });
+        break;
+      case 'document':
+        if (part.source.kind === 'base64') {
+          blocks.push({
+            type: 'document',
+            title: part.name,
+            source: {
+              type: 'base64',
+              media_type: part.mimeType,
+              data: part.source.data,
+            },
+          });
+        } else if (
+          part.source.uri.startsWith('http://') ||
+          part.source.uri.startsWith('https://')
+        ) {
+          blocks.push({
+            type: 'document',
+            title: part.name,
+            source: {
+              type: 'url',
+              url: part.source.uri,
+            },
+          });
+        } else if (part.source.uri.startsWith('file:')) {
+          blocks.push({
+            type: 'document',
+            title: part.name,
+            source: {
+              type: 'file',
+              file_id: part.source.uri.slice('file:'.length),
+            },
+          });
+        } else {
+          blocks.push({ type: 'text', text: renderDocumentReferenceText(part) });
+        }
         break;
       case 'image': {
         // Anthropic supports both URL and base64. A `data:` URL that matches the
@@ -519,6 +590,34 @@ function toGroupableContentPart(block: AnthropicContentBlock): MultiModalContent
     case 'container_upload':
       // Preserve the uploaded-file reference instead of dropping it.
       return { type: 'container_upload', file_id: block.file_id };
+    case 'document': {
+      const name = block.title ?? 'document';
+      if (block.source.type === 'base64') {
+        return {
+          type: 'document',
+          name,
+          mimeType: block.source.media_type,
+          source: { kind: 'base64', data: block.source.data },
+        };
+      }
+      if (block.source.type === 'text') {
+        return { type: 'text', text: block.source.data };
+      }
+      if (block.source.type === 'url') {
+        return {
+          type: 'document',
+          name,
+          mimeType: 'application/octet-stream',
+          source: { kind: 'reference', uri: block.source.url },
+        };
+      }
+      return {
+        type: 'document',
+        name,
+        mimeType: 'application/octet-stream',
+        source: { kind: 'reference', uri: `file:${block.source.file_id}` },
+      };
+    }
     case 'image':
       return block.source.type === 'url'
         ? { type: 'image', url: block.source.url }

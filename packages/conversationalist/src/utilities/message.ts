@@ -1,5 +1,5 @@
 import type { MultiModalContent } from '../multi-modal';
-import { copyContent } from '../multi-modal';
+import { copyContent, renderDocumentReferenceText } from '../multi-modal';
 import type { AssistantMessage, Message } from '../types';
 import { toReadonly } from './type-helpers';
 
@@ -121,6 +121,7 @@ export function messageToString(message: Message): string {
     .map((part): string | null => {
       if (part.type === 'text') return part.text;
       if (part.type === 'image') return `![${part.text ?? ''}](${part.url})`;
+      if (part.type === 'document') return renderDocumentReferenceText(part);
       // Structural blocks carry no plain-text prose — drop them so they leave
       // no blank paragraphs in the joined output.
       return null;
