@@ -16,7 +16,7 @@ Pure helper functions transform `ConversationHistory` values without side effect
 
 ## Project Role
 
-`conversationalist` is the conversation state layer for Agent Bureau. `operative` uses it during the agent loop, `herald` uses it to build provider payloads, `gateway` persists sessions around it, and `armorer` shares its tool-call model through `interoperability`.
+`conversationalist` is the conversation state layer for Agent Bureau. `operative` uses it during the agent loop and to build provider payloads through its own provider adapters, `gateway` persists sessions around it, and `armorer` shares its tool-call model through `interoperability`.
 
 ## Installation
 

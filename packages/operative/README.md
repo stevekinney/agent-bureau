@@ -15,7 +15,7 @@
 
 The core loop starts with an agent definition, a conversation, tools, and a `GenerateFunction`. For each step, it prepares context, calls the generate function, validates the response, executes requested tools, appends tool results back to the conversation, emits typed events, and evaluates stop conditions.
 
-Everything provider-specific stays outside the package. `herald` can supply generate functions for common providers, but callers can pass any function that satisfies the runtime type. Durable execution, scheduler tasks, and session persistence build on the same loop so product surfaces can recover or resume runs without changing agent code.
+Everything provider-specific stays behind a narrow seam: the `operative/anthropic`, `operative/openai`, and `operative/gemini` subpaths (plus fallover, routing, and embedding factories under `operative/providers/*`) supply ready-made generate functions, but callers can pass any function that satisfies the `GenerateFunction` type. Durable execution, scheduler tasks, and session persistence build on the same loop so product surfaces can recover or resume runs without changing agent code.
 
 ## Project Role
 
@@ -249,7 +249,7 @@ const generate: GenerateFunction = async ({ conversation, toolbox }) => ({
 });
 ```
 
-In production, `herald` provides ready-made generate functions for Anthropic, OpenAI, and Gemini.
+In production, `operative`'s own provider subpaths (`operative/anthropic`, `operative/openai`, `operative/gemini`) provide ready-made generate functions for Anthropic, OpenAI, and Gemini.
 
 #### Sessions
 

@@ -35,7 +35,7 @@ A tool combines metadata, an input schema, and an execute function. A toolbox re
 
 ## Project Role
 
-`armorer` is the action layer for Agent Bureau. `operative` uses it to execute tool calls during an agent run, `herald` uses its adapters when sending tools to providers, `skills` and `memory` expose their capabilities as toolboxes, and `gateway` surfaces the composed tool set through API and UI state.
+`armorer` is the action layer for Agent Bureau. `operative` uses it to execute tool calls during an agent run and uses its provider adapters when sending tools to providers, `skills` and `memory` expose their capabilities as toolboxes, and `gateway` surfaces the composed tool set through API and UI state.
 
 ## Features
 
