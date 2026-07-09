@@ -19,6 +19,7 @@ const entry = {
   'conversation/index': './src/conversation/index.ts',
   context: './src/context.ts',
   streaming: './src/streaming.ts',
+  projection: './src/projection.ts',
   history: './src/history.ts',
   'utilities/message': './src/utilities/message.ts',
   'utilities/index': './src/utilities/index.ts',

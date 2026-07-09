@@ -146,6 +146,15 @@ export type {
   WebSearchToolResultContent,
 } from './multi-modal';
 export type {
+  Projection,
+  ProjectionEventIdentity,
+  ProjectionOptions,
+  ProjectionReducer,
+  ProjectionReducerContext,
+  ProjectionReducerResult,
+} from './projection';
+export { createProjection, isProjectionPrefixExtension } from './projection';
+export type {
   AppendableToolAction,
   AppendableToolCallInput,
   AppendableToolError,

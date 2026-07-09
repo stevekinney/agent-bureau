@@ -10,6 +10,7 @@ This document tracks the published export map in [package.json](/Users/stevekinn
 | `conversationalist/conversation`       | Pure immutable conversation helpers                                                                             |
 | `conversationalist/context`            | Token estimation and truncation helpers                                                                         |
 | `conversationalist/streaming`          | Streaming-message helpers                                                                                       |
+| `conversationalist/projection`         | Incremental append-log projection helpers                                                                       |
 | `conversationalist/history`            | `Conversation` class and event types                                                                            |
 | `conversationalist/message`            | Message formatting and narrowing helpers                                                                        |
 | `conversationalist/utilities`          | Content, message, transient-metadata, pairing, and helper utilities                                             |
@@ -338,6 +339,19 @@ Messages flagged as streaming (`isStreamingMessage` returns `true`) are automati
 - **Compaction**: `partitionMessages` adds streaming messages to the preserved set so they are never summarized away.
 - **Truncation**: `truncateToTokenLimit` locks streaming message blocks alongside system and protected blocks. `truncateFromPosition` preserves streaming messages that fall below the cutoff position.
 - **Adapters**: All three provider adapters (OpenAI, Anthropic, Gemini) skip streaming messages during export so that incomplete content is never sent to an API. Once a streaming message is finalized via `finalizeStreamingMessage`, the streaming flag is removed and the message participates normally in all subsystems.
+
+## `conversationalist/projection`
+
+- `createProjection`
+- `isProjectionPrefixExtension`
+- `Projection`
+- `ProjectionEventIdentity`
+- `ProjectionOptions`
+- `ProjectionReducer`
+- `ProjectionReducerContext`
+- `ProjectionReducerResult`
+
+Projection builders compare stable event identities to detect prefix extensions. Use durable event ids or sequence numbers, not array or object identity, so reactive proxies can pass fresh arrays safely.
 
 ## `conversationalist/history`
 

@@ -191,6 +191,80 @@ console.assert(interactions.every(({ call, result }) => call.id === result?.call
 
 The `sequence` column is the replay authority. The message identifier and timestamp hooks keep the rebuilt `ConversationHistory` aligned with the external event rows, while the tool-call identifier remains the durable key that pairs every tool result with its call across process restarts.
 
+## Incremental Projection During Streaming
+
+Use `createProjection` when a UI receives the complete event log on every SSE frame. The projection owns the processed-count cursor: prefix extensions reduce only the new tail, while reconnects, reloads, or session switches reset to the seed and refold the supplied log.
+
+```typescript
+import {
+  appendUserMessage,
+  createConversationHistory,
+  createProjection,
+  type ConversationHistory,
+} from 'conversationalist';
+import {
+  appendUnsafeStreamingMessage,
+  finalizeUnsafeStreamingMessage,
+  updateUnsafeStreamingMessage,
+} from 'conversationalist/streaming';
+
+type StreamEvent =
+  | { id: string; kind: 'user.message'; content: string }
+  | { id: string; kind: 'assistant.delta'; delta: string }
+  | { id: string; kind: 'assistant.done' };
+
+type ProjectionState = {
+  assistantMessageId?: string;
+  assistantText: string;
+};
+
+const projection = createProjection<StreamEvent, ProjectionState>({
+  seed: createConversationHistory({ title: 'Live transcript' }),
+  initialState: () => ({ assistantText: '' }),
+  identify: (event) => event.id,
+  reduce({ conversation, event, state }) {
+    switch (event.kind) {
+      case 'user.message':
+        return {
+          conversation: appendUserMessage(conversation, event.content),
+          state,
+        };
+      case 'assistant.delta': {
+        let nextConversation: ConversationHistory = conversation;
+        let messageId = state.assistantMessageId;
+        if (!messageId) {
+          const appended = appendUnsafeStreamingMessage(nextConversation, 'assistant');
+          nextConversation = appended.conversation;
+          messageId = appended.messageId;
+        }
+
+        const assistantText = state.assistantText + event.delta;
+        return {
+          conversation: updateUnsafeStreamingMessage(nextConversation, messageId, assistantText),
+          state: { assistantMessageId: messageId, assistantText },
+        };
+      }
+      case 'assistant.done':
+        return state.assistantMessageId
+          ? {
+              conversation: finalizeUnsafeStreamingMessage(conversation, state.assistantMessageId),
+              state: { assistantText: '' },
+            }
+          : { conversation, state };
+    }
+  },
+});
+
+for await (const events of streamTranscriptEvents()) {
+  projection.apply(events);
+  renderConversation(projection.snapshot());
+}
+```
+
+`identify` must return a stable event identity such as a durable event id or sequence number. The projection compares those identities, not array references or event object references, so reactive proxies from frameworks such as Svelte or Vue can pass fresh proxied arrays without triggering unnecessary refolds.
+
+Keep a pure full rebuild in tests and assert it deep-equals the incremental snapshots after each chunk. That equivalence check is the guardrail: if `projection.apply(eventsSoFar); projection.snapshot()` ever differs from rebuilding from an empty seed over `eventsSoFar`, the reducer or event identity contract is wrong.
+
 ## Package Structure
 
 ### `conversationalist` (root)
@@ -229,6 +303,7 @@ import {
 - Materializer helpers: `materializeToolCall`, `materializeToolCalls`, `materializeToolResult`, `materializeToolResultAsync`, `materializeToolResults`, `materializeToolResultsAsync`.
 - Validation: `validateConversationHistoryIntegrity`, `assertConversationHistoryIntegrity`.
 - Builder helpers: `withConversationHistory`, `pipeConversationHistory`.
+- Projection helpers: `createProjection`, `isProjectionPrefixExtension`.
 - Modify: `redactMessageAtPosition`.
 - Guards: `isConversation`, `isConversationHistory`, `isMessage`, `isToolCall`, `isToolResult`, and more.
 - Error constructors: `ConversationalistError`, `createNotFoundError`, `createValidationError`, and others.
@@ -373,6 +448,20 @@ conversation = cancelStreamingMessage(conversation, messageId);
 
 Streaming messages (those with `metadata.__streaming === true`) are automatically protected from compaction, truncation, and adapter export until finalized.
 Use the unsafe variants only for render-side projections that may contain incomplete tool-call/tool-result pairs, such as partial transcript windows or approval placeholders.
+
+---
+
+### `conversationalist/projection`
+
+Incremental projection helpers for turning cumulative append-only event logs into render-ready conversation snapshots.
+
+```typescript
+import { createProjection, isProjectionPrefixExtension } from 'conversationalist/projection';
+```
+
+**Key exports:** `createProjection`, `isProjectionPrefixExtension`. Also exports `Projection`, `ProjectionEventIdentity`, `ProjectionOptions`, `ProjectionReducer`, `ProjectionReducerContext`, and `ProjectionReducerResult` types.
+
+The prefix check compares stable event identities only. Use durable event ids or sequence numbers rather than object references so reactive framework proxies remain safe.
 
 ---
 
