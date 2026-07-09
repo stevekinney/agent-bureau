@@ -223,8 +223,11 @@ This document tracks the published export map in [package.json](/Users/stevekinn
 - `truncateFromPosition(position, options?)`
 - `truncateToTokenLimit(maxTokens, options?)`
 - `appendStreamingMessage(role, metadata?)`
+- `appendUnsafeStreamingMessage(role, metadata?)`
 - `updateStreamingMessage(messageId, content)`
+- `updateUnsafeStreamingMessage(messageId, content)`
 - `finalizeStreamingMessage(messageId, options?)`
+- `finalizeUnsafeStreamingMessage(messageId, options?)`
 - `cancelStreamingMessage(messageId)`
 - `appendToolCall(toolCall, options?)`
 - `appendToolCalls(toolCalls)`
@@ -322,11 +325,14 @@ This document tracks the published export map in [package.json](/Users/stevekinn
 ## `conversationalist/streaming`
 
 - `appendStreamingMessage`
+- `appendUnsafeStreamingMessage`
 - `cancelStreamingMessage`
 - `finalizeStreamingMessage`
+- `finalizeUnsafeStreamingMessage`
 - `getStreamingMessage`
 - `isStreamingMessage`
 - `updateStreamingMessage`
+- `updateUnsafeStreamingMessage`
 
 ### Streaming safety
 

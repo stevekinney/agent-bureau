@@ -1,16 +1,22 @@
 import { describe, expect, it } from 'bun:test';
 
-import { createConversationHistory as createConversation } from '../src/conversation/index';
+import {
+  appendUnsafeMessage,
+  createConversationHistory as createConversation,
+} from '../src/conversation/index';
 import {
   appendStreamingMessage,
+  appendUnsafeStreamingMessage,
   cancelStreamingMessage,
   contentOf,
   createStreamingAccumulator,
   finalizeStreamingMessage,
+  finalizeUnsafeStreamingMessage,
   getStreamingMessage,
   isStreamingMessage,
   toolCallsOf,
   updateStreamingMessage,
+  updateUnsafeStreamingMessage,
 } from '../src/streaming';
 import type { ConversationHistory as Conversation, Message } from '../src/types';
 
@@ -60,6 +66,52 @@ describe('appendStreamingMessage', () => {
     );
 
     expect(getOrderedMessages(conversation)[0]?.metadata.custom).toBe('value');
+  });
+});
+
+describe('unsafe streaming primitives', () => {
+  it('updates and finalizes streaming messages on render-side conversations with orphan tool-results', () => {
+    const withApprovalPlaceholder = appendUnsafeMessage(
+      createConversation({ id: 'test' }, testEnvironment),
+      {
+        role: 'tool-result',
+        content: 'Approval required: shell.exec',
+        toolResult: {
+          callId: 'apr-1',
+          outcome: 'action_required',
+          content: 'Waiting for approval',
+        },
+      },
+      testEnvironment,
+    );
+
+    expect(() =>
+      appendStreamingMessage(withApprovalPlaceholder, 'assistant', undefined, testEnvironment),
+    ).toThrow(/conversation integrity check failed/);
+
+    const { conversation, messageId } = appendUnsafeStreamingMessage(
+      withApprovalPlaceholder,
+      'assistant',
+      undefined,
+      testEnvironment,
+    );
+    const updated = updateUnsafeStreamingMessage(
+      conversation,
+      messageId,
+      'Approved. Running command.',
+      testEnvironment,
+    );
+    const finalized = finalizeUnsafeStreamingMessage(
+      updated,
+      messageId,
+      { metadata: { rendered: true } },
+      testEnvironment,
+    );
+
+    const streamingMessage = finalized.messages[messageId];
+    expect(streamingMessage?.content).toBe('Approved. Running command.');
+    expect(streamingMessage?.metadata.rendered).toBe(true);
+    expect(streamingMessage && isStreamingMessage(streamingMessage)).toBe(false);
   });
 });
 

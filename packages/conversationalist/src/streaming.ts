@@ -80,6 +80,30 @@ export function appendStreamingMessage(
   metadata?: Record<string, JSONValue>,
   environment?: Partial<ConversationEnvironment>,
 ): { conversation: Conversation; messageId: string } {
+  return appendStreamingMessageInternal(conversation, role, metadata, environment, true);
+}
+
+/**
+ * Creates a pending/streaming message placeholder without validating the
+ * resulting conversation. Use only for render-side projections that can contain
+ * structurally incomplete tool-call/tool-result pairs.
+ */
+export function appendUnsafeStreamingMessage(
+  conversation: Conversation,
+  role: 'assistant' | 'user',
+  metadata?: Record<string, JSONValue>,
+  environment?: Partial<ConversationEnvironment>,
+): { conversation: Conversation; messageId: string } {
+  return appendStreamingMessageInternal(conversation, role, metadata, environment, false);
+}
+
+const appendStreamingMessageInternal = (
+  conversation: Conversation,
+  role: 'assistant' | 'user',
+  metadata: Record<string, JSONValue> | Partial<ConversationEnvironment> | undefined,
+  environment: Partial<ConversationEnvironment> | undefined,
+  validate: boolean,
+): { conversation: Conversation; messageId: string } => {
   const resolvedEnvironment = resolveConversationEnvironment(
     isConversationEnvironmentParameter(metadata) ? metadata : environment,
   );
@@ -107,8 +131,11 @@ export function appendStreamingMessage(
     updatedAt: now,
   });
 
-  return { conversation: ensureConversationSafe(updatedConversation), messageId };
-}
+  return {
+    conversation: validate ? ensureConversationSafe(updatedConversation) : updatedConversation,
+    messageId,
+  };
+};
 
 /**
  * Updates the content of a streaming message.
@@ -120,12 +147,36 @@ export function updateStreamingMessage(
   content: string | MultiModalContent[],
   environment?: Partial<ConversationEnvironment>,
 ): Conversation {
+  return updateStreamingMessageInternal(conversation, messageId, content, environment, true);
+}
+
+/**
+ * Updates a streaming message without validating the resulting conversation.
+ * Use only for render-side projections that can contain structurally incomplete
+ * tool-call/tool-result pairs.
+ */
+export function updateUnsafeStreamingMessage(
+  conversation: Conversation,
+  messageId: string,
+  content: string | MultiModalContent[],
+  environment?: Partial<ConversationEnvironment>,
+): Conversation {
+  return updateStreamingMessageInternal(conversation, messageId, content, environment, false);
+}
+
+const updateStreamingMessageInternal = (
+  conversation: Conversation,
+  messageId: string,
+  content: string | MultiModalContent[],
+  environment: Partial<ConversationEnvironment> | undefined,
+  validate: boolean,
+): Conversation => {
   const resolvedEnvironment = resolveConversationEnvironment(environment);
   const now = resolvedEnvironment.now();
 
   const original = conversation.messages[messageId];
   if (!original) {
-    return ensureConversationSafe(conversation);
+    return validate ? ensureConversationSafe(conversation) : conversation;
   }
 
   const overrides: {
@@ -139,16 +190,15 @@ export function updateStreamingMessage(
   }
 
   const updated = cloneMessage(original, overrides);
+  const updatedConversation = toReadonly({
+    ...conversation,
+    ids: [...conversation.ids],
+    messages: { ...conversation.messages, [updated.id]: updated },
+    updatedAt: now,
+  });
 
-  return ensureConversationSafe(
-    toReadonly({
-      ...conversation,
-      ids: [...conversation.ids],
-      messages: { ...conversation.messages, [updated.id]: updated },
-      updatedAt: now,
-    }),
-  );
-}
+  return validate ? ensureConversationSafe(updatedConversation) : updatedConversation;
+};
 
 /**
  * Marks a streaming message as complete, removing the streaming flag.
@@ -163,6 +213,41 @@ export function finalizeStreamingMessage(
   },
   environment?: Partial<ConversationEnvironment>,
 ): Conversation {
+  return finalizeStreamingMessageInternal(conversation, messageId, options, environment, true);
+}
+
+/**
+ * Finalizes a streaming message without validating the resulting conversation.
+ * Use only for render-side projections that can contain structurally incomplete
+ * tool-call/tool-result pairs.
+ */
+export function finalizeUnsafeStreamingMessage(
+  conversation: Conversation,
+  messageId: string,
+  options?:
+    | {
+        tokenUsage?: TokenUsage;
+        metadata?: Record<string, JSONValue>;
+      }
+    | Partial<ConversationEnvironment>,
+  environment?: Partial<ConversationEnvironment>,
+): Conversation {
+  return finalizeStreamingMessageInternal(conversation, messageId, options, environment, false);
+}
+
+const finalizeStreamingMessageInternal = (
+  conversation: Conversation,
+  messageId: string,
+  options:
+    | {
+        tokenUsage?: TokenUsage;
+        metadata?: Record<string, JSONValue>;
+      }
+    | Partial<ConversationEnvironment>
+    | undefined,
+  environment: Partial<ConversationEnvironment> | undefined,
+  validate: boolean,
+): Conversation => {
   const resolvedEnvironment = resolveConversationEnvironment(
     isConversationEnvironmentParameter(options) ? options : environment,
   );
@@ -171,7 +256,7 @@ export function finalizeStreamingMessage(
 
   const original = conversation.messages[messageId];
   if (!original) {
-    return ensureConversationSafe(conversation);
+    return validate ? ensureConversationSafe(conversation) : conversation;
   }
 
   // Remove the streaming flag and merge in any new metadata
@@ -192,16 +277,15 @@ export function finalizeStreamingMessage(
   }
 
   const updated = cloneMessage(original, finalizeOverrides);
+  const updatedConversation = toReadonly({
+    ...conversation,
+    ids: [...conversation.ids],
+    messages: { ...conversation.messages, [updated.id]: updated },
+    updatedAt: now,
+  });
 
-  return ensureConversationSafe(
-    toReadonly({
-      ...conversation,
-      ids: [...conversation.ids],
-      messages: { ...conversation.messages, [updated.id]: updated },
-      updatedAt: now,
-    }),
-  );
-}
+  return validate ? ensureConversationSafe(updatedConversation) : updatedConversation;
+};
 
 // ─── Multi-part streaming accumulation ──────────────────────────────────────
 
