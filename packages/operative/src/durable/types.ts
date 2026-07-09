@@ -31,6 +31,18 @@ export interface RunCursor {
   lastContent: string;
   /** Run-scoped count of structured-output schema retries already consumed. */
   schemaAttempts: number;
+  /**
+   * The workflow version identifier this run was created under (see
+   * {@link import('./run-workflow').createRunWorkflow}'s `version` option),
+   * stamped once at run creation and carried unchanged across every subsequent
+   * cursor update. `undefined` for a run created before workflow versioning
+   * existed, or when no version was configured for the engine that started it —
+   * always treated as compatible (no mismatch is ever reported when either side
+   * of a comparison is unset). See {@link import('./create-run-engine').CreateRunEngineOptions.runWorkflowVersion}
+   * for how this is compared against the currently-registered version on
+   * recovery.
+   */
+  workflowVersion?: string;
 }
 
 /**

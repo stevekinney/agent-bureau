@@ -293,6 +293,26 @@ export interface BureauOptions {
    * only when a durable engine is composed.
    */
   durableGuardrails?: DurableGuardrailsConfiguration;
+  /**
+   * Caller-supplied version identifier for the currently-deployed agent/workflow
+   * code (e.g. the app's `package.json` version or a deploy SHA) — AB-10,
+   * workflow versioning for in-flight durable runs. Has effect only when a
+   * durable engine is composed.
+   *
+   * Stamped into every new durable run's checkpoint at creation
+   * (`CreateRunEngineOptions.runWorkflowVersion` /
+   * `createRunWorkflow`'s `version` option), and compared against each
+   * recovered run's stamped version on boot. A mismatch does not block or
+   * alter recovery — it is a PIN-AND-WARN signal only, surfaced via
+   * `classifyRecoveredRun`'s `'reattach-version-mismatch'` verdict (instead of
+   * plain `'reattach'`) and logged at boot. See
+   * `documentation/workflow-versioning.md` for the deploy runbook: what happens
+   * to in-flight runs when this value changes across a deploy.
+   *
+   * Omit to disable version tracking entirely — every run's stamped version is
+   * then `undefined` and no mismatch is ever reported.
+   */
+  workflowVersion?: string;
 }
 
 /**

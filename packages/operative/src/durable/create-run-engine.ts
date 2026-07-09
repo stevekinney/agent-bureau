@@ -16,6 +16,7 @@ import { createObservabilityInterceptors } from '@lostgradient/weft/observabilit
 import type { Storage } from '@lostgradient/weft/storage';
 import { textValueStore } from '@lostgradient/weft/storage';
 
+import { WorkflowVersionMismatchEvent } from '../events';
 import type { CheckpointStore } from './checkpoint-store';
 import { createCheckpointStore } from './checkpoint-store';
 import {
@@ -149,6 +150,41 @@ export interface CreateRunEngineOptions {
    * a real-time poller fires an expired timer within a tight observation window.
    */
   schedulerPollIntervalMs?: number;
+
+  /**
+   * Caller-supplied version identifier for the currently-deployed `agentRun`
+   * workflow code (e.g. the app's package version or a deploy SHA) — AB-10,
+   * workflow versioning for in-flight durable runs. On every recovered run,
+   * compared against the version stamped into that run's checkpoint at
+   * creation (`createRunWorkflow`'s `version` option, which SHOULD be passed
+   * the same value). A mismatch fires {@link onWorkflowVersionMismatch}; it
+   * never blocks or alters recovery (pin-and-warn).
+   *
+   * @remarks
+   * Deliberately NOT implemented via Weft's own `WorkflowDefinition.version`
+   * field. Weft already tracks a per-workflow version and throws
+   * `VersionMismatchError` on a recovery mismatch — but that throw propagates
+   * out of `engine.recoverAll()` uncaught (its per-run try/catch only special-
+   * cases `RegExpExtensionDecodeError`), aborting recovery for every OTHER
+   * in-flight run in the same batch, not just the mismatched one. That
+   * fleet-wide-abort failure mode is unsafe for a production deploy (the
+   * whole point of versioning is to keep deploying safely with runs in
+   * flight), so this option implements an independent, non-throwing
+   * stamp-and-compare at the checkpoint-store layer instead. Filed upstream:
+   * weft ticket requesting `recoverAll` fail just the mismatched run (like
+   * `resolveWorkflowServices` returning `'unavailable'` already does) and/or
+   * exporting a public pre-flight version-check surface.
+   */
+  runWorkflowVersion?: string;
+
+  /**
+   * Fired once per recovered run whose checkpointed `workflowVersion` differs
+   * from {@link runWorkflowVersion}. Both sides must be set for a comparison to
+   * run — a run with no stamped version, or an engine with no configured
+   * `runWorkflowVersion`, is never flagged. See {@link runWorkflowVersion} for
+   * the pin-and-warn semantics.
+   */
+  onWorkflowVersionMismatch?: (event: WorkflowVersionMismatchEvent) => void;
 }
 
 /**
@@ -220,12 +256,29 @@ export async function createRunEngine(options: CreateRunEngineOptions): Promise<
   const storageActivities = createStorageActivities(checkpointStore);
   const durableHeartbeatServicesStore = createDurableHeartbeatServicesStore();
 
+  // AB-10 — workflow versioning: compare a recovered run's stamped
+  // `workflowVersion` (see `createRunWorkflow`'s `version` option) against the
+  // currently-registered `runWorkflowVersion` and fire `onWorkflowVersionMismatch`
+  // on drift. Read-only and non-blocking — see `runWorkflowVersion`'s JSDoc for
+  // why this does NOT use Weft's own `WorkflowDefinition.version` recovery check.
+  async function checkWorkflowVersionMismatch(info: WorkflowServicesResolverInfo): Promise<void> {
+    if (options.runWorkflowVersion === undefined || !options.onWorkflowVersionMismatch) return;
+    const cursor = await checkpointStore.loadCursor(info.workflowId);
+    const storedVersion = cursor?.workflowVersion;
+    if (storedVersion === undefined || storedVersion === options.runWorkflowVersion) return;
+    options.onWorkflowVersionMismatch(
+      new WorkflowVersionMismatchEvent(info.workflowId, storedVersion, options.runWorkflowVersion),
+    );
+  }
+
   async function resolveWorkflowServices(
     info: WorkflowServicesResolverInfo,
   ): Promise<WorkflowServicesResolution> {
     if (info.workflowType === DURABLE_HEARTBEAT_TICK_WORKFLOW_TYPE) {
       return resolveDurableHeartbeatTickServices(durableHeartbeatServicesStore, info);
     }
+
+    await checkWorkflowVersionMismatch(info);
 
     if (options.resolveWorkflowServices) {
       return options.resolveWorkflowServices(info);

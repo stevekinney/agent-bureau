@@ -75,6 +75,7 @@ import {
   isScheduledAgentRunInput,
   SCHEDULER_ORIGIN_TAG,
   SCHEDULER_RUN_ID_PREFIX,
+  WorkflowVersionMismatchEvent,
 } from 'operative/durable';
 import { createGeminiProvider, createGeminiProviderStream } from 'operative/gemini';
 import { createOpenAIProvider, createOpenAIProviderStream } from 'operative/openai';
@@ -908,6 +909,17 @@ export interface RuntimeComposition {
    */
   pendingRecoveryEmitters: Map<string, PendingRecoveryEvents>;
   /**
+   * Run ids the durable engine flagged, during boot recovery, as resuming
+   * under a DIFFERENT workflow version than the one they were checkpointed
+   * with (AB-10 — workflow versioning for in-flight durable runs). Populated
+   * by the `onWorkflowVersionMismatch` callback wired into `createRunEngine`,
+   * which fires once per recovered run BEFORE `engine.recoverAll()` returns —
+   * so this set is fully populated by the time the bureau's recovery loop
+   * calls `classifyRecoveredRun`. Never cleared: entries are read exactly once
+   * per boot recovery pass and the set is rebuilt fresh on the next boot.
+   */
+  workflowVersionMismatches: Set<string>;
+  /**
    * Disposes the raw `Storage` backend this composition resolved from
    * `options.storage`, if any. The KV/checkpoint views are created with
    * `disposeUnderlyingStorage: false` (they share one backend), and Weft's
@@ -964,6 +976,10 @@ export async function createRuntimeComposition(
   // #28: per-recovered-run emitter+toolbox the resolver pre-allocates and the
   // bureau's reattach loop consumes — see RuntimeComposition.pendingRecoveryEmitters.
   const pendingRecoveryEmitters = new Map<string, PendingRecoveryEvents>();
+
+  // AB-10: run ids the durable engine flags as version-mismatched during boot
+  // recovery — see RuntimeComposition.workflowVersionMismatches.
+  const workflowVersionMismatches = new Set<string>();
 
   // Resolve the `persistence` option into its components. The three forms are:
   // - PersistenceOptions { store, history?, observability?, onLog? }
@@ -1031,7 +1047,7 @@ export async function createRuntimeComposition(
     const checkpointStore = createCheckpointStore(
       textValueStore(durableStorage, { disposeUnderlyingStorage: false }),
     );
-    const runWorkflow = createRunWorkflow(checkpointStore);
+    const runWorkflow = createRunWorkflow(checkpointStore, { version: options.workflowVersion });
     // recover: false is REQUIRED. Weft's `Engine.create` default is recover:true,
     // which runs recoverAll() *during construction* — but the bureau needs the
     // recovered handles itself (to attach the `settleRecoveredRun` monitors that
@@ -1064,6 +1080,19 @@ export async function createRuntimeComposition(
       ...options.durableGuardrails,
       // history from PersistenceOptions takes precedence over durableGuardrails.history
       ...(persistenceHistory !== undefined ? { history: persistenceHistory } : {}),
+      runWorkflowVersion: options.workflowVersion,
+      // AB-10: record the mismatch so the boot recovery loop below can pass it
+      // to `classifyRecoveredRun` (distinct 'reattach-version-mismatch' verdict)
+      // before it inspects `workflowVersionMismatches`.
+      onWorkflowVersionMismatch: (event: WorkflowVersionMismatchEvent) => {
+        workflowVersionMismatches.add(event.runId);
+        console.warn(
+          `[bureau] Recovered run "${event.runId}" was checkpointed under workflow version ` +
+            `"${event.storedVersion}" but is resuming under "${event.registeredVersion}". ` +
+            `Recovery proceeds against the currently-deployed code (pin-and-warn) — see ` +
+            `documentation/workflow-versioning.md.`,
+        );
+      },
     });
   }
 
@@ -2084,6 +2113,7 @@ export async function createRuntimeComposition(
     kv,
     durable,
     pendingRecoveryEmitters,
+    workflowVersionMismatches,
     disposeStorage: durableStorage ? () => durableStorage[Symbol.dispose]() : undefined,
     memory,
     sessionStore,

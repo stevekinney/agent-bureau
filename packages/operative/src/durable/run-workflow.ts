@@ -217,13 +217,19 @@ function classifyErrorFinishReason(error: unknown): FinishReason {
   return 'error';
 }
 
-/** The fresh cursor for a brand-new run: step 0, zeroed accumulators. */
-function initialCursor(): RunCursor {
+/**
+ * The fresh cursor for a brand-new run: step 0, zeroed accumulators, stamped
+ * with the workflow version this run was created under (AB-10 — workflow
+ * versioning). `version` is `undefined` when the engine was built without
+ * {@link CreateRunWorkflowOptions.version}.
+ */
+function initialCursor(version: string | undefined): RunCursor {
   return {
     step: 0,
     totalUsage: { prompt: 0, completion: 0, total: 0 },
     lastContent: '',
     schemaAttempts: 0,
+    ...(version !== undefined ? { workflowVersion: version } : {}),
   };
 }
 
@@ -243,13 +249,35 @@ function runDepsFrom(services: unknown): DurableRunDeps {
   return services as DurableRunDeps;
 }
 
+/** Options for {@link createRunWorkflow}. */
+export interface CreateRunWorkflowOptions {
+  /**
+   * The workflow version identifier stamped into every new run's cursor at
+   * creation (AB-10 — workflow versioning for in-flight durable runs). Pass
+   * the same value to {@link import('./create-run-engine').CreateRunEngineOptions.runWorkflowVersion}
+   * so recovery can compare a resumed run's stamped version against the
+   * currently-registered one and surface a mismatch via
+   * `onWorkflowVersionMismatch` — see that option's JSDoc for why this is a
+   * SEPARATE, softer mechanism from Weft's own `workflow({ version })`
+   * recovery check (which throws and aborts the WHOLE fleet's `recoverAll()`
+   * on a single mismatched run; not used here). Omit to disable stamping —
+   * every run's `workflowVersion` is then `undefined` and no mismatch is ever
+   * reported.
+   */
+  version?: string;
+}
+
 /**
  * Builds the durable `agentRun` workflow over the given {@link CheckpointStore}.
  * The storage activities are created from the same store the engine persists to,
  * so the workflow's reads and writes share one backend.
  */
-export function createRunWorkflow(checkpointStore: CheckpointStore) {
+export function createRunWorkflow(
+  checkpointStore: CheckpointStore,
+  options: CreateRunWorkflowOptions = {},
+) {
   const storage = createStorageActivities(checkpointStore);
+  const workflowVersion = options.version;
 
   return (
     workflow({ name: 'agentRun' })
@@ -308,7 +336,7 @@ export function createRunWorkflow(checkpointStore: CheckpointStore) {
         // instance. The checkpoint-store writes below exist only so the ActiveRun
         // adapter can reconstruct the RunResult post-completion; they are not the
         // workflow's own resume mechanism.
-        let cursor: RunCursor = initialCursor();
+        let cursor: RunCursor = initialCursor(workflowVersion);
 
         // Seed the conversation on the first run from the run's options + prompt,
         // then persist it so the adapter and any external reader see the transcript.
@@ -512,6 +540,7 @@ export function createRunWorkflow(checkpointStore: CheckpointStore) {
           // `RunResult.steps.length` in `executeLoop`.
           const aborted = outcome.kind === 'abort' || outcome.kind === 'error';
           cursor = {
+            ...cursor,
             step: aborted ? cursor.step : cursor.step + 1,
             ...stepResult.nextAccumulators,
           };

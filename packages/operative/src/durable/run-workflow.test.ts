@@ -42,11 +42,12 @@ async function buildEngine(
   storage: Storage,
   recover: boolean,
   resolveWorkflowServices?: ServicesResolver,
+  version?: string,
 ) {
   const checkpointStore = createCheckpointStore(
     textValueStore(storage, { disposeUnderlyingStorage: false }),
   );
-  const runWorkflow = createRunWorkflow(checkpointStore);
+  const runWorkflow = createRunWorkflow(checkpointStore, { version });
   const activities = createStorageActivities(checkpointStore);
   const engine = await Engine.create({
     storage,
@@ -265,6 +266,71 @@ describe('durable agentRun workflow', () => {
     } finally {
       engine[Symbol.dispose]();
     }
+  });
+
+  // AB-10 — workflow versioning: `createRunWorkflow`'s `version` option stamps
+  // `RunCursor.workflowVersion` at creation and it survives every subsequent
+  // cursor update (the multi-step case exercises the `cursor = { ...cursor, ... }`
+  // rebuild at each step, which must NOT drop the stamp).
+  describe('workflow version stamping', () => {
+    it('stamps the configured version into the cursor for a brand-new run', async () => {
+      const { engine, checkpointStore } = await buildEngine(
+        new MemoryStorage(),
+        false,
+        undefined,
+        '1.2.3',
+      );
+      const services = makeServices(async () => ({ content: 'done', toolCalls: [] }));
+
+      try {
+        await runToCompletion(engine, { runId: 'run-versioned', prompt: 'Hi' }, services);
+        const cursor = await checkpointStore.loadCursor('run-versioned');
+        expect(cursor?.workflowVersion).toBe('1.2.3');
+      } finally {
+        engine[Symbol.dispose]();
+      }
+    });
+
+    it('carries the stamped version unchanged across every step of a multi-step run', async () => {
+      const { engine, checkpointStore } = await buildEngine(
+        new MemoryStorage(),
+        false,
+        undefined,
+        '2.0.0',
+      );
+      const services = makeServices(async ({ step }) => {
+        if (step < 3) {
+          return { content: `step ${step}`, toolCalls: [{ name: 'next', arguments: {} }] };
+        }
+        return { content: 'final', toolCalls: [] };
+      });
+
+      try {
+        const result = await runToCompletion(
+          engine,
+          { runId: 'run-versioned-multi', prompt: 'Go' },
+          services,
+        );
+        expect(result.steps).toBe(4);
+        const cursor = await checkpointStore.loadCursor('run-versioned-multi');
+        expect(cursor?.workflowVersion).toBe('2.0.0');
+      } finally {
+        engine[Symbol.dispose]();
+      }
+    });
+
+    it('leaves workflowVersion unset when the engine has no configured version', async () => {
+      const { engine, checkpointStore } = await buildEngine(new MemoryStorage(), false);
+      const services = makeServices(async () => ({ content: 'done', toolCalls: [] }));
+
+      try {
+        await runToCompletion(engine, { runId: 'run-unversioned', prompt: 'Hi' }, services);
+        const cursor = await checkpointStore.loadCursor('run-unversioned');
+        expect(cursor?.workflowVersion).toBeUndefined();
+      } finally {
+        engine[Symbol.dispose]();
+      }
+    });
   });
 
   it('stops at maximumSteps when the agent never settles', async () => {

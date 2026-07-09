@@ -21,7 +21,11 @@ export type {
   RunEngineObservability,
 } from './create-run-engine';
 export { createRunEngine } from './create-run-engine';
-export type { AgentRunWorkflowInput, AgentRunWorkflowResult } from './run-workflow';
+export type {
+  AgentRunWorkflowInput,
+  AgentRunWorkflowResult,
+  CreateRunWorkflowOptions,
+} from './run-workflow';
 export { createRunWorkflow, isAgentRunWorkflowInput } from './run-workflow';
 export type {
   AgentScheduleHandle,
@@ -39,3 +43,5 @@ export {
 } from './schedule-agent';
 export { createStorageActivities } from './storage-activities';
 export type { DurableRunDeps, PendingWakeup, RunCheckpoint, RunCursor, StepRecord } from './types';
+// AB-10 — workflow versioning for in-flight durable runs
+export { WorkflowVersionMismatchEvent } from '../events';

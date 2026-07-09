@@ -289,7 +289,16 @@ export function classifyRecoveredRun(args: {
   hasSessionStore: boolean;
   /** The session-load outcome; only meaningful when `ownedSessionId` is set + `hasSessionStore`. */
   sessionLoad: SessionLoadOutcome;
-}): 'reattach' | 'monitor' | 'cancel' | 'skip' {
+  /**
+   * AB-10 — true when the durable engine flagged this run's checkpointed
+   * `workflowVersion` as differing from the currently-registered one (see
+   * `RuntimeComposition.workflowVersionMismatches`). Only changes the verdict
+   * for what would otherwise be `'reattach'` — the run still reattaches
+   * (pin-and-warn), it is just flagged distinctly so callers can log/alert on
+   * the drift.
+   */
+  versionMismatch?: boolean;
+}): 'reattach' | 'reattach-version-mismatch' | 'monitor' | 'cancel' | 'skip' {
   // A failed metadata read means we cannot even identify the run — but it WAS
   // resumed by recoverAll, so cancel it rather than leave it unowned.
   if (args.metadataReadFailed) return 'cancel';
@@ -310,7 +319,7 @@ export function classifyRecoveredRun(args: {
   if (!session || session.lastRunId !== args.handleId || session.lastRunStatus !== 'running') {
     return 'cancel';
   }
-  return 'reattach';
+  return args.versionMismatch ? 'reattach-version-mismatch' : 'reattach';
 }
 
 export function isRecoverableScheduledFireInput(input: unknown): input is ScheduledAgentRunInput {
@@ -1169,11 +1178,20 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         metadataReadFailed: readError !== undefined,
         hasSessionStore: sessionStore !== undefined,
         sessionLoad,
+        versionMismatch: runtime.workflowVersionMismatches.has(handle.id),
       });
 
-      if (verdict === 'reattach') {
-        // ownedSessionId is defined when the verdict is 'reattach'. reattach
-        // consumes-and-deletes any pending recovery emitter for this run.
+      if (verdict === 'reattach' || verdict === 'reattach-version-mismatch') {
+        if (verdict === 'reattach-version-mismatch') {
+          console.warn(
+            `[bureau] Reattaching recovered run "${handle.id}" that resumed under a ` +
+              `different workflow version than it was checkpointed with (pin-and-warn; ` +
+              `see documentation/workflow-versioning.md).`,
+          );
+        }
+        // ownedSessionId is defined when the verdict is 'reattach' /
+        // 'reattach-version-mismatch'. reattach consumes-and-deletes any
+        // pending recovery emitter for this run.
         reattachRecoveredRun(handle.id, ownedSessionId!, handle);
       } else if (verdict === 'monitor') {
         // Scheduled fires have no ActiveRun surface, but the recovered Weft handle
