@@ -6,11 +6,9 @@ import { SveltePlugin } from 'bun-plugin-svelte';
  * the hydration client bundle, then writes a single `dist/manifest.json`
  * and a single `dist/public/styles.css`.
  *
- * Both passes load the official Bun Svelte plugin and force
- * `conditions: ['svelte']` so cinder (and our own `.svelte` files) resolve
- * to raw `src/` and are compiled by the single installed Svelte version —
- * never cinder's prebuilt `dist/`, which would couple us to its build-time
- * `svelte/internal/*`.
+ * Both passes load the official Bun Svelte plugin. Gateway consumes Cinder's
+ * published component output instead of forcing Cinder's source condition, so
+ * the build stays aligned with the package's public contract.
  */
 
 await $`rm -rf dist`;
@@ -18,22 +16,19 @@ await $`rm -rf dist`;
 // ── PASS 1 — SERVER (SSR) ───────────────────────────────────────────
 // `target: 'bun'` makes the Svelte plugin emit `generate: 'server'`. The
 // server graph reaches `app.svelte` via create-gateway -> pages.ts, so the
-// plugin compiles those (and cinder's `.svelte`) to SSR output. `svelte`
-// itself stays external so the bundle imports `svelte/server` and
-// `svelte/internal/server` from the single installed version at runtime.
+// plugin compiles those files to SSR output. `svelte` itself stays external
+// so the bundle imports `svelte/server` and `svelte/internal/server` from the
+// single installed version at runtime.
 const serverResult = await Bun.build({
   entrypoints: ['./src/index.ts', './src/events.ts'],
   outdir: './dist',
   root: './src',
   target: 'bun',
   format: 'esm',
-  // Default naming keeps entries flat (`index.js`, `events.js`) AND lets the
-  // cinder side-effect CSS asset retain its `.css` extension. The former
-  // `'[dir]/[name].js'` string override forced that asset to `index.js`,
-  // colliding with the entry now that the server graph pulls in `.svelte`.
+  // Default naming keeps entries flat (`index.js`, `events.js`) and preserves
+  // non-entry asset extensions if a future server graph emits them.
   sourcemap: 'external',
   minify: true,
-  conditions: ['svelte'],
   external: [
     'hono',
     'hono/*',
@@ -60,23 +55,11 @@ if (!serverResult.success) {
   process.exit(1);
 }
 
-// Drop the SSR pass's stray CSS assets. Cinder's `.svelte` files
-// side-effect `import './<name>.css'`, so the server pass emits CSS even
-// though SSR never references it — only the client-pass CSS feeds the
-// linked `/public/styles.css`. Removing it keeps `dist/` clean and avoids
-// a dead `*.css` sitting next to the server entry.
-for (const output of serverResult.outputs) {
-  if (output.path.endsWith('.css')) {
-    await $`rm -f ${output.path}`;
-  }
-}
-
 // ── PASS 2 — CLIENT (DOM / hydrate) ─────────────────────────────────
 // `target: 'browser'` makes the Svelte plugin emit `generate: 'client'`.
-// Bundle the svelte runtime AND cinder's compiled component graph (browsers
-// can't resolve bare specifiers). Per-component CSS (external `.css`
-// side-effect imports plus compiled `<style>` blocks emitted as virtual
-// CSS) flows through this pass's CSS outputs.
+// Bundle the Svelte runtime and Cinder's component graph because browsers
+// cannot resolve bare specifiers. Component CSS flows through this pass's
+// CSS outputs.
 const clientResult = await Bun.build({
   entrypoints: ['./src/client/entry.ts'],
   outdir: './dist/public',
@@ -86,7 +69,6 @@ const clientResult = await Bun.build({
   naming: '[name]-[hash].[ext]',
   sourcemap: 'external',
   minify: true,
-  conditions: ['svelte'],
   plugins: [SveltePlugin()],
 });
 
