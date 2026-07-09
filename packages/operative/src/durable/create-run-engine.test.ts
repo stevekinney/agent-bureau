@@ -5,10 +5,11 @@ import {
   type WorkflowLogRecord,
   type WorkflowStatus,
 } from '@lostgradient/weft';
-import { MemoryStorage } from '@lostgradient/weft/storage';
+import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
 import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
 import { afterEach, describe, expect, it, spyOn } from 'bun:test';
 
+import { WorkflowVersionMismatchEvent } from '../events';
 import { createCheckpointStore } from './checkpoint-store';
 import { type AnyRunEngine, createRunEngine } from './create-run-engine';
 
@@ -366,6 +367,200 @@ describe('createRunEngine', () => {
     } finally {
       engine[Symbol.dispose]();
     }
+  });
+
+  // AB-10 — workflow versioning: `onWorkflowVersionMismatch` fires when a
+  // recovered run's checkpointed `workflowVersion` differs from the currently
+  // registered `runWorkflowVersion`, and recovery is NOT blocked by it
+  // (pin-and-warn, unlike Weft's own `WorkflowDefinition.version` recovery
+  // check — see `runWorkflowVersion`'s JSDoc).
+  describe('workflow version mismatch on recovery', () => {
+    it('fires onWorkflowVersionMismatch for a recovered run stamped with an older version', async () => {
+      const storage = new MemoryStorage();
+      const runWorkflow = makeRecoverableServicesWorkflow(DURABLE_SLEEP_MILLISECONDS);
+      const checkpointStore = createCheckpointStore(
+        textValueStore(storage, { disposeUnderlyingStorage: false }),
+      );
+
+      const firstEngine = await createRunEngine({
+        storage,
+        runWorkflow,
+        checkpointStore,
+        recover: false,
+        startScheduler: false,
+      });
+      try {
+        const handle = await firstEngine.engine.start(
+          'agentRun',
+          { value: 7 },
+          { id: 'versioned-recovery-run', services: { multiplier: 2 } },
+        );
+        void handle.result().catch(() => {});
+        for (let turn = 0; turn < 5; turn++) {
+          await yieldToPortableEventLoop();
+        }
+      } finally {
+        firstEngine.engine[Symbol.dispose]();
+      }
+
+      // `makeRecoverableServicesWorkflow` is a standalone probe (not the real
+      // `agentRun` body from run-workflow.ts), so it never calls
+      // `createRunWorkflow`'s stamping logic. Write the stamp directly here —
+      // this is exactly what `createRunWorkflow`'s `version` option persists
+      // for a real run (see run-workflow.test.ts's "workflow version stamping"
+      // suite, which exercises the real stamping path end-to-end).
+      await checkpointStore.saveCursor('versioned-recovery-run', {
+        step: 0,
+        totalUsage: { prompt: 0, completion: 0, total: 0 },
+        lastContent: '',
+        schemaAttempts: 0,
+        workflowVersion: 'v1',
+      });
+
+      const mismatches: WorkflowVersionMismatchEvent[] = [];
+      const { engine } = await createRunEngine({
+        storage,
+        runWorkflow,
+        checkpointStore,
+        recover: false,
+        startScheduler: true,
+        runWorkflowVersion: 'v2',
+        onWorkflowVersionMismatch: (event) => {
+          mismatches.push(event);
+        },
+        resolveWorkflowServices: () => ({ status: 'available', services: { multiplier: 3 } }),
+      });
+
+      try {
+        const handles = await engine.recoverAll();
+        expect(handles).toHaveLength(1);
+        // Recovery is NOT blocked by the mismatch — the run still completes
+        // normally against the currently-deployed code (pin-and-warn).
+        expect(await handles[0]!.result()).toEqual({ multiplied: 21 });
+        expect(mismatches).toHaveLength(1);
+        expect(mismatches[0]).toMatchObject({
+          type: 'workflow.version-mismatch',
+          runId: 'versioned-recovery-run',
+          storedVersion: 'v1',
+          registeredVersion: 'v2',
+        });
+      } finally {
+        engine[Symbol.dispose]();
+      }
+    });
+
+    it('does not fire onWorkflowVersionMismatch when the stamped and registered versions match', async () => {
+      const storage = new MemoryStorage();
+      const runWorkflow = makeRecoverableServicesWorkflow(DURABLE_SLEEP_MILLISECONDS);
+      const checkpointStore = createCheckpointStore(
+        textValueStore(storage, { disposeUnderlyingStorage: false }),
+      );
+
+      const firstEngine = await createRunEngine({
+        storage,
+        runWorkflow,
+        checkpointStore,
+        recover: false,
+        startScheduler: false,
+      });
+      try {
+        const handle = await firstEngine.engine.start(
+          'agentRun',
+          { value: 7 },
+          { id: 'matched-version-run', services: { multiplier: 2 } },
+        );
+        void handle.result().catch(() => {});
+        for (let turn = 0; turn < 5; turn++) {
+          await yieldToPortableEventLoop();
+        }
+      } finally {
+        firstEngine.engine[Symbol.dispose]();
+      }
+
+      await checkpointStore.saveCursor('matched-version-run', {
+        step: 0,
+        totalUsage: { prompt: 0, completion: 0, total: 0 },
+        lastContent: '',
+        schemaAttempts: 0,
+        workflowVersion: 'v1',
+      });
+
+      const mismatches: WorkflowVersionMismatchEvent[] = [];
+      const { engine } = await createRunEngine({
+        storage,
+        runWorkflow,
+        checkpointStore,
+        recover: false,
+        startScheduler: true,
+        runWorkflowVersion: 'v1',
+        onWorkflowVersionMismatch: (event) => {
+          mismatches.push(event);
+        },
+        resolveWorkflowServices: () => ({ status: 'available', services: { multiplier: 3 } }),
+      });
+
+      try {
+        const handles = await engine.recoverAll();
+        expect(await handles[0]!.result()).toEqual({ multiplied: 21 });
+        expect(mismatches).toHaveLength(0);
+      } finally {
+        engine[Symbol.dispose]();
+      }
+    });
+
+    it('does not fire onWorkflowVersionMismatch when the run has no stamped version', async () => {
+      const storage = new MemoryStorage();
+      const runWorkflow = makeRecoverableServicesWorkflow(DURABLE_SLEEP_MILLISECONDS);
+      const checkpointStore = createCheckpointStore(
+        textValueStore(storage, { disposeUnderlyingStorage: false }),
+      );
+
+      const firstEngine = await createRunEngine({
+        storage,
+        runWorkflow,
+        checkpointStore,
+        recover: false,
+        startScheduler: false,
+      });
+      try {
+        const handle = await firstEngine.engine.start(
+          'agentRun',
+          { value: 7 },
+          { id: 'unstamped-run', services: { multiplier: 2 } },
+        );
+        void handle.result().catch(() => {});
+        for (let turn = 0; turn < 5; turn++) {
+          await yieldToPortableEventLoop();
+        }
+      } finally {
+        firstEngine.engine[Symbol.dispose]();
+      }
+      // No saveCursor call — this run's checkpoint carries no `workflowVersion`
+      // at all (as if it predated versioning, or the engine that created it had
+      // no `runWorkflowVersion` configured).
+
+      const mismatches: WorkflowVersionMismatchEvent[] = [];
+      const { engine } = await createRunEngine({
+        storage,
+        runWorkflow,
+        checkpointStore,
+        recover: false,
+        startScheduler: true,
+        runWorkflowVersion: 'v2',
+        onWorkflowVersionMismatch: (event) => {
+          mismatches.push(event);
+        },
+        resolveWorkflowServices: () => ({ status: 'available', services: { multiplier: 3 } }),
+      });
+
+      try {
+        const handles = await engine.recoverAll();
+        expect(await handles[0]!.result()).toEqual({ multiplied: 21 });
+        expect(mismatches).toHaveLength(0);
+      } finally {
+        engine[Symbol.dispose]();
+      }
+    });
   });
 
   it('omits the observability handle when not requested', async () => {

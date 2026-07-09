@@ -807,6 +807,87 @@ describe('createBureau', () => {
     }
   });
 
+  // AB-10 — workflow versioning: end-to-end cross-process proof that
+  // `BureauOptions.workflowVersion` threads through to both the stamp
+  // (createRunWorkflow) and the recovery comparison (createRunEngine), and
+  // that a mismatch is observed (warned + classified) WITHOUT blocking the
+  // recovered run's completion.
+  it('recovers an in-flight run across a workflowVersion change, warning but not blocking (AB-10)', async () => {
+    const databasePath = join(
+      tmpdir(),
+      `bureau-version-mismatch-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+
+    try {
+      let bureauAReachedStep1 = false;
+      const bureauA = await createBureau({
+        generate: async ({ step }) => {
+          if (step === 0) {
+            return { content: 'A step 0', toolCalls: [{ name: 'next', arguments: {} }] };
+          }
+          bureauAReachedStep1 = true;
+          return new Promise<never>(() => {});
+        },
+        toolbox: createToolbox([createNextTool()]) as unknown as Toolbox,
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+        stopWhen: stopWhen.noToolCalls(),
+        workflowVersion: 'v1',
+      });
+
+      const run = await bureauA.createRun({ message: 'Recover me under a new version' });
+      await pollUntil(() => bureauAReachedStep1);
+      expect(bureauAReachedStep1).toBe(true);
+      bureauA.dispose();
+
+      const warnSpy = spyOn(console, 'warn');
+      const bSteps: number[] = [];
+      const bureauB = await createBureau({
+        generate: async ({ step }) => {
+          bSteps.push(step);
+          return { content: `B recovered step ${step}`, toolCalls: [] };
+        },
+        toolbox: createToolbox([createNextTool()]) as unknown as Toolbox,
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+        stopWhen: stopWhen.noToolCalls(),
+        // Different version than bureau A stamped — simulates a deploy that
+        // shipped while this run was in flight.
+        workflowVersion: 'v2',
+      });
+
+      try {
+        // The mismatch is detected during boot recovery, before the resumed
+        // run advances — assert it was warned about immediately, independent
+        // of how long the run itself takes to complete.
+        const mismatchWarnings = warnSpy.mock.calls.filter((call) =>
+          String(call[0]).includes(run.id),
+        );
+        expect(mismatchWarnings.length).toBeGreaterThan(0);
+        expect(String(mismatchWarnings[0]?.[0])).toContain('v1');
+        expect(String(mismatchWarnings[0]?.[0])).toContain('v2');
+
+        // The run still recovers and completes normally — the mismatch is a
+        // pin-and-warn signal, not a block.
+        await pollUntil(() => bSteps.includes(1));
+        expect(bSteps).toEqual([1]);
+        await pollUntil(async () => {
+          const current = await bureauB.getSession(run.sessionId);
+          return current?.metadata['lastRunStatus'] !== 'running';
+        });
+        const session = await bureauB.getSession(run.sessionId);
+        expect(session?.metadata['lastRunStatus']).toBe('completed');
+      } finally {
+        warnSpy.mockRestore();
+        bureauB.dispose();
+      }
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
   it('cancels a recovered handle with undefined launch metadata without aborting boot', async () => {
     const probe = await createRuntimeComposition({
       generate: createMockGenerate(),
@@ -2575,6 +2656,28 @@ describe('classifyRecoveredRun', () => {
 
   it('skips an owned run when no session store is configured (cannot reattach, must not cancel)', () => {
     expect(classifyRecoveredRun({ ...base, hasSessionStore: false })).toBe('skip');
+  });
+
+  // AB-10 — workflow versioning: a run that would otherwise reattach is flagged
+  // distinctly (not blocked) when the durable engine detected a stamped-version
+  // mismatch during recovery.
+  it('flags a reattaching run as reattach-version-mismatch when versionMismatch is set', () => {
+    expect(classifyRecoveredRun({ ...base, versionMismatch: true })).toBe(
+      'reattach-version-mismatch',
+    );
+  });
+
+  it('reattaches normally when versionMismatch is false or omitted', () => {
+    expect(classifyRecoveredRun({ ...base, versionMismatch: false })).toBe('reattach');
+    expect(classifyRecoveredRun(base)).toBe('reattach');
+  });
+
+  it('does not flag a cancelled run as version-mismatched even when versionMismatch is set', () => {
+    // versionMismatch only distinguishes the 'reattach' outcome — an unowned /
+    // cancelled run stays 'cancel' regardless of the durable engine's version flag.
+    expect(
+      classifyRecoveredRun({ ...base, ownedSessionId: undefined, versionMismatch: true }),
+    ).toBe('cancel');
   });
 });
 

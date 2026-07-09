@@ -838,6 +838,35 @@ export class WakeupScheduledEvent extends Event {
 }
 
 // ---------------------------------------------------------------------------
+// Workflow versioning (AB-10). Emitted, NOT through the per-run
+// `CombinedOperativeEventMap` emitter (a recovered run's dependencies —
+// including its emitter — are rebuilt AFTER this check runs, and a headless
+// durable run has no emitter at all) but via the plain callback injection
+// `CreateRunEngineOptions.onWorkflowVersionMismatch`, matching
+// `onCheckpointSizeWarning`'s pattern.
+// ---------------------------------------------------------------------------
+
+/**
+ * Emitted when a recovered run's checkpointed `workflowVersion` (stamped at
+ * creation, see `createRunWorkflow`'s `version` option) differs from the
+ * currently-registered `CreateRunEngineOptions.runWorkflowVersion`. This is a
+ * pin-and-warn observation, not a control: the recovery itself is never
+ * blocked or altered by this event — see `runWorkflowVersion`'s JSDoc for why.
+ */
+export class WorkflowVersionMismatchEvent extends Event {
+  static readonly type = 'workflow.version-mismatch' as const;
+  readonly runId: string;
+  readonly storedVersion: string;
+  readonly registeredVersion: string;
+  constructor(runId: string, storedVersion: string, registeredVersion: string) {
+    super(WorkflowVersionMismatchEvent.type);
+    this.runId = runId;
+    this.storedVersion = storedVersion;
+    this.registeredVersion = registeredVersion;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Event map: maps event type string to the Event subclass instance
 // ---------------------------------------------------------------------------
 

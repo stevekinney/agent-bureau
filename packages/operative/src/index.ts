@@ -242,6 +242,8 @@ export {
   isScheduledAgentRunInput,
 } from './durable/schedule-agent';
 export { AgentScheduledEvent, WakeupScheduledEvent } from './events';
+// AB-10 — workflow versioning for in-flight durable runs
+export { WorkflowVersionMismatchEvent } from './events';
 export { composeGenerate, createFallbackGenerate } from './generate-middleware';
 export type {
   CodeSafetyValidatorOptions,
