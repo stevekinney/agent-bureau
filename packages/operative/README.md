@@ -503,17 +503,19 @@ const generate = createAnthropicProvider({
 ```
 
 **Per-provider endpoint allowlist.** Each provider issues requests to exactly
-one endpoint per generate call — the set below is pinned by
-`test/provider-proxy-contract.test.ts`, which runs each provider through a
-real SDK client against a local `Bun.serve` mock and asserts the exact
-`(method, path)` set observed over a multi-step run. Use it to build a proxy
-allowlist:
+one endpoint per generate call (a second, distinct endpoint for the streaming
+factories of OpenAI and Gemini) — the set below is pinned by
+`test/provider-proxy-contract.test.ts`, which runs each provider (and each
+streaming counterpart) through a real SDK client against a local `Bun.serve`
+mock and asserts the exact `(method, path)` set observed over a multi-step
+run. Use it to build a proxy allowlist:
 
-| Provider  | Method | Path                                     | Auth header                     |
-| --------- | ------ | ---------------------------------------- | ------------------------------- |
-| Anthropic | POST   | `/v1/messages`                           | `x-api-key`                     |
-| OpenAI    | POST   | `/chat/completions`                      | `authorization: Bearer <token>` |
-| Gemini    | POST   | `/v1beta/models/{model}:generateContent` | `x-goog-api-key`                |
+| Provider           | Method | Path                                               | Auth header                     |
+| ------------------ | ------ | -------------------------------------------------- | ------------------------------- |
+| Anthropic          | POST   | `/v1/messages` (streaming uses the same path)      | `x-api-key`                     |
+| OpenAI             | POST   | `/chat/completions` (streaming uses the same path) | `authorization: Bearer <token>` |
+| Gemini             | POST   | `/v1beta/models/{model}:generateContent`           | `x-goog-api-key`                |
+| Gemini (streaming) | POST   | `/v1beta/models/{model}:streamGenerateContent`     | `x-goog-api-key`                |
 
 No provider issues a token-counting, models-list, or beta/experimental
 endpoint call as part of a normal generate step.

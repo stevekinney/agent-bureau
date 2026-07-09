@@ -17,6 +17,18 @@
  * the provider's generate function on a scratch branch, rebuild, rerun this
  * file, and confirm the affected `it('issues only ...')` test fails on the
  * exact-set assertion; then restore.
+ *
+ * IMPORTANT — do not mock.module() '@anthropic-ai/sdk', 'openai', or
+ * '@google/generative-ai' anywhere else in this package's test suite.
+ * bun:test's mock.module() mutates the process-global module registry (not
+ * a per-file sandbox), and this file's dynamic `import(...)` calls need the
+ * REAL SDKs to actually hit the wire. `provider-coverage.test.ts` used to
+ * mock these modules to test the "no client injected" branch; that raced
+ * against this file (fails only under CI's file-scheduling, never
+ * reproduced locally) and was removed in favor of the equivalent, stronger
+ * coverage here — every "no client, dynamic import, real SDK, real network
+ * call" branch for all three providers (streaming and non-streaming) is
+ * exercised below.
  */
 import { createToolbox } from 'armorer';
 import { describe, expect, it } from 'bun:test';
@@ -26,8 +38,8 @@ import {
   createAnthropicProvider,
   createAnthropicProviderStream,
 } from '../src/providers/anthropic.ts';
-import { createGeminiProvider } from '../src/providers/gemini.ts';
-import { createOpenAIProvider } from '../src/providers/openai.ts';
+import { createGeminiProvider, createGeminiProviderStream } from '../src/providers/gemini.ts';
+import { createOpenAIProvider, createOpenAIProviderStream } from '../src/providers/openai.ts';
 import type { GenerateContext, StreamingHandle } from '../src/types.ts';
 
 const PLACEHOLDER_TOKEN = 'placeholder-not-a-real-key-0000';
@@ -82,6 +94,37 @@ function createRecordingProxy(responseBody: unknown): RecordingProxy {
   };
 }
 
+/**
+ * Same shape as {@link createRecordingProxy}, but replies with a raw
+ * `text/event-stream` body — for the streaming provider factories, whose
+ * SDKs parse the response as an SSE stream rather than a single JSON object.
+ */
+function createRecordingSseProxy(sseBody: string): RecordingProxy {
+  const requests: RecordedRequest[] = [];
+  const server = Bun.serve({
+    port: 0,
+    hostname: '127.0.0.1',
+    fetch(request) {
+      const url = new URL(request.url);
+      requests.push({
+        method: request.method,
+        path: url.pathname,
+        query: url.search,
+        headers: Object.fromEntries(request.headers.entries()),
+      });
+      return new Response(sseBody, {
+        headers: { 'content-type': 'text/event-stream' },
+      });
+    },
+  });
+
+  return {
+    baseURL: `http://127.0.0.1:${server.port}`,
+    requests,
+    stop: () => server.stop(),
+  };
+}
+
 function twoStepConversation(): Conversation {
   const conversation = new Conversation();
   conversation.appendUserMessage('What is the weather in Paris?');
@@ -116,80 +159,6 @@ async function runTwoStepStreamingLoop(
   conversation.appendUserMessage('And in London?');
   await generate({ ...makeContext(conversation), streaming: makeStreamingHandle() });
 }
-
-describe('CI diagnostic — direct SDK probe (temporary)', () => {
-  it('probes the real Anthropic SDK against the recording proxy directly', async () => {
-    const requests: RecordedRequest[] = [];
-    const server = Bun.serve({
-      port: 0,
-      hostname: '127.0.0.1',
-      fetch(request) {
-        const url = new URL(request.url);
-        requests.push({
-          method: request.method,
-          path: url.pathname,
-          query: url.search,
-          headers: Object.fromEntries(request.headers.entries()),
-        });
-        return new Response(
-          JSON.stringify({
-            id: 'msg_diag',
-            type: 'message',
-            role: 'assistant',
-            content: [{ type: 'text', text: 'diag' }],
-            model: 'claude-3-5-sonnet-20241022',
-            stop_reason: 'end_turn',
-            usage: { input_tokens: 1, output_tokens: 1 },
-          }),
-          { headers: { 'content-type': 'application/json' } },
-        );
-      },
-    });
-
-    try {
-      const module = await import('@anthropic-ai/sdk');
-      const Anthropic =
-        (module as { default?: unknown; Anthropic?: unknown }).default ??
-        (module as { default?: unknown; Anthropic?: unknown }).Anthropic;
-      console.log('[DIAG] module keys:', Object.keys(module));
-      console.log(
-        '[DIAG] Anthropic ctor:',
-        typeof Anthropic,
-        (Anthropic as { name?: string })?.name,
-      );
-
-      const AnthropicCtor = Anthropic as new (options: Record<string, unknown>) => {
-        messages: { create: (params: Record<string, unknown>) => Promise<unknown> };
-      };
-      const client = new AnthropicCtor({
-        apiKey: PLACEHOLDER_TOKEN,
-        baseURL: `http://127.0.0.1:${server.port}`,
-      });
-      console.log('[DIAG] client keys:', Object.keys(client));
-
-      let response: unknown;
-      let caught: unknown;
-      try {
-        response = await client.messages.create({
-          model: 'claude-3-5-sonnet-20241022',
-          max_tokens: 100,
-          messages: [{ role: 'user', content: 'hi' }],
-        });
-      } catch (error) {
-        caught = error;
-      }
-
-      console.log('[DIAG] requests received:', JSON.stringify(requests));
-      console.log('[DIAG] response:', JSON.stringify(response));
-      console.log(
-        '[DIAG] caught error:',
-        caught instanceof Error ? caught.stack : JSON.stringify(caught),
-      );
-    } finally {
-      server.stop();
-    }
-  });
-});
 
 describe('Anthropic provider behind a proxy', () => {
   const anthropicResponseBody = {
@@ -267,37 +236,22 @@ describe('Anthropic provider behind a proxy', () => {
       '',
     ].join('\n');
 
-    const requests: RecordedRequest[] = [];
-    const server = Bun.serve({
-      port: 0,
-      hostname: '127.0.0.1',
-      fetch(request) {
-        const url = new URL(request.url);
-        requests.push({
-          method: request.method,
-          path: url.pathname,
-          query: url.search,
-          headers: Object.fromEntries(request.headers.entries()),
-        });
-        return new Response(sseBody, {
-          headers: { 'content-type': 'text/event-stream' },
-        });
-      },
-    });
-
+    const proxy = createRecordingSseProxy(sseBody);
     try {
       const generate = createAnthropicProviderStream({
         model: 'claude-3-5-sonnet-20241022',
         apiKey: PLACEHOLDER_TOKEN,
-        baseURL: `http://127.0.0.1:${server.port}`,
+        baseURL: proxy.baseURL,
       });
       await runTwoStepStreamingLoop(generate);
 
-      const endpoints = new Set(requests.map((request) => `${request.method} ${request.path}`));
+      const endpoints = new Set(
+        proxy.requests.map((request) => `${request.method} ${request.path}`),
+      );
       expect(endpoints).toEqual(new Set(['POST /v1/messages']));
-      expect(requests).toHaveLength(2);
+      expect(proxy.requests).toHaveLength(2);
     } finally {
-      server.stop();
+      proxy.stop();
     }
   });
 });
@@ -340,6 +294,35 @@ describe('OpenAI provider behind a proxy', () => {
         baseURL: proxy.baseURL,
       });
       await runTwoStepLoop(generate);
+
+      const endpoints = new Set(
+        proxy.requests.map((request) => `${request.method} ${request.path}`),
+      );
+      expect(endpoints).toEqual(new Set(['POST /chat/completions']));
+      expect(proxy.requests).toHaveLength(2);
+    } finally {
+      proxy.stop();
+    }
+  });
+
+  it('the streaming variant issues only POST /chat/completions as well', async () => {
+    const sseBody = [
+      `data: ${JSON.stringify({ id: 'chatcmpl_stream', object: 'chat.completion.chunk', created: 0, model: 'gpt-4o-mini', choices: [{ index: 0, delta: { role: 'assistant', content: 'Sunny.' }, finish_reason: null }] })}`,
+      '',
+      `data: ${JSON.stringify({ id: 'chatcmpl_stream', object: 'chat.completion.chunk', created: 0, model: 'gpt-4o-mini', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}`,
+      '',
+      'data: [DONE]',
+      '',
+    ].join('\n');
+
+    const proxy = createRecordingSseProxy(sseBody);
+    try {
+      const generate = createOpenAIProviderStream({
+        model: 'gpt-4o-mini',
+        apiKey: PLACEHOLDER_TOKEN,
+        baseURL: proxy.baseURL,
+      });
+      await runTwoStepStreamingLoop(generate);
 
       const endpoints = new Set(
         proxy.requests.map((request) => `${request.method} ${request.path}`),
@@ -395,6 +378,34 @@ describe('Gemini provider behind a proxy', () => {
         proxy.requests.map((request) => `${request.method} ${request.path}`),
       );
       expect(endpoints).toEqual(new Set(['POST /v1beta/models/gemini-1.5-flash:generateContent']));
+      expect(proxy.requests).toHaveLength(2);
+    } finally {
+      proxy.stop();
+    }
+  });
+
+  it('the streaming variant issues only POST /v1beta/models/{model}:streamGenerateContent as well', async () => {
+    const sseBody = [
+      `data: ${JSON.stringify({ candidates: [{ content: { role: 'model', parts: [{ text: 'Sunny.' }] }, index: 0 }] })}`,
+      `data: ${JSON.stringify({ candidates: [{ content: { role: 'model', parts: [{ text: '' }] }, finishReason: 'STOP', index: 0 }], usageMetadata: { promptTokenCount: 5, candidatesTokenCount: 3, totalTokenCount: 8 } })}`,
+      '',
+    ].join('\n\n');
+
+    const proxy = createRecordingSseProxy(sseBody);
+    try {
+      const generate = createGeminiProviderStream({
+        model: 'gemini-1.5-flash',
+        apiKey: PLACEHOLDER_TOKEN,
+        baseURL: proxy.baseURL,
+      });
+      await runTwoStepStreamingLoop(generate);
+
+      const endpoints = new Set(
+        proxy.requests.map((request) => `${request.method} ${request.path}`),
+      );
+      expect(endpoints).toEqual(
+        new Set(['POST /v1beta/models/gemini-1.5-flash:streamGenerateContent']),
+      );
       expect(proxy.requests).toHaveLength(2);
     } finally {
       proxy.stop();
