@@ -42,6 +42,127 @@ describe('createToolbox', () => {
     expect(result.result).toBe(3);
   });
 
+  it('evaluates availability lazily against toolbox context', async () => {
+    let availabilityChecks = 0;
+    const toolbox = createToolbox(
+      [
+        createTool({
+          name: 'darwin-tool',
+          description: 'Runs on Darwin hosts',
+          input: z.object({}),
+          availability(context) {
+            availabilityChecks += 1;
+            return context['platform'] === 'darwin';
+          },
+          async execute() {
+            return 'ok';
+          },
+        }),
+        createTool({
+          name: 'linux-tool',
+          description: 'Runs on Linux hosts',
+          input: z.object({}),
+          availability: async (context) => context['platform'] === 'linux',
+          async execute() {
+            return 'ok';
+          },
+        }),
+        createTool({
+          name: 'always-tool',
+          description: 'Runs everywhere',
+          input: z.object({}),
+          async execute() {
+            return 'ok';
+          },
+        }),
+      ],
+      { context: { platform: 'darwin' } },
+    );
+
+    expect(availabilityChecks).toBe(0);
+
+    const available = await toolbox.getAvailable();
+
+    expect(availabilityChecks).toBe(1);
+    expect(available.map((tool) => tool.name)).toEqual(['darwin-tool', 'always-tool']);
+  });
+
+  it('filters unavailable tools from toolbox provider materialization', async () => {
+    const toolbox = createToolbox(
+      [
+        createTool({
+          name: 'available-tool',
+          description: 'Available tool',
+          input: z.object({}),
+          availability: () => true,
+          async execute() {
+            return 'ok';
+          },
+        }),
+        createTool({
+          name: 'unavailable-tool',
+          description: 'Unavailable tool',
+          input: z.object({}),
+          availability: () => false,
+          async execute() {
+            return 'nope';
+          },
+        }),
+      ],
+      { context: { optionalApiKey: undefined } },
+    );
+
+    const openAITools = await toolbox.toOpenAITools();
+    const anthropicTools = await toolbox.toAnthropicTools();
+    const geminiTools = await toolbox.toGeminiTools();
+
+    expect(openAITools.map((tool) => tool.function.name)).toEqual(['available-tool']);
+    expect(anthropicTools.map((tool) => tool.name)).toEqual(['available-tool']);
+    expect(
+      geminiTools.flatMap((tool) =>
+        tool.functionDeclarations.map((declaration) => declaration.name),
+      ),
+    ).toEqual(['available-tool']);
+  });
+
+  it('returns a structured unavailable ToolError without executing the tool', async () => {
+    let executed = false;
+    const toolbox = createToolbox(
+      [
+        createTool({
+          name: 'macos-only',
+          description: 'Requires macOS APIs',
+          input: z.object({}),
+          availability: () => false,
+          async execute() {
+            executed = true;
+            return 'ok';
+          },
+        }),
+      ],
+      { context: { platform: 'linux' } },
+    );
+
+    const result = await toolbox.execute({ id: 'call-1', name: 'macos-only', arguments: {} });
+
+    expect(executed).toBe(false);
+    expect(result).toMatchObject({
+      callId: 'call-1',
+      outcome: 'error',
+      toolCallId: 'call-1',
+      toolName: 'macos-only',
+      result: undefined,
+      errorMessage: 'Tool unavailable: macos-only',
+      errorCategory: 'unavailable',
+      error: {
+        code: 'TOOL_UNAVAILABLE',
+        category: 'unavailable',
+        retryable: false,
+        message: 'Tool unavailable: macos-only',
+      },
+    });
+  });
+
   it('returns a serializable pending approval descriptor and resumes with edited arguments', async () => {
     const charges: number[] = [];
     const createChargeToolbox = (approvalSecret: string) =>

@@ -21,6 +21,7 @@ export type ToolErrorCategory =
   | 'validation'
   | 'permission'
   | 'not_found'
+  | 'unavailable'
   | 'conflict'
   | 'transient'
   | 'timeout'

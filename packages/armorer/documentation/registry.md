@@ -48,6 +48,32 @@ toolbox.register({
 
 Tool configurations and `createTool()` are consistent: if `input` is omitted, Toolbox defaults it to `z.object({})` for no-params tools.
 
+### Availability
+
+Add `availability` to a tool when it depends on a platform or runtime capability:
+
+```typescript
+const macosTool = createTool({
+  name: 'read-keychain',
+  description: 'Read a macOS Keychain item',
+  input: z.object({ service: z.string() }),
+  availability(context) {
+    return context['platform'] === 'darwin';
+  },
+  async execute({ service }) {
+    return readKeychain(service);
+  },
+});
+
+const toolbox = createToolbox([macosTool], {
+  context: { platform: process.platform },
+});
+```
+
+`await toolbox.getAvailable()` returns only currently runnable tools. The toolbox provider exporters use that same filter, so unavailable tools are not shown to the model. If a caller executes an unavailable tool anyway, the toolbox returns a structured `ToolError` with category `unavailable` and code `TOOL_UNAVAILABLE`.
+
+Availability is for platform and runtime capability checks. Do not use it to hide a keyless tool when an optional API key only increases limits or quota; keep that tool available and handle the configured versus unconfigured behavior inside the implementation.
+
 ### Execution
 
 ```typescript

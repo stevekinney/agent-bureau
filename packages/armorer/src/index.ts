@@ -1,5 +1,6 @@
 export { combineToolboxes } from './combine-toolboxes';
 export type { ToolError, ToolErrorCategory } from './core/errors';
+export type { ToolAvailabilityContext, ToolAvailabilityHook } from './core/tool-definition';
 export type { CreateToolOptions, WithContext } from './create-tool';
 export { createTool, createToolCall, lazy, withContext } from './create-tool';
 export type {

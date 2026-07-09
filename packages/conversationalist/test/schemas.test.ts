@@ -11,6 +11,7 @@ import {
   multiModalContentSchema,
   tokenUsageSchema,
   toolCallSchema,
+  toolErrorCategorySchema,
   toolResultSchema,
 } from '../src/schemas';
 import { CURRENT_SCHEMA_VERSION } from '../src/versioning';
@@ -138,6 +139,24 @@ describe('schemas', () => {
     expect('messages' in schemaShape).toBe(true);
     expect('createdAt' in schemaShape).toBe(true);
     expect('updatedAt' in schemaShape).toBe(true);
+  });
+
+  test('tool result schema accepts unavailable tool errors', () => {
+    expect(toolErrorCategorySchema.safeParse('unavailable').success).toBeTrue();
+
+    const result = toolResultSchema.safeParse({
+      callId: 'call-1',
+      outcome: 'error',
+      content: 'Tool unavailable: macos-only',
+      error: {
+        code: 'TOOL_UNAVAILABLE',
+        category: 'unavailable',
+        retryable: false,
+        message: 'Tool unavailable: macos-only',
+      },
+    });
+
+    expect(result.success).toBeTrue();
   });
 
   test('conversationShape works with storage systems', () => {
