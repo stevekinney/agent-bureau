@@ -313,6 +313,9 @@ export function createUntrustedOutputFencingMiddleware(
   const preamble = options.preamble ?? DEFAULT_UNTRUSTED_OUTPUT_PREAMBLE;
   const startDelimiter = options.startDelimiter ?? DEFAULT_UNTRUSTED_OUTPUT_START_DELIMITER;
   const endDelimiter = options.endDelimiter ?? DEFAULT_UNTRUSTED_OUTPUT_END_DELIMITER;
+  if (!startDelimiter || !endDelimiter) {
+    throw new Error('Untrusted output fencing delimiters must be non-empty.');
+  }
 
   return (configuration: ToolConfiguration): ToolConfiguration => {
     if (configuration.risk?.untrustedOutput !== true) {
@@ -320,6 +323,11 @@ export function createUntrustedOutputFencingMiddleware(
     }
 
     const originalExecute = configuration.execute;
+    const rawExecuteSource = (configuration as Record<string, unknown>)['rawExecute'];
+    const originalRawExecute =
+      typeof rawExecuteSource === 'function'
+        ? (rawExecuteSource as (params: unknown, context: unknown) => Promise<unknown>)
+        : undefined;
 
     const wrappedExecute = async (params: unknown, context: unknown) => {
       let executeFn: (params: unknown, context: unknown) => Promise<unknown>;
@@ -336,7 +344,21 @@ export function createUntrustedOutputFencingMiddleware(
       });
     };
 
-    return { ...configuration, execute: wrappedExecute };
+    const wrappedRawExecute =
+      originalRawExecute !== undefined
+        ? async (params: unknown, context: unknown) =>
+            fenceToolResult(await originalRawExecute(params, context), {
+              preamble,
+              startDelimiter,
+              endDelimiter,
+            })
+        : undefined;
+
+    return {
+      ...configuration,
+      execute: wrappedExecute,
+      ...(wrappedRawExecute ? { rawExecute: wrappedRawExecute } : {}),
+    };
   };
 }
 
@@ -345,8 +367,23 @@ function fenceToolResult(result: unknown, options: Required<UntrustedOutputFenci
     return fenceText(result, options);
   }
 
+  if (isAsyncIterable(result)) {
+    return createFencedAsyncIterable(result, options);
+  }
+
   if (result && typeof result === 'object') {
     const objectResult = result as Record<string, unknown>;
+    if (isAsyncIterable(objectResult['stream']) || isAsyncIterable(objectResult['result'])) {
+      return {
+        ...objectResult,
+        ...(isAsyncIterable(objectResult['stream'])
+          ? { stream: createFencedAsyncIterable(objectResult['stream'], options) }
+          : {}),
+        ...(isAsyncIterable(objectResult['result'])
+          ? { result: createFencedAsyncIterable(objectResult['result'], options) }
+          : {}),
+      };
+    }
     if (typeof objectResult['content'] === 'string') {
       return {
         ...objectResult,
@@ -359,7 +396,31 @@ function fenceToolResult(result: unknown, options: Required<UntrustedOutputFenci
 }
 
 function fenceText(text: string, options: Required<UntrustedOutputFencingOptions>): string {
-  return `${options.preamble}\n${options.startDelimiter}\n${text}\n${options.endDelimiter}`;
+  return `${options.preamble}\n${options.startDelimiter}\n${escapeFenceText(text, options.endDelimiter)}\n${options.endDelimiter}`;
+}
+
+async function* createFencedAsyncIterable<T>(
+  source: AsyncIterable<T>,
+  options: Required<UntrustedOutputFencingOptions>,
+): AsyncIterable<T | string> {
+  yield `${options.preamble}\n${options.startDelimiter}\n`;
+  for await (const chunk of source) {
+    if (typeof chunk === 'string') {
+      yield escapeFenceText(chunk, options.endDelimiter) as T | string;
+    } else {
+      yield chunk;
+    }
+  }
+  yield `\n${options.endDelimiter}`;
+}
+
+function escapeFenceText(text: string, endDelimiter: string): string {
+  const replacement = escapeDelimiter(endDelimiter);
+  return text.split(endDelimiter).join(replacement);
+}
+
+function escapeDelimiter(delimiter: string): string {
+  return `${delimiter.slice(0, -1)}\\${delimiter.slice(-1)}`;
 }
 
 /**

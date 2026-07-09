@@ -2,7 +2,7 @@ import { z } from 'zod';
 
 import { normalizeSchema } from '../utilities/schema-normalization';
 import { formatToolId, normalizeIdentity, type ToolId, type ToolIdentity } from './identity';
-import { type ToolRisk } from './risk';
+import { buildTagsFromRisk, type ToolRisk } from './risk';
 import type { JsonObject } from './serialization/json';
 import { assertKebabCaseTag, type NormalizeTagsOption, uniqTags } from './tag-utilities';
 
@@ -86,7 +86,7 @@ export function defineTool<
     ...(version !== undefined ? { version } : {}),
   });
   const normalizedInput = normalizeSchema(input);
-  const resolvedTags = normalizeTags(tags, name);
+  const resolvedTags = buildTagsFromRisk(normalizeTags(tags, name), risk);
   const display: ToolDisplay = {
     title: title ?? name,
     description,

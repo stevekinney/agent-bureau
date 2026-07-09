@@ -227,14 +227,25 @@ describe('registry helpers', () => {
     toolbox.register(
       makeTool('web-fetch', { risk: { untrustedOutput: true } }),
       makeTool('calculator', { risk: { readOnly: true } }),
+      makeTool('plain'),
     );
 
     const untrusted = queryTools(toolbox, { risk: { untrustedOutput: true } });
     const trusted = queryTools(toolbox, { risk: { untrustedOutput: false } });
 
     expect(untrusted.map((tool) => tool.name)).toEqual(['web-fetch']);
-    expect(trusted.map((tool) => tool.name)).toEqual(['calculator']);
+    expect(trusted.map((tool) => tool.name)).toEqual(['calculator', 'plain']);
     expect(untrusted[0]?.tags).toContain('untrusted-output');
+  });
+
+  it('generates risk tags for defineTool registration paths', () => {
+    const definition = defineTool({
+      name: 'document-loader',
+      description: 'loads user documents',
+      risk: { untrustedOutput: true },
+    });
+
+    expect(definition.tags).toContain('untrusted-output');
   });
 
   it('skips embedding scores when vector lengths mismatch', () => {
