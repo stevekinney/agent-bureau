@@ -172,6 +172,14 @@
       "require": "./dist/idempotency/index.cjs",
       "default": "./dist/idempotency/index.js",
       "types": "./dist/idempotency/index.d.ts"
+    },
+    "./coding": {
+      "bun": "./dist/coding/index.js",
+      "browser": "./dist/coding/index.js",
+      "import": "./dist/coding/index.js",
+      "require": "./dist/coding/index.cjs",
+      "default": "./dist/coding/index.js",
+      "types": "./dist/coding/index.d.ts"
     }
   },
   "main": "./dist/index.js",

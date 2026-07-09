@@ -23,6 +23,7 @@ const entry = {
   'truncation/index': './src/truncation/index.ts',
   'test/index': './src/test/index.ts',
   'idempotency/index': './src/idempotency/index.ts',
+  'coding/index': './src/coding/index.ts',
   'create-tool': './src/create-tool.ts',
   'core/registry/index': './src/core/registry/index.ts',
   'integrations/mcp/index': './src/integrations/mcp/index.ts',
