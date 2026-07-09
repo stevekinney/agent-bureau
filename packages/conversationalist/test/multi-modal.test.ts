@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'bun:test';
 
-import { copyContent, copyMultiModalContent } from '../src/multi-modal';
+import {
+  copyContent,
+  copyMultiModalContent,
+  type DocumentContent,
+  renderDocumentReferenceText,
+} from '../src/multi-modal';
 
 describe('copyMultiModalContent', () => {
   describe('text content', () => {
@@ -61,6 +66,40 @@ describe('copyMultiModalContent', () => {
   });
 
   describe('tool blocks deep-copy JSON payloads', () => {
+    it('copies document content without sharing source objects', () => {
+      const input: DocumentContent = {
+        type: 'document',
+        name: 'requirements.pdf',
+        mimeType: 'application/pdf',
+        source: { kind: 'base64', data: 'cGRm' },
+      };
+      const result = copyMultiModalContent(input);
+
+      expect(result).toEqual(input);
+      expect(result).not.toBe(input);
+      expect((result as DocumentContent).source).not.toBe(input.source);
+    });
+
+    it('renders document reference fallbacks without embedding base64 data', () => {
+      expect(
+        renderDocumentReferenceText({
+          type: 'document',
+          name: 'requirements.pdf',
+          mimeType: 'application/pdf',
+          source: { kind: 'base64', data: 'cGRm' },
+        }),
+      ).toBe('[Document: requirements.pdf (application/pdf); base64 data omitted]');
+
+      expect(
+        renderDocumentReferenceText({
+          type: 'document',
+          name: 'notes.md',
+          mimeType: 'text/markdown',
+          source: { kind: 'reference', uri: 'sandbox:/workspace/notes.md' },
+        }),
+      ).toBe('[Document: notes.md (text/markdown) at sandbox:/workspace/notes.md]');
+    });
+
     it('copies thinking content', () => {
       const input = { type: 'thinking' as const, thinking: 'reasoning', signature: 'sig' };
       const result = copyMultiModalContent(input);

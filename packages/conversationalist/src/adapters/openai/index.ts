@@ -1,6 +1,6 @@
 import { appendMessages, createConversationHistory } from '../../conversation/index';
 import { assertConversationSafe } from '../../conversation/validation';
-import type { MultiModalContent } from '../../multi-modal';
+import { type MultiModalContent, renderDocumentReferenceText } from '../../multi-modal';
 import { isStreamingMessage } from '../../streaming';
 import type {
   ConversationHistory as Conversation,
@@ -115,6 +115,8 @@ function toOpenAIContent(
   for (const part of content) {
     if (part.type === 'text') {
       parts.push({ type: 'text', text: part.text ?? '' });
+    } else if (part.type === 'document') {
+      parts.push({ type: 'text', text: renderDocumentReferenceText(part) });
     } else if (part.type === 'image' && allowImages) {
       parts.push({
         type: 'image_url',

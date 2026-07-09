@@ -17,6 +17,31 @@ export interface ImageContent {
   text?: string;
 }
 
+export type DocumentSource =
+  | {
+      kind: 'base64';
+      data: string;
+    }
+  | {
+      kind: 'reference';
+      uri: string;
+    };
+
+export interface DocumentContent {
+  type: 'document';
+  name: string;
+  mimeType: string;
+  source: DocumentSource;
+}
+
+export function renderDocumentReferenceText(document: DocumentContent): string {
+  if (document.source.kind === 'reference') {
+    return `[Document: ${document.name} (${document.mimeType}) at ${document.source.uri}]`;
+  }
+
+  return `[Document: ${document.name} (${document.mimeType}); base64 data omitted]`;
+}
+
 /**
  * Extended thinking content block.
  * Represents the model's internal reasoning. The signature must be preserved
@@ -100,6 +125,7 @@ export interface ContainerUploadContent {
 export type MultiModalContent =
   | TextContent
   | ImageContent
+  | DocumentContent
   | ThinkingContent
   | RedactedThinkingContent
   | ServerToolUseContent
@@ -129,6 +155,14 @@ export function copyMultiModalContent(item: MultiModalContent): MultiModalConten
     return {
       type: 'redacted_thinking',
       data: item.data,
+    };
+  }
+  if (item.type === 'document') {
+    return {
+      type: 'document',
+      name: item.name,
+      mimeType: item.mimeType,
+      source: { ...item.source },
     };
   }
   if (item.type === 'server_tool_use') {

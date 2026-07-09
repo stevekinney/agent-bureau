@@ -133,6 +133,8 @@ export type {
 export { Conversation } from './history';
 export type {
   ContainerUploadContent,
+  DocumentContent,
+  DocumentSource,
   ImageContent,
   MultiModalContent,
   RedactedThinkingContent,
