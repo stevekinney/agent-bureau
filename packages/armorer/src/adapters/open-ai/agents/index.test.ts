@@ -43,6 +43,41 @@ describe('open-ai agents adapter', () => {
     expect(dangerousToolNames).toEqual(['dangerous-tool']);
   });
 
+  it('filters unavailable toolbox tools and rechecks availability when invoked', async () => {
+    let available = true;
+    let executed = false;
+    const toolbox = createToolbox([
+      createTool({
+        name: 'available-tool',
+        description: 'available',
+        input: z.object({}),
+        availability: () => available,
+        async execute() {
+          executed = true;
+          return { ok: true };
+        },
+      }),
+      createTool({
+        name: 'unavailable-tool',
+        description: 'unavailable',
+        input: z.object({}),
+        availability: () => false,
+        async execute() {
+          return { hidden: true };
+        },
+      }),
+    ]);
+
+    const { tools, toolNames } = await toOpenAIAgentTools(toolbox);
+    available = false;
+
+    const output = await tools[0]!.invoke(undefined as never, '{}');
+
+    expect(toolNames).toEqual(['available-tool']);
+    expect(executed).toBe(false);
+    expect(output).toContain('Tool unavailable: available-tool');
+  });
+
   it('denies mutating and dangerous tools when gated', async () => {
     const toolbox = createToolbox([
       createTool({

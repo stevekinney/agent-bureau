@@ -250,6 +250,48 @@ describe('createMCP', () => {
     }
   });
 
+  it('registers only available toolbox tools and rechecks availability on calls', async () => {
+    let available = true;
+    let executed = false;
+    const toolbox = createToolbox([
+      createTool({
+        name: 'available-tool',
+        description: 'available',
+        input: z.object({}),
+        availability: () => available,
+        async execute() {
+          executed = true;
+          return { ok: true };
+        },
+      }),
+      createTool({
+        name: 'unavailable-tool',
+        description: 'unavailable',
+        input: z.object({}),
+        availability: () => false,
+        async execute() {
+          return { hidden: true };
+        },
+      }),
+    ]);
+
+    const { client, server } = await connect(toolbox);
+
+    try {
+      const tools = await client.listTools();
+      available = false;
+      const result = await client.callTool({ name: 'available-tool', arguments: {} });
+
+      expect(tools.tools.map((tool) => tool.name)).toEqual(['available-tool']);
+      expect(executed).toBe(false);
+      expect(result.isError).toBe(true);
+      expect(result.content?.[0]?.text).toContain('Tool unavailable: available-tool');
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
   it('applies MCP metadata configuration when provided', async () => {
     const toolbox = createToolbox();
     createTool(

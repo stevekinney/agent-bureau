@@ -10,16 +10,20 @@ import { createTool } from '../src/create-tool';
 import { createToolbox } from '../src/create-toolbox';
 import { createMCP } from '../src/integrations/mcp';
 
-const builtFixtureCode = () => {
+const sourceFixtureCode = () => {
   const currentDir = dirname(fileURLToPath(import.meta.url));
-  const indexModule = pathToFileURL(join(currentDir, '..', 'dist', 'index.js')).href;
+  const createToolModule = pathToFileURL(join(currentDir, '..', 'src', 'create-tool.ts')).href;
+  const createToolboxModule = pathToFileURL(
+    join(currentDir, '..', 'src', 'create-toolbox.ts'),
+  ).href;
   const mcpModule = pathToFileURL(
-    join(currentDir, '..', 'dist', 'integrations', 'mcp', 'index.js'),
+    join(currentDir, '..', 'src', 'integrations', 'mcp', 'index.ts'),
   ).href;
   return `
     import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
     import { z } from 'zod';
-    import { createTool, createToolbox } from ${JSON.stringify(indexModule)};
+    import { createTool } from ${JSON.stringify(createToolModule)};
+    import { createToolbox } from ${JSON.stringify(createToolboxModule)};
     import { createMCP } from ${JSON.stringify(mcpModule)};
 
     const sum = createTool({
@@ -49,7 +53,7 @@ describe('OpenAI Agents SDK MCP integration', () => {
   it('lists tools over stdio', async () => {
     const server = new MCPServerStdio({
       command: 'bun',
-      args: ['--eval', builtFixtureCode()],
+      args: ['--eval', sourceFixtureCode()],
       cwd: packagePath(),
       name: 'toolbox-tools',
       cacheToolsList: true,

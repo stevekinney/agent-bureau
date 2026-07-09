@@ -3,6 +3,8 @@ import { isTool } from '../../../is-tool';
 
 type ToolboxLike = {
   tools: () => readonly Tool[];
+  getAvailable?: () => Promise<ReadonlyArray<Tool>>;
+  execute?: (call: { name: string; arguments: unknown }) => Promise<ToolExecutionResult>;
 };
 
 type OpenAIAgentsModule = typeof import('@openai/agents');
@@ -73,7 +75,7 @@ export async function toOpenAIAgentTools(
   input: ToolboxLike | Tool | readonly Tool[],
   options: OpenAIAgentToolOptions = {},
 ): Promise<OpenAIAgentToolsResult> {
-  const tools = normalizeToTools(input);
+  const tools = await resolveAvailableTools(input);
   const { tool: sdkTool } = await loadOpenAIAgentsModule();
 
   const toolNames: string[] = [];
@@ -97,7 +99,10 @@ export async function toOpenAIAgentTools(
       parameters,
       strict: true,
       execute: async (args: unknown) => {
-        const result = await tool.executeWith({ params: args ?? {} });
+        const result =
+          isExecutableToolbox(input) && input.getTool?.(tool.name) === tool
+            ? await input.execute({ name: tool.name, arguments: args ?? {} })
+            : await tool.executeWith({ params: args ?? {} });
         return options.formatResult ? options.formatResult(result) : formatToolResult(result);
       },
     });
@@ -207,6 +212,24 @@ function normalizeToTools(input: ToolboxLike | Tool | readonly Tool[]): Tool[] {
     return [input];
   }
   throw new TypeError('Invalid input: expected tool, tool array, or Toolbox');
+}
+
+async function resolveAvailableTools(input: ToolboxLike | Tool | readonly Tool[]): Promise<Tool[]> {
+  if (isToolboxLike(input) && typeof input.getAvailable === 'function') {
+    return [...(await input.getAvailable())];
+  }
+  return normalizeToTools(input);
+}
+
+function isExecutableToolbox(input: ToolboxLike | Tool | readonly Tool[]): input is ToolboxLike & {
+  execute: (call: { name: string; arguments: unknown }) => Promise<ToolExecutionResult>;
+  getTool: (nameOrId: string) => Tool | undefined;
+} {
+  return (
+    isToolboxLike(input) &&
+    typeof input.execute === 'function' &&
+    typeof (input as { getTool?: unknown }).getTool === 'function'
+  );
 }
 
 function isToolboxLike(value: unknown): value is ToolboxLike {

@@ -22,6 +22,12 @@ import type { ToolResultLike } from '../../types';
 
 type ToolboxLike = {
   tools: () => readonly Tool[];
+  getAvailable?: () => Promise<ReadonlyArray<Tool>>;
+  execute?: (
+    call: { id?: string; name: string; arguments: unknown },
+    options?: { signal?: AbortSignal },
+  ) => Promise<ToolResultLike>;
+  getTool?: (nameOrId: string) => Tool | undefined;
 };
 
 export type MCPToolConfiguration = {
@@ -61,6 +67,12 @@ export type MCPToolSource = MCPTool | MCPToolLike | MCPToolDefinition;
 export type ToMCPToolsOptions = {
   toolConfiguration?: (tool: Tool) => MCPToolConfiguration;
   formatResult?: (result: ToolResultLike) => CallToolResult;
+  executeTool?: (
+    tool: Tool,
+    params: unknown,
+    callId?: string,
+    signal?: AbortSignal,
+  ) => Promise<ToolResultLike>;
 };
 
 export type FromMCPToolsOptions = {
@@ -110,7 +122,27 @@ export async function createMCP(
     registered.set(toolName, registeredTool);
   };
 
-  for (const tool of toMcpTools(toolbox, { toolConfiguration, formatResult })) {
+  const availableTools =
+    typeof toolbox.getAvailable === 'function' ? await toolbox.getAvailable() : toolbox.tools();
+  const executeTool =
+    typeof toolbox.execute === 'function' && typeof toolbox.getTool === 'function'
+      ? (tool: Tool, params: unknown, callId?: string, signal?: AbortSignal) =>
+          toolbox.getTool!(tool.name) === tool
+            ? toolbox.execute!(
+                {
+                  ...(callId !== undefined ? { id: callId } : {}),
+                  name: tool.name,
+                  arguments: params ?? {},
+                },
+                signal ? { signal } : undefined,
+              )
+            : tool.executeWith({
+                params: params ?? {},
+                ...(callId !== undefined ? { callId } : {}),
+              })
+      : undefined;
+
+  for (const tool of toMcpTools(availableTools, { toolConfiguration, formatResult, executeTool })) {
     registerTool(tool);
   }
 
@@ -178,17 +210,22 @@ function toMcpToolDefinition(tool: Tool, options: ToMCPToolsOptions): MCPToolDef
       const params = args ?? {};
       let result: ToolResultLike;
       try {
-        const runnable = tool as unknown as {
-          executeWith: (options: ToolExecuteWithOptions) => Promise<ToolResultLike>;
-        };
-        const executeOptions: ToolExecuteWithOptions = { params };
-        if (extra?.requestId !== undefined) {
-          executeOptions.callId = String(extra.requestId);
+        const callId = extra?.requestId !== undefined ? String(extra.requestId) : undefined;
+        if (options.executeTool) {
+          result = await options.executeTool(tool, params, callId, extra?.signal);
+        } else {
+          const runnable = tool as unknown as {
+            executeWith: (options: ToolExecuteWithOptions) => Promise<ToolResultLike>;
+          };
+          const executeOptions: ToolExecuteWithOptions = { params };
+          if (callId !== undefined) {
+            executeOptions.callId = callId;
+          }
+          if (extra?.signal) {
+            executeOptions.signal = extra.signal;
+          }
+          result = await runnable.executeWith(executeOptions);
         }
-        if (extra?.signal) {
-          executeOptions.signal = extra.signal;
-        }
-        result = await runnable.executeWith(executeOptions);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         return {
