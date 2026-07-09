@@ -359,6 +359,7 @@ export type ImportedToolConfiguration = {
   metadata?: ToolConfiguration['metadata'];
   risk?: ToolConfiguration['risk'];
   lifecycle?: ToolConfiguration['lifecycle'];
+  availability?: ToolConfiguration['availability'];
   execute?: ToolConfiguration['execute'];
   policy?: ToolConfiguration['policy'];
   policyContext?: ToolConfiguration['policyContext'];
@@ -408,6 +409,8 @@ type ToolboxResultForCall<TTools extends readonly Tool[], TCall extends { name: 
     ? ToolboxResultForTool<ToolboxToolByNameOrFallback<TTools, TCall['name']>>
     : ToolExecutionResult;
 
+type AvailableTools<TTools extends readonly Tool[]> = ReadonlyArray<TTools[number]>;
+
 export interface Toolbox<TTools extends readonly Tool[] = readonly Tool[]> {
   execute<const TCall extends ToolboxCallInputForTools<TTools>>(
     call: TCall,
@@ -430,6 +433,7 @@ export interface Toolbox<TTools extends readonly Tool[] = readonly Tool[]> {
     toolbox: Toolbox<TOtherTools>,
   ): Toolbox<MergeTools<TTools, TOtherTools>>;
   tools: () => TTools;
+  getAvailable: () => Promise<AvailableTools<TTools>>;
   getTool(nameOrId: string): TTools[number] | undefined;
   /**
    * Returns names of tools that are not present in this toolbox.
@@ -830,6 +834,32 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
         return notFound;
       }
 
+      if (!(await isToolAvailable(tool))) {
+        const toolError = createToolError(
+          'unavailable',
+          `Tool unavailable: ${toolCall.name}`,
+          'TOOL_UNAVAILABLE',
+          false,
+        );
+        const unavailable: ToolExecutionResult = {
+          callId: toolCall.id,
+          outcome: 'error',
+          content: toolError.message,
+          toolCallId: toolCall.id,
+          toolName: toolCall.name,
+          result: undefined,
+          error: toolError,
+          errorMessage: toolError.message,
+          errorCategory: toolError.category,
+        };
+        emit('error', { tool, result: unavailable });
+        if (errorMode === 'failFast') {
+          // eslint-disable-next-line @typescript-eslint/only-throw-error
+          throw toolError;
+        }
+        return unavailable;
+      }
+
       emit('call', {
         tool,
         call: toolCall,
@@ -1211,6 +1241,26 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
     return names.every((name) => getTool(name));
   }
 
+  async function getAvailable(): Promise<AvailableTools<ToolsFromEntries<TEntries>>> {
+    const tools = Array.from(toolsById.values());
+    const availability = await Promise.all(tools.map((tool) => isToolAvailable(tool)));
+    return tools.filter(
+      (tool, index) => availability[index] === true && getTool(tool.name) === tool,
+    ) as unknown as AvailableTools<ToolsFromEntries<TEntries>>;
+  }
+
+  async function isToolAvailable(tool: Tool): Promise<boolean> {
+    const availability = tool.configuration.availability ?? tool.availability;
+    if (!availability) {
+      return true;
+    }
+    try {
+      return await availability(baseContext);
+    } catch {
+      return false;
+    }
+  }
+
   function inspect(detailLevel: InspectorDetailLevel = 'standard'): RegistryInspection {
     const tools = Array.from(toolsById.values());
     return inspectRegistry(tools, detailLevel);
@@ -1218,17 +1268,20 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
 
   async function toOpenAITools(): Promise<OpenAITool[]> {
     const { toOpenAITools: convertToOpenAITools } = await import('./adapters/openai');
-    return convertToOpenAITools(api);
+    const availableTools = [...(await getAvailable())] as AnyToolDefinition[];
+    return convertToOpenAITools(availableTools);
   }
 
   async function toAnthropicTools(): Promise<AnthropicTool[]> {
     const { toAnthropicTools: convertToAnthropicTools } = await import('./adapters/anthropic');
-    return convertToAnthropicTools(api);
+    const availableTools = [...(await getAvailable())] as AnyToolDefinition[];
+    return convertToAnthropicTools(availableTools);
   }
 
   async function toGeminiTools(): Promise<GeminiTool[]> {
     const { toGeminiTools: convertToGeminiTools } = await import('./adapters/gemini');
-    return convertToGeminiTools(api);
+    const availableTools = [...(await getAvailable())] as AnyToolDefinition[];
+    return convertToGeminiTools(availableTools);
   }
 
   async function toProvider(
@@ -1238,15 +1291,18 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
     switch (provider) {
       case 'openai': {
         const { openAIToolAdapter } = await import('./adapters/openai');
-        return openAIToolAdapter.export(api, adapterOptions as never);
+        const availableTools = [...(await getAvailable())] as AnyToolDefinition[];
+        return openAIToolAdapter.export(availableTools, adapterOptions as never);
       }
       case 'anthropic': {
         const { anthropicToolAdapter } = await import('./adapters/anthropic');
-        return anthropicToolAdapter.export(api);
+        const availableTools = [...(await getAvailable())] as AnyToolDefinition[];
+        return anthropicToolAdapter.export(availableTools);
       }
       case 'gemini': {
         const { geminiToolAdapter } = await import('./adapters/gemini');
-        return geminiToolAdapter.export(api);
+        const availableTools = [...(await getAvailable())] as AnyToolDefinition[];
+        return geminiToolAdapter.export(availableTools);
       }
     }
   }
@@ -1281,6 +1337,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
     resumeApproval,
     extend,
     tools,
+    getAvailable,
     getTool,
     getMissingTools,
     hasAllTools,
@@ -1440,6 +1497,9 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
     if (configuration.metadata) {
       options.metadata = configuration.metadata;
     }
+    if (configuration.availability) {
+      options.availability = configuration.availability;
+    }
     if (resolvedPolicy) {
       options.policy = resolvedPolicy;
     }
@@ -1519,6 +1579,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
       ...(configuration.metadata ? { metadata: configuration.metadata } : {}),
       ...(resolvedRisk !== undefined ? { risk: resolvedRisk } : {}),
       ...(configuration.lifecycle ? { lifecycle: configuration.lifecycle } : {}),
+      ...(configuration.availability ? { availability: configuration.availability } : {}),
       input: normalizedInput,
     }) as AnyToolDefinition;
     const rawExecute = (configuration as Record<string, unknown>)['rawExecute'];
@@ -1735,6 +1796,9 @@ function materializeImportedToolConfiguration(
     ...(configuration.metadata !== undefined ? { metadata: configuration.metadata } : {}),
     ...(configuration.risk !== undefined ? { risk: configuration.risk } : {}),
     ...(configuration.lifecycle !== undefined ? { lifecycle: configuration.lifecycle } : {}),
+    ...(configuration.availability !== undefined
+      ? { availability: configuration.availability }
+      : {}),
     input: configuration.input,
   }) as AnyToolDefinition;
 

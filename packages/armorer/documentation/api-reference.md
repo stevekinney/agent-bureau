@@ -122,6 +122,7 @@ This document tracks the published export map in [package.json](/Users/stevekinn
 - `toolbox.toOpenAITools()`
 - `toolbox.toAnthropicTools()`
 - `toolbox.toGeminiTools()`
+- `toolbox.getAvailable()`
 - `toolbox.asExecuteResolver()`
 
 ## `armorer/core`
@@ -141,6 +142,11 @@ This document tracks the published export map in [package.json](/Users/stevekinn
 - `ToolError`
 - `ToolErrorCategory`
 - `isToolError`
+
+### Availability
+
+- `ToolAvailabilityContext`
+- `ToolAvailabilityHook`
 
 ### Identity
 

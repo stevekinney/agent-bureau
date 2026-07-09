@@ -4,7 +4,7 @@ import { z } from 'zod';
 import type { ToolContext as CoreToolContext } from './core/context';
 import type { ToolErrorCategory } from './core/errors';
 import type { JsonObject } from './core/serialization/json';
-import type { ToolDefinition } from './core/tool-definition';
+import type { ToolAvailabilityHook, ToolDefinition } from './core/tool-definition';
 import type { ToolEventMap } from './events';
 import type { ToolCall, ToolExecutionResult } from './types';
 
@@ -30,6 +30,7 @@ export type ClearScheduledTimeout = (handle: TimeoutHandle) => void;
 export type ToolConfiguration = ToolDefinition<Record<string, unknown>, unknown> & {
   input: ToolParametersSchema;
   metadata?: ToolMetadata;
+  availability?: ToolAvailabilityHook;
   execute:
     | ((params: unknown, context?: unknown) => Promise<unknown>)
     | Promise<(params: unknown, context?: unknown) => Promise<unknown>>;

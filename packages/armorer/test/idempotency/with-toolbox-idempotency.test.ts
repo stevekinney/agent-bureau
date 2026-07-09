@@ -298,6 +298,51 @@ describe('withToolboxIdempotency', () => {
     expect(addCallCount).toBe(0);
   });
 
+  it('does not keep started state for unavailable tools before execution', async () => {
+    let available = false;
+    const tool = createTool({
+      name: 'add',
+      description: 'Adds two numbers when available',
+      input: z.object({ a: z.number(), b: z.number() }),
+      idempotencyKey: (input: unknown) => fullInputKey(input),
+      availability: () => available,
+      async execute({ a, b }) {
+        addCallCount++;
+        return a + b;
+      },
+    });
+    const toolbox = createToolbox([tool]);
+    const idempotentToolbox = withToolboxIdempotency(toolbox, { cache });
+
+    const first = await idempotentToolbox.execute(
+      { name: 'add', arguments: { a: 1, b: 2 } },
+      { idempotencyKey: 'unavailable-now' },
+    );
+    available = true;
+    const second = await idempotentToolbox.execute(
+      { name: 'add', arguments: { a: 1, b: 2 } },
+      { idempotencyKey: 'unavailable-now' },
+    );
+
+    expect(first.outcome).toBe('error');
+    expect(first.error?.category).toBe('unavailable');
+    expect(first.idempotency).toBeUndefined();
+    expect(await cache.getState!('add:unavailable-now')).toEqual(
+      expect.objectContaining({
+        status: 'completed',
+        toolName: 'add',
+        result: 3,
+      }),
+    );
+    expect(second.outcome).toBe('success');
+    expect(second.result).toBe(3);
+    expect(second.idempotency).toEqual({
+      key: 'add:unavailable-now',
+      outcome: 'fresh',
+    });
+    expect(addCallCount).toBe(1);
+  });
+
   it('does not keep started state for approval pauses before execution', async () => {
     const toolbox = createToolbox([createToolWithKey()], {
       policy: {

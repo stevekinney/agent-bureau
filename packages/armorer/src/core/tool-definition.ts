@@ -18,6 +18,12 @@ export type ToolLifecycle = {
   replacedBy?: ToolId;
 };
 
+export type ToolAvailabilityContext = Record<string, unknown>;
+
+export type ToolAvailabilityHook<
+  TContext extends ToolAvailabilityContext = ToolAvailabilityContext,
+> = (context: TContext) => boolean | Promise<boolean>;
+
 export type ToolDefinition<TInput extends object = Record<string, unknown>, TOutput = unknown> = {
   identity: ToolIdentity;
   id: ToolId;
@@ -28,6 +34,7 @@ export type ToolDefinition<TInput extends object = Record<string, unknown>, TOut
   metadata?: JsonObject | undefined;
   risk?: ToolRisk | undefined;
   lifecycle?: ToolLifecycle | undefined;
+  availability?: ToolAvailabilityHook | undefined;
   input: z.ZodTypeAny;
   /** @internal Type marker for inference. */
   __types?: { input: TInput; output: TOutput } | undefined;
@@ -49,6 +56,7 @@ export type DefineToolOptions<
   metadata?: JsonObject;
   risk?: ToolRisk;
   lifecycle?: ToolLifecycle;
+  availability?: ToolAvailabilityHook;
   input?: z.ZodType<TInput> | z.ZodRawShape | z.ZodTypeAny;
 };
 
@@ -68,6 +76,7 @@ export function defineTool<
     metadata,
     risk,
     lifecycle,
+    availability,
     input,
   } = options;
 
@@ -96,6 +105,7 @@ export function defineTool<
     ...(metadata !== undefined ? { metadata } : {}),
     ...(risk !== undefined ? { risk } : {}),
     ...(lifecycle !== undefined ? { lifecycle } : {}),
+    ...(availability !== undefined ? { availability } : {}),
     input: normalizedInput as z.ZodType<TInput>,
   };
 }

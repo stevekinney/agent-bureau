@@ -171,6 +171,7 @@ export const toolErrorCategorySchema = z.enum([
   'validation',
   'permission',
   'not_found',
+  'unavailable',
   'conflict',
   'transient',
   'timeout',

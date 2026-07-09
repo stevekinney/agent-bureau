@@ -1,4 +1,4 @@
-import { parseOpenAIToolCalls, toOpenAITools } from 'armorer/adapters/openai';
+import { parseOpenAIToolCalls } from 'armorer/adapters/openai';
 import { toOpenAIMessagesGrouped } from 'conversationalist/adapters/openai';
 import type { ToolCallInput } from 'interoperability';
 
@@ -50,8 +50,8 @@ export function createOpenAIProvider(options: OpenAIProviderOptions): GenerateFu
   return async (context: GenerateContext): Promise<GenerateResponse> => {
     const client = await getClient();
     const messages = toOpenAIMessagesGrouped(context.conversation.current);
-    const tools = toOpenAITools(context.toolbox);
-    const hasTools = Array.isArray(tools) ? tools.length > 0 : true;
+    const tools = await context.toolbox.toOpenAITools();
+    const hasTools = tools.length > 0;
 
     const params: Record<string, unknown> = {
       model,
@@ -60,8 +60,7 @@ export function createOpenAIProvider(options: OpenAIProviderOptions): GenerateFu
 
     const effectiveMaxTokens = context.maximumTokens ?? common.maximumTokens;
     if (effectiveMaxTokens !== undefined) params['max_tokens'] = effectiveMaxTokens;
-    if (hasTools && options.toolChoice !== 'none')
-      params['tools'] = Array.isArray(tools) ? tools : [tools];
+    if (hasTools && options.toolChoice !== 'none') params['tools'] = tools;
     if (hasTools && options.toolChoice && options.toolChoice !== 'none')
       params['tool_choice'] = toOpenAIToolChoice(options.toolChoice);
     if (options.responseFormat) {
@@ -139,8 +138,8 @@ export function createOpenAIProviderStream(
     const client = await getClient();
     const { streaming } = context;
     const messages = toOpenAIMessagesGrouped(context.conversation.current);
-    const tools = toOpenAITools(context.toolbox);
-    const hasTools = Array.isArray(tools) ? tools.length > 0 : true;
+    const tools = await context.toolbox.toOpenAITools();
+    const hasTools = tools.length > 0;
 
     const params: Record<string, unknown> = {
       model,
@@ -151,8 +150,7 @@ export function createOpenAIProviderStream(
 
     const effectiveMaxTokensStream = context.maximumTokens ?? common.maximumTokens;
     if (effectiveMaxTokensStream !== undefined) params['max_tokens'] = effectiveMaxTokensStream;
-    if (hasTools && options.toolChoice !== 'none')
-      params['tools'] = Array.isArray(tools) ? tools : [tools];
+    if (hasTools && options.toolChoice !== 'none') params['tools'] = tools;
     if (hasTools && options.toolChoice && options.toolChoice !== 'none')
       params['tool_choice'] = toOpenAIToolChoice(options.toolChoice);
     if (options.responseFormat) {

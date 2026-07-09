@@ -154,6 +154,8 @@ const importedToolbox = await createToolbox.fromOpenAITools(openAITools, {
 });
 ```
 
+Use the toolbox methods when your tools define runtime availability hooks. `toolbox.toOpenAITools()`, `toolbox.toAnthropicTools()`, `toolbox.toGeminiTools()`, and `toolbox.toProvider(...)` evaluate availability against the toolbox context and omit unavailable tools from the provider manifest.
+
 #### `armorer/truncation`
 
 Truncation utilities for tool results:
@@ -699,6 +701,35 @@ Tools are callable. `await tool(params)` and `await tool.execute(params)` are eq
 `executeWith(...)` lets you supply params plus `callId`, `timeout` (milliseconds), `signal`, and `stream` in a single call, returning a `ToolResult` instead of throwing. `rawExecute(...)` invokes the underlying implementation with a full `ToolContext` when you need precise control over dispatch/meta or to bypass the `ToolCall` wrapper.
 
 Tool schemas must be object schemas (`z.object(...)` or a plain object shape). Tool calls always pass a JSON object for `arguments`, so wrap primitives inside an object (for example, `z.object({ value: z.number() })`).
+
+### Runtime Availability
+
+Use `availability` when a tool can only run in the current platform or runtime environment. The hook is evaluated lazily against the toolbox context, so boot-time checks such as `process.platform`, an optional local binary probe, or a service health flag can decide whether the tool should be shown to a model.
+
+```typescript
+const toolbox = createToolbox([], {
+  context: {
+    platform: process.platform,
+    ripgrepAvailable: await hasCommand('rg'),
+  },
+});
+
+const searchFiles = createTool({
+  name: 'search-files',
+  description: 'Search local files with ripgrep',
+  input: z.object({ query: z.string() }),
+  availability(context) {
+    return context['ripgrepAvailable'] === true;
+  },
+  async execute({ query }) {
+    return runRipgrep(query);
+  },
+});
+```
+
+`await toolbox.getAvailable()` returns only tools whose hook passes. The toolbox provider exporters use the same filter, so unavailable tools are excluded from model manifests. If a caller still tries to execute an unavailable tool by name, `toolbox.execute(...)` returns a structured `ToolError` with category `unavailable` and code `TOOL_UNAVAILABLE`; it does not call the tool implementation.
+
+Availability is not secrets configuration. A tool with an optional API key can still be available without the key if the key only raises limits or unlocks a higher quota. Use `availability` for platform/runtime capability, not for hiding keyless tools that can still run.
 
 You can use `isTool(obj)` to check if an object is a tool:
 

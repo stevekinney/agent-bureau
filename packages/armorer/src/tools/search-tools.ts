@@ -7,6 +7,7 @@ import { isTestRuntime } from '../type-guards';
 
 type SearchableToolbox = {
   tools: () => readonly Tool[];
+  getAvailable?: () => Promise<ReadonlyArray<Tool>>;
 };
 
 /**
@@ -155,9 +156,11 @@ export function createSearchTool(
         ...(tags?.length ? { tags: { any: tags } } : {}),
       };
 
-      const results = await Promise.resolve(
-        queryTools(toolbox as unknown as ToolQueryInput, criteria),
-      );
+      const queryInput =
+        typeof toolbox.getAvailable === 'function'
+          ? await toolbox.getAvailable()
+          : (toolbox as unknown as ToolQueryInput);
+      const results = await Promise.resolve(queryTools(queryInput, criteria));
 
       return results.map((tool, index) => ({
         name: tool.identity.name,

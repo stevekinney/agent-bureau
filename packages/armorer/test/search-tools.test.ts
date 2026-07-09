@@ -59,6 +59,30 @@ describe('createSearchTool', () => {
     expect(tools.map((t) => t.name)).toContain('send-sms');
   });
 
+  it('omits unavailable tools from search results', async () => {
+    const toolbox = createToolbox([
+      makeTool('available-send', {
+        description: 'Send an available message',
+        availability: () => true,
+      }),
+      makeTool('unavailable-send', {
+        description: 'Send an unavailable message',
+        availability: () => false,
+      }),
+    ]);
+    createSearchTool(toolbox);
+
+    const results = await toolbox.execute({
+      name: 'search-tools',
+      arguments: { query: 'send message' },
+    });
+
+    expect(results.error).toBeUndefined();
+    const tools = results.result as Array<{ name: string }>;
+    expect(tools.map((tool) => tool.name)).toContain('available-send');
+    expect(tools.map((tool) => tool.name)).not.toContain('unavailable-send');
+  });
+
   it('respects limit parameter', async () => {
     const toolbox = createToolbox();
     toolbox.register(

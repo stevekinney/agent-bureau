@@ -7,7 +7,11 @@ import type { ToolRisk } from './core/risk';
 import { serializeToolDefinition } from './core/serialization';
 import { assertJsonValue, type JsonValue, stableStringifyJson } from './core/serialization/json';
 import { assertKebabCaseTag, type NormalizeTagsOption, uniqTags } from './core/tag-utilities';
-import type { AnyToolDefinition, ToolLifecycle } from './core/tool-definition';
+import type {
+  AnyToolDefinition,
+  ToolAvailabilityHook,
+  ToolLifecycle,
+} from './core/tool-definition';
 import { defineTool } from './core/tool-definition';
 import { errorString, normalizeError } from './errors';
 import {
@@ -114,6 +118,7 @@ export interface CreateToolOptions<
   examples?: readonly string[];
   risk?: ToolRisk;
   lifecycle?: ToolLifecycle;
+  availability?: ToolAvailabilityHook;
   input?: z.ZodType<TInput> | z.ZodRawShape | z.ZodTypeAny;
   execute:
     | ((params: TInput, context: TContext) => Promise<TReturn>)
@@ -434,6 +439,7 @@ export function createTool<
     examples,
     risk,
     lifecycle,
+    availability,
     input: toolInput,
     execute: fn,
     timeout,
@@ -499,6 +505,7 @@ export function createTool<
     ...(metadataValue !== undefined ? { metadata: metadataValue } : {}),
     ...(resolvedRisk !== undefined ? { risk: resolvedRisk } : {}),
     ...(lifecycle !== undefined ? { lifecycle } : {}),
+    ...(availability !== undefined ? { availability } : {}),
     input: normalizedInput,
   }) as AnyToolDefinition;
 
@@ -1667,6 +1674,8 @@ function defaultErrorCode(category: ToolErrorCategory): string {
       return 'PERMISSION_DENIED';
     case 'not_found':
       return 'NOT_FOUND';
+    case 'unavailable':
+      return 'TOOL_UNAVAILABLE';
     case 'conflict':
       return 'CONFLICT';
     case 'transient':

@@ -1,5 +1,5 @@
 import type { GeminiPart } from 'armorer/adapters/gemini';
-import { parseGeminiToolCalls, toGeminiTools } from 'armorer/adapters/gemini';
+import { parseGeminiToolCalls } from 'armorer/adapters/gemini';
 import { toGeminiMessages } from 'conversationalist/adapters/gemini';
 
 import { ProviderError } from './errors.ts';
@@ -59,7 +59,7 @@ export function createGeminiProvider(options: GeminiProviderOptions): GenerateFu
   return async (context: GenerateContext): Promise<GenerateResponse> => {
     const generativeModel = await getModel();
     const { systemInstruction, contents } = toGeminiMessages(context.conversation.current);
-    const tools = toGeminiTools(context.toolbox);
+    const tools = await context.toolbox.toGeminiTools();
     const hasTools = tools.length > 0;
 
     const params: Record<string, unknown> = {
@@ -171,7 +171,7 @@ export function createGeminiProviderStream(
     const generativeModel = await getModel();
     const { streaming } = context;
     const { systemInstruction, contents } = toGeminiMessages(context.conversation.current);
-    const tools = toGeminiTools(context.toolbox);
+    const tools = await context.toolbox.toGeminiTools();
     const hasTools = tools.length > 0;
 
     const params: Record<string, unknown> = {
