@@ -123,6 +123,30 @@ describe('provider reverse conversion', () => {
     ]);
   });
 
+  it('downgrades Anthropic text document sources to text content', () => {
+    const conversation = fromAnthropicMessages({
+      messages: [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'document',
+              title: 'notes.md',
+              source: {
+                type: 'text',
+                media_type: 'text/markdown',
+                data: '# Notes\n\nPlain document text.',
+              },
+            },
+          ],
+        },
+      ],
+    });
+    const messages = getOrderedMessages(conversation);
+
+    expect(messages[0]?.content).toBe('# Notes\n\nPlain document text.');
+  });
+
   it('downgrades document content to text for providers without document blocks', () => {
     let conversation = createConversationHistory();
     conversation = appendMessages(conversation, {

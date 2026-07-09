@@ -571,13 +571,16 @@ function toGroupableContentPart(block: AnthropicContentBlock): MultiModalContent
       return { type: 'container_upload', file_id: block.file_id };
     case 'document': {
       const name = block.title ?? 'document';
-      if (block.source.type === 'base64' || block.source.type === 'text') {
+      if (block.source.type === 'base64') {
         return {
           type: 'document',
           name,
           mimeType: block.source.media_type,
           source: { kind: 'base64', data: block.source.data },
         };
+      }
+      if (block.source.type === 'text') {
+        return { type: 'text', text: block.source.data };
       }
       if (block.source.type === 'url') {
         return {
