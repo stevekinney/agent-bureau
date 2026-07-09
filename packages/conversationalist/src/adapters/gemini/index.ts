@@ -272,6 +272,12 @@ function extractSystemInstruction(messages: ReadonlyArray<Message>): GeminiConte
  *   contents,
  * });
  * ```
+ *
+ * `message.cacheBoundary` is intentionally a no-op here: Gemini's context
+ * caching is an out-of-band resource (`cachedContent`, created ahead of time
+ * via a separate API call and referenced by name in the request) rather than
+ * a per-message annotation, so there is no per-message wire field to
+ * translate the mark to.
  */
 export function toGeminiMessages(conversation: Conversation): GeminiConversation {
   assertConversationSafe(conversation);

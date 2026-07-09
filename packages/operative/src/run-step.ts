@@ -276,6 +276,41 @@ function createElicit(
 }
 
 /**
+ * Seals every tool-call message that has no matching tool-result yet with a
+ * synthesized error result. Called on every unrecovered error/abort path that
+ * runs after `conversation.appendToolCalls` — a `beforeToolExecution` hook
+ * throwing, unrecovered tool-execution failure, or a `validateToolResult`
+ * hook throwing — so a killed or errored run never leaves a dangling
+ * `tool-call` message behind. A dangling tool-call breaks replay: every
+ * provider adapter requires a `tool_use`/`tool_call` to have a paired result
+ * before the conversation can be sent to the model again (durable resume,
+ * retry-from-history, etc.).
+ */
+async function sealDanglingToolCalls(
+  conversation: Conversation,
+  collectAsync: boolean,
+  reason: string,
+): Promise<void> {
+  const pending = conversation.getPendingToolCalls();
+  if (pending.length === 0) return;
+
+  const danglingResults = pending.map((tc) => ({
+    callId: tc.id,
+    toolCallId: tc.id,
+    toolName: tc.name,
+    outcome: 'error' as const,
+    content: reason,
+    result: reason,
+  }));
+
+  if (collectAsync) {
+    await conversation.appendToolResultsAsync(danglingResults);
+  } else {
+    conversation.appendToolResults(danglingResults);
+  }
+}
+
+/**
  * Executes exactly one iteration of the agent loop against a live
  * {@link Conversation}, mutating it in place and pushing any completed step
  * into `runState.steps`. This is the entire per-step body extracted verbatim
@@ -744,6 +779,11 @@ export async function runStep(
           });
         }
       } catch (error) {
+        await sealDanglingToolCalls(
+          conversation,
+          deps.collectAsync,
+          'Tool execution aborted before a result could be produced (beforeToolExecution hook failed)',
+        );
         emitter?.dispatch(new RunErrorEvent(step, error));
         return { kind: 'error', error };
       }
@@ -761,6 +801,11 @@ export async function runStep(
           callsToExecute = registryResult;
         }
       } catch (error) {
+        await sealDanglingToolCalls(
+          conversation,
+          deps.collectAsync,
+          'Tool execution aborted before a result could be produced (beforeToolExecution hook failed)',
+        );
         emitter?.dispatch(new RunErrorEvent(step, error));
         return { kind: 'error', error };
       }
@@ -858,6 +903,11 @@ export async function runStep(
           }
         }
         if (!recovered) {
+          await sealDanglingToolCalls(
+            conversation,
+            deps.collectAsync,
+            'Tool execution failed before a result could be produced',
+          );
           emitter?.dispatch(new RunErrorEvent(step, error));
           return { kind: 'error', error };
         }
@@ -901,6 +951,14 @@ export async function runStep(
           }
           results = validatedResults;
         } catch (error) {
+          // Validation failed, but the underlying tool execution already
+          // produced real results — seal the tool calls with those
+          // (unvalidated) results rather than leaving them dangling.
+          if (deps.collectAsync) {
+            await conversation.appendToolResultsAsync(results);
+          } else {
+            conversation.appendToolResults(results);
+          }
           emitter?.dispatch(new RunErrorEvent(step, error));
           return { kind: 'error', error };
         }

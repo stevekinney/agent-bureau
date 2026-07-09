@@ -88,6 +88,24 @@ describe('conversation (functional)', () => {
     ]);
   });
 
+  test('cacheBoundary survives a JSON serialization round trip', () => {
+    let c = createConversation();
+    c = appendMessages(
+      c,
+      { role: 'system', content: 'Stable prefix.', cacheBoundary: true },
+      {
+        role: 'user',
+        content: 'Not a boundary',
+      },
+    );
+
+    const restored = deserializeConversation(JSON.parse(JSON.stringify(c)));
+    const [system, user] = getOrderedMessages(restored);
+
+    expect(system?.cacheBoundary).toBe(true);
+    expect(user?.cacheBoundary).toBeUndefined();
+  });
+
   test('redact message by position', () => {
     let c = createConversation();
     c = appendUserMessage(c, 'secret');

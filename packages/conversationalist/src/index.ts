@@ -10,6 +10,7 @@ export type {
   InstructionSection,
   InstructionTemplate,
   MissingVariableStrategy,
+  SectionsToMessageInputsOptions,
   TemplateOptions,
 } from './composition/index';
 export {
@@ -18,6 +19,7 @@ export {
   createInstructionTemplate,
   extractTemplateVariables,
   renderTemplate,
+  sectionsToMessageInputs,
   whenAnyToolAvailable,
   whenMetadata,
   whenMetadataPresent,

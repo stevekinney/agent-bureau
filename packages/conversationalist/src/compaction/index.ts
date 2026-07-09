@@ -297,6 +297,7 @@ export async function compactConversation(
       toolCall: m.toolCall ? { ...m.toolCall } : undefined,
       toolResult: m.toolResult ? { ...m.toolResult } : undefined,
       tokenUsage: m.tokenUsage ? { ...m.tokenUsage } : undefined,
+      cacheBoundary: m.cacheBoundary,
     }));
     compacted = appendMessages(compacted, ...preservedInputs, env);
   }

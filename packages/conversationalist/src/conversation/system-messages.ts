@@ -73,6 +73,7 @@ export function prependSystemMessage(
       toolCall: message.toolCall,
       toolResult: message.toolResult,
       tokenUsage: message.tokenUsage,
+      cacheBoundary: message.cacheBoundary,
     }),
   );
 
@@ -120,6 +121,7 @@ export function replaceSystemMessage(
     toolCall: undefined,
     toolResult: undefined,
     tokenUsage: undefined,
+    cacheBoundary: original.cacheBoundary,
   });
 
   const next: Conversation = {
@@ -182,6 +184,7 @@ export function collapseSystemMessages(
     toolCall: undefined,
     toolResult: undefined,
     tokenUsage: undefined,
+    cacheBoundary: firstSystemMsg.cacheBoundary,
   });
 
   const systemIdsToRemove = systemMessages.slice(1).reduce((ids, message) => {

@@ -101,6 +101,7 @@ export function redactMessageAtPosition(
     toolCall,
     toolResult,
     tokenUsage: original.tokenUsage ? { ...original.tokenUsage } : undefined,
+    cacheBoundary: original.cacheBoundary,
   });
 
   const resolvedEnvironment = resolveConversationEnvironment(env);

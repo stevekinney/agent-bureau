@@ -42,6 +42,7 @@ const cloneMessage = (
     toolCall: original.toolCall ? { ...original.toolCall } : undefined,
     toolResult: original.toolResult ? { ...original.toolResult } : undefined,
     tokenUsage: overrides.tokenUsage,
+    cacheBoundary: original.cacheBoundary,
   };
 
   if (isAssistantMessage(original)) {

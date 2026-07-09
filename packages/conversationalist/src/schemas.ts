@@ -251,6 +251,7 @@ export const messageInputSchema = z
     toolResult: toolResultSchema.optional(),
     tokenUsage: tokenUsageSchema.optional(),
     goalCompleted: z.boolean().optional(),
+    cacheBoundary: z.boolean().optional(),
   })
   .strict() satisfies z.ZodType<MessageInput>;
 
@@ -270,6 +271,7 @@ export const messageSchema = z
     toolResult: toolResultSchema.optional(),
     tokenUsage: tokenUsageSchema.optional(),
     goalCompleted: z.boolean().optional(),
+    cacheBoundary: z.boolean().optional(),
   })
   .strict() satisfies z.ZodType<Message>;
 

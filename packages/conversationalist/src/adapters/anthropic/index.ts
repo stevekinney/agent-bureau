@@ -163,9 +163,20 @@ export interface AnthropicContainerUploadBlock {
 }
 
 /**
- * Anthropic content block union type.
+ * Anthropic prompt-cache breakpoint marker. Attached to the LAST content
+ * block of a message (or system block) to mark everything up to and
+ * including it as a cacheable stable prefix. Lowered from
+ * {@link import('../../types').MessageInput.cacheBoundary}.
  */
-export type AnthropicContentBlock =
+export interface AnthropicCacheControl {
+  type: 'ephemeral';
+}
+
+/**
+ * Anthropic content block union type. Every block variant can carry a
+ * `cache_control` breakpoint marker.
+ */
+export type AnthropicContentBlock = (
   | AnthropicTextBlock
   | AnthropicImageBlock
   | AnthropicDocumentBlock
@@ -176,7 +187,8 @@ export type AnthropicContentBlock =
   | AnthropicServerToolUseBlock
   | AnthropicWebSearchToolResultBlock
   | AnthropicServerToolResultBlock
-  | AnthropicContainerUploadBlock;
+  | AnthropicContainerUploadBlock
+) & { cache_control?: AnthropicCacheControl };
 
 /**
  * Anthropic message format for the Messages API.
@@ -187,11 +199,25 @@ export interface AnthropicMessage {
 }
 
 /**
+ * A system-prompt block, mirroring the shape Anthropic accepts when `system`
+ * is passed as an array of blocks rather than a single string (required to
+ * attach a `cache_control` breakpoint to an individual system segment).
+ */
+export interface AnthropicSystemBlock {
+  type: 'text';
+  text: string;
+  cache_control?: AnthropicCacheControl;
+}
+
+/**
  * Result of converting a conversation to Anthropic format.
- * System messages are extracted separately since Anthropic uses a top-level system parameter.
+ * System messages are extracted separately since Anthropic uses a top-level
+ * system parameter. `system` is a plain string unless at least one system
+ * message carries a cache boundary, in which case each system message
+ * becomes its own addressable block so the breakpoint can be attached.
  */
 export interface AnthropicConversation {
-  system?: string;
+  system?: string | AnthropicSystemBlock[];
   messages: AnthropicMessage[];
 }
 
@@ -367,9 +393,27 @@ function toToolResultBlock(toolResult: ToolResult): AnthropicToolResultBlock {
 }
 
 /**
- * Collects system message content from a conversation.
+ * Renders a single system/developer message's content to plain text.
  */
-function extractSystemContent(messages: ReadonlyArray<Message>): string | undefined {
+function systemMessageText(message: Message): string {
+  if (typeof message.content === 'string') {
+    return message.content;
+  }
+  return message.content
+    .filter((part): part is { type: 'text'; text: string } => part.type === 'text')
+    .map((part) => part.text ?? '')
+    .join('\n\n');
+}
+
+/**
+ * Collects system message content from a conversation. Returns a plain
+ * joined string in the common case; when at least one system message carries
+ * a `cacheBoundary`, returns one addressable block per system message so the
+ * cache breakpoint can be attached to the right segment.
+ */
+function extractSystemPrompt(
+  messages: ReadonlyArray<Message>,
+): string | AnthropicSystemBlock[] | undefined {
   const systemMessages = messages.filter(
     (m) => (m.role === 'system' || m.role === 'developer') && !m.hidden && !isStreamingMessage(m),
   );
@@ -378,20 +422,16 @@ function extractSystemContent(messages: ReadonlyArray<Message>): string | undefi
     return undefined;
   }
 
-  const parts: string[] = [];
-  for (const msg of systemMessages) {
-    if (typeof msg.content === 'string') {
-      parts.push(msg.content);
-    } else {
-      for (const part of msg.content) {
-        if (part.type === 'text') {
-          parts.push(part.text ?? '');
-        }
-      }
-    }
+  const hasCacheBoundary = systemMessages.some((m) => m.cacheBoundary);
+  if (!hasCacheBoundary) {
+    return systemMessages.map((m) => systemMessageText(m)).join('\n\n');
   }
 
-  return parts.join('\n\n');
+  return systemMessages.map((m) => ({
+    type: 'text' as const,
+    text: systemMessageText(m),
+    ...(m.cacheBoundary ? { cache_control: { type: 'ephemeral' as const } } : {}),
+  }));
 }
 
 /**
@@ -414,7 +454,7 @@ function extractSystemContent(messages: ReadonlyArray<Message>): string | undefi
 export function toAnthropicMessages(conversation: Conversation): AnthropicConversation {
   assertConversationSafe(conversation);
   const ordered = getOrderedMessages(conversation);
-  const system = extractSystemContent(ordered);
+  const system = extractSystemPrompt(ordered);
   const messages: AnthropicMessage[] = [];
 
   // Track pending content blocks to merge consecutive same-role messages
@@ -424,7 +464,12 @@ export function toAnthropicMessages(conversation: Conversation): AnthropicConver
   const flushCurrent = () => {
     if (currentRole && currentBlocks.length > 0) {
       const onlyBlock = currentBlocks.length === 1 ? currentBlocks[0] : undefined;
-      const collapsible = onlyBlock?.type === 'text' && onlyBlock.citations === undefined;
+      // A cache_control breakpoint must stay attached to a real block — a
+      // lone text block carrying one cannot collapse to a bare string.
+      const collapsible =
+        onlyBlock?.type === 'text' &&
+        onlyBlock.citations === undefined &&
+        onlyBlock.cache_control === undefined;
       messages.push({
         role: currentRole,
         content: collapsible && onlyBlock?.type === 'text' ? onlyBlock.text : currentBlocks,
@@ -475,6 +520,19 @@ export function toAnthropicMessages(conversation: Conversation): AnthropicConver
       blocks = [toToolResultBlock(message.toolResult)];
     } else {
       continue;
+    }
+
+    // A cache boundary marks everything up to and including THIS message as
+    // cacheable, so the breakpoint lands on the last block this specific
+    // message contributed (not the last block of the merged Anthropic
+    // message, which may span several ConversationHistory messages).
+    if (message.cacheBoundary && blocks.length > 0) {
+      const lastIndex = blocks.length - 1;
+      const lastBlock = blocks[lastIndex]!;
+      blocks = [
+        ...blocks.slice(0, lastIndex),
+        { ...lastBlock, cache_control: { type: 'ephemeral' } },
+      ];
     }
 
     // Merge with current or start new
@@ -635,11 +693,21 @@ function toGroupableContentPart(block: AnthropicContentBlock): MultiModalContent
 function toMessageInputs(payload: AnthropicConversation): MessageInput[] {
   const inputs: MessageInput[] = [];
 
-  if (payload.system !== undefined) {
+  if (typeof payload.system === 'string') {
     inputs.push({
       role: 'system',
       content: payload.system,
     });
+  } else if (payload.system !== undefined) {
+    // Array form: one addressable system segment per block, cache mark
+    // restored from `cache_control` on that block.
+    for (const block of payload.system) {
+      inputs.push({
+        role: 'system',
+        content: block.text,
+        ...(block.cache_control !== undefined ? { cacheBoundary: true } : {}),
+      });
+    }
   }
 
   for (const message of payload.messages) {
@@ -659,29 +727,38 @@ function toMessageInputs(payload: AnthropicConversation): MessageInput[] {
     // their own message, keeping interleaved sequences like
     // [text, tool_use, text] in their true order.
     let pendingParts: MultiModalContent[] = [];
+    let pendingCacheBoundary = false;
 
     const flushPending = () => {
       if (pendingParts.length === 0) return;
+      const cacheBoundaryFlag = pendingCacheBoundary ? { cacheBoundary: true as const } : {};
       // A lone PLAIN text part round-trips as a string to match the
       // one-block-one-string storage convention; a cited text part (or any mixed
       // run) stays as an array so citations aren't lost.
       const first = pendingParts[0];
       if (pendingParts.length === 1 && first?.type === 'text' && first.citations === undefined) {
-        inputs.push({ role: message.role, content: first.text });
+        inputs.push({ role: message.role, content: first.text, ...cacheBoundaryFlag });
       } else {
-        inputs.push({ role: message.role, content: pendingParts });
+        inputs.push({ role: message.role, content: pendingParts, ...cacheBoundaryFlag });
       }
       pendingParts = [];
+      pendingCacheBoundary = false;
     };
 
     for (const block of message.content) {
       const part = toGroupableContentPart(block);
       if (part !== undefined) {
         pendingParts.push(part);
+        if (block.cache_control !== undefined) {
+          pendingCacheBoundary = true;
+        }
       } else if (block.type === 'tool_use' || block.type === 'tool_result') {
         // Role-bearing block: flush the accumulated run first to preserve order.
         flushPending();
-        inputs.push(toMessageInputFromBlock(block));
+        const roleInput = toMessageInputFromBlock(block);
+        inputs.push(
+          block.cache_control !== undefined ? { ...roleInput, cacheBoundary: true } : roleInput,
+        );
       }
     }
 
