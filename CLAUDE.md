@@ -19,7 +19,7 @@ This monorepo consumes **weft** (`@lostgradient/weft`) and **cinder** (`@lostgra
 ```bash
 tasks create --project weft \
   --title "Engine.recoverAll throws on duplicate run id" \
-  --description "Consumed from agent-bureau via the @lostgradient/weft version declared in package.json.
+  --description "Consumed from agent-bureau via the @lostgradient/weft version declared in the relevant workspace package.json.
 
 Repro: ...
 Expected: ...
