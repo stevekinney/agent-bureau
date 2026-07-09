@@ -1,8 +1,12 @@
 import type { AnthropicContentBlock } from 'armorer/adapters/anthropic';
 import { parseAnthropicToolCalls } from 'armorer/adapters/anthropic';
+import type { ConversationHistory, Message, MessageInput } from 'conversationalist';
+import { appendMessages, createProjection } from 'conversationalist';
 import { toAnthropicMessages } from 'conversationalist/adapters/anthropic';
 import type { ToolCallInput } from 'interoperability';
 
+import type { TokenBudget } from '../context/token-budget.ts';
+import type { ContextAssembler } from '../context/types.ts';
 import { ProviderError } from './errors.ts';
 import { resolveAnthropicEffort } from './shared/effort.ts';
 import { resolveAnthropicModel } from './shared/model-registry.ts';
@@ -19,6 +23,60 @@ import type {
   StreamingGenerateFunction,
   StreamingHandle,
 } from './types.ts';
+
+/**
+ * Converts an assembled `Message` (from `ContextAssembler`) into the
+ * `MessageInput` shape `appendMessages` expects, preserving the
+ * `cacheBoundary` mark a stable-prefix assembly sets on the boundary message.
+ */
+function toMessageInput(message: Message): MessageInput {
+  const content: MessageInput['content'] =
+    typeof message.content === 'string' ? message.content : [...message.content];
+  return {
+    role: message.role,
+    content,
+    metadata: { ...message.metadata },
+    hidden: message.hidden,
+    ...(message.toolCall ? { toolCall: message.toolCall } : {}),
+    ...(message.toolResult ? { toolResult: message.toolResult } : {}),
+    ...(message.tokenUsage ? { tokenUsage: message.tokenUsage } : {}),
+    ...(message.cacheBoundary ? { cacheBoundary: true as const } : {}),
+  };
+}
+
+/**
+ * Creates a stateful helper that runs `assembler` in stable-prefix mode on
+ * every call and folds the result into an incremental `ConversationHistory`
+ * through `createProjection` — the same conversation-level prefix-extension
+ * mechanism AB-98 built for incremental streaming projections. Reusing one
+ * projection instance across calls means the unchanged stable prefix is
+ * never re-processed, only the new tail; the `cacheBoundary` mark that
+ * landed on the prefix's last message the first time it was appended is
+ * therefore preserved untouched for as long as it stays a prefix extension,
+ * which is exactly what lets Anthropic's `cache_control` breakpoint survive
+ * across steps.
+ */
+function createCacheAwareAssembly(
+  assembler: ContextAssembler,
+  budget: TokenBudget,
+  pinnedMessages?: ReadonlyArray<Message>,
+): (context: GenerateContext) => ConversationHistory {
+  const projection = createProjection<Message>({
+    identify: (message) => message.id,
+    reduce: ({ conversation, event }) => appendMessages(conversation, toMessageInput(event)),
+  });
+
+  return (context: GenerateContext): ConversationHistory => {
+    const { messages } = assembler({
+      conversation: context.conversation,
+      budget,
+      stablePrefix: true,
+      ...(pinnedMessages ? { pinnedMessages } : {}),
+    });
+    projection.apply(messages);
+    return projection.snapshot();
+  };
+}
 
 /**
  * Build a provider-neutral {@link TokenUsage} from an Anthropic `usage` payload.
@@ -62,6 +120,10 @@ export function createAnthropicProvider(options: AnthropicProviderOptions): Gene
     : undefined;
   const common = resolveCommonParameters(options);
   let clientPromise: Promise<AnthropicClient> | undefined;
+  const cacheAwareAssembly =
+    options.assembler && options.contextBudget
+      ? createCacheAwareAssembly(options.assembler, options.contextBudget, options.pinnedMessages)
+      : undefined;
 
   function getClient(): Promise<AnthropicClient> {
     if (options.client) return Promise.resolve(options.client);
@@ -76,7 +138,10 @@ export function createAnthropicProvider(options: AnthropicProviderOptions): Gene
 
   return async (context: GenerateContext): Promise<GenerateResponse> => {
     const client = await getClient();
-    const { system, messages } = toAnthropicMessages(context.conversation.current);
+    const conversationForRequest = cacheAwareAssembly
+      ? cacheAwareAssembly(context)
+      : context.conversation.current;
+    const { system, messages } = toAnthropicMessages(conversationForRequest);
     const tools = await context.toolbox.toAnthropicTools();
     const hasTools = tools.length > 0;
 
@@ -158,6 +223,10 @@ export function createAnthropicProviderStream(
     : undefined;
   const common = resolveCommonParameters(options);
   let clientPromise: Promise<AnthropicStreamingClient> | undefined;
+  const cacheAwareAssembly =
+    options.assembler && options.contextBudget
+      ? createCacheAwareAssembly(options.assembler, options.contextBudget, options.pinnedMessages)
+      : undefined;
 
   function getClient(): Promise<AnthropicStreamingClient> {
     if (options.client) return Promise.resolve(options.client);
@@ -175,7 +244,10 @@ export function createAnthropicProviderStream(
   ): Promise<GenerateResponse> => {
     const client = await getClient();
     const { streaming } = context;
-    const { system, messages } = toAnthropicMessages(context.conversation.current);
+    const conversationForRequest = cacheAwareAssembly
+      ? cacheAwareAssembly(context)
+      : context.conversation.current;
+    const { system, messages } = toAnthropicMessages(conversationForRequest);
     const tools = await context.toolbox.toAnthropicTools();
     const hasTools = tools.length > 0;
 

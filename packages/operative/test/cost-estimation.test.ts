@@ -3,6 +3,7 @@ import { describe, expect, it } from 'bun:test';
 import {
   type CostEstimate,
   defaultPricingTable,
+  estimateCacheHitRate,
   estimateCost,
   getModelPricing,
   type ModelPricing,
@@ -235,5 +236,36 @@ describe('defaultPricingTable', () => {
       expect(pricing!.cacheReadCostPerMillionTokens).toBeUndefined();
       expect(pricing!.cacheWriteCostPerMillionTokens).toBeUndefined();
     }
+  });
+});
+
+describe('estimateCacheHitRate', () => {
+  it('returns undefined when the usage carries no cache signal at all', () => {
+    expect(estimateCacheHitRate({ prompt: 100, completion: 20, total: 120 })).toBeUndefined();
+  });
+
+  it('returns 0 for a pure cache-write request (first turn, no reads yet)', () => {
+    expect(
+      estimateCacheHitRate({ prompt: 0, completion: 5, total: 5, cacheCreationTokens: 500 }),
+    ).toBe(0);
+  });
+
+  it('returns 1 when the entire request was served from cache', () => {
+    expect(estimateCacheHitRate({ prompt: 0, completion: 5, total: 5, cacheReadTokens: 500 })).toBe(
+      1,
+    );
+  });
+
+  it('computes the fraction served from cache when prompt, reads, and writes are mixed', () => {
+    // 100 read + 50 write + 50 fresh prompt = 200 total input; 100/200 = 0.5.
+    expect(
+      estimateCacheHitRate({
+        prompt: 50,
+        completion: 10,
+        total: 160,
+        cacheReadTokens: 100,
+        cacheCreationTokens: 50,
+      }),
+    ).toBe(0.5);
   });
 });

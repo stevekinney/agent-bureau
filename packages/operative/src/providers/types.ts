@@ -1,3 +1,7 @@
+import type { Message } from 'conversationalist';
+
+import type { TokenBudget } from '../context/token-budget.ts';
+import type { ContextAssembler } from '../context/types.ts';
 import type { ResponseFormat, ToolChoice } from './structured-output/types.ts';
 
 export type {
@@ -80,6 +84,20 @@ export interface AnthropicMessageResponse {
 export interface AnthropicProviderOptions extends BaseProviderOptions {
   client?: AnthropicClient;
   apiKey?: string;
+  /**
+   * Enables prompt-cache-aware context assembly. When set (together with
+   * {@link AnthropicProviderOptions.contextBudget}), each call runs
+   * `assembler` in stable-prefix mode instead of sending the conversation
+   * verbatim. The resulting `cacheBoundary` mark on the assembled
+   * system/pinned prefix is preserved through to the request, so
+   * `toAnthropicMessages` lowers it to a `cache_control` breakpoint — see
+   * `createContextAssembler`'s `stablePrefix` option.
+   */
+  assembler?: ContextAssembler;
+  /** Token budget passed to `assembler`. Required when `assembler` is set. */
+  contextBudget?: TokenBudget;
+  /** Passed through to `assembler` as `pinnedMessages` (e.g. reference docs, tool usage notes). */
+  pinnedMessages?: ReadonlyArray<Message>;
 }
 
 /**

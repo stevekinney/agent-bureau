@@ -59,7 +59,12 @@ export type {
 } from './cost-budget-monitor';
 export { createCostBudgetMonitor } from './cost-budget-monitor';
 export type { CostEstimate, CostEstimationOptions, ModelPricing } from './cost-estimation';
-export { defaultPricingTable, estimateCost, getModelPricing } from './cost-estimation';
+export {
+  defaultPricingTable,
+  estimateCacheHitRate,
+  estimateCost,
+  getModelPricing,
+} from './cost-estimation';
 export type { CreateAgentOptions, StandaloneAgent } from './create-agent';
 export { createAgent } from './create-agent';
 export type {

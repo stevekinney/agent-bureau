@@ -409,19 +409,69 @@ const agent = defineAgent({
 
 #### Context Assembly
 
+`createContextAssembler()` returns a function that, given a conversation and a
+budget, partitions messages into system / retrieved / history slices and
+trims each to fit:
+
 ```typescript
 import { createContextAssembler, createTokenBudget } from 'operative';
 
 const budget = createTokenBudget({
   maxTokens: 100_000,
-  reserveTokens: 4_000,
+  minimumResponseTokens: 4_000,
 });
 
-const assembler = createContextAssembler({
+const assembler = createContextAssembler();
+const { messages, budgetReport } = assembler({ conversation, budget });
+```
+
+**Stable-prefix mode (`stablePrefix: true`)** trades the default
+priority-ranked/budget-fill behavior for a prompt-cache-friendly one: system
+messages and `pinnedMessages` are assembled into a prefix that stays
+byte-identical across steps as the conversation grows — never budget-truncated,
+never re-ranked — and the last message of that prefix comes back with
+`cacheBoundary: true`. History and `retrievedMessages` are unaffected: they're
+assembled exactly as in the default mode and appended AFTER the stable prefix,
+so their normal per-step re-ranking never touches the cached region.
+
+```typescript
+const { messages } = assembler({
+  conversation,
   budget,
-  documents: [{ content: systemDoc, priority: 'high' }],
+  stablePrefix: true,
+  pinnedMessages: [toolUsageNotesMessage], // always included, in order, right after system
 });
 ```
+
+The `cacheBoundary` mark is the same conversation-level primitive
+`conversationalist`'s Anthropic adapter already lowers to a `cache_control`
+breakpoint (`toAnthropicMessages`). `createAnthropicProvider` and
+`createAnthropicProviderStream` consume it directly — pass `assembler` and
+`contextBudget` and every request runs through stable-prefix assembly instead
+of sending the conversation verbatim:
+
+```typescript
+import { createAnthropicProvider, createContextAssembler, createTokenBudget } from 'operative';
+
+const generate = createAnthropicProvider({
+  model: 'claude-sonnet-4-20250514',
+  assembler: createContextAssembler(),
+  contextBudget: createTokenBudget({ maxTokens: 100_000 }),
+  pinnedMessages: [toolUsageNotesMessage],
+});
+```
+
+**Cache economics.** Anthropic prices a cache write at 1.25x the base prompt
+rate and a cache read at 0.1x (`estimateCost` already applies this — see
+`cost-estimation.ts`). A run whose system prompt is a few thousand tokens pays
+that 1.25x premium once, on the first step, then reads the same prefix at
+0.1x on every following step instead of paying full price for it again — a
+~90% cost cut on that slice of the request for steps 2 onward. Prompt-cache
+hit rate is exposed per step and cumulatively on `usage.accumulated`
+(`UsageAccumulatedEvent.stepCacheHitRate` / `totalCacheHitRate`, computed by
+`estimateCacheHitRate`). `test/prompt-cache-economics.test.ts` walks through
+these numbers end to end against the mock Anthropic client (no live API
+calls) — see it for the worked example.
 
 #### Backpressure
 
