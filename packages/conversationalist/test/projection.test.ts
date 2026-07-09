@@ -4,6 +4,7 @@ import {
   appendMessages,
   type ConversationEnvironment,
   createConversationHistory,
+  getMessages,
 } from '../src/conversation/index';
 import { createProjection, isProjectionPrefixExtension } from '../src/projection';
 import {
@@ -194,6 +195,9 @@ function expectIncrementalProjectionToEqualPureFold(
 }
 
 describe('createProjection', () => {
+  const messageContents = (conversation: ConversationHistory): string[] =>
+    getMessages(conversation).map((message) => message.content as string);
+
   it('keeps incremental multi-turn streaming projection equivalent to pure full rebuilds', () => {
     const events: TranscriptEvent[] = [
       { id: '1', kind: 'user.message', content: 'Where is my order?' },
@@ -269,5 +273,81 @@ describe('createProjection', () => {
     expect(projection.processedCount).toBe(2);
     expect(isProjectionPrefixExtension(['1'], ['1', '2'])).toBe(true);
     expect(isProjectionPrefixExtension(['1', '2'], ['1', '3'])).toBe(false);
+  });
+
+  it('uses log keys to refold independent logs with colliding event identities', () => {
+    let reducerCalls = 0;
+    const environment = createTestEnvironment();
+    const projection = createProjection<{ id: string; content: string }>({
+      seed: createSeed(),
+      identify: (event) => event.id,
+      reduce({ conversation, event }) {
+        reducerCalls += 1;
+        return appendMessages(conversation, { role: 'user', content: event.content }, environment);
+      },
+    });
+
+    projection.apply(
+      [
+        { id: '1', content: 'First session message' },
+        { id: '2', content: 'First session tail' },
+      ],
+      { logKey: 'session-a' },
+    );
+    projection.apply(
+      [
+        { id: '1', content: 'Second session message' },
+        { id: '2', content: 'Second session tail' },
+        { id: '3', content: 'Second session extension' },
+      ],
+      { logKey: 'session-b' },
+    );
+
+    expect(reducerCalls).toBe(5);
+    expect(messageContents(projection.snapshot())).toEqual([
+      'Second session message',
+      'Second session tail',
+      'Second session extension',
+    ]);
+  });
+
+  it('creates fresh object state when divergent logs refold from the seed', () => {
+    const environment = createTestEnvironment();
+    const projection = createProjection<{ id: string; content: string }, { count: number }>({
+      seed: createSeed(),
+      initialState: { count: 0 },
+      identify: (event) => event.id,
+      reduce({ conversation, event, state }) {
+        state.count += 1;
+        return {
+          conversation: appendMessages(
+            conversation,
+            { role: 'user', content: `${event.content}:${state.count}` },
+            environment,
+          ),
+          state,
+        };
+      },
+    });
+
+    projection.apply([{ id: '1', content: 'Original' }]);
+    projection.apply([{ id: '2', content: 'Refolded' }]);
+
+    expect(messageContents(projection.snapshot())).toEqual(['Refolded:1']);
+  });
+
+  it('throws when a stateful reducer returns conversation without state', () => {
+    const projection = createProjection<{ id: string }, { count: number }>({
+      seed: createSeed(),
+      initialState: { count: 0 },
+      identify: (event) => event.id,
+      reduce({ conversation }) {
+        return { conversation } as never;
+      },
+    });
+
+    expect(() => projection.apply([{ id: '1' }])).toThrow(
+      'Projection reducer returned a conversation without state.',
+    );
   });
 });

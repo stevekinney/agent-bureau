@@ -2,6 +2,7 @@ import { describe, expectTypeOf, it } from 'bun:test';
 
 import { Conversation } from '../src/history';
 import type { MultiModalContent } from '../src/multi-modal';
+import { createProjection } from '../src/projection';
 import type {
   AssistantMessage,
   ConversationHistory,
@@ -208,6 +209,18 @@ describe('conversationalist types Type Inference', () => {
 
       // Just to verify the test compiles (the errors above are expected)
       expectTypeOf(conv).toMatchTypeOf<ConversationHistory>();
+    });
+  });
+
+  describe('createProjection', () => {
+    it('requires initialState for stateful projections', () => {
+      // @ts-expect-error - stateful projections must provide initialState
+      createProjection<{ id: string }, { count: number }>({
+        identify: (event) => event.id,
+        reduce({ conversation }) {
+          return { conversation, state: { count: 1 } };
+        },
+      });
     });
   });
 });
