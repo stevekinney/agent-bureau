@@ -117,6 +117,46 @@ describe('step hooks', () => {
     expect(result.steps[0].results).toHaveLength(1);
   });
 
+  it('seals tool calls a beforeToolExecution hook filters out (tool-pair integrity)', async () => {
+    // The Seattle call was appended to the conversation via appendToolCalls
+    // before the hook ran, then filtered out of execution entirely by the
+    // hook's return value (not an error/abort). It must still get a
+    // tool-result so the conversation never has a dangling tool-call.
+    const conversation = new Conversation();
+
+    const generate = createMockGenerate([
+      toolCallResponse([weatherToolCall('Denver'), weatherToolCall('Seattle')]),
+      textResponse('Done'),
+    ]);
+
+    await run({
+      generate,
+      toolbox: createTestToolbox([tool]),
+      conversation,
+      stopWhen: noToolCalls(),
+      beforeToolExecution: async ({ toolCalls }) => {
+        return toolCalls.filter((call) => {
+          const args = call.arguments as { location: string };
+          return args.location === 'Denver';
+        });
+      },
+    });
+
+    expect(conversation.getPendingToolCalls()).toHaveLength(0);
+
+    const messages = conversation.getMessages({ includeHidden: true });
+    const toolCalls = messages.filter((m) => m.role === 'tool-call');
+    const toolResults = messages.filter((m) => m.role === 'tool-result');
+    expect(toolCalls).toHaveLength(2);
+    expect(toolResults).toHaveLength(2);
+
+    const seattleCallId = toolCalls.find(
+      (m) => (m.toolCall?.arguments as { location: string }).location === 'Seattle',
+    )?.toolCall?.id;
+    const seattleResult = toolResults.find((m) => m.toolResult?.callId === seattleCallId);
+    expect(seattleResult?.toolResult?.outcome).toBe('error');
+  });
+
   it('beforeToolExecution returns [] to skip execution', async () => {
     const executedLocations: string[] = [];
 
@@ -145,6 +185,28 @@ describe('step hooks', () => {
 
     expect(executedLocations).toEqual([]);
     expect(result.steps[0].results).toHaveLength(0);
+  });
+
+  it('seals the tool call when beforeToolExecution returns [] to skip all execution (tool-pair integrity)', async () => {
+    const conversation = new Conversation();
+
+    const generate = createMockGenerate([
+      toolCallResponse([weatherToolCall('Denver')]),
+      textResponse('Done'),
+    ]);
+
+    await run({
+      generate,
+      toolbox: createTestToolbox([tool]),
+      conversation,
+      stopWhen: noToolCalls(),
+      beforeToolExecution: async () => [],
+    });
+
+    expect(conversation.getPendingToolCalls()).toHaveLength(0);
+    const messages = conversation.getMessages({ includeHidden: true });
+    expect(messages.filter((m) => m.role === 'tool-call')).toHaveLength(1);
+    expect(messages.filter((m) => m.role === 'tool-result')).toHaveLength(1);
   });
 
   it('afterToolExecution receives correct results', async () => {

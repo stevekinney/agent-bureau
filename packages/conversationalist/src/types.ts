@@ -118,6 +118,19 @@ export interface MessageInput {
   tokenUsage?: TokenUsage | undefined;
   /** Indicates if this message represents goal completion (assistant only) */
   goalCompleted?: boolean | undefined;
+  /**
+   * Marks this message as a prompt-cache boundary: everything up to and
+   * including this message is a stable prefix a provider can cache.
+   * First-class on the conversation model so it survives history
+   * serialization round-trips (schemas.ts, JSON, markdown) without a
+   * parallel annotated-message wrapper. Provider adapters translate the
+   * mark to their native form — Anthropic lowers it to `cache_control` on
+   * the message's last content block; OpenAI and Gemini have no per-message
+   * cache-control primitive, so their adapters treat it as a documented
+   * no-op (OpenAI caches automatically; Gemini uses an out-of-band
+   * `cachedContent` resource, not a message annotation).
+   */
+  cacheBoundary?: boolean | undefined;
 }
 
 /**
@@ -134,6 +147,8 @@ export interface Message {
   toolCall?: Readonly<ToolCall> | undefined;
   toolResult?: Readonly<ToolResult> | undefined;
   tokenUsage?: Readonly<TokenUsage> | undefined;
+  /** See {@link MessageInput.cacheBoundary}. */
+  cacheBoundary?: boolean | undefined;
 }
 
 /**

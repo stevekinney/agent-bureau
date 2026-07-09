@@ -119,6 +119,7 @@ const appendMessagesInternal = (
         toolCall: processedInput.toolCall,
         toolResult: processedInput.toolResult,
         tokenUsage: processedInput.tokenUsage,
+        cacheBoundary: processedInput.cacheBoundary,
       };
 
       let message: Message;

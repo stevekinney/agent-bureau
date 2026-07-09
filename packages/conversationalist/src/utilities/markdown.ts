@@ -207,6 +207,7 @@ function sanitizeMessage(message: Message, options: ResolvedMarkdownOptions): Me
     toolCall: toolCall ? toReadonly(toolCall) : undefined,
     toolResult: toolResult ? toReadonly(toolResult) : undefined,
     tokenUsage: message.tokenUsage ? toReadonly({ ...message.tokenUsage }) : undefined,
+    cacheBoundary: message.cacheBoundary,
   };
 
   if (isAssistantMessage(message)) {
@@ -285,6 +286,7 @@ interface MessageFrontmatter {
   toolResult?: ToolResult;
   tokenUsage?: TokenUsage;
   goalCompleted?: boolean;
+  cacheBoundary?: boolean;
 }
 
 /**
@@ -450,6 +452,9 @@ function toMarkdownWithMetadata(
     }
     if (isAssistantMessage(message) && message.goalCompleted !== undefined) {
       messageMeta.goalCompleted = message.goalCompleted;
+    }
+    if (message.cacheBoundary !== undefined) {
+      messageMeta.cacheBoundary = message.cacheBoundary;
     }
 
     messagesMetadata[message.id] = messageMeta;
@@ -632,6 +637,7 @@ function parseMarkdownWithMetadata(trimmed: string): Conversation {
         ? toReadonly(normalizeLegacyMarkdownToolResult(messageMeta.toolResult))
         : undefined,
       tokenUsage: messageMeta.tokenUsage ? toReadonly({ ...messageMeta.tokenUsage }) : undefined,
+      cacheBoundary: messageMeta.cacheBoundary,
     };
     let message: Message | AssistantMessage = baseMessage;
     if (role === 'assistant') {

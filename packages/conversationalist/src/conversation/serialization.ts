@@ -104,6 +104,7 @@ function normalizeMessage(message: Message): Message | AssistantMessage {
     toolCall: message.toolCall ? { ...message.toolCall } : undefined,
     toolResult: normalizeToolResult(message.toolResult),
     tokenUsage: message.tokenUsage ? { ...message.tokenUsage } : undefined,
+    cacheBoundary: message.cacheBoundary,
   };
 
   if (isAssistantMessage(message)) {

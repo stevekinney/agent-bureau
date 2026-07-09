@@ -2,8 +2,12 @@ import { describe, expect, it } from 'bun:test';
 
 import type { AnthropicConversation } from '../src/adapters/anthropic';
 import { fromAnthropicMessages, toAnthropicMessages } from '../src/adapters/anthropic';
-import { toGeminiMessages } from '../src/adapters/gemini';
-import { toOpenAIMessages, toOpenAIMessagesGrouped } from '../src/adapters/openai';
+import { fromGeminiMessages, toGeminiMessages } from '../src/adapters/gemini';
+import {
+  fromOpenAIMessages,
+  toOpenAIMessages,
+  toOpenAIMessagesGrouped,
+} from '../src/adapters/openai';
 import { simpleTokenEstimator, truncateToTokenLimit } from '../src/context';
 import {
   appendMessages,
@@ -14,6 +18,7 @@ import {
 import { ConversationalistError } from '../src/errors';
 import { appendStreamingMessage } from '../src/streaming';
 import type { ConversationHistory as Conversation } from '../src/types';
+import { getOrderedMessages } from '../src/utilities/message-store';
 
 const testEnvironment = {
   now: () => '2024-01-01T00:00:00.000Z',
@@ -761,6 +766,199 @@ describe('Anthropic Adapter', () => {
         // @ts-expect-error - testing runtime behavior for invalid role
         appendMessages(conv, { role: 'unknown', content: 'blah' }, testEnvironment),
       ).toThrow(ConversationalistError);
+    });
+  });
+
+  describe('cacheBoundary → cache_control', () => {
+    it('lowers a cache-boundary system message to a system block with cache_control', () => {
+      let conv = createConversation({ id: 'test' }, testEnvironment);
+      conv = appendMessages(
+        conv,
+        { role: 'system', content: 'Shared contract.', cacheBoundary: true },
+        { role: 'system', content: 'Task-specific context.' },
+        { role: 'user', content: 'Hello' },
+        testEnvironment,
+      );
+
+      const { system } = toAnthropicMessages(conv);
+
+      expect(Array.isArray(system)).toBe(true);
+      const blocks = system as unknown as Array<Record<string, unknown>>;
+      expect(blocks).toEqual([
+        { type: 'text', text: 'Shared contract.', cache_control: { type: 'ephemeral' } },
+        { type: 'text', text: 'Task-specific context.' },
+      ]);
+    });
+
+    it('uses a plain joined string for system when no message carries a cache boundary', () => {
+      const conv = createBasicConversation();
+      const { system } = toAnthropicMessages(conv);
+      expect(typeof system).toBe('string');
+    });
+
+    it('attaches cache_control to the last content block of a cache-boundary message', () => {
+      let conv = createConversation({ id: 'test' }, testEnvironment);
+      conv = appendMessages(
+        conv,
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'First part' },
+            { type: 'text', text: 'Second part' },
+          ],
+          cacheBoundary: true,
+        },
+        testEnvironment,
+      );
+
+      const { messages } = toAnthropicMessages(conv);
+      const blocks = messages[0]?.content as any[];
+
+      expect(blocks).toHaveLength(2);
+      expect(blocks[0].cache_control).toBeUndefined();
+      expect(blocks[1].cache_control).toEqual({ type: 'ephemeral' });
+    });
+
+    it('does not collapse a lone cache-boundary text block to a bare string', () => {
+      let conv = createConversation({ id: 'test' }, testEnvironment);
+      conv = appendMessages(
+        conv,
+        { role: 'user', content: 'Stable prefix message', cacheBoundary: true },
+        testEnvironment,
+      );
+
+      const { messages } = toAnthropicMessages(conv);
+
+      expect(Array.isArray(messages[0]?.content)).toBe(true);
+      const blocks = messages[0]?.content as any[];
+      expect(blocks).toEqual([
+        { type: 'text', text: 'Stable prefix message', cache_control: { type: 'ephemeral' } },
+      ]);
+    });
+
+    it('round-trips a cache boundary through toAnthropicMessages/fromAnthropicMessages', () => {
+      let conv = createConversation({ id: 'test' }, testEnvironment);
+      conv = appendMessages(
+        conv,
+        { role: 'system', content: 'Shared contract.', cacheBoundary: true },
+        { role: 'user', content: 'Stable prefix message', cacheBoundary: true },
+        testEnvironment,
+      );
+
+      const anthropicPayload = toAnthropicMessages(conv);
+      const roundTripped = fromAnthropicMessages(anthropicPayload);
+      const messages = Object.values(roundTripped.messages).sort((a, b) => a.position - b.position);
+
+      expect(messages[0]?.role).toBe('system');
+      expect(messages[0]?.cacheBoundary).toBe(true);
+      expect(messages[1]?.role).toBe('user');
+      expect(messages[1]?.cacheBoundary).toBe(true);
+    });
+
+    it('splits the run at a cache_control block instead of extending the boundary to later blocks in the same Anthropic message', () => {
+      // toAnthropicMessages merges consecutive same-role messages, so a
+      // single Anthropic message can contain a cache_control block followed
+      // by MORE blocks that came from a later, unmarked ConversationHistory
+      // message. Decoding must not fold that trailing content into the
+      // cache-boundary-marked message — cache_control means "up to and
+      // including THIS block," not "the rest of this Anthropic message."
+      const payload: AnthropicConversation = {
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: 'Before the boundary' },
+              {
+                type: 'text',
+                text: 'The stable prefix',
+                cache_control: { type: 'ephemeral' },
+              },
+              { type: 'text', text: 'After the boundary' },
+            ],
+          },
+        ],
+      };
+
+      const conversation = fromAnthropicMessages(payload);
+      const messages = getOrderedMessages(conversation);
+
+      expect(messages).toHaveLength(3);
+      expect(messages[0]?.content).toBe('Before the boundary');
+      expect(messages[0]?.cacheBoundary).toBeUndefined();
+      expect(messages[1]?.content).toBe('The stable prefix');
+      expect(messages[1]?.cacheBoundary).toBe(true);
+      expect(messages[2]?.content).toBe('After the boundary');
+      expect(messages[2]?.cacheBoundary).toBeUndefined();
+    });
+
+    it('walks back past a trailing thinking block to find a cacheable block for the boundary', () => {
+      let conv = createConversation({ id: 'test' }, testEnvironment);
+      conv = appendMessages(
+        conv,
+        {
+          role: 'assistant',
+          content: [
+            { type: 'text', text: 'Visible answer' },
+            { type: 'thinking', thinking: 'internal reasoning', signature: 'sig' },
+          ],
+          cacheBoundary: true,
+        },
+        testEnvironment,
+      );
+
+      const { messages } = toAnthropicMessages(conv);
+      const blocks = messages[0]?.content as any[];
+
+      const thinkingBlock = blocks.find((b: any) => b.type === 'thinking');
+      const textBlock = blocks.find((b: any) => b.type === 'text');
+      expect(thinkingBlock.cache_control).toBeUndefined();
+      expect(textBlock.cache_control).toEqual({ type: 'ephemeral' });
+    });
+
+    it('does not attach cache_control when every block in the message is non-cacheable', () => {
+      let conv = createConversation({ id: 'test' }, testEnvironment);
+      conv = appendMessages(
+        conv,
+        {
+          role: 'assistant',
+          content: [{ type: 'thinking', thinking: 'internal reasoning', signature: 'sig' }],
+          cacheBoundary: true,
+        },
+        testEnvironment,
+      );
+
+      const { messages } = toAnthropicMessages(conv);
+      const blocks = messages[0]?.content as any[];
+      expect(blocks.every((b: any) => b.cache_control === undefined)).toBe(true);
+    });
+
+    it('caps explicit cache breakpoints at 4, stripping the earliest excess ones', () => {
+      let conv = createConversation({ id: 'test' }, testEnvironment);
+      conv = appendMessages(
+        conv,
+        { role: 'system', content: 'Segment 1', cacheBoundary: true },
+        { role: 'system', content: 'Segment 2', cacheBoundary: true },
+        { role: 'user', content: 'Segment 3', cacheBoundary: true },
+        { role: 'assistant', content: 'Segment 4', cacheBoundary: true },
+        { role: 'user', content: 'Segment 5', cacheBoundary: true },
+        testEnvironment,
+      );
+
+      const { system, messages } = toAnthropicMessages(conv);
+
+      const systemBlocks = system as unknown as Array<Record<string, unknown>>;
+      const allBlocks = [
+        ...systemBlocks,
+        ...messages.flatMap((m) => (Array.isArray(m.content) ? m.content : [])),
+      ];
+      const withBreakpoints = allBlocks.filter(
+        (block) => (block as { cache_control?: unknown }).cache_control !== undefined,
+      );
+
+      // "Segment 1" (the earliest mark) is stripped; the other 4 survive.
+      expect(withBreakpoints).toHaveLength(4);
+      expect(systemBlocks[0]?.['cache_control']).toBeUndefined();
+      expect(systemBlocks[1]?.['cache_control']).toEqual({ type: 'ephemeral' });
     });
   });
 });
@@ -1693,5 +1891,115 @@ describe('C3 — Extended-thinking content blocks (Anthropic adapter)', () => {
     expect(textBlock).toBeDefined();
     expect(textBlock.text).toBe('Here is a fact.');
     expect(textBlock.citations).toEqual(citations);
+  });
+});
+
+/**
+ * Cross-adapter conformance: the same conversation history, run through each
+ * provider adapter's export and back, must preserve the conversation's
+ * structural shape — role sequence, text content, and tool call/result
+ * pairing. Providers are NOT expected to preserve everything identically:
+ * `toAnthropicMessages` merges consecutive same-role messages before
+ * re-import, so message-object identity (ids/positions) is not preserved by
+ * any of the three adapters — only the normalized shape is. `cacheBoundary`
+ * is Anthropic-only by design (OpenAI/Gemini adapters treat it as a
+ * documented no-op), so it is intentionally excluded from the shared
+ * normalization and checked separately per adapter.
+ */
+describe('Cross-adapter conformance', () => {
+  type NormalizedMessage =
+    | { role: 'system'; text: string }
+    | { role: 'user' | 'assistant'; text: string }
+    | { role: 'tool-call'; name: string; callIndex: number }
+    | { role: 'tool-result'; callIndex: number };
+
+  /**
+   * Normalizes call ids to their sequential appearance order rather than
+   * comparing literal ids — Gemini's wire format has no id field, so
+   * `fromGeminiMessages` synthesizes fresh ids on import. What must survive
+   * is the PAIRING (a tool-result resolves to the right tool-call), not the
+   * literal id string.
+   */
+  function normalize(conversation: Conversation): NormalizedMessage[] {
+    const callIndexById = new Map<string, number>();
+    return getOrderedMessages(conversation)
+      .filter((m) => !m.hidden)
+      .map((m): NormalizedMessage | undefined => {
+        if (m.role === 'tool-call' && m.toolCall) {
+          const callIndex = callIndexById.size;
+          callIndexById.set(m.toolCall.id, callIndex);
+          return { role: 'tool-call', name: m.toolCall.name, callIndex };
+        }
+        if (m.role === 'tool-result' && m.toolResult) {
+          return { role: 'tool-result', callIndex: callIndexById.get(m.toolResult.callId) ?? -1 };
+        }
+        if (m.role === 'system' || m.role === 'user' || m.role === 'assistant') {
+          const text = typeof m.content === 'string' ? m.content : JSON.stringify(m.content);
+          return { role: m.role, text };
+        }
+        return undefined;
+      })
+      .filter((m): m is NormalizedMessage => m !== undefined);
+  }
+
+  function buildConversation(): Conversation {
+    let conv = createConversation({ id: 'conformance' }, testEnvironment);
+    conv = appendMessages(
+      conv,
+      { role: 'system', content: 'You are a careful assistant.' },
+      { role: 'user', content: 'What is the weather in NYC?' },
+      {
+        role: 'tool-call',
+        content: '',
+        toolCall: { id: 'call-1', name: 'get_weather', arguments: { location: 'NYC' } },
+      },
+      {
+        role: 'tool-result',
+        content: '',
+        toolResult: { callId: 'call-1', outcome: 'success', content: { tempF: 72 } },
+      },
+      { role: 'assistant', content: 'It is 72°F in NYC.' },
+      testEnvironment,
+    );
+    return conv;
+  }
+
+  it('preserves shape through Anthropic export/import', () => {
+    const original = buildConversation();
+    const roundTripped = fromAnthropicMessages(toAnthropicMessages(original));
+    expect(normalize(roundTripped)).toEqual(normalize(original));
+  });
+
+  it('preserves shape through OpenAI export/import', () => {
+    const original = buildConversation();
+    const roundTripped = fromOpenAIMessages(toOpenAIMessagesGrouped(original));
+    expect(normalize(roundTripped)).toEqual(normalize(original));
+  });
+
+  it('preserves shape through Gemini export/import', () => {
+    const original = buildConversation();
+    const roundTripped = fromGeminiMessages(toGeminiMessages(original));
+    expect(normalize(roundTripped)).toEqual(normalize(original));
+  });
+
+  it('preserves a cache boundary through Anthropic but drops it (by design) through OpenAI and Gemini', () => {
+    let original = createConversation({ id: 'conformance-cache' }, testEnvironment);
+    original = appendMessages(
+      original,
+      { role: 'system', content: 'Stable prefix.', cacheBoundary: true },
+      { role: 'user', content: 'Hello' },
+      testEnvironment,
+    );
+
+    const throughAnthropic = fromAnthropicMessages(toAnthropicMessages(original));
+    const throughOpenAI = fromOpenAIMessages(toOpenAIMessagesGrouped(original));
+    const throughGemini = fromGeminiMessages(toGeminiMessages(original));
+
+    const systemOf = (conv: Conversation) =>
+      getOrderedMessages(conv).find((m) => m.role === 'system');
+
+    expect(systemOf(throughAnthropic)?.cacheBoundary).toBe(true);
+    expect(systemOf(throughOpenAI)?.cacheBoundary).toBeUndefined();
+    expect(systemOf(throughGemini)?.cacheBoundary).toBeUndefined();
   });
 });

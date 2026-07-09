@@ -182,4 +182,47 @@ describe('abort signal handling', () => {
     // and not called again after the abort.
     expect(generate.callCount).toBe(1);
   });
+
+  it('seals a dangling tool-call when a real AbortSignal fires mid-execution (tool-pair integrity)', async () => {
+    // A tool that respects the run signal: it aborts the controller itself
+    // (simulating an external kill arriving while the tool is in flight) and
+    // then throws the signal's own abort reason, exactly as `fetch`/other
+    // signal-aware APIs do. With `errorMode: 'failFast'` this throw
+    // propagates out of `toolbox.execute`, landing in the same unrecovered
+    // tool-execution-error path a genuine kill takes.
+    const controller = new AbortController();
+    const abortAwareTool = createTool({
+      name: 'get_weather',
+      description: 'Get weather',
+      input: z.object({ location: z.string() }),
+      execute: async (_input, options) => {
+        controller.abort('killed mid-tool');
+        throw options?.signal?.reason ?? new Error('aborted');
+      },
+    });
+
+    const toolbox = createTestToolbox([abortAwareTool]);
+    const conversation = new Conversation();
+    const generate = createMockGenerate([toolCallResponse([weatherToolCall('Denver')])]);
+
+    const result = await run({
+      generate,
+      toolbox,
+      conversation,
+      stopWhen: noToolCalls(),
+      signal: controller.signal,
+      executeOptions: { errorMode: 'failFast' },
+    });
+
+    expect(result.finishReason).toBe('error');
+    expect(conversation.getPendingToolCalls()).toHaveLength(0);
+
+    const messages = conversation.getMessages({ includeHidden: true });
+    const toolCallMessage = messages.find((m) => m.role === 'tool-call');
+    const toolResultMessage = messages.find((m) => m.role === 'tool-result');
+    expect(toolCallMessage).toBeDefined();
+    expect(toolResultMessage).toBeDefined();
+    expect(toolResultMessage?.toolResult?.callId).toBe(toolCallMessage?.toolCall?.id);
+    expect(toolResultMessage?.toolResult?.outcome).toBe('error');
+  });
 });

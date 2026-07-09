@@ -16,7 +16,8 @@ export type {
   InstructionComposer,
   InstructionComposerRenderOptions,
   InstructionSection,
+  SectionsToMessageInputsOptions,
 } from './instruction-composer';
-export { createInstructionComposer } from './instruction-composer';
+export { createInstructionComposer, sectionsToMessageInputs } from './instruction-composer';
 export type { InstructionTemplate, MissingVariableStrategy, TemplateOptions } from './template';
 export { createInstructionTemplate, extractTemplateVariables, renderTemplate } from './template';

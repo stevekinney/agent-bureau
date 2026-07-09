@@ -1,9 +1,17 @@
+import type { MessageInput } from '../types';
 import { renderTemplate, type TemplateOptions } from './template';
 
 export interface InstructionSection {
   name: string;
   content: string;
   priority?: number;
+  /**
+   * Marks this section as a prompt-cache boundary when rendered into a
+   * conversation via {@link sectionsToMessageInputs}: everything up to and
+   * including this section is a stable prefix a provider can cache. See
+   * `MessageInput.cacheBoundary`.
+   */
+  cacheBoundary?: boolean;
 }
 
 export interface InstructionComposerRenderOptions {
@@ -75,6 +83,49 @@ function buildComposer(currentSections: InstructionSection[]): InstructionCompos
       return rendered.join(separator);
     },
   };
+}
+
+/**
+ * Options for {@link sectionsToMessageInputs}.
+ */
+export interface SectionsToMessageInputsOptions {
+  variables?: Record<string, string>;
+  templateOptions?: TemplateOptions;
+}
+
+/**
+ * Renders a composer's sections into an ordered array of `system`-role
+ * {@link MessageInput}s — one per section, in priority order — instead of
+ * collapsing them into a single joined string. This is the structured
+ * prompt-assembly path: each segment (shared contract, guidelines, task
+ * context, diff, agent role, ...) stays individually addressable in the
+ * resulting conversation, and a section's `cacheBoundary` carries through to
+ * its message so the stable prefix survives into the provider adapters.
+ *
+ * Rendering is a pure function of the composer's sections and the supplied
+ * variables — sections sort deterministically (stable sort by priority, ties
+ * broken by insertion order) and template substitution has no hidden state,
+ * so two assemblies of the same composer with the same variables produce
+ * byte-identical output.
+ */
+export function sectionsToMessageInputs(
+  composer: InstructionComposer,
+  options?: SectionsToMessageInputsOptions,
+): MessageInput[] {
+  const variables = options?.variables;
+  const templateOptions = options?.templateOptions;
+
+  return sortedSections(composer.sections()).map((section) => {
+    const content = variables
+      ? renderTemplate(section.content, variables, templateOptions)
+      : section.content;
+
+    return {
+      role: 'system' as const,
+      content,
+      ...(section.cacheBoundary ? { cacheBoundary: true as const } : {}),
+    };
+  });
 }
 
 function sortedSections(sections: readonly InstructionSection[]): InstructionSection[] {

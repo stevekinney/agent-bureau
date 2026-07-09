@@ -385,6 +385,41 @@ describe('toMarkdown', () => {
       expect(result).toContain('goalCompleted: true');
     });
 
+    test('includes cacheBoundary in message metadata when set', () => {
+      const conversation = createConversation([
+        {
+          id: 'msg-1',
+          role: 'system',
+          content: 'Stable prefix.',
+          position: 0,
+          createdAt: '2024-01-15T10:00:00.000Z',
+          metadata: {},
+          hidden: false,
+          cacheBoundary: true,
+        },
+      ]);
+
+      const result = toMarkdown(conversation, { includeMetadata: true });
+      expect(result).toContain('cacheBoundary: true');
+    });
+
+    test('omits cacheBoundary from message metadata when unset', () => {
+      const conversation = createConversation([
+        {
+          id: 'msg-1',
+          role: 'system',
+          content: 'Not a boundary.',
+          position: 0,
+          createdAt: '2024-01-15T10:00:00.000Z',
+          metadata: {},
+          hidden: false,
+        },
+      ]);
+
+      const result = toMarkdown(conversation, { includeMetadata: true });
+      expect(result).not.toContain('cacheBoundary');
+    });
+
     test('includes content array in metadata for multi-modal messages', () => {
       const conversation = createConversation([
         {
@@ -1249,6 +1284,31 @@ Task complete`;
       const message = getOrderedMessages(conversation)[0];
       expect(isAssistantMessage(message) && message.goalCompleted).toBe(true);
     });
+
+    test('parses cacheBoundary metadata', () => {
+      const markdown = `---
+id: conv-1
+status: active
+metadata: {}
+createdAt: '2024-01-15T10:00:00.000Z'
+updatedAt: '2024-01-15T10:00:00.000Z'
+messages:
+  msg-1:
+    position: 0
+    createdAt: '2024-01-15T10:00:00.000Z'
+    metadata: {}
+    hidden: false
+    cacheBoundary: true
+---
+
+### System (msg-1)
+
+Stable prefix.`;
+
+      const conversation = fromMarkdown(markdown);
+      const message = getOrderedMessages(conversation)[0];
+      expect(message?.cacheBoundary).toBe(true);
+    });
   });
 });
 
@@ -1489,6 +1549,19 @@ describe('toMarkdown/fromMarkdown round-trip', () => {
 
     const message = getOrderedMessages(parsed)[0];
     expect(isAssistantMessage(message) && message.goalCompleted).toBe(true);
+  });
+
+  test('round-trip preserves cacheBoundary', () => {
+    const original = createConversation([
+      createMessage({ role: 'system', content: 'Stable prefix.', cacheBoundary: true }),
+      { ...createMessage({ role: 'user', content: 'Not a boundary.' }), id: 'msg-2', position: 1 },
+    ]);
+    const markdown = toMarkdown(original, { includeMetadata: true });
+    const parsed = fromMarkdown(markdown);
+
+    const [system, user] = getOrderedMessages(parsed);
+    expect(system?.cacheBoundary).toBe(true);
+    expect(user?.cacheBoundary).toBeUndefined();
   });
 
   test('round-trip preserves multi-modal content with images', () => {

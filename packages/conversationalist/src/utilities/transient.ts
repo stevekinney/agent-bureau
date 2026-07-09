@@ -80,6 +80,7 @@ export function stripTransientMetadata(conversation: Conversation): Conversation
       toolCall: message.toolCall,
       toolResult: message.toolResult,
       tokenUsage: message.tokenUsage,
+      cacheBoundary: message.cacheBoundary,
     };
 
     if (isAssistantMessage(message)) {

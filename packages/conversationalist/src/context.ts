@@ -38,6 +38,7 @@ const cloneMessageWithPosition = (
     toolCall: message.toolCall ? { ...message.toolCall } : undefined,
     toolResult: message.toolResult ? { ...message.toolResult } : undefined,
     tokenUsage: message.tokenUsage ? { ...message.tokenUsage } : undefined,
+    cacheBoundary: message.cacheBoundary,
   };
 
   if (isAssistantMessage(message)) {

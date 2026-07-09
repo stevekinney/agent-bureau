@@ -26,6 +26,7 @@ export function createMessage(props: Message | AssistantMessage): Message | Assi
     toolCall: props.toolCall ? toReadonly(structuredClone(props.toolCall)) : undefined,
     toolResult: props.toolResult ? toReadonly(structuredClone(props.toolResult)) : undefined,
     tokenUsage: props.tokenUsage ? toReadonly({ ...props.tokenUsage }) : undefined,
+    cacheBoundary: props.cacheBoundary,
   };
 
   if (isAssistantMessage(props)) {
@@ -57,6 +58,7 @@ export function messageToJSON(message: Message | AssistantMessage): Message | As
     toolCall: message.toolCall ? { ...message.toolCall } : undefined,
     toolResult: message.toolResult ? { ...message.toolResult } : undefined,
     tokenUsage: message.tokenUsage ? { ...message.tokenUsage } : undefined,
+    cacheBoundary: message.cacheBoundary,
   };
 
   if (isAssistantMessage(message)) {

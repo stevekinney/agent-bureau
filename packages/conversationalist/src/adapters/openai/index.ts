@@ -165,6 +165,11 @@ function toOpenAIToolCall(toolCall: ToolCall): OpenAIToolCall {
 /**
  * Converts a single message to OpenAI format.
  * Returns null for messages that should be skipped.
+ *
+ * `message.cacheBoundary` is intentionally a no-op here: OpenAI's prompt
+ * caching (Chat Completions / Responses API) is automatic — the platform
+ * caches the longest matching prefix of a request with no manual breakpoint
+ * marker to translate to. There is no OpenAI wire field this maps to.
  */
 function convertMessage(message: Message): OpenAIMessage | null {
   // Skip hidden messages

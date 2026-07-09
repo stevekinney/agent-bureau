@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'bun:test';
 
-import { createInstructionComposer } from '../src/composition/instruction-composer';
+import {
+  createInstructionComposer,
+  sectionsToMessageInputs,
+} from '../src/composition/instruction-composer';
 
 describe('createInstructionComposer', () => {
   it('renders empty composer as empty string', () => {
@@ -126,5 +129,70 @@ describe('createInstructionComposer', () => {
 
     expect(original.hasSection('a')).toBe(true);
     expect(modified.hasSection('a')).toBe(false);
+  });
+});
+
+describe('sectionsToMessageInputs', () => {
+  it('renders each section as its own individually-addressable system message, in priority order', () => {
+    const composer = createInstructionComposer(
+      { name: 'guidelines', content: 'Follow the guidelines.', priority: 1 },
+      { name: 'contract', content: 'Shared contract text.', priority: 0 },
+      { name: 'role', content: 'You are a code reviewer.', priority: 2 },
+    );
+
+    const inputs = sectionsToMessageInputs(composer);
+
+    expect(inputs).toEqual([
+      { role: 'system', content: 'Shared contract text.' },
+      { role: 'system', content: 'Follow the guidelines.' },
+      { role: 'system', content: 'You are a code reviewer.' },
+    ]);
+  });
+
+  it('substitutes template variables per section', () => {
+    const composer = createInstructionComposer(
+      { name: 'role', content: 'You are a {{role}}.', priority: 0 },
+      { name: 'task', content: 'Task: {{task}}', priority: 1 },
+    );
+
+    const inputs = sectionsToMessageInputs(composer, {
+      variables: { role: 'reviewer', task: 'review the diff' },
+    });
+
+    expect(inputs).toEqual([
+      { role: 'system', content: 'You are a reviewer.' },
+      { role: 'system', content: 'Task: review the diff' },
+    ]);
+  });
+
+  it('carries a section cacheBoundary through to its message', () => {
+    const composer = createInstructionComposer(
+      { name: 'contract', content: 'Shared contract.', priority: 0, cacheBoundary: true },
+      { name: 'task', content: 'Task-specific context.', priority: 1 },
+    );
+
+    const inputs = sectionsToMessageInputs(composer);
+
+    expect(inputs[0]).toEqual({
+      role: 'system',
+      content: 'Shared contract.',
+      cacheBoundary: true,
+    });
+    expect(inputs[1]).toEqual({ role: 'system', content: 'Task-specific context.' });
+  });
+
+  it('renders byte-identically across two assemblies of the same composer and variables', () => {
+    const composer = createInstructionComposer(
+      { name: 'contract', content: 'Shared contract.', priority: 0, cacheBoundary: true },
+      { name: 'guidelines', content: 'Follow the {{style}} style.', priority: 1 },
+      { name: 'task', content: 'Task: {{task}}', priority: 2 },
+      { name: 'role', content: 'You are the {{role}}.', priority: 3 },
+    );
+    const variables = { style: 'concise', task: 'review the diff', role: 'reviewer' };
+
+    const first = sectionsToMessageInputs(composer, { variables });
+    const second = sectionsToMessageInputs(composer, { variables });
+
+    expect(JSON.stringify(second)).toBe(JSON.stringify(first));
   });
 });

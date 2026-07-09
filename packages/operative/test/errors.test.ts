@@ -114,6 +114,43 @@ describe('error handling', () => {
     void originalExecute;
   });
 
+  it('seals the dangling tool-call with an error result when toolbox.execute throws (tool-pair integrity)', async () => {
+    // The tool-call message is appended to the conversation BEFORE execution
+    // runs. If execution then throws and the error is not recovered, the
+    // conversation must not be left with a tool-call that has no matching
+    // tool-result — a killed/errored run's history would otherwise be unsafe
+    // to replay against a provider (every tool_use requires a paired
+    // tool_result).
+    const generate = createMockGenerate([
+      toolCallResponse([{ name: 'get_weather', arguments: { location: 'Denver' } }]),
+    ]);
+
+    const toolbox = createTestToolbox([weatherTool]);
+    (toolbox as any).execute = async () => {
+      throw new Error('Toolbox execute failed catastrophically');
+    };
+
+    const conversation = new Conversation();
+
+    const result = await run({
+      generate,
+      toolbox,
+      conversation,
+      stopWhen: noToolCalls(),
+    });
+
+    expect(result.finishReason).toBe('error');
+    expect(conversation.getPendingToolCalls()).toHaveLength(0);
+
+    const messages = conversation.getMessages({ includeHidden: true });
+    const toolCallMessage = messages.find((m) => m.role === 'tool-call');
+    const toolResultMessage = messages.find((m) => m.role === 'tool-result');
+    expect(toolCallMessage).toBeDefined();
+    expect(toolResultMessage).toBeDefined();
+    expect(toolResultMessage?.toolResult?.callId).toBe(toolCallMessage?.toolCall?.id);
+    expect(toolResultMessage?.toolResult?.outcome).toBe('error');
+  });
+
   it('terminates with error finish reason when onStep hook throws', async () => {
     const generate = createMockGenerate([
       toolCallResponse([{ name: 'get_weather', arguments: { location: 'Denver' } }]),
