@@ -87,6 +87,50 @@ describe('createToolbox', () => {
     expect(available.map((tool) => tool.name)).toEqual(['darwin-tool', 'always-tool']);
   });
 
+  it('evaluates availability hooks in parallel while preserving order', async () => {
+    const resolvers: Array<(value: boolean) => void> = [];
+    const started: string[] = [];
+    const makeAvailability = (name: string) => () =>
+      new Promise<boolean>((resolve) => {
+        started.push(name);
+        resolvers.push(resolve);
+      });
+    const toolbox = createToolbox([
+      createTool({
+        name: 'first',
+        description: 'First tool',
+        input: z.object({}),
+        availability: makeAvailability('first'),
+        async execute() {
+          return 'first';
+        },
+      }),
+      createTool({
+        name: 'second',
+        description: 'Second tool',
+        input: z.object({}),
+        availability: makeAvailability('second'),
+        async execute() {
+          return 'second';
+        },
+      }),
+    ]);
+
+    const availablePromise = toolbox.getAvailable();
+    await Promise.resolve();
+
+    expect(started).toEqual(['first', 'second']);
+    expect(resolvers).toHaveLength(2);
+
+    resolvers[1]?.(true);
+    resolvers[0]?.(true);
+
+    await expect(availablePromise).resolves.toEqual([
+      toolbox.getTool('first'),
+      toolbox.getTool('second'),
+    ]);
+  });
+
   it('filters unavailable tools from toolbox provider materialization', async () => {
     const toolbox = createToolbox(
       [
@@ -123,6 +167,73 @@ describe('createToolbox', () => {
         tool.functionDeclarations.map((declaration) => declaration.name),
       ),
     ).toEqual(['available-tool']);
+  });
+
+  it('treats throwing availability hooks as unavailable during materialization and execution', async () => {
+    let executed = false;
+    const toolbox = createToolbox([
+      createTool({
+        name: 'probe-tool',
+        description: 'Tool with a failing availability probe',
+        input: z.object({}),
+        availability() {
+          throw new Error('probe failed');
+        },
+        async execute() {
+          executed = true;
+          return 'ok';
+        },
+      }),
+    ]);
+
+    await expect(toolbox.getAvailable()).resolves.toEqual([]);
+    await expect(toolbox.toOpenAITools()).resolves.toEqual([]);
+
+    const result = await toolbox.execute({ id: 'call-1', name: 'probe-tool', arguments: {} });
+
+    expect(executed).toBe(false);
+    expect(result.outcome).toBe('error');
+    expect(result.error).toMatchObject({
+      category: 'unavailable',
+      code: 'TOOL_UNAVAILABLE',
+    });
+  });
+
+  it('does not advertise an older same-name tool when the executable name resolves to an unavailable tool', async () => {
+    const toolbox = createToolbox([
+      createTool({
+        name: 'duplicate',
+        description: 'Older available tool',
+        input: z.object({}),
+        availability: () => true,
+        async execute() {
+          return 'older';
+        },
+      }),
+      createTool({
+        name: 'duplicate',
+        description: 'Newer unavailable tool',
+        input: z.object({}),
+        availability: () => false,
+        async execute() {
+          return 'newer';
+        },
+      }),
+    ]);
+
+    const availableTools = await toolbox.getAvailable();
+    const openAITools = await toolbox.toOpenAITools();
+
+    expect(availableTools.map((tool) => tool.name)).toEqual([]);
+    expect(openAITools.map((tool) => tool.function.name)).toEqual([]);
+
+    const result = await toolbox.execute({ id: 'call-1', name: 'duplicate', arguments: {} });
+
+    expect(result).toMatchObject({
+      outcome: 'error',
+      errorCategory: 'unavailable',
+      error: { code: 'TOOL_UNAVAILABLE' },
+    });
   });
 
   it('returns a structured unavailable ToolError without executing the tool', async () => {

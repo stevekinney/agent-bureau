@@ -8,10 +8,12 @@ import {
 import { CompletableEventTarget } from 'lifecycle';
 import {
   type ActiveRun,
+  type AgentSession,
   createActiveRun,
   createAgentSession,
   type JSONValue,
   type SessionStore,
+  type SessionSummary,
 } from 'operative';
 import {
   createAgentScheduler,
@@ -350,7 +352,7 @@ async function loadExistingScheduledSessionId(
   }
   const sessions = await store.list();
   return sessions.find(
-    (session) =>
+    (session: SessionSummary) =>
       session.id.startsWith('sched-') &&
       session.id.endsWith(`-${runId}`) &&
       session.metadata['lastScheduledFireRunId'] === runId,
@@ -520,7 +522,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       return;
     }
 
-    await sessionStore.update(sessionId, (existingSession) => {
+    await sessionStore.update(sessionId, (existingSession: AgentSession | undefined) => {
       const nextSession =
         existingSession ??
         createAgentSession({

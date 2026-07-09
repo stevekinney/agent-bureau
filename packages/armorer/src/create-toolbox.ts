@@ -409,6 +409,8 @@ type ToolboxResultForCall<TTools extends readonly Tool[], TCall extends { name: 
     ? ToolboxResultForTool<ToolboxToolByNameOrFallback<TTools, TCall['name']>>
     : ToolExecutionResult;
 
+type AvailableTools<TTools extends readonly Tool[]> = ReadonlyArray<TTools[number]>;
+
 export interface Toolbox<TTools extends readonly Tool[] = readonly Tool[]> {
   execute<const TCall extends ToolboxCallInputForTools<TTools>>(
     call: TCall,
@@ -431,7 +433,7 @@ export interface Toolbox<TTools extends readonly Tool[] = readonly Tool[]> {
     toolbox: Toolbox<TOtherTools>,
   ): Toolbox<MergeTools<TTools, TOtherTools>>;
   tools: () => TTools;
-  getAvailable: () => Promise<TTools>;
+  getAvailable: () => Promise<AvailableTools<TTools>>;
   getTool(nameOrId: string): TTools[number] | undefined;
   /**
    * Returns names of tools that are not present in this toolbox.
@@ -1239,19 +1241,24 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
     return names.every((name) => getTool(name));
   }
 
-  async function getAvailable(): Promise<ToolsFromEntries<TEntries>> {
-    const available: Tool[] = [];
-    for (const tool of toolsById.values()) {
-      if (await isToolAvailable(tool)) {
-        available.push(tool);
-      }
-    }
-    return available as unknown as ToolsFromEntries<TEntries>;
+  async function getAvailable(): Promise<AvailableTools<ToolsFromEntries<TEntries>>> {
+    const tools = Array.from(toolsById.values());
+    const availability = await Promise.all(tools.map((tool) => isToolAvailable(tool)));
+    return tools.filter(
+      (tool, index) => availability[index] === true && getTool(tool.name) === tool,
+    ) as unknown as AvailableTools<ToolsFromEntries<TEntries>>;
   }
 
   async function isToolAvailable(tool: Tool): Promise<boolean> {
     const availability = tool.configuration.availability ?? tool.availability;
-    return availability ? await availability(baseContext) : true;
+    if (!availability) {
+      return true;
+    }
+    try {
+      return await availability(baseContext);
+    } catch {
+      return false;
+    }
   }
 
   function inspect(detailLevel: InspectorDetailLevel = 'standard'): RegistryInspection {

@@ -55,6 +55,7 @@ function shouldClearStartedState(result: ToolExecutionResult): boolean {
   return (
     category === 'validation' ||
     category === 'permission' ||
+    category === 'unavailable' ||
     category === 'not_found' ||
     isPreExecutionConflict(result.error)
   );
@@ -69,6 +70,7 @@ function shouldClearStartedStateForThrownError(error: unknown): boolean {
   return (
     category === 'validation' ||
     category === 'permission' ||
+    category === 'unavailable' ||
     category === 'not_found' ||
     isPreExecutionConflict(error)
   );

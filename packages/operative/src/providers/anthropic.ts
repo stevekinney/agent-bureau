@@ -1,5 +1,5 @@
 import type { AnthropicContentBlock } from 'armorer/adapters/anthropic';
-import { parseAnthropicToolCalls, toAnthropicTools } from 'armorer/adapters/anthropic';
+import { parseAnthropicToolCalls } from 'armorer/adapters/anthropic';
 import { toAnthropicMessages } from 'conversationalist/adapters/anthropic';
 import type { ToolCallInput } from 'interoperability';
 
@@ -46,8 +46,8 @@ export function createAnthropicProvider(options: AnthropicProviderOptions): Gene
   return async (context: GenerateContext): Promise<GenerateResponse> => {
     const client = await getClient();
     const { system, messages } = toAnthropicMessages(context.conversation.current);
-    const tools = toAnthropicTools(context.toolbox);
-    const hasTools = Array.isArray(tools) ? tools.length > 0 : true;
+    const tools = await context.toolbox.toAnthropicTools();
+    const hasTools = tools.length > 0;
 
     const params: Record<string, unknown> = {
       model,
@@ -61,7 +61,7 @@ export function createAnthropicProvider(options: AnthropicProviderOptions): Gene
     if (options.toolChoice === 'none') {
       // Anthropic has no tool_choice 'none' — omit tools to prevent calls
     } else if (hasTools) {
-      params['tools'] = Array.isArray(tools) ? tools : [tools];
+      params['tools'] = tools;
       if (options.toolChoice) {
         const adapted = toAnthropicToolChoice(options.toolChoice);
         if (adapted !== undefined) {
@@ -142,8 +142,8 @@ export function createAnthropicProviderStream(
     const client = await getClient();
     const { streaming } = context;
     const { system, messages } = toAnthropicMessages(context.conversation.current);
-    const tools = toAnthropicTools(context.toolbox);
-    const hasTools = Array.isArray(tools) ? tools.length > 0 : true;
+    const tools = await context.toolbox.toAnthropicTools();
+    const hasTools = tools.length > 0;
 
     const params: Record<string, unknown> = {
       model,
@@ -158,7 +158,7 @@ export function createAnthropicProviderStream(
     if (options.toolChoice === 'none') {
       // Anthropic has no tool_choice 'none' — omit tools to prevent calls
     } else if (hasTools) {
-      params['tools'] = Array.isArray(tools) ? tools : [tools];
+      params['tools'] = tools;
       if (options.toolChoice) {
         const adapted = toAnthropicToolChoice(options.toolChoice);
         if (adapted !== undefined) {

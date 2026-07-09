@@ -31,6 +31,7 @@ import { CompletableEventTarget, forwardEvents, TypedEventTarget } from 'lifecyc
 import type { CreateMemoryOptions, Memory } from 'memory';
 import { createMemory } from 'memory';
 import type {
+  AgentSession,
   CombinedOperativeEventMap,
   GenerateFunction,
   JSONValue,
@@ -38,6 +39,7 @@ import type {
   PrepareStepHook,
   Scheduler,
   SessionStore,
+  SessionSummary,
   StreamEventMap,
   ValidateResponseHook,
 } from 'operative';
@@ -1476,7 +1478,7 @@ export async function createRuntimeComposition(
     getActiveSkillEntries: () => ActiveSkillEntry[],
   ): OnStepHook {
     return async (context) => {
-      await store.update(sessionId, (existing) => {
+      await store.update(sessionId, (existing: AgentSession | undefined) => {
         const activeSkillEntries = getActiveSkillEntries();
         const sessionOwnedByAnotherRunningRun =
           existing?.metadata['lastRunStatus'] === 'running' &&
@@ -1536,7 +1538,7 @@ export async function createRuntimeComposition(
   ): Promise<string | undefined> {
     const sessions = await store.list();
     return sessions.find(
-      (session) =>
+      (session: SessionSummary) =>
         session.id.startsWith('sched-') &&
         session.id.endsWith(`-${runId}`) &&
         session.metadata['lastScheduledFireRunId'] === runId,
