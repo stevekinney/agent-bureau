@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.0
+
+### Minor Changes
+
+- 09c7301: Remove Conversation-owned persistence from Conversationalist. Conversation instances now remain pure state/event objects; callers should persist `Conversation.current` themselves or use Bureau/Operative session persistence. This also removes Conversationalist's direct `@lostgradient/weft` dependency.
+- bc80889: Add document multimodal content with base64 and reference sources, including provider fallbacks and Anthropic document block export.
+- 6aab434: Add an incremental append-log projection builder with stable-identity prefix detection.
+- b44dd7a: Add unsafe streaming primitives for render-side projections that contain incomplete tool-call/tool-result pairs.
+
+### Patch Changes
+
+- d3ec2a6: Add runtime availability hooks for Armorer tools and propagate the new unavailable tool error category through shared tool-result schemas.
+
 ## 0.2.1
 
 ### Patch Changes

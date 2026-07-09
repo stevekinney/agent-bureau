@@ -1,6 +1,6 @@
 {
   "name": "bureau",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "private": true,
   "description": "The agent fleet brain: createBureau, runtime composition, durability, recovery, and agent assembly",
   "keywords": [
