@@ -55,6 +55,12 @@ function createRecordingProxy(responseBody: unknown): RecordingProxy {
   const requests: RecordedRequest[] = [];
   const server = Bun.serve({
     port: 0,
+    // Bind and address by the literal loopback IP rather than the
+    // "localhost" hostname — some sandboxed CI network namespaces resolve
+    // "localhost" to an address family (or via a path) the server isn't
+    // actually listening on, which silently drops the connection instead of
+    // erroring. The literal IP sidesteps DNS/hosts-file resolution entirely.
+    hostname: '127.0.0.1',
     fetch(request) {
       const url = new URL(request.url);
       requests.push({
@@ -70,7 +76,7 @@ function createRecordingProxy(responseBody: unknown): RecordingProxy {
   });
 
   return {
-    baseURL: `http://localhost:${server.port}`,
+    baseURL: `http://127.0.0.1:${server.port}`,
     requests,
     stop: () => server.stop(),
   };
@@ -190,6 +196,7 @@ describe('Anthropic provider behind a proxy', () => {
     const requests: RecordedRequest[] = [];
     const server = Bun.serve({
       port: 0,
+      hostname: '127.0.0.1',
       fetch(request) {
         const url = new URL(request.url);
         requests.push({
@@ -208,7 +215,7 @@ describe('Anthropic provider behind a proxy', () => {
       const generate = createAnthropicProviderStream({
         model: 'claude-3-5-sonnet-20241022',
         apiKey: PLACEHOLDER_TOKEN,
-        baseURL: `http://localhost:${server.port}`,
+        baseURL: `http://127.0.0.1:${server.port}`,
       });
       await runTwoStepStreamingLoop(generate);
 
