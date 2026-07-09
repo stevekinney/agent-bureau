@@ -4,6 +4,8 @@ import { toAnthropicMessages } from 'conversationalist/adapters/anthropic';
 import type { ToolCallInput } from 'interoperability';
 
 import { ProviderError } from './errors.ts';
+import { resolveAnthropicEffort } from './shared/effort.ts';
+import { resolveAnthropicModel } from './shared/model-registry.ts';
 import { resolveCommonParameters } from './shared/resolve-common-parameters.ts';
 import { toAnthropicToolChoice } from './structured-output/tool-choice-adapters.ts';
 import type {
@@ -28,7 +30,11 @@ import type {
  * function that produces a `GenerateResponse` — not an SDK provider object.
  */
 export function createAnthropicProvider(options: AnthropicProviderOptions): GenerateFunction {
-  const { model, maximumTokens = 4096 } = options;
+  const { maximumTokens = 4096 } = options;
+  const resolvedModel = resolveAnthropicModel(options.model);
+  const resolvedEffort = options.effort
+    ? resolveAnthropicEffort(options.effort, resolvedModel)
+    : undefined;
   const common = resolveCommonParameters(options);
   let clientPromise: Promise<AnthropicClient> | undefined;
 
@@ -50,12 +56,13 @@ export function createAnthropicProvider(options: AnthropicProviderOptions): Gene
     const hasTools = tools.length > 0;
 
     const params: Record<string, unknown> = {
-      model,
+      model: resolvedModel,
       messages,
       max_tokens: context.maximumTokens ?? maximumTokens,
     };
 
     if (system !== undefined) params['system'] = system;
+    if (resolvedEffort !== undefined) params['output_config'] = { effort: resolvedEffort };
 
     // Tool choice: when 'none', omit tools entirely; otherwise set tool_choice
     if (options.toolChoice === 'none') {
@@ -101,6 +108,10 @@ export function createAnthropicProvider(options: AnthropicProviderOptions): Gene
         content: textParts.join(''),
         toolCalls,
         usage,
+        metadata: {
+          effectiveModel: resolvedModel,
+          effectiveEffort: resolvedEffort ?? 'none',
+        },
       };
     } catch (error) {
       throw new ProviderError({ provider: 'anthropic', cause: error });
@@ -121,7 +132,11 @@ export function createAnthropicProvider(options: AnthropicProviderOptions): Gene
 export function createAnthropicProviderStream(
   options: Omit<AnthropicProviderOptions, 'client'> & { client?: AnthropicStreamingClient },
 ): StreamingGenerateFunction {
-  const { model, maximumTokens = 4096 } = options;
+  const { maximumTokens = 4096 } = options;
+  const resolvedModel = resolveAnthropicModel(options.model);
+  const resolvedEffort = options.effort
+    ? resolveAnthropicEffort(options.effort, resolvedModel)
+    : undefined;
   const common = resolveCommonParameters(options);
   let clientPromise: Promise<AnthropicStreamingClient> | undefined;
 
@@ -146,13 +161,14 @@ export function createAnthropicProviderStream(
     const hasTools = tools.length > 0;
 
     const params: Record<string, unknown> = {
-      model,
+      model: resolvedModel,
       messages,
       max_tokens: context.maximumTokens ?? maximumTokens,
       stream: true,
     };
 
     if (system !== undefined) params['system'] = system;
+    if (resolvedEffort !== undefined) params['output_config'] = { effort: resolvedEffort };
 
     // Tool choice: when 'none', omit tools entirely; otherwise set tool_choice
     if (options.toolChoice === 'none') {
@@ -254,6 +270,10 @@ export function createAnthropicProviderStream(
         content: accumulatedText,
         toolCalls,
         usage,
+        metadata: {
+          effectiveModel: resolvedModel,
+          effectiveEffort: resolvedEffort ?? 'none',
+        },
       };
     } catch (error) {
       throw new ProviderError({ provider: 'anthropic', cause: error });

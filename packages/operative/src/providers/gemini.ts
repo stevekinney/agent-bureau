@@ -3,6 +3,8 @@ import { parseGeminiToolCalls } from 'armorer/adapters/gemini';
 import { toGeminiMessages } from 'conversationalist/adapters/gemini';
 
 import { ProviderError } from './errors.ts';
+import { resolveGeminiEffort } from './shared/effort.ts';
+import { resolveGeminiModel } from './shared/model-registry.ts';
 import { resolveCommonParameters } from './shared/resolve-common-parameters.ts';
 import { toGeminiResponseFormat } from './structured-output/response-format-adapters.ts';
 import { toGeminiToolChoice } from './structured-output/tool-choice-adapters.ts';
@@ -29,7 +31,10 @@ import type {
  * function that produces a `GenerateResponse` — not an SDK provider object.
  */
 export function createGeminiProvider(options: GeminiProviderOptions): GenerateFunction {
-  const { model } = options;
+  const resolvedModel = resolveGeminiModel(options.model);
+  const resolvedEffort = options.effort
+    ? resolveGeminiEffort(options.effort, resolvedModel)
+    : undefined;
   const common = resolveCommonParameters(options);
   let modelPromise: Promise<GeminiGenerativeModel> | undefined;
 
@@ -50,7 +55,9 @@ export function createGeminiProvider(options: GeminiProviderOptions): GenerateFu
           });
         }
         const genAI = new GoogleGenerativeAI(apiKey);
-        return genAI.getGenerativeModel({ model }) as unknown as GeminiGenerativeModel;
+        return genAI.getGenerativeModel({
+          model: resolvedModel,
+        }) as unknown as GeminiGenerativeModel;
       });
     }
     return modelPromise;
@@ -78,6 +85,9 @@ export function createGeminiProvider(options: GeminiProviderOptions): GenerateFu
     if (common.temperature !== undefined) generationConfig['temperature'] = common.temperature;
     if (common.topP !== undefined) generationConfig['topP'] = common.topP;
     if (common.stopSequences) generationConfig['stopSequences'] = common.stopSequences;
+    if (resolvedEffort !== undefined) {
+      generationConfig['thinkingConfig'] = { thinkingBudget: resolvedEffort.thinkingBudget };
+    }
     if (options.responseFormat) {
       const adapted = toGeminiResponseFormat(options.responseFormat);
       if (adapted !== undefined) Object.assign(generationConfig, adapted);
@@ -117,6 +127,10 @@ export function createGeminiProvider(options: GeminiProviderOptions): GenerateFu
         content: textParts.join(''),
         toolCalls,
         usage,
+        metadata: {
+          effectiveModel: resolvedModel,
+          effectiveEffort: resolvedEffort ? resolvedEffort.effort : 'none',
+        },
       };
     } catch (error) {
       throw new ProviderError({ provider: 'gemini', cause: error });
@@ -138,7 +152,10 @@ export function createGeminiProvider(options: GeminiProviderOptions): GenerateFu
 export function createGeminiProviderStream(
   options: Omit<GeminiProviderOptions, 'client'> & { client?: GeminiStreamingModel },
 ): StreamingGenerateFunction {
-  const { model } = options;
+  const resolvedModel = resolveGeminiModel(options.model);
+  const resolvedEffort = options.effort
+    ? resolveGeminiEffort(options.effort, resolvedModel)
+    : undefined;
   const common = resolveCommonParameters(options);
   let modelPromise: Promise<GeminiStreamingModel> | undefined;
 
@@ -159,7 +176,9 @@ export function createGeminiProviderStream(
           });
         }
         const genAI = new GoogleGenerativeAI(apiKey);
-        return genAI.getGenerativeModel({ model }) as unknown as GeminiStreamingModel;
+        return genAI.getGenerativeModel({
+          model: resolvedModel,
+        }) as unknown as GeminiStreamingModel;
       });
     }
     return modelPromise;
@@ -190,6 +209,9 @@ export function createGeminiProviderStream(
     if (common.temperature !== undefined) generationConfig['temperature'] = common.temperature;
     if (common.topP !== undefined) generationConfig['topP'] = common.topP;
     if (common.stopSequences) generationConfig['stopSequences'] = common.stopSequences;
+    if (resolvedEffort !== undefined) {
+      generationConfig['thinkingConfig'] = { thinkingBudget: resolvedEffort.thinkingBudget };
+    }
     if (options.responseFormat) {
       const adapted = toGeminiResponseFormat(options.responseFormat);
       if (adapted !== undefined) Object.assign(generationConfig, adapted);
@@ -245,6 +267,10 @@ export function createGeminiProviderStream(
         content: accumulatedText,
         toolCalls,
         usage,
+        metadata: {
+          effectiveModel: resolvedModel,
+          effectiveEffort: resolvedEffort ? resolvedEffort.effort : 'none',
+        },
       };
     } catch (error) {
       throw new ProviderError({ provider: 'gemini', cause: error });

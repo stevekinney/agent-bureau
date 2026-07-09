@@ -423,7 +423,12 @@ describe('OpenAI provider coverage', () => {
         ...makeContext({ signal: abortController.signal }),
         streaming: makeStreamingHandle(),
       }),
-    ).toEqual({ content: '', toolCalls: [], usage: undefined });
+    ).toEqual({
+      content: '',
+      toolCalls: [],
+      usage: undefined,
+      metadata: { effectiveModel: 'gpt-4o', effectiveEffort: 'none' },
+    });
 
     const failingClient = createMockOpenAIStreamingClient([], [new Error('OpenAI stream failed')]);
     const failingGenerate = createOpenAIProviderStream({ model: 'gpt-4o', client: failingClient });
@@ -634,7 +639,12 @@ describe('Anthropic provider coverage', () => {
         ...makeContext({ signal: abortController.signal }),
         streaming: makeStreamingHandle(),
       }),
-    ).toEqual({ content: '', toolCalls: [], usage: undefined });
+    ).toEqual({
+      content: '',
+      toolCalls: [],
+      usage: undefined,
+      metadata: { effectiveModel: 'claude-3-5-sonnet-20241022', effectiveEffort: 'none' },
+    });
 
     const failingClient = createMockAnthropicStreamingClient(
       [],
@@ -848,7 +858,12 @@ describe('Gemini provider coverage', () => {
         ...makeContext({ signal: abortController.signal }),
         streaming: makeStreamingHandle(),
       }),
-    ).toEqual({ content: '', toolCalls: [], usage: undefined });
+    ).toEqual({
+      content: '',
+      toolCalls: [],
+      usage: undefined,
+      metadata: { effectiveModel: 'gemini-pro', effectiveEffort: 'none' },
+    });
 
     const failingClient = createMockGeminiStreamingModel([], [new Error('Gemini stream failed')]);
     const failingGenerate = createGeminiProviderStream({

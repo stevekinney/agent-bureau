@@ -62,6 +62,23 @@ export {
   extractComplexitySignals,
   withRoutingMetrics,
 } from './routing/index.ts';
+export type { GeminiResolvedEffort } from './shared/effort.ts';
+export {
+  ANTHROPIC_EFFORT_SUPPORT,
+  GEMINI_THINKING_MODELS,
+  OPENAI_REASONING_MODELS,
+  resolveAnthropicEffort,
+  resolveGeminiEffort,
+  resolveOpenAIEffort,
+} from './shared/effort.ts';
+export {
+  ANTHROPIC_MODEL_ALIASES,
+  GEMINI_MODEL_ALIASES,
+  OPENAI_MODEL_ALIASES,
+  resolveAnthropicModel,
+  resolveGeminiModel,
+  resolveOpenAIModel,
+} from './shared/model-registry.ts';
 export { normalizeAnthropicStream, normalizeOpenAIStream } from './streaming/index.ts';
 export type { ResponseFormat, ToolChoice } from './structured-output/index.ts';
 export {
@@ -78,6 +95,7 @@ export type {
   AnthropicStreamEvent,
   AnthropicStreamingClient,
   BaseProviderOptions,
+  Effort,
   GeminiGenerateContentResult,
   GeminiGenerativeModel,
   GeminiProviderOptions,
