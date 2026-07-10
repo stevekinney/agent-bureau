@@ -1,5 +1,5 @@
 export { compareEvaluationReports } from './comparison';
-export { createAgentEvaluation } from './create-agent-evaluation';
+export { computeSummary, createAgentEvaluation } from './create-agent-evaluation';
 export { getDatasetVersion, loadDataset, loadDatasets, saveDataset } from './datasets';
 export { createLLMJudge } from './llm-judge';
 export {
@@ -17,6 +17,11 @@ export {
   matchToolCalls,
 } from './metrics';
 export { promoteRunToCase } from './promote-run';
+export {
+  benchmarkPromptInjectionConfigurations,
+  benchmarkPromptInjectionDetector,
+  DEFAULT_PRESET_TRIPWIRE_THRESHOLD,
+} from './prompt-injection-benchmark';
 export { listEvaluationReports } from './reports';
 export { isEvaluationReport, runEvaluationSuite } from './run-evaluation-suite';
 export {
@@ -47,6 +52,8 @@ export type {
   LLMJudgeResult,
   MatchResult,
   PromoteRunToCaseOptions,
+  PromptInjectionBenchmarkComparison,
+  PromptInjectionBenchmarkResult,
   RegressionThresholds,
   SemanticMatcher,
   TrajectoryMatchResult,

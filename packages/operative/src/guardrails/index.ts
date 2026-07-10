@@ -38,4 +38,5 @@ export {
   createInputLengthDetector,
   createPromptInjectionDetector,
   createTopicBoundaryDetector,
+  withMinimumTripwireConfidence,
 } from 'armorer';

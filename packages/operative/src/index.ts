@@ -293,6 +293,7 @@ export {
   createPromptInjectionDetector,
   createSessionTaintTracker,
   createTopicBoundaryDetector,
+  withMinimumTripwireConfidence,
 } from './guardrails/index';
 export type { OperativeHookMap } from './hooks';
 export type {

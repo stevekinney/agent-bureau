@@ -31,6 +31,31 @@ export interface PromptInjectionDetectorOptions {
 }
 
 /**
+ * Wraps a detector so it only reports `triggered: true` once its confidence
+ * meets `threshold`. Below that, the detection is reported as NOT triggered
+ * rather than passed through unchanged — useful for gating a low-precision
+ * detector (e.g. a single-pattern prompt-injection match, common in benign
+ * phrasing like "act as a translator") before wiring it into `mode:
+ * 'tripwire'`, where a false positive hard-halts the run instead of just
+ * producing a warning.
+ */
+export function withMinimumTripwireConfidence(
+  detector: InputDetector,
+  threshold: number,
+): InputDetector {
+  return {
+    name: detector.name,
+    async detect(input, context) {
+      const result = await detector.detect(input, context);
+      if (result.triggered && result.confidence < threshold) {
+        return { ...result, triggered: false };
+      }
+      return result;
+    },
+  };
+}
+
+/**
  * Creates a detector that pattern-matches user input for known prompt injection techniques.
  *
  * Confidence scales with the number of matched patterns: 1 match = 0.3, 2 = 0.6, 3+ = 0.9.

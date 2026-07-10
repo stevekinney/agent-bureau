@@ -265,9 +265,12 @@ async function runCasesWithConcurrency(
 }
 
 /**
- * Computes aggregate summary statistics from a list of case results.
+ * Computes aggregate summary statistics from a list of case results. Shared
+ * by `createAgentEvaluation()` and any other producer of `EvaluationReport`
+ * (e.g. the non-agent detector benchmarks in `prompt-injection-benchmark.ts`)
+ * so every report's summary is computed identically.
  */
-function computeSummary(cases: EvaluationCaseResult[]): EvaluationReport['summary'] {
+export function computeSummary(cases: EvaluationCaseResult[]): EvaluationReport['summary'] {
   const total = cases.length;
   const passed = cases.filter((c) => c.pass).length;
   const failed = total - passed;

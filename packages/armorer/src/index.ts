@@ -47,7 +47,10 @@ export { jsonSchemaToZod } from './json-schema-to-zod';
 export type { InputLengthDetectorOptions } from './guardrails/detectors/input-length';
 export { createInputLengthDetector } from './guardrails/detectors/input-length';
 export type { PromptInjectionDetectorOptions } from './guardrails/detectors/prompt-injection';
-export { createPromptInjectionDetector } from './guardrails/detectors/prompt-injection';
+export {
+  createPromptInjectionDetector,
+  withMinimumTripwireConfidence,
+} from './guardrails/detectors/prompt-injection';
 export type { TopicBoundaryDetectorOptions } from './guardrails/detectors/topic-boundary';
 export { createTopicBoundaryDetector } from './guardrails/detectors/topic-boundary';
 export type { DetectorPipelineResult } from './guardrails/pipeline';

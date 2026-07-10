@@ -21,6 +21,8 @@ export type {
   DurableMultiAgentHarness,
 } from './durable-multi-agent-harness';
 export { createDurableMultiAgentHarness } from './durable-multi-agent-harness';
+export type { PromptInjectionFixtureCase } from './prompt-injection-fixtures';
+export { PROMPT_INJECTION_FIXTURES } from './prompt-injection-fixtures';
 export { createStepwiseBlockingGenerate } from './stepwise-generate';
 export { createTestStore } from './store';
 export { type RunLookup, waitForCondition, waitForRunState } from './wait';
