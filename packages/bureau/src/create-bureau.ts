@@ -64,6 +64,7 @@ import type {
   SubmitSchedulerTaskResponse,
   ToolSummary,
 } from './types';
+import { createWebhookNotifier, type WebhookNotifier } from './webhook-notifier';
 import { streamEventToFrame } from './websocket-frames';
 
 const BUREAU_AGENT_NAME = 'bureau';
@@ -1772,9 +1773,12 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       }
 
       try {
-        // Dispose the audit trail before emitting bureau.disposed so any
-        // in-flight write callbacks are unsubscribed cleanly.
+        // Dispose the audit trail and webhook notifier before emitting
+        // bureau.disposed so any in-flight write/delivery callbacks are
+        // unsubscribed cleanly (the notifier also abandons in-flight backoff
+        // waits so a disposed bureau never fires a webhook late).
         auditTrailInstance?.dispose();
+        webhookNotifierInstance?.dispose();
         emitter.dispatch(new BureauDisposedEvent());
         storeSubscription.unsubscribe();
         for (const disposeListener of schedulerCleanup) {
@@ -1836,10 +1840,12 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     }
   }
 
-  // Build the bureau object first so the audit trail can subscribe to its
-  // action events via addEventListener. The audit trail is best-effort — a
-  // write failure must never crash a run (handled inside createAuditTrail).
+  // Build the bureau object first so the audit trail (and webhook notifier)
+  // can subscribe to its action events via addEventListener. The audit trail
+  // is best-effort — a write failure must never crash a run (handled inside
+  // createAuditTrail).
   let auditTrailInstance: AuditTrail | undefined;
+  let webhookNotifierInstance: WebhookNotifier | undefined;
 
   const bureau: Bureau = {
     store,
@@ -1849,6 +1855,9 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     kv: runtime.kv,
     get auditTrail(): AuditTrail | undefined {
       return auditTrailInstance;
+    },
+    get webhookNotifier(): WebhookNotifier | undefined {
+      return webhookNotifierInstance;
     },
     get ready() {
       return runtime.ready;
@@ -1913,6 +1922,19 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
   // captured in the durable trail rather than landing only in the live store.
   if (runtime.kv) {
     auditTrailInstance = createAuditTrail(bureau, runtime.kv);
+  }
+
+  // Wire the webhook notifier (AB-21) now that the audit trail exists (an
+  // exhausted delivery is recorded there). Only created when at least one
+  // target is configured — the common case (no `options.webhooks`) costs
+  // nothing beyond the `undefined` check in `createWebhookNotifier`.
+  if (options.webhooks && options.webhooks.targets.length > 0) {
+    webhookNotifierInstance = createWebhookNotifier(
+      bureau,
+      runtime.kv,
+      auditTrailInstance,
+      options.webhooks,
+    );
   }
 
   // Resume any durable runs a previous process left in flight. Best-effort: a
