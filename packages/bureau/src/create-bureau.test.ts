@@ -20,7 +20,13 @@ import type {
   GenerateResponse,
   Toolbox,
 } from 'operative';
-import { createSessionStore, HumanWaitParkedEvent, StepStartedEvent, stopWhen } from 'operative';
+import {
+  createSessionStore,
+  HumanWaitParkedEvent,
+  RunAbortedEvent,
+  StepCompletedEvent,
+  stopWhen,
+} from 'operative';
 import {
   type DurableRunDeps,
   SCHEDULER_ORIGIN_TAG,
@@ -2980,6 +2986,43 @@ function createNeedsApprovalToolbox(approvalSecret: string, charges: number[]) {
   ) as unknown as Toolbox;
 }
 
+/**
+ * A `beforeExecute` policy that changes its `reason` on the SECOND
+ * evaluation — simulating a policy that re-gates a resumed approval (e.g.
+ * because the policy changed between the original request and the resume)
+ * rather than treating the prior approval as still satisfying it.
+ */
+function createRegatingApprovalToolbox(approvalSecret: string, charges: number[]) {
+  let evaluationCount = 0;
+  return createToolbox(
+    [
+      createTool({
+        name: 'charge-card',
+        description: 'Charge a payment card',
+        input: z.object({ cents: z.number() }),
+        async execute({ cents }) {
+          charges.push(cents);
+          return { charged: cents };
+        },
+      }),
+    ],
+    {
+      approvalSecret,
+      policy: {
+        beforeExecute() {
+          evaluationCount += 1;
+          return {
+            allow: false,
+            status: 'needs_approval',
+            reason: `Operator approval required (evaluation ${evaluationCount})`,
+            action: { message: 'Approve charge' },
+          };
+        },
+      },
+    },
+  ) as unknown as Toolbox;
+}
+
 describe('createBureau review queue (AB-20)', () => {
   it('listPendingReviews surfaces a tool call parked on needs_approval', async () => {
     const charges: number[] = [];
@@ -3038,7 +3081,49 @@ describe('createBureau review queue (AB-20)', () => {
     bureau.dispose();
   });
 
-  it('listPendingReviews omits a human-wait run that already produced a later action', async () => {
+  it('listPendingReviews still surfaces a human-wait run whose parking step has already completed', async () => {
+    // Regression test for the real production ordering: `requestHumanInput`
+    // dispatches `HumanWaitParkedEvent` from INSIDE the tool's `execute`
+    // (mid-step), and the SAME step's own `step.completed` is recorded right
+    // after it, well before the durable workflow's `ctx.waitForSignal`
+    // actually suspends. A run must still be "still parked" even though a
+    // same-step action was recorded after the park event — only a status
+    // change away from `'running'` (the run resuming to completion) should
+    // exclude it. See `listPendingReviews omits a human-wait run whose park
+    // has resolved and the run completed` below for that side of the check.
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+    });
+
+    const { activeRun, emitter } = createParkedActiveRun();
+    const runId = bureau.store.register(activeRun, 'run-parked-human-wait-trailing-step');
+    emitter.dispatchEvent(
+      new HumanWaitParkedEvent('human-response', runId, 'Approve this refund?'),
+    );
+    emitter.dispatchEvent(
+      new StepCompletedEvent({
+        step: 0,
+        conversation: new Conversation(),
+        content: '',
+        toolCalls: [],
+        results: [],
+        final: true,
+      }),
+    );
+
+    const reviews = bureau.listPendingReviews();
+    expect(reviews).toHaveLength(1);
+    const [review] = reviews;
+    expect(review!.kind).toBe('human-wait');
+    if (review!.kind !== 'human-wait') throw new Error('unreachable');
+    expect(review!.runId).toBe(runId);
+    expect(review!.signalName).toBe('human-response');
+
+    bureau.dispose();
+  });
+
+  it('listPendingReviews omits a human-wait run whose park has resolved and the run completed', async () => {
     const bureau = await createBureau({
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
@@ -3047,10 +3132,10 @@ describe('createBureau review queue (AB-20)', () => {
     const { activeRun, emitter } = createParkedActiveRun();
     const runId = bureau.store.register(activeRun, 'run-resumed-human-wait');
     emitter.dispatchEvent(new HumanWaitParkedEvent('human-response', runId));
-    // A later action (the run resuming past the park point, e.g. its next
-    // step starting) means the park event is no longer the LAST action, so
-    // the run is no longer "still parked".
-    emitter.dispatchEvent(new StepStartedEvent(new Conversation(), 1));
+    // Resuming a `ctx.waitForSignal` park runs the durable workflow straight
+    // through to completion (it does not start a new step) — the run's
+    // status leaving `'running'` is what marks it no longer parked.
+    emitter.dispatchEvent(new RunAbortedEvent(1, new Conversation(), 'resumed'));
 
     expect(bureau.listPendingReviews()).toHaveLength(0);
 
@@ -3091,6 +3176,48 @@ describe('createBureau review queue (AB-20)', () => {
 
     // Resolved reviews disappear from the queue.
     expect(bureau.listPendingReviews()).toHaveLength(0);
+
+    bureau.dispose();
+  });
+
+  it('resolveReview approve keeps a review pending when the policy gates it again', async () => {
+    // `createRegatingApprovalToolbox`'s policy returns a DIFFERENT reason on
+    // its second evaluation, so `resumeApproval`'s re-run of `beforeExecute`
+    // is not satisfied by the prior approval and gates the call again
+    // instead of executing it. The review must stay resolvable, not vanish
+    // from the queue: the tool never ran, so there is still a genuine
+    // approval decision pending.
+    const charges: number[] = [];
+    const bureau = await createBureau({
+      generate: createSequentialGenerate([
+        {
+          content: '',
+          toolCalls: [{ id: 'call-3', name: 'charge-card', arguments: { cents: 900 } }],
+        },
+      ]),
+      toolbox: createRegatingApprovalToolbox('test-secret-3', charges),
+      stopWhen: stopWhen.toolOutcome('action_required'),
+    });
+
+    const run = await bureau.createRun({ message: 'Charge the customer' });
+    await waitForRunCompletion(bureau, run.id);
+
+    const [review] = bureau.listPendingReviews();
+    expect(review).toBeDefined();
+
+    const outcome = await bureau.resolveReview({
+      id: review!.id,
+      decision: 'approve',
+      principal: 'api-key:reviewer-3',
+    });
+
+    expect(outcome.decision).toBe('approve');
+    expect(charges).toEqual([]); // the tool did NOT run — gated again
+
+    // The review is still there to be resolved, not silently dropped.
+    const stillPending = bureau.listPendingReviews();
+    expect(stillPending).toHaveLength(1);
+    expect(stillPending[0]!.id).toBe(review!.id);
 
     bureau.dispose();
   });
@@ -3198,6 +3325,55 @@ describe('createBureau review queue (AB-20)', () => {
       );
     expect(error).toBeInstanceOf(BureauError);
     expect((error as BureauError).code).toBe('NOT_FOUND');
+
+    bureau.dispose();
+  });
+
+  it("deleteRun prunes that run's entries out of the resolved-review tracking set", async () => {
+    // `resolvedReviewIds` grows monotonically otherwise (an unbounded
+    // per-run leak on a long-lived gateway) — `deleteRun` must prune the
+    // run's ids so a LATER run reusing the same run id is never permanently
+    // suppressed from the review queue by a stale resolved-mark it never
+    // itself produced. Reusing a run id doesn't happen in production (ids
+    // are unique), but it is the only externally observable way to prove
+    // the internal set was actually pruned rather than merely believed to
+    // be pruned.
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+    });
+
+    const runId = 'run-prune-resolved-ids';
+    const first = createParkedActiveRun();
+    bureau.store.register(first.activeRun, runId);
+    first.emitter.dispatchEvent(new HumanWaitParkedEvent('human-response', runId, 'Approve?'));
+
+    const [review] = bureau.listPendingReviews();
+    expect(review).toBeDefined();
+    await bureau.resolveReview({
+      id: review!.id,
+      decision: 'deny',
+      principal: 'api-key:reviewer-5',
+    });
+    expect(bureau.listPendingReviews()).toHaveLength(0);
+
+    // Terminate and delete the run — deleteRun refuses a still-`running` run.
+    first.emitter.dispatchEvent(new RunAbortedEvent(0, new Conversation(), 'test-cleanup'));
+    bureau.deleteRun(runId);
+
+    // A new run REUSES the same run id and produces the exact same review id
+    // (`human-wait:${runId}:human-response`). Before the fix, this id was
+    // still in `resolvedReviewIds` from the first run, so it would never
+    // surface — after the fix, deleting the first run pruned it.
+    const second = createParkedActiveRun();
+    bureau.store.register(second.activeRun, runId);
+    second.emitter.dispatchEvent(
+      new HumanWaitParkedEvent('human-response', runId, 'Approve again?'),
+    );
+
+    const reviewsAfterReuse = bureau.listPendingReviews();
+    expect(reviewsAfterReuse).toHaveLength(1);
+    expect(reviewsAfterReuse[0]!.id).toBe(review!.id);
 
     bureau.dispose();
   });

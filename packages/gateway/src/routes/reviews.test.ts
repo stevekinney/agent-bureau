@@ -238,4 +238,32 @@ describe('reviews routes', () => {
     });
     expect(response.status).toBe(404);
   });
+
+  it('POST /api/v1/reviews/:id/approve returns 400 for a valid-JSON non-object body instead of throwing', async () => {
+    const gateway = await createTestGateway({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+    });
+
+    // `null` is valid JSON but not an object — the route must reject it as a
+    // 400 before dereferencing fields off it, not crash into a 500.
+    const response = await requestJSON(gateway, '/api/v1/reviews/nope/approve', {
+      method: 'POST',
+      body: 'null',
+    });
+    expect(response.status).toBe(400);
+  });
+
+  it('POST /api/v1/reviews/:id/deny returns 400 for a JSON array body instead of throwing', async () => {
+    const gateway = await createTestGateway({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+    });
+
+    const response = await requestJSON(gateway, '/api/v1/reviews/nope/deny', {
+      method: 'POST',
+      body: '[]',
+    });
+    expect(response.status).toBe(400);
+  });
 });

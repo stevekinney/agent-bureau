@@ -453,9 +453,23 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       case 'run.registered':
         emitter.dispatch(new RunRegisteredEvent((event as StoreRunRegisteredEvent).runId));
         break;
-      case 'run.removed':
-        emitter.dispatch(new RunRemovedEvent((event as StoreRunRemovedEvent).runId));
+      case 'run.removed': {
+        const removedRunId = (event as StoreRunRemovedEvent).runId;
+        emitter.dispatch(new RunRemovedEvent(removedRunId));
+        // Prune this run's entries from `resolvedReviewIds` — the review ids
+        // it tracks (`approval:${runId}:...`, `human-wait:${runId}:...`) can
+        // never be produced by `listPendingReviews()` again once the run
+        // itself is gone from the store, so keeping them around forever
+        // would be an unbounded per-run leak on a long-lived gateway with
+        // frequent approvals/denials.
+        const runReviewPrefixes = [`approval:${removedRunId}:`, `human-wait:${removedRunId}:`];
+        for (const id of resolvedReviewIds) {
+          if (runReviewPrefixes.some((prefix) => id.startsWith(prefix))) {
+            resolvedReviewIds.delete(id);
+          }
+        }
         break;
+      }
     }
   });
 
@@ -1501,16 +1515,33 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         }
       }
 
-      // Human-wait: the run is still parked iff its LAST recorded action is
-      // the park event — any subsequent action (post-signal continuation)
-      // means it already resumed.
-      const lastAction = runState.actions.at(-1);
-      if (
-        runState.status === 'running' &&
-        lastAction !== undefined &&
-        lastAction.type === HumanWaitParkedEvent.type
-      ) {
-        const rawDetail = lastAction.detail;
+      // Human-wait: the run is still parked iff it has a HumanWaitParkedEvent
+      // action and its status is still 'running'. The park event fires
+      // MID-step (from inside the `requestHumanInput` tool's `execute`,
+      // called by `runStep`), so that same step's own trailing events —
+      // `tools.executed`, `step.generated`, `step.completed` — are always
+      // recorded AFTER it, even though the run is genuinely still parked at
+      // that point (`ctx.waitForSignal` only runs once the whole step loop
+      // exits). Requiring the park event to be the literal last action
+      // therefore misses every real parked run — this instead takes the
+      // MOST RECENT park event (a later step's `requestHumanInput` call
+      // last-write-wins over an earlier one, mirroring the durable
+      // workflow's own accumulation) and relies on `status === 'running'`
+      // to exclude a run that has already resumed and finished — resuming
+      // via `ctx.waitForSignal` runs the workflow straight through to
+      // completion, so `runState.status` leaves `'running'` the moment a
+      // parked run is actually resumed.
+      let parkedAction: (typeof runState.actions)[number] | undefined;
+      for (let index = runState.actions.length - 1; index >= 0; index--) {
+        const action = runState.actions[index];
+        if (action?.type === HumanWaitParkedEvent.type) {
+          parkedAction = action;
+          break;
+        }
+      }
+
+      if (runState.status === 'running' && parkedAction !== undefined) {
+        const rawDetail = parkedAction.detail;
         const detail: Record<string, unknown> | undefined =
           rawDetail !== null && typeof rawDetail === 'object'
             ? (rawDetail as Record<string, unknown>)
@@ -1529,8 +1560,8 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
               agentName,
               signalName,
               prompt,
-              requestedAt: lastAction.timestamp,
-              ageMilliseconds: now - lastAction.timestamp,
+              requestedAt: parkedAction.timestamp,
+              ageMilliseconds: now - parkedAction.timestamp,
             });
           }
         }
@@ -1568,6 +1599,23 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
               ? { arguments: input.arguments }
               : undefined,
           );
+
+          // `resumeApproval` re-runs the tool's `beforeExecute` policy from
+          // scratch — a policy that re-evaluates on edited arguments (or has
+          // changed since the original request) can gate it again, returning
+          // ANOTHER `action_required` instead of executing. The tool did not
+          // run, so this id must stay resolvable: undo the resolved mark (the
+          // same recovery the catch block below does for a thrown error) so
+          // the review is not silently dropped from the queue while the tool
+          // call remains genuinely pending approval.
+          if (
+            result !== null &&
+            typeof result === 'object' &&
+            'outcome' in result &&
+            (result as { outcome: unknown }).outcome === 'action_required'
+          ) {
+            resolvedReviewIds.delete(review.id);
+          }
         }
       } else if (input.decision === 'approve') {
         // Route through the public `bureau.signalSession` (rather than the

@@ -1,5 +1,6 @@
 import { Hono } from 'hono';
 
+import { createScopeGuard } from '../middleware/scope-guard';
 import type {
   Bureau,
   ConfigurationResponse,
@@ -8,6 +9,7 @@ import type {
   RunDetail,
   RunSummary,
 } from '../types';
+import { SCOPE } from '../types';
 import App from '../ui/app.svelte';
 import { renderPage } from './render';
 
@@ -87,7 +89,11 @@ export function createPages(dependencies: PageDependencies) {
     return renderAppResponse(`Run ${run.id}`, `/runs/${run.id}`, { run });
   });
 
-  app.get('/reviews', async () => {
+  // Same `reviews:read` scope as `GET /api/v1/reviews` (routes/index.ts) —
+  // this SSR route embeds the same pending-review data (tool arguments,
+  // prompts) in the hydration payload, so an under-scoped key must not be
+  // able to read it here just because the JSON API is guarded.
+  app.get('/reviews', createScopeGuard([SCOPE.REVIEWS_READ]), async () => {
     const reviews: PendingReview[] = dependencies.bureau.listPendingReviews();
     return renderAppResponse('Review Queue', '/reviews', { reviews });
   });

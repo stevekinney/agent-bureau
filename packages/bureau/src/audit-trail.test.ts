@@ -5,7 +5,7 @@
  * without starting a live bureau or durable engine.
  */
 import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
-import { describe, expect, it } from 'bun:test';
+import { afterEach, describe, expect, it, spyOn } from 'bun:test';
 import type { Action } from 'operative/store';
 
 import { type AuditRecord, createAuditTrail } from './audit-trail';
@@ -439,5 +439,51 @@ describe('createAuditTrail', () => {
       'run.completed',
     ]);
     trail.dispose();
+  });
+
+  describe('same-millisecond manual-record ordering', () => {
+    const originalDateNow = Date.now;
+
+    afterEach(() => {
+      Date.now = originalDateNow;
+    });
+
+    it('preserves insertion order for two out-of-band records in the same millisecond', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      const { bureau } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv);
+
+      // Pin the clock so both `record()` calls land in the exact same
+      // millisecond — the only condition under which the manual-sequence
+      // counter's direction (up vs down) actually matters for ordering.
+      const fixedNow = Date.now();
+      spyOn(Date, 'now').mockReturnValue(fixedNow);
+
+      await trail.record({
+        runId: 'run-same-ms',
+        type: 'review.tool-approval.approved',
+        detail: { order: 'first' },
+      });
+      await trail.record({
+        runId: 'run-same-ms',
+        type: 'review.tool-approval.denied',
+        detail: { order: 'second' },
+      });
+
+      Date.now = originalDateNow;
+
+      const records = await trail.query({ runId: 'run-same-ms' });
+      expect(records).toHaveLength(2);
+      // Both records genuinely share a timestamp — otherwise this test
+      // isn't exercising the same-millisecond tiebreak at all.
+      expect(records[0]!.timestampMs).toBe(records[1]!.timestampMs);
+      // Ascending sequence (the tiebreak `query()`/`/api/v1/audit` sort by)
+      // must put the FIRST call before the SECOND — chronological order.
+      expect(records[0]!.sequence).toBeLessThan(records[1]!.sequence);
+      expect((records[0]!.detail as { order: string }).order).toBe('first');
+      expect((records[1]!.detail as { order: string }).order).toBe('second');
+
+      trail.dispose();
+    });
   });
 });

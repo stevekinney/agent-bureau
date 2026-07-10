@@ -150,13 +150,15 @@ export function createAuditTrail(bureau: Bureau, kv: TextValueStore | undefined)
   // Out-of-band records (via `record()`) have no operative store `Action` to
   // draw a `sequence` from — they happen outside any run's step loop.
   // `encodeKey` zero-pads `sequence` as an unsigned decimal, so the counter
-  // must stay non-negative for the lexicographic key sort to hold. Counting
-  // DOWN from Number.MAX_SAFE_INTEGER keeps it in that same unsigned decimal
-  // shape while making a collision with a real action's sequence (which the
-  // store always assigns starting at 0) astronomically unlikely, and still
-  // gives `encodeKey` a per-timestamp tiebreak for two decisions landing in
-  // the same millisecond.
-  let manualSequence = Number.MAX_SAFE_INTEGER;
+  // must stay non-negative for the lexicographic key sort to hold, and
+  // `query()`/`/api/v1/audit` order ties by ASCENDING sequence — so it must
+  // count UP (not down) for later same-millisecond records to sort after
+  // earlier ones. Starting well below `Number.MAX_SAFE_INTEGER` (10 billion
+  // of headroom — far more manual records than any process could plausibly
+  // emit) keeps every value in that same large, real-action-sequence-proof
+  // range (the store's own sequence always starts at 0) while leaving room
+  // to increment without exceeding `MAX_SAFE_INTEGER`.
+  let manualSequence = Number.MAX_SAFE_INTEGER - 10_000_000_000;
 
   // Subscribe to the bureau's action stream. The bureau re-emits every
   // operative store action as an ActionEvent, so we don't need to reach into
@@ -200,7 +202,7 @@ export function createAuditTrail(bureau: Bureau, kv: TextValueStore | undefined)
       if (!kv) return;
 
       const timestampMs = Date.now();
-      const sequence = manualSequence--;
+      const sequence = manualSequence++;
 
       const record: AuditRecord = {
         timestamp: new Date(timestampMs).toISOString(),

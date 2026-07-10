@@ -15,6 +15,7 @@
 import { BureauError } from 'bureau';
 import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
+import { z } from 'zod';
 
 import type { Bureau } from '../types';
 
@@ -26,6 +27,50 @@ import type { Bureau } from '../types';
  */
 function resolvePrincipal(context: { req: { header(name: string): string | undefined } }): string {
   return context.req.header('x-auth-principal') ?? 'anonymous';
+}
+
+const approveBodySchema = z
+  .object({
+    arguments: z.unknown(),
+    payload: z.unknown(),
+    reason: z.string().optional(),
+  })
+  .partial();
+
+const denyBodySchema = z
+  .object({
+    reason: z.string().optional(),
+  })
+  .partial();
+
+/**
+ * Parses and validates a mutating review route's JSON body against `schema`.
+ * Rejects with `400` for both malformed JSON AND a syntactically valid but
+ * non-object payload (e.g. `null`, `"hi"`, `[]`) — the boundary check the
+ * route bodies (which dereference fields like `body.payload` directly) rely
+ * on to never see a shape they can't index into.
+ */
+async function parseReviewBody<TSchema extends z.ZodTypeAny>(
+  context: { req: { text(): Promise<string> } },
+  schema: TSchema,
+): Promise<z.infer<TSchema>> {
+  const rawBody = await context.req.text();
+  if (rawBody.length === 0) {
+    return schema.parse({});
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawBody);
+  } catch {
+    throw new HTTPException(400, { message: 'Invalid JSON body' });
+  }
+
+  const result = schema.safeParse(parsed);
+  if (!result.success) {
+    throw new HTTPException(400, { message: 'Request body must be a JSON object' });
+  }
+  return result.data;
 }
 
 function toHttpException(error: unknown): HTTPException {
@@ -49,15 +94,7 @@ export function createReviewsRoutes(bureau: Bureau) {
 
   app.post('/:id/approve', async (context) => {
     const id = context.req.param('id');
-    let body: { arguments?: unknown; payload?: unknown; reason?: string } = {};
-    const rawBody = await context.req.text();
-    if (rawBody.length > 0) {
-      try {
-        body = JSON.parse(rawBody) as typeof body;
-      } catch {
-        throw new HTTPException(400, { message: 'Invalid JSON body' });
-      }
-    }
+    const body = await parseReviewBody(context, approveBodySchema);
 
     try {
       const outcome = await bureau.resolveReview({
@@ -78,15 +115,7 @@ export function createReviewsRoutes(bureau: Bureau) {
 
   app.post('/:id/deny', async (context) => {
     const id = context.req.param('id');
-    let body: { reason?: string } = {};
-    const rawBody = await context.req.text();
-    if (rawBody.length > 0) {
-      try {
-        body = JSON.parse(rawBody) as typeof body;
-      } catch {
-        throw new HTTPException(400, { message: 'Invalid JSON body' });
-      }
-    }
+    const body = await parseReviewBody(context, denyBodySchema);
 
     try {
       const outcome = await bureau.resolveReview({
