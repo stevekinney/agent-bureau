@@ -265,6 +265,7 @@ export type {
   DetectorContext,
   GroundingValidatorOptions,
   GuardrailHooks,
+  GuardrailProvenance,
   GuardrailsOptions,
   GuardrailTriggeredEvent,
   InputDetector,

@@ -1,36 +1,27 @@
+import type {
+  DetectionResult,
+  DetectorContext,
+  GuardrailProvenance,
+  GuardrailTriggeredEvent,
+  InputDetector,
+} from 'armorer';
+
 import type { PrepareStepHook, ValidateResponseHook } from '../types';
 
-/** Context provided to input detectors for situational awareness. */
-export interface DetectorContext {
-  step: number;
-  conversationLength: number;
-  sessionTainted: boolean;
-}
-
-/** Result of running an input detector against user input. */
-export interface DetectionResult {
-  triggered: boolean;
-  confidence: number;
-  category: string;
-  detail?: string;
-  sanitized?: string;
-}
-
-/** An input detector that inspects user messages for policy violations. */
-export interface InputDetector {
-  name: string;
-  detect: (input: string, context: DetectorContext) => Promise<DetectionResult>;
-}
-
-/** Event emitted when an input guardrail is triggered. */
-export interface GuardrailTriggeredEvent {
-  detector: string;
-  category: string;
-  confidence: number;
-  action: 'block' | 'warn' | 'sanitize' | 'tripwire';
-  input: string;
-  detail?: string;
-}
+/**
+ * `DetectorContext`, `DetectionResult`, `InputDetector`, `GuardrailTriggeredEvent`,
+ * and `GuardrailProvenance` live in `armorer`'s guardrail detector pipeline —
+ * the same pipeline reused by memory recall, ingested documents, and skill
+ * resources so every surface that admits retrieved content into the model's
+ * context runs through identical detection and confidence-gating logic.
+ */
+export type {
+  DetectionResult,
+  DetectorContext,
+  GuardrailProvenance,
+  GuardrailTriggeredEvent,
+  InputDetector,
+};
 
 /** Options for configuring input guardrails. */
 export interface InputGuardrailOptions {
@@ -98,6 +89,14 @@ export interface SessionTaintedEvent {
   detector: string;
   confidence: number;
   step: number;
+  /**
+   * Where the content that caused the taint originated from. Defaults to
+   * `'user-input'` for taints raised by the input guardrail hook; retrieval
+   * surfaces (memory recall, ingested documents, skill resources) that feed
+   * their own `GuardrailTriggeredEvent`s into a taint tracker should pass
+   * their `event.provenance` through here.
+   */
+  provenance?: GuardrailProvenance;
 }
 
 /** Options for configuring session tainting behavior. */
@@ -133,6 +132,14 @@ export interface GuardrailsOptions {
 export interface GuardrailHooks {
   prepareStep: PrepareStepHook;
   validateResponse: ValidateResponseHook;
+  /**
+   * The session's taint tracker. Retrieval surfaces outside operative's run
+   * loop — memory recall, ingested documents, skill resources — don't go
+   * through `prepareStep`/`validateResponse`, but their `scanContent()`
+   * `onTriggered` callbacks can call `taint.taint(event)` directly to fold
+   * their detections into the same session-wide taint state.
+   */
+  taint: SessionTaintTracker;
 }
 
 /** State tracker for session tainting. */
