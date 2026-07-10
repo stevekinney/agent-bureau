@@ -3,7 +3,12 @@ import type { RunResult } from 'operative';
 import { createActiveRun, stopWhen } from 'operative';
 
 import { matchOutput } from './matchers';
-import { extractStepCount, extractTokenUsage, matchToolCalls } from './metrics';
+import {
+  extractStepCount,
+  extractTokenUsage,
+  extractToolCallSequence,
+  matchToolCalls,
+} from './metrics';
 import type {
   CreateAgentEvaluationOptions,
   EvaluationCase,
@@ -185,7 +190,11 @@ async function runCase(
     }
 
     const outputMatchResult = await matchOutput(runResult, evaluationCase, options.embedder);
-    const toolCallMatch = matchToolCalls(runResult, evaluationCase.expectedToolCalls);
+    const toolCallCountMatch =
+      evaluationCase.expectedToolCallCount === undefined ||
+      extractToolCallSequence(runResult).length === evaluationCase.expectedToolCallCount;
+    const toolCallMatch =
+      matchToolCalls(runResult, evaluationCase.expectedToolCalls) && toolCallCountMatch;
 
     const pass = outputMatchResult.pass && toolCallMatch;
     const score = toolCallMatch ? outputMatchResult.score : 0;

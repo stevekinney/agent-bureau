@@ -94,6 +94,10 @@ function validateEvaluationCase(value: unknown, index: number): EvaluationCase {
     expectedToolCalls: Array.isArray(record['expectedToolCalls'])
       ? (record['expectedToolCalls'] as EvaluationCase['expectedToolCalls'])
       : undefined,
+    expectedToolCallCount:
+      typeof record['expectedToolCallCount'] === 'number'
+        ? record['expectedToolCallCount']
+        : undefined,
     maxSteps: typeof record['maxSteps'] === 'number' ? record['maxSteps'] : undefined,
     tags: Array.isArray(record['tags']) ? (record['tags'] as string[]) : undefined,
     timeout: typeof record['timeout'] === 'number' ? record['timeout'] : undefined,
@@ -154,6 +158,11 @@ export async function loadDataset(path: string): Promise<EvaluationCase[]> {
  * Returns `0` when the file does not exist or predates versioning (a bare
  * JSON array) — `saveDataset()` treats that as "not yet versioned" and bumps
  * to `1` on the next managed write.
+ *
+ * @throws When the file exists but its content is not valid JSON — a
+ * truncated/corrupted managed dataset must fail loudly for operator repair
+ * rather than being silently treated as "unversioned" and having
+ * `saveDataset()` overwrite it with a fresh version 1.
  */
 export async function getDatasetVersion(path: string): Promise<number> {
   const file = Bun.file(path);
@@ -163,10 +172,45 @@ export async function getDatasetVersion(path: string): Promise<number> {
   try {
     parsed = JSON.parse(await file.text());
   } catch {
-    return 0;
+    throw new Error(
+      `Dataset file "${path}" exists but is not valid JSON — refusing to treat it as ` +
+        'unversioned, since that would let saveDataset() overwrite a corrupted file. ' +
+        'Repair or remove it before saving.',
+    );
   }
 
   return isDatasetFileShape(parsed) ? parsed.version : 0;
+}
+
+/** Type guard for a `SemanticMatcher` or plain string `expectedOutput` — the only two shapes JSON can round-trip. */
+function isSerializableExpectedOutput(value: EvaluationCase['expectedOutput']): boolean {
+  return value === undefined || typeof value === 'string' || isSemanticMatcher(value);
+}
+
+/**
+ * Rejects evaluation cases whose expectations can't survive a JSON
+ * round-trip — a `RegExp` `expectedOutput` serializes to `{}` and a custom
+ * `assert` function is dropped entirely, so saving one would silently strip
+ * the case's only assertion and it would pass by default on reload.
+ */
+function assertSerializable(cases: EvaluationCase[], path: string): void {
+  for (const evaluationCase of cases) {
+    if (!isSerializableExpectedOutput(evaluationCase.expectedOutput)) {
+      throw new Error(
+        `Cannot save dataset "${path}": case "${evaluationCase.name}" has a RegExp ` +
+          '`expectedOutput`, which JSON cannot represent (it would serialize to `{}` and ' +
+          'silently lose the assertion on reload). Use a string or SemanticMatcher for ' +
+          'cases saved via saveDataset(), or add this case to a programmatic dataset instead.',
+      );
+    }
+    if (evaluationCase.assert !== undefined) {
+      throw new Error(
+        `Cannot save dataset "${path}": case "${evaluationCase.name}" has a custom \`assert\` ` +
+          'function, which JSON cannot represent (it would be dropped entirely and silently ' +
+          'lose the assertion on reload). Add this case to a programmatic dataset instead.',
+      );
+    }
+  }
 }
 
 /**
@@ -175,11 +219,15 @@ export async function getDatasetVersion(path: string): Promise<number> {
  * `{ version, cases }`. This is the dataset lifecycle's write path —
  * `promoteRunToCase()` produces cases, `saveDataset()` commits them to disk
  * with a traceable revision.
+ *
+ * @throws When any case has a `RegExp` `expectedOutput` or a function
+ * `assert` — see `assertSerializable`.
  */
 export async function saveDataset(
   path: string,
   cases: EvaluationCase[],
 ): Promise<{ version: number }> {
+  assertSerializable(cases, path);
   const version = (await getDatasetVersion(path)) + 1;
   const payload: DatasetFile = { version, cases };
   await Bun.write(path, `${JSON.stringify(payload, null, 2)}\n`);

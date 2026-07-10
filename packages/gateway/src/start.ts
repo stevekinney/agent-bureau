@@ -66,6 +66,10 @@ const EnvironmentSchema = z.object({
   AUTH_TOKEN: optionalString(),
   STORAGE_TYPE: z.enum(['sqlite', 'lmdb', 'memory']).default('sqlite'),
   STORAGE_PATH: optionalString(),
+  // Directory of evaluation report JSON files for the read-only `/evaluations`
+  // trend page — mirrors `GatewayOptions.evaluationReportsDirectory`. Unset
+  // means the page renders empty; evaluation reporting is opt-in.
+  EVALUATION_REPORTS_DIRECTORY: optionalString(),
   PROVIDER: z.enum(['anthropic', 'openai', 'gemini']).default('anthropic'),
   MODEL: optionalString(),
   SYSTEM_PROMPT: optionalString(),
@@ -160,6 +164,9 @@ export function resolveStartOptions(environment: StartEnvironment): {
       ...(environment.PORT !== undefined ? { port: environment.PORT } : {}),
       ...(environment.GATEWAY_HOST !== undefined ? { hostname: environment.GATEWAY_HOST } : {}),
       ...(environment.AUTH_TOKEN !== undefined ? { authToken: environment.AUTH_TOKEN } : {}),
+      ...(environment.EVALUATION_REPORTS_DIRECTORY !== undefined
+        ? { evaluationReportsDirectory: environment.EVALUATION_REPORTS_DIRECTORY }
+        : {}),
     },
   };
 }

@@ -72,6 +72,15 @@ export type EvaluationCase = {
   systemPrompt?: string;
   /** Expected tool calls (in order or as a set). */
   expectedToolCalls?: ExpectedToolCall[];
+  /**
+   * When set, the case also fails unless the actual number of tool calls
+   * equals this count exactly — closes the gap `expectedToolCalls` alone
+   * leaves open (it pins the calls it lists but never rejects *extra*,
+   * unlisted calls). `promoteRunToCase()` sets this to the promoted run's
+   * call count so a promoted case reproduces the exact golden trajectory,
+   * not just "at least these calls happened."
+   */
+  expectedToolCallCount?: number;
   /** Expected output pattern (string match, regex, or semantic). */
   expectedOutput?: string | RegExp | SemanticMatcher;
   /** Maximum steps the agent should need. */

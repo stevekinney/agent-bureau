@@ -90,6 +90,24 @@ describe('promoteRunToCase', () => {
     ]);
   });
 
+  it('sets expectedToolCallCount to the recorded call count, locking the trajectory length', () => {
+    const runResult = createMockRunResult({
+      steps: [
+        createMockStep([{ name: 'lookup-cart' }]),
+        createMockStep([{ name: 'charge-card', arguments: { amount: 42 } }]),
+      ],
+    });
+
+    const promoted = promoteRunToCase({
+      sourceCase,
+      runResult,
+      origin: 'evaluation-run',
+      runId: 'run-1',
+    });
+
+    expect(promoted.expectedToolCallCount).toBe(2);
+  });
+
   it('omits arguments for a non-object tool-call argument value', () => {
     const runResult = createMockRunResult({
       steps: [createMockStep([{ name: 'lookup-cart' }])],
@@ -252,6 +270,56 @@ describe('promoteRunToCase', () => {
 
     const report = await evaluation.run();
 
+    expect(report.cases[0]!.pass).toBe(false);
+  });
+
+  it('the promoted case FAILS when the agent makes an extra, unlisted tool call', async () => {
+    // Recorded run: exactly one tool call.
+    const runResult = createMockRunResult({
+      content: 'Your order has shipped.',
+      steps: [createMockStep([{ name: 'lookup-cart' }])],
+    });
+
+    const promoted = promoteRunToCase({
+      sourceCase,
+      runResult,
+      origin: 'evaluation-run',
+      runId: 'run-6',
+    });
+
+    // Regressed agent: performs the recorded call AND an extra, unlisted one
+    // before returning the same content — matchToolCallsOrdered alone only
+    // checks the positions it was told about, so this would otherwise pass.
+    const generate = createMockGenerate([
+      {
+        content: '',
+        toolCalls: [{ id: 'c1', name: 'lookup-cart', arguments: {} }],
+        usage: { prompt: 5, completion: 2, total: 7 },
+      },
+      {
+        content: '',
+        toolCalls: [{ id: 'c2', name: 'send-marketing-email', arguments: {} }],
+        usage: { prompt: 5, completion: 2, total: 7 },
+      },
+      {
+        content: 'Your order has shipped.',
+        toolCalls: [],
+        usage: { prompt: 6, completion: 3, total: 9 },
+      },
+    ]);
+    const toolbox = createTestToolbox([
+      createMockTool({ name: 'lookup-cart' }),
+      createMockTool({ name: 'send-marketing-email' }),
+    ]);
+
+    const evaluation = createAgentEvaluation({
+      cases: [promoted],
+      agent: { generate, toolbox },
+    });
+
+    const report = await evaluation.run();
+
+    expect(report.cases[0]!.metrics.toolCallMatch).toBe(false);
     expect(report.cases[0]!.pass).toBe(false);
   });
 });

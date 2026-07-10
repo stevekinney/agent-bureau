@@ -272,6 +272,32 @@ describe('getDatasetVersion / saveDataset', () => {
     }
   });
 
+  it('throws rather than treating a truncated/corrupted JSON file as unversioned', async () => {
+    const path = fixturePath('corrupted-json.json');
+    await Bun.write(path, '{ "version": 3, "cases": [ this is not valid json');
+
+    let caught: unknown;
+    try {
+      await getDatasetVersion(path);
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(Error);
+
+    // saveDataset() must not be able to silently overwrite the corrupted
+    // file with a fresh version 1 — it should propagate the same error.
+    let saveCaught: unknown;
+    try {
+      await saveDataset(path, [{ name: 'case-1', input: 'hi' }]);
+    } catch (error) {
+      saveCaught = error;
+    }
+    expect(saveCaught).toBeInstanceOf(Error);
+
+    // The corrupted file on disk must be untouched.
+    expect(await Bun.file(path).text()).toBe('{ "version": 3, "cases": [ this is not valid json');
+  });
+
   it('writes version 1 on the first saveDataset() call for a new path', async () => {
     const path = fixturePath('versioned-new.json');
     const { version } = await saveDataset(path, [{ name: 'case-1', input: 'hi' }]);
@@ -336,5 +362,57 @@ describe('getDatasetVersion / saveDataset', () => {
 
     const loaded = await loadDataset(path);
     expect(loaded[0]!.provenance).toEqual(cases[0]!.provenance);
+  });
+
+  it('rejects saving a case with a RegExp expectedOutput rather than silently dropping it', async () => {
+    const path = fixturePath('unserializable-regexp.json');
+
+    let caught: unknown;
+    try {
+      await saveDataset(path, [{ name: 'case-1', input: 'hi', expectedOutput: /^hello/ }]);
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toContain('RegExp');
+    // Nothing should have been written.
+    expect(await Bun.file(path).exists()).toBe(false);
+  });
+
+  it('rejects saving a case with a custom assert function rather than silently dropping it', async () => {
+    const path = fixturePath('unserializable-assert.json');
+
+    let caught: unknown;
+    try {
+      await saveDataset(path, [
+        { name: 'case-1', input: 'hi', assert: () => ({ pass: true, score: 1 }) },
+      ]);
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toContain('assert');
+    expect(await Bun.file(path).exists()).toBe(false);
+  });
+
+  it('accepts a SemanticMatcher expectedOutput, which JSON can represent', async () => {
+    const path = fixturePath('semantic-matcher.json');
+    const { version } = await saveDataset(path, [
+      {
+        name: 'case-1',
+        input: 'hi',
+        expectedOutput: { type: 'semantic', reference: 'hello', threshold: 0.8 },
+      },
+    ]);
+    expect(version).toBe(1);
+
+    const loaded = await loadDataset(path);
+    expect(loaded[0]!.expectedOutput).toEqual({
+      type: 'semantic',
+      reference: 'hello',
+      threshold: 0.8,
+    });
   });
 });

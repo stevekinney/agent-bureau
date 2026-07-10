@@ -51,13 +51,19 @@ function toExpectedToolCalls(runResult: RunResult): ExpectedToolCall[] {
  */
 export function promoteRunToCase(options: PromoteRunToCaseOptions): EvaluationCase {
   const { sourceCase, runResult, origin, runId } = options;
+  const expectedToolCalls = toExpectedToolCalls(runResult);
 
   return {
     name: options.name ?? `${sourceCase.name} (promoted)`,
     input: sourceCase.input,
     systemPrompt: sourceCase.systemPrompt,
     expectedOutput: options.expectedOutput ?? runResult.content,
-    expectedToolCalls: toExpectedToolCalls(runResult),
+    expectedToolCalls,
+    // Locks the trajectory length so a later run that performs every
+    // expected call PLUS an extra, unlisted one still fails — otherwise
+    // `matchToolCallsOrdered` only checks the positions it was told about
+    // and silently accepts extras (see `expectedToolCallCount`'s doc).
+    expectedToolCallCount: expectedToolCalls.length,
     maxSteps: sourceCase.maxSteps,
     tags: [...(sourceCase.tags ?? []), 'promoted'],
     timeout: sourceCase.timeout,

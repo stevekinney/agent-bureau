@@ -138,6 +138,18 @@ describe('resolveStartOptions', () => {
     const options = resolveStartOptions(parseStartEnvironment(BASE_ENVIRONMENT));
     expect(options.gateway).toEqual({});
   });
+
+  it('wires EVALUATION_REPORTS_DIRECTORY into GatewayOptions.evaluationReportsDirectory', () => {
+    const options = resolveStartOptions(
+      parseStartEnvironment({ EVALUATION_REPORTS_DIRECTORY: './reports' }),
+    );
+    expect(options.gateway.evaluationReportsDirectory).toBe('./reports');
+  });
+
+  it('leaves evaluationReportsDirectory unset when EVALUATION_REPORTS_DIRECTORY is unset', () => {
+    const options = resolveStartOptions(parseStartEnvironment(BASE_ENVIRONMENT));
+    expect(options.gateway.evaluationReportsDirectory).toBeUndefined();
+  });
 });
 
 describe('startGateway', () => {
