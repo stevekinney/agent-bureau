@@ -109,7 +109,61 @@ import { loadDatasets } from 'evaluation';
 const cases = await loadDatasets('datasets/**/*.json');
 ```
 
-Dataset files must be JSON arrays where every object has at least `name` (string) and `input` (string). `RegExp` matchers cannot be serialized to JSON—add them programmatically after loading.
+Dataset files must be JSON arrays where every object has at least `name` (string) and `input` (string). `RegExp` matchers cannot be serialized to JSON—add them programmatically after loading. `loadDataset()`/`loadDatasets()` also accept the versioned `{ version, cases }` shape written by `saveDataset()` (see below)—both shapes load into the same `EvaluationCase[]`.
+
+---
+
+### Dataset Lifecycle
+
+Datasets are versioned artifacts, and regression cases can be minted directly from a recorded run instead of hand-written. This is the loop: an evaluation (or production) run fails or behaves correctly → `promoteRunToCase()` snapshots that run into a case with `provenance` → `saveDataset()` commits it to disk with a bumped `version`.
+
+**`promoteRunToCase(options)`:** Turns a `RunResult` into a runnable `EvaluationCase`. By default it snapshots the run's actual `content` and ordered tool-call trajectory as the golden expectation (characterization testing—"this is what it did, keep doing this"). Pass `expectedOutput` to set the _desired_ output instead when promoting a failure, so the bug isn't locked in as the expectation. Records `provenance`: which run produced the case, from where (`evaluation-run` or `production-failure`), and when.
+
+```typescript
+import { promoteRunToCase, saveDataset } from 'evaluation';
+
+// report.cases[i].pass === false; runResult is the RunResult that produced it
+// (capture it via a custom `assert` on the case, or by calling operative's
+// run loop directly instead of createAgentEvaluation for this one case).
+const promoted = promoteRunToCase({
+  sourceCase: originalCase, // the EvaluationCase whose input produced the run
+  runResult,
+  origin: 'production-failure',
+  runId: `incident-2026-01-15`,
+  expectedOutput: 'The corrected response text.', // fix, not the bug
+});
+
+const { version } = await saveDataset('datasets/regressions.json', [...existingCases, promoted]);
+console.log(`datasets/regressions.json is now version ${version}`);
+```
+
+---
+
+**`saveDataset(path, cases)`:** Writes `cases` to `path` as a versioned `{ version, cases }` artifact. Reads the file's current version (`0` if the file is missing or is a legacy bare-array file), bumps it by one, and writes. Returns `{ version }`.
+
+```typescript
+import { saveDataset } from 'evaluation';
+
+const { version } = await saveDataset('datasets/basic-tool-use.json', updatedCases);
+// version === previous version + 1 (or 1, for a brand-new or legacy-unversioned file)
+```
+
+---
+
+**`getDatasetVersion(path)`:** Reads a dataset file's current version without validating its cases. Returns `0` for a missing file or a pre-versioning bare-array file.
+
+---
+
+### Report Aggregation
+
+**`listEvaluationReports(directory)`:** Lists every evaluation report JSON file in `directory` (as written by `runEvaluationSuite`'s `output` option) and returns per-report summaries—pass rate, token cost, duration—sorted oldest to newest by timestamp. This is the aggregation the gateway's read-only `/evaluations` trend page reads directly. Returns `[]` for a directory that doesn't exist yet (no reports written). Files that parse but aren't a valid `EvaluationReport` are skipped rather than failing the whole listing.
+
+```typescript
+import { listEvaluationReports } from 'evaluation';
+
+const summaries = await listEvaluationReports('reports/evaluations');
+// [{ path, timestamp, total, passed, failed, passRate, averageTokens, averageDuration }, ...]
+```
 
 ---
 
@@ -295,6 +349,69 @@ if (comparison.regressions.length > 0) {
 
 ---
 
+## CI Gating: Release-Gate Recipe
+
+`compareEvaluationReports` and `runEvaluationSuite`'s `exitCode` are the primitives; this section documents the recipe for wiring them into a CI job as a merge gate. **This is documentation, not CI wiring**—no workflow file ships with this package. Adapt the shell to your CI provider.
+
+### 1. Commit a baseline report
+
+Run the suite once against `main` (or a known-good revision) and commit the resulting report as the baseline:
+
+```bash
+bun run -e '
+  import { runEvaluationSuite } from "evaluation";
+  import { generate, toolbox } from "./my-agent";
+
+  await runEvaluationSuite({
+    datasets: "datasets/*.json",
+    agent: { generate, toolbox },
+    output: "reports/baseline.json",
+  });
+'
+git add reports/baseline.json
+git commit -m "eval: refresh baseline"
+```
+
+Refresh the baseline deliberately—after a reviewed, intentional behavior change—not automatically on every merge. An auto-refreshed baseline can never detect a regression, because it always compares a commit against itself.
+
+### 2. Gate every PR against the baseline
+
+In the CI job that runs on pull requests, run the suite again with `baseline` pointed at the committed file and exit on `exitCode`:
+
+```bash
+bun run -e '
+  import { runEvaluationSuite } from "evaluation";
+  import { generate, toolbox } from "./my-agent";
+
+  const { comparison, exitCode } = await runEvaluationSuite({
+    datasets: "datasets/*.json",
+    agent: { generate, toolbox },
+    baseline: "reports/baseline.json",
+    output: "reports/current.json",
+    thresholds: { passRateDrop: 0.05, costIncrease: 0.2 }, // tune per project
+  });
+
+  if (comparison) {
+    console.log(`Regressions: ${comparison.regressions.length}`);
+    console.log(`Improvements: ${comparison.improvements.length}`);
+  }
+
+  process.exit(exitCode); // 0 = pass, 1 = regression -> CI job fails, PR blocked
+'
+```
+
+`exitCode` is `1` whenever `compareEvaluationReports` finds a regression under the configured `RegressionThresholds`—a pass→fail flip on any matched case, a pass-rate drop beyond `passRateDrop`, or a token-cost increase beyond `costIncrease`. A non-zero process exit fails the CI step, which should be a required check on the PR's branch protection rule so a regression blocks merge rather than just posting a warning.
+
+### 3. Archive every report for trend visibility
+
+Write `output` into a directory that accumulates report history (e.g. uploaded as a CI artifact, or synced to the path the gateway's `evaluationReportsDirectory` option points at) so `listEvaluationReports()` can build a pass-rate/cost trend over time—see the `gateway` package's read-only `/evaluations` page. A one-off `reports/current.json` per run is enough for gating; a directory of dated report files (`reports/evaluations/2026-01-15T00-00-00.json`) is what trend aggregation needs.
+
+### 4. Promote regressions into permanent regression cases
+
+When a regression is confirmed and fixed, promote the failing run into a dataset case with `promoteRunToCase()` (see Dataset Lifecycle above) so the same failure can never silently reappear—it becomes a permanent, versioned case in the suite rather than a one-off incident.
+
+---
+
 ## Types
 
 ### `EvaluationCase`
@@ -312,6 +429,60 @@ type EvaluationCase = {
   assert?: (result: RunResult) => EvaluationAssertion;
   tags?: string[];
   timeout?: number; // ms, default: 30_000
+  provenance?: EvaluationCaseProvenance; // set when promoted via promoteRunToCase()
+};
+```
+
+### `EvaluationCaseProvenance` / `PromoteRunToCaseOptions`
+
+Recorded on a case promoted from a run via `promoteRunToCase()`—which run/failure produced it, and when.
+
+```typescript
+type EvaluationCaseOrigin = 'evaluation-run' | 'production-failure';
+
+type EvaluationCaseProvenance = {
+  origin: EvaluationCaseOrigin;
+  runId: string;
+  sourceCaseName?: string;
+  promotedAt: string; // ISO 8601
+  finishReason: FinishReason;
+};
+
+type PromoteRunToCaseOptions = {
+  sourceCase: EvaluationCase;
+  runResult: RunResult;
+  origin: EvaluationCaseOrigin;
+  runId: string;
+  name?: string; // default: "<sourceCase.name> (promoted)"
+  expectedOutput?: string | SemanticMatcher; // override the run's actual content
+};
+```
+
+### `DatasetFile`
+
+The versioned envelope `saveDataset()` writes to disk.
+
+```typescript
+type DatasetFile = {
+  version: number;
+  cases: EvaluationCase[];
+};
+```
+
+### `EvaluationReportSummary`
+
+A single report's aggregate stats, keyed by file path—the row shape `listEvaluationReports()` returns.
+
+```typescript
+type EvaluationReportSummary = {
+  path: string;
+  timestamp: string; // ISO 8601
+  total: number;
+  passed: number;
+  failed: number;
+  passRate: number;
+  averageTokens: number;
+  averageDuration: number; // ms
 };
 ```
 

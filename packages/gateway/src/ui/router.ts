@@ -10,6 +10,7 @@ export const routes: Route[] = [
   { pattern: '/usage', name: 'usage' },
   { pattern: '/configuration', name: 'configuration' },
   { pattern: '/chat', name: 'chat' },
+  { pattern: '/evaluations', name: 'evaluations' },
 ];
 
 export interface MatchResult {

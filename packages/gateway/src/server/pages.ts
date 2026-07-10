@@ -1,3 +1,4 @@
+import { listEvaluationReports } from 'evaluation';
 import { Hono } from 'hono';
 
 import { createScopeGuard } from '../middleware/scope-guard';
@@ -5,6 +6,7 @@ import { buildUsageResponse, type UsageResponse } from '../routes/usage';
 import type {
   Bureau,
   ConfigurationResponse,
+  EvaluationReportsResponse,
   PendingReview,
   ProviderConfiguration,
   RunDetail,
@@ -16,8 +18,8 @@ import { renderPage } from './render';
 
 /**
  * The canonical per-route hydration payload. Mirrors the client app's
- * `InitialData` contract: only `runs`, `run`, `config`, and `reviews` are
- * ever populated, each on the route that owns it.
+ * `InitialData` contract: only `runs`, `run`, `config`, `reviews`, and
+ * `evaluations` are ever populated, each on the route that owns it.
  */
 interface InitialData {
   runs?: RunSummary[];
@@ -25,6 +27,7 @@ interface InitialData {
   config?: ConfigurationResponse;
   reviews?: PendingReview[];
   usage?: UsageResponse;
+  evaluations?: EvaluationReportsResponse;
 }
 
 interface PageDependencies {
@@ -39,6 +42,12 @@ interface PageDependencies {
   provider: Omit<ProviderConfiguration, 'apiKey'> | undefined;
   maximumSteps: number;
   systemPrompt: string | undefined;
+  /**
+   * Directory of evaluation report JSON files backing the `/evaluations`
+   * page (mirrors `GatewayOptions.evaluationReportsDirectory`). Undefined
+   * means the page renders empty — evaluation reporting is opt-in.
+   */
+  evaluationReportsDirectory: string | undefined;
 }
 
 const HTML_HEADERS = { 'content-type': 'text/html; charset=utf-8' } as const;
@@ -121,6 +130,13 @@ export function createPages(dependencies: PageDependencies) {
 
   app.get('/chat', async () => {
     return renderAppResponse('Chat', '/chat', {});
+  });
+
+  app.get('/evaluations', async () => {
+    const reports = dependencies.evaluationReportsDirectory
+      ? await listEvaluationReports(dependencies.evaluationReportsDirectory)
+      : [];
+    return renderAppResponse('Evaluations', '/evaluations', { evaluations: { reports } });
   });
 
   return app;

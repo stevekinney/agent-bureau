@@ -22,6 +22,7 @@
     { href: '/reviews', label: 'Review Queue' },
     { href: '/usage', label: 'Usage' },
     { href: '/chat', label: 'Chat' },
+    { href: '/evaluations', label: 'Evaluations' },
     { href: '/configuration', label: 'Configuration' },
   ];
   const sidebarBreakpointQuery = '(max-width: 47.99rem)';

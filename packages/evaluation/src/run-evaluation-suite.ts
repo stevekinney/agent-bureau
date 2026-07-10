@@ -29,15 +29,48 @@ async function loadCasesFromDatasets(datasets: string | string[]): Promise<Evalu
   return allCases;
 }
 
-/** Type guard that validates the minimal shape of a baseline report. */
-function isEvaluationReport(value: unknown): value is EvaluationReport {
+/** Every numeric field `EvaluationReport['summary']` must have, all finite. */
+const SUMMARY_NUMERIC_FIELDS = [
+  'total',
+  'passed',
+  'failed',
+  'passRate',
+  'averageScore',
+  'averageSteps',
+  'averageTokens',
+  'averageDuration',
+] as const;
+
+/**
+ * Validates `EvaluationReport['summary']` has every required numeric field,
+ * each a finite number — not just "is an object". Without this, a file like
+ * `{ timestamp, cases: [], summary: {} }` (or any unrelated JSON sharing
+ * those top-level keys) would pass `isEvaluationReport` and propagate
+ * `undefined`/`NaN` totals, pass rates, and token averages into consumers
+ * (the gateway's report trend view, baseline regression comparison) instead
+ * of being skipped as an invalid report.
+ */
+function isEvaluationReportSummary(value: unknown): value is EvaluationReport['summary'] {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return SUMMARY_NUMERIC_FIELDS.every(
+    (field) => typeof record[field] === 'number' && Number.isFinite(record[field]),
+  );
+}
+
+/**
+ * Type guard that validates the minimal shape of an EvaluationReport.
+ * Exported for reuse by `listEvaluationReports()`, which validates arbitrary
+ * files in a reports directory the same way a baseline report is validated
+ * here.
+ */
+export function isEvaluationReport(value: unknown): value is EvaluationReport {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
   const record = value as Record<string, unknown>;
   return (
     typeof record['timestamp'] === 'string' &&
     Array.isArray(record['cases']) &&
-    typeof record['summary'] === 'object' &&
-    record['summary'] !== null
+    isEvaluationReportSummary(record['summary'])
   );
 }
 

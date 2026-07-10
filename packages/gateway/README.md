@@ -7,7 +7,7 @@
 - Wraps an already-constructed `Bureau` (built with `createBureau()` from the `bureau` package) in a Hono application through `createGateway(bureau, options)`.
 - Mounts routes for health, configuration, runs, sessions, events, scheduler operations, and managed API keys.
 - Streams live run state over Bun WebSocket and server-sent events.
-- Renders the Svelte browser UI for dashboards, chat, run detail, and configuration pages.
+- Renders the Svelte browser UI for dashboards, chat, run detail, configuration, and evaluation-report trend pages.
 - Reuses the runtime key-value store for API keys and rate-limit state when available.
 
 ## How It Works
@@ -136,6 +136,7 @@ interface GatewayOptions {
   allowedOrigins?: string[]; // WebSocket upgrade origin allowlist
   enableCsp?: boolean; // default: true
   idleTimeout?: number; // seconds; Bun default: 10
+  evaluationReportsDirectory?: string; // backs the read-only /evaluations trend page
 }
 
 interface Gateway {
@@ -145,6 +146,22 @@ interface Gateway {
   readonly port: number;
   start(): Promise<{ stop(): void }>;
 }
+```
+
+### `/evaluations` — evaluation report trend page
+
+A read-only, server-rendered page listing evaluation reports over time (pass rate, cost). Set `evaluationReportsDirectory` to the directory `runEvaluationSuite`'s `output` option writes reports into — `GET /evaluations` reads it via `listEvaluationReports()` (from the `evaluation` package) on every request and renders a pass-rate trend chart, an average-token-cost trend chart, and a table of every report. When unset, the page renders an empty state; there is no write path from the UI in this v1.
+
+```typescript
+import { createBureau } from 'bureau';
+import { createGateway } from 'gateway';
+
+const bureau = await createBureau();
+const gateway = await createGateway(bureau, {
+  evaluationReportsDirectory: 'reports/evaluations',
+});
+await gateway.start();
+// Visit http://localhost:5555/evaluations
 ```
 
 ### `createBureau(options?): Promise<Bureau>` (from `bureau`, not `gateway`)

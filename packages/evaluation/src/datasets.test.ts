@@ -3,7 +3,7 @@ import { join } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 
-import { loadDataset, loadDatasets } from './datasets';
+import { getDatasetVersion, loadDataset, loadDatasets, saveDataset } from './datasets';
 
 const fixturesDirectory = join(import.meta.dir, '__test-fixtures__');
 
@@ -238,5 +238,181 @@ describe('loadDatasets', () => {
       expect(error).toBeInstanceOf(Error);
       expect((error as Error).message).toMatch(/name/i);
     }
+  });
+});
+
+describe('getDatasetVersion / saveDataset', () => {
+  it('reports version 0 for a dataset file that does not exist yet', async () => {
+    const version = await getDatasetVersion(fixturePath('does-not-exist.json'));
+    expect(version).toBe(0);
+  });
+
+  it('reports version 0 for a legacy bare-array dataset file', async () => {
+    // valid-cases.json (seeded in beforeEach) is a bare array — predates versioning.
+    const version = await getDatasetVersion(fixturePath('valid-cases.json'));
+    expect(version).toBe(0);
+  });
+
+  it('treats a corrupted (non-finite/negative/fractional) version as unversioned rather than propagating it', async () => {
+    const corruptions = [
+      { version: Number.NaN, cases: [] },
+      { version: Number.POSITIVE_INFINITY, cases: [] },
+      { version: -1, cases: [] },
+      { version: 1.5, cases: [] },
+    ];
+
+    for (const [index, corrupted] of corruptions.entries()) {
+      const path = fixturePath(`corrupted-version-${index}.json`);
+      await Bun.write(path, JSON.stringify(corrupted));
+
+      expect(await getDatasetVersion(path)).toBe(0);
+      const { version } = await saveDataset(path, [{ name: 'case-1', input: 'hi' }]);
+      expect(version).toBe(1);
+      expect(Number.isFinite(version)).toBe(true);
+    }
+  });
+
+  it('throws rather than treating a truncated/corrupted JSON file as unversioned', async () => {
+    const path = fixturePath('corrupted-json.json');
+    await Bun.write(path, '{ "version": 3, "cases": [ this is not valid json');
+
+    let caught: unknown;
+    try {
+      await getDatasetVersion(path);
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(Error);
+
+    // saveDataset() must not be able to silently overwrite the corrupted
+    // file with a fresh version 1 — it should propagate the same error.
+    let saveCaught: unknown;
+    try {
+      await saveDataset(path, [{ name: 'case-1', input: 'hi' }]);
+    } catch (error) {
+      saveCaught = error;
+    }
+    expect(saveCaught).toBeInstanceOf(Error);
+
+    // The corrupted file on disk must be untouched.
+    expect(await Bun.file(path).text()).toBe('{ "version": 3, "cases": [ this is not valid json');
+  });
+
+  it('writes version 1 on the first saveDataset() call for a new path', async () => {
+    const path = fixturePath('versioned-new.json');
+    const { version } = await saveDataset(path, [{ name: 'case-1', input: 'hi' }]);
+
+    expect(version).toBe(1);
+    expect(await getDatasetVersion(path)).toBe(1);
+  });
+
+  it('bumps the version by one on each subsequent saveDataset() call', async () => {
+    const path = fixturePath('versioned-bump.json');
+    await saveDataset(path, [{ name: 'case-1', input: 'hi' }]);
+    const second = await saveDataset(path, [
+      { name: 'case-1', input: 'hi' },
+      { name: 'case-2', input: 'bye' },
+    ]);
+    const third = await saveDataset(path, [{ name: 'case-1', input: 'hi' }]);
+
+    expect(second.version).toBe(2);
+    expect(third.version).toBe(3);
+  });
+
+  it('bumps a legacy unversioned dataset to version 1 on its first managed write', async () => {
+    const path = fixturePath('legacy-promoted.json');
+    await Bun.write(path, JSON.stringify([{ name: 'legacy-case', input: 'legacy input' }]));
+    expect(await getDatasetVersion(path)).toBe(0);
+
+    const { version } = await saveDataset(path, [{ name: 'legacy-case', input: 'legacy input' }]);
+    expect(version).toBe(1);
+  });
+
+  it('round-trips cases saved via saveDataset() through loadDataset()', async () => {
+    const path = fixturePath('round-trip.json');
+    const cases = [
+      { name: 'case-1', input: 'What is 2+2?', tags: ['math'] },
+      { name: 'case-2', input: 'Say hello' },
+    ];
+    await saveDataset(path, cases);
+
+    const loaded = await loadDataset(path);
+    expect(loaded).toHaveLength(2);
+    expect(loaded[0]!.name).toBe('case-1');
+    expect(loaded[1]!.name).toBe('case-2');
+  });
+
+  it('round-trips provenance through saveDataset() and loadDataset()', async () => {
+    const path = fixturePath('round-trip-provenance.json');
+    const cases = [
+      {
+        name: 'promoted-case',
+        input: 'reproduce the bug',
+        expectedOutput: 'fixed output',
+        provenance: {
+          origin: 'production-failure' as const,
+          runId: 'run-123',
+          sourceCaseName: 'original-case',
+          promotedAt: '2026-01-01T00:00:00.000Z',
+          finishReason: 'stop-condition' as const,
+        },
+      },
+    ];
+    await saveDataset(path, cases);
+
+    const loaded = await loadDataset(path);
+    expect(loaded[0]!.provenance).toEqual(cases[0]!.provenance);
+  });
+
+  it('rejects saving a case with a RegExp expectedOutput rather than silently dropping it', async () => {
+    const path = fixturePath('unserializable-regexp.json');
+
+    let caught: unknown;
+    try {
+      await saveDataset(path, [{ name: 'case-1', input: 'hi', expectedOutput: /^hello/ }]);
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toContain('RegExp');
+    // Nothing should have been written.
+    expect(await Bun.file(path).exists()).toBe(false);
+  });
+
+  it('rejects saving a case with a custom assert function rather than silently dropping it', async () => {
+    const path = fixturePath('unserializable-assert.json');
+
+    let caught: unknown;
+    try {
+      await saveDataset(path, [
+        { name: 'case-1', input: 'hi', assert: () => ({ pass: true, score: 1 }) },
+      ]);
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toContain('assert');
+    expect(await Bun.file(path).exists()).toBe(false);
+  });
+
+  it('accepts a SemanticMatcher expectedOutput, which JSON can represent', async () => {
+    const path = fixturePath('semantic-matcher.json');
+    const { version } = await saveDataset(path, [
+      {
+        name: 'case-1',
+        input: 'hi',
+        expectedOutput: { type: 'semantic', reference: 'hello', threshold: 0.8 },
+      },
+    ]);
+    expect(version).toBe(1);
+
+    const loaded = await loadDataset(path);
+    expect(loaded[0]!.expectedOutput).toEqual({
+      type: 'semantic',
+      reference: 'hello',
+      threshold: 0.8,
+    });
   });
 });

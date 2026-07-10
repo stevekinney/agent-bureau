@@ -1,9 +1,14 @@
+import { rmSync } from 'node:fs';
+import { join } from 'node:path';
+
 import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
-import { describe, expect, it } from 'bun:test';
+import { afterEach, describe, expect, it } from 'bun:test';
 import { createBureau } from 'bureau';
 
 import { createApiKeyStore } from '../keys/create-api-key-store';
 import { createTestGateway } from '../test';
+
+const evaluationsFixturesDirectory = join(import.meta.dir, '__evaluations-fixtures__');
 
 /**
  * Extracts the serialized `window.__INITIAL_DATA__` payload from an SSR HTML
@@ -31,6 +36,10 @@ function extractRootMarkup(html: string): string {
   }
   return match[1] ?? '';
 }
+
+afterEach(() => {
+  rmSync(evaluationsFixturesDirectory, { recursive: true, force: true });
+});
 
 describe('SSR pages', () => {
   it('GET / redirects to /dashboard', async () => {
@@ -135,6 +144,56 @@ describe('SSR pages', () => {
 
     const data = extractInitialData(html);
     expect(data).toEqual({});
+  });
+
+  it('GET /evaluations returns 200 HTML with an empty evaluations payload when no directory is configured', async () => {
+    const gateway = await createTestGateway();
+    const response = await gateway.app.request('/evaluations');
+
+    expect(response.status).toBe(200);
+    const html = await response.text();
+    const data = extractInitialData(html);
+    expect(data).toEqual({ evaluations: { reports: [] } });
+  });
+
+  it('GET /evaluations returns report summaries from the configured directory', async () => {
+    await Bun.write(
+      join(evaluationsFixturesDirectory, 'report-1.json'),
+      JSON.stringify({
+        timestamp: '2026-01-01T00:00:00.000Z',
+        cases: [],
+        summary: {
+          total: 4,
+          passed: 3,
+          failed: 1,
+          passRate: 0.75,
+          averageScore: 0.75,
+          averageSteps: 2,
+          averageTokens: 300,
+          averageDuration: 900,
+        },
+      }),
+    );
+
+    const gateway = await createTestGateway({
+      evaluationReportsDirectory: evaluationsFixturesDirectory,
+    });
+    const response = await gateway.app.request('/evaluations');
+
+    expect(response.status).toBe(200);
+    const html = await response.text();
+    const data = extractInitialData(html) as { evaluations: { reports: unknown[] } };
+    expect(data.evaluations.reports).toHaveLength(1);
+    expect(data.evaluations.reports[0]).toMatchObject({
+      timestamp: '2026-01-01T00:00:00.000Z',
+      total: 4,
+      passed: 3,
+      failed: 1,
+      passRate: 0.75,
+    });
+    // The Svelte page actually rendered the report into the trend chart /
+    // table server-side, not just the empty-state fallback.
+    expect(extractRootMarkup(html)).toContain('2026-01-01T00:00:00.000Z');
   });
 
   it('links the cinder stylesheet and the hydration module script on every page', async () => {
