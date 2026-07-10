@@ -3525,3 +3525,233 @@ describe('createBureau review queue (AB-20)', () => {
     bureau.dispose();
   });
 });
+
+// ── AB-13: flow control ───────────────────────────────────────────────
+
+async function rejectionOf<T>(promise: Promise<T>): Promise<unknown> {
+  return promise.then(
+    () => undefined,
+    (error: unknown) => error,
+  );
+}
+
+/**
+ * `submitSchedulerTask` is a plain (non-`async`) function — an admission
+ * rejection throws SYNCHRONOUSLY rather than returning a rejected promise
+ * (matching its existing `BAD_REQUEST`/`NOT_CONFIGURED` validation throws).
+ * Defer the call through `Promise.resolve().then(...)` so `rejectionOf`'s
+ * `.then()` chain has a promise to attach to.
+ */
+async function rejectionOfSchedulerSubmit(
+  call: () => ReturnType<Bureau['submitSchedulerTask']>,
+): Promise<unknown> {
+  return rejectionOf(Promise.resolve().then(call));
+}
+
+describe('createBureau flow control (AB-13)', () => {
+  it('enforces a concurrency cap, rejecting admission until a slot frees', async () => {
+    const { generate } = createBlockingGenerate();
+    const bureau = await createBureau({
+      generate,
+      toolbox: createEmptyToolbox(),
+      flowControl: { concurrency: { limit: 2 } },
+    });
+
+    const first = await bureau.createRun({ message: 'one' });
+    const second = await bureau.createRun({ message: 'two' });
+
+    const rejected = await rejectionOf(bureau.createRun({ message: 'three' }));
+    expect(rejected).toBeInstanceOf(BureauError);
+    expect((rejected as BureauError).code).toBe('RATE_LIMITED');
+    expect((rejected as BureauError).message).toContain('concurrency');
+
+    // Settling one run (abort → run.aborted → flowController.settle) frees its slot.
+    bureau.abortRun(first.id);
+    await waitForRunState(bureau, first.id);
+
+    const third = await bureau.createRun({ message: 'three-retry' });
+    expect(third.id).not.toBe(first.id);
+
+    bureau.abortRun(second.id);
+    bureau.abortRun(third.id);
+    await waitForRunState(bureau, second.id);
+    await waitForRunState(bureau, third.id);
+
+    bureau.dispose();
+  });
+
+  it('isolates the concurrency cap per agent by default', async () => {
+    const { generate } = createBlockingGenerate();
+    const bureau = await createBureau({
+      generate,
+      toolbox: createEmptyToolbox(),
+      flowControl: { concurrency: { limit: 1 } },
+    });
+
+    const runA = await bureau.createRun({ message: 'a', agentName: 'agent-a' });
+    const runB = await bureau.createRun({ message: 'b', agentName: 'agent-b' });
+    expect(runA.id).not.toBe(runB.id);
+
+    const rejectedA = await rejectionOf(bureau.createRun({ message: 'a2', agentName: 'agent-a' }));
+    expect(rejectedA).toBeInstanceOf(BureauError);
+    expect((rejectedA as BureauError).code).toBe('RATE_LIMITED');
+
+    // agent-b's cap is a SEPARATE key — unaffected by agent-a's exhaustion.
+    const rejectedB = await rejectionOf(bureau.createRun({ message: 'b2', agentName: 'agent-b' }));
+    expect(rejectedB).toBeInstanceOf(BureauError);
+
+    bureau.abortRun(runA.id);
+    bureau.abortRun(runB.id);
+    await waitForRunState(bureau, runA.id);
+    await waitForRunState(bureau, runB.id);
+
+    bureau.dispose();
+  });
+
+  it('isolates rate limits per an arbitrary key function', async () => {
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      flowControl: {
+        rateLimit: {
+          limit: 1,
+          windowMilliseconds: 60_000,
+          key: (trigger) => trigger.principal ?? 'anonymous',
+        },
+      },
+    });
+
+    const alice = await bureau.createRun({ message: 'hi', principal: 'alice' });
+    await waitForRunCompletion(bureau, alice.id);
+
+    const aliceAgain = await rejectionOf(
+      bureau.createRun({ message: 'hi again', principal: 'alice' }),
+    );
+    expect(aliceAgain).toBeInstanceOf(BureauError);
+    expect((aliceAgain as BureauError).code).toBe('RATE_LIMITED');
+    expect((aliceAgain as BureauError).message).toContain('rate-limit');
+
+    // A different principal has its own, unconsumed limit.
+    const bob = await bureau.createRun({ message: 'hi', principal: 'bob' });
+    await waitForRunCompletion(bureau, bob.id);
+
+    bureau.dispose();
+  });
+
+  it('dedupes a concurrent identical trigger via singleton, and admits again once it settles', async () => {
+    const { generate } = createBlockingGenerate();
+    const bureau = await createBureau({
+      generate,
+      toolbox: createEmptyToolbox(),
+      flowControl: { singleton: { key: (trigger) => trigger.sessionId ?? 'none' } },
+    });
+
+    const first = await bureau.createRun({ message: 'first', sessionId: 'shared-session' });
+
+    const duplicate = await rejectionOf(
+      bureau.createRun({ message: 'duplicate', sessionId: 'shared-session' }),
+    );
+    expect(duplicate).toBeInstanceOf(BureauError);
+    expect((duplicate as BureauError).code).toBe('RATE_LIMITED');
+    expect((duplicate as BureauError).message).toContain('singleton');
+
+    // A different key is unaffected.
+    const independent = await bureau.createRun({
+      message: 'independent',
+      sessionId: 'other-session',
+    });
+    expect(independent.id).not.toBe(first.id);
+
+    bureau.abortRun(first.id);
+    await waitForRunState(bureau, first.id);
+
+    // Once the original settles, a fresh trigger with the same key is admitted.
+    const afterSettle = await bureau.createRun({ message: 'retry', sessionId: 'shared-session' });
+    expect(afterSettle.id).not.toBe(first.id);
+
+    bureau.abortRun(independent.id);
+    bureau.abortRun(afterSettle.id);
+    await waitForRunState(bureau, independent.id);
+    await waitForRunState(bureau, afterSettle.id);
+
+    bureau.dispose();
+  });
+
+  it('covers scheduler-originated admission, and frees + reclaims the concurrency slot across a real preempt/resume cycle', async () => {
+    const { generate, resolve } = createBlockingGenerate();
+    const bureau = await createBureau({
+      generate,
+      toolbox: createEmptyToolbox(),
+      scheduler: { enabled: true, idleDelay: 1 },
+      flowControl: { concurrency: { limit: 1 } },
+    });
+
+    // A (background priority) is admitted and dispatched — the only task, so
+    // the scheduler starts it immediately, occupying the concurrency slot.
+    const taskA = await bureau.submitSchedulerTask({ message: 'task A', priority: 'background' });
+    await waitForCondition(
+      () => bureau.scheduler?.getState().activeTask?.id === taskA.taskId,
+      'task A was not dispatched',
+    );
+
+    // A SECOND submission is rejected outright — the cap is full.
+    const rejectedWhileActive = await rejectionOfSchedulerSubmit(() =>
+      bureau.submitSchedulerTask({ message: 'rejected while A runs', priority: 'background' }),
+    );
+    expect(rejectedWhileActive).toBeInstanceOf(BureauError);
+    expect((rejectedWhileActive as BureauError).code).toBe('RATE_LIMITED');
+
+    // Submit an IMMEDIATE task directly on the scheduler (bypassing bureau's
+    // own admission gate — this is purely the mechanism to force a REAL
+    // preemption of task A, not a flow-controlled trigger itself).
+    const immediateResult = bureau.scheduler!.submitImmediate(() => ({
+      generate: createMockGenerate('immediate-done'),
+      toolbox: createEmptyToolbox(),
+      conversation: new Conversation(),
+      maximumSteps: 1,
+    }));
+    await waitForCondition(
+      () => (bureau.scheduler?.getState().preemptedCount ?? 0) >= 1,
+      'task A was not preempted',
+    );
+
+    // AB-13 — task A's preemption (requeued) freed its concurrency slot: a
+    // NEW scheduler-originated submission is now admitted.
+    const taskC = await bureau.submitSchedulerTask({ message: 'task C', priority: 'background' });
+    expect(taskC.taskId).not.toBe(taskA.taskId);
+
+    // The cap is full again with C holding the reclaimed slot.
+    const rejectedWithCHoldingSlot = await rejectionOfSchedulerSubmit(() =>
+      bureau.submitSchedulerTask({
+        message: 'rejected while C holds the slot',
+        priority: 'background',
+      }),
+    );
+    expect(rejectedWithCHoldingSlot).toBeInstanceOf(BureauError);
+
+    // Free C's slot (it may still be queued behind the immediate task, so
+    // cancel rather than abort — TaskCancelledEvent settles it either way).
+    bureau.scheduler!.cancel(taskC.taskId);
+
+    // Let the immediate task finish so the scheduler redispatches task A
+    // (requeued on preemption).
+    resolve({ content: 'immediate-done', toolCalls: [] });
+    await immediateResult;
+    await waitForCondition(
+      () => bureau.scheduler?.getState().activeTask?.id === taskA.taskId,
+      'task A was not redispatched after the immediate task completed',
+    );
+
+    // AB-13 — task A's resume (TaskDispatchedEvent) reclaimed its slot: with
+    // C already cancelled/settled, a fresh submission is rejected again only
+    // because A's resumed slot fills the cap.
+    const rejectedAfterResume = await rejectionOfSchedulerSubmit(() =>
+      bureau.submitSchedulerTask({ message: 'rejected after A resumed', priority: 'background' }),
+    );
+    expect(rejectedAfterResume).toBeInstanceOf(BureauError);
+    expect((rejectedAfterResume as BureauError).code).toBe('RATE_LIMITED');
+
+    bureau.scheduler!.cancel(taskA.taskId);
+    bureau.dispose();
+  });
+});
