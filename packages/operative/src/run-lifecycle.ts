@@ -89,13 +89,15 @@ export function makeAbortResult(
   reason?: string,
   costEstimation?: RunOptions['costEstimation'],
 ): RunResult {
-  emitter?.dispatch(new RunAbortedEvent(step, conversation, reason));
+  const costEstimate = computeCostEstimate(runState.totalUsage, costEstimation);
+  emitter?.dispatch(
+    new RunAbortedEvent(step, conversation, reason, runState.totalUsage, costEstimate),
+  );
   runHookSilently(hooks, 'onRunAbort', {
     reason,
     partialSteps: [...runState.steps],
     conversation,
   });
-  const costEstimate = computeCostEstimate(runState.totalUsage, costEstimation);
   return {
     conversation,
     steps: runState.steps,
