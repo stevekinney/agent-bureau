@@ -179,6 +179,59 @@ describe('matchTrajectory', () => {
 
       expect(result.pass).toBe(true);
     });
+
+    it('keeps allowExtraCalls: false authoritative even when maxExtraCalls also permits extras', () => {
+      const steps = [
+        createMockStep([{ name: 'search' }, { name: 'unexpected' }, { name: 'save' }]),
+      ];
+      const golden: GoldenTrajectoryStep[] = [{ name: 'search' }, { name: 'save' }];
+      const result = matchTrajectory(createMockRunResult({ steps }), golden, {
+        allowExtraCalls: false,
+        maxExtraCalls: 1,
+      });
+
+      expect(result.pass).toBe(false);
+      expect(result.score).toBe(0);
+    });
+
+    it('enforces allowExtraCalls: false against an empty golden trajectory', () => {
+      const steps = [createMockStep([{ name: 'unexpected' }])];
+      const result = matchTrajectory(createMockRunResult({ steps }), [], {
+        allowExtraCalls: false,
+      });
+
+      expect(result.pass).toBe(false);
+      expect(result.score).toBe(0);
+      expect(result.extraCallCount).toBe(1);
+    });
+
+    it('still passes an empty golden trajectory with no calls when extras are disallowed', () => {
+      const result = matchTrajectory(createMockRunResult(), [], {
+        allowExtraCalls: false,
+      });
+
+      expect(result.pass).toBe(true);
+      expect(result.score).toBe(1);
+      expect(result.extraCallCount).toBe(0);
+    });
+  });
+
+  describe('duplicate tool names', () => {
+    it('prefers an in-order match over consuming an earlier duplicate', () => {
+      // actual: B, A, B — golden: A, B
+      // A matches at index 1, B matches at index 2 (in order); the earlier
+      // B at index 0 becomes an extra call rather than causing a spurious
+      // reorder.
+      const steps = [createMockStep([{ name: 'B' }, { name: 'A' }, { name: 'B' }])];
+      const golden: GoldenTrajectoryStep[] = [{ name: 'A' }, { name: 'B' }];
+      const result = matchTrajectory(createMockRunResult({ steps }), golden);
+
+      expect(result.reorderedCount).toBe(0);
+      expect(result.extraCallCount).toBe(1);
+      expect(result.pass).toBe(true);
+      expect(result.steps[0]).toMatchObject({ name: 'A', actualIndex: 1, reordered: false });
+      expect(result.steps[1]).toMatchObject({ name: 'B', actualIndex: 2, reordered: false });
+    });
   });
 });
 

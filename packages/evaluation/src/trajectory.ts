@@ -20,10 +20,16 @@ const REORDER_PENALTY_WEIGHT = 0.5;
 const EXTRA_CALL_PENALTY_WEIGHT = 0.25;
 
 /**
- * Greedily assigns each golden step to the earliest unconsumed actual call
- * matching its name (and arguments, when specified). This mirrors the
- * first-fit strategy `matchToolCalls` already uses for unordered matching —
- * each actual call can satisfy at most one golden step.
+ * Assigns each golden step to an unconsumed actual call matching its name
+ * (and arguments, when specified). For each step, an in-order match (at an
+ * index after the previously assigned index) is preferred; only when no
+ * in-order match exists does this fall back to the earliest unconsumed
+ * match anywhere, which may be an earlier duplicate. This avoids spuriously
+ * consuming an earlier occurrence of a repeated tool name when a later
+ * occurrence would have kept the golden subsequence in order — e.g. actual
+ * `B, A, B` against golden `A, B` assigns `A` at index 1 and `B` at index 2
+ * (the first `B` becomes an extra call) rather than assigning `B` to index 0
+ * and reporting a spurious reorder.
  */
 function assignGoldenSteps(
   actualCalls: Array<{ name: string; arguments: unknown }>,
@@ -31,20 +37,29 @@ function assignGoldenSteps(
 ): Array<number | undefined> {
   const consumed = new Set<number>();
   const assignments: Array<number | undefined> = [];
+  let lastAssignedIndex = -1;
 
   for (const step of golden) {
-    const foundIndex = actualCalls.findIndex((call, index) => {
+    const matches = (call: { name: string; arguments: unknown }, index: number): boolean => {
       if (consumed.has(index)) return false;
       if (call.name !== step.name) return false;
       if (step.arguments && !deepEqual(call.arguments, step.arguments)) return false;
       return true;
-    });
+    };
+
+    let foundIndex = actualCalls.findIndex(
+      (call, index) => index > lastAssignedIndex && matches(call, index),
+    );
+    if (foundIndex === -1) {
+      foundIndex = actualCalls.findIndex((call, index) => matches(call, index));
+    }
 
     if (foundIndex === -1) {
       assignments.push(undefined);
     } else {
       consumed.add(foundIndex);
       assignments.push(foundIndex);
+      if (foundIndex > lastAssignedIndex) lastAssignedIndex = foundIndex;
     }
   }
 
@@ -77,19 +92,32 @@ export function matchTrajectory(
   tolerance?: TrajectoryTolerance,
 ): TrajectoryMatchResult {
   const allowExtraCalls = tolerance?.allowExtraCalls ?? true;
-  const maxExtraCalls = tolerance?.maxExtraCalls ?? (allowExtraCalls ? Infinity : 0);
+  // `allowExtraCalls: false` is authoritative: it forces the extra-call cap
+  // to 0 regardless of a supplied `maxExtraCalls`, so the two options can't
+  // disagree (e.g. `{ allowExtraCalls: false, maxExtraCalls: 1 }` no longer
+  // tolerates an extra call).
+  const maxExtraCalls = allowExtraCalls ? (tolerance?.maxExtraCalls ?? Infinity) : 0;
   const reorderTolerance = tolerance?.reorderTolerance ?? DEFAULT_REORDER_TOLERANCE;
 
   const actualCalls = extractToolCallSequence(result);
 
   if (golden.length === 0) {
+    // An empty golden trajectory still asserts "no unexpected calls" when
+    // extra calls are disallowed — every actual call is unmatched, so the
+    // extra-call tolerance must still be enforced rather than passing
+    // unconditionally.
+    const extraCallCount = actualCalls.length;
+    const extraCallsOk = extraCallCount <= maxExtraCalls;
+
     return {
-      pass: true,
-      score: 1,
-      message: 'No golden trajectory provided; case passed by default',
+      pass: extraCallsOk,
+      score: extraCallsOk ? 1 : 0,
+      message: extraCallsOk
+        ? 'No golden trajectory provided; case passed by default'
+        : `No golden trajectory provided, but ${extraCallCount} call(s) were made and extra calls are not allowed`,
       steps: [],
       missingCallCount: 0,
-      extraCallCount: 0,
+      extraCallCount,
       reorderedCount: 0,
     };
   }
