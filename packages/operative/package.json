@@ -51,6 +51,14 @@
       "default": "./dist/durable/index.js",
       "types": "./dist/durable/index.d.ts"
     },
+    "./guardrails": {
+      "bun": "./dist/guardrails/index.js",
+      "browser": "./dist/guardrails/index.js",
+      "import": "./dist/guardrails/index.js",
+      "require": "./dist/guardrails/index.cjs",
+      "default": "./dist/guardrails/index.js",
+      "types": "./dist/guardrails/index.d.ts"
+    },
     "./instrumentation": {
       "bun": "./dist/instrumentation/index.js",
       "browser": "./dist/instrumentation/index.js",
