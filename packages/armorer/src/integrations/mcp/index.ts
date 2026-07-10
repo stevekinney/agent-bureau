@@ -4,6 +4,10 @@ import type { AnySchema } from '@modelcontextprotocol/sdk/server/zod-compat.js';
 import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/protocol.js';
 import type {
   CallToolResult,
+  ElicitRequest,
+  ElicitRequestFormParams,
+  ElicitRequestURLParams,
+  ElicitResult,
   Implementation,
   ServerNotification,
   ServerRequest,
@@ -15,7 +19,13 @@ import { z } from 'zod';
 
 import { isZodSchema } from '../../core/schema-utilities';
 import { createTool } from '../../create-tool';
-import type { Tool, ToolExecuteWithOptions } from '../../is-tool';
+import type {
+  Tool,
+  ToolElicitationRequest,
+  ToolElicitationRequester,
+  ToolElicitationResult,
+  ToolExecuteWithOptions,
+} from '../../is-tool';
 import { isTool } from '../../is-tool';
 import { jsonSchemaToZod } from '../../json-schema-to-zod';
 import type { ToolResultLike } from '../../types';
@@ -25,7 +35,7 @@ type ToolboxLike = {
   getAvailable?: () => Promise<ReadonlyArray<Tool>>;
   execute?: (
     call: { id?: string; name: string; arguments: unknown },
-    options?: { signal?: AbortSignal },
+    options?: { signal?: AbortSignal; elicit?: ToolElicitationRequester },
   ) => Promise<ToolResultLike>;
   getTool?: (nameOrId: string) => Tool | undefined;
 };
@@ -72,6 +82,7 @@ export type ToMCPToolsOptions = {
     params: unknown,
     callId?: string,
     signal?: AbortSignal,
+    elicit?: ToolElicitationRequester,
   ) => Promise<ToolResultLike>;
 };
 
@@ -126,7 +137,13 @@ export async function createMCP(
     typeof toolbox.getAvailable === 'function' ? await toolbox.getAvailable() : toolbox.tools();
   const executeTool =
     typeof toolbox.execute === 'function' && typeof toolbox.getTool === 'function'
-      ? (tool: Tool, params: unknown, callId?: string, signal?: AbortSignal) =>
+      ? (
+          tool: Tool,
+          params: unknown,
+          callId?: string,
+          signal?: AbortSignal,
+          elicit?: ToolElicitationRequester,
+        ) =>
           toolbox.getTool!(tool.name) === tool
             ? toolbox.execute!(
                 {
@@ -134,11 +151,14 @@ export async function createMCP(
                   name: tool.name,
                   arguments: params ?? {},
                 },
-                signal ? { signal } : undefined,
+                signal || elicit
+                  ? { ...(signal ? { signal } : {}), ...(elicit ? { elicit } : {}) }
+                  : undefined,
               )
             : tool.executeWith({
                 params: params ?? {},
                 ...(callId !== undefined ? { callId } : {}),
+                ...(elicit ? { elicit } : {}),
               })
       : undefined;
 
@@ -211,8 +231,9 @@ function toMcpToolDefinition(tool: Tool, options: ToMCPToolsOptions): MCPToolDef
       let result: ToolResultLike;
       try {
         const callId = extra?.requestId !== undefined ? String(extra.requestId) : undefined;
+        const elicit = extra ? createMcpToolElicitationRequester(extra) : undefined;
         if (options.executeTool) {
-          result = await options.executeTool(tool, params, callId, extra?.signal);
+          result = await options.executeTool(tool, params, callId, extra?.signal, elicit);
         } else {
           const runnable = tool as unknown as {
             executeWith: (options: ToolExecuteWithOptions) => Promise<ToolResultLike>;
@@ -223,6 +244,9 @@ function toMcpToolDefinition(tool: Tool, options: ToMCPToolsOptions): MCPToolDef
           }
           if (extra?.signal) {
             executeOptions.signal = extra.signal;
+          }
+          if (elicit) {
+            executeOptions.elicit = elicit;
           }
           result = await runnable.executeWith(executeOptions);
         }
@@ -561,10 +585,161 @@ async function requireMcp(): Promise<McpSdk> {
   }
 }
 
+type McpTypesSdk = typeof import('@modelcontextprotocol/sdk/types.js');
+
+let cachedMcpTypesSdk: McpTypesSdk | undefined;
+const defaultMcpTypesLoader = async (): Promise<McpTypesSdk> => {
+  const { createRequire } = await import('node:module');
+  const require = createRequire(import.meta.url);
+  return require('@modelcontextprotocol/sdk/types.js') as McpTypesSdk;
+};
+let mcpTypesLoader: () => McpTypesSdk | Promise<McpTypesSdk> = defaultMcpTypesLoader;
+
+async function requireMcpTypes(): Promise<McpTypesSdk> {
+  if (cachedMcpTypesSdk) return cachedMcpTypesSdk;
+  try {
+    cachedMcpTypesSdk = await mcpTypesLoader();
+    return cachedMcpTypesSdk;
+  } catch (error) {
+    const hint =
+      'Missing peer dependency "@modelcontextprotocol/sdk". Install it to use armorer/mcp elicitation.';
+    const wrapped = error instanceof Error ? error : new Error(String(error));
+    wrapped.message = `${hint}\n${wrapped.message}`;
+    throw wrapped;
+  }
+}
+
+/**
+ * Translates a transport-agnostic {@link ToolElicitationRequest} into MCP
+ * wire params for an `elicitation/create` request (form or URL mode).
+ */
+function toElicitRequestParams(
+  request: ToolElicitationRequest,
+): ElicitRequestFormParams | ElicitRequestURLParams {
+  if (request.mode === 'url') {
+    if (!request.url) {
+      throw new TypeError('URL-mode elicitation requires a `url`.');
+    }
+    return {
+      mode: 'url',
+      message: request.message,
+      url: request.url,
+      elicitationId: crypto.randomUUID(),
+      // The precise literal-typed `url` params shape is generated from the MCP
+      // spec's zod schema; our generic request only carries the plain fields
+      // that schema requires, so this cast is a boundary translation, not a
+      // type-safety escape hatch.
+    } as ElicitRequestURLParams;
+  }
+  return {
+    mode: 'form',
+    message: request.message,
+    requestedSchema: (request.schema ?? {
+      type: 'object',
+      properties: {},
+    }) as ElicitRequestFormParams['requestedSchema'],
+  } as ElicitRequestFormParams;
+}
+
+/** Translates an MCP `ElicitResult` back into our transport-agnostic shape. */
+function fromElicitResult(result: ElicitResult): ToolElicitationResult {
+  if (result.action === 'accept') {
+    return { action: 'accept', content: result.content ?? {} };
+  }
+  if (result.action === 'decline') {
+    return { action: 'decline' };
+  }
+  return { action: 'cancel' };
+}
+
+/** Translates an MCP `ElicitRequest`'s params into our transport-agnostic shape. */
+function toToolElicitationRequest(params: ElicitRequest['params']): ToolElicitationRequest {
+  if (params.mode === 'url') {
+    return { message: params.message, mode: 'url', url: params.url };
+  }
+  return {
+    message: params.message,
+    mode: 'form',
+    schema: params.requestedSchema as unknown as Record<string, unknown>,
+  };
+}
+
+/**
+ * Translates our transport-agnostic result back into an MCP `ElicitResult`.
+ * The wire schema requires `content` on every action (not just `accept`) —
+ * the SDK's transform only fills in `{}` for genuinely `undefined` input, not
+ * a missing key, so we always send the field explicitly.
+ */
+function toElicitResult(result: ToolElicitationResult): ElicitResult {
+  return {
+    action: result.action,
+    content: (result.action === 'accept' ? (result.content ?? {}) : {}) as ElicitResult['content'],
+  };
+}
+
+/**
+ * Builds an MCP client request handler for `elicitation/create`, adapting a
+ * transport-agnostic {@link ToolElicitationRequester} to the SDK's wire
+ * shape. Register it on an MCP `Client` to handle elicitation requests sent
+ * by a connected server:
+ *
+ * ```ts
+ * import { ElicitRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+ * import { createMcpElicitationHandler } from 'armorer/mcp';
+ *
+ * client.setRequestHandler(
+ *   ElicitRequestSchema,
+ *   createMcpElicitationHandler(async (request) => {
+ *     // request.mode === 'form' | 'url'
+ *     return { action: 'accept', content: { approved: true } };
+ *   }),
+ * );
+ * ```
+ *
+ * This is the "MCP client" direction (`fromMcpTools`): an elicitation
+ * request from the connected server is translated into a
+ * {@link ToolElicitationRequest} and handed to `respond`.
+ */
+export function createMcpElicitationHandler(
+  respond: ToolElicitationRequester,
+): (
+  request: ElicitRequest,
+  extra: RequestHandlerExtra<ServerRequest, ServerNotification>,
+) => Promise<ElicitResult> {
+  return async (request) => {
+    const toolRequest = toToolElicitationRequest(request.params);
+    const result = await respond(toolRequest);
+    return toElicitResult(result);
+  };
+}
+
+/**
+ * Builds a {@link ToolElicitationRequester} backed by the MCP server's
+ * `extra.sendRequest`, letting a tool's `execute` ask the connected client
+ * for approval or human input mid-execution. This is the "MCP server"
+ * direction (`createMCP`): the calling client answers the elicitation, and
+ * the tool sees the response through `context.elicit(...)`.
+ */
+export function createMcpToolElicitationRequester(
+  extra: RequestHandlerExtra<ServerRequest, ServerNotification>,
+): ToolElicitationRequester {
+  return async (request) => {
+    const { ElicitResultSchema } = await requireMcpTypes();
+    const params = toElicitRequestParams(request);
+    const result = await extra.sendRequest(
+      { method: 'elicitation/create', params },
+      ElicitResultSchema,
+    );
+    return fromElicitResult(result as ElicitResult);
+  };
+}
+
 export const internalMcpTestUtilities = {
   resetModuleState() {
     cachedMcpSdk = undefined;
     mcpLoader = defaultMcpLoader;
+    cachedMcpTypesSdk = undefined;
+    mcpTypesLoader = defaultMcpTypesLoader;
   },
   setModuleLoader(loader: (() => McpSdk | Promise<McpSdk>) | undefined) {
     cachedMcpSdk = undefined;

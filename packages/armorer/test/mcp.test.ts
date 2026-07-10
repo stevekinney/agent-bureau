@@ -4,12 +4,19 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { ReadBuffer, serializeMessage } from '@modelcontextprotocol/sdk/shared/stdio.js';
+import { ElicitRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { describe, expect, it } from 'bun:test';
 import { z } from 'zod';
 
 import { createTool } from '../src/create-tool';
 import { createToolbox } from '../src/create-toolbox';
-import { createMCP, fromMcpTools, toMcpTools } from '../src/integrations/mcp';
+import {
+  createMCP,
+  createMcpElicitationHandler,
+  fromMcpTools,
+  toMcpTools,
+} from '../src/integrations/mcp';
+import type { ToolElicitationRequest, ToolElicitationRequester } from '../src/is-tool';
 
 type ConnectedMcp = {
   client: Client;
@@ -1275,5 +1282,131 @@ describe('createMCP', () => {
     const [mcpTool] = toMcpTools([tool]);
     expect(mcpTool?.title).toBe('metadata title');
     expect(mcpTool?.annotations?.readOnlyHint).toBe(true);
+  });
+});
+
+describe('MCP elicitation', () => {
+  const createApprovalToolbox = () => {
+    const toolbox = createToolbox();
+    createTool(
+      {
+        name: 'approve-purchase',
+        description: 'requests human approval before completing a purchase',
+        input: z.object({ amount: z.number() }),
+        async execute({ amount }, context) {
+          if (!context.elicit) {
+            throw new Error('elicitation unavailable in this context');
+          }
+          const response = await context.elicit({
+            message: `Approve purchase of $${amount}?`,
+            mode: 'form',
+            schema: {
+              type: 'object',
+              properties: { approved: { type: 'boolean' } },
+              required: ['approved'],
+            },
+          });
+          if (response.action !== 'accept' || response.content?.['approved'] !== true) {
+            return { completed: false };
+          }
+          return { completed: true };
+        },
+      },
+      toolbox,
+    );
+    return toolbox;
+  };
+
+  const connectWithElicitation = async (
+    toolbox: ReturnType<typeof createToolbox>,
+    respond: ToolElicitationRequester,
+  ) => {
+    const server = await createMCP(toolbox);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client(
+      { name: 'elicitation-client', version: '0.0.0' },
+      { capabilities: { elicitation: {} } },
+    );
+    client.setRequestHandler(ElicitRequestSchema, createMcpElicitationHandler(respond));
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    return { client, server };
+  };
+
+  it('lets an MCP server tool request elicitation from the connecting client (server direction)', async () => {
+    const requests: ToolElicitationRequest[] = [];
+    const { client, server } = await connectWithElicitation(
+      createApprovalToolbox(),
+      async (request) => {
+        requests.push(request);
+        return { action: 'accept', content: { approved: true } };
+      },
+    );
+
+    try {
+      const result = await client.callTool({
+        name: 'approve-purchase',
+        arguments: { amount: 42 },
+      });
+
+      expect(requests).toHaveLength(1);
+      expect(requests[0]).toEqual({
+        message: 'Approve purchase of $42?',
+        mode: 'form',
+        schema: {
+          type: 'object',
+          properties: { approved: { type: 'boolean' } },
+          required: ['approved'],
+        },
+      });
+      expect(result.structuredContent).toEqual({ completed: true });
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  it('propagates a declined elicitation back to the tool result (server direction)', async () => {
+    const { client, server } = await connectWithElicitation(createApprovalToolbox(), async () => ({
+      action: 'decline',
+    }));
+
+    try {
+      const result = await client.callTool({
+        name: 'approve-purchase',
+        arguments: { amount: 42 },
+      });
+      expect(result.structuredContent).toEqual({ completed: false });
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  it('surfaces a server elicitation request through fromMcpTools (client direction)', async () => {
+    const requests: ToolElicitationRequest[] = [];
+    const { client, server } = await connectWithElicitation(
+      createApprovalToolbox(),
+      async (request) => {
+        requests.push(request);
+        return { action: 'accept', content: { approved: true } };
+      },
+    );
+
+    try {
+      const listed = await client.listTools();
+      const [tool] = fromMcpTools(listed.tools, {
+        callTool: (request) => client.callTool(request),
+      });
+
+      const result = await tool!.execute({ amount: 10 });
+
+      expect(requests).toHaveLength(1);
+      expect(requests[0]?.message).toBe('Approve purchase of $10?');
+      expect(result).toEqual({ completed: true });
+    } finally {
+      await client.close();
+      await server.close();
+    }
   });
 });

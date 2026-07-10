@@ -1012,6 +1012,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
           options?.signal ||
           options?.timeout !== undefined ||
           options?.stream !== undefined ||
+          options?.elicit ||
           durableOperationKey !== undefined ||
           (options !== undefined && approvalResumeSymbol in options)
             ? {
@@ -1019,6 +1020,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
                 ...(options?.signal ? { signal: options.signal } : {}),
                 ...(options?.timeout !== undefined ? { timeout: options.timeout } : {}),
                 ...(options?.stream !== undefined ? { stream: options.stream } : {}),
+                ...(options?.elicit ? { elicit: options.elicit } : {}),
                 ...(options !== undefined && approvalResumeSymbol in options
                   ? { [approvalResumeSymbol]: options[approvalResumeSymbol] }
                   : {}),
@@ -1488,6 +1490,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
           signal: toolContext.signal,
           timeout: toolContext.timeout,
           stream: toolContext.stream,
+          ...(toolContext.elicit !== undefined ? { elicit: toolContext.elicit } : {}),
         });
       },
     };

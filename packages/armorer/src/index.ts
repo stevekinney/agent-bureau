@@ -40,6 +40,7 @@ export {
   withIdempotency,
   withToolboxIdempotency,
 } from './idempotency';
+export { jsonSchemaToZod } from './json-schema-to-zod';
 
 // Event classes and event maps
 export {
@@ -109,6 +110,9 @@ export type {
   ToolDiagnostics,
   ToolDiagnosticsAdapter,
   ToolDigestOptions,
+  ToolElicitationRequest,
+  ToolElicitationRequester,
+  ToolElicitationResult,
   ToolEventsMap,
   ToolExecuteOptions,
   ToolExecuteWithOptions,

@@ -199,6 +199,35 @@ export type MergeEvents<Custom extends ToolEventsMap> = DefaultToolEvents & Cust
 export type ToolCustomEvent<Detail = unknown> = Event & Detail;
 
 /**
+ * A request to elicit input (approval, form data, or a URL-mode
+ * out-of-band flow) from whoever is on the other end of a tool's
+ * execution — typically an MCP client, but the shape is transport-agnostic.
+ *
+ * Mirrors the MCP spec's form/URL elicitation split without depending on
+ * `@modelcontextprotocol/sdk` types: `schema` is a plain JSON Schema object
+ * for form mode, `url` is set for URL mode.
+ */
+export interface ToolElicitationRequest {
+  message: string;
+  mode?: 'form' | 'url';
+  /** JSON Schema object describing the requested form data (form mode). */
+  schema?: Record<string, unknown>;
+  /** The URL the caller should open (URL mode). */
+  url?: string;
+}
+
+/** The response to a {@link ToolElicitationRequest}. */
+export type ToolElicitationResult =
+  | { action: 'accept'; content?: Record<string, unknown> }
+  | { action: 'decline' }
+  | { action: 'cancel' };
+
+/** Requests elicitation from whoever is driving the current tool execution. */
+export type ToolElicitationRequester = (
+  request: ToolElicitationRequest,
+) => Promise<ToolElicitationResult>;
+
+/**
  * Context passed to tool execute functions.
  */
 export interface RuntimeToolContext extends CoreToolContext {
@@ -211,6 +240,8 @@ export interface RuntimeToolContext extends CoreToolContext {
   /** Execution timeout in milliseconds. */
   timeout?: number;
   stream?: boolean;
+  /** Requests elicitation (approval/human input) from the calling MCP client, when available. */
+  elicit?: ToolElicitationRequester;
 }
 
 export type ToolContext<_E extends ToolEventsMap = DefaultToolEvents> = RuntimeToolContext;
@@ -228,6 +259,8 @@ export interface ToolExecuteOptions {
    * When false/omitted, async-iterables are collected into arrays.
    */
   stream?: boolean;
+  /** Requests elicitation (approval/human input) from the calling MCP client, when available. */
+  elicit?: ToolElicitationRequester;
 }
 
 /**
