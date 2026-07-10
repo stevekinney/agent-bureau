@@ -27,6 +27,7 @@ Everything provider-specific stays behind a narrow seam: the `operative/anthropi
 - [Public API](#public-api)
   - [`operative` — Core Entry Point](#operative--core-entry-point)
   - [`operative/conditions` — Stop Conditions](#operativeconditions--stop-conditions)
+  - [`operative/guardrails` — Guardrails](#operativeguardrails--guardrails)
   - [`operative/store` — Run Store](#operativestore--run-store)
   - [`operative/streaming` — Streaming Helpers](#operativestreaming--streaming-helpers)
   - [`operative/retry` — Retry Mutators](#operativeretry--retry-mutators)
@@ -366,6 +367,8 @@ const agent = defineAgent({
 
 #### Guardrails
 
+See [`operative/guardrails`](#operativeguardrails--guardrails) below for the tripwire model, the detector/validator catalog, provenance and the three retrieval surfaces, and the `bureau` default preset. This is a quick-start example; import from either `operative` or `operative/guardrails` — they're the same implementation.
+
 ```typescript
 import {
   createGuardrails,
@@ -381,14 +384,12 @@ import {
 } from 'operative';
 
 // Injection detection on inputs
-const injectionDetector = createPromptInjectionDetector({
-  sensitivity: 'medium',
-});
+const injectionDetector = createPromptInjectionDetector();
 
 // Restrict topics
 const topicGuard = createTopicBoundaryDetector({
   allowedTopics: ['cooking', 'recipes'],
-  blockedTopics: ['finance', 'legal'],
+  blockedKeywords: ['finance', 'legal'],
 });
 
 // Block overlong inputs
@@ -396,8 +397,8 @@ const lengthGuard = createInputLengthDetector({ maxLength: 2000 });
 
 // Compose into a guardrails hook set
 const guardrails = createGuardrails({
-  inputDetectors: [injectionDetector, topicGuard, lengthGuard],
-  outputValidators: [createOutputPIIValidator()],
+  input: { detectors: [injectionDetector, topicGuard, lengthGuard] },
+  output: { validators: [createOutputPIIValidator()] },
 });
 
 const agent = defineAgent({
@@ -1085,6 +1086,87 @@ const agent = defineAgent({
 | `tokenBudget(maxTokens, options?)`         | Stop when cumulative token usage exceeds `maxTokens`.                    |
 | `wallClockTimeout(milliseconds, options?)` | Stop when elapsed wall-clock time exceeds `milliseconds`.                |
 | `costBudget(options)`                      | Stop when accumulated dollar cost exceeds `options.budget`.              |
+
+---
+
+### `operative/guardrails` — Guardrails
+
+Guardrails are the trust boundary between the agent loop and everything that can inject untrusted content into it — the user, retrieved memories, ingested documents, and skill resources. Detectors live in `armorer` (shared with the retrieval surfaces); `operative/guardrails` wires them into the loop as `prepareStep`/`validateResponse` hooks. The same functions are also re-exported from the root `operative` entry point (see [Guardrails](#guardrails) under Public API) — import from either path, they're the same implementation.
+
+#### The Tripwire Model (AB-40)
+
+Every detector/validator returns a `DetectionResult`/`ValidationResult` carrying a `confidence` score. What happens when one triggers is governed by an `action`, configured per guardrail group — `InputGuardrailOptions.action` (`'block' | 'warn' | 'sanitize' | 'tripwire'`, using `DetectionResult.sanitized` for `'sanitize'`) and `OutputGuardrailOptions.action` (`'block' | 'warn' | 'redact' | 'tripwire'`, using `ValidationResult.redacted` for `'redact'`). `GuardrailsOptions.mode` sets both sides at once:
+
+- **`mode: 'validate'`** (default) — a tripped detector/validator substitutes a blocked/sanitized/redacted response and the run continues, per each guardrail's own `action`.
+- **`mode: 'tripwire'`** — overrides `input.action`/`output.action` to `'tripwire'` regardless of what they were set to. A tripped wire throws a `GuardrailTripwireError`, hard-halting the run with `finishReason: 'tripwire'` and a `run.tripwire` event identifying the guardrail, instead of substituting a blocked or redacted response. Use this where a false negative is unacceptable and a human should look at the transcript before the agent takes another step.
+
+`withMinimumTripwireConfidence(detector, threshold)` wraps a detector so it only trips at or above a confidence floor, letting a broad detector stay quiet on low-confidence hits while still reaching the tripwire on high-confidence ones.
+
+#### Detector and Validator Catalog
+
+| Name                            | Kind             | Scans                             | Notes                                                                                                                                                                                                                                             |
+| ------------------------------- | ---------------- | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `createPromptInjectionDetector` | Input detector   | Incoming content, any provenance  | Pattern + heuristic scoring; confidence scales with the number of matched signals.                                                                                                                                                                |
+| `createInputLengthDetector`     | Input detector   | Incoming content                  | Blocks overlong inputs before they reach the model.                                                                                                                                                                                               |
+| `createTopicBoundaryDetector`   | Input detector   | Incoming content                  | Restricts the conversation to an allow/block topic list.                                                                                                                                                                                          |
+| `createOutputPIIValidator`      | Output validator | Model output                      | Detects and redacts email addresses, phone numbers, and API-key-shaped secrets in generated text.                                                                                                                                                 |
+| `createGroundingValidator`      | Output validator | Model output vs. supplied context | Flags claims the output makes that aren't traceable to the provided context.                                                                                                                                                                      |
+| `createCodeSafetyValidator`     | Output validator | Model output                      | Flags destructive shell patterns (`rm -rf`), code execution (`eval`/`exec`/`Function`/`subprocess`), dangerous SQL (`DROP TABLE`, unfiltered `DELETE FROM`), and pipe-to-shell (`curl \| bash`) in generated code. Extend with `blockedPatterns`. |
+| `createSessionTaintTracker`     | Session state    | Cumulative session history        | Sticky escalation: once a high-confidence hit taints a session, escalated detectors/validators activate for its remainder.                                                                                                                        |
+
+#### Provenance and the Three Retrieval Surfaces (AB-41)
+
+Input detectors run against a `GuardrailProvenance` tag — every `DetectorContext.provenance` and every `GuardrailTriggeredEvent.provenance` on the input side carries one of:
+
+- `'user-input'` — content typed directly by the session's user.
+- `'recalled-memory'` — content pulled in by `memory`'s recall tool.
+- `'ingested-document'` — content pulled in from an ingested document (e.g. a file or URL fetched into context).
+- `'skill-resource'` — content pulled in from a skill's bundled resources.
+
+The three retrieval tags mark a distinct trust boundary from `'user-input'`: that content was authored by someone (or something) other than the current session's user and may have been crafted specifically to manipulate the model. Callers that assemble context from memory, documents, or skills should tag detector calls with the matching provenance so guardrail triggers and audit logs can distinguish "the user asked for this" from "this arrived via retrieval." (Provenance is an input-side concept — output validators run against generated text with no retrieval source to tag; a taint raised from a retrieval surface can still carry its `provenance` through `SessionTaintedEvent.provenance` into `createSessionTaintTracker`.)
+
+#### The Bureau Default Preset
+
+`bureau` wires a guardrail preset automatically whenever `BureauOptions.guardrails` is left `undefined`:
+
+- `mode: 'tripwire'` — any trigger hard-halts the run.
+- **Input**: `createPromptInjectionDetector()` wrapped in `withMinimumTripwireConfidence(..., DEFAULT_PROMPT_INJECTION_TRIPWIRE_THRESHOLD)` — the threshold is `0.6`, so only medium-to-high-confidence injection matches trip the run.
+- **Output**: `createOutputPIIValidator()` — output PII trips the run rather than being redacted.
+
+Pass `guardrails: false` to `bureau`'s options to opt out entirely, or a `GuardrailsOptions` object to replace the preset with your own detectors/validators.
+
+**Buffered-generation note:** the default preset's output PII validator only ever sees a complete response — it cannot inspect a stream mid-flight. `bureau` accounts for this: whenever the default preset is in effect (`options.guardrails === undefined`), it forces buffered (non-streaming) generation so the tripwire has a chance to fire before any output reaches the caller. A caller who supplies their own `GuardrailsOptions` (replacing the preset) has opted into managing that tradeoff themselves and keeps streaming enabled.
+
+#### Usage
+
+```typescript
+import {
+  createGuardrails,
+  createPromptInjectionDetector,
+  createOutputPIIValidator,
+  withMinimumTripwireConfidence,
+} from 'operative/guardrails';
+
+const guardrails = createGuardrails({
+  mode: 'tripwire',
+  input: {
+    detectors: [withMinimumTripwireConfidence(createPromptInjectionDetector(), 0.6)],
+  },
+  output: { validators: [createOutputPIIValidator()] },
+});
+
+const agent = defineAgent({
+  name: 'safe-agent',
+  generate,
+  toolbox,
+  prepareStep: guardrails.prepareStep,
+  validateResponse: guardrails.validateResponse,
+});
+```
+
+**Exported functions:** `createGuardrails`, `createInputGuardrail`, `createOutputGuardrail`, `createSessionTaintTracker`, `createCodeSafetyValidator`, `createGroundingValidator`, `createOutputPIIValidator`, `createInputLengthDetector`, `createPromptInjectionDetector`, `createTopicBoundaryDetector`, `withMinimumTripwireConfidence`, `DEFAULT_PROMPT_INJECTION_TRIPWIRE_THRESHOLD`.
+
+**Exported types:** `DetectionResult`, `DetectorContext`, `GuardrailHooks`, `GuardrailProvenance`, `GuardrailsOptions`, `GuardrailTriggeredEvent`, `InputDetector`, `InputGuardrailOptions`, `OutputGuardrailOptions`, `OutputGuardrailTriggeredEvent`, `OutputValidator`, `SessionTaintedEvent`, `SessionTaintOptions`, `SessionTaintTracker`, `ValidationResult`, `ValidatorContext`, `CodeSafetyValidatorOptions`, `GroundingValidatorOptions`, `InputLengthDetectorOptions`, `PromptInjectionDetectorOptions`, `TopicBoundaryDetectorOptions`.
 
 ---
 
