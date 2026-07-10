@@ -74,6 +74,16 @@ export interface CompactionOptions {
   summarize?: (messages: ReadonlyArray<Message>) => Promise<string>;
   /** Maximum age (in turns) for tool results before they are eligible for pruning. */
   maxToolResultAge?: number;
+  /**
+   * Preserve tool-result messages with `toolResult.outcome === 'error'` or
+   * `metadata.error === true`, regardless of age. Default: `true`. Mirrors
+   * the `errors` flag in conversationalist's `CompactionPreservePolicy` (see
+   * `Conversation.compact()`), so both compaction paths agree on the same
+   * preserve-by-default posture — error results are diagnostic signal that
+   * age-based pruning would otherwise discard. Set to `false` to opt back
+   * into pruning errors purely by age.
+   */
+  preserveErrorToolResults?: boolean;
 }
 
 /** A function that compacts a conversation to free tokens. */

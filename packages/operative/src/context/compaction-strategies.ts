@@ -70,7 +70,12 @@ export function createSlidingWindowStrategy(): CompactionStrategy {
  *
  * Redacts old tool-result messages (replacing content with a placeholder)
  * while keeping tool-call breadcrumbs intact. Preserves recent messages,
- * system messages, and pending tool pairs.
+ * system messages, pending tool pairs, and — by default — tool results
+ * whose `outcome` is `'error'` or whose `metadata.error` is `true`,
+ * regardless of age. Errors are diagnostic signal that age-based pruning
+ * would otherwise discard right when it's needed; set
+ * `preserveErrorToolResults: false` to opt back into pruning them purely by
+ * age.
  */
 export function createSelectivePruningStrategy(): CompactionStrategy {
   return (
@@ -80,6 +85,7 @@ export function createSelectivePruningStrategy(): CompactionStrategy {
   ): Promise<void> => {
     const retainRecent = options.retainRecentMessages ?? 4;
     const maxAge = options.maxToolResultAge ?? 5;
+    const preserveErrors = options.preserveErrorToolResults ?? true;
     const messages = conversation.getMessages();
     const nonSystem = messages.filter((m) => m.role !== 'system');
 
@@ -99,6 +105,10 @@ export function createSelectivePruningStrategy(): CompactionStrategy {
       if (i >= recentStart) continue;
 
       if (message.role === 'tool-result' && message.toolResult) {
+        const isError =
+          message.toolResult.outcome === 'error' || message.metadata['error'] === true;
+        if (preserveErrors && isError) continue;
+
         const turnsFromEnd = totalNonSystem - i;
         if (turnsFromEnd > maxAge) {
           conversation.redactMessageAtPosition(message.position, {
