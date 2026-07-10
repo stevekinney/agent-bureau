@@ -139,8 +139,52 @@ describe('instrument', () => {
     activeRun.complete();
     unsubscribe();
 
-    const runSpan = findSpan(tracer, 'operative.run');
+    const runSpan = findSpan(tracer, 'invoke_agent');
     expect(runSpan).toBeDefined();
+    expect(runSpan?.attributes['gen_ai.operation.name']).toBe('invoke_agent');
+  });
+
+  it('names the run span with the agent name and sets gen_ai.agent.name when provided', async () => {
+    const tracer = createMockTracer();
+    const toolbox = createTestToolbox([]);
+
+    const activeRun = createActiveRun({
+      generate: async () => textResponse('Hello'),
+      toolbox,
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+    });
+
+    const unsubscribe = instrument(activeRun, { tracer, agentName: 'Math Tutor' });
+    await activeRun.result;
+    activeRun.complete();
+    unsubscribe();
+
+    const runSpan = findSpan(tracer, 'invoke_agent Math Tutor');
+    expect(runSpan).toBeDefined();
+    expect(runSpan?.attributes['gen_ai.agent.name']).toBe('Math Tutor');
+    expect(findSpan(tracer, 'invoke_agent')).toBeUndefined();
+  });
+
+  it('treats an empty or whitespace-only agentName as unset for both the span name and attribute', async () => {
+    const tracer = createMockTracer();
+    const toolbox = createTestToolbox([]);
+
+    const activeRun = createActiveRun({
+      generate: async () => textResponse('Hello'),
+      toolbox,
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+    });
+
+    const unsubscribe = instrument(activeRun, { tracer, agentName: '   ' });
+    await activeRun.result;
+    activeRun.complete();
+    unsubscribe();
+
+    const runSpan = findSpan(tracer, 'invoke_agent')!;
+    expect(runSpan).toBeDefined();
+    expect('gen_ai.agent.name' in runSpan.attributes).toBe(false);
   });
 
   it('ends the run span on run.completed with finish reason and usage', async () => {
@@ -159,13 +203,41 @@ describe('instrument', () => {
     activeRun.complete();
     unsubscribe();
 
-    const runSpan = findSpan(tracer, 'operative.run')!;
+    const runSpan = findSpan(tracer, 'invoke_agent')!;
     expect(runSpan.ended).toBe(true);
     expect(runSpan.attributes['operative.finish_reason']).toBe('stop-condition');
+    expect('gen_ai.response.finish_reasons' in runSpan.attributes).toBe(false);
     expect(runSpan.attributes['operative.total_steps']).toBe(1);
-    expect(runSpan.attributes['operative.usage.prompt_tokens']).toBe(10);
-    expect(runSpan.attributes['operative.usage.completion_tokens']).toBe(20);
-    expect(runSpan.attributes['operative.usage.total_tokens']).toBe(30);
+    expect(runSpan.attributes['gen_ai.usage.input_tokens']).toBe(10);
+    expect(runSpan.attributes['gen_ai.usage.output_tokens']).toBe(20);
+  });
+
+  it('reports cache token usage on the run span when present', async () => {
+    const tracer = createMockTracer();
+    const toolbox = createTestToolbox([]);
+
+    const activeRun = createActiveRun({
+      generate: async () =>
+        textResponse('Done', {
+          prompt: 10,
+          completion: 20,
+          total: 30,
+          cacheCreationTokens: 4,
+          cacheReadTokens: 6,
+        }),
+      toolbox,
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+    });
+
+    const unsubscribe = instrument(activeRun, { tracer });
+    await activeRun.result;
+    activeRun.complete();
+    unsubscribe();
+
+    const runSpan = findSpan(tracer, 'invoke_agent')!;
+    expect(runSpan.attributes['gen_ai.usage.cache_creation.input_tokens']).toBe(4);
+    expect(runSpan.attributes['gen_ai.usage.cache_read.input_tokens']).toBe(6);
   });
 
   it('creates a step span as a child of the run span', async () => {
@@ -184,8 +256,8 @@ describe('instrument', () => {
     activeRun.complete();
     unsubscribe();
 
-    const runSpan = findSpan(tracer, 'operative.run')!;
-    const stepSpan = findSpan(tracer, 'operative.step.0')!;
+    const runSpan = findSpan(tracer, 'invoke_agent')!;
+    const stepSpan = findSpan(tracer, 'step')!;
     expect(stepSpan).toBeDefined();
     // The step span's parentContext should contain the run span
     expect(stepSpan.parentContext).toBeDefined();
@@ -207,7 +279,7 @@ describe('instrument', () => {
     activeRun.complete();
     unsubscribe();
 
-    const generateSpan = findSpan(tracer, 'operative.generate')!;
+    const generateSpan = findSpan(tracer, 'generate')!;
     expect(generateSpan).toBeDefined();
     expect(generateSpan.parentContext).toBeDefined();
   });
@@ -228,7 +300,7 @@ describe('instrument', () => {
     activeRun.complete();
     unsubscribe();
 
-    const generateSpan = findSpan(tracer, 'operative.generate')!;
+    const generateSpan = findSpan(tracer, 'generate')!;
     expect(generateSpan.ended).toBe(true);
     expect(generateSpan.attributes['operative.usage.prompt_tokens']).toBe(5);
     expect(generateSpan.attributes['operative.usage.completion_tokens']).toBe(10);
@@ -258,14 +330,14 @@ describe('instrument', () => {
 
     // The first generate span (step 0) should be ended before tools.executed
     // We can verify by checking that the generate span is ended and a tools span exists
-    const generateSpans = tracer.spans.filter((s) => s.name === 'operative.generate');
+    const generateSpans = tracer.spans.filter((s) => s.name === 'generate');
     expect(generateSpans.length).toBeGreaterThanOrEqual(1);
 
     // First generate span (from step 0 with tools) should be ended
     expect(generateSpans[0].ended).toBe(true);
 
     // A tools span should exist
-    const toolsSpan = findSpan(tracer, 'operative.tools');
+    const toolsSpan = findSpan(tracer, 'tool_calls');
     expect(toolsSpan).toBeDefined();
   });
 
@@ -290,7 +362,7 @@ describe('instrument', () => {
     activeRun.complete();
     unsubscribe();
 
-    const toolsSpan = findSpan(tracer, 'operative.tools')!;
+    const toolsSpan = findSpan(tracer, 'tool_calls')!;
     expect(toolsSpan).toBeDefined();
     expect(toolsSpan.attributes['operative.tools.count']).toBe(1);
     expect(toolsSpan.attributes['operative.tools.names']).toBe('get_weather');
@@ -317,7 +389,7 @@ describe('instrument', () => {
     activeRun.complete();
     unsubscribe();
 
-    const toolsSpan = findSpan(tracer, 'operative.tools')!;
+    const toolsSpan = findSpan(tracer, 'tool_calls')!;
     expect(toolsSpan.ended).toBe(true);
     expect(toolsSpan.attributes['operative.tools.results_count']).toBe(1);
   });
@@ -338,7 +410,7 @@ describe('instrument', () => {
     activeRun.complete();
     unsubscribe();
 
-    const stepSpan = findSpan(tracer, 'operative.step.0')!;
+    const stepSpan = findSpan(tracer, 'step')!;
     expect(stepSpan.ended).toBe(true);
   });
 
@@ -367,12 +439,17 @@ describe('instrument', () => {
     expect(tracer.spans).toHaveLength(6);
 
     const spanNames = tracer.spans.map((s) => s.name);
-    expect(spanNames).toContain('operative.run');
-    expect(spanNames).toContain('operative.step.0');
-    expect(spanNames).toContain('operative.step.1');
-    expect(spanNames).toContain('operative.tools');
+    expect(spanNames).toContain('invoke_agent');
+    expect(spanNames).toContain('tool_calls');
 
-    const generateSpans = tracer.spans.filter((s) => s.name === 'operative.generate');
+    // The step span name is intentionally stable (not `step {n}`) to avoid
+    // unbounded cardinality; the step index is carried on the attribute
+    // instead, so both steps should be distinguishable there.
+    const stepSpans = tracer.spans.filter((s) => s.name === 'step');
+    expect(stepSpans).toHaveLength(2);
+    expect(stepSpans.map((s) => s.attributes['operative.step.index'])).toEqual([0, 1]);
+
+    const generateSpans = tracer.spans.filter((s) => s.name === 'generate');
     expect(generateSpans).toHaveLength(2);
 
     // All spans should be ended
@@ -399,10 +476,11 @@ describe('instrument', () => {
     activeRun.complete();
     unsubscribe();
 
-    const runSpan = findSpan(tracer, 'operative.run')!;
+    const runSpan = findSpan(tracer, 'invoke_agent')!;
     expect(runSpan).toBeDefined();
     expect(runSpan.status.code).toBe(SpanStatusCode.ERROR);
     expect(runSpan.status.message).toBe('LLM service unavailable');
+    expect(runSpan.attributes['error.type']).toBe('Error');
     expect(runSpan.exceptions).toHaveLength(1);
     expect(runSpan.ended).toBe(true);
 
@@ -438,7 +516,7 @@ describe('instrument', () => {
     activeRun.complete();
     unsubscribe();
 
-    const runSpan = findSpan(tracer, 'operative.run')!;
+    const runSpan = findSpan(tracer, 'invoke_agent')!;
     expect(runSpan).toBeDefined();
     expect(runSpan.attributes['operative.abort_reason']).toBe('user cancelled');
     expect(runSpan.ended).toBe(true);
@@ -491,7 +569,7 @@ describe('instrument', () => {
 
     // The tools span should have been created by tools.executing
     // and ended by endAllOpenSpans (called from run.error handler)
-    const toolsSpan = findSpan(tracer, 'operative.tools');
+    const toolsSpan = findSpan(tracer, 'tool_calls');
     expect(toolsSpan).toBeDefined();
     expect(toolsSpan!.ended).toBe(true);
 
@@ -523,7 +601,7 @@ describe('instrument', () => {
     activeRun.complete();
     unsubscribe();
 
-    const generateSpan = findSpan(tracer, 'operative.generate')!;
+    const generateSpan = findSpan(tracer, 'generate')!;
     expect(generateSpan).toBeDefined();
     const retryEvents = generateSpan.events.filter((e) => e.name === 'generate.retry');
     expect(retryEvents).toHaveLength(1);
@@ -579,7 +657,7 @@ describe('instrument', () => {
     // Unsubscribe while the generate span is still open
     unsubscribe();
 
-    const generateSpan = findSpan(tracer, 'operative.generate')!;
+    const generateSpan = findSpan(tracer, 'generate')!;
     expect(generateSpan).toBeDefined();
     expect(generateSpan.ended).toBe(true);
 

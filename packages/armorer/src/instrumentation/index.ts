@@ -52,16 +52,26 @@ export function instrument(
   subscriptions.push(
     toolbox.addEventListener('call', (event) => {
       const { tool, call } = event;
+      const attributes: Attributes = {
+        // gen_ai.* attributes follow the OTel GenAI semantic conventions
+        // "Execute tool span" shape. See the mapping table in the package
+        // README for the pinned conventions version and any divergence.
+        'gen_ai.operation.name': 'execute_tool',
+        'gen_ai.tool.name': tool.identity.name,
+        'gen_ai.tool.call.id': call.id,
+        'gen_ai.tool.call.arguments': safeStringify(call.arguments),
+      };
+      if (tool.description) {
+        attributes['gen_ai.tool.description'] = tool.description;
+      }
       const span = tracer.startSpan(
-        `tool ${tool.identity.name}`,
+        `execute_tool ${tool.identity.name}`,
         {
-          kind: SpanKind.CLIENT,
-          attributes: {
-            'gen_ai.system': 'toolbox',
-            'gen_ai.tool.name': tool.identity.name,
-            'gen_ai.tool.id': call.id,
-            'gen_ai.tool.arguments': safeStringify(call.arguments),
-          },
+          // Per convention: tool execution spans SHOULD be INTERNAL — the
+          // tool call happens inside the instrumented process, not as an
+          // outbound client call to the GenAI provider.
+          kind: SpanKind.INTERNAL,
+          attributes,
           ...(event.spanLinks ? { links: event.spanLinks } : {}),
         },
         event.parentContext,
@@ -76,7 +86,7 @@ export function instrument(
       const span = activeSpans.get(toolCall.id);
       if (span) {
         span.addEvent('tool.started', {
-          'gen_ai.tool.arguments': safeStringify(params),
+          'gen_ai.tool.call.arguments': safeStringify(params),
         });
       }
     }),
@@ -84,30 +94,43 @@ export function instrument(
 
   subscriptions.push(
     toolbox.addEventListener('tool.finished', (event) => {
-      const { toolCall, status, result, error, durationMs, inputDigest, outputDigest } = event;
+      const {
+        toolCall,
+        status,
+        result,
+        error,
+        durationMs,
+        inputDigest,
+        outputDigest,
+        errorCategory,
+      } = event;
       const span = activeSpans.get(toolCall.id);
       if (span) {
+        // armorer.tool.* attributes are intentionally divergent extensions —
+        // the GenAI conventions do not define duration/digest/status
+        // attributes for the execute_tool span, so these are namespaced
+        // outside gen_ai.* to avoid squatting the reserved vocabulary.
         const attributes: Attributes = {
-          'gen_ai.tool.duration_ms': durationMs,
-          'gen_ai.tool.status': status,
+          'armorer.tool.duration_ms': durationMs,
+          'armorer.tool.status': status,
         };
 
         if (inputDigest) {
-          attributes['gen_ai.tool.input_digest'] = inputDigest;
+          attributes['armorer.tool.input_digest'] = inputDigest;
         }
         if (outputDigest) {
-          attributes['gen_ai.tool.output_digest'] = outputDigest;
+          attributes['armorer.tool.output_digest'] = outputDigest;
         }
 
         switch (status as string) {
           case 'success': {
-            attributes['gen_ai.tool.result'] = safeStringify(result);
+            attributes['gen_ai.tool.call.result'] = safeStringify(result);
             span.setStatus({ code: SpanStatusCode.OK });
             break;
           }
           case 'cancelled': {
             span.setStatus({ code: SpanStatusCode.UNSET, message: 'Cancelled' });
-            attributes['gen_ai.tool.cancellation_reason'] = safeStringify(error);
+            attributes['armorer.tool.cancellation_reason'] = safeStringify(error);
 
             break;
           }
@@ -116,7 +139,7 @@ export function instrument(
               code: SpanStatusCode.OK,
               message: 'Paused (Action Required)',
             });
-            attributes['gen_ai.tool.status'] = 'paused';
+            attributes['armorer.tool.status'] = 'paused';
 
             break;
           }
@@ -126,10 +149,11 @@ export function instrument(
               code: SpanStatusCode.ERROR,
               message: error instanceof Error ? error.message : String(error),
             });
+            attributes['error.type'] = errorCategory ?? status;
             if (error instanceof Error) {
               span.recordException(error);
             } else {
-              attributes['gen_ai.tool.error'] = safeStringify(error);
+              attributes['armorer.tool.error'] = safeStringify(error);
             }
           }
         }
