@@ -3,8 +3,10 @@ import { Hono } from 'hono';
 import type { ApiKeyStore } from '../keys/types';
 import type { LiveFrameBroker } from '../live-events';
 import { createScopeGuard } from '../middleware/scope-guard';
-import type { Bureau } from '../types';
+import type { A2AAgentCardOptions, Bureau } from '../types';
 import { SCOPE } from '../types';
+import { createA2ARoutes } from './a2a';
+import { createAgentCardRoutes } from './a2a-agent-card';
 import { createAuditRoutes, createConversationRoutes, createMemoryRoutes } from './audit';
 import { createConfigurationRoutes } from './configuration';
 import { createEventsRoutes } from './events';
@@ -23,9 +25,10 @@ type CreateRoutesOptions = {
   bureau: Bureau;
   broker: LiveFrameBroker;
   apiKeyStore?: ApiKeyStore;
+  a2a?: A2AAgentCardOptions;
 };
 
-export function createRoutes({ bureau, broker, apiKeyStore }: CreateRoutesOptions) {
+export function createRoutes({ bureau, broker, apiKeyStore, a2a }: CreateRoutesOptions) {
   const app = new Hono();
 
   app.route('/api/v1/health', createHealthRoutes(bureau));
@@ -132,6 +135,17 @@ export function createRoutes({ bureau, broker, apiKeyStore }: CreateRoutesOption
   schedulesRouter.delete('*', createScopeGuard([SCOPE.SCHEDULES_WRITE]));
   schedulesRouter.route('/', createSchedulesRoutes(bureau));
   app.route('/schedules', schedulesRouter);
+
+  // A2A (AB-71) — Agent Card discovery + JSON-RPC task endpoints.
+  const agentCardRouter = new Hono();
+  agentCardRouter.get('*', createScopeGuard([SCOPE.CONFIG_READ]));
+  agentCardRouter.route('/', createAgentCardRoutes(bureau, a2a));
+  app.route('/.well-known/agent-card.json', agentCardRouter);
+
+  const a2aRouter = new Hono();
+  a2aRouter.post('*', createScopeGuard([SCOPE.RUNS_WRITE]));
+  a2aRouter.route('/', createA2ARoutes(bureau));
+  app.route('/a2a', a2aRouter);
 
   return app;
 }

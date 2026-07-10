@@ -76,6 +76,41 @@ export interface GatewayOptions {
    * evaluation reporting is opt-in.
    */
   evaluationReportsDirectory?: string;
+  /**
+   * AB-71 — A2A (Agent2Agent) server facade. Configures the Agent Card served
+   * at `GET /.well-known/agent-card.json` and the `POST /a2a` JSON-RPC
+   * endpoint's self-description. Omit to use generic defaults derived from
+   * `bureau.getConfiguration()`.
+   */
+  a2a?: A2AAgentCardOptions;
+}
+
+/**
+ * Operator-supplied metadata for the A2A Agent Card (AB-71). Everything is
+ * optional — the card renders with generic defaults when omitted, since
+ * `bureau` has no first-class "agent identity" concept of its own (a bureau
+ * is one or more agents dispatched by name, not a single named entity).
+ */
+export interface A2AAgentCardOptions {
+  /** Human-readable agent name. Default: `'Agent Bureau'`. */
+  name?: string;
+  /** Human-readable description. Default: a generic bureau description. */
+  description?: string;
+  /** Agent/deploy version string (e.g. `'1.4.2'`). Default: `'0.0.0'`. */
+  version?: string;
+  /** Service provider identity, surfaced on the card's `provider` field. */
+  provider?: { organization: string; url: string };
+  /** URL to an icon representing the agent. */
+  iconUrl?: string;
+  /**
+   * Absolute base URL this gateway is publicly reachable at (e.g.
+   * `'https://agents.example.com'`), used to build the Agent Card's
+   * `supportedInterfaces[].url`. Defaults to the incoming request's own
+   * origin (scheme + host) — the right default for direct exposure, but
+   * required when a reverse proxy rewrites the request `Host` before it
+   * reaches the gateway.
+   */
+  baseUrl?: string;
 }
 
 export interface Gateway {

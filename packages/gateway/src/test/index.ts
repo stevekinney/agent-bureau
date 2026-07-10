@@ -68,6 +68,7 @@ export async function createTestGateway(
     enableCsp,
     idleTimeout,
     evaluationReportsDirectory,
+    a2a,
     ...bureauOptions
   } = bureauOrOptions;
 
@@ -81,6 +82,7 @@ export async function createTestGateway(
     enableCsp,
     idleTimeout,
     evaluationReportsDirectory,
+    a2a,
   });
 }
 

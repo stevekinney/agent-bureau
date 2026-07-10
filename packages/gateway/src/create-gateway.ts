@@ -149,7 +149,7 @@ export async function createGateway(
   );
 
   // Mount API routes
-  app.route('/', createRoutes({ bureau, broker: liveFrameBroker, apiKeyStore }));
+  app.route('/', createRoutes({ bureau, broker: liveFrameBroker, apiKeyStore, a2a: options.a2a }));
 
   // Mount SSR pages — configuration (including systemPrompt) is read from
   // bureau.getConfiguration() so the door does not need to duplicate brain config.
