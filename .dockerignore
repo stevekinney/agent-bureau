@@ -1,0 +1,17 @@
+.git
+.github
+.claude
+.codex
+.changeset
+node_modules
+**/node_modules
+**/dist
+**/coverage
+**/.turbo
+tmp
+*.log
+.DS_Store
+*.tsbuildinfo
+.env
+.env.*
+reference

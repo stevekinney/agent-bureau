@@ -1,0 +1,63 @@
+# Reference compose file for self-hosting the agent-bureau gateway (AB-80).
+# See documentation/deployment.md for the full deployment guide.
+#
+# This is a distinct file from the repository's existing `docker-compose.yaml`
+# (redis + postgresql, unrelated integration-test fixtures used elsewhere in
+# the workspace) — that file is untouched. Run this one explicitly:
+#
+#   docker compose -f docker-compose.deployment.yaml up --build
+#
+# Configure secrets via a `.env` file next to this one (see the variables
+# referenced below) rather than editing this file directly.
+services:
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - '5555:5555'
+    environment:
+      PORT: '5555'
+      GATEWAY_HOST: '0.0.0.0'
+      STORAGE_TYPE: '${STORAGE_TYPE:-sqlite}'
+      # Unset by default (an empty string from `${STORAGE_PATH:-}` is treated
+      # as unset by start.ts) so start.ts's own per-STORAGE_TYPE default
+      # applies — `./data/agent-bureau.sqlite` for sqlite, `./data/agent-bureau-lmdb`
+      # for lmdb, both resolving under the volume mounted below. Do NOT
+      # hard-code a sqlite-shaped filename here: it would silently point lmdb
+      # at a file path instead of a directory if STORAGE_TYPE=lmdb is set
+      # without also overriding this. Set STORAGE_PATH in `.env` only if you
+      # need a non-default location.
+      STORAGE_PATH: '${STORAGE_PATH:-}'
+      # A stable admin credential for infrastructure (this healthcheck, a
+      # reverse proxy, monitoring). Distinct from the per-user managed API
+      # keys the bureau bootstraps on first boot (see the deployment guide's
+      # "API key bootstrap" section) — set this to a real secret in `.env`.
+      AUTH_TOKEN: '${AUTH_TOKEN:?set AUTH_TOKEN in .env}'
+      PROVIDER: '${PROVIDER:-anthropic}'
+      ANTHROPIC_API_KEY: '${ANTHROPIC_API_KEY:-}'
+      OPENAI_API_KEY: '${OPENAI_API_KEY:-}'
+      GEMINI_API_KEY: '${GEMINI_API_KEY:-}'
+    volumes:
+      # Durable store persistence — matches start.ts's default relative
+      # storage path resolved against the Dockerfile's WORKDIR. See "Backup
+      # and restore" in the deployment guide for how to snapshot this volume.
+      - agent-bureau-data:/app/packages/gateway/data
+    healthcheck:
+      # No curl/wget in the slim base image — use bun's fetch instead.
+      # Checks liveness (process up), not readiness (provider configured):
+      # a bureau with no API key is a valid, intentionally-partial boot
+      # state (see documentation/deployment.md).
+      test:
+        [
+          'CMD-SHELL',
+          'bun -e "fetch(''http://localhost:''+process.env.PORT+''/api/v1/health/live'',{headers:{authorization:''Bearer ''+process.env.AUTH_TOKEN}}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"',
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+volumes:
+  agent-bureau-data:

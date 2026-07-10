@@ -47,12 +47,13 @@ flowchart TD
 
 ## Gateway-First Flow
 
-The simplest way to use the workspace is to start with `createGateway()` and let it compose the runtime for you.
+The simplest way to use the workspace is to build a `Bureau` with `createBureau()` (all runtime/brain configuration) and wrap it in a `Gateway` with `createGateway()` (transport-only: port, host, auth).
 
 ```ts
+import { createBureau } from 'bureau';
 import { createGateway } from 'gateway';
 
-const gateway = await createGateway({
+const bureau = await createBureau({
   storage: { type: 'sqlite', path: 'agent-bureau.sqlite' },
   providers: [
     {
@@ -73,8 +74,11 @@ const gateway = await createGateway({
   scheduler: { enabled: true },
 });
 
+const gateway = await createGateway(bureau);
 const server = await gateway.start();
 ```
+
+For a full self-hosted deployment (Docker, storage backend choice, API-key bootstrap, reverse proxy, backup/restore), see [`documentation/deployment.md`](documentation/deployment.md).
 
 That composition path gives you:
 
