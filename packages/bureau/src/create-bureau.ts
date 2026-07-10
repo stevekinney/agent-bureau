@@ -44,6 +44,8 @@ import {
 } from './events';
 import { createRuntimeComposition } from './runtime-composition';
 import {
+  findRunAgentName,
+  type RunAttribution,
   serializeActionDetail,
   serializeRunDetail,
   serializeRunState,
@@ -415,6 +417,14 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
   // authoritative "already handled" marker so a resolved review disappears
   // from the queue immediately, and is never accidentally resolved twice.
   const resolvedReviewIds = new Set<string>();
+  // AB-54 usage analytics: agentName/principal resolved deterministically at
+  // `createRun` time, keyed by runId. Layer A only (in-memory, like the rest
+  // of RunSummary) — a durably recovered run (process restart) has no entry
+  // here and `serializeRunState` falls back to the `findRunAgentName`
+  // heuristic for `agentName`; `principal` has no such fallback since it is
+  // never persisted durably. Entries are removed on `deleteRun` so this map
+  // does not outlive the run it describes.
+  const runAttribution = new Map<string, RunAttribution>();
   const liveFrameListeners = new Set<(frame: ServerFrame) => void>();
   const sessionPersistenceRetryDelayMilliseconds =
     options.sessionPersistenceRetryDelayMilliseconds ??
@@ -656,6 +666,14 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     conversation.appendUserMessage(request.message);
 
     const runId = `run-${crypto.randomUUID()}`;
+    // AB-54 usage analytics: resolve agentName/principal deterministically now
+    // (before `store.register`, so it's in place before any listRuns()/getRun()
+    // call can observe this run) rather than relying on the tool-bubble-event
+    // heuristic, which cannot see a run that never calls a tool.
+    runAttribution.set(runId, {
+      agentName: request.agentName ?? BUREAU_AGENT_NAME,
+      ...(request.principal !== undefined ? { principal: request.principal } : {}),
+    });
     const runRuntime = await runtime.createRunRuntime({
       ...request,
       sessionId,
@@ -1335,7 +1353,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       }
 
       const sessionId = getRunSessionIdentifier(runState);
-      summaries.push(serializeRunState(runState, sessionId));
+      summaries.push(serializeRunState(runState, sessionId, runAttribution.get(runState.id)));
     }
 
     return summaries;
@@ -1347,7 +1365,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       return undefined;
     }
 
-    return serializeRunDetail(runState, getRunSessionIdentifier(runState));
+    return serializeRunDetail(runState, getRunSessionIdentifier(runState), runAttribution.get(id));
   }
 
   function abortRun(id: string): RunSummary {
@@ -1362,7 +1380,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
 
     runState.activeRun.abort('Aborted via API');
     return {
-      ...serializeRunState(runState, getRunSessionIdentifier(runState)),
+      ...serializeRunState(runState, getRunSessionIdentifier(runState), runAttribution.get(id)),
       status: 'aborted',
     };
   }
@@ -1378,6 +1396,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     }
 
     runSessionIdentifiers.delete(runState.activeRun);
+    runAttribution.delete(id);
     store.removeRun(id);
   }
 
@@ -1457,29 +1476,6 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     if (!runtime.durable) throw new BureauError('Durable engine not configured', 'NOT_CONFIGURED');
     const runId = await requireSessionRunId(sessionId);
     return runtime.durable.engine.query(runId, name, input);
-  }
-
-  /**
-   * Best-effort agentName lookup for a run: the curated `tool.*` bubble events
-   * (`ToolStartedBubbleEvent` et al.) stamp every action with `{agentName,
-   * runId, step}`, so the first action carrying it tells us the run's agent.
-   * `undefined` for a run with no tool activity yet.
-   */
-  function findRunAgentName(runState: {
-    actions: readonly { detail: unknown }[];
-  }): string | undefined {
-    for (const action of runState.actions) {
-      const detail = action.detail;
-      if (
-        detail !== null &&
-        typeof detail === 'object' &&
-        'agentName' in detail &&
-        typeof (detail as { agentName: unknown }).agentName === 'string'
-      ) {
-        return (detail as { agentName: string }).agentName;
-      }
-    }
-    return undefined;
   }
 
   function listPendingReviews(): PendingReview[] {

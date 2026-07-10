@@ -20,6 +20,7 @@
   const navigationLinks: NavigationLink[] = [
     { href: '/dashboard', label: 'Dashboard' },
     { href: '/reviews', label: 'Review Queue' },
+    { href: '/usage', label: 'Usage' },
     { href: '/chat', label: 'Chat' },
     { href: '/configuration', label: 'Configuration' },
   ];

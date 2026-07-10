@@ -147,6 +147,9 @@ describe('renderPage with a populated run-detail page', () => {
     finishReason: 'stop',
     error: undefined,
     actionCount: 1,
+    agentName: 'bureau',
+    principal: undefined,
+    startedAt: 0,
     stepDetails: [
       {
         step: 0,

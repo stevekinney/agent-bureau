@@ -188,29 +188,80 @@ export function serializeActionDetail(eventType: string, detail: unknown): unkno
 }
 
 /**
+ * Best-effort agentName lookup for a run from its action log: the curated
+ * `tool.*` bubble events (`ToolStartedBubbleEvent` et al.) stamp every action
+ * with `{agentName, runId, step}`, so the first action carrying it tells us
+ * the run's agent. `undefined` for a run with no tool activity yet.
+ *
+ * This is a fallback for runs whose deterministic `agentName` (resolved at
+ * creation time from `CreateRunRequest.agentName`) is unavailable — namely a
+ * run reattached after durable recovery, whose in-memory resolution was lost
+ * to the process restart.
+ */
+export function findRunAgentName(runState: {
+  actions: readonly { detail: unknown }[];
+}): string | undefined {
+  for (const action of runState.actions) {
+    const detail = action.detail;
+    if (
+      detail !== null &&
+      typeof detail === 'object' &&
+      'agentName' in detail &&
+      typeof (detail as { agentName: unknown }).agentName === 'string'
+    ) {
+      return (detail as { agentName: string }).agentName;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Run attribution resolved outside the operative store (AB-54 usage
+ * analytics grouping): the agent and authenticated principal captured at
+ * `createRun` time. Both are `undefined` when unresolved (e.g. a durably
+ * recovered run whose in-memory attribution was lost to a process restart).
+ */
+export interface RunAttribution {
+  agentName?: string;
+  principal?: string;
+}
+
+/**
  * Maps a live RunState (which may contain non-serializable objects like
  * ActiveRun and Conversation) to a JSON-safe RunSummary DTO.
+ *
+ * `attribution` carries the agentName/principal resolved deterministically at
+ * `createRun` time (see {@link RunAttribution}); when omitted (or its
+ * `agentName` is unset), `agentName` falls back to the {@link findRunAgentName}
+ * heuristic scan of the run's own action log.
  */
-export function serializeRunState(runState: RunState, sessionId?: string): RunSummary {
+export function serializeRunState(
+  runState: RunState,
+  sessionId?: string,
+  attribution?: RunAttribution,
+): RunSummary {
   return {
     id: runState.id,
     sessionId: sessionId ?? '',
     status: runState.status,
     steps: runState.steps.length,
-    usage: {
-      prompt: runState.usage.prompt,
-      completion: runState.usage.completion,
-      total: runState.usage.total,
-    },
+    usage: { ...runState.usage },
     finishReason: runState.finishReason,
     error: runState.error !== undefined ? serializeUnknownError(runState.error) : undefined,
     actionCount: runState.actions.length,
+    agentName: attribution?.agentName ?? findRunAgentName(runState),
+    principal: attribution?.principal,
+    startedAt: runState.actions[0]?.timestamp,
   };
 }
 
-export function serializeRunDetail(runState: RunState, sessionId?: string): RunDetail {
+export function serializeRunDetail(
+  runState: RunState,
+  sessionId?: string,
+  attribution?: RunAttribution,
+): RunDetail {
   return {
-    ...serializeRunState(runState, sessionId),
+    ...serializeRunState(runState, sessionId, attribution),
     events: runState.actions.map((action) => ({
       sequence: action.sequence,
       runId: action.runId,

@@ -17,17 +17,8 @@ import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import { z } from 'zod';
 
+import { resolvePrincipal } from '../middleware/authentication';
 import type { Bureau } from '../types';
-
-/**
- * Falls back to `'anonymous'` when no authentication is configured at all
- * (the authentication middleware injects no `x-auth-principal` header in
- * that case) — every review decision must have SOME attribution, even on a
- * gateway with auth disabled.
- */
-function resolvePrincipal(context: { req: { header(name: string): string | undefined } }): string {
-  return context.req.header('x-auth-principal') ?? 'anonymous';
-}
 
 const approveBodySchema = z
   .object({

@@ -2,6 +2,7 @@ import { BureauError } from 'bureau';
 import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 
+import { resolvePrincipal } from '../middleware/authentication';
 import type { Bureau, CreateRunRequest } from '../types';
 
 /**
@@ -69,6 +70,7 @@ export function createHooksRoutes(bureau: Bureau) {
       const request: CreateRunRequest = {
         message,
         agentName: agentName.trim(),
+        principal: resolvePrincipal(context),
         ...(sessionId ? { sessionId } : {}),
         ...(typeof body['systemPrompt'] === 'string' ? { systemPrompt: body['systemPrompt'] } : {}),
         ...(typeof body['maximumSteps'] === 'number' ? { maximumSteps: body['maximumSteps'] } : {}),

@@ -19,12 +19,31 @@ import type {
   Unsubscribe,
 } from './types';
 
+/**
+ * Accumulates `TokenUsage`, including AB-92's cache-token fields. `absent`
+ * and `zero` are distinct (see {@link TokenUsage}): the summed cache field is
+ * only present when at least one side reports it, so a provider/run that
+ * never reports cache activity keeps the accumulator's cache fields
+ * `undefined` rather than fabricating `0`.
+ */
 function addUsage(accumulated: TokenUsage, incoming: TokenUsage | undefined): TokenUsage {
   if (!incoming) return accumulated;
+
+  const cacheCreationTokens =
+    accumulated.cacheCreationTokens !== undefined || incoming.cacheCreationTokens !== undefined
+      ? (accumulated.cacheCreationTokens ?? 0) + (incoming.cacheCreationTokens ?? 0)
+      : undefined;
+  const cacheReadTokens =
+    accumulated.cacheReadTokens !== undefined || incoming.cacheReadTokens !== undefined
+      ? (accumulated.cacheReadTokens ?? 0) + (incoming.cacheReadTokens ?? 0)
+      : undefined;
+
   return {
     prompt: accumulated.prompt + incoming.prompt,
     completion: accumulated.completion + incoming.completion,
     total: accumulated.total + incoming.total,
+    ...(cacheCreationTokens !== undefined ? { cacheCreationTokens } : {}),
+    ...(cacheReadTokens !== undefined ? { cacheReadTokens } : {}),
   };
 }
 

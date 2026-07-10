@@ -7,6 +7,7 @@ export const routes: Route[] = [
   { pattern: '/dashboard', name: 'dashboard' },
   { pattern: '/runs/:id', name: 'run-detail' },
   { pattern: '/reviews', name: 'reviews' },
+  { pattern: '/usage', name: 'usage' },
   { pattern: '/configuration', name: 'configuration' },
   { pattern: '/chat', name: 'chat' },
 ];
