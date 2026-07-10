@@ -262,6 +262,32 @@ describe('createAuditTrail', () => {
     trail.dispose();
   });
 
+  it('sinks run.tripwire action events into the kv store (regression PRRT_kwDORvupsc6PxCXU)', async () => {
+    // Before the fix, AUDIT_EVENT_TYPES only had 'run.completed' / 'run.error'
+    // / 'run.aborted' for run-lifecycle events, so a guardrail tripwire halt
+    // — the only terminal event carrying guardrailName/category/phase as
+    // first-class fields — was dropped from the durable audit trail entirely.
+    const kv = textValueStore(new MemoryStorage());
+    const { bureau, emit } = createStubBureau();
+    const trail = createAuditTrail(bureau, kv);
+
+    const action: Action = {
+      type: 'run.tripwire',
+      timestamp: 6000,
+      sequence: 7,
+      runId: 'run-tripwire',
+      detail: { guardrailName: 'output-pii', category: 'pii', phase: 'output', confidence: 1 },
+    };
+
+    emit(new ActionEvent(action));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const records = await trail.query({ runId: 'run-tripwire' });
+    expect(records).toHaveLength(1);
+    expect(records[0]?.type).toBe('run.tripwire');
+    trail.dispose();
+  });
+
   it('does not sink non-audit event types into the kv store', async () => {
     const kv = textValueStore(new MemoryStorage());
     const { bureau, emit } = createStubBureau();

@@ -1109,7 +1109,7 @@ function finalizeRunResult(args: FinalizeArgs): RunResult {
                 guardrailName: args.tripwire?.guardrailName ?? 'unknown',
                 category: args.tripwire?.category ?? 'unknown',
                 phase: args.tripwire?.phase ?? 'input',
-                confidence: args.tripwire?.confidence ?? 1,
+                confidence: args.tripwire?.confidence ?? 0,
                 detail: args.tripwire?.detail,
               })
             : new Error(message);

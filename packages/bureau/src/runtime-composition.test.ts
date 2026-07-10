@@ -2942,6 +2942,66 @@ describe('AB-40: default guardrails preset', () => {
     }
   });
 
+  it('forces buffered (non-streaming) generation when the default guardrails preset is active, so the output tripwire sees the full response before anything reaches a client', async () => {
+    // Regression guard (P1 review finding, PRRT_kwDORvupsc6PxCXX): the default
+    // output PII validator runs in `validateResponse`, which only fires AFTER
+    // `withEnhancedStreaming` has already forwarded `stream:text-delta` events
+    // during generation. Streaming a response the default tripwire is meant to
+    // gate would leak the flagged content before the guardrail ever ran. No
+    // `generate` and no `streaming: { enabled: false }` — provider streaming
+    // would normally be wired here — and no `guardrails` option, so the
+    // default preset must be the thing suppressing it.
+    let resolveProviderGenerateCalls = 0;
+    const runtime = await createRuntimeComposition(
+      {
+        providers: [{ name: 'primary', provider: { provider: 'openai', model: 'cheap-model' } }],
+        toolbox: createToolbox([], { context: {} }),
+      },
+      {
+        resolveProviderGenerate(provider) {
+          resolveProviderGenerateCalls += 1;
+          return createGenerateForProvider(provider);
+        },
+      },
+    );
+
+    const runRuntime = await runtime.createRunRuntime({
+      message: 'Hello',
+      sessionId: 'default-guardrails-streaming-suppressed',
+    });
+
+    expect(runRuntime.streamEventTarget).toBeUndefined();
+    // resolveProviderGenerate is only called for the buffered (non-streaming)
+    // pipeline in this test's stub — proves the streaming branch was never taken.
+    expect(resolveProviderGenerateCalls).toBe(1);
+  });
+
+  it('keeps streaming enabled when the caller explicitly supplies a guardrails config, even one with an output tripwire', async () => {
+    // A caller who explicitly configures guardrails (replacing the default
+    // preset) has opted into managing the streaming/guardrail tradeoff
+    // themselves — the forced-buffering only applies to the auto-wired
+    // default preset.
+    const runtime = await createRuntimeComposition(
+      {
+        providers: [{ name: 'primary', provider: { provider: 'openai', model: 'cheap-model' } }],
+        toolbox: createToolbox([], { context: {} }),
+        guardrails: { mode: 'tripwire', output: { validators: [] } },
+      },
+      {
+        resolveProviderGenerate(provider) {
+          return createGenerateForProvider(provider);
+        },
+      },
+    );
+
+    const runRuntime = await runtime.createRunRuntime({
+      message: 'Hello',
+      sessionId: 'explicit-guardrails-streaming-kept',
+    });
+
+    expect(runRuntime.streamEventTarget).toBeDefined();
+  });
+
   it('a caller-supplied guardrails config replaces the default preset entirely', async () => {
     const runtime = await createRuntimeComposition({
       generate: async () => ({ content: 'ok', toolCalls: [] }),

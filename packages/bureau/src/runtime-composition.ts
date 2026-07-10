@@ -1325,8 +1325,26 @@ export async function createRuntimeComposition(
     },
   ) {
     const liveStreaming = runtimeOptions?.liveStreaming ?? true;
+    // AB-40 — the auto-wired default guardrail preset (`options.guardrails ===
+    // undefined`) runs its output PII validator in `mode: 'tripwire'` against
+    // the FULL response content in `validateResponse`, which only runs after
+    // `runStep`'s generate call returns. `withEnhancedStreaming` forwards
+    // `stream:text-delta` events (and finalizes the streaming message) as the
+    // provider streams, which happens entirely INSIDE that generate call —
+    // before `validateResponse` ever sees the content. A streamed response
+    // would therefore leak PII to clients before the default tripwire could
+    // fire, defeating the preset's purpose. Force buffered (non-streaming)
+    // generation whenever the default preset is in effect so the output
+    // guardrail actually gates what reaches the client. A caller who
+    // explicitly supplies `guardrails` (including re-supplying this same
+    // preset) has opted into managing that tradeoff themselves and keeps
+    // streaming.
+    const usingDefaultGuardrailsPreset = options.guardrails === undefined;
     const streamEventTarget =
-      !liveStreaming || options.generate !== undefined || options.streaming?.enabled === false
+      !liveStreaming ||
+      options.generate !== undefined ||
+      options.streaming?.enabled === false ||
+      usingDefaultGuardrailsPreset
         ? undefined
         : new TypedEventTarget<StreamEventMap>();
     const generate =
@@ -1440,8 +1458,9 @@ export async function createRuntimeComposition(
 
     // AB-40 — `undefined` (not configured) wires the enabled-by-default
     // preset; `false` opts out entirely; anything else replaces the preset.
-    const guardrailsConfig =
-      options.guardrails === undefined ? defaultGuardrailsPreset() : options.guardrails;
+    const guardrailsConfig = usingDefaultGuardrailsPreset
+      ? defaultGuardrailsPreset()
+      : options.guardrails;
     if (guardrailsConfig) {
       const guardrails = createGuardrails(guardrailsConfig);
       prepareStep.push(guardrails.prepareStep);

@@ -197,6 +197,53 @@ describe('createHeartbeat', () => {
     expect(failureError).toBeDefined();
   });
 
+  it('treats a tripwire-halted tick as a failure (regression PRRT_kwDORvupsc6PxCXR)', async () => {
+    // Before the fix, only `finishReason: 'error'` counted as a heartbeat
+    // failure. A guardrail tripwire halt (`finishReason: 'tripwire'`) fell
+    // through to the success branch and silently reset consecutiveFailures,
+    // so a heartbeat whose runs are repeatedly halted by a guardrail would
+    // never trip maxConsecutiveFailures / onFailure.
+    const tripwireScheduler = {
+      submit: async () =>
+        ({
+          conversation: new Conversation(),
+          steps: [],
+          content: '',
+          usage: { prompt: 0, completion: 0, total: 0 },
+          finishReason: 'tripwire',
+          error: new Error('guardrail tripwire'),
+        }) satisfies RunResult,
+    } as Scheduler;
+    const manualSleep = createManualSleep();
+
+    let failureError: unknown;
+
+    const heartbeat = createHeartbeat({
+      scheduler: tripwireScheduler,
+      interval: 5,
+      maxConsecutiveFailures: 2,
+      sleepFunction: manualSleep.sleepFunction,
+      createHeartbeatRun: () => ({
+        generate: createMockGenerate([textResponse('unreachable')]),
+        toolbox: createTestToolbox([]),
+        conversation: new Conversation(),
+        maximumSteps: 1,
+      }),
+      onFailure: (error) => {
+        failureError = error;
+      },
+    });
+
+    heartbeat.start();
+    await flushAsyncWork();
+    await manualSleep.advanceOne();
+    await manualSleep.advanceOne();
+
+    expect(heartbeat.isRunning).toBe(false);
+    expect(heartbeat.consecutiveFailures).toBe(2);
+    expect(failureError).toBeDefined();
+  });
+
   it('a successful tick resets consecutiveFailures', async () => {
     const scheduler = createTestScheduler();
     const manualSleep = createManualSleep();

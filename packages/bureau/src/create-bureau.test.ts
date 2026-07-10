@@ -1545,6 +1545,41 @@ describe('createBureau', () => {
     expect(session?.metadata['lastError']).toBe('Explode');
   });
 
+  it('persists a guardrail tripwire halt as lastRunStatus: error with lastError set (regression PRRT_kwDORvupsc6PxCXP)', async () => {
+    // Before the fix, the run.completed listener only mapped
+    // `finishReason === 'error'` to `lastRunStatus: 'error'` — a tripwire halt
+    // (`finishReason: 'tripwire'`) fell into the `'completed'` branch and never
+    // wrote `lastError`, so a malicious/flagged prompt that hard-halted the run
+    // was persisted to session metadata as an ordinary successful completion.
+    const generate: GenerateFunction = async () => ({ content: 'ok', toolCalls: [] });
+
+    const bureau = await createBureau({
+      generate,
+      toolbox: createEmptyToolbox(),
+      persistence: textValueStore(new MemoryStorage()),
+      guardrails: {
+        mode: 'tripwire',
+        input: {
+          detectors: [
+            {
+              name: 'always-trip',
+              detect: async () => ({ triggered: true, confidence: 1, category: 'test' }),
+            },
+          ],
+        },
+      },
+    });
+
+    const run = await bureau.createRun({ message: 'trip me' });
+    await waitForRunCompletion(bureau, run.id);
+
+    const session = await bureau.getSession(run.sessionId);
+    expect(session?.metadata['lastRunStatus']).toBe('error');
+    expect(session?.metadata['lastFinishReason']).toBe('tripwire');
+    expect(session?.metadata['lastError']).toBeDefined();
+    expect(typeof session?.metadata['lastError']).toBe('string');
+  });
+
   it('persists error session state once after the initial running save', async () => {
     const backingStore = textValueStore(new MemoryStorage());
     let sessionSaveCount = 0;
