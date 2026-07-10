@@ -150,7 +150,7 @@ export function createMcpOAuthProvider(options: McpOAuthProviderOptions): OAuthC
     },
     async state() {
       const stored = await tokenStorage.load();
-      if (stored.state) return stored.state;
+      if (stored.state !== undefined) return stored.state;
       const generated = crypto.randomUUID();
       await tokenStorage.save({ state: generated });
       return generated;
@@ -330,8 +330,7 @@ export type McpAuthorizationCallbackParams = {
 export function parseMcpAuthorizationCallback(
   callbackUrl: string | URL,
 ): McpAuthorizationCallbackParams {
-  const url = callbackUrl instanceof URL ? callbackUrl : new URL(callbackUrl);
-  const params = url.searchParams;
+  const params = extractCallbackSearchParams(callbackUrl);
   const result: McpAuthorizationCallbackParams = {};
   const code = params.get('code');
   const state = params.get('state');
@@ -344,6 +343,25 @@ export function parseMcpAuthorizationCallback(
   if (error !== null) result.error = error;
   if (errorDescription !== null) result.errorDescription = errorDescription;
   return result;
+}
+
+/**
+ * Resolves the search params off a redirect callback, accepting either a
+ * full URL (`https://app.example.com/callback?code=...`) or just its query
+ * string (`?code=...` or `code=...`) — integrators that only have access to
+ * the query string of an incoming request (e.g. behind a router that only
+ * hands them `req.query`) shouldn't have to reconstruct a full URL first.
+ */
+function extractCallbackSearchParams(callbackUrl: string | URL): URLSearchParams {
+  if (callbackUrl instanceof URL) {
+    return callbackUrl.searchParams;
+  }
+  try {
+    return new URL(callbackUrl).searchParams;
+  } catch {
+    const queryString = callbackUrl.startsWith('?') ? callbackUrl.slice(1) : callbackUrl;
+    return new URLSearchParams(queryString);
+  }
 }
 
 export type CompleteMcpOAuthAuthorizationOptions = {

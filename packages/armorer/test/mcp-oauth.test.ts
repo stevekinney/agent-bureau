@@ -13,6 +13,7 @@ import {
   fromMcpClientTools,
   isMcpUnauthorizedError,
   McpAuthorizationIssuerValidationError,
+  parseMcpAuthorizationCallback,
 } from '../src/integrations/mcp';
 
 /**
@@ -423,5 +424,42 @@ describe('MCP OAuth client support', () => {
     }
     expect(caught).toBeInstanceOf(McpAuthorizationIssuerValidationError);
     expect(mockServer.tokenRequestCount).toBe(0);
+  });
+});
+
+describe('parseMcpAuthorizationCallback', () => {
+  it('parses a full callback URL', () => {
+    const result = parseMcpAuthorizationCallback(
+      'https://app.example.com/callback?code=abc&state=xyz&iss=https%3A%2F%2Fas.example.com%2F',
+    );
+    expect(result).toEqual({ code: 'abc', state: 'xyz', iss: 'https://as.example.com/' });
+  });
+
+  it('parses a bare query string, as documented for callers that only have req.query', () => {
+    const withLeadingQuestionMark = parseMcpAuthorizationCallback('?code=abc&state=xyz');
+    expect(withLeadingQuestionMark).toEqual({ code: 'abc', state: 'xyz' });
+
+    const withoutLeadingQuestionMark = parseMcpAuthorizationCallback('code=abc&state=xyz');
+    expect(withoutLeadingQuestionMark).toEqual({ code: 'abc', state: 'xyz' });
+  });
+});
+
+describe('createMcpOAuthProvider state()', () => {
+  it('does not regenerate the state parameter mid-flow, even for a falsy stored value', async () => {
+    let stored: { state?: string } = { state: '' };
+    const provider = createMcpOAuthProvider({
+      redirectUrl: 'http://127.0.0.1:9999/callback',
+      clientMetadata: { redirect_uris: ['http://127.0.0.1:9999/callback'] },
+      tokenStorage: {
+        load: () => stored,
+        save: (patch) => {
+          stored = { ...stored, ...patch };
+        },
+      },
+      onAuthorizationRequired: () => {},
+    });
+
+    expect(await provider.state?.()).toBe('');
+    expect(await provider.state?.()).toBe('');
   });
 });
