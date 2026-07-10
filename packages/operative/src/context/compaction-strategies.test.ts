@@ -17,6 +17,7 @@ function buildConversation(
       callId: string;
       content: string;
       outcome: 'success' | 'error' | 'action_required';
+      metadata?: Record<string, boolean>;
     };
   }>,
 ): Conversation {
@@ -42,7 +43,12 @@ function buildConversation(
         if (msg.role === 'tool-call' && msg.toolCall) {
           conversation.appendToolCalls([msg.toolCall]);
         } else if (msg.role === 'tool-result' && msg.toolResult) {
-          conversation.appendToolResults([msg.toolResult]);
+          const { metadata, ...toolResult } = msg.toolResult;
+          if (metadata) {
+            conversation.appendToolResult(toolResult, { metadata });
+          } else {
+            conversation.appendToolResults([toolResult]);
+          }
         }
     }
   }
@@ -269,6 +275,122 @@ describe('createSelectivePruningStrategy', () => {
     await strategy(conversation, budget, {
       retainRecentMessages: 2,
       maxToolResultAge: 2,
+    });
+
+    const toolResult = conversation.getMessages().find((message) => message.role === 'tool-result');
+    expect(toolResult?.toolResult?.content).toBe('[pruned tool result]');
+  });
+
+  it('preserves old error tool results by default, even past maxToolResultAge', async () => {
+    const conversation = buildConversation([
+      { role: 'system', content: 'System' },
+      { role: 'user', content: 'Question' },
+      { role: 'assistant', content: 'Working on it' },
+      {
+        role: 'tool-call',
+        content: '',
+        toolCall: { id: 'call-1', name: 'search', arguments: '{}' },
+      },
+      {
+        role: 'tool-result',
+        content: 'Search failed: timeout',
+        toolResult: {
+          callId: 'call-1',
+          content: 'Search failed: timeout',
+          outcome: 'error',
+        },
+      },
+      { role: 'assistant', content: 'Interpreting results' },
+      { role: 'user', content: 'Follow-up 1' },
+      { role: 'assistant', content: 'Follow-up 2' },
+      { role: 'user', content: 'Follow-up 3' },
+      { role: 'assistant', content: 'Follow-up 4' },
+    ]);
+
+    const strategy = createSelectivePruningStrategy();
+    const budget = createTokenBudget({ maxTokens: 10000 });
+
+    await strategy(conversation, budget, {
+      retainRecentMessages: 2,
+      maxToolResultAge: 2,
+    });
+
+    const toolResult = conversation.getMessages().find((message) => message.role === 'tool-result');
+    expect(toolResult?.toolResult?.content).toBe('Search failed: timeout');
+  });
+
+  it('preserves old tool results flagged via metadata.error, even with a success outcome', async () => {
+    const conversation = buildConversation([
+      { role: 'system', content: 'System' },
+      { role: 'user', content: 'Question' },
+      { role: 'assistant', content: 'Working on it' },
+      {
+        role: 'tool-call',
+        content: '',
+        toolCall: { id: 'call-1', name: 'search', arguments: '{}' },
+      },
+      {
+        role: 'tool-result',
+        content: 'Partial result flagged downstream as an error',
+        toolResult: {
+          callId: 'call-1',
+          content: 'Partial result flagged downstream as an error',
+          outcome: 'success',
+          metadata: { error: true },
+        },
+      },
+      { role: 'assistant', content: 'Interpreting results' },
+      { role: 'user', content: 'Follow-up 1' },
+      { role: 'assistant', content: 'Follow-up 2' },
+      { role: 'user', content: 'Follow-up 3' },
+      { role: 'assistant', content: 'Follow-up 4' },
+    ]);
+
+    const strategy = createSelectivePruningStrategy();
+    const budget = createTokenBudget({ maxTokens: 10000 });
+
+    await strategy(conversation, budget, {
+      retainRecentMessages: 2,
+      maxToolResultAge: 2,
+    });
+
+    const toolResult = conversation.getMessages().find((message) => message.role === 'tool-result');
+    expect(toolResult?.toolResult?.content).toBe('Partial result flagged downstream as an error');
+  });
+
+  it('prunes old error tool results when preserveErrorToolResults is disabled', async () => {
+    const conversation = buildConversation([
+      { role: 'system', content: 'System' },
+      { role: 'user', content: 'Question' },
+      { role: 'assistant', content: 'Working on it' },
+      {
+        role: 'tool-call',
+        content: '',
+        toolCall: { id: 'call-1', name: 'search', arguments: '{}' },
+      },
+      {
+        role: 'tool-result',
+        content: 'Search failed: timeout',
+        toolResult: {
+          callId: 'call-1',
+          content: 'Search failed: timeout',
+          outcome: 'error',
+        },
+      },
+      { role: 'assistant', content: 'Interpreting results' },
+      { role: 'user', content: 'Follow-up 1' },
+      { role: 'assistant', content: 'Follow-up 2' },
+      { role: 'user', content: 'Follow-up 3' },
+      { role: 'assistant', content: 'Follow-up 4' },
+    ]);
+
+    const strategy = createSelectivePruningStrategy();
+    const budget = createTokenBudget({ maxTokens: 10000 });
+
+    await strategy(conversation, budget, {
+      retainRecentMessages: 2,
+      maxToolResultAge: 2,
+      preserveErrorToolResults: false,
     });
 
     const toolResult = conversation.getMessages().find((message) => message.role === 'tool-result');
