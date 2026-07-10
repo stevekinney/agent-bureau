@@ -257,7 +257,16 @@ export function instrument(
       if (runSpan) {
         setUsageAttributes(runSpan, event.usage);
         runSpan.setAttributes({
-          'gen_ai.response.finish_reasons': [event.finishReason],
+          // event.finishReason ('stop-condition', 'maximum-steps',
+          // 'budget-exceeded', 'aborted', ...) is operative's own
+          // agent-loop control-flow reason, not a provider-reported model
+          // completion reason — it does NOT belong on
+          // gen_ai.response.finish_reasons, which OTel GenAI backends
+          // expect to hold well-known provider stop reasons (e.g. `stop`,
+          // `length`, `tool_calls`). Keeping it under operative.* avoids
+          // misleading those backends into treating a runtime control
+          // state as a model-reported one.
+          'operative.finish_reason': event.finishReason,
           'operative.total_steps': event.steps.length,
         });
         // Only set OK if run.error did not already set ERROR status

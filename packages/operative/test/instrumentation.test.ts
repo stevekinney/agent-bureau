@@ -205,7 +205,8 @@ describe('instrument', () => {
 
     const runSpan = findSpan(tracer, 'invoke_agent')!;
     expect(runSpan.ended).toBe(true);
-    expect(runSpan.attributes['gen_ai.response.finish_reasons']).toEqual(['stop-condition']);
+    expect(runSpan.attributes['operative.finish_reason']).toBe('stop-condition');
+    expect('gen_ai.response.finish_reasons' in runSpan.attributes).toBe(false);
     expect(runSpan.attributes['operative.total_steps']).toBe(1);
     expect(runSpan.attributes['gen_ai.usage.input_tokens']).toBe(10);
     expect(runSpan.attributes['gen_ai.usage.output_tokens']).toBe(20);
