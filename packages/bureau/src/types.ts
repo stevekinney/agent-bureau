@@ -29,6 +29,8 @@ import type {
   EnhancedStreamingOptions,
   GenerateFunction,
   GuardrailsOptions,
+  RunFrame,
+  RunReport,
   Scheduler,
   SchedulerPriority,
   SchedulerState,
@@ -446,6 +448,21 @@ export interface Bureau {
   submitSchedulerTask(request: SubmitSchedulerTaskRequest): Promise<SubmitSchedulerTaskResponse>;
   listRuns(status?: string): RunSummary[];
   getRun(id: string): RunDetail | undefined;
+
+  /**
+   * Synchronously returns the versioned, JSON-serializable {@link RunReport}
+   * (AB-96) for a run — a plain in-memory read, no I/O, no promise.
+   *
+   * For a terminal run (`completed`/`error`/`aborted`) this is the cached
+   * report built at the moment the run's lifecycle event fired. For a
+   * still-`running` run this synchronously builds a **partial** report from
+   * the live `RunState` (accumulated usage, transcript through the last
+   * checkpointed step) — the graceful-shutdown path: call this right after
+   * `abortRun(id)` (or from a `SIGTERM` handler, before process exit) to
+   * capture what the run had accomplished, without waiting for the abort to
+   * fully settle. Returns `undefined` when `id` is unknown.
+   */
+  getRunReport(id: string): RunReport | undefined;
   abortRun(id: string): RunSummary;
   deleteRun(id: string): void;
 
@@ -810,7 +827,14 @@ export type ServerFrame =
       arguments: unknown;
     }
   | { type: 'stream:complete'; runId: string; state: unknown }
-  | { type: 'stream:error'; runId: string; error: string };
+  | { type: 'stream:error'; runId: string; error: string }
+  /**
+   * AB-96 — a versioned run-lifecycle frame from `operative`'s run envelope
+   * (`RunFrame`: run-started, step, assistant-chunk/final, tool-pre/post,
+   * notification, run-finished). See {@link Bureau.getRunReport} for the
+   * terminal `RunReport` embedded on the `run-finished` variant.
+   */
+  | { type: 'run-envelope'; runId: string; frame: RunFrame };
 
 // ── Constants ───────────────────────────────────────────────────────
 

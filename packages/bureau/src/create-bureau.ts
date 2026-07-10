@@ -11,8 +11,11 @@ import {
   type AgentSession,
   createActiveRun,
   createAgentSession,
+  createRunFinishedFrame,
+  createRunStartedFrame,
   HumanWaitParkedEvent,
   type JSONValue,
+  type RunReport,
   type SessionStore,
   type SessionSummary,
 } from 'operative';
@@ -43,6 +46,12 @@ import {
   RunRemovedEvent,
 } from './events';
 import { createOnlineEvalSampler, type OnlineEvalSampler } from './online-evals';
+import {
+  buildPartialRunReport,
+  buildTerminalReportFromAbortedEvent,
+  buildTerminalReportFromCompletedEvent,
+  createRunFrameForwarder,
+} from './run-envelope';
 import { createRuntimeComposition } from './runtime-composition';
 import {
   findRunAgentName,
@@ -427,6 +436,9 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
   // does not outlive the run it describes.
   const runAttribution = new Map<string, RunAttribution>();
   const liveFrameListeners = new Set<(frame: ServerFrame) => void>();
+  // AB-96 — terminal RunReports, cached at the moment each run's lifecycle
+  // event fires so `getRunReport` never needs to re-derive them.
+  const runReports = new Map<string, RunReport>();
   const sessionPersistenceRetryDelayMilliseconds =
     options.sessionPersistenceRetryDelayMilliseconds ??
     SESSION_PERSISTENCE_RETRY_DELAY_MILLISECONDS;
@@ -783,12 +795,40 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         : undefined,
     );
 
+    // AB-96 — the versioned run-lifecycle frame stream. Registered before
+    // `store.register` so `run-started` is the first frame a live subscriber
+    // ever sees for this run.
+    const disposeRunFrameForwarder = createRunFrameForwarder(
+      runId,
+      activeRun,
+      (frame) => emitLiveFrame({ type: 'run-envelope', runId, frame }),
+      { streamEventTarget },
+    );
+    disposeStreamListeners.push(disposeRunFrameForwarder);
+    emitLiveFrame({
+      type: 'run-envelope',
+      runId,
+      frame: createRunStartedFrame({
+        runId,
+        sessionId,
+        agentName: request.agentName ?? BUREAU_AGENT_NAME,
+      }),
+    });
+
     activeRun.once('run.completed', (event) => {
       disposeRegisteredStreamListeners(disposeStreamListeners);
 
       const finishReason = event.finishReason;
       const lastRunStatus =
         finishReason === 'error' || finishReason === 'tripwire' ? 'error' : 'completed';
+
+      const report = buildTerminalReportFromCompletedEvent(runId, event);
+      runReports.set(runId, report);
+      emitLiveFrame({
+        type: 'run-envelope',
+        runId,
+        frame: createRunFinishedFrame({ runId, report }),
+      });
 
       persistSessionUpdate(
         () =>
@@ -816,6 +856,20 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
 
     activeRun.once('run.aborted', (event) => {
       disposeRegisteredStreamListeners(disposeStreamListeners);
+
+      const report = buildTerminalReportFromAbortedEvent(runId, {
+        usage: event.usage,
+        costEstimate: event.costEstimate,
+        reason: event.reason,
+        steps: store.getRun(runId)?.steps ?? [],
+        conversation: event.conversation,
+      });
+      runReports.set(runId, report);
+      emitLiveFrame({
+        type: 'run-envelope',
+        runId,
+        frame: createRunFinishedFrame({ runId, report }),
+      });
 
       persistSessionUpdate(
         () =>
@@ -936,6 +990,15 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         finishReason === 'error' || finishReason === 'tripwire' ? 'error' : 'completed';
       const lastError =
         finishReason === 'error' || finishReason === 'tripwire' ? event.error : undefined;
+
+      const report = buildTerminalReportFromCompletedEvent(runId, event);
+      runReports.set(runId, report);
+      emitLiveFrame({
+        type: 'run-envelope',
+        runId,
+        frame: createRunFinishedFrame({ runId, report }),
+      });
+
       persistSessionUpdate(
         () =>
           saveSession(sessionId, completedConversation, {
@@ -952,6 +1015,21 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
 
     recoveredRun.once('run.aborted', (event) => {
       const abortedConversation = event.conversation;
+
+      const report = buildTerminalReportFromAbortedEvent(runId, {
+        usage: event.usage,
+        costEstimate: event.costEstimate,
+        reason: event.reason,
+        steps: store.getRun(runId)?.steps ?? [],
+        conversation: event.conversation,
+      });
+      runReports.set(runId, report);
+      emitLiveFrame({
+        type: 'run-envelope',
+        runId,
+        frame: createRunFinishedFrame({ runId, report }),
+      });
+
       persistSessionUpdate(
         // The reattach adapter reconstructs the abort RunResult from the run's
         // final checkpoint and threads it into RunAbortedEvent.conversation, so
@@ -1372,6 +1450,19 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     }
 
     return serializeRunDetail(runState, getRunSessionIdentifier(runState), runAttribution.get(id));
+  }
+
+  function getRunReport(id: string): RunReport | undefined {
+    const cached = runReports.get(id);
+    if (cached) return cached;
+
+    // Not yet terminal (or unknown) — build a partial report synchronously
+    // from the live RunState. This is the graceful-shutdown path: safe to
+    // call from an abort() call site or a SIGTERM handler with no await.
+    const runState = store.getRun(id);
+    if (!runState) return undefined;
+
+    return buildPartialRunReport(id, runState, 'Run report requested before a terminal result');
   }
 
   function abortRun(id: string): RunSummary {
@@ -1873,6 +1964,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     submitSchedulerTask,
     listRuns,
     getRun,
+    getRunReport,
     abortRun,
     deleteRun,
     getDurableRun,
