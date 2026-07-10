@@ -180,6 +180,14 @@
       "require": "./dist/coding/index.cjs",
       "default": "./dist/coding/index.js",
       "types": "./dist/coding/index.d.ts"
+    },
+    "./openapi": {
+      "bun": "./dist/integrations/openapi/index.js",
+      "browser": "./dist/integrations/openapi/index.js",
+      "import": "./dist/integrations/openapi/index.js",
+      "require": "./dist/integrations/openapi/index.cjs",
+      "default": "./dist/integrations/openapi/index.js",
+      "types": "./dist/integrations/openapi/index.d.ts"
     }
   },
   "main": "./dist/index.js",

@@ -27,6 +27,7 @@ const entry = {
   'create-tool': './src/create-tool.ts',
   'core/registry/index': './src/core/registry/index.ts',
   'integrations/mcp/index': './src/integrations/mcp/index.ts',
+  'integrations/openapi/index': './src/integrations/openapi/index.ts',
   'adapters/openai/index': './src/adapters/openai/index.ts',
   'adapters/anthropic/index': './src/adapters/anthropic/index.ts',
   'adapters/gemini/index': './src/adapters/gemini/index.ts',
