@@ -231,6 +231,92 @@ describe('createChatStore', () => {
     expect(store.toolActivity).toEqual(['search completed {"q":"agent"}']);
   });
 
+  it('calls onHumanInputRequested on step.completed for the active run', async () => {
+    const fetchMock = mock(() =>
+      Promise.resolve(new Response(JSON.stringify(makeRun({ id: 'run-1' })))),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const onHumanInputRequested = mock(() => {});
+
+    const { store } = makeStore({ onHumanInputRequested });
+    await store.send('question');
+
+    store.handleMessage({
+      type: 'event',
+      runId: 'run-1',
+      event: 'step.completed',
+      detail: {},
+      sequence: 1,
+      timestamp: 1,
+    });
+
+    expect(onHumanInputRequested).toHaveBeenCalledTimes(1);
+  });
+
+  it('calls onHumanInputRequested on multiagent.human-wait.parked for the active run', async () => {
+    const fetchMock = mock(() =>
+      Promise.resolve(new Response(JSON.stringify(makeRun({ id: 'run-1' })))),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const onHumanInputRequested = mock(() => {});
+
+    const { store } = makeStore({ onHumanInputRequested });
+    await store.send('question');
+
+    store.handleMessage({
+      type: 'event',
+      runId: 'run-1',
+      event: 'multiagent.human-wait.parked',
+      detail: {},
+      sequence: 1,
+      timestamp: 1,
+    });
+
+    expect(onHumanInputRequested).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not call onHumanInputRequested for an unrelated run', async () => {
+    const fetchMock = mock(() =>
+      Promise.resolve(new Response(JSON.stringify(makeRun({ id: 'run-1' })))),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const onHumanInputRequested = mock(() => {});
+
+    const { store } = makeStore({ onHumanInputRequested });
+    await store.send('question');
+
+    store.handleMessage({
+      type: 'event',
+      runId: 'someone-else',
+      event: 'step.completed',
+      detail: {},
+      sequence: 1,
+      timestamp: 1,
+    });
+
+    expect(onHumanInputRequested).not.toHaveBeenCalled();
+  });
+
+  it('does not call onHumanInputRequested for unrelated event types', async () => {
+    const fetchMock = mock(() =>
+      Promise.resolve(new Response(JSON.stringify(makeRun({ id: 'run-1' })))),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const onHumanInputRequested = mock(() => {});
+
+    const { store } = makeStore({ onHumanInputRequested });
+    await store.send('question');
+
+    store.handleMessage({
+      type: 'stream:text-delta',
+      runId: 'run-1',
+      content: 'x',
+      accumulated: 'x',
+    });
+
+    expect(onHumanInputRequested).not.toHaveBeenCalled();
+  });
+
   it('resets streaming and tool activity at the start of each send', async () => {
     const fetchMock = mock(() =>
       Promise.resolve(new Response(JSON.stringify(makeRun({ id: 'run-1' })))),
