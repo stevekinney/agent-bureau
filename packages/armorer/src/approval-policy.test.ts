@@ -1,3 +1,5 @@
+import { isAbsolute, normalize, resolve as resolvePath, sep } from 'node:path';
+
 import { describe, expect, it } from 'bun:test';
 import { z } from 'zod';
 
@@ -7,12 +9,17 @@ import {
   type CapabilityTier,
   combineApprovalStatuses,
   createApprovalPolicyHooks,
+  createHeadlessPermissionPolicyHooks,
   evaluateApprovalStatus,
   evaluateCapabilityApproval,
+  evaluateHeadlessPermission,
+  type HeadlessPermissionPolicyConfiguration,
+  type PermissionGate,
   resolveApprovalMode,
   resolveCapabilityTier,
 } from './approval-policy';
 import { createCodingTools } from './coding/index';
+import { PathTraversalError } from './coding/jail';
 import { createTool, createToolCall } from './create-tool';
 import { createToolbox } from './create-toolbox';
 import { createToolboxFromOpenAPI, type OpenAPISpec } from './integrations/openapi/index';
@@ -398,5 +405,162 @@ describe('capability axis fed by real AB-90 and AB-72 metadata, unmodified', () 
     const result = await toolbox.execute(createToolCall('delete-widget', { id: '1' }));
     expect(result.outcome).toBe('error');
     expect(result.error?.code).toBe('POLICY_DENIED');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AB-94 — headless deny-by-default permission mode
+// ---------------------------------------------------------------------------
+
+describe('evaluateHeadlessPermission', () => {
+  it('denies a tool that is not on the allowlist', () => {
+    const result = evaluateHeadlessPermission(
+      { toolName: 'shell', params: {} },
+      { allowList: ['read_file'] },
+    );
+    expect(result.status).toBe('deny');
+    expect(result.reason).toContain('shell');
+    expect(result.reason).toContain('allowlist');
+  });
+
+  it('allows a tool that is on the allowlist with no other restrictions', () => {
+    const result = evaluateHeadlessPermission(
+      { toolName: 'read_file', params: {} },
+      { allowList: ['read_file'] },
+    );
+    expect(result).toEqual({ status: 'allow' });
+  });
+
+  it('deny list wins over an allowlisted tool (deny > ask > allow precedence)', () => {
+    const result = evaluateHeadlessPermission(
+      { toolName: 'read_file', params: {} },
+      { allowList: ['read_file'], denyList: ['read_file'] },
+    );
+    expect(result.status).toBe('deny');
+    expect(result.reason).toContain('deny list');
+  });
+
+  it('converts a capability-tier "ask" into "deny" instead of parking (headless approvalMode: never)', () => {
+    const result = evaluateHeadlessPermission(
+      { toolName: 'write_file', params: {}, metadata: { mutates: true } },
+      { allowList: ['write_file'], capability: { mode: 'on-mutation' } },
+    );
+    expect(result.status).toBe('deny');
+    expect(result.reason).toContain('headless');
+    expect(result.reason).toContain('write_file');
+  });
+
+  it('denies outright when the capability tier itself denies', () => {
+    const result = evaluateHeadlessPermission(
+      { toolName: 'delete_all', params: {}, metadata: { dangerous: true } },
+      {
+        allowList: ['delete_all'],
+        capability: { mode: 'never', tierModes: { dangerous: 'deny' } },
+      },
+    );
+    expect(result.status).toBe('deny');
+    expect(result.reason).toContain('capability-tier policy');
+  });
+
+  it('runs the synchronous gate and denies with a redacted reason on a path-traversal input', () => {
+    const root = '/workspace/project';
+    const jailGate: PermissionGate = (_toolName, input) => {
+      const path = (input as { path?: string }).path;
+      if (typeof path !== 'string' || isAbsolute(path)) {
+        return { allow: true };
+      }
+      const candidate = normalize(resolvePath(root, path));
+      if (candidate === root || candidate.startsWith(root + sep)) {
+        return { allow: true };
+      }
+      const error = new PathTraversalError(`Path "${path}" escapes root "${root}"`, {
+        requestedPath: path,
+        root,
+      });
+      return { allow: false, reason: error.message };
+    };
+
+    const configuration: HeadlessPermissionPolicyConfiguration = {
+      allowList: ['read_file'],
+      gate: jailGate,
+    };
+
+    const traversalResult = evaluateHeadlessPermission(
+      { toolName: 'read_file', params: { path: '../../etc/passwd' } },
+      configuration,
+    );
+    expect(traversalResult.status).toBe('deny');
+    expect(traversalResult.reason).toContain('escapes root');
+
+    const withinRootResult = evaluateHeadlessPermission(
+      { toolName: 'read_file', params: { path: 'src/index.ts' } },
+      configuration,
+    );
+    expect(withinRootResult).toEqual({ status: 'allow' });
+  });
+
+  it('redacts an oversized gate denial reason to a bounded length', () => {
+    const hugeReason = 'x'.repeat(1000);
+    const gate: PermissionGate = () => ({ allow: false, reason: hugeReason });
+    const result = evaluateHeadlessPermission(
+      { toolName: 'read_file', params: {} },
+      { allowList: ['read_file'], gate },
+    );
+    expect(result.status).toBe('deny');
+    expect(result.reason?.length).toBeLessThan(hugeReason.length);
+  });
+});
+
+describe('createHeadlessPermissionPolicyHooks — toolbox integration', () => {
+  it('denies an unlisted tool call and returns a tool-error result, not an exception', async () => {
+    const shellTool = makeTool('shell', {});
+    const toolbox = createToolbox([shellTool], {
+      policy: createHeadlessPermissionPolicyHooks({ allowList: ['read_file'] }),
+    });
+    const result = await toolbox.execute(createToolCall('shell', {}));
+    expect(result.outcome).toBe('error');
+    expect(result.error?.code).toBe('POLICY_DENIED');
+    expect(result.errorMessage).toContain('shell');
+  });
+
+  it('never returns action_required — an ask-tier tool is denied, not parked, under the headless preset', async () => {
+    const mutatingTool = makeTool('write-file', { mutates: true });
+    const toolbox = createToolbox([mutatingTool], {
+      policy: createHeadlessPermissionPolicyHooks({
+        allowList: ['write-file'],
+        capability: { mode: 'on-mutation' },
+      }),
+    });
+    const result = await toolbox.execute(createToolCall('write-file', {}));
+    expect(result.outcome).toBe('error');
+    expect(result.pendingApproval).toBeUndefined();
+  });
+
+  it('NEUTER: without the headless ask->deny resolution, the same tool would park as needs_approval instead of denying', async () => {
+    // This mirrors what createHeadlessPermissionPolicyHooks would do if the
+    // ask->deny conversion were removed — using the tier-only approvalPolicy
+    // (which does NOT have headless resolution) as the "neutered" stand-in.
+    // Confirms the headless preset is doing real work, not just re-expressing
+    // pre-existing armorer deny behavior.
+    const mutatingTool = makeTool('write-file-neutered', { mutates: true });
+    const toolbox = createToolbox([mutatingTool], {
+      approvalPolicy: { mode: 'on-mutation' },
+    });
+    const result = await toolbox.execute(createToolCall('write-file-neutered', {}));
+    expect(result.outcome).toBe('action_required');
+    expect(result.pendingApproval).toBeDefined();
+  });
+
+  it('allows a call through unchanged when it passes the name list, capability tier, and gate', async () => {
+    const readTool = makeTool('read-file', { readOnly: true });
+    const toolbox = createToolbox([readTool], {
+      policy: createHeadlessPermissionPolicyHooks({
+        allowList: ['read-file'],
+        capability: { mode: 'on-mutation' },
+        gate: () => ({ allow: true }),
+      }),
+    });
+    const result = await toolbox.execute(createToolCall('read-file', {}));
+    expect(result.outcome).toBe('success');
   });
 });
