@@ -253,6 +253,25 @@ describe('getDatasetVersion / saveDataset', () => {
     expect(version).toBe(0);
   });
 
+  it('treats a corrupted (non-finite/negative/fractional) version as unversioned rather than propagating it', async () => {
+    const corruptions = [
+      { version: Number.NaN, cases: [] },
+      { version: Number.POSITIVE_INFINITY, cases: [] },
+      { version: -1, cases: [] },
+      { version: 1.5, cases: [] },
+    ];
+
+    for (const [index, corrupted] of corruptions.entries()) {
+      const path = fixturePath(`corrupted-version-${index}.json`);
+      await Bun.write(path, JSON.stringify(corrupted));
+
+      expect(await getDatasetVersion(path)).toBe(0);
+      const { version } = await saveDataset(path, [{ name: 'case-1', input: 'hi' }]);
+      expect(version).toBe(1);
+      expect(Number.isFinite(version)).toBe(true);
+    }
+  });
+
   it('writes version 1 on the first saveDataset() call for a new path', async () => {
     const path = fixturePath('versioned-new.json');
     const { version } = await saveDataset(path, [{ name: 'case-1', input: 'hi' }]);

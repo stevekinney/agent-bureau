@@ -33,12 +33,22 @@ function isProvenance(value: unknown): value is EvaluationCaseProvenance {
  * Type guard for the wrapped `{ version, cases }` dataset file shape written
  * by `saveDataset()`. Distinguishes it from the legacy bare-array shape that
  * hand-authored dataset files (and `loadDataset()`'s pre-versioning callers)
- * still use — both are accepted on load.
+ * still use — both are accepted on load. `version` must be a finite,
+ * non-negative integer — a corrupted file with `NaN`/`Infinity`/negative/
+ * fractional `version` is treated as unversioned (falls through to the
+ * "not a dataset file shape" branch) rather than being propagated forward
+ * by `getDatasetVersion()`/`saveDataset()`.
  */
 function isDatasetFileShape(value: unknown): value is { version: number; cases: unknown[] } {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
   const record = value as Record<string, unknown>;
-  return typeof record['version'] === 'number' && Array.isArray(record['cases']);
+  const version = record['version'];
+  return (
+    typeof version === 'number' &&
+    Number.isInteger(version) &&
+    version >= 0 &&
+    Array.isArray(record['cases'])
+  );
 }
 
 /**
