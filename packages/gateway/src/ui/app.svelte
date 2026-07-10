@@ -2,7 +2,13 @@
   import { untrack } from 'svelte';
 
   import type { UsageResponse } from '../routes/usage';
-  import type { ConfigurationResponse, PendingReview, RunDetail, RunSummary } from '../types';
+  import type {
+    ConfigurationResponse,
+    EvaluationReportsResponse,
+    PendingReview,
+    RunDetail,
+    RunSummary,
+  } from '../types';
   import { createChatStore } from './hooks/use-chat.svelte';
   import { createReviewsStore } from './hooks/use-reviews.svelte';
   import { createRunDetailStore } from './hooks/use-run-detail.svelte';
@@ -12,6 +18,7 @@
   import ChatPage from './pages/chat.svelte';
   import ConfigurationPage from './pages/configuration.svelte';
   import DashboardPage from './pages/dashboard.svelte';
+  import EvaluationsPage from './pages/evaluations.svelte';
   import ReviewsPage from './pages/reviews.svelte';
   import RunDetailPage from './pages/run-detail.svelte';
   import UsagePage from './pages/usage.svelte';
@@ -23,6 +30,7 @@
     config?: ConfigurationResponse;
     reviews?: PendingReview[];
     usage?: UsageResponse;
+    evaluations?: EvaluationReportsResponse;
   };
 
   /**
@@ -33,7 +41,7 @@
    *
    * It owns the four reactive stores, fans every incoming websocket/SSE frame
    * out to their handlers, drives route-scoped subscriptions, and routes
-   * between the four pages inside the shared {@link Layout}.
+   * between the six pages inside the shared {@link Layout}.
    */
   let { initialData, pathname }: { initialData: InitialData; pathname: string } = $props();
 
@@ -73,6 +81,7 @@
     analytics: { byAgent: [], byPrincipal: [], byWindow: [] },
     runs: [],
   };
+  const EMPTY_EVALUATIONS: EvaluationReportsResponse = { reports: [] };
 
   let route = $derived(matchRoute(pathname));
 
@@ -194,6 +203,8 @@
     <ConfigurationPage config={initialData.config ?? EMPTY_CONFIGURATION} />
   {:else if route?.name === 'chat'}
     <ChatPage chat={chatStore} reviews={reviewsStore} />
+  {:else if route?.name === 'evaluations'}
+    <EvaluationsPage evaluations={initialData.evaluations ?? EMPTY_EVALUATIONS} />
   {:else}
     <p>Page not found.</p>
   {/if}

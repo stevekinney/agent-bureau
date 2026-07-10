@@ -28,6 +28,11 @@ describe('matchRoute', () => {
     expect(result).toEqual({ name: 'chat', params: {} });
   });
 
+  it('matches /evaluations', () => {
+    const result = matchRoute('/evaluations');
+    expect(result).toEqual({ name: 'evaluations', params: {} });
+  });
+
   it('returns undefined for unknown paths', () => {
     expect(matchRoute('/unknown')).toBeUndefined();
   });

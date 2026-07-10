@@ -53,12 +53,35 @@ export async function createTestGateway(
     return createGateway(bureauOrOptions, doorOptions ?? {});
   }
 
-  // Treat as combined TestGatewayOptions: extract door-specific fields,
-  // pass the rest to createBureau.
-  const { port, hostname, authToken, runtime, ...bureauOptions } = bureauOrOptions;
+  // Treat as combined TestGatewayOptions: extract every door-specific field
+  // (all of GatewayOptions) and pass the rest to createBureau. This must
+  // enumerate every GatewayOptions key — an allowlist that silently dropped
+  // new fields (e.g. evaluationReportsDirectory) would leak them into
+  // bureauOptions, where createBureau ignores unknown keys and the option
+  // has no effect.
+  const {
+    port,
+    hostname,
+    authToken,
+    runtime,
+    allowedOrigins,
+    enableCsp,
+    idleTimeout,
+    evaluationReportsDirectory,
+    ...bureauOptions
+  } = bureauOrOptions;
 
   const bureau = await createBureau(bureauOptions);
-  return createGateway(bureau, { port, hostname, authToken, runtime });
+  return createGateway(bureau, {
+    port,
+    hostname,
+    authToken,
+    runtime,
+    allowedOrigins,
+    enableCsp,
+    idleTimeout,
+    evaluationReportsDirectory,
+  });
 }
 
 /**

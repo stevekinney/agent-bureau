@@ -1,3 +1,4 @@
+import type { EvaluationReportSummary } from 'evaluation';
 import type { Hono } from 'hono';
 import type { Store } from 'operative/store';
 
@@ -31,6 +32,7 @@ export type {
   ToolSummary,
 } from 'bureau';
 export { DEFAULT_MAXIMUM_STEPS } from 'bureau';
+export type { EvaluationReportSummary } from 'evaluation';
 
 // ── Gateway (HTTP door — door-only config, no brain options) ────────
 
@@ -67,6 +69,13 @@ export interface GatewayOptions {
    * Bun default: 10 s.
    */
   idleTimeout?: number;
+  /**
+   * Directory containing evaluation report JSON files (written by
+   * `runEvaluationSuite`'s `output` option) for the read-only
+   * `/evaluations` trend page. When omitted, the page renders empty —
+   * evaluation reporting is opt-in.
+   */
+  evaluationReportsDirectory?: string;
 }
 
 export interface Gateway {
@@ -85,6 +94,15 @@ export interface ApiErrorResponse {
     message: string;
     requestId?: string;
   };
+}
+
+/**
+ * The `/evaluations` page's hydration payload: eval report summaries sorted
+ * oldest to newest, the shape a pass-rate/cost trend view reads directly.
+ * Empty when `evaluationReportsDirectory` isn't configured.
+ */
+export interface EvaluationReportsResponse {
+  reports: EvaluationReportSummary[];
 }
 
 // ── WebSocket Frame Types (door-only client frames) ─────────────────

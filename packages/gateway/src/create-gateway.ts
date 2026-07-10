@@ -152,6 +152,7 @@ export async function createGateway(
       provider: configuration.provider,
       maximumSteps: configuration.maximumSteps,
       systemPrompt: configuration.systemPrompt,
+      evaluationReportsDirectory: options.evaluationReportsDirectory,
     }),
   );
 
