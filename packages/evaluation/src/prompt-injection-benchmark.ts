@@ -29,6 +29,7 @@ const BENCHMARK_CONTEXT: DetectorContext = {
   step: 1,
   conversationLength: 1,
   sessionTainted: false,
+  provenance: 'user-input',
 };
 
 /**
