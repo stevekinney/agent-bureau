@@ -111,6 +111,10 @@ export class RunCompletedEvent extends Event {
   readonly finishReason: RunResult['finishReason'];
   readonly error?: unknown;
   readonly schemaValidation?: RunResult['schemaValidation'];
+  /** See {@link RunResult.costEstimate}. */
+  readonly costEstimate?: RunResult['costEstimate'];
+  /** See {@link RunResult.structuredOutput}. */
+  readonly structuredOutput?: unknown;
   constructor(data: RunResult) {
     super(RunCompletedEvent.type);
     this.conversation = data.conversation;
@@ -120,6 +124,8 @@ export class RunCompletedEvent extends Event {
     this.finishReason = data.finishReason;
     this.error = data.error;
     this.schemaValidation = data.schemaValidation;
+    this.costEstimate = data.costEstimate;
+    this.structuredOutput = data.structuredOutput;
   }
 }
 
@@ -143,11 +149,29 @@ export class RunAbortedEvent extends Event {
   // instance, so listeners MUST persist this conversation (the reconstructed /
   // checkpoint transcript) rather than the seed they captured at launch.
   readonly conversation: Conversation;
-  constructor(step: number, conversation: Conversation, reason?: string) {
+  /**
+   * Accumulated usage at the point of abort — the same `runState.totalUsage`
+   * `makeAbortResult` puts on the returned `RunResult`. Present so a listener
+   * that only sees this event (rather than awaiting `run.result()`) can still
+   * build an accurate terminal report (AB-96) without a race against the
+   * result promise's microtask resolution.
+   */
+  readonly usage?: TokenUsage;
+  /** See {@link RunResult.costEstimate}. Computed from `usage` when available. */
+  readonly costEstimate?: RunResult['costEstimate'];
+  constructor(
+    step: number,
+    conversation: Conversation,
+    reason?: string,
+    usage?: TokenUsage,
+    costEstimate?: RunResult['costEstimate'],
+  ) {
     super(RunAbortedEvent.type);
     this.step = step;
     this.conversation = conversation;
     this.reason = reason;
+    this.usage = usage;
+    this.costEstimate = costEstimate;
   }
 }
 

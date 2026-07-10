@@ -1192,6 +1192,84 @@ describe('createBureau', () => {
     }
   });
 
+  it('forwards run-envelope frames (step, tool-pre/post) for a RECOVERED run, not just run-finished (regression PRRT_kwDORvupsc6PxWjc)', async () => {
+    // AB-96 codex review: `reattachRecoveredRun` only ever emitted a terminal
+    // `run-finished` frame — it never wired `createRunFrameForwarder`, so a
+    // `subscribeLiveFrames` consumer relying on the AB-96 run-envelope stream
+    // missed every resumed `step`/`tool-pre`/`tool-post` frame for a recovered
+    // run, even though those events already reach the recovered run's plain
+    // ActiveRun listeners (see the #28 test above). The fix wires the same
+    // forwarder the live-run path uses onto the recovered run.
+    const databasePath = join(
+      tmpdir(),
+      `bureau-recovery-envelope-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+
+    try {
+      // Bureau A: step 0 commits a tool call, then step 1's generate hangs (crash).
+      let bureauAReachedStep1 = false;
+      const bureauA = await createBureau({
+        generate: async ({ step }) => {
+          if (step === 0) {
+            return { content: 'A step 0', toolCalls: [{ name: 'next', arguments: {} }] };
+          }
+          bureauAReachedStep1 = true;
+          return new Promise<never>(() => {});
+        },
+        toolbox: createToolbox([createNextTool()]) as unknown as Toolbox,
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+        stopWhen: stopWhen.noToolCalls(),
+      });
+
+      const run = await bureauA.createRun({ message: 'Recover with envelope frames' });
+      await pollUntil(() => bureauAReachedStep1);
+      bureauA.dispose();
+
+      // Bureau B: resumes at step 1, which calls the `next` tool again before
+      // settling — so step/tool-pre/tool-post frames should surface on the
+      // recovered run's run-envelope stream, not just the terminal one.
+      const bureauB = await createBureau({
+        generate: async ({ step }) => {
+          if (step === 1) {
+            return { content: 'B resume step 1', toolCalls: [{ name: 'next', arguments: {} }] };
+          }
+          return { content: `B step ${step}`, toolCalls: [] };
+        },
+        toolbox: createToolbox([createNextTool()]) as unknown as Toolbox,
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+        stopWhen: stopWhen.noToolCalls(),
+      });
+
+      const envelopeFrameTypes: string[] = [];
+      bureauB.subscribeLiveFrames((frame) => {
+        if (frame.type === 'run-envelope' && frame.runId === run.id) {
+          envelopeFrameTypes.push(frame.frame.type);
+        }
+      });
+
+      try {
+        await pollUntil(async () => {
+          const current = await bureauB.getSession(run.sessionId);
+          return current?.metadata['lastRunStatus'] !== 'running';
+        });
+
+        // Before the fix, only 'run-finished' would ever appear here.
+        expect(envelopeFrameTypes).toContain('step');
+        expect(envelopeFrameTypes).toContain('tool-pre');
+        expect(envelopeFrameTypes).toContain('tool-post');
+        expect(envelopeFrameTypes).toContain('run-finished');
+      } finally {
+        bureauB.dispose();
+      }
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
   it('stamps tool.started events with agentName and runId on a RECOVERED run (regression PRRT_kwDORvupsc6MXoT3)', async () => {
     // REGRESSION: the recovery resolver wired the toolbox-forward but omitted the
     // C3 stamping block, so tool.* bubble events from a recovered run carried
@@ -1954,6 +2032,40 @@ describe('createBureau', () => {
     });
 
     expect(bureau.getTools()).toEqual([]);
+  });
+
+  it('does not abort run setup when a subscribeLiveFrames listener throws (regression PRRT_kwDORvupsc6PxP_w)', async () => {
+    // AB-96 codex review: `emitLiveFrame` fired listeners with no isolation. The
+    // 'run-started' run-envelope frame is emitted BEFORE `store.register` +
+    // the terminal listeners are installed, so a throwing subscriber there
+    // used to propagate out of `createRun`, leaving the session persisted as
+    // `running` and the ActiveRun launched but never registered — `getRun`
+    // would return `undefined` forever for a run that is actually executing.
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+    });
+
+    const goodFrameTypes: string[] = [];
+    bureau.subscribeLiveFrames(() => {
+      throw new Error('boom — a badly behaved subscriber');
+    });
+    bureau.subscribeLiveFrames((frame) => {
+      goodFrameTypes.push(frame.type);
+    });
+
+    try {
+      // createRun must not throw even though the first listener always throws.
+      const run = await bureau.createRun({ message: 'Survive a throwing subscriber' });
+
+      // The run must have been fully registered — not aborted mid-setup.
+      expect(bureau.getRun(run.id)).toBeDefined();
+      // A well-behaved sibling listener still received frames despite the
+      // other listener throwing on every one of them.
+      expect(goodFrameTypes.length).toBeGreaterThan(0);
+    } finally {
+      bureau.dispose();
+    }
   });
 
   it('emits one scheduler preempted frame with current state', async () => {

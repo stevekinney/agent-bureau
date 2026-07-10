@@ -1226,6 +1226,75 @@ describe('reattachDurableActiveRun', () => {
     }
   });
 
+  // Regression (AB-96 codex review, PRRT_kwDORvupsc6PxWje): the reattach
+  // adapter's abort-cancel-wins branch built its RunAbortedEvent from an empty
+  // `createRunState()` after loading only the checkpoint CONVERSATION, so
+  // `event.usage` was zeroed even when the recovered run had already
+  // checkpointed steps before the abort raced it. Mirrors the sibling B6 fix
+  // for `createDurableActiveRun` above ("preserves checkpointed steps and
+  // usage when cancel wins the B6 abort race"), for the RECOVERED-run path.
+  it('preserves checkpointed usage when an adapter-initiated abort wins the race on a RECOVERED run', async () => {
+    const context = await buildContext();
+    try {
+      const runId = 'reattach-abort-preserves-usage';
+
+      // Pre-populate the checkpoint store with a completed step and usage —
+      // simulating a multi-step run that checkpointed step 0 in a prior
+      // process before this process recovered it.
+      await context.checkpointStore.saveCursor(runId, {
+        step: 1,
+        totalUsage: { prompt: 42, completion: 17, total: 59 },
+        lastContent: 'step 0 content',
+        schemaAttempts: 0,
+      });
+      await context.checkpointStore.saveStep(runId, {
+        step: 0,
+        content: 'step 0 content',
+        toolCalls: [],
+        results: [],
+        usage: { prompt: 42, completion: 17, total: 59 },
+        final: true,
+      });
+
+      let rejectResult: ((error: unknown) => void) | undefined;
+      const handle = {
+        id: runId,
+        result: () => new Promise<unknown>((_resolve, reject) => (rejectResult = reject)),
+      };
+      const cancelled: string[] = [];
+      const engine = {
+        cancel: async (id: string) => {
+          cancelled.push(id);
+          rejectResult?.(new Error('cancelled'));
+        },
+      } as unknown as AnyRunEngine;
+
+      const recoveredRun = reattachDurableActiveRun(
+        { engine, checkpointStore: context.checkpointStore },
+        { runId, handle },
+      );
+
+      let abortEvent: { usage: { prompt: number; completion: number; total: number } } | undefined;
+      recoveredRun.addEventListener('run.aborted', (event) => {
+        abortEvent = event as unknown as typeof abortEvent;
+      });
+
+      await Promise.resolve();
+      recoveredRun.abort();
+      const result = await recoveredRun.result;
+
+      expect(cancelled).toEqual([runId]);
+      expect(result.finishReason).toBe('aborted');
+      // The checkpointed step + usage survive the abort — not a zeroed run state.
+      expect(result.steps).toHaveLength(1);
+      expect(result.steps[0]?.content).toBe('step 0 content');
+      expect(result.usage).toEqual({ prompt: 42, completion: 17, total: 59 });
+      expect(abortEvent?.usage).toEqual({ prompt: 42, completion: 17, total: 59 });
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+
   it('falls back to an empty conversation when abort reconstruction cannot read the checkpoint', async () => {
     let rejectResult: ((error: unknown) => void) | undefined;
     const handle = {
