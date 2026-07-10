@@ -80,6 +80,11 @@
     subscribe: (runId: string) => websocket.subscribe(runId),
     unsubscribe: (runId: string) => websocket.unsubscribe(runId),
     onRunCreated: (run: RunSummary) => runsStore.upsertRun(run),
+    // AB-23: a tool call parked on `needs_approval` or a durable run parked
+    // on `requestHumanInput` both surface as a `PendingReview` — refresh the
+    // queue immediately instead of waiting for the next poll tick so the
+    // chat surface's inline form appears promptly.
+    onHumanInputRequested: () => void reviewsStore.refresh(),
   });
 
   const websocket = createWebSocket({
@@ -94,15 +99,22 @@
 
   let isDashboardRoute = $derived(route?.name === 'dashboard');
   let isReviewsRoute = $derived(route?.name === 'reviews');
+  let isChatRoute = $derived(route?.name === 'chat');
   let detailRunId = $derived(route?.name === 'run-detail' ? route.params['id'] : undefined);
 
   /**
    * Poll interval for the review queue, in milliseconds. The review queue has
    * no live websocket/SSE feed (unlike runs) — a review is created/resolved
    * by a direct human action elsewhere, not a run's step loop — so staying
-   * current means polling while the page is open.
+   * current means polling while the page is open. The chat page (AB-23) is
+   * included whenever a run is active so its inline elicitation/human-wait
+   * form (a review whose `runId` matches the active chat run) stays current
+   * even if the `onHumanInputRequested` fast-path trigger is missed.
    */
   const REVIEWS_POLL_INTERVAL_MS = 5000;
+  let shouldPollReviews = $derived(
+    isReviewsRoute || (isChatRoute && chatStore.runId !== undefined),
+  );
 
   // The live transport exposes start()/stop() rather than self-connecting, so
   // the root component owns its lifecycle. This effect runs only on the client
@@ -128,12 +140,20 @@
     return () => websocket.unsubscribe(id);
   });
 
-  // Keep the review queue current while it is the active route (see
+  // Keep the review queue current while it is relevant (see
   // REVIEWS_POLL_INTERVAL_MS above for why this is polling, not a live feed).
   $effect(() => {
-    if (!isReviewsRoute) return;
+    if (!shouldPollReviews) return;
     const interval = setInterval(() => void reviewsStore.refresh(), REVIEWS_POLL_INTERVAL_MS);
     return () => clearInterval(interval);
+  });
+
+  // Entering the chat route with an already-active run (e.g. the chat store
+  // was seeded before this effect first ran) should surface an
+  // already-parked review immediately, not after the first poll tick.
+  $effect(() => {
+    if (!isChatRoute || chatStore.runId === undefined) return;
+    void reviewsStore.refresh();
   });
 </script>
 
@@ -153,7 +173,7 @@
   {:else if route?.name === 'configuration'}
     <ConfigurationPage config={initialData.config ?? EMPTY_CONFIGURATION} />
   {:else if route?.name === 'chat'}
-    <ChatPage chat={chatStore} />
+    <ChatPage chat={chatStore} reviews={reviewsStore} />
   {:else}
     <p>Page not found.</p>
   {/if}

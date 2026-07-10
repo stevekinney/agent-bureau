@@ -4,7 +4,9 @@
   import type { ChatSubmitEvent, MultiModalContent } from '@lostgradient/cinder/chat';
   import { SectionHeading } from '@lostgradient/cinder/section-heading';
 
+  import ReviewRow from '../components/review-row.svelte';
   import type { ChatStore } from '../hooks/use-chat.svelte';
+  import type { ReviewsStore } from '../hooks/use-reviews.svelte';
 
   /**
    * Chat page. Adopts cinder's full {@link Chat} component for the transcript,
@@ -14,8 +16,23 @@
    *
    * Attachments are disabled: the gateway run API accepts a plain text message,
    * so the composer only emits text.
+   *
+   * AB-23 (elicitation end-to-end): an agent invoking `requestHumanInput`
+   * (durable park) or hitting armorer's `needs_approval` tool policy (live or
+   * durable) produces a {@link PendingReview} scoped to the active run. This
+   * page renders that review inline, right in the chat surface, using the
+   * same {@link ReviewRow} form the AB-20 review queue page uses — so the
+   * response is submitted through the identical `resolveReview` API and
+   * resumes the run the same way, whether it was parked in-memory or
+   * durably. `reviews` is shared with the reviews page's store rather than
+   * duplicated so there is exactly one fetch/approve/deny implementation.
    */
-  let { chat }: { chat: ChatStore } = $props();
+  let { chat, reviews }: { chat: ChatStore; reviews: ReviewsStore } = $props();
+
+  /** Pending reviews belonging to the chat's active run, oldest first. */
+  let pendingReviews = $derived(
+    chat.runId === undefined ? [] : reviews.reviews.filter((review) => review.runId === chat.runId),
+  );
 
   /** Extracts plain text from a submitted message's content. */
   function extractText(content: string | MultiModalContent[]): string {
@@ -44,6 +61,26 @@
 
   {#if chat.error}
     <Callout variant="danger" title="Chat error">{chat.error}</Callout>
+  {/if}
+
+  {#if reviews.error}
+    <Callout variant="danger" title="Review error">{reviews.error}</Callout>
+  {/if}
+
+  {#if pendingReviews.length > 0}
+    <section class="chat-pending-input" aria-live="polite">
+      <SectionHeading level={3} title="Needs your input" />
+      <div class="chat-pending-input-list">
+        {#each pendingReviews as review (review.id)}
+          <ReviewRow
+            {review}
+            pending={reviews.pendingId === review.id}
+            onapprove={(id, payload) => void reviews.approve(id, { payload })}
+            ondeny={(id, reason) => void reviews.deny(id, { reason })}
+          />
+        {/each}
+      </div>
+    </section>
   {/if}
 
   <Chat
@@ -90,5 +127,15 @@
 
   .chat-tool-activity {
     margin-bottom: 1rem;
+  }
+
+  .chat-pending-input {
+    flex-shrink: 0;
+  }
+
+  .chat-pending-input-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--cinder-space-4, 1rem);
   }
 </style>

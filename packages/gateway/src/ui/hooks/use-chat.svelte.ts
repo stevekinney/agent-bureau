@@ -20,6 +20,19 @@ export interface CreateChatStoreOptions {
   subscribe: (runId: string) => void;
   /** Unsubscribes the live transport from a run id. */
   unsubscribe: (runId: string) => void;
+  /**
+   * Called when a live frame suggests the active run's review-queue state
+   * (AB-20) may have changed — a `step.completed` (a tool call may now be
+   * parked on `needs_approval`) or `multiagent.human-wait.parked` (a durable
+   * run parked on `requestHumanInput`) event. Mirrors exactly the two action
+   * types `webhook-notifier.ts`'s `fireReview` listens for, so the chat
+   * surface refreshes its pending-review view on the same triggers the
+   * webhook notifier already treats as authoritative. The reviews store has
+   * no live feed of its own (AB-20 doc comment on `use-reviews.svelte.ts`),
+   * so this is what makes an in-progress chat notice a newly-parked run
+   * without waiting for the next poll tick.
+   */
+  onHumanInputRequested?: () => void;
 }
 
 /**
@@ -95,6 +108,7 @@ export function createChatStore({
   onRunCreated,
   subscribe,
   unsubscribe,
+  onHumanInputRequested,
 }: CreateChatStoreOptions): ChatStore {
   let conversation = $state<ConversationHistory>(createConversation());
   let runId = $state<string | undefined>(undefined);
@@ -178,6 +192,10 @@ export function createChatStore({
         if (frame.event === 'run.aborted') {
           streamingContent = '';
           streamingAssistantContent = '';
+        }
+
+        if (frame.event === 'step.completed' || frame.event === 'multiagent.human-wait.parked') {
+          onHumanInputRequested?.();
         }
 
         break;
