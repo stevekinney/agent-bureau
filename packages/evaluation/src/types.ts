@@ -444,3 +444,31 @@ export type EvaluationSuiteResult = {
   /** Exit code: 0 when all checks pass, 1 when a regression is detected. */
   exitCode: 0 | 1;
 };
+
+/**
+ * The result of benchmarking one `InputDetector` configuration against the
+ * prompt-injection fixture set (AB-44). See `prompt-injection-benchmark.ts`.
+ */
+export type PromptInjectionBenchmarkResult = {
+  /** Standard evaluation report — usable with `compareEvaluationReports()`. */
+  report: EvaluationReport;
+  /** True positive rate on attack fixtures: correctly triggered / total attacks. */
+  detectionRate: number;
+  /** False positive rate on benign fixtures: incorrectly triggered / total benign. */
+  falsePositiveRate: number;
+};
+
+/**
+ * The two detector configurations `benchmarkPromptInjectionConfigurations()`
+ * compares: the raw detector and the confidence-gated preset (AB-40).
+ */
+export type PromptInjectionBenchmarkComparison = {
+  /** `createPromptInjectionDetector()` with no confidence gating. */
+  raw: PromptInjectionBenchmarkResult;
+  /**
+   * `createPromptInjectionDetector()` wrapped in
+   * `withMinimumTripwireConfidence(..., 0.6)` — the configuration actually
+   * wired into the default guardrail preset (AB-40).
+   */
+  gated: PromptInjectionBenchmarkResult;
+};

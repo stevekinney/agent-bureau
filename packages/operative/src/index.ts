@@ -293,6 +293,8 @@ export {
   createPromptInjectionDetector,
   createSessionTaintTracker,
   createTopicBoundaryDetector,
+  DEFAULT_PROMPT_INJECTION_TRIPWIRE_THRESHOLD,
+  withMinimumTripwireConfidence,
 } from './guardrails/index';
 export type { OperativeHookMap } from './hooks';
 export type {

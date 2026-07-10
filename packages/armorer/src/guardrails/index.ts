@@ -1,7 +1,11 @@
 export type { InputLengthDetectorOptions } from './detectors/input-length';
 export { createInputLengthDetector } from './detectors/input-length';
 export type { PromptInjectionDetectorOptions } from './detectors/prompt-injection';
-export { createPromptInjectionDetector } from './detectors/prompt-injection';
+export {
+  createPromptInjectionDetector,
+  DEFAULT_PROMPT_INJECTION_TRIPWIRE_THRESHOLD,
+  withMinimumTripwireConfidence,
+} from './detectors/prompt-injection';
 export type { TopicBoundaryDetectorOptions } from './detectors/topic-boundary';
 export { createTopicBoundaryDetector } from './detectors/topic-boundary';
 export type { DetectorPipelineResult } from './pipeline';

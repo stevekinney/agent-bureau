@@ -1,5 +1,5 @@
 export { compareEvaluationReports } from './comparison';
-export { createAgentEvaluation } from './create-agent-evaluation';
+export { computeSummary, createAgentEvaluation } from './create-agent-evaluation';
 export { getDatasetVersion, loadDataset, loadDatasets, saveDataset } from './datasets';
 export { createLLMJudge } from './llm-judge';
 export {
@@ -47,6 +47,8 @@ export type {
   LLMJudgeResult,
   MatchResult,
   PromoteRunToCaseOptions,
+  PromptInjectionBenchmarkComparison,
+  PromptInjectionBenchmarkResult,
   RegressionThresholds,
   SemanticMatcher,
   TrajectoryMatchResult,

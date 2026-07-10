@@ -38,4 +38,6 @@ export {
   createInputLengthDetector,
   createPromptInjectionDetector,
   createTopicBoundaryDetector,
+  DEFAULT_PROMPT_INJECTION_TRIPWIRE_THRESHOLD,
+  withMinimumTripwireConfidence,
 } from 'armorer';

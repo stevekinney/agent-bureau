@@ -7,6 +7,10 @@ const entrypoints = [
   './src/metrics.ts',
   './src/create-agent-evaluation.ts',
   './src/comparison.ts',
+  // Separate subpath: pulls in `operative/test` fixtures, which production
+  // consumers of the main `evaluation` entrypoint (e.g. gateway) should not
+  // eagerly load.
+  './src/prompt-injection-benchmark.ts',
 ];
 
 const root = './src';
