@@ -17,9 +17,13 @@ export function extractTokenUsage(result: RunResult): TokenUsage {
 }
 
 /**
- * Flattens all tool calls across all steps into a single ordered array.
+ * Flattens all tool calls across all steps into a single ordered array, in
+ * the order they occurred within and across steps. Shared by tool-call
+ * matching (this module) and trajectory matching (./trajectory).
  */
-function flattenToolCalls(result: RunResult): Array<{ name: string; arguments: unknown }> {
+export function extractToolCallSequence(
+  result: RunResult,
+): Array<{ name: string; arguments: unknown }> {
   const calls: Array<{ name: string; arguments: unknown }> = [];
   for (const step of result.steps) {
     for (const tc of step.toolCalls) {
@@ -38,9 +42,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * Performs a deep equality check for JSON-serializable values.
+ * Performs a deep equality check for JSON-serializable values. Shared by
+ * tool-call matching (this module) and trajectory matching (./trajectory).
  */
-function deepEqual(a: unknown, b: unknown): boolean {
+export function deepEqual(a: unknown, b: unknown): boolean {
   if (a === b) return true;
   if (a === null || b === null) return false;
   if (typeof a !== typeof b) return false;
@@ -72,7 +77,7 @@ function deepEqual(a: unknown, b: unknown): boolean {
 function matchToolCallsOrdered(result: RunResult, expected: ExpectedToolCall[]): boolean {
   if (expected.length === 0) return true;
 
-  const actualCalls = flattenToolCalls(result);
+  const actualCalls = extractToolCallSequence(result);
   const consumed = new Set<number>();
 
   // First pass: match expected calls that have an explicit index
@@ -115,7 +120,7 @@ function matchToolCallsOrdered(result: RunResult, expected: ExpectedToolCall[]):
 function matchToolCallsUnordered(result: RunResult, expected: ExpectedToolCall[]): boolean {
   if (expected.length === 0) return true;
 
-  const actualCalls = flattenToolCalls(result);
+  const actualCalls = extractToolCallSequence(result);
   const consumed = new Set<number>();
 
   for (const exp of expected) {

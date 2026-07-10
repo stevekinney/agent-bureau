@@ -10,8 +10,19 @@ export {
   matchSemantic,
   matchSubstring,
 } from './matchers';
-export { extractStepCount, extractTokenUsage, matchToolCalls } from './metrics';
+export {
+  extractStepCount,
+  extractTokenUsage,
+  extractToolCallSequence,
+  matchToolCalls,
+} from './metrics';
 export { runEvaluationSuite } from './run-evaluation-suite';
+export {
+  computeTrajectoryRegression,
+  describeTrajectory,
+  judgeTrajectoryQuality,
+  matchTrajectory,
+} from './trajectory';
 export type {
   CreateAgentEvaluationOptions,
   EmbedderFunction,
@@ -25,9 +36,16 @@ export type {
   EvaluationSuiteOptions,
   EvaluationSuiteResult,
   ExpectedToolCall,
+  GoldenTrajectoryStep,
   LLMJudgeOptions,
   LLMJudgeResult,
   MatchResult,
   RegressionThresholds,
   SemanticMatcher,
+  TrajectoryMatchResult,
+  TrajectoryMetricDelta,
+  TrajectoryRegressionReport,
+  TrajectoryRegressionThresholds,
+  TrajectoryStepMatch,
+  TrajectoryTolerance,
 } from './types';
