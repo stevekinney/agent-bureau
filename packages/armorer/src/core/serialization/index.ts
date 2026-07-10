@@ -44,6 +44,9 @@ export function serializeToolDefinition(
     ? (sortJsonValue(definition.lifecycle) as JsonObject)
     : undefined;
 
+  if (definition.inputJsonSchema !== undefined) {
+    assertJsonValue(definition.inputJsonSchema, 'inputJsonSchema');
+  }
   const input = definition.inputJsonSchema
     ? (sortJsonValue(definition.inputJsonSchema) as JsonSchema)
     : toJsonSchema(definition.input);

@@ -137,7 +137,8 @@ export interface CreateToolOptions<
   input?: z.ZodType<TInput> | z.ZodRawShape | z.ZodTypeAny | StandardSchemaV1;
   /**
    * JSON Schema for `input`, required when `input` is a non-Zod Standard Schema validator.
-   * Ignored (Zod's own JSON Schema generation is used instead) when `input` is a Zod schema.
+   * When `input` is a Zod schema, `z.toJSONSchema(input)` is used unless `inputSchema` is
+   * ALSO explicitly supplied, in which case the caller's `inputSchema` wins.
    */
   inputSchema?: JsonObject;
   execute:
@@ -485,6 +486,13 @@ export function createTool<
           '(JSON Schema) so the tool can be serialized for providers.',
       );
     }
+  }
+  // `inputSchema` is serialized verbatim (see `serializeToolDefinition`), so
+  // reject a non-JSON value HERE — at the boundary where it enters the tool
+  // pipeline — rather than letting a Date/function/circular-ref corrupt the
+  // provider tool definition or throw at a distance during serialization.
+  if (toolInputJsonSchema !== undefined) {
+    assertJsonValue(toolInputJsonSchema, `Tool "${name}": inputSchema`);
   }
 
   const customMetadata = resolvedMetadata ?? (undefined as M);

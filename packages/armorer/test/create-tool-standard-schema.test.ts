@@ -105,4 +105,22 @@ describe('createTool with a non-Zod Standard Schema input', () => {
     const serialized = tool.toJSON();
     expect(serialized.input).toEqual(greetingJsonSchema);
   });
+
+  it('rejects a non-JSON `inputSchema` at creation time, not later at serialization', () => {
+    // `inputSchema` is serialized verbatim; a Date (or function, or circular
+    // ref) must be rejected at the boundary where it enters the tool, not
+    // silently corrupted by sortJsonValue or thrown at a distance later.
+    expect(() =>
+      createTool({
+        name: 'greet-bad-schema',
+        description: 'Greets by name',
+        input: greetingSchema(),
+        inputSchema: { type: 'object', createdAt: new Date() } as unknown as Record<
+          string,
+          unknown
+        >,
+        execute: async (params: { name: string }) => `hello, ${params.name}`,
+      }),
+    ).toThrow();
+  });
 });
