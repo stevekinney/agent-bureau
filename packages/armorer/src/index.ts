@@ -1,3 +1,20 @@
+export type {
+  ApprovalMode,
+  ApprovalPolicyConfiguration,
+  ApprovalStatus,
+  CapabilityApprovalContext,
+  CapabilityApprovalResult,
+  CapabilityTier,
+} from './approval-policy';
+export {
+  approvalStatusToDecision,
+  combineApprovalStatuses,
+  createApprovalPolicyHooks,
+  evaluateApprovalStatus,
+  evaluateCapabilityApproval,
+  resolveApprovalMode,
+  resolveCapabilityTier,
+} from './approval-policy';
 export { combineToolboxes } from './combine-toolboxes';
 export type { ToolError, ToolErrorCategory } from './core/errors';
 export type { ToolAvailabilityContext, ToolAvailabilityHook } from './core/tool-definition';

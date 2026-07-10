@@ -10,6 +10,8 @@ import { z } from 'zod';
 import type { AnthropicTool } from './adapters/anthropic/types';
 import type { GeminiTool } from './adapters/gemini/types';
 import type { OpenAITool } from './adapters/openai/types';
+import type { ApprovalPolicyConfiguration } from './approval-policy';
+import { approvalStatusToDecision, evaluateCapabilityApproval } from './approval-policy';
 import type { ToolError, ToolErrorCategory } from './core/errors';
 import {
   type InspectorDetailLevel,
@@ -176,6 +178,17 @@ export interface ToolboxOptions {
   readOnly?: boolean;
   allowMutation?: boolean;
   allowDangerous?: boolean;
+  /**
+   * The two-axis approval policy (AB-22): capability tier (read-only /
+   * mutating / dangerous, derived from tool metadata) x approval mode (never
+   * / on-mutation / always / deny). When set, this is evaluated before any
+   * registry- or tool-level `policy.beforeExecute` hook, so persona/skill
+   * tool policies can only narrow it further, never bypass it. `readOnly`,
+   * `allowMutation`, and `allowDangerous` remain available as a simpler
+   * boolean shorthand for the read-only/mutating/dangerous deny gates; when
+   * both are configured, the most restrictive verdict of the two wins.
+   */
+  approvalPolicy?: ApprovalPolicyConfiguration;
   toolFactory?: (configuration: ToolConfiguration, context: ToolboxFactoryContext) => Tool;
   /**
    * Called when a tool configuration doesn't have an execute method.
@@ -703,6 +716,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
   const readOnly = options.readOnly ?? false;
   const allowMutation = options.allowMutation ?? !readOnly;
   const allowDangerous = options.allowDangerous ?? true;
+  const approvalPolicy = options.approvalPolicy;
   const telemetryEnabled = options.telemetry === true;
   const registryPolicy = options.policy;
   const registryPolicyContext = options.policyContext;
@@ -1440,6 +1454,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
       readOnly,
       allowMutation,
       allowDangerous,
+      approvalPolicy,
     });
     const resolvedPolicyContext = mergePolicyContexts(
       registryPolicyContext,
@@ -1911,13 +1926,20 @@ function toPolicyContextProvider(
 function mergePolicies(
   registryPolicy: ToolPolicyHooks | undefined,
   toolPolicy: ToolPolicyHooks | undefined,
-  options: { readOnly: boolean; allowMutation: boolean; allowDangerous: boolean },
+  options: {
+    readOnly: boolean;
+    allowMutation: boolean;
+    allowDangerous: boolean;
+    approvalPolicy?: ApprovalPolicyConfiguration;
+  },
 ): ToolPolicyHooks | undefined {
   const enforceMutating = options.readOnly || !options.allowMutation;
   const enforceDangerous = !options.allowDangerous;
+  const approvalPolicy = options.approvalPolicy;
   const hasBefore =
     enforceMutating ||
     enforceDangerous ||
+    approvalPolicy !== undefined ||
     registryPolicy?.beforeExecute !== undefined ||
     toolPolicy?.beforeExecute !== undefined;
   const hasAfter =
@@ -1930,14 +1952,22 @@ function mergePolicies(
       if (enforceMutating && isMutatingToolContext(context)) {
         return {
           allow: false,
+          status: 'deny',
           reason: `Mutating tool "${context.toolName}" is not allowed`,
         } satisfies ToolPolicyDecision;
       }
       if (enforceDangerous && isDangerousToolContext(context)) {
         return {
           allow: false,
+          status: 'deny',
           reason: `Dangerous tool "${context.toolName}" is not allowed`,
         } satisfies ToolPolicyDecision;
+      }
+      if (approvalPolicy) {
+        const result = evaluateCapabilityApproval(context, approvalPolicy);
+        if (result.status !== 'allow') {
+          return approvalStatusToDecision(context.toolName, result);
+        }
       }
       const registryDecision = await resolvePolicyDecision(registryPolicy?.beforeExecute, context);
       if (registryDecision?.allow === false) {

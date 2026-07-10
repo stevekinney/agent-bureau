@@ -3,6 +3,7 @@
 ## Core Guides
 
 - [Public API Reference](api-reference.md)
+- [Approval Policy](approval-policy.md)
 - [Context](context.md)
 - [Eventing](eventing.md)
 - [Registry](registry.md)
