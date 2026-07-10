@@ -84,6 +84,59 @@ export interface DurableActiveRunOptions {
 }
 
 /**
+ * Rebuild a {@link RunState} (accumulated usage + step records) and its
+ * {@link Conversation} from the durable checkpoint — the shared core of
+ * {@link reconstructRunResult}. Factored out so every fallback path that fires
+ * a terminal lifecycle event from a checkpoint (a normal completion, an
+ * adapter-initiated abort that raced a rejecting `handle.result()`, or a
+ * `WorkflowTimeoutError`) carries the SAME accumulated `usage` a live run
+ * would — not a zeroed {@link createRunState}, which would under-report usage
+ * for a recovered run that had already checkpointed steps before it settled.
+ * At RUNTIME `checkpoint.cursor.totalUsage` is the exact object `run-step.ts`'s
+ * accumulator writes (including AB-92's `cacheCreationTokens`/`cacheReadTokens`
+ * when a step reports them — `saveCursor` JSON-serializes it verbatim, no
+ * stripping), even though `types.ts`'s `RunCursor.totalUsage` is typed
+ * narrower than `TokenUsage` and doesn't say so (a tracked type-hygiene gap,
+ * not a runtime data loss). On a checkpoint read failure (e.g. no checkpoint
+ * was ever written), falls back to an empty run state + conversation —
+ * callers already tolerate that shape from `createRunState()`/`new
+ * Conversation()`.
+ */
+async function loadRunStateFromCheckpoint(
+  context: DurableActiveRunContext,
+  runId: string,
+): Promise<{ runState: RunState; conversation: Conversation }> {
+  try {
+    const checkpoint = await context.checkpointStore.loadCheckpoint(runId);
+    const conversation =
+      checkpoint.conversation !== null
+        ? Conversation.from(checkpoint.conversation)
+        : new Conversation();
+
+    const runState = createRunState();
+    runState.totalUsage = { ...checkpoint.cursor.totalUsage };
+    runState.lastContent = checkpoint.cursor.lastContent;
+    runState.schemaAttempts = checkpoint.cursor.schemaAttempts;
+    runState.steps = checkpoint.steps.map((record, index) => ({
+      step: record.step,
+      conversation,
+      content: record.content,
+      toolCalls: record.toolCalls,
+      results: record.results,
+      ...(record.usage ? { usage: record.usage } : {}),
+      ...(record.metadata ? { metadata: record.metadata } : {}),
+      // Only the final step is marked final, mirroring the in-memory loop where
+      // `final` is set on the step that triggered the stop condition.
+      final: record.final && index === checkpoint.steps.length - 1,
+    }));
+
+    return { runState, conversation };
+  } catch {
+    return { runState: createRunState(), conversation: new Conversation() };
+  }
+}
+
+/**
  * Reconstruct a full {@link RunResult} from the durable checkpoint. The workflow
  * returns only a thin {@link AgentRunWorkflowResult} summary; the `ActiveRun`
  * contract requires the complete shape (conversation, steps, usage). We rebuild
@@ -98,28 +151,7 @@ async function reconstructRunResult(
   runId: string,
   summary: AgentRunWorkflowResult,
 ): Promise<{ result: RunResult; runState: RunState; conversation: Conversation }> {
-  const checkpoint = await context.checkpointStore.loadCheckpoint(runId);
-  const conversation =
-    checkpoint.conversation !== null
-      ? Conversation.from(checkpoint.conversation)
-      : new Conversation();
-
-  const runState = createRunState();
-  runState.totalUsage = { ...checkpoint.cursor.totalUsage };
-  runState.lastContent = checkpoint.cursor.lastContent;
-  runState.schemaAttempts = checkpoint.cursor.schemaAttempts;
-  runState.steps = checkpoint.steps.map((record, index) => ({
-    step: record.step,
-    conversation,
-    content: record.content,
-    toolCalls: record.toolCalls,
-    results: record.results,
-    ...(record.usage ? { usage: record.usage } : {}),
-    ...(record.metadata ? { metadata: record.metadata } : {}),
-    // Only the final step is marked final, mirroring the in-memory loop where
-    // `final` is set on the step that triggered the stop condition.
-    final: record.final && index === checkpoint.steps.length - 1,
-  }));
+  const { runState, conversation } = await loadRunStateFromCheckpoint(context, runId);
 
   const result: RunResult = {
     conversation,
@@ -700,16 +732,23 @@ async function driveReattachedRun(
     // and that owner's status must not be clobbered.
     const cancelSucceeded = await (abortOutcome() ?? Promise.resolve(false));
     if (cancelSucceeded) {
-      // A failed transcript read must NOT suppress the abort lifecycle (committee
-      // round-3 finding 2) — fall back to an empty conversation.
-      let conversation: Conversation;
-      try {
-        const snapshot = await context.checkpointStore.loadConversation(runId);
-        conversation = snapshot ? Conversation.from(snapshot) : new Conversation();
-      } catch {
-        conversation = new Conversation();
-      }
-      return makeAbortResult(createRunState(), conversation, undefined, emitter, 0, 'aborted');
+      // Reconstruct the checkpointed usage + steps (not a zeroed
+      // `createRunState()`), so an abort that raced a run with prior checkpointed
+      // steps reports the SAME accumulated usage the eventual terminal
+      // `RunResult` would have — `loadRunStateFromCheckpoint` already tolerates a
+      // failed/absent checkpoint by falling back to an empty run state +
+      // conversation, satisfying the "must NOT suppress the abort lifecycle"
+      // requirement (committee round-3 finding 2).
+      const { runState, conversation } = await loadRunStateFromCheckpoint(context, runId);
+      const lastStep = runState.steps[runState.steps.length - 1];
+      return makeAbortResult(
+        runState,
+        conversation,
+        undefined,
+        emitter,
+        lastStep ? lastStep.step + 1 : 0,
+        'aborted',
+      );
     }
     // A `history.maxEvents` circuit-breaker (or a genuine execution-deadline
     // timeout) rejects `handle.result()` with a `WorkflowTimeoutError`. On a
@@ -722,16 +761,13 @@ async function driveReattachedRun(
     // per the reattach contract; the conversation comes from the checkpoint.
     if (isWeftErrorLike(error) && error.code === 'WorkflowTimeoutError') {
       const message = await classifyTimeoutMessage(context, runId, error);
-      let conversation: Conversation;
-      try {
-        const snapshot = await context.checkpointStore.loadConversation(runId);
-        conversation = snapshot ? Conversation.from(snapshot) : new Conversation();
-      } catch {
-        conversation = new Conversation();
-      }
+      // Same checkpointed-usage reconstruction as the abort branch above — a
+      // circuit-breaker/deadline timeout after prior checkpointed steps must not
+      // under-report the run's accumulated usage.
+      const { runState, conversation } = await loadRunStateFromCheckpoint(context, runId);
       return finalizeRunResult({
         finishReason: 'error',
-        runState: emptyRunState(),
+        runState,
         conversation,
         hooks: undefined,
         emitter,

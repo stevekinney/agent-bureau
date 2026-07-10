@@ -1,3 +1,4 @@
+import { Conversation } from 'conversationalist';
 import type { TypedEventTarget } from 'lifecycle';
 import {
   type ActiveRun,
@@ -334,7 +335,6 @@ export function buildPartialRunReport(
   reason?: string,
 ): RunReport {
   const { effectiveModel, effectiveEffort } = extractEffectiveModelAndEffort(runState.steps);
-  const lastStep = runState.steps[runState.steps.length - 1];
   return buildRunReport({
     runId,
     status: 'aborted',
@@ -344,6 +344,26 @@ export function buildPartialRunReport(
     effectiveEffort,
     error:
       reason ?? serializeUnknownError(runState.error ?? 'process shutdown before run completion'),
-    transcript: lastStep?.conversation.current,
+    transcript: extractLastCompletedTranscript(runState),
   });
+}
+
+/**
+ * Extracts the transcript through the LAST COMPLETED step from `runState`.
+ * `runState.steps[last].conversation` is the same mutable `Conversation`
+ * instance every step shares (see `run-step.ts`), so reading it while a LATER,
+ * still-in-flight step is appending to it (e.g. after that step's tool call is
+ * pushed but before its result lands) would read a dangling, not-yet-committed
+ * transcript rather than the last COMPLETED step's. `runState.snapshots` is the
+ * store's own immutable capture, taken via `conversation.snapshot()` on every
+ * `step.completed`/`run.completed` action (see `store.ts`), so its last entry
+ * is always the most recent transcript that actually finished — safe to read
+ * from a `SIGTERM` handler or `abort()` call site mid-step. Falls back to
+ * `undefined` (an empty transcript) when no step has completed yet.
+ */
+function extractLastCompletedTranscript(
+  runState: RunState,
+): BuildRunReportInput['transcript'] | undefined {
+  const lastSnapshot = runState.snapshots[runState.snapshots.length - 1];
+  return lastSnapshot ? Conversation.from(lastSnapshot).current : undefined;
 }

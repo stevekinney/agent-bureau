@@ -451,8 +451,25 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
   }
 
   function emitLiveFrame(frame: ServerFrame): void {
+    // AB-96 codex review — a throwing `subscribeLiveFrames` listener must not
+    // abort the caller. `emitLiveFrame` is invoked synchronously from run-setup
+    // call sites (e.g. the `run-started` frame fires BEFORE `store.register` and
+    // the terminal listeners are installed), so an unguarded throw here would
+    // propagate out of `createRun`/`reattachRecoveredRun` and leave the run
+    // launched-but-untracked: the session already persisted as `running`, the
+    // `ActiveRun` already started, but never registered — stuck forever. Catch
+    // and log per-listener instead, matching the isolation every other fan-out
+    // in this file already gives its listeners (see `disposeRegisteredStreamListeners`
+    // callers, `emitter.dispatch`).
     for (const listener of liveFrameListeners) {
-      listener(frame);
+      try {
+        listener(frame);
+      } catch (error) {
+        console.error(
+          `[bureau] subscribeLiveFrames listener threw on a "${frame.type}" frame:`,
+          error,
+        );
+      }
     }
   }
 
@@ -974,6 +991,22 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       },
     );
 
+    // AB-96 — wire the same versioned run-envelope forwarder the live-run path
+    // uses. `pendingRecovery.emitter` is the SAME `CombinedOperativeEventTarget`
+    // the resolver already forwards this run's resumed `step.*`/`tool.*` bubble
+    // events onto (see `resolveRunServices` above), and `recoveredRun`'s
+    // `addEventListener` is bound to that identical emitter — so subscribing
+    // here surfaces every `step`/`tool-pre`/`tool-post`/notification frame a
+    // resumed run produces, not just its terminal `run-finished`. No
+    // `streamEventTarget` is threaded through recovery (enhanced streaming is a
+    // fresh-run-only concern), so `assistant-chunk` frames are the one frame
+    // type a resumed run never emits.
+    const disposeRecoveredRunFrameForwarder = createRunFrameForwarder(
+      runId,
+      recoveredRun,
+      (frame) => emitLiveFrame({ type: 'run-envelope', runId, frame }),
+    );
+
     // Persist terminal session status from the recovered run's OWN terminal
     // events — the same fields the live-run listeners write. The conversation
     // comes from `event.conversation`, which the reattach adapter reconstructs
@@ -984,6 +1017,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     // adapter stays write-free for those and the resolver/teardown owns the
     // session status; so these listeners only run for a genuinely settled run.
     recoveredRun.once('run.completed', (event) => {
+      disposeRecoveredRunFrameForwarder();
       const completedConversation = event.conversation;
       const finishReason = event.finishReason;
       const lastRunStatus =
@@ -1014,6 +1048,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     });
 
     recoveredRun.once('run.aborted', (event) => {
+      disposeRecoveredRunFrameForwarder();
       const abortedConversation = event.conversation;
 
       const report = buildTerminalReportFromAbortedEvent(runId, {

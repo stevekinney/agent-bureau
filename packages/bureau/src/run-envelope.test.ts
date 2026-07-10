@@ -303,7 +303,11 @@ describe('buildPartialRunReport', () => {
       usage: { prompt: 6, completion: 3, total: 9 },
       finishReason: undefined,
       error: undefined,
-      snapshots: [],
+      // The real store (`store.ts`) always pushes a `conversation.snapshot()`
+      // alongside every `step.completed` action, in the same reducer update as
+      // the step itself — so a genuine RunState never has more steps than
+      // snapshots. Mirror that invariant here.
+      snapshots: [conversation.snapshot()],
       actions: [],
       activeRun: {} as ActiveRun,
     };
@@ -314,6 +318,70 @@ describe('buildPartialRunReport', () => {
     expect(report.effectiveModel).toBe('claude-sonnet-5');
     expect(report.error).toBe('process shutdown');
     expect(report.transcript?.ids.length).toBeGreaterThan(0);
+  });
+
+  it('reads the transcript from the last COMPLETED step snapshot, not a later in-flight mutation of the shared Conversation (regression PRRT_kwDORvupsc6PxWjh)', () => {
+    // AB-96 codex review: every StepResult.conversation is the SAME mutable
+    // Conversation instance the loop threads through every step (see
+    // `run-step.ts`). Reading `steps[last].conversation` while a LATER step is
+    // still in flight (e.g. it already pushed a tool call but has not yet
+    // committed the tool result) would read that dangling, uncommitted state.
+    // `buildPartialRunReport` must read the STORE'S OWN immutable snapshot
+    // (`runState.snapshots`, captured via `conversation.snapshot()` at each
+    // `step.completed`) instead, which freezes the transcript at the moment
+    // the step actually finished.
+    const conversation = new Conversation();
+    conversation.appendUserMessage('hi');
+    conversation.appendAssistantMessage('step 0 done', {
+      effectiveModel: 'claude-sonnet-5',
+      effectiveEffort: 'low',
+    });
+    // Snapshot taken the instant step 0 completed — this is what a partial
+    // report requested right now should reflect.
+    const completedSnapshot = conversation.snapshot();
+
+    // Step 1 is now IN FLIGHT on the SAME shared conversation instance: it has
+    // pushed a tool call but the tool result has not landed yet (a dangling,
+    // uncommitted mutation a partial report must NOT observe).
+    conversation.appendToolCall({ id: 'call-1', name: 'search', arguments: {} });
+
+    const runState = {
+      id: 'run-partial-dangling',
+      status: 'running' as const,
+      steps: [
+        {
+          step: 0,
+          // Both entries point at the SAME live, now-further-mutated instance —
+          // exactly the shape a real in-memory RunState has.
+          conversation,
+          content: 'step 0 done',
+          toolCalls: [],
+          results: [],
+          usage: { prompt: 6, completion: 3, total: 9 },
+          metadata: { effectiveModel: 'claude-sonnet-5', effectiveEffort: 'low' },
+          final: false,
+        },
+      ],
+      usage: { prompt: 6, completion: 3, total: 9 },
+      finishReason: undefined,
+      error: undefined,
+      // Only step 0 ever completed, so only its snapshot was ever captured —
+      // the in-flight step 1 mutation has no corresponding snapshot yet.
+      snapshots: [completedSnapshot],
+      actions: [],
+      activeRun: {} as ActiveRun,
+    };
+
+    const report = buildPartialRunReport('run-partial-dangling', runState, 'process shutdown');
+
+    const transcriptMessages = (report.transcript?.ids ?? []).map(
+      (id) => report.transcript?.messages[id],
+    );
+
+    // The dangling tool call from the in-flight step must NOT appear.
+    expect(transcriptMessages.some((message) => message?.toolCall?.id === 'call-1')).toBe(false);
+    // The last COMPLETED content must be present.
+    expect(transcriptMessages.some((message) => message?.content === 'step 0 done')).toBe(true);
   });
 });
 
