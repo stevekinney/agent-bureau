@@ -181,6 +181,71 @@ const mcp = createMCP(toolbox, {
 When tools are re-registered in the Toolbox registry, the MCP server refreshes
 the tool definitions and notifies connected clients with `toolListChanged`.
 
+## OAuth client support
+
+When connecting to an MCP server that requires authorization, `armorer/mcp` provides an
+`OAuthClientProvider` implementation and thin connection orchestration on top of
+`@modelcontextprotocol/sdk`'s `client/auth.js` (PKCE, RFC 9728/8414 discovery, dynamic client
+registration, and token refresh) and `StreamableHTTPClientTransport`. This module never persists
+anything itself — you supply a `McpOAuthTokenStorage` hook (in-memory, a database row, an encrypted
+session, ...) and it reads/writes exclusively through that interface.
+
+```typescript
+import {
+  completeMcpOAuthAuthorization,
+  connectMcpClientWithOAuth,
+  createInMemoryMcpOAuthTokenStorage,
+  createMcpOAuthProvider,
+  fromMcpClientTools,
+  isMcpUnauthorizedError,
+} from 'armorer/mcp';
+
+const tokenStorage = createInMemoryMcpOAuthTokenStorage(); // swap for durable storage in production
+
+const provider = createMcpOAuthProvider({
+  redirectUrl: 'https://my-app.example.com/oauth/callback',
+  clientMetadata: {
+    client_name: 'my-app',
+    redirect_uris: ['https://my-app.example.com/oauth/callback'],
+    grant_types: ['authorization_code', 'refresh_token'],
+    response_types: ['code'],
+    token_endpoint_auth_method: 'none',
+  },
+  tokenStorage,
+  onAuthorizationRequired(authorizationUrl) {
+    // Send the resource owner here (redirect an HTTP response, open a webview, ...).
+    // This module never navigates or opens a browser itself.
+  },
+});
+
+try {
+  const client = await connectMcpClientWithOAuth({
+    serverUrl: 'https://mcp.example.com',
+    provider,
+  });
+  const tools = await fromMcpClientTools(client);
+} catch (error) {
+  if (!isMcpUnauthorizedError(error)) throw error;
+  // Authorization is required — onAuthorizationRequired already fired above.
+}
+
+// After the resource owner is redirected back to `redirectUrl?code=...&state=...&iss=...`:
+await completeMcpOAuthAuthorization(provider, {
+  serverUrl: 'https://mcp.example.com',
+  callbackUrl: receivedCallbackUrl, // the full redirect URL
+  tokenStorage,
+});
+// Now retry connectMcpClientWithOAuth(...) — it will use the newly saved tokens.
+```
+
+`completeMcpOAuthAuthorization` validates the redirect's `iss` parameter per
+[RFC 9207](https://datatracker.ietf.org/doc/html/rfc9207) against the issuer recorded during
+discovery — guarding against authorization-server mix-up attacks — before ever exchanging the
+authorization code for tokens. This is implemented against the MCP Authorization spec base
+revision [2025-06-18](https://modelcontextprotocol.io/specification/2025-06-18/basic/authorization),
+plus the RFC 9207 issuer-validation requirement from the
+[current draft revision](https://modelcontextprotocol.io/specification/draft/basic/authorization#authorization-response-validation).
+
 ## Agent SDK integrations
 
 Agent SDK integration examples are documented in [Agent SDK Integrations](./agent-sdk-integrations.md), including:

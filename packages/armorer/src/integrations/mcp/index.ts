@@ -792,3 +792,24 @@ export const internalMcpTestUtilities = {
     mcpLoader = loader ?? defaultMcpLoader;
   },
 };
+
+export type {
+  CompleteMcpOAuthAuthorizationOptions,
+  ConnectMcpClientWithOAuthOptions,
+  McpAuthorizationCallbackParams,
+  McpOAuthProviderOptions,
+  McpOAuthStorageState,
+  McpOAuthTokenStorage,
+} from './oauth';
+export {
+  completeMcpOAuthAuthorization,
+  connectMcpClientWithOAuth,
+  createInMemoryMcpOAuthTokenStorage,
+  createMcpOAuthProvider,
+  fromMcpClientTools,
+  internalMcpOAuthTestUtilities,
+  isMcpUnauthorizedError,
+  McpAuthorizationIssuerValidationError,
+  parseMcpAuthorizationCallback,
+  validateMcpAuthorizationResponseIssuer,
+} from './oauth';
