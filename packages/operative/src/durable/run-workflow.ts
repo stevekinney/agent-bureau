@@ -1,7 +1,7 @@
 import { workflow } from '@lostgradient/weft';
 import { Conversation, isConversation } from 'conversationalist';
 
-import { BudgetExceededError, ElicitationDeniedError } from '../errors';
+import { BudgetExceededError, ElicitationDeniedError, GuardrailTripwireError } from '../errors';
 import { RunErrorEvent } from '../events';
 import { buildStepDeps, createRunState } from '../loop';
 import { DEFAULT_MAXIMUM_STEPS, runStep } from '../run-step';
@@ -204,6 +204,20 @@ export interface AgentRunWorkflowResult {
    * can surface this so the next run knows which signal triggered its resume.
    */
   humanWaitSignal?: string;
+  /**
+   * The tripped guardrail's identity, when `finishReason` is `'tripwire'`. The
+   * live `GuardrailTripwireError` is not cloneable across a checkpoint, so its
+   * identifying fields are carried here (plain, cloneable) and the adapter
+   * rebuilds the error from them — mirroring `errorMessage`'s
+   * serialize/rebuild contract for `elicitation-denied` / `budget-exceeded`.
+   */
+  tripwire?: {
+    guardrailName: string;
+    category: string;
+    phase: 'input' | 'output';
+    confidence: number;
+    detail?: string;
+  };
 }
 
 /** Serialize an unknown error to a stable message string for the checkpoint. */
@@ -227,7 +241,27 @@ function serializeError(error: unknown): string {
 function classifyErrorFinishReason(error: unknown): FinishReason {
   if (error instanceof ElicitationDeniedError) return 'elicitation-denied';
   if (error instanceof BudgetExceededError) return 'budget-exceeded';
+  if (error instanceof GuardrailTripwireError) return 'tripwire';
   return 'error';
+}
+
+/**
+ * Plain, cloneable projection of a {@link GuardrailTripwireError}'s identifying
+ * fields, captured INSIDE the memo where the live error still exists (its
+ * guardrail identity does not survive serialization across the checkpoint).
+ * Carried on {@link AgentRunWorkflowResult} so the adapter can reconstruct the
+ * error and fire `RunTripwireEvent` on the durable path exactly as the
+ * in-memory loop does.
+ */
+function tripwireDetailFrom(error: unknown): AgentRunWorkflowResult['tripwire'] {
+  if (!(error instanceof GuardrailTripwireError)) return undefined;
+  return {
+    guardrailName: error.guardrailName,
+    category: error.category,
+    phase: error.phase,
+    confidence: error.confidence,
+    ...(error.detail !== undefined ? { detail: error.detail } : {}),
+  };
 }
 
 /**
@@ -375,6 +409,7 @@ export function createRunWorkflow(
         let abortReason: string | undefined;
         let schemaValidation: { success: boolean; error?: string } | undefined;
         let structuredOutput: unknown;
+        let tripwire: AgentRunWorkflowResult['tripwire'];
         // True when a terminal outcome (stop/abort/error) broke the loop early.
         // False means the loop exhausted `maximumSteps` naturally — the only case
         // where `onMaximumSteps` should run, mirroring `executeLoop` exactly.
@@ -487,6 +522,7 @@ export function createRunWorkflow(
               errorMessage: outcome.kind === 'error' ? serializeError(outcome.error) : undefined,
               errorFinishReason:
                 outcome.kind === 'error' ? classifyErrorFinishReason(outcome.error) : undefined,
+              tripwire: outcome.kind === 'error' ? tripwireDetailFrom(outcome.error) : undefined,
               abortReason: outcome.kind === 'abort' ? outcome.reason : undefined,
               stopFinishReason: outcome.kind === 'stop' ? outcome.finishReason : undefined,
               schemaValidation:
@@ -581,6 +617,7 @@ export function createRunWorkflow(
             // the in-memory loop.
             finishReason = stepResult.errorFinishReason ?? 'error';
             errorMessage = stepResult.errorMessage;
+            tripwire = stepResult.tripwire;
             stoppedEarly = true;
             break;
           }
@@ -653,18 +690,20 @@ export function createRunWorkflow(
         // state, so the workflow cannot sleep AND then wait for a signal in sequence.
         //
         // CRITICAL: Only park on successful / maximum-steps outcomes. A terminal
-        // failure (`error`, `aborted`, `elicitation-denied`, `budget-exceeded`) must
-        // return immediately — parking on a failed/aborted run would leave the Weft
-        // workflow status as `running` until the sleep/signal fires, hiding the real
-        // outcome and blocking the caller from seeing the error result. This covers
-        // both a failing step (outcome.kind === 'abort' | 'error') and a failing
-        // `onMaximumSteps` handler (tail.kind === 'error'), because both update
-        // `finishReason` before we reach this point.
+        // failure (`error`, `aborted`, `elicitation-denied`, `budget-exceeded`,
+        // `tripwire`) must return immediately — parking on a failed/aborted run
+        // would leave the Weft workflow status as `running` until the sleep/signal
+        // fires, hiding the real outcome and blocking the caller from seeing the
+        // error result. This covers both a failing step (outcome.kind === 'abort' |
+        // 'error') and a failing `onMaximumSteps` handler (tail.kind === 'error'),
+        // because both update `finishReason` before we reach this point. A tripped
+        // guardrail is a hard halt by definition — it must never park.
         const isFailureOutcome =
           finishReason === 'error' ||
           finishReason === 'aborted' ||
           finishReason === 'elicitation-denied' ||
-          finishReason === 'budget-exceeded';
+          finishReason === 'budget-exceeded' ||
+          finishReason === 'tripwire';
         if (!isFailureOutcome && pendingWakeup !== undefined) {
           yield* ctx.sleep(pendingWakeup.duration);
         } else if (!isFailureOutcome && pendingHumanWait !== undefined) {
@@ -683,6 +722,7 @@ export function createRunWorkflow(
           ...(abortReason !== undefined ? { abortReason } : {}),
           ...(schemaValidation !== undefined ? { schemaValidation } : {}),
           ...(structuredOutput !== undefined ? { structuredOutput } : {}),
+          ...(tripwire !== undefined ? { tripwire } : {}),
           // Only include park metadata on non-failure outcomes: a failed/aborted run
           // never actually parks (the park block above is gated on !isFailureOutcome),
           // so surfacing stale park state in the result would mislead callers.

@@ -5,7 +5,7 @@ import type { ForwardableSource } from 'lifecycle';
 import { CompletableEventTarget, forwardEvents } from 'lifecycle';
 
 import type { ActiveRun } from '../create-run';
-import { BudgetExceededError, ElicitationDeniedError } from '../errors';
+import { BudgetExceededError, ElicitationDeniedError, GuardrailTripwireError } from '../errors';
 import type { CombinedOperativeEventMap } from '../events';
 import {
   StepStartedEvent,
@@ -778,6 +778,7 @@ async function driveReattachedRun(
     abortReason: summary.abortReason,
     schemaValidation: summary.schemaValidation,
     structuredOutput: summary.structuredOutput,
+    tripwire: summary.tripwire,
   });
 }
 
@@ -964,6 +965,7 @@ async function driveDurableRun(
     abortReason: summary.abortReason,
     schemaValidation: summary.schemaValidation,
     structuredOutput: summary.structuredOutput,
+    tripwire: summary.tripwire,
     costEstimation: options.costEstimation,
   });
 }
@@ -1044,6 +1046,19 @@ interface FinalizeArgs {
   /** Forwarded from `RunOptions.costEstimation` so a durable run's terminal
    * `RunResult.costEstimate` matches the in-memory loop's. */
   costEstimation?: RunOptions['costEstimation'];
+  /**
+   * The tripped guardrail's identity, carried out of the workflow summary when
+   * `finishReason` is `'tripwire'`. Used to rebuild the same `GuardrailTripwireError`
+   * subclass the workflow classified, so `makeErrorResult`'s `instanceof` check
+   * lands on `finishReason: 'tripwire'` again and `RunTripwireEvent` fires.
+   */
+  tripwire?: {
+    guardrailName: string;
+    category: string;
+    phase: 'input' | 'output';
+    confidence: number;
+    detail?: string;
+  };
 }
 
 /**
@@ -1070,21 +1085,34 @@ function finalizeRunResult(args: FinalizeArgs): RunResult {
   if (
     finishReason === 'error' ||
     finishReason === 'elicitation-denied' ||
-    finishReason === 'budget-exceeded'
+    finishReason === 'budget-exceeded' ||
+    finishReason === 'tripwire'
   ) {
     // Rebuild an Error from the serialized message so consumers see the real
     // cause (gateway's `lastError: serializeUnknownError(event.error)`).
     // Rebuild the SAME error SUBCLASS the workflow classified, so
     // `makeErrorResult`'s `instanceof` re-classification lands on the same
     // `finishReason` — otherwise a plain `Error` would always flatten back to
-    // `'error'` and lose the elicitation-denied / budget-exceeded distinction.
+    // `'error'` and lose the elicitation-denied / budget-exceeded / tripwire
+    // distinction. For `tripwire`, the guardrail's identity also has to be
+    // rebuilt from `args.tripwire` (carried out of the workflow summary) so
+    // `RunTripwireEvent` (dispatched inside `makeErrorResult`) names the real
+    // guardrail rather than a placeholder.
     const message = args.errorMessage ?? `Durable run ${finishReason}`;
     const error =
       finishReason === 'elicitation-denied'
         ? new ElicitationDeniedError(message)
         : finishReason === 'budget-exceeded'
           ? new BudgetExceededError(message)
-          : new Error(message);
+          : finishReason === 'tripwire'
+            ? new GuardrailTripwireError(message, {
+                guardrailName: args.tripwire?.guardrailName ?? 'unknown',
+                category: args.tripwire?.category ?? 'unknown',
+                phase: args.tripwire?.phase ?? 'input',
+                confidence: args.tripwire?.confidence ?? 1,
+                detail: args.tripwire?.detail,
+              })
+            : new Error(message);
     return makeErrorResult(runState, conversation, hooks, emitter, error, args.costEstimation);
   }
   const schemaValidation = args.schemaValidation

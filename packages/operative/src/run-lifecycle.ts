@@ -1,8 +1,14 @@
 import type { Conversation } from 'conversationalist';
 
 import { estimateCost, getModelPricing } from './cost-estimation';
-import { BudgetExceededError, ElicitationDeniedError } from './errors';
-import { RunAbortedEvent, RunCompletedEvent, RunErrorEvent, RunStartedEvent } from './events';
+import { BudgetExceededError, ElicitationDeniedError, GuardrailTripwireError } from './errors';
+import {
+  RunAbortedEvent,
+  RunCompletedEvent,
+  RunErrorEvent,
+  RunStartedEvent,
+  RunTripwireEvent,
+} from './events';
 import {
   DEFAULT_MAXIMUM_STEPS,
   type EventDispatcher,
@@ -103,8 +109,14 @@ export function makeAbortResult(
 /**
  * Build the errored {@link RunResult}: fire `onRunError`, then emit
  * `RunCompletedEvent` with the finish reason classified from the error
- * (`elicitation-denied` / `budget-exceeded` / `error`). Mirrors `executeLoop`'s
- * `makeErrorResult` exactly.
+ * (`elicitation-denied` / `budget-exceeded` / `tripwire` / `error`). Mirrors
+ * `executeLoop`'s `makeErrorResult` exactly.
+ *
+ * When `error` is a {@link GuardrailTripwireError}, this ALSO dispatches a
+ * `RunTripwireEvent` (in addition to `RunCompletedEvent`, never instead of it —
+ * gateway's `.once('run.completed' | 'run.aborted' | 'run.error')` contract
+ * still depends on `RunCompletedEvent` firing) so listeners that only care
+ * about tripwires don't have to unpack `result.error` themselves.
  */
 export function makeErrorResult(
   runState: RunState,
@@ -125,7 +137,9 @@ export function makeErrorResult(
       ? 'elicitation-denied'
       : error instanceof BudgetExceededError
         ? 'budget-exceeded'
-        : 'error';
+        : error instanceof GuardrailTripwireError
+          ? 'tripwire'
+          : 'error';
 
   const costEstimate = computeCostEstimate(runState.totalUsage, costEstimation);
   const result: RunResult = {
@@ -137,6 +151,17 @@ export function makeErrorResult(
     finishReason,
     error,
   };
+  if (error instanceof GuardrailTripwireError) {
+    emitter?.dispatch(
+      new RunTripwireEvent(runState.steps.length, {
+        guardrailName: error.guardrailName,
+        category: error.category,
+        phase: error.phase,
+        confidence: error.confidence,
+        detail: error.detail,
+      }),
+    );
+  }
   emitter?.dispatch(new RunCompletedEvent(result));
   return result;
 }

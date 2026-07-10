@@ -3,6 +3,7 @@ import { Conversation, materializeToolCalls } from 'conversationalist';
 import type { ToolCall } from 'interoperability';
 import type { ZodType } from 'zod';
 
+import { GuardrailTripwireError } from './errors';
 import {
   BackpressureAppliedEvent,
   BackpressureReleasedEvent,
@@ -625,6 +626,17 @@ export async function runStep(
       }
       backpressure?.onSuccess();
     } catch (error) {
+      // A tripwire guardrail (mode: 'tripwire') MUST hard-halt the run — it
+      // must not be retried, skipped, or otherwise recovered by a user-supplied
+      // `onError` hook, which would silently defeat the tripwire. Bypass onError
+      // entirely and propagate straight to the error result, matching how the
+      // validateResponse tripwire path (below) never consults onError either.
+      if (error instanceof GuardrailTripwireError) {
+        backpressure?.onError(error);
+        emitter?.dispatch(new RunErrorEvent(step, error));
+        return { kind: 'error', error };
+      }
+
       // onError recovery: sequential, first non-void return wins.
       // We always invoke the hook regardless of retry count so it can
       // return 'skip' or 'abort' even after retries are exhausted.

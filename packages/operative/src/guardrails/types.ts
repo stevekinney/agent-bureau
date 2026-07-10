@@ -27,7 +27,7 @@ export interface GuardrailTriggeredEvent {
   detector: string;
   category: string;
   confidence: number;
-  action: 'block' | 'warn' | 'sanitize';
+  action: 'block' | 'warn' | 'sanitize' | 'tripwire';
   input: string;
   detail?: string;
 }
@@ -35,7 +35,12 @@ export interface GuardrailTriggeredEvent {
 /** Options for configuring input guardrails. */
 export interface InputGuardrailOptions {
   detectors: InputDetector[];
-  action?: 'block' | 'warn' | 'sanitize';
+  /**
+   * `'tripwire'` throws a `GuardrailTripwireError` instead of substituting a
+   * blocked response — it hard-halts the run rather than letting the loop
+   * continue. See `GuardrailsOptions.mode`, which sets this for you.
+   */
+  action?: 'block' | 'warn' | 'sanitize' | 'tripwire';
   onTriggered?: (event: GuardrailTriggeredEvent) => void;
   mode?: 'parallel' | 'sequential';
   /** Getter that returns the current session taint state. When provided, detectors receive the live value. */
@@ -69,7 +74,7 @@ export interface OutputGuardrailTriggeredEvent {
   validator: string;
   category: string;
   confidence: number;
-  action: 'block' | 'warn' | 'redact';
+  action: 'block' | 'warn' | 'redact' | 'tripwire';
   output: string;
   detail?: string;
 }
@@ -77,7 +82,12 @@ export interface OutputGuardrailTriggeredEvent {
 /** Options for configuring output guardrails. */
 export interface OutputGuardrailOptions {
   validators: OutputValidator[];
-  action?: 'block' | 'warn' | 'redact';
+  /**
+   * `'tripwire'` throws a `GuardrailTripwireError` instead of substituting a
+   * blocked/redacted response — it hard-halts the run rather than letting the
+   * loop continue. See `GuardrailsOptions.mode`, which sets this for you.
+   */
+  action?: 'block' | 'warn' | 'redact' | 'tripwire';
   onTriggered?: (event: OutputGuardrailTriggeredEvent) => void;
   blockMessage?: string;
 }
@@ -103,6 +113,20 @@ export interface GuardrailsOptions {
   input?: InputGuardrailOptions;
   output?: OutputGuardrailOptions;
   taint?: SessionTaintOptions;
+  /**
+   * `'validate'` (default) — a tripped detector/validator substitutes a
+   * blocked/sanitized/redacted response and the run continues, per each
+   * guardrail's own `action`.
+   *
+   * `'tripwire'` — OpenAI-tripwire model: input detectors gate the first
+   * generate call and output validators gate post-processing; a tripped wire
+   * throws a `GuardrailTripwireError`, hard-halting the run with a clean
+   * `finishReason: 'tripwire'` terminal result and a `run.tripwire` event
+   * identifying the guardrail — distinct from `'validate'`'s retry/substitute
+   * behavior. Overrides `input.action`/`output.action` to `'tripwire'`
+   * regardless of what they were set to.
+   */
+  mode?: 'validate' | 'tripwire';
 }
 
 /** Hooks returned by the guardrails composition factory. */

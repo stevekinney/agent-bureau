@@ -142,11 +142,12 @@ export {
   TaskFailedEvent,
   TaskRoutedEvent,
 } from './create-supervisor';
-export type { ClassifiedError, ErrorCategory } from './errors';
+export type { ClassifiedError, ErrorCategory, GuardrailTripwireDetail } from './errors';
 export {
   BudgetExceededError,
   classifyError,
   ElicitationDeniedError,
+  GuardrailTripwireError,
   StandardSchemaValidationError,
 } from './errors';
 export type {
@@ -176,6 +177,7 @@ export {
   RunCompletedEvent,
   RunErrorEvent,
   RunStartedEvent,
+  RunTripwireEvent,
   SessionCreatedEvent,
   SessionDeletedEvent,
   SessionLoadedEvent,

@@ -1,3 +1,4 @@
+import { GuardrailTripwireError } from '../errors';
 import type { GenerateResponse, PrepareStepHook, StepContext } from '../types';
 import type {
   DetectionResult,
@@ -34,6 +35,8 @@ function createBlockResponse(): GenerateResponse {
  * - `'block'` (default): returns a `GenerateResponse` with refusal text, short-circuiting generate
  * - `'warn'`: calls `onTriggered` but allows the request through
  * - `'sanitize'`: replaces the last user message with the detector's sanitized version
+ * - `'tripwire'`: throws a `GuardrailTripwireError`, hard-halting the run before the
+ *   generate call fires (see `createGuardrails({ mode: 'tripwire' })`)
  *
  * Detector errors are caught via `Promise.allSettled` to prevent a broken detector
  * from crashing the agent loop.
@@ -102,6 +105,19 @@ export function createInputGuardrail(options: InputGuardrailOptions): PrepareSte
     };
 
     onTriggered?.(event);
+
+    if (action === 'tripwire') {
+      throw new GuardrailTripwireError(
+        `Input guardrail tripwire: "${topResult.detectorName}" flagged the request (${topResult.result.category}).`,
+        {
+          guardrailName: topResult.detectorName,
+          category: topResult.result.category,
+          phase: 'input',
+          confidence: topResult.result.confidence,
+          detail: topResult.result.detail,
+        },
+      );
+    }
 
     if (action === 'warn') {
       return;

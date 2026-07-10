@@ -36,6 +36,7 @@ const FAILURE_FINISH_REASONS: ReadonlySet<FinishReason> = new Set([
   'aborted',
   'budget-exceeded',
   'elicitation-denied',
+  'tripwire',
 ]);
 
 /**
@@ -383,7 +384,8 @@ function finishReasonToStatus(finishReason: string): RunRef['status'] {
   if (
     finishReason === 'error' ||
     finishReason === 'elicitation-denied' ||
-    finishReason === 'budget-exceeded'
+    finishReason === 'budget-exceeded' ||
+    finishReason === 'tripwire'
   ) {
     return 'error';
   }

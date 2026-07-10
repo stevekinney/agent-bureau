@@ -14,10 +14,17 @@ const DEFAULT_TAINT_THRESHOLD = 0.9;
  * tracker. When a high-confidence detection occurs, the session becomes tainted and
  * escalated detectors/validators are added to subsequent checks.
  *
+ * `mode: 'tripwire'` switches both input and output guardrails to the
+ * OpenAI-tripwire model: a tripped detector/validator throws a
+ * `GuardrailTripwireError` (hard-halting the run) instead of substituting a
+ * blocked/sanitized/redacted response. It overrides `input.action` /
+ * `output.action` regardless of what they were individually set to, so
+ * callers don't have to set the action on both.
+ *
  * Returns `{ prepareStep, validateResponse }` hooks ready for use in `RunOptions`.
  */
 export function createGuardrails(options: GuardrailsOptions): GuardrailHooks {
-  const { input, output, taint } = options;
+  const { input, output, taint, mode = 'validate' } = options;
 
   const taintThreshold = taint?.taintThreshold ?? DEFAULT_TAINT_THRESHOLD;
   const taintTracker = createSessionTaintTracker(taint);
@@ -33,6 +40,7 @@ export function createGuardrails(options: GuardrailsOptions): GuardrailHooks {
     const hook = createInputGuardrail({
       ...input,
       detectors: activeDetectors,
+      action: mode === 'tripwire' ? 'tripwire' : input.action,
       getSessionTainted: () => taintTracker.isTainted(),
       onTriggered: (event) => {
         // Wire taint: if confidence exceeds threshold, taint the session
@@ -67,6 +75,7 @@ export function createGuardrails(options: GuardrailsOptions): GuardrailHooks {
     const hook = createOutputGuardrail({
       ...output,
       validators: activeValidators,
+      action: mode === 'tripwire' ? 'tripwire' : output?.action,
       onTriggered: (event) => {
         output?.onTriggered?.(event);
       },

@@ -151,6 +151,41 @@ export class RunAbortedEvent extends Event {
   }
 }
 
+/**
+ * Fired when a `mode: 'tripwire'` guardrail halts a run. Dispatched alongside
+ * (immediately before) `RunCompletedEvent` — that event carries the generic
+ * `finishReason: 'tripwire'` + the reconstructed `GuardrailTripwireError` on
+ * `.error`, while this event surfaces the guardrail identity as first-class
+ * fields for listeners that only care about tripwires.
+ */
+export class RunTripwireEvent extends Event {
+  static readonly type = 'run.tripwire' as const;
+  readonly step: number;
+  readonly guardrailName: string;
+  readonly category: string;
+  readonly phase: 'input' | 'output';
+  readonly confidence: number;
+  readonly detail?: string;
+  constructor(
+    step: number,
+    data: {
+      guardrailName: string;
+      category: string;
+      phase: 'input' | 'output';
+      confidence: number;
+      detail?: string;
+    },
+  ) {
+    super(RunTripwireEvent.type);
+    this.step = step;
+    this.guardrailName = data.guardrailName;
+    this.category = data.category;
+    this.phase = data.phase;
+    this.confidence = data.confidence;
+    this.detail = data.detail;
+  }
+}
+
 export class StepAbortedEvent extends Event {
   static readonly type = 'step.aborted' as const;
   readonly step: number;
@@ -894,6 +929,7 @@ export interface OperativeEventMap extends EventMap {
   [RunCompletedEvent.type]: RunCompletedEvent;
   [RunErrorEvent.type]: RunErrorEvent;
   [RunAbortedEvent.type]: RunAbortedEvent;
+  [RunTripwireEvent.type]: RunTripwireEvent;
   [StepAbortedEvent.type]: StepAbortedEvent;
   [GenerateStartedEvent.type]: GenerateStartedEvent;
   [GenerateCompletedEvent.type]: GenerateCompletedEvent;
