@@ -2,6 +2,7 @@ import { BureauError } from 'bureau';
 import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 
+import { resolvePrincipal } from '../middleware/authentication';
 import type { Bureau, CreateRunRequest } from '../types';
 
 export function createRunsRoutes(bureau: Bureau) {
@@ -15,7 +16,10 @@ export function createRunsRoutes(bureau: Bureau) {
       throw new HTTPException(400, { message: 'Invalid JSON body' });
     }
     try {
-      const summary = await bureau.createRun(body);
+      // Overwrite any caller-supplied `principal` with the authenticated
+      // principal from the verified request header — never trust it from an
+      // untrusted request body (AB-54 usage analytics attribution).
+      const summary = await bureau.createRun({ ...body, principal: resolvePrincipal(context) });
       return context.json(summary, 201);
     } catch (error) {
       if (error instanceof BureauError) {

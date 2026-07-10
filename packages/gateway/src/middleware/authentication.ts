@@ -1,9 +1,24 @@
+import type { Context } from 'hono';
 import { createMiddleware } from 'hono/factory';
 import { HTTPException } from 'hono/http-exception';
 
 import type { ApiKeyStore } from '../keys/types';
 
 const QUERY_TOKEN_PATH_ALLOW_LIST = new Set(['/api/v1/events']);
+
+/**
+ * Resolves the authenticated principal for the current request from the
+ * `x-auth-principal` header this middleware injects after verification
+ * (`api-key:<id>` or `static-token`). Falls back to `'anonymous'` when no
+ * auth is configured at all (the middleware injects no header in that case).
+ *
+ * The single source of truth for "who made this request" — used both to
+ * attribute review decisions (AB-20) and to attribute created runs for usage
+ * analytics (AB-54).
+ */
+export function resolvePrincipal(context: Context): string {
+  return context.req.header('x-auth-principal') ?? 'anonymous';
+}
 
 /**
  * Bearer token authentication middleware with managed API key support.

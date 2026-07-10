@@ -1,6 +1,7 @@
 <script lang="ts">
   import { untrack } from 'svelte';
 
+  import type { UsageResponse } from '../routes/usage';
   import type { ConfigurationResponse, PendingReview, RunDetail, RunSummary } from '../types';
   import { createChatStore } from './hooks/use-chat.svelte';
   import { createReviewsStore } from './hooks/use-reviews.svelte';
@@ -13,6 +14,7 @@
   import DashboardPage from './pages/dashboard.svelte';
   import ReviewsPage from './pages/reviews.svelte';
   import RunDetailPage from './pages/run-detail.svelte';
+  import UsagePage from './pages/usage.svelte';
   import { matchRoute } from './router';
 
   type InitialData = {
@@ -20,6 +22,7 @@
     run?: RunDetail;
     config?: ConfigurationResponse;
     reviews?: PendingReview[];
+    usage?: UsageResponse;
   };
 
   /**
@@ -54,6 +57,21 @@
     maximumSteps: 10,
     systemPrompt: undefined,
     tools: [],
+  };
+
+  const EMPTY_USAGE: UsageResponse = {
+    aggregate: {
+      promptTokens: 0,
+      completionTokens: 0,
+      totalTokens: 0,
+      cacheCreationTokens: 0,
+      cacheReadTokens: 0,
+      runCount: 0,
+      totalCost: 0,
+      costComplete: true,
+    },
+    analytics: { byAgent: [], byPrincipal: [], byWindow: [] },
+    runs: [],
   };
 
   let route = $derived(matchRoute(pathname));
@@ -170,6 +188,8 @@
     />
   {:else if route?.name === 'reviews'}
     <ReviewsPage reviews={reviewsStore} />
+  {:else if route?.name === 'usage'}
+    <UsagePage usage={initialData.usage ?? EMPTY_USAGE} />
   {:else if route?.name === 'configuration'}
     <ConfigurationPage config={initialData.config ?? EMPTY_CONFIGURATION} />
   {:else if route?.name === 'chat'}

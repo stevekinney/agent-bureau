@@ -624,10 +624,39 @@ export interface RunSummary {
   sessionId: string;
   status: string;
   steps: number;
-  usage: { prompt: number; completion: number; total: number };
+  /**
+   * Token usage, including AB-92's `cacheCreationTokens`/`cacheReadTokens`
+   * when the provider reported them (absent, never fabricated as `0`, when
+   * it did not — see {@link TokenUsage}).
+   */
+  usage: TokenUsage;
   finishReason: string | undefined;
   error: string | undefined;
   actionCount: number;
+  /**
+   * The agent that ran this run (AB-54 usage analytics grouping). Resolved
+   * deterministically from `CreateRunRequest.agentName` (falling back to the
+   * house default) at run-creation time. A run reattached after durable
+   * recovery — whose process restarted, losing the in-memory resolution —
+   * falls back to the tool-bubble-event heuristic and may be `undefined` for
+   * a recovered run with no tool activity yet.
+   */
+  agentName: string | undefined;
+  /**
+   * The authenticated principal that created this run (e.g. `api-key:<id>`
+   * or `static-token`), when the request carried an `x-auth-principal`
+   * header. Captured only at creation time (in-memory, Layer A) — a run
+   * reattached after durable recovery has no principal, since it is not
+   * persisted durably. `undefined` for scheduler-fired runs, which have no
+   * human principal.
+   */
+  principal: string | undefined;
+  /**
+   * Epoch-ms timestamp of the run's first recorded action (`run.started`).
+   * `undefined` only in the vanishingly brief window between `store.register`
+   * and the first action being appended.
+   */
+  startedAt: number | undefined;
 }
 
 export interface RunStepDetail {
@@ -681,6 +710,14 @@ export interface CreateRunRequest {
    * fallback at the door.
    */
   agentName?: string;
+  /**
+   * The authenticated principal creating this run (e.g. `api-key:<id>` or
+   * `static-token`), for AB-54 usage analytics attribution. The gateway
+   * overwrites any caller-supplied value with the request's own
+   * `x-auth-principal` header before calling `createRun` — never trust this
+   * field verbatim from an untrusted request body.
+   */
+  principal?: string;
 }
 
 export interface SubmitSchedulerTaskRequest {

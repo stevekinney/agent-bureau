@@ -13,6 +13,9 @@ function makeRun(overrides: Partial<RunSummary> = {}): RunSummary {
     finishReason: undefined,
     error: undefined,
     actionCount: 0,
+    agentName: 'bureau',
+    principal: undefined,
+    startedAt: 0,
     ...overrides,
   };
 }

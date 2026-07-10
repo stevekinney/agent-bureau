@@ -36,6 +36,9 @@ function makeRunSummary(overrides?: Partial<RunSummary>): RunSummary {
     finishReason: 'end_turn',
     error: undefined,
     actionCount: 0,
+    agentName: 'bureau',
+    principal: undefined,
+    startedAt: 0,
     ...overrides,
   };
 }

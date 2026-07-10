@@ -101,6 +101,28 @@ describe('SSR pages', () => {
     expect(config).toHaveProperty('tools');
   });
 
+  it('GET /usage returns 200 HTML with the real UsageResponse', async () => {
+    const gateway = await createTestGateway();
+    const response = await gateway.app.request('/usage');
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('content-type')).toBe('text/html; charset=utf-8');
+
+    const html = await response.text();
+    expect(html).toContain('id="root"');
+
+    const data = extractInitialData(html);
+    expect(data).toHaveProperty('usage');
+    const usage = (data as { usage: Record<string, unknown> }).usage;
+    expect(usage).toHaveProperty('aggregate');
+    expect(usage).toHaveProperty('analytics');
+    expect(usage).toHaveProperty('runs');
+    const analytics = usage['analytics'] as Record<string, unknown>;
+    expect(analytics).toHaveProperty('byAgent');
+    expect(analytics).toHaveProperty('byPrincipal');
+    expect(analytics).toHaveProperty('byWindow');
+  });
+
   it('GET /chat returns 200 HTML with an empty initial-data payload', async () => {
     const gateway = await createTestGateway();
     const response = await gateway.app.request('/chat');
@@ -179,6 +201,44 @@ describe('SSR pages', () => {
       });
 
       expect(response.status).toBe(200);
+    });
+  });
+
+  describe('GET /usage scope enforcement (AB-54)', () => {
+    it('rejects a managed key without runs:read with 403, same as the JSON API', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      const apiKeyStore = createApiKeyStore(kv);
+      const { plaintext } = await apiKeyStore.create({
+        name: 'no-usage',
+        scopes: ['reviews:read'],
+      });
+
+      const bureau = await createBureau({ persistence: kv });
+      const gateway = await createTestGateway(bureau);
+
+      const response = await gateway.app.request('/usage', {
+        headers: { authorization: `Bearer ${plaintext}` },
+      });
+
+      expect(response.status).toBe(403);
+    });
+
+    it('serves the usage page for a key that carries runs:read', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      const apiKeyStore = createApiKeyStore(kv);
+      const { plaintext } = await apiKeyStore.create({ name: 'has-runs', scopes: ['runs:read'] });
+
+      const bureau = await createBureau({ persistence: kv });
+      const gateway = await createTestGateway(bureau);
+
+      const response = await gateway.app.request('/usage', {
+        headers: { authorization: `Bearer ${plaintext}` },
+      });
+
+      expect(response.status).toBe(200);
+      const html = await response.text();
+      const data = extractInitialData(html);
+      expect(data).toHaveProperty('usage');
     });
   });
 });

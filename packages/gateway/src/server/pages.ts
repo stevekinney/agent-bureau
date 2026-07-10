@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 
 import { createScopeGuard } from '../middleware/scope-guard';
+import { buildUsageResponse, type UsageResponse } from '../routes/usage';
 import type {
   Bureau,
   ConfigurationResponse,
@@ -23,6 +24,7 @@ interface InitialData {
   run?: RunDetail;
   config?: ConfigurationResponse;
   reviews?: PendingReview[];
+  usage?: UsageResponse;
 }
 
 interface PageDependencies {
@@ -96,6 +98,15 @@ export function createPages(dependencies: PageDependencies) {
   app.get('/reviews', createScopeGuard([SCOPE.REVIEWS_READ]), async () => {
     const reviews: PendingReview[] = dependencies.bureau.listPendingReviews();
     return renderAppResponse('Review Queue', '/reviews', { reviews });
+  });
+
+  // Same `runs:read` scope as `GET /api/v1/usage` (routes/index.ts) — this SSR
+  // route embeds the same per-run usage/cost/attribution data, so an
+  // under-scoped key must not be able to read it here just because the JSON
+  // API is guarded.
+  app.get('/usage', createScopeGuard([SCOPE.RUNS_READ]), async () => {
+    const usage = buildUsageResponse(dependencies.bureau);
+    return renderAppResponse('Usage', '/usage', { usage });
   });
 
   app.get('/configuration', async () => {

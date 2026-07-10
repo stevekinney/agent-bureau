@@ -3,6 +3,7 @@ import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import { z } from 'zod';
 
+import { resolvePrincipal } from '../middleware/authentication';
 import type { Bureau, CreateRunRequest } from '../types';
 
 /**
@@ -200,6 +201,7 @@ export function createOpenAICompatRoutes(bureau: Bureau) {
     const request: CreateRunRequest = {
       message,
       agentName,
+      principal: resolvePrincipal(context),
       ...(systemPrompt ? { systemPrompt } : {}),
       ...(max_tokens ? { maximumTokens: max_tokens } : {}),
     };

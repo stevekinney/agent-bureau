@@ -130,6 +130,57 @@ describe('createStore', () => {
     expect(store.getRun('nonexistent')).toBeUndefined();
   });
 
+  it('accumulates cache-token usage fields across steps (AB-92)', async () => {
+    const store = createStore();
+    const toolbox = createTestToolbox([weatherTool]);
+    const conversation = new Conversation();
+    conversation.appendUserMessage('test');
+    const generate = createMockGenerate([
+      {
+        content: 'first',
+        toolCalls: [{ id: 'call-1', name: 'get_weather', arguments: { location: 'Denver' } }],
+        usage: { prompt: 10, completion: 5, total: 15, cacheCreationTokens: 100 },
+      },
+      {
+        content: 'second',
+        toolCalls: [],
+        usage: { prompt: 10, completion: 5, total: 15, cacheReadTokens: 90 },
+      },
+    ]);
+    const activeRun = createActiveRun({
+      generate,
+      toolbox,
+      conversation,
+      stopWhen: stopWhen.noToolCalls(),
+    });
+    const id = store.register(activeRun);
+
+    await activeRun.result;
+
+    const runState = store.getRun(id);
+    expect(runState!.usage.prompt).toBe(20);
+    expect(runState!.usage.completion).toBe(10);
+    expect(runState!.usage.total).toBe(30);
+    expect(runState!.usage.cacheCreationTokens).toBe(100);
+    expect(runState!.usage.cacheReadTokens).toBe(90);
+
+    store.dispose();
+  });
+
+  it('leaves cache-token fields undefined when no step reports them', async () => {
+    const store = createStore();
+    const activeRun = makeTestRun([textResponse('no cache signal')]);
+    const id = store.register(activeRun);
+
+    await activeRun.result;
+
+    const runState = store.getRun(id);
+    expect(runState!.usage.cacheCreationTokens).toBeUndefined();
+    expect(runState!.usage.cacheReadTokens).toBeUndefined();
+
+    store.dispose();
+  });
+
   it('subscribe calls listener on every action with state and action', async () => {
     const store = createStore();
     const received: Array<{ state: StoreState; action: Action }> = [];
