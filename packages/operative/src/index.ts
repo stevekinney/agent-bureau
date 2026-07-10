@@ -118,8 +118,12 @@ export {
   EntrySetEvent,
   ScratchpadClearedEvent,
 } from './create-scratchpad';
-export type { CreateSubagentToolOptions } from './create-subagent-tool';
-export { createSubagentTool } from './create-subagent-tool';
+export type {
+  CreateSubagentToolOptions,
+  SubagentSummarizer,
+  SubagentSummaryContext,
+} from './create-subagent-tool';
+export { createSubagentTool, defaultSubagentSummarizer } from './create-subagent-tool';
 export type {
   CreateSupervisorOptions,
   PipelineStage,

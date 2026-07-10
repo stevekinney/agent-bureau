@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test';
 import { CompletableEventTarget } from 'lifecycle';
 import { z } from 'zod';
 
-import { createSubagentTool } from './create-subagent-tool';
+import { createSubagentTool, defaultSubagentSummarizer } from './create-subagent-tool';
 import type { CombinedOperativeEventMap } from './events';
 import { ChildWorkflowStartedEvent } from './events';
 import type { RunResult } from './types';
@@ -422,6 +422,191 @@ describe('createSubagentTool', () => {
       });
 
       expect(timeline).toEqual(['event', 'run']);
+    });
+  });
+
+  describe('AB-64 — returnMode / summary', () => {
+    it('defaults to returnMode "summary"', async () => {
+      let receivedMaxTokens: number | undefined;
+      const tool = createSubagentTool({
+        name: 'researcher',
+        description: 'Research a topic',
+        agentName: 'researcher',
+        input: z.object({ topic: z.string() }),
+        run: makeSuccessfulRun('short result'),
+        summarizer: (result, context) => {
+          receivedMaxTokens = context.maxTokens;
+          return result.content;
+        },
+      });
+
+      await (tool as unknown as { execute: (p: unknown) => Promise<unknown> }).execute({
+        topic: 'AI',
+      });
+
+      // The summarizer is only invoked in 'summary' mode, so its being
+      // called at all proves the default is 'summary', not 'full'.
+      expect(receivedMaxTokens).toBe(500);
+    });
+
+    it('condenses content to the token cap using a mock summarizer', async () => {
+      const longContent = 'x'.repeat(10_000);
+      let summarizerCalledWith: { content: string; maxTokens: number } | undefined;
+
+      const tool = createSubagentTool({
+        name: 'researcher',
+        description: 'Research a topic',
+        agentName: 'researcher',
+        input: z.object({ topic: z.string() }),
+        run: makeSuccessfulRun(longContent),
+        summaryTokenCap: 50,
+        summarizer: (result, context) => {
+          summarizerCalledWith = { content: result.content, maxTokens: context.maxTokens };
+          return `[condensed to ${context.maxTokens} tokens]`;
+        },
+      });
+
+      const result = await (
+        tool as unknown as { execute: (p: unknown) => Promise<unknown> }
+      ).execute({ topic: 'AI' });
+
+      expect(result).toBe('[condensed to 50 tokens]');
+      expect(summarizerCalledWith?.content).toBe(longContent);
+      expect(summarizerCalledWith?.maxTokens).toBe(50);
+    });
+
+    it('passes the agentName to the summarizer context', async () => {
+      let receivedAgentName: string | undefined;
+
+      const tool = createSubagentTool({
+        name: 'researcher',
+        description: 'Research a topic',
+        agentName: 'topic-researcher',
+        input: z.object({ topic: z.string() }),
+        run: makeSuccessfulRun('ok'),
+        summarizer: (_result, context) => {
+          receivedAgentName = context.agentName;
+          return 'summarized';
+        },
+      });
+
+      await (tool as unknown as { execute: (p: unknown) => Promise<unknown> }).execute({
+        topic: 'AI',
+      });
+
+      expect(receivedAgentName).toBe('topic-researcher');
+    });
+
+    it('passes result.content through unmodified when returnMode is "full"', async () => {
+      const longContent = 'x'.repeat(10_000);
+      let summarizerCalled = false;
+
+      const tool = createSubagentTool({
+        name: 'researcher',
+        description: 'Research a topic',
+        agentName: 'researcher',
+        input: z.object({ topic: z.string() }),
+        run: makeSuccessfulRun(longContent),
+        returnMode: 'full',
+        summaryTokenCap: 10,
+        summarizer: () => {
+          summarizerCalled = true;
+          return 'should not be used';
+        },
+      });
+
+      const result = await (
+        tool as unknown as { execute: (p: unknown) => Promise<unknown> }
+      ).execute({ topic: 'AI' });
+
+      expect(result).toBe(longContent);
+      expect(summarizerCalled).toBe(false);
+    });
+
+    it('applies the default summarizer when content exceeds the token cap', async () => {
+      const longContent = 'a'.repeat(1000); // ~250 tokens
+      const tool = createSubagentTool({
+        name: 'researcher',
+        description: 'Research a topic',
+        agentName: 'researcher',
+        input: z.object({ topic: z.string() }),
+        run: makeSuccessfulRun(longContent),
+        summaryTokenCap: 20,
+      });
+
+      const result = (await (
+        tool as unknown as { execute: (p: unknown) => Promise<unknown> }
+      ).execute({ topic: 'AI' })) as string;
+
+      expect(result.length).toBeLessThan(longContent.length);
+      expect(result).toContain('truncated');
+    });
+
+    it('leaves content untouched via the default summarizer when under the cap', async () => {
+      const tool = createSubagentTool({
+        name: 'researcher',
+        description: 'Research a topic',
+        agentName: 'researcher',
+        input: z.object({ topic: z.string() }),
+        run: makeSuccessfulRun('short'),
+      });
+
+      const result = await (
+        tool as unknown as { execute: (p: unknown) => Promise<unknown> }
+      ).execute({ topic: 'AI' });
+
+      expect(result).toBe('short');
+    });
+
+    it('mapOutput receives the summarized content, not the raw content', async () => {
+      const tool = createSubagentTool({
+        name: 'researcher',
+        description: 'Research a topic',
+        agentName: 'researcher',
+        input: z.object({ topic: z.string() }),
+        run: makeSuccessfulRun('raw content'),
+        summarizer: () => 'SUMMARIZED',
+        mapOutput: (result) => ({ text: result.content }),
+      });
+
+      const result = await (
+        tool as unknown as { execute: (p: unknown) => Promise<unknown> }
+      ).execute({ topic: 'AI' });
+
+      expect(result).toEqual({ text: 'SUMMARIZED' });
+    });
+  });
+
+  describe('defaultSubagentSummarizer', () => {
+    it('returns content unchanged when within the token cap', () => {
+      const result = defaultSubagentSummarizer(
+        {
+          conversation: {} as any,
+          content: 'hello world',
+          finishReason: 'stop-condition',
+          steps: [],
+          usage: { prompt: 0, completion: 0, total: 0 },
+        } as any,
+        { agentName: 'a', maxTokens: 500 },
+      );
+      expect(result).toBe('hello world');
+    });
+
+    it('truncates and annotates content exceeding the token cap', () => {
+      const content = 'y'.repeat(400); // ~100 tokens
+      const result = defaultSubagentSummarizer(
+        {
+          conversation: {} as any,
+          content,
+          finishReason: 'stop-condition',
+          steps: [],
+          usage: { prompt: 0, completion: 0, total: 0 },
+        } as any,
+        { agentName: 'a', maxTokens: 10 },
+      ) as string;
+
+      expect(result.startsWith('y'.repeat(40))).toBe(true);
+      expect(result).toContain('truncated to ~10 tokens');
     });
   });
 });
