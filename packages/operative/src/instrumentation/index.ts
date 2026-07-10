@@ -98,12 +98,16 @@ export function instrument(
   activeRun.addEventListener(
     'run.started',
     () => {
-      const spanName = options.agentName ? `invoke_agent ${options.agentName}` : 'invoke_agent';
+      // Normalize once so the span name and the gen_ai.agent.name attribute
+      // never disagree — an empty or whitespace-only agentName is treated
+      // as "no agent name supplied" for both.
+      const agentName = options.agentName?.trim() || undefined;
+      const spanName = agentName ? `invoke_agent ${agentName}` : 'invoke_agent';
       runSpan = tracer.startSpan(spanName, {
         kind: SpanKind.INTERNAL,
         attributes: {
           'gen_ai.operation.name': 'invoke_agent',
-          ...(options.agentName !== undefined && { 'gen_ai.agent.name': options.agentName }),
+          ...(agentName !== undefined && { 'gen_ai.agent.name': agentName }),
         },
       });
       runContext = trace.setSpan(context.active(), runSpan);

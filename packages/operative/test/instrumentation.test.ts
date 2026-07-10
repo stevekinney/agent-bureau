@@ -166,6 +166,27 @@ describe('instrument', () => {
     expect(findSpan(tracer, 'invoke_agent')).toBeUndefined();
   });
 
+  it('treats an empty or whitespace-only agentName as unset for both the span name and attribute', async () => {
+    const tracer = createMockTracer();
+    const toolbox = createTestToolbox([]);
+
+    const activeRun = createActiveRun({
+      generate: async () => textResponse('Hello'),
+      toolbox,
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+    });
+
+    const unsubscribe = instrument(activeRun, { tracer, agentName: '   ' });
+    await activeRun.result;
+    activeRun.complete();
+    unsubscribe();
+
+    const runSpan = findSpan(tracer, 'invoke_agent')!;
+    expect(runSpan).toBeDefined();
+    expect('gen_ai.agent.name' in runSpan.attributes).toBe(false);
+  });
+
   it('ends the run span on run.completed with finish reason and usage', async () => {
     const tracer = createMockTracer();
     const toolbox = createTestToolbox([]);
