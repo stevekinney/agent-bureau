@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 
-import { chunkMarkdown } from '../src/chunking';
+import { chunkMarkdown, chunkText } from '../src/chunking';
 
 describe('chunkMarkdown', () => {
   it('returns an empty array for empty content', () => {
@@ -157,5 +157,74 @@ describe('chunkMarkdown', () => {
 
     expect(chunks.some((chunk) => chunk.text.trim().length === 0)).toBe(false);
     expect(chunks.map((chunk) => chunk.text).join('')).toContain('Important');
+  });
+});
+
+describe('chunkText', () => {
+  it('returns an empty array for empty text', () => {
+    expect(chunkText({ text: '' })).toEqual([]);
+  });
+
+  it('behaves like chunkMarkdown when no structure hints are given', () => {
+    const text = 'Short content\nwith a few lines\nthat fits easily.';
+
+    expect(chunkText({ text })).toEqual(chunkMarkdown(text));
+  });
+
+  it('never merges content across a structure boundary', () => {
+    const sectionA = 'Alpha content.'.repeat(1);
+    const sectionB = 'Beta content.'.repeat(1);
+    const text = `${sectionA}\n${sectionB}`;
+
+    const chunks = chunkText(
+      { text, structure: [{ startLine: 1, label: 'Section B' }] },
+      { maximumTokens: 100, overlapTokens: 0 },
+    );
+
+    // Even though both sections would fit in a single chunk by token count,
+    // the boundary at line 1 forces a split.
+    expect(chunks).toHaveLength(2);
+    expect(chunks[0]!.text).toBe(sectionA);
+    expect(chunks[1]!.text).toBe(sectionB);
+  });
+
+  it('tags each chunk with the nearest preceding heading label', () => {
+    const text = ['Intro line.', 'Heading One', 'Body under heading one.'].join('\n');
+
+    const chunks = chunkText({
+      text,
+      structure: [{ startLine: 1, label: 'Heading One' }],
+    });
+
+    expect(chunks).toHaveLength(2);
+    expect(chunks[0]!.heading).toBeUndefined();
+    expect(chunks[1]!.heading).toBe('Heading One');
+  });
+
+  it('reindexes chunks continuously across sections', () => {
+    const text = ['Section A content.', 'Section B content.', 'Section C content.'].join('\n');
+
+    const chunks = chunkText(
+      {
+        text,
+        structure: [
+          { startLine: 1, label: 'B' },
+          { startLine: 2, label: 'C' },
+        ],
+      },
+      { maximumTokens: 10, overlapTokens: 0 },
+    );
+
+    for (let i = 0; i < chunks.length; i++) {
+      expect(chunks[i]!.index).toBe(i);
+    }
+  });
+
+  it('clamps out-of-range structure hints instead of throwing', () => {
+    const text = 'One line only.';
+
+    expect(() =>
+      chunkText({ text, structure: [{ startLine: 50, label: 'Out of range' }] }),
+    ).not.toThrow();
   });
 });
