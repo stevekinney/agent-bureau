@@ -32,6 +32,13 @@ export { BureauError, classifyRecoveredRun, createBureau } from './create-bureau
 export type { BureauEventMap } from './events';
 export { ActionEvent, BureauDisposedEvent, RunRegisteredEvent, RunRemovedEvent } from './events';
 export type {
+  EvalScore,
+  OnlineEvalJudge,
+  OnlineEvalSampler,
+  OnlineEvalSamplerOptions,
+} from './online-evals';
+export { createOnlineEvalSampler } from './online-evals';
+export type {
   BureauToolbox,
   DurableComposition,
   PendingRecoveryEvents,

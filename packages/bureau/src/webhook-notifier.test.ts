@@ -413,4 +413,92 @@ describe('createWebhookNotifier', () => {
     // (`!disposed`) then stops it from attempting a second time.
     expect(callCount).toBe(1);
   });
+
+  // ── notify() — out-of-band delivery (AB-53) ─────────────────────────
+
+  it('notify() delivers to targets subscribed to the given trigger, deep-linked to the run', async () => {
+    const { bureau } = createStubBureau();
+    const { fetch: fetchImpl, calls } = okFetch();
+    const notifier = createWebhookNotifier(bureau, undefined, undefined, {
+      targets: [{ url: 'https://example.com/hook', events: ['eval.threshold-breached'] }],
+      fetch: fetchImpl,
+      reviewQueueBaseUrl: 'https://gateway.example.com',
+    });
+
+    notifier.notify({
+      runId: 'run-1',
+      subjectId: 'eval:run-1:quality-judge',
+      trigger: 'eval.threshold-breached',
+      detail: { judgeName: 'quality-judge', score: 0.2, threshold: 0.5 },
+    });
+    await notifier.flush();
+
+    expect(calls).toHaveLength(1);
+    const body = JSON.parse(calls[0]!.body);
+    expect(body).toMatchObject({
+      trigger: 'eval.threshold-breached',
+      runId: 'run-1',
+      deepLink: 'https://gateway.example.com/runs/run-1',
+      detail: { judgeName: 'quality-judge', score: 0.2, threshold: 0.5 },
+    });
+
+    notifier.dispose();
+  });
+
+  it('notify() does not deliver to a target not subscribed to the given trigger', async () => {
+    const { bureau } = createStubBureau();
+    const { fetch: fetchImpl, calls } = okFetch();
+    const notifier = createWebhookNotifier(bureau, undefined, undefined, {
+      targets: [{ url: 'https://example.com/approvals-only', events: ['approval-pending'] }],
+      fetch: fetchImpl,
+    });
+
+    notifier.notify({
+      runId: 'run-1',
+      subjectId: 'eval:run-1:quality-judge',
+      trigger: 'eval.threshold-breached',
+    });
+    await notifier.flush();
+
+    expect(calls).toHaveLength(0);
+
+    notifier.dispose();
+  });
+
+  it('notify() dedupes by subjectId + target, same as the action-stream triggers', async () => {
+    const { bureau } = createStubBureau();
+    const { fetch: fetchImpl, calls } = okFetch();
+    const notifier = createWebhookNotifier(bureau, undefined, undefined, {
+      targets: [{ url: 'https://example.com/hook' }],
+      fetch: fetchImpl,
+    });
+
+    notifier.notify({
+      runId: 'run-1',
+      subjectId: 'eval:run-1:judge-a',
+      trigger: 'eval.threshold-breached',
+    });
+    notifier.notify({
+      runId: 'run-1',
+      subjectId: 'eval:run-1:judge-a',
+      trigger: 'eval.threshold-breached',
+    });
+    await notifier.flush();
+
+    expect(calls).toHaveLength(1);
+
+    notifier.dispose();
+  });
+
+  it('notify() is a no-op on the no-targets notifier', async () => {
+    const { bureau } = createStubBureau();
+    const notifier = createWebhookNotifier(bureau, undefined, undefined, { targets: [] });
+    notifier.notify({
+      runId: 'run-1',
+      subjectId: 'eval:run-1:judge-a',
+      trigger: 'eval.threshold-breached',
+    });
+    await notifier.flush();
+    notifier.dispose();
+  });
 });
