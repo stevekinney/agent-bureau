@@ -30,24 +30,35 @@ import {
   mapFinishReasonToStatus,
 } from 'operative';
 
+type BuildTribunalRunReportOptionalKeys =
+  | 'costEstimate'
+  | 'structuredOutput'
+  | 'effectiveModel'
+  | 'effectiveEffort';
+
 /**
- * Thin wrapper over `buildRunReport` that omits `costEstimate`/`structuredOutput`
- * entirely when undefined, rather than passing the key through explicitly —
+ * Thin wrapper over `buildRunReport` that omits its optional fields entirely
+ * when undefined, rather than passing the key through explicitly —
  * `BuildRunReportInput`'s optional fields don't accept an explicit `undefined`
- * under this package's `exactOptionalPropertyTypes: true`, and `RunResult`'s
- * `costEstimate`/`structuredOutput` are themselves `T | undefined`.
+ * under this package's `exactOptionalPropertyTypes: true`, but callers here
+ * routinely derive these from `RunResult`/`GenerateResponse.metadata` fields
+ * that are themselves `T | undefined`.
  */
 export function buildTribunalRunReport(
-  input: Omit<BuildRunReportInput, 'costEstimate' | 'structuredOutput'> & {
+  input: Omit<BuildRunReportInput, BuildTribunalRunReportOptionalKeys> & {
     costEstimate?: BuildRunReportInput['costEstimate'] | undefined;
     structuredOutput?: unknown;
+    effectiveModel?: string | undefined;
+    effectiveEffort?: string | undefined;
   },
 ): RunReport {
-  const { costEstimate, structuredOutput, ...rest } = input;
+  const { costEstimate, structuredOutput, effectiveModel, effectiveEffort, ...rest } = input;
   return buildRunReport({
     ...rest,
     ...(costEstimate !== undefined ? { costEstimate } : {}),
     ...(structuredOutput !== undefined ? { structuredOutput } : {}),
+    ...(effectiveModel !== undefined ? { effectiveModel } : {}),
+    ...(effectiveEffort !== undefined ? { effectiveEffort } : {}),
   });
 }
 

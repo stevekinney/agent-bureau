@@ -153,16 +153,33 @@ describe('AB-99 Tribunal conformance — single provider (Anthropic mock)', () =
         toolPostFrames.every((frame) => frame.type === 'tool-post' && frame.status === 'success'),
       ).toBe(true);
 
+      // Pulled from the last step's GenerateResponse.metadata (AB-91's
+      // effective-value reporting), not hardcoded — this is what actually
+      // reaches a real RunReport, including the literal `'none'` sentinel
+      // the Anthropic/OpenAI adapters set for `effectiveEffort` when no
+      // effort option was supplied.
+      const lastStepMetadata = result.steps.at(-1)?.metadata;
       const report = buildTribunalRunReport({
         runId,
         status: mapFinishReasonToStatus(result.finishReason),
         finishReason: result.finishReason,
         usage: result.usage,
         costEstimate: result.costEstimate,
-        effectiveModel: 'claude-sonnet-4-20250514',
+        effectiveModel:
+          typeof lastStepMetadata?.['effectiveModel'] === 'string'
+            ? lastStepMetadata['effectiveModel']
+            : undefined,
+        effectiveEffort:
+          typeof lastStepMetadata?.['effectiveEffort'] === 'string'
+            ? lastStepMetadata['effectiveEffort']
+            : undefined,
         structuredOutput: result.structuredOutput,
         transcript: result.conversation.current,
       });
+
+      // The 'none' sentinel must never leak into Tribunal's agentResult —
+      // mapRunReportToTribunalAgentResult normalizes it to null.
+      expect(report.effectiveEffort).toBe('none');
 
       // Append the terminal `run-finished` frame via the same AB-96
       // constructor the mid-run frames used, then confirm the FULL NDJSON
@@ -183,6 +200,10 @@ describe('AB-99 Tribunal conformance — single provider (Anthropic mock)', () =
       if (parsed.success) {
         expect(parsed.data.findings).toHaveLength(1);
         expect(parsed.data.usage.inputTokens).toBeGreaterThan(0);
+        // Without the 'none' -> null normalization this assertion is what
+        // would fail: agentResultSchema.effortUsed only accepts the real
+        // effort enum or null, never the literal string 'none'.
+        expect(parsed.data.effortUsed).toBeNull();
       }
     } finally {
       await repo.cleanup();

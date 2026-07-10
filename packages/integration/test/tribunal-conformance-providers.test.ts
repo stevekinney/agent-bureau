@@ -8,14 +8,14 @@
  * option is shared between the two runs, proving `RunOptions` genuinely
  * abstracts over the provider.
  */
-import { createToolbox } from 'armorer';
+import { createHeadlessPermissionPolicyHooks, createToolbox } from 'armorer';
 import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
 import type { GenerateFunction } from 'operative';
-import { createActiveRun, stopWhen } from 'operative';
-import type { AnthropicMessageResponse } from 'operative/anthropic';
+import { createActiveRun, resolveResponseFormat, stopWhen } from 'operative';
+import type { AnthropicClient, AnthropicMessageResponse } from 'operative/anthropic';
 import { createAnthropicProvider } from 'operative/anthropic';
-import type { OpenAIChatCompletion } from 'operative/openai';
+import type { OpenAIChatCompletion, OpenAIClient } from 'operative/openai';
 import { createOpenAIProvider } from 'operative/openai';
 import { createMockAnthropicClient, createMockOpenAIClient } from 'operative/providers/test';
 
@@ -27,6 +27,7 @@ import {
   tribunalOutputSchemaForRole,
 } from './fixtures/tribunal-schemas';
 import {
+  createTribunalPermissions,
   createTribunalToolboxFixture,
   type TribunalToolboxFixture,
 } from './fixtures/tribunal-toolbox';
@@ -51,7 +52,7 @@ function seedConversation(): Conversation {
   return conversation;
 }
 
-function buildAnthropicGenerate(): GenerateFunction {
+function buildAnthropicGenerate(): { generate: GenerateFunction; client: AnthropicClient } {
   const client = createMockAnthropicClient([
     {
       content: [
@@ -66,10 +67,13 @@ function buildAnthropicGenerate(): GenerateFunction {
       usage: { input_tokens: 40, output_tokens: 10 },
     },
   ] satisfies AnthropicMessageResponse[]);
-  return createAnthropicProvider({ model: 'claude-sonnet-4-20250514', client });
+  return {
+    generate: createAnthropicProvider({ model: 'claude-sonnet-4-20250514', client }),
+    client,
+  };
 }
 
-function buildOpenAIGenerate(): GenerateFunction {
+function buildOpenAIGenerate(): { generate: GenerateFunction; client: OpenAIClient } {
   const client = createMockOpenAIClient([
     {
       choices: [
@@ -102,7 +106,25 @@ function buildOpenAIGenerate(): GenerateFunction {
       usage: { prompt_tokens: 40, completion_tokens: 10, total_tokens: 50 },
     },
   ] satisfies OpenAIChatCompletion[]);
-  return createOpenAIProvider({ model: 'gpt-4o', client });
+  // Unlike `RunOptions.responseSchema` (client-side validation, resolved
+  // fresh per-call by the loop as `context.responseFormat`), the OpenAI
+  // adapter only sends a provider-native `response_format` when
+  // `OpenAIProviderOptions.responseFormat` is set at CONSTRUCTION time —
+  // it never reads `context.responseFormat`. So a caller must derive the
+  // same `ResponseFormat` (via `resolveResponseFormat`, the exact function
+  // the loop itself uses) and pass it here for the schema to actually reach
+  // the wire, not just be validated locally after the fact.
+  const responseFormat = resolveResponseFormat(
+    tribunalOutputSchemaForRole('specialist'),
+    undefined,
+  );
+  if (!responseFormat) {
+    throw new Error('resolveResponseFormat unexpectedly returned undefined for a raw JSON Schema');
+  }
+  return {
+    generate: createOpenAIProvider({ model: 'gpt-4o', client, responseFormat }),
+    client,
+  };
 }
 
 async function runAgainstProvider(
@@ -110,7 +132,11 @@ async function runAgainstProvider(
   generate: GenerateFunction,
   effectiveModel: string,
 ) {
-  const toolbox = createToolbox(toolboxFixture.tools);
+  const toolbox = createToolbox(toolboxFixture.tools, {
+    policy: createHeadlessPermissionPolicyHooks(
+      createTribunalPermissions(toolboxFixture.allowedToolNames),
+    ),
+  });
   const activeRun = createActiveRun({
     generate,
     toolbox,
@@ -147,10 +173,12 @@ describe('AB-99 Tribunal conformance — two-provider parity', () => {
 
       const anthropicToolbox = createTribunalToolboxFixture(diffContext);
       const openaiToolbox = createTribunalToolboxFixture(diffContext);
+      const anthropic = buildAnthropicGenerate();
+      const openai = buildOpenAIGenerate();
 
       const [anthropicRun, openaiRun] = await Promise.all([
-        runAgainstProvider(anthropicToolbox, buildAnthropicGenerate(), 'claude-sonnet-4-20250514'),
-        runAgainstProvider(openaiToolbox, buildOpenAIGenerate(), 'gpt-4o'),
+        runAgainstProvider(anthropicToolbox, anthropic.generate, 'claude-sonnet-4-20250514'),
+        runAgainstProvider(openaiToolbox, openai.generate, 'gpt-4o'),
       ]);
 
       for (const [run, toolboxFixture, agentSlug] of [
@@ -173,6 +201,39 @@ describe('AB-99 Tribunal conformance — two-provider parity', () => {
       // both runs collected the identical finding via the identical tool
       // definition and the identical AB-95 response schema.
       expect(anthropicToolbox.collectedFindings).toEqual(openaiToolbox.collectedFindings);
+
+      // Wire-level check (not just local post-hoc validation): the OpenAI
+      // request actually carried the resolved `response_format` —
+      // `json_schema` with Tribunal's specialist findings schema, `strict:
+      // true`. Every recorded call must carry it, since it's a
+      // construction-time provider option (see `buildOpenAIGenerate`).
+      const openaiCalls = (openai.client as unknown as { _calls: Array<Record<string, unknown>> })
+        ._calls;
+      expect(openaiCalls.length).toBeGreaterThan(0);
+      for (const call of openaiCalls) {
+        const responseFormat = call['response_format'] as
+          | { type?: string; json_schema?: { schema?: unknown } }
+          | undefined;
+        expect(responseFormat?.type).toBe('json_schema');
+        expect(responseFormat?.json_schema?.schema).toEqual(
+          tribunalOutputSchemaForRole('specialist'),
+        );
+      }
+
+      // Anthropic's Messages API has no request-level structured-output
+      // field at all (no `response_format`/`tool_choice`-forced-JSON
+      // wiring in `createAnthropicProvider` today) — `responseSchema`
+      // enforcement on that provider is CLIENT-SIDE ONLY
+      // (`validateResponseSchema`, after the fact). Assert that honestly
+      // rather than implying wire-level enforcement this provider doesn't
+      // have: no recorded call carries anything schema-shaped.
+      const anthropicCalls = (
+        anthropic.client as unknown as { _calls: Array<Record<string, unknown>> }
+      )._calls;
+      expect(anthropicCalls.length).toBeGreaterThan(0);
+      for (const call of anthropicCalls) {
+        expect(call['response_format']).toBeUndefined();
+      }
     } finally {
       await repo.cleanup();
     }

@@ -152,7 +152,14 @@ export function mapRunReportToTribunalAgentResult(
     agentSlug: context.agentSlug,
     findings: context.findings,
     modelUsed: report.effectiveModel ?? 'unknown',
-    effortUsed: report.effectiveEffort ?? null,
+    // AB-91's provider adapters set `metadata.effectiveEffort` to the
+    // literal string `'none'` (not `undefined`) whenever no effort option
+    // was supplied — see `createAnthropicProvider`/`createOpenAIProvider`'s
+    // `effectiveEffort: resolvedEffort ?? 'none'`. Tribunal's `effortSchema`
+    // only accepts the real effort enum or `null`, so that sentinel must be
+    // normalized here rather than passed through.
+    effortUsed:
+      report.effectiveEffort && report.effectiveEffort !== 'none' ? report.effectiveEffort : null,
     usage: {
       inputTokens: report.usage.prompt,
       outputTokens: report.usage.completion,
