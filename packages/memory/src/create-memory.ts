@@ -5,6 +5,7 @@ import { applyMaximalMarginalRelevance } from './maximal-marginal-relevance';
 import type { MemoryRecord, MemoryRecordScope } from './memory-record-storage';
 import { extractKeywords } from './query-expansion';
 import { applyTemporalDecay } from './temporal-decay';
+import { filterByValidity, stampSupersession } from './temporal-validity';
 import { computeBM25Scores } from './text-search';
 import type {
   CreateMemoryOptions,
@@ -48,7 +49,9 @@ function toMemoryMetadata(record: MemoryRecord): MemoryMetadata {
  * own field, never in the metadata blob.
  */
 function buildStoredMetadata(metadata: Partial<MemoryMetadata>): Record<string, unknown> {
-  const { namespace: _namespace, ...rest } = metadata;
+  // `namespace` lives on the record's own field; `supersedes` is a write-only
+  // directive consumed by remember() (AB-61 spike) and never persisted.
+  const { namespace: _namespace, supersedes: _supersedes, ...rest } = metadata;
   return { source: 'manual', ...rest };
 }
 
@@ -83,6 +86,7 @@ export function createMemory(options: CreateMemoryOptions): Memory {
     requireNamespace = false,
     conflictThreshold,
     onConflict,
+    experimentalTemporalValidity = false,
   } = options;
 
   if (conflictThreshold !== undefined && conflictThreshold >= deduplicationThreshold) {
@@ -143,6 +147,12 @@ export function createMemory(options: CreateMemoryOptions): Memory {
       if (requireNamespace && !metadata?.namespace && defaultNamespace === DEFAULT_NAMESPACE) {
         throw new Error(
           'Namespace is required: provide a namespace in metadata or configure a default namespace.',
+        );
+      }
+
+      if (metadata?.supersedes !== undefined && !experimentalTemporalValidity) {
+        throw new Error(
+          'metadata.supersedes requires experimentalTemporalValidity to be enabled (AB-61 spike).',
         );
       }
 
@@ -228,6 +238,21 @@ export function createMemory(options: CreateMemoryOptions): Memory {
         await textSearchProvider.index(id, content, namespace);
       }
 
+      // AB-61 spike: stamp the superseded record as invalidated, pointing at
+      // the new record. Runs after the new record is durably stored so a
+      // failed stamp never leaves an orphaned fact with no successor.
+      if (experimentalTemporalValidity && metadata?.supersedes !== undefined) {
+        const superseded = await storage.get(metadata.supersedes, scope);
+        if (!superseded) {
+          throw new Error(
+            `Cannot supersede unknown record "${metadata.supersedes}" in namespace "${namespace}".`,
+          );
+        }
+        await storage.update(superseded.id, scope, {
+          metadata: stampSupersession(superseded.metadata, id, now),
+        });
+      }
+
       return toMemoryEntry(record, vector);
     },
 
@@ -297,6 +322,10 @@ export function createMemory(options: CreateMemoryOptions): Memory {
       const candidateMultiplier = 3;
       const vectorResultLimit = limit * candidateMultiplier;
 
+      // AB-61 spike: resolve once so both search branches filter to the same
+      // instant. Only active when the flag is set — otherwise `asOf` is inert.
+      const asOf = experimentalTemporalValidity ? (mergedOptions.asOf ?? Date.now()) : undefined;
+
       // When vectorOnly is set, skip BM25 and return pure cosine similarity
       // scores filtered by the (cosine-semantics) threshold.
       if (mergedOptions.vectorOnly) {
@@ -313,6 +342,10 @@ export function createMemory(options: CreateMemoryOptions): Memory {
           createdAt: hit.record.createdAt,
           vector: Array.from(hit.record.vector),
         }));
+
+        if (asOf !== undefined) {
+          results = filterByValidity(results, asOf);
+        }
 
         if (mergedOptions.temporalDecay) {
           results = applyTemporalDecay(results, {
@@ -405,6 +438,10 @@ export function createMemory(options: CreateMemoryOptions): Memory {
           vector: matched ? Array.from(matched.vector) : undefined,
         };
       });
+
+      if (asOf !== undefined) {
+        results = filterByValidity(results, asOf);
+      }
 
       // Apply temporal decay if configured.
       if (mergedOptions.temporalDecay) {

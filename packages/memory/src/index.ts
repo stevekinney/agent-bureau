@@ -50,6 +50,8 @@ export type { GetMemoryStatusOptions, MemoryStatus } from './status';
 export { getMemoryStatus } from './status';
 export type { TemporalDecayOptions } from './temporal-decay';
 export { applyTemporalDecay, computeTemporalDecay } from './temporal-decay';
+export type { TemporalValidityMetadata } from './temporal-validity';
+export { filterByValidity, isValidAtTimestamp, stampSupersession } from './temporal-validity';
 export type { BM25Options } from './text-search';
 export { computeBM25Scores, tokenize } from './text-search';
 export type { TextSearchProvider } from './text-search-provider';
