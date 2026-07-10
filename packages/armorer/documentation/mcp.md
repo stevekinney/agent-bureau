@@ -191,9 +191,13 @@ Agent SDK integration examples are documented in [Agent SDK Integrations](./agen
 
 ## No dependence on MCP sampling or roots
 
-`armorer/mcp` only exposes Toolbox tools (and, optionally, resources/prompts) as an MCP
-server — it never acts as an MCP client and never requests `sampling/createMessage` or
-`roots/list` from a connected host. This is intentional, not an oversight:
+`createMCP` only exposes Toolbox tools (and, optionally, resources/prompts) as an MCP
+server — it never establishes an MCP client session against a host and never requests
+`sampling/createMessage` or `roots/list`. `fromMcpTools` does interoperate with MCP tool
+definitions (turning them into executable Toolbox tools via a caller-supplied `callTool`),
+but that's a one-shot `tools/call` invocation, not a client session that could negotiate
+sampling or roots capabilities — those two capabilities are never used anywhere in
+`armorer/mcp`. This is intentional, not an oversight:
 
 - **Sampling** (`sampling/createMessage`) lets an MCP server ask the connected client's
   host to run an LLM completion on its behalf. Armorer's tools call out to LLM providers
