@@ -961,7 +961,12 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
             // armorer's `execute` contract is async; the raw tool factory's
             // `execute` is synchronous (it only mutates `context` and returns a
             // plain result), so wrap it rather than changing its public shape.
-            execute: (input) => Promise.resolve(rawHumanInputTool.execute(input)),
+            // Must stay `async` so a synchronous throw from `execute` is
+            // converted into a rejected Promise instead of escaping
+            // synchronously (Copilot review PRRT_kwDORvupsc6P7_8H) — awaiting
+            // `Promise.resolve(...)` (a genuine thenable) keeps both
+            // require-await and await-thenable satisfied.
+            execute: async (input) => await Promise.resolve(rawHumanInputTool.execute(input)),
           }),
         ]);
         runToolbox = combineToolboxes(runRuntime.toolbox, humanInputToolbox);
