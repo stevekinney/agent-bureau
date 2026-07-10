@@ -10,6 +10,7 @@ function createRunFrame(): ServerFrame {
     event: 'run.completed',
     detail: { content: 'Done.' },
     sequence: 1,
+    runSeq: 1,
     timestamp: Date.now(),
   };
 }

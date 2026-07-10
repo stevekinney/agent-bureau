@@ -1,13 +1,18 @@
 import type { StreamEvent } from 'operative';
 
-import type { ServerFrame } from './types';
+import type { StreamFrame } from './types';
 
 /**
- * Converts a streaming pipeline StreamEvent into a typed ServerFrame
- * suitable for WebSocket transmission. Returns undefined for event
+ * Converts a streaming pipeline StreamEvent into a typed {@link StreamFrame}
+ * suitable for WebSocket/SSE transmission. Returns undefined for event
  * types that do not have a corresponding frame.
+ *
+ * Does not stamp `runSeq` — that happens once, at the single emission point
+ * in `create-bureau.ts`'s `emitLiveFrame` callers, so every run-scoped frame
+ * (this function's output, plus the `event` frame built directly from store
+ * actions) shares one per-run counter.
  */
-export function streamEventToFrame(runId: string, event: StreamEvent): ServerFrame | undefined {
+export function streamEventToFrame(runId: string, event: StreamEvent): StreamFrame | undefined {
   switch (event.type) {
     case 'stream:text-delta':
       return {

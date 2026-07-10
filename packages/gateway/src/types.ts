@@ -108,7 +108,17 @@ export interface EvaluationReportsResponse {
 // ── WebSocket Frame Types (door-only client frames) ─────────────────
 
 export type ClientFrame =
-  | { type: 'subscribe'; runId: string }
+  | {
+      type: 'subscribe';
+      runId: string;
+      /**
+       * AB-15 replay cursor: the highest `ServerFrame.runSeq` this client has
+       * already seen for `runId`. When present, the door replays buffered
+       * frames with `runSeq > since` before the subscription goes live.
+       * Omit for a fresh subscription with no replay.
+       */
+      since?: number;
+    }
   | { type: 'unsubscribe'; runId: string }
   | { type: 'ping' };
 
