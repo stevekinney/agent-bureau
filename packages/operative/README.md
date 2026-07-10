@@ -473,6 +473,80 @@ hit rate is exposed per step and cumulatively on `usage.accumulated`
 these numbers end to end against the mock Anthropic client (no live API
 calls) — see it for the worked example.
 
+**Extended (1-hour) cache TTL.** Anthropic's cache breakpoints default to a
+5-minute TTL. Passing `extendedCacheTtl: true` to `createAnthropicProvider` /
+`createAnthropicProviderStream` opts every `cache_control` breakpoint lowered
+from a `cacheBoundary` mark into the extended one-hour TTL instead
+(`cache_control: { type: 'ephemeral', ttl: '1h' }`), which Anthropic bills at
+a higher cache-write rate in exchange for a longer-lived cache. It only takes
+effect on requests that actually have a cache boundary (i.e. `assembler` +
+`contextBudget`, or an already-marked conversation). OpenAI and Gemini use
+implicit, non-configurable prompt caching — there's no checkpoint metadata to
+interpret, so this option doesn't apply to `createOpenAIProvider` /
+`createGeminiProvider`.
+
+#### Providers Behind a Proxy
+
+Every shipped provider (`createAnthropicProvider`, `createOpenAIProvider`,
+`createGeminiProvider`, and their streaming counterparts) accepts a
+`baseURL` override and an arbitrary `apiKey` string with no shape
+validation — both pass straight to the underlying SDK client, so a
+credential-injecting proxy can sit in front of the real provider and swap in
+the real key server-side:
+
+```typescript
+const generate = createAnthropicProvider({
+  model: 'claude-sonnet-4-20250514',
+  apiKey: 'placeholder-token', // never a real key — the proxy injects it
+  baseURL: 'https://llm-proxy.internal.example.com',
+});
+```
+
+**Per-provider endpoint allowlist.** Each provider issues requests to exactly
+one endpoint per generate call (a second, distinct endpoint for the streaming
+factories of OpenAI and Gemini) — the set below is pinned by
+`test/provider-proxy-contract.test.ts`, which runs each provider (and each
+streaming counterpart) through a real SDK client against a local `Bun.serve`
+mock and asserts the exact `(method, path)` set observed over a multi-step
+run. Use it to build a proxy allowlist:
+
+| Provider           | Method | Path                                               | Auth header                     |
+| ------------------ | ------ | -------------------------------------------------- | ------------------------------- |
+| Anthropic          | POST   | `/v1/messages` (streaming uses the same path)      | `x-api-key`                     |
+| OpenAI             | POST   | `/chat/completions` (streaming uses the same path) | `authorization: Bearer <token>` |
+| Gemini             | POST   | `/v1beta/models/{model}:generateContent`           | `x-goog-api-key`                |
+| Gemini (streaming) | POST   | `/v1beta/models/{model}:streamGenerateContent`     | `x-goog-api-key`                |
+
+No provider issues a token-counting, models-list, or beta/experimental
+endpoint call as part of a normal generate step.
+
+**Per-run request metadata.** `requestMetadata` (a `Record<string, string>`)
+attaches to every generate request of a run:
+
+```typescript
+const generate = createAnthropicProvider({
+  model: 'claude-sonnet-4-20250514',
+  requestMetadata: { requestId: 'run-42', tenant: 'acme' },
+});
+```
+
+It's mapped to each provider's native field: Anthropic Messages `metadata`,
+OpenAI Chat Completions `metadata` (native string-keyed map, up to 16 keys).
+Gemini's `generateContent` API has no request-level metadata field, so
+`requestMetadata` is an explicit no-op for `createGeminiProvider` /
+`createGeminiProviderStream`.
+
+**Anthropic caveat — the whole object is forwarded, but the real API only
+accepts `user_id`.** Anthropic's `Metadata` type has exactly one documented
+field (`user_id`); calling `createAnthropicProvider` with `requestMetadata`
+containing OTHER keys and pointing `baseURL` at Anthropic's real endpoint
+directly (no proxy in front) gets the request rejected. This option exists
+for the credential-injecting-proxy case above: the proxy sees the whole
+object on the wire and can route/log on it, then either forward only
+`user_id` to the real Anthropic API or strip/translate the rest before
+forwarding. Don't pass arbitrary `requestMetadata` keys straight through to
+`api.anthropic.com` — only to a proxy that knows what to do with them.
+
 #### Backpressure
 
 ```typescript

@@ -55,9 +55,11 @@ export function createGeminiProvider(options: GeminiProviderOptions): GenerateFu
           });
         }
         const genAI = new GoogleGenerativeAI(apiKey);
-        return genAI.getGenerativeModel({
-          model: resolvedModel,
-        }) as unknown as GeminiGenerativeModel;
+        const requestOptions = options.baseURL ? { baseUrl: options.baseURL } : undefined;
+        return genAI.getGenerativeModel(
+          { model: resolvedModel },
+          requestOptions,
+        ) as unknown as GeminiGenerativeModel;
       });
     }
     return modelPromise;
@@ -176,9 +178,11 @@ export function createGeminiProviderStream(
           });
         }
         const genAI = new GoogleGenerativeAI(apiKey);
-        return genAI.getGenerativeModel({
-          model: resolvedModel,
-        }) as unknown as GeminiStreamingModel;
+        const requestOptions = options.baseURL ? { baseUrl: options.baseURL } : undefined;
+        return genAI.getGenerativeModel(
+          { model: resolvedModel },
+          requestOptions,
+        ) as unknown as GeminiStreamingModel;
       });
     }
     return modelPromise;
