@@ -1,6 +1,8 @@
 import { PassThrough } from 'node:stream';
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import type { TaskStore } from '@modelcontextprotocol/sdk/experimental/tasks';
+import { InMemoryTaskStore } from '@modelcontextprotocol/sdk/experimental/tasks';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { ReadBuffer, serializeMessage } from '@modelcontextprotocol/sdk/shared/stdio.js';
@@ -1516,6 +1518,33 @@ async function waitForTerminalTaskStatus(
   throw new Error(`Task ${taskId} did not reach a terminal status within ${maxPolls} polls.`);
 }
 
+/** Yields the microtask queue a handful of times, without any real timer. */
+async function flushMicrotasks(times = 10): Promise<void> {
+  for (let i = 0; i < times; i += 1) {
+    await Promise.resolve();
+  }
+}
+
+/**
+ * Builds a `TaskStore` that delegates every method to a fresh
+ * `InMemoryTaskStore`, except for whichever methods are supplied as
+ * overrides. Lets tests simulate a custom/session-scoped store that rejects
+ * a specific operation (e.g. `updateTaskStatus`, `storeTaskResult`) while
+ * everything else behaves like the real thing.
+ */
+function createDelegatingTaskStore(overrides: Partial<TaskStore> = {}): TaskStore {
+  const inner = new InMemoryTaskStore();
+  return {
+    createTask: (...args) => inner.createTask(...args),
+    getTask: (...args) => inner.getTask(...args),
+    storeTaskResult: (...args) => inner.storeTaskResult(...args),
+    getTaskResult: (...args) => inner.getTaskResult(...args),
+    updateTaskStatus: (...args) => inner.updateTaskStatus(...args),
+    listTasks: (...args) => inner.listTasks(...args),
+    ...overrides,
+  };
+}
+
 describe('task-based tools (MCP Tasks extension)', () => {
   it('exposes a long-running tool as a task: create, poll via tasks/get, retrieve via tasks/result', async () => {
     const toolbox = createToolbox();
@@ -1639,6 +1668,281 @@ describe('task-based tools (MCP Tasks extension)', () => {
 
     try {
       expect(client.getServerCapabilities()?.tasks).toBeUndefined();
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  it('creates every task with a short poll interval so the SDK automatic-polling fallback does not stall', async () => {
+    const toolbox = createToolbox();
+    createTool(
+      {
+        name: 'quick-task',
+        description: 'a task-based tool',
+        input: z.object({}),
+        metadata: { mcp: { execution: { taskSupport: 'required' } } },
+        async execute() {
+          return { ok: true };
+        },
+      },
+      toolbox,
+    );
+
+    const { client, server } = await connect(toolbox);
+
+    try {
+      const createResult = await client.request(
+        { method: 'tools/call', params: { name: 'quick-task', arguments: {}, task: {} } },
+        CreateTaskResultSchema,
+      );
+      expect(createResult.task.pollInterval).toBe(250);
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  it('omits the task ttl when the client does not request one, letting the task store apply its own default', async () => {
+    const toolbox = createToolbox();
+    createTool(
+      {
+        name: 'no-ttl-task',
+        description: 'a task-based tool',
+        input: z.object({}),
+        metadata: { mcp: { execution: { taskSupport: 'required' } } },
+        async execute() {
+          return { ok: true };
+        },
+      },
+      toolbox,
+    );
+
+    const recordedTtls: Array<number | null | undefined> = [];
+    const taskStore = createDelegatingTaskStore({
+      createTask: (params, requestId, request, sessionId) => {
+        recordedTtls.push(params.ttl);
+        return new InMemoryTaskStore().createTask(params, requestId, request, sessionId);
+      },
+    });
+
+    const { client, server } = await connect(toolbox, { taskStore });
+
+    try {
+      await client.request(
+        { method: 'tools/call', params: { name: 'no-ttl-task', arguments: {}, task: {} } },
+        CreateTaskResultSchema,
+      );
+      expect(recordedTtls).toEqual([undefined]);
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  it('passes through a client-requested task ttl', async () => {
+    const toolbox = createToolbox();
+    createTool(
+      {
+        name: 'ttl-task',
+        description: 'a task-based tool',
+        input: z.object({}),
+        metadata: { mcp: { execution: { taskSupport: 'required' } } },
+        async execute() {
+          return { ok: true };
+        },
+      },
+      toolbox,
+    );
+
+    const recordedTtls: Array<number | null | undefined> = [];
+    const taskStore = createDelegatingTaskStore({
+      createTask: (params, requestId, request, sessionId) => {
+        recordedTtls.push(params.ttl);
+        return new InMemoryTaskStore().createTask(params, requestId, request, sessionId);
+      },
+    });
+
+    const { client, server } = await connect(toolbox, { taskStore });
+
+    try {
+      await client.request(
+        {
+          method: 'tools/call',
+          params: { name: 'ttl-task', arguments: {}, task: { ttl: 60_000 } },
+        },
+        CreateTaskResultSchema,
+      );
+      expect(recordedTtls).toEqual([60_000]);
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  it('does not abort the tool until the task store confirms the cancellation', async () => {
+    const toolbox = createToolbox();
+    const started = createDeferred<void>();
+    let sawAbort = false;
+
+    createTool(
+      {
+        name: 'guarded-cancel-task',
+        description: 'a task-based tool cancelled through a store that rejects the update',
+        input: z.object({}),
+        metadata: { mcp: { execution: { taskSupport: 'required' } } },
+        async execute(_params, context) {
+          started.resolve();
+          return new Promise((_resolve, reject) => {
+            context.signal?.addEventListener('abort', () => {
+              sawAbort = true;
+              reject(context.signal?.reason ?? new Error('aborted'));
+            });
+          });
+        },
+      },
+      toolbox,
+    );
+
+    const taskStore = createDelegatingTaskStore({
+      async updateTaskStatus() {
+        throw new Error('session mismatch: not authorized to cancel this task');
+      },
+    });
+
+    const { client, server } = await connect(toolbox, { taskStore });
+
+    try {
+      const createResult = await client.request(
+        {
+          method: 'tools/call',
+          params: { name: 'guarded-cancel-task', arguments: {}, task: {} },
+        },
+        CreateTaskResultSchema,
+      );
+      const taskId = createResult.task.taskId;
+      await started.promise;
+
+      let cancelError: unknown;
+      try {
+        await client.experimental.tasks.cancelTask(taskId);
+      } catch (error) {
+        cancelError = error;
+      }
+      expect(cancelError).toBeDefined();
+
+      await flushMicrotasks();
+      expect(sawAbort).toBe(false);
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  it('does not surface an unhandled rejection when storeTaskResult fails after the tool completes', async () => {
+    const toolbox = createToolbox();
+    createTool(
+      {
+        name: 'unstorable-task',
+        description: 'a task-based tool whose result the store refuses to persist',
+        input: z.object({}),
+        metadata: { mcp: { execution: { taskSupport: 'required' } } },
+        async execute() {
+          return { ok: true };
+        },
+      },
+      toolbox,
+    );
+
+    const taskStore = createDelegatingTaskStore({
+      async storeTaskResult() {
+        throw new Error('write conflict: task result already finalized elsewhere');
+      },
+    });
+
+    const unhandledRejections: unknown[] = [];
+    const onUnhandledRejection = (reason: unknown) => {
+      unhandledRejections.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandledRejection);
+
+    const { client, server } = await connect(toolbox, { taskStore });
+
+    try {
+      await client.request(
+        {
+          method: 'tools/call',
+          params: { name: 'unstorable-task', arguments: {}, task: {} },
+        },
+        CreateTaskResultSchema,
+      );
+
+      await flushMicrotasks(20);
+      expect(unhandledRejections).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandledRejection);
+      await client.close();
+      await server.close();
+    }
+  });
+
+  it('passes the elicitation requester into a task-backed tool, mirroring the plain call path', async () => {
+    const toolbox = createToolbox();
+    createTool(
+      {
+        name: 'approve-task',
+        description: 'a task-based tool that requests approval',
+        input: z.object({}),
+        metadata: { mcp: { execution: { taskSupport: 'required' } } },
+        async execute(_params, context) {
+          if (!context.elicit) {
+            throw new Error('elicitation unavailable in this context');
+          }
+          const response = await context.elicit({
+            message: 'Approve?',
+            mode: 'form',
+            schema: {
+              type: 'object',
+              properties: { approved: { type: 'boolean' } },
+              required: ['approved'],
+            },
+          });
+          return {
+            approved: response.action === 'accept' && response.content?.['approved'] === true,
+          };
+        },
+      },
+      toolbox,
+    );
+
+    const server = await createMCP(toolbox);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client(
+      { name: 'task-elicitation-client', version: '0.0.0' },
+      { capabilities: { elicitation: {} } },
+    );
+    client.setRequestHandler(
+      ElicitRequestSchema,
+      createMcpElicitationHandler(async () => ({ action: 'accept', content: { approved: true } })),
+    );
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+
+    try {
+      const createResult = await client.request(
+        { method: 'tools/call', params: { name: 'approve-task', arguments: {}, task: {} } },
+        CreateTaskResultSchema,
+      );
+      const taskId = createResult.task.taskId;
+
+      const finalStatus = await waitForTerminalTaskStatus(client, taskId);
+      expect(finalStatus).toBe('completed');
+
+      const taskResult = await client.experimental.tasks.getTaskResult(
+        taskId,
+        CallToolResultSchema,
+      );
+      expect(taskResult.structuredContent).toEqual({ approved: true });
     } finally {
       await client.close();
       await server.close();

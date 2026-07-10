@@ -463,29 +463,69 @@ function registerMcpTaskTool(
 }
 
 /**
+ * Default poll interval (ms) advertised on a newly created task, and — for
+ * `taskSupport: 'optional'` tools called without task augmentation — the
+ * interval the SDK's own automatic-polling fallback (`handleAutomaticTaskPolling`)
+ * waits before its first status check. Kept short so an optional task tool
+ * that finishes quickly doesn't force a synchronous caller to wait out a
+ * multi-second default poll interval.
+ */
+const DEFAULT_TASK_POLL_INTERVAL_MS = 250;
+
+/**
  * Builds the `createTask` / `getTask` / `getTaskResult` triad the Tasks
  * extension requires. `createTask` starts the tool's execution in the
  * background (not awaited) against a per-task `AbortController`; that
  * controller is registered in `taskAbortControllers` so a later
  * `tasks/cancel` (routed through {@link createTaskAwareTaskStore}) can abort
- * it. `getTask`/`getTaskResult` simply delegate to the request-scoped
- * `RequestTaskStore`, per the SDK's documented `registerToolTask` pattern.
+ * it, and is also linked to `extra.signal` so that cancelling the underlying
+ * `tools/call` request itself — the only cancellation path available for a
+ * `taskSupport: 'optional'` tool invoked without task augmentation, since the
+ * SDK's automatic-polling fallback never surfaces a task id to the client —
+ * also stops the tool's work. `getTask`/`getTaskResult` simply delegate to
+ * the request-scoped `RequestTaskStore`, per the SDK's documented
+ * `registerToolTask` pattern.
  */
 function createMcpTaskToolHandler(
   tool: Tool,
-  options: Pick<ToMCPToolsOptions, 'executeTool' | 'formatResult'>,
+  options: ToMCPToolsOptions,
   taskAbortControllers: Map<string, AbortController>,
 ): ToolTaskHandler<AnySchema> {
   return {
     async createTask(args, extra: CreateTaskRequestHandlerExtra) {
-      const task = await extra.taskStore.createTask({ ttl: extra.taskRequestedTtl ?? null });
+      const task = await extra.taskStore.createTask({
+        ...(extra.taskRequestedTtl !== undefined ? { ttl: extra.taskRequestedTtl } : {}),
+        pollInterval: DEFAULT_TASK_POLL_INTERVAL_MS,
+      });
+
       const controller = new AbortController();
+      if (extra.signal.aborted) {
+        controller.abort(extra.signal.reason);
+      } else {
+        extra.signal.addEventListener('abort', () => controller.abort(extra.signal.reason), {
+          once: true,
+        });
+      }
       taskAbortControllers.set(task.taskId, controller);
-      void runMcpTaskTool(tool, args, extra.taskStore, task.taskId, controller, options).finally(
-        () => {
-          taskAbortControllers.delete(task.taskId);
-        },
-      );
+
+      const clientSupportsElicitation = options.supportsElicitation
+        ? options.supportsElicitation()
+        : true;
+      const elicit = clientSupportsElicitation
+        ? createMcpToolElicitationRequester(extra)
+        : undefined;
+
+      void runMcpTaskTool(
+        tool,
+        args,
+        extra.taskStore,
+        task.taskId,
+        controller,
+        elicit,
+        options,
+      ).finally(() => {
+        taskAbortControllers.delete(task.taskId);
+      });
       return { task };
     },
     async getTask(_args, extra: TaskRequestHandlerExtra) {
@@ -505,6 +545,11 @@ function createMcpTaskToolHandler(
  * terminal `cancelled` status — recording a completion/failure on top of
  * that would both be rejected by the store (terminal states don't
  * transition) and semantically wrong, so this returns without storing.
+ * `storeTaskResult` can also reject on its own (e.g. the task's TTL elapsed
+ * and the store already removed it, or a session-scoped store rejects the
+ * write) — this call is fire-and-forget from the caller's perspective, so
+ * that rejection is swallowed here rather than becoming an unhandled
+ * promise rejection.
  */
 async function runMcpTaskTool(
   tool: Tool,
@@ -512,17 +557,23 @@ async function runMcpTaskTool(
   taskStore: RequestTaskStore,
   taskId: string,
   controller: AbortController,
+  elicit: ToolElicitationRequester | undefined,
   options: Pick<ToMCPToolsOptions, 'executeTool' | 'formatResult'>,
 ): Promise<void> {
   let outcome: { ok: true; result: ToolResultLike } | { ok: false; error: unknown };
   try {
     const result = options.executeTool
-      ? await options.executeTool(tool, params, taskId, controller.signal)
+      ? await options.executeTool(tool, params, taskId, controller.signal, elicit)
       : await (
           tool as unknown as {
             executeWith: (options: ToolExecuteWithOptions) => Promise<ToolResultLike>;
           }
-        ).executeWith({ params: params ?? {}, callId: taskId, signal: controller.signal });
+        ).executeWith({
+          params: params ?? {},
+          callId: taskId,
+          signal: controller.signal,
+          ...(elicit ? { elicit } : {}),
+        });
     outcome = { ok: true, result };
   } catch (error) {
     outcome = { ok: false, error };
@@ -538,7 +589,18 @@ async function runMcpTaskTool(
       : toCallToolResult(outcome.result)
     : toErrorCallToolResult(outcome.error);
 
-  await taskStore.storeTaskResult(taskId, callResult.isError ? 'failed' : 'completed', callResult);
+  try {
+    await taskStore.storeTaskResult(
+      taskId,
+      callResult.isError ? 'failed' : 'completed',
+      callResult,
+    );
+  } catch {
+    // The task was cancelled or its TTL elapsed while the tool was finishing
+    // (or a session-scoped store otherwise rejected the write) — the store
+    // has already finalized or removed the task, so there is nothing left
+    // to record.
+  }
 }
 
 function toErrorCallToolResult(error: unknown): CallToolResult {
@@ -565,6 +627,12 @@ function asCallToolResult(result: Result): CallToolResult {
  * 'cancelled', ...)` — also aborts the `AbortController` registered for
  * that task in `createTask`, actually stopping the in-flight tool
  * execution rather than merely flipping a status flag.
+ *
+ * The store update is awaited *before* aborting: for a session-scoped store,
+ * `baseStore.updateTaskStatus` is what verifies the caller's session is
+ * actually allowed to cancel this task, and a terminal task rejects the
+ * transition outright. Aborting first would stop real work on a
+ * cancellation the store goes on to reject.
  */
 function createTaskAwareTaskStore(
   baseStore: TaskStore,
@@ -579,12 +647,12 @@ function createTaskAwareTaskStore(
     getTaskResult: (taskId, sessionId) => baseStore.getTaskResult(taskId, sessionId),
     listTasks: (cursor, sessionId) => baseStore.listTasks(cursor, sessionId),
     async updateTaskStatus(taskId, status, statusMessage, sessionId) {
+      await baseStore.updateTaskStatus(taskId, status, statusMessage, sessionId);
       if (status === 'cancelled') {
         taskAbortControllers
           .get(taskId)
           ?.abort(new Error('Task cancelled by client via tasks/cancel.'));
       }
-      return baseStore.updateTaskStatus(taskId, status, statusMessage, sessionId);
     },
   };
 }
