@@ -1097,12 +1097,12 @@ Guardrails are the trust boundary between the agent loop and everything that can
 
 #### The Tripwire Model (AB-40)
 
-Every detector and validator returns a `DetectionResult`/`ValidationResult` with a `confidence` score and an `action`: `'block'`, `'warn'`, `'sanitize'`, or `'tripwire'`. Guardrails as a whole run in one of two `mode`s:
+Every detector/validator returns a `DetectionResult`/`ValidationResult` carrying a `confidence` score. What happens when one triggers is governed by an `action`, configured per guardrail group — `InputGuardrailOptions.action` (`'block' | 'warn' | 'sanitize' | 'tripwire'`, using `DetectionResult.sanitized` for `'sanitize'`) and `OutputGuardrailOptions.action` (`'block' | 'warn' | 'redact' | 'tripwire'`, using `ValidationResult.redacted` for `'redact'`). `GuardrailsOptions.mode` sets both sides at once:
 
-- **`mode: 'gate'`** (default) — a triggered detector/validator applies its own `action`: block the step, warn and continue, or sanitize the offending content in place.
-- **`mode: 'tripwire'`** — any trigger hard-halts the run regardless of the individual `action`, setting `finishReason: 'tripwire'` on the result instead of substituting a blocked or redacted response. Use this where a false negative is unacceptable and a human should look at the transcript before the agent takes another step.
+- **`mode: 'validate'`** (default) — a tripped detector/validator substitutes a blocked/sanitized/redacted response and the run continues, per each guardrail's own `action`.
+- **`mode: 'tripwire'`** — overrides `input.action`/`output.action` to `'tripwire'` regardless of what they were set to. A tripped wire throws a `GuardrailTripwireError`, hard-halting the run with `finishReason: 'tripwire'` and a `run.tripwire` event identifying the guardrail, instead of substituting a blocked or redacted response. Use this where a false negative is unacceptable and a human should look at the transcript before the agent takes another step.
 
-`withMinimumTripwireConfidence(detector, threshold)` wraps a detector so it only trips at or above a confidence floor, letting you run a broad detector in `'gate'` mode for low-confidence hits while reserving the tripwire for high-confidence ones.
+`withMinimumTripwireConfidence(detector, threshold)` wraps a detector so it only trips at or above a confidence floor, letting a broad detector stay quiet on low-confidence hits while still reaching the tripwire on high-confidence ones.
 
 #### Detector and Validator Catalog
 
@@ -1118,14 +1118,14 @@ Every detector and validator returns a `DetectionResult`/`ValidationResult` with
 
 #### Provenance and the Three Retrieval Surfaces (AB-41)
 
-Every detector call carries a `DetectorContext.provenance` tag, and every triggered result carries the same tag on `GuardrailProvenance`:
+Input detectors run against a `GuardrailProvenance` tag — every `DetectorContext.provenance` and every `GuardrailTriggeredEvent.provenance` on the input side carries one of:
 
 - `'user-input'` — content typed directly by the session's user.
 - `'recalled-memory'` — content pulled in by `memory`'s recall tool.
 - `'ingested-document'` — content pulled in from an ingested document (e.g. a file or URL fetched into context).
 - `'skill-resource'` — content pulled in from a skill's bundled resources.
 
-The three retrieval tags mark a distinct trust boundary from `'user-input'`: that content was authored by someone (or something) other than the current session's user and may have been crafted specifically to manipulate the model. Callers that assemble context from memory, documents, or skills should tag detector calls with the matching provenance so guardrail triggers and audit logs can distinguish "the user asked for this" from "this arrived via retrieval."
+The three retrieval tags mark a distinct trust boundary from `'user-input'`: that content was authored by someone (or something) other than the current session's user and may have been crafted specifically to manipulate the model. Callers that assemble context from memory, documents, or skills should tag detector calls with the matching provenance so guardrail triggers and audit logs can distinguish "the user asked for this" from "this arrived via retrieval." (Provenance is an input-side concept — output validators run against generated text with no retrieval source to tag; a taint raised from a retrieval surface can still carry its `provenance` through `SessionTaintedEvent.provenance` into `createSessionTaintTracker`.)
 
 #### The Bureau Default Preset
 
