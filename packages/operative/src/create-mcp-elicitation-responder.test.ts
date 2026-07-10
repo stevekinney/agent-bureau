@@ -58,11 +58,13 @@ describe('createMcpElicitationResponder', () => {
     expect(result).toEqual({ action: 'decline' });
   });
 
-  it('models URL-mode elicitation as a boolean acknowledgement schema', async () => {
+  it('models URL-mode elicitation as a boolean acknowledgement schema and folds the URL into the message', async () => {
     let capturedSchema: unknown;
+    let capturedMessage: string | undefined;
     const responder = createMcpElicitationResponder({
       onElicitation: async (request) => {
         capturedSchema = request.schema;
+        capturedMessage = request.message;
         return { data: { acknowledged: true } } as any;
       },
       getContext: makeContext,
@@ -75,6 +77,7 @@ describe('createMcpElicitationResponder', () => {
     ).toEqual({
       acknowledged: true,
     });
+    expect(capturedMessage).toBe('Open this link (https://example.com)');
   });
 
   it('dispatches ElicitationRequestedEvent and ElicitationResolvedEvent around the call', async () => {

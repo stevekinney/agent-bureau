@@ -67,9 +67,10 @@ export function createMcpElicitationResponder(
   return async (request: ToolElicitationRequest): Promise<ToolElicitationResult> => {
     const context = getContext();
     const schema = toZodSchema(request);
+    const message = toElicitationMessage(request);
 
-    emitter?.dispatch(new ElicitationRequestedEvent(context.step, request.message));
-    const response = await onElicitation({ message: request.message, schema, context });
+    emitter?.dispatch(new ElicitationRequestedEvent(context.step, message));
+    const response = await onElicitation({ message, schema, context });
     const accepted = response !== null;
     emitter?.dispatch(new ElicitationResolvedEvent(context.step, accepted));
 
@@ -78,6 +79,19 @@ export function createMcpElicitationResponder(
     }
     return { action: 'accept', content: toContentRecord(response.data) };
   };
+}
+
+/**
+ * `ElicitationRequest.message` is a plain string — `onElicitation`
+ * implementations and the `elicitation.requested` event have no separate
+ * slot for a URL. For URL-mode requests, fold the URL into the message so
+ * callers can still present/launch it, instead of silently dropping it.
+ */
+function toElicitationMessage(request: ToolElicitationRequest): string {
+  if (request.mode === 'url') {
+    return `${request.message} (${request.url})`;
+  }
+  return request.message;
 }
 
 /**

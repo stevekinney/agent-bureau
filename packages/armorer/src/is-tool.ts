@@ -199,22 +199,38 @@ export type MergeEvents<Custom extends ToolEventsMap> = DefaultToolEvents & Cust
 export type ToolCustomEvent<Detail = unknown> = Event & Detail;
 
 /**
+ * A form-mode elicitation request: asks for structured data matching a JSON
+ * Schema object.
+ */
+export interface ToolElicitationFormRequest {
+  message: string;
+  mode?: 'form';
+  /** JSON Schema object describing the requested form data. */
+  schema?: Record<string, unknown>;
+}
+
+/**
+ * A URL-mode elicitation request: asks the caller to open a link out-of-band.
+ */
+export interface ToolElicitationUrlRequest {
+  message: string;
+  mode: 'url';
+  /** The URL the caller should open. */
+  url: string;
+}
+
+/**
  * A request to elicit input (approval, form data, or a URL-mode
  * out-of-band flow) from whoever is on the other end of a tool's
  * execution — typically an MCP client, but the shape is transport-agnostic.
  *
  * Mirrors the MCP spec's form/URL elicitation split without depending on
- * `@modelcontextprotocol/sdk` types: `schema` is a plain JSON Schema object
- * for form mode, `url` is set for URL mode.
+ * `@modelcontextprotocol/sdk` types. This is a discriminated union on `mode`
+ * so a URL-mode request can never be constructed without its `url`, and a
+ * form-mode request can never carry a stray `url` that would silently be
+ * dropped by a `mode`-unaware caller.
  */
-export interface ToolElicitationRequest {
-  message: string;
-  mode?: 'form' | 'url';
-  /** JSON Schema object describing the requested form data (form mode). */
-  schema?: Record<string, unknown>;
-  /** The URL the caller should open (URL mode). */
-  url?: string;
-}
+export type ToolElicitationRequest = ToolElicitationFormRequest | ToolElicitationUrlRequest;
 
 /** The response to a {@link ToolElicitationRequest}. */
 export type ToolElicitationResult =
