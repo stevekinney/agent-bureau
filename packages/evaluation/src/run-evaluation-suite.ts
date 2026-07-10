@@ -29,8 +29,13 @@ async function loadCasesFromDatasets(datasets: string | string[]): Promise<Evalu
   return allCases;
 }
 
-/** Type guard that validates the minimal shape of a baseline report. */
-function isEvaluationReport(value: unknown): value is EvaluationReport {
+/**
+ * Type guard that validates the minimal shape of an EvaluationReport.
+ * Exported for reuse by `listEvaluationReports()`, which validates arbitrary
+ * files in a reports directory the same way a baseline report is validated
+ * here.
+ */
+export function isEvaluationReport(value: unknown): value is EvaluationReport {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
   const record = value as Record<string, unknown>;
   return (

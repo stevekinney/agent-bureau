@@ -3,7 +3,7 @@ import { join } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 
-import { loadDataset, loadDatasets } from './datasets';
+import { getDatasetVersion, loadDataset, loadDatasets, saveDataset } from './datasets';
 
 const fixturesDirectory = join(import.meta.dir, '__test-fixtures__');
 
@@ -238,5 +238,84 @@ describe('loadDatasets', () => {
       expect(error).toBeInstanceOf(Error);
       expect((error as Error).message).toMatch(/name/i);
     }
+  });
+});
+
+describe('getDatasetVersion / saveDataset', () => {
+  it('reports version 0 for a dataset file that does not exist yet', async () => {
+    const version = await getDatasetVersion(fixturePath('does-not-exist.json'));
+    expect(version).toBe(0);
+  });
+
+  it('reports version 0 for a legacy bare-array dataset file', async () => {
+    // valid-cases.json (seeded in beforeEach) is a bare array — predates versioning.
+    const version = await getDatasetVersion(fixturePath('valid-cases.json'));
+    expect(version).toBe(0);
+  });
+
+  it('writes version 1 on the first saveDataset() call for a new path', async () => {
+    const path = fixturePath('versioned-new.json');
+    const { version } = await saveDataset(path, [{ name: 'case-1', input: 'hi' }]);
+
+    expect(version).toBe(1);
+    expect(await getDatasetVersion(path)).toBe(1);
+  });
+
+  it('bumps the version by one on each subsequent saveDataset() call', async () => {
+    const path = fixturePath('versioned-bump.json');
+    await saveDataset(path, [{ name: 'case-1', input: 'hi' }]);
+    const second = await saveDataset(path, [
+      { name: 'case-1', input: 'hi' },
+      { name: 'case-2', input: 'bye' },
+    ]);
+    const third = await saveDataset(path, [{ name: 'case-1', input: 'hi' }]);
+
+    expect(second.version).toBe(2);
+    expect(third.version).toBe(3);
+  });
+
+  it('bumps a legacy unversioned dataset to version 1 on its first managed write', async () => {
+    const path = fixturePath('legacy-promoted.json');
+    await Bun.write(path, JSON.stringify([{ name: 'legacy-case', input: 'legacy input' }]));
+    expect(await getDatasetVersion(path)).toBe(0);
+
+    const { version } = await saveDataset(path, [{ name: 'legacy-case', input: 'legacy input' }]);
+    expect(version).toBe(1);
+  });
+
+  it('round-trips cases saved via saveDataset() through loadDataset()', async () => {
+    const path = fixturePath('round-trip.json');
+    const cases = [
+      { name: 'case-1', input: 'What is 2+2?', tags: ['math'] },
+      { name: 'case-2', input: 'Say hello' },
+    ];
+    await saveDataset(path, cases);
+
+    const loaded = await loadDataset(path);
+    expect(loaded).toHaveLength(2);
+    expect(loaded[0]!.name).toBe('case-1');
+    expect(loaded[1]!.name).toBe('case-2');
+  });
+
+  it('round-trips provenance through saveDataset() and loadDataset()', async () => {
+    const path = fixturePath('round-trip-provenance.json');
+    const cases = [
+      {
+        name: 'promoted-case',
+        input: 'reproduce the bug',
+        expectedOutput: 'fixed output',
+        provenance: {
+          origin: 'production-failure' as const,
+          runId: 'run-123',
+          sourceCaseName: 'original-case',
+          promotedAt: '2026-01-01T00:00:00.000Z',
+          finishReason: 'stop-condition' as const,
+        },
+      },
+    ];
+    await saveDataset(path, cases);
+
+    const loaded = await loadDataset(path);
+    expect(loaded[0]!.provenance).toEqual(cases[0]!.provenance);
   });
 });

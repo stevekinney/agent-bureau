@@ -1,4 +1,9 @@
-import type { EvaluationCase, SemanticMatcher } from './types';
+import type {
+  DatasetFile,
+  EvaluationCase,
+  EvaluationCaseProvenance,
+  SemanticMatcher,
+} from './types';
 
 /** Type guard for SemanticMatcher objects loaded from JSON datasets. */
 function isSemanticMatcher(value: unknown): value is SemanticMatcher {
@@ -9,6 +14,31 @@ function isSemanticMatcher(value: unknown): value is SemanticMatcher {
     typeof record['reference'] === 'string' &&
     typeof record['threshold'] === 'number'
   );
+}
+
+/** Type guard for EvaluationCaseProvenance objects loaded from JSON datasets. */
+function isProvenance(value: unknown): value is EvaluationCaseProvenance {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return (
+    (record['origin'] === 'evaluation-run' || record['origin'] === 'production-failure') &&
+    typeof record['runId'] === 'string' &&
+    typeof record['promotedAt'] === 'string' &&
+    typeof record['finishReason'] === 'string' &&
+    (record['sourceCaseName'] === undefined || typeof record['sourceCaseName'] === 'string')
+  );
+}
+
+/**
+ * Type guard for the wrapped `{ version, cases }` dataset file shape written
+ * by `saveDataset()`. Distinguishes it from the legacy bare-array shape that
+ * hand-authored dataset files (and `loadDataset()`'s pre-versioning callers)
+ * still use — both are accepted on load.
+ */
+function isDatasetFileShape(value: unknown): value is { version: number; cases: unknown[] } {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return typeof record['version'] === 'number' && Array.isArray(record['cases']);
 }
 
 /**
@@ -57,6 +87,7 @@ function validateEvaluationCase(value: unknown, index: number): EvaluationCase {
     maxSteps: typeof record['maxSteps'] === 'number' ? record['maxSteps'] : undefined,
     tags: Array.isArray(record['tags']) ? (record['tags'] as string[]) : undefined,
     timeout: typeof record['timeout'] === 'number' ? record['timeout'] : undefined,
+    provenance: isProvenance(record['provenance']) ? record['provenance'] : undefined,
   };
 }
 
@@ -91,11 +122,58 @@ export async function loadDataset(path: string): Promise<EvaluationCase[]> {
     throw new Error(`Invalid JSON in dataset file "${path}": failed to parse`);
   }
 
+  // Datasets are versioned artifacts (see `saveDataset()`), written as
+  // `{ version, cases }`. Hand-authored and pre-versioning dataset files are
+  // a bare JSON array — both shapes are accepted here so existing datasets
+  // keep loading unchanged.
+  if (isDatasetFileShape(parsed)) {
+    return parsed.cases.map((entry, index) => validateEvaluationCase(entry, index));
+  }
+
   if (!Array.isArray(parsed)) {
-    throw new Error(`Dataset file "${path}" must contain a JSON array, got ${typeof parsed}`);
+    throw new Error(
+      `Dataset file "${path}" must contain a JSON array or a { version, cases } object, got ${typeof parsed}`,
+    );
   }
 
   return parsed.map((entry, index) => validateEvaluationCase(entry, index));
+}
+
+/**
+ * Reads the version of a dataset file without validating its cases.
+ * Returns `0` when the file does not exist or predates versioning (a bare
+ * JSON array) — `saveDataset()` treats that as "not yet versioned" and bumps
+ * to `1` on the next managed write.
+ */
+export async function getDatasetVersion(path: string): Promise<number> {
+  const file = Bun.file(path);
+  if (!(await file.exists())) return 0;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(await file.text());
+  } catch {
+    return 0;
+  }
+
+  return isDatasetFileShape(parsed) ? parsed.version : 0;
+}
+
+/**
+ * Writes a dataset as a versioned artifact: reads the current version at
+ * `path` (0 if absent or unversioned), bumps it by one, and writes
+ * `{ version, cases }`. This is the dataset lifecycle's write path —
+ * `promoteRunToCase()` produces cases, `saveDataset()` commits them to disk
+ * with a traceable revision.
+ */
+export async function saveDataset(
+  path: string,
+  cases: EvaluationCase[],
+): Promise<{ version: number }> {
+  const version = (await getDatasetVersion(path)) + 1;
+  const payload: DatasetFile = { version, cases };
+  await Bun.write(path, `${JSON.stringify(payload, null, 2)}\n`);
+  return { version };
 }
 
 /**

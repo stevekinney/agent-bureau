@@ -38,6 +38,28 @@ export type EvaluationAssertion = {
 };
 
 /**
+ * Where a promoted evaluation case's golden expectation came from.
+ */
+export type EvaluationCaseOrigin = 'evaluation-run' | 'production-failure';
+
+/**
+ * Provenance recorded on a case that was promoted from a recorded run via
+ * `promoteRunToCase()` — which run/failure produced it, and when.
+ */
+export type EvaluationCaseProvenance = {
+  /** Whether the source run came from an evaluation suite or a production failure. */
+  origin: EvaluationCaseOrigin;
+  /** Identifier for the recorded run (report timestamp + case name, bureau run id, etc). */
+  runId: string;
+  /** Name of the case that produced the run, when promoted from an existing evaluation case. */
+  sourceCaseName?: string;
+  /** ISO timestamp of when the case was promoted. */
+  promotedAt: string;
+  /** The finish reason of the promoted run. */
+  finishReason: FinishReason;
+};
+
+/**
  * A single evaluation test case that defines what to send to an agent
  * and how to judge its response.
  */
@@ -60,6 +82,42 @@ export type EvaluationCase = {
   tags?: string[];
   /** Timeout in ms for this case. Default: 30_000. */
   timeout?: number;
+  /** Set when this case was promoted from a recorded run via `promoteRunToCase()`. */
+  provenance?: EvaluationCaseProvenance;
+};
+
+/**
+ * Options for `promoteRunToCase()` — turns a recorded run into a runnable
+ * regression case whose expectations snapshot that run's actual behavior.
+ */
+export type PromoteRunToCaseOptions = {
+  /** The case whose input/systemPrompt/tags produced the run. */
+  sourceCase: EvaluationCase;
+  /** The recorded run to promote into a golden regression case. */
+  runResult: RunResult;
+  /** Whether the run came from an evaluation suite or a production failure. */
+  origin: EvaluationCaseOrigin;
+  /** Identifier for the recorded run (report timestamp + case name, bureau run id, etc). */
+  runId: string;
+  /** Name for the new case. Default: `"${sourceCase.name} (promoted)"`. */
+  name?: string;
+  /**
+   * Overrides the golden expected output instead of snapshotting the run's
+   * actual `content`. Use this when promoting a *failure* — snapshotting the
+   * buggy output as the expectation would lock the bug in as "correct".
+   */
+  expectedOutput?: string | SemanticMatcher;
+};
+
+/**
+ * A dataset file on disk, versioned: `saveDataset()` bumps `version` on every
+ * write so dataset changes are attributable to a specific revision.
+ */
+export type DatasetFile = {
+  /** Monotonically increasing version, bumped on every `saveDataset()` write. */
+  version: number;
+  /** The evaluation cases in this dataset revision. */
+  cases: EvaluationCase[];
 };
 
 /**
@@ -112,6 +170,23 @@ export type EvaluationReport = {
     averageTokens: number;
     averageDuration: number;
   };
+};
+
+/**
+ * A single report's aggregate stats, keyed by file path — the row shape
+ * `listEvaluationReports()` returns for a pass-rate/cost trend view over time.
+ */
+export type EvaluationReportSummary = {
+  /** Absolute path to the report file this summary was read from. */
+  path: string;
+  /** ISO timestamp the report was generated (`EvaluationReport.timestamp`). */
+  timestamp: string;
+  total: number;
+  passed: number;
+  failed: number;
+  passRate: number;
+  averageTokens: number;
+  averageDuration: number;
 };
 
 /**

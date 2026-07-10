@@ -1,6 +1,6 @@
 export { compareEvaluationReports } from './comparison';
 export { createAgentEvaluation } from './create-agent-evaluation';
-export { loadDataset, loadDatasets } from './datasets';
+export { getDatasetVersion, loadDataset, loadDatasets, saveDataset } from './datasets';
 export { createLLMJudge } from './llm-judge';
 export {
   matchCustomAssertion,
@@ -16,7 +16,9 @@ export {
   extractToolCallSequence,
   matchToolCalls,
 } from './metrics';
-export { runEvaluationSuite } from './run-evaluation-suite';
+export { promoteRunToCase } from './promote-run';
+export { listEvaluationReports } from './reports';
+export { isEvaluationReport, runEvaluationSuite } from './run-evaluation-suite';
 export {
   computeTrajectoryRegression,
   describeTrajectory,
@@ -25,14 +27,18 @@ export {
 } from './trajectory';
 export type {
   CreateAgentEvaluationOptions,
+  DatasetFile,
   EmbedderFunction,
   EvaluationAgentConfiguration,
   EvaluationAssertion,
   EvaluationCase,
+  EvaluationCaseOrigin,
+  EvaluationCaseProvenance,
   EvaluationCaseResult,
   EvaluationChange,
   EvaluationComparison,
   EvaluationReport,
+  EvaluationReportSummary,
   EvaluationSuiteOptions,
   EvaluationSuiteResult,
   ExpectedToolCall,
@@ -40,6 +46,7 @@ export type {
   LLMJudgeOptions,
   LLMJudgeResult,
   MatchResult,
+  PromoteRunToCaseOptions,
   RegressionThresholds,
   SemanticMatcher,
   TrajectoryMatchResult,
