@@ -199,6 +199,51 @@ export type MergeEvents<Custom extends ToolEventsMap> = DefaultToolEvents & Cust
 export type ToolCustomEvent<Detail = unknown> = Event & Detail;
 
 /**
+ * A form-mode elicitation request: asks for structured data matching a JSON
+ * Schema object.
+ */
+export interface ToolElicitationFormRequest {
+  message: string;
+  mode?: 'form';
+  /** JSON Schema object describing the requested form data. */
+  schema?: Record<string, unknown>;
+}
+
+/**
+ * A URL-mode elicitation request: asks the caller to open a link out-of-band.
+ */
+export interface ToolElicitationUrlRequest {
+  message: string;
+  mode: 'url';
+  /** The URL the caller should open. */
+  url: string;
+}
+
+/**
+ * A request to elicit input (approval, form data, or a URL-mode
+ * out-of-band flow) from whoever is on the other end of a tool's
+ * execution — typically an MCP client, but the shape is transport-agnostic.
+ *
+ * Mirrors the MCP spec's form/URL elicitation split without depending on
+ * `@modelcontextprotocol/sdk` types. This is a discriminated union on `mode`
+ * so a URL-mode request can never be constructed without its `url`, and a
+ * form-mode request can never carry a stray `url` that would silently be
+ * dropped by a `mode`-unaware caller.
+ */
+export type ToolElicitationRequest = ToolElicitationFormRequest | ToolElicitationUrlRequest;
+
+/** The response to a {@link ToolElicitationRequest}. */
+export type ToolElicitationResult =
+  | { action: 'accept'; content?: Record<string, unknown> }
+  | { action: 'decline' }
+  | { action: 'cancel' };
+
+/** Requests elicitation from whoever is driving the current tool execution. */
+export type ToolElicitationRequester = (
+  request: ToolElicitationRequest,
+) => Promise<ToolElicitationResult>;
+
+/**
  * Context passed to tool execute functions.
  */
 export interface RuntimeToolContext extends CoreToolContext {
@@ -211,6 +256,8 @@ export interface RuntimeToolContext extends CoreToolContext {
   /** Execution timeout in milliseconds. */
   timeout?: number;
   stream?: boolean;
+  /** Requests elicitation (approval/human input) from the calling MCP client, when available. */
+  elicit?: ToolElicitationRequester;
 }
 
 export type ToolContext<_E extends ToolEventsMap = DefaultToolEvents> = RuntimeToolContext;
@@ -228,6 +275,8 @@ export interface ToolExecuteOptions {
    * When false/omitted, async-iterables are collected into arrays.
    */
   stream?: boolean;
+  /** Requests elicitation (approval/human input) from the calling MCP client, when available. */
+  elicit?: ToolElicitationRequester;
 }
 
 /**

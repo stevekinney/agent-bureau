@@ -90,6 +90,8 @@ export type { CreateHandoffToolOptions } from './create-handoff-tool';
 export { createHandoffTool, extractHandoffTarget, HANDOFF_MARKER } from './create-handoff-tool';
 export type { CreateIdentityHookOptions } from './create-identity-hook';
 export { createIdentityHook } from './create-identity-hook';
+export type { CreateMcpElicitationResponderOptions } from './create-mcp-elicitation-responder';
+export { createMcpElicitationResponder } from './create-mcp-elicitation-responder';
 export type { CreateMemoryBridgeOptions, MemoryLike } from './create-memory-bridge';
 export { createMemoryBridge } from './create-memory-bridge';
 export type {
@@ -330,6 +332,7 @@ export {
   combineProvider,
   combineTools,
 } from './inheritance';
+export type { EventDispatcher } from './loop';
 export type {
   JitterOptions,
   OverflowMutatorOptions,

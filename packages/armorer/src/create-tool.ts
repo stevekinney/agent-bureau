@@ -828,6 +828,7 @@ export function createTool<
         ...(options.signal ? { signal: options.signal } : {}),
         ...(options.timeout !== undefined ? { timeout: options.timeout } : {}),
         ...(options.stream !== undefined ? { stream: options.stream } : {}),
+        ...(options.elicit ? { elicit: options.elicit } : {}),
       };
 
       // `TContext` may be a subtype of `ToolContext<E>` (e.g. with extra fields).
