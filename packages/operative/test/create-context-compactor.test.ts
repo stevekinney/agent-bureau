@@ -170,4 +170,63 @@ describe('createContextCompactor', () => {
     expect(summarize).not.toHaveBeenCalled();
     expect(conversation.getMessages().length).toBe(0);
   });
+
+  it('forwards preservePolicy to Conversation.compact so a pinned message survives', async () => {
+    const summarize = mock(async () => 'Summary');
+    const compactor = createContextCompactor({
+      summarize,
+      retainRecentMessages: 2,
+      preservePolicy: { pinned: true },
+    });
+
+    const conversation = new Conversation();
+    conversation.appendUserMessage('pinned reference material', { pinned: true });
+    for (const [user, assistant] of [
+      ['Turn 1', 'Response 1'],
+      ['Turn 2', 'Response 2'],
+      ['Turn 3', 'Response 3'],
+      ['Turn 4', 'Response 4'],
+    ] as [string, string][]) {
+      conversation.appendUserMessage(user);
+      conversation.appendAssistantMessage(assistant);
+    }
+
+    const context = createStubContext(conversation);
+    await compactor(conversation, context);
+
+    const messages = conversation.getMessages();
+    expect(messages.some((m) => m.content === 'pinned reference material')).toBe(true);
+  });
+
+  it('forwards preservePolicy: { pinned: false } so a pinned message is NOT protected', async () => {
+    // `pinned: true` is the default even with no policy at all, so a test that only
+    // asserts survival under `pinned: true` would still pass if createContextCompactor
+    // silently dropped the option. Assert the opposite: passing `pinned: false` must
+    // let the pinned message fall out of the retained window and get compacted away,
+    // which only happens if preservePolicy is actually forwarded to Conversation.compact.
+    const summarize = mock(async () => 'Summary');
+    const compactor = createContextCompactor({
+      summarize,
+      retainRecentMessages: 2,
+      preservePolicy: { pinned: false },
+    });
+
+    const conversation = new Conversation();
+    conversation.appendUserMessage('pinned reference material', { pinned: true });
+    for (const [user, assistant] of [
+      ['Turn 1', 'Response 1'],
+      ['Turn 2', 'Response 2'],
+      ['Turn 3', 'Response 3'],
+      ['Turn 4', 'Response 4'],
+    ] as [string, string][]) {
+      conversation.appendUserMessage(user);
+      conversation.appendAssistantMessage(assistant);
+    }
+
+    const context = createStubContext(conversation);
+    await compactor(conversation, context);
+
+    const messages = conversation.getMessages();
+    expect(messages.some((m) => m.content === 'pinned reference material')).toBe(false);
+  });
 });

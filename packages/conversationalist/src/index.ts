@@ -1,4 +1,9 @@
-export type { CompactionOptions, CompactionResult, Summarizer } from './compaction/index';
+export type {
+  CompactionOptions,
+  CompactionPreservePolicy,
+  CompactionResult,
+  Summarizer,
+} from './compaction/index';
 export { compactConversation, stripToolResultDetails } from './compaction/index';
 export type {
   ConditionalInstructionComposer,
