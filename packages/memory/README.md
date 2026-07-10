@@ -603,6 +603,8 @@ const memoryToolbox = createToolbox([
 ```typescript
 import {
   chunkMarkdown,
+  chunkText,
+  chunkHtml,
   ingest,
   createFileSynchronizer,
   SOURCE_DOCUMENT_KEY,
@@ -610,9 +612,11 @@ import {
 } from 'memory';
 ```
 
+Every loader below implements the same contract — `(document: string, options?: ChunkingOptions) => ContentChunk[] | Promise<ContentChunk[]>` — and produces `ContentChunk[]`. `ingest()` accepts any function matching that shape via its `chunk` option, so adding a format doesn't require changes to this package: write (or wrap) a loader, pass it to `ingest()`.
+
 ### `chunkMarkdown(content, options?)`
 
-Splits a Markdown string into overlapping chunks suitable for embedding. Chunks track their source line range so individual chunks can be located back in the original document.
+Splits a Markdown string into overlapping chunks suitable for embedding. Chunks track their source line range so individual chunks can be located back in the original document. This is `ingest()`'s default loader.
 
 ```typescript
 function chunkMarkdown(content: string, options?: ChunkingOptions): ContentChunk[];
@@ -627,12 +631,80 @@ interface ContentChunk {
   startLine: number;
   endLine: number;
   index: number;
+  heading?: string; // nearest preceding structure-hint label, when known
 }
+```
+
+### `chunkText(document, options?)`
+
+The ingestion contract for pre-extracted text: hand it plain text plus optional structural boundaries (headings, page breaks, ...) and it chunks by token count same as `chunkMarkdown`, except a chunk never spans across a boundary. This is the seam every non-Markdown loader (including `chunkHtml`) is built on, and the one to use for formats this package doesn't parse itself (PDF, DOCX, plain extracted text, ...).
+
+```typescript
+function chunkText(document: ExtractedDocument, options?: ChunkingOptions): ContentChunk[];
+
+interface StructureHint {
+  startLine: number; // 0-based line within `document.text`
+  label?: string; // e.g. a heading's text or "page 3"
+}
+
+interface ExtractedDocument {
+  text: string;
+  structure?: StructureHint[];
+}
+```
+
+With no `structure` hints, `chunkText({ text })` behaves exactly like `chunkMarkdown(text)`.
+
+### `chunkHtml(html, options?)`
+
+First-party HTML loader. Strips tags with Bun's built-in `HTMLRewriter` (a lightweight streaming parser — no DOM dependency), drops `<script>`/`<style>`/`<template>` content, inserts line breaks between block-level elements, and carries heading text forward as each chunk's `heading`. Built on `chunkText`, so headings become structure hints and a chunk never spans a heading boundary.
+
+```typescript
+function chunkHtml(html: string, options?: ChunkingOptions): Promise<ContentChunk[]>;
+```
+
+```typescript
+import { chunkHtml, ingest } from 'memory';
+
+const html = await Bun.file('docs/page.html').text();
+
+await ingest(memory, html, {
+  sourceIdentifier: 'docs/page.html',
+  chunk: chunkHtml,
+});
+```
+
+### PDF (recipe, not a bundled dependency)
+
+This package intentionally does not bundle a PDF parser — extracting PDF text pulls in a heavyweight, native-dependent library, and only some consumers need it. Extract the text yourself (e.g. with [`pdf-parse`](https://www.npmjs.com/package/pdf-parse) or [`unpdf`](https://www.npmjs.com/package/unpdf), whichever fits your runtime), and feed the result to `chunkText` with page breaks as structure hints:
+
+```typescript
+import { chunkText, ingest } from 'memory';
+// npm install pdf-parse (or your extractor of choice) as a project dependency
+import pdf from 'pdf-parse';
+
+const buffer = await Bun.file('report.pdf').arrayBuffer();
+const { text: fullText, numpages } = await pdf(Buffer.from(buffer));
+
+// pdf-parse joins pages with form-feed (\f); rebuild page-break structure hints.
+const pages = fullText.split('\f');
+const lines: string[] = [];
+const structure: { startLine: number; label: string }[] = [];
+for (let i = 0; i < pages.length; i++) {
+  structure.push({ startLine: lines.length, label: `page ${i + 1}` });
+  lines.push(...pages[i]!.split('\n'));
+}
+const text = lines.join('\n');
+
+await ingest(memory, text, {
+  sourceIdentifier: 'report.pdf',
+  chunk: (document, options) => chunkText({ text: document, structure }, options),
+});
 ```
 
 ### `ingest(memory, content, options?)`
 
-Chunks a document and calls `memory.rememberOnce()` for each chunk, tagged with `SOURCE_DOCUMENT_KEY` and `CHUNK_INDEX_KEY` metadata. Chunks from the same source document are deduplicated on re-ingest. During recall, only the highest-scoring chunk per source document is returned.
+Chunks a document — via `options.chunk`, default `chunkMarkdown` — and calls `memory.rememberOnce()` for each chunk, tagged with `SOURCE_DOCUMENT_KEY` and `CHUNK_INDEX_KEY` metadata. Each chunk's `dedupeKey` is derived from the source identifier, chunk index, and chunk text, so **re-ingesting the same document through any loader (with the same `sourceIdentifier`) stores no new entries** — it's a no-op. Re-ingesting with different content under the same `sourceIdentifier` stores fresh entries alongside the old ones (see `createFileSynchronizer` below for a pattern that also removes stale chunks). During recall, only the highest-scoring chunk per source document is returned.
 
 ```typescript
 const SOURCE_DOCUMENT_KEY = '__sourceDocument';
@@ -644,6 +716,8 @@ interface IngestOptions extends ChunkingOptions {
   sourceIdentifier?: string;
   metadata?: Partial<MemoryMetadata>;
   onProgress?: (progress: { completed: number; total: number }) => void;
+  /** Loader that turns `content` into chunks. Defaults to `chunkMarkdown`. */
+  chunk?: (document: string, options?: ChunkingOptions) => ContentChunk[] | Promise<ContentChunk[]>;
 }
 
 interface IngestResult {
@@ -655,7 +729,6 @@ interface IngestResult {
 
 ```typescript
 import { ingest } from 'memory';
-import { readFileSync } from 'node:fs';
 
 const markdown = await Bun.file('docs/getting-started.md').text();
 

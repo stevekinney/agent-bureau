@@ -1,5 +1,5 @@
-export type { ChunkingOptions, ContentChunk } from './chunking';
-export { chunkMarkdown } from './chunking';
+export type { ChunkingOptions, ContentChunk, ExtractedDocument, StructureHint } from './chunking';
+export { chunkMarkdown, chunkText } from './chunking';
 export type {
   ConsolidationChunkedTaskOptions,
   ConsolidationState,
@@ -26,6 +26,7 @@ export type {
 export { createFileSynchronizer } from './file-synchronizer';
 export type { MemoryHookOptions } from './hooks';
 export { createMemoryHooks } from './hooks';
+export { chunkHtml } from './html-chunking';
 export type {
   HybridSearchCandidate,
   HybridSearchOptions,
@@ -35,7 +36,7 @@ export type {
 export { mergeHybridResults } from './hybrid-search';
 export type { CreateHyDEGeneratorOptions, HyDEOptions, HypotheticalAnswerGenerator } from './hyde';
 export { createHyDEGenerator, withHyDE } from './hyde';
-export type { IngestOptions, IngestResult } from './ingest';
+export type { ChunkerFunction, IngestOptions, IngestResult } from './ingest';
 export { CHUNK_INDEX_KEY, ingest, SOURCE_DOCUMENT_KEY } from './ingest';
 export type { MaximalMarginalRelevanceOptions } from './maximal-marginal-relevance';
 export { applyMaximalMarginalRelevance } from './maximal-marginal-relevance';

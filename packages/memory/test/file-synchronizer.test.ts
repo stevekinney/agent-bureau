@@ -154,22 +154,22 @@ describe('createFileSynchronizer', () => {
 
     await synchronizer.start();
 
-    const originalRemember = memory.remember.bind(memory);
+    const originalRememberOnce = memory.rememberOnce.bind(memory);
     let failing = true;
     let rememberCalls = 0;
     Object.assign(memory, {
-      remember: async (...args: Parameters<Memory['remember']>) => {
+      rememberOnce: async (...args: Parameters<Memory['rememberOnce']>) => {
         rememberCalls += 1;
         if (failing) {
           throw new Error('poll failure');
         }
-        return originalRemember(...args);
+        return originalRememberOnce(...args);
       },
     });
 
     // Change the file so the next poll re-ingests it, then fire the poll. The
     // synchronize() running inside the interval performs real filesystem I/O on
-    // macrotasks, so we must wait until remember() has actually been invoked
+    // macrotasks, so we must wait until rememberOnce() has actually been invoked
     // (and thrown) before proceeding — otherwise flipping `failing` below could
     // race ahead of the in-flight sync and let it succeed, never exercising the
     // polling error-swallow path.

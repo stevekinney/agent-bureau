@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it } from 'bun:test';
 
+import { chunkText } from '../src/chunking';
 import { createMemory } from '../src/create-memory';
+import { chunkHtml } from '../src/html-chunking';
 import { CHUNK_INDEX_KEY, ingest, SOURCE_DOCUMENT_KEY } from '../src/ingest';
 import { createInMemoryMemoryRecordStorage, createMockEmbedder } from '../src/test/index';
 import type { Memory } from '../src/types';
@@ -113,5 +115,89 @@ describe('ingest', () => {
 
     // Both source documents should appear.
     expect(new Set(sourceDocuments).size).toBe(2);
+  });
+
+  // These tests configure `deduplicationThreshold: 2` — a similarity value
+  // cosine similarity can never reach — so `remember()`'s own near-duplicate
+  // collapsing (a semantic, similarity-threshold mechanism) can never fire.
+  // Any idempotency observed here is exclusively due to `ingest()`'s
+  // dedupeKey-based use of `rememberOnce()`, not that unrelated mechanism.
+  function createNonDedupingMemory(): Memory {
+    const storage = createInMemoryMemoryRecordStorage();
+    const embedder = createMockEmbedder(DIMENSION);
+    return createMemory({ embedder, storage, dimension: DIMENSION, deduplicationThreshold: 2 });
+  }
+
+  it('is a no-op when re-ingesting the same markdown document', async () => {
+    const isolatedMemory = createNonDedupingMemory();
+    await isolatedMemory.init();
+    const content = 'A note about connection pooling that stays the same.';
+
+    const first = await ingest(isolatedMemory, content, { sourceIdentifier: 'doc-idempotent' });
+    const second = await ingest(isolatedMemory, content, { sourceIdentifier: 'doc-idempotent' });
+
+    expect(second.entries.map((e) => e.id)).toEqual(first.entries.map((e) => e.id));
+    expect(await isolatedMemory.count()).toBe(first.entries.length);
+  });
+
+  it('is a no-op when re-ingesting the same document through chunkText', async () => {
+    const isolatedMemory = createNonDedupingMemory();
+    await isolatedMemory.init();
+    const document = { text: 'Structured content.', structure: [{ startLine: 0, label: 'Intro' }] };
+
+    const first = await ingest(isolatedMemory, document.text, {
+      sourceIdentifier: 'doc-structured',
+      chunk: (text, options) => chunkText({ text, structure: document.structure }, options),
+    });
+    const second = await ingest(isolatedMemory, document.text, {
+      sourceIdentifier: 'doc-structured',
+      chunk: (text, options) => chunkText({ text, structure: document.structure }, options),
+    });
+
+    expect(second.entries.map((e) => e.id)).toEqual(first.entries.map((e) => e.id));
+    expect(await isolatedMemory.count()).toBe(first.entries.length);
+  });
+
+  it('is a no-op when re-ingesting the same document through chunkHtml', async () => {
+    const isolatedMemory = createNonDedupingMemory();
+    await isolatedMemory.init();
+    const html = '<h1>Title</h1><p>Body text that stays the same.</p>';
+
+    const first = await ingest(isolatedMemory, html, {
+      sourceIdentifier: 'doc-html',
+      chunk: chunkHtml,
+    });
+    const second = await ingest(isolatedMemory, html, {
+      sourceIdentifier: 'doc-html',
+      chunk: chunkHtml,
+    });
+
+    expect(second.entries.map((e) => e.id)).toEqual(first.entries.map((e) => e.id));
+    expect(await isolatedMemory.count()).toBe(first.entries.length);
+  });
+
+  it('creates new entries when the same source is re-ingested with different content', async () => {
+    const isolatedMemory = createNonDedupingMemory();
+    await isolatedMemory.init();
+
+    const first = await ingest(isolatedMemory, 'Version one of the document.', {
+      sourceIdentifier: 'doc-changing',
+    });
+    const second = await ingest(isolatedMemory, 'Version two of the document, now different.', {
+      sourceIdentifier: 'doc-changing',
+    });
+
+    expect(second.entries[0]!.id).not.toBe(first.entries[0]!.id);
+  });
+
+  it('uses chunkHtml to ingest HTML content when passed as the loader', async () => {
+    const html = '<h1>Heading</h1><p>Paragraph body.</p>';
+
+    const result = await ingest(memory, html, { chunk: chunkHtml });
+
+    expect(result.entries.length).toBeGreaterThan(0);
+    expect(result.entries.map((e) => e.content).join(' ')).toContain('Paragraph body.');
+    // HTML tags must not leak into stored content.
+    expect(result.entries.map((e) => e.content).join(' ')).not.toContain('<p>');
   });
 });
