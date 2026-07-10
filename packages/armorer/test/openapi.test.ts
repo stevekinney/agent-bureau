@@ -273,6 +273,123 @@ describe('createToolboxFromOpenAPI', () => {
     expect(caught).toBeInstanceOf(Error);
   });
 
+  it('resolves a $ref parameter before reading its `in`/`name`/`schema` fields', async () => {
+    const specWithRefParameter = {
+      servers: [{ url: 'https://example.test' }],
+      // `components.parameters` isn't part of the narrow `OpenAPISpec` type this generator
+      // declares, but it's exactly what a real spec's `$ref` points at.
+      components: {
+        parameters: {
+          WidgetId: { name: 'id', in: 'path', schema: { type: 'string' } },
+        },
+      },
+      paths: {
+        '/widgets/{id}': {
+          parameters: [{ $ref: '#/components/parameters/WidgetId' }],
+          get: { operationId: 'getWidget' },
+        },
+      },
+    } as unknown as OpenAPISpec;
+
+    const { fetch: fakeFetch, calls } = createFakeFetch({ status: 200, body: {} });
+    const tools = createToolboxFromOpenAPI(specWithRefParameter, { fetch: fakeFetch });
+    const getWidget = tools.find((tool) => tool.name === 'get-widget');
+
+    // The path parameter must be recognized as required (proves `.in`/`.name` were read from
+    // the resolved parameter, not the unresolved `$ref` wrapper).
+    expect(getWidget?.input.safeParse({}).success).toBe(false);
+    expect(getWidget?.input.safeParse({ id: 'abc' }).success).toBe(true);
+
+    await getWidget?.execute({ id: 'abc' });
+    expect(calls[0]?.url).toBe('https://example.test/widgets/abc');
+  });
+
+  it('resolves a $ref request body before reading its content', async () => {
+    const specWithRefBody = {
+      servers: [{ url: 'https://example.test' }],
+      components: {
+        requestBodies: {
+          Widget: {
+            required: true,
+            content: { 'application/json': { schema: { type: 'object' } } },
+          },
+        },
+      },
+      paths: {
+        '/widgets': {
+          post: {
+            operationId: 'createWidget',
+            requestBody: { $ref: '#/components/requestBodies/Widget' },
+          },
+        },
+      },
+    } as unknown as OpenAPISpec;
+
+    const { fetch: fakeFetch, calls } = createFakeFetch({ status: 200, body: {} });
+    const tools = createToolboxFromOpenAPI(specWithRefBody, { fetch: fakeFetch });
+    const createWidget = tools.find((tool) => tool.name === 'create-widget');
+
+    expect(createWidget?.input.safeParse({}).success).toBe(false);
+
+    await createWidget?.execute({ body: { name: 'gizmo' } });
+    expect(calls[0]?.init?.body).toBe(JSON.stringify({ name: 'gizmo' }));
+  });
+
+  it('accepts a JSON-compatible request body media type other than application/json', async () => {
+    const specWithMergePatch: OpenAPISpec = {
+      servers: [{ url: 'https://example.test' }],
+      paths: {
+        '/widgets/{id}': {
+          patch: {
+            operationId: 'patchWidget',
+            parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+            requestBody: {
+              required: true,
+              content: { 'application/merge-patch+json': { schema: { type: 'object' } } },
+            },
+          },
+        },
+      },
+    };
+    const { fetch: fakeFetch, calls } = createFakeFetch({ status: 200, body: {} });
+    const tools = createToolboxFromOpenAPI(specWithMergePatch, { fetch: fakeFetch });
+    const patchWidget = tools.find((tool) => tool.name === 'patch-widget');
+
+    expect(patchWidget?.input.safeParse({}).success).toBe(false);
+
+    await patchWidget?.execute({ id: '1', body: { name: 'gizmo' } });
+    expect(calls[0]?.init?.body).toBe(JSON.stringify({ name: 'gizmo' }));
+    const headers = new Headers(calls[0]?.init?.headers);
+    expect(headers.get('content-type')).toBe('application/merge-patch+json');
+  });
+
+  it('disambiguates same-named parameters in different locations', async () => {
+    const specWithCollidingNames: OpenAPISpec = {
+      servers: [{ url: 'https://example.test' }],
+      paths: {
+        '/widgets': {
+          get: {
+            operationId: 'listWidgets',
+            parameters: [
+              { name: 'version', in: 'query', schema: { type: 'string' } },
+              { name: 'version', in: 'header', schema: { type: 'string' } },
+            ],
+          },
+        },
+      },
+    };
+    const { fetch: fakeFetch, calls } = createFakeFetch({ status: 200, body: [] });
+    const tools = createToolboxFromOpenAPI(specWithCollidingNames, { fetch: fakeFetch });
+    const listWidgets = tools.find((tool) => tool.name === 'list-widgets');
+
+    await listWidgets?.execute({ version: 'v1', versionHeader: 'v2' });
+
+    const url = new URL(calls[0]?.url ?? '');
+    expect(url.searchParams.get('version')).toBe('v1');
+    const headers = new Headers(calls[0]?.init?.headers);
+    expect(headers.get('version')).toBe('v2');
+  });
+
   it('composes into a regular armorer toolbox', async () => {
     const { fetch: fakeFetch } = createFakeFetch({ status: 200, body: [] });
     const tools = createToolboxFromOpenAPI(spec, { fetch: fakeFetch });

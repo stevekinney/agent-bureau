@@ -21,12 +21,17 @@ export type OpenAPIRequestBody = {
   content?: Record<string, { schema?: unknown }>;
 };
 
+/** A local `$ref` pointer, e.g. `#/components/parameters/PetId`. */
+export type OpenAPIRef = { $ref: string };
+
 export type OpenAPIOperation = {
   operationId?: string;
   summary?: string;
   description?: string;
-  parameters?: OpenAPIParameter[];
-  requestBody?: OpenAPIRequestBody;
+  /** May contain Reference Objects pointing at `#/components/parameters/...`. */
+  parameters?: Array<OpenAPIParameter | OpenAPIRef>;
+  /** May itself be a Reference Object pointing at `#/components/requestBodies/...`. */
+  requestBody?: OpenAPIRequestBody | OpenAPIRef;
 };
 
 /** HTTP methods that can appear under an OpenAPI path item. */
@@ -41,7 +46,8 @@ export type OpenAPIHttpMethod =
   | 'trace';
 
 export type OpenAPIPathItem = Partial<Record<OpenAPIHttpMethod, OpenAPIOperation>> & {
-  parameters?: OpenAPIParameter[];
+  /** May contain Reference Objects pointing at `#/components/parameters/...`. */
+  parameters?: Array<OpenAPIParameter | OpenAPIRef>;
 };
 
 /**
@@ -176,7 +182,7 @@ type CreateOperationToolOptions = {
   path: string;
   method: OpenAPIHttpMethod;
   operation: OpenAPIOperation;
-  pathParameters: OpenAPIParameter[];
+  pathParameters: Array<OpenAPIParameter | OpenAPIRef>;
   baseUrl: string;
   auth: OpenAPIAuth | undefined;
   fetchImplementation: typeof fetch;
@@ -188,6 +194,11 @@ type OpenAPIToolResult = {
   status: number;
   data: unknown;
 };
+
+/** A resolved parameter's wire name (used on the URL/headers) paired with the input-shape
+ * key used to read its value out of the tool call's arguments. These differ only when two
+ * parameters in different locations share the same `name` (see {@link inputKeyFor}). */
+type ParameterKey = { name: string; key: string };
 
 function createOperationTool(options: CreateOperationToolOptions): Tool {
   const {
@@ -203,13 +214,22 @@ function createOperationTool(options: CreateOperationToolOptions): Tool {
     extraTags,
   } = options;
 
-  const parameters = mergeParameters(pathParameters, operation.parameters ?? []);
-  const pathParameterNames = parameters.filter((p) => p.in === 'path').map((p) => p.name);
-  const queryParameterNames = parameters.filter((p) => p.in === 'query').map((p) => p.name);
-  const headerParameterNames = parameters.filter((p) => p.in === 'header').map((p) => p.name);
-  const jsonRequestBodySchema = operation.requestBody?.content?.['application/json']?.schema;
+  const parameters = mergeParameters(pathParameters, operation.parameters ?? [], spec);
+  const toParameterKeys = (location: OpenAPIParameterLocation): ParameterKey[] =>
+    parameters
+      .filter((p) => p.in === location)
+      .map((p) => ({ name: p.name, key: inputKeyFor(p, parameters) }));
+  const pathParameterKeys = toParameterKeys('path');
+  const queryParameterKeys = toParameterKeys('query');
+  const headerParameterKeys = toParameterKeys('header');
+
+  const requestBody = dereferenceRequestBody(operation.requestBody, spec);
+  const jsonMediaType = findJsonMediaType(requestBody);
+  const jsonRequestBodySchema = jsonMediaType
+    ? requestBody?.content?.[jsonMediaType]?.schema
+    : undefined;
   const hasRequestBody = jsonRequestBodySchema !== undefined;
-  const requestBodyRequired = operation.requestBody?.required ?? false;
+  const requestBodyRequired = requestBody?.required ?? false;
 
   const inputShape: Record<string, z.ZodTypeAny> = {};
   for (const parameter of parameters) {
@@ -222,13 +242,14 @@ function createOperationTool(options: CreateOperationToolOptions): Tool {
     // Path parameters are always required per the OpenAPI spec (and required for URL
     // interpolation below), regardless of whether the document sets `required: true`.
     const isRequired = parameter.in === 'path' || parameter.required === true;
-    inputShape[parameter.name] = isRequired ? fieldSchema : fieldSchema.optional();
+    const key = inputKeyFor(parameter, parameters);
+    inputShape[key] = isRequired ? fieldSchema : fieldSchema.optional();
   }
   if (hasRequestBody) {
     const dereferenced = dereference(jsonRequestBodySchema, spec);
     let bodySchema = importToolSchema(dereferenced);
-    if (operation.requestBody?.description) {
-      bodySchema = bodySchema.describe(operation.requestBody.description);
+    if (requestBody?.description) {
+      bodySchema = bodySchema.describe(requestBody.description);
     }
     inputShape['body'] = requestBodyRequired ? bodySchema : bodySchema.optional();
   }
@@ -245,23 +266,23 @@ function createOperationTool(options: CreateOperationToolOptions): Tool {
     metadata: metadataForMethod(method),
     async execute(params) {
       const record = isRecord(params) ? params : {};
-      const url = buildRequestUrl(baseUrl, path, pathParameterNames, record);
-      for (const queryName of queryParameterNames) {
-        appendQueryParameter(url, queryName, record[queryName]);
+      const url = buildRequestUrl(baseUrl, path, pathParameterKeys, record);
+      for (const queryParameter of queryParameterKeys) {
+        appendQueryParameter(url, queryParameter.name, record[queryParameter.key]);
       }
 
       const headers: Record<string, string> = {};
-      for (const headerName of headerParameterNames) {
-        const value = record[headerName];
+      for (const headerParameter of headerParameterKeys) {
+        const value = record[headerParameter.key];
         if (value !== undefined) {
-          headers[headerName] = toParameterString(value);
+          headers[headerParameter.name] = toParameterString(value);
         }
       }
       applyAuth(headers, auth);
 
       let body: string | undefined;
       if (hasRequestBody && record['body'] !== undefined) {
-        headers['content-type'] = 'application/json';
+        headers['content-type'] = jsonMediaType ?? 'application/json';
         body = JSON.stringify(record['body']);
       }
 
@@ -288,17 +309,77 @@ function createOperationTool(options: CreateOperationToolOptions): Tool {
 }
 
 function mergeParameters(
-  pathParameters: OpenAPIParameter[],
-  operationParameters: OpenAPIParameter[],
+  pathParameters: Array<OpenAPIParameter | OpenAPIRef>,
+  operationParameters: Array<OpenAPIParameter | OpenAPIRef>,
+  spec: OpenAPISpec,
 ): OpenAPIParameter[] {
   const merged = new Map<string, OpenAPIParameter>();
   for (const parameter of pathParameters) {
-    merged.set(`${parameter.in}:${parameter.name}`, parameter);
+    const resolved = dereferenceParameter(parameter, spec);
+    merged.set(`${resolved.in}:${resolved.name}`, resolved);
   }
   for (const parameter of operationParameters) {
-    merged.set(`${parameter.in}:${parameter.name}`, parameter);
+    const resolved = dereferenceParameter(parameter, spec);
+    merged.set(`${resolved.in}:${resolved.name}`, resolved);
   }
   return [...merged.values()];
+}
+
+/**
+ * Resolves a Parameter Object that may itself be a `$ref` (e.g. `#/components/parameters/PetId`)
+ * before its `.in`/`.name`/`.schema` fields are read. The result is trusted to be shaped like
+ * {@link OpenAPIParameter} because that is the structural contract of a Parameter Object at the
+ * pointed-to location in a spec-compliant document; {@link dereference} already resolves nested
+ * `$ref`s (e.g. inside `.schema`) and fails fast on an unresolvable pointer.
+ */
+function dereferenceParameter(
+  parameter: OpenAPIParameter | OpenAPIRef,
+  spec: OpenAPISpec,
+): OpenAPIParameter {
+  return dereference(parameter, spec) as OpenAPIParameter;
+}
+
+/**
+ * Resolves a Request Body Object that may itself be a `$ref` (e.g.
+ * `#/components/requestBodies/Pet`). See {@link dereferenceParameter} for the trust rationale.
+ */
+function dereferenceRequestBody(
+  requestBody: OpenAPIRequestBody | OpenAPIRef | undefined,
+  spec: OpenAPISpec,
+): OpenAPIRequestBody | undefined {
+  if (requestBody === undefined) return undefined;
+  return dereference(requestBody, spec) as OpenAPIRequestBody;
+}
+
+/**
+ * Finds the first request-body media type that is JSON or JSON-compatible: the exact
+ * `application/json` key, or any `+json` structured-syntax suffix (e.g.
+ * `application/merge-patch+json`, `application/vnd.api+json`).
+ */
+function findJsonMediaType(requestBody: OpenAPIRequestBody | undefined): string | undefined {
+  const content = requestBody?.content;
+  if (!content) return undefined;
+  return Object.keys(content).find((key) => key === 'application/json' || key.endsWith('+json'));
+}
+
+/**
+ * Computes the input-shape key for a parameter. Parameters are keyed by their bare `name` in
+ * the common case; when two parameters in different locations share the same `name` (legal per
+ * OpenAPI, which scopes uniqueness to `(name, in)`), each is suffixed with its location so both
+ * remain independently addressable, e.g. a `version` query parameter and a `version` header
+ * parameter become `version` and `versionHeader`. The first-seen location keeps the bare name so
+ * the common, non-colliding case is unaffected.
+ */
+function inputKeyFor(parameter: OpenAPIParameter, allParameters: OpenAPIParameter[]): string {
+  const sameName = allParameters.filter((p) => p.in !== 'cookie' && p.name === parameter.name);
+  if (sameName.length <= 1) return parameter.name;
+  const firstLocation = sameName[0]?.in;
+  if (parameter.in === firstLocation) return parameter.name;
+  return `${parameter.name}${capitalize(parameter.in)}`;
+}
+
+function capitalize(value: string): string {
+  return `${value.charAt(0).toUpperCase()}${value.slice(1)}`;
 }
 
 function metadataForMethod(method: OpenAPIHttpMethod): ToolMetadata {
@@ -339,17 +420,17 @@ function applyAuth(headers: Record<string, string>, auth: OpenAPIAuth | undefine
 function buildRequestUrl(
   baseUrl: string,
   path: string,
-  pathParameterNames: readonly string[],
+  pathParameters: readonly ParameterKey[],
   params: Record<string, unknown>,
 ): URL {
   let interpolated = path;
-  for (const parameterName of pathParameterNames) {
-    const value = params[parameterName];
+  for (const { name, key } of pathParameters) {
+    const value = params[key];
     if (value === undefined) {
-      throw new Error(`Missing required path parameter "${parameterName}"`);
+      throw new Error(`Missing required path parameter "${name}"`);
     }
     interpolated = interpolated.replaceAll(
-      `{${parameterName}}`,
+      `{${name}}`,
       encodeURIComponent(toParameterString(value)),
     );
   }
@@ -401,13 +482,15 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * Recursively resolves local `$ref` pointers (`#/components/schemas/...`) against `root`,
- * returning a plain JSON Schema object suitable for {@link importToolSchema}. Only called on
- * parameter/request-body schemas, which directly drive generated tool input validation, so an
- * unresolvable `$ref` throws rather than silently degrading to an unvalidated `z.unknown()`
- * field. A pointer that refers back to a schema already on the current resolution path (a
- * recursive schema, e.g. a tree-shaped `Node`) resolves to `{}` at the cycle point instead of
- * recursing forever — recursive JSON Schemas are legitimate and Zod has no direct equivalent.
+ * Recursively resolves local `$ref` pointers (e.g. `#/components/schemas/...`,
+ * `#/components/parameters/...`, `#/components/requestBodies/...`) against `root`. Used both on
+ * parameter/request-body *schemas* (returning a plain JSON Schema object suitable for
+ * {@link importToolSchema}) and on whole Parameter/Request Body Objects that may themselves be
+ * `$ref`s. Both directly drive generated tool input validation, so an unresolvable `$ref` throws
+ * rather than silently degrading to an unvalidated `z.unknown()` field. A pointer that refers
+ * back to a value already on the current resolution path (a recursive schema, e.g. a tree-shaped
+ * `Node`) resolves to `{}` at the cycle point instead of recursing forever — recursive JSON
+ * Schemas are legitimate and Zod has no direct equivalent.
  */
 function dereference(value: unknown, root: OpenAPISpec, seen: Set<unknown> = new Set()): unknown {
   if (Array.isArray(value)) {
