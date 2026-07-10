@@ -42,6 +42,7 @@ import type { Store } from 'operative/store';
 
 import type { AuditTrail } from './audit-trail';
 import type { BureauEventMap } from './events';
+import type { OnlineEvalSampler, OnlineEvalSamplerOptions } from './online-evals';
 import type { WebhookNotifier, WebhookNotifierOptions } from './webhook-notifier';
 
 // ── Provider Configuration ───────────────────────────────────────────
@@ -331,6 +332,15 @@ export interface BureauOptions {
    * Omit or pass `{ targets: [] }` to disable — the default.
    */
   webhooks?: WebhookNotifierOptions;
+  /**
+   * Online evaluations (AB-53) — samples a fraction of completed live runs
+   * through configured judges/matchers, records every sampled score to the
+   * durable audit trail, and fires a webhook (via `options.webhooks`, AB-21's
+   * durable delivery infra) when a judge's score breaches its configured
+   * alert threshold. Omit, pass no judges, or pass `sampleRate: 0` to
+   * disable — the default.
+   */
+  onlineEvals?: OnlineEvalSamplerOptions;
 }
 
 /**
@@ -623,6 +633,16 @@ export interface Bureau {
    * Use `webhookNotifier.listDeliveries()` to inspect durable delivery state.
    */
   readonly webhookNotifier: WebhookNotifier | undefined;
+
+  /**
+   * The online eval sampler (AB-53). Present whenever `options.onlineEvals`
+   * configures at least one judge with a positive `sampleRate`; `undefined`
+   * when online evals are disabled (the default). Use
+   * `onlineEvalSampler.sampledCount()`/`observedCount()` to inspect sampling
+   * state and `onlineEvalSampler.flush()` to await in-flight judge
+   * evaluations deterministically.
+   */
+  readonly onlineEvalSampler: OnlineEvalSampler | undefined;
 }
 
 // ── API Request / Response Types ─────────────────────────────────────

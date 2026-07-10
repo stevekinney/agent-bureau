@@ -14,6 +14,12 @@
  *   against the ids already notified.
  * - `human-wait.parked` — a NEW `human-wait` item appeared in
  *   `listPendingReviews()` (backed by operative's `HumanWaitParkedEvent`).
+ * - `eval.threshold-breached` — fired out-of-band via {@link WebhookNotifier.notify}
+ *   rather than derived from the action stream (there is no bureau event for
+ *   it). AB-53's online eval sampler is the only current caller: a judge's
+ *   score breaches its configured alert threshold and calls `notify()`
+ *   directly, reusing this module's persist/retry/backoff pipeline instead of
+ *   duplicating it.
  *
  * Both queue-backed triggers deep-link to `/reviews?id=<reviewId>` — the
  * AB-20 review queue's only route (`/reviews`, no `:id` segment), so the
@@ -41,8 +47,12 @@ import type { Bureau, PendingReview } from './types';
 
 // ── Public surface ──────────────────────────────────────────────────
 
-/** The three trigger types that fire a configured webhook. */
-export type WebhookTriggerType = 'elicitation.requested' | 'approval-pending' | 'human-wait.parked';
+/** The trigger types that fire a configured webhook. */
+export type WebhookTriggerType =
+  | 'elicitation.requested'
+  | 'approval-pending'
+  | 'human-wait.parked'
+  | 'eval.threshold-breached';
 
 /** A configured webhook delivery target. */
 export interface WebhookTarget {
@@ -104,6 +114,25 @@ export interface WebhookNotifier {
    * outstanding deliveries before shutting down.
    */
   flush(): Promise<void>;
+  /**
+   * Fire a delivery out-of-band, reusing the same durable persist/retry/backoff
+   * pipeline the action-stream-derived triggers use. For callers with no
+   * corresponding bureau action to derive a trigger from — AB-53's online eval
+   * sampler, which alerts on a threshold breach that has no bureau event.
+   *
+   * @param input.subjectId - Stable id for this notification, deduplicated
+   *   the same way as the action-stream triggers (`<subjectId>:<targetIndex>`)
+   *   — calling `notify()` twice with the same `subjectId` and trigger kicks
+   *   off delivery only once.
+   * @param input.detail - Extra fields merged into the delivered payload
+   *   under `detail`.
+   */
+  notify(input: {
+    runId: string;
+    subjectId: string;
+    trigger: WebhookTriggerType;
+    detail?: Record<string, unknown>;
+  }): void;
   /** Stop listening to bureau events and abandon any in-flight backoff waits. */
   dispose(): void;
 }
@@ -156,6 +185,8 @@ interface WebhookPayload {
   message?: string;
   prompt?: string;
   requestedAt: number;
+  /** Extra fields for out-of-band triggers fired via {@link WebhookNotifier.notify}. */
+  detail?: Record<string, unknown>;
 }
 
 function reviewTriggerType(kind: PendingReview['kind']): WebhookTriggerType {
@@ -196,6 +227,9 @@ export function createWebhookNotifier(
       },
       async flush() {
         // Nothing was ever kicked off.
+      },
+      notify() {
+        // No targets configured — nothing to deliver.
       },
       dispose() {
         // Nothing was ever subscribed.
@@ -366,6 +400,30 @@ export function createWebhookNotifier(
     }
   }
 
+  function notifyExternal(input: {
+    runId: string;
+    subjectId: string;
+    trigger: WebhookTriggerType;
+    detail?: Record<string, unknown>;
+  }): void {
+    const eligibleTargets = targetsFor(targets, input.trigger);
+    if (eligibleTargets.length === 0) return;
+
+    const payload: WebhookPayload = {
+      trigger: input.trigger,
+      runId: input.runId,
+      deepLink: runDeepLink(input.runId, reviewQueueBaseUrl),
+      requestedAt: now(),
+      detail: input.detail,
+    };
+
+    for (const target of eligibleTargets) {
+      const targetIndex = targets.indexOf(target);
+      if (!claim(`${input.subjectId}:${targetIndex}`)) continue;
+      trackDelivery(deliver(input.subjectId, target, targetIndex, payload));
+    }
+  }
+
   const listener = (event: ActionEvent) => {
     const { action } = event;
     if (action.type === 'elicitation.requested') {
@@ -401,6 +459,7 @@ export function createWebhookNotifier(
     async flush(): Promise<void> {
       await Promise.allSettled([...activeDeliveries]);
     },
+    notify: notifyExternal,
     dispose(): void {
       disposed = true;
       bureau.removeEventListener('action', listener);

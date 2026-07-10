@@ -42,6 +42,7 @@ import {
   RunRegisteredEvent,
   RunRemovedEvent,
 } from './events';
+import { createOnlineEvalSampler, type OnlineEvalSampler } from './online-evals';
 import { createRuntimeComposition } from './runtime-composition';
 import {
   findRunAgentName,
@@ -1780,6 +1781,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         // waits so a disposed bureau never fires a webhook late).
         auditTrailInstance?.dispose();
         webhookNotifierInstance?.dispose();
+        onlineEvalSamplerInstance?.dispose();
         emitter.dispatch(new BureauDisposedEvent());
         storeSubscription.unsubscribe();
         for (const disposeListener of schedulerCleanup) {
@@ -1847,6 +1849,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
   // createAuditTrail).
   let auditTrailInstance: AuditTrail | undefined;
   let webhookNotifierInstance: WebhookNotifier | undefined;
+  let onlineEvalSamplerInstance: OnlineEvalSampler | undefined;
 
   const bureau: Bureau = {
     store,
@@ -1859,6 +1862,9 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     },
     get webhookNotifier(): WebhookNotifier | undefined {
       return webhookNotifierInstance;
+    },
+    get onlineEvalSampler(): OnlineEvalSampler | undefined {
+      return onlineEvalSamplerInstance;
     },
     get ready() {
       return runtime.ready;
@@ -1935,6 +1941,25 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       runtime.kv,
       auditTrailInstance,
       options.webhooks,
+    );
+  }
+
+  // Wire the online eval sampler (AB-53) now that the audit trail and webhook
+  // notifier exist (a sampled score is recorded to the former; a threshold
+  // breach is delivered through the latter). Only created when at least one
+  // judge is configured with a positive sample rate — the common case (no
+  // `options.onlineEvals`) costs nothing beyond the `undefined` check inside
+  // `createOnlineEvalSampler`.
+  if (
+    options.onlineEvals &&
+    options.onlineEvals.judges.length > 0 &&
+    options.onlineEvals.sampleRate > 0
+  ) {
+    onlineEvalSamplerInstance = createOnlineEvalSampler(
+      bureau,
+      auditTrailInstance,
+      webhookNotifierInstance,
+      options.onlineEvals,
     );
   }
 
