@@ -73,4 +73,62 @@ describe('chunkHtml', () => {
       expect(typeof chunk.endLine).toBe('number');
     }
   });
+
+  it('carries the full heading label when it spans multiple text callbacks', async () => {
+    const html = ['<h1>Install <code>CLI</code></h1>', '<p>Body text.</p>'].join('');
+
+    const chunks = await chunkHtml(html);
+
+    expect(chunks[0]!.heading).toBe('Install CLI');
+  });
+
+  it('does not label the next chunk with a heading that has no text', async () => {
+    const html = ['<h1><img src="x.png"></h1>', '<p>Not a heading.</p>'].join('');
+
+    const chunks = await chunkHtml(html);
+
+    expect(chunks[0]!.heading).toBeUndefined();
+  });
+
+  it('preserves whitespace separators between adjacent inline elements', async () => {
+    const html = '<p><strong>Hello</strong> <em>world</em></p>';
+    const chunks = await chunkHtml(html);
+
+    expect(chunks[0]!.text).toBe('Hello world');
+  });
+
+  it('decodes common HTML entities before storing text', async () => {
+    const html = '<p>AT&amp;T&nbsp;plans</p>';
+    const chunks = await chunkHtml(html);
+
+    expect(chunks[0]!.text).toBe('AT&T plans');
+  });
+
+  it('decodes numeric character references', async () => {
+    const html = '<p>caf&#233; &#x2013; menu</p>';
+    const chunks = await chunkHtml(html);
+
+    expect(chunks[0]!.text).toBe('café – menu');
+  });
+
+  it('captures text nodes that are not wrapped in any element', async () => {
+    const html = 'Hello <b>world</b>';
+    const chunks = await chunkHtml(html);
+
+    expect(chunks[0]!.text).toBe('Hello world');
+  });
+
+  it('ignores elements nested inside skipped tags entirely', async () => {
+    const html =
+      '<p>Before<template><h1>Hidden</h1><p>Also hidden</p></template>After</p><p>Next</p>';
+    const chunks = await chunkHtml(html);
+    const combined = chunks.map((chunk) => chunk.text).join('\n');
+
+    expect(combined).not.toContain('Hidden');
+    expect(combined).not.toContain('Also hidden');
+    // Nested block/heading tags inside a skipped container must not insert
+    // spurious line breaks into the surrounding text.
+    expect(combined).toBe('BeforeAfter\nNext');
+    expect(chunks.find((chunk) => chunk.text.includes('Next'))?.heading).toBeUndefined();
+  });
 });
