@@ -1,7 +1,17 @@
+import type {
+  CreateTaskRequestHandlerExtra,
+  TaskRequestHandlerExtra,
+  TaskStore,
+  TaskToolExecution,
+  ToolTaskHandler,
+} from '@modelcontextprotocol/sdk/experimental/tasks';
 import type { ServerOptions } from '@modelcontextprotocol/sdk/server/index.js';
 import type { McpServer, RegisteredTool } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { AnySchema } from '@modelcontextprotocol/sdk/server/zod-compat.js';
-import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/protocol.js';
+import type {
+  RequestHandlerExtra,
+  RequestTaskStore,
+} from '@modelcontextprotocol/sdk/shared/protocol.js';
 import type {
   CallToolResult,
   ElicitRequest,
@@ -9,6 +19,8 @@ import type {
   ElicitRequestURLParams,
   ElicitResult,
   Implementation,
+  Result,
+  ServerCapabilities,
   ServerNotification,
   ServerRequest,
   Tool as MCPTool,
@@ -116,34 +128,53 @@ const DEFAULT_SERVER_INFO: Implementation = {
   version: '0.0.0',
 };
 
+/**
+ * Creates an MCP server from a toolbox.
+ *
+ * Tools whose resolved MCP `execution.taskSupport` is `'required'` or
+ * `'optional'` (set via {@link MCPToolConfiguration.execution}, typically
+ * through `toolConfiguration()` or `tool.metadata.mcp.execution`) are
+ * registered as MCP Tasks-extension tools instead of plain call/response
+ * tools. This lets clients poll a long-running tool via `tasks/get`,
+ * retrieve its result via `tasks/result`, and cancel it via `tasks/cancel`
+ * (MCP spec revision `2025-11-25`, `@modelcontextprotocol/sdk` experimental
+ * tasks module). If no `taskStore` is supplied in `options`, a fresh
+ * `InMemoryTaskStore` is created and wrapped so that a client's
+ * `tasks/cancel` call aborts the tool's `AbortSignal`.
+ */
 export async function createMCP(
   toolbox: ToolboxLike,
   options: CreateMCPOptions = {},
 ): Promise<McpServer> {
   const { serverInfo, toolConfiguration, formatResult, resources, prompts, ...serverOptions } =
     options;
-  const { McpServer: McpServerClass } = await requireMcp();
-  const server = new McpServerClass(serverInfo ?? DEFAULT_SERVER_INFO, serverOptions);
-  const registered = new Map<string, RegisteredTool>();
-
-  const registerTool = (tool: MCPToolDefinition) => {
-    const toolName = tool.name;
-    const existing = registered.get(toolName);
-    if (existing) {
-      existing.remove();
-    }
-
-    const registeredTool = server.registerTool(
-      toolName,
-      toMcpRegisteredToolConfiguration(tool),
-      tool.handler,
-    );
-
-    registered.set(toolName, registeredTool);
-  };
 
   const availableTools =
     typeof toolbox.getAvailable === 'function' ? await toolbox.getAvailable() : toolbox.tools();
+  const toolEntries = availableTools.map((tool) => ({
+    tool,
+    configuration: resolveToolConfiguration(tool, toolConfiguration),
+  }));
+  const hasTaskTools = toolEntries.some((entry) =>
+    isTaskSupportedExecution(entry.configuration.execution),
+  );
+
+  const taskAbortControllers = new Map<string, AbortController>();
+  let resolvedServerOptions = serverOptions;
+  if (hasTaskTools) {
+    const { InMemoryTaskStore } = await requireMcpTasks();
+    const baseTaskStore = serverOptions.taskStore ?? new InMemoryTaskStore();
+    resolvedServerOptions = {
+      ...serverOptions,
+      taskStore: createTaskAwareTaskStore(baseTaskStore, taskAbortControllers),
+      capabilities: withTaskCapabilities(serverOptions.capabilities),
+    };
+  }
+
+  const { McpServer: McpServerClass } = await requireMcp();
+  const server = new McpServerClass(serverInfo ?? DEFAULT_SERVER_INFO, resolvedServerOptions);
+  const registered = new Map<string, RegisteredTool>();
+
   const executeTool =
     typeof toolbox.execute === 'function' && typeof toolbox.getTool === 'function'
       ? (
@@ -174,13 +205,40 @@ export async function createMCP(
   const supportsElicitation = () =>
     server.server.getClientCapabilities()?.elicitation !== undefined;
 
-  for (const tool of toMcpTools(availableTools, {
+  const toolOptions: ToMCPToolsOptions = {
     toolConfiguration,
     formatResult,
     executeTool,
     supportsElicitation,
-  })) {
-    registerTool(tool);
+  };
+
+  for (const { tool, configuration } of toolEntries) {
+    const toolName = tool.name;
+    const existing = registered.get(toolName);
+    if (existing) {
+      existing.remove();
+    }
+
+    let registeredTool: RegisteredTool;
+    if (isTaskSupportedExecution(configuration.execution)) {
+      registeredTool = registerMcpTaskTool(
+        server,
+        tool,
+        configuration,
+        configuration.execution,
+        toolOptions,
+        taskAbortControllers,
+      );
+    } else {
+      const definition = buildMcpToolDefinitionFromConfiguration(tool, configuration, toolOptions);
+      registeredTool = server.registerTool(
+        toolName,
+        toMcpRegisteredToolConfiguration(definition),
+        definition.handler,
+      );
+    }
+
+    registered.set(toolName, registeredTool);
   }
 
   applyRegistrars(server, resources);
@@ -222,12 +280,43 @@ export function fromMcpTools(
   }) as Tool[];
 }
 
-function toMcpToolDefinition(tool: Tool, options: ToMCPToolsOptions): MCPToolDefinition {
+/**
+ * Resolves a tool's MCP configuration by merging metadata-derived
+ * configuration (`tool.metadata.mcp`) with the caller-supplied
+ * `toolConfiguration()` callback, mirroring the precedence used inline by
+ * {@link toMcpToolDefinition} and {@link createMCP}'s task-tool path.
+ */
+function resolveToolConfiguration(
+  tool: Tool,
+  toolConfiguration: ToMCPToolsOptions['toolConfiguration'],
+): MCPToolConfiguration {
   const metadataConfiguration = toolConfigurationFromMetadata(tool);
-  const configuration = {
+  return {
     ...metadataConfiguration,
-    ...(options.toolConfiguration?.(tool) ?? {}),
+    ...(toolConfiguration?.(tool) ?? {}),
   };
+}
+
+/** A tool's MCP `execution` hint that opts it into the Tasks extension. */
+function isTaskSupportedExecution(
+  execution: ToolExecution | undefined,
+): execution is TaskToolExecution {
+  return execution?.taskSupport === 'required' || execution?.taskSupport === 'optional';
+}
+
+type ResolvedMcpToolShape = {
+  title?: string;
+  description: string;
+  inputSchema: AnySchema;
+  annotations?: ToolAnnotations;
+  meta?: Record<string, unknown>;
+};
+
+/** Resolves the title/description/schema/annotations/meta shared by both the plain-call and task-tool registration paths. */
+function resolveMcpToolShape(
+  tool: Tool,
+  configuration: MCPToolConfiguration,
+): ResolvedMcpToolShape {
   const meta = configuration.meta ?? tool.metadata;
   const readOnlyHint = tool.metadata?.readOnly === true;
   const annotations = readOnlyHint
@@ -239,10 +328,38 @@ function toMcpToolDefinition(tool: Tool, options: ToMCPToolsOptions): MCPToolDef
   const resolvedInputSchema =
     resolveMcpSchema(configuration.schema) ?? (tool.input as unknown as AnySchema);
 
-  const mcpTool: MCPToolDefinition = {
-    name: tool.name,
+  const shape: ResolvedMcpToolShape = {
     description: configuration.description ?? tool.description,
     inputSchema: resolvedInputSchema,
+  };
+  if (configuration.title !== undefined) {
+    shape.title = configuration.title;
+  }
+  if (annotations !== undefined) {
+    shape.annotations = annotations;
+  }
+  if (meta && typeof meta === 'object' && !Array.isArray(meta)) {
+    shape.meta = meta;
+  }
+  return shape;
+}
+
+function toMcpToolDefinition(tool: Tool, options: ToMCPToolsOptions): MCPToolDefinition {
+  const configuration = resolveToolConfiguration(tool, options.toolConfiguration);
+  return buildMcpToolDefinitionFromConfiguration(tool, configuration, options);
+}
+
+function buildMcpToolDefinitionFromConfiguration(
+  tool: Tool,
+  configuration: MCPToolConfiguration,
+  options: ToMCPToolsOptions,
+): MCPToolDefinition {
+  const shape = resolveMcpToolShape(tool, configuration);
+
+  const mcpTool: MCPToolDefinition = {
+    name: tool.name,
+    description: shape.description,
+    inputSchema: shape.inputSchema,
     handler: async (args, extra) => {
       const params = args ?? {};
       let result: ToolResultLike;
@@ -282,20 +399,213 @@ function toMcpToolDefinition(tool: Tool, options: ToMCPToolsOptions): MCPToolDef
     },
   };
 
-  if (configuration.title !== undefined) {
-    mcpTool.title = configuration.title;
+  if (shape.title !== undefined) {
+    mcpTool.title = shape.title;
   }
-  if (annotations !== undefined) {
-    mcpTool.annotations = annotations;
+  if (shape.annotations !== undefined) {
+    mcpTool.annotations = shape.annotations;
   }
   if (configuration.execution !== undefined) {
     mcpTool.execution = configuration.execution;
   }
-  if (meta && typeof meta === 'object' && !Array.isArray(meta)) {
-    mcpTool._meta = meta;
+  if (shape.meta !== undefined) {
+    mcpTool._meta = shape.meta;
   }
 
   return mcpTool;
+}
+
+/**
+ * Registers a tool as an MCP Tasks-extension tool (`server.experimental.tasks.registerToolTask`)
+ * instead of a plain call/response tool. The tool's `execute` runs in the background once
+ * `tasks/get` is first polled; its result is recorded via the request-scoped `RequestTaskStore`
+ * so `tasks/result` can retrieve it and `tasks/cancel` can abort it (see
+ * {@link createTaskAwareTaskStore}).
+ */
+function registerMcpTaskTool(
+  server: McpServer,
+  tool: Tool,
+  configuration: MCPToolConfiguration,
+  execution: TaskToolExecution,
+  options: ToMCPToolsOptions,
+  taskAbortControllers: Map<string, AbortController>,
+): RegisteredTool {
+  const shape = resolveMcpToolShape(tool, configuration);
+
+  const taskConfig: {
+    title?: string;
+    description: string;
+    inputSchema: AnySchema;
+    annotations?: ToolAnnotations;
+    execution: TaskToolExecution;
+    _meta?: Record<string, unknown>;
+  } = {
+    description: shape.description,
+    inputSchema: shape.inputSchema,
+    execution,
+  };
+  if (shape.title !== undefined) {
+    taskConfig.title = shape.title;
+  }
+  if (shape.annotations !== undefined) {
+    taskConfig.annotations = shape.annotations;
+  }
+  if (shape.meta !== undefined) {
+    taskConfig._meta = shape.meta;
+  }
+
+  return server.experimental.tasks.registerToolTask(
+    tool.name,
+    taskConfig,
+    createMcpTaskToolHandler(tool, options, taskAbortControllers),
+  );
+}
+
+/**
+ * Builds the `createTask` / `getTask` / `getTaskResult` triad the Tasks
+ * extension requires. `createTask` starts the tool's execution in the
+ * background (not awaited) against a per-task `AbortController`; that
+ * controller is registered in `taskAbortControllers` so a later
+ * `tasks/cancel` (routed through {@link createTaskAwareTaskStore}) can abort
+ * it. `getTask`/`getTaskResult` simply delegate to the request-scoped
+ * `RequestTaskStore`, per the SDK's documented `registerToolTask` pattern.
+ */
+function createMcpTaskToolHandler(
+  tool: Tool,
+  options: Pick<ToMCPToolsOptions, 'executeTool' | 'formatResult'>,
+  taskAbortControllers: Map<string, AbortController>,
+): ToolTaskHandler<AnySchema> {
+  return {
+    async createTask(args, extra: CreateTaskRequestHandlerExtra) {
+      const task = await extra.taskStore.createTask({ ttl: extra.taskRequestedTtl ?? null });
+      const controller = new AbortController();
+      taskAbortControllers.set(task.taskId, controller);
+      void runMcpTaskTool(tool, args, extra.taskStore, task.taskId, controller, options).finally(
+        () => {
+          taskAbortControllers.delete(task.taskId);
+        },
+      );
+      return { task };
+    },
+    async getTask(_args, extra: TaskRequestHandlerExtra) {
+      return extra.taskStore.getTask(extra.taskId);
+    },
+    async getTaskResult(_args, extra: TaskRequestHandlerExtra) {
+      const result = await extra.taskStore.getTaskResult(extra.taskId);
+      return asCallToolResult(result);
+    },
+  };
+}
+
+/**
+ * Runs a task-tool's execution to completion (or failure) and records the
+ * outcome via `storeTaskResult`. If the task was cancelled while running
+ * (`controller.signal.aborted`), the store has already transitioned to the
+ * terminal `cancelled` status — recording a completion/failure on top of
+ * that would both be rejected by the store (terminal states don't
+ * transition) and semantically wrong, so this returns without storing.
+ */
+async function runMcpTaskTool(
+  tool: Tool,
+  params: unknown,
+  taskStore: RequestTaskStore,
+  taskId: string,
+  controller: AbortController,
+  options: Pick<ToMCPToolsOptions, 'executeTool' | 'formatResult'>,
+): Promise<void> {
+  let outcome: { ok: true; result: ToolResultLike } | { ok: false; error: unknown };
+  try {
+    const result = options.executeTool
+      ? await options.executeTool(tool, params, taskId, controller.signal)
+      : await (
+          tool as unknown as {
+            executeWith: (options: ToolExecuteWithOptions) => Promise<ToolResultLike>;
+          }
+        ).executeWith({ params: params ?? {}, callId: taskId, signal: controller.signal });
+    outcome = { ok: true, result };
+  } catch (error) {
+    outcome = { ok: false, error };
+  }
+
+  if (controller.signal.aborted) {
+    return;
+  }
+
+  const callResult = outcome.ok
+    ? options.formatResult
+      ? options.formatResult(outcome.result)
+      : toCallToolResult(outcome.result)
+    : toErrorCallToolResult(outcome.error);
+
+  await taskStore.storeTaskResult(taskId, callResult.isError ? 'failed' : 'completed', callResult);
+}
+
+function toErrorCallToolResult(error: unknown): CallToolResult {
+  const message = error instanceof Error ? error.message : String(error);
+  return { content: toTextContent(message), isError: true };
+}
+
+/**
+ * Narrows a task-store `Result` (loose by design, since `tasks/result` can
+ * carry the result of any request type) to `CallToolResult`. Safe here
+ * because {@link runMcpTaskTool} only ever calls `storeTaskResult` with a
+ * genuine `CallToolResult`.
+ */
+function asCallToolResult(result: Result): CallToolResult {
+  if (isRecord(result) && Array.isArray((result as { content?: unknown }).content)) {
+    return result as CallToolResult;
+  }
+  throw new TypeError('Task result store returned a value that is not a CallToolResult.');
+}
+
+/**
+ * Wraps a base {@link TaskStore} so that a client's `tasks/cancel` call —
+ * which the SDK implements as `taskStore.updateTaskStatus(taskId,
+ * 'cancelled', ...)` — also aborts the `AbortController` registered for
+ * that task in `createTask`, actually stopping the in-flight tool
+ * execution rather than merely flipping a status flag.
+ */
+function createTaskAwareTaskStore(
+  baseStore: TaskStore,
+  taskAbortControllers: Map<string, AbortController>,
+): TaskStore {
+  return {
+    createTask: (taskParams, requestId, request, sessionId) =>
+      baseStore.createTask(taskParams, requestId, request, sessionId),
+    getTask: (taskId, sessionId) => baseStore.getTask(taskId, sessionId),
+    storeTaskResult: (taskId, status, result, sessionId) =>
+      baseStore.storeTaskResult(taskId, status, result, sessionId),
+    getTaskResult: (taskId, sessionId) => baseStore.getTaskResult(taskId, sessionId),
+    listTasks: (cursor, sessionId) => baseStore.listTasks(cursor, sessionId),
+    async updateTaskStatus(taskId, status, statusMessage, sessionId) {
+      if (status === 'cancelled') {
+        taskAbortControllers
+          .get(taskId)
+          ?.abort(new Error('Task cancelled by client via tasks/cancel.'));
+      }
+      return baseStore.updateTaskStatus(taskId, status, statusMessage, sessionId);
+    },
+  };
+}
+
+/** Merges in the `tasks` server capability required to advertise Tasks-extension support for `tools/call`. */
+function withTaskCapabilities(existing: ServerCapabilities | undefined): ServerCapabilities {
+  const existingTasks = existing?.tasks;
+  return {
+    ...existing,
+    tasks: {
+      ...existingTasks,
+      list: existingTasks?.list ?? {},
+      cancel: existingTasks?.cancel ?? {},
+      requests: {
+        ...existingTasks?.requests,
+        tools: {
+          ...existingTasks?.requests?.tools,
+          call: existingTasks?.requests?.tools?.call ?? {},
+        },
+      },
+    },
+  };
 }
 
 function toMcpRegisteredToolConfiguration(tool: MCPToolDefinition): {
@@ -630,6 +940,30 @@ async function requireMcpTypes(): Promise<McpTypesSdk> {
   }
 }
 
+type McpTasksSdk = typeof import('@modelcontextprotocol/sdk/experimental/tasks');
+
+let cachedMcpTasksSdk: McpTasksSdk | undefined;
+const defaultMcpTasksLoader = async (): Promise<McpTasksSdk> => {
+  const { createRequire } = await import('node:module');
+  const require = createRequire(import.meta.url);
+  return require('@modelcontextprotocol/sdk/experimental/tasks') as McpTasksSdk;
+};
+let mcpTasksLoader: () => McpTasksSdk | Promise<McpTasksSdk> = defaultMcpTasksLoader;
+
+async function requireMcpTasks(): Promise<McpTasksSdk> {
+  if (cachedMcpTasksSdk) return cachedMcpTasksSdk;
+  try {
+    cachedMcpTasksSdk = await mcpTasksLoader();
+    return cachedMcpTasksSdk;
+  } catch (error) {
+    const hint =
+      'Missing peer dependency "@modelcontextprotocol/sdk". Install it to use armorer/mcp task-based tools.';
+    const wrapped = error instanceof Error ? error : new Error(String(error));
+    wrapped.message = `${hint}\n${wrapped.message}`;
+    throw wrapped;
+  }
+}
+
 /**
  * Translates a transport-agnostic {@link ToolElicitationRequest} into MCP
  * wire params for an `elicitation/create` request (form or URL mode).
@@ -786,6 +1120,8 @@ export const internalMcpTestUtilities = {
     mcpLoader = defaultMcpLoader;
     cachedMcpTypesSdk = undefined;
     mcpTypesLoader = defaultMcpTypesLoader;
+    cachedMcpTasksSdk = undefined;
+    mcpTasksLoader = defaultMcpTasksLoader;
   },
   setModuleLoader(loader: (() => McpSdk | Promise<McpSdk>) | undefined) {
     cachedMcpSdk = undefined;

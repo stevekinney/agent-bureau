@@ -4,7 +4,11 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { ReadBuffer, serializeMessage } from '@modelcontextprotocol/sdk/shared/stdio.js';
-import { ElicitRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import {
+  CallToolResultSchema,
+  CreateTaskResultSchema,
+  ElicitRequestSchema,
+} from '@modelcontextprotocol/sdk/types.js';
 import { describe, expect, it } from 'bun:test';
 import { z } from 'zod';
 
@@ -1477,5 +1481,167 @@ describe('MCP elicitation', () => {
 
     expect(sendRequestCalls).toHaveLength(1);
     expect(sendRequestCalls[0]?.options).toEqual({ signal: controller.signal });
+  });
+});
+
+function createDeferred<T>() {
+  let deferredResolve!: (value: T) => void;
+  let deferredReject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolve, reject) => {
+    deferredResolve = resolve;
+    deferredReject = reject;
+  });
+  return { promise, resolve: deferredResolve, reject: deferredReject };
+}
+
+/**
+ * Polls `tasks/get` until the task reaches a terminal status, yielding a
+ * microtask between polls. Bounded so a genuine bug (e.g. a broken
+ * `storeTaskResult` wiring) fails the test fast instead of hanging — this
+ * does not wait on any real timer, only on the in-memory promise chain
+ * started by `createTask` settling.
+ */
+async function waitForTerminalTaskStatus(
+  client: Client,
+  taskId: string,
+  maxPolls = 50,
+): Promise<string> {
+  for (let attempt = 0; attempt < maxPolls; attempt += 1) {
+    const task = await client.experimental.tasks.getTask(taskId);
+    if (task.status === 'completed' || task.status === 'failed' || task.status === 'cancelled') {
+      return task.status;
+    }
+    await Promise.resolve();
+  }
+  throw new Error(`Task ${taskId} did not reach a terminal status within ${maxPolls} polls.`);
+}
+
+describe('task-based tools (MCP Tasks extension)', () => {
+  it('exposes a long-running tool as a task: create, poll via tasks/get, retrieve via tasks/result', async () => {
+    const toolbox = createToolbox();
+    const deferred = createDeferred<{ done: true }>();
+
+    createTool(
+      {
+        name: 'long-task',
+        description: 'a long-running task-based tool',
+        input: z.object({}),
+        metadata: { mcp: { execution: { taskSupport: 'required' } } },
+        async execute() {
+          return deferred.promise;
+        },
+      },
+      toolbox,
+    );
+
+    const { client, server } = await connect(toolbox);
+
+    try {
+      const createResult = await client.request(
+        { method: 'tools/call', params: { name: 'long-task', arguments: {}, task: {} } },
+        CreateTaskResultSchema,
+      );
+      const taskId = createResult.task.taskId;
+      expect(createResult.task.status).toBe('working');
+
+      const polledWhileWorking = await client.experimental.tasks.getTask(taskId);
+      expect(polledWhileWorking.status).toBe('working');
+
+      deferred.resolve({ done: true });
+
+      const finalStatus = await waitForTerminalTaskStatus(client, taskId);
+      expect(finalStatus).toBe('completed');
+
+      const taskResult = await client.experimental.tasks.getTaskResult(
+        taskId,
+        CallToolResultSchema,
+      );
+      expect(taskResult.isError).not.toBe(true);
+      expect(taskResult.structuredContent).toEqual({ done: true });
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  it('cancels a running task via tasks/cancel, aborting the tool AbortSignal', async () => {
+    const toolbox = createToolbox();
+    const started = createDeferred<void>();
+    let sawAbort = false;
+
+    createTool(
+      {
+        name: 'cancellable-task',
+        description: 'a task-based tool that observes cancellation',
+        input: z.object({}),
+        metadata: { mcp: { execution: { taskSupport: 'required' } } },
+        async execute(_params, context) {
+          started.resolve();
+          return new Promise((_resolve, reject) => {
+            context.signal?.addEventListener('abort', () => {
+              sawAbort = true;
+              reject(context.signal?.reason ?? new Error('aborted'));
+            });
+          });
+        },
+      },
+      toolbox,
+    );
+
+    const { client, server } = await connect(toolbox);
+
+    try {
+      const createResult = await client.request(
+        {
+          method: 'tools/call',
+          params: { name: 'cancellable-task', arguments: {}, task: {} },
+        },
+        CreateTaskResultSchema,
+      );
+      const taskId = createResult.task.taskId;
+      await started.promise;
+
+      const cancelResult = await client.experimental.tasks.cancelTask(taskId);
+      expect(cancelResult.status).toBe('cancelled');
+
+      const finalStatus = await waitForTerminalTaskStatus(client, taskId);
+      expect(finalStatus).toBe('cancelled');
+      expect(sawAbort).toBe(true);
+
+      let taskResultError: unknown;
+      try {
+        await client.experimental.tasks.getTaskResult(taskId, CallToolResultSchema);
+      } catch (error) {
+        taskResultError = error;
+      }
+      expect(taskResultError).toBeDefined();
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  it('does not advertise the tasks capability when no tool opts into task support', async () => {
+    const toolbox = createToolbox();
+    createTool(
+      {
+        name: 'plain-tool',
+        description: 'a regular, non-task tool',
+        input: z.object({}),
+        async execute() {
+          return { ok: true };
+        },
+      },
+      toolbox,
+    );
+
+    const { client, server } = await connect(toolbox);
+
+    try {
+      expect(client.getServerCapabilities()?.tasks).toBeUndefined();
+    } finally {
+      await client.close();
+      await server.close();
+    }
   });
 });
