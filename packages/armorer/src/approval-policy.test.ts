@@ -509,6 +509,30 @@ describe('evaluateHeadlessPermission', () => {
     expect(result.status).toBe('deny');
     expect(result.reason?.length).toBeLessThan(hugeReason.length);
   });
+
+  it("surfaces the gate's redacted reason, not the capability-tier message, when both axes deny the same call (regression)", () => {
+    // A mutating tool: the capability tier would `ask` (headless converts
+    // that to `deny`), AND the gate independently denies on the parsed
+    // input. Both are terminal denials, but the gate's reason is the more
+    // specific, actionable one — it must not be masked by the generic
+    // capability-tier message.
+    const gate: PermissionGate = () => ({
+      allow: false,
+      reason: 'Path "../../etc/passwd" escapes root "/workspace"',
+    });
+    const result = evaluateHeadlessPermission(
+      { toolName: 'write_file', params: { path: '../../etc/passwd' }, metadata: { mutates: true } },
+      {
+        allowList: ['write_file'],
+        capability: { mode: 'on-mutation' },
+        gate,
+      },
+    );
+    expect(result.status).toBe('deny');
+    expect(result.reason).toContain('escapes root');
+    expect(result.reason).not.toContain('headless');
+    expect(result.reason).not.toContain('capability-tier policy');
+  });
 });
 
 describe('createHeadlessPermissionPolicyHooks — toolbox integration', () => {

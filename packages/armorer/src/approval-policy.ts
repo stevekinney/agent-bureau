@@ -323,6 +323,15 @@ export function evaluateHeadlessPermission(
     return { status: 'deny', reason };
   }
 
+  // The gate is checked ahead of the capability tier for reason attribution
+  // (though every axis was already evaluated above for the combined status):
+  // it's the most specific, input-derived signal — e.g. "this exact path
+  // escapes the jail root" — and must not be masked by a more generic
+  // capability-tier message when both axes independently deny the same call.
+  if (gateResult && !gateResult.allow) {
+    return { status: 'deny', reason: redactGateReason(gateResult.reason) };
+  }
+
   if (capabilityStatus === 'ask' || capabilityStatus === 'deny') {
     const tierLabel = capabilityResult?.tier ?? 'unrecognized';
     const reason =
@@ -330,10 +339,6 @@ export function evaluateHeadlessPermission(
         ? `Tool "${toolName}" (${tierLabel} tier) would require human approval, but this run is headless (approvalMode: never) — denying instead of parking.`
         : `Tool "${toolName}" (${tierLabel} tier) is denied by the capability-tier policy (mode: ${capabilityResult?.mode}).`;
     return { status: 'deny', reason };
-  }
-
-  if (gateResult && !gateResult.allow) {
-    return { status: 'deny', reason: redactGateReason(gateResult.reason) };
   }
 
   return {
