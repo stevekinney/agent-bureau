@@ -620,16 +620,59 @@ import { createSubagentTool } from 'operative';
 const researcherTool = createSubagentTool({
   name: 'research',
   description: 'Delegates a research task to a specialist agent.',
-  agent: researcherAgent,
+  agentName: 'researcher',
+  run: (prompt, context) => researcherAgent.run(prompt, context),
   input: z.object({ query: z.string() }),
   mapInput: ({ query }) => query,
-  mapOutput: (result) => result.content,
 });
 
 const orchestrator = defineAgent({
   name: 'orchestrator',
   generate,
   toolbox: createToolbox([researcherTool]),
+});
+```
+
+**Context isolation (AB-64):** by default, `createSubagentTool` keeps a
+sub-agent's full conversation, steps, and usage out of the parent's context
+window — only a capped summary of its `content` crosses back. `returnMode`
+controls this:
+
+- `'summary'` — the **documented default**. Only `result.content`, condensed
+  by a `summarizer` and hard-capped at `summaryTokenCap` tokens (default
+  `500`), returns to the parent. The sub-agent's own transcript stays
+  isolated. This is what keeps a fan-out of several sub-agents from blowing
+  up the orchestrator's context window.
+- `'full'` — `result.content` is returned verbatim and uncapped. Opt in
+  deliberately, e.g. for a single close-coupled delegation that needs the
+  sub-agent's exact output (structured extraction, code the parent will
+  paste unmodified).
+
+Both modes ultimately hand off to `mapOutput(result)`, which still receives
+the complete `RunResult` — including `conversation`, `steps`, and `usage` —
+so a custom `mapOutput` CAN reach past the summary and return those fields
+directly. `returnMode`/`summaryTokenCap` cap `result.content`, not what a
+custom `mapOutput` chooses to do with the rest of the object; keep that in
+mind if you override `mapOutput`.
+
+```typescript
+const researcherTool = createSubagentTool({
+  name: 'research',
+  description: 'Delegates a research task to a specialist agent.',
+  agentName: 'researcher',
+  run: (prompt, context) => researcherAgent.run(prompt, context),
+  input: z.object({ query: z.string() }),
+  mapInput: ({ query }) => query,
+  // returnMode: 'summary' is the default — shown explicitly here.
+  returnMode: 'summary',
+  summaryTokenCap: 300,
+  // Swap in a real LLM-backed condensation instead of the default
+  // character-truncation summarizer:
+  summarizer: async (result, { agentName, maxTokens, signal }) => {
+    // Pass `signal` through to cancel the LLM call if the parent tool call
+    // is aborted while summarization is in flight.
+    return condenseWithLLM(result.content, { agentName, maxTokens, signal });
+  },
 });
 ```
 
@@ -654,6 +697,43 @@ const supervisor = createSupervisor({
 
 const supervisorResult = await supervisor.delegate('Write a detailed report on climate change.');
 // supervisorResult.synthesis — the merged output
+```
+
+**Supervisor synthesis and context discipline (AB-64):** the built-in
+`synthesis` strategy concatenates every delegated agent's `result.content`
+verbatim, attributed by agent name — it applies no cap. That default is fine
+for a small, fixed agent pool, but it does not carry the same
+context-isolation discipline as `createSubagentTool`'s `'summary'` mode: a
+`createFanOutRouting()` delegation across many agents can accumulate an
+uncapped amount of text into `supervisorResult.synthesis`. For fan-out at
+scale, supply a custom `SynthesisStrategy` that applies the same discipline
+— condense each `SupervisorTaskResult` (optionally via
+`defaultSubagentSummarizer` or your own summarizer) and cap the combined
+output before returning it:
+
+```typescript
+import { createFanOutRouting, defaultSubagentSummarizer } from 'operative';
+import type { SynthesisStrategy } from 'operative';
+
+const cappedSynthesis: SynthesisStrategy = async (results) => {
+  const summaries = await Promise.all(
+    results.map(async (r) => {
+      if (r.error || !r.result) return `[${r.agentName}] Error`;
+      const summary = await defaultSubagentSummarizer(r.result, {
+        agentName: r.agentName,
+        maxTokens: 200,
+      });
+      return `[${r.agentName}] ${summary}`;
+    }),
+  );
+  return summaries.join('\n\n');
+};
+
+const supervisor = createSupervisor({
+  agents: agentPool,
+  routing: createFanOutRouting(),
+  synthesis: cappedSynthesis,
+});
 ```
 
 **Handoffs:**
