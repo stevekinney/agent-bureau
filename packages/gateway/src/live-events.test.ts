@@ -3,14 +3,14 @@ import { describe, expect, it } from 'bun:test';
 import { LiveFrameBroker } from './live-events';
 import type { ServerFrame } from './types';
 
-function createRunFrame(): ServerFrame {
+function createRunFrame(runSeq = 1): ServerFrame {
   return {
     type: 'event',
     runId: 'run-1',
     event: 'run.completed',
     detail: { content: 'Done.' },
-    sequence: 1,
-    runSeq: 1,
+    sequence: runSeq,
+    runSeq,
     timestamp: Date.now(),
   };
 }
@@ -151,5 +151,98 @@ describe('LiveFrameBroker', () => {
 
     expect(broker.getSubscriberCount('run-1')).toBe(0);
     expect(() => broker.broadcast(createRunFrame())).not.toThrow();
+  });
+
+  it('replays nothing for an omitted "since" — a fresh subscribe is not a history replay', () => {
+    const broker = new LiveFrameBroker();
+    broker.broadcast(createRunFrame());
+    broker.broadcast(createRunFrame(2));
+
+    // Buffer has frames, but a fresh subscribe (no cursor at all) must not
+    // receive any of them — only an explicit `since` triggers replay.
+    expect(broker.getFramesSince('run-1')).toEqual([]);
+  });
+
+  it('replays the full buffer for an explicit "since: 0" (reconnect from the start)', () => {
+    const broker = new LiveFrameBroker();
+    broker.broadcast(createRunFrame());
+    broker.broadcast(createRunFrame(2));
+
+    const frames = broker.getFramesSince('run-1', 0);
+    expect(frames).toHaveLength(2);
+  });
+
+  it('does not replay buffered history to a fresh SSE subscription with no cursor', async () => {
+    const broker = new LiveFrameBroker();
+    broker.broadcast(createRunFrame());
+    broker.broadcast(createRunFrame(2));
+
+    const request = new Request('http://example.test/api/v1/events?runId=run-1');
+    const response = broker.createEventStreamResponse(request, { runIds: ['run-1'] });
+    const reader = response.body?.getReader();
+    expect(reader).toBeDefined();
+    if (!reader) return;
+
+    // Only the ': connected' comment should show up — no replayed data lines.
+    const first = await reader.read();
+    const text = new TextDecoder().decode(first.value);
+    expect(text).toContain(': connected');
+    expect(text).not.toContain('data:');
+
+    await reader.cancel();
+  });
+
+  it('falls back to the "since" query param when Last-Event-ID is present but empty', async () => {
+    const broker = new LiveFrameBroker();
+    broker.broadcast(createRunFrame());
+    broker.broadcast(createRunFrame(2));
+
+    const request = new Request(
+      `http://example.test/api/v1/events?runId=run-1&since=${encodeURIComponent('run-1')}:1`,
+      { headers: { 'last-event-id': '' } },
+    );
+    const response = broker.createEventStreamResponse(request, { runIds: ['run-1'] });
+    const reader = response.body?.getReader();
+    expect(reader).toBeDefined();
+    if (!reader) return;
+
+    const chunk = await reader.read();
+    const text = new TextDecoder().decode(chunk.value);
+    // The `since=run-1:1` query param should win (empty header is ignored),
+    // so only runSeq 2 (the frame after the cursor) is replayed.
+    expect(text).toContain('"runSeq":2');
+    expect(text).not.toContain('"runSeq":1');
+
+    await reader.cancel();
+  });
+
+  it('tolerates a malformed percent-encoded cursor without throwing', async () => {
+    const broker = new LiveFrameBroker();
+    broker.broadcast(createRunFrame());
+
+    const request = new Request('http://example.test/api/v1/events?runId=run-1&since=bad%zz:3');
+    expect(() => broker.createEventStreamResponse(request, { runIds: ['run-1'] })).not.toThrow();
+  });
+
+  it('ignores a negative or fractional cursor entry instead of using it', async () => {
+    const broker = new LiveFrameBroker();
+    broker.broadcast(createRunFrame());
+    broker.broadcast(createRunFrame(2));
+
+    const request = new Request(
+      `http://example.test/api/v1/events?runId=run-1&since=${encodeURIComponent('run-1')}:-1`,
+    );
+    const response = broker.createEventStreamResponse(request, { runIds: ['run-1'] });
+    const reader = response.body?.getReader();
+    expect(reader).toBeDefined();
+    if (!reader) return;
+
+    // An invalid cursor entry is dropped, which decodes to "no cursor for
+    // run-1" — i.e. no replay, not "replay everything".
+    const first = await reader.read();
+    const text = new TextDecoder().decode(first.value);
+    expect(text).not.toContain('data:');
+
+    await reader.cancel();
   });
 });

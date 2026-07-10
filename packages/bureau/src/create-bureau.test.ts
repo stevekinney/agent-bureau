@@ -820,6 +820,91 @@ describe('createBureau', () => {
     }
   });
 
+  // AB-15 regression: a recovered run's runSeq generation must never overlap
+  // the pre-restart generation, or a browser reconnecting with a pre-restart
+  // cursor (e.g. `since: 25`) would have every post-restart frame filtered
+  // out by `getFramesSince` as "already seen" — a silent frame loss.
+  it('seeds a recovered run with a runSeq far above its pre-restart high-water mark (AB-15)', async () => {
+    const databasePath = join(
+      tmpdir(),
+      `bureau-recovery-runseq-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+
+    try {
+      let bureauAReachedStep1 = false;
+      const runSeqsFromA: number[] = [];
+      const bureauA = await createBureau({
+        generate: async ({ step }) => {
+          if (step === 0) {
+            return { content: 'A step 0', toolCalls: [{ name: 'next', arguments: {} }] };
+          }
+          bureauAReachedStep1 = true;
+          return new Promise<never>(() => {});
+        },
+        toolbox: createToolbox([createNextTool()]) as unknown as Toolbox,
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+        stopWhen: stopWhen.noToolCalls(),
+      });
+
+      const unsubscribeA = bureauA.subscribeLiveFrames((frame) => {
+        if ('runSeq' in frame) {
+          runSeqsFromA.push(frame.runSeq);
+        }
+      });
+
+      const run = await bureauA.createRun({ message: 'Recover me' });
+      await pollUntil(() => bureauAReachedStep1);
+      expect(bureauAReachedStep1).toBe(true);
+      // Bureau A's own generation stays small (single-digit run-scoped
+      // frames for a two-step run) — this is the pre-restart high-water mark
+      // a reconnecting client's cursor would be based on.
+      const preRestartMaxRunSeq = Math.max(...runSeqsFromA);
+      expect(preRestartMaxRunSeq).toBeGreaterThan(0);
+      expect(preRestartMaxRunSeq).toBeLessThan(1000);
+      unsubscribeA();
+      bureauA.dispose();
+
+      const bSteps: number[] = [];
+      const runSeqsFromB: number[] = [];
+      const bureauB = await createBureau({
+        generate: async ({ step }) => {
+          bSteps.push(step);
+          return { content: `B recovered step ${step}`, toolCalls: [] };
+        },
+        toolbox: createToolbox([createNextTool()]) as unknown as Toolbox,
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+        stopWhen: stopWhen.noToolCalls(),
+      });
+
+      const unsubscribeB = bureauB.subscribeLiveFrames((frame) => {
+        if ('runSeq' in frame && frame.runId === run.id) {
+          runSeqsFromB.push(frame.runSeq);
+        }
+      });
+
+      try {
+        await pollUntil(() => bSteps.includes(1));
+        expect(runSeqsFromB.length).toBeGreaterThan(0);
+
+        // Every post-restart runSeq must be strictly greater than the
+        // pre-restart high-water mark — a stale `since: preRestartMaxRunSeq`
+        // cursor from before the crash must not filter out ANY of these.
+        for (const seq of runSeqsFromB) {
+          expect(seq).toBeGreaterThan(preRestartMaxRunSeq);
+        }
+      } finally {
+        unsubscribeB();
+        bureauB.dispose();
+      }
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
   // AB-10 — workflow versioning: end-to-end cross-process proof that
   // `BureauOptions.workflowVersion` threads through to both the stamp
   // (createRunWorkflow) and the recovery comparison (createRunEngine), and

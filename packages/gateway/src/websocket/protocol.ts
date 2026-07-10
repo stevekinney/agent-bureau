@@ -11,7 +11,13 @@ import type { ClientFrame, ServerFrame } from '../types';
 export function parseClientFrame(data: string | Buffer): ClientFrame | ServerFrame {
   try {
     const raw = typeof data === 'string' ? data : data.toString();
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const parsedJson: unknown = JSON.parse(raw);
+
+    if (typeof parsedJson !== 'object' || parsedJson === null || Array.isArray(parsedJson)) {
+      return { type: 'error', code: 'INVALID_FRAME', message: 'Frame must be a JSON object' };
+    }
+
+    const parsed = parsedJson as Record<string, unknown>;
     const type = parsed['type'];
     const runId = parsed['runId'];
     const since = parsed['since'];
@@ -25,7 +31,14 @@ export function parseClientFrame(data: string | Buffer): ClientFrame | ServerFra
         if (typeof runId !== 'string') {
           return { type: 'error', code: 'INVALID_FRAME', message: 'subscribe requires "runId"' };
         }
-        return { type: 'subscribe', runId, since: typeof since === 'number' ? since : undefined };
+        return {
+          type: 'subscribe',
+          runId,
+          since:
+            typeof since === 'number' && Number.isSafeInteger(since) && since >= 0
+              ? since
+              : undefined,
+        };
 
       case 'unsubscribe':
         if (typeof runId !== 'string') {
@@ -92,7 +105,10 @@ export class SubscriptionManager {
     const connections = this.runToConnections.get(runId);
     if (connections) {
       connections.delete(ws);
-      if (connections.size === 0) this.runToConnections.delete(runId);
+      if (connections.size === 0) {
+        this.runToConnections.delete(runId);
+        this.runSequenceCounters.delete(runId);
+      }
     }
   }
 
@@ -104,7 +120,10 @@ export class SubscriptionManager {
       const connections = this.runToConnections.get(runId);
       if (connections) {
         connections.delete(ws);
-        if (connections.size === 0) this.runToConnections.delete(runId);
+        if (connections.size === 0) {
+          this.runToConnections.delete(runId);
+          this.runSequenceCounters.delete(runId);
+        }
       }
     }
 
@@ -140,6 +159,8 @@ export class SubscriptionManager {
    * Converts the StreamEvent into the appropriate ServerFrame before sending.
    */
   broadcastStreamEvent(runId: string, event: StreamEvent): void {
+    if (this.getSubscriberCount(runId) === 0) return;
+
     const frame = streamEventToFrame(runId, event);
     if (frame) {
       this.broadcast(runId, { ...frame, runSeq: this.nextRunSeq(runId) });

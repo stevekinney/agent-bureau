@@ -115,6 +115,24 @@ export function createWebSocket({
     return parts.length > 0 ? parts.join(',') : undefined;
   }
 
+  /**
+   * The run ids to (re)subscribe/replay-for on connect. Normally just
+   * `desiredRunIds`, but a wildcard (`*`) subscription has no real run id of
+   * its own to carry a cursor — `lastSeenRunSeq` is keyed by the actual run
+   * ids frames arrived for, not `'*'`. So when the dashboard is wildcard-
+   * subscribed, fold in every run id we have a recorded cursor for: the door
+   * skips replay for the literal `'*'` entry (there's no stable buffered
+   * position across an open-ended run set), but replays each real run
+   * individually while `'*'` keeps the connection subscribed to future runs.
+   */
+  function reconnectRunIds(): Set<string> {
+    const ids = new Set(desiredRunIds);
+    for (const runId of lastSeenRunSeq.keys()) {
+      ids.add(runId);
+    }
+    return ids;
+  }
+
   function closeEventStream(): void {
     eventSource?.close();
     eventSource = null;
@@ -142,12 +160,13 @@ export function createWebSocket({
     }
 
     status = 'connecting';
+    const reconnectIds = reconnectRunIds();
     const source = new EventSource(
       buildEventStreamUrl(
         eventStreamUrl,
         authToken,
-        desiredRunIds.values(),
-        encodeSinceCursor(desiredRunIds),
+        reconnectIds.values(),
+        encodeSinceCursor(reconnectIds),
       ),
     );
     eventSource = source;
@@ -202,7 +221,7 @@ export function createWebSocket({
       websocketConnected = true;
       closeEventStream();
 
-      for (const runId of desiredRunIds) {
+      for (const runId of reconnectRunIds()) {
         socket.send(
           JSON.stringify({
             type: 'subscribe',

@@ -105,7 +105,12 @@ describe('AB-15 resumable streaming: reconnect replays missed frames', () => {
     const { bureau, broker, runId, releaseStep1, unsubscribe } = await setUpBlockedRun();
 
     try {
-      const requestA = new Request(`http://example.test/api/v1/events?runId=${runId}`);
+      // Explicit `since=<runId>:0` — this connection wants a full replay from
+      // the beginning (AB-15: an omitted `since` means "fresh subscribe, no
+      // replay", so a genuine "reconnect from the start" must say so).
+      const requestA = new Request(
+        `http://example.test/api/v1/events?runId=${runId}&since=${encodeURIComponent(runId)}:0`,
+      );
       const responseA = broker.createEventStreamResponse(requestA, { runIds: [runId] });
       const readerA = responseA.body?.getReader();
       expect(readerA).toBeDefined();
@@ -180,7 +185,10 @@ describe('AB-15 resumable streaming: reconnect replays missed frames', () => {
 
       const connectionA = createFakeSocket();
       handler.open(connectionA.ws);
-      handler.message(connectionA.ws, JSON.stringify({ type: 'subscribe', runId }));
+      // Explicit `since: 0` — AB-15 treats an omitted `since` as "fresh
+      // subscribe, no replay", so a genuine "reconnect from the start" must
+      // ask for it explicitly.
+      handler.message(connectionA.ws, JSON.stringify({ type: 'subscribe', runId, since: 0 }));
 
       await waitForCondition(
         () => connectionA.sent.some((raw) => JSON.parse(raw).type === 'event'),

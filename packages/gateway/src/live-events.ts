@@ -81,7 +81,12 @@ function encodeCursor(cursor: ReadonlyMap<string, number>): string {
     .join(',');
 }
 
-/** Inverse of {@link encodeCursor}. Tolerant of malformed/empty input. */
+/**
+ * Inverse of {@link encodeCursor}. Tolerant of malformed/empty input: an
+ * unparseable pair (bad percent-encoding, a non-integer/negative sequence)
+ * is skipped rather than thrown, so one bad entry in a multi-run cursor
+ * cannot take down the whole SSE handler.
+ */
 function decodeCursor(raw: string | null | undefined): Map<string, number> {
   const cursor = new Map<string, number>();
   if (!raw) {
@@ -95,8 +100,15 @@ function decodeCursor(raw: string | null | undefined): Map<string, number> {
     }
 
     const seq = Number(rawSeq);
-    if (Number.isFinite(seq)) {
+    if (!Number.isSafeInteger(seq) || seq < 0) {
+      continue;
+    }
+
+    try {
       cursor.set(decodeURIComponent(encodedRunId), seq);
+    } catch {
+      // Malformed percent-encoding (e.g. a lone `%zz`) — skip this pair
+      // instead of throwing out of the request handler.
     }
   }
 
@@ -169,19 +181,25 @@ export class LiveFrameBroker {
   }
 
   /**
-   * Returns buffered frames for `runId` with `runSeq > since` (or every
-   * buffered frame when `since` is omitted), in original emission order.
+   * Returns buffered frames for `runId` with `runSeq > since`, in original
+   * emission order. `since` omitted means a fresh subscription with nothing
+   * to resume — per the client-frame contract (`subscribe.since` unset on
+   * first subscribe, see `use-websocket.svelte.ts`), that means NO replay,
+   * not "replay everything": a first-time subscriber typically already has
+   * the run's history from its initial page load, and re-delivering the
+   * whole buffer would duplicate it. Callers that genuinely want the full
+   * buffer (an explicit "reconnect from the beginning") pass `since: 0`.
    * A `since` older than the buffer's floor (post-trim) returns only what
    * remains — see the {@link RUN_FRAME_BUFFER_LIMIT} doc comment.
    */
   getFramesSince(runId: string, since?: number): ServerFrame[] {
-    const buffer = this.runFrameBuffers.get(runId);
-    if (!buffer) {
+    if (since === undefined) {
       return [];
     }
 
-    if (since === undefined) {
-      return [...buffer];
+    const buffer = this.runFrameBuffers.get(runId);
+    if (!buffer) {
+      return [];
     }
 
     return buffer.filter((frame) => (getRunSeq(frame) ?? 0) > since);
@@ -270,8 +288,12 @@ export class LiveFrameBroker {
     // preserve Last-Event-ID, so callers doing a manual reconnect must pass
     // `since` explicitly. The header wins when both are present.
     const requestUrl = new URL(request.url);
+    // An empty `Last-Event-ID` header (some clients send it blank rather than
+    // omitting it) must not shadow a real `?since=` query param — treat empty
+    // string the same as absent.
+    const lastEventIdHeader = request.headers.get('last-event-id');
     const resumeCursor = decodeCursor(
-      request.headers.get('last-event-id') ?? requestUrl.searchParams.get('since'),
+      lastEventIdHeader ? lastEventIdHeader : requestUrl.searchParams.get('since'),
     );
     // Tracks the highest `runSeq` sent per run over this connection's
     // lifetime, seeded from the resume cursor. Each frame's SSE `id:` line
