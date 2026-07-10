@@ -450,5 +450,11 @@ describe('loop helper coverage', () => {
 
     expect(result.finishReason).toBe('budget-exceeded');
     expect(result.error).toBeInstanceOf(BudgetExceededError);
+    // The step that triggered the throwing StopCondition already ran its
+    // generate call and tool execution — it must still be recorded, not
+    // silently dropped from partialSteps just because the condition after
+    // it threw (regression: Copilot review on PR #215).
+    expect(result.steps).toHaveLength(1);
+    expect(result.steps[0]?.toolCalls).toHaveLength(1);
   });
 });
