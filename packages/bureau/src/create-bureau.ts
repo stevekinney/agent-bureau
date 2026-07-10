@@ -11,13 +11,20 @@ import {
   type AgentSession,
   createActiveRun,
   createAgentSession,
+  createFlowController,
   createRunFinishedFrame,
   createRunStartedFrame,
+  type FlowController,
   HumanWaitParkedEvent,
   type JSONValue,
   type RunReport,
+  SchedulerTaskCompletedEvent,
+  SchedulerTaskFailedEvent,
   type SessionStore,
   type SessionSummary,
+  TaskCancelledEvent,
+  TaskDispatchedEvent,
+  TaskPreemptedEvent,
 } from 'operative';
 import {
   createAgentScheduler,
@@ -135,7 +142,13 @@ function appendConversationMessages(
 class BureauError extends Error {
   constructor(
     message: string,
-    readonly code: 'NOT_FOUND' | 'CONFLICT' | 'NOT_CONFIGURED' | 'NOT_IMPLEMENTED' | 'BAD_REQUEST',
+    readonly code:
+      | 'NOT_FOUND'
+      | 'CONFLICT'
+      | 'NOT_CONFIGURED'
+      | 'NOT_IMPLEMENTED'
+      | 'BAD_REQUEST'
+      | 'RATE_LIMITED',
   ) {
     super(message);
     this.name = 'BureauError';
@@ -418,6 +431,13 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
   // an already-closed SQLite handle is runtime-dependent).
   let disposed = false;
   const runtime = await createRuntimeComposition(options);
+  // AB-13 — declarative flow control (concurrency/rate-limit/singleton). One
+  // controller instance shared across BOTH `createRun` (API-triggered) and
+  // `submitSchedulerTask` (scheduler-originated), so a per-agent concurrency
+  // cap counts runs from either surface against the same limit.
+  const flowController: FlowController | undefined = options.flowControl
+    ? createFlowController(options.flowControl)
+    : undefined;
   const runSessionIdentifiers = new WeakMap<ActiveRun, string>();
   // Ids of PendingReview items already resolved via resolveReview() (AB-20).
   // Neither resolution path (resumeApproval, signalSession) mutates the live
@@ -552,6 +572,51 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
           return () => runtime.scheduler?.removeEventListener(eventType, listener);
         });
 
+  // AB-13 — enforce the flow-control lifecycle for scheduler-originated
+  // tasks. Preemption (`task.preempted`, `requeued: true`) is this scheduler's
+  // OWN notion of "parked" — the run is suspended and will be redispatched
+  // later — so it maps directly onto `markParked`/`markResumed`, freeing the
+  // concurrency slot while the task sits preempted. `markResumed` is a no-op
+  // when the slot was never parked (e.g. a task's FIRST dispatch), so it is
+  // safe to call on every `task.dispatched`.
+  const flowControlSchedulerCleanup: Array<() => void> =
+    flowController === undefined || runtime.scheduler === undefined
+      ? []
+      : (
+          [
+            [
+              SchedulerTaskCompletedEvent.type,
+              (event: SchedulerTaskCompletedEvent) => flowController.settle(event.taskId),
+            ],
+            [
+              SchedulerTaskFailedEvent.type,
+              (event: SchedulerTaskFailedEvent) => flowController.settle(event.taskId),
+            ],
+            [
+              TaskCancelledEvent.type,
+              (event: TaskCancelledEvent) => flowController.settle(event.taskId),
+            ],
+            [
+              TaskPreemptedEvent.type,
+              (event: TaskPreemptedEvent) => {
+                if (event.requeued) {
+                  flowController.markParked(event.taskId);
+                } else {
+                  flowController.settle(event.taskId);
+                }
+              },
+            ],
+            [
+              TaskDispatchedEvent.type,
+              (event: TaskDispatchedEvent) => flowController.markResumed(event.taskId),
+            ],
+          ] as const
+        ).map(([eventType, listener]) => {
+          const boundListener = listener as (event: Event) => void;
+          runtime.scheduler!.addEventListener(eventType, boundListener);
+          return () => runtime.scheduler?.removeEventListener(eventType, boundListener);
+        });
+
   function requireSessionStore() {
     if (!runtime.sessionStore) {
       throw new BureauError(
@@ -683,254 +748,305 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     }
 
     const sessionId = request.sessionId?.trim() ?? crypto.randomUUID();
-    const { session, conversation } = await loadConversation(sessionId);
-    const baseConversationHistory = conversation.current;
-
-    if (!session) {
-      const prompt = request.systemPrompt ?? runtime.systemPrompt;
-      if (prompt) {
-        conversation.appendSystemMessage(prompt);
-      }
-    }
-
-    conversation.appendUserMessage(request.message);
-
     const runId = `run-${crypto.randomUUID()}`;
-    // AB-54 usage analytics: resolve agentName/principal deterministically now
-    // (before `store.register`, so it's in place before any listRuns()/getRun()
-    // call can observe this run) rather than relying on the tool-bubble-event
-    // heuristic, which cannot see a run that never calls a tool.
-    runAttribution.set(runId, {
-      agentName: request.agentName ?? BUREAU_AGENT_NAME,
-      ...(request.principal !== undefined ? { principal: request.principal } : {}),
-    });
-    const runRuntime = await runtime.createRunRuntime({
-      ...request,
-      sessionId,
-      runId,
-    });
+    const agentName = request.agentName ?? BUREAU_AGENT_NAME;
 
-    const disposeStreamListeners: Array<() => void> = [];
-    const streamEventTarget = runRuntime.streamEventTarget;
-    if (streamEventTarget) {
-      const streamEventTypes = [
-        'stream:text-delta',
-        'stream:tool-call-start',
-        'stream:tool-call-delta',
-        'stream:tool-call-complete',
-        'stream:complete',
-        'stream:error',
-      ] as const;
-
-      for (const eventType of streamEventTypes) {
-        const listener = (event: Event) => {
-          const detail = (event as Event & { detail: Parameters<typeof streamEventToFrame>[1] })
-            .detail;
-          const frame = streamEventToFrame(runId, detail);
-          if (frame) {
-            emitLiveFrame(frame);
-          }
-        };
-
-        streamEventTarget.addEventListener(eventType, listener);
-        disposeStreamListeners.push(() =>
-          streamEventTarget.removeEventListener(eventType, listener),
+    // AB-13 — admit BEFORE any session/runtime work: createRun returns
+    // synchronously right after the run starts (it does not await
+    // completion), so admission is a synchronous pre-gate — over-cap or
+    // rate-limited or duplicate triggers are rejected outright, not queued.
+    if (flowController) {
+      const decision = flowController.admit({
+        runId,
+        agentName,
+        source: 'api',
+        message: request.message,
+        sessionId,
+        ...(request.principal !== undefined ? { principal: request.principal } : {}),
+      });
+      if (!decision.allowed) {
+        throw new BureauError(
+          `Run rejected by flow control policy (${decision.reason})`,
+          'RATE_LIMITED',
         );
       }
     }
 
-    await saveSession(
-      sessionId,
-      conversation,
-      {
-        lastRunId: runId,
-        lastRunStatus: 'running',
-        lastUserMessage: request.message,
-        // Always write these keys (null when absent) so a reused session never
-        // inherits a stale cap from a previous run. A conditional spread would leave
-        // the old value in place when the request omits the field; null is treated as
-        // "unset" by buildRunDepsFromSession (it gates on typeof === 'number'),
-        // so null is a safe sentinel for "caller did not specify a cap" (PRRT_kwDORvupsc6MZ1Mb).
-        lastMaximumTokens: request.maximumTokens ?? null,
-        // Persist the per-request step cap too, so a recovered run honours the
-        // caller's maximumSteps instead of falling back to the bureau default
-        // (PRRT_kwDORvupsc6MZfl5 — mirror of the maximumTokens recovery fix).
-        lastMaximumSteps: request.maximumSteps ?? null,
-        // Reset the active-skill snapshot at the start of every run so a reused
-        // session never seeds a fresh run with the PREVIOUS run's active skills.
-        // The snapshot is otherwise written only by createSkillStateSnapshotHook
-        // after the run's first onStep boundary; if the durable process crashes
-        // before that first snapshot, recovery would read this session's stale
-        // lastActiveSkills and pre-seed the new run's SkillSession with skills a
-        // live fresh run would not have — making load_skill_resource/list_skills
-        // treat stale skills as active. null clears it: buildRunDepsFromSession
-        // runs lastActiveSkills through isActiveSkillEntryArray, which rejects
-        // null → initialActiveSkills undefined → the recovered run starts empty,
-        // exactly as a fresh run would (PRRT_kwDORvupsc6Mddv3).
-        lastActiveSkills: null,
-      },
-      // Stamp the session with the dispatched agent (PRRT_kwDORvupsc6MbUsN) so it
-      // is not always recorded as the house default 'bureau'.
-      request.agentName,
-      baseConversationHistory,
-    );
+    // AB-13 — everything below stays INLINE in this same function (not a
+    // separately-awaited helper): an extra `await helper(...)` layer would
+    // add a microtask hop before `createRun` resolves back to the caller,
+    // shifting how much of the in-memory loop's own internal scheduling has
+    // run by the time a caller can first call `abortRun()` — existing
+    // abort-timing tests depend on that not moving. try/catch alone adds no
+    // such hop, so it is the release mechanism here.
+    try {
+      const { session, conversation } = await loadConversation(sessionId);
+      const baseConversationHistory = conversation.current;
 
-    const activeRun = createActiveRun(
-      {
-        generate: runRuntime.generate,
-        toolbox: runRuntime.toolbox,
-        conversation,
-        maximumSteps: request.maximumSteps ?? runtime.maximumSteps,
-        maximumTokens: request.maximumTokens,
-        stopWhen: options.stopWhen,
-        prepareStep: runRuntime.prepareStep,
-        onStep: runRuntime.onStep,
-        validateResponse: runRuntime.validateResponse,
-        // Thread agentName and runId so curated tool.* bubble events are stamped
-        // with {agentName, runId, step} metadata (C3) and durable launch input
-        // carries the owning agent for audit/recovery attribution (F2). Fall back
-        // to BUREAU_AGENT_NAME when the request omits it, matching the agent the
-        // session is stamped with — otherwise the durable input + tool events
-        // carry an empty agentName while the session says 'bureau'.
-        agentName: request.agentName ?? BUREAU_AGENT_NAME,
-        runId,
-      },
-      // Route through the durable engine when one was composed (durableExecution
-      // + storage). The conversation already carries the seeded user/system
-      // messages, so no separate `prompt` is passed — the workflow snapshots it.
-      // The run is then checkpointed and resumes from its last step after a crash.
-      runtime.durable
-        ? {
-            engine: runtime.durable.engine,
-            checkpointStore: runtime.durable.checkpointStore,
-            runId,
-            // Carry the owning session in the durable input so boot recovery can
-            // correlate a recovered handle back to its session without a side
-            // table (see recoverDurableRuns / resolveRunServices).
-            sessionId,
-          }
-        : undefined,
-    );
+      if (!session) {
+        const prompt = request.systemPrompt ?? runtime.systemPrompt;
+        if (prompt) {
+          conversation.appendSystemMessage(prompt);
+        }
+      }
 
-    // AB-96 — the versioned run-lifecycle frame stream. Registered before
-    // `store.register` so `run-started` is the first frame a live subscriber
-    // ever sees for this run.
-    const disposeRunFrameForwarder = createRunFrameForwarder(
-      runId,
-      activeRun,
-      (frame) => emitLiveFrame({ type: 'run-envelope', runId, frame }),
-      { streamEventTarget },
-    );
-    disposeStreamListeners.push(disposeRunFrameForwarder);
-    emitLiveFrame({
-      type: 'run-envelope',
-      runId,
-      frame: createRunStartedFrame({
-        runId,
+      conversation.appendUserMessage(request.message);
+
+      // AB-54 usage analytics: resolve agentName/principal deterministically now
+      // (before `store.register`, so it's in place before any listRuns()/getRun()
+      // call can observe this run) rather than relying on the tool-bubble-event
+      // heuristic, which cannot see a run that never calls a tool.
+      runAttribution.set(runId, {
+        agentName,
+        ...(request.principal !== undefined ? { principal: request.principal } : {}),
+      });
+      const runRuntime = await runtime.createRunRuntime({
+        ...request,
         sessionId,
-        agentName: request.agentName ?? BUREAU_AGENT_NAME,
-      }),
-    });
+        runId,
+      });
 
-    activeRun.once('run.completed', (event) => {
-      disposeRegisteredStreamListeners(disposeStreamListeners);
+      const disposeStreamListeners: Array<() => void> = [];
+      const streamEventTarget = runRuntime.streamEventTarget;
+      if (streamEventTarget) {
+        const streamEventTypes = [
+          'stream:text-delta',
+          'stream:tool-call-start',
+          'stream:tool-call-delta',
+          'stream:tool-call-complete',
+          'stream:complete',
+          'stream:error',
+        ] as const;
 
-      const finishReason = event.finishReason;
-      const lastRunStatus =
-        finishReason === 'error' || finishReason === 'tripwire' ? 'error' : 'completed';
+        for (const eventType of streamEventTypes) {
+          const listener = (event: Event) => {
+            const detail = (event as Event & { detail: Parameters<typeof streamEventToFrame>[1] })
+              .detail;
+            const frame = streamEventToFrame(runId, detail);
+            if (frame) {
+              emitLiveFrame(frame);
+            }
+          };
 
-      const report = buildTerminalReportFromCompletedEvent(runId, event);
-      runReports.set(runId, report);
+          streamEventTarget.addEventListener(eventType, listener);
+          disposeStreamListeners.push(() =>
+            streamEventTarget.removeEventListener(eventType, listener),
+          );
+        }
+      }
+
+      await saveSession(
+        sessionId,
+        conversation,
+        {
+          lastRunId: runId,
+          lastRunStatus: 'running',
+          lastUserMessage: request.message,
+          // Always write these keys (null when absent) so a reused session never
+          // inherits a stale cap from a previous run. A conditional spread would leave
+          // the old value in place when the request omits the field; null is treated as
+          // "unset" by buildRunDepsFromSession (it gates on typeof === 'number'),
+          // so null is a safe sentinel for "caller did not specify a cap" (PRRT_kwDORvupsc6MZ1Mb).
+          lastMaximumTokens: request.maximumTokens ?? null,
+          // Persist the per-request step cap too, so a recovered run honours the
+          // caller's maximumSteps instead of falling back to the bureau default
+          // (PRRT_kwDORvupsc6MZfl5 — mirror of the maximumTokens recovery fix).
+          lastMaximumSteps: request.maximumSteps ?? null,
+          // Reset the active-skill snapshot at the start of every run so a reused
+          // session never seeds a fresh run with the PREVIOUS run's active skills.
+          // The snapshot is otherwise written only by createSkillStateSnapshotHook
+          // after the run's first onStep boundary; if the durable process crashes
+          // before that first snapshot, recovery would read this session's stale
+          // lastActiveSkills and pre-seed the new run's SkillSession with skills a
+          // live fresh run would not have — making load_skill_resource/list_skills
+          // treat stale skills as active. null clears it: buildRunDepsFromSession
+          // runs lastActiveSkills through isActiveSkillEntryArray, which rejects
+          // null → initialActiveSkills undefined → the recovered run starts empty,
+          // exactly as a fresh run would (PRRT_kwDORvupsc6Mddv3).
+          lastActiveSkills: null,
+        },
+        // Stamp the session with the dispatched agent (PRRT_kwDORvupsc6MbUsN) so it
+        // is not always recorded as the house default 'bureau'.
+        request.agentName,
+        baseConversationHistory,
+      );
+
+      const activeRun = createActiveRun(
+        {
+          generate: runRuntime.generate,
+          toolbox: runRuntime.toolbox,
+          conversation,
+          maximumSteps: request.maximumSteps ?? runtime.maximumSteps,
+          maximumTokens: request.maximumTokens,
+          stopWhen: options.stopWhen,
+          prepareStep: runRuntime.prepareStep,
+          onStep: runRuntime.onStep,
+          validateResponse: runRuntime.validateResponse,
+          // Thread agentName and runId so curated tool.* bubble events are stamped
+          // with {agentName, runId, step} metadata (C3) and durable launch input
+          // carries the owning agent for audit/recovery attribution (F2). Fall back
+          // to BUREAU_AGENT_NAME when the request omits it, matching the agent the
+          // session is stamped with — otherwise the durable input + tool events
+          // carry an empty agentName while the session says 'bureau'.
+          agentName,
+          runId,
+        },
+        // Route through the durable engine when one was composed (durableExecution
+        // + storage). The conversation already carries the seeded user/system
+        // messages, so no separate `prompt` is passed — the workflow snapshots it.
+        // The run is then checkpointed and resumes from its last step after a crash.
+        runtime.durable
+          ? {
+              engine: runtime.durable.engine,
+              checkpointStore: runtime.durable.checkpointStore,
+              runId,
+              // Carry the owning session in the durable input so boot recovery can
+              // correlate a recovered handle back to its session without a side
+              // table (see recoverDurableRuns / resolveRunServices).
+              sessionId,
+            }
+          : undefined,
+      );
+
+      // AB-96 — the versioned run-lifecycle frame stream. Registered before
+      // `store.register` so `run-started` is the first frame a live subscriber
+      // ever sees for this run.
+      const disposeRunFrameForwarder = createRunFrameForwarder(
+        runId,
+        activeRun,
+        (frame) => emitLiveFrame({ type: 'run-envelope', runId, frame }),
+        { streamEventTarget },
+      );
+      disposeStreamListeners.push(disposeRunFrameForwarder);
       emitLiveFrame({
         type: 'run-envelope',
         runId,
-        frame: createRunFinishedFrame({ runId, report }),
-      });
-
-      persistSessionUpdate(
-        () =>
-          saveSession(
-            sessionId,
-            event.conversation,
-            {
-              lastRunId: runId,
-              lastRunStatus,
-              lastFinishReason: event.finishReason,
-              ...(event.finishReason === 'error' || event.finishReason === 'tripwire'
-                ? { lastError: serializeUnknownError(event.error) }
-                : {}),
-            },
-            request.agentName,
-            baseConversationHistory,
-          ),
-        {
+        frame: createRunStartedFrame({
           runId,
           sessionId,
-          status: lastRunStatus,
-        },
-      );
-    });
-
-    activeRun.once('run.aborted', (event) => {
-      disposeRegisteredStreamListeners(disposeStreamListeners);
-
-      const report = buildTerminalReportFromAbortedEvent(runId, {
-        usage: event.usage,
-        costEstimate: event.costEstimate,
-        reason: event.reason,
-        steps: store.getRun(runId)?.steps ?? [],
-        conversation: event.conversation,
-      });
-      runReports.set(runId, report);
-      emitLiveFrame({
-        type: 'run-envelope',
-        runId,
-        frame: createRunFinishedFrame({ runId, report }),
+          agentName,
+        }),
       });
 
-      persistSessionUpdate(
-        () =>
-          // Persist the conversation carried on the abort event, NOT the
-          // launch-time `conversation` closure. On the durable path the workflow
-          // mutates per-step checkpoint snapshots, so a run that aborts after
-          // checkpointed steps (e.g. when engine.cancel() wins the abort race)
-          // reconstructs its abort RunResult from the checkpoint — the event's
-          // conversation reflects those steps, whereas the closure still holds
-          // only the seed transcript. For the in-memory loop the event carries
-          // the same mutated instance, so this is correct on both paths.
-          saveSession(
-            sessionId,
-            event.conversation,
-            {
-              lastRunId: runId,
-              lastRunStatus: 'aborted',
-              // Write lastFinishReason too so an aborted session's metadata is
-              // internally consistent (status + finishReason agree) and a prior
-              // run's stale lastFinishReason on the same session can't linger. This
-              // is also what boot recovery now relies on: a recovered run that
-              // aborts settles through THIS listener (settleRecoveredRun is gone),
-              // so the field must be written here, not only on the old recovery path.
-              lastFinishReason: 'aborted',
-            },
-            request.agentName,
-            baseConversationHistory,
-          ),
-        {
+      // AB-13 — free this run's concurrency slot while it is parked on a
+      // human-wait signal; `HumanWaitParkedEvent` fires on the SAME emitter
+      // `store.register` subscribes to below, so this observes both the
+      // in-memory and durable paths identically.
+      if (flowController) {
+        activeRun.addEventListener(HumanWaitParkedEvent.type, () => {
+          flowController.markParked(runId);
+        });
+      }
+
+      activeRun.once('run.completed', (event) => {
+        disposeRegisteredStreamListeners(disposeStreamListeners);
+        flowController?.settle(runId);
+
+        const finishReason = event.finishReason;
+        const lastRunStatus =
+          finishReason === 'error' || finishReason === 'tripwire' ? 'error' : 'completed';
+
+        const report = buildTerminalReportFromCompletedEvent(runId, event);
+        runReports.set(runId, report);
+        emitLiveFrame({
+          type: 'run-envelope',
           runId,
-          sessionId,
-          status: 'aborted',
-        },
-      );
-    });
+          frame: createRunFinishedFrame({ runId, report }),
+        });
 
-    activeRun.once('run.error', (_event) => {
-      disposeRegisteredStreamListeners(disposeStreamListeners);
-    });
+        persistSessionUpdate(
+          () =>
+            saveSession(
+              sessionId,
+              event.conversation,
+              {
+                lastRunId: runId,
+                lastRunStatus,
+                lastFinishReason: event.finishReason,
+                ...(event.finishReason === 'error' || event.finishReason === 'tripwire'
+                  ? { lastError: serializeUnknownError(event.error) }
+                  : {}),
+              },
+              request.agentName,
+              baseConversationHistory,
+            ),
+          {
+            runId,
+            sessionId,
+            status: lastRunStatus,
+          },
+        );
+      });
 
-    store.register(activeRun, runId);
-    runSessionIdentifiers.set(activeRun, sessionId);
+      activeRun.once('run.aborted', (event) => {
+        disposeRegisteredStreamListeners(disposeStreamListeners);
+        flowController?.settle(runId);
 
-    return serializeRunState(store.getRun(runId)!, sessionId);
+        const report = buildTerminalReportFromAbortedEvent(runId, {
+          usage: event.usage,
+          costEstimate: event.costEstimate,
+          reason: event.reason,
+          steps: store.getRun(runId)?.steps ?? [],
+          conversation: event.conversation,
+        });
+        runReports.set(runId, report);
+        emitLiveFrame({
+          type: 'run-envelope',
+          runId,
+          frame: createRunFinishedFrame({ runId, report }),
+        });
+
+        persistSessionUpdate(
+          () =>
+            // Persist the conversation carried on the abort event, NOT the
+            // launch-time `conversation` closure. On the durable path the workflow
+            // mutates per-step checkpoint snapshots, so a run that aborts after
+            // checkpointed steps (e.g. when engine.cancel() wins the abort race)
+            // reconstructs its abort RunResult from the checkpoint — the event's
+            // conversation reflects those steps, whereas the closure still holds
+            // only the seed transcript. For the in-memory loop the event carries
+            // the same mutated instance, so this is correct on both paths.
+            saveSession(
+              sessionId,
+              event.conversation,
+              {
+                lastRunId: runId,
+                lastRunStatus: 'aborted',
+                // Write lastFinishReason too so an aborted session's metadata is
+                // internally consistent (status + finishReason agree) and a prior
+                // run's stale lastFinishReason on the same session can't linger. This
+                // is also what boot recovery now relies on: a recovered run that
+                // aborts settles through THIS listener (settleRecoveredRun is gone),
+                // so the field must be written here, not only on the old recovery path.
+                lastFinishReason: 'aborted',
+              },
+              request.agentName,
+              baseConversationHistory,
+            ),
+          {
+            runId,
+            sessionId,
+            status: 'aborted',
+          },
+        );
+      });
+
+      activeRun.once('run.error', (_event) => {
+        disposeRegisteredStreamListeners(disposeStreamListeners);
+        flowController?.settle(runId);
+      });
+
+      store.register(activeRun, runId);
+      runSessionIdentifiers.set(activeRun, sessionId);
+
+      return serializeRunState(store.getRun(runId)!, sessionId);
+    } catch (error) {
+      // The run never reached `store.register` (and therefore never fired a
+      // terminal event to settle through) — release whatever this admission
+      // claimed so it does not leak a phantom concurrency/singleton hold.
+      flowController?.settle(runId);
+      throw error;
+    }
   }
 
   /**
@@ -1417,6 +1533,33 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     const taskId = `scheduler-task-${crypto.randomUUID()}`;
     const priority = request.priority ?? 'scheduled';
 
+    // AB-13 — same admission gate as `createRun`, applied to the
+    // scheduler-originated surface. `taskId` doubles as the flow-control run
+    // identity: it is stable for the task's whole lifecycle (queued →
+    // dispatched → completed, including any preempt/requeue cycles), which is
+    // exactly the identity `markParked`/`markResumed`/`settle` need. There is
+    // no per-task `agentName` field on `SubmitSchedulerTaskRequest`, so the
+    // grouping key falls back to `metadata.agentName` (when the caller set
+    // one) and otherwise the house default — matching `createRun`'s default.
+    if (flowController) {
+      const metadataAgentName = request.metadata?.['agentName'];
+      const agentName =
+        typeof metadataAgentName === 'string' ? metadataAgentName : BUREAU_AGENT_NAME;
+      const decision = flowController.admit({
+        runId: taskId,
+        agentName,
+        source: 'scheduler',
+        message: request.message,
+        ...(request.metadata !== undefined ? { metadata: request.metadata } : {}),
+      });
+      if (!decision.allowed) {
+        throw new BureauError(
+          `Scheduler task rejected by flow control policy (${decision.reason})`,
+          'RATE_LIMITED',
+        );
+      }
+    }
+
     const task: Parameters<NonNullable<typeof runtime.scheduler>['submit']>[0] = {
       id: taskId,
       priority,
@@ -1595,6 +1738,12 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     if (!runtime.durable) throw new BureauError('Durable engine not configured', 'NOT_CONFIGURED');
     const runId = await requireSessionRunId(sessionId);
     await runtime.durable.engine.signal(runId, name, payload);
+    // AB-13 — a signal is how a human-wait park is released (directly, or via
+    // `resolveReview`'s human-wait approve path). Reacquire the concurrency
+    // slot `HumanWaitParkedEvent` freed. A no-op when this runId was never
+    // parked (e.g. a signal delivered to a run that never called
+    // `requestHumanInput`) or when no flow control is configured.
+    flowController?.markResumed(runId);
   }
 
   async function updateSession(
@@ -1914,6 +2063,9 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         emitter.dispatch(new BureauDisposedEvent());
         storeSubscription.unsubscribe();
         for (const disposeListener of schedulerCleanup) {
+          disposeListener();
+        }
+        for (const disposeListener of flowControlSchedulerCleanup) {
           disposeListener();
         }
         // #28 backstop: stop the toolbox forwarding for any pending recovery entry

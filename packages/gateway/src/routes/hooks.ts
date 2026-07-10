@@ -95,6 +95,11 @@ export function createHooksRoutes(bureau: Bureau) {
         if (error.code === 'NOT_FOUND') {
           throw new HTTPException(404, { message: error.message });
         }
+        // AB-13 — a flow-control policy (concurrency cap, rate limit, or
+        // singleton dedupe) rejected this run's admission.
+        if (error.code === 'RATE_LIMITED') {
+          throw new HTTPException(429, { message: error.message });
+        }
       }
       throw error;
     }

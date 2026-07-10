@@ -1,4 +1,6 @@
+import { BureauError } from 'bureau';
 import { Hono } from 'hono';
+import { HTTPException } from 'hono/http-exception';
 import type { Scheduler, SchedulerPriority } from 'operative';
 import { z } from 'zod';
 
@@ -168,8 +170,29 @@ export function createSchedulerRoutes(
     }
 
     const body: SubmitSchedulerTaskRequest = parsedBody.data;
-    const response = await submitSchedulerTask(body);
-    return context.json(response, 202);
+    try {
+      const response = await submitSchedulerTask(body);
+      return context.json(response, 202);
+    } catch (error) {
+      // submitSchedulerTask is a plain (non-async) function — a rejected
+      // admission (BAD_REQUEST validation, AB-13's RATE_LIMITED flow-control
+      // gate) throws synchronously, which surfaces here as a caught error
+      // the same as an async rejection would.
+      if (error instanceof BureauError) {
+        if (error.code === 'NOT_CONFIGURED') {
+          throw new HTTPException(503, { message: error.message });
+        }
+        if (error.code === 'BAD_REQUEST') {
+          throw new HTTPException(400, { message: error.message });
+        }
+        // AB-13 — a flow-control policy (concurrency cap, rate limit, or
+        // singleton dedupe) rejected this task's admission.
+        if (error.code === 'RATE_LIMITED') {
+          throw new HTTPException(429, { message: error.message });
+        }
+      }
+      throw error;
+    }
   });
 
   app.delete('/tasks/:id', (context) => {

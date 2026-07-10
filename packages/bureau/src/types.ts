@@ -27,6 +27,7 @@ import type {
   AgentSession,
   CacheOptions,
   EnhancedStreamingOptions,
+  FlowControlPolicy,
   GenerateFunction,
   GuardrailsOptions,
   RunFrame,
@@ -119,7 +120,7 @@ export interface SkillRuntimeConfiguration {
   skillPolicy?: ToolPolicy;
 }
 
-export type { ToolPolicy };
+export type { FlowControlPolicy, ToolPolicy };
 
 export interface SkillCatalogEntry {
   name: string;
@@ -279,6 +280,20 @@ export interface BureauOptions {
   skills?: SkillRuntimeConfiguration;
   streaming?: StreamingConfiguration;
   scheduler?: SchedulerConfiguration;
+  /**
+   * AB-13 — declarative flow control gating run ADMISSION, composed over
+   * operative's `createFlowController`: a per-key concurrency cap, a rate
+   * limit keyed by an arbitrary function of the trigger, and singleton
+   * dedupe of concurrent identical triggers. Applies uniformly to both
+   * API-triggered runs (`createRun`) and scheduler-originated ones
+   * (`submitSchedulerTask`, durable schedule fires) — the same policy
+   * instance tracks state across both surfaces. `concurrency`/`rateLimit`
+   * default their grouping key to the run's `agentName`; `singleton`
+   * requires an explicit key (there is no sane default identity for "this
+   * is a duplicate of that"). A rejected admission throws
+   * `BureauError` with code `RATE_LIMITED`. Omit to disable — the default.
+   */
+  flowControl?: FlowControlPolicy;
   stopWhen?: StopCondition | StopCondition[];
   sessionPersistenceRetryDelayMilliseconds?: number;
   sessionPersistenceSleep?: (milliseconds: number) => Promise<void>;

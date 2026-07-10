@@ -416,9 +416,21 @@ export type {
   SchedulerTask,
   SchedulerTaskSummary,
 } from './scheduler/index';
+export type {
+  ConcurrencyPolicy,
+  FlowControlDecision,
+  FlowControlKeyFunction,
+  FlowController,
+  FlowControlPolicy,
+  FlowControlRejectionReason,
+  FlowControlTrigger,
+  RateLimitPolicy,
+  SingletonPolicy,
+} from './scheduler/index';
 export {
   createChunkedTask,
   createDurableHeartbeat,
+  createFlowController,
   createHeartbeat,
   createPriorityQueue,
   createScheduler,

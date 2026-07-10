@@ -48,6 +48,20 @@ describe('runs routes', () => {
     expect(body.status).toBe('running');
   });
 
+  it('POST /api/v1/runs returns 429 when a flow-control policy rejects admission (AB-13)', async () => {
+    const gateway = await createTestGateway({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      flowControl: { concurrency: { limit: 0 } },
+    });
+
+    const response = await requestJSON(gateway, '/api/v1/runs', {
+      method: 'POST',
+      body: JSON.stringify({ message: 'Hello' }),
+    });
+    expect(response.status).toBe(429);
+  });
+
   it('GET /api/v1/runs lists all runs', async () => {
     const gateway = await createTestGateway({
       generate: createMockGenerate(),
