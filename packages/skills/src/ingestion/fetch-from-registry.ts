@@ -158,6 +158,12 @@ export async function fetchFromRegistry(options: FetchFromRegistryOptions): Prom
 
       const parsed = parseSkillMarkdown(text);
 
+      if (parsed.metadata.name !== name) {
+        throw new Error(
+          `Registry returned metadata name "${parsed.metadata.name}" for requested skill "${name}"; refusing mismatched content`,
+        );
+      }
+
       await provider.saveSkill(parsed.metadata.name, parsed);
       result.loaded.push(parsed.metadata.name);
     } catch (error) {

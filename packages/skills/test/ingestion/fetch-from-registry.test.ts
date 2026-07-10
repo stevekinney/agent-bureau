@@ -213,11 +213,16 @@ describe('fetchFromRegistry', () => {
 describe('fetchFromRegistry integrity', () => {
   const baseUrl = 'https://registry.example.com/skills';
 
-  it('sends the bearer token as an Authorization header', async () => {
+  it('sends the bearer token as an Authorization header on both the skill and signature requests', async () => {
     const provider = createMockSkillProvider();
     const requests: RecordedRequest[] = [];
+    const { publicKey, privateKey } = generateEd25519KeyPair();
+    const signature = signContent(VALID_SKILL_MD, privateKey);
     const fetchFunction = createMockFetch(
-      { [`${baseUrl}/test-skill/SKILL.md`]: { status: 200, body: VALID_SKILL_MD } },
+      {
+        [`${baseUrl}/test-skill/SKILL.md`]: { status: 200, body: VALID_SKILL_MD },
+        [`${baseUrl}/test-skill/SKILL.md.sig`]: { status: 200, body: signature },
+      },
       requests,
     );
 
@@ -227,13 +232,17 @@ describe('fetchFromRegistry integrity', () => {
       provider,
       fetchFunction,
       authToken: 'super-secret-token',
-      allowUnverified: true,
+      publicKey,
     });
 
     const skillRequest = requests.find(
       (request) => request.url === `${baseUrl}/test-skill/SKILL.md`,
     );
+    const signatureRequest = requests.find(
+      (request) => request.url === `${baseUrl}/test-skill/SKILL.md.sig`,
+    );
     expect(skillRequest?.authorization).toBe('Bearer super-secret-token');
+    expect(signatureRequest?.authorization).toBe('Bearer super-secret-token');
   });
 
   it('rejects unsigned, unpinned content by default', async () => {
@@ -378,7 +387,7 @@ describe('fetchFromRegistry integrity', () => {
     expect(result.errors[0]?.error).toContain('Signature verification failed');
   });
 
-  it('rejects when publicKey is configured but no signature is served, unless opted out', async () => {
+  it('rejects when publicKey is configured but no signature is served', async () => {
     const provider = createMockSkillProvider();
     const { publicKey } = generateEd25519KeyPair();
 
@@ -397,5 +406,49 @@ describe('fetchFromRegistry integrity', () => {
     expect(result.loaded).toHaveLength(0);
     expect(result.errors).toHaveLength(1);
     expect(result.errors[0]?.error).toContain('unverified');
+  });
+
+  it('allows a missing signature when opted out, even with publicKey configured', async () => {
+    const provider = createMockSkillProvider();
+    const { publicKey } = generateEd25519KeyPair();
+
+    const fetchFunction = createMockFetch({
+      [`${baseUrl}/test-skill/SKILL.md`]: { status: 200, body: VALID_SKILL_MD },
+    });
+
+    const result = await fetchFromRegistry({
+      baseUrl,
+      names: ['test-skill'],
+      provider,
+      fetchFunction,
+      publicKey,
+      allowUnverified: true,
+    });
+
+    expect(result.loaded).toEqual(['test-skill']);
+    expect(result.errors).toHaveLength(0);
+  });
+
+  it('rejects content whose metadata name does not match the requested skill name', async () => {
+    const provider = createMockSkillProvider();
+    const mismatchedBody = makeSkillMarkdown('a-different-skill');
+    const fetchFunction = createMockFetch({
+      [`${baseUrl}/test-skill/SKILL.md`]: { status: 200, body: mismatchedBody },
+    });
+
+    const result = await fetchFromRegistry({
+      baseUrl,
+      names: ['test-skill'],
+      provider,
+      fetchFunction,
+      allowUnverified: true,
+    });
+
+    expect(result.loaded).toHaveLength(0);
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0]?.error).toContain('mismatched');
+
+    const saved = provider.calls.filter((call) => call.method === 'saveSkill');
+    expect(saved).toHaveLength(0);
   });
 });
