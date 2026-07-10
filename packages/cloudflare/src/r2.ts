@@ -43,6 +43,14 @@ export interface R2ListResult {
  * tests it is a recording fake.
  */
 export interface R2Bucket {
+  /**
+   * Check whether `key` exists without reading its body. Real R2 `head()`
+   * resolves to `R2Object | null` (metadata only); typed here as
+   * `Promise<unknown>` since this backend only ever checks the result against
+   * `null`, and `unknown` keeps the interface honest about not touching
+   * `R2Object`'s other fields.
+   */
+  head(key: string): Promise<unknown>;
   /** Read an object's body, or `null` if the key is absent. */
   get(key: string): Promise<R2ObjectBody | null>;
   /**

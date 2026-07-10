@@ -11,6 +11,8 @@ import type { R2Bucket, R2ListOptions, R2ListResult, R2ObjectBody } from '../r2'
  * loop instead of assuming a single-page result.
  */
 export interface FakeR2 extends R2Bucket {
+  /** Every key passed to `head`, in order. */
+  readonly headCalls: string[];
   /** Every key passed to `get`, in order. */
   readonly getCalls: string[];
   /** Every `[key, value]` pair passed to `put`, in order. */
@@ -24,6 +26,7 @@ export interface FakeR2 extends R2Bucket {
 /** Creates a recording, in-memory {@link FakeR2}. */
 export function createFakeR2(options?: { pageSize?: number }): FakeR2 {
   const objects = new Map<string, string>();
+  const headCalls: string[] = [];
   const getCalls: string[] = [];
   const putCalls: Array<readonly [string, string]> = [];
   const deleteCalls: string[] = [];
@@ -31,10 +34,16 @@ export function createFakeR2(options?: { pageSize?: number }): FakeR2 {
   const pageSize = options?.pageSize ?? 3;
 
   return {
+    headCalls,
     getCalls,
     putCalls,
     deleteCalls,
     listCalls,
+
+    head(key: string): Promise<unknown> {
+      headCalls.push(key);
+      return Promise.resolve(objects.has(key) ? { key } : null);
+    },
 
     get(key: string): Promise<R2ObjectBody | null> {
       getCalls.push(key);

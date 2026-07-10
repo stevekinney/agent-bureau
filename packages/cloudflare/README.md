@@ -98,7 +98,7 @@ export class SessionDurableObject {
 Wire `createCloudflareR2TextValueStore` into `skills`'s `createStorageSkillProvider`:
 
 ```typescript
-import { createCloudflareR2TextValueStore } from 'cloudflare';
+import { createCloudflareR2TextValueStore, type R2Bucket } from 'cloudflare';
 import { createStorageSkillProvider } from 'skills';
 
 export interface Env {
@@ -346,12 +346,15 @@ interface R2ListResult {
 }
 
 interface R2Bucket {
+  head(key: string): Promise<unknown>;
   get(key: string): Promise<R2ObjectBody | null>;
   put(key: string, value: string): Promise<unknown>;
   delete(key: string): Promise<void>;
   list(options?: R2ListOptions): Promise<R2ListResult>;
 }
 ```
+
+`has()` on the resulting `TextValueStore` calls `head()`, not `get()` — a metadata-only existence check that never reads an object's (potentially large) body.
 
 ---
 
@@ -384,6 +387,8 @@ A recording, in-memory `R2Bucket` fake. Unlike the real binding it can't exist u
 function createFakeR2(options?: { pageSize?: number }): FakeR2;
 
 interface FakeR2 extends R2Bucket {
+  /** Every key passed to `head`, in order. */
+  readonly headCalls: string[];
   /** Every key passed to `get`, in order. */
   readonly getCalls: string[];
   /** Every `[key, value]` pair passed to `put`, in order. */

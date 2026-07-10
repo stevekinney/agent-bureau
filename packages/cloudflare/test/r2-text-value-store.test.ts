@@ -2,6 +2,7 @@ import type { TextValueStore } from '@lostgradient/weft/storage';
 import { describe, expect, it } from 'bun:test';
 
 import { createCloudflareR2TextValueStore } from '../src/create-cloudflare-r2-text-value-store';
+import type { R2Bucket } from '../src/r2';
 import { createFakeR2 } from '../src/test/fake-r2';
 
 describe('createCloudflareR2TextValueStore', () => {
@@ -34,6 +35,18 @@ describe('createCloudflareR2TextValueStore', () => {
 
     expect(await store.has('present')).toBe(true);
     expect(await store.has('absent')).toBe(false);
+  });
+
+  it('has() reads metadata via head(), never the object body via get()', async () => {
+    const bucket = createFakeR2();
+    const store = createCloudflareR2TextValueStore({ bucket });
+    await store.set('present', 'value');
+
+    await store.has('present');
+    await store.has('absent');
+
+    expect(bucket.headCalls).toEqual(['present', 'absent']);
+    expect(bucket.getCalls).toEqual([]);
   });
 
   it('list() follows R2 cursor pagination past a single page', async () => {
@@ -74,6 +87,30 @@ describe('createCloudflareR2TextValueStore', () => {
     expect(await store.get('skill:doomed:b')).toBeNull();
     expect(await store.get('skill:doomed:c')).toBeNull();
     expect(await store.get('skill:kept:a')).toBe('safe');
+  });
+
+  it('fails fast instead of silently truncating when list() reports truncated with no cursor', async () => {
+    // A malformed R2-shaped response: truncated: true but no cursor to
+    // continue from. Real R2 never does this, but a fake/middleware/proxy
+    // might — the adapter must not silently return a partial key set.
+    const malformedBucket: R2Bucket = {
+      head: () => Promise.resolve(null),
+      get: () => Promise.resolve(null),
+      put: () => Promise.resolve(undefined),
+      delete: () => Promise.resolve(),
+      list: () => Promise.resolve({ objects: [{ key: 'a' }], truncated: true }),
+    };
+    const store = createCloudflareR2TextValueStore({ bucket: malformedBucket });
+
+    let caught: unknown;
+    try {
+      await store.list('prefix');
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toContain('truncated: true without a cursor');
   });
 
   it('close() is a non-owning no-op', async () => {

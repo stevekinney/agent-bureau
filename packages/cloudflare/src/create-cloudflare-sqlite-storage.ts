@@ -220,12 +220,16 @@ export function createCloudflareSqliteStorage(
       return Promise.resolve();
     },
 
+    // `scan` must be an async generator to satisfy `Storage.scan`'s
+    // `AsyncIterable` return type, but the read itself is synchronous SQLite
+    // `exec`. Deliberately NOT adding an `await Promise.resolve()` here: that
+    // would introduce a real yield point before the query runs, letting other
+    // Durable Object work interleave ahead of it and undermining the
+    // "synchronous before the next await" snapshot guarantee documented on
+    // this adapter's capabilities.
+    // eslint-disable-next-line @typescript-eslint/require-await
     async *scan(prefix: string, scanOptions?: ScanOptions): AsyncIterable<[string, Uint8Array]> {
       ensureTable();
-      // The underlying read is synchronous (SQLite `exec`), but `scan` must be
-      // an async generator to satisfy `Storage.scan`'s `AsyncIterable` return
-      // type; this `await` is a deliberate no-op yield point, not dead code.
-      await Promise.resolve();
       const { sql: query, parameters } = buildScanQuery(table, prefix, scanOptions);
       const rows = sql.exec<{ key: string; value: string }>(query, ...parameters).toArray();
       for (const row of rows) {

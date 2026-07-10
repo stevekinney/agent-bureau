@@ -38,14 +38,24 @@ export function createCloudflareR2TextValueStore(
   async function listKeys(prefix: string): Promise<string[]> {
     const keys: string[] = [];
     let cursor: string | undefined;
-    do {
+    let truncated = true;
+    while (truncated) {
       const result: Awaited<ReturnType<R2Bucket['list']>> = await bucket.list({
         prefix,
         ...(cursor !== undefined ? { cursor } : {}),
       });
       for (const object of result.objects) keys.push(object.key);
-      cursor = result.truncated ? result.cursor : undefined;
-    } while (cursor !== undefined);
+      truncated = result.truncated;
+      if (truncated && result.cursor === undefined) {
+        // A `truncated: true` result with no `cursor` is a malformed R2
+        // response (real R2 always pairs `truncated: true` with a `cursor`).
+        // Fail fast instead of silently returning a partial key set.
+        throw new Error(
+          `R2 list() reported truncated: true without a cursor for prefix "${prefix}".`,
+        );
+      }
+      cursor = result.cursor;
+    }
     return keys;
   }
 
@@ -68,7 +78,10 @@ export function createCloudflareR2TextValueStore(
     },
 
     async has(key: string): Promise<boolean> {
-      const object = await bucket.get(key);
+      // `head` reads metadata only — cheaper than `get` for an existence
+      // check, and avoids pulling a large tool-output body into memory just
+      // to test presence.
+      const object = await bucket.head(key);
       return object !== null;
     },
 
