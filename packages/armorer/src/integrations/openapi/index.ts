@@ -219,7 +219,10 @@ function createOperationTool(options: CreateOperationToolOptions): Tool {
     if (parameter.description) {
       fieldSchema = fieldSchema.describe(parameter.description);
     }
-    inputShape[parameter.name] = parameter.required ? fieldSchema : fieldSchema.optional();
+    // Path parameters are always required per the OpenAPI spec (and required for URL
+    // interpolation below), regardless of whether the document sets `required: true`.
+    const isRequired = parameter.in === 'path' || parameter.required === true;
+    inputShape[parameter.name] = isRequired ? fieldSchema : fieldSchema.optional();
   }
   if (hasRequestBody) {
     const dereferenced = dereference(jsonRequestBodySchema, spec);
@@ -345,7 +348,7 @@ function buildRequestUrl(
     if (value === undefined) {
       throw new Error(`Missing required path parameter "${parameterName}"`);
     }
-    interpolated = interpolated.replace(
+    interpolated = interpolated.replaceAll(
       `{${parameterName}}`,
       encodeURIComponent(toParameterString(value)),
     );
@@ -399,9 +402,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 /**
  * Recursively resolves local `$ref` pointers (`#/components/schemas/...`) against `root`,
- * returning a plain JSON Schema object suitable for {@link importToolSchema}. Non-local refs
- * and unresolved pointers are dropped rather than throwing, since a spec may reference
- * schemas this generator does not need (e.g. only used in response bodies).
+ * returning a plain JSON Schema object suitable for {@link importToolSchema}. Only called on
+ * parameter/request-body schemas, which directly drive generated tool input validation, so an
+ * unresolvable `$ref` throws rather than silently degrading to an unvalidated `z.unknown()`
+ * field. A pointer that refers back to a schema already on the current resolution path (a
+ * recursive schema, e.g. a tree-shaped `Node`) resolves to `{}` at the cycle point instead of
+ * recursing forever — recursive JSON Schemas are legitimate and Zod has no direct equivalent.
  */
 function dereference(value: unknown, root: OpenAPISpec, seen: Set<unknown> = new Set()): unknown {
   if (Array.isArray(value)) {
@@ -412,7 +418,6 @@ function dereference(value: unknown, root: OpenAPISpec, seen: Set<unknown> = new
     if (typeof ref === 'string') {
       if (seen.has(value)) return {};
       const resolved = resolveRef(ref, root);
-      if (resolved === undefined) return {};
       const nextSeen = new Set(seen);
       nextSeen.add(value);
       return dereference(resolved, root, nextSeen);
@@ -427,7 +432,9 @@ function dereference(value: unknown, root: OpenAPISpec, seen: Set<unknown> = new
 }
 
 function resolveRef(ref: string, root: OpenAPISpec): unknown {
-  if (!ref.startsWith('#/')) return undefined;
+  if (!ref.startsWith('#/')) {
+    throw new Error(`createToolboxFromOpenAPI: cannot resolve non-local $ref "${ref}"`);
+  }
   const segments = ref
     .slice(2)
     .split('/')
@@ -435,7 +442,9 @@ function resolveRef(ref: string, root: OpenAPISpec): unknown {
 
   let current: unknown = root;
   for (const segment of segments) {
-    if (!isRecord(current)) return undefined;
+    if (!isRecord(current) || !(segment in current)) {
+      throw new Error(`createToolboxFromOpenAPI: unresolved $ref "${ref}"`);
+    }
     current = current[segment];
   }
   return current;

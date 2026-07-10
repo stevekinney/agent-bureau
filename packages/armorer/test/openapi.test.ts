@@ -63,6 +63,75 @@ describe('createToolboxFromOpenAPI', () => {
     expect(tools.some((tool) => tool.name === 'find-pet-by-id')).toBe(true);
   });
 
+  it('treats a path parameter as required even when the spec omits `required: true`', () => {
+    const specWithLaxPathParameter: OpenAPISpec = {
+      servers: [{ url: 'https://example.test' }],
+      paths: {
+        '/widgets/{id}': {
+          get: {
+            operationId: 'getWidget',
+            parameters: [{ name: 'id', in: 'path', schema: { type: 'string' } }],
+          },
+        },
+      },
+    };
+    const tools = createToolboxFromOpenAPI(specWithLaxPathParameter);
+    const getWidget = tools.find((tool) => tool.name === 'get-widget');
+
+    expect(getWidget?.input.safeParse({}).success).toBe(false);
+    expect(getWidget?.input.safeParse({ id: 'abc' }).success).toBe(true);
+  });
+
+  it('interpolates every occurrence of a path parameter that appears more than once', async () => {
+    const specWithRepeatedPathParameter: OpenAPISpec = {
+      servers: [{ url: 'https://example.test' }],
+      paths: {
+        '/widgets/{id}/related/{id}': {
+          get: {
+            operationId: 'getRelatedWidget',
+            parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+          },
+        },
+      },
+    };
+    const { fetch: fakeFetch, calls } = createFakeFetch({ status: 200, body: {} });
+    const tools = createToolboxFromOpenAPI(specWithRepeatedPathParameter, { fetch: fakeFetch });
+    const getRelatedWidget = tools.find((tool) => tool.name === 'get-related-widget');
+
+    await getRelatedWidget?.execute({ id: '42' });
+
+    expect(calls[0]?.url).toBe('https://example.test/widgets/42/related/42');
+  });
+
+  it('throws instead of silently degrading to an unvalidated schema when a $ref cannot be resolved', () => {
+    const specWithBrokenRef: OpenAPISpec = {
+      servers: [{ url: 'https://example.test' }],
+      paths: {
+        '/widgets': {
+          post: {
+            operationId: 'createWidget',
+            requestBody: {
+              required: true,
+              content: {
+                'application/json': {
+                  schema: { $ref: '#/components/schemas/DoesNotExist' },
+                },
+              },
+            },
+          },
+        },
+      },
+    };
+
+    let caught: unknown;
+    try {
+      createToolboxFromOpenAPI(specWithBrokenRef);
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(Error);
+  });
+
   it('builds a Zod input schema from query parameters', () => {
     const tools = createToolboxFromOpenAPI(spec);
     const findPets = tools.find((tool) => tool.name === 'find-pets');
