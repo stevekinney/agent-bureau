@@ -1,5 +1,8 @@
+import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
 import { describe, expect, it } from 'bun:test';
+import { createBureau } from 'bureau';
 
+import { createApiKeyStore } from '../keys/create-api-key-store';
 import { createTestGateway } from '../test';
 
 /**
@@ -121,5 +124,61 @@ describe('SSR pages', () => {
     expect(html).toContain('/public/styles.css');
     expect(html).toContain('type="module"');
     expect(html).toContain('/public/entry.js');
+  });
+
+  describe('GET /reviews scope enforcement (AB-20)', () => {
+    it('rejects a managed key without reviews:read with 403, same as the JSON API', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      const apiKeyStore = createApiKeyStore(kv);
+      // A key scoped for something else entirely — no `reviews:read` — must
+      // not be able to read the SSR page's hydration payload even though
+      // `GET /api/v1/reviews` already rejects it.
+      const { plaintext } = await apiKeyStore.create({ name: 'no-reviews', scopes: ['runs:read'] });
+
+      const bureau = await createBureau({ persistence: kv });
+      const gateway = await createTestGateway(bureau);
+
+      const response = await gateway.app.request('/reviews', {
+        headers: { authorization: `Bearer ${plaintext}` },
+      });
+
+      expect(response.status).toBe(403);
+    });
+
+    it('serves the review queue page for a key that carries reviews:read', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      const apiKeyStore = createApiKeyStore(kv);
+      const { plaintext } = await apiKeyStore.create({
+        name: 'has-reviews',
+        scopes: ['reviews:read'],
+      });
+
+      const bureau = await createBureau({ persistence: kv });
+      const gateway = await createTestGateway(bureau);
+
+      const response = await gateway.app.request('/reviews', {
+        headers: { authorization: `Bearer ${plaintext}` },
+      });
+
+      expect(response.status).toBe(200);
+      const html = await response.text();
+      const data = extractInitialData(html);
+      expect(data).toHaveProperty('reviews');
+    });
+
+    it('serves the review queue page for an admin key (empty scopes)', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      const apiKeyStore = createApiKeyStore(kv);
+      const { plaintext } = await apiKeyStore.create({ name: 'admin' });
+
+      const bureau = await createBureau({ persistence: kv });
+      const gateway = await createTestGateway(bureau);
+
+      const response = await gateway.app.request('/reviews', {
+        headers: { authorization: `Bearer ${plaintext}` },
+      });
+
+      expect(response.status).toBe(200);
+    });
   });
 });

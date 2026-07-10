@@ -32,6 +32,7 @@ export { BureauError, classifyRecoveredRun, createBureau } from './create-bureau
 export type { BureauEventMap } from './events';
 export { ActionEvent, BureauDisposedEvent, RunRegisteredEvent, RunRemovedEvent } from './events';
 export type {
+  BureauToolbox,
   DurableComposition,
   PendingRecoveryEvents,
   RuntimeComposition,
@@ -55,10 +56,15 @@ export type {
   GenerateProviderName,
   IdentityConfiguration,
   LoadedSkill,
+  PendingHumanWaitReview,
+  PendingReview,
+  PendingToolApprovalReview,
   PersistenceOptions,
   ProviderConfiguration,
   ProviderRouteConfiguration,
   RedactedProviderConfiguration,
+  ResolveReviewInput,
+  ResolveReviewResult,
   RoutingConfiguration,
   RunDetail,
   RunEventRecord,

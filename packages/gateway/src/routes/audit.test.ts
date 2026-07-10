@@ -392,6 +392,7 @@ describe('GET /api/v1/audit', () => {
     // Stub an AuditTrail that returns the single durable record above.
     const stubAuditTrail: AuditTrail = {
       query: async () => [durableRecord],
+      record: async () => {},
       dispose: () => {},
     };
 

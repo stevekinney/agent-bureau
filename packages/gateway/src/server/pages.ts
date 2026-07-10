@@ -1,24 +1,28 @@
 import { Hono } from 'hono';
 
+import { createScopeGuard } from '../middleware/scope-guard';
 import type {
   Bureau,
   ConfigurationResponse,
+  PendingReview,
   ProviderConfiguration,
   RunDetail,
   RunSummary,
 } from '../types';
+import { SCOPE } from '../types';
 import App from '../ui/app.svelte';
 import { renderPage } from './render';
 
 /**
  * The canonical per-route hydration payload. Mirrors the client app's
- * `InitialData` contract: only `runs`, `run`, and `config` are ever
- * populated, each on the route that owns it.
+ * `InitialData` contract: only `runs`, `run`, `config`, and `reviews` are
+ * ever populated, each on the route that owns it.
  */
 interface InitialData {
   runs?: RunSummary[];
   run?: RunDetail;
   config?: ConfigurationResponse;
+  reviews?: PendingReview[];
 }
 
 interface PageDependencies {
@@ -83,6 +87,15 @@ export function createPages(dependencies: PageDependencies) {
       return context.text('Run not found', 404);
     }
     return renderAppResponse(`Run ${run.id}`, `/runs/${run.id}`, { run });
+  });
+
+  // Same `reviews:read` scope as `GET /api/v1/reviews` (routes/index.ts) —
+  // this SSR route embeds the same pending-review data (tool arguments,
+  // prompts) in the hydration payload, so an under-scoped key must not be
+  // able to read it here just because the JSON API is guarded.
+  app.get('/reviews', createScopeGuard([SCOPE.REVIEWS_READ]), async () => {
+    const reviews: PendingReview[] = dependencies.bureau.listPendingReviews();
+    return renderAppResponse('Review Queue', '/reviews', { reviews });
   });
 
   app.get('/configuration', async () => {

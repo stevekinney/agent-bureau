@@ -12,7 +12,7 @@ import type {
 import type { ObservabilityOptions } from '@lostgradient/weft/observability';
 import type { StorageConfiguration, TextValueStore } from '@lostgradient/weft/storage';
 import type { ConditionalTextValueStore } from '@lostgradient/weft/storage/text-value-store';
-import type { Toolbox } from 'armorer';
+import type { PendingToolApproval, SignedPendingToolApproval, Toolbox } from 'armorer';
 import type { ConversationSnapshot } from 'conversationalist';
 import type { ToolPolicy } from 'interoperability';
 import type {
@@ -333,6 +333,81 @@ export type DurableGuardrailsConfiguration = Pick<
 
 export type BureauEventType = keyof BureauEventMap & string;
 
+// ── Review queue (AB-20) ─────────────────────────────────────────────
+
+/**
+ * A tool call parked by armorer's `needs_approval` policy decision. `approval`
+ * is the exact {@link PendingToolApproval} (signed with `approvalToken` when
+ * the bureau's toolbox was constructed with `approvalSecret`) that
+ * `resolveReview` passes straight to `Toolbox.resumeApproval` on approve.
+ */
+export interface PendingToolApprovalReview {
+  kind: 'tool-approval';
+  /** Stable id for this review, e.g. `approval:<runId>:<callId>`. */
+  id: string;
+  runId: string;
+  sessionId: string;
+  agentName: string | undefined;
+  approval: PendingToolApproval | SignedPendingToolApproval;
+  /** Epoch-ms timestamp the tool call requested approval. */
+  requestedAt: number;
+  /** Milliseconds elapsed since `requestedAt`, computed at read time. */
+  ageMilliseconds: number;
+}
+
+/**
+ * A durable run parked on `ctx.waitForSignal` by the `requestHumanInput` tool
+ * (operative's F3 HITL primitive). `signalName` is the exact name
+ * `resolveReview` passes to `Bureau.signalSession` on approve.
+ */
+export interface PendingHumanWaitReview {
+  kind: 'human-wait';
+  /** Stable id for this review, e.g. `human-wait:<runId>:<signalName>`. */
+  id: string;
+  runId: string;
+  sessionId: string;
+  agentName: string | undefined;
+  signalName: string;
+  prompt: string | undefined;
+  /** Epoch-ms timestamp the run parked. */
+  requestedAt: number;
+  /** Milliseconds elapsed since `requestedAt`, computed at read time. */
+  ageMilliseconds: number;
+}
+
+/** A single item in the gateway's review queue (AB-20). */
+export type PendingReview = PendingToolApprovalReview | PendingHumanWaitReview;
+
+export interface ResolveReviewInput {
+  /** The {@link PendingReview.id} to resolve. */
+  id: string;
+  decision: 'approve' | 'deny';
+  /**
+   * The authenticated principal making the decision (e.g. `api-key:<id>` or
+   * `static-token`). Recorded in the audit trail for attribution — required,
+   * not optional, so every resolution is attributable.
+   */
+  principal: string;
+  /**
+   * `tool-approval` approve only: override the tool call's arguments instead
+   * of resuming with the originally-proposed ones. Ignored for `deny` and for
+   * `human-wait` reviews.
+   */
+  arguments?: unknown;
+  /** `human-wait` approve only: the payload delivered with the signal. */
+  payload?: unknown;
+  /** Optional human-readable note, recorded in the audit trail either way. */
+  reason?: string;
+}
+
+export interface ResolveReviewResult {
+  id: string;
+  kind: PendingReview['kind'];
+  decision: 'approve' | 'deny';
+  /** The tool's `ToolExecutionResult` when a `tool-approval` was approved. */
+  result?: unknown;
+}
+
 export interface Bureau {
   readonly store: Store;
   readonly memory: Memory | undefined;
@@ -395,6 +470,31 @@ export interface Bureau {
    * Throws `BureauError('NOT_CONFIGURED')` when no durable engine is composed.
    */
   querySession(sessionId: string, name: string, input?: unknown): Promise<unknown>;
+
+  /**
+   * List every parked run awaiting human review (AB-20): armorer's
+   * `needs_approval` tool-approval flow AND durable `requestHumanInput`
+   * (`ctx.waitForSignal`) waits, across all live runs. Newest requests last
+   * are NOT guaranteed — order is run-registration order, not age order.
+   * Excludes items already resolved via `resolveReview` (approved or denied),
+   * even if the underlying run has not produced further activity.
+   */
+  listPendingReviews(): PendingReview[];
+
+  /**
+   * Approve or deny a pending review. Approve resumes the run: a
+   * `tool-approval` calls `Toolbox.resumeApproval` on the bureau's toolbox and
+   * returns its `ToolExecutionResult`; a `human-wait` calls `signalSession`
+   * with the parked signal name. Deny records the decision without resuming
+   * anything — there is no built-in "reject and continue" verb for either
+   * primitive, so a denied tool call is simply never resumed and a denied
+   * human-wait run stays parked. Every resolution — approve or deny — is
+   * recorded in the audit trail attributed to `input.principal`.
+   *
+   * Throws `BureauError('NOT_FOUND')` when `input.id` does not match a
+   * currently pending review (including an already-resolved one).
+   */
+  resolveReview(input: ResolveReviewInput): Promise<ResolveReviewResult>;
 
   /**
    * Register a durable recurring schedule via `engine.schedule(...)`.

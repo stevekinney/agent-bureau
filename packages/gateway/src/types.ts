@@ -13,8 +13,13 @@ export type {
   ConfigurationResponse,
   CreateRunRequest,
   DurableScheduleDefinition,
+  PendingHumanWaitReview,
+  PendingReview,
+  PendingToolApprovalReview,
   PersistenceOptions,
   ProviderConfiguration,
+  ResolveReviewInput,
+  ResolveReviewResult,
   RunDetail,
   RunEventRecord,
   RunStepDetail,
@@ -113,6 +118,12 @@ export const SCOPE = {
   HOOKS_WRITE: 'hooks:write',
   SCHEDULES_READ: 'schedules:read',
   SCHEDULES_WRITE: 'schedules:write',
+  /** The review queue (AB-20): parked tool approvals and human-input waits. */
+  REVIEWS_READ: 'reviews:read',
+  /** Approve/deny a pending review — deliberately its own scope, not folded
+   * into `runs:write`, since it grants the ability to resume a parked run or
+   * execute a previously-gated tool call. */
+  REVIEWS_WRITE: 'reviews:write',
 } as const;
 
 export type Scope = (typeof SCOPE)[keyof typeof SCOPE];

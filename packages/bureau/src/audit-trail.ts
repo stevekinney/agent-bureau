@@ -49,6 +49,14 @@ export interface AuditRecord {
   type: string;
   /** Serializable detail snapshot from the operative store's action. */
   detail: unknown;
+  /**
+   * The authenticated principal attributed with this record (e.g.
+   * `api-key:<id>` or `static-token`). Only present on records written via
+   * {@link AuditTrail.record} — out-of-band human decisions (AB-20 review
+   * queue approve/deny). Bureau-action-stream records (`tool.*`, `run.*`,
+   * `step.completed`) have no principal; they are attributed to the run.
+   */
+  principal?: string;
 }
 
 /**
@@ -78,6 +86,21 @@ export interface AuditTrail {
    * no KV store is available (non-persistent bureau).
    */
   query(options?: AuditQueryOptions): Promise<AuditRecord[]>;
+  /**
+   * Write an out-of-band record directly into the durable trail, bypassing the
+   * bureau action-stream listener. Used by `resolveReview` (AB-20 review
+   * queue) to attribute a human's approve/deny decision to `entry.principal` —
+   * a decision made outside any run's step loop, so it never appears on the
+   * bureau's `action` event stream. A no-op when no KV store is configured
+   * (ephemeral bureau); the review is still resolved, just not durably
+   * recorded — Layer A (live) has no equivalent for out-of-band records.
+   */
+  record(entry: {
+    runId: string;
+    type: string;
+    detail: unknown;
+    principal?: string;
+  }): Promise<void>;
   /** Stop listening to bureau events and release the subscription. */
   dispose(): void;
 }
@@ -124,6 +147,19 @@ export function createAuditTrail(bureau: Bureau, kv: TextValueStore | undefined)
   // Determine which event types qualify as audit events.
   const auditEventSet = new Set<string>(AUDIT_EVENT_TYPES);
 
+  // Out-of-band records (via `record()`) have no operative store `Action` to
+  // draw a `sequence` from — they happen outside any run's step loop.
+  // `encodeKey` zero-pads `sequence` as an unsigned decimal, so the counter
+  // must stay non-negative for the lexicographic key sort to hold, and
+  // `query()`/`/api/v1/audit` order ties by ASCENDING sequence — so it must
+  // count UP (not down) for later same-millisecond records to sort after
+  // earlier ones. Starting well below `Number.MAX_SAFE_INTEGER` (10 billion
+  // of headroom — far more manual records than any process could plausibly
+  // emit) keeps every value in that same large, real-action-sequence-proof
+  // range (the store's own sequence always starts at 0) while leaving room
+  // to increment without exceeding `MAX_SAFE_INTEGER`.
+  let manualSequence = Number.MAX_SAFE_INTEGER - 10_000_000_000;
+
   // Subscribe to the bureau's action stream. The bureau re-emits every
   // operative store action as an ActionEvent, so we don't need to reach into
   // the store directly — the event surface is the intended integration point.
@@ -157,6 +193,37 @@ export function createAuditTrail(bureau: Bureau, kv: TextValueStore | undefined)
   bureau.addEventListener('action', listener);
 
   return {
+    async record(entry: {
+      runId: string;
+      type: string;
+      detail: unknown;
+      principal?: string;
+    }): Promise<void> {
+      if (!kv) return;
+
+      const timestampMs = Date.now();
+      const sequence = manualSequence++;
+
+      const record: AuditRecord = {
+        timestamp: new Date(timestampMs).toISOString(),
+        timestampMs,
+        sequence,
+        runId: entry.runId,
+        type: entry.type,
+        detail: entry.detail,
+        ...(entry.principal !== undefined ? { principal: entry.principal } : {}),
+      };
+
+      const key = encodeKey(timestampMs, sequence, entry.runId);
+      try {
+        await kv.set(key, JSON.stringify(record));
+      } catch (error: unknown) {
+        // Best-effort, matching the listener above: a write failure must
+        // never fail the caller's approve/deny decision.
+        console.error(`[audit-trail] Failed to persist audit record for key "${key}":`, error);
+      }
+    },
+
     async query(options: AuditQueryOptions = {}): Promise<AuditRecord[]> {
       if (!kv) return [];
 
