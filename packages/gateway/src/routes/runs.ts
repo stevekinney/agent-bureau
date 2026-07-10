@@ -26,6 +26,9 @@ export function createRunsRoutes(bureau: Bureau) {
         if (error.code === 'NOT_CONFIGURED')
           throw new HTTPException(503, { message: error.message });
         if (error.code === 'BAD_REQUEST') throw new HTTPException(400, { message: error.message });
+        // AB-13 — a flow-control policy (concurrency cap, rate limit, or
+        // singleton dedupe) rejected this run's admission.
+        if (error.code === 'RATE_LIMITED') throw new HTTPException(429, { message: error.message });
       }
       throw error;
     }
