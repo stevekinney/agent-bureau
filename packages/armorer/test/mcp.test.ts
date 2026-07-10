@@ -13,6 +13,7 @@ import { createToolbox } from '../src/create-toolbox';
 import {
   createMCP,
   createMcpElicitationHandler,
+  createMcpToolElicitationRequester,
   fromMcpTools,
   toMcpTools,
 } from '../src/integrations/mcp';
@@ -1383,6 +1384,26 @@ describe('MCP elicitation', () => {
     }
   });
 
+  it('rejects an accepted elicitation whose content does not match the requested schema (server direction)', async () => {
+    const { client, server } = await connectWithElicitation(createApprovalToolbox(), async () => ({
+      action: 'accept',
+      // `approved` is a string, but the tool's schema requires a boolean.
+      content: { approved: 'yes' as unknown as boolean },
+    }));
+
+    try {
+      const result = await client.callTool({
+        name: 'approve-purchase',
+        arguments: { amount: 42 },
+      });
+      expect(result.isError).toBe(true);
+      expect(result.content?.[0]?.text).toContain('did not match the requested schema');
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
   it('surfaces a server elicitation request through fromMcpTools (client direction)', async () => {
     const requests: ToolElicitationRequest[] = [];
     const { client, server } = await connectWithElicitation(
@@ -1408,5 +1429,53 @@ describe('MCP elicitation', () => {
       await client.close();
       await server.close();
     }
+  });
+
+  it('leaves context.elicit undefined for a client that did not declare the elicitation capability', async () => {
+    const toolbox = createApprovalToolbox();
+    const server = await createMCP(toolbox);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    // No `capabilities: { elicitation: {} }` — this client cannot answer elicitation requests.
+    const client = new Client({ name: 'no-elicitation-client', version: '0.0.0' });
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+
+    try {
+      const result = await client.callTool({
+        name: 'approve-purchase',
+        arguments: { amount: 42 },
+      });
+
+      expect(result.isError).toBe(true);
+      expect(result.content?.[0]?.text).toBe('elicitation unavailable in this context');
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  it('propagates the tool call abort signal into the underlying elicitation request', async () => {
+    const controller = new AbortController();
+    const sendRequestCalls: Array<{
+      request: unknown;
+      resultSchema: unknown;
+      options: unknown;
+    }> = [];
+    const fakeExtra = {
+      signal: controller.signal,
+      sendRequest: async (request: unknown, resultSchema: unknown, options: unknown) => {
+        sendRequestCalls.push({ request, resultSchema, options });
+        return { action: 'accept', content: {} };
+      },
+      // Unused by createMcpToolElicitationRequester but present on the real type.
+      sendNotification: async () => {},
+      requestId: 'test-request-id',
+    } as unknown as Parameters<typeof createMcpToolElicitationRequester>[0];
+
+    const requester = createMcpToolElicitationRequester(fakeExtra);
+    await requester({ message: 'Approve?', mode: 'form', schema: { type: 'object' } });
+
+    expect(sendRequestCalls).toHaveLength(1);
+    expect(sendRequestCalls[0]?.options).toEqual({ signal: controller.signal });
   });
 });

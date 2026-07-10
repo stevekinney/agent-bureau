@@ -84,6 +84,15 @@ export type ToMCPToolsOptions = {
     signal?: AbortSignal,
     elicit?: ToolElicitationRequester,
   ) => Promise<ToolResultLike>;
+  /**
+   * Reports whether the connected client declared the `elicitation`
+   * capability. When it returns `false`, `context.elicit` is left
+   * `undefined` instead of a requester that would fail at call time — tools
+   * using the common `if (context.elicit)` feature-detection pattern then
+   * correctly fall back to their no-elicitation path. Defaults to `true`
+   * (always expose `elicit`) when omitted.
+   */
+  supportsElicitation?: () => boolean;
 };
 
 export type FromMCPToolsOptions = {
@@ -162,7 +171,15 @@ export async function createMCP(
               })
       : undefined;
 
-  for (const tool of toMcpTools(availableTools, { toolConfiguration, formatResult, executeTool })) {
+  const supportsElicitation = () =>
+    server.server.getClientCapabilities()?.elicitation !== undefined;
+
+  for (const tool of toMcpTools(availableTools, {
+    toolConfiguration,
+    formatResult,
+    executeTool,
+    supportsElicitation,
+  })) {
     registerTool(tool);
   }
 
@@ -231,7 +248,11 @@ function toMcpToolDefinition(tool: Tool, options: ToMCPToolsOptions): MCPToolDef
       let result: ToolResultLike;
       try {
         const callId = extra?.requestId !== undefined ? String(extra.requestId) : undefined;
-        const elicit = extra ? createMcpToolElicitationRequester(extra) : undefined;
+        const clientSupportsElicitation = options.supportsElicitation
+          ? options.supportsElicitation()
+          : true;
+        const elicit =
+          extra && clientSupportsElicitation ? createMcpToolElicitationRequester(extra) : undefined;
         if (options.executeTool) {
           result = await options.executeTool(tool, params, callId, extra?.signal, elicit);
         } else {
@@ -641,10 +662,31 @@ function toElicitRequestParams(
   } as ElicitRequestFormParams;
 }
 
-/** Translates an MCP `ElicitResult` back into our transport-agnostic shape. */
-function fromElicitResult(result: ElicitResult): ToolElicitationResult {
+/**
+ * Translates an MCP `ElicitResult` back into our transport-agnostic shape.
+ *
+ * For an accepted form-mode result, validates `content` against the
+ * requested schema first — a tool calling `context.elicit()` trusts the
+ * response to honor the schema it asked for, so a client returning malformed
+ * content (wrong types, missing required fields) fails loudly here instead
+ * of silently reaching the tool and driving an incorrect action.
+ */
+function fromElicitResult(
+  result: ElicitResult,
+  request: ToolElicitationRequest,
+): ToolElicitationResult {
   if (result.action === 'accept') {
-    return { action: 'accept', content: result.content ?? {} };
+    const content = result.content ?? {};
+    if (request.mode !== 'url') {
+      const schema = jsonSchemaToZod(request.schema ?? { type: 'object', properties: {} });
+      const parsed = schema?.safeParse(content);
+      if (parsed && !parsed.success) {
+        throw new TypeError(
+          `Elicitation response for "${request.message}" did not match the requested schema: ${parsed.error.message}`,
+        );
+      }
+    }
+    return { action: 'accept', content };
   }
   if (result.action === 'decline') {
     return { action: 'decline' };
@@ -729,8 +771,12 @@ export function createMcpToolElicitationRequester(
     const result = await extra.sendRequest(
       { method: 'elicitation/create', params },
       ElicitResultSchema,
+      // Propagate the tool call's abort signal so a cancelled `tools/call`
+      // also cancels the nested `elicitation/create` request instead of
+      // leaving it pending until the client answers or it times out.
+      extra.signal ? { signal: extra.signal } : undefined,
     );
-    return fromElicitResult(result as ElicitResult);
+    return fromElicitResult(result as ElicitResult, request);
   };
 }
 
