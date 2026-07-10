@@ -111,8 +111,9 @@ export function createHeartbeat(options: CreateHeartbeatOptions): Heartbeat {
         return null;
       }
 
-      if (result.finishReason === 'error') {
-        // The run completed with an error — treat as a failure
+      if (result.finishReason === 'error' || result.finishReason === 'tripwire') {
+        // The run completed with an error (or was halted by a guardrail
+        // tripwire) — treat as a failure
         failures++;
         if (failures >= maxConsecutiveFailures) {
           stop();

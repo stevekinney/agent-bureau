@@ -32,6 +32,44 @@ export class StandardSchemaValidationError extends Error {
   }
 }
 
+/** Identifying details of the guardrail that tripped the wire. */
+export interface GuardrailTripwireDetail {
+  /** The name of the detector (input) or validator (output) that tripped. */
+  guardrailName: string;
+  /** The category the detector/validator reported (e.g. 'prompt-injection', 'pii'). */
+  category: string;
+  /** Whether the tripwire fired on the input (pre-generate) or output (post-generate) side. */
+  phase: 'input' | 'output';
+  confidence: number;
+  detail?: string;
+}
+
+/**
+ * Thrown by a guardrail hook running in `mode: 'tripwire'` to hard-halt the run
+ * immediately, distinct from the default `'validate'` mode (block/warn/sanitize/
+ * redact), which substitutes a response and lets the loop continue. Classified by
+ * `makeErrorResult`/`classifyErrorFinishReason` into `finishReason: 'tripwire'`,
+ * mirroring the `ElicitationDeniedError`/`BudgetExceededError` pattern — the run
+ * terminates cleanly (a `RunCompletedEvent` + `RunTripwireEvent`, not a crash).
+ */
+export class GuardrailTripwireError extends Error implements GuardrailTripwireDetail {
+  readonly guardrailName: string;
+  readonly category: string;
+  readonly phase: 'input' | 'output';
+  readonly confidence: number;
+  readonly detail?: string;
+
+  constructor(message: string, info: GuardrailTripwireDetail) {
+    super(message);
+    this.name = 'GuardrailTripwireError';
+    this.guardrailName = info.guardrailName;
+    this.category = info.category;
+    this.phase = info.phase;
+    this.confidence = info.confidence;
+    this.detail = info.detail;
+  }
+}
+
 export type ErrorCategory =
   | 'rate-limit'
   | 'timeout'

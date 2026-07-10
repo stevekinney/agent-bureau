@@ -10,6 +10,7 @@ import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
 
 import { createCostBudgetMonitor } from '../src/cost-budget-monitor';
+import { GuardrailTripwireError } from '../src/errors';
 import { executeLoop } from '../src/loop';
 import type { GenerateResponse } from '../src/types';
 
@@ -128,6 +129,39 @@ describe('RunResult terminal usage + costEstimate parity', () => {
       stopWhen: monitor.stopCondition,
     });
     expect(stopped.costEstimate).toBeUndefined();
+  });
+
+  it('a tripwire raised by validateResponse (e.g. the default output guardrail) still carries the metered response usage and costEstimate', async () => {
+    // Regression guard (P2 review finding, PRRT_kwDORvupsc6PxCXc): validateResponse
+    // hooks run AFTER the generate call has already returned (and been billed by
+    // the provider). A hook that throws GuardrailTripwireError — the output
+    // guardrail's `mode: 'tripwire'` path — short-circuited straight to the error
+    // result BEFORE runStep's usage-accumulation block ever ran, so a
+    // tripwire-halted run reported zero usage/cost despite the generate call
+    // having actually happened.
+    const result = await executeLoop({
+      generate: async () =>
+        usageResponse('flagged output', { prompt: 300, completion: 40, total: 340 }),
+      toolbox: createTestToolbox([]),
+      conversation: new Conversation(),
+      validateResponse: () => {
+        throw new GuardrailTripwireError('blocked', {
+          guardrailName: 'test-output-guardrail',
+          category: 'test',
+          phase: 'output',
+          confidence: 1,
+        });
+      },
+      costEstimation: { model: 'gpt-4o' },
+    });
+
+    expect(result.finishReason).toBe('tripwire');
+    expect(result.usage).toEqual({ prompt: 300, completion: 40, total: 340 });
+    expect(result.costEstimate).toBeDefined();
+    expect(result.costEstimate!.totalCost).toBeCloseTo(
+      (300 / 1_000_000) * 2.5 + (40 / 1_000_000) * 10,
+      10,
+    );
   });
 
   it('leaves costEstimate absent (never fabricated) when the configured model has no resolvable pricing', async () => {

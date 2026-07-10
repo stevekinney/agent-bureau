@@ -3,6 +3,7 @@ import { Conversation, materializeToolCalls } from 'conversationalist';
 import type { ToolCall } from 'interoperability';
 import type { ZodType } from 'zod';
 
+import { GuardrailTripwireError } from './errors';
 import {
   BackpressureAppliedEvent,
   BackpressureReleasedEvent,
@@ -322,6 +323,40 @@ async function sealDanglingToolCalls(
 }
 
 /**
+ * Folds a step's token usage into `runState.totalUsage` and dispatches
+ * `UsageAccumulatedEvent`. Extracted so the validate-response tripwire path
+ * (which returns an error result before the main usage-accumulation block)
+ * can still record usage for a response the provider already billed —
+ * otherwise a tripwire fired by the default output guardrail would report
+ * zero usage/cost for a completed, metered generate call.
+ */
+function accumulateUsage(
+  runState: RunState,
+  emitter: EventDispatcher | undefined,
+  step: number,
+  usage: TokenUsage | undefined,
+): void {
+  if (usage) {
+    runState.totalUsage.prompt += usage.prompt;
+    runState.totalUsage.completion += usage.completion;
+    runState.totalUsage.total += usage.total;
+    // Cache fields are provider-neutral but not universally reported. Only
+    // accumulate when this step's usage actually carried the field, and only
+    // materialize it on the run total once a step has reported it — an
+    // absent field must never be fabricated as `0`.
+    if (usage.cacheCreationTokens !== undefined) {
+      runState.totalUsage.cacheCreationTokens =
+        (runState.totalUsage.cacheCreationTokens ?? 0) + usage.cacheCreationTokens;
+    }
+    if (usage.cacheReadTokens !== undefined) {
+      runState.totalUsage.cacheReadTokens =
+        (runState.totalUsage.cacheReadTokens ?? 0) + usage.cacheReadTokens;
+    }
+  }
+  emitter?.dispatch(new UsageAccumulatedEvent(step, { ...runState.totalUsage }, usage));
+}
+
+/**
  * Executes exactly one iteration of the agent loop against a live
  * {@link Conversation}, mutating it in place and pushing any completed step
  * into `runState.steps`. This is the entire per-step body extracted verbatim
@@ -625,6 +660,17 @@ export async function runStep(
       }
       backpressure?.onSuccess();
     } catch (error) {
+      // A tripwire guardrail (mode: 'tripwire') MUST hard-halt the run — it
+      // must not be retried, skipped, or otherwise recovered by a user-supplied
+      // `onError` hook, which would silently defeat the tripwire. Bypass onError
+      // entirely and propagate straight to the error result, matching how the
+      // validateResponse tripwire path (below) never consults onError either.
+      if (error instanceof GuardrailTripwireError) {
+        backpressure?.onError(error);
+        emitter?.dispatch(new RunErrorEvent(step, error));
+        return { kind: 'error', error };
+      }
+
       // onError recovery: sequential, first non-void return wins.
       // We always invoke the hook regardless of retry count so it can
       // return 'skip' or 'abort' even after retries are exhausted.
@@ -710,6 +756,12 @@ export async function runStep(
         }
       }
     } catch (error) {
+      // The provider call already completed (and may have been metered)
+      // before this hook ran — e.g. the default output-guardrail tripwire
+      // throws GuardrailTripwireError here. Accumulate the response's usage
+      // before returning the error result so a tripwire-halted run still
+      // reports the cost of the generate call that triggered it.
+      accumulateUsage(runState, emitter, step, response.usage);
       emitter?.dispatch(new RunErrorEvent(step, error));
       return { kind: 'error', error };
     }
@@ -729,6 +781,9 @@ export async function runStep(
         response = validated;
       }
     } catch (error) {
+      // See the comment on the validateResponseHooks catch above — the
+      // response has already been billed by the provider.
+      accumulateUsage(runState, emitter, step, response.usage);
       emitter?.dispatch(new RunErrorEvent(step, error));
       return { kind: 'error', error };
     }
@@ -747,24 +802,7 @@ export async function runStep(
 
   const { content, toolCalls: toolCallInputs, usage, metadata } = response;
   runState.lastContent = content;
-  if (usage) {
-    runState.totalUsage.prompt += usage.prompt;
-    runState.totalUsage.completion += usage.completion;
-    runState.totalUsage.total += usage.total;
-    // Cache fields are provider-neutral but not universally reported. Only
-    // accumulate when this step's usage actually carried the field, and only
-    // materialize it on the run total once a step has reported it — an
-    // absent field must never be fabricated as `0`.
-    if (usage.cacheCreationTokens !== undefined) {
-      runState.totalUsage.cacheCreationTokens =
-        (runState.totalUsage.cacheCreationTokens ?? 0) + usage.cacheCreationTokens;
-    }
-    if (usage.cacheReadTokens !== undefined) {
-      runState.totalUsage.cacheReadTokens =
-        (runState.totalUsage.cacheReadTokens ?? 0) + usage.cacheReadTokens;
-    }
-  }
-  emitter?.dispatch(new UsageAccumulatedEvent(step, { ...runState.totalUsage }, usage));
+  accumulateUsage(runState, emitter, step, usage);
 
   if (content && !response.messageAppended) {
     conversation.appendAssistantMessage(content, metadata);

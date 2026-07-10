@@ -29,6 +29,7 @@ export const AUDIT_EVENT_TYPES = [
   'run.completed',
   'run.error',
   'run.aborted',
+  'run.tripwire',
   // Step lifecycle
   'step.completed',
 ] as const;

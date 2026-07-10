@@ -76,7 +76,8 @@ export type FinishReason =
   | 'aborted'
   | 'error'
   | 'elicitation-denied'
-  | 'budget-exceeded';
+  | 'budget-exceeded'
+  | 'tripwire';
 
 /**
  * Context passed to the user-provided generate function.

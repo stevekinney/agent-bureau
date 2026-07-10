@@ -51,6 +51,7 @@ const VALID_FINISH_REASONS: ReadonlySet<RunResult['finishReason']> = new Set([
   'error',
   'elicitation-denied',
   'budget-exceeded',
+  'tripwire',
 ]);
 
 /**
@@ -165,7 +166,8 @@ async function runCase(
       runResult.finishReason === 'error' ||
       runResult.finishReason === 'aborted' ||
       runResult.finishReason === 'budget-exceeded' ||
-      runResult.finishReason === 'elicitation-denied'
+      runResult.finishReason === 'elicitation-denied' ||
+      runResult.finishReason === 'tripwire'
     ) {
       return {
         name: evaluationCase.name,

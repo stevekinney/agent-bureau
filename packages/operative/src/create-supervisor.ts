@@ -14,6 +14,7 @@ const FAILURE_FINISH_REASONS: ReadonlySet<FinishReason> = new Set<FinishReason>(
   'aborted',
   'budget-exceeded',
   'elicitation-denied',
+  'tripwire',
 ]);
 
 /** Returns true when a RunResult's finishReason indicates the agent failed. */

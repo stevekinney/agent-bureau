@@ -820,6 +820,58 @@ describe('createDurableHeartbeat', () => {
     }
   });
 
+  it('reports a failed durable tick when scheduler submission returns a tripwire-halted result (regression PRRT_kwDORvupsc6PxCXR)', async () => {
+    // Before the fix, only `finishReason: 'error'` counted as a durable tick
+    // failure — a guardrail tripwire halt (`finishReason: 'tripwire'`) fell
+    // through to the success branch, so a durable heartbeat run halted by a
+    // guardrail reported `status: 'completed'` instead of `'failed'`.
+    const tripwireResult: RunResult = {
+      ...createRunResult('tripwire heartbeat tick'),
+      finishReason: 'tripwire',
+      error: undefined,
+    };
+    const { engine } = await createRunEngine({
+      storage: new MemoryStorage(),
+      runWorkflow: createAgentRunProbeWorkflow(),
+      recover: false,
+      startScheduler: false,
+    });
+    const { scheduler, submittedTasks } = createRecordingScheduler(tripwireResult);
+    const completedTicks: DurableHeartbeatTickResult[] = [];
+    const failureErrors: unknown[] = [];
+    engine.addEventListener(weft.WorkflowCompletedEvent.type, (event) => {
+      const result = (event as weft.WorkflowCompletedEvent).result;
+      if (isDurableHeartbeatTickResult(result)) completedTicks.push(result);
+    });
+
+    const heartbeat = await createDurableHeartbeat(engine, {
+      scheduler,
+      scheduleId: 'heartbeat-tripwire-result',
+      spec: { every: '1h' },
+      createHeartbeatRun: () => ({ conversation: new Conversation() }),
+      onFailure: (error) => {
+        failureErrors.push(error);
+      },
+    });
+
+    try {
+      await fireSchedule(engine, 'heartbeat-tripwire-result');
+
+      expect(completedTicks).toHaveLength(1);
+      expect(completedTicks[0]).toMatchObject({
+        scheduleId: 'heartbeat-tripwire-result',
+        status: 'failed',
+      });
+      expect(submittedTasks).toHaveLength(1);
+      expect(failureErrors).toHaveLength(1);
+      expect(failureErrors[0]).toBeInstanceOf(Error);
+      expect((failureErrors[0] as Error).message).toBe('durable heartbeat tick failed');
+    } finally {
+      await heartbeat.cancel();
+      engine[Symbol.dispose]();
+    }
+  });
+
   it('does not write agent-run checkpoints under an undefined run id', async () => {
     const storage = new MemoryStorage();
     const { engine, checkpointStore } = await createRunEngine({

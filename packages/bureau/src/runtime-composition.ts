@@ -34,6 +34,8 @@ import type {
   AgentSession,
   CombinedOperativeEventMap,
   GenerateFunction,
+  GuardrailsOptions,
+  InputDetector,
   JSONValue,
   OnStepHook,
   PrepareStepHook,
@@ -47,6 +49,8 @@ import {
   createAgentSession,
   createGuardrails,
   createIdentityHook,
+  createOutputPIIValidator,
+  createPromptInjectionDetector,
   createScheduler,
   createSessionStore,
   StepStartedEvent,
@@ -112,6 +116,52 @@ import type {
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Toolbox generic variance; bureau never inspects the type parameter
 export type BureauToolbox = Toolbox<any>;
+
+/**
+ * A single-pattern prompt-injection match (`confidence: 0.3`) is common in
+ * completely benign phrasing — "act as a translator", "you are now our
+ * support contact" — and `createPromptInjectionDetector` reports `triggered:
+ * true` on any match count, with no built-in confidence floor. That's a
+ * reasonable default for `mode: 'validate'` (a false positive just gets a
+ * `'warn'`/re-prompt), but `mode: 'tripwire'` HARD-HALTS the run — so the
+ * enabled-by-default preset wraps the detector to only trip at `confidence >=
+ * 0.6` (2+ matched patterns), the point where a real injection attempt
+ * clearly outweighs an incidental phrase. Below that, the detection is
+ * reported as NOT triggered so it doesn't gate the run at all (this preset
+ * has no `'warn'` fallback for weak matches — it is intentionally a coarse,
+ * high-precision tripwire, not a low-confidence advisory).
+ */
+function withMinimumTripwireConfidence(detector: InputDetector, threshold: number): InputDetector {
+  return {
+    name: detector.name,
+    async detect(input, context) {
+      const result = await detector.detect(input, context);
+      if (result.triggered && result.confidence < threshold) {
+        return { ...result, triggered: false };
+      }
+      return result;
+    },
+  };
+}
+
+/**
+ * AB-40 — the enabled-by-default guardrail preset. Wired whenever
+ * `BureauOptions.guardrails` is omitted (`undefined`): a prompt-injection
+ * input detector (gated at `confidence >= 0.6` — see
+ * {@link withMinimumTripwireConfidence}) and an output PII validator, both in
+ * `mode: 'tripwire'` — a trip hard-halts the run (`finishReason: 'tripwire'`)
+ * rather than substituting a blocked/redacted response. Pass `guardrails:
+ * false` to opt out entirely, or a `GuardrailsOptions` to replace this preset.
+ */
+function defaultGuardrailsPreset(): GuardrailsOptions {
+  return {
+    mode: 'tripwire',
+    input: {
+      detectors: [withMinimumTripwireConfidence(createPromptInjectionDetector(), 0.6)],
+    },
+    output: { validators: [createOutputPIIValidator()] },
+  };
+}
 
 /**
  * Discriminate a {@link PersistenceOptions} object from a bare
@@ -1275,8 +1325,26 @@ export async function createRuntimeComposition(
     },
   ) {
     const liveStreaming = runtimeOptions?.liveStreaming ?? true;
+    // AB-40 — the auto-wired default guardrail preset (`options.guardrails ===
+    // undefined`) runs its output PII validator in `mode: 'tripwire'` against
+    // the FULL response content in `validateResponse`, which only runs after
+    // `runStep`'s generate call returns. `withEnhancedStreaming` forwards
+    // `stream:text-delta` events (and finalizes the streaming message) as the
+    // provider streams, which happens entirely INSIDE that generate call —
+    // before `validateResponse` ever sees the content. A streamed response
+    // would therefore leak PII to clients before the default tripwire could
+    // fire, defeating the preset's purpose. Force buffered (non-streaming)
+    // generation whenever the default preset is in effect so the output
+    // guardrail actually gates what reaches the client. A caller who
+    // explicitly supplies `guardrails` (including re-supplying this same
+    // preset) has opted into managing that tradeoff themselves and keeps
+    // streaming.
+    const usingDefaultGuardrailsPreset = options.guardrails === undefined;
     const streamEventTarget =
-      !liveStreaming || options.generate !== undefined || options.streaming?.enabled === false
+      !liveStreaming ||
+      options.generate !== undefined ||
+      options.streaming?.enabled === false ||
+      usingDefaultGuardrailsPreset
         ? undefined
         : new TypedEventTarget<StreamEventMap>();
     const generate =
@@ -1388,8 +1456,13 @@ export async function createRuntimeComposition(
       }
     }
 
-    if (options.guardrails) {
-      const guardrails = createGuardrails(options.guardrails);
+    // AB-40 — `undefined` (not configured) wires the enabled-by-default
+    // preset; `false` opts out entirely; anything else replaces the preset.
+    const guardrailsConfig = usingDefaultGuardrailsPreset
+      ? defaultGuardrailsPreset()
+      : options.guardrails;
+    if (guardrailsConfig) {
+      const guardrails = createGuardrails(guardrailsConfig);
       prepareStep.push(guardrails.prepareStep);
       validateResponse.push(guardrails.validateResponse);
     }

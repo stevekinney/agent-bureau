@@ -189,7 +189,7 @@ export function createDurableHeartbeatTickWorkflow() {
               return { workflowId, scheduleId: input.scheduleId, status: 'preempted' };
             }
 
-            if (result.finishReason === 'error') {
+            if (result.finishReason === 'error' || result.finishReason === 'tripwire') {
               await notifyFailure(
                 services,
                 result.error ?? new Error('durable heartbeat tick failed'),

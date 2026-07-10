@@ -333,7 +333,8 @@ export function createOpenAICompatRoutes(bureau: Bureau) {
             const isError =
               event.finishReason === 'error' ||
               event.finishReason === 'budget-exceeded' ||
-              event.finishReason === 'elicitation-denied';
+              event.finishReason === 'elicitation-denied' ||
+              event.finishReason === 'tripwire';
             if (isError) {
               emitTerminal({
                 kind: 'error',
@@ -378,7 +379,8 @@ export function createOpenAICompatRoutes(bureau: Bureau) {
             const isError =
               settledState.finishReason === 'error' ||
               settledState.finishReason === 'budget-exceeded' ||
-              settledState.finishReason === 'elicitation-denied';
+              settledState.finishReason === 'elicitation-denied' ||
+              settledState.finishReason === 'tripwire';
             if (settledState.status === 'aborted') {
               emitTerminal({ kind: 'aborted' });
             } else if (isError) {
@@ -454,7 +456,8 @@ export function createOpenAICompatRoutes(bureau: Bureau) {
       runDetail.status === 'error' ||
       runDetail.finishReason === 'error' ||
       runDetail.finishReason === 'budget-exceeded' ||
-      runDetail.finishReason === 'elicitation-denied';
+      runDetail.finishReason === 'elicitation-denied' ||
+      runDetail.finishReason === 'tripwire';
     if (isFailure) {
       const message = runDetail.error ?? 'Run failed with an unspecified error';
       throw new HTTPException(500, {

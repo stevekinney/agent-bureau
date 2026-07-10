@@ -137,6 +137,7 @@ export function createRunRecorder(activeRun: ActiveRun): RunRecorder {
     'run.completed',
     'run.error',
     'run.aborted',
+    'run.tripwire',
     'step.aborted',
     'generate.started',
     'generate.completed',

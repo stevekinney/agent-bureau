@@ -263,7 +263,15 @@ export interface BureauOptions {
   durableExecution?: boolean;
   memory?: CreateMemoryOptions | Memory;
   cache?: CacheConfiguration;
-  guardrails?: GuardrailsOptions;
+  /**
+   * AB-40 — guardrail tripwires. When omitted (the default), bureau wires an
+   * enabled-by-default preset: a prompt-injection input detector + an output
+   * PII validator, both running in `mode: 'tripwire'` (a trip hard-halts the
+   * run with `finishReason: 'tripwire'` rather than substituting a response).
+   * Pass a `GuardrailsOptions` to override the preset entirely (input/output
+   * detectors, taint, `mode`), or `false` to opt out of guardrails altogether.
+   */
+  guardrails?: GuardrailsOptions | false;
   identity?: IdentityConfiguration;
   skills?: SkillRuntimeConfiguration;
   streaming?: StreamingConfiguration;

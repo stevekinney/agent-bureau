@@ -3,6 +3,7 @@ import { createTool } from 'armorer';
 import type { TypedEventTarget } from 'lifecycle';
 import type { ZodType } from 'zod';
 
+import { GuardrailTripwireError } from './errors';
 import type { OperativeEventMap } from './events';
 import { ChildWorkflowStartedEvent } from './events';
 import type { RunResult } from './types';
@@ -111,6 +112,14 @@ export function createSubagentTool(options: CreateSubagentToolOptions) {
 
       if (result.finishReason === 'elicitation-denied') {
         throw new Error(`Sub-agent "${agentName}" was denied elicitation`);
+      }
+
+      if (result.finishReason === 'tripwire') {
+        const guardrailName =
+          result.error instanceof GuardrailTripwireError ? result.error.guardrailName : 'unknown';
+        throw new Error(
+          `Sub-agent "${agentName}" was halted by guardrail tripwire "${guardrailName}"`,
+        );
       }
 
       if (result.finishReason === 'maximum-steps' && treatMaximumStepsAsError) {

@@ -1,3 +1,4 @@
+import { GuardrailTripwireError } from '../errors';
 import type { GenerateResponse, StepContext, ValidateResponseHook } from '../types';
 import type {
   OutputGuardrailOptions,
@@ -17,6 +18,8 @@ const DEFAULT_BLOCK_MESSAGE =
  * - `'block'` (default): returns a new `GenerateResponse` with refusal text
  * - `'warn'`: calls `onTriggered` but passes the original response through
  * - `'redact'`: returns a new `GenerateResponse` with the validator's redacted content
+ * - `'tripwire'`: throws a `GuardrailTripwireError`, hard-halting the run right after
+ *   post-processing flags the response (see `createGuardrails({ mode: 'tripwire' })`)
  *
  * Validator errors are caught via `Promise.allSettled` to prevent a broken validator
  * from crashing the agent loop.
@@ -72,6 +75,19 @@ export function createOutputGuardrail(options: OutputGuardrailOptions): Validate
     };
 
     onTriggered?.(event);
+
+    if (action === 'tripwire') {
+      throw new GuardrailTripwireError(
+        `Output guardrail tripwire: "${topFailure.validatorName}" flagged the response (${topFailure.result.category}).`,
+        {
+          guardrailName: topFailure.validatorName,
+          category: topFailure.result.category,
+          phase: 'output',
+          confidence: topFailure.result.confidence,
+          detail: topFailure.result.detail,
+        },
+      );
+    }
 
     if (action === 'warn') {
       return;

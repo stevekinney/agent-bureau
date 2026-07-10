@@ -786,7 +786,8 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       disposeRegisteredStreamListeners(disposeStreamListeners);
 
       const finishReason = event.finishReason;
-      const lastRunStatus = finishReason === 'error' ? 'error' : 'completed';
+      const lastRunStatus =
+        finishReason === 'error' || finishReason === 'tripwire' ? 'error' : 'completed';
 
       persistSessionUpdate(
         () =>
@@ -797,7 +798,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
               lastRunId: runId,
               lastRunStatus,
               lastFinishReason: event.finishReason,
-              ...(event.finishReason === 'error'
+              ...(event.finishReason === 'error' || event.finishReason === 'tripwire'
                 ? { lastError: serializeUnknownError(event.error) }
                 : {}),
             },
@@ -930,15 +931,19 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     recoveredRun.once('run.completed', (event) => {
       const completedConversation = event.conversation;
       const finishReason = event.finishReason;
-      const lastRunStatus = finishReason === 'error' ? 'error' : 'completed';
-      const lastError = finishReason === 'error' ? event.error : undefined;
+      const lastRunStatus =
+        finishReason === 'error' || finishReason === 'tripwire' ? 'error' : 'completed';
+      const lastError =
+        finishReason === 'error' || finishReason === 'tripwire' ? event.error : undefined;
       persistSessionUpdate(
         () =>
           saveSession(sessionId, completedConversation, {
             lastRunId: runId,
             lastRunStatus,
             lastFinishReason: finishReason,
-            ...(finishReason === 'error' ? { lastError: serializeUnknownError(lastError) } : {}),
+            ...(finishReason === 'error' || finishReason === 'tripwire'
+              ? { lastError: serializeUnknownError(lastError) }
+              : {}),
           }),
         { runId, sessionId, status: lastRunStatus },
       );
