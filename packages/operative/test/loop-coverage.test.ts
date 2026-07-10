@@ -421,4 +421,40 @@ describe('loop helper coverage', () => {
     expect(result.finishReason).toBe('stop-condition');
     expect(durableOperationKeys).toEqual(['host-provided-key']);
   });
+
+  it('classifies a StopCondition that throws BudgetExceededError as an errored, budget-exceeded result instead of an unhandled rejection (regression, AB-99)', async () => {
+    const { BudgetExceededError } = await import('../src/errors');
+
+    const echoTool = createTool({
+      name: 'echo_value',
+      description: 'Echo a provided value.',
+      input: z.object({ value: z.string() }),
+      execute: async ({ value }) => ({ echoed: value }),
+    });
+
+    const throwingStopCondition = () => {
+      throw new BudgetExceededError('Cost budget exceeded (0.02 of 0.01)');
+    };
+
+    const result = await executeLoop({
+      // Always returns a tool call, so `noToolCalls()` never short-circuits
+      // `evaluateStopConditions` before the throwing condition is reached.
+      generate: async () => ({
+        content: '',
+        toolCalls: [{ id: 'call-budget-1', name: 'echo_value', arguments: { value: 'x' } }],
+      }),
+      toolbox: createTestToolbox([echoTool]),
+      conversation: new Conversation(),
+      stopWhen: [noToolCalls(), throwingStopCondition],
+    });
+
+    expect(result.finishReason).toBe('budget-exceeded');
+    expect(result.error).toBeInstanceOf(BudgetExceededError);
+    // The step that triggered the throwing StopCondition already ran its
+    // generate call and tool execution — it must still be recorded, not
+    // silently dropped from partialSteps just because the condition after
+    // it threw (regression: Copilot review on PR #215).
+    expect(result.steps).toHaveLength(1);
+    expect(result.steps[0]?.toolCalls).toHaveLength(1);
+  });
 });

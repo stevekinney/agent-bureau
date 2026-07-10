@@ -186,7 +186,9 @@ describe('AB-97 sandbox-image embedding', () => {
         expect(stderr).toBe('');
 
         // --- 3. Network isolation: only the expected calls landed -----
-        const endpoints = new Set(mock.requests.map((request) => `${request.method} ${request.path}`));
+        const endpoints = new Set(
+          mock.requests.map((request) => `${request.method} ${request.path}`),
+        );
         expect(endpoints).toEqual(new Set(['POST /v1/messages']));
         expect(mock.requests).toHaveLength(2);
 

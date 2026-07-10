@@ -235,6 +235,7 @@
       "name": "integration",
       "dependencies": {
         "armorer": "workspace:*",
+        "bureau": "workspace:*",
         "conversationalist": "workspace:*",
         "operative": "workspace:*",
         "zod": "^4.4.1",

@@ -1097,7 +1097,34 @@ export async function runStep(
     final: false,
   };
 
-  const shouldStop = await evaluateStopConditions(deps.stopConditions, stepResult);
+  // Mirrors the onStepHooks/hooks.onStep error handling immediately below:
+  // a `StopCondition` that throws (e.g. `createCostBudgetMonitor`'s
+  // `onExceeded` raising `BudgetExceededError` to signal a hard stop, per
+  // its documented pattern) must produce a classified `'error'` outcome —
+  // `makeErrorResult` maps `BudgetExceededError` to `finishReason:
+  // 'budget-exceeded'` — not an unhandled rejection that crashes the run.
+  //
+  // Unlike the onStepHooks/hooks.onStep catches below (which fire AFTER
+  // `stepResult` already carries a real `final` verdict), a throw here means
+  // the generate call and tool execution for this step already happened —
+  // usage was already folded into `runState.totalUsage` above. So this step
+  // still gets recorded: `StepCompletedEvent` still fires and `stepResult`
+  // still lands in `runState.steps` (with `final: false` — the run is
+  // erroring, not cleanly stopping) before returning the error outcome.
+  // Otherwise `makeErrorResult`'s `partialSteps: [...runState.steps]` would
+  // silently omit the last successfully generated step even though its
+  // usage and conversation mutations already occurred — exactly the kind of
+  // gap a SIGTERM/graceful-shutdown partial-report consumer (AB-96) can't
+  // afford.
+  let shouldStop: boolean;
+  try {
+    shouldStop = await evaluateStopConditions(deps.stopConditions, stepResult);
+  } catch (error) {
+    emitter?.dispatch(new StepCompletedEvent(stepResult));
+    runState.steps.push(stepResult);
+    emitter?.dispatch(new RunErrorEvent(step, error));
+    return { kind: 'error', error };
+  }
   stepResult.final = shouldStop;
 
   emitter?.dispatch(new StepCompletedEvent(stepResult));

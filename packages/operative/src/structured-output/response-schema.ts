@@ -57,7 +57,13 @@ export async function validateResponseSchema(
     if (result.issues) {
       const issues = result.issues.map((issue) => ({
         message: issue.message,
-        path: issue.path?.map((segment) => (typeof segment === 'object' ? segment.key : segment)),
+        ...(issue.path
+          ? {
+              path: issue.path.map((segment) =>
+                typeof segment === 'object' ? segment.key : segment,
+              ),
+            }
+          : {}),
       }));
       return { success: false, error: new StandardSchemaValidationError(issues) };
     }

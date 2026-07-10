@@ -1,0 +1,100 @@
+# Tribunal runner migration map (AB-99)
+
+Tribunal's entire Claude Agent SDK dependency lives in one file:
+`tribunal/runner/run-agent.mjs`. It is spawned in a sandbox, and the
+sandbox parses NDJSON `AgentEvent`s plus one terminal, Zod-validated
+`{ type: 'result', result }` line from its stdout (`agentResultSchema`,
+`tribunal/packages/review-core/src/schemas.ts`).
+
+This document maps every `query()` option (and every environment knob)
+`run-agent.mjs` uses today to its agent-bureau equivalent, and lists the
+Tribunal-side work items the migration requires. The conformance harness in
+`packages/integration/test/tribunal-conformance*.test.ts` exercises the
+bureau side of every row marked **exercised** below against a real fixture
+repository and mocked provider endpoints.
+
+## `query()` option -> bureau equivalent
+
+| Tribunal (`run-agent.mjs`) | Bureau equivalent | Exercised | Notes |
+| --- | --- | --- | --- |
+| `agents[agentSlug]` (`{ description, prompt, tools, model, effort, permissionMode }`) | `operative`'s `createAgent({...})` (bureau-less, in-memory) or `bureau.agent({...})` (AB-43-era typed builder) | yes | The old `defineAgent` name is gone (see `operative/src/create-agent.ts`'s doc comment) — `createAgent` is bureau-less/ephemeral, `bureau.agent()` is the fleet-owned, durable-capable form. Tribunal's per-review, throwaway agent maps to `createAgent`. |
+| `agent: agentSlug` (which registered agent runs) | Not needed — `createAgent(...)` returns a single runnable agent; there is no registry indirection to select from for a one-shot run. | yes | |
+| `cwd: repositoryPath` | Root passed to `armorer/coding`'s `createRootJail`/`createCodingTools({ root })` (AB-90) | yes | This is the cwd jail. Every path a coding tool resolves is checked against this root, including symlink dereferencing — see `packages/armorer/src/coding/jail.ts`. |
+| `env: sdkEnvironment` (API key substitution, `CLAUDE_CODE_DISABLE_AUTO_MEMORY`) | N/A — see the `CLAUDE_CODE_DISABLE_AUTO_MEMORY` row below | yes (isolation half) | Credential substitution becomes provider `apiKey`/`baseURL` construction options (`createAnthropicProvider({ apiKey, baseURL })`) — no env-var indirection needed. |
+| `model`, `effort` | `RunOptions`/`CreateAgentOptions` `model`-resolution is provider-construction-time (`createAnthropicProvider({ model, effort })`), not per-run | yes | AB-91's effort tiers + model aliases resolve to a concrete provider model at provider-construction time, with effective-value reporting on the result (`GenerateResponse.metadata.effectiveModel/effectiveEffort`), carried into the AB-96 envelope as `RunReport.effectiveModel/effectiveEffort`. **Gotcha** (confirmed by the single-provider conformance test): when no `effort` option is supplied, both adapters set `metadata.effectiveEffort` to the *literal string* `'none'`, not `undefined`. Tribunal's `effortSchema` only accepts its five-tier enum or `null` — a naive `report.effectiveEffort ?? null` mapping lets `'none'` leak through and fails `agentResultSchema.safeParse`. `mapRunReportToTribunalAgentResult` (`test/fixtures/tribunal-schemas.ts`) normalizes `'none'` to `null` explicitly; the migrated runner needs the same normalization wherever it builds Tribunal's `agentResult`. |
+| `maxBudgetUsd` | `operative`'s `createCostBudgetMonitor({ budget, model, onExceeded })` composed into `stopWhen`, with `onExceeded` throwing `BudgetExceededError` | yes | See the "budget stop" test in `tribunal-conformance.test.ts`. A `StopCondition` that throws is now (AB-99 fix, `packages/operative/src/run-step.ts`) classified into a clean `finishReason: 'budget-exceeded'` result instead of an unhandled rejection — `mapFinishReasonToStatus` maps that to `RunReport.status: 'budget_stopped'`, which the migration map's `mapRunReportToTribunalAgentResult` (`test/fixtures/tribunal-schemas.ts`) surfaces as `agentResult.stopped: 'budget'`. |
+| `settingSources: []` | N/A | yes (by construction) | Bureau/operative never reads `~/.claude/settings.json` or any filesystem settings source in the first place — there is no settings-source concept to disable. Covered by AB-97's isolation proof (`sandbox-embedding.test.ts`): a bundled runner touches nothing outside its declared root. |
+| `strictMcpConfig: true` | N/A | yes (by construction) | There is no implicit/discovered MCP server list to strict-lock against — a bureau/operative toolbox is exactly and only the tools passed to `tools`/`createToolbox(...)`. |
+| `CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1'` | N/A | yes (by construction) | Bureau's `memory` package is opt-in (`BureauOptions.memory`) and per-bureau-instance — there is no global, always-on memory store to disable. A fresh `createAgent(...)`/ephemeral bureau run has none by default. |
+| `mcpServers: { tribunal: tribunalMcpServer }` with `mcp__tribunal__*` tool names | A plain armorer toolbox — `createToolbox([getChangedFiles, readBaseFile, recordFinding, ...])` | yes | AB-90's `createTool`/`createToolbox` replace the whole MCP-server indirection. Tool names drop the `mcp__tribunal__` prefix entirely: `get_changed_files`, `read_base_file`, `record_finding` — see `packages/integration/test/fixtures/tribunal-toolbox.ts`. |
+| `permissionMode: 'dontAsk'` + `tools`/`allowedTools`/`disallowedTools` (name lists) | `armorer`'s `createHeadlessPermissionPolicyHooks({ allowList, denyList })` (AB-94), passed as a toolbox `policy` or `CreateAgentOptions.permissions` | yes | See the "deny-gate" test. AB-94's `evaluateHeadlessPermission` is explicitly documented as "Tribunal's `canUseTool` callback parity" (`packages/armorer/src/approval-policy.ts`). |
+| `canUseTool: async (toolName, input, options) => ...` (per-call input-dependent gate) | AB-94's `HeadlessPermissionPolicyConfiguration.gate` (`PermissionGate`) — a synchronous per-call check against parsed input | yes | Same file/type as the row above: the `gate` field is a second, input-aware axis composed with the name-list axis via `deny > ask > allow` precedence. |
+| `outputFormat: { type: 'json_schema', schema: outputSchemaForRole(role) }` | `RunOptions.responseSchema` accepting a raw JSON Schema object directly (AB-95) | yes | `run-agent.mjs`'s three role schemas (`specialist`/`triage`/`verifier`) are copied verbatim into `test/fixtures/tribunal-schemas.ts`'s `tribunalOutputSchemaForRole` and passed straight through as `responseSchema` — no Zod re-authoring needed. See `resolveResponseFormat`'s raw-JSON-Schema branch in `packages/operative/src/structured-output/response-schema.ts`. **Wire-level nuance** (confirmed by the two-provider-parity test): `RunOptions.responseSchema` always gets *client-side* validation (`validateResponseSchema`, after the model responds), but *provider-native* request-level enforcement differs per adapter. OpenAI sends a real `response_format: { type: 'json_schema', ... }` — but only when `OpenAIProviderOptions.responseFormat` is *also* set at provider-construction time via `resolveResponseFormat(schema, undefined)` (the adapter never reads the loop's per-call `context.responseFormat`). Anthropic's Messages API has no request-level structured-output field in `createAnthropicProvider` at all today — enforcement there is client-side only, full stop. A migrated Tribunal runner using Anthropic gets exactly Claude's own JSON-following-instructions behavior, not schema-forced decoding; a migrated runner using OpenAI needs both `RunOptions.responseSchema` **and** the provider-construction `responseFormat` set from the same schema to get wire-level enforcement. |
+| Prompt building (`buildReviewPrompt`/`buildTriagePrompt`/`buildVerificationPrompt`, string concatenation) | `conversationalist`'s `Conversation` + AB-98 stable-prefix assembly (`createContextAssembler({ stablePrefix: true })` via a provider's `assembler`/`contextBudget` options) | yes | See the cache-read-observability test: the same system/tool prefix, re-assembled on every call, carries Anthropic's `cache_control` breakpoint through `toAnthropicMessages`, which is why a re-run against the same mock records a cache read on the second call. |
+| NDJSON `{ type: 'event', event }` lines (`emitEvent`) | AB-96's `RunFrame` sequence + constructors (`createRunStartedFrame`, `createStepFrame`, `createToolPreFrame`, `createToolPostFrame`, `createNotificationFrame`), one `JSON.stringify(frame)` per line | yes | `test/fixtures/tribunal-run-envelope.ts`'s `captureRunEnvelope` wires an `ActiveRun`'s curated `tool.*`/`step.*` events into exactly this frame sequence — the same primitives bureau's own (internal) `createRunFrameForwarder` is built on. |
+| Terminal `{ type: 'result', result }` line (`createResult`, `agentResultSchema`-shaped) | AB-96's `buildRunReport(...)` -> `RunReport`, mapped into Tribunal's `agentResult` shape | yes | `mapRunReportToTribunalAgentResult` (`test/fixtures/tribunal-schemas.ts`) performs this mapping field-by-field and is asserted, in every conformance test, against a literal copy of `agentResultSchema`. |
+| `terminateListener` (SIGTERM -> partial result -> `writeResult` -> `exit(143)`) | `bureau.abortRun(id)` + a **synchronous** `bureau.getRunReport(id)` call (AB-96) | yes | See the SIGTERM test in `tribunal-conformance-generality.test.ts`. `getRunReport` returns a cached terminal report once a run settles, or synchronously builds a *partial* one (accumulated usage + transcript through the last checkpointed step) for a still-running/just-aborted run — exactly the "kill mid-step, still get something" contract a real `SIGTERM` handler needs, with no `await`. |
+
+## Tribunal-side checklist (filed as a ticket, see below)
+
+1. **Rewrite `runner/run-agent.mjs`** against agent-bureau primitives per the
+   table above: `operative`'s `createAgent`/`createActiveRun` in place of
+   `query()`, `armorer`'s `createToolbox` + `createHeadlessPermissionPolicyHooks`
+   in place of `createSdkMcpServer`/`canUseTool`, `RunOptions.responseSchema`
+   in place of `outputFormat`, AB-96's frame/`RunReport` primitives in place
+   of the hand-rolled `emitEvent`/`createResult`/`writeResult`.
+2. **`runner/verify-image.mjs`**: replace the `@anthropic-ai/claude-agent-sdk`
+   + `@tribunal/agents` shape checks with equivalents for `operative`,
+   `armorer`, and `armorer/coding` (`typeof createAgent === 'function'`,
+   `typeof createHeadlessPermissionPolicyHooks === 'function'`, etc.), and
+   drop the `node` binary requirement from `requiredCommands` once the
+   sandbox image no longer needs Node — see the next item.
+3. **Sandbox image: drop Node, keep Bun.** agent-bureau is Bun-native
+   end to end (`Bun.spawn`, `bun:test`, no Node-only APIs in the packages
+   this migration touches). `packages/sandbox/src/configuration.ts`'s image
+   build and `verify-image.mjs`'s `requiredCommands` list can drop `node`
+   once the runner itself no longer imports the Node-only Claude Agent SDK.
+4. **Proxy allowlist per AB-93's endpoint contracts.**
+   `packages/sandbox/src/configuration.ts`'s MVP egress policy pins
+   `ANTHROPIC_BASE_URL` to `${proxyUrl}/anthropic/api.anthropic.com`
+   (`allowOut: [proxyCidr]`). Adding a second provider (AB-99's
+   two-provider-parity requirement) means the proxy needs an equivalent
+   scoped route per provider (e.g. `${proxyUrl}/openai/api.openai.com`),
+   each matching AB-93's request-metadata/endpoint contract shape so
+   `createOpenAIProvider({ baseURL })` can point at it the same way
+   `createAnthropicProvider({ baseURL })` already does.
+5. **`ENABLE_PROMPT_CACHING_1H` semantics.**
+   `applications/engine/src/workflows/runtime-ports.ts` currently threads
+   this flag into the SDK's env. Its bureau equivalent is
+   `AnthropicProviderOptions.extendedCacheTtl` (`packages/operative/src/providers/types.ts`)
+   — opts a `cacheBoundary`-marked breakpoint into the 1-hour cache TTL
+   instead of the default 5-minute one. No effect unless
+   `assembler`/`contextBudget` (AB-98 stable-prefix assembly) are also
+   configured, per the table row above.
+6. **Second-provider proxy routes + model/effort vocabulary.** Tribunal's
+   `agentModelSchema` / `effortSchema` (`packages/review-core/src/schemas.ts`)
+   currently enumerate Anthropic-only model aliases (`sonnet`/`opus`/`haiku`/
+   `fable`/`inherit`) and a five-tier effort enum. Once a second provider
+   proxy route (previous item) exists, relax those Zod enums to accept
+   agent-bureau's AB-91 model-alias + effort vocabulary
+   (`packages/operative/src/providers/shared/model-registry.ts` and
+   `shared/effort.ts`) so a Tribunal `AgentSpec` can name an OpenAI model the
+   same way it names an Anthropic one today.
+
+## Generality (Phase Two)
+
+AB-99's harness also runs a non-review, "webhook event handler"-shaped
+agent — arbitrary instructions, no PR/diff context, no `get_changed_files`/
+`read_base_file`/`record_finding` tools, just the generic read-only coding
+toolbox — through the identical `createActiveRun`/AB-96/AB-98 primitives
+Tribunal's PR-review agent uses. See
+`packages/integration/test/tribunal-conformance-generality.test.ts`. Nothing
+in the migrated primitives assumes a pull request exists; a review agent and
+a generic event-handler agent are the same shape with different tools and a
+different prompt.
+
+## Filed ticket
+
+`tasks create --project tribunal --tag agent-bureau --title "Migrate runner
+from Claude Agent SDK to agent-bureau"` carries the checklist above plus a
+pointer back to this file.

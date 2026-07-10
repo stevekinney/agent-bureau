@@ -66,7 +66,7 @@ export class GuardrailTripwireError extends Error implements GuardrailTripwireDe
     this.category = info.category;
     this.phase = info.phase;
     this.confidence = info.confidence;
-    this.detail = info.detail;
+    if (info.detail !== undefined) this.detail = info.detail;
   }
 }
 
