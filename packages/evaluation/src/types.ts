@@ -221,6 +221,113 @@ export type LLMJudgeResult = {
 };
 
 /**
+ * A single step in a golden (reference) trajectory: the tool call an agent
+ * is expected to make, in sequence order (array position is the expected
+ * order — unlike `ExpectedToolCall`, there is no separate `index` field).
+ */
+export type GoldenTrajectoryStep = {
+  /** The name of the tool expected to be called at this step. */
+  name: string;
+  /** When provided, arguments must match exactly. Otherwise just the name is checked. */
+  arguments?: Record<string, unknown>;
+};
+
+/**
+ * Configurable tolerance for trajectory matching.
+ */
+export type TrajectoryTolerance = {
+  /** Whether tool calls not present in the golden path are permitted at all. Default: true. */
+  allowExtraCalls?: boolean;
+  /**
+   * Maximum number of extra (unmatched) actual tool calls tolerated before
+   * the trajectory fails. Default: `Infinity` when `allowExtraCalls` is true,
+   * `0` otherwise.
+   */
+  maxExtraCalls?: number;
+  /**
+   * Maximum number of golden steps allowed to be matched out of relative
+   * order before the trajectory fails. Default: 0 (strict order).
+   */
+  reorderTolerance?: number;
+};
+
+/**
+ * The outcome of matching a single golden trajectory step against the
+ * actual tool-call sequence.
+ */
+export type TrajectoryStepMatch = {
+  /** Index of this step within the golden trajectory. */
+  goldenIndex: number;
+  /** The expected tool name. */
+  name: string;
+  /** Whether a corresponding actual call was found. */
+  matched: boolean;
+  /** Index of the matched call within the flattened actual tool-call sequence. */
+  actualIndex?: number;
+  /** Whether this step's match came out of relative order with prior matched steps. */
+  reordered: boolean;
+  /** Whether the matched call's arguments matched (only meaningful when `arguments` was specified). */
+  argumentsMatch?: boolean;
+};
+
+/**
+ * The result of scoring an actual tool-call trajectory against a golden path.
+ */
+export type TrajectoryMatchResult = {
+  /** Whether the trajectory passed under the given tolerance. */
+  pass: boolean;
+  /** Score from 0-1 (1 = perfect match). */
+  score: number;
+  /** Human-readable summary of the match outcome. */
+  message: string;
+  /** Per-golden-step match diagnostics, in golden order. */
+  steps: TrajectoryStepMatch[];
+  /** Number of golden steps with no corresponding actual call. */
+  missingCallCount: number;
+  /** Number of actual calls not matched to any golden step. */
+  extraCallCount: number;
+  /** Number of golden steps whose match came out of relative order. */
+  reorderedCount: number;
+};
+
+/**
+ * Thresholds for detecting per-case step-count and cost regressions between
+ * two evaluation runs of the same case.
+ */
+export type TrajectoryRegressionThresholds = {
+  /** Maximum allowed absolute increase in step count. Default: 0 (any increase regresses). */
+  maxStepIncrease?: number;
+  /** Maximum allowed increase in total token cost, as a ratio of baseline. Default: 0.2 (20%). */
+  maxCostIncreaseRatio?: number;
+};
+
+/**
+ * A single metric's baseline-vs-current comparison, including whether it
+ * regressed under the configured threshold.
+ */
+export type TrajectoryMetricDelta = {
+  baseline: number;
+  current: number;
+  delta: number;
+  regressed: boolean;
+};
+
+/**
+ * Per-case step-count and cost regression report, comparing a baseline
+ * evaluation case result against a current one.
+ */
+export type TrajectoryRegressionReport = {
+  /** Name of the evaluation case being compared. */
+  caseName: string;
+  /** Step-count comparison. */
+  stepCount: TrajectoryMetricDelta;
+  /** Total-token cost comparison. */
+  cost: TrajectoryMetricDelta;
+  /** True when either step count or cost regressed. */
+  regressed: boolean;
+};
+
+/**
  * Options for running a full evaluation suite with dataset loading,
  * baseline comparison, and report output.
  */
