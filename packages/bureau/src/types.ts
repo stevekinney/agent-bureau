@@ -294,6 +294,18 @@ export interface BureauOptions {
    * `BureauError` with code `RATE_LIMITED`. Omit to disable — the default.
    */
   flowControl?: FlowControlPolicy;
+  /**
+   * F3 — opt into operative's `requestHumanInput` HITL tool for durable runs
+   * (`createRun` only; has no effect without a durable engine composed). When
+   * `true`, bureau adds a `requestHumanInput` tool to each durable run's
+   * toolbox, bound to that run's OWN event emitter and its real `ctx.services`
+   * object — the only wiring under which a `HumanWaitParkedEvent` the tool
+   * dispatches actually reaches `subscribeLiveFrames`/`store` listeners
+   * (including AB-13's flow-control `markParked`) and `listPendingReviews`
+   * (AB-20). Omit (the default) to leave the toolbox as configured — this tool
+   * is opt-in, never an ambient grant.
+   */
+  humanInput?: boolean;
   stopWhen?: StopCondition | StopCondition[];
   sessionPersistenceRetryDelayMilliseconds?: number;
   sessionPersistenceSleep?: (milliseconds: number) => Promise<void>;

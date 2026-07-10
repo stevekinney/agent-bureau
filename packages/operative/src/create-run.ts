@@ -5,6 +5,7 @@ import { CompletableEventTarget, forwardEvents } from 'lifecycle';
 
 import type { DurableActiveRunContext } from './durable/active-run-adapter';
 import { createDurableActiveRun } from './durable/active-run-adapter';
+import type { DurableRunDeps } from './durable/types';
 import type { CombinedOperativeEventMap, CombinedOperativeEventType } from './events';
 import {
   StepStartedEvent,
@@ -86,6 +87,8 @@ export function createActiveRun(options: RunOptions, durable?: DurableRunRouting
         agentName: options.agentName,
         options,
         prompt: durable.prompt,
+        ...(durable.emitter ? { emitter: durable.emitter } : {}),
+        ...(durable.onServices ? { onServices: durable.onServices } : {}),
       },
     );
   }
@@ -287,4 +290,18 @@ export interface DurableRunRouting extends DurableActiveRunContext {
   sessionId?: string;
   /** First user message to seed a brand-new run. */
   prompt?: string;
+  /**
+   * A pre-built emitter for this run's event surface. Threaded through to
+   * {@link createDurableActiveRun} — see `DurableActiveRunOptions.emitter` for
+   * why a caller would supply one (binding a toolbox tool's dispatches, like
+   * `requestHumanInput`'s `HumanWaitParkedEvent`, to the exact emitter this
+   * `ActiveRun` exposes).
+   */
+  emitter?: CompletableEventTarget<CombinedOperativeEventMap>;
+  /**
+   * Synchronous hook invoked with the freshly-built per-run `DurableRunDeps`
+   * (`ctx.services`) right before `engine.start`. See
+   * `DurableActiveRunOptions.onServices`.
+   */
+  onServices?: (services: DurableRunDeps) => void;
 }
