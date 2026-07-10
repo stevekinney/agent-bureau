@@ -483,9 +483,10 @@ function toJsonSafeOrUndefined(value: unknown): JSONValue | undefined {
 /**
  * Maps a loop {@link FinishReason} to the envelope's coarser {@link
  * RunReportStatus}. `stop-condition` and `maximum-steps` both count as a
- * successful exit; `elicitation-denied` and `error` are `'failed'`;
- * `budget-exceeded` gets its own status so a budget-triggered stop is
- * distinguishable from a genuine failure; `aborted` maps directly.
+ * successful exit; `elicitation-denied`, `error`, and `tripwire` (a guardrail
+ * hard-halt — see AB-40) are all `'failed'`; `budget-exceeded` gets its own
+ * status so a budget-triggered stop is distinguishable from a genuine
+ * failure; `aborted` maps directly.
  */
 export function mapFinishReasonToStatus(finishReason: FinishReason): RunReportStatus {
   switch (finishReason) {
@@ -498,6 +499,7 @@ export function mapFinishReasonToStatus(finishReason: FinishReason): RunReportSt
       return 'budget_stopped';
     case 'elicitation-denied':
     case 'error':
+    case 'tripwire':
       return 'failed';
     default: {
       const exhaustive: never = finishReason;
