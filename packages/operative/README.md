@@ -633,19 +633,27 @@ const orchestrator = defineAgent({
 });
 ```
 
-**Context isolation (AB-64):** `createSubagentTool` never lets a sub-agent's
-full conversation, steps, or usage leak into the parent's context window.
-`returnMode` controls what crosses back:
+**Context isolation (AB-64):** by default, `createSubagentTool` keeps a
+sub-agent's full conversation, steps, and usage out of the parent's context
+window — only a capped summary of its `content` crosses back. `returnMode`
+controls this:
 
 - `'summary'` — the **documented default**. Only `result.content`, condensed
-  by a `summarizer` and capped at `summaryTokenCap` tokens (default `500`),
-  returns to the parent. The sub-agent's own transcript stays isolated. This
-  is what keeps a fan-out of several sub-agents from blowing up the
-  orchestrator's context window.
+  by a `summarizer` and hard-capped at `summaryTokenCap` tokens (default
+  `500`), returns to the parent. The sub-agent's own transcript stays
+  isolated. This is what keeps a fan-out of several sub-agents from blowing
+  up the orchestrator's context window.
 - `'full'` — `result.content` is returned verbatim and uncapped. Opt in
   deliberately, e.g. for a single close-coupled delegation that needs the
   sub-agent's exact output (structured extraction, code the parent will
   paste unmodified).
+
+Both modes ultimately hand off to `mapOutput(result)`, which still receives
+the complete `RunResult` — including `conversation`, `steps`, and `usage` —
+so a custom `mapOutput` CAN reach past the summary and return those fields
+directly. `returnMode`/`summaryTokenCap` cap `result.content`, not what a
+custom `mapOutput` chooses to do with the rest of the object; keep that in
+mind if you override `mapOutput`.
 
 ```typescript
 const researcherTool = createSubagentTool({
@@ -702,7 +710,8 @@ scale, supply a custom `SynthesisStrategy` that applies the same discipline
 output before returning it:
 
 ```typescript
-import { defaultSubagentSummarizer } from 'operative';
+import { createFanOutRouting, defaultSubagentSummarizer } from 'operative';
+import type { SynthesisStrategy } from 'operative';
 
 const cappedSynthesis: SynthesisStrategy = async (results) => {
   const summaries = await Promise.all(

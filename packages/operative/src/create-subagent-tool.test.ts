@@ -602,11 +602,68 @@ describe('createSubagentTool', () => {
           steps: [],
           usage: { prompt: 0, completion: 0, total: 0 },
         } as any,
-        { agentName: 'a', maxTokens: 10 },
+        { agentName: 'a', maxTokens: 50 },
       ) as string;
 
-      expect(result.startsWith('y'.repeat(40))).toBe(true);
-      expect(result).toContain('truncated to ~10 tokens');
+      expect(result.startsWith('y'.repeat(30))).toBe(true);
+      expect(result).toContain('truncated to fit the ~50 token cap');
+      // The cap includes the marker itself — never exceeds maxTokens * 4 chars.
+      expect(result.length).toBeLessThanOrEqual(200);
+    });
+
+    it('never exceeds the token cap even when the marker alone would overflow it', () => {
+      const content = 'z'.repeat(1000);
+      const result = defaultSubagentSummarizer(
+        {
+          conversation: {} as any,
+          content,
+          finishReason: 'stop-condition',
+          steps: [],
+          usage: { prompt: 0, completion: 0, total: 0 },
+        } as any,
+        { agentName: 'a', maxTokens: 2 },
+      ) as string;
+
+      expect(result.length).toBeLessThanOrEqual(8);
+    });
+  });
+
+  describe('AB-64 — summarizer output is hard-capped regardless of what it returns', () => {
+    it('truncates a custom summarizer that ignores maxTokens entirely', async () => {
+      const oversizedSummary = 'w'.repeat(5000);
+      const tool = createSubagentTool({
+        name: 'researcher',
+        description: 'Research a topic',
+        agentName: 'researcher',
+        input: z.object({ topic: z.string() }),
+        run: makeSuccessfulRun('some content'),
+        summaryTokenCap: 25, // 100-char budget
+        summarizer: () => oversizedSummary,
+      });
+
+      const result = (await (
+        tool as unknown as { execute: (p: unknown) => Promise<unknown> }
+      ).execute({ topic: 'AI' })) as string;
+
+      expect(result.length).toBeLessThanOrEqual(100);
+      expect(result.length).toBeLessThan(oversizedSummary.length);
+    });
+
+    it('returns an empty string when summaryTokenCap is 0', async () => {
+      const tool = createSubagentTool({
+        name: 'researcher',
+        description: 'Research a topic',
+        agentName: 'researcher',
+        input: z.object({ topic: z.string() }),
+        run: makeSuccessfulRun('some content'),
+        summaryTokenCap: 0,
+      });
+
+      const result = await (
+        tool as unknown as { execute: (p: unknown) => Promise<unknown> }
+      ).execute({ topic: 'AI' });
+
+      expect(result).toBe('');
     });
   });
 });

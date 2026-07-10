@@ -13,7 +13,28 @@ import type { RunResult } from './types';
  * `context/token-budget.ts`'s default estimator. Good enough for capping a
  * summary; not a substitute for a real tokenizer.
  */
-const estimateTokens = (text: string): number => Math.ceil(text.length / 4);
+const CHARACTERS_PER_TOKEN = 4;
+
+/**
+ * Hard-truncates `text` to at most `maxTokens` worth of characters —
+ * INCLUDING the truncation marker itself, so the returned string's length
+ * never exceeds `maxTokens * CHARACTERS_PER_TOKEN` characters. Negative or
+ * fractional `maxTokens` are clamped to `0`.
+ *
+ * This is what makes `summaryTokenCap` an actual guarantee rather than a
+ * suggestion: `createSubagentTool` applies it to whatever `summarizer`
+ * returns — including a caller-supplied one — not just to the default
+ * summarizer's own truncation logic.
+ */
+function enforceTokenCap(text: string, maxTokens: number): string {
+  const safeMaxTokens = Math.max(0, Math.floor(maxTokens));
+  const maxChars = safeMaxTokens * CHARACTERS_PER_TOKEN;
+  if (text.length <= maxChars) return text;
+
+  const marker = `\n\n[truncated to fit the ~${safeMaxTokens} token cap]`;
+  const contentBudget = Math.max(0, maxChars - marker.length);
+  return `${text.slice(0, contentBudget)}${marker}`.slice(0, maxChars);
+}
 
 /**
  * Context passed to a `SubagentSummarizer` alongside the sub-agent's
@@ -31,6 +52,11 @@ export interface SubagentSummaryContext {
  * context window can afford. Receives the full `RunResult` — not just
  * `content` — so a custom summarizer can factor in `usage`, `steps`, or
  * `finishReason` when deciding what to keep.
+ *
+ * A summarizer's return value is NOT trusted as already within budget:
+ * `createSubagentTool` hard-caps whatever it returns via `enforceTokenCap`
+ * before it reaches the parent, so `summaryTokenCap` holds even if a custom
+ * summarizer ignores `maxTokens` entirely.
  */
 export type SubagentSummarizer = (
   result: RunResult,
@@ -39,22 +65,14 @@ export type SubagentSummarizer = (
 
 /**
  * Default summarizer: passes `result.content` through unchanged when it
- * already fits within `maxTokens`, otherwise truncates it and appends a
- * marker noting how much was cut. This is a naive character-based cap, not
- * genuine summarization — callers that need real condensation (e.g. an LLM
- * call that distills the sub-agent's output) should supply their own
+ * already fits within `maxTokens`, otherwise hard-truncates it via
+ * `enforceTokenCap`. This is a naive character-based cap, not genuine
+ * summarization — callers that need real condensation (e.g. an LLM call
+ * that distills the sub-agent's output) should supply their own
  * `summarizer`.
  */
-export const defaultSubagentSummarizer: SubagentSummarizer = (result, { maxTokens }) => {
-  const { content } = result;
-  const tokens = estimateTokens(content);
-  if (tokens <= maxTokens) return content;
-
-  const maxChars = maxTokens * 4;
-  const truncated = content.slice(0, maxChars);
-  const omittedTokens = tokens - maxTokens;
-  return `${truncated}\n\n[summary truncated to ~${maxTokens} tokens — ~${omittedTokens} tokens omitted]`;
-};
+export const defaultSubagentSummarizer: SubagentSummarizer = (result, { maxTokens }) =>
+  enforceTokenCap(result.content, maxTokens);
 
 /**
  * Options for creating a tool that delegates execution to a sub-agent.
@@ -219,8 +237,12 @@ export function createSubagentTool(options: CreateSubagentToolOptions) {
       // AB-64 — condense the sub-agent's context down to a capped summary
       // before it crosses back into the parent. Only `content` is replaced;
       // `mapOutput` still receives the rest of the RunResult untouched.
+      // The summarizer's output is hard-capped here regardless of what it
+      // returns — summaryTokenCap is a guarantee enforced by the tool, not
+      // a suggestion the summarizer has to honor itself.
       const summarizedContent = await summarizer(result, { agentName, maxTokens: summaryTokenCap });
-      return mapOutput({ ...result, content: summarizedContent });
+      const cappedContent = enforceTokenCap(summarizedContent, summaryTokenCap);
+      return mapOutput({ ...result, content: cappedContent });
     },
   });
 }
