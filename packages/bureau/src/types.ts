@@ -42,6 +42,7 @@ import type { Store } from 'operative/store';
 
 import type { AuditTrail } from './audit-trail';
 import type { BureauEventMap } from './events';
+import type { WebhookNotifier, WebhookNotifierOptions } from './webhook-notifier';
 
 // ── Provider Configuration ───────────────────────────────────────────
 
@@ -313,6 +314,15 @@ export interface BureauOptions {
    * then `undefined` and no mismatch is ever reported.
    */
   workflowVersion?: string;
+  /**
+   * Notification delivery for pending approvals (AB-21). Configured targets
+   * receive a webhook POST on `elicitation.requested`, a newly-appeared
+   * `approval-pending` review, and a newly-appeared `human-wait.parked`
+   * review, each carrying a deep link back into the AB-20 review queue (or
+   * the run detail page for elicitation, which has no review-queue item).
+   * Omit or pass `{ targets: [] }` to disable — the default.
+   */
+  webhooks?: WebhookNotifierOptions;
 }
 
 /**
@@ -598,6 +608,13 @@ export interface Bureau {
    * Layer B (durable) = `auditTrail.query()`.
    */
   readonly auditTrail: AuditTrail | undefined;
+
+  /**
+   * The webhook notifier (AB-21). Present whenever `options.webhooks.targets`
+   * is non-empty; `undefined` when no webhooks are configured (the default).
+   * Use `webhookNotifier.listDeliveries()` to inspect durable delivery state.
+   */
+  readonly webhookNotifier: WebhookNotifier | undefined;
 }
 
 // ── API Request / Response Types ─────────────────────────────────────
