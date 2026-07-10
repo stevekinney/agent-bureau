@@ -142,13 +142,16 @@
    * included whenever a run is active so its inline elicitation/human-wait
    * form (a review whose `runId` matches the active chat run) stays current
    * even if the `onHumanInputRequested` fast-path trigger is missed. The
-   * run-detail page (AB-12) is included unconditionally — its resume
-   * affordance needs to notice a run parking on `ctx.waitForSignal` while
-   * the operator is already looking at it, not just on the next visit.
+   * run-detail page (AB-12) is included only while its run is still
+   * `running` — a completed/error/aborted run can never park, so polling
+   * for its resume affordance past that point is pure background traffic
+   * for a state that can no longer change.
    */
   const REVIEWS_POLL_INTERVAL_MS = 5000;
   let shouldPollReviews = $derived(
-    isReviewsRoute || isRunDetailRoute || (isChatRoute && chatStore.runId !== undefined),
+    isReviewsRoute ||
+      (isRunDetailRoute && runDetailStore.run.status === 'running') ||
+      (isChatRoute && chatStore.runId !== undefined),
   );
 
   // The live transport exposes start()/stop() rather than self-connecting, so
@@ -193,8 +196,10 @@
 
   // Same immediacy for the run-detail route: a run parked on human-wait
   // before this page loaded should show its resume affordance right away.
+  // Gated on `running` for the same reason as `shouldPollReviews` above — a
+  // terminal run cannot be parked, so there is nothing to refresh for.
   $effect(() => {
-    if (!isRunDetailRoute) return;
+    if (!isRunDetailRoute || runDetailStore.run.status !== 'running') return;
     void reviewsStore.refresh();
   });
 </script>

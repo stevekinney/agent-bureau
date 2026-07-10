@@ -333,6 +333,27 @@ describe('renderPage with a populated run-detail page', () => {
     expect(html).toContain('v2');
   });
 
+  // Regression (Codex review, PR #203) — the Timeline section must classify
+  // milestones from the LIVE `events` list, not the server-fetched
+  // `run.timeline` snapshot. Simulates exactly the staleness scenario the
+  // review flagged: a milestone (`multiagent.human-wait.parked`) has arrived
+  // over the live stream and is in `events`, but `run.timeline` is still the
+  // stale (here, empty) snapshot from before that event landed — the page
+  // must render the milestone from `events` regardless.
+  it('classifies timeline milestones from live events, not the stale run.timeline snapshot', async () => {
+    const staleRun: RunDetailResponse = { ...populatedRun, timeline: [] };
+    const html = await renderPage({
+      title: 'Run run-populated',
+      component: RunDetailPage,
+      props: { ...props, run: staleRun },
+    });
+
+    expect(html).toContain('Parked');
+    expect(html).toContain('multiagent.human-wait.parked');
+    expect(html).toContain('Reattached');
+    expect(html).toContain('workflow.reattached');
+  });
+
   // AB-12 — a run parked on a human-wait signal offers a resume affordance,
   // reusing the AB-20 review-queue store and its `ReviewRow` component
   // rather than a second approve/deny code path. This exercises the actual

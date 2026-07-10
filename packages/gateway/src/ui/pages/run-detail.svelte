@@ -18,7 +18,9 @@
   import { StatGroup } from '@lostgradient/cinder/stat-group';
   import { StackedListItem } from '@lostgradient/cinder/stacked-list-item';
 
-  import type { RunDetailResponse, RunTimelineEntry, RunTimelineEntryKind } from '../../routes/runs';
+  import type { RunDetailResponse } from '../../routes/runs';
+  import { assembleRunTimeline } from '../../timeline';
+  import type { RunTimelineEntry, RunTimelineEntryKind } from '../../timeline';
   import ReviewRow from '../components/review-row.svelte';
   import StatusBadge from '../components/status-badge.svelte';
   import type { ReviewsStore } from '../hooks/use-reviews.svelte';
@@ -76,7 +78,13 @@
     return 'info';
   }
 
-  /** Badge tone for a timeline milestone kind (AB-12). */
+  /**
+   * Badge tone for a timeline milestone kind (AB-12). `kind` is classified
+   * server- or client-side from JSON over the wire, so a value outside the
+   * current `RunTimelineEntryKind` union (an older client talking to a
+   * newer server, or malformed data) must still fall through to a safe
+   * default rather than leaving the badge's `variant` prop `undefined`.
+   */
   function timelineBadgeVariant(kind: RunTimelineEntryKind): BadgeVariant {
     switch (kind) {
       case 'human-wait-parked':
@@ -91,10 +99,15 @@
       case 'checkpoint':
       case 'other':
         return 'neutral';
+      default:
+        return 'neutral';
     }
   }
 
-  /** Human-readable label for a timeline milestone kind (AB-12). */
+  /**
+   * Human-readable label for a timeline milestone kind (AB-12). Same
+   * unknown-kind safety net as {@link timelineBadgeVariant} above.
+   */
   function timelineKindLabel(kind: RunTimelineEntryKind): string {
     switch (kind) {
       case 'checkpoint':
@@ -110,6 +123,8 @@
       case 'retry-attempt':
         return 'Retry';
       case 'other':
+        return 'Event';
+      default:
         return 'Event';
     }
   }
@@ -241,12 +256,25 @@
 
   // AB-12 run-inspector: the milestone timeline — checkpoint boundaries,
   // multi-agent delegation transitions, human-wait parks, recovery/reattach
-  // markers, and retry attempts — filtered down from the server-assembled
-  // `run.timeline` (already sorted by `sequence`; see `assembleRunTimeline`).
+  // markers, and retry attempts.
+  //
+  // Classified from the `events` prop (the store's live-merged event list),
+  // NOT `run.timeline` (a snapshot fetched at page load / last refresh).
+  // A milestone that arrives over the live stream — e.g. a
+  // `multiagent.human-wait.parked` the operator is watching happen — must
+  // show up immediately, not wait for a refresh-triggering terminal event
+  // (which, for a park, may never come until the operator responds). Only
+  // sequenced entries are classified: synthetic client-only rows (e.g. the
+  // `stream:tool-call-start` marker) have no `sequence` and are not part of
+  // the durable action log this timeline represents.
   // `'other'` entries are excluded here — they still render in the full
   // Event Stream section below, just not called out as a milestone.
   let milestoneEntries = $derived<RunTimelineEntry[]>(
-    run.timeline.filter((entry) => entry.kind !== 'other'),
+    assembleRunTimeline(
+      events.filter((event): event is TimelineEvent & { sequence: number } => {
+        return event.sequence !== undefined;
+      }),
+    ).filter((entry) => entry.kind !== 'other'),
   );
 
   // The pending human-wait review (if any) parking this run, reused from the
