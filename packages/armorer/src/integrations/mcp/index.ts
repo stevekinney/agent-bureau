@@ -417,9 +417,10 @@ function buildMcpToolDefinitionFromConfiguration(
 
 /**
  * Registers a tool as an MCP Tasks-extension tool (`server.experimental.tasks.registerToolTask`)
- * instead of a plain call/response tool. The tool's `execute` runs in the background once
- * `tasks/get` is first polled; its result is recorded via the request-scoped `RequestTaskStore`
- * so `tasks/result` can retrieve it and `tasks/cancel` can abort it (see
+ * instead of a plain call/response tool. The tool's `execute` starts running in the background
+ * immediately, fire-and-forget, as soon as the task-augmented `tools/call` request creates the
+ * task; its result is recorded via the request-scoped `RequestTaskStore` so `tasks/get` can poll
+ * status, `tasks/result` can retrieve the outcome, and `tasks/cancel` can abort it (see
  * {@link createTaskAwareTaskStore}).
  */
 function registerMcpTaskTool(
