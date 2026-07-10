@@ -19,16 +19,23 @@ function isToolCall(value: unknown): value is ToolCallWithArguments {
   );
 }
 
-function inputMatchesToolSchema(tool: Tool, params: unknown): boolean {
+async function inputMatchesToolSchema(tool: Tool, params: unknown): Promise<boolean> {
   const input = (
-    tool as unknown as { input?: { safeParse?: (value: unknown) => { success: boolean } } }
+    tool as unknown as {
+      input?: { safeParseAsync?: (value: unknown) => Promise<{ success: boolean }> };
+    }
   ).input;
 
-  if (typeof input?.safeParse !== 'function') {
+  if (typeof input?.safeParseAsync !== 'function') {
     return true;
   }
 
-  return input.safeParse(params).success;
+  // `safeParseAsync` (not `safeParse`) so schemas with async refinements —
+  // e.g. a non-Zod Standard Schema wrapped via `wrapStandardSchema`, whose
+  // validation runs through an async `transform` — resolve instead of
+  // throwing synchronously ("Encountered Promise during synchronous parse").
+  const result = await input.safeParseAsync(params);
+  return result.success;
 }
 
 /**
@@ -64,7 +71,7 @@ export function withIdempotency<T extends Tool>(tool: T, options: IdempotencyOpt
   async function executeWithCache(params: unknown): Promise<unknown> {
     const key = namespacedKey(tool.name, idempotencyKey!(params));
 
-    if (!inputMatchesToolSchema(tool, params)) {
+    if (!(await inputMatchesToolSchema(tool, params))) {
       return tool(params);
     }
 

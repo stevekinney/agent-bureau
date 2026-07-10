@@ -1,12 +1,21 @@
 import { isStandardSchema } from 'interoperability';
 import { z } from 'zod';
 
-import { isZodObjectSchema, isZodSchema, wrapStandardSchema } from '../core/schema-utilities';
+import {
+  isWrappedStandardSchema,
+  isZodObjectSchema,
+  isZodSchema,
+  wrapStandardSchema,
+} from '../core/schema-utilities';
 import type { ToolParametersSchema } from '../is-tool';
 
 /**
  * Normalizes a schema input into a `z.ZodTypeAny`:
  * - `undefined` becomes `z.object({})`
+ * - A schema already produced by {@link wrapStandardSchema} passes through
+ *   unchanged (idempotent: re-registering a `Tool` through `createToolbox`
+ *   re-normalizes `tool.configuration.input`, which for a Standard Schema
+ *   tool is already the wrapped pipe)
  * - A ZodObject is passed through
  * - A plain object of Zod schemas is wrapped with `z.object()`
  * - A non-object Zod schema (e.g. `z.string()`) throws
@@ -18,6 +27,9 @@ import type { ToolParametersSchema } from '../is-tool';
 export function normalizeSchema(schema: unknown): ToolParametersSchema {
   if (schema === undefined) {
     return z.object({});
+  }
+  if (isWrappedStandardSchema(schema)) {
+    return schema as ToolParametersSchema;
   }
   if (isZodObjectSchema(schema)) {
     return schema;

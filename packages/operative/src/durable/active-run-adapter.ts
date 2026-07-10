@@ -127,6 +127,13 @@ async function reconstructRunResult(
     content: summary.content,
     usage: runState.totalUsage,
     finishReason: summary.finishReason,
+    // Mirror the in-memory loop and `finalizeRunResult`: a successful
+    // `responseSchema` run's validated value must survive result-only durable
+    // paths (`resumeDurableRunResult`, `startDurableRunResult`), not just the
+    // full lifecycle/finalize path (`driveReattachedRun`/`driveDurableRun`).
+    ...(summary.structuredOutput !== undefined
+      ? { structuredOutput: summary.structuredOutput }
+      : {}),
   };
 
   return { result, runState, conversation };

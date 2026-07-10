@@ -1,10 +1,11 @@
-import type { StandardSchemaV1 } from 'interoperability';
+import { isStandardSchema, type StandardSchemaV1 } from 'interoperability';
 import { z } from 'zod';
 
 import { normalizeSchema } from '../utilities/schema-normalization';
 import { formatToolId, normalizeIdentity, type ToolId, type ToolIdentity } from './identity';
 import { buildTagsFromRisk, type ToolRisk } from './risk';
-import type { JsonObject } from './serialization/json';
+import { isZodSchema } from './schema-utilities';
+import { assertJsonValue, type JsonObject } from './serialization/json';
 import { assertKebabCaseTag, type NormalizeTagsOption, uniqTags } from './tag-utilities';
 
 export type ToolDisplay = {
@@ -89,6 +90,26 @@ export function defineTool<
     input,
     inputJsonSchema,
   } = options;
+
+  // A non-Zod Standard Schema validator (Valibot, ArkType, ...) has no general
+  // JSON Schema export, so the definition cannot be serialized for a provider
+  // without a caller-supplied `inputJsonSchema`. Fail fast here too — this is
+  // the same guard `createTool` applies, but `defineTool` is itself part of
+  // the public `armorer/core` surface and can be called directly, bypassing
+  // that higher-level check. Without it, `z.toJSONSchema` (called with
+  // `io: 'input'` in `serializeToolDefinition`) silently degrades to `{}` —
+  // an empty schema that accepts anything — instead of failing loudly.
+  if (input !== undefined && !isZodSchema(input) && isStandardSchema(input)) {
+    if (inputJsonSchema === undefined) {
+      throw new Error(
+        `Tool "${name}": a non-Zod Standard Schema \`input\` requires an explicit \`inputJsonSchema\` ` +
+          '(JSON Schema) so the tool can be serialized for providers.',
+      );
+    }
+  }
+  if (inputJsonSchema !== undefined) {
+    assertJsonValue(inputJsonSchema, `Tool "${name}": inputJsonSchema`);
+  }
 
   const normalizedIdentity = normalizeIdentity({
     name,

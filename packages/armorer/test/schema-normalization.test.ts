@@ -67,4 +67,17 @@ describe('normalizeSchema', () => {
       expect(error).toBeInstanceOf(z.ZodError);
     }
   });
+
+  it('is idempotent for an already-wrapped Standard Schema (re-normalization passes through)', async () => {
+    // A `Tool` built by `createTool` stores the WRAPPED schema on
+    // `tool.configuration.input`. Re-registering that tool through
+    // `createToolbox([tool])` re-runs `normalizeSchema` on the already-wrapped
+    // pipe. Before the fix this hit the "non-object Zod schema" branch and
+    // threw "Tool input must be a Zod object schema" — see
+    // `create-toolbox-standard-schema.test.ts` for the end-to-end regression.
+    const wrapped = normalizeSchema(nonEmptyStringSchema());
+    const reNormalized = normalizeSchema(wrapped);
+    expect(reNormalized).toBe(wrapped);
+    await expect(reNormalized.parseAsync('ok')).resolves.toBe('ok');
+  });
 });
