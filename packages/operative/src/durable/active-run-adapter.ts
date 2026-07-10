@@ -27,6 +27,7 @@ import type { FinishReason, RunOptions, RunResult } from '../types';
 import type { CheckpointStore } from './checkpoint-store';
 import type { AnyRunEngine } from './create-run-engine';
 import type { AgentRunWorkflowResult } from './run-workflow';
+import type { DurableRunDeps } from './types';
 
 /**
  * Tag stamped on every durable run launched by the operative scheduler (via
@@ -81,6 +82,29 @@ export interface DurableActiveRunOptions {
   options: RunOptions;
   /** First user message to seed a brand-new run. Ignored when resuming. */
   prompt?: string;
+  /**
+   * A pre-built emitter for this run's event surface. When provided, this
+   * adapter dispatches to it instead of minting its own — so a caller that
+   * built a toolbox tool bound to this SAME emitter (e.g. `requestHumanInput`
+   * via `createRequestHumanInputTool({ emitter })`) sees that tool's events
+   * (like `HumanWaitParkedEvent`) flow onto the exact emitter this `ActiveRun`
+   * exposes via `addEventListener`/`toObservable`. Omit for a fresh internal
+   * emitter (the pre-existing default behavior).
+   */
+  emitter?: CompletableEventTarget<CombinedOperativeEventMap>;
+  /**
+   * Optional synchronous hook invoked with the freshly-built per-run
+   * {@link DurableRunDeps} — the exact object Weft hands back as `ctx.services`
+   * — immediately BEFORE `engine.start`. This is the only point at which a
+   * caller can obtain a live reference to that object: it is minted inside
+   * `driveDurableRun`, after the toolbox (and any tools closed over a mutable
+   * "context" slot, like `requestHumanInput`'s `pendingHumanWait`) has already
+   * been constructed. A caller wanting a tool's mutation of `deps.pendingHumanWait`
+   * (or `deps.pendingWakeup`) to actually reach `ctx.services` — the only copy
+   * the durable workflow reads — must capture this reference here and point the
+   * tool's context at it (see bureau's `createRunFromRequest` for the pattern).
+   */
+  onServices?: (services: DurableRunDeps) => void;
 }
 
 /**
@@ -211,7 +235,10 @@ export function createDurableActiveRun(
   const { runId, options } = durableRun;
   // F2: resolve agentName — explicit > RunOptions.agentName > empty string.
   const agentName = durableRun.agentName ?? options.agentName ?? '';
-  const emitter = new CompletableEventTarget<CombinedOperativeEventMap>();
+  // Use the caller-supplied emitter when provided (see `DurableActiveRunOptions.emitter`)
+  // so a toolbox tool built against that same emitter dispatches onto the exact
+  // surface this `ActiveRun` exposes. Falls back to a fresh one otherwise.
+  const emitter = durableRun.emitter ?? new CompletableEventTarget<CombinedOperativeEventMap>();
   const abortController = new AbortController();
 
   const combinedSignal = options.signal
@@ -363,6 +390,7 @@ export function createDurableActiveRun(
       combinedSignal,
       emitter,
       durableRun.prompt,
+      durableRun.onServices,
     );
   }
 
@@ -834,6 +862,7 @@ async function driveDurableRun(
   signal: AbortSignal,
   emitter: CompletableEventTarget<CombinedOperativeEventMap>,
   prompt: string | undefined,
+  onServices: ((services: DurableRunDeps) => void) | undefined,
 ): Promise<RunResult> {
   const runStartTime = performance.now();
   const { hooks } = options;
@@ -868,6 +897,17 @@ async function driveDurableRun(
   // non-serializable value cannot cross to a Worker. This run engine is inline
   // by construction (tool execution runs in-process via `runStep`), so the
   // constraint is always satisfied here.
+  const services: DurableRunDeps = {
+    options: { ...options, signal },
+    toolbox: options.toolbox,
+    emitter,
+  };
+  // Give the caller a live reference to the EXACT object Weft will hand back as
+  // `ctx.services` — see `DurableActiveRunOptions.onServices`. Must fire before
+  // `engine.start` so a tool the caller wired against this reference (e.g.
+  // `requestHumanInput`) can mutate it the moment `runStep` executes.
+  onServices?.(services);
+
   const handle = await context.engine.start(
     'agentRun',
     {
@@ -881,11 +921,7 @@ async function driveDurableRun(
     },
     {
       id: runId,
-      services: {
-        options: { ...options, signal },
-        toolbox: options.toolbox,
-        emitter,
-      },
+      services,
     },
   );
 

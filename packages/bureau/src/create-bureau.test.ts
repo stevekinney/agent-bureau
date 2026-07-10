@@ -3872,3 +3872,168 @@ describe('createBureau flow control (AB-13)', () => {
     bureau.dispose();
   });
 });
+
+// ── F3 real durable park wiring (bureau-durable-park-event-wiring) ────────
+//
+// Regression coverage for the pre-existing gap: `createRunFromRequest` never
+// threaded a run's event emitter (or the real `ctx.services` object) into
+// `requestHumanInput`, so a HumanWaitParkedEvent from an ACTUAL durable park
+// never reached bureau's listeners — only synthetic `ActiveRun` fixtures
+// (`createParkedActiveRun` above) exercised AB-13's `markParked`/`markResumed`
+// and AB-20's `listPendingReviews` human-wait branch. These tests drive a
+// REAL durable run through `requestHumanInput` end to end via the new
+// `humanInput: true` bureau option.
+
+describe('createBureau human input wiring — real durable park (F3)', () => {
+  it('a real durable park frees the flow-control concurrency slot and reclaims it on resume', async () => {
+    const parkingGenerate = createSequentialGenerate([
+      {
+        content: '',
+        toolCalls: [
+          { id: 'call-1', name: 'requestHumanInput', arguments: { signalName: 'human-response' } },
+        ],
+      },
+    ]);
+
+    const { generate: blockingGenerate, resolve: resolveBlocking } = createBlockingGenerate();
+
+    // Route the FIRST generate call (run1's only step, before it parks) to the
+    // HITL tool call, and every subsequent call (run2's step(s)) to the
+    // blocking generate — the two runs are created strictly in that order, so
+    // this call-index dispatch reliably distinguishes them without needing to
+    // inspect conversation content.
+    let callIndex = 0;
+    const generate: GenerateFunction = async (context) => {
+      const index = callIndex++;
+      return index === 0 ? parkingGenerate(context) : blockingGenerate(context);
+    };
+
+    const bureau = await createBureau({
+      generate,
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+      humanInput: true,
+      flowControl: { concurrency: { limit: 1 } },
+      // `toolCalled` stops run1's loop right after the HITL tool call (so the
+      // post-loop park check sees `pendingHumanWait` set); `noToolCalls` stops
+      // run2's loop on its first (tool-free) resolved step, once the test
+      // releases `resolveBlocking`.
+      stopWhen: stopWhen.some(stopWhen.toolCalled('requestHumanInput'), stopWhen.noToolCalls()),
+    });
+
+    try {
+      // 1. Admit the run that will park — occupies the only slot.
+      const run1 = await bureau.createRun({ message: 'park-me' });
+
+      // 2. Wait for the REAL requestHumanInput tool call to fire
+      // HumanWaitParkedEvent and free the slot (AB-13 markParked).
+      await pollUntil(() =>
+        bureau
+          .listPendingReviews()
+          .some((review) => review.kind === 'human-wait' && review.runId === run1.id),
+      );
+
+      // 3. The slot is free: a second run is admitted (would have been
+      // rejected before the park freed it).
+      const run2 = await bureau.createRun({ message: 'hold the slot' });
+      expect(run2.id).not.toBe(run1.id);
+
+      // 4. With run2 (blocked, never settling) holding the only slot, a third
+      // admission is rejected — proves the slot is genuinely occupied at 1/1.
+      const rejectedWhileRun2Holds = await rejectionOf(
+        bureau.createRun({ message: 'rejected while run2 holds the slot' }),
+      );
+      expect(rejectedWhileRun2Holds).toBeInstanceOf(BureauError);
+      expect((rejectedWhileRun2Holds as BureauError).code).toBe('RATE_LIMITED');
+
+      // 5. Resume run1 via the real signal path. `signalSession` calls
+      // `flowController.markResumed(runId)` synchronously right after the
+      // engine accepts the signal — before Weft's inline-launch continuation
+      // (a macrotask) has any chance to run and settle run1. A synchronous
+      // admission check immediately after this `await` therefore reliably
+      // observes run1's slot as reclaimed.
+      await bureau.signalSession(run1.sessionId, 'human-response', { approved: true });
+
+      // 6. Reclaim: run2 still holds its slot AND run1 just reclaimed its
+      // own — a fourth admission is rejected again, proving `markResumed`
+      // actually re-occupied the cap rather than leaving it permanently freed.
+      const rejectedAfterResume = await rejectionOf(
+        bureau.createRun({ message: 'rejected after run1 reclaimed its slot' }),
+      );
+      expect(rejectedAfterResume).toBeInstanceOf(BureauError);
+      expect((rejectedAfterResume as BureauError).code).toBe('RATE_LIMITED');
+
+      // Cleanup: free run2's slot and let run1 settle.
+      resolveBlocking({ content: 'run2-done', toolCalls: [] });
+      await waitForRunCompletion(bureau, run2.id);
+      await waitForRunCompletion(bureau, run1.id);
+
+      const finalRun1 = bureau.getRun(run1.id);
+      expect(finalRun1?.status).toBe('completed');
+    } finally {
+      bureau.dispose();
+    }
+  });
+
+  it('listPendingReviews surfaces a real durable park and resolveReview resumes it', async () => {
+    const generate = createSequentialGenerate([
+      {
+        content: '',
+        toolCalls: [
+          {
+            id: 'call-1',
+            name: 'requestHumanInput',
+            arguments: { signalName: 'human-response', prompt: 'Approve this refund?' },
+          },
+        ],
+      },
+    ]);
+
+    const bureau = await createBureau({
+      generate,
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+      humanInput: true,
+      stopWhen: stopWhen.toolCalled('requestHumanInput'),
+    });
+
+    try {
+      const run = await bureau.createRun({ message: 'Please refund this order' });
+
+      await pollUntil(() => bureau.listPendingReviews().some((review) => review.runId === run.id));
+
+      const reviews = bureau.listPendingReviews();
+      expect(reviews).toHaveLength(1);
+      const [review] = reviews;
+      expect(review!.kind).toBe('human-wait');
+      if (review!.kind !== 'human-wait') throw new Error('unreachable');
+      expect(review!.runId).toBe(run.id);
+      expect(review!.sessionId).toBe(run.sessionId);
+      expect(review!.signalName).toBe('human-response');
+      expect(review!.prompt).toBe('Approve this refund?');
+
+      // The run is genuinely still parked (a real durable ctx.waitForSignal,
+      // not a synthetic fixture) — it has not settled.
+      expect(bureau.getRun(run.id)?.status).toBe('running');
+
+      const result = await bureau.resolveReview({
+        id: review!.id,
+        decision: 'approve',
+        principal: 'test-operator',
+      });
+      expect(result.decision).toBe('approve');
+
+      await waitForRunCompletion(bureau, run.id);
+
+      const finalRun = bureau.getRun(run.id);
+      expect(finalRun?.status).toBe('completed');
+
+      // Resolved reviews disappear from the queue immediately.
+      expect(bureau.listPendingReviews()).toHaveLength(0);
+    } finally {
+      bureau.dispose();
+    }
+  });
+});

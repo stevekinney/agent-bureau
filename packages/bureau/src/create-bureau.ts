@@ -1,5 +1,6 @@
 import { decode, type ListFilter, type ListOptions, type ScheduleSpec } from '@lostgradient/weft';
 import { KEYS } from '@lostgradient/weft/storage';
+import { combineToolboxes, createTool, createToolbox } from 'armorer';
 import {
   Conversation,
   type ConversationHistory,
@@ -9,14 +10,17 @@ import { CompletableEventTarget } from 'lifecycle';
 import {
   type ActiveRun,
   type AgentSession,
+  type CombinedOperativeEventMap,
   createActiveRun,
   createAgentSession,
   createFlowController,
+  createRequestHumanInputTool,
   createRunFinishedFrame,
   createRunStartedFrame,
   type FlowController,
   HumanWaitParkedEvent,
   type JSONValue,
+  type RequestHumanInputContext,
   type RunReport,
   SchedulerTaskCompletedEvent,
   SchedulerTaskFailedEvent,
@@ -28,6 +32,7 @@ import {
 } from 'operative';
 import {
   createAgentScheduler,
+  type DurableRunDeps,
   InvalidScheduleError,
   isAgentRunWorkflowInput,
   isScheduledAgentRunInput,
@@ -59,6 +64,7 @@ import {
   buildTerminalReportFromCompletedEvent,
   createRunFrameForwarder,
 } from './run-envelope';
+import type { BureauToolbox } from './runtime-composition';
 import { createRuntimeComposition } from './runtime-composition';
 import {
   findRunAgentName,
@@ -910,10 +916,65 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         baseConversationHistory,
       );
 
+      // F3 — opt-in `requestHumanInput` wiring for a REAL durable run
+      // (`options.humanInput`). This closes the tracked wiring gap: the tool's
+      // mutable `pendingHumanWait` slot must be the EXACT object Weft hands
+      // back as `ctx.services` (durable's own per-run deps), and its
+      // `HumanWaitParkedEvent` dispatch must land on the EXACT emitter this
+      // run's `ActiveRun` exposes — neither exists until `createActiveRun`
+      // constructs them below, and both are internal to the durable adapter.
+      // `emitter` is threaded in directly (built here, handed to
+      // `createActiveRun` to use instead of minting its own); the
+      // `ctx.services` reference is captured via `onServices`, a synchronous
+      // hook the durable adapter fires immediately before `engine.start` —
+      // see `DurableActiveRunOptions.onServices` in operative for why this is
+      // the only point such a reference can be obtained. Once captured, the
+      // tool's `pendingHumanWait` setter forwards onto it, so a real
+      // `requestHumanInput` call actually parks the workflow AND fires an
+      // observable event — reaching the `activeRun.addEventListener(
+      // HumanWaitParkedEvent.type, …)` listener below (AB-13 `markParked`)
+      // and `store`'s action log (AB-20 `listPendingReviews`).
+      let humanInputEmitter: CompletableEventTarget<CombinedOperativeEventMap> | undefined;
+      let humanInputOnServices: ((services: DurableRunDeps) => void) | undefined;
+      let runToolbox: BureauToolbox = runRuntime.toolbox;
+      if (options.humanInput && runtime.durable) {
+        const servicesRef: { current?: DurableRunDeps } = {};
+        humanInputEmitter = new CompletableEventTarget<CombinedOperativeEventMap>();
+        const humanWaitContext: RequestHumanInputContext = {
+          get pendingHumanWait() {
+            return servicesRef.current?.pendingHumanWait;
+          },
+          set pendingHumanWait(value) {
+            if (servicesRef.current) {
+              servicesRef.current.pendingHumanWait = value;
+            }
+          },
+          runId,
+        };
+        const rawHumanInputTool = createRequestHumanInputTool({
+          context: humanWaitContext,
+          emitter: humanInputEmitter,
+        });
+        const humanInputToolbox = createToolbox([
+          createTool({
+            ...rawHumanInputTool,
+            // armorer's `execute` contract is async; the raw tool factory's
+            // `execute` is synchronous (it only mutates `context` and returns a
+            // plain result), so wrap it rather than changing its public shape.
+            execute: (input) => Promise.resolve(rawHumanInputTool.execute(input)),
+          }),
+        ]);
+        runToolbox = combineToolboxes(runRuntime.toolbox, humanInputToolbox);
+        humanInputOnServices = (services) => {
+          servicesRef.current = services;
+        };
+      }
+
       const activeRun = createActiveRun(
         {
           generate: runRuntime.generate,
-          toolbox: runRuntime.toolbox,
+          // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment -- Toolbox generic variance; bureau never inspects the tool-tuple type parameter (matches createRunRuntime's internal Toolbox<any> usage elsewhere in this package).
+          toolbox: runToolbox,
           conversation,
           maximumSteps: request.maximumSteps ?? runtime.maximumSteps,
           maximumTokens: request.maximumTokens,
@@ -943,6 +1004,8 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
               // correlate a recovered handle back to its session without a side
               // table (see recoverDurableRuns / resolveRunServices).
               sessionId,
+              ...(humanInputEmitter ? { emitter: humanInputEmitter } : {}),
+              ...(humanInputOnServices ? { onServices: humanInputOnServices } : {}),
             }
           : undefined,
       );
