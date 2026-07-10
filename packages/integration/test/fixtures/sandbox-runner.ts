@@ -17,8 +17,8 @@
  *
  * On completion, prints one JSON line to stdout: `{ content, toolCallCount }`.
  * Installs SIGTERM/SIGINT handlers that exit 0 immediately — the same
- * "signal in, clean exit out" shape `gateway/src/start.ts` uses (AB-96),
- * scaled down to a process with no server or storage to close.
+ * "signal in, clean exit out" shape `packages/gateway/src/start.ts` uses
+ * (AB-96), scaled down to a process with no server or storage to close.
  */
 import { createToolbox } from 'armorer';
 import { createCodingToolbox } from 'armorer/coding';
@@ -26,8 +26,13 @@ import { Conversation } from 'conversationalist';
 import { createActiveRun, stopWhen } from 'operative';
 import { createAnthropicProvider } from 'operative/anthropic';
 
+/**
+ * Reads a required env var, treating a blank/whitespace-only value the same
+ * as unset — matching `gateway/src/start.ts`'s `optionalString()` handling
+ * (a whitespace-only `SANDBOX_RUNNER_ROOT` is not a usable jail root).
+ */
 function requireEnv(name: string): string {
-  const value = Bun.env[name];
+  const value = Bun.env[name]?.trim();
   if (!value) throw new Error(`${name} is required`);
   return value;
 }

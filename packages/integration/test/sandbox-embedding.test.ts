@@ -125,6 +125,11 @@ describe('AB-97 sandbox-image embedding', () => {
         target: 'bun',
         outdir: bundleDirectory,
         naming: 'sandbox-runner.js',
+        // Explicit, not relying on Bun's current defaults: single-outfile
+        // intent must stay stable even if a future Bun version starts
+        // splitting chunks or emitting sourcemaps by default.
+        splitting: false,
+        sourcemap: 'none',
       });
       const buildDurationMs = performance.now() - buildStartedAt;
       expect(build.success).toBe(true);
@@ -149,9 +154,10 @@ describe('AB-97 sandbox-image embedding', () => {
           cwd: bundleDirectory,
           env: {
             // A deliberately minimal, isolated environment: the runner's
-            // own declared root/config, no ambient PATH-discovered tools,
-            // no inherited credentials.
-            PATH: process.env['PATH'] ?? '',
+            // own declared root/config, no ambient PATH-discovered tools
+            // (empty PATH — the runner's read-only tool surface never
+            // shells out), no inherited credentials.
+            PATH: '',
             SANDBOX_RUNNER_ROOT: declaredRoot,
             SANDBOX_RUNNER_BASE_URL: mock.baseURL,
             SANDBOX_RUNNER_API_KEY: 'placeholder-not-a-real-key-0000',
