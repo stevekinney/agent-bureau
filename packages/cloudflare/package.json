@@ -37,13 +37,17 @@
     "validate": "bun run format:check && bun run lint && bun run check-types && bun run test"
   },
   "dependencies": {
+    "@lostgradient/weft": "^0.9.0",
     "interoperability": "workspace:*",
     "memory": "workspace:*",
     "zod": "^4.4.1"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260606.1",
-    "@types/bun": "^1.3.9"
+    "@types/bun": "^1.3.9",
+    "conversationalist": "workspace:*",
+    "operative": "workspace:*",
+    "skills": "workspace:*"
   },
   "engines": {
     "bun": ">=1.3.0"
