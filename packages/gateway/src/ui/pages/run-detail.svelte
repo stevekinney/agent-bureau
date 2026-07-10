@@ -1,5 +1,7 @@
 <script lang="ts">
+  import { Badge, type BadgeVariant } from '@lostgradient/cinder/badge';
   import { CodeBlock } from '@lostgradient/cinder/code-block';
+  import { DataList } from '@lostgradient/cinder/data-list';
   import { DescriptionList } from '@lostgradient/cinder/description-list';
   import { EmptyState } from '@lostgradient/cinder/empty-state';
   import { EventStreamViewer } from '@lostgradient/cinder/event-stream-viewer';
@@ -14,9 +16,12 @@
   import { SectionHeading } from '@lostgradient/cinder/section-heading';
   import { Stat } from '@lostgradient/cinder/stat';
   import { StatGroup } from '@lostgradient/cinder/stat-group';
+  import { StackedListItem } from '@lostgradient/cinder/stacked-list-item';
 
-  import type { RunDetail } from '../../types';
+  import type { RunDetailResponse, RunTimelineEntry, RunTimelineEntryKind } from '../../routes/runs';
+  import ReviewRow from '../components/review-row.svelte';
   import StatusBadge from '../components/status-badge.svelte';
+  import type { ReviewsStore } from '../hooks/use-reviews.svelte';
   import type { ConnectionStatus } from '../hooks/use-websocket.svelte';
 
   type TimelineEvent = {
@@ -44,12 +49,21 @@
     streamingAssistantContent,
     toolActivity,
     connectionStatus,
+    reviews,
   }: {
-    run: RunDetail;
+    run: RunDetailResponse;
     events: TimelineEvent[];
     streamingAssistantContent: string;
     toolActivity: string[];
     connectionStatus: ConnectionStatus;
+    /**
+     * The shared review-queue store (AB-20), reused here so a parked run
+     * offers a resume affordance without a second approve/deny code path.
+     * Optional — omitted by tests that render this page without the wider
+     * app shell (e.g. `server/render.test.ts`), in which case no resume
+     * section renders.
+     */
+    reviews?: ReviewsStore;
   } = $props();
 
   let eventFilterQuery = $state('');
@@ -60,6 +74,44 @@
     if (event.endsWith('.error') || event === 'stream:error') return 'error';
     if (event.endsWith('.aborted')) return 'warning';
     return 'info';
+  }
+
+  /** Badge tone for a timeline milestone kind (AB-12). */
+  function timelineBadgeVariant(kind: RunTimelineEntryKind): BadgeVariant {
+    switch (kind) {
+      case 'human-wait-parked':
+        return 'warning';
+      case 'retry-attempt':
+        return 'danger';
+      case 'reattached':
+        return 'accent';
+      case 'child-workflow-started':
+      case 'handoff-occurred':
+        return 'info';
+      case 'checkpoint':
+      case 'other':
+        return 'neutral';
+    }
+  }
+
+  /** Human-readable label for a timeline milestone kind (AB-12). */
+  function timelineKindLabel(kind: RunTimelineEntryKind): string {
+    switch (kind) {
+      case 'checkpoint':
+        return 'Checkpoint';
+      case 'human-wait-parked':
+        return 'Parked';
+      case 'child-workflow-started':
+        return 'Child workflow';
+      case 'handoff-occurred':
+        return 'Handoff';
+      case 'reattached':
+        return 'Reattached';
+      case 'retry-attempt':
+        return 'Retry';
+      case 'other':
+        return 'Event';
+    }
   }
 
   /** Stable, unique key for a timeline event. Mirrors the React row key. */
@@ -186,7 +238,53 @@
   });
 
   let eventStreamConnectionState = $derived<EventStreamState>(connectionStatus);
+
+  // AB-12 run-inspector: the milestone timeline — checkpoint boundaries,
+  // multi-agent delegation transitions, human-wait parks, recovery/reattach
+  // markers, and retry attempts — filtered down from the server-assembled
+  // `run.timeline` (already sorted by `sequence`; see `assembleRunTimeline`).
+  // `'other'` entries are excluded here — they still render in the full
+  // Event Stream section below, just not called out as a milestone.
+  let milestoneEntries = $derived<RunTimelineEntry[]>(
+    run.timeline.filter((entry) => entry.kind !== 'other'),
+  );
+
+  // The pending human-wait review (if any) parking this run, reused from the
+  // AB-20 review queue store — the same data and approve/deny plumbing the
+  // Review Queue page uses, so there is exactly one resume code path.
+  let parkedReview = $derived(
+    reviews?.reviews.find((review) => review.kind === 'human-wait' && review.runId === run.id),
+  );
 </script>
+
+{#snippet timelineEmpty()}
+  <p>No milestone events yet.</p>
+{/snippet}
+
+{#snippet timelineTitle(entry: RunTimelineEntry)}
+  {entry.event}
+{/snippet}
+
+{#snippet timelineDescription(entry: RunTimelineEntry)}
+  {stringifyPayload(entry.detail)}
+{/snippet}
+
+{#snippet timelineMeta(entry: RunTimelineEntry)}
+  {formatEventTime(entry.timestamp).label}
+{/snippet}
+
+{#snippet timelineRow(entry: RunTimelineEntry)}
+  <StackedListItem>
+    {#snippet leading()}
+      <Badge variant={timelineBadgeVariant(entry.kind)} size="sm">
+        {timelineKindLabel(entry.kind)}
+      </Badge>
+    {/snippet}
+    {#snippet title()}{@render timelineTitle(entry)}{/snippet}
+    {#snippet description()}{@render timelineDescription(entry)}{/snippet}
+    {#snippet meta()}{@render timelineMeta(entry)}{/snippet}
+  </StackedListItem>
+{/snippet}
 
 {#snippet stepPayload(step: RunStep)}
   {@const detail = stepDetailFor(step)}
@@ -224,6 +322,35 @@
       <Stat label="Completion" value={run.usage.completion} />
       <Stat label="Total" value={run.usage.total} />
     </StatGroup>
+  </section>
+
+  {#if parkedReview}
+    <section>
+      <SectionHeading level={3} title="Awaiting Human Input" />
+      <ReviewRow
+        review={parkedReview}
+        pending={reviews?.pendingId === parkedReview.id}
+        onapprove={(id, payload) => void reviews?.approve(id, { payload })}
+        ondeny={(id, reason) => void reviews?.deny(id, { reason })}
+      />
+    </section>
+  {/if}
+
+  <section>
+    <SectionHeading level={3} title="Timeline" />
+    {#if milestoneEntries.length === 0}
+      <EmptyState
+        title="No milestone events yet."
+        description="Checkpoint boundaries, delegation, human-wait parks, recovery markers, and retries appear here as the run progresses."
+      />
+    {:else}
+      <DataList
+        items={milestoneEntries}
+        key={(entry) => `${entry.sequence}-${entry.event}`}
+        children={timelineRow}
+        empty={timelineEmpty}
+      />
+    {/if}
   </section>
 
   {#if streamingAssistantContent}

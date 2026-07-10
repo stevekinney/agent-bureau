@@ -33,7 +33,8 @@ import '@lostgradient/cinder/table-row/styles';
 
 import { hydrate } from 'svelte';
 
-import type { ConfigurationResponse, RunDetail, RunSummary } from '../types';
+import type { RunDetailResponse } from '../routes/runs';
+import type { ConfigurationResponse, RunSummary } from '../types';
 import App from '../ui/app.svelte';
 
 /**
@@ -43,7 +44,7 @@ import App from '../ui/app.svelte';
  */
 interface InitialData {
   runs?: RunSummary[];
-  run?: RunDetail;
+  run?: RunDetailResponse;
   config?: ConfigurationResponse;
 }
 

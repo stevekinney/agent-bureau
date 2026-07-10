@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it, mock } from 'bun:test';
 
-import type { RunDetail } from '../../types';
+import type { RunDetailResponse } from '../../routes/runs';
 import { createRunDetailStore } from './use-run-detail.svelte.ts';
 
-function makeRunDetail(overrides: Partial<RunDetail> = {}): RunDetail {
+function makeRunDetail(overrides: Partial<RunDetailResponse> = {}): RunDetailResponse {
   return {
     id: 'run-1',
     sessionId: 'session-1',
@@ -19,6 +19,7 @@ function makeRunDetail(overrides: Partial<RunDetail> = {}): RunDetail {
     events: [],
     stepDetails: [],
     latestSnapshot: undefined,
+    timeline: [],
     ...overrides,
   };
 }
@@ -128,7 +129,7 @@ describe('createRunDetailStore', () => {
   });
 
   it('refreshes on terminal events and merges synthetic timeline entries', async () => {
-    const refreshed: RunDetail = makeRunDetail({
+    const refreshed: RunDetailResponse = makeRunDetail({
       id: 'run-1',
       status: 'completed',
       events: [{ sequence: 2, runId: 'run-1', event: 'run.completed', detail: {}, timestamp: 20 }],
@@ -177,7 +178,7 @@ describe('createRunDetailStore', () => {
     // (lagging) API response was dropped — timeline rows vanished right after a
     // terminal event. The merge must keep such events until the API includes
     // them.
-    const lagging: RunDetail = makeRunDetail({
+    const lagging: RunDetailResponse = makeRunDetail({
       id: 'run-1',
       status: 'completed',
       // The API lags the stream: it knows about sequence 1 but not the

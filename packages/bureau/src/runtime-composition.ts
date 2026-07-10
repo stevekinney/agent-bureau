@@ -944,11 +944,16 @@ export interface RuntimeComposition {
    * with (AB-10 — workflow versioning for in-flight durable runs). Populated
    * by the `onWorkflowVersionMismatch` callback wired into `createRunEngine`,
    * which fires once per recovered run BEFORE `engine.recoverAll()` returns —
-   * so this set is fully populated by the time the bureau's recovery loop
+   * so this map is fully populated by the time the bureau's recovery loop
    * calls `classifyRecoveredRun`. Never cleared: entries are read exactly once
-   * per boot recovery pass and the set is rebuilt fresh on the next boot.
+   * per boot recovery pass and the map is rebuilt fresh on the next boot.
+   *
+   * Keyed by runId, valued with the stored/registered version strings (AB-12
+   * run inspector — `reattachRecoveredRun` reads these to stamp a
+   * `workflow.reattached` timeline marker with the mismatch detail, not just
+   * the boolean `classifyRecoveredRun` needs).
    */
-  workflowVersionMismatches: Set<string>;
+  workflowVersionMismatches: Map<string, { storedVersion: string; registeredVersion: string }>;
   /**
    * Disposes the raw `Storage` backend this composition resolved from
    * `options.storage`, if any. The KV/checkpoint views are created with
@@ -1018,7 +1023,10 @@ export async function createRuntimeComposition(
 
   // AB-10: run ids the durable engine flags as version-mismatched during boot
   // recovery — see RuntimeComposition.workflowVersionMismatches.
-  const workflowVersionMismatches = new Set<string>();
+  const workflowVersionMismatches = new Map<
+    string,
+    { storedVersion: string; registeredVersion: string }
+  >();
 
   // Resolve the `persistence` option into its components. The three forms are:
   // - PersistenceOptions { store, history?, observability?, onLog? }
@@ -1124,7 +1132,10 @@ export async function createRuntimeComposition(
       // to `classifyRecoveredRun` (distinct 'reattach-version-mismatch' verdict)
       // before it inspects `workflowVersionMismatches`.
       onWorkflowVersionMismatch: (event: WorkflowVersionMismatchEvent) => {
-        workflowVersionMismatches.add(event.runId);
+        workflowVersionMismatches.set(event.runId, {
+          storedVersion: event.storedVersion,
+          registeredVersion: event.registeredVersion,
+        });
         console.warn(
           `[bureau] Recovered run "${event.runId}" was checkpointed under workflow version ` +
             `"${event.storedVersion}" but is resuming under "${event.registeredVersion}". ` +

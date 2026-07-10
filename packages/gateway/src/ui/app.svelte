@@ -1,12 +1,12 @@
 <script lang="ts">
   import { untrack } from 'svelte';
 
+  import type { RunDetailResponse } from '../routes/runs';
   import type { UsageResponse } from '../routes/usage';
   import type {
     ConfigurationResponse,
     EvaluationReportsResponse,
     PendingReview,
-    RunDetail,
     RunSummary,
   } from '../types';
   import { createChatStore } from './hooks/use-chat.svelte';
@@ -26,7 +26,7 @@
 
   type InitialData = {
     runs?: RunSummary[];
-    run?: RunDetail;
+    run?: RunDetailResponse;
     config?: ConfigurationResponse;
     reviews?: PendingReview[];
     usage?: UsageResponse;
@@ -45,7 +45,7 @@
    */
   let { initialData, pathname }: { initialData: InitialData; pathname: string } = $props();
 
-  const EMPTY_RUN_DETAIL: RunDetail = {
+  const EMPTY_RUN_DETAIL: RunDetailResponse = {
     id: '',
     sessionId: '',
     status: 'running',
@@ -54,9 +54,13 @@
     finishReason: undefined,
     error: undefined,
     actionCount: 0,
+    agentName: undefined,
+    principal: undefined,
+    startedAt: undefined,
     events: [],
     stepDetails: [],
     latestSnapshot: undefined,
+    timeline: [],
   };
 
   const EMPTY_CONFIGURATION: ConfigurationResponse = {
@@ -127,6 +131,7 @@
   let isDashboardRoute = $derived(route?.name === 'dashboard');
   let isReviewsRoute = $derived(route?.name === 'reviews');
   let isChatRoute = $derived(route?.name === 'chat');
+  let isRunDetailRoute = $derived(route?.name === 'run-detail');
   let detailRunId = $derived(route?.name === 'run-detail' ? route.params['id'] : undefined);
 
   /**
@@ -136,11 +141,14 @@
    * current means polling while the page is open. The chat page (AB-23) is
    * included whenever a run is active so its inline elicitation/human-wait
    * form (a review whose `runId` matches the active chat run) stays current
-   * even if the `onHumanInputRequested` fast-path trigger is missed.
+   * even if the `onHumanInputRequested` fast-path trigger is missed. The
+   * run-detail page (AB-12) is included unconditionally — its resume
+   * affordance needs to notice a run parking on `ctx.waitForSignal` while
+   * the operator is already looking at it, not just on the next visit.
    */
   const REVIEWS_POLL_INTERVAL_MS = 5000;
   let shouldPollReviews = $derived(
-    isReviewsRoute || (isChatRoute && chatStore.runId !== undefined),
+    isReviewsRoute || isRunDetailRoute || (isChatRoute && chatStore.runId !== undefined),
   );
 
   // The live transport exposes start()/stop() rather than self-connecting, so
@@ -182,6 +190,13 @@
     if (!isChatRoute || chatStore.runId === undefined) return;
     void reviewsStore.refresh();
   });
+
+  // Same immediacy for the run-detail route: a run parked on human-wait
+  // before this page loaded should show its resume affordance right away.
+  $effect(() => {
+    if (!isRunDetailRoute) return;
+    void reviewsStore.refresh();
+  });
 </script>
 
 <Layout connectionStatus={websocket.status} {pathname}>
@@ -194,6 +209,7 @@
       streamingAssistantContent={runDetailStore.streamingAssistantContent}
       toolActivity={runDetailStore.toolActivity}
       connectionStatus={websocket.status}
+      reviews={reviewsStore}
     />
   {:else if route?.name === 'reviews'}
     <ReviewsPage reviews={reviewsStore} />

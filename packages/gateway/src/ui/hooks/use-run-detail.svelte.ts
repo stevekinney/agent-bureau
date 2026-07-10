@@ -1,4 +1,5 @@
-import type { RunDetail, ServerFrame } from '../../types';
+import type { RunDetailResponse } from '../../routes/runs';
+import type { ServerFrame } from '../../types';
 import {
   INITIAL_TOOL_ACTIVITY_STATE,
   reduceToolActivity,
@@ -24,7 +25,7 @@ export type TimelineEvent = {
  */
 export interface RunDetailStore {
   /** The current run detail record. Reactive — read directly, never destructure. */
-  readonly run: RunDetail;
+  readonly run: RunDetailResponse;
   /** The accumulated timeline of run events. */
   readonly events: TimelineEvent[];
   /** The latest accumulated streaming assistant text ('' when idle). */
@@ -37,7 +38,7 @@ export interface RunDetailStore {
   refresh: () => Promise<void>;
 }
 
-function timelineFromRun(run: RunDetail): TimelineEvent[] {
+function timelineFromRun(run: RunDetailResponse): TimelineEvent[] {
   return run.events.map((event) => ({
     event: event.event,
     detail: event.detail,
@@ -49,8 +50,8 @@ function timelineFromRun(run: RunDetail): TimelineEvent[] {
 /**
  * Creates a {@link RunDetailStore} seeded with the server-provided initial run.
  */
-export function createRunDetailStore(initialRun: RunDetail): RunDetailStore {
-  let run = $state<RunDetail>(initialRun);
+export function createRunDetailStore(initialRun: RunDetailResponse): RunDetailStore {
+  let run = $state<RunDetailResponse>(initialRun);
   let events = $state<TimelineEvent[]>(timelineFromRun(initialRun));
   let streamingAssistantContent = $state('');
   let toolActivityState = $state<ToolActivityState>(INITIAL_TOOL_ACTIVITY_STATE);
@@ -72,7 +73,7 @@ export function createRunDetailStore(initialRun: RunDetail): RunDetailStore {
       return;
     }
 
-    const nextRun = (await response.json()) as RunDetail;
+    const nextRun = (await response.json()) as RunDetailResponse;
     run = nextRun;
 
     // Merge the freshly-fetched timeline with the locally-held one keyed on

@@ -292,9 +292,7 @@ export class LiveFrameBroker {
     // omitting it) must not shadow a real `?since=` query param — treat empty
     // string the same as absent.
     const lastEventIdHeader = request.headers.get('last-event-id');
-    const resumeCursor = decodeCursor(
-      lastEventIdHeader ? lastEventIdHeader : requestUrl.searchParams.get('since'),
-    );
+    const resumeCursor = decodeCursor(lastEventIdHeader || requestUrl.searchParams.get('since'));
     // Tracks the highest `runSeq` sent per run over this connection's
     // lifetime, seeded from the resume cursor. Each frame's SSE `id:` line
     // carries the full cursor (not just that frame's own runSeq) so a

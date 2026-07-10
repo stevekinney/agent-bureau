@@ -789,6 +789,24 @@ describe('createBureau', () => {
         expect(recoveredDetail).toBeDefined();
         expect(recoveredDetail?.id).toBe(run.id);
 
+        // AB-12 run-inspector: reattachment itself never fires as an
+        // observable run event (it happens before `store.register`'s
+        // subscription exists to see it) — `reattachRecoveredRun` stamps a
+        // synthetic `workflow.reattached` marker via `store.recordAction` so
+        // the timeline shows the recovery boundary. Assert it landed with no
+        // version mismatch (both bureaus use the default workflow version).
+        const reattachEvent = recoveredDetail?.events.find(
+          (event) => event.event === 'workflow.reattached',
+        );
+        expect(reattachEvent).toBeDefined();
+        expect(reattachEvent?.detail).toMatchObject({ versionMismatch: false });
+        // It is stamped immediately on reattach, ordered before the resumed
+        // run's own step events by sequence number.
+        const laterEvent = recoveredDetail?.events.find((event) => event.event === 'step.started');
+        if (laterEvent) {
+          expect(reattachEvent!.sequence).toBeLessThan(laterEvent.sequence);
+        }
+
         // The session is no longer stuck `running`: the detached monitor persisted
         // its terminal status. Poll (re-reading the store each iteration) until
         // that write lands — it happens after the resumed run completes, off the
@@ -964,6 +982,20 @@ describe('createBureau', () => {
         expect(mismatchWarnings.length).toBeGreaterThan(0);
         expect(String(mismatchWarnings[0]?.[0])).toContain('v1');
         expect(String(mismatchWarnings[0]?.[0])).toContain('v2');
+
+        // AB-12 run-inspector: the mismatch detail (not just the boolean
+        // `classifyRecoveredRun` needs) is stamped into the run's timeline as
+        // a `workflow.reattached` marker, so the run-detail view can surface
+        // "resumed under a different workflow version" without re-deriving
+        // it from a console.warn string.
+        const reattachEvent = bureauB
+          .getRun(run.id)
+          ?.events.find((event) => event.event === 'workflow.reattached');
+        expect(reattachEvent?.detail).toMatchObject({
+          versionMismatch: true,
+          storedVersion: 'v1',
+          registeredVersion: 'v2',
+        });
 
         // The run still recovers and completes normally — the mismatch is a
         // pin-and-warn signal, not a block.
