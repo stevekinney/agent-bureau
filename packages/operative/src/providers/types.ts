@@ -56,11 +56,18 @@ export interface BaseProviderOptions {
   /**
    * Provider-neutral per-run request metadata, attached to every generate
    * request of the run. Mapped to each provider's native field: Anthropic
-   * Messages `metadata` (officially reads only `user_id`, but the whole
-   * object is forwarded so an embedder's proxy can inspect it); OpenAI Chat
-   * Completions `metadata` (native string-keyed map, up to 16 keys). Gemini
-   * has no request-level metadata field in its API — this option is an
-   * explicit no-op for {@link createGeminiProvider}.
+   * Messages `metadata`; OpenAI Chat Completions `metadata` (native
+   * string-keyed map, up to 16 keys). Gemini has no request-level metadata
+   * field in its API — this option is an explicit no-op for
+   * {@link createGeminiProvider}.
+   *
+   * Anthropic caveat: its `Metadata` type documents exactly one field
+   * (`user_id`) — the whole object is still forwarded as-is so a
+   * credential-injecting proxy (see {@link AnthropicProviderOptions.baseURL})
+   * can inspect arbitrary keys on the wire, but sending non-`user_id` keys
+   * straight to Anthropic's real endpoint (no proxy in front) gets the
+   * request rejected. Only pass extra keys when a proxy will translate or
+   * strip them before forwarding.
    */
   requestMetadata?: Record<string, string>;
 }

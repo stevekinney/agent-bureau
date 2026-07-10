@@ -530,12 +530,22 @@ const generate = createAnthropicProvider({
 });
 ```
 
-It's mapped to each provider's native field: Anthropic Messages `metadata`
-(officially only reads `user_id`, but the whole object is forwarded so a
-proxy can inspect it for routing/logging), OpenAI Chat Completions `metadata`
-(native string-keyed map, up to 16 keys). Gemini's `generateContent` API has
-no request-level metadata field, so `requestMetadata` is an explicit no-op
-for `createGeminiProvider` / `createGeminiProviderStream`.
+It's mapped to each provider's native field: Anthropic Messages `metadata`,
+OpenAI Chat Completions `metadata` (native string-keyed map, up to 16 keys).
+Gemini's `generateContent` API has no request-level metadata field, so
+`requestMetadata` is an explicit no-op for `createGeminiProvider` /
+`createGeminiProviderStream`.
+
+**Anthropic caveat — the whole object is forwarded, but the real API only
+accepts `user_id`.** Anthropic's `Metadata` type has exactly one documented
+field (`user_id`); calling `createAnthropicProvider` with `requestMetadata`
+containing OTHER keys and pointing `baseURL` at Anthropic's real endpoint
+directly (no proxy in front) gets the request rejected. This option exists
+for the credential-injecting-proxy case above: the proxy sees the whole
+object on the wire and can route/log on it, then either forward only
+`user_id` to the real Anthropic API or strip/translate the rest before
+forwarding. Don't pass arbitrary `requestMetadata` keys straight through to
+`api.anthropic.com` — only to a proxy that knows what to do with them.
 
 #### Backpressure
 

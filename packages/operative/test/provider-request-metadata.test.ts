@@ -108,7 +108,9 @@ describe('Per-run request metadata passthrough', () => {
 
     expect(model._calls).toHaveLength(3);
     for (const call of model._calls) {
-      expect(call['metadata']).toBeUndefined();
+      // Asserting absence, not just an undefined value — `metadata: undefined`
+      // would also satisfy `toBeUndefined()` but is not the documented no-op.
+      expect(Object.hasOwn(call, 'metadata')).toBe(false);
     }
   });
 
@@ -120,6 +122,6 @@ describe('Per-run request metadata passthrough', () => {
 
     await generate(makeContext(conversation));
 
-    expect(client._calls[0]?.['metadata']).toBeUndefined();
+    expect(Object.hasOwn(client._calls[0] ?? {}, 'metadata')).toBe(false);
   });
 });
