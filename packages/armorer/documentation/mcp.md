@@ -188,3 +188,29 @@ Agent SDK integration examples are documented in [Agent SDK Integrations](./agen
 - OpenAI Agents SDK via MCP (`stdio` and Streamable HTTP)
 - Anthropic Claude Agent SDK via in-process MCP server
 - Guidance on when to use MCP vs direct OpenAI Agents adapter
+
+## No dependence on MCP sampling or roots
+
+`createMCP` only exposes Toolbox tools (and, optionally, resources/prompts) as an MCP
+server — it never establishes an MCP client session against a host and never requests
+`sampling/createMessage` or `roots/list`. `fromMcpTools` does interoperate with MCP tool
+definitions (turning them into executable Toolbox tools via a caller-supplied `callTool`),
+but that's a one-shot `tools/call` invocation, not a client session that could negotiate
+sampling or roots capabilities — those two capabilities are never used anywhere in
+`armorer/mcp`. This is intentional, not an oversight:
+
+- **Sampling** (`sampling/createMessage`) lets an MCP server ask the connected client's
+  host to run an LLM completion on its behalf. Armorer's tools call out to LLM providers
+  directly (via `conversationalist`/provider adapters) rather than routing through a host's
+  sampling capability — there's no reason for a tool to depend on whether the MCP client it's
+  connected to happens to support sampling.
+- **Roots** (`roots/list`) lets a server ask the client which filesystem/workspace roots it
+  should operate within. Armorer's filesystem-touching tools (e.g. the coding toolbox) take
+  paths as explicit tool input or configuration, validated by the tool itself, instead of
+  discovering them through an MCP root negotiation.
+
+Both capabilities are on a deprecation path in the MCP specification's draft revision
+(tracked upstream via SEP-2577). If you need an agent to call an LLM, use a provider SDK or
+`conversationalist`'s adapters directly — do not build a dependency on MCP sampling. If a tool
+needs to know which paths it may touch, pass that in as tool input/configuration — do not
+build a dependency on MCP roots.
