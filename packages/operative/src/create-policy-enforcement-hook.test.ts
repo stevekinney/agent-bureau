@@ -59,6 +59,26 @@ describe('createPolicyEnforcementHook composes with armorer capability policy', 
     expect(result.error?.code).toBe('POLICY_DENIED');
   });
 
+  it('control: the same persona allow-list DOES let the tool execute once the capability tier allows it', async () => {
+    // Negative control for the test above. Same tool, same persona
+    // allow-list, only the capability policy's mode changes (deny -> never).
+    // If this executes successfully, the prior test's denial was actually
+    // caused by the capability tier — not by some inert or accidental
+    // interaction with `createPolicyEnforcementHook`.
+    const tool = makeDangerousTool();
+    const enforceToolPolicy = createPolicyEnforcementHook({
+      personaToolPolicy: { allowList: [tool.name] },
+    });
+    const visibleTools = enforceToolPolicy([tool]);
+
+    const toolbox = createToolbox(visibleTools, {
+      approvalPolicy: { mode: 'never' },
+    });
+
+    const result = await toolbox.execute(createToolCall(tool.name, {}));
+    expect(result.outcome).toBe('success');
+  });
+
   it('a skill deny-list combined with a permissive capability policy still blocks the tool', async () => {
     const tool = makeDangerousTool();
     const enforceToolPolicy = createPolicyEnforcementHook({

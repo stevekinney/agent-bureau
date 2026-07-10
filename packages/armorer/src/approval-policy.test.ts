@@ -12,8 +12,10 @@ import {
   resolveApprovalMode,
   resolveCapabilityTier,
 } from './approval-policy';
+import { createCodingTools } from './coding/index';
 import { createTool, createToolCall } from './create-tool';
 import { createToolbox } from './create-toolbox';
+import { createToolboxFromOpenAPI, type OpenAPISpec } from './integrations/openapi/index';
 import type { ToolMetadata, ToolPolicyContext } from './is-tool';
 
 const TIERS: readonly (CapabilityTier | undefined)[] = [
@@ -285,6 +287,58 @@ describe('createToolbox — approvalPolicy composition', () => {
       approvalPolicy: { mode: 'never' },
     });
     const result = await toolbox.execute(createToolCall('legacy-dangerous', {}));
+    expect(result.outcome).toBe('error');
+    expect(result.error?.code).toBe('POLICY_DENIED');
+  });
+});
+
+describe('capability axis fed by real AB-90 and AB-72 metadata, unmodified', () => {
+  it('the AB-90 coding toolbox’s read-only tools resolve to the read-only tier', () => {
+    const { readFile, grep, glob } = createCodingTools({ root: import.meta.dir });
+    for (const tool of [readFile, grep, glob]) {
+      expect(evaluateCapabilityApproval(tool, { mode: 'on-mutation' })).toMatchObject({
+        tier: 'read-only',
+        status: 'allow',
+      });
+    }
+  });
+
+  it('AB-72 OpenAPI verb-derived metadata drives the same capability tiers with no adaptation', async () => {
+    const spec: OpenAPISpec = {
+      openapi: '3.0.0',
+      servers: [{ url: 'https://example.test' }],
+      paths: {
+        '/widgets': {
+          get: { operationId: 'listWidgets' },
+        },
+        '/widgets/{id}': {
+          delete: {
+            operationId: 'deleteWidget',
+            parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+          },
+        },
+      },
+    };
+    const tools = createToolboxFromOpenAPI(spec);
+    const listWidgets = tools.find((tool) => tool.name === 'list-widgets');
+    const deleteWidget = tools.find((tool) => tool.name === 'delete-widget');
+
+    expect(evaluateCapabilityApproval(listWidgets!, { mode: 'on-mutation' })).toMatchObject({
+      tier: 'read-only',
+      status: 'allow',
+    });
+    expect(evaluateCapabilityApproval(deleteWidget!, { mode: 'never' })).toMatchObject({
+      tier: 'dangerous',
+      status: 'allow',
+    });
+
+    // And under a policy that denies the dangerous tier, the DELETE-derived
+    // tool is blocked at execution time — no changes needed to the OpenAPI
+    // integration to make this hold.
+    const toolbox = createToolbox([deleteWidget!], {
+      approvalPolicy: { mode: 'never', tierModes: { dangerous: 'deny' } },
+    });
+    const result = await toolbox.execute(createToolCall('delete-widget', { id: '1' }));
     expect(result.outcome).toBe('error');
     expect(result.error?.code).toBe('POLICY_DENIED');
   });

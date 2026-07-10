@@ -50,11 +50,9 @@ const toolbox = createToolbox(tools, {
 
 ## Precedence: deny > ask > allow
 
-When multiple policy layers weigh in on the same tool call — the capability
-policy, a registry-level `policy.beforeExecute` hook, a tool-level
-`policy.beforeExecute` hook, a persona or skill tool policy — the combined
-verdict is always the **most restrictive** one. `combineApprovalStatuses`
-implements this:
+Combining verdicts from multiple sources should always keep the **most
+restrictive** one — `deny` beats `ask` beats `allow`. `combineApprovalStatuses`
+is the primitive for that:
 
 ```typescript
 import { combineApprovalStatuses } from 'armorer';
@@ -64,9 +62,14 @@ combineApprovalStatuses('allow', 'ask'); // 'ask'
 combineApprovalStatuses('allow', 'allow'); // 'allow'
 ```
 
-In `createToolbox`, the capability policy runs **before** any registry- or
-tool-level `policy.beforeExecute` hook, and before persona/skill tool
-filtering ever gets a chance to matter. That ordering is what makes
+In `createToolbox`, this precedence is enforced by evaluation order rather
+than by an explicit merge: the capability policy runs **first**, and any
+non-`allow` verdict short-circuits before any registry- or tool-level
+`policy.beforeExecute` hook runs. A downstream hook is never consulted once
+the capability policy has denied or asked, so nothing layered on top can
+loosen that verdict — only the capability policy itself, or an
+equally-or-more-restrictive boolean gate (`readOnly` / `allowMutation` /
+`allowDangerous`), can tighten it further. That ordering is what makes
 composition safe: a persona's tool policy (see `operative`'s
 `createPolicyEnforcementHook`) can make a dangerous tool _visible_ to the
 model by allow-listing its name, but it can never make armorer _execute_ it —
