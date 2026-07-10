@@ -51,18 +51,27 @@ Concretely:
 `gateway`'s own `src/index.ts` is a **library barrel** — it exports
 `createGateway`, `resolveGenerate`, and a few types. Importing it starts
 nothing. The process entrypoint that actually boots a listening server from
-environment variables is `packages/gateway/src/start.ts`, wired to `bun run
-start` / `bun run dev` in `package.json` and to the reference `Dockerfile`'s
-`CMD`. It:
+environment variables is `packages/gateway/src/start.ts`. It:
 
 1. Parses and validates `Bun.env` with a Zod schema (`parseStartEnvironment`).
 2. Resolves that into `BureauOptions`/`GatewayOptions` (`resolveStartOptions`
    — a pure function, unit-tested directly).
-3. Builds the bureau (`createBureau`), wraps it in a gateway
+3. Ensures the storage path's parent directory exists for file-backed
+   backends (`bun:sqlite` creates the database file but not its containing
+   directory).
+4. Builds the bureau (`createBureau`), wraps it in a gateway
    (`createGateway`), and starts listening.
-4. Installs `SIGTERM`/`SIGINT` handlers that dispose the bureau and exit
-   cleanly — required for a container orchestrator's graceful-shutdown
-   grace period to actually do something.
+5. Installs `SIGTERM`/`SIGINT` handlers that stop the HTTP server, dispose
+   the bureau, and exit cleanly — required for a container orchestrator's
+   graceful-shutdown grace period to actually do something.
+
+`bun run start` (the reference `Dockerfile`'s `CMD`) runs the **built**
+`dist/start.js`, not this source file — see
+[Reference Dockerfile and compose file](#reference-dockerfile-and-compose-file)
+below for why that distinction is load-bearing, not just convention. `bun
+run dev` runs source (`bun --watch run src/start.ts`) for a fast local
+iteration loop; it shares the same environment contract but won't correctly
+serve the browser UI's hashed asset bundle (see the same section).
 
 If you are embedding the gateway in your own process rather than running it
 standalone, call `createBureau()`/`createGateway()` directly (see the
@@ -71,19 +80,19 @@ package READMEs) — `start.ts` is just the reference bootstrap for the
 
 ### Environment variables
 
-| Variable            | Default                                                                   | Notes                                                                                                 |
-| ------------------- | ------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
-| `PORT`              | `5555`                                                                    | HTTP port.                                                                                            |
-| `HOSTNAME`          | runtime default                                                           | Bind address; set `0.0.0.0` in a container so it's reachable from outside.                            |
-| `AUTH_TOKEN`        | unset                                                                     | Static bearer token, unrestricted admin scope. See [API key bootstrap](#api-key-bootstrap).           |
-| `STORAGE_TYPE`      | `sqlite`                                                                  | `sqlite` \| `lmdb` \| `memory`. See [Storage backend choice](#storage-backend-choice-sqlite-vs-lmdb). |
-| `STORAGE_PATH`      | `./data/agent-bureau.sqlite` (sqlite) / `./data/agent-bureau-lmdb` (lmdb) | Ignored for `memory`.                                                                                 |
-| `PROVIDER`          | `anthropic`                                                               | `anthropic` \| `openai` \| `gemini`.                                                                  |
-| `MODEL`             | provider-specific default                                                 | e.g. `claude-opus-4-5` for `anthropic`.                                                               |
-| `SYSTEM_PROMPT`     | unset                                                                     | Passed through to `BureauOptions.systemPrompt`.                                                       |
-| `ANTHROPIC_API_KEY` | unset                                                                     | Read when `PROVIDER=anthropic`.                                                                       |
-| `OPENAI_API_KEY`    | unset                                                                     | Read when `PROVIDER=openai`.                                                                          |
-| `GEMINI_API_KEY`    | unset                                                                     | Read when `PROVIDER=gemini`.                                                                          |
+| Variable            | Default                                                                   | Notes                                                                                                                                                                                                                |
+| ------------------- | ------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PORT`              | `5555`                                                                    | HTTP port. `0` binds an OS-assigned ephemeral port.                                                                                                                                                                  |
+| `GATEWAY_HOST`      | runtime default                                                           | Bind address; set `0.0.0.0` in a container so it's reachable from outside. Deliberately NOT named `HOSTNAME` — see the code comment on `EnvironmentSchema` for why reading that ambient variable would be a footgun. |
+| `AUTH_TOKEN`        | unset                                                                     | Static bearer token, unrestricted admin scope. See [API key bootstrap](#api-key-bootstrap).                                                                                                                          |
+| `STORAGE_TYPE`      | `sqlite`                                                                  | `sqlite` \| `lmdb` \| `memory`. See [Storage backend choice](#storage-backend-choice-sqlite-vs-lmdb).                                                                                                                |
+| `STORAGE_PATH`      | `./data/agent-bureau.sqlite` (sqlite) / `./data/agent-bureau-lmdb` (lmdb) | Ignored for `memory`. The parent directory is created automatically if it doesn't exist (`mkdir -p` semantics) — `bun:sqlite` creates the database file but not its containing directory.                            |
+| `PROVIDER`          | `anthropic`                                                               | `anthropic` \| `openai` \| `gemini`.                                                                                                                                                                                 |
+| `MODEL`             | provider-specific default                                                 | e.g. `claude-opus-4-5` for `anthropic`.                                                                                                                                                                              |
+| `SYSTEM_PROMPT`     | unset                                                                     | Passed through to `BureauOptions.systemPrompt`.                                                                                                                                                                      |
+| `ANTHROPIC_API_KEY` | unset                                                                     | Read when `PROVIDER=anthropic`. A blank/whitespace-only value is treated as unset (matters for `${VAR:-}`-style Compose interpolation of an unset host variable).                                                    |
+| `OPENAI_API_KEY`    | unset                                                                     | Read when `PROVIDER=openai`. Same blank-is-unset handling as above.                                                                                                                                                  |
+| `GEMINI_API_KEY`    | unset                                                                     | Read when `PROVIDER=gemini`. Same blank-is-unset handling as above.                                                                                                                                                  |
 
 Without an API key for the configured `PROVIDER`, the bureau boots anyway
 with `ready: false` rather than crashing — see
@@ -319,9 +328,11 @@ would a database, because it is one.
   the gateway. On boot, Weft's recovery path reattaches in-flight durable
   runs from the restored checkpoints.
 - **Container/volume backup:** if you're using the reference compose file's
-  named volume, `docker run --rm -v <volume>:/data -v $(pwd):/backup
-alpine tar czf /backup/agent-bureau-backup.tar.gz -C /data .` with the
-  gateway container stopped is the simplest correct snapshot.
+  named volume (mounted at `/app/packages/gateway/data` — matching `start.ts`'s
+  default relative storage path resolved against the Dockerfile's `WORKDIR`,
+  not `/data`), `docker run --rm -v <volume>:/data -v $(pwd):/backup alpine
+tar czf /backup/agent-bureau-backup.tar.gz -C /data .` with the gateway
+  container stopped is the simplest correct snapshot.
 
 ### LMDB
 
@@ -367,15 +378,30 @@ builds every workspace dependency in dependency order first, since
 dependencies rather than bundling them — see the comment in
 `packages/bureau/scripts/build.ts` for why bundling `@lostgradient/weft`
 specifically breaks storage resolution at runtime — filed upstream as weft
-ticket `93540e30`). The container then runs
-`bun run start`, which executes `packages/gateway/src/start.ts` **from
-source** — Bun runs TypeScript directly, so the server process itself needs
-no bundling step. The build step is still required, though: it produces
-`dist/manifest.json` and `dist/public/*`, which the server needs at runtime
-to serve the browser UI's content-hashed asset bundle.
+ticket `93540e30`). The container then runs `bun run start`, which executes
+the **built** `packages/gateway/dist/start.js` — not
+`src/start.ts` from source, and not `dist/index.js` (a library barrel with
+no bootstrap). Bun can execute TypeScript directly, so running from source
+would work for the HTTP layer alone, but `server/render.ts` only serves the
+browser UI's content-hashed asset bundle (`dist/public/entry-<hash>.js`)
+when it detects it is running from `dist/`; from `src/` it falls back to an
+unhashed `/public/entry.js` URL the build never produces, and the UI fails
+to hydrate. `scripts/build.ts` therefore builds `start.ts` as one of its
+entrypoints (alongside `index.ts`/`events.ts`), with `bureau` added to that
+build pass's `external` list so it isn't bundled — bundling it would
+reintroduce the exact weft dynamic-import bug described above, one level up
+the dependency graph.
 
-**Verification performed for this guide** (2026-07-09, Docker Desktop 29.2.1
-on this machine, `oven/bun:1.3.13-slim` base image):
+**Verification performed for this guide** (2026-07-09/10, Docker Desktop
+29.2.1 on this machine, `oven/bun:1.3.13-slim` base image). This ran twice:
+an initial pass, then a second pass after PR review caught that the first
+pass never actually loaded the browser UI (only health endpoints) and
+missed a real bug — running `src/start.ts` from source serves a dashboard
+whose script tag points at a content-hashed asset URL the build never
+produces at that unhashed name, 404ing the client bundle. Fixed by building
+`start.ts` as a real build entrypoint and running the built `dist/start.js`
+in production (`bun run start`) — see the "Build shape" note above. The
+evidence below is from the corrected second pass:
 
 - `docker build -t agent-bureau-gateway:ab-80-test .` — succeeded, full
   workspace build (`interoperability`, `lifecycle`, `armorer`,
@@ -383,26 +409,33 @@ on this machine, `oven/bun:1.3.13-slim` base image):
   completed inside the image.
 - `docker run` with `STORAGE_TYPE=sqlite` and `AUTH_TOKEN` set — booted,
   logged `[gateway] Bootstrap API key created: ...` and `[gateway]
-listening on port 5555`.
+listening on port 5555`, confirming it ran `bun run dist/start.js`.
 - `GET /api/v1/health/live` with the bearer token → `200 {"status":"ok"}`;
   without a token → `401`.
 - `GET /api/v1/health/ready` (no provider API key configured) → `503
 {"status":"unavailable"}`, confirming the liveness/readiness split
   documented above.
+- `GET /` → `302` to `/dashboard`; `GET /dashboard` (bearer token) → `200`
+  with a `<script src="/public/entry-<hash>.js">` tag; a direct request for
+  that exact hashed URL → `200` — confirming the browser UI actually
+  hydrates, not just that the HTTP layer answers.
+- Storage directory auto-creation: the default `./data` directory (resolved
+  under the Dockerfile's `WORKDIR`) did not exist before boot and was
+  created automatically — no `SQLITE_CANTOPEN` failure.
 - `docker restart` on the same container → reattached to the same sqlite
-  file under `/data`, did **not** re-print a bootstrap key (confirming the
-  admin key persisted across restart), and logged `[gateway] received
-SIGTERM, shutting down` before restarting — confirming the graceful
-  shutdown handler in `start.ts` runs.
+  file, did **not** re-print a bootstrap key (confirming the admin key
+  persisted across restart), and logged `[gateway] received SIGTERM,
+shutting down` before restarting — confirming `server.stop()` and
+  `bureau.dispose()` both run in the shutdown handler.
 - `docker compose -f docker-compose.deployment.yaml up -d --build` — built
   and started the `gateway` service; `docker compose ps` reported
   `Up ... (healthy)` from the compose file's own bun-based `HEALTHCHECK`
   (no curl/wget in the slim base image, so the healthcheck uses `bun -e`
-  with `fetch()` directly); a direct `curl` against the published port
-  confirmed `200`.
-- Both containers and the named volume were torn down after verification
-  (`docker compose down -v`, `docker rm`, `docker rmi`) — nothing from this
-  verification was left running.
+  with `fetch()` directly); direct requests against the published port
+  confirmed `200` for both the dashboard and its hashed asset.
+- Both containers, the named volume, and the built image were torn down
+  after verification (`docker compose down -v`, `docker rm`, `docker rmi`)
+  — nothing from this verification was left running.
 
 This was a **real container build and boot**, not a source-only
 approximation — Docker was available on the machine used to prepare this

@@ -16,7 +16,7 @@ const root = './src';
 //    runtime (`Cannot find module './bun-sql.js' from bureau/dist/index.js`).
 //    Keeping weft external lets the dynamic import resolve against its own
 //    package directory, where the adapter files actually live.
-const external = [
+const esmExternal = [
   '@lostgradient/weft',
   '@lostgradient/weft/*',
   'armorer',
@@ -36,6 +36,23 @@ const external = [
   'zod',
 ];
 
+// `conversationalist` ships only ESM/"bun"/"browser"/"default" export
+// conditions — no `require`. `builder.ts` imports `Conversation` from it as
+// a real runtime value (not just types), so if this CJS pass left it
+// external, the emitted `require('conversationalist')` would resolve (via
+// the "default" condition) to an ES module and throw `ERR_REQUIRE_ESM` in
+// any Node < 22 CJS consumer — a real breakage of `bureau`'s own advertised
+// `require: './dist/index.cjs'` export. Bundle it into the CJS output
+// instead; every other external here (weft, armorer, operative, lifecycle,
+// memory, skills, zod) DOES ship a `require` condition of its own, so
+// leaving them external is safe for both formats. `interoperability` is
+// imported type-only in bureau's source (erased at compile time either
+// way), so its presence/absence here has no runtime effect — left in for
+// documentation, not because it's load-bearing.
+const cjsExternal = esmExternal.filter(
+  (specifier) => specifier !== 'conversationalist' && specifier !== 'conversationalist/*',
+);
+
 await $`rm -rf dist`;
 
 await Bun.build({
@@ -47,7 +64,7 @@ await Bun.build({
   naming: '[dir]/[name].js',
   sourcemap: 'external',
   minify: true,
-  external,
+  external: esmExternal,
 });
 
 await $`bunx tsc --declaration --emitDeclarationOnly --project tsconfig.build.json`;
@@ -61,7 +78,7 @@ await Bun.build({
   naming: '[dir]/[name].cjs',
   sourcemap: 'external',
   minify: true,
-  external,
+  external: cjsExternal,
 });
 
 console.log('Build complete!');

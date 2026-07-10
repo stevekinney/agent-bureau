@@ -14,7 +14,7 @@
     "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,json,md,css}\"",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
-    "start": "bun run src/start.ts",
+    "start": "bun run dist/start.js",
     "test": "bun test",
     "test:coverage": "bun test --coverage",
     "validate": "bun run format:check && bun run lint && bun run check-types && bun run test"

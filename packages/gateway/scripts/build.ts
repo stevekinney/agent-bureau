@@ -20,13 +20,23 @@ await $`rm -rf dist`;
 // so the bundle imports `svelte/server` and `svelte/internal/server` from the
 // single installed version at runtime.
 const serverResult = await Bun.build({
-  entrypoints: ['./src/index.ts', './src/events.ts'],
+  // `start.ts` (the process entrypoint — see documentation/deployment.md)
+  // is built here, not just run from source, because `server/render.ts`
+  // only serves the content-hashed client bundle (`dist/public/entry-<hash>.js`)
+  // when it detects it is running from `dist/` (via `import.meta.url`); run
+  // from source it degrades to unhashed `/public/entry.js` URLs, which do
+  // not exist on disk (only the hashed files do) and 404 the client
+  // bundle. `bun run dist/start.js` — not `bun run src/start.ts` — is the
+  // correct way to run this in production; the reference Dockerfile does
+  // this.
+  entrypoints: ['./src/index.ts', './src/events.ts', './src/start.ts'],
   outdir: './dist',
   root: './src',
   target: 'bun',
   format: 'esm',
-  // Default naming keeps entries flat (`index.js`, `events.js`) and preserves
-  // non-entry asset extensions if a future server graph emits them.
+  // Default naming keeps entries flat (`index.js`, `events.js`, `start.js`)
+  // and preserves non-entry asset extensions if a future server graph
+  // emits them.
   sourcemap: 'external',
   minify: true,
   external: [
@@ -39,6 +49,7 @@ const serverResult = await Bun.build({
     'operative',
     'operative/*',
     'armorer',
+    'bureau',
     'conversationalist',
     'lifecycle',
     'lifecycle/*',
