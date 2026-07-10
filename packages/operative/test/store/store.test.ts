@@ -130,6 +130,59 @@ describe('createStore', () => {
     expect(store.getRun('nonexistent')).toBeUndefined();
   });
 
+  it('recordAction appends a synthetic action to a registered run (AB-12)', async () => {
+    const store = createStore();
+    const activeRun = makeTestRun();
+    const id = store.register(activeRun);
+    await activeRun.result;
+
+    const beforeCount = store.getRun(id)!.actions.length;
+    const lastSequence = store.getRun(id)!.actions.at(-1)!.sequence;
+
+    store.recordAction(id, 'workflow.reattached', { sessionId: 'session-1' });
+
+    const runState = store.getRun(id)!;
+    expect(runState.actions.length).toBe(beforeCount + 1);
+    const recorded = runState.actions.at(-1)!;
+    expect(recorded.runId).toBe(id);
+    expect(recorded.type).toBe('workflow.reattached');
+    expect(recorded.detail).toEqual({ sessionId: 'session-1' });
+    // Sequenced through the same monotonic counter as observable-driven
+    // actions, so timeline consumers can sort synthetic and observed
+    // actions together by `sequence` alone.
+    expect(recorded.sequence).toBeGreaterThan(lastSequence);
+    expect(store.getState().actions).toContainEqual(recorded);
+
+    store.dispose();
+  });
+
+  it('recordAction is a no-op for an unregistered run id', () => {
+    const store = createStore();
+
+    store.recordAction('nonexistent', 'workflow.reattached', { sessionId: 'session-1' });
+
+    expect(store.getState().actions).toEqual([]);
+  });
+
+  it('recordAction notifies subscribers like an observable-driven action', async () => {
+    const store = createStore();
+    const activeRun = makeTestRun();
+    const id = store.register(activeRun);
+    await activeRun.result;
+
+    const received: Action[] = [];
+    store.subscribe((_state, action) => {
+      received.push(action);
+    });
+
+    store.recordAction(id, 'workflow.reattached', { sessionId: 'session-1' });
+
+    expect(received).toHaveLength(1);
+    expect(received[0]!.type).toBe('workflow.reattached');
+
+    store.dispose();
+  });
+
   it('accumulates cache-token usage fields across steps (AB-92)', async () => {
     const store = createStore();
     const toolbox = createTestToolbox([weatherTool]);

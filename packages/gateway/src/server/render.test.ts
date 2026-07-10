@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'bun:test';
 
-import type { RunDetail } from '../types';
+import { assembleRunTimeline, type RunDetailResponse } from '../routes/runs';
+import type { PendingReview } from '../types';
+import { createReviewsStore } from '../ui/hooks/use-reviews.svelte';
 import RunDetailPage from '../ui/pages/run-detail.svelte';
 import { renderPage } from './render';
 import Fixture from './test-fixtures/render-fixture.svelte';
@@ -138,7 +140,80 @@ describe('renderPage with a populated run-detail page', () => {
   // with fully populated data — including a tool call carrying a code string to
   // hit the payload/code path — to prove SSR does not throw and emits the
   // expected cinder markup.
-  const populatedRun: RunDetail = {
+  const populatedRunEvents = [
+    {
+      sequence: 0,
+      runId: 'run-populated',
+      event: 'run.started',
+      detail: { at: 0 },
+      timestamp: 1,
+    },
+    {
+      sequence: 1,
+      runId: 'run-populated',
+      event: 'tool.completed',
+      detail: { tool: 'read_file', ok: true },
+      timestamp: 2,
+    },
+    // AB-12 milestone kinds — one of each so the timeline section proves it
+    // classifies and renders every kind, not just the generic event stream.
+    {
+      sequence: 2,
+      runId: 'run-populated',
+      event: 'step.started',
+      detail: { step: 1 },
+      timestamp: 3,
+    },
+    {
+      sequence: 3,
+      runId: 'run-populated',
+      event: 'generate.retry',
+      detail: { attempt: 1, error: 'rate limited' },
+      timestamp: 4,
+    },
+    {
+      sequence: 4,
+      runId: 'run-populated',
+      event: 'multiagent.child-workflow.started',
+      detail: { parentAgentName: 'lead', childAgentName: 'researcher' },
+      timestamp: 5,
+    },
+    {
+      sequence: 5,
+      runId: 'run-populated',
+      event: 'multiagent.handoff.occurred',
+      detail: { sourceAgentName: 'lead', targetAgentName: 'closer' },
+      timestamp: 6,
+    },
+    {
+      sequence: 6,
+      runId: 'run-populated',
+      event: 'multiagent.human-wait.parked',
+      detail: { signalName: 'human-response', prompt: 'Approve the refund?' },
+      timestamp: 7,
+    },
+    {
+      sequence: 7,
+      runId: 'run-populated',
+      event: 'workflow.reattached',
+      detail: {
+        sessionId: 'session-1',
+        versionMismatch: true,
+        storedVersion: 'v1',
+        registeredVersion: 'v2',
+      },
+      timestamp: 8,
+    },
+    {
+      sequence: 8,
+      runId: 'run-populated',
+      event: 'run.completed',
+      detail: { finishReason: 'stop' },
+      timestamp: 9,
+    },
+  ];
+
+  const populatedRun: RunDetailResponse = {
     id: 'run-populated',
     sessionId: 'session-1',
     status: 'completed',
@@ -179,29 +254,8 @@ describe('renderPage with a populated run-detail page', () => {
     // what this test proves, so leave it undefined and let the tool
     // calls/results/timeline detail exercise JsonViewer instead.
     latestSnapshot: undefined,
-    events: [
-      {
-        sequence: 0,
-        runId: 'run-populated',
-        event: 'run.started',
-        detail: { at: 0 },
-        timestamp: 1,
-      },
-      {
-        sequence: 1,
-        runId: 'run-populated',
-        event: 'tool.completed',
-        detail: { tool: 'read_file', ok: true },
-        timestamp: 2,
-      },
-      {
-        sequence: 2,
-        runId: 'run-populated',
-        event: 'run.completed',
-        detail: { finishReason: 'stop' },
-        timestamp: 3,
-      },
-    ],
+    events: populatedRunEvents,
+    timeline: assembleRunTimeline(populatedRunEvents),
   };
 
   const props = {
@@ -246,8 +300,135 @@ describe('renderPage with a populated run-detail page', () => {
     expect(html).toContain('run.completed');
   });
 
+  // AB-12 — the run-inspector Timeline section renders every milestone kind
+  // classified from the run's event log: checkpoint boundaries,
+  // HumanWaitParkedEvent, ChildWorkflowStartedEvent, HandoffOccurredEvent,
+  // the recovery/reattach marker (including AB-10's version-mismatch
+  // detail), and a generate retry attempt.
+  it('renders a Timeline section covering every AB-12 milestone kind', async () => {
+    const html = await renderPage({ title: 'Run run-populated', component: RunDetailPage, props });
+
+    expect(html).toContain('Timeline');
+    expect(html).toContain('cinder-data-list');
+    expect(html).toContain('cinder-stacked-list-item');
+
+    // Milestone kind badges.
+    expect(html).toContain('Checkpoint');
+    expect(html).toContain('Retry');
+    expect(html).toContain('Child workflow');
+    expect(html).toContain('Handoff');
+    expect(html).toContain('Parked');
+    expect(html).toContain('Reattached');
+
+    // Underlying event types and detail — proves real timeline data flowed
+    // through the classification, not just static badge labels.
+    expect(html).toContain('step.started');
+    expect(html).toContain('generate.retry');
+    expect(html).toContain('multiagent.child-workflow.started');
+    expect(html).toContain('multiagent.handoff.occurred');
+    expect(html).toContain('multiagent.human-wait.parked');
+    expect(html).toContain('workflow.reattached');
+    expect(html).toContain('human-response');
+    expect(html).toContain('v1');
+    expect(html).toContain('v2');
+  });
+
+  // Regression (Codex review, PR #203) — the Timeline section must classify
+  // milestones from the LIVE `events` list, not the server-fetched
+  // `run.timeline` snapshot. Simulates exactly the staleness scenario the
+  // review flagged: a milestone (`multiagent.human-wait.parked`) has arrived
+  // over the live stream and is in `events`, but `run.timeline` is still the
+  // stale (here, empty) snapshot from before that event landed — the page
+  // must render the milestone from `events` regardless.
+  it('classifies timeline milestones from live events, not the stale run.timeline snapshot', async () => {
+    const staleRun: RunDetailResponse = { ...populatedRun, timeline: [] };
+    const html = await renderPage({
+      title: 'Run run-populated',
+      component: RunDetailPage,
+      props: { ...props, run: staleRun },
+    });
+
+    expect(html).toContain('Parked');
+    expect(html).toContain('multiagent.human-wait.parked');
+    expect(html).toContain('Reattached');
+    expect(html).toContain('workflow.reattached');
+  });
+
+  // AB-12 — a run parked on a human-wait signal offers a resume affordance,
+  // reusing the AB-20 review-queue store and its `ReviewRow` component
+  // rather than a second approve/deny code path. This exercises the actual
+  // client-side render branch (`{#if parkedReview}` in run-detail.svelte),
+  // not just the server-side `findParkedReview` helper in isolation.
+  it('shows the "Awaiting Human Input" resume affordance for a parked run', async () => {
+    const parkedReview: PendingReview = {
+      kind: 'human-wait',
+      id: 'human-wait:run-populated:human-response',
+      runId: 'run-populated',
+      sessionId: 'session-1',
+      agentName: 'bureau',
+      signalName: 'human-response',
+      prompt: 'Approve the refund?',
+      requestedAt: 0,
+      ageMilliseconds: 5000,
+    };
+    const reviews = createReviewsStore([parkedReview]);
+
+    const html = await renderPage({
+      title: 'Run run-populated',
+      component: RunDetailPage,
+      props: { ...props, reviews },
+    });
+
+    expect(html).toContain('Awaiting Human Input');
+    expect(html).toContain('human-response');
+    expect(html).toContain('Approve the refund?');
+    expect(html).toContain('Approve');
+    expect(html).toContain('Deny');
+  });
+
+  // A review parking a DIFFERENT run must not surface here — the affordance
+  // is scoped to the run this page is showing, not the whole queue.
+  it('does not show a resume affordance for a review parking a different run', async () => {
+    const otherRunReview: PendingReview = {
+      kind: 'human-wait',
+      id: 'human-wait:other-run:human-response',
+      runId: 'other-run',
+      sessionId: 'session-2',
+      agentName: 'bureau',
+      signalName: 'human-response',
+      prompt: 'Approve the refund?',
+      requestedAt: 0,
+      ageMilliseconds: 5000,
+    };
+    const reviews = createReviewsStore([otherRunReview]);
+
+    const html = await renderPage({
+      title: 'Run run-populated',
+      component: RunDetailPage,
+      props: { ...props, reviews },
+    });
+
+    expect(html).not.toContain('Awaiting Human Input');
+  });
+
   it('does not mark a completed step failed just because the run failed later', async () => {
-    const erroredRun: RunDetail = {
+    const erroredRunEvents = [
+      {
+        sequence: 0,
+        runId: 'run-error-after-step',
+        event: 'step.completed',
+        detail: { step: 0 },
+        timestamp: 1,
+      },
+      {
+        sequence: 1,
+        runId: 'run-error-after-step',
+        event: 'run.error',
+        detail: { error: 'The next step failed before it completed.' },
+        timestamp: 2,
+      },
+    ];
+    const erroredRun: RunDetailResponse = {
       ...populatedRun,
       id: 'run-error-after-step',
       status: 'error',
@@ -264,22 +445,8 @@ describe('renderPage with a populated run-detail page', () => {
           results: [],
         },
       ],
-      events: [
-        {
-          sequence: 0,
-          runId: 'run-error-after-step',
-          event: 'step.completed',
-          detail: { step: 0 },
-          timestamp: 1,
-        },
-        {
-          sequence: 1,
-          runId: 'run-error-after-step',
-          event: 'run.error',
-          detail: { error: 'The next step failed before it completed.' },
-          timestamp: 2,
-        },
-      ],
+      events: erroredRunEvents,
+      timeline: assembleRunTimeline(erroredRunEvents),
     };
     const html = await renderPage({
       title: 'Run run-error-after-step',

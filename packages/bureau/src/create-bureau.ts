@@ -1239,6 +1239,21 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     seedRunSeqGeneration(runId);
     store.register(recoveredRun, runId);
     runSessionIdentifiers.set(recoveredRun, sessionId);
+
+    // AB-12 — stamp a `workflow.reattached` marker into this run's action
+    // log so the run-inspector timeline shows the recovery/reattach boundary.
+    // Reattachment happens BEFORE `store.register`'s observable subscription
+    // exists (recovery itself never fires as a run event), so there is no
+    // other way for this transition to reach the sequenced action log.
+    // `recordAction` is called synchronously right after `register`, so it
+    // gets the lowest sequence number of this run's post-reattach actions —
+    // it always precedes whatever the resumed generator emits next.
+    const versionMismatch = runtime.workflowVersionMismatches.get(runId);
+    store.recordAction(runId, 'workflow.reattached', {
+      sessionId,
+      versionMismatch: versionMismatch !== undefined,
+      ...(versionMismatch ?? {}),
+    });
   }
 
   /**

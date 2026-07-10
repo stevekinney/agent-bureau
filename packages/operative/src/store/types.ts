@@ -47,6 +47,25 @@ export interface Store {
   getState(): StoreState;
   getRun(id: string): RunState | undefined;
 
+  /**
+   * Appends a synthetic {@link Action} to `runId`'s action log outside the
+   * normal `activeRun.toObservable()` flow (AB-12 run-inspector timeline).
+   *
+   * Some journal-worthy transitions never pass through a run's own event
+   * emitter — most notably durable-recovery reattachment, which fires
+   * before `register`'s subscription exists to observe it, and workflow
+   * version-mismatch detection, which is reported via a plain callback (see
+   * `WorkflowVersionMismatchEvent`'s JSDoc) rather than the per-run
+   * `CombinedOperativeEventMap`. `recordAction` gives callers a supported
+   * way to stamp those transitions into the same sequenced action log the
+   * observable-driven path uses, so timeline consumers see one ordered
+   * stream regardless of origin.
+   *
+   * A no-op when `runId` is not registered (there is no `RunState` to append
+   * to) — mirrors `getRun`'s "no throw on unknown id" convention.
+   */
+  recordAction(runId: string, type: string, detail: unknown): void;
+
   /** Convenience subscribe overload: listener receives (state, action) on every action. */
   subscribe(listener: StoreListener): Unsubscribe;
   /** EventTarget-style subscribe for a single event type. */

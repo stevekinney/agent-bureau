@@ -2,6 +2,7 @@ import { listEvaluationReports } from 'evaluation';
 import { Hono } from 'hono';
 
 import { createScopeGuard } from '../middleware/scope-guard';
+import { buildRunDetailResponse, type RunDetailResponse } from '../routes/runs';
 import { buildUsageResponse, type UsageResponse } from '../routes/usage';
 import type {
   Bureau,
@@ -9,7 +10,6 @@ import type {
   EvaluationReportsResponse,
   PendingReview,
   ProviderConfiguration,
-  RunDetail,
   RunSummary,
 } from '../types';
 import { SCOPE } from '../types';
@@ -23,7 +23,7 @@ import { renderPage } from './render';
  */
 interface InitialData {
   runs?: RunSummary[];
-  run?: RunDetail;
+  run?: RunDetailResponse;
   config?: ConfigurationResponse;
   reviews?: PendingReview[];
   usage?: UsageResponse;
@@ -93,7 +93,7 @@ export function createPages(dependencies: PageDependencies) {
 
   app.get('/runs/:id', async (context) => {
     const id = context.req.param('id');
-    const run = dependencies.bureau.getRun(id);
+    const run = buildRunDetailResponse(dependencies.bureau, id);
     if (!run) {
       return context.text('Run not found', 404);
     }

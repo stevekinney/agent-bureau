@@ -86,6 +86,12 @@ export function createStore(options: StoreOptions = {}): Store {
     return action;
   }
 
+  function recordAction(runId: string, type: string, detail: unknown): void {
+    if (!runs.has(runId)) return;
+    const action = appendAction(runId, type, detail, Date.now());
+    emitter.dispatch(new StoreActionEvent(action));
+  }
+
   function register(activeRun: ActiveRun, id?: string): string {
     const runId = id ?? `run-${++idCounter}`;
 
@@ -269,6 +275,7 @@ export function createStore(options: StoreOptions = {}): Store {
     register,
     getState,
     getRun,
+    recordAction,
     subscribe,
     addEventListener: emitter.addEventListener.bind(emitter),
     removeEventListener: emitter.removeEventListener.bind(emitter),

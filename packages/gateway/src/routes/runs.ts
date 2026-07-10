@@ -3,7 +3,10 @@ import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 
 import { resolvePrincipal } from '../middleware/authentication';
-import type { Bureau, CreateRunRequest } from '../types';
+import { assembleRunTimeline } from '../timeline';
+import type { Bureau, CreateRunRequest, PendingReview, RunDetail } from '../types';
+
+export { assembleRunTimeline, type RunTimelineEntry, type RunTimelineEntryKind } from '../timeline';
 
 export function createRunsRoutes(bureau: Bureau) {
   const app = new Hono();
@@ -40,9 +43,9 @@ export function createRunsRoutes(bureau: Bureau) {
   });
 
   app.get('/:id', (context) => {
-    const run = bureau.getRun(context.req.param('id'));
-    if (!run) throw new HTTPException(404, { message: 'Run not found' });
-    return context.json(run, 200);
+    const detail = buildRunDetailResponse(bureau, context.req.param('id'));
+    if (!detail) throw new HTTPException(404, { message: 'Run not found' });
+    return context.json(detail, 200);
   });
 
   app.post('/:id/abort', (context) => {
@@ -72,4 +75,37 @@ export function createRunsRoutes(bureau: Bureau) {
   });
 
   return app;
+}
+
+// ── Shared response builder (used by both the JSON route and the SSR /runs/:id page) ──
+
+export interface RunDetailResponse extends RunDetail {
+  timeline: ReturnType<typeof assembleRunTimeline>;
+}
+
+/**
+ * Finds the pending human-wait review (if any) parking `runId` — the resume
+ * affordance the run-detail view offers a parked run, reusing AB-20's review
+ * queue plumbing (`Bureau.listPendingReviews`/`resolveReview`) rather than
+ * inventing a second resume path. `undefined` when the run is not currently
+ * parked on a human-wait signal (including tool-approval parks, which have
+ * no `runId`-scoped signal to resume via this affordance).
+ */
+export function findParkedReview(
+  reviews: readonly PendingReview[],
+  runId: string,
+): PendingReview | undefined {
+  return reviews.find((review) => review.kind === 'human-wait' && review.runId === runId);
+}
+
+/**
+ * Builds the full run-detail response — the run record plus its assembled
+ * timeline — shared by `GET /api/v1/runs/:id` and the SSR `/runs/:id` page
+ * (`server/pages.ts`) so both surfaces agree on shape. `undefined` when the
+ * run does not exist.
+ */
+export function buildRunDetailResponse(bureau: Bureau, id: string): RunDetailResponse | undefined {
+  const run = bureau.getRun(id);
+  if (!run) return undefined;
+  return { ...run, timeline: assembleRunTimeline(run.events) };
 }
