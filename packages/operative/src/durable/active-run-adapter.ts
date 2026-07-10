@@ -770,6 +770,7 @@ async function driveReattachedRun(
     errorMessage: summary.errorMessage,
     abortReason: summary.abortReason,
     schemaValidation: summary.schemaValidation,
+    structuredOutput: summary.structuredOutput,
   });
 }
 
@@ -955,6 +956,7 @@ async function driveDurableRun(
     errorMessage: summary.errorMessage,
     abortReason: summary.abortReason,
     schemaValidation: summary.schemaValidation,
+    structuredOutput: summary.structuredOutput,
     costEstimation: options.costEstimation,
   });
 }
@@ -1025,6 +1027,13 @@ interface FinalizeArgs {
    * loop. Its serialized error message is rebuilt into an `Error` for parity.
    */
   schemaValidation?: { success: boolean; error?: string };
+  /**
+   * The `responseSchema`-validated structured output carried out of the
+   * workflow, mirroring `RunResult.structuredOutput` on the in-memory path.
+   * Unlike `schemaValidation.error`, this crosses the checkpoint as plain
+   * (already-JSON) data, so no reconstruction is needed here.
+   */
+  structuredOutput?: unknown;
   /** Forwarded from `RunOptions.costEstimation` so a durable run's terminal
    * `RunResult.costEstimate` matches the in-memory loop's. */
   costEstimation?: RunOptions['costEstimation'];
@@ -1088,6 +1097,7 @@ function finalizeRunResult(args: FinalizeArgs): RunResult {
     finishReason === 'stop-condition' ? 'stop-condition' : 'maximum-steps',
     runStartTime,
     schemaValidation,
+    args.structuredOutput,
     args.costEstimation,
   );
 }

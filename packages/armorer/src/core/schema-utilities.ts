@@ -3,9 +3,43 @@
  * These utilities intentionally work with untyped Zod internals (_def, shape, etc.)
  * which requires permissive type handling.
  */
-import type { z } from 'zod';
+import type { StandardSchemaV1 } from 'interoperability';
+import { z } from 'zod';
 
 export type ToolSchema = z.ZodTypeAny;
+
+/**
+ * Wraps a non-Zod Standard Schema validator (Valibot, ArkType, ...) as a
+ * `z.ZodTypeAny` so it flows through the rest of the tool pipeline —
+ * execution, error classification, diagnostics — unchanged. Implemented as a
+ * `transform` (not a `refine`) so the validator's OUTPUT (post-coercion,
+ * post-default) reaches `execute()`, not the raw input.
+ *
+ * Validation failures raise a real `z.ZodError` (via `ctx.addIssue`), so
+ * `error instanceof z.ZodError` still holds for callers that branch on it.
+ * Because the check is async, callers MUST use `parseAsync`/`safeParseAsync`
+ * on the wrapped schema — `parse`/`safeParse` throw for async refinements.
+ *
+ * JSON Schema generation is NOT covered here: `z.toJSONSchema` cannot
+ * represent an arbitrary external validator, so callers must supply a JSON
+ * Schema alongside (see `CreateToolOptions.inputSchema`).
+ */
+export function wrapStandardSchema(schema: StandardSchemaV1): z.ZodTypeAny {
+  return z.any().transform(async (value, ctx) => {
+    const result = await schema['~standard'].validate(value);
+    if (result.issues) {
+      for (const issue of result.issues) {
+        ctx.addIssue({
+          code: 'custom',
+          message: issue.message,
+          path: issue.path?.map((segment) => (typeof segment === 'object' ? segment.key : segment)),
+        });
+      }
+      return z.NEVER;
+    }
+    return result.value;
+  });
+}
 
 type ZodShape = Record<string, unknown>;
 

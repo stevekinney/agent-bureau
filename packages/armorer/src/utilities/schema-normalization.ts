@@ -1,6 +1,7 @@
+import { isStandardSchema } from 'interoperability';
 import { z } from 'zod';
 
-import { isZodObjectSchema, isZodSchema } from '../core/schema-utilities';
+import { isZodObjectSchema, isZodSchema, wrapStandardSchema } from '../core/schema-utilities';
 import type { ToolParametersSchema } from '../is-tool';
 
 /**
@@ -9,6 +10,9 @@ import type { ToolParametersSchema } from '../is-tool';
  * - A ZodObject is passed through
  * - A plain object of Zod schemas is wrapped with `z.object()`
  * - A non-object Zod schema (e.g. `z.string()`) throws
+ * - A non-Zod Standard Schema validator (Valibot, ArkType, ...) is wrapped via
+ *   {@link wrapStandardSchema} so it flows through the same `z.ZodTypeAny`
+ *   pipeline as every other tool schema
  * - Anything else throws
  */
 export function normalizeSchema(schema: unknown): ToolParametersSchema {
@@ -20,6 +24,9 @@ export function normalizeSchema(schema: unknown): ToolParametersSchema {
   }
   if (isZodSchema(schema)) {
     throw new Error('Tool input must be a Zod object schema');
+  }
+  if (isStandardSchema(schema)) {
+    return wrapStandardSchema(schema);
   }
   if (schema && typeof schema === 'object') {
     return z.object(schema as Record<string, z.ZodTypeAny>);

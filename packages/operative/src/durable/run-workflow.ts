@@ -178,6 +178,19 @@ export interface AgentRunWorkflowResult {
    */
   schemaValidation?: { success: boolean; error?: string };
   /**
+   * The `responseSchema`-validated structured output, when the run stopped
+   * after a `responseSchema` was applied AND validation succeeded. Mirrors
+   * `RunResult.structuredOutput` on the in-memory path. Unlike
+   * `schemaValidation.error`, this is already plain (JSON-parsed and
+   * validated) data, so it crosses the checkpoint boundary unchanged — no
+   * serialize/reconstruct step is needed the way `schemaValidation.error`
+   * needs one. (A Standard Schema validator whose `transform` produces a
+   * non-JSON value, e.g. a `Date`, would NOT survive the checkpoint
+   * faithfully — this is a durable-path constraint on schema authors, not a
+   * bug: only JSON-serializable structured output round-trips.)
+   */
+  structuredOutput?: unknown;
+  /**
    * The note from a `scheduleWakeup` call, when the agent self-scheduled a
    * wakeup during this run (D6 — self-scheduling tools). Carries the note the
    * agent attached to the wakeup request so the next run knows why it resumed.
@@ -361,6 +374,7 @@ export function createRunWorkflow(
         let errorMessage: string | undefined;
         let abortReason: string | undefined;
         let schemaValidation: { success: boolean; error?: string } | undefined;
+        let structuredOutput: unknown;
         // True when a terminal outcome (stop/abort/error) broke the loop early.
         // False means the loop exhausted `maximumSteps` naturally — the only case
         // where `onMaximumSteps` should run, mirroring `executeLoop` exactly.
@@ -484,6 +498,7 @@ export function createRunWorkflow(
                         : {}),
                     }
                   : undefined,
+              structuredOutput: outcome.kind === 'stop' ? outcome.structuredOutput : undefined,
               record,
               conversationSnapshot: conversation.snapshot(),
               nextAccumulators: {
@@ -549,6 +564,7 @@ export function createRunWorkflow(
           if (outcome.kind === 'stop') {
             finishReason = stepResult.stopFinishReason ?? 'stop-condition';
             schemaValidation = stepResult.schemaValidation;
+            structuredOutput = stepResult.structuredOutput;
             stoppedEarly = true;
             break;
           }
@@ -666,6 +682,7 @@ export function createRunWorkflow(
           ...(errorMessage !== undefined ? { errorMessage } : {}),
           ...(abortReason !== undefined ? { abortReason } : {}),
           ...(schemaValidation !== undefined ? { schemaValidation } : {}),
+          ...(structuredOutput !== undefined ? { structuredOutput } : {}),
           // Only include park metadata on non-failure outcomes: a failed/aborted run
           // never actually parks (the park block above is gated on !isFailureOutcome),
           // so surfacing stale park state in the result would mislead callers.

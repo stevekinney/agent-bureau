@@ -1,11 +1,18 @@
-import { createIncrementalHash, sha256HexSync } from 'interoperability';
+import type { StandardSchemaV1 } from 'interoperability';
+import { createIncrementalHash, isStandardSchema, sha256HexSync } from 'interoperability';
 import { CompletableEventTarget } from 'lifecycle';
 import { z } from 'zod';
 
 import type { ToolError, ToolErrorCategory } from './core/errors';
 import { buildTagsFromRisk, type ToolRisk } from './core/risk';
+import { isZodSchema } from './core/schema-utilities';
 import { serializeToolDefinition } from './core/serialization';
-import { assertJsonValue, type JsonValue, stableStringifyJson } from './core/serialization/json';
+import {
+  assertJsonValue,
+  type JsonObject,
+  type JsonValue,
+  stableStringifyJson,
+} from './core/serialization/json';
 import { assertKebabCaseTag, type NormalizeTagsOption, uniqTags } from './core/tag-utilities';
 import type {
   AnyToolDefinition,
@@ -62,7 +69,6 @@ import type {
 import { isAsyncIterable, isPromise, isTestRuntime } from './type-guards';
 import type { ToolAction, ToolCall, ToolExecutionResult } from './types';
 import { createConcurrencyLimiter, normalizeConcurrency } from './utilities/concurrency';
-import { normalizeSchema } from './utilities/schema-normalization';
 
 type InternalToolExecuteOptions = ToolExecuteOptions & {
   [approvalResumeSymbol]?: ApprovalResumeState;
@@ -119,7 +125,21 @@ export interface CreateToolOptions<
   risk?: ToolRisk;
   lifecycle?: ToolLifecycle;
   availability?: ToolAvailabilityHook;
-  input?: z.ZodType<TInput> | z.ZodRawShape | z.ZodTypeAny;
+  /**
+   * The tool's input schema. Accepts:
+   * - A Zod schema (object schema, or a `z.ZodRawShape` wrapped with `z.object()`) — the
+   *   documented default. JSON Schema for provider tool definitions is derived automatically
+   *   via `z.toJSONSchema`.
+   * - Any other Standard Schema-conforming validator (Valibot, ArkType, ...) — validated via
+   *   its `~standard.validate()`. Since these have no general JSON Schema export, `inputSchema`
+   *   MUST also be supplied so the tool can still be serialized for providers.
+   */
+  input?: z.ZodType<TInput> | z.ZodRawShape | z.ZodTypeAny | StandardSchemaV1;
+  /**
+   * JSON Schema for `input`, required when `input` is a non-Zod Standard Schema validator.
+   * Ignored (Zod's own JSON Schema generation is used instead) when `input` is a Zod schema.
+   */
+  inputSchema?: JsonObject;
   execute:
     | ((params: TInput, context: TContext) => Promise<TReturn>)
     | Promise<(params: TInput, context: TContext) => Promise<TReturn>>;
@@ -441,6 +461,7 @@ export function createTool<
     lifecycle,
     availability,
     input: toolInput,
+    inputSchema: toolInputJsonSchema,
     execute: fn,
     timeout,
     tags,
@@ -453,8 +474,26 @@ export function createTool<
     idempotencyKey,
   } = options as CreateToolOptions<TInput, TOutput, E, Tags, M, TContext, TReturn>;
 
+  // A non-Zod Standard Schema validator (Valibot, ArkType, ...) has no general
+  // JSON Schema export, so the tool cannot be serialized for a provider
+  // without a caller-supplied `inputSchema`. Fail fast at creation time rather
+  // than deferring to a throw the first time the tool is serialized.
+  if (toolInput !== undefined && !isZodSchema(toolInput) && isStandardSchema(toolInput)) {
+    if (toolInputJsonSchema === undefined) {
+      throw new Error(
+        `Tool "${name}": a non-Zod Standard Schema \`input\` requires an explicit \`inputSchema\` ` +
+          '(JSON Schema) so the tool can be serialized for providers.',
+      );
+    }
+  }
+
   const customMetadata = resolvedMetadata ?? (undefined as M);
-  const normalizedInput = normalizeSchema(toolInput);
+  // NOTE: `defineTool` below calls `normalizeSchema(toolInput)` itself — do
+  // not pre-normalize here too. `normalizeSchema` is idempotent for a plain
+  // Zod object schema (a passthrough), but NOT for a wrapped Standard Schema
+  // validator (`wrapStandardSchema` produces a `z.any().transform(...)`
+  // pipe, which is not a Zod OBJECT schema); re-running it on its own output
+  // would incorrectly reject that pipe as "not a Zod object schema".
 
   const emitter = new CompletableEventTarget<ToolEventMap>();
 
@@ -506,7 +545,8 @@ export function createTool<
     ...(resolvedRisk !== undefined ? { risk: resolvedRisk } : {}),
     ...(lifecycle !== undefined ? { lifecycle } : {}),
     ...(availability !== undefined ? { availability } : {}),
-    input: normalizedInput,
+    input: toolInput,
+    ...(toolInputJsonSchema !== undefined ? { inputJsonSchema: toolInputJsonSchema } : {}),
   }) as AnyToolDefinition;
 
   const inputSchema = definition.input as unknown as ToolParametersSchema;
@@ -697,7 +737,10 @@ export function createTool<
       if (options.signal?.aborted) {
         return handleCancellation(options.signal.reason);
       }
-      const parsed = schema.parse(toolCall.arguments) as TInput;
+      // `parseAsync` (not `parse`) because a wrapped non-Zod Standard Schema
+      // validator (see `wrapStandardSchema`) requires async parsing; it works
+      // identically to `parse` for a plain Zod schema.
+      const parsed = (await schema.parseAsync(toolCall.arguments)) as TInput;
       const typedToolCall = { ...toolCall, arguments: parsed } as ToolCallWithArguments;
       const parsedDetail = { toolCall: typedToolCall, configuration };
       emit('validate-success', { ...parsedDetail, params: toolCall.arguments, parsed });

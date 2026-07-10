@@ -44,7 +44,9 @@ export function serializeToolDefinition(
     ? (sortJsonValue(definition.lifecycle) as JsonObject)
     : undefined;
 
-  const input = toJsonSchema(definition.input);
+  const input = definition.inputJsonSchema
+    ? (sortJsonValue(definition.inputJsonSchema) as JsonSchema)
+    : toJsonSchema(definition.input);
 
   return {
     schemaVersion: '2020-12',

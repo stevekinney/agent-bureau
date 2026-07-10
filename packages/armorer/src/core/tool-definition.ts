@@ -1,3 +1,4 @@
+import type { StandardSchemaV1 } from 'interoperability';
 import { z } from 'zod';
 
 import { normalizeSchema } from '../utilities/schema-normalization';
@@ -36,6 +37,13 @@ export type ToolDefinition<TInput extends object = Record<string, unknown>, TOut
   lifecycle?: ToolLifecycle | undefined;
   availability?: ToolAvailabilityHook | undefined;
   input: z.ZodTypeAny;
+  /**
+   * Caller-supplied JSON Schema for `input`, required when `input` is a
+   * non-Zod Standard Schema validator (Zod's own JSON Schema generation only
+   * covers Zod schemas — see `CreateToolOptions.inputSchema`). When present,
+   * serialization prefers this over deriving one from `input`.
+   */
+  inputJsonSchema?: JsonObject | undefined;
   /** @internal Type marker for inference. */
   __types?: { input: TInput; output: TOutput } | undefined;
 };
@@ -57,7 +65,8 @@ export type DefineToolOptions<
   risk?: ToolRisk;
   lifecycle?: ToolLifecycle;
   availability?: ToolAvailabilityHook;
-  input?: z.ZodType<TInput> | z.ZodRawShape | z.ZodTypeAny;
+  input?: z.ZodType<TInput> | z.ZodRawShape | z.ZodTypeAny | StandardSchemaV1;
+  inputJsonSchema?: JsonObject;
 };
 
 export function defineTool<
@@ -78,6 +87,7 @@ export function defineTool<
     lifecycle,
     availability,
     input,
+    inputJsonSchema,
   } = options;
 
   const normalizedIdentity = normalizeIdentity({
@@ -107,6 +117,7 @@ export function defineTool<
     ...(lifecycle !== undefined ? { lifecycle } : {}),
     ...(availability !== undefined ? { availability } : {}),
     input: normalizedInput as z.ZodType<TInput>,
+    ...(inputJsonSchema !== undefined ? { inputJsonSchema } : {}),
   };
 }
 

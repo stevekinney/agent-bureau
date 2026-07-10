@@ -15,7 +15,7 @@ import {
   runStep,
   type StepDeps,
 } from './run-step';
-import { zodToJsonSchema } from './structured-output/zod-to-json-schema';
+import { resolveResponseFormat } from './structured-output/response-schema';
 import type { RunOptions, RunResult, StopCondition } from './types';
 
 export type { EventDispatcher } from './run-step';
@@ -27,13 +27,7 @@ export type { EventDispatcher } from './run-step';
  * never fork the step implementation.
  */
 export function buildStepDeps(options: RunOptions): StepDeps {
-  const responseFormat = options.responseSchema
-    ? ({
-        type: 'json_schema' as const,
-        schema: zodToJsonSchema(options.responseSchema),
-        name: 'response',
-      } as const)
-    : undefined;
+  const responseFormat = resolveResponseFormat(options.responseSchema, options.responseJsonSchema);
 
   const stopConditions: StopCondition[] = !options.stopWhen
     ? []
@@ -144,6 +138,7 @@ export async function executeLoop(
         outcome.finishReason,
         runStartTime,
         outcome.schemaValidation,
+        outcome.structuredOutput,
         costEstimation,
       );
     }
@@ -174,6 +169,7 @@ export async function executeLoop(
     emitter,
     'maximum-steps',
     runStartTime,
+    undefined,
     undefined,
     costEstimation,
   );

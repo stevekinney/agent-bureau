@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'bun:test';
+import type { StandardSchemaV1 } from 'interoperability';
 import { z } from 'zod';
 
 import {
@@ -8,7 +9,27 @@ import {
   isZodSchema,
   schemasLooselyMatch,
   unwrapSchema,
+  wrapStandardSchema,
 } from '../src/core/schema-utilities';
+
+/** A minimal hand-rolled Standard Schema V1 validator that trims and uppercases. */
+function shoutingStringSchema(): StandardSchemaV1<unknown, string> {
+  return {
+    '~standard': {
+      version: 1,
+      vendor: 'test',
+      validate(value: unknown) {
+        if (typeof value !== 'string' || value.trim().length === 0) {
+          return { issues: [{ message: 'expected a non-empty string', path: ['value'] }] };
+        }
+        // A real transform: the OUTPUT differs from the raw input, so a
+        // refine-based (rather than transform-based) wrapper would silently
+        // drop this and leak the raw input through to `execute()`.
+        return { value: value.trim().toUpperCase() };
+      },
+    },
+  };
+}
 
 describe('schema utilities', () => {
   it('derives shapes from direct shape functions and objects', () => {
@@ -82,5 +103,31 @@ describe('schema utilities', () => {
   it('identifies Zod object schemas by shape detection', () => {
     expect(isZodObjectSchema(z.object({ foo: z.string() }))).toBe(true);
     expect(isZodObjectSchema(z.number())).toBe(false);
+  });
+
+  describe('wrapStandardSchema', () => {
+    it('produces a ZodTypeAny whose parseAsync returns the VALIDATOR output, not the raw input', async () => {
+      const wrapped = wrapStandardSchema(shoutingStringSchema());
+      const result = await wrapped.parseAsync('  hello  ');
+      // If wrapStandardSchema used `refine` (boolean gate) instead of
+      // `transform`, this would be the untouched raw input ('  hello  ').
+      expect(result).toBe('HELLO');
+    });
+
+    it('raises a real z.ZodError on validation failure, carrying the issue message', async () => {
+      const wrapped = wrapStandardSchema(shoutingStringSchema());
+      try {
+        await wrapped.parseAsync('   ');
+        throw new Error('expected parseAsync to reject');
+      } catch (error) {
+        expect(error).toBeInstanceOf(z.ZodError);
+        expect((error as z.ZodError).issues[0]?.message).toBe('expected a non-empty string');
+      }
+    });
+
+    it('throws synchronously via `parse` because the wrapped check is async', () => {
+      const wrapped = wrapStandardSchema(shoutingStringSchema());
+      expect(() => wrapped.parse('hello')).toThrow();
+    });
   });
 });

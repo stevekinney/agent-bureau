@@ -1,7 +1,24 @@
 import { describe, expect, it } from 'bun:test';
+import type { StandardSchemaV1 } from 'interoperability';
 import { z } from 'zod';
 
 import { normalizeSchema } from '../src/utilities/schema-normalization';
+
+/** A minimal hand-rolled Standard Schema V1 validator — no vendor dependency required. */
+function nonEmptyStringSchema(): StandardSchemaV1<unknown, string> {
+  return {
+    '~standard': {
+      version: 1,
+      vendor: 'test',
+      validate(value: unknown) {
+        if (typeof value === 'string' && value.length > 0) {
+          return { value };
+        }
+        return { issues: [{ message: 'expected a non-empty string' }] };
+      },
+    },
+  };
+}
 
 describe('normalizeSchema', () => {
   it('returns z.object({}) for undefined input', () => {
@@ -38,5 +55,16 @@ describe('normalizeSchema', () => {
     expect(() => normalizeSchema(42)).toThrow(
       'Tool input must be a Zod object schema or an object of Zod schemas',
     );
+  });
+
+  it('wraps a non-Zod Standard Schema validator into a ZodTypeAny', async () => {
+    const result = normalizeSchema(nonEmptyStringSchema());
+    await expect(result.parseAsync('ok')).resolves.toBe('ok');
+    try {
+      await result.parseAsync('');
+      throw new Error('expected rejection');
+    } catch (error) {
+      expect(error).toBeInstanceOf(z.ZodError);
+    }
   });
 });
