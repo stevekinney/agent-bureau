@@ -20,14 +20,18 @@ export interface FetchFromRegistryOptions {
    * Expected SHA-256 hex digests of the raw `SKILL.md` content, keyed by skill name.
    * When a name has a pinned hash, the fetched content's digest must match it exactly —
    * a mismatch is always rejected, regardless of {@link FetchFromRegistryOptions.allowUnverified}.
+   * A matching pinned hash is sufficient proof of integrity on its own: the signature
+   * ({@link FetchFromRegistryOptions.publicKey}) is not also fetched or required for
+   * that skill, so a flaky `.sig` sidecar can't reject already-verified content.
    */
   expectedHashes?: Record<string, string>;
   /**
    * SPKI PEM-encoded Ed25519 public key used to verify detached signatures.
-   * When set, each skill's signature is fetched from `{baseUrl}/{name}/SKILL.md.sig`
-   * (a base64-encoded detached Ed25519 signature over the raw `SKILL.md` bytes) and
-   * verified against this key. A present-but-invalid signature is always rejected,
-   * regardless of {@link FetchFromRegistryOptions.allowUnverified}.
+   * For any skill without a matching entry in {@link FetchFromRegistryOptions.expectedHashes},
+   * the signature is fetched from `{baseUrl}/{name}/SKILL.md.sig` (a base64-encoded
+   * detached Ed25519 signature over the raw `SKILL.md` bytes) and verified against this
+   * key. A present-but-invalid signature is always rejected, regardless of
+   * {@link FetchFromRegistryOptions.allowUnverified}.
    */
   publicKey?: string;
   /**
@@ -53,11 +57,12 @@ export interface FetchResult {
  *
  * Signing/verification convention:
  * - Content hash pinning: callers may pass `expectedHashes[name]`, a SHA-256 hex
- *   digest of the raw `SKILL.md` bytes. A mismatch is always rejected.
- * - Detached signatures: when `publicKey` (SPKI PEM, Ed25519) is configured, the
- *   registry is expected to also serve a base64-encoded detached signature at
- *   `{baseUrl}/{name}/SKILL.md.sig`, computed over the raw `SKILL.md` bytes. An
- *   invalid signature is always rejected.
+ *   digest of the raw `SKILL.md` bytes. A mismatch is always rejected. A match is
+ *   sufficient on its own — the signature is not also fetched or required.
+ * - Detached signatures: for a skill with no pinned hash, when `publicKey` (SPKI PEM,
+ *   Ed25519) is configured, the registry is expected to also serve a base64-encoded
+ *   detached signature at `{baseUrl}/{name}/SKILL.md.sig`, computed over the raw
+ *   `SKILL.md` bytes. An invalid signature is always rejected.
  * - Unverified content — no matching hash pin and no valid signature — is rejected
  *   by default. Pass `allowUnverified: true` to explicitly opt out.
  */
@@ -68,13 +73,16 @@ async function verifyContent(
   fetchSignature: () => Promise<string | undefined>,
 ): Promise<void> {
   const expectedHash = options.expectedHashes?.[name];
-  const hashPinned = expectedHash !== undefined;
 
-  if (hashPinned) {
+  if (expectedHash !== undefined) {
     const actualHash = sha256HexSync(content);
     if (!timingSafeEqualHex(actualHash, expectedHash)) {
       throw new Error(`Content hash mismatch for skill "${name}": tampered or corrupted content`);
     }
+    // The pinned hash alone proves integrity — no need to also fetch and verify a
+    // signature, and no need to let a flaky/unavailable .sig sidecar reject content
+    // that already passed a stronger, caller-supplied check.
+    return;
   }
 
   let signatureVerified = false;
@@ -88,7 +96,7 @@ async function verifyContent(
     }
   }
 
-  if (!hashPinned && !signatureVerified && !options.allowUnverified) {
+  if (!signatureVerified && !options.allowUnverified) {
     throw new Error(
       `Skill "${name}" has no content hash pin or valid signature; refusing unverified content (set allowUnverified to opt out)`,
     );

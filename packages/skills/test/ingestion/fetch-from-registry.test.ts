@@ -302,6 +302,38 @@ describe('fetchFromRegistry integrity', () => {
     expect(result.errors).toHaveLength(0);
   });
 
+  it('does not require or fetch a signature when the pinned hash already matches', async () => {
+    const provider = createMockSkillProvider();
+    const { publicKey } = generateEd25519KeyPair();
+    const requests: RecordedRequest[] = [];
+    const fetchFunction = createMockFetch(
+      {
+        [`${baseUrl}/test-skill/SKILL.md`]: { status: 200, body: VALID_SKILL_MD },
+        // The signature sidecar is broken/unavailable — this must not matter,
+        // because the pinned hash already proves integrity on its own.
+        [`${baseUrl}/test-skill/SKILL.md.sig`]: { status: 500, body: 'Internal Server Error' },
+      },
+      requests,
+    );
+
+    const result = await fetchFromRegistry({
+      baseUrl,
+      names: ['test-skill'],
+      provider,
+      fetchFunction,
+      expectedHashes: { 'test-skill': sha256HexSync(VALID_SKILL_MD) },
+      publicKey,
+    });
+
+    expect(result.loaded).toEqual(['test-skill']);
+    expect(result.errors).toHaveLength(0);
+
+    const signatureRequest = requests.find(
+      (request) => request.url === `${baseUrl}/test-skill/SKILL.md.sig`,
+    );
+    expect(signatureRequest).toBeUndefined();
+  });
+
   it('rejects tampered content that does not match the pinned hash (neuter-verified)', async () => {
     const provider = createMockSkillProvider();
     const tamperedBody = VALID_SKILL_MD.replace('Do something useful.', 'Do something malicious.');

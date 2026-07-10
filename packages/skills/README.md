@@ -139,12 +139,17 @@ refused unless you explicitly opt out.
   content's SHA-256 hex digest (computed with `sha256HexSync` from `interoperability` — the
   same hasher the self-improvement proposal-rejection flow uses, not a duplicate) must match
   exactly. A mismatch is **always** rejected, even if `allowUnverified` is set — that's
-  tamper evidence, not merely "no verification configured."
-- **Detached signatures**: pass `publicKey`, an SPKI PEM-encoded Ed25519 public key. The
-  registry must also serve a base64-encoded detached Ed25519 signature over the raw
-  `SKILL.md` bytes at `{baseUrl}/{name}/SKILL.md.sig`. Verification uses `node:crypto`'s
-  `verify(null, content, publicKey, signature)` (the `null` algorithm is required for
-  Ed25519). An invalid signature is **always** rejected, same as a hash mismatch.
+  tamper evidence, not merely "no verification configured." A matching pin is sufficient
+  proof of integrity on its own: the signature is not also fetched or required for that
+  skill, so an unrelated `.sig` outage can't reject already hash-verified content.
+- **Detached signatures**: pass `publicKey`, an SPKI PEM-encoded Ed25519 public key. For any
+  skill with no pinned hash, the registry must also serve a base64-encoded detached Ed25519
+  signature over the raw `SKILL.md` bytes at `{baseUrl}/{name}/SKILL.md.sig`. Verification
+  uses `node:crypto`'s `verify(null, content, publicKey, signature)` (the `null` algorithm is
+  required for Ed25519). An invalid signature is **always** rejected, same as a hash
+  mismatch — and a non-404 error fetching the signature (401/403/500/...) is treated as that
+  same kind of failure, not as "no signature," so it fails closed rather than falling through
+  to unverified.
 - **`allowUnverified`**: opts out of the default-reject policy only for the "nothing to
   verify against" case — no matching hash pin and no signature configured/served. It never
   rescues a hash mismatch or a failed signature check.
