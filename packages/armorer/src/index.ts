@@ -5,13 +5,19 @@ export type {
   CapabilityApprovalContext,
   CapabilityApprovalResult,
   CapabilityTier,
+  HeadlessPermissionPolicyConfiguration,
+  HeadlessPermissionResult,
+  PermissionGate,
+  PermissionGateDecision,
 } from './approval-policy';
 export {
   approvalStatusToDecision,
   combineApprovalStatuses,
   createApprovalPolicyHooks,
+  createHeadlessPermissionPolicyHooks,
   evaluateApprovalStatus,
   evaluateCapabilityApproval,
+  evaluateHeadlessPermission,
   resolveApprovalMode,
   resolveCapabilityTier,
 } from './approval-policy';

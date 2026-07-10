@@ -1,5 +1,5 @@
-import type { Tool } from 'armorer';
-import { createToolbox } from 'armorer';
+import type { HeadlessPermissionPolicyConfiguration, Tool } from 'armorer';
+import { createHeadlessPermissionPolicyHooks, createToolbox } from 'armorer';
 import { Conversation } from 'conversationalist';
 
 import type { AgentRun } from './agent-run';
@@ -61,6 +61,18 @@ export interface CreateAgentOptions {
 
   /** Context window management (compaction). */
   contextManagement?: ContextManagementOptions;
+
+  /**
+   * Headless deny-by-default permission mode (AB-94, armorer's
+   * `createHeadlessPermissionPolicyHooks`). When set, every tool call is
+   * checked against an explicit allowlist/denylist and an optional
+   * capability-tier policy and synchronous per-call gate — anything unlisted
+   * or that would otherwise require human approval is denied outright (this
+   * run never parks on a human). A denial feeds the model a tool-error
+   * result and the loop continues; it never throws and never terminates the
+   * run.
+   */
+  permissions?: HeadlessPermissionPolicyConfiguration;
 }
 
 // ---------------------------------------------------------------------------
@@ -113,7 +125,7 @@ export type { AgentRun };
  * ```
  */
 export function createAgent(options: CreateAgentOptions): StandaloneAgent {
-  const { generate, tools = {}, instructions, ...rest } = options;
+  const { generate, tools = {}, instructions, permissions, ...rest } = options;
 
   // Pre-compute tool entries once (pure transform — no per-run state).
   // The map key is canonical — override each tool's inner `.name` with the
@@ -131,7 +143,10 @@ export function createAgent(options: CreateAgentOptions): StandaloneAgent {
       // state (loop detection, budget counters). A shared toolbox causes
       // concurrent runs to cross-fire each other's tool events and share
       // budget limits. The tool entries are pure config and are safe to share.
-      const toolbox = createToolbox(toolEntries);
+      const toolbox = createToolbox(
+        toolEntries,
+        permissions ? { policy: createHeadlessPermissionPolicyHooks(permissions) } : undefined,
+      );
 
       // Build a fresh Conversation for each run (ephemeral — no session state).
       const conversation = new Conversation();
