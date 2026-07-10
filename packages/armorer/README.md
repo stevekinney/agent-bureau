@@ -451,6 +451,29 @@ await tracer.startActiveSpan('temporal.activity', async (activitySpan) => {
 
 Pass `parentContext` to nest tool spans under an existing OpenTelemetry context. Pass `links` to attach span links when the orchestrator prefers linked traces over a direct parent-child relationship.
 
+### OTel GenAI semantic conventions
+
+The tool span (`execute_tool {name}`, kind `INTERNAL`) follows the OTel GenAI
+["Execute tool" span](https://github.com/open-telemetry/semantic-conventions-genai/blob/63f8200eee093730ce845d26ce2aafb621b0807e/docs/gen-ai/gen-ai-agent-spans.md#execute-tool-span)
+convention. See the pinned-version note and full mapping table in
+[`operative`'s README](../operative/README.md#otel-genai-semantic-conventions) —
+armorer's tool span is one row of that table.
+
+| Attribute                    | Source                                                            |
+| ---------------------------- | ----------------------------------------------------------------- |
+| `gen_ai.operation.name`      | Always `execute_tool`                                             |
+| `gen_ai.tool.name`           | `tool.identity.name`                                              |
+| `gen_ai.tool.call.id`        | `call.id`                                                         |
+| `gen_ai.tool.call.arguments` | `call.arguments`, stringified                                     |
+| `gen_ai.tool.call.result`    | Result on success, stringified                                    |
+| `gen_ai.tool.description`    | `tool.description`, when set                                      |
+| `error.type`                 | `errorCategory` (or `status`) when the call errored or was denied |
+
+Non-standard fields (duration, digests, cancellation reason, internal
+status) are namespaced under `armorer.tool.*` rather than `gen_ai.*`, since
+the conventions do not define them and squatting the reserved `gen_ai.*`
+vocabulary would confuse a generic OTel GenAI backend.
+
 ## Middleware
 
 Batteries-included middleware for production needs.

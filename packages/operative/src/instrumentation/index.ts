@@ -2,6 +2,7 @@ import {
   type Context,
   context,
   type Span,
+  SpanKind,
   SpanStatusCode,
   trace,
   type Tracer,
@@ -14,6 +15,14 @@ export type InstrumentationOptions = {
   tracer?: Tracer;
   tracerName?: string;
   tracerVersion?: string;
+  /**
+   * Human-readable agent name. When supplied, the run span is named
+   * `invoke_agent {agentName}` and carries `gen_ai.agent.name`, matching
+   * the OTel GenAI "Invoke agent (internal)" span convention. Omitted spans
+   * fall back to the bare `invoke_agent` name the conventions specify for
+   * unnamed agents.
+   */
+  agentName?: string;
 };
 
 type InstrumentableActiveRun = {
@@ -23,6 +32,13 @@ type InstrumentableActiveRun = {
 /**
  * Subscribes to events on an ActiveRun and creates OpenTelemetry spans
  * that mirror the agent loop lifecycle.
+ *
+ * Span shape follows the OTel GenAI semantic conventions where a direct
+ * mapping exists (the run span is `invoke_agent`); spans with no spec
+ * equivalent (step, generate, tool batch) are kept as documented,
+ * non-normative extensions. See the mapping table in the package README
+ * (`operative/instrumentation` section) for the full rationale and the
+ * pinned conventions version.
  *
  * Returns an unsubscribe function that removes all listeners and ends
  * any spans still open.
@@ -48,9 +64,14 @@ export function instrument(
 
   function setUsageAttributes(span: Span, usage: TokenUsage): void {
     span.setAttributes({
-      'operative.usage.prompt_tokens': usage.prompt,
-      'operative.usage.completion_tokens': usage.completion,
-      'operative.usage.total_tokens': usage.total,
+      'gen_ai.usage.input_tokens': usage.prompt,
+      'gen_ai.usage.output_tokens': usage.completion,
+      ...(usage.cacheCreationTokens !== undefined && {
+        'gen_ai.usage.cache_creation.input_tokens': usage.cacheCreationTokens,
+      }),
+      ...(usage.cacheReadTokens !== undefined && {
+        'gen_ai.usage.cache_read.input_tokens': usage.cacheReadTokens,
+      }),
     });
   }
 
@@ -77,7 +98,14 @@ export function instrument(
   activeRun.addEventListener(
     'run.started',
     () => {
-      runSpan = tracer.startSpan('operative.run');
+      const spanName = options.agentName ? `invoke_agent ${options.agentName}` : 'invoke_agent';
+      runSpan = tracer.startSpan(spanName, {
+        kind: SpanKind.INTERNAL,
+        attributes: {
+          'gen_ai.operation.name': 'invoke_agent',
+          ...(options.agentName !== undefined && { 'gen_ai.agent.name': options.agentName }),
+        },
+      });
       runContext = trace.setSpan(context.active(), runSpan);
     },
     { signal },
@@ -87,7 +115,15 @@ export function instrument(
     'step.started',
     (event) => {
       const { step } = event;
-      const stepSpan = tracer.startSpan(`operative.step.${step}`, {}, runContext);
+      // "step" has no OTel GenAI equivalent — it is operative's own loop
+      // iteration boundary, kept as a documented, non-normative extension.
+      // The span name is intentionally stable (not `step {n}`) to avoid
+      // unbounded cardinality; the step index lives in an attribute.
+      const stepSpan = tracer.startSpan(
+        'step',
+        { attributes: { 'operative.step.index': step } },
+        runContext,
+      );
       stepSpans.set(step, stepSpan);
       const stepContext = trace.setSpan(context.active(), stepSpan);
       stepContexts.set(step, stepContext);
@@ -100,7 +136,16 @@ export function instrument(
     (event) => {
       const { step } = event;
       const stepContext = stepContexts.get(step);
-      const generateSpan = tracer.startSpan('operative.generate', {}, stepContext);
+      // This span observes the agent loop's call boundary around the
+      // user-supplied GenerateFunction — it does not know provider/model
+      // details. It is intentionally NOT labeled with `gen_ai.operation.name`
+      // or a `chat`-style span name: the canonical, spec-compliant chat span
+      // (with model, provider, and gen_ai.usage.*) comes from
+      // `operative/providers/instrumentation`, wrapped around the same
+      // GenerateFunction. Usage here is namespaced under `operative.*` so
+      // the two instrumentation points never double-report gen_ai.usage.*
+      // for the same call when both are wired up.
+      const generateSpan = tracer.startSpan('generate', {}, stepContext);
       generateSpans.set(step, generateSpan);
     },
     { signal },
@@ -113,7 +158,11 @@ export function instrument(
       const generateSpan = generateSpans.get(step);
       if (generateSpan?.isRecording()) {
         if (response.usage) {
-          setUsageAttributes(generateSpan, response.usage);
+          generateSpan.setAttributes({
+            'operative.usage.prompt_tokens': response.usage.prompt,
+            'operative.usage.completion_tokens': response.usage.completion,
+            'operative.usage.total_tokens': response.usage.total,
+          });
         }
         generateSpan.setAttribute('operative.generate.duration_ms', durationMilliseconds);
         generateSpan.end();
@@ -133,6 +182,7 @@ export function instrument(
           code: SpanStatusCode.ERROR,
           message: error instanceof Error ? error.message : String(error),
         });
+        generateSpan.setAttribute('error.type', error instanceof Error ? error.name : '_OTHER');
         if (error instanceof Error) {
           generateSpan.recordException(error);
         }
@@ -149,8 +199,13 @@ export function instrument(
     (event) => {
       const { step, toolCalls } = event;
       const stepContext = stepContexts.get(step);
+      // "tool_calls" has no OTel GenAI equivalent either — the conventions
+      // define a per-call `execute_tool` span (emitted by
+      // `armorer/instrumentation`), not a batch wrapper. This span groups
+      // the calls issued in a single loop step; it is a documented,
+      // non-normative extension.
       const toolsSpan = tracer.startSpan(
-        'operative.tools',
+        'tool_calls',
         {
           attributes: {
             'operative.tools.count': toolCalls.length,
@@ -196,12 +251,10 @@ export function instrument(
     'run.completed',
     (event) => {
       if (runSpan) {
+        setUsageAttributes(runSpan, event.usage);
         runSpan.setAttributes({
-          'operative.finish_reason': event.finishReason,
+          'gen_ai.response.finish_reasons': [event.finishReason],
           'operative.total_steps': event.steps.length,
-          'operative.usage.prompt_tokens': event.usage.prompt,
-          'operative.usage.completion_tokens': event.usage.completion,
-          'operative.usage.total_tokens': event.usage.total,
         });
         // Only set OK if run.error did not already set ERROR status
         if (!event.error) {
@@ -222,6 +275,7 @@ export function instrument(
           code: SpanStatusCode.ERROR,
           message: error instanceof Error ? error.message : String(error),
         });
+        runSpan.setAttribute('error.type', error instanceof Error ? error.name : '_OTHER');
         if (error instanceof Error) {
           runSpan.recordException(error);
         }

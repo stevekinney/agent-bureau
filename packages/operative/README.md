@@ -31,6 +31,8 @@ Everything provider-specific stays behind a narrow seam: the `operative/anthropi
   - [`operative/streaming` — Streaming Helpers](#operativestreaming--streaming-helpers)
   - [`operative/retry` — Retry Mutators](#operativeretry--retry-mutators)
   - [`operative/instrumentation` — OpenTelemetry](#operativeinstrumentation--opentelemetry)
+  - [`operative/providers/instrumentation` — OpenTelemetry (Inference Calls)](#operativeprovidersinstrumentation--opentelemetry-inference-calls)
+  - [OTel GenAI Semantic Conventions](#otel-genai-semantic-conventions)
   - [`operative/durable` — Durable Runs](#operativedurable--durable-runs)
   - [`operative/test` — Test Utilities](#operativetest--test-utilities)
 - [Development](#development)
@@ -1223,6 +1225,7 @@ const stopInstrumentation = instrument(activeRun, {
   // Or let instrument create a default tracer:
   // tracerName: 'operative',
   // tracerVersion: '0.0.0',
+  agentName: 'Math Tutor', // optional — names the run span `invoke_agent Math Tutor`
 });
 
 await activeRun.result;
@@ -1231,19 +1234,80 @@ stopInstrumentation(); // Remove listeners and end any open spans
 
 `instrument()` creates:
 
-- `operative.run` span for the full run lifetime.
-- `operative.step.N` spans for each step, nested under the run span.
-- `operative.generate` spans for each LLM call, nested under their step.
-- `operative.tools` spans for tool execution batches, nested under their step.
+- `invoke_agent` (or `invoke_agent {agentName}`) span for the full run lifetime — the OTel GenAI "Invoke agent (internal)" span.
+- `step` spans for each loop iteration, nested under the run span (`operative.step.index` carries the step number; the name is intentionally stable to avoid unbounded span-name cardinality).
+- `generate` spans for each LLM call observed at the loop boundary, nested under their step.
+- `tool_calls` spans grouping the tool calls issued in a step, nested under their step.
 
-Span attributes include token usage, step counts, finish reason, abort reason, generate duration in ms, and retry attempt counts.
+See [OTel GenAI Semantic Conventions](#otel-genai-semantic-conventions) below for the full attribute mapping and pinned conventions version.
 
 **Exported:**
 
-| Symbol                            | Description                                         |
-| --------------------------------- | --------------------------------------------------- |
-| `instrument(activeRun, options?)` | Attach OTel spans; returns an unsubscribe function. |
-| `InstrumentationOptions`          | `{ tracer?, tracerName?, tracerVersion? }`          |
+| Symbol                            | Description                                            |
+| --------------------------------- | ------------------------------------------------------ |
+| `instrument(activeRun, options?)` | Attach OTel spans; returns an unsubscribe function.    |
+| `InstrumentationOptions`          | `{ tracer?, tracerName?, tracerVersion?, agentName? }` |
+
+---
+
+### `operative/providers/instrumentation` — OpenTelemetry (Inference Calls)
+
+Wraps a `GenerateFunction` with a single CLIENT span per call, following the OTel GenAI "Inference" (chat) span convention. Use this when you want the canonical, spec-compliant span for the actual LLM request — with model, provider, and token usage — as opposed to the loop-level `generate` span from `operative/instrumentation`, which has no model/provider visibility.
+
+```typescript
+import { instrument } from 'operative/providers/instrumentation';
+import { createAnthropicProvider } from 'operative/anthropic';
+import { trace } from '@opentelemetry/api';
+
+const rawGenerate = createAnthropicProvider({ model: 'claude-sonnet-5' });
+const generate = instrument(rawGenerate, {
+  provider: 'anthropic',
+  model: 'claude-sonnet-5',
+  tracer: trace.getTracer('my-app', '1.0.0'),
+});
+```
+
+`instrument()` creates a `{operation} {model}` CLIENT span — `operation` is `chat` for turn-based chat completion providers (Anthropic, OpenAI, Voyage, Ollama) and `generate_content` for Gemini's native `generateContent` surface — with `gen_ai.operation.name`, `gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.request.max_tokens` (when supplied), and `gen_ai.usage.*` token attributes (including provider cache fields, when present).
+
+**Exported:**
+
+| Symbol                                  | Description                                                 |
+| --------------------------------------- | ----------------------------------------------------------- |
+| `instrument(generateFunction, options)` | Wrap a `GenerateFunction` with a CLIENT chat span.          |
+| `InstrumentationOptions`                | `{ tracer?, tracerName?, tracerVersion? }`                  |
+| `InstrumentableGenerateOptions`         | `{ provider: ProviderName, model: string, maximumTokens? }` |
+
+---
+
+### OTel GenAI Semantic Conventions
+
+Spans and attributes across `operative/instrumentation`, `operative/providers/instrumentation`, and `armorer/instrumentation` follow the [OpenTelemetry GenAI semantic conventions](https://github.com/open-telemetry/semantic-conventions-genai) wherever a direct mapping exists. The conventions are still in **Development** status (no tagged release as of this writing) and can change — this table is pinned to:
+
+- `open-telemetry/semantic-conventions-genai` commit [`63f8200`](https://github.com/open-telemetry/semantic-conventions-genai/commit/63f8200eee093730ce845d26ce2aafb621b0807e) (`docs/gen-ai/gen-ai-spans.md`, `docs/gen-ai/gen-ai-agent-spans.md`)
+- general attributes (`error.*`, `server.*`) cross-referenced against semantic-conventions [v1.43.0](https://github.com/open-telemetry/semantic-conventions/tree/v1.43.0)
+
+When the pinned spec revision changes, re-diff these two files against the new commit and update this table alongside the code.
+
+| Our span (package)                                                         | OTel GenAI span                                | Span name                         | Kind     | Key attributes                                                                                                                                                                    | Divergence                                                                                                                                                                                                                                                                                                                                   |
+| -------------------------------------------------------------------------- | ---------------------------------------------- | --------------------------------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `invoke_agent` (`operative/instrumentation`)                               | Invoke agent (internal)                        | `invoke_agent [{agentName}]`      | INTERNAL | `gen_ai.operation.name=invoke_agent`, `gen_ai.agent.name`, `gen_ai.usage.*`, `gen_ai.response.finish_reasons`                                                                     | None — full compliance. `operative.total_steps`/`operative.abort_reason` are documented custom extensions.                                                                                                                                                                                                                                   |
+| `step` (`operative/instrumentation`)                                       | _(none)_                                       | `step`                            | INTERNAL | `operative.step.index`                                                                                                                                                            | **Divergent.** No spec equivalent for a single loop iteration. Kept as a non-normative structural span; name held constant (not `step {n}`) to avoid unbounded span-name cardinality.                                                                                                                                                        |
+| `generate` (`operative/instrumentation`)                                   | _(none — see `providers/instrumentation` row)_ | `generate`                        | INTERNAL | `operative.usage.*`, `operative.generate.duration_ms`                                                                                                                             | **Divergent, intentionally.** Observes the loop's call boundary without model/provider visibility. NOT labeled `gen_ai.operation.name=chat` and usage is namespaced under `operative.*` (not `gen_ai.*`) so it never double-reports usage against the canonical chat span below when both instrumentation points are wired to the same call. |
+| `tool_calls` (`operative/instrumentation`)                                 | _(none)_                                       | `tool_calls`                      | INTERNAL | `operative.tools.count`, `operative.tools.names`, `operative.tools.results_count`                                                                                                 | **Divergent.** The spec defines a per-call `execute_tool` span (see below), not a batch wrapper for the calls issued in one step.                                                                                                                                                                                                            |
+| `{chat\|generate_content} {model}` (`operative/providers/instrumentation`) | Inference                                      | `{gen_ai.operation.name} {model}` | CLIENT   | `gen_ai.operation.name` (`chat`, or `generate_content` for Gemini), `gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.request.max_tokens`, `gen_ai.usage.*`                 | None — full compliance. This is the canonical span for a single LLM inference call.                                                                                                                                                                                                                                                          |
+| `execute_tool {name}` (`armorer/instrumentation`)                          | Execute tool                                   | `execute_tool {gen_ai.tool.name}` | INTERNAL | `gen_ai.operation.name=execute_tool`, `gen_ai.tool.name`, `gen_ai.tool.call.id`, `gen_ai.tool.call.arguments`, `gen_ai.tool.call.result`, `gen_ai.tool.description`, `error.type` | None — full compliance. `armorer.tool.*` carries duration/digest/status extensions the spec doesn't define.                                                                                                                                                                                                                                  |
+
+`gen_ai.provider.name` values are mapped from operative's internal `ProviderName` to the conventions' well-known values where one is registered:
+
+| `ProviderName` | `gen_ai.provider.name` | Note                                                                                                                                                                                                 |
+| -------------- | ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `anthropic`    | `anthropic`            | Well-known value.                                                                                                                                                                                    |
+| `openai`       | `openai`               | Well-known value.                                                                                                                                                                                    |
+| `gemini`       | `gcp.gemini`           | operative's `gemini` provider talks to the AI Studio endpoint (`generativelanguage.googleapis.com`) via `@google/generative-ai`, which the conventions register as `gcp.gemini` (not bare `gemini`). |
+| `voyage`       | `voyage`               | No well-known value registered — a custom value, as explicitly permitted by the conventions.                                                                                                         |
+| `ollama`       | `ollama`               | No well-known value registered — a custom value, as explicitly permitted by the conventions.                                                                                                         |
+
+`total_tokens` is intentionally not emitted as a `gen_ai.usage.*` attribute anywhere — it isn't a defined attribute in the conventions, and any GenAI-aware backend already sums `input_tokens` + `output_tokens` itself.
 
 ---
 

@@ -135,10 +135,16 @@ describe('instrument', () => {
     stop();
 
     expect(startedSpans).toHaveLength(1);
-    expect(startedSpans[0]?.name).toBe('tool lookup');
+    expect(startedSpans[0]?.name).toBe('execute_tool lookup');
     expect(startedSpans[0]?.context).toBe(parentContext);
-    expect(startedSpans[0]?.options?.kind).toBe(SpanKind.CLIENT);
+    expect(startedSpans[0]?.options?.kind).toBe(SpanKind.INTERNAL);
     expect(startedSpans[0]?.options?.links).toBe(spanLinks);
+    expect(startedSpans[0]?.options?.attributes).toMatchObject({
+      'gen_ai.operation.name': 'execute_tool',
+      'gen_ai.tool.name': 'lookup',
+      'gen_ai.tool.call.id': 'call-1',
+      'gen_ai.tool.description': 'Lookup a value',
+    });
     expect(startedSpans[0]?.span.ended).toBe(true);
   });
 
@@ -232,17 +238,17 @@ describe('instrument', () => {
       {
         name: 'tool.started',
         attributes: {
-          'gen_ai.tool.arguments': '[object Object]',
+          'gen_ai.tool.call.arguments': '[object Object]',
         },
       },
     ]);
     expect(span.status).toEqual({ code: SpanStatusCode.OK });
     expect(span.attributes).toMatchObject({
-      'gen_ai.tool.duration_ms': 12,
-      'gen_ai.tool.input_digest': 'input',
-      'gen_ai.tool.output_digest': 'output',
-      'gen_ai.tool.result': '{"ok":true}',
-      'gen_ai.tool.status': 'success',
+      'armorer.tool.duration_ms': 12,
+      'armorer.tool.input_digest': 'input',
+      'armorer.tool.output_digest': 'output',
+      'gen_ai.tool.call.result': '{"ok":true}',
+      'armorer.tool.status': 'success',
     });
     expect(span.ended).toBe(true);
   });
@@ -291,21 +297,23 @@ describe('instrument', () => {
     stop();
 
     expect(recordedSpans[0]?.status).toEqual({ code: SpanStatusCode.UNSET, message: 'Cancelled' });
-    expect(recordedSpans[0]?.attributes['gen_ai.tool.cancellation_reason']).toBe(
+    expect(recordedSpans[0]?.attributes['armorer.tool.cancellation_reason']).toBe(
       '{"reason":"abort"}',
     );
     expect(recordedSpans[1]?.status).toEqual({
       code: SpanStatusCode.OK,
       message: 'Paused (Action Required)',
     });
-    expect(recordedSpans[1]?.attributes['gen_ai.tool.status']).toBe('paused');
+    expect(recordedSpans[1]?.attributes['armorer.tool.status']).toBe('paused');
     expect(recordedSpans[2]?.status).toEqual({ code: SpanStatusCode.ERROR, message: 'failed' });
     expect(recordedSpans[2]?.exceptions).toEqual([thrown]);
+    expect(recordedSpans[2]?.attributes['error.type']).toBe('error');
     expect(recordedSpans[3]?.status).toEqual({
       code: SpanStatusCode.ERROR,
       message: '[object Object]',
     });
-    expect(recordedSpans[3]?.attributes['gen_ai.tool.error']).toBe('{"code":"DENIED"}');
+    expect(recordedSpans[3]?.attributes['armorer.tool.error']).toBe('{"code":"DENIED"}');
+    expect(recordedSpans[3]?.attributes['error.type']).toBe('denied');
   });
 
   it('covers complete and error fallback events', () => {
