@@ -429,6 +429,34 @@ describe('fetchFromRegistry integrity', () => {
     expect(result.errors).toHaveLength(0);
   });
 
+  it('fails closed on a signature-endpoint error, even with allowUnverified set', async () => {
+    const provider = createMockSkillProvider();
+    const { publicKey } = generateEd25519KeyPair();
+
+    const fetchFunction = createMockFetch({
+      [`${baseUrl}/test-skill/SKILL.md`]: { status: 200, body: VALID_SKILL_MD },
+      [`${baseUrl}/test-skill/SKILL.md.sig`]: { status: 500, body: 'Internal Server Error' },
+    });
+
+    const result = await fetchFromRegistry({
+      baseUrl,
+      names: ['test-skill'],
+      provider,
+      fetchFunction,
+      publicKey,
+      // A 500 from the signature endpoint must never be treated as "unsigned" —
+      // even the opt-out shouldn't paper over a registry/auth failure.
+      allowUnverified: true,
+    });
+
+    expect(result.loaded).toHaveLength(0);
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0]?.error).toContain('500');
+
+    const saved = provider.calls.filter((call) => call.method === 'saveSkill');
+    expect(saved).toHaveLength(0);
+  });
+
   it('rejects content whose metadata name does not match the requested skill name', async () => {
     const provider = createMockSkillProvider();
     const mismatchedBody = makeSkillMarkdown('a-different-skill');

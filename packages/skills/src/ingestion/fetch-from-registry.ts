@@ -150,8 +150,16 @@ export async function fetchFromRegistry(options: FetchFromRegistryOptions): Prom
       await verifyContent(name, text, options, async () => {
         const signatureUrl = `${baseUrl}/${name}/SKILL.md.sig`;
         const signatureResponse = await fetchFunction(signatureUrl, { headers });
-        if (!signatureResponse.ok) {
+        if (signatureResponse.status === 404) {
+          // No signature published for this skill — treat as absent, not an error.
           return undefined;
+        }
+        if (!signatureResponse.ok) {
+          // Anything else (401/403/500/...) is a registry/auth failure, not "unsigned".
+          // Fail closed rather than silently falling back to unverified content.
+          throw new Error(
+            `Registry returned ${signatureResponse.status} fetching signature for skill "${name}"`,
+          );
         }
         return await signatureResponse.text();
       });
