@@ -35,6 +35,7 @@ import type {
   CombinedOperativeEventMap,
   GenerateFunction,
   GuardrailsOptions,
+  InputDetector,
   JSONValue,
   OnStepHook,
   PrepareStepHook,
@@ -117,17 +118,47 @@ import type {
 export type BureauToolbox = Toolbox<any>;
 
 /**
+ * A single-pattern prompt-injection match (`confidence: 0.3`) is common in
+ * completely benign phrasing — "act as a translator", "you are now our
+ * support contact" — and `createPromptInjectionDetector` reports `triggered:
+ * true` on any match count, with no built-in confidence floor. That's a
+ * reasonable default for `mode: 'validate'` (a false positive just gets a
+ * `'warn'`/re-prompt), but `mode: 'tripwire'` HARD-HALTS the run — so the
+ * enabled-by-default preset wraps the detector to only trip at `confidence >=
+ * 0.6` (2+ matched patterns), the point where a real injection attempt
+ * clearly outweighs an incidental phrase. Below that, the detection is
+ * reported as NOT triggered so it doesn't gate the run at all (this preset
+ * has no `'warn'` fallback for weak matches — it is intentionally a coarse,
+ * high-precision tripwire, not a low-confidence advisory).
+ */
+function withMinimumTripwireConfidence(detector: InputDetector, threshold: number): InputDetector {
+  return {
+    name: detector.name,
+    async detect(input, context) {
+      const result = await detector.detect(input, context);
+      if (result.triggered && result.confidence < threshold) {
+        return { ...result, triggered: false };
+      }
+      return result;
+    },
+  };
+}
+
+/**
  * AB-40 — the enabled-by-default guardrail preset. Wired whenever
  * `BureauOptions.guardrails` is omitted (`undefined`): a prompt-injection
- * input detector and an output PII validator, both in `mode: 'tripwire'` — a
- * trip hard-halts the run (`finishReason: 'tripwire'`) rather than
- * substituting a blocked/redacted response. Pass `guardrails: false` to opt
- * out entirely, or a `GuardrailsOptions` to replace this preset.
+ * input detector (gated at `confidence >= 0.6` — see
+ * {@link withMinimumTripwireConfidence}) and an output PII validator, both in
+ * `mode: 'tripwire'` — a trip hard-halts the run (`finishReason: 'tripwire'`)
+ * rather than substituting a blocked/redacted response. Pass `guardrails:
+ * false` to opt out entirely, or a `GuardrailsOptions` to replace this preset.
  */
 function defaultGuardrailsPreset(): GuardrailsOptions {
   return {
     mode: 'tripwire',
-    input: { detectors: [createPromptInjectionDetector()] },
+    input: {
+      detectors: [withMinimumTripwireConfidence(createPromptInjectionDetector(), 0.6)],
+    },
     output: { validators: [createOutputPIIValidator()] },
   };
 }
