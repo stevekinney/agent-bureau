@@ -442,19 +442,172 @@ This was a **real container build and boot**, not a source-only
 approximation — Docker was available on the machine used to prepare this
 guide.
 
+## Embedding bureau in a sandbox image (AB-97)
+
+The Dockerfile above packages `gateway` as a standalone HTTP service. A
+different shape — the one this section documents — is embedding just the
+agent loop (`operative` + a tool package + a provider) as a single bundled
+file inside someone else's sandbox image: a code-execution sandbox, a CI
+runner, a serverless function with a cold-start budget. No `gateway`, no
+`bureau`, no HTTP server, no durable store — just a process that runs one
+agent loop against stdin/env input and exits.
+
+`packages/integration/test/fixtures/sandbox-runner.ts` is the reference
+shape, exercised end-to-end by
+`packages/integration/test/sandbox-embedding.test.ts`. It composes:
+
+- `armorer`'s read-only `coding` toolbox (`createCodingToolbox({ root })`) —
+  jailed to a declared root, so the tool surface itself enforces the
+  filesystem boundary rather than relying on process-level sandboxing alone.
+- `operative`'s agent loop (`createActiveRun` + `stopWhen.noToolCalls()`).
+- `operative/anthropic`'s `createAnthropicProvider`, pointed at a
+  `baseURL` (a credential-injecting proxy in production, per AB-93's
+  "Providers Behind a Proxy" pattern documented in `operative`'s README —
+  the sandboxed process never needs a real API key, only a placeholder
+  forwarded to the proxy).
+
+### Entrypoint shape
+
+Write the entrypoint as a plain async function driven entirely by
+environment variables and/or stdin — no CLI framework, no config file
+resolution. `sandbox-runner.ts`'s contract is representative:
+
+```typescript
+const root = requireEnv('SANDBOX_RUNNER_ROOT'); // declared filesystem jail
+const baseURL = requireEnv('SANDBOX_RUNNER_BASE_URL'); // proxy/provider endpoint
+const apiKey = requireEnv('SANDBOX_RUNNER_API_KEY'); // placeholder, forwarded verbatim
+
+const toolbox = createToolbox(createCodingToolbox({ root }));
+const generate = createAnthropicProvider({ model, apiKey, baseURL });
+const result = await createActiveRun({
+  generate,
+  toolbox,
+  conversation,
+  stopWhen: stopWhen.noToolCalls(),
+}).result;
+console.log(JSON.stringify({ content: result.content }));
+```
+
+Fail loudly on missing configuration (throw, don't default) — a sandboxed
+process that boots half-configured and produces silently-wrong output is
+worse than one that exits non-zero immediately.
+
+### Bundling
+
+Build with `bun build --target=bun <entry> --outfile=<outfile>` (or the
+`Bun.build()` API — the integration test uses the latter, see
+`sandbox-embedding.test.ts`). This produces **one file**: no `node_modules`
+needs to travel with it inside the sandbox image.
+
+The one thing worth verifying for your own entrypoint: `operative`'s
+Anthropic provider (`operative/anthropic`) lazily `import()`s
+`@anthropic-ai/sdk` on first call — a zero-SDK-if-unused optimization for
+consumers who only use OpenAI or Gemini. AB-97 proved this dynamic import
+**survives** `bun build --target=bun` bundling: the SDK is inlined into the
+single outfile, and the bundled process resolves it at runtime with no
+`node_modules` on disk. If a future SDK version or bundler change breaks
+that (the test would start failing at
+`packages/integration/test/sandbox-embedding.test.ts`), the documented
+fallback is to construct the provider's `client` explicitly and pass it via
+`createAnthropicProvider({ client, ... })` — `operative`'s own top-level
+`import { Anthropic } from '@anthropic-ai/sdk'` then becomes a normal
+static import the bundler resolves at build time instead of a runtime
+dynamic one, at the cost of always bundling the SDK regardless of which
+provider you use.
+
+### Env contract
+
+Follow the same pattern as `gateway`'s `parseStartEnvironment`
+(`packages/gateway/src/start.ts`): one Zod schema, parsed once at process
+start, blank/whitespace treated as unset, throw a readable error on invalid
+input rather than booting half-configured. `sandbox-runner.ts`'s contract
+is deliberately minimal (three required variables) because it has no
+storage, no HTTP port, and no multi-provider selection to configure — scale
+the schema up only for what your embedding actually needs.
+
+### SIGTERM handling
+
+A sandboxed process is typically killed by its orchestrator sending
+`SIGTERM` with a grace period, the same shape `gateway`'s AB-96 shutdown
+handler uses. `sandbox-runner.ts` mirrors that pattern at the scale
+appropriate to a process with no server or storage to close:
+
+```typescript
+let shuttingDown = false;
+function shutdown(signal: string): void {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.error(`[sandbox-runner] received ${signal}, exiting`);
+  process.exit(0);
+}
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
+```
+
+If your embedding runs a durable (Weft-backed) run rather than the
+in-memory loop `createActiveRun` uses without a `durable` option, dispose
+of the engine in `shutdown()` before `process.exit(0)` the same way
+`gateway`'s handler calls `bureau.dispose()` — an abrupt `SIGKILL` still
+produces a terminal `RunReport` on next recovery (AB-96's run-envelope
+contract), but a clean `SIGTERM` path should still close the engine/storage
+handle it opened rather than relying on that recovery path as the only
+exit.
+
+### What this proves, and what it does not
+
+`sandbox-embedding.test.ts` is a **behavioral smoke test**, not a security
+sandbox audit:
+
+- **Filesystem isolation.** The test points `HOME`/`XDG_CONFIG_HOME`/
+  `XDG_CACHE_HOME`/`XDG_DATA_HOME` at an empty temp directory and asserts it
+  is still empty after the run, while a real file read _inside_ the
+  declared coding-tool root succeeds. This proves the bundled runner, given
+  this input, did not write outside its declared root — it does not prove
+  the runner _could not_ under a different code path. There is no
+  seccomp/landlock/namespace enforcement here; that's the sandbox image's
+  job, not this test's.
+- **Network isolation.** The mock server records every request it receives
+  and the test asserts the only endpoint hit is `POST /v1/messages` at the
+  configured `baseURL` — there is no second listener standing in for
+  "everything else" to prove the runner _couldn't_ reach. Real network
+  egress control (a network namespace, an egress allowlist/proxy) is the
+  sandbox image's responsibility; this test proves the application-level
+  code path issues no extra calls, which is what an embedder configuring an
+  egress allowlist needs to know before locking it down to one host.
+
+Treat the test as proof of the running code's shape, and pair it with your
+sandbox platform's own filesystem/network enforcement — the two are
+complementary, not substitutes for each other.
+
 ### AB-97 footprint numbers
 
-_Not yet available — AB-97 ("Sandbox-image Embedding: Bundling, Isolation,
-and Footprint Proof") had not merged at the time this guide was written.
-That item's acceptance criteria include recording bundle size and cold-start
-time for a minimal bundled runner; once it lands, its numbers belong here._
+Recorded from `sandbox-embedding.test.ts` on the machine used to prepare
+this guide (Bun 1.3.13, `bun build --target=bun`, no minification):
 
-For a rough point of reference from this guide's own verification (not a
-substitute for AB-97's numbers, which cover a different bundling shape — a
-single-file `bun build --target=bun` runner, not this Dockerfile's
-full-workspace-context image): `gateway`'s own build step alone (client +
-server) reported a 271,826-byte CSS bundle across 731 client files and a
-369-entry asset manifest; the full `docker build` (dependency install +
-9-package `turbo run build --filter=gateway`) completed in well under a
-minute on this machine. Full cold-start (`docker run` to first successful
-`/api/v1/health/live` response) was on the order of a few seconds.
+| Metric                                                                                                                 | Value                      |
+| ---------------------------------------------------------------------------------------------------------------------- | -------------------------- |
+| Bundle size (single outfile)                                                                                           | ~3.18 MB (3,184,923 bytes) |
+| Build time (`Bun.build()`, cold, dependencies pre-built)                                                               | ~60–100 ms                 |
+| Cold start (spawn bundled outfile → first stdout line, including a full two-step agent loop + mock network round trip) | ~140–200 ms                |
+
+These are point-in-time numbers from one machine and one run shape (a
+single-step tool call + final text response, in-memory loop, no durable
+engine) — not a benchmark suite. **Regression threshold: noted, not
+enforced.** The test asserts only a generous sanity ceiling (bundle size
+under 50 MB) as a smoke check against something going obviously wrong (a
+provider SDK newly bundling itself several times over, a stray large
+asset); it does not fail the build on a size or timing regression. If
+bundle size or cold-start time becomes a tracked concern, add a dedicated
+budget/threshold as a follow-up decision, informed by these numbers as a
+baseline — don't infer a hard gate from their presence here.
+
+For a rough point of reference from the `gateway` Dockerfile's own
+verification above (not a substitute for these numbers, which cover a
+different bundling shape — a single-file `bun build --target=bun` runner,
+not a full-workspace-context Docker image): `gateway`'s own build step
+alone (client + server) reported a 271,826-byte CSS bundle across 731
+client files and a 369-entry asset manifest; the full `docker build`
+(dependency install + 9-package `turbo run build --filter=gateway`)
+completed in well under a minute on this machine. Full cold-start
+(`docker run` to first successful `/api/v1/health/live` response) was on
+the order of a few seconds.
