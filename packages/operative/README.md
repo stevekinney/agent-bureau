@@ -384,14 +384,12 @@ import {
 } from 'operative';
 
 // Injection detection on inputs
-const injectionDetector = createPromptInjectionDetector({
-  sensitivity: 'medium',
-});
+const injectionDetector = createPromptInjectionDetector();
 
 // Restrict topics
 const topicGuard = createTopicBoundaryDetector({
   allowedTopics: ['cooking', 'recipes'],
-  blockedTopics: ['finance', 'legal'],
+  blockedKeywords: ['finance', 'legal'],
 });
 
 // Block overlong inputs
@@ -399,8 +397,8 @@ const lengthGuard = createInputLengthDetector({ maxLength: 2000 });
 
 // Compose into a guardrails hook set
 const guardrails = createGuardrails({
-  inputDetectors: [injectionDetector, topicGuard, lengthGuard],
-  outputValidators: [createOutputPIIValidator()],
+  input: { detectors: [injectionDetector, topicGuard, lengthGuard] },
+  output: { validators: [createOutputPIIValidator()] },
 });
 
 const agent = defineAgent({
