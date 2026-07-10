@@ -17,11 +17,6 @@ export {
   matchToolCalls,
 } from './metrics';
 export { promoteRunToCase } from './promote-run';
-export {
-  benchmarkPromptInjectionConfigurations,
-  benchmarkPromptInjectionDetector,
-  DEFAULT_PRESET_TRIPWIRE_THRESHOLD,
-} from './prompt-injection-benchmark';
 export { listEvaluationReports } from './reports';
 export { isEvaluationReport, runEvaluationSuite } from './run-evaluation-suite';
 export {

@@ -49,6 +49,7 @@ export { createInputLengthDetector } from './guardrails/detectors/input-length';
 export type { PromptInjectionDetectorOptions } from './guardrails/detectors/prompt-injection';
 export {
   createPromptInjectionDetector,
+  DEFAULT_PROMPT_INJECTION_TRIPWIRE_THRESHOLD,
   withMinimumTripwireConfidence,
 } from './guardrails/detectors/prompt-injection';
 export type { TopicBoundaryDetectorOptions } from './guardrails/detectors/topic-boundary';

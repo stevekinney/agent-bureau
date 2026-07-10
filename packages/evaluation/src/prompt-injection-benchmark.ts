@@ -1,5 +1,6 @@
 import {
   createPromptInjectionDetector,
+  DEFAULT_PROMPT_INJECTION_TRIPWIRE_THRESHOLD,
   type DetectorContext,
   type InputDetector,
   withMinimumTripwireConfidence,
@@ -96,18 +97,13 @@ export async function benchmarkPromptInjectionDetector(
 }
 
 /**
- * Confidence floor used by the AB-40 enabled-by-default guardrail preset
- * (`withMinimumTripwireConfidence(createPromptInjectionDetector(), 0.6)`).
- * Kept here (rather than re-imported) so this module documents the exact
- * value it benchmarks against.
- */
-export const DEFAULT_PRESET_TRIPWIRE_THRESHOLD = 0.6;
-
-/**
  * Benchmarks both the raw `createPromptInjectionDetector()` and the
- * confidence-gated configuration used by the default guardrail preset, over
- * the same fixture set, so their detection/false-positive tradeoff can be
- * compared directly.
+ * confidence-gated configuration used by the default guardrail preset
+ * (`withMinimumTripwireConfidence(..., DEFAULT_PROMPT_INJECTION_TRIPWIRE_THRESHOLD)`,
+ * the same threshold `bureau`'s AB-40 preset uses — imported, not
+ * re-hardcoded, so a preset tuning change is reflected here automatically),
+ * over the same fixture set, so their detection/false-positive tradeoff can
+ * be compared directly.
  */
 export async function benchmarkPromptInjectionConfigurations(
   fixtures: readonly PromptInjectionFixtureCase[] = PROMPT_INJECTION_FIXTURES,
@@ -115,7 +111,7 @@ export async function benchmarkPromptInjectionConfigurations(
   const raw = await benchmarkPromptInjectionDetector(createPromptInjectionDetector(), fixtures);
   const gatedDetector = withMinimumTripwireConfidence(
     createPromptInjectionDetector(),
-    DEFAULT_PRESET_TRIPWIRE_THRESHOLD,
+    DEFAULT_PROMPT_INJECTION_TRIPWIRE_THRESHOLD,
   );
   const gated = await benchmarkPromptInjectionDetector(gatedDetector, fixtures);
 

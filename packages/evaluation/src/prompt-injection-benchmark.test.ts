@@ -1,24 +1,23 @@
 import { join } from 'node:path';
 
 import { describe, expect, it } from 'bun:test';
-import type { InputDetector } from 'operative';
+import { DEFAULT_PROMPT_INJECTION_TRIPWIRE_THRESHOLD, type InputDetector } from 'operative';
 import type { PromptInjectionFixtureCase } from 'operative/test';
 
 import { compareEvaluationReports } from './comparison';
 import {
   benchmarkPromptInjectionConfigurations,
   benchmarkPromptInjectionDetector,
-  DEFAULT_PRESET_TRIPWIRE_THRESHOLD,
 } from './prompt-injection-benchmark';
 import type { EvaluationReport } from './types';
 
 const rawBaselinePath = join(
   import.meta.dir,
-  '../datasets/prompt-injection-benchmark-baseline-raw.json',
+  '../benchmarks/prompt-injection-benchmark-baseline-raw.json',
 );
 const gatedBaselinePath = join(
   import.meta.dir,
-  '../datasets/prompt-injection-benchmark-baseline-gated.json',
+  '../benchmarks/prompt-injection-benchmark-baseline-gated.json',
 );
 
 async function loadBaseline(path: string): Promise<EvaluationReport> {
@@ -29,6 +28,20 @@ function makeFixture(
   overrides: Partial<PromptInjectionFixtureCase> & { name: string },
 ): PromptInjectionFixtureCase {
   return { input: '', label: 'benign', source: 'test fixture', ...overrides };
+}
+
+/**
+ * `compareEvaluationReports()` only compares case names present in both
+ * reports — it silently ignores a case that was renamed, removed, or added,
+ * since a matched-name gate can't see cases it never matched. This asserts
+ * the case name *set* is unchanged first, so the fixture set itself stays
+ * protected, not just the rates computed from whatever fixtures happen to
+ * still be name-matched.
+ */
+function expectSameCaseNames(baseline: EvaluationReport, current: EvaluationReport): void {
+  const baselineNames = baseline.cases.map((c) => c.name).sort();
+  const currentNames = current.cases.map((c) => c.name).sort();
+  expect(currentNames).toEqual(baselineNames);
 }
 
 describe('benchmarkPromptInjectionDetector', () => {
@@ -127,8 +140,9 @@ describe('benchmarkPromptInjectionConfigurations', () => {
   });
 
   it('the gated preset never has a higher false-positive rate than the raw detector', async () => {
-    // Gating at confidence >= 0.6 can only suppress triggers, never add them,
-    // so it can only reduce or hold false positives steady relative to raw.
+    // Gating at confidence >= threshold can only suppress triggers, never
+    // add them, so it can only reduce or hold false positives steady
+    // relative to raw.
     const { raw, gated } = await benchmarkPromptInjectionConfigurations();
 
     expect(gated.falsePositiveRate).toBeLessThanOrEqual(raw.falsePositiveRate);
@@ -142,8 +156,8 @@ describe('benchmarkPromptInjectionConfigurations', () => {
     expect(gated.detectionRate).toBeLessThanOrEqual(raw.detectionRate);
   });
 
-  it('uses the AB-40 preset threshold of 0.6', () => {
-    expect(DEFAULT_PRESET_TRIPWIRE_THRESHOLD).toBe(0.6);
+  it('gates at the same threshold as the AB-40 default preset', () => {
+    expect(DEFAULT_PROMPT_INJECTION_TRIPWIRE_THRESHOLD).toBe(0.6);
   });
 });
 
@@ -154,6 +168,13 @@ describe('benchmarkPromptInjectionConfigurations', () => {
  * silently made the detector (or the gated preset) worse at classifying the
  * fixture set — either missing an attack it used to catch, or firing on a
  * benign control it used to leave alone.
+ *
+ * The rate assertions below assert *bounds*, not the exact current values —
+ * a detector improvement (catching a previously-missed attack, or dropping a
+ * false positive) must not fail this suite just because the numbers moved in
+ * the desirable direction. `compareEvaluationReports()` is what actually
+ * gates regressions; the bounds here just keep this file honest as
+ * documentation.
  *
  * Measured results as of this baseline (40 fixtures: 22 attack, 18 benign):
  *
@@ -170,48 +191,55 @@ describe('benchmarkPromptInjectionConfigurations', () => {
  * positive rate is high (44.4%) because single-pattern matches like "act as"
  * or "you are now" are common in benign phrasing.
  *
- * The AB-40 gated preset (`withMinimumTripwireConfidence(..., 0.6)`)
- * eliminates false positives entirely on this fixture set, but at a steep
- * cost: because most of the fixture set's direct attacks are single-sentence
- * and match only one pattern group (confidence 0.3), gating to `>= 0.6`
- * suppresses the overwhelming majority of them too — only the two fixtures
- * that stack multiple pattern families in one message survive the gate. This
- * is the tradeoff `withMinimumTripwireConfidence` was documented to make
- * (precision over recall, since `mode: 'tripwire'` hard-halts the run on any
- * trigger), but the magnitude — losing over 90% of detections to buy a clean
+ * The AB-40 gated preset (`withMinimumTripwireConfidence(...,
+ * DEFAULT_PROMPT_INJECTION_TRIPWIRE_THRESHOLD)`) eliminates false positives
+ * entirely on this fixture set, but at a steep cost: because most of the
+ * fixture set's direct attacks are single-sentence and match only one
+ * pattern group (confidence 0.3), gating to `>= 0.6` suppresses the
+ * overwhelming majority of them too — only the two fixtures that stack
+ * multiple pattern families in one message survive the gate. This is the
+ * tradeoff `withMinimumTripwireConfidence` was documented to make (precision
+ * over recall, since `mode: 'tripwire'` hard-halts the run on any trigger),
+ * but the magnitude — losing over 90% of detections to buy a clean
  * false-positive rate — is worth calling out explicitly rather than assuming
  * the gate is "mostly fine."
  */
 describe('prompt-injection detector regression gate', () => {
-  it('raw detector: no regression against the checked-in baseline', async () => {
+  it('raw detector: fixture set matches the checked-in baseline and has no regressions', async () => {
     const baseline = await loadBaseline(rawBaselinePath);
     const { raw } = await benchmarkPromptInjectionConfigurations();
 
-    const comparison = compareEvaluationReports(baseline, raw.report);
+    expectSameCaseNames(baseline, raw.report);
 
+    const comparison = compareEvaluationReports(baseline, raw.report);
     expect(comparison.regressions).toEqual([]);
   });
 
-  it('gated preset: no regression against the checked-in baseline', async () => {
+  it('gated preset: fixture set matches the checked-in baseline and has no regressions', async () => {
     const baseline = await loadBaseline(gatedBaselinePath);
     const { gated } = await benchmarkPromptInjectionConfigurations();
 
-    const comparison = compareEvaluationReports(baseline, gated.report);
+    expectSameCaseNames(baseline, gated.report);
 
+    const comparison = compareEvaluationReports(baseline, gated.report);
     expect(comparison.regressions).toEqual([]);
   });
 
-  it('raw detector: measured rates match the documented baseline', async () => {
+  it('raw detector: detection and false-positive rates stay within documented bounds', async () => {
     const { raw } = await benchmarkPromptInjectionConfigurations();
 
-    expect(raw.detectionRate).toBeCloseTo(16 / 22, 5);
-    expect(raw.falsePositiveRate).toBeCloseTo(8 / 18, 5);
+    // >= documented baseline: an improvement (catching more attacks) must
+    // not fail this test.
+    expect(raw.detectionRate).toBeGreaterThanOrEqual(16 / 22);
+    // <= documented baseline: an improvement (fewer false positives) must
+    // not fail this test either.
+    expect(raw.falsePositiveRate).toBeLessThanOrEqual(8 / 18);
   });
 
-  it('gated preset: measured rates match the documented baseline', async () => {
+  it('gated preset: detection and false-positive rates stay within documented bounds', async () => {
     const { gated } = await benchmarkPromptInjectionConfigurations();
 
-    expect(gated.detectionRate).toBeCloseTo(2 / 22, 5);
-    expect(gated.falsePositiveRate).toBe(0);
+    expect(gated.detectionRate).toBeGreaterThanOrEqual(2 / 22);
+    expect(gated.falsePositiveRate).toBeLessThanOrEqual(0);
   });
 });

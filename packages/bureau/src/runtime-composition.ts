@@ -52,6 +52,7 @@ import {
   createPromptInjectionDetector,
   createScheduler,
   createSessionStore,
+  DEFAULT_PROMPT_INJECTION_TRIPWIRE_THRESHOLD,
   StepStartedEvent,
   ToolErrorBubbleEvent,
   ToolPolicyDeniedBubbleEvent,
@@ -120,17 +121,23 @@ export type BureauToolbox = Toolbox<any>;
 /**
  * AB-40 — the enabled-by-default guardrail preset. Wired whenever
  * `BureauOptions.guardrails` is omitted (`undefined`): a prompt-injection
- * input detector (gated at `confidence >= 0.6` — see
- * {@link withMinimumTripwireConfidence}) and an output PII validator, both in
- * `mode: 'tripwire'` — a trip hard-halts the run (`finishReason: 'tripwire'`)
- * rather than substituting a blocked/redacted response. Pass `guardrails:
- * false` to opt out entirely, or a `GuardrailsOptions` to replace this preset.
+ * input detector (gated at `confidence >= DEFAULT_PROMPT_INJECTION_TRIPWIRE_THRESHOLD`
+ * — see {@link withMinimumTripwireConfidence}) and an output PII validator,
+ * both in `mode: 'tripwire'` — a trip hard-halts the run (`finishReason:
+ * 'tripwire'`) rather than substituting a blocked/redacted response. Pass
+ * `guardrails: false` to opt out entirely, or a `GuardrailsOptions` to
+ * replace this preset.
  */
 function defaultGuardrailsPreset(): GuardrailsOptions {
   return {
     mode: 'tripwire',
     input: {
-      detectors: [withMinimumTripwireConfidence(createPromptInjectionDetector(), 0.6)],
+      detectors: [
+        withMinimumTripwireConfidence(
+          createPromptInjectionDetector(),
+          DEFAULT_PROMPT_INJECTION_TRIPWIRE_THRESHOLD,
+        ),
+      ],
     },
     output: { validators: [createOutputPIIValidator()] },
   };
