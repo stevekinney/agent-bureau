@@ -122,7 +122,42 @@ await fetchFromRegistry({
   baseUrl: 'https://example.com/skills',
   names: ['code-review', 'incident-response'],
   provider,
+  authToken: process.env.SKILL_REGISTRY_TOKEN, // sent as `Authorization: Bearer <token>`
+  publicKey: process.env.SKILL_REGISTRY_PUBLIC_KEY, // SPKI PEM, Ed25519
 });
+```
+
+### Registry Integrity: Auth and Signing
+
+`fetchFromRegistry()` **rejects unverified content by default.** A fetched `SKILL.md` is
+accepted only if it passes at least one of two guards; if neither applies, saving is
+refused unless you explicitly opt out.
+
+- **Bearer auth**: pass `authToken` to send `Authorization: Bearer <authToken>` on every
+  request (both the `SKILL.md` fetch and, when signing is configured, the `.sig` fetch).
+- **Content-hash pinning**: pass `expectedHashes: { [name]: sha256HexDigest }`. The fetched
+  content's SHA-256 hex digest (computed with `sha256HexSync` from `interoperability` — the
+  same hasher the self-improvement proposal-rejection flow uses, not a duplicate) must match
+  exactly. A mismatch is **always** rejected, even if `allowUnverified` is set — that's
+  tamper evidence, not merely "no verification configured."
+- **Detached signatures**: pass `publicKey`, an SPKI PEM-encoded Ed25519 public key. The
+  registry must also serve a base64-encoded detached Ed25519 signature over the raw
+  `SKILL.md` bytes at `{baseUrl}/{name}/SKILL.md.sig`. Verification uses `node:crypto`'s
+  `verify(null, content, publicKey, signature)` (the `null` algorithm is required for
+  Ed25519). An invalid signature is **always** rejected, same as a hash mismatch.
+- **`allowUnverified`**: opts out of the default-reject policy only for the "nothing to
+  verify against" case — no matching hash pin and no signature configured/served. It never
+  rescues a hash mismatch or a failed signature check.
+
+To generate a signing key pair and sign a skill file:
+
+```typescript
+import { generateKeyPairSync, sign } from 'node:crypto';
+
+const { publicKey, privateKey } = generateKeyPairSync('ed25519');
+const signature = sign(null, Buffer.from(skillMarkdown), privateKey).toString('base64');
+// Publish `signature` alongside SKILL.md at `{baseUrl}/{name}/SKILL.md.sig`,
+// and distribute `publicKey.export({ type: 'spki', format: 'pem' })` to consumers.
 ```
 
 ## Gateway Integration
