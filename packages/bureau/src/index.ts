@@ -60,6 +60,7 @@ export type {
   CreateRunRequest,
   DurableGuardrailsConfiguration,
   DurableScheduleDefinition,
+  FlowControlPolicy,
   GenerateProviderName,
   IdentityConfiguration,
   LoadedSkill,
