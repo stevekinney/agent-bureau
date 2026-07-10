@@ -4,8 +4,7 @@
 
 ## What It Does
 
-- Creates a `Bureau` runtime through `createBureau()`.
-- Starts a Hono application through `createGateway()`.
+- Wraps an already-constructed `Bureau` (built with `createBureau()` from the `bureau` package) in a Hono application through `createGateway(bureau, options)`.
 - Mounts routes for health, configuration, runs, sessions, events, scheduler operations, and managed API keys.
 - Streams live run state over Bun WebSocket and server-sent events.
 - Renders the Svelte browser UI for dashboards, chat, run detail, and configuration pages.
@@ -13,9 +12,9 @@
 
 ## How It Works
 
-`createGateway()` is the outer composition point. It calls `createBureau()`, creates a live-frame broker, mounts Hono middleware, attaches API routes, renders UI pages, serves built assets, and chooses a Bun or Node server adapter at runtime.
+`createGateway(bureau, options)` is the outer composition point, but it does **not** build the runtime itself — it takes an already-constructed `Bureau` as its first argument and wraps it: creates a live-frame broker, mounts Hono middleware, attaches API routes, renders UI pages, serves built assets, and chooses a Bun or Node server adapter at runtime. `options` (`GatewayOptions`) is transport-only (port, host, auth, runtime) — it carries no brain/runtime configuration.
 
-`createBureau()`, imported from the `bureau` package, is the runtime composition point behind the gateway. It resolves providers through `operative`'s provider factories (`operative/anthropic`, `operative/openai`, `operative/gemini`, plus fallover, routing, and embeddings under `operative/providers/*`), tools through `armorer`, conversation state through `conversationalist`, run execution through `operative`, state tracking through `operative/store`, memory through `memory`, and skills through `skills`. It also owns session persistence and recovered-run classification when durable execution is configured.
+`createBureau()`, imported from the `bureau` package, is the runtime composition point — the caller builds this first and passes it to `createGateway()`. It resolves providers through `operative`'s provider factories (`operative/anthropic`, `operative/openai`, `operative/gemini`, plus fallover, routing, and embeddings under `operative/providers/*`), tools through `armorer`, conversation state through `conversationalist`, run execution through `operative`, state tracking through `operative/store`, memory through `memory`, and skills through `skills`. It also owns session persistence and recovered-run classification when durable execution is configured.
 
 ## Project Role
 
@@ -28,33 +27,37 @@ The other packages can be used as libraries. `gateway` is the integrated applica
 
 ### Starting the HTTP server
 
+`createGateway()` takes an already-constructed `Bureau` as its first argument — the bureau is the brain, the gateway is the door over it. Build the bureau with `createBureau()` from the `bureau` package, then wrap it.
+
 ```typescript
+import { createBureau } from 'bureau';
 import { createGateway } from 'gateway';
 
-const gateway = await createGateway({
+const bureau = await createBureau({
   provider: {
     provider: 'anthropic',
     model: 'claude-opus-4-5',
     apiKey: process.env.ANTHROPIC_API_KEY,
   },
   systemPrompt: 'You are a helpful assistant.',
-  port: 5555,
 });
 
+const gateway = await createGateway(bureau, { port: 5555 });
 const server = await gateway.start();
 
 // Shut down cleanly
 server.stop();
+bureau.dispose();
 ```
 
-`createGateway()` auto-detects the runtime (`'bun'` when `typeof Bun !== 'undefined'`, `'node'` otherwise). The default port is `5555`. Pass `authToken` to require a bearer token on every request.
+`createGateway()` auto-detects the runtime (`'bun'` when `typeof Bun !== 'undefined'`, `'node'` otherwise). The default port is `5555`. Pass `authToken` to require a bearer token on every request. See `src/start.ts` for the reference process entrypoint that reads this configuration from the environment (used by `bun run start` and the Dockerfile — documented in `documentation/deployment.md`).
 
 ### Running the bureau without HTTP
 
-Use `createBureau()` directly when you want the runtime but not the HTTP layer—useful for embedding in another server or running offline.
+Use `createBureau()` (from the `bureau` package) directly when you want the runtime but not the HTTP layer—useful for embedding in another server or running offline.
 
 ```typescript
-import { createBureau } from 'gateway';
+import { createBureau } from 'bureau';
 
 const bureau = await createBureau({
   provider: { provider: 'openai', model: 'gpt-4o', apiKey: process.env.OPENAI_API_KEY },
@@ -91,10 +94,10 @@ const generate = resolveGenerate({
 
 ### Serializing run state
 
-`serializeRunState()` converts an internal `RunState` (which holds live objects) into the JSON-safe `RunSummary` DTO used by the REST API. Call it when you hold a `RunState` from `operative/store` and need a wire-safe representation.
+`serializeRunState()` converts an internal `RunState` (which holds live objects) into the JSON-safe `RunSummary` DTO used by the REST API. It lives in the `bureau` package — call it when you hold a `RunState` from `operative/store` and need a wire-safe representation.
 
 ```typescript
-import { serializeRunState } from 'gateway';
+import { serializeRunState } from 'bureau';
 
 const summary = serializeRunState(runState, sessionId);
 // { id, sessionId, status, steps, usage, finishReason, error, actionCount }
@@ -102,32 +105,37 @@ const summary = serializeRunState(runState, sessionId);
 
 ### Durable execution with SQLite
 
-Pass `storage` to enable checkpoint-based recovery. Durable execution is on by default whenever a persistent backend is configured.
+Pass `storage` to `createBureau()` to enable checkpoint-based recovery. Durable execution is on by default whenever a persistent backend is configured.
 
 ```typescript
+import { createBureau } from 'bureau';
 import { createGateway } from 'gateway';
 
-const gateway = await createGateway({
+const bureau = await createBureau({
   provider: { provider: 'anthropic', model: 'claude-opus-4-5' },
   storage: { type: 'sqlite', path: './bureau.db' },
   // durableExecution defaults to true for sqlite/lmdb; override with false to disable
 });
 
+const gateway = await createGateway(bureau);
 const server = await gateway.start();
 ```
 
 ## Public API
 
-### `createGateway(options?): Promise<Gateway>`
+### `createGateway(bureau, options?): Promise<Gateway>`
 
-Creates the Hono application, wires all middleware and routes, and returns a `Gateway` handle. The server is **not** started until you call `gateway.start()`.
+Wraps an already-constructed `Bureau` (see `createBureau()` in the `bureau` package) in an HTTP door: creates the Hono application, wires all middleware and routes, and returns a `Gateway` handle. The server is **not** started until you call `gateway.start()`. `GatewayOptions` is transport-only — it does not carry any brain/runtime configuration, which lives entirely on the `Bureau` passed as the first argument.
 
 ```typescript
-interface GatewayOptions extends BureauOptions {
+interface GatewayOptions {
   port?: number; // default: 5555
   hostname?: string;
   authToken?: string; // bearer token required on every request when set
   runtime?: 'bun' | 'node'; // default: auto-detected
+  allowedOrigins?: string[]; // WebSocket upgrade origin allowlist
+  enableCsp?: boolean; // default: true
+  idleTimeout?: number; // seconds; Bun default: 10
 }
 
 interface Gateway {
@@ -139,9 +147,9 @@ interface Gateway {
 }
 ```
 
-### `createBureau(options?): Promise<Bureau>`
+### `createBureau(options?): Promise<Bureau>` (from `bureau`, not `gateway`)
 
-Composes the runtime without the HTTP layer. All `BureauOptions` fields are optional—the bureau starts with no provider configured when `generate`, `provider`, and `providers` are all omitted (`bureau.ready` returns `false`).
+Composes the runtime without the HTTP layer. `gateway` does not re-export this — import it from the `bureau` package (`createGateway`'s first argument is a `Bureau` built this way). All `BureauOptions` fields are optional—the bureau starts with no provider configured when `generate`, `provider`, and `providers` are all omitted (`bureau.ready` returns `false`).
 
 ```typescript
 interface BureauOptions {
@@ -192,11 +200,11 @@ Key `Bureau` methods:
 
 ### `resolveGenerate(configuration): GenerateFunction`
 
-Maps a `ProviderConfiguration` to a generate function from `operative`'s provider factories. Supports `'anthropic'`, `'openai'`, `'gemini'`, `'voyage'`, and `'ollama'` (`operative`'s full `ProviderName` set).
+Maps a `ProviderConfiguration` to a generate function from `operative`'s provider factories. Gateway's `ProviderConfiguration` (re-exported from `bureau`) is the generate-capable subset of `operative`'s full `ProviderName` union — `'anthropic'`, `'openai'`, or `'gemini'`. `'voyage'` and `'ollama'` are embedding-only in `operative` and are not accepted here.
 
 ```typescript
 interface ProviderConfiguration {
-  provider: 'anthropic' | 'openai' | 'gemini' | 'voyage' | 'ollama';
+  provider: 'anthropic' | 'openai' | 'gemini';
   model: string;
   maximumTokens?: number;
   temperature?: number;
@@ -204,7 +212,7 @@ interface ProviderConfiguration {
 }
 ```
 
-### `serializeRunState(runState, sessionId?): RunSummary`
+### `serializeRunState(runState, sessionId?): RunSummary` (from `bureau`, not `gateway`)
 
 Converts a live `RunState` to the JSON-safe `RunSummary` DTO. Strips non-serializable objects (`Conversation`, `ActiveRun`) and normalizes errors to strings.
 
@@ -223,10 +231,10 @@ interface RunSummary {
 
 ### Constants
 
-| Export                  | Value  | Description                   |
-| ----------------------- | ------ | ----------------------------- |
-| `DEFAULT_PORT`          | `5555` | Default HTTP port             |
-| `DEFAULT_MAXIMUM_STEPS` | `10`   | Default agentic loop step cap |
+| Export                                                 | Value  | Description                   |
+| ------------------------------------------------------ | ------ | ----------------------------- |
+| `DEFAULT_PORT`                                         | `5555` | Default HTTP port             |
+| `DEFAULT_MAXIMUM_STEPS` (from `bureau`, not `gateway`) | `10`   | Default agentic loop step cap |
 
 ### Events
 
