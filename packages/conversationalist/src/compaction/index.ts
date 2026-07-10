@@ -14,6 +14,27 @@ export type Summarizer = (
   options?: { maxTokens?: number | undefined },
 ) => Promise<string>;
 
+/**
+ * Structured policy for which messages compaction must preserve verbatim,
+ * independent of recency. Each flag defaults to `true` — compaction is
+ * "safe by default" and callers opt out rather than in.
+ *
+ * - `pinned`: preserves any message whose `metadata.pinned === true`. Callers
+ *   pin a message by setting that metadata key when appending it (e.g.
+ *   `appendUserMessage(c, text, { pinned: true })`).
+ * - `decisions`: preserves any message whose `metadata.decision === true`.
+ *   Intended for messages recording a decision or its rationale that should
+ *   survive summarization verbatim rather than being paraphrased away.
+ * - `errors`: preserves tool-result messages with `toolResult.outcome ===
+ *   'error'`, plus any message with `metadata.error === true`. Errors are
+ *   diagnostic signal that summarization tends to flatten or drop.
+ */
+export interface CompactionPreservePolicy {
+  pinned?: boolean | undefined;
+  decisions?: boolean | undefined;
+  errors?: boolean | undefined;
+}
+
 export interface CompactionOptions {
   preserveRecentCount?: number | undefined;
   preserveSystemMessages?: boolean | undefined;
@@ -22,6 +43,12 @@ export interface CompactionOptions {
   minimumChunkRatio?: number | undefined;
   safetyMargin?: number | undefined;
   maxSummaryTokens?: number | undefined;
+  /**
+   * Structured preserve policy for pinned messages, decision/error
+   * annotations. Merged over the all-`true` default — set a flag to `false`
+   * to opt a category back into compaction. See {@link CompactionPreservePolicy}.
+   */
+  preservePolicy?: CompactionPreservePolicy | undefined;
 }
 
 export interface CompactionResult {
@@ -46,6 +73,54 @@ export function calculateChunkSize(
   return Math.max(1, Math.floor((totalTokens * ratio) / safety));
 }
 
+/**
+ * Returns `true` when `message` must be preserved under the resolved
+ * preserve policy, independent of its position in the conversation.
+ */
+function isPolicyPreservedMessage(
+  message: Message,
+  policy: Required<CompactionPreservePolicy>,
+): boolean {
+  if (policy.pinned && message.metadata['pinned'] === true) return true;
+  if (policy.decisions && message.metadata['decision'] === true) return true;
+  if (policy.errors) {
+    if (message.toolResult?.outcome === 'error') return true;
+    if (message.metadata['error'] === true) return true;
+  }
+  return false;
+}
+
+/**
+ * Expands `selected` to include the matching tool-call/tool-result partner
+ * (from `pool`) for any tool-call or tool-result message already selected,
+ * so a preserved message never ends up as an orphaned half of a pair.
+ */
+function expandToolPairs(selected: readonly Message[], pool: readonly Message[]): Message[] {
+  const toolCallById = new Map<string, Message>();
+  const toolResultByCallId = new Map<string, Message>();
+  for (const message of pool) {
+    if (message.role === 'tool-call' && message.toolCall) {
+      toolCallById.set(message.toolCall.id, message);
+    }
+    if (message.role === 'tool-result' && message.toolResult) {
+      toolResultByCallId.set(message.toolResult.callId, message);
+    }
+  }
+
+  const expanded = new Map(selected.map((m) => [m.id, m]));
+  for (const message of selected) {
+    if (message.role === 'tool-result' && message.toolResult) {
+      const call = toolCallById.get(message.toolResult.callId);
+      if (call) expanded.set(call.id, call);
+    }
+    if (message.role === 'tool-call' && message.toolCall) {
+      const result = toolResultByCallId.get(message.toolCall.id);
+      if (result) expanded.set(result.id, result);
+    }
+  }
+  return [...expanded.values()];
+}
+
 export function partitionMessages(
   conversation: ConversationHistory,
   options?: CompactionOptions,
@@ -54,12 +129,22 @@ export function partitionMessages(
   const preserveRecent = options?.preserveRecentCount ?? 4;
   const preserveSystem = options?.preserveSystemMessages ?? true;
   const preserveToolPairs = options?.preserveToolPairs ?? true;
+  const preservePolicy: Required<CompactionPreservePolicy> = {
+    pinned: options?.preservePolicy?.pinned ?? true,
+    decisions: options?.preservePolicy?.decisions ?? true,
+    errors: options?.preservePolicy?.errors ?? true,
+  };
 
   const allMessages = getMessages(conversation);
 
-  // Separate system messages and streaming messages
+  // Separate system messages, streaming messages, and policy-preserved
+  // messages (pinned / decision / error annotations) — these are preserved
+  // regardless of recency.
   const systemMessages = preserveSystem ? allMessages.filter((m) => m.role === 'system') : [];
   const streamingMessages = allMessages.filter(isStreamingMessage);
+  const policyPreservedMessages = allMessages.filter((m) =>
+    isPolicyPreservedMessage(m, preservePolicy),
+  );
   const nonSystem = allMessages.filter((m) => m.role !== 'system');
 
   if (nonSystem.length <= preserveRecent) {
@@ -68,26 +153,19 @@ export function partitionMessages(
 
   // Recent N messages
   let recentMessages = nonSystem.slice(-preserveRecent);
+  let alwaysPreserved: Message[] = [...streamingMessages, ...policyPreservedMessages];
 
-  // If preserveToolPairs, ensure tool pairs are not split
-  if (preserveToolPairs && recentMessages.length > 0) {
-    const firstRecent = recentMessages[0]!;
-    // If the first recent message is a tool-result, also include its tool-call
-    if (firstRecent.role === 'tool-result' && firstRecent.toolResult) {
-      const callId = firstRecent.toolResult.callId;
-      const toolCallMsg = nonSystem.find(
-        (m) => m.role === 'tool-call' && m.toolCall?.id === callId,
-      );
-      if (toolCallMsg && !recentMessages.includes(toolCallMsg)) {
-        recentMessages = [toolCallMsg, ...recentMessages];
-      }
-    }
+  // If preserveToolPairs, ensure tool pairs are not split — for the recent
+  // window and for any policy-preserved / streaming message.
+  if (preserveToolPairs) {
+    recentMessages = expandToolPairs(recentMessages, nonSystem);
+    alwaysPreserved = expandToolPairs(alwaysPreserved, allMessages);
   }
 
   const preservedSet = new Set([
     ...systemMessages.map((m) => m.id),
     ...recentMessages.map((m) => m.id),
-    ...streamingMessages.map((m) => m.id),
+    ...alwaysPreserved.map((m) => m.id),
   ]);
   const compactable = allMessages.filter((m) => !preservedSet.has(m.id));
   const preserved = allMessages.filter((m) => preservedSet.has(m.id));

@@ -1,4 +1,9 @@
-import type { Conversation, Message, Summarizer } from 'conversationalist';
+import type {
+  CompactionPreservePolicy,
+  Conversation,
+  Message,
+  Summarizer,
+} from 'conversationalist';
 
 import type { StepContext } from './types';
 
@@ -23,6 +28,13 @@ export interface CreateContextCompactorOptions {
    * Default: `'Previous conversation summary:'`.
    */
   summaryPrefix?: string;
+  /**
+   * Structured preserve policy forwarded to `Conversation.compact()`:
+   * pinned messages, decision/error annotations. See
+   * `CompactionPreservePolicy` in conversationalist. All flags default to
+   * `true` when omitted.
+   */
+  preservePolicy?: CompactionPreservePolicy;
 }
 
 /**
@@ -54,6 +66,7 @@ export function createContextCompactor(
     summarize,
     retainRecentMessages = 4,
     summaryPrefix = 'Previous conversation summary:',
+    preservePolicy,
   } = options;
 
   // Adapt the consumer's summarize function to conversationalist's Summarizer
@@ -66,6 +79,7 @@ export function createContextCompactor(
   return async (conversation: Conversation, _context: StepContext): Promise<void> => {
     await conversation.compact(summarizer, {
       preserveRecentCount: retainRecentMessages,
+      ...(preservePolicy ? { preservePolicy } : {}),
     });
   };
 }

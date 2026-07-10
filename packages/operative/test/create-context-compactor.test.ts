@@ -170,4 +170,31 @@ describe('createContextCompactor', () => {
     expect(summarize).not.toHaveBeenCalled();
     expect(conversation.getMessages().length).toBe(0);
   });
+
+  it('forwards preservePolicy to Conversation.compact so a pinned message survives', async () => {
+    const summarize = mock(async () => 'Summary');
+    const compactor = createContextCompactor({
+      summarize,
+      retainRecentMessages: 2,
+      preservePolicy: { pinned: true },
+    });
+
+    const conversation = new Conversation();
+    conversation.appendUserMessage('pinned reference material', { pinned: true });
+    for (const [user, assistant] of [
+      ['Turn 1', 'Response 1'],
+      ['Turn 2', 'Response 2'],
+      ['Turn 3', 'Response 3'],
+      ['Turn 4', 'Response 4'],
+    ] as [string, string][]) {
+      conversation.appendUserMessage(user);
+      conversation.appendAssistantMessage(assistant);
+    }
+
+    const context = createStubContext(conversation);
+    await compactor(conversation, context);
+
+    const messages = conversation.getMessages();
+    expect(messages.some((m) => m.content === 'pinned reference material')).toBe(true);
+  });
 });
