@@ -836,14 +836,21 @@ export type StreamFrame =
       arguments: unknown;
     }
   | { type: 'stream:complete'; runId: string; state: unknown }
-  | { type: 'stream:error'; runId: string; error: string }
-  /**
-   * AB-96 — a versioned run-lifecycle frame from `operative`'s run envelope
-   * (`RunFrame`: run-started, step, assistant-chunk/final, tool-pre/post,
-   * notification, run-finished). See {@link Bureau.getRunReport} for the
-   * terminal `RunReport` embedded on the `run-finished` variant.
-   */
-  | { type: 'run-envelope'; runId: string; frame: RunFrame };
+  | { type: 'stream:error'; runId: string; error: string };
+
+/**
+ * AB-96 — a versioned run-lifecycle frame from `operative`'s run envelope
+ * (`RunFrame`: run-started, step, assistant-chunk/final, tool-pre/post,
+ * notification, run-finished). See {@link Bureau.getRunReport} for the
+ * terminal `RunReport` embedded on the `run-finished` variant.
+ *
+ * Deliberately NOT part of {@link StreamFrame}/the AB-15 `runSeq` replay
+ * contract: `create-bureau.ts` emits these without a `runSeq` stamp (they
+ * carry their own envelope-level sequencing via `RunFrame`), so
+ * `getRunSeq`/the live-frame replay buffer correctly treat them as
+ * non-replayable, same as before AB-15 added `runSeq`.
+ */
+export type RunEnvelopeFrame = { type: 'run-envelope'; runId: string; frame: RunFrame };
 
 export type ServerFrame =
   | {
@@ -877,7 +884,8 @@ export type ServerFrame =
   | { type: 'pong' }
   | { type: 'scheduler.state'; state: SchedulerState }
   | { type: 'scheduler.task.preempted'; taskId: string; reason: string; state: SchedulerState }
-  | (StreamFrame & { runSeq: number });
+  | (StreamFrame & { runSeq: number })
+  | RunEnvelopeFrame;
 
 // ── Constants ───────────────────────────────────────────────────────
 

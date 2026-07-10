@@ -258,6 +258,7 @@ describe('createChatStore', () => {
       event: 'step.completed',
       detail: {},
       sequence: 1,
+      runSeq: 1,
       timestamp: 1,
     });
 
@@ -280,6 +281,7 @@ describe('createChatStore', () => {
       event: 'multiagent.human-wait.parked',
       detail: {},
       sequence: 1,
+      runSeq: 1,
       timestamp: 1,
     });
 
@@ -302,6 +304,7 @@ describe('createChatStore', () => {
       event: 'step.completed',
       detail: {},
       sequence: 1,
+      runSeq: 1,
       timestamp: 1,
     });
 
@@ -323,6 +326,7 @@ describe('createChatStore', () => {
       runId: 'run-1',
       content: 'x',
       accumulated: 'x',
+      runSeq: 1,
     });
 
     expect(onHumanInputRequested).not.toHaveBeenCalled();
