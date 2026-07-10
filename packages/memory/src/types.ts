@@ -35,6 +35,30 @@ export interface MemoryMetadata {
   evergreen?: boolean;
   tags?: string[];
   dedupeKey?: string;
+  /**
+   * AB-61 spike (opt-in via `CreateMemoryOptions.experimentalTemporalValidity`):
+   * epoch-millisecond start of this fact's validity window. Defaults to the
+   * record's `createdAt` when unset. Set explicitly to backdate a fact (e.g.
+   * importing something that was true before it was recorded).
+   */
+  validFrom?: number;
+  /**
+   * AB-61 spike: epoch-millisecond end of this fact's validity window,
+   * exclusive. Unset for currently-valid facts. Stamped automatically on the
+   * superseded record when `remember()` is called with `supersedes`.
+   */
+  invalidatedAt?: number;
+  /**
+   * AB-61 spike: id of the record that superseded this one. Stamped
+   * automatically alongside `invalidatedAt`.
+   */
+  supersededBy?: string;
+  /**
+   * AB-61 spike, write-only directive: id of an existing record this new
+   * fact supersedes. Only read by `remember()`; never persisted onto the
+   * new record's stored metadata. Requires `experimentalTemporalValidity`.
+   */
+  supersedes?: string;
   [key: string]: unknown;
 }
 
@@ -52,6 +76,14 @@ export interface MemorySearchOptions {
    * Useful when thresholds assume cosine semantics (e.g., deduplication at 0.95).
    */
   vectorOnly?: boolean;
+  /**
+   * AB-61 spike, requires `CreateMemoryOptions.experimentalTemporalValidity`:
+   * epoch-millisecond timestamp to answer an "as of" query. `recall()` filters
+   * out records that were not valid at this instant — i.e. `validFrom > asOf`
+   * or `invalidatedAt <= asOf`. Defaults to `Date.now()` when the flag is
+   * enabled and `asOf` is omitted, so recall shows only currently-valid facts.
+   */
+  asOf?: number;
 }
 
 /**
@@ -137,6 +169,17 @@ export interface CreateMemoryOptions {
    * conflicting entries default to `'keep-both'`.
    */
   onConflict?: OnConflictHandler;
+  /**
+   * AB-61 spike: opt-in flag for temporal fact-validity (validFrom /
+   * invalidatedAt / supersededBy). When `true`:
+   * - `remember(content, { supersedes: id, ... })` stamps `supersededBy` and
+   *   `invalidatedAt` onto the record at `id` once the new record is stored.
+   * - `recall()` filters results to those valid at `options.asOf` (defaulting
+   *   to `Date.now()`), running before temporal decay and MMR.
+   * Default `false` — existing consumers see no behavior change. This is a
+   * prototype flag for the AB-61 spike, not a stable feature.
+   */
+  experimentalTemporalValidity?: boolean;
 }
 
 /**
