@@ -1963,10 +1963,22 @@ function mergePolicies(
           reason: `Dangerous tool "${context.toolName}" is not allowed`,
         } satisfies ToolPolicyDecision;
       }
+      // A capability `deny` is terminal — nothing downstream can be more
+      // restrictive, so it's safe to short-circuit immediately. A capability
+      // `ask`, however, must NOT short-circuit: registry- and tool-level
+      // hooks still need to run (both on this call and on every subsequent
+      // approval-resume call) so an eventual `deny` from either of them is
+      // never silently skipped just because the capability tier already
+      // asked. Skipping them would let a human's approval of the capability
+      // ask bypass a registry/tool deny that was never even evaluated.
+      let capabilityAskDecision: ToolPolicyDecision | undefined;
       if (approvalPolicy) {
         const result = evaluateCapabilityApproval(context, approvalPolicy);
-        if (result.status !== 'allow') {
+        if (result.status === 'deny') {
           return approvalStatusToDecision(context.toolName, result);
+        }
+        if (result.status === 'ask') {
+          capabilityAskDecision = approvalStatusToDecision(context.toolName, result);
         }
       }
       const registryDecision = await resolvePolicyDecision(registryPolicy?.beforeExecute, context);
@@ -1976,6 +1988,9 @@ function mergePolicies(
       const toolDecision = await resolvePolicyDecision(toolPolicy?.beforeExecute, context);
       if (toolDecision?.allow === false) {
         return toolDecision;
+      }
+      if (capabilityAskDecision) {
+        return capabilityAskDecision;
       }
       return { allow: true } satisfies ToolPolicyDecision;
     },

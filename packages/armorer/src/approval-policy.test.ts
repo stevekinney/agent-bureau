@@ -290,6 +290,63 @@ describe('createToolbox — approvalPolicy composition', () => {
     expect(result.outcome).toBe('error');
     expect(result.error?.code).toBe('POLICY_DENIED');
   });
+
+  it('a registry-level deny still wins even when the capability policy already asked (regression: an "ask" must not skip downstream deny checks)', async () => {
+    // A mutating tool under `on-mutation` asks first. If the beforeExecute
+    // chain short-circuited on that `ask` — returning before the registry
+    // hook ever ran — this registry-level deny would never be evaluated,
+    // and an approved capability "ask" would silently bypass it (this is
+    // exactly what a human approving the capability ask on resume would
+    // otherwise slip past).
+    let registryHookCalled = false;
+    const mutatingTool = makeTool('write-file', { mutates: true });
+    const toolbox = createToolbox([mutatingTool], {
+      approvalPolicy: { mode: 'on-mutation' },
+      policy: {
+        beforeExecute: () => {
+          registryHookCalled = true;
+          return { allow: false, status: 'deny', reason: 'registry says no' };
+        },
+      },
+    });
+    const result = await toolbox.execute(createToolCall('write-file', {}));
+    expect(registryHookCalled).toBe(true);
+    expect(result.outcome).toBe('error');
+    expect(result.error?.code).toBe('POLICY_DENIED');
+    expect(result.errorMessage).toContain('registry says no');
+  });
+
+  it('returns the capability-tier ask only once registry and tool hooks have both allowed', async () => {
+    let registryHookCalled = false;
+    let toolHookCalled = false;
+    const mutatingTool = createTool({
+      name: 'write-file-2',
+      description: 'Writes a file',
+      input: z.object({}),
+      metadata: { mutates: true },
+      policy: {
+        beforeExecute: () => {
+          toolHookCalled = true;
+          return { allow: true, status: 'allow' };
+        },
+      },
+      execute: async () => ({ ok: true }),
+    });
+    const toolbox = createToolbox([mutatingTool], {
+      approvalPolicy: { mode: 'on-mutation' },
+      policy: {
+        beforeExecute: () => {
+          registryHookCalled = true;
+          return { allow: true, status: 'allow' };
+        },
+      },
+    });
+    const result = await toolbox.execute(createToolCall('write-file-2', {}));
+    expect(registryHookCalled).toBe(true);
+    expect(toolHookCalled).toBe(true);
+    expect(result.outcome).toBe('action_required');
+    expect(result.pendingApproval).toBeDefined();
+  });
 });
 
 describe('capability axis fed by real AB-90 and AB-72 metadata, unmodified', () => {
