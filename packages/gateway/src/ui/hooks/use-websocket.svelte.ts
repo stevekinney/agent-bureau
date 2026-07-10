@@ -27,12 +27,15 @@ export interface WebSocketStore {
 
 /**
  * Builds the SSE fallback URL, threading the auth token and the currently
- * desired run ids into the query string.
+ * desired run ids into the query string. `since`, when given, is the AB-15
+ * composite replay cursor (see {@link encodeSinceCursor}) — omitted for a
+ * fresh connection with nothing to replay.
  */
 function buildEventStreamUrl(
   baseUrl: string,
   authToken: string | undefined,
   runIds: Iterable<string>,
+  since: string | undefined,
 ): string {
   const url = new URL(baseUrl, window.location.origin);
 
@@ -42,6 +45,10 @@ function buildEventStreamUrl(
 
   for (const runId of runIds) {
     url.searchParams.append('runId', runId);
+  }
+
+  if (since) {
+    url.searchParams.set('since', since);
   }
 
   return url.toString();
@@ -77,6 +84,55 @@ export function createWebSocket({
   let shouldUseEventStream = false;
   let websocketConnected = false;
 
+  // AB-15: the highest `ServerFrame.runSeq` seen so far per run, across both
+  // transports. Reconnecting (WS `subscribe.since`, SSE `since=`/native
+  // `Last-Event-ID`) reports this so the door can replay only what was
+  // missed — surviving a refresh/disconnect with zero frame loss and no
+  // duplicates, without the client tracking anything beyond "what did I last
+  // see" per run.
+  const lastSeenRunSeq = new Map<string, number>();
+
+  function recordRunSeq(frame: ServerFrame): void {
+    if (!('runId' in frame) || !('runSeq' in frame)) {
+      return;
+    }
+
+    const previous = lastSeenRunSeq.get(frame.runId) ?? 0;
+    if (frame.runSeq > previous) {
+      lastSeenRunSeq.set(frame.runId, frame.runSeq);
+    }
+  }
+
+  /** Builds the SSE composite replay cursor (see live-events.ts `encodeCursor`). */
+  function encodeSinceCursor(runIds: Iterable<string>): string | undefined {
+    const parts: string[] = [];
+    for (const runId of runIds) {
+      const seq = lastSeenRunSeq.get(runId);
+      if (seq !== undefined) {
+        parts.push(`${encodeURIComponent(runId)}:${seq}`);
+      }
+    }
+    return parts.length > 0 ? parts.join(',') : undefined;
+  }
+
+  /**
+   * The run ids to (re)subscribe/replay-for on connect. Normally just
+   * `desiredRunIds`, but a wildcard (`*`) subscription has no real run id of
+   * its own to carry a cursor — `lastSeenRunSeq` is keyed by the actual run
+   * ids frames arrived for, not `'*'`. So when the dashboard is wildcard-
+   * subscribed, fold in every run id we have a recorded cursor for: the door
+   * skips replay for the literal `'*'` entry (there's no stable buffered
+   * position across an open-ended run set), but replays each real run
+   * individually while `'*'` keeps the connection subscribed to future runs.
+   */
+  function reconnectRunIds(): Set<string> {
+    const ids = new Set(desiredRunIds);
+    for (const runId of lastSeenRunSeq.keys()) {
+      ids.add(runId);
+    }
+    return ids;
+  }
+
   function closeEventStream(): void {
     eventSource?.close();
     eventSource = null;
@@ -104,8 +160,14 @@ export function createWebSocket({
     }
 
     status = 'connecting';
+    const reconnectIds = reconnectRunIds();
     const source = new EventSource(
-      buildEventStreamUrl(eventStreamUrl, authToken, desiredRunIds.values()),
+      buildEventStreamUrl(
+        eventStreamUrl,
+        authToken,
+        reconnectIds.values(),
+        encodeSinceCursor(reconnectIds),
+      ),
     );
     eventSource = source;
 
@@ -118,6 +180,7 @@ export function createWebSocket({
     source.addEventListener('message', (event) => {
       try {
         const frame = JSON.parse((event as MessageEvent<string>).data) as ServerFrame;
+        recordRunSeq(frame);
         onMessage?.(frame);
       } catch {
         // Ignore malformed frames.
@@ -158,8 +221,14 @@ export function createWebSocket({
       websocketConnected = true;
       closeEventStream();
 
-      for (const runId of desiredRunIds) {
-        socket.send(JSON.stringify({ type: 'subscribe', runId } satisfies ClientFrame));
+      for (const runId of reconnectRunIds()) {
+        socket.send(
+          JSON.stringify({
+            type: 'subscribe',
+            runId,
+            since: lastSeenRunSeq.get(runId),
+          } satisfies ClientFrame),
+        );
       }
 
       if (active) {
@@ -170,6 +239,7 @@ export function createWebSocket({
     socket.addEventListener('message', (event) => {
       try {
         const frame = JSON.parse(event.data as string) as ServerFrame;
+        recordRunSeq(frame);
         onMessage?.(frame);
       } catch {
         // Ignore malformed frames.
@@ -224,7 +294,7 @@ export function createWebSocket({
   }
 
   function subscribe(runId: string): void {
-    send({ type: 'subscribe', runId });
+    send({ type: 'subscribe', runId, since: lastSeenRunSeq.get(runId) });
   }
 
   function unsubscribe(runId: string): void {

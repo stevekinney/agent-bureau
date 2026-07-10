@@ -114,6 +114,15 @@ export async function createGateway(
   const unsubscribeLiveFrames = bureau.subscribeLiveFrames((frame) => {
     liveFrameBroker.broadcast(frame);
   });
+  // AB-15: drop a run's replay buffer once the run itself is deleted from
+  // the bureau — nothing can reconnect to replay for a run that no longer
+  // exists, so there is no reason to keep holding its frames.
+  const clearRunBufferOnRemoval: Parameters<typeof bureau.addEventListener<'run.removed'>>[1] = (
+    event,
+  ) => {
+    liveFrameBroker.clearRunBuffer(event.runId);
+  };
+  bureau.addEventListener('run.removed', clearRunBufferOnRemoval);
 
   // ── API Key Store ───────────────────────────────────────────────
   // Reuse the bureau's KV store to avoid creating a duplicate backend.
@@ -180,6 +189,7 @@ export async function createGateway(
         handle.stop();
         wsHandler.dispose();
         unsubscribeLiveFrames();
+        bureau.removeEventListener('run.removed', clearRunBufferOnRemoval);
       },
     };
   }

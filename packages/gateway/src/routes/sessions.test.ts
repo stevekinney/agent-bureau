@@ -185,6 +185,8 @@ describe('sessions routes', () => {
         ready: true,
         dispose: () => undefined,
         subscribeLiveFrames: () => () => undefined,
+        addEventListener: () => undefined,
+        removeEventListener: () => undefined,
         getConfiguration: () => ({
           provider: undefined,
           maximumSteps: 10,

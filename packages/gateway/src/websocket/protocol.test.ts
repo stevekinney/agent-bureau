@@ -57,6 +57,49 @@ describe('parseClientFrame', () => {
     const frame = parseClientFrame(Buffer.from(JSON.stringify({ type: 'ping' })));
     expect(frame).toEqual({ type: 'ping' });
   });
+
+  it('returns INVALID_FRAME (not PARSE_ERROR) for a JSON null payload', () => {
+    const frame = parseClientFrame('null');
+    expect(frame.type).toBe('error');
+    if (frame.type === 'error') {
+      expect(frame.code).toBe('INVALID_FRAME');
+    }
+  });
+
+  it('returns INVALID_FRAME for a JSON array payload', () => {
+    const frame = parseClientFrame('[1,2,3]');
+    expect(frame.type).toBe('error');
+    if (frame.type === 'error') {
+      expect(frame.code).toBe('INVALID_FRAME');
+    }
+  });
+
+  it('returns INVALID_FRAME for a JSON scalar payload', () => {
+    const frame = parseClientFrame('42');
+    expect(frame.type).toBe('error');
+    if (frame.type === 'error') {
+      expect(frame.code).toBe('INVALID_FRAME');
+    }
+  });
+
+  it('drops a negative "since" on subscribe instead of accepting it', () => {
+    const frame = parseClientFrame(
+      JSON.stringify({ type: 'subscribe', runId: 'run-1', since: -5 }),
+    );
+    expect(frame).toEqual({ type: 'subscribe', runId: 'run-1', since: undefined });
+  });
+
+  it('drops a fractional "since" on subscribe instead of accepting it', () => {
+    const frame = parseClientFrame(
+      JSON.stringify({ type: 'subscribe', runId: 'run-1', since: 1.5 }),
+    );
+    expect(frame).toEqual({ type: 'subscribe', runId: 'run-1', since: undefined });
+  });
+
+  it('accepts a safe non-negative integer "since" on subscribe', () => {
+    const frame = parseClientFrame(JSON.stringify({ type: 'subscribe', runId: 'run-1', since: 0 }));
+    expect(frame).toEqual({ type: 'subscribe', runId: 'run-1', since: 0 });
+  });
 });
 
 describe('SubscriptionManager', () => {
@@ -193,6 +236,34 @@ describe('SubscriptionManager', () => {
 
     expect(sent1).toHaveLength(1);
     expect(sent2).toHaveLength(0);
+  });
+
+  it('does not advance the run sequence when a run has zero subscribers', () => {
+    const manager = new SubscriptionManager();
+    const { ws, sent } = createMockWebSocket();
+
+    // Subscribe then immediately unsubscribe, so 'run-1' has zero subscribers
+    // but its sequence counter (if any) still exists in the manager.
+    manager.subscribe(ws, 'run-1');
+    manager.unsubscribe(ws, 'run-1');
+
+    const event: StreamEvent = {
+      type: 'stream:text-delta',
+      content: 'nobody home',
+      accumulated: 'nobody home',
+    };
+
+    // Broadcasting with zero subscribers must not throw or deliver anything.
+    manager.broadcastStreamEvent('run-1', event);
+    expect(sent).toHaveLength(0);
+
+    // Re-subscribing must see a fresh sequence starting at 1, proving the
+    // earlier no-subscriber broadcast never advanced (or leaked) the counter.
+    manager.subscribe(ws, 'run-1');
+    manager.broadcastStreamEvent('run-1', event);
+    expect(sent).toHaveLength(1);
+    const parsed = JSON.parse(sent[0]!) as Record<string, unknown>;
+    expect(parsed['runSeq']).toBe(1);
   });
 });
 

@@ -54,6 +54,7 @@ describe('createRunsStore', () => {
       event: 'step.completed',
       detail: { step: 2, usage: { prompt: 10, completion: 5, total: 15 } },
       sequence: 1,
+      runSeq: 1,
       timestamp: 1,
     };
     store.handleMessage(frame);
@@ -71,6 +72,7 @@ describe('createRunsStore', () => {
       event: 'run.completed',
       detail: { finishReason: 'stop' },
       sequence: 1,
+      runSeq: 1,
       timestamp: 1,
     });
 
@@ -86,6 +88,7 @@ describe('createRunsStore', () => {
       event: 'run.error',
       detail: { error: 'boom' },
       sequence: 1,
+      runSeq: 1,
       timestamp: 1,
     });
 
@@ -101,6 +104,7 @@ describe('createRunsStore', () => {
       event: 'run.aborted',
       detail: {},
       sequence: 1,
+      runSeq: 1,
       timestamp: 1,
     });
 
@@ -125,6 +129,7 @@ describe('createRunsStore', () => {
       event: 'run.started',
       detail: {},
       sequence: 1,
+      runSeq: 1,
       timestamp: 1,
     });
 
@@ -147,6 +152,7 @@ describe('createRunsStore', () => {
       event: 'run.started',
       detail: {},
       sequence: 1,
+      runSeq: 1,
       timestamp: 1,
     });
 

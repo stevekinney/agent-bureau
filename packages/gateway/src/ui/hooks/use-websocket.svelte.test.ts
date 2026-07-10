@@ -282,4 +282,73 @@ describe('createWebSocket', () => {
     expect(lastSource().url).toBe('http://localhost/api/v1/events?runId=run-1&runId=run-2');
     store.stop();
   });
+
+  // AB-15 regression: a wildcard ('*') subscription has no run id of its own
+  // to carry a replay cursor — `lastSeenRunSeq` is keyed by the real run ids
+  // frames arrived for. A reconnect must still carry those per-run cursors
+  // (in addition to '*') or every run update received while disconnected is
+  // silently lost until a manual refresh.
+  it('carries per-run cursors alongside a wildcard subscription on reconnect', () => {
+    const store = createWebSocket({ url: '/ws', eventStreamUrl: '/api/v1/events' });
+    store.start();
+    store.subscribe('*');
+    lastSocket().open();
+
+    // Frames for two concrete runs arrive over the wildcard subscription.
+    lastSocket().emit('message', {
+      data: JSON.stringify({
+        type: 'event',
+        runId: 'run-a',
+        event: 'run.completed',
+        detail: {},
+        sequence: 1,
+        runSeq: 3,
+        timestamp: Date.now(),
+      }),
+    });
+    lastSocket().emit('message', {
+      data: JSON.stringify({
+        type: 'event',
+        runId: 'run-b',
+        event: 'run.completed',
+        detail: {},
+        sequence: 1,
+        runSeq: 5,
+        timestamp: Date.now(),
+      }),
+    });
+
+    // Kill the socket after it was established — falls to the reconnect
+    // timer path (not the immediate SSE-fallback path).
+    const setTimeoutSpy = mock((handler: () => void, _ms?: number) => {
+      pendingReconnect = handler;
+      return 1 as unknown as ReturnType<typeof setTimeout>;
+    });
+    let pendingReconnect: (() => void) | undefined;
+    const originalSetTimeout = globalThis.setTimeout;
+    globalThis.setTimeout = setTimeoutSpy as unknown as typeof setTimeout;
+
+    try {
+      lastSocket().fireClose();
+      pendingReconnect?.();
+      lastSocket().open();
+
+      const sentSubscribes = lastSocket().sent.map(
+        (raw) => JSON.parse(raw) as Record<string, unknown>,
+      );
+      const byRunId = new Map(sentSubscribes.map((frame) => [frame['runId'], frame['since']]));
+
+      // '*' stays subscribed (with no cursor of its own — there's no stable
+      // buffered position across an open-ended run set).
+      expect(byRunId.get('*')).toBeUndefined();
+      expect(byRunId.has('*')).toBe(true);
+      // Each concrete run carries its own last-seen cursor so the door can
+      // replay exactly what was missed while disconnected.
+      expect(byRunId.get('run-a')).toBe(3);
+      expect(byRunId.get('run-b')).toBe(5);
+    } finally {
+      globalThis.setTimeout = originalSetTimeout;
+      store.stop();
+    }
+  });
 });

@@ -459,6 +459,43 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
   // AB-96 — terminal RunReports, cached at the moment each run's lifecycle
   // event fires so `getRunReport` never needs to re-derive them.
   const runReports = new Map<string, RunReport>();
+  // AB-15: per-run monotonic sequence counter for run-scoped live frames
+  // (`event` and `stream:*`). Stamped once here — the single point where
+  // frames reach `emitLiveFrame` — so `streamEventToFrame` and the store
+  // action listener never have to coordinate on sequencing themselves.
+  // Cleared on `run.removed` (see the store subscription below) so the map
+  // does not grow unbounded across a long-lived bureau.
+  const runSequenceCounters = new Map<string, number>();
+
+  function nextRunSeq(runId: string): number {
+    const next = (runSequenceCounters.get(runId) ?? 0) + 1;
+    runSequenceCounters.set(runId, next);
+    return next;
+  }
+
+  /**
+   * AB-15: seeds `runSequenceCounters` for a run reattached by
+   * `engine.recoverAll()` so a pre-restart client cursor cannot suppress
+   * post-restart frames. `runSequenceCounters` is in-memory only and this
+   * bureau instance's store is rebuilt fresh on every boot (`store.register`
+   * in {@link reattachRecoveredRun} attaches to a brand-new `RunState`), so
+   * without seeding, `nextRunSeq` would restart a recovered run's sequence
+   * at 1 — and a browser reconnecting with a pre-restart cursor like
+   * `since: 25` would have every post-restart frame (runSeq 1, 2, 3, ...)
+   * filtered out by `getFramesSince`/`SubscriptionManager`, silently losing
+   * them instead of replaying them.
+   *
+   * Seeding from the current wall-clock time (rather than 0) guarantees the
+   * new generation's sequence numbers are far larger than anything handed
+   * out in a previous process's lifetime, so old cursors always compare as
+   * "already behind" and every post-restart frame is delivered — at worst a
+   * client sees a handful of frames it already had (harmless; frame
+   * application in the UI stores is idempotent per-field, not a strict
+   * just-once contract), never a silent gap.
+   */
+  function seedRunSeqGeneration(runId: string): void {
+    runSequenceCounters.set(runId, Date.now());
+  }
   const sessionPersistenceRetryDelayMilliseconds =
     options.sessionPersistenceRetryDelayMilliseconds ??
     SESSION_PERSISTENCE_RETRY_DELAY_MILLISECONDS;
@@ -507,6 +544,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
             storeActionEvent.action.detail,
           ),
           sequence: storeActionEvent.action.sequence,
+          runSeq: nextRunSeq(storeActionEvent.action.runId),
           timestamp: storeActionEvent.action.timestamp,
         });
         break;
@@ -516,6 +554,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         break;
       case 'run.removed': {
         const removedRunId = (event as StoreRunRemovedEvent).runId;
+        runSequenceCounters.delete(removedRunId);
         emitter.dispatch(new RunRemovedEvent(removedRunId));
         // Prune this run's entries from `resolvedReviewIds` — the review ids
         // it tracks (`approval:${runId}:...`, `human-wait:${runId}:...`) can
@@ -824,7 +863,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
               .detail;
             const frame = streamEventToFrame(runId, detail);
             if (frame) {
-              emitLiveFrame(frame);
+              emitLiveFrame({ ...frame, runSeq: nextRunSeq(runId) });
             }
           };
 
@@ -1195,6 +1234,9 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       );
     });
 
+    // Seed the runSeq generation before `store.register` wires the action
+    // subscription that starts stamping frames — see `seedRunSeqGeneration`.
+    seedRunSeqGeneration(runId);
     store.register(recoveredRun, runId);
     runSessionIdentifiers.set(recoveredRun, sessionId);
   }

@@ -1,4 +1,5 @@
 import type { ServerWebSocket } from 'bun';
+import { streamEventToFrame } from 'bureau';
 import type { StreamEvent } from 'operative';
 
 import type { ClientFrame, ServerFrame } from '../types';
@@ -10,9 +11,16 @@ import type { ClientFrame, ServerFrame } from '../types';
 export function parseClientFrame(data: string | Buffer): ClientFrame | ServerFrame {
   try {
     const raw = typeof data === 'string' ? data : data.toString();
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const parsedJson: unknown = JSON.parse(raw);
+
+    if (typeof parsedJson !== 'object' || parsedJson === null || Array.isArray(parsedJson)) {
+      return { type: 'error', code: 'INVALID_FRAME', message: 'Frame must be a JSON object' };
+    }
+
+    const parsed = parsedJson as Record<string, unknown>;
     const type = parsed['type'];
     const runId = parsed['runId'];
+    const since = parsed['since'];
 
     if (typeof type !== 'string') {
       return { type: 'error', code: 'INVALID_FRAME', message: 'Missing "type" field' };
@@ -23,7 +31,14 @@ export function parseClientFrame(data: string | Buffer): ClientFrame | ServerFra
         if (typeof runId !== 'string') {
           return { type: 'error', code: 'INVALID_FRAME', message: 'subscribe requires "runId"' };
         }
-        return { type: 'subscribe', runId };
+        return {
+          type: 'subscribe',
+          runId,
+          since:
+            typeof since === 'number' && Number.isSafeInteger(since) && since >= 0
+              ? since
+              : undefined,
+        };
 
       case 'unsubscribe':
         if (typeof runId !== 'string') {
@@ -55,6 +70,14 @@ export class SubscriptionManager {
   private connectionToRuns = new Map<ServerWebSocket<unknown>, Set<string>>();
   /** Run IDs → subscribed connections */
   private runToConnections = new Map<string, Set<ServerWebSocket<unknown>>>();
+  /**
+   * Per-run monotonic sequence counter, mirroring the one `create-bureau.ts`
+   * stamps onto live frames (AB-15). This manager is a standalone broadcast
+   * path (not wired into the production `createGateway` — see
+   * `LiveFrameBroker`), so it keeps its own counter rather than depending on
+   * the bureau's.
+   */
+  private readonly runSequenceCounters = new Map<string, number>();
 
   subscribe(ws: ServerWebSocket<unknown>, runId: string): void {
     let runs = this.connectionToRuns.get(ws);
@@ -82,7 +105,10 @@ export class SubscriptionManager {
     const connections = this.runToConnections.get(runId);
     if (connections) {
       connections.delete(ws);
-      if (connections.size === 0) this.runToConnections.delete(runId);
+      if (connections.size === 0) {
+        this.runToConnections.delete(runId);
+        this.runSequenceCounters.delete(runId);
+      }
     }
   }
 
@@ -94,7 +120,10 @@ export class SubscriptionManager {
       const connections = this.runToConnections.get(runId);
       if (connections) {
         connections.delete(ws);
-        if (connections.size === 0) this.runToConnections.delete(runId);
+        if (connections.size === 0) {
+          this.runToConnections.delete(runId);
+          this.runSequenceCounters.delete(runId);
+        }
       }
     }
 
@@ -119,76 +148,27 @@ export class SubscriptionManager {
     return this.runToConnections.get(runId)?.size ?? 0;
   }
 
+  private nextRunSeq(runId: string): number {
+    const next = (this.runSequenceCounters.get(runId) ?? 0) + 1;
+    this.runSequenceCounters.set(runId, next);
+    return next;
+  }
+
   /**
    * Broadcasts a stream event to all subscribers of the given run.
    * Converts the StreamEvent into the appropriate ServerFrame before sending.
    */
   broadcastStreamEvent(runId: string, event: StreamEvent): void {
+    if (this.getSubscriberCount(runId) === 0) return;
+
     const frame = streamEventToFrame(runId, event);
     if (frame) {
-      this.broadcast(runId, frame);
+      this.broadcast(runId, { ...frame, runSeq: this.nextRunSeq(runId) });
     }
   }
 }
 
-/**
- * Converts a streaming pipeline StreamEvent into a typed ServerFrame
- * suitable for WebSocket transmission. Returns undefined for event
- * types that do not have a corresponding frame.
- */
-export function streamEventToFrame(runId: string, event: StreamEvent): ServerFrame | undefined {
-  switch (event.type) {
-    case 'stream:text-delta':
-      return {
-        type: 'stream:text-delta',
-        runId,
-        content: event.content,
-        accumulated: event.accumulated,
-      };
-
-    case 'stream:tool-call-start':
-      return {
-        type: 'stream:tool-call-start',
-        runId,
-        toolName: event.toolName,
-        blockId: event.blockId,
-      };
-
-    case 'stream:tool-call-delta':
-      return {
-        type: 'stream:tool-call-delta',
-        runId,
-        toolName: event.toolName,
-        blockId: event.blockId,
-        partialArgs: event.partialArguments,
-      };
-
-    case 'stream:tool-call-complete':
-      return {
-        type: 'stream:tool-call-complete',
-        runId,
-        toolName: event.toolName,
-        blockId: event.blockId,
-        arguments: event.arguments,
-      };
-
-    case 'stream:complete':
-      return {
-        type: 'stream:complete',
-        runId,
-        state: event.state,
-      };
-
-    case 'stream:error':
-      return {
-        type: 'stream:error',
-        runId,
-        error: event.error instanceof Error ? event.error.message : String(event.error),
-      };
-
-    default:
-      // Other event types (block-start, block-delta, block-complete, usage, start)
-      // are internal to the pipeline and not relayed to WebSocket clients.
-      return undefined;
-  }
-}
+// Re-exported for existing consumers of `./protocol` and `./index` — the
+// canonical implementation lives in `bureau` (`streamEventToFrame` /
+// `StreamFrame`) so this door package and the brain package never drift.
+export { streamEventToFrame };

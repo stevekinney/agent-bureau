@@ -46,6 +46,7 @@ describe('createRunDetailStore', () => {
     const store = createRunDetailStore(makeRunDetail({ id: 'run-1' }));
     store.handleMessage({
       type: 'stream:text-delta',
+      runSeq: 1,
       runId: 'other',
       content: 'x',
       accumulated: 'x',
@@ -61,6 +62,7 @@ describe('createRunDetailStore', () => {
       event: 'log',
       detail: { line: 'hello' },
       sequence: 7,
+      runSeq: 7,
       timestamp: 99,
     });
 
@@ -77,13 +79,14 @@ describe('createRunDetailStore', () => {
     const store = createRunDetailStore(makeRunDetail({ id: 'run-1' }));
     store.handleMessage({
       type: 'stream:text-delta',
+      runSeq: 1,
       runId: 'run-1',
       content: 'lo',
       accumulated: 'hello',
     });
     expect(store.streamingAssistantContent).toBe('hello');
 
-    store.handleMessage({ type: 'stream:complete', runId: 'run-1', state: undefined });
+    store.handleMessage({ type: 'stream:complete', runSeq: 1, runId: 'run-1', state: undefined });
     expect(store.streamingAssistantContent).toBe('');
   });
 
@@ -92,12 +95,14 @@ describe('createRunDetailStore', () => {
 
     store.handleMessage({
       type: 'stream:tool-call-start',
+      runSeq: 1,
       runId: 'run-1',
       toolName: 'search',
       blockId: 'block-a',
     });
     store.handleMessage({
       type: 'stream:tool-call-delta',
+      runSeq: 1,
       runId: 'run-1',
       toolName: 'search',
       blockId: 'block-a',
@@ -105,6 +110,7 @@ describe('createRunDetailStore', () => {
     });
     store.handleMessage({
       type: 'stream:tool-call-complete',
+      runSeq: 1,
       runId: 'run-1',
       toolName: 'search',
       blockId: 'block-a',
@@ -117,7 +123,7 @@ describe('createRunDetailStore', () => {
 
   it('appends a streaming error to the tool-activity log', () => {
     const store = createRunDetailStore(makeRunDetail({ id: 'run-1' }));
-    store.handleMessage({ type: 'stream:error', runId: 'run-1', error: 'disconnected' });
+    store.handleMessage({ type: 'stream:error', runSeq: 1, runId: 'run-1', error: 'disconnected' });
     expect(store.toolActivity).toEqual(['Streaming error: disconnected']);
   });
 
@@ -135,6 +141,7 @@ describe('createRunDetailStore', () => {
     // A synthetic (sequence-less) tool-call-start entry should survive refresh.
     store.handleMessage({
       type: 'stream:tool-call-start',
+      runSeq: 1,
       runId: 'run-1',
       toolName: 'search',
       blockId: 'block-a',
@@ -146,6 +153,7 @@ describe('createRunDetailStore', () => {
       event: 'run.completed',
       detail: {},
       sequence: 2,
+      runSeq: 2,
       timestamp: 20,
     });
 
@@ -187,6 +195,7 @@ describe('createRunDetailStore', () => {
       event: 'step.completed',
       detail: {},
       sequence: 2,
+      runSeq: 2,
       timestamp: 20,
     });
 

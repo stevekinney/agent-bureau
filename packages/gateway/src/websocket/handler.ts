@@ -32,7 +32,14 @@ export function createWebSocketHandler(options: WebSocketHandlerOptions): WebSoc
 
     switch (frame.type) {
       case 'subscribe': {
-        options.broker.subscribe(ws, frame.runId);
+        // AB-15: `subscribe` adds the connection to the live set and (in the
+        // same synchronous call) returns any buffered frames newer than
+        // `frame.since`. Sent before the `subscribed` ack so a client that
+        // treats the ack as "now caught up" sees replay first.
+        const replayFrames = options.broker.subscribe(ws, frame.runId, frame.since);
+        for (const replayFrame of replayFrames) {
+          ws.send(JSON.stringify(replayFrame));
+        }
         const response: ServerFrame = { type: 'subscribed', runId: frame.runId };
         ws.send(JSON.stringify(response));
         break;

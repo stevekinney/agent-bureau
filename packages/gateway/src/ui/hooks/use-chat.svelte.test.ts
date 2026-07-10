@@ -122,6 +122,7 @@ describe('createChatStore', () => {
 
     store.handleMessage({
       type: 'stream:text-delta',
+      runSeq: 1,
       runId: 'someone-else',
       content: 'x',
       accumulated: 'x',
@@ -140,6 +141,7 @@ describe('createChatStore', () => {
 
     store.handleMessage({
       type: 'stream:text-delta',
+      runSeq: 1,
       runId: 'run-1',
       content: 'answer',
       accumulated: 'answer',
@@ -152,6 +154,7 @@ describe('createChatStore', () => {
       event: 'run.completed',
       detail: {},
       sequence: 1,
+      runSeq: 1,
       timestamp: 1,
     });
 
@@ -174,6 +177,7 @@ describe('createChatStore', () => {
       event: 'run.completed',
       detail: { content: 'from-detail' },
       sequence: 1,
+      runSeq: 1,
       timestamp: 1,
     });
 
@@ -191,6 +195,7 @@ describe('createChatStore', () => {
 
     store.handleMessage({
       type: 'stream:text-delta',
+      runSeq: 1,
       runId: 'run-1',
       content: 'partial',
       accumulated: 'partial',
@@ -201,6 +206,7 @@ describe('createChatStore', () => {
       event: 'run.error',
       detail: { error: 'kaboom' },
       sequence: 1,
+      runSeq: 1,
       timestamp: 1,
     });
 
@@ -219,12 +225,14 @@ describe('createChatStore', () => {
 
     store.handleMessage({
       type: 'stream:tool-call-start',
+      runSeq: 1,
       runId: 'run-1',
       toolName: 'search',
       blockId: 'block-a',
     });
     store.handleMessage({
       type: 'stream:tool-call-complete',
+      runSeq: 1,
       runId: 'run-1',
       toolName: 'search',
       blockId: 'block-a',
@@ -250,6 +258,7 @@ describe('createChatStore', () => {
       event: 'step.completed',
       detail: {},
       sequence: 1,
+      runSeq: 1,
       timestamp: 1,
     });
 
@@ -272,6 +281,7 @@ describe('createChatStore', () => {
       event: 'multiagent.human-wait.parked',
       detail: {},
       sequence: 1,
+      runSeq: 1,
       timestamp: 1,
     });
 
@@ -294,6 +304,7 @@ describe('createChatStore', () => {
       event: 'step.completed',
       detail: {},
       sequence: 1,
+      runSeq: 1,
       timestamp: 1,
     });
 
@@ -315,6 +326,7 @@ describe('createChatStore', () => {
       runId: 'run-1',
       content: 'x',
       accumulated: 'x',
+      runSeq: 1,
     });
 
     expect(onHumanInputRequested).not.toHaveBeenCalled();
@@ -330,6 +342,7 @@ describe('createChatStore', () => {
     await store.send('first');
     store.handleMessage({
       type: 'stream:tool-call-start',
+      runSeq: 1,
       runId: 'run-1',
       toolName: 'search',
       blockId: 'block-a',

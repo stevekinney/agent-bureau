@@ -83,6 +83,7 @@ export type {
   SkillCatalogEntry,
   SkillProvider,
   SkillRuntimeConfiguration,
+  StreamFrame,
   StreamingConfiguration,
   SubmitSchedulerTaskRequest,
   SubmitSchedulerTaskResponse,
