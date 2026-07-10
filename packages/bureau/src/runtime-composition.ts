@@ -34,6 +34,7 @@ import type {
   AgentSession,
   CombinedOperativeEventMap,
   GenerateFunction,
+  GuardrailsOptions,
   JSONValue,
   OnStepHook,
   PrepareStepHook,
@@ -47,6 +48,8 @@ import {
   createAgentSession,
   createGuardrails,
   createIdentityHook,
+  createOutputPIIValidator,
+  createPromptInjectionDetector,
   createScheduler,
   createSessionStore,
   StepStartedEvent,
@@ -112,6 +115,22 @@ import type {
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Toolbox generic variance; bureau never inspects the type parameter
 export type BureauToolbox = Toolbox<any>;
+
+/**
+ * AB-40 — the enabled-by-default guardrail preset. Wired whenever
+ * `BureauOptions.guardrails` is omitted (`undefined`): a prompt-injection
+ * input detector and an output PII validator, both in `mode: 'tripwire'` — a
+ * trip hard-halts the run (`finishReason: 'tripwire'`) rather than
+ * substituting a blocked/redacted response. Pass `guardrails: false` to opt
+ * out entirely, or a `GuardrailsOptions` to replace this preset.
+ */
+function defaultGuardrailsPreset(): GuardrailsOptions {
+  return {
+    mode: 'tripwire',
+    input: { detectors: [createPromptInjectionDetector()] },
+    output: { validators: [createOutputPIIValidator()] },
+  };
+}
 
 /**
  * Discriminate a {@link PersistenceOptions} object from a bare
@@ -1388,8 +1407,12 @@ export async function createRuntimeComposition(
       }
     }
 
-    if (options.guardrails) {
-      const guardrails = createGuardrails(options.guardrails);
+    // AB-40 — `undefined` (not configured) wires the enabled-by-default
+    // preset; `false` opts out entirely; anything else replaces the preset.
+    const guardrailsConfig =
+      options.guardrails === undefined ? defaultGuardrailsPreset() : options.guardrails;
+    if (guardrailsConfig) {
+      const guardrails = createGuardrails(guardrailsConfig);
       prepareStep.push(guardrails.prepareStep);
       validateResponse.push(guardrails.validateResponse);
     }

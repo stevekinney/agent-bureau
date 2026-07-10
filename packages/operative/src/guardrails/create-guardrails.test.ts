@@ -1,6 +1,7 @@
 import { describe, expect, it, mock } from 'bun:test';
 import { Conversation } from 'conversationalist';
 
+import { GuardrailTripwireError } from '../errors';
 import { createGuardrails } from './create-guardrails';
 import type {
   DetectionResult,
@@ -219,6 +220,100 @@ describe('createGuardrails', () => {
       await validateResponse(response, context2);
 
       expect(escalatedValidateSpy).toHaveBeenCalled();
+    });
+  });
+
+  describe('mode: tripwire', () => {
+    it('throws GuardrailTripwireError from prepareStep when an input detector triggers', async () => {
+      const detector = createMockDetector('injection-detector', triggeredDetection);
+      const { prepareStep } = createGuardrails({
+        mode: 'tripwire',
+        input: { detectors: [detector] },
+      });
+
+      const context = createTestContext();
+      let caught: unknown;
+      try {
+        await prepareStep(context);
+      } catch (error) {
+        caught = error;
+      }
+
+      expect(caught).toBeInstanceOf(GuardrailTripwireError);
+      const tripwireError = caught as GuardrailTripwireError;
+      expect(tripwireError.guardrailName).toBe('injection-detector');
+      expect(tripwireError.category).toBe('prompt-injection');
+      expect(tripwireError.phase).toBe('input');
+      expect(tripwireError.confidence).toBe(0.95);
+    });
+
+    it('does not throw from prepareStep when no input detector triggers', async () => {
+      const detector = createMockDetector('injection-detector', safeDetection);
+      const { prepareStep } = createGuardrails({
+        mode: 'tripwire',
+        input: { detectors: [detector] },
+      });
+
+      const context = createTestContext();
+      const result = await prepareStep(context);
+      expect(result).toBeUndefined();
+    });
+
+    it('throws GuardrailTripwireError from validateResponse when an output validator triggers', async () => {
+      const validator = createMockValidator('pii-validator', invalidValidation);
+      const { validateResponse } = createGuardrails({
+        mode: 'tripwire',
+        output: { validators: [validator] },
+      });
+
+      const context = createTestContext();
+      const response = {
+        content: 'sensitive data',
+        toolCalls: [] as Array<{ name: string; arguments: Record<string, unknown> }>,
+      };
+
+      let caught: unknown;
+      try {
+        await validateResponse(response, context);
+      } catch (error) {
+        caught = error;
+      }
+
+      expect(caught).toBeInstanceOf(GuardrailTripwireError);
+      const tripwireError = caught as GuardrailTripwireError;
+      expect(tripwireError.guardrailName).toBe('pii-validator');
+      expect(tripwireError.category).toBe('pii');
+      expect(tripwireError.phase).toBe('output');
+    });
+
+    it('overrides an explicit action set on input/output options', async () => {
+      // Even though the caller asked for 'warn', mode: 'tripwire' wins.
+      const detector = createMockDetector('injection-detector', triggeredDetection);
+      const { prepareStep } = createGuardrails({
+        mode: 'tripwire',
+        input: { detectors: [detector], action: 'warn' },
+      });
+
+      const context = createTestContext();
+      let caught: unknown;
+      try {
+        await prepareStep(context);
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(GuardrailTripwireError);
+    });
+
+    it('mode: "validate" (the default) still substitutes a blocked response instead of throwing', async () => {
+      const detector = createMockDetector('injection-detector', triggeredDetection);
+      const { prepareStep } = createGuardrails({
+        input: { detectors: [detector] },
+      });
+
+      const context = createTestContext();
+      const result = await prepareStep(context);
+      expect(result).toBeDefined();
+      expect(result?.content).toContain('blocked');
     });
   });
 
