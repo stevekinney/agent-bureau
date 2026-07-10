@@ -4,6 +4,7 @@ import { HTTPException } from 'hono/http-exception';
 import { z } from 'zod';
 
 import { resolvePrincipal } from '../middleware/authentication';
+import { isRunFailure } from '../run-outcome';
 import type { Bureau, CreateRunRequest } from '../types';
 
 /**
@@ -335,11 +336,7 @@ export function createOpenAICompatRoutes(bureau: Bureau) {
             error?: unknown;
             content: string;
           }): void => {
-            const isError =
-              event.finishReason === 'error' ||
-              event.finishReason === 'budget-exceeded' ||
-              event.finishReason === 'elicitation-denied' ||
-              event.finishReason === 'tripwire';
+            const isError = isRunFailure({ status: 'completed', finishReason: event.finishReason });
             if (isError) {
               emitTerminal({
                 kind: 'error',
@@ -381,11 +378,7 @@ export function createOpenAICompatRoutes(bureau: Bureau) {
             // run lands in the store as status 'completed' (the store only marks
             // 'error' when status was already error), so a status-based branch
             // would emit a content chunk where the listener emits an error chunk.
-            const isError =
-              settledState.finishReason === 'error' ||
-              settledState.finishReason === 'budget-exceeded' ||
-              settledState.finishReason === 'elicitation-denied' ||
-              settledState.finishReason === 'tripwire';
+            const isError = isRunFailure(settledState);
             if (settledState.status === 'aborted') {
               emitTerminal({ kind: 'aborted' });
             } else if (isError) {
@@ -457,13 +450,7 @@ export function createOpenAICompatRoutes(bureau: Bureau) {
     // marks 'error' when status was already error), so a status-only check would
     // return a 200 chat completion with partial content. Discriminate by
     // finishReason — mirroring the streaming branch (PRRT_kwDORvupsc6MkTtu).
-    const isFailure =
-      runDetail.status === 'error' ||
-      runDetail.finishReason === 'error' ||
-      runDetail.finishReason === 'budget-exceeded' ||
-      runDetail.finishReason === 'elicitation-denied' ||
-      runDetail.finishReason === 'tripwire';
-    if (isFailure) {
+    if (isRunFailure(runDetail)) {
       const message = runDetail.error ?? 'Run failed with an unspecified error';
       throw new HTTPException(500, {
         message: typeof message === 'string' ? message : 'Run failed',
