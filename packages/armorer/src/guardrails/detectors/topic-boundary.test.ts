@@ -2,7 +2,12 @@ import { describe, expect, it } from 'bun:test';
 
 import { createTopicBoundaryDetector } from './topic-boundary';
 
-const baseContext = { step: 1, conversationLength: 1, sessionTainted: false };
+const baseContext = {
+  step: 1,
+  conversationLength: 1,
+  sessionTainted: false,
+  provenance: 'user-input' as const,
+};
 
 describe('createTopicBoundaryDetector', () => {
   it('returns a detector with the name "topic-boundary"', () => {

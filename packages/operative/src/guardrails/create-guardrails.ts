@@ -50,6 +50,7 @@ export function createGuardrails(options: GuardrailsOptions): GuardrailHooks {
             detector: event.detector,
             confidence: event.confidence,
             step: context.step,
+            provenance: event.provenance,
           });
         }
 
@@ -84,5 +85,5 @@ export function createGuardrails(options: GuardrailsOptions): GuardrailHooks {
     return hook(response, context);
   };
 
-  return { prepareStep, validateResponse };
+  return { prepareStep, validateResponse, taint: taintTracker };
 }

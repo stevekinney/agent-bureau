@@ -56,6 +56,8 @@ export { reflectionSweep } from './self-improvement/reflection-sweep';
 // ── Types ─────────────────────────────────────────────────────────────
 export type { CreateSkillCatalogHookOptions } from './create-skill-catalog-hook';
 export type { CreateSkillToolsOptions } from './create-skill-tools';
+export type { ScannedSkillContent, SkillGuardrailOptions } from './guardrail';
+export { scanSkillResource } from './guardrail';
 export type { FetchFromRegistryOptions, FetchResult } from './ingestion/fetch-from-registry';
 export type { ScanDirectoryOptions, ScanResult } from './ingestion/scan-directory';
 export type { CreateProposalToolboxOptions } from './self-improvement/create-proposal-tools';

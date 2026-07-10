@@ -2,7 +2,12 @@ import { describe, expect, it } from 'bun:test';
 
 import { createInputLengthDetector } from './input-length';
 
-const baseContext = { step: 1, conversationLength: 1, sessionTainted: false };
+const baseContext = {
+  step: 1,
+  conversationLength: 1,
+  sessionTainted: false,
+  provenance: 'user-input' as const,
+};
 
 describe('createInputLengthDetector', () => {
   it('returns a detector with the name "input-length"', () => {

@@ -42,6 +42,26 @@ export {
 } from './idempotency';
 export { jsonSchemaToZod } from './json-schema-to-zod';
 
+// Guardrail detector pipeline shared across operative (input guardrail) and
+// retrieval surfaces (memory recall, ingested documents, skill resources).
+export type { InputLengthDetectorOptions } from './guardrails/detectors/input-length';
+export { createInputLengthDetector } from './guardrails/detectors/input-length';
+export type { PromptInjectionDetectorOptions } from './guardrails/detectors/prompt-injection';
+export { createPromptInjectionDetector } from './guardrails/detectors/prompt-injection';
+export type { TopicBoundaryDetectorOptions } from './guardrails/detectors/topic-boundary';
+export { createTopicBoundaryDetector } from './guardrails/detectors/topic-boundary';
+export type { DetectorPipelineResult } from './guardrails/pipeline';
+export { runDetectorPipeline } from './guardrails/pipeline';
+export type { ScanContentOptions, ScanContentResult } from './guardrails/scan';
+export { scanContent } from './guardrails/scan';
+export type {
+  DetectionResult,
+  DetectorContext,
+  GuardrailProvenance,
+  GuardrailTriggeredEvent,
+  InputDetector,
+} from './guardrails/types';
+
 // Event classes and event maps
 export {
   ToolboxBudgetExceededEvent,

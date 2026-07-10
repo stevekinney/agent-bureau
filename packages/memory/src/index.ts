@@ -24,6 +24,8 @@ export type {
   SynchronizeResult,
 } from './file-synchronizer';
 export { createFileSynchronizer } from './file-synchronizer';
+export type { MemoryGuardrailOptions, ScannedMemoryContent } from './guardrail';
+export { provenanceForMemoryEntry, scanMemoryContent } from './guardrail';
 export type { MemoryHookOptions } from './hooks';
 export { createMemoryHooks } from './hooks';
 export { chunkHtml } from './html-chunking';
@@ -51,6 +53,7 @@ export { applyTemporalDecay, computeTemporalDecay } from './temporal-decay';
 export type { BM25Options } from './text-search';
 export { computeBM25Scores, tokenize } from './text-search';
 export type { TextSearchProvider } from './text-search-provider';
+export type { CreateMemoryRecallToolOptions } from './tools';
 export { createMemoryForgetTool, createMemoryRecallTool, createMemoryStoreTool } from './tools';
 export type {
   CreateMemoryOptions,

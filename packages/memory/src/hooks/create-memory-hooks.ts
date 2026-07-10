@@ -1,3 +1,4 @@
+import { type MemoryGuardrailOptions, scanMemoryContent } from '../guardrail';
 import type { Memory, MemorySearchResult } from '../types';
 
 /**
@@ -38,6 +39,12 @@ export interface MemoryHookOptions {
   autoRecall?: boolean;
   autoCapture?: boolean;
   recallLimit?: number;
+  /**
+   * Runs auto-recalled content through the shared guardrail detector
+   * pipeline before it's injected into the conversation as a system
+   * message. Omit to skip scanning entirely.
+   */
+  guardrail?: MemoryGuardrailOptions;
 }
 
 const REMEMBER_TRIGGER_PATTERNS = [
@@ -93,7 +100,14 @@ export function createMemoryHooks(options: MemoryHookOptions): {
   prepareStep: (context: StepContextLike) => Promise<void>;
   afterToolExecution: (context: ToolExecutionResultContextLike) => Promise<void>;
 } {
-  const { memory, namespace, autoRecall = true, autoCapture = true, recallLimit = 5 } = options;
+  const {
+    memory,
+    namespace,
+    autoRecall = true,
+    autoCapture = true,
+    recallLimit = 5,
+    guardrail,
+  } = options;
 
   const searchOptions = namespace ? { namespace, limit: recallLimit } : { limit: recallLimit };
 
@@ -106,7 +120,24 @@ export function createMemoryHooks(options: MemoryHookOptions): {
     const results = await memory.recall(lastUserMessage, searchOptions);
     if (results.length === 0) return;
 
-    const memorySummary = formatMemories(results);
+    let usableResults = results;
+
+    if (guardrail) {
+      const scanned = await Promise.all(
+        results.map(async (result) => ({
+          result,
+          scan: await scanMemoryContent(result.content, result.metadata, guardrail),
+        })),
+      );
+
+      usableResults = scanned
+        .filter(({ scan }) => !scan.blocked)
+        .map(({ result, scan }) => ({ ...result, content: scan.content }));
+
+      if (usableResults.length === 0) return;
+    }
+
+    const memorySummary = formatMemories(usableResults);
     context.conversation.appendSystemMessage(memorySummary, {
       _memoryInjected: true,
     });

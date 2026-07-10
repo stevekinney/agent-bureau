@@ -1,11 +1,8 @@
+import { runDetectorPipeline } from 'armorer';
+
 import { GuardrailTripwireError } from '../errors';
 import type { GenerateResponse, PrepareStepHook, StepContext } from '../types';
-import type {
-  DetectionResult,
-  DetectorContext,
-  GuardrailTriggeredEvent,
-  InputGuardrailOptions,
-} from './types';
+import type { DetectorContext, GuardrailTriggeredEvent, InputGuardrailOptions } from './types';
 
 /**
  * Extracts the text content of the last user message from a conversation.
@@ -59,39 +56,10 @@ export function createInputGuardrail(options: InputGuardrailOptions): PrepareSte
       step: context.step,
       conversationLength: messages.length,
       sessionTainted: getSessionTainted?.() ?? false,
+      provenance: 'user-input',
     };
 
-    let topResult: { result: DetectionResult; detectorName: string } | undefined;
-
-    if (mode === 'sequential') {
-      for (const detector of detectors) {
-        try {
-          const result = await detector.detect(input, detectorContext);
-          if (result.triggered) {
-            topResult = { result, detectorName: detector.name };
-            break;
-          }
-        } catch {
-          // Detector errors must not crash the agent
-        }
-      }
-    } else {
-      // Parallel mode: run all detectors and pick the highest-confidence trigger
-      const settled = await Promise.allSettled(
-        detectors.map(async (detector) => ({
-          result: await detector.detect(input, detectorContext),
-          detectorName: detector.name,
-        })),
-      );
-
-      for (const outcome of settled) {
-        if (outcome.status === 'fulfilled' && outcome.value.result.triggered) {
-          if (!topResult || outcome.value.result.confidence > topResult.result.confidence) {
-            topResult = outcome.value;
-          }
-        }
-      }
-    }
+    const topResult = await runDetectorPipeline(input, detectors, detectorContext, mode);
 
     if (!topResult) return;
 
@@ -102,6 +70,7 @@ export function createInputGuardrail(options: InputGuardrailOptions): PrepareSte
       action,
       input,
       detail: topResult.result.detail,
+      provenance: detectorContext.provenance,
     };
 
     onTriggered?.(event);

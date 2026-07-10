@@ -2,6 +2,8 @@ import { createTool } from 'armorer';
 import { z } from 'zod';
 
 import { escapeXml } from './create-skill-catalog-hook';
+import type { SkillGuardrailOptions } from './guardrail';
+import { scanSkillResource } from './guardrail';
 import type { SkillSession } from './skill-session';
 import type { SkillProvider } from './types';
 
@@ -12,6 +14,12 @@ export interface CreateSkillToolsOptions {
   provider: SkillProvider;
   /** Session tracker for active skills. */
   session: SkillSession;
+  /**
+   * Runs a skill's body (on activation) and its resources (on load) through
+   * the shared guardrail detector pipeline before they're returned to the
+   * model. Omit to skip scanning entirely.
+   */
+  guardrail?: SkillGuardrailOptions;
 }
 
 // ── Tools ────────────────────────────────────────────────────────────
@@ -19,9 +27,13 @@ export interface CreateSkillToolsOptions {
 /**
  * Creates a tool that activates a skill by name.
  * Loads the skill content and marks it as active in the session.
+ *
+ * When `options.guardrail` is provided, the skill's body is scanned before
+ * activation. A blocked skill is never marked active and its content never
+ * reaches the model.
  */
 export function createActivateSkillTool(options: CreateSkillToolsOptions) {
-  const { provider, session } = options;
+  const { provider, session, guardrail } = options;
 
   return createTool({
     name: 'activate_skill',
@@ -43,6 +55,18 @@ export function createActivateSkillTool(options: CreateSkillToolsOptions) {
       const skill = await provider.loadSkill(params.name);
       if (!skill) {
         return { error: 'Skill not found', name: params.name };
+      }
+
+      if (guardrail) {
+        const scan = await scanSkillResource(skill.body, guardrail);
+        if (scan.blocked) {
+          return {
+            error: 'Skill content blocked by guardrail',
+            name: params.name,
+            category: scan.event?.category,
+            detail: scan.event?.detail,
+          };
+        }
       }
 
       const resources = await provider.listResources(params.name);
@@ -67,9 +91,12 @@ export function createActivateSkillTool(options: CreateSkillToolsOptions) {
 
 /**
  * Creates a tool that loads a specific resource from an active skill.
+ *
+ * When `options.guardrail` is provided, the resource content is scanned
+ * before being returned; a blocked resource is never returned to the model.
  */
 export function createLoadSkillResourceTool(options: CreateSkillToolsOptions) {
-  const { provider, session } = options;
+  const { provider, session, guardrail } = options;
 
   return createTool({
     name: 'load_skill_resource',
@@ -90,6 +117,20 @@ export function createLoadSkillResourceTool(options: CreateSkillToolsOptions) {
           skillName: params.skillName,
           path: params.path,
         };
+      }
+
+      if (guardrail) {
+        const scan = await scanSkillResource(content, guardrail);
+        if (scan.blocked) {
+          return {
+            error: 'Resource blocked by guardrail',
+            skillName: params.skillName,
+            path: params.path,
+            category: scan.event?.category,
+            detail: scan.event?.detail,
+          };
+        }
+        return { content: scan.content, ...(scan.flagged ? { flagged: true as const } : {}) };
       }
 
       return { content };
