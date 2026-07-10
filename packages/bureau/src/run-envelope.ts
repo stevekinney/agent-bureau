@@ -97,7 +97,37 @@ export function createRunFrameForwarder(
     );
   });
 
+  // A policy-denied tool call fires THREE armorer events in order —
+  // 'policy-denied', 'execute-error', 'settled' (see `create-tool.ts`) — and
+  // operative bubbles the first as `tool.policy-denied` and the last as
+  // `tool.settled` (with `status: 'error'`, losing the denial-specific
+  // reason). `deniedToolCallIds` lets the `tool.settled` handler recognize
+  // "I already reported this one, with better information" and skip it,
+  // rather than emitting two `tool-post` frames for the same call — the same
+  // class of bug as `tool.error`/`tool.settled` below, just on the denial
+  // path.
+  const deniedToolCallIds = new Set<string>();
+
+  on('tool.policy-denied', (event) => {
+    deniedToolCallIds.add(event.toolCallId);
+    emit(
+      createToolPostFrame(
+        {
+          runId,
+          step: event.step,
+          toolCallId: event.toolCallId,
+          toolName: event.toolName,
+          status: 'denied' satisfies ToolFrameStatus,
+          error: event.reason,
+          summarizeOptions,
+        },
+        clock,
+      ),
+    );
+  });
+
   on('tool.settled', (event) => {
+    if (deniedToolCallIds.delete(event.toolCallId)) return;
     emit(
       createToolPostFrame(
         {
@@ -122,23 +152,6 @@ export function createRunFrameForwarder(
   // Listening to both would emit two `tool-post` frames for one tool call;
   // `tool.settled`'s error branch already carries everything `tool.error`
   // does.
-
-  on('tool.policy-denied', (event) => {
-    emit(
-      createToolPostFrame(
-        {
-          runId,
-          step: event.step,
-          toolCallId: event.toolCallId,
-          toolName: event.toolName,
-          status: 'denied' satisfies ToolFrameStatus,
-          error: event.reason,
-          summarizeOptions,
-        },
-        clock,
-      ),
-    );
-  });
 
   on('budget.threshold', (event) => {
     emit(

@@ -159,6 +159,44 @@ describe('createRunFrameForwarder', () => {
     expect(toolPostFrames[0]?.status).toBe('error');
     expect(toolPostFrames[0]?.error).toBe('kaboom');
   });
+
+  it('emits exactly one tool-post frame for a policy-denied tool call (regression: create-tool.ts fires policy-denied AND settled for the same denial)', async () => {
+    const deniedTool = createTool({
+      name: 'restricted',
+      description: 'never allowed',
+      input: z.object({}),
+      policy: {
+        beforeExecute: () => ({ allow: false, reason: 'not permitted' }),
+      },
+      execute: async () => 'unreachable',
+    });
+
+    const generate: GenerateFunction = async ({ step }) =>
+      step === 0
+        ? { content: '', toolCalls: [{ name: 'restricted', arguments: {} }] }
+        : { content: 'moving on', toolCalls: [] };
+
+    const activeRun = createActiveRun({
+      generate,
+      toolbox: createTestToolbox([deniedTool]),
+      conversation: new Conversation(),
+      maximumSteps: 5,
+      runId: 'run-forwarder-4',
+    });
+
+    const frames: RunFrame[] = [];
+    const dispose = createRunFrameForwarder('run-forwarder-4', activeRun, (frame) =>
+      frames.push(frame),
+    );
+
+    await activeRun.result;
+    dispose();
+
+    const toolPostFrames = frames.filter((frame) => frame.type === 'tool-post');
+    expect(toolPostFrames.length).toBe(1);
+    expect(toolPostFrames[0]?.status).toBe('denied');
+    expect(toolPostFrames[0]?.error).toBe('not permitted');
+  });
 });
 
 describe('buildTerminalReportFromCompletedEvent / buildTerminalReportFromAbortedEvent', () => {
