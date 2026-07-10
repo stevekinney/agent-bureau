@@ -1,8 +1,9 @@
 <script lang="ts">
   import { untrack } from 'svelte';
 
-  import type { ConfigurationResponse, RunDetail, RunSummary } from '../types';
+  import type { ConfigurationResponse, PendingReview, RunDetail, RunSummary } from '../types';
   import { createChatStore } from './hooks/use-chat.svelte';
+  import { createReviewsStore } from './hooks/use-reviews.svelte';
   import { createRunDetailStore } from './hooks/use-run-detail.svelte';
   import { createRunsStore } from './hooks/use-runs.svelte';
   import { createWebSocket } from './hooks/use-websocket.svelte';
@@ -10,6 +11,7 @@
   import ChatPage from './pages/chat.svelte';
   import ConfigurationPage from './pages/configuration.svelte';
   import DashboardPage from './pages/dashboard.svelte';
+  import ReviewsPage from './pages/reviews.svelte';
   import RunDetailPage from './pages/run-detail.svelte';
   import { matchRoute } from './router';
 
@@ -17,6 +19,7 @@
     runs?: RunSummary[];
     run?: RunDetail;
     config?: ConfigurationResponse;
+    reviews?: PendingReview[];
   };
 
   /**
@@ -66,6 +69,7 @@
   // seeds stay identical.
   const runsStore = createRunsStore(untrack(() => initialData.runs ?? []));
   const runDetailStore = createRunDetailStore(untrack(() => initialData.run ?? EMPTY_RUN_DETAIL));
+  const reviewsStore = createReviewsStore(untrack(() => initialData.reviews ?? []));
 
   const websocketProtocol =
     typeof window !== 'undefined' && window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -89,7 +93,16 @@
   });
 
   let isDashboardRoute = $derived(route?.name === 'dashboard');
+  let isReviewsRoute = $derived(route?.name === 'reviews');
   let detailRunId = $derived(route?.name === 'run-detail' ? route.params['id'] : undefined);
+
+  /**
+   * Poll interval for the review queue, in milliseconds. The review queue has
+   * no live websocket/SSE feed (unlike runs) — a review is created/resolved
+   * by a direct human action elsewhere, not a run's step loop — so staying
+   * current means polling while the page is open.
+   */
+  const REVIEWS_POLL_INTERVAL_MS = 5000;
 
   // The live transport exposes start()/stop() rather than self-connecting, so
   // the root component owns its lifecycle. This effect runs only on the client
@@ -114,6 +127,14 @@
     websocket.subscribe(id);
     return () => websocket.unsubscribe(id);
   });
+
+  // Keep the review queue current while it is the active route (see
+  // REVIEWS_POLL_INTERVAL_MS above for why this is polling, not a live feed).
+  $effect(() => {
+    if (!isReviewsRoute) return;
+    const interval = setInterval(() => void reviewsStore.refresh(), REVIEWS_POLL_INTERVAL_MS);
+    return () => clearInterval(interval);
+  });
 </script>
 
 <Layout connectionStatus={websocket.status} {pathname}>
@@ -127,6 +148,8 @@
       toolActivity={runDetailStore.toolActivity}
       connectionStatus={websocket.status}
     />
+  {:else if route?.name === 'reviews'}
+    <ReviewsPage reviews={reviewsStore} />
   {:else if route?.name === 'configuration'}
     <ConfigurationPage config={initialData.config ?? EMPTY_CONFIGURATION} />
   {:else if route?.name === 'chat'}

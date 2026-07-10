@@ -3,6 +3,7 @@ import { Hono } from 'hono';
 import type {
   Bureau,
   ConfigurationResponse,
+  PendingReview,
   ProviderConfiguration,
   RunDetail,
   RunSummary,
@@ -12,13 +13,14 @@ import { renderPage } from './render';
 
 /**
  * The canonical per-route hydration payload. Mirrors the client app's
- * `InitialData` contract: only `runs`, `run`, and `config` are ever
- * populated, each on the route that owns it.
+ * `InitialData` contract: only `runs`, `run`, `config`, and `reviews` are
+ * ever populated, each on the route that owns it.
  */
 interface InitialData {
   runs?: RunSummary[];
   run?: RunDetail;
   config?: ConfigurationResponse;
+  reviews?: PendingReview[];
 }
 
 interface PageDependencies {
@@ -83,6 +85,11 @@ export function createPages(dependencies: PageDependencies) {
       return context.text('Run not found', 404);
     }
     return renderAppResponse(`Run ${run.id}`, `/runs/${run.id}`, { run });
+  });
+
+  app.get('/reviews', async () => {
+    const reviews: PendingReview[] = dependencies.bureau.listPendingReviews();
+    return renderAppResponse('Review Queue', '/reviews', { reviews });
   });
 
   app.get('/configuration', async () => {

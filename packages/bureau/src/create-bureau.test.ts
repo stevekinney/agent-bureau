@@ -10,10 +10,17 @@ import { createTool, createToolbox } from 'armorer';
 import { createMockTool, createTestToolbox } from 'armorer/test';
 import { afterEach, describe, expect, it, mock, spyOn } from 'bun:test';
 import { Conversation, createConversationHistory, getMessages } from 'conversationalist';
+import { CompletableEventTarget } from 'lifecycle';
 import { createMemory, type Memory } from 'memory';
 import { createInMemoryMemoryRecordStorage, createMockEmbedder } from 'memory/test';
-import type { GenerateFunction, GenerateResponse, Toolbox } from 'operative';
-import { createSessionStore, stopWhen } from 'operative';
+import type {
+  ActiveRun,
+  CombinedOperativeEventMap,
+  GenerateFunction,
+  GenerateResponse,
+  Toolbox,
+} from 'operative';
+import { createSessionStore, HumanWaitParkedEvent, StepStartedEvent, stopWhen } from 'operative';
 import {
   type DurableRunDeps,
   SCHEDULER_ORIGIN_TAG,
@@ -2895,6 +2902,300 @@ describe('createBureau session signal/update/query with terminal sessions', () =
       () => undefined,
       (rejection) => rejection,
     );
+    expect(error).toBeInstanceOf(BureauError);
+    expect((error as BureauError).code).toBe('NOT_FOUND');
+
+    bureau.dispose();
+  });
+});
+
+// ── AB-20: review queue ──────────────────────────────────────────────
+
+/**
+ * Builds a bare-bones `ActiveRun` backed by a real `CompletableEventTarget`,
+ * so a test can `store.register()` it and then dispatch events onto its
+ * `toObservable()` stream exactly as `operative`'s run loop would — without
+ * needing a full `generate`/toolbox-driven run. Used to simulate a durable
+ * run parked on `requestHumanInput` (operative's F3 HITL tool), since no
+ * caller in this monorepo yet wires that tool into a real durable run (a
+ * separate, tracked gap — see the AB-20 PR description).
+ */
+function createParkedActiveRun(): {
+  activeRun: ActiveRun;
+  emitter: CompletableEventTarget<CombinedOperativeEventMap>;
+} {
+  const emitter = new CompletableEventTarget<CombinedOperativeEventMap>();
+  // Casts mirror operative's own `createActiveRun`/`createDurableActiveRun`
+  // (create-run.ts, active-run-adapter.ts): `ActiveRun`'s `on`/`once`/
+  // `subscribe`/`events` are generic over `CombinedOperativeEventType`
+  // (`keyof CombinedOperativeEventMap`, not intersected with `string`), which
+  // `.bind()` on `CompletableEventTarget`'s `K extends string`-constrained
+  // methods cannot structurally satisfy — the same cast operative's own
+  // production adapters use for this exact assignment.
+  const activeRun: ActiveRun = {
+    result: new Promise<never>(() => {}),
+    abort: () => {},
+    addEventListener: emitter.addEventListener.bind(emitter) as ActiveRun['addEventListener'],
+    removeEventListener: emitter.removeEventListener.bind(
+      emitter,
+    ) as ActiveRun['removeEventListener'],
+    on: emitter.on.bind(emitter) as ActiveRun['on'],
+    once: emitter.once.bind(emitter) as ActiveRun['once'],
+    subscribe: emitter.subscribe.bind(emitter) as ActiveRun['subscribe'],
+    events: emitter.events.bind(emitter) as ActiveRun['events'],
+    toObservable: emitter.toObservable.bind(emitter),
+    complete: emitter.complete.bind(emitter),
+    [Symbol.dispose]: () => {},
+  };
+  return { activeRun, emitter };
+}
+
+/** A `beforeExecute` policy that always requires approval. */
+function createNeedsApprovalToolbox(approvalSecret: string, charges: number[]) {
+  return createToolbox(
+    [
+      createTool({
+        name: 'charge-card',
+        description: 'Charge a payment card',
+        input: z.object({ cents: z.number() }),
+        async execute({ cents }) {
+          charges.push(cents);
+          return { charged: cents };
+        },
+      }),
+    ],
+    {
+      approvalSecret,
+      policy: {
+        beforeExecute() {
+          return {
+            allow: false,
+            status: 'needs_approval',
+            reason: 'Operator approval required',
+            action: { message: 'Approve charge' },
+          };
+        },
+      },
+    },
+  ) as unknown as Toolbox;
+}
+
+describe('createBureau review queue (AB-20)', () => {
+  it('listPendingReviews surfaces a tool call parked on needs_approval', async () => {
+    const charges: number[] = [];
+    const bureau = await createBureau({
+      generate: createSequentialGenerate([
+        {
+          content: '',
+          toolCalls: [{ id: 'call-1', name: 'charge-card', arguments: { cents: 500 } }],
+        },
+      ]),
+      toolbox: createNeedsApprovalToolbox('test-secret', charges),
+      stopWhen: stopWhen.toolOutcome('action_required'),
+    });
+
+    const run = await bureau.createRun({ message: 'Charge the customer' });
+    await waitForRunCompletion(bureau, run.id);
+
+    const reviews = bureau.listPendingReviews();
+    expect(reviews).toHaveLength(1);
+    const [review] = reviews;
+    expect(review!.kind).toBe('tool-approval');
+    if (review!.kind !== 'tool-approval') throw new Error('unreachable');
+    expect(review!.runId).toBe(run.id);
+    expect(review!.approval.callId).toBe('call-1');
+    expect(review!.approval.toolName).toBe('charge-card');
+    expect(review!.approval.arguments).toEqual({ cents: 500 });
+    expect(review!.approval.approvalToken).toEqual(expect.any(String));
+    expect(review!.ageMilliseconds).toBeGreaterThanOrEqual(0);
+    expect(charges).toEqual([]); // not yet executed
+
+    bureau.dispose();
+  });
+
+  it('listPendingReviews surfaces a run parked on a human-wait signal', async () => {
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+    });
+
+    const { activeRun, emitter } = createParkedActiveRun();
+    const runId = bureau.store.register(activeRun, 'run-parked-human-wait');
+    emitter.dispatchEvent(
+      new HumanWaitParkedEvent('human-response', runId, 'Approve this refund?'),
+    );
+
+    const reviews = bureau.listPendingReviews();
+    expect(reviews).toHaveLength(1);
+    const [review] = reviews;
+    expect(review!.kind).toBe('human-wait');
+    if (review!.kind !== 'human-wait') throw new Error('unreachable');
+    expect(review!.runId).toBe(runId);
+    expect(review!.signalName).toBe('human-response');
+    expect(review!.prompt).toBe('Approve this refund?');
+    expect(review!.ageMilliseconds).toBeGreaterThanOrEqual(0);
+
+    bureau.dispose();
+  });
+
+  it('listPendingReviews omits a human-wait run that already produced a later action', async () => {
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+    });
+
+    const { activeRun, emitter } = createParkedActiveRun();
+    const runId = bureau.store.register(activeRun, 'run-resumed-human-wait');
+    emitter.dispatchEvent(new HumanWaitParkedEvent('human-response', runId));
+    // A later action (the run resuming past the park point, e.g. its next
+    // step starting) means the park event is no longer the LAST action, so
+    // the run is no longer "still parked".
+    emitter.dispatchEvent(new StepStartedEvent(new Conversation(), 1));
+
+    expect(bureau.listPendingReviews()).toHaveLength(0);
+
+    bureau.dispose();
+  });
+
+  it('resolveReview approve resumes a tool-approval and executes the tool for real', async () => {
+    const charges: number[] = [];
+    const bureau = await createBureau({
+      generate: createSequentialGenerate([
+        {
+          content: '',
+          toolCalls: [{ id: 'call-2', name: 'charge-card', arguments: { cents: 750 } }],
+        },
+      ]),
+      toolbox: createNeedsApprovalToolbox('test-secret-2', charges),
+      stopWhen: stopWhen.toolOutcome('action_required'),
+    });
+
+    const run = await bureau.createRun({ message: 'Charge the customer' });
+    await waitForRunCompletion(bureau, run.id);
+
+    const [review] = bureau.listPendingReviews();
+    expect(review).toBeDefined();
+
+    const outcome = await bureau.resolveReview({
+      id: review!.id,
+      decision: 'approve',
+      principal: 'api-key:reviewer-1',
+    });
+
+    expect(outcome.decision).toBe('approve');
+    expect(outcome.kind).toBe('tool-approval');
+    expect((outcome.result as { result?: unknown } | undefined)?.result).toEqual({
+      charged: 750,
+    });
+    expect(charges).toEqual([750]); // the tool genuinely ran
+
+    // Resolved reviews disappear from the queue.
+    expect(bureau.listPendingReviews()).toHaveLength(0);
+
+    bureau.dispose();
+  });
+
+  it('resolveReview approve on a human-wait review signals the parked session', async () => {
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+
+    // A run injected directly via `store.register()` (rather than through
+    // `bureau.createRun()`) has no session association — bureau only tracks
+    // the run→session mapping inside `createRunFromRequest`, which nothing in
+    // this monorepo yet drives for a `requestHumanInput`-parked run (see the
+    // AB-20 PR description). `review.sessionId` is therefore `''` here; what
+    // this test verifies is that `resolveReview` forwards it — and the
+    // signal name and payload — to `bureau.signalSession` UNCHANGED, which is
+    // the actual resume wiring under test. `mockImplementation` bypasses the
+    // real session lookup (already covered by the signalSession tests above)
+    // so this test is purely about resolveReview's call, not signalSession's.
+    const signalSpy = spyOn(bureau, 'signalSession').mockImplementation(async () => {});
+
+    const { activeRun, emitter } = createParkedActiveRun();
+    const runId = bureau.store.register(activeRun, 'run-approve-human-wait');
+    emitter.dispatchEvent(new HumanWaitParkedEvent('human-response', runId, 'Approve?'));
+
+    const [review] = bureau.listPendingReviews();
+    expect(review).toBeDefined();
+
+    const outcome = await bureau.resolveReview({
+      id: review!.id,
+      decision: 'approve',
+      principal: 'api-key:reviewer-2',
+      payload: { approved: true },
+    });
+
+    expect(outcome.decision).toBe('approve');
+    expect(signalSpy).toHaveBeenCalledWith('', 'human-response', { approved: true });
+
+    expect(bureau.listPendingReviews()).toHaveLength(0);
+
+    bureau.dispose();
+  });
+
+  it('resolveReview deny records the decision without resuming, attributed to the principal', async () => {
+    const charges: number[] = [];
+    const bureau = await createBureau({
+      generate: createSequentialGenerate([
+        {
+          content: '',
+          toolCalls: [{ id: 'call-3', name: 'charge-card', arguments: { cents: 999 } }],
+        },
+      ]),
+      toolbox: createNeedsApprovalToolbox('test-secret-3', charges),
+      stopWhen: stopWhen.toolOutcome('action_required'),
+      persistence: textValueStore(new MemoryStorage()),
+    });
+
+    const run = await bureau.createRun({ message: 'Charge the customer' });
+    await waitForRunCompletion(bureau, run.id);
+
+    const [review] = bureau.listPendingReviews();
+    expect(review).toBeDefined();
+
+    const outcome = await bureau.resolveReview({
+      id: review!.id,
+      decision: 'deny',
+      principal: 'api-key:reviewer-3',
+      reason: 'Amount looks fraudulent',
+    });
+
+    expect(outcome.decision).toBe('deny');
+    expect(outcome.result).toBeUndefined();
+    expect(charges).toEqual([]); // never executed
+
+    // The audit trail record carries the ATTRIBUTED principal — this is the
+    // NEUTER-VERIFIED assertion: dropping `principal: input.principal` from
+    // resolveReview's `auditTrail.record(...)` call (or the `record()` write
+    // path itself) makes this specific assertion fail, not just a vague
+    // "record exists" check.
+    const records = await bureau.auditTrail!.query({ runId: run.id });
+    const denyRecord = records.find((record) => record.type === 'review.tool-approval.denied');
+    expect(denyRecord).toBeDefined();
+    expect(denyRecord!.principal).toBe('api-key:reviewer-3');
+    expect((denyRecord!.detail as { reason?: string }).reason).toBe('Amount looks fraudulent');
+
+    expect(bureau.listPendingReviews()).toHaveLength(0);
+
+    bureau.dispose();
+  });
+
+  it('resolveReview throws NOT_FOUND for an unknown or already-resolved review id', async () => {
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+    });
+
+    const error = await bureau
+      .resolveReview({ id: 'approval:nope:nope', decision: 'approve', principal: 'static-token' })
+      .then(
+        () => undefined,
+        (rejection: unknown) => rejection,
+      );
     expect(error).toBeInstanceOf(BureauError);
     expect((error as BureauError).code).toBe('NOT_FOUND');
 

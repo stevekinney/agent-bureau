@@ -111,7 +111,7 @@ import type {
 } from './types';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Toolbox generic variance; bureau never inspects the type parameter
-type BureauToolbox = Toolbox<any>;
+export type BureauToolbox = Toolbox<any>;
 
 /**
  * Discriminate a {@link PersistenceOptions} object from a bare
@@ -932,6 +932,15 @@ export interface RuntimeComposition {
   memory: Memory | undefined;
   sessionStore: SessionStore | undefined;
   scheduler: Scheduler | undefined;
+  /**
+   * The bureau's canonical toolbox (`options.toolbox`, or an internally
+   * created one). `resolveReview` calls `resumeApproval()` on this instance to
+   * resume a signed pending tool approval — `resumeApproval` re-invokes the
+   * tool by name/callId, so any toolbox sharing the original `approvalSecret`
+   * and tool set can resume it, not only the specific per-run `.extend()` clone
+   * that produced the pending approval.
+   */
+  baseToolbox: BureauToolbox;
   ready: boolean;
   provider: RedactedProviderConfiguration | undefined;
   providers: RedactedProviderRouteConfiguration[];
@@ -2118,6 +2127,13 @@ export async function createRuntimeComposition(
     memory,
     sessionStore,
     scheduler,
+    // Exposed so the review queue (`resolveReview`) can call `resumeApproval()`
+    // on the SAME toolbox instance (or any `.extend()` clone of it, which
+    // preserves `approvalSecret` — see armorer's `extend()`) that executed the
+    // original tool call. `resumeApproval` re-invokes the tool by name/callId,
+    // so any toolbox sharing this instance's `approvalSecret` and tool set can
+    // resume a signed pending approval, not only the specific per-run clone.
+    baseToolbox,
     ready:
       options.generate !== undefined ||
       options.provider !== undefined ||

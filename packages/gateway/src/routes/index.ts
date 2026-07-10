@@ -12,6 +12,7 @@ import { createHealthRoutes } from './health';
 import { createHooksRoutes } from './hooks';
 import { createKeysRoutes } from './keys';
 import { createOpenAICompatRoutes } from './openai-compat';
+import { createReviewsRoutes } from './reviews';
 import { createRunsRoutes } from './runs';
 import { createSchedulerRoutes } from './scheduler';
 import { createSchedulesRoutes } from './schedules';
@@ -86,6 +87,13 @@ export function createRoutes({ bureau, broker, apiKeyStore }: CreateRoutesOption
     createSchedulerRoutes(bureau.scheduler, (request) => bureau.submitSchedulerTask(request)),
   );
   app.route('/api/v1/scheduler', schedulerRouter);
+
+  // Review queue routes (AB-20): parked tool approvals + human-input waits.
+  const reviewsRouter = new Hono();
+  reviewsRouter.get('*', createScopeGuard([SCOPE.REVIEWS_READ]));
+  reviewsRouter.post('*', createScopeGuard([SCOPE.REVIEWS_WRITE]));
+  reviewsRouter.route('/', createReviewsRoutes(bureau));
+  app.route('/api/v1/reviews', reviewsRouter);
 
   // Key management routes (only when key store is available)
   if (apiKeyStore) {

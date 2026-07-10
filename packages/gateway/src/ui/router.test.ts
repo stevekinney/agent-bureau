@@ -13,6 +13,11 @@ describe('matchRoute', () => {
     expect(result).toEqual({ name: 'run-detail', params: { id: 'run-42' } });
   });
 
+  it('matches /reviews', () => {
+    const result = matchRoute('/reviews');
+    expect(result).toEqual({ name: 'reviews', params: {} });
+  });
+
   it('matches /configuration', () => {
     const result = matchRoute('/configuration');
     expect(result).toEqual({ name: 'configuration', params: {} });

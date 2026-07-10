@@ -11,6 +11,7 @@ import {
   type AgentSession,
   createActiveRun,
   createAgentSession,
+  HumanWaitParkedEvent,
   type JSONValue,
   type SessionStore,
   type SessionSummary,
@@ -54,6 +55,9 @@ import type {
   ConfigurationResponse,
   CreateRunRequest,
   DurableScheduleDefinition,
+  PendingReview,
+  ResolveReviewInput,
+  ResolveReviewResult,
   RunSummary,
   ServerFrame,
   SubmitSchedulerTaskRequest,
@@ -402,6 +406,14 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
   let disposed = false;
   const runtime = await createRuntimeComposition(options);
   const runSessionIdentifiers = new WeakMap<ActiveRun, string>();
+  // Ids of PendingReview items already resolved via resolveReview() (AB-20).
+  // Neither resolution path (resumeApproval, signalSession) mutates the live
+  // store in a way listPendingReviews() can detect on its own — resumeApproval
+  // re-invokes the tool directly (no run/step event), and a signalled human-wait
+  // run may take a moment to produce its next action. This set is the
+  // authoritative "already handled" marker so a resolved review disappears
+  // from the queue immediately, and is never accidentally resolved twice.
+  const resolvedReviewIds = new Set<string>();
   const liveFrameListeners = new Set<(frame: ServerFrame) => void>();
   const sessionPersistenceRetryDelayMilliseconds =
     options.sessionPersistenceRetryDelayMilliseconds ??
@@ -1432,6 +1444,166 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     return runtime.durable.engine.query(runId, name, input);
   }
 
+  /**
+   * Best-effort agentName lookup for a run: the curated `tool.*` bubble events
+   * (`ToolStartedBubbleEvent` et al.) stamp every action with `{agentName,
+   * runId, step}`, so the first action carrying it tells us the run's agent.
+   * `undefined` for a run with no tool activity yet.
+   */
+  function findRunAgentName(runState: {
+    actions: readonly { detail: unknown }[];
+  }): string | undefined {
+    for (const action of runState.actions) {
+      const detail = action.detail;
+      if (
+        detail !== null &&
+        typeof detail === 'object' &&
+        'agentName' in detail &&
+        typeof (detail as { agentName: unknown }).agentName === 'string'
+      ) {
+        return (detail as { agentName: string }).agentName;
+      }
+    }
+    return undefined;
+  }
+
+  function listPendingReviews(): PendingReview[] {
+    const now = Date.now();
+    const reviews: PendingReview[] = [];
+    const { runs } = store.getState();
+
+    for (const [runId, runState] of runs) {
+      const sessionId = getRunSessionIdentifier(runState);
+      const agentName = findRunAgentName(runState);
+
+      // Tool-approval: any step result still needing approval, across every
+      // step (not just the last) — the run may have continued past it.
+      const stepCompletedTimestamps = runState.actions
+        .filter((action) => action.type === 'step.completed')
+        .map((action) => action.timestamp);
+
+      for (const [stepIndex, step] of runState.steps.entries()) {
+        for (const result of step.results) {
+          if (result.outcome !== 'action_required' || !result.pendingApproval) continue;
+          const id = `approval:${runId}:${result.pendingApproval.callId}`;
+          if (resolvedReviewIds.has(id)) continue;
+          const requestedAt = stepCompletedTimestamps[stepIndex] ?? now;
+          reviews.push({
+            kind: 'tool-approval',
+            id,
+            runId,
+            sessionId,
+            agentName,
+            approval: result.pendingApproval,
+            requestedAt,
+            ageMilliseconds: now - requestedAt,
+          });
+        }
+      }
+
+      // Human-wait: the run is still parked iff its LAST recorded action is
+      // the park event — any subsequent action (post-signal continuation)
+      // means it already resumed.
+      const lastAction = runState.actions.at(-1);
+      if (
+        runState.status === 'running' &&
+        lastAction !== undefined &&
+        lastAction.type === HumanWaitParkedEvent.type
+      ) {
+        const rawDetail = lastAction.detail;
+        const detail: Record<string, unknown> | undefined =
+          rawDetail !== null && typeof rawDetail === 'object'
+            ? (rawDetail as Record<string, unknown>)
+            : undefined;
+        const signalName = detail?.['signalName'];
+        if (typeof signalName === 'string' && signalName.length > 0) {
+          const id = `human-wait:${runId}:${signalName}`;
+          if (!resolvedReviewIds.has(id)) {
+            const promptValue = detail?.['prompt'];
+            const prompt = typeof promptValue === 'string' ? promptValue : undefined;
+            reviews.push({
+              kind: 'human-wait',
+              id,
+              runId,
+              sessionId,
+              agentName,
+              signalName,
+              prompt,
+              requestedAt: lastAction.timestamp,
+              ageMilliseconds: now - lastAction.timestamp,
+            });
+          }
+        }
+      }
+    }
+
+    return reviews;
+  }
+
+  async function resolveReview(input: ResolveReviewInput): Promise<ResolveReviewResult> {
+    const review = listPendingReviews().find((candidate) => candidate.id === input.id);
+    if (!review) {
+      throw new BureauError(`No pending review with id "${input.id}"`, 'NOT_FOUND');
+    }
+
+    // Mark resolved BEFORE acting so a concurrent resolveReview() for the same
+    // id (e.g. a double-click) cannot resume/signal twice.
+    resolvedReviewIds.add(review.id);
+
+    let result: unknown;
+    try {
+      if (review.kind === 'tool-approval') {
+        if (input.decision === 'approve') {
+          const { approval } = review;
+          if (approval.approvalToken === undefined) {
+            throw new BureauError(
+              'Cannot approve: the toolbox that executed this tool call has no ' +
+                'approvalSecret configured, so its pendingApproval was never signed.',
+              'NOT_CONFIGURED',
+            );
+          }
+          result = await runtime.baseToolbox.resumeApproval(
+            { ...approval, approvalToken: approval.approvalToken },
+            Object.prototype.hasOwnProperty.call(input, 'arguments')
+              ? { arguments: input.arguments }
+              : undefined,
+          );
+        }
+      } else if (input.decision === 'approve') {
+        // Route through the public `bureau.signalSession` (rather than the
+        // local closure function) so this is the exact same call surface a
+        // caller could make directly — one seam, not two ways to do the same
+        // thing.
+        await bureau.signalSession(review.sessionId, review.signalName, input.payload);
+      }
+    } catch (error) {
+      resolvedReviewIds.delete(review.id);
+      throw error;
+    }
+
+    const decisionType =
+      review.kind === 'tool-approval'
+        ? input.decision === 'approve'
+          ? 'review.tool-approval.approved'
+          : 'review.tool-approval.denied'
+        : input.decision === 'approve'
+          ? 'review.human-wait.approved'
+          : 'review.human-wait.denied';
+
+    await auditTrailInstance?.record({
+      runId: review.runId,
+      type: decisionType,
+      detail: {
+        review,
+        decision: input.decision,
+        ...(input.reason !== undefined ? { reason: input.reason } : {}),
+      },
+      principal: input.principal,
+    });
+
+    return { id: review.id, kind: review.kind, decision: input.decision, result };
+  }
+
   async function createSchedule(
     definition: DurableScheduleDefinition,
   ): Promise<import('@lostgradient/weft').ScheduleSummary | null | undefined> {
@@ -1647,6 +1819,8 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     signalSession,
     updateSession,
     querySession,
+    listPendingReviews,
+    resolveReview,
     createSchedule,
     getSchedule,
     listSchedules,

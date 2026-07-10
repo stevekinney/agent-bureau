@@ -357,4 +357,87 @@ describe('createAuditTrail', () => {
     // No records should have been written after dispose
     expect(await trail.query()).toHaveLength(0);
   });
+
+  // ── record() — out-of-band records (AB-20 review queue) ─────────────
+
+  it('record() persists an out-of-band record with the given principal', async () => {
+    const kv = textValueStore(new MemoryStorage());
+    const { bureau } = createStubBureau();
+    const trail = createAuditTrail(bureau, kv);
+
+    await trail.record({
+      runId: 'run-review-1',
+      type: 'review.tool-approval.approved',
+      detail: { decision: 'approve' },
+      principal: 'api-key:reviewer-1',
+    });
+
+    const records = await trail.query({ runId: 'run-review-1' });
+    expect(records).toHaveLength(1);
+    expect(records[0]!.type).toBe('review.tool-approval.approved');
+    expect(records[0]!.principal).toBe('api-key:reviewer-1');
+    expect(records[0]!.detail).toEqual({ decision: 'approve' });
+    trail.dispose();
+  });
+
+  it('record() omits `principal` when not supplied', async () => {
+    const kv = textValueStore(new MemoryStorage());
+    const { bureau } = createStubBureau();
+    const trail = createAuditTrail(bureau, kv);
+
+    await trail.record({
+      runId: 'run-review-2',
+      type: 'review.human-wait.denied',
+      detail: {},
+    });
+
+    const [record] = await trail.query({ runId: 'run-review-2' });
+    expect(record!.principal).toBeUndefined();
+    trail.dispose();
+  });
+
+  it('record() is a no-op when no kv store is configured', async () => {
+    const { bureau } = createStubBureau();
+    const trail = createAuditTrail(bureau, undefined);
+
+    // Must not throw even though there is nowhere to persist to.
+    await trail.record({ runId: 'run-review-3', type: 'review.tool-approval.denied', detail: {} });
+    expect(await trail.query({ runId: 'run-review-3' })).toEqual([]);
+    trail.dispose();
+  });
+
+  it('record() and the live action-event listener never collide on key/sequence', async () => {
+    const kv = textValueStore(new MemoryStorage());
+    const { bureau, emit } = createStubBureau();
+    const trail = createAuditTrail(bureau, kv);
+
+    // A live action-stream record and an out-of-band record for the SAME run,
+    // landing in the same millisecond, must both survive — proving the
+    // manual-record sequence counter (AB-20) never collides with a real
+    // action's sequence.
+    const now = Date.now();
+    emit(
+      new ActionEvent({
+        type: 'run.completed',
+        timestamp: now,
+        sequence: 0,
+        runId: 'run-collision-check',
+        detail: null,
+      }),
+    );
+    await trail.record({
+      runId: 'run-collision-check',
+      type: 'review.tool-approval.approved',
+      detail: {},
+      principal: 'api-key:reviewer-4',
+    });
+
+    const records = await trail.query({ runId: 'run-collision-check' });
+    expect(records).toHaveLength(2);
+    expect(records.map((r) => r.type).sort()).toEqual([
+      'review.tool-approval.approved',
+      'run.completed',
+    ]);
+    trail.dispose();
+  });
 });
