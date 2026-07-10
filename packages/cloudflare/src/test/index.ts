@@ -5,6 +5,7 @@ import {
 import { createFakeVectorize, type FakeVectorize } from './fake-vectorize';
 import { createSqliteDouble, type SqliteDouble } from './sqlite-double';
 
+export { createFakeR2, type FakeR2 } from './fake-r2';
 export {
   createFakeVectorize,
   type FakeVectorize,
