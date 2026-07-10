@@ -668,8 +668,10 @@ const researcherTool = createSubagentTool({
   summaryTokenCap: 300,
   // Swap in a real LLM-backed condensation instead of the default
   // character-truncation summarizer:
-  summarizer: async (result, { agentName, maxTokens }) => {
-    return condenseWithLLM(result.content, { agentName, maxTokens });
+  summarizer: async (result, { agentName, maxTokens, signal }) => {
+    // Pass `signal` through to cancel the LLM call if the parent tool call
+    // is aborted while summarization is in flight.
+    return condenseWithLLM(result.content, { agentName, maxTokens, signal });
   },
 });
 ```

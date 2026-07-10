@@ -575,6 +575,73 @@ describe('createSubagentTool', () => {
 
       expect(result).toEqual({ text: 'SUMMARIZED' });
     });
+
+    it('passes the tool call abort signal through to the summarizer context', async () => {
+      const controller = new AbortController();
+      let observedSignal: AbortSignal | undefined;
+
+      const tool = createSubagentTool({
+        name: 'researcher',
+        description: 'Research a topic',
+        agentName: 'researcher',
+        input: z.object({ topic: z.string() }),
+        run: makeSuccessfulRun('raw content'),
+        summarizer: (_result, context) => {
+          observedSignal = context.signal;
+          return 'SUMMARIZED';
+        },
+      });
+
+      await (
+        tool as unknown as {
+          execute: (p: unknown, o?: { signal?: AbortSignal }) => Promise<unknown>;
+        }
+      ).execute({ topic: 'AI' }, { signal: controller.signal });
+
+      expect(observedSignal).toBe(controller.signal);
+    });
+
+    it('does not invoke the summarizer once the signal has been aborted', async () => {
+      const controller = new AbortController();
+      let summarizerCalled = false;
+
+      const tool = createSubagentTool({
+        name: 'researcher',
+        description: 'Research a topic',
+        agentName: 'researcher',
+        input: z.object({ topic: z.string() }),
+        // Aborts the parent run's signal as a side effect of the sub-agent
+        // finishing — simulates the parent cancelling right as the child
+        // run completes, before summarization would otherwise start.
+        run: async (_input, _context) => {
+          await Promise.resolve();
+          controller.abort();
+          return {
+            conversation: {} as any,
+            content: 'raw content',
+            finishReason: 'end-turn',
+            steps: [],
+            usage: { prompt: 1, completion: 1, total: 2 },
+          } as any;
+        },
+        summarizer: () => {
+          summarizerCalled = true;
+          return 'SUMMARIZED';
+        },
+      });
+
+      try {
+        await (
+          tool as unknown as {
+            execute: (p: unknown, o?: { signal?: AbortSignal }) => Promise<unknown>;
+          }
+        ).execute({ topic: 'AI' }, { signal: controller.signal });
+      } catch {
+        // Expected: the tool call rejects because the signal aborted.
+      }
+
+      expect(summarizerCalled).toBe(false);
+    });
   });
 
   describe('defaultSubagentSummarizer', () => {

@@ -45,6 +45,14 @@ export interface SubagentSummaryContext {
   agentName: string;
   /** The configured `summaryTokenCap` the summarizer should condense to. */
   maxTokens: number;
+  /**
+   * The parent tool call's abort signal, when one was supplied. An
+   * async/LLM-backed summarizer should pass this through to whatever it
+   * awaits (e.g. `fetch(url, { signal })`) so an aborted parent run doesn't
+   * leave summarization work running in the background after the tool call
+   * has already been cancelled.
+   */
+  signal?: AbortSignal;
 }
 
 /**
@@ -240,7 +248,21 @@ export function createSubagentTool(options: CreateSubagentToolOptions) {
       // The summarizer's output is hard-capped here regardless of what it
       // returns — summaryTokenCap is a guarantee enforced by the tool, not
       // a suggestion the summarizer has to honor itself.
-      const summarizedContent = await summarizer(result, { agentName, maxTokens: summaryTokenCap });
+      //
+      // The signal is checked both before and after the summarizer runs: a
+      // custom/LLM-backed summarizer may not itself observe `signal`, so an
+      // abort that lands mid-summarization would otherwise go unnoticed by
+      // the tool and let the run continue to consume tokens in the
+      // background. Passing `signal` through `SubagentSummaryContext` also
+      // lets a summarizer that DOES respect it (e.g. via `fetch`) cancel its
+      // own in-flight work immediately.
+      context.signal?.throwIfAborted();
+      const summarizedContent = await summarizer(result, {
+        agentName,
+        maxTokens: summaryTokenCap,
+        signal: context.signal,
+      });
+      context.signal?.throwIfAborted();
       const cappedContent = enforceTokenCap(summarizedContent, summaryTokenCap);
       return mapOutput({ ...result, content: cappedContent });
     },
