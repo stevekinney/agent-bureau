@@ -1097,7 +1097,19 @@ export async function runStep(
     final: false,
   };
 
-  const shouldStop = await evaluateStopConditions(deps.stopConditions, stepResult);
+  // Mirrors the onStepHooks/hooks.onStep error handling immediately below:
+  // a `StopCondition` that throws (e.g. `createCostBudgetMonitor`'s
+  // `onExceeded` raising `BudgetExceededError` to signal a hard stop, per
+  // its documented pattern) must produce a classified `'error'` outcome —
+  // `makeErrorResult` maps `BudgetExceededError` to `finishReason:
+  // 'budget-exceeded'` — not an unhandled rejection that crashes the run.
+  let shouldStop: boolean;
+  try {
+    shouldStop = await evaluateStopConditions(deps.stopConditions, stepResult);
+  } catch (error) {
+    emitter?.dispatch(new RunErrorEvent(step, error));
+    return { kind: 'error', error };
+  }
   stepResult.final = shouldStop;
 
   emitter?.dispatch(new StepCompletedEvent(stepResult));

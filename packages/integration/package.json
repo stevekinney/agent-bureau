@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "transit": "bun run --cwd ../armorer build && bun run --cwd ../conversationalist build && bun run --cwd ../operative build",
+    "transit": "../../node_modules/.bin/turbo run build --filter=bureau",
     "test": "bun run scripts/run-tests.ts",
     "check-types": "tsc --noEmit",
     "lint": "eslint .",
@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "armorer": "workspace:*",
+    "bureau": "workspace:*",
     "conversationalist": "workspace:*",
     "operative": "workspace:*",
     "zod": "^4.4.1"
