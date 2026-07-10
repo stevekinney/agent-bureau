@@ -153,14 +153,25 @@ export function partitionMessages(
 
   // Recent N messages
   let recentMessages = nonSystem.slice(-preserveRecent);
-  let alwaysPreserved: Message[] = [...streamingMessages, ...policyPreservedMessages];
 
-  // If preserveToolPairs, ensure tool pairs are not split — for the recent
-  // window and for any policy-preserved / streaming message.
+  // If preserveToolPairs, ensure the recency window doesn't split a tool
+  // pair — this one is governed by the option since it only affects which
+  // messages ride along with the recent window.
   if (preserveToolPairs) {
     recentMessages = expandToolPairs(recentMessages, nonSystem);
-    alwaysPreserved = expandToolPairs(alwaysPreserved, allMessages);
   }
+
+  // Streaming / policy-preserved messages (pinned, decision, error) must
+  // ALWAYS keep their tool-call/tool-result partner together, regardless of
+  // `preserveToolPairs`. compactConversation rebuilds the transcript by
+  // re-appending `preserved` messages through `appendMessages`, which
+  // rejects a tool-result whose tool-call isn't already present — orphaning
+  // half of a policy-preserved pair (e.g. an error tool-result whose
+  // tool-call gets compacted away) would make compaction throw.
+  const alwaysPreserved: Message[] = expandToolPairs(
+    [...streamingMessages, ...policyPreservedMessages],
+    allMessages,
+  );
 
   const preservedSet = new Set([
     ...systemMessages.map((m) => m.id),

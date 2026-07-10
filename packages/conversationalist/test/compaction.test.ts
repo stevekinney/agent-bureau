@@ -692,6 +692,67 @@ describe('summarizer-based compaction', () => {
       expect(pinnedMessage).toBeDefined();
       expect(pinnedMessage?.metadata.pinned).toBe(true);
     });
+
+    test('keeps a policy-preserved error tool-result paired with its tool-call even when preserveToolPairs is false', () => {
+      // Regression: alwaysPreserved (streaming + policy-preserved messages) must expand
+      // to include the matching tool-call/tool-result partner unconditionally. Gating that
+      // expansion on `preserveToolPairs` (which is meant only for the recency window) let
+      // an error tool-result get policy-preserved while its tool-call stayed compactable,
+      // orphaning the pair once compaction removed the call.
+      let c = createConversation();
+      c = appendMessages(c, {
+        role: 'tool-call',
+        content: '',
+        toolCall: { id: 'tc-err', name: 'tool', arguments: {} },
+      });
+      c = appendMessages(c, {
+        role: 'tool-result',
+        content: 'boom',
+        toolResult: { callId: 'tc-err', outcome: 'error', content: 'boom' },
+      });
+      for (let i = 0; i < 8; i++) {
+        c = appendUserMessage(c, `filler ${i}`);
+      }
+
+      const { compactable, preserved } = partitionMessages(c, {
+        preserveRecentCount: 4,
+        preserveToolPairs: false,
+      });
+
+      const preservedRoles = preserved.map((m) => m.role);
+      expect(preservedRoles).toContain('tool-result');
+      expect(preservedRoles).toContain('tool-call');
+      expect(compactable.some((m) => m.role === 'tool-call' || m.role === 'tool-result')).toBe(
+        false,
+      );
+    });
+
+    test('compactConversation does not throw on an error tool-result outside the recent window when preserveToolPairs is false', async () => {
+      let c = createConversation();
+      c = appendMessages(c, {
+        role: 'tool-call',
+        content: '',
+        toolCall: { id: 'tc-err-2', name: 'tool', arguments: {} },
+      });
+      c = appendMessages(c, {
+        role: 'tool-result',
+        content: 'boom',
+        toolResult: { callId: 'tc-err-2', outcome: 'error', content: 'boom' },
+      });
+      for (let i = 0; i < 8; i++) {
+        c = appendUserMessage(c, `filler ${i}`);
+      }
+
+      const { conversation: next, result } = await compactWithSummarizer(c, summarizingMock, {
+        preserveRecentCount: 4,
+        preserveToolPairs: false,
+      });
+
+      expect(result.compacted).toBe(true);
+      const messages = getMessages(next);
+      expect(messages.some((m) => m.toolResult?.callId === 'tc-err-2')).toBe(true);
+      expect(messages.some((m) => m.toolCall?.id === 'tc-err-2')).toBe(true);
+    });
   });
 
   describe('streaming message protection', () => {
