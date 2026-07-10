@@ -690,6 +690,61 @@ describe('createRun with durable routing', () => {
     }
   });
 
+  it('carries structuredOutput through to the durable RunResult (durable parity)', async () => {
+    // A run with a `responseSchema` produces `RunResult.structuredOutput` on the
+    // in-memory path (AB-95's "distinct field" requirement); the durable path
+    // must surface the SAME validated value, unchanged (it's already plain JSON,
+    // so unlike `schemaValidation.error` it needs no reconstruction).
+    const context = await buildContext();
+    try {
+      const activeRun = createRun(
+        {
+          generate: async () => ({ content: '{"answer":"42"}', toolCalls: [] }),
+          toolbox: createToolbox([]) as unknown as RunOptions['toolbox'],
+          conversation: createConversationHistory(),
+          stopWhen: stopWhen.noToolCalls(),
+          responseSchema: z.object({ answer: z.string() }),
+        },
+        { ...context, runId: 'structured-output-run', prompt: 'Hello' },
+      );
+
+      const result = await activeRun.result;
+
+      expect(result.finishReason).toBe('stop-condition');
+      expect(result.structuredOutput).toEqual({ answer: '42' });
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+
+  it('NEUTER CHECK: structuredOutput is absent on the durable path when validation fails', async () => {
+    // Confirms the parity test above is exercising the real success path (a
+    // structuredOutput field that's ALWAYS present regardless of validation
+    // outcome would trivially pass the previous test too).
+    const context = await buildContext();
+    try {
+      const activeRun = createRun(
+        {
+          generate: async () => ({ content: '{"answer":42}', toolCalls: [] }),
+          toolbox: createToolbox([]) as unknown as RunOptions['toolbox'],
+          conversation: createConversationHistory(),
+          stopWhen: stopWhen.noToolCalls(),
+          responseSchema: z.object({ answer: z.string() }),
+          schemaRetries: 0,
+        },
+        { ...context, runId: 'structured-output-fail-run', prompt: 'Hello' },
+      );
+
+      const result = await activeRun.result;
+
+      expect(result.finishReason).toBe('stop-condition');
+      expect(result.schemaValidation?.success).toBe(false);
+      expect(result.structuredOutput).toBeUndefined();
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+
   // Regression: PRRT_kwDORvupsc6MV8Xa — durable path was missing the C3 curated
   // tool.* bubble events; only raw toolbox:* events were forwarded. The audit trail
   // sinks tool.started / tool.settled / tool.error, so durable tool calls were

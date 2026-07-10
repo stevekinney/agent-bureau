@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, mock } from 'bun:test';
+import type { StandardSchemaV1 } from 'interoperability';
 import { z } from 'zod';
 
 import { createTool } from '../../src/create-tool';
@@ -7,6 +8,23 @@ import { fullInputKey } from '../../src/idempotency/key-generators';
 import type { CachedToolResult, ToolResultCache } from '../../src/idempotency/types';
 import { withIdempotency } from '../../src/idempotency/with-idempotency';
 import type { Tool } from '../../src/is-tool';
+
+/** A minimal hand-rolled Standard Schema V1 validator — no vendor dependency required. */
+function greetingSchema(): StandardSchemaV1<unknown, { name: string }> {
+  return {
+    '~standard': {
+      version: 1,
+      vendor: 'test',
+      validate(value: unknown) {
+        const name = (value as { name?: unknown })?.name;
+        if (typeof name !== 'string' || !name.trim()) {
+          return { issues: [{ message: 'expected { name: non-empty string }' }] };
+        }
+        return { value: { name: name.trim() } };
+      },
+    },
+  };
+}
 
 function createTestStore() {
   const map = new Map<string, string>();
@@ -366,5 +384,48 @@ describe('withIdempotency', () => {
 
     expect(wrapped.configuration).toBeDefined();
     expect(wrapped.configuration.identity.name).toBe('add');
+  });
+
+  it('wraps a non-Zod Standard Schema tool without throwing on the schema-match check', async () => {
+    // A Standard Schema tool's `input` is `wrapStandardSchema(...)` — a
+    // `z.any().transform(async ...)` pipe. `inputMatchesToolSchema` used to
+    // call `input.safeParse(params)`, and Zod's SYNC `safeParse` throws for
+    // an async transform ("Encountered Promise during synchronous parse")
+    // instead of returning `{ success: false }`, so every idempotent call to
+    // a Standard Schema tool rejected before `execute()` ever ran.
+    const tool = createTool({
+      name: 'greet',
+      description: 'Greets by name',
+      input: greetingSchema(),
+      inputSchema: { type: 'object', properties: { name: { type: 'string' } } },
+      idempotencyKey: (input: unknown) => fullInputKey(input),
+      async execute(params: { name: string }) {
+        callCount++;
+        return `hello, ${params.name}`;
+      },
+    });
+    const wrapped = withIdempotency(tool, { cache });
+
+    const result = await wrapped({ name: 'ada' });
+    expect(result).toBe('hello, ada');
+    expect(callCount).toBe(1);
+
+    const cached = await wrapped({ name: 'ada' });
+    expect(cached).toBe('hello, ada');
+    expect(callCount).toBe(1);
+  });
+
+  it('NEUTER CHECK: a sync `safeParse` on the wrapped schema throws (proves the fix is load-bearing)', () => {
+    const tool = createTool({
+      name: 'greet-neuter',
+      description: 'Greets by name',
+      input: greetingSchema(),
+      inputSchema: { type: 'object', properties: { name: { type: 'string' } } },
+      execute: async (params: { name: string }) => `hello, ${params.name}`,
+    });
+    const input = (tool as unknown as { input: { safeParse: (v: unknown) => unknown } }).input;
+    expect(() => input.safeParse({ name: 'ada' })).toThrow(
+      'Encountered Promise during synchronous parse',
+    );
   });
 });

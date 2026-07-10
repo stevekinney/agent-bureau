@@ -143,7 +143,12 @@ export {
   TaskRoutedEvent,
 } from './create-supervisor';
 export type { ClassifiedError, ErrorCategory } from './errors';
-export { BudgetExceededError, classifyError, ElicitationDeniedError } from './errors';
+export {
+  BudgetExceededError,
+  classifyError,
+  ElicitationDeniedError,
+  StandardSchemaValidationError,
+} from './errors';
 export type {
   CombinedOperativeEventMap,
   CombinedOperativeEvents,
@@ -427,8 +432,19 @@ export {
   StreamCustomEvent,
   withEnhancedStreaming,
 } from './streaming/index';
-export type { ResponseFormat, ToolChoice } from './structured-output/index';
-export { zodToJsonSchema } from './structured-output/index';
+export type {
+  ResponseFormat,
+  ResponseSchemaInput,
+  ResponseSchemaValidationResult,
+  ToolChoice,
+} from './structured-output/index';
+export {
+  isNonZodStandardResponseSchema,
+  isZodResponseSchema,
+  resolveResponseFormat,
+  validateResponseSchema,
+  zodToJsonSchema,
+} from './structured-output/index';
 export type {
   AfterGenerateHook,
   AfterToolExecutionHook,

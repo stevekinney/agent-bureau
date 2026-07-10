@@ -22,6 +22,8 @@ export {
   materializeToolResults,
   materializeToolResultsAsync,
 } from './materialization';
+export type { StandardSchemaV1 } from './standard-schema';
+export { isStandardSchema, validateStandardSchema } from './standard-schema';
 export type {
   JSONPrimitive,
   JSONValue,

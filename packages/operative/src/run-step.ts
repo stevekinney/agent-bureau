@@ -28,6 +28,8 @@ import {
 } from './events';
 import type { ErrorRecoveryAction } from './hooks/types';
 import { addJitter } from './retry/jitter';
+import type { ResponseSchemaInput } from './structured-output/response-schema';
+import { validateResponseSchema } from './structured-output/response-schema';
 import type { ToolChoice } from './structured-output/types';
 import type {
   AfterToolExecutionHook,
@@ -82,7 +84,7 @@ export interface StepDeps {
   readonly onElicitation: OnElicitation | undefined;
   readonly hooks: RunOptions['hooks'];
   readonly contextManagement: ContextManagementOptions | undefined;
-  readonly responseSchema: ZodType | undefined;
+  readonly responseSchema: ResponseSchemaInput | undefined;
   readonly responseFormat: GenerateContext['responseFormat'];
   /** Per-request output token cap passed through to every GenerateContext. */
   readonly maximumTokens: number | undefined;
@@ -141,6 +143,8 @@ export type StepOutcome =
       // is decided by the driver's loop bound, not a step.
       finishReason: 'stop-condition';
       schemaValidation?: { success: boolean; error?: unknown };
+      /** The validated structured output — set only on a successful `schemaValidation`. */
+      structuredOutput?: unknown;
     }
   | { kind: 'abort'; reason?: string }
   | { kind: 'error'; error: unknown };
@@ -1090,40 +1094,45 @@ export async function runStep(
       parsed = runState.lastContent;
     }
 
-    try {
-      deps.responseSchema.parse(parsed);
-      // Schema validation passed
-      return { kind: 'stop', finishReason: 'stop-condition', schemaValidation: { success: true } };
-    } catch (validationError) {
-      runState.schemaAttempts++;
-      if (runState.schemaAttempts <= deps.schemaRetries) {
-        emitter?.dispatch(
-          new ResponseSchemaFailedEvent(
-            step,
-            runState.lastContent,
-            validationError,
-            deps.schemaRetries - runState.schemaAttempts,
-          ),
-        );
-        // Append a user message with the validation error to prompt correction
-        const retryMessage = deps.schemaRetryMessage
-          ? deps.schemaRetryMessage(validationError, runState.schemaAttempts)
-          : `Your response did not match the required schema. Error: ${String(validationError)}. Please try again with a valid response.`;
-        conversation.appendUserMessage(retryMessage);
-        stepResult.final = false;
-        return { kind: 'continue' };
-      }
-
-      // Schema retries exhausted
-      emitter?.dispatch(
-        new ResponseSchemaFailedEvent(step, runState.lastContent, validationError, 0),
-      );
+    const validation = await validateResponseSchema(deps.responseSchema, parsed);
+    if (validation.success) {
       return {
         kind: 'stop',
         finishReason: 'stop-condition',
-        schemaValidation: { success: false, error: validationError },
+        schemaValidation: { success: true },
+        structuredOutput: validation.value,
       };
     }
+
+    const validationError = validation.error;
+    runState.schemaAttempts++;
+    if (runState.schemaAttempts <= deps.schemaRetries) {
+      emitter?.dispatch(
+        new ResponseSchemaFailedEvent(
+          step,
+          runState.lastContent,
+          validationError,
+          deps.schemaRetries - runState.schemaAttempts,
+        ),
+      );
+      // Append a user message with the validation error to prompt correction
+      const retryMessage = deps.schemaRetryMessage
+        ? deps.schemaRetryMessage(validationError, runState.schemaAttempts)
+        : `Your response did not match the required schema. Error: ${String(validationError)}. Please try again with a valid response.`;
+      conversation.appendUserMessage(retryMessage);
+      stepResult.final = false;
+      return { kind: 'continue' };
+    }
+
+    // Schema retries exhausted
+    emitter?.dispatch(
+      new ResponseSchemaFailedEvent(step, runState.lastContent, validationError, 0),
+    );
+    return {
+      kind: 'stop',
+      finishReason: 'stop-condition',
+      schemaValidation: { success: false, error: validationError },
+    };
   }
 
   if (shouldStop) {

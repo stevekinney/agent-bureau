@@ -1,6 +1,7 @@
 import { createTestToolbox } from 'armorer/test';
 import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
+import { z } from 'zod';
 
 import { createScheduler } from '../../src/scheduler/create-scheduler';
 import type { SchedulerEventType } from '../../src/scheduler/events';
@@ -548,7 +549,17 @@ describe('createScheduler', () => {
       toolbox: createTestToolbox([]),
       conversation: new Conversation(),
       maximumSteps: 1,
-      responseSchema: {} as never,
+      // `z.custom()` has no JSON Schema representation, so deriving the
+      // provider `responseFormat` throws SYNCHRONOUSLY during run setup
+      // (`buildStepDeps`), before the per-step try/catch exists to convert
+      // it into a resolved error `RunResult` — this is what actually
+      // rejects `result`, distinguishing this test from an in-run error
+      // (e.g. a throwing `generate`), which resolves with
+      // `finishReason: 'error'` instead. (Previously this used
+      // `responseSchema: {} as never`; that stopped triggering a throw once
+      // `responseSchema` legitimately accepts a plain JSON Schema object —
+      // `{}` is now a valid, if permissive, JSON Schema.)
+      responseSchema: z.custom(() => true),
     }));
 
     await expect(result).rejects.toThrow();

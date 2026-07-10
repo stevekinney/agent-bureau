@@ -12,6 +12,26 @@ export class BudgetExceededError extends Error {
   }
 }
 
+/**
+ * Raised when a `responseSchema` that is a non-Zod Standard Schema validator
+ * (Valibot, ArkType, ...) rejects the model's structured output. Carries the
+ * validator's raw `issues` array (per the Standard Schema spec) so callers
+ * that inspect the error programmatically don't need to guess the shape.
+ */
+export class StandardSchemaValidationError extends Error {
+  readonly issues: ReadonlyArray<{ message: string; path?: ReadonlyArray<PropertyKey> }>;
+
+  constructor(issues: ReadonlyArray<{ message: string; path?: ReadonlyArray<PropertyKey> }>) {
+    super(
+      issues.length > 0
+        ? `Response failed schema validation: ${issues.map((issue) => issue.message).join('; ')}`
+        : 'Response failed schema validation',
+    );
+    this.name = 'StandardSchemaValidationError';
+    this.issues = issues;
+  }
+}
+
 export type ErrorCategory =
   | 'rate-limit'
   | 'timeout'
