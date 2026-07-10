@@ -116,22 +116,12 @@ export function createRunFrameForwarder(
     );
   });
 
-  on('tool.error', (event) => {
-    emit(
-      createToolPostFrame(
-        {
-          runId,
-          step: event.step,
-          toolCallId: event.toolCallId,
-          toolName: event.toolName,
-          status: 'error' satisfies ToolFrameStatus,
-          error: event.error,
-          summarizeOptions,
-        },
-        clock,
-      ),
-    );
-  });
+  // `tool.error` is intentionally NOT wired here — `create-run.ts` always
+  // fires `tool.settled` first (with `status: 'error'` and the same `error`
+  // payload) and then ALSO fires `tool.error` for the same failed call.
+  // Listening to both would emit two `tool-post` frames for one tool call;
+  // `tool.settled`'s error branch already carries everything `tool.error`
+  // does.
 
   on('tool.policy-denied', (event) => {
     emit(

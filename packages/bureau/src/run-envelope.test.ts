@@ -122,6 +122,43 @@ describe('createRunFrameForwarder', () => {
     await activeRun.result;
     expect(frames.length).toBe(0);
   });
+
+  it('emits exactly one tool-post frame for a failing tool call (regression: create-run.ts fires both tool.settled AND tool.error for the same failure)', async () => {
+    const failingTool = createTool({
+      name: 'explode',
+      description: 'always fails',
+      input: z.object({}),
+      execute: async () => {
+        throw new Error('kaboom');
+      },
+    });
+
+    const generate: GenerateFunction = async ({ step }) =>
+      step === 0
+        ? { content: '', toolCalls: [{ name: 'explode', arguments: {} }] }
+        : { content: 'recovered', toolCalls: [] };
+
+    const activeRun = createActiveRun({
+      generate,
+      toolbox: createTestToolbox([failingTool]),
+      conversation: new Conversation(),
+      maximumSteps: 5,
+      runId: 'run-forwarder-3',
+    });
+
+    const frames: RunFrame[] = [];
+    const dispose = createRunFrameForwarder('run-forwarder-3', activeRun, (frame) =>
+      frames.push(frame),
+    );
+
+    await activeRun.result;
+    dispose();
+
+    const toolPostFrames = frames.filter((frame) => frame.type === 'tool-post');
+    expect(toolPostFrames.length).toBe(1);
+    expect(toolPostFrames[0]?.status).toBe('error');
+    expect(toolPostFrames[0]?.error).toBe('kaboom');
+  });
 });
 
 describe('buildTerminalReportFromCompletedEvent / buildTerminalReportFromAbortedEvent', () => {

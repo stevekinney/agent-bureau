@@ -1495,6 +1495,9 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     runSessionIdentifiers.delete(runState.activeRun);
     runAttribution.delete(id);
     store.removeRun(id);
+    // AB-96 — drop the cached terminal RunReport too, or a long-lived bureau
+    // that creates/deletes many runs would retain one forever per run id.
+    runReports.delete(id);
   }
 
   /**
