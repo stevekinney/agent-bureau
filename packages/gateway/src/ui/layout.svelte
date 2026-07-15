@@ -1,11 +1,11 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
-  import { onMount } from 'svelte';
+  import { MediaQuery } from 'svelte/reactivity';
 
   import { Button } from '@lostgradient/cinder/button';
   import { SideNavigation } from '@lostgradient/cinder/side-navigation';
   import { SideNavigationItem } from '@lostgradient/cinder/side-navigation-item';
-  import { Sidebar } from '@lostgradient/cinder/sidebar';
+  import { SIDEBAR_MOBILE_MEDIA_QUERY, Sidebar } from '@lostgradient/cinder/sidebar';
   import { SkipLink } from '@lostgradient/cinder/skip-link';
   import { StatusDot } from '@lostgradient/cinder/status-dot';
   import { Menu } from 'lucide-svelte';
@@ -25,9 +25,7 @@
     { href: '/evaluations', label: 'Evaluations' },
     { href: '/configuration', label: 'Configuration' },
   ];
-  const sidebarBreakpointQuery = '(max-width: 47.99rem)';
-  const isMobileSidebarViewport = () =>
-    typeof window !== 'undefined' && window.matchMedia(sidebarBreakpointQuery).matches;
+  const mobileSidebar = new MediaQuery(SIDEBAR_MOBILE_MEDIA_QUERY, false);
 
   let {
     children,
@@ -39,33 +37,23 @@
     pathname: string;
   } = $props();
 
-  const initialMobileSidebar = isMobileSidebarViewport();
-  let mobileSidebar = $state(initialMobileSidebar);
-  let sidebarCollapsed = $state(initialMobileSidebar);
+  let sidebarCollapsed = $state(mobileSidebar.current);
+  const sidebarTriggerLabel = $derived(
+    sidebarCollapsed ? 'Open navigation' : 'Close navigation',
+  );
 
-  const openSidebar = () => {
-    sidebarCollapsed = false;
+  const toggleSidebar = () => {
+    sidebarCollapsed = !sidebarCollapsed;
   };
 
   const closeSidebarOnMobile = () => {
-    if (isMobileSidebarViewport()) {
+    if (mobileSidebar.current) {
       sidebarCollapsed = true;
     }
   };
 
-  onMount(() => {
-    const mediaQuery = window.matchMedia(sidebarBreakpointQuery);
-    const syncSidebarState = () => {
-      mobileSidebar = mediaQuery.matches;
-      sidebarCollapsed = mediaQuery.matches;
-    };
-
-    syncSidebarState();
-    mediaQuery.addEventListener('change', syncSidebarState);
-
-    return () => {
-      mediaQuery.removeEventListener('change', syncSidebarState);
-    };
+  $effect(() => {
+    sidebarCollapsed = mobileSidebar.current;
   });
 
   /**
@@ -82,22 +70,29 @@
   }
 </script>
 
-<div class="layout">
+<div class="layout" class:layout--mobile={mobileSidebar.current}>
   <SkipLink target="main-content" />
   <div class="mobile-navigation-toggle">
     <Button
       iconOnly
-      aria-label="Open navigation"
+      aria-label={sidebarTriggerLabel}
+      aria-controls="agent-bureau-sidebar"
+      aria-expanded={!sidebarCollapsed}
       class="navigation-toggle"
       size="sm"
       variant="secondary"
-      onclick={openSidebar}
+      onclick={toggleSidebar}
     >
       <Menu size={18} aria-hidden="true" />
     </Button>
   </div>
   <div class="sidebar-shell">
-    <Sidebar bind:collapsed={sidebarCollapsed} label="Agent Bureau" class="sidebar">
+    <Sidebar
+      id="agent-bureau-sidebar"
+      bind:collapsed={sidebarCollapsed}
+      label="Agent Bureau"
+      class="sidebar"
+    >
       {#snippet brand()}
         <div class="sidebar-title">Agent Bureau</div>
       {/snippet}
