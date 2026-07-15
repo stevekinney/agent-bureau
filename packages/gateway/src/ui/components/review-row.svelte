@@ -100,13 +100,15 @@
 
   {#snippet footer()}
     <div class="review-row-actions">
-      <Textarea
-        id={`review-reason-${review.id}`}
-        label="Reason (optional, shown on deny)"
-        rows={1}
-        bind:value={reasonText}
-        disabled={pending}
-      />
+      <div class="review-row-reason-field">
+        <Textarea
+          id={`review-reason-${review.id}`}
+          label="Reason (optional, shown on deny)"
+          rows={1}
+          bind:value={reasonText}
+          disabled={pending}
+        />
+      </div>
       <div class="review-row-buttons">
         <Button
           variant="danger"
@@ -165,8 +167,8 @@
     flex-wrap: wrap;
   }
 
-  .review-row-actions :global(.cinder-textarea) {
-    flex: 1;
+  .review-row-reason-field {
+    flex: 1 1 12rem;
     min-width: 12rem;
   }
 

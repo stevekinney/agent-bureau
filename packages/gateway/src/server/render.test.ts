@@ -384,6 +384,7 @@ describe('renderPage with a populated run-detail page', () => {
     expect(html).toContain('Approve the refund?');
     expect(html).toContain('Approve');
     expect(html).toContain('Deny');
+    expect(html).toContain('review-row-reason-field');
   });
 
   // A review parking a DIFFERENT run must not surface here — the affordance
