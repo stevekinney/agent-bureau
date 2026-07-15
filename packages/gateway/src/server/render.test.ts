@@ -6,6 +6,7 @@ import { createReviewsStore } from '../ui/hooks/use-reviews.svelte';
 import RunDetailPage from '../ui/pages/run-detail.svelte';
 import { renderPage } from './render';
 import Fixture from './test-fixtures/render-fixture.svelte';
+import { extractRootMarkup } from './test-utilities';
 
 const baseProps = { initialData: { label: 'hello' }, pathname: '/dashboard' };
 
@@ -139,7 +140,7 @@ describe('renderPage with a populated run-detail page', () => {
   // the other routes proves none of this, so this test renders the REAL page
   // with fully populated data — including a tool call carrying a code string to
   // hit the payload/code path — to prove SSR does not throw and emits the
-  // expected cinder markup.
+  // expected visible content and public semantics.
   const populatedRunEvents = [
     {
       sequence: 0,
@@ -278,26 +279,33 @@ describe('renderPage with a populated run-detail page', () => {
     expect(html).toContain('<title>Run run-populated</title>');
   });
 
-  it('emits markup from the event stream, run-step, payload, code-block, and stat components', async () => {
+  it('renders populated run details through the event, step, payload, code, and usage surfaces', async () => {
     const html = await renderPage({ title: 'Run run-populated', component: RunDetailPage, props });
+    const rootMarkup = extractRootMarkup(html);
 
     // Section headings the page composes around the heavy components.
-    expect(html).toContain('Summary');
-    expect(html).toContain('Streaming Output');
-    expect(html).toContain('Tool Activity');
-    expect(html).toContain('Event Stream');
+    expect(rootMarkup).toContain('Summary');
+    expect(rootMarkup).toContain('Streaming Output');
+    expect(rootMarkup).toContain('Tool Activity');
+    expect(rootMarkup).toContain('Event Stream');
 
-    // Each heavy cinder component emits its namespaced class under SSR.
-    expect(html).toContain('cinder-code-block');
-    expect(html).toContain('cinder-event-stream-viewer');
-    expect(html).toContain('cinder-payload-inspector');
-    expect(html).toContain('cinder-run-step-timeline');
-    expect(html).toContain('cinder-stat');
-
-    // Real data flows through: the code string, step content, and an event.
-    expect(html).toContain('greeting');
-    expect(html).toContain('Calling a tool');
-    expect(html).toContain('run.completed');
+    // Public labels and fixture data prove each surface rendered under SSR.
+    expect(rootMarkup).toContain('aria-label="Token usage"');
+    expect(rootMarkup).toContain('Prompt');
+    expect(rootMarkup).toContain('120');
+    expect(rootMarkup).toContain('Completion');
+    expect(rootMarkup).toContain('80');
+    expect(rootMarkup).toContain('Total');
+    expect(rootMarkup).toContain('200');
+    expect(rootMarkup).toContain('const greeting = "hello"');
+    expect(rootMarkup).toContain('read_file → completed');
+    expect(rootMarkup).toContain('aria-label="Run steps"');
+    expect(rootMarkup).toContain('Step 1');
+    expect(rootMarkup).toContain('Step 2 (final)');
+    expect(rootMarkup).toContain('Step 1 tool calls');
+    expect(rootMarkup).toContain('Step 1 results');
+    expect(rootMarkup).toContain('aria-label="Run event stream"');
+    expect(rootMarkup).toContain('run.completed');
   });
 
   // AB-12 — the run-inspector Timeline section renders every milestone kind
@@ -307,30 +315,29 @@ describe('renderPage with a populated run-detail page', () => {
   // detail), and a generate retry attempt.
   it('renders a Timeline section covering every AB-12 milestone kind', async () => {
     const html = await renderPage({ title: 'Run run-populated', component: RunDetailPage, props });
+    const rootMarkup = extractRootMarkup(html);
 
-    expect(html).toContain('Timeline');
-    expect(html).toContain('cinder-data-list');
-    expect(html).toContain('cinder-stacked-list-item');
+    expect(rootMarkup).toContain('Timeline');
 
     // Milestone kind badges.
-    expect(html).toContain('Checkpoint');
-    expect(html).toContain('Retry');
-    expect(html).toContain('Child workflow');
-    expect(html).toContain('Handoff');
-    expect(html).toContain('Parked');
-    expect(html).toContain('Reattached');
+    expect(rootMarkup).toContain('Checkpoint');
+    expect(rootMarkup).toContain('Retry');
+    expect(rootMarkup).toContain('Child workflow');
+    expect(rootMarkup).toContain('Handoff');
+    expect(rootMarkup).toContain('Parked');
+    expect(rootMarkup).toContain('Reattached');
 
     // Underlying event types and detail — proves real timeline data flowed
     // through the classification, not just static badge labels.
-    expect(html).toContain('step.started');
-    expect(html).toContain('generate.retry');
-    expect(html).toContain('multiagent.child-workflow.started');
-    expect(html).toContain('multiagent.handoff.occurred');
-    expect(html).toContain('multiagent.human-wait.parked');
-    expect(html).toContain('workflow.reattached');
-    expect(html).toContain('human-response');
-    expect(html).toContain('v1');
-    expect(html).toContain('v2');
+    expect(rootMarkup).toContain('step.started');
+    expect(rootMarkup).toContain('generate.retry');
+    expect(rootMarkup).toContain('multiagent.child-workflow.started');
+    expect(rootMarkup).toContain('multiagent.handoff.occurred');
+    expect(rootMarkup).toContain('multiagent.human-wait.parked');
+    expect(rootMarkup).toContain('workflow.reattached');
+    expect(rootMarkup).toContain('human-response');
+    expect(rootMarkup).toContain('v1');
+    expect(rootMarkup).toContain('v2');
   });
 
   // Regression (Codex review, PR #203) — the Timeline section must classify
@@ -465,8 +472,9 @@ describe('renderPage with a populated run-detail page', () => {
         toolActivity: [],
       },
     });
+    const rootMarkup = extractRootMarkup(html);
 
-    expect(html).toContain('data-cinder-status="succeeded"');
-    expect(html).not.toContain('data-cinder-status="failed"');
+    expect(rootMarkup).toContain('aria-label="Status: Succeeded"');
+    expect(rootMarkup).not.toContain('aria-label="Status: Failed"');
   });
 });
