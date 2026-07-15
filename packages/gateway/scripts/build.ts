@@ -127,6 +127,15 @@ for (const path of stylePaths) {
   cssBundle += '\n';
 }
 
+// These selectors come from components rendered by the Gateway client. Keep
+// this check in the production build so missing Cinder side effects fail the
+// artifact-producing path itself rather than a second, test-only Svelte build.
+for (const selector of ['.cinder-card', '.cinder-textarea']) {
+  if (!cssBundle.includes(selector)) {
+    throw new Error(`Client CSS bundle is missing required selector: ${selector}`);
+  }
+}
+
 await Bun.write('./dist/public/styles.css', cssBundle);
 manifest['styles.css'] = '/public/styles.css';
 
