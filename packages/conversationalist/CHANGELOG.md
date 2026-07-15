@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.0
+
+### Minor Changes
+
+- b38dc8b: `Conversation.compact()` and `compactConversation()` now accept a structured `preservePolicy` on `CompactionOptions` (`{ pinned?, decisions?, errors? }`, all defaulting to `true`). When set, compaction preserves — regardless of recency — messages pinned via `metadata.pinned === true`, decision annotations via `metadata.decision === true`, and errors via `toolResult.outcome === 'error'` or `metadata.error === true`. Preserved messages that are half of a tool-call/tool-result pair now pull in their partner in both directions (previously only a recent tool-result pulled in its tool-call). Because these flags default to `true`, plain `compact()` calls now preserve error tool-results and pinned/decision messages that were previously summarized away — this is an intentional behavior change; pass `preservePolicy: { pinned: false, decisions: false, errors: false }` to restore the old summarize-everything-outside-the-recent-window behavior.
+- 0c0dc84: `TokenUsage` gains provider-neutral `cacheCreationTokens` and `cacheReadTokens` fields, both optional and never fabricated — a provider or response with no native cache-token concept leaves them `undefined` rather than `0`.
+- 49745de: `toAnthropicMessages` accepts an optional second argument, `{ extendedCacheTtl?: boolean }`. When set, every `cache_control` breakpoint lowered from a `cacheBoundary` mark opts into Anthropic's extended one-hour cache TTL (`cache_control: { type: 'ephemeral', ttl: '1h' }`) instead of the default 5-minute one. `AnthropicCacheControl` gains the matching optional `ttl?: '5m' | '1h'` field. Backward compatible — omitting the option preserves the existing 5-minute-default behavior byte-for-byte.
+- 2b56d5c: Add first-class prompt-cache checkpoint metadata and a structured prompt-assembly path, closing the last gaps in making conversationalist the runner's full conversation substrate.
+  - `Message`/`MessageInput` gain `cacheBoundary?: boolean` — a message-level mark that everything up to and including it is a stable, cacheable prefix. It survives JSON serialization, markdown export/import, compaction, truncation, redaction, and streaming finalize. `toAnthropicMessages` lowers it to native `cache_control: { type: 'ephemeral' }` (on the message's last content block, or as an addressable `system` block for system messages); `fromAnthropicMessages` restores it on import. OpenAI and Gemini adapters treat it as a documented no-op (both cache automatically / out-of-band, with no per-message wire field to target).
+  - `sectionsToMessageInputs(composer, options)` (new export from `conversationalist/composition`) renders an `InstructionComposer`'s sections into an ordered array of individually-addressable `system`-role `MessageInput`s instead of one joined string, so callers can express stable-prefix discipline (shared contract, guidelines, task context, diff, agent role, ...) natively in the conversation. `InstructionSection` gains an optional `cacheBoundary` that carries through to its rendered message. Rendering is pure and deterministic — two assemblies of the same composer and variables are byte-identical.
+
+  No parallel annotated-message wrapper layer was introduced; the mark lives directly on `Message`/`MessageInput`.
+
 ## 0.3.0
 
 ### Minor Changes
