@@ -1029,11 +1029,17 @@ export async function createRuntimeComposition(
   // would be pure overhead with zero recovery. The explicit `durableExecution`
   // flag overrides the default either way.
   const hasKvOnlyPersistence = persistenceKvStore !== undefined;
+  let effectiveStorageIsPersistent = false;
+  if (effectiveStorage) {
+    if (isStorageConfiguration(effectiveStorage)) {
+      effectiveStorageIsPersistent = effectiveStorage.type !== 'memory';
+    } else {
+      const persistence = effectiveStorage.capabilities().persistence;
+      effectiveStorageIsPersistent = persistence === 'local' || persistence === 'remote';
+    }
+  }
   const wantsDurable =
-    options.durableExecution ??
-    (effectiveStorage !== undefined &&
-      (!isStorageConfiguration(effectiveStorage) || effectiveStorage.type !== 'memory') &&
-      !hasKvOnlyPersistence);
+    options.durableExecution ?? (effectiveStorageIsPersistent && !hasKvOnlyPersistence);
 
   // A KV-only `persistence` (ConditionalTextValueStore) value means no raw `Storage` was
   // resolved and a durable engine cannot be built. Fail loud if `durableExecution:

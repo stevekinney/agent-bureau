@@ -371,6 +371,22 @@ describe('createRuntimeComposition durable execution', () => {
     }
   });
 
+  it('keeps durable execution off by default for an injected ephemeral Storage adapter', async () => {
+    const storage = new MemoryStorage();
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'ephemeral storage', toolCalls: [] }),
+      toolbox: createToolbox([], { context: {} }),
+      storage,
+    });
+
+    try {
+      expect(runtime.durable).toBeUndefined();
+      expect(runtime.disposeStorage).toBeUndefined();
+    } finally {
+      storage[Symbol.dispose]();
+    }
+  });
+
   it('throws when durableExecution: true is combined with a custom persistence value', async () => {
     // `persistence` shadows `storage`, so no raw backend is resolved and a
     // durable engine cannot share its backend with the session store. Honoring

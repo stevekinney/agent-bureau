@@ -790,9 +790,7 @@ describe('createRunEngine', () => {
     const { engine } = await createRunEngine({
       storage: new MemoryStorage(),
       runWorkflow: makeSleepingWorkflow(PARKED_SLEEP_MILLISECONDS),
-      recover: false,
       backgroundTasks: 'manual',
-      startScheduler: false,
       onLog: (record) => {
         if (record.message === REACHED_SLEEP_MARKER) reachedSleep.push(record);
       },
