@@ -69,7 +69,7 @@
     "validate": "bun run format:check && bun run lint && bun run check-types && bun run test"
   },
   "dependencies": {
-    "@lostgradient/weft": "^0.9.0",
+    "@lostgradient/weft": "^0.10.0",
     "armorer": "workspace:*",
     "conversationalist": "workspace:*",
     "interoperability": "workspace:*",

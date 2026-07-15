@@ -794,8 +794,9 @@ describe('createRuntimeComposition durable execution', () => {
         const originalGet = secondRuntime.durable!.engine.storage.get.bind(
           secondRuntime.durable!.engine.storage,
         );
+        let scheduleMarkerReads = 0;
         secondRuntime.durable!.engine.storage.get = async (key) => {
-          if (key === KEYS.scheduleRun(runId)) {
+          if (key === KEYS.scheduleRun(runId) && ++scheduleMarkerReads === 2) {
             throw new Error('transient schedule marker read failure');
           }
           return originalGet(key);
@@ -1243,8 +1244,9 @@ describe('createRuntimeComposition durable execution', () => {
           get: (key: string) => Promise<Uint8Array | null>;
         };
         const originalGet = storageWithPatchedGet.get.bind(storageWithPatchedGet);
+        let scheduleMarkerReads = 0;
         storageWithPatchedGet.get = async (key) => {
-          if (key === KEYS.scheduleRun(runId)) {
+          if (key === KEYS.scheduleRun(runId) && ++scheduleMarkerReads === 2) {
             throw new Error('transient schedule marker read failure');
           }
           return originalGet(key);
