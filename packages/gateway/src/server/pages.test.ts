@@ -7,6 +7,7 @@ import { createBureau } from 'bureau';
 
 import { createApiKeyStore } from '../keys/create-api-key-store';
 import { createTestGateway } from '../test';
+import { extractRootMarkup } from './test-utilities';
 
 const evaluationsFixturesDirectory = join(import.meta.dir, '__evaluations-fixtures__');
 
@@ -21,20 +22,6 @@ function extractInitialData(html: string): unknown {
     throw new Error('window.__INITIAL_DATA__ not found in SSR output');
   }
   return JSON.parse(match[1]);
-}
-
-/**
- * Extracts the markup the Svelte app server-rendered into `<div id="root">`,
- * i.e. everything between the root open tag and the inline data `<script>`.
- * Lets tests assert the app actually rendered (non-empty body) rather than
- * merely emitting the shell, without coupling to a specific page's markup.
- */
-function extractRootMarkup(html: string): string {
-  const match = html.match(/<div id="root">(.*?)<\/div>\s*<script>window\.__INITIAL_DATA__/s);
-  if (!match) {
-    throw new Error('#root mount not found in SSR output');
-  }
-  return match[1] ?? '';
 }
 
 afterEach(() => {

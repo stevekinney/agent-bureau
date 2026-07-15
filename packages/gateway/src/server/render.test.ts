@@ -6,16 +6,9 @@ import { createReviewsStore } from '../ui/hooks/use-reviews.svelte';
 import RunDetailPage from '../ui/pages/run-detail.svelte';
 import { renderPage } from './render';
 import Fixture from './test-fixtures/render-fixture.svelte';
+import { extractRootMarkup } from './test-utilities';
 
 const baseProps = { initialData: { label: 'hello' }, pathname: '/dashboard' };
-
-function extractRootMarkup(html: string): string {
-  const match = html.match(/<div id="root">(.*?)<\/div>\s*<script>window\.__INITIAL_DATA__/s);
-  if (!match) {
-    throw new Error('#root mount not found in SSR output');
-  }
-  return match[1] ?? '';
-}
 
 describe('renderPage', () => {
   it('returns a complete HTML document string', async () => {
