@@ -1240,10 +1240,9 @@ describe('createBureau', () => {
 
   it('forwards toolbox events from a recovered run to the live surface during resume (#28)', async () => {
     // #28: before this fix a recovered run fired only TERMINAL events — its
-    // per-step toolbox:* actions were silent. The resolver now pre-allocates the
-    // run's emitter+toolbox and the reattach adapter forwards toolbox events to it,
-    // so a tool the resumed step executes is observable on bureau B's `action`
-    // surface (same channel the live durable path uses).
+    // per-step toolbox:* actions were silent. The awaited Weft recovery hook now
+    // installs and registers the recovered event surface before replay, so a tool
+    // executed by the resumed step is observable on bureau B's `action` surface.
     const databasePath = join(
       tmpdir(),
       `bureau-recovery-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
@@ -2500,6 +2499,40 @@ describe('createBureau durable inspection surface', () => {
 
     expect(await bureau.getDurableRun('any-run')).toBeUndefined();
     expect(await bureau.listDurableRuns()).toBeUndefined();
+    expect(await bureau.runDurableMaintenance()).toBeUndefined();
+  });
+
+  it('forwards host-driven maintenance to the durable engine', async () => {
+    const probe = await createRuntimeComposition({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+    const enginePrototype = Object.getPrototypeOf(probe.durable!.engine) as {
+      runMaintenance: (now?: number) => Promise<void>;
+    };
+    probe.durable!.engine[Symbol.dispose]?.();
+    probe.disposeStorage?.();
+    const maintenanceSpy = spyOn(enginePrototype, 'runMaintenance').mockResolvedValue(undefined);
+
+    try {
+      const bureau = await createBureau({
+        generate: createMockGenerate(),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'memory' },
+        durableExecution: true,
+        durableBackgroundTasks: 'manual',
+      });
+      try {
+        expect(await bureau.runDurableMaintenance(123_456)).toBe(true);
+        expect(maintenanceSpy).toHaveBeenCalledWith(123_456);
+      } finally {
+        bureau.dispose();
+      }
+    } finally {
+      maintenanceSpy.mockRestore();
+    }
   });
 
   it('getDurableRun returns null for an unknown run and state for a completed run', async () => {

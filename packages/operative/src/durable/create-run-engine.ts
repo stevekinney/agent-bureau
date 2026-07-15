@@ -58,6 +58,14 @@ export interface CreateRunEngineOptions {
   recover?: boolean;
 
   /**
+   * Select how Weft's periodic maintenance is driven. The default
+   * `'automatic'` profile uses in-process intervals. Use `'manual'` in
+   * serverless hosts such as Cloudflare Durable Objects, then call
+   * `engine.runMaintenance()` from each alarm or Cron wake-up.
+   */
+  backgroundTasks?: 'automatic' | 'manual';
+
+  /**
    * Arm Weft's durable-timer polling loop, independent of {@link recover}
    * in Weft. `recover` decides *who drives `recoverAll`*; `startScheduler`
    * decides *whether `ctx.sleep(...)` / `engine.schedule(...)` timers fire*. It
@@ -297,6 +305,7 @@ export async function createRunEngine(options: CreateRunEngineOptions): Promise<
   const engine = await Engine.create({
     storage: options.storage,
     recover: options.recover ?? true,
+    ...(options.backgroundTasks !== undefined ? { backgroundTasks: options.backgroundTasks } : {}),
     ...(options.startScheduler !== undefined ? { startScheduler: options.startScheduler } : {}),
     ...(options.schedulerPollIntervalMs !== undefined
       ? { schedulerPollIntervalMs: options.schedulerPollIntervalMs }

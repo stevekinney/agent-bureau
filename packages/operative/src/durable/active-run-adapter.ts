@@ -470,6 +470,124 @@ export interface RecoveredRunHandle {
   result(): Promise<unknown>;
 }
 
+export interface RecoveredRunEventSurface {
+  emitter: CompletableEventTarget<CombinedOperativeEventMap>;
+  stopToolboxForward: () => void;
+}
+
+/**
+ * Build the live event surface for a recovered run during Weft's
+ * `onRecoveredWorkflow` hook, before the recovered generator advances.
+ */
+export function createRecoveredRunEventSurface(
+  services: DurableRunDeps,
+  runId: string,
+  agentName: string,
+): RecoveredRunEventSurface {
+  const emitter = new CompletableEventTarget<CombinedOperativeEventMap>();
+  services.emitter = emitter;
+  const cleanups: Array<(() => void) | undefined> = [];
+  const toolboxForward = forwardEvents(
+    services.toolbox as unknown as ForwardableSource,
+    emitter,
+    'toolbox',
+  );
+  cleanups.push(() => toolboxForward.stop());
+
+  let currentStep = 0;
+  const stepListener = (event: StepStartedEvent) => {
+    currentStep = event.step;
+  };
+  emitter.addEventListener(StepStartedEvent.type, stepListener);
+  cleanups.push(() => emitter.removeEventListener(StepStartedEvent.type, stepListener));
+
+  const toolbox = services.toolbox as unknown as {
+    addEventListener?: <K extends keyof ToolboxEventMap>(
+      type: K,
+      listener: (event: ToolboxEventMap[K]) => void,
+      options?: AddEventListenerOptions,
+    ) => () => void;
+  };
+
+  if (toolbox.addEventListener) {
+    const addListener = toolbox.addEventListener.bind(toolbox);
+    cleanups.push(
+      addListener('execute-start', (event) => {
+        emitter.dispatchEvent(
+          new ToolStartedBubbleEvent(
+            { agentName, runId, step: currentStep },
+            {
+              toolName: event.call.name,
+              toolCallId: event.call.id,
+              params: event.params,
+              startedAt: Date.now(),
+            },
+          ),
+        );
+      }),
+      addListener('settled', (event) => {
+        const hasError = event.error !== undefined;
+        emitter.dispatchEvent(
+          new ToolSettledBubbleEvent(
+            { agentName, runId, step: currentStep },
+            {
+              toolName: event.call.name,
+              toolCallId: event.call.id,
+              status: hasError ? 'error' : 'success',
+              result: event.result,
+              error: event.error,
+            },
+          ),
+        );
+        if (hasError) {
+          emitter.dispatchEvent(
+            new ToolErrorBubbleEvent(
+              { agentName, runId, step: currentStep },
+              {
+                toolName: event.call.name,
+                toolCallId: event.call.id,
+                error: event.error,
+              },
+            ),
+          );
+        }
+      }),
+      addListener('progress', (event) => {
+        emitter.dispatchEvent(
+          new ToolProgressBubbleEvent(
+            { agentName, runId, step: currentStep },
+            {
+              toolName: event.call.name,
+              toolCallId: event.call.id,
+              percent: event.percent,
+              message: event.message,
+            },
+          ),
+        );
+      }),
+      addListener('policy-denied', (event) => {
+        emitter.dispatchEvent(
+          new ToolPolicyDeniedBubbleEvent(
+            { agentName, runId, step: currentStep },
+            {
+              toolName: event.call.name,
+              toolCallId: event.call.id,
+              reason: event.reason,
+            },
+          ),
+        );
+      }),
+    );
+  }
+
+  return {
+    emitter,
+    stopToolboxForward: () => {
+      for (const cleanup of cleanups) cleanup?.();
+    },
+  };
+}
+
 /**
  * Reattach an `ActiveRun` to a run RECOVERED in this process by
  * `engine.recoverAll()` (closes seam #5b). Unlike {@link createDurableActiveRun},
@@ -479,12 +597,10 @@ export interface RecoveredRunHandle {
  * resolve and live subscribers see it) and fires its TERMINAL lifecycle when the
  * resumed run settles.
  *
- * Contract (core scope — deliberately narrower than a fresh run):
- * - **Terminal events only.** `run.completed` / `run.aborted` / `run.error` fire
- *   when the recovered run settles. Per-step / toolbox / progress events are NOT
- *   forwarded: the recovered generator runs against the resolver's rebuilt
- *   `ctx.services.toolbox`, whose events fire on THAT toolbox, never this
- *   adapter's. Live-per-step-during-resume is a documented sub-seam, not core.
+ * Contract (deliberately narrower than a fresh run):
+ * - `run.completed` / `run.aborted` / `run.error` fire when the recovered run
+ *   settles. When the caller supplies the event surface installed by Weft's
+ *   pre-resume hook, per-step and toolbox events use that same surface too.
  * - **No start lifecycle (seam #11).** `startRunLifecycle` / `onRunStart` are NOT
  *   re-fired — the run already started in the prior process and `onRunStart` is
  *   side-effecting. Re-firing it on every recovery would double-execute it.
@@ -506,30 +622,15 @@ export function reattachDurableActiveRun(
     runId: string;
     handle: RecoveredRunHandle;
     /**
-     * The emitter the resolver pre-allocated and injected into the recovered run's
-     * rebuilt `services` (#28). When present it IS this ActiveRun's event surface,
-     * so the per-step events `runStep` dispatches during resume reach
-     * `getRun(runId)` subscribers — instead of the reattach path opening a fresh,
-     * disconnected emitter. The resolver and this reattach run on the same boot
-     * pass keyed by the same `runId`, so reusing one emitter is the wiring that
-     * closes seam #10's step visibility. Omit (fresh emitter) when there is no
-     * resolver-built emitter (e.g. a handle reattached outside recovery).
-     *
-     * Residual race (documented, narrow): an event `runStep` dispatches in the
-     * SAME microtask `recoverAll()` drives the generator — i.e. before
-     * `recoverDurableRuns` attaches this ActiveRun's listeners synchronously on the
-     * next turn — is not observed (CompletableEventTarget does not replay to late
-     * subscribers). Only the earliest events of a run that races to its first step
-     * inside recoverAll are affected; every subsequent event is live.
+     * The emitter installed in the rebuilt services during Weft's awaited
+     * `onRecoveredWorkflow` hook. When present it IS this ActiveRun's event
+     * surface, so `runStep` events are observable before resumed user code can
+     * advance. Omit when reattaching outside that recovery hook.
      */
     emitter?: CompletableEventTarget<CombinedOperativeEventMap>;
     /**
-     * Cleanup for the `toolbox → emitter` forwarding the RESOLVER already wired
-     * (#28). The resolver forwards `toolbox:*` events from the moment services are
-     * built — closing the window where a fast-resuming run fires its first step
-     * before reattach runs — so reattach does NOT re-wire forwarding; it only takes
-     * OWNERSHIP of this cleanup and runs it when the run completes. Omit when there
-     * is no resolver-built forwarding (a handle reattached outside recovery).
+     * Cleanup for the `toolbox → emitter` forwarding the recovery hook wired.
+     * Reattach owns it and runs it when the recovered run completes.
      */
     stopToolboxForward?: () => void;
   },
@@ -537,9 +638,8 @@ export function reattachDurableActiveRun(
   const { runId, handle } = reattach;
   const emitter = reattach.emitter ?? new CompletableEventTarget<CombinedOperativeEventMap>();
 
-  // #28: the resolver already forwards the toolbox's action events into `emitter`
-  // (race-free, from services-build time). Reattach just owns the teardown so the
-  // subscription stops when this run completes.
+  // The awaited recovery hook already forwards toolbox actions into `emitter`.
+  // Reattach owns the teardown so the subscription stops on completion.
   const toolboxForwardCleanup = reattach.stopToolboxForward;
 
   // Resolves `true` only when an adapter-initiated `engine.cancel` SUCCEEDS for

@@ -119,21 +119,69 @@ The same store works for large tool-call outputs that should not live in a sessi
 
 ## Deploying a Bureau agent to Workers
 
-**What works today.** A stateless agent — request in, `bureau.run()`, response out, no `ctx.sleep`, no scheduled/durable runs — can deploy to Workers now: `createCloudflareSqliteStorage` (sessions), `createCloudflareR2TextValueStore` (skills/large outputs), and `createCloudflareMemoryRecordStorage` (memory) cover every storage seam `operative`/`skills`/`memory` need outside of Weft's durable `Engine`. This package's own test suite proves each adapter against the real contract the consuming package expects (Weft's `Storage` conformance suite; `createSessionStore`; `createStorageSkillProvider`).
+Weft 0.10 supports host-driven maintenance. Configure the Bureau with
+`durableBackgroundTasks: 'manual'` to disable process-local maintenance intervals,
+then call `bureau.runDurableMaintenance()` from a Durable Object alarm or a Worker
+Cron trigger. One maintenance cycle fires due `ctx.sleep(...)` timers and durable
+schedules and performs Weft's cleanup, retention, and alert work.
 
-**What's blocked: `operative`'s durable run engine.** `createRunEngine` (used whenever a bureau is configured with `durableExecution: true` or a persistent backend) builds a Weft `Engine`, and the `Engine`'s scheduler and housekeeping are `setInterval`-driven poll loops, not one-shot timers:
+`BureauOptions.storage` accepts the `Storage` returned by
+`createCloudflareSqliteStorage()`. The injected adapter remains caller-owned; the
+Bureau does not dispose the Durable Object's storage binding.
 
-- the durable-timer scheduler (`ctx.sleep(...)`, `engine.schedule(...)`) polls storage on `schedulerPollIntervalMs`;
-- a checkpoint-cleanup interval runs every 60 seconds;
-- a second-instance-liveness heartbeat runs on its own interval.
+```ts
+import type { Bureau } from 'bureau';
+import { createBureau } from 'bureau';
+import { createCloudflareSqliteStorage } from 'cloudflare';
 
-All three need a process that keeps running between requests. A Cloudflare Worker's execution context ends when its request finishes — timers started during a `fetch()` handler do not persist to the next invocation. Durable Objects CAN stay warm across requests, but Cloudflare's own guidance is that `setInterval`/`setTimeout` are not guaranteed to fire while a Durable Object is idle; the platform-native durable-timer primitive is a single one-shot `ctx.storage.setAlarm()`, not a poll loop. Weft's scheduler does not target the alarm API today, so there is no way to keep `ctx.sleep`/durable timers firing on Workers without changes on Weft's side.
+const MAINTENANCE_INTERVAL_MILLISECONDS = 1_000;
 
-This is a **real, verified blocker**, not a stand-in for "we didn't get to it": [`packages/operative/src/durable/create-run-engine.ts`](../operative/src/durable/create-run-engine.ts) calls `Engine.create` unconditionally when a durable engine is built, and Weft's `core/engine/index.js` starts the scheduler poller and the two `setInterval` housekeeping loops from inside that same call — there is no flag to swap in an alarm-driven scheduler.
+interface Environment {
+  ANTHROPIC_API_KEY: string;
+}
 
-**Weft's browser tier is not a fallback path either.** Weft explicitly supports two environment classes — Node/Bun (stable) and browsers (Web Worker + Service Worker + IndexedDB, marked **Experimental** in Weft's own compatibility table, gated behind a `browser-smoke` CI job that has not gone required). Cloudflare Workers (`workerd`) is neither: it has no `new Worker(...)`, no `ServiceWorker`, and no `IndexedDB`. So even Weft's least-stable existing tier doesn't run on Workers unmodified — this isn't a "just use the experimental build" situation.
+export class AgentDurableObject {
+  private readonly bureau: Promise<Bureau>;
 
-**What would unblock it** (tracked upstream, not solved here): Weft would need a scheduler backend driven by external ticks — a Durable Object `alarm()` handler or a Workers Cron Trigger calling into `engine.tick()`/equivalent — instead of an in-process `setInterval`. Filed as `weft` task `bdfde501-f461-4011-b11d-1aedb2dd9ae8` ("Scheduler: alarm/tick-driven mode for environments without long-lived setInterval") so the fix lands in the dependency rather than being worked around here (see `CLAUDE.md`'s "Filing Work in Upstream Dependencies").
+  constructor(
+    private readonly context: DurableObjectState,
+    environment: Environment,
+  ) {
+    this.bureau = createBureau({
+      provider: {
+        provider: 'anthropic',
+        apiKey: environment.ANTHROPIC_API_KEY,
+        model: 'claude-sonnet-4.5',
+      },
+      storage: createCloudflareSqliteStorage({ sql: context.storage.sql }),
+      durableExecution: true,
+      durableBackgroundTasks: 'manual',
+    });
+
+    context.blockConcurrencyWhile(async () => {
+      await this.bureau;
+      if ((await context.storage.getAlarm()) === null) {
+        await this.scheduleNextMaintenance();
+      }
+    });
+  }
+
+  async alarm(): Promise<void> {
+    const bureau = await this.bureau;
+    await bureau.runDurableMaintenance();
+    await this.scheduleNextMaintenance();
+  }
+
+  private scheduleNextMaintenance(): Promise<void> {
+    return this.context.storage.setAlarm(Date.now() + MAINTENANCE_INTERVAL_MILLISECONDS);
+  }
+}
+```
+
+Durable Object alarms are one-shot, so re-arm the next alarm only after the current
+maintenance cycle finishes. A Cron-triggered host uses the same contract: construct
+the Bureau with manual background tasks, await `runDurableMaintenance()` during the
+trigger, and let the platform schedule the next invocation.
 
 ## Development
 

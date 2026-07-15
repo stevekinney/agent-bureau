@@ -352,6 +352,25 @@ describe('createRuntimeComposition durable execution', () => {
     }
   });
 
+  it('uses an injected Storage adapter without taking ownership of its lifecycle', async () => {
+    const storage = new MemoryStorage();
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'manual maintenance', toolCalls: [] }),
+      toolbox: createToolbox([], { context: {} }),
+      storage,
+      durableExecution: true,
+      durableBackgroundTasks: 'manual',
+    });
+
+    try {
+      expect(runtime.durable?.engine.storage).toBe(storage);
+      expect(runtime.disposeStorage).toBeUndefined();
+    } finally {
+      runtime.durable?.engine[Symbol.dispose]?.();
+      storage[Symbol.dispose]();
+    }
+  });
+
   it('throws when durableExecution: true is combined with a custom persistence value', async () => {
     // `persistence` shadows `storage`, so no raw backend is resolved and a
     // durable engine cannot share its backend with the session store. Honoring

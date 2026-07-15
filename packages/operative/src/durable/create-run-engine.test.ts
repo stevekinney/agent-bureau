@@ -784,6 +784,44 @@ describe('createRunEngine', () => {
     }
   });
 
+  it('supports host-driven maintenance without starting background intervals', async () => {
+    const schedulerStartSpy = spyOn(Scheduler.prototype, 'start');
+    const reachedSleep: WorkflowLogRecord[] = [];
+    const { engine } = await createRunEngine({
+      storage: new MemoryStorage(),
+      runWorkflow: makeSleepingWorkflow(PARKED_SLEEP_MILLISECONDS),
+      recover: false,
+      backgroundTasks: 'manual',
+      startScheduler: false,
+      onLog: (record) => {
+        if (record.message === REACHED_SLEEP_MARKER) reachedSleep.push(record);
+      },
+    });
+
+    try {
+      expect(schedulerStartSpy).not.toHaveBeenCalled();
+      const handle = await engine.start('agentRun', { value: 21 });
+      await pollUntil(async () => {
+        if (reachedSleep.length === 0) return false;
+        const snapshot = await handle.snapshot();
+        return snapshot !== null && !TERMINAL_STATUSES.has(snapshot.status);
+      });
+
+      await engine.runMaintenance(
+        Date.now() + PARKED_SLEEP_MILLISECONDS + TICK_DEADLINE_MARGIN_MILLISECONDS,
+      );
+      await pollUntil(async () => {
+        const snapshot = await handle.snapshot();
+        return snapshot?.status === 'completed';
+      });
+      const completedSnapshot = await handle.snapshot();
+      expect(completedSnapshot?.status).toBe('completed');
+    } finally {
+      schedulerStartSpy.mockRestore();
+      engine[Symbol.dispose]();
+    }
+  });
+
   it('defaults startScheduler to recover (poller armed when recover defaults to true)', async () => {
     // startScheduler defaults to `recover !== false`. With recover left at its
     // true default, the poller arms, so a durable sleep fires without passing the

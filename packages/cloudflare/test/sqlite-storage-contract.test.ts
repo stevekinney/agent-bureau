@@ -1,3 +1,4 @@
+import { Engine } from '@lostgradient/weft';
 import type { StorageCapabilities } from '@lostgradient/weft/storage/interface';
 import {
   runBasicStorageContract,
@@ -5,6 +6,7 @@ import {
   runConcurrentConditionalBatchConformance,
   runStorageCapabilityConformance,
 } from '@lostgradient/weft/storage/testing';
+import { describe, expect, it } from 'bun:test';
 
 import { createCloudflareSqliteStorage } from '../src/create-cloudflare-sqlite-storage';
 import { createSqliteDouble } from '../src/test/sqlite-double';
@@ -45,4 +47,22 @@ runConcurrentConditionalBatchConformance('CloudflareSqliteStorage', {
 
 runBinaryAndLargeScanStorageConformance('CloudflareSqliteStorage', {
   create: () => createCloudflareSqliteStorage({ sql: createSqliteDouble() }),
+});
+
+describe('CloudflareSqliteStorage supports manual Weft maintenance', () => {
+  it('runs a host-driven maintenance cycle without platform timers', async () => {
+    const storage = createCloudflareSqliteStorage({ sql: createSqliteDouble() });
+    const engine = await Engine.create({
+      storage,
+      recover: false,
+      backgroundTasks: 'manual',
+      startScheduler: false,
+    });
+
+    try {
+      await expect(engine.runMaintenance()).resolves.toBeUndefined();
+    } finally {
+      engine[Symbol.dispose]();
+    }
+  });
 });

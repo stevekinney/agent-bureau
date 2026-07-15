@@ -10,7 +10,7 @@ import type {
   WorkflowSummary,
 } from '@lostgradient/weft';
 import type { ObservabilityOptions } from '@lostgradient/weft/observability';
-import type { StorageConfiguration, TextValueStore } from '@lostgradient/weft/storage';
+import type { Storage, StorageConfiguration, TextValueStore } from '@lostgradient/weft/storage';
 import type { ConditionalTextValueStore } from '@lostgradient/weft/storage/text-value-store';
 import type { PendingToolApproval, SignedPendingToolApproval, Toolbox } from 'armorer';
 import type { ConversationSnapshot } from 'conversationalist';
@@ -238,7 +238,12 @@ export interface BureauOptions {
    * When omitted, runs are ephemeral (in-memory loop, no sessions persisted).
    */
   persistence?: PersistenceOptions | StorageConfiguration | ConditionalTextValueStore;
-  storage?: StorageConfiguration;
+  /**
+   * Storage configuration or an already-constructed Weft storage adapter. Raw
+   * adapters let platform packages such as `cloudflare` supply a Durable Object
+   * SQLite backend; their lifecycle remains owned by the caller.
+   */
+  storage?: StorageConfiguration | Storage;
   /**
    * Override for Weft-backed durable execution. Durable execution is **on by
    * default whenever a persistent `storage` backend (`sqlite`/`lmdb`) is
@@ -258,13 +263,18 @@ export interface BureauOptions {
    * session store would live on different backends and a recovered run could
    * never be found. Provide `storage` WITHOUT `persistence` for durable runs.
    *
-   * Known limitation (seam #5b): a run RESUMED after a process restart (via
-   * boot recovery) persists its terminal SESSION status — observable through
-   * {@link Bureau.getSession} — but is not re-registered with the run store, so
-   * {@link Bureau.getRun} and live event subscribers do not see that recovered
-   * run individually. Use `getSession` to confirm a recovered run's outcome.
+   * Recovered runs are registered through Weft's pre-resume recovery hook, so
+   * {@link Bureau.getRun} and live event subscribers see them before resumed
+   * user code advances.
    */
   durableExecution?: boolean;
+  /**
+   * Select how the durable engine's periodic maintenance is driven. The
+   * default `'automatic'` profile uses in-process intervals. Cloudflare
+   * Durable Objects and other serverless hosts should use `'manual'`, then
+   * call {@link Bureau.runDurableMaintenance} from each alarm or Cron wake-up.
+   */
+  durableBackgroundTasks?: 'automatic' | 'manual';
   memory?: CreateMemoryOptions | Memory;
   cache?: CacheConfiguration;
   /**
@@ -516,6 +526,14 @@ export interface Bureau {
     filter?: ListFilter,
     options?: ListOptions,
   ): Promise<PaginatedResult<WorkflowSummary> | undefined>;
+
+  /**
+   * Run one host-driven durable-engine maintenance cycle. This fires due
+   * timers and schedules and performs Weft's cleanup, retention, and alert
+   * maintenance. Intended for `durableBackgroundTasks: 'manual'` hosts.
+   * Returns `undefined` when no durable engine is composed.
+   */
+  runDurableMaintenance(now?: number): Promise<true | undefined>;
 
   listSessions(): Promise<SessionSummary[]>;
   getSession(id: string): Promise<AgentSession | undefined>;

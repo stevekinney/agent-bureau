@@ -6,6 +6,7 @@ export type {
 } from './active-run-adapter';
 export {
   createDurableActiveRun,
+  createRecoveredRunEventSurface,
   reattachDurableActiveRun,
   resumeDurableRunResult,
   SCHEDULER_ORIGIN_TAG,

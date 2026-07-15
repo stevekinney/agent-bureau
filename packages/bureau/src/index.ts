@@ -38,12 +38,7 @@ export type {
   OnlineEvalSamplerOptions,
 } from './online-evals';
 export { createOnlineEvalSampler } from './online-evals';
-export type {
-  BureauToolbox,
-  DurableComposition,
-  PendingRecoveryEvents,
-  RuntimeComposition,
-} from './runtime-composition';
+export type { BureauToolbox, DurableComposition, RuntimeComposition } from './runtime-composition';
 export { createMemoryPersistHook, createRuntimeComposition } from './runtime-composition';
 export {
   serializeActionDetail,
