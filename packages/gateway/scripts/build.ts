@@ -103,9 +103,9 @@ for (const output of clientResult.outputs) {
 
 // ── CSS ─────────────────────────────────────────────────────────────
 // Compose a single deterministic stylesheet the HTML shell links as
-// /public/styles.css. Cinder is import-order-sensitive: entry.ts imports
-// `cinder/styles` first, then each rendered component's CSS. That client-pass
-// CSS comes before any hand-written gateway app CSS under src/ui/styles/.
+// /public/styles.css. entry.ts imports Cinder's base layer, while rendered
+// component entrypoints contribute their own CSS to the client graph. That
+// client-pass CSS comes before Gateway app CSS under src/ui/styles/.
 const cssOutputs = clientResult.outputs
   .filter((output) => output.path.endsWith('.css'))
   .sort((a, b) => a.path.localeCompare(b.path));
