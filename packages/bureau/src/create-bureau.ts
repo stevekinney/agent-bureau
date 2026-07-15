@@ -1455,7 +1455,8 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     if (
       !isAgentRunWorkflowInput(info.input) ||
       info.input.runId !== info.workflowId ||
-      !runtime.sessionStore
+      !runtime.sessionStore ||
+      store.getRun(info.workflowId)
     ) {
       return;
     }
