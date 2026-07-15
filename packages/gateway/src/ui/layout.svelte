@@ -26,6 +26,35 @@
     { href: '/configuration', label: 'Configuration' },
   ];
   const mobileSidebar = new MediaQuery(SIDEBAR_MOBILE_MEDIA_QUERY, false);
+  const mobileLayoutFallbackStyles = `<style data-gateway-mobile-layout>
+    @media ${SIDEBAR_MOBILE_MEDIA_QUERY} {
+      .layout {
+        grid-template-columns: 1fr;
+        grid-template-rows: auto 1fr;
+      }
+
+      .mobile-navigation-toggle {
+        display: flex;
+        align-items: center;
+        grid-row: 1;
+        padding-block: var(--cinder-space-3);
+        padding-inline: var(--cinder-space-4);
+        border-block-end: 1px solid var(--cinder-border);
+        background: var(--cinder-surface);
+      }
+
+      .sidebar-shell {
+        grid-row: 1;
+        height: 0;
+        overflow: visible;
+      }
+
+      .main-content {
+        grid-row: 2;
+        padding: 1rem;
+      }
+    }
+  </style>`;
 
   let {
     children,
@@ -69,6 +98,13 @@
     return pathname === href || pathname.startsWith(`${href}/`);
   }
 </script>
+
+<!-- The server cannot know the viewport. Emit a CSS fallback from Cinder's
+     shared query so mobile first paint is correct before hydration; the
+     reactive class below takes over once MediaQuery can observe the client. -->
+<svelte:head>
+  {@html mobileLayoutFallbackStyles}
+</svelte:head>
 
 <div class="layout" class:layout--mobile={mobileSidebar.current}>
   <SkipLink target="main-content" />

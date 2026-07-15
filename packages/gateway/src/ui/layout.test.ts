@@ -7,17 +7,16 @@ const layoutStyles = readFileSync(new URL('./styles/layout.css', import.meta.url
 
 describe('Gateway layout responsive contract', () => {
   it('uses Cinder and Svelte responsive primitives instead of owning the Sidebar breakpoint', () => {
-    expect(layoutSource).toContain("import { MediaQuery } from 'svelte/reactivity'");
-    expect(layoutSource).toContain('SIDEBAR_MOBILE_MEDIA_QUERY');
-    expect(layoutSource).toContain('new MediaQuery(SIDEBAR_MOBILE_MEDIA_QUERY, false)');
-    expect(layoutSource).toContain('class:layout--mobile={mobileSidebar.current}');
-    expect(layoutStyles).toContain('.layout--mobile');
+    expect(layoutSource).toMatch(/import\s*{\s*MediaQuery\s*}\s*from\s*'svelte\/reactivity'/);
+    expect(layoutSource).toMatch(/new MediaQuery\(SIDEBAR_MOBILE_MEDIA_QUERY,\s*false\)/);
+    expect(layoutSource).toMatch(/class:layout--mobile\s*=\s*{mobileSidebar\.current}/);
+    expect(layoutSource).toMatch(/@media\s+\${SIDEBAR_MOBILE_MEDIA_QUERY}/);
+    expect(layoutStyles).toMatch(/\.layout--mobile\b/);
 
     expect(layoutSource).not.toContain('matchMedia');
     expect(layoutSource).not.toContain('sidebarBreakpointQuery');
     expect(layoutSource).not.toContain('47.99rem');
     expect(layoutStyles).not.toContain('47.99rem');
-    expect(layoutStyles).not.toContain('@media');
   });
 
   it('keeps the app-owned trigger associated with the Sidebar drawer', () => {

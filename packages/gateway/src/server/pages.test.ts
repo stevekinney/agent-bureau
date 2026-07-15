@@ -207,6 +207,15 @@ describe('SSR pages', () => {
     expect(html).toContain('/public/entry.js');
   });
 
+  it('server-renders the Cinder Sidebar mobile query for a correct mobile first paint', async () => {
+    const gateway = await createTestGateway();
+    const response = await gateway.app.request('/dashboard');
+    const html = await response.text();
+
+    expect(html).toContain('data-gateway-mobile-layout');
+    expect(html).toMatch(/@media \(max-width: [^)]+\)/);
+  });
+
   describe('GET /reviews scope enforcement (AB-20)', () => {
     it('rejects a managed key without reviews:read with 403, same as the JSON API', async () => {
       const kv = textValueStore(new MemoryStorage());
