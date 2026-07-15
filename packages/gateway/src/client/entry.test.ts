@@ -40,5 +40,6 @@ describe('Gateway client styles', () => {
     const entry = await Bun.file(entryPath).text();
 
     expect(entry).not.toMatch(/@lostgradient\/cinder\/.+\/styles/);
+    expect(entry).not.toContain('@lostgradient/cinder/styles/all');
   });
 });
