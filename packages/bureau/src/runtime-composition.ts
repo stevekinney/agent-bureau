@@ -18,7 +18,6 @@ import {
   createTool,
   createToolbox,
   type Toolbox,
-  type ToolboxEventMap,
   type ToolCallInput,
 } from 'armorer';
 import {
@@ -26,13 +25,12 @@ import {
   type ConversationHistory,
   createConversationHistory,
 } from 'conversationalist';
-import type { ForwardableSource, HookReplayPolicy } from 'lifecycle';
-import { CompletableEventTarget, forwardEvents, TypedEventTarget } from 'lifecycle';
+import type { HookReplayPolicy } from 'lifecycle';
+import { TypedEventTarget } from 'lifecycle';
 import type { CreateMemoryOptions, Memory } from 'memory';
 import { createMemory } from 'memory';
 import type {
   AgentSession,
-  CombinedOperativeEventMap,
   GenerateFunction,
   GuardrailsOptions,
   JSONValue,
@@ -53,12 +51,6 @@ import {
   createScheduler,
   createSessionStore,
   DEFAULT_PROMPT_INJECTION_TRIPWIRE_THRESHOLD,
-  StepStartedEvent,
-  ToolErrorBubbleEvent,
-  ToolPolicyDeniedBubbleEvent,
-  ToolProgressBubbleEvent,
-  ToolSettledBubbleEvent,
-  ToolStartedBubbleEvent,
   withCache,
   withEnhancedStreaming,
   withMinimumTripwireConfidence,
@@ -166,7 +158,7 @@ function isPersistenceOptions(value: BureauOptions['persistence']): value is Per
  * `ConditionalTextValueStore` has callable `get`/`set` methods instead.
  */
 function isStorageConfiguration(
-  value: StorageConfiguration | ConditionalTextValueStore,
+  value: StorageConfiguration | Storage | ConditionalTextValueStore,
 ): value is StorageConfiguration {
   const candidate = value as Record<string, unknown>;
   return typeof candidate['type'] === 'string';
@@ -898,24 +890,6 @@ export interface DurableComposition {
   observability?: RunEngineObservability;
 }
 
-/**
- * The pieces the resolver pre-allocates for a recovered run so the reattached
- * ActiveRun can surface live events (#28):
- * - `emitter` — what `runStep` dispatches step events to during resume; it becomes
- *   the reattached ActiveRun's event surface (reattach reuses this exact instance).
- * - `stopToolboxForward` — the cleanup for the `toolbox → emitter` forwarding that
- *   the RESOLVER wires immediately (the moment services are built), so `toolbox:*`
- *   action events are captured from the very first resumed step. Wiring it at
- *   reattach instead would drop events the toolbox emits in the window between the
- *   resolver firing (inside `recoverAll`) and reattach installing the bridge.
- *   Reattach takes ownership and calls it on completion; the drain/dispose paths
- *   call it for entries that are never reattached, so the subscription never leaks.
- */
-export interface PendingRecoveryEvents {
-  emitter: CompletableEventTarget<CombinedOperativeEventMap>;
-  stopToolboxForward: () => void;
-}
-
 export interface RuntimeComposition {
   kv: ConditionalTextValueStore | undefined;
   /**
@@ -926,18 +900,6 @@ export interface RuntimeComposition {
    * surface is unchanged, but the run is checkpointed and resumes after a crash.
    */
   durable: DurableComposition | undefined;
-  /**
-   * Per-recovered-run emitters the resolver pre-allocates and injects into the
-   * rebuilt `services` (#28), keyed by `runId`. `reattachRecoveredRun` consumes
-   * (and DELETES) the entry so the reattached ActiveRun reuses the SAME emitter
-   * the resumed generator's `runStep` dispatches to — closing seam #10's toolbox/
-   * step-event visibility for recovered runs. Entry lifetime is one boot recovery
-   * pass: any entry the resolver populated but recovery did not reattach (the run
-   * failed/skipped) MUST be drained, since the emitter closes over nothing
-   * credential-bearing itself but the Map otherwise leaks across boots. The bureau
-   * clears it on dispose as a backstop.
-   */
-  pendingRecoveryEmitters: Map<string, PendingRecoveryEvents>;
   /**
    * Run ids the durable engine flagged, during boot recovery, as resuming
    * under a DIFFERENT workflow version than the one they were checkpointed
@@ -1007,19 +969,13 @@ export async function createRuntimeComposition(
   const maximumSteps = options.maximumSteps ?? 10;
   const systemPrompt = options.systemPrompt;
 
-  // Gate the resolver until the whole composition is assembled. `createRunEngine`
-  // is constructed with `startScheduler: true` BELOW, before later consts
-  // (`sessionStore`, the `createRunRuntime` closure deps) are initialized — so a
-  // persisted schedule's poller tick could fire `resolveRunServices` mid-build and
-  // hit a not-yet-initialized binding (review: codex). This flag, declared before
-  // the engine and flipped true just before we return, lets the resolver bail out
-  // cleanly (the fire fails terminally and the next tick — once ready — succeeds).
-  // Recovery is unaffected: the bureau calls `recoverAll()` only after this returns.
+  // Gate the resolver until the whole composition is assembled. In automatic
+  // mode `createRunEngine` starts its scheduler before later consts (`sessionStore`,
+  // the `createRunRuntime` closure deps) are initialized, so a persisted schedule
+  // could fire `resolveRunServices` mid-build and hit a not-yet-initialized binding.
+  // This flag lets the resolver bail out cleanly until composition is ready. Manual
+  // mode has no background poller, but shares the same gate for consistency.
   let compositionReady = false;
-
-  // #28: per-recovered-run emitter+toolbox the resolver pre-allocates and the
-  // bureau's reattach loop consumes — see RuntimeComposition.pendingRecoveryEmitters.
-  const pendingRecoveryEmitters = new Map<string, PendingRecoveryEvents>();
 
   // AB-10: run ids the durable engine flags as version-mismatched during boot
   // recovery — see RuntimeComposition.workflowVersionMismatches.
@@ -1041,16 +997,23 @@ export async function createRuntimeComposition(
     persistenceOnLog,
   } = resolvePersistenceOptions(options);
 
-  // The effective StorageConfiguration to resolve: prefer the new `persistence`
-  // form over the legacy `storage` field.
-  const effectiveStorageConfig = persistenceStorageConfig ?? options.storage;
+  // Prefer the `persistence` form over the top-level storage field. A caller may
+  // inject a raw adapter (notably Cloudflare Durable Object SQLite) because it
+  // cannot be represented by Weft's built-in StorageConfiguration union.
+  const effectiveStorage = persistenceStorageConfig ?? options.storage;
 
   let kv: ConditionalTextValueStore | undefined = persistenceKvStore;
   // Keep the raw Storage so the durable engine can share the exact backend with
   // the text-value KV view (Weft requires one engine per durable store).
   let durableStorage: Storage | undefined;
-  if (!kv && effectiveStorageConfig) {
-    durableStorage = await resolveStorage(effectiveStorageConfig);
+  let ownsDurableStorage = false;
+  if (!kv && effectiveStorage) {
+    if (isStorageConfiguration(effectiveStorage)) {
+      durableStorage = await resolveStorage(effectiveStorage);
+      ownsDurableStorage = true;
+    } else {
+      durableStorage = effectiveStorage;
+    }
     kv = textValueStore(durableStorage, { disposeUnderlyingStorage: false });
   }
 
@@ -1066,11 +1029,17 @@ export async function createRuntimeComposition(
   // would be pure overhead with zero recovery. The explicit `durableExecution`
   // flag overrides the default either way.
   const hasKvOnlyPersistence = persistenceKvStore !== undefined;
+  let effectiveStorageIsPersistent = false;
+  if (effectiveStorage) {
+    if (isStorageConfiguration(effectiveStorage)) {
+      effectiveStorageIsPersistent = effectiveStorage.type !== 'memory';
+    } else {
+      const persistence = effectiveStorage.capabilities().persistence;
+      effectiveStorageIsPersistent = persistence === 'local' || persistence === 'remote';
+    }
+  }
   const wantsDurable =
-    options.durableExecution ??
-    (effectiveStorageConfig !== undefined &&
-      effectiveStorageConfig.type !== 'memory' &&
-      !hasKvOnlyPersistence);
+    options.durableExecution ?? (effectiveStorageIsPersistent && !hasKvOnlyPersistence);
 
   // A KV-only `persistence` (ConditionalTextValueStore) value means no raw `Storage` was
   // resolved and a durable engine cannot be built. Fail loud if `durableExecution:
@@ -1106,18 +1075,18 @@ export async function createRuntimeComposition(
     // per recovered run before its generator advances — no pre-injection, no
     // module-global registry.
     //
-    // startScheduler: true is then REQUIRED too (Weft 0.6.0). recover:false
-    // decouples *who drives recovery* from *whether timers fire*, and the poller
-    // defaults to following recover — so without this flag a recover:false engine
-    // leaves durable `ctx.sleep(...)` / `engine.schedule(...)` timers parked
-    // forever. The bureau owns recovery but still needs durable timers, so it
-    // arms the poller explicitly.
+    // In the default automatic profile, `startScheduler: true` is REQUIRED too:
+    // recover:false decouples *who drives recovery* from *whether timers fire*,
+    // and the poller otherwise follows recover. In manual mode the serverless
+    // host drives timers through `Bureau.runDurableMaintenance()`, so Weft
+    // requires the in-process scheduler to remain stopped.
     durable = await createRunEngine({
       storage: durableStorage,
       runWorkflow,
       checkpointStore,
       recover: false,
-      startScheduler: true,
+      backgroundTasks: options.durableBackgroundTasks ?? 'automatic',
+      startScheduler: options.durableBackgroundTasks === 'manual' ? false : true,
       resolveWorkflowServices: resolveRunServices,
       ...(effectiveObservability !== undefined ? { observability: effectiveObservability } : {}),
       ...(effectiveOnLog ? { onLog: effectiveOnLog } : {}),
@@ -1476,9 +1445,9 @@ export async function createRuntimeComposition(
    * the session is absent (the run is not bureau-owned / not reconstructable).
    *
    * The reconstructed `conversation` is a placeholder: a resumed run reads its
-   * transcript from the checkpoint, not from `options.conversation`. No `emitter`
-   * is attached — a recovered run has no live event surface (the accepted
-   * seam #5b: recovered runs are observable via `getSession`, not `getRun`).
+   * transcript from the checkpoint, not from `options.conversation`. Weft's
+   * awaited recovery hook attaches the live emitter after these services are
+   * rebuilt and before resumed user code advances.
    */
   async function buildRunDepsFromSession(
     session: Awaited<ReturnType<NonNullable<typeof sessionStore>['load']>>,
@@ -1855,11 +1824,8 @@ export async function createRuntimeComposition(
       },
     };
 
-    // Plain available services — no `emitter`, and intentionally NOT registered in
-    // `pendingRecoveryEmitters` and NOT wrapped in the C3 tool-bubble forwarding.
-    // Those exist so the bureau's reattach loop can consume them for a recovered
-    // ActiveRun; a scheduled fire has no reattach behind it, so wiring them would
-    // leak a Map entry + toolbox subscription per fire.
+    // Scheduled fires have no interactive ActiveRun surface. The recovery hook
+    // monitors them without attaching live event forwarding.
     return { status: 'available', services };
   }
 
@@ -2034,148 +2000,7 @@ export async function createRuntimeComposition(
       // changes, since rebuilding from a null session would otherwise NPE.
       return { status: 'unavailable', reason: `run ${info.workflowId} not reconstructable` };
     }
-    // #28: pre-allocate the recovered run's emitter HERE (before the generator
-    // advances) and inject it into the rebuilt services, so `runStep` dispatches
-    // its step events to it during resume. CRITICAL (Codex round-1): also wire the
-    // `toolbox → emitter` forwarding RIGHT NOW, not at reattach — `toolbox:*` action
-    // events originate from the toolbox, and a recovered run can fire its first
-    // step (inside `recoverAll`) before the bureau's reattach loop runs on the next
-    // turn. Forwarding from the moment the toolbox exists closes that window. The
-    // bureau's reattach loop reuses this same emitter (by runId) as the reattached
-    // ActiveRun's surface and takes ownership of `stopToolboxForward`; the Map entry
-    // is drained (and the forward stopped) by reattach, the cancel/skip branches, or
-    // dispose, so the subscription never leaks across boots.
-    const recoveryEmitter = new CompletableEventTarget<CombinedOperativeEventMap>();
-    const toolboxForward = forwardEvents(
-      // The toolbox is variance-widened; the durable layer never inspects the
-      // tool-tuple type, matching createDurableActiveRun's documented cast.
-      services.toolbox as unknown as ForwardableSource,
-      recoveryEmitter,
-      'toolbox',
-    );
-
-    // C3 — curated tool.* bubble events stamped with {agentName, runId, step}.
-    // Mirrors the same block in createDurableActiveRun so the audit trail and
-    // operative store receive identical tool.* events regardless of whether the
-    // run is freshly started or durably recovered. Without this, recovered runs
-    // emitted blank-id tool.* events (regression PRRT_kwDORvupsc6MXoT3).
-    //
-    // Wire from HERE (not at reattach) — mirrors the toolboxForward rationale:
-    // a recovered run can fire its first step INSIDE recoverAll before the
-    // bureau's reattach loop runs, so we must capture tool events from the
-    // moment the toolbox exists. Cleanup is bundled into stopToolboxForward so
-    // the subscriptions live exactly as long as the toolbox forwarding.
-    const recoveryC3Cleanups: Array<(() => void) | undefined> = [];
-    {
-      const runId = info.workflowId;
-      const agentName = info.input.agentName;
-      let currentStep = 0;
-
-      const stepListener = (e: StepStartedEvent) => {
-        currentStep = e.step;
-      };
-      recoveryEmitter.addEventListener(StepStartedEvent.type, stepListener);
-      recoveryC3Cleanups.push(() =>
-        recoveryEmitter.removeEventListener(StepStartedEvent.type, stepListener),
-      );
-
-      const toolbox = services.toolbox as unknown as {
-        addEventListener?: <K extends keyof ToolboxEventMap>(
-          type: K,
-          listener: (e: ToolboxEventMap[K]) => void,
-          options?: AddEventListenerOptions,
-        ) => () => void;
-      };
-
-      const onExecuteStart = (e: ToolboxEventMap['execute-start']) => {
-        recoveryEmitter.dispatchEvent(
-          new ToolStartedBubbleEvent(
-            { agentName, runId, step: currentStep },
-            {
-              toolName: e.call.name,
-              toolCallId: e.call.id,
-              params: e.params,
-              startedAt: Date.now(),
-            },
-          ),
-        );
-      };
-
-      const onSettled = (e: ToolboxEventMap['settled']) => {
-        const hasError = e.error !== undefined;
-        const status: 'success' | 'error' = hasError ? 'error' : 'success';
-        recoveryEmitter.dispatchEvent(
-          new ToolSettledBubbleEvent(
-            { agentName, runId, step: currentStep },
-            {
-              toolName: e.call.name,
-              toolCallId: e.call.id,
-              status,
-              result: e.result,
-              error: e.error,
-            },
-          ),
-        );
-        if (hasError) {
-          recoveryEmitter.dispatchEvent(
-            new ToolErrorBubbleEvent(
-              { agentName, runId, step: currentStep },
-              {
-                toolName: e.call.name,
-                toolCallId: e.call.id,
-                error: e.error,
-              },
-            ),
-          );
-        }
-      };
-
-      const onToolProgress = (e: ToolboxEventMap['progress']) => {
-        recoveryEmitter.dispatchEvent(
-          new ToolProgressBubbleEvent(
-            { agentName, runId, step: currentStep },
-            {
-              toolName: e.call.name,
-              toolCallId: e.call.id,
-              percent: e.percent,
-              message: e.message,
-            },
-          ),
-        );
-      };
-
-      const onPolicyDenied = (e: ToolboxEventMap['policy-denied']) => {
-        recoveryEmitter.dispatchEvent(
-          new ToolPolicyDeniedBubbleEvent(
-            { agentName, runId, step: currentStep },
-            {
-              toolName: e.call.name,
-              toolCallId: e.call.id,
-              reason: e.reason,
-            },
-          ),
-        );
-      };
-
-      if (toolbox.addEventListener) {
-        const addListener = toolbox.addEventListener.bind(toolbox);
-        recoveryC3Cleanups.push(
-          addListener('execute-start', onExecuteStart),
-          addListener('settled', onSettled),
-          addListener('progress', onToolProgress),
-          addListener('policy-denied', onPolicyDenied),
-        );
-      }
-    }
-
-    pendingRecoveryEmitters.set(info.workflowId, {
-      emitter: recoveryEmitter,
-      stopToolboxForward: () => {
-        toolboxForward.stop();
-        for (const cleanup of recoveryC3Cleanups) cleanup?.();
-      },
-    });
-    return { status: 'available', services: { ...services, emitter: recoveryEmitter } };
+    return { status: 'available', services };
   }
 
   // Every closure dependency the resolver reads is now initialized; open the gate
@@ -2185,9 +2010,9 @@ export async function createRuntimeComposition(
   return {
     kv,
     durable,
-    pendingRecoveryEmitters,
     workflowVersionMismatches,
-    disposeStorage: durableStorage ? () => durableStorage[Symbol.dispose]() : undefined,
+    disposeStorage:
+      durableStorage && ownsDurableStorage ? () => durableStorage[Symbol.dispose]() : undefined,
     memory,
     sessionStore,
     scheduler,

@@ -58,14 +58,20 @@ export interface CreateRunEngineOptions {
   recover?: boolean;
 
   /**
+   * Select how Weft's periodic maintenance is driven. The default
+   * `'automatic'` profile uses in-process intervals. Use `'manual'` in
+   * serverless hosts such as Cloudflare Durable Objects, then call
+   * `engine.runMaintenance()` from each alarm or Cron wake-up.
+   */
+  backgroundTasks?: 'automatic' | 'manual';
+
+  /**
    * Arm Weft's durable-timer polling loop, independent of {@link recover}
    * in Weft. `recover` decides *who drives `recoverAll`*; `startScheduler`
    * decides *whether `ctx.sleep(...)` / `engine.schedule(...)` timers fire*. It
-   * defaults to `recover !== false`, so the common in-process host keeps prior
-   * behavior. A host that owns its own recovery — passing `recover: false` so it
-   * can capture the recovered handles from its own `engine.recoverAll()` — must
-   * pass `startScheduler: true` here, otherwise durable timers silently never
-   * fire on that engine.
+   * defaults to `false` when {@link backgroundTasks} is `'manual'`; otherwise it
+   * follows `recover !== false`, so the common in-process host keeps prior
+   * behavior. An explicit value always wins.
    */
   startScheduler?: boolean;
 
@@ -239,10 +245,11 @@ export interface RunEngine {
  * {@link CreateRunEngineOptions.resolveWorkflowServices}, which Weft fires before
  * the resumed generator reads `ctx.services` — no module-global registry.
  *
- * Weft's durable-timer poller follows {@link CreateRunEngineOptions.startScheduler},
- * which defaults to `recover !== false`. A host that owns recovery (`recover:
- * false`) must pass `startScheduler: true` so `ctx.sleep(...)` /
- * `engine.schedule(...)` timers still fire.
+ * Weft's durable-timer poller follows {@link CreateRunEngineOptions.startScheduler}.
+ * Manual background tasks default it off; otherwise it follows `recover !==
+ * false`. An automatic host that owns recovery (`recover: false`) must pass
+ * `startScheduler: true` so `ctx.sleep(...)` / `engine.schedule(...)` timers
+ * still fire.
  *
  * History/checkpoint guardrails ({@link CreateRunEngineOptions.history},
  * `checkpointSizeWarningThreshold`, `checkpointHistory`, `payloadSize`) are
@@ -255,6 +262,8 @@ export async function createRunEngine(options: CreateRunEngineOptions): Promise<
     options.checkpointStore ?? createCheckpointStoreFromStorage(options.storage);
   const storageActivities = createStorageActivities(checkpointStore);
   const durableHeartbeatServicesStore = createDurableHeartbeatServicesStore();
+  const startScheduler =
+    options.startScheduler ?? (options.backgroundTasks === 'manual' ? false : undefined);
 
   // AB-10 — workflow versioning: compare a recovered run's stamped
   // `workflowVersion` (see `createRunWorkflow`'s `version` option) against the
@@ -297,7 +306,8 @@ export async function createRunEngine(options: CreateRunEngineOptions): Promise<
   const engine = await Engine.create({
     storage: options.storage,
     recover: options.recover ?? true,
-    ...(options.startScheduler !== undefined ? { startScheduler: options.startScheduler } : {}),
+    ...(options.backgroundTasks !== undefined ? { backgroundTasks: options.backgroundTasks } : {}),
+    ...(startScheduler !== undefined ? { startScheduler } : {}),
     ...(options.schedulerPollIntervalMs !== undefined
       ? { schedulerPollIntervalMs: options.schedulerPollIntervalMs }
       : {}),

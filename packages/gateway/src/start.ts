@@ -177,12 +177,19 @@ export function resolveStartOptions(environment: StartEnvironment): {
  * opening `./data/agent-bureau.sqlite` when `./data` doesn't exist yet
  * fails with `SQLITE_CANTOPEN` (the documented default path is exactly this
  * shape). LMDB's directory-as-storage similarly needs its own directory to
- * exist. A no-op for `memory` storage (no path) and a no-op if the
- * directory already exists.
+ * exist. A no-op for an injected storage adapter, `memory` storage (no
+ * path), and a no-op if the directory already exists.
  */
 async function ensureStorageDirectoryExists(bureauOptions: BureauOptions): Promise<void> {
   const storage = bureauOptions.storage;
-  if (!storage || storage.type === 'memory' || !('path' in storage) || !storage.path) return;
+  if (
+    !storage ||
+    !('type' in storage) ||
+    storage.type === 'memory' ||
+    !('path' in storage) ||
+    !storage.path
+  )
+    return;
   await mkdir(dirname(storage.path), { recursive: true });
 }
 

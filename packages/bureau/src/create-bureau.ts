@@ -1,4 +1,10 @@
-import { decode, type ListFilter, type ListOptions, type ScheduleSpec } from '@lostgradient/weft';
+import {
+  decode,
+  type ListFilter,
+  type ListOptions,
+  type RecoveredWorkflowInfo,
+  type ScheduleSpec,
+} from '@lostgradient/weft';
 import { KEYS } from '@lostgradient/weft/storage';
 import { combineToolboxes, createTool, createToolbox } from 'armorer';
 import {
@@ -32,6 +38,7 @@ import {
 } from 'operative';
 import {
   createAgentScheduler,
+  createRecoveredRunEventSurface,
   type DurableRunDeps,
   InvalidScheduleError,
   isAgentRunWorkflowInput,
@@ -1177,47 +1184,32 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     runId: string,
     sessionId: string,
     handle: RecoveredRunHandle,
+    eventSurface?: ReturnType<typeof createRecoveredRunEventSurface>,
   ): void {
     // At-most-once registration per runId (guards double-recover / a runId already
     // started live on this process — neither should reach here, but a silent
     // Map.set overwrite would be a split-brain, so cheap-guard it).
     if (store.getRun(runId)) {
-      // Already registered: drain any pending entry so it does not leak (the
-      // resolver populated it but this run will not be reattached again) — and stop
-      // its toolbox forwarding, since nothing will take ownership of it here.
-      const orphan = runtime.pendingRecoveryEmitters.get(runId);
-      runtime.pendingRecoveryEmitters.delete(runId);
-      orphan?.stopToolboxForward();
       return;
     }
-
-    // #28: reuse the emitter the resolver pre-allocated and injected into this
-    // run's rebuilt services (so the per-step events the resumed generator
-    // dispatched flow to this reattached ActiveRun's subscribers), and take
-    // OWNERSHIP of the toolbox-forwarding cleanup the resolver wired (so toolbox:*
-    // events stop when the run completes). Consume-and-delete: the entry's lifetime
-    // ends here.
-    const pendingRecovery = runtime.pendingRecoveryEmitters.get(runId);
-    runtime.pendingRecoveryEmitters.delete(runId);
 
     const recoveredRun = reattachDurableActiveRun(
       { engine: runtime.durable!.engine, checkpointStore: runtime.durable!.checkpointStore },
       {
         runId,
         handle,
-        ...(pendingRecovery
+        ...(eventSurface
           ? {
-              emitter: pendingRecovery.emitter,
-              stopToolboxForward: pendingRecovery.stopToolboxForward,
+              emitter: eventSurface.emitter,
+              stopToolboxForward: eventSurface.stopToolboxForward,
             }
           : {}),
       },
     );
 
     // AB-96 — wire the same versioned run-envelope forwarder the live-run path
-    // uses. `pendingRecovery.emitter` is the SAME `CombinedOperativeEventTarget`
-    // the resolver already forwards this run's resumed `step.*`/`tool.*` bubble
-    // events onto (see `resolveRunServices` above), and `recoveredRun`'s
+    // uses. The recovered run's event surface is installed during Weft's awaited
+    // recovery hook, before resumed user code advances, and `recoveredRun`'s
     // `addEventListener` is bound to that identical emitter — so subscribing
     // here surfaces every `step`/`tool-pre`/`tool-post`/notification frame a
     // resumed run produces, not just its terminal `run-finished`. No
@@ -1339,11 +1331,10 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
    * (`resolveRunServices`) before its generator advances — no pre-injection, no
    * module-global registry.
    *
-   * #3/#5b — live visibility. Each recovered handle is wrapped in a
-   * {@link reattachRecoveredRun} adapter and `store.register`d, so the resumed run
-   * rejoins `getRun(...)` and the live subscriber surface and its terminal session
-   * status is persisted from its own lifecycle events. (Per-step events during
-   * resume are not forwarded — see `reattachDurableActiveRun`'s contract.)
+   * #3/#5b — live visibility. Weft's awaited `onRecoveredWorkflow` hook wraps
+   * each owned handle in a {@link reattachRecoveredRun} adapter and registers it
+   * before resumed user code advances, so per-step events, live subscribers, and
+   * terminal session persistence all share the same recovered event surface.
    *
    * Boot returns once `recoverAll()` has STARTED the handles and they are
    * registered, not when they complete: a recovered run that resumes into a long
@@ -1454,6 +1445,64 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     });
   }
 
+  /**
+   * Reattach an owned interactive run inside Weft's awaited recovery hook. At
+   * this point the resolver has rebuilt `services`, but the recovered workflow
+   * has not advanced, so the ActiveRun surface and all event forwarding exist
+   * before the first resumed step can emit anything.
+   */
+  async function onRecoveredWorkflow(info: RecoveredWorkflowInfo): Promise<void> {
+    if (
+      !isAgentRunWorkflowInput(info.input) ||
+      info.input.runId !== info.workflowId ||
+      !runtime.sessionStore ||
+      store.getRun(info.workflowId)
+    ) {
+      return;
+    }
+
+    let sessionLoad: SessionLoadOutcome;
+    try {
+      const session = await runtime.sessionStore.load(info.input.sessionId);
+      sessionLoad = { ok: true, session: session ? { ...session.metadata } : null };
+    } catch (error) {
+      console.error(
+        `[bureau] Could not load owning session for recovered run "${info.workflowId}"; leaving it to resume without live visibility: ${serializeUnknownError(error)}`,
+      );
+      return;
+    }
+
+    const verdict = classifyRecoveredRun({
+      handleId: info.workflowId,
+      scheduledFire: false,
+      ownedSessionId: info.input.sessionId,
+      metadataReadFailed: false,
+      hasSessionStore: true,
+      sessionLoad,
+      versionMismatch: runtime.workflowVersionMismatches.has(info.workflowId),
+    });
+    if (verdict !== 'reattach' && verdict !== 'reattach-version-mismatch') return;
+
+    if (verdict === 'reattach-version-mismatch') {
+      console.warn(
+        `[bureau] Reattaching recovered run "${info.workflowId}" that resumed under a ` +
+          `different workflow version than it was checkpointed with (pin-and-warn; ` +
+          `see documentation/workflow-versioning.md).`,
+      );
+    }
+    if (info.services === undefined || info.services === null) {
+      throw new Error(`Recovered run "${info.workflowId}" has no reconstructed services`);
+    }
+
+    const services = info.services as DurableRunDeps;
+    const eventSurface = createRecoveredRunEventSurface(
+      services,
+      info.workflowId,
+      info.input.agentName,
+    );
+    reattachRecoveredRun(info.workflowId, info.input.sessionId, info.handle, eventSurface);
+  }
+
   async function recoverDurableRuns(): Promise<void> {
     if (!runtime.durable) return;
 
@@ -1483,7 +1532,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     // recoverAll resumes the in-flight workflows (firing the services resolver per
     // run before each generator advances); if it throws, the boot try/catch logs
     // and continues.
-    const handles = await durable.engine.recoverAll();
+    const handles = await durable.engine.recoverAll({ onRecoveredWorkflow });
 
     // Read each handle's launch metadata CONCURRENTLY, so one slow/stuck read does
     // not block registration of the rest (no head-of-line blocking). The read is
@@ -1505,6 +1554,11 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     const orphanCancellations: Array<{ runId: string; cancel: Promise<void> }> = [];
     const sessionStore = runtime.sessionStore;
     for (const { handle, metadata, ...rest } of resolved) {
+      // The awaited recovery hook already registered owned interactive runs
+      // before replay. The post-recovery pass only classifies the remaining
+      // handles (scheduled fires, orphans, and unknown ownership).
+      if (store.getRun(handle.id)) continue;
+
       const readError = 'error' in rest ? rest.error : undefined;
       if (readError !== undefined) {
         console.error(
@@ -1594,30 +1648,15 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
               `see documentation/workflow-versioning.md).`,
           );
         }
-        // ownedSessionId is defined when the verdict is 'reattach' /
-        // 'reattach-version-mismatch'. reattach consumes-and-deletes any
-        // pending recovery emitter for this run.
+        // A mocked/custom engine that does not invoke Weft's recovery hook can
+        // still reattach terminal visibility here. Real Weft recovery has
+        // already taken the hook path above, including live event forwarding.
         reattachRecoveredRun(handle.id, ownedSessionId!, handle);
       } else if (verdict === 'monitor') {
         // Scheduled fires have no ActiveRun surface, but the recovered Weft handle
-        // still needs a detached result monitor so failures are visible. Drain a
-        // pending emitter defensively; the scheduled resolver branch should not
-        // create one because there is no reattach owner for it.
-        const orphan = runtime.pendingRecoveryEmitters.get(handle.id);
-        runtime.pendingRecoveryEmitters.delete(handle.id);
-        orphan?.stopToolboxForward();
-
+        // still needs a detached result monitor so failures are visible.
         void monitorRecoveredScheduledFire(handle);
       } else {
-        // 'cancel' or 'skip': this run will NOT be reattached, so drain its pending
-        // recovery entry (#28) and stop its toolbox forwarding — the resolver may
-        // have populated one (it fires for any run that resolved to available,
-        // including one later cancelled), and an undrained entry would leak the
-        // forwarding subscription across boots.
-        const orphan = runtime.pendingRecoveryEmitters.get(handle.id);
-        runtime.pendingRecoveryEmitters.delete(handle.id);
-        orphan?.stopToolboxForward();
-
         if (verdict === 'cancel') {
           // Collect the cancel (do NOT fire-and-forget swallow): a rejected cancel
           // could leave an unowned, already-resumed run live with no monitor, so
@@ -1820,6 +1859,12 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
   async function listDurableRuns(filter?: ListFilter, options?: ListOptions) {
     if (!runtime.durable) return undefined;
     return runtime.durable.engine.list(filter, options);
+  }
+
+  async function runDurableMaintenance(now?: number): Promise<true | undefined> {
+    if (!runtime.durable) return undefined;
+    await runtime.durable.engine.runMaintenance(now);
+    return true;
   }
 
   async function listSessions() {
@@ -2193,13 +2238,6 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         for (const disposeListener of flowControlSchedulerCleanup) {
           disposeListener();
         }
-        // #28 backstop: stop the toolbox forwarding for any pending recovery entry
-        // the boot reattach pass did not consume, then drop them, so neither the Map
-        // nor the forwarding subscriptions survive teardown.
-        for (const pending of runtime.pendingRecoveryEmitters.values()) {
-          pending.stopToolboxForward();
-        }
-        runtime.pendingRecoveryEmitters.clear();
         emitter.complete();
       } catch (error) {
         console.error(
@@ -2284,6 +2322,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     deleteRun,
     getDurableRun,
     listDurableRuns,
+    runDurableMaintenance,
     listSessions,
     getSession,
     deleteSession,
