@@ -103,9 +103,9 @@ for (const output of clientResult.outputs) {
 
 // ── CSS ─────────────────────────────────────────────────────────────
 // Compose a single deterministic stylesheet the HTML shell links as
-// /public/styles.css. Cinder is import-order-sensitive: entry.ts imports
-// `cinder/styles` first, then each rendered component's CSS. That client-pass
-// CSS comes before any hand-written gateway app CSS under src/ui/styles/.
+// /public/styles.css. entry.ts imports Cinder's base layer, while rendered
+// component entrypoints contribute their own CSS to the client graph. That
+// client-pass CSS comes before Gateway app CSS under src/ui/styles/.
 const cssOutputs = clientResult.outputs
   .filter((output) => output.path.endsWith('.css'))
   .sort((a, b) => a.path.localeCompare(b.path));
@@ -125,6 +125,15 @@ stylePaths.sort();
 for (const path of stylePaths) {
   cssBundle += await Bun.file(path).text();
   cssBundle += '\n';
+}
+
+// These selectors come from components rendered by the Gateway client. Keep
+// this check in the production build so missing Cinder side effects fail the
+// artifact-producing path itself rather than a second, test-only Svelte build.
+for (const selector of ['.cinder-card', '.cinder-textarea']) {
+  if (!cssBundle.includes(selector)) {
+    throw new Error(`Client CSS bundle is missing required selector: ${selector}`);
+  }
 }
 
 await Bun.write('./dist/public/styles.css', cssBundle);
