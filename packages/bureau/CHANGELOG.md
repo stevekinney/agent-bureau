@@ -1,5 +1,30 @@
 # bureau
 
+## 0.0.3
+
+### Patch Changes
+
+- Updated dependencies [ed8d1d6]
+- Updated dependencies [f245bdd]
+- Updated dependencies [824bc5b]
+- Updated dependencies [b8a74af]
+- Updated dependencies [b429d1b]
+- Updated dependencies [0e3cc24]
+- Updated dependencies [5d7fe33]
+- Updated dependencies [b38dc8b]
+- Updated dependencies [b2a800a]
+- Updated dependencies [d010dbe]
+- Updated dependencies [3818f24]
+- Updated dependencies [0c0dc84]
+- Updated dependencies [49745de]
+- Updated dependencies [844fdba]
+- Updated dependencies [2b56d5c]
+  - armorer@0.10.0
+  - conversationalist@0.4.0
+  - memory@0.0.1
+  - operative@0.1.0
+  - skills@0.0.1
+
 ## 0.0.2
 
 ### Patch Changes
