@@ -22,6 +22,7 @@ export interface AnthropicInputSchema {
   properties: Record<string, JSONSchemaProperty>;
   required?: string[];
   additionalProperties?: boolean;
+  [key: string]: unknown;
 }
 
 /**

@@ -56,14 +56,14 @@ import {
   appendUserMessage,
   createConversationHistory,
 } from 'conversationalist/conversation';
-import { toAnthropicMessages } from 'conversationalist/adapters/anthropic';
+import { toAnthropicMessagesForSdk } from 'conversationalist/adapters/anthropic';
 import { createToolbox } from 'armorer';
 import { parseAnthropicToolCalls, toAnthropicTools } from 'armorer/adapters/anthropic';
 
 let conversation = createConversationHistory({ title: 'Weather' });
 conversation = appendUserMessage(conversation, 'Use the weather tool for Denver.');
 
-const { system, messages } = toAnthropicMessages(conversation);
+const { system, messages } = toAnthropicMessagesForSdk(conversation);
 const response = await anthropic.messages.create({
   model: 'claude-sonnet-4-20250514',
   system,

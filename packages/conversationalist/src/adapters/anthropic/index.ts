@@ -1,3 +1,5 @@
+import type { MessageParam, TextBlockParam } from '@anthropic-ai/sdk/resources/messages';
+
 import { appendMessages, createConversationHistory } from '../../conversation/index';
 import { assertConversationSafe } from '../../conversation/validation';
 import { type MultiModalContent, renderDocumentReferenceText } from '../../multi-modal';
@@ -225,6 +227,14 @@ export interface AnthropicSystemBlock {
 export interface AnthropicConversation {
   system?: string | AnthropicSystemBlock[];
   messages: AnthropicMessage[];
+}
+
+/**
+ * Anthropic Messages API request shapes from the official SDK.
+ */
+export interface AnthropicSdkConversation {
+  system?: string | TextBlockParam[];
+  messages: MessageParam[];
 }
 
 /**
@@ -708,6 +718,20 @@ export function toAnthropicMessages(
     result.system = system;
   }
   return capCacheBreakpoints(result);
+}
+
+/**
+ * Converts a conversation to shapes accepted by `@anthropic-ai/sdk`.
+ *
+ * The neutral adapter remains useful for other Anthropic-compatible clients;
+ * this helper makes the official SDK boundary explicit and keeps consumers
+ * from having to repeat a type assertion for the same wire-format data.
+ */
+export function toAnthropicMessagesForSdk(
+  conversation: Conversation,
+  options?: ToAnthropicMessagesOptions,
+): AnthropicSdkConversation {
+  return toAnthropicMessages(conversation, options) as unknown as AnthropicSdkConversation;
 }
 
 function parseToolResultContent(callId: string, content: string, isError?: boolean): ToolResult {
