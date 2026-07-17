@@ -6,7 +6,10 @@ import type {
 } from '@anthropic-ai/sdk/resources/messages';
 import { parseAnthropicToolCalls, toAnthropicTools } from 'armorer/adapters/anthropic';
 import { describe, expect, expectTypeOf, it } from 'bun:test';
-import { toAnthropicMessagesForSdk } from 'conversationalist/adapters/anthropic';
+import {
+  fromAnthropicMessages,
+  toAnthropicMessagesForSdk,
+} from 'conversationalist/adapters/anthropic';
 import { appendUserMessage, createConversationHistory } from 'conversationalist/conversation';
 
 describe('Anthropic SDK interoperability', () => {
@@ -36,6 +39,51 @@ describe('Anthropic SDK interoperability', () => {
 
     expect(parseAnthropicToolCalls(blocks)).toEqual([
       { id: 'toolu_123', name: 'weather', arguments: { city: 'Denver' } },
+    ]);
+  });
+
+  it('converts neutral citation data to the SDK citation shape', () => {
+    const conversation = fromAnthropicMessages({
+      messages: [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: 'The cited answer.',
+              citations: [
+                {
+                  type: 'char_location',
+                  cited_text: 'The cited answer.',
+                  document_index: 0,
+                  document_title: 'Reference',
+                  start_char_index: 0,
+                  end_char_index: 18,
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+
+    const { messages } = toAnthropicMessagesForSdk(conversation);
+
+    expect(messages[0]?.content).toEqual([
+      {
+        type: 'text',
+        text: 'The cited answer.',
+        citations: [
+          {
+            type: 'char_location',
+            cited_text: 'The cited answer.',
+            document_index: 0,
+            document_title: 'Reference',
+            start_char_index: 0,
+            end_char_index: 18,
+          },
+        ],
+      },
     ]);
   });
 });
