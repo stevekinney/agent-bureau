@@ -1,5 +1,16 @@
 # bureau
 
+## 0.0.4
+
+### Patch Changes
+
+- Updated dependencies [cee1695]
+  - armorer@0.10.1
+  - conversationalist@0.4.1
+  - memory@0.0.1
+  - operative@0.1.0
+  - skills@0.0.1
+
 ## 0.0.3
 
 ### Patch Changes

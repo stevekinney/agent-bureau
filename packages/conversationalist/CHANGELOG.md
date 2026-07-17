@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.1
+
+### Patch Changes
+
+- cee1695: Make the Anthropic adapters interoperate directly with the official Anthropic SDK types.
+
 ## 0.4.0
 
 ### Minor Changes
