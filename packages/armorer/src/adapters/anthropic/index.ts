@@ -141,7 +141,7 @@ function convertToAnthropic(tool: SerializedToolDefinition): AnthropicTool {
 function convertFromAnthropic(tool: AnthropicTool): ImportedToolConfiguration {
   return {
     name: tool.name,
-    description: tool.description,
+    description: tool.description ?? '',
     input: importToolSchema(tool.input_schema),
   };
 }

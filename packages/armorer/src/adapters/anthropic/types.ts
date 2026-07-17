@@ -3,7 +3,7 @@
  */
 export interface JSONSchemaProperty {
   type?: string | string[];
-  properties?: Record<string, JSONSchemaProperty>;
+  properties?: Record<string, JSONSchemaProperty> | null;
   required?: string[];
   additionalProperties?: boolean;
   items?: JSONSchemaProperty;
@@ -19,7 +19,7 @@ export interface JSONSchemaProperty {
  */
 export interface AnthropicInputSchema {
   type: 'object';
-  properties: Record<string, JSONSchemaProperty>;
+  properties?: unknown;
   required?: string[];
   additionalProperties?: boolean;
   [key: string]: unknown;
@@ -33,7 +33,7 @@ export interface AnthropicTool {
   /** The name of the tool. */
   name: string;
   /** A description of what the tool does. */
-  description: string;
+  description?: string;
   /** The JSON Schema describing the tool's input parameters. */
   input_schema: AnthropicInputSchema;
 }

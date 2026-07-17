@@ -32,6 +32,13 @@ describe('Anthropic SDK interoperability', () => {
     expectTypeOf(messages).toExtend<MessageParam[]>();
     expectTypeOf(tools).toExtend<Tool[]>();
 
+    const sdkToolWithoutProperties: Tool = {
+      name: 'weather',
+      description: 'Get the weather.',
+      input_schema: { type: 'object', properties: null },
+    };
+    expect(sdkToolWithoutProperties.input_schema.properties).toBeNull();
+
     const blocks: ContentBlock[] = [
       { type: 'text', text: 'Calling a tool.', citations: null },
       { type: 'tool_use', id: 'toolu_123', name: 'weather', input: { city: 'Denver' } },
