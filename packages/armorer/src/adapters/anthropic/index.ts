@@ -10,12 +10,7 @@ import {
   normalizeToSerializedDefinitions,
   type ToolRegistryLike,
 } from '../shared';
-import type {
-  AnthropicContentBlock,
-  AnthropicTool,
-  AnthropicToolResultBlock,
-  AnthropicToolUseBlock,
-} from './types';
+import type { AnthropicTool, AnthropicToolResultBlock, AnthropicToolUseBlock } from './types';
 
 export type {
   AnthropicContentBlock,
@@ -26,15 +21,6 @@ export type {
   AnthropicToolUseBlock,
   JSONSchemaProperty,
 } from './types';
-
-type AnthropicToolCallSource =
-  | AnthropicContentBlock[]
-  | { content?: AnthropicContentBlock[] | undefined | null }
-  | {
-      message?: { content?: AnthropicContentBlock[] | undefined | null } | undefined | null;
-    }
-  | undefined
-  | null;
 
 /**
  * Converts Toolbox tools to Anthropic Messages API format.
@@ -83,15 +69,16 @@ export function fromAnthropicTools(
   return Array.isArray(input) ? converted : converted[0]!;
 }
 
-export function parseAnthropicToolCalls(contentBlocks: AnthropicToolCallSource): ToolCallInput[] {
+export function parseAnthropicToolCalls(contentBlocks: unknown): ToolCallInput[] {
   const resolvedContentBlocks = extractAnthropicContentBlocks(contentBlocks);
   if (!resolvedContentBlocks || !Array.isArray(resolvedContentBlocks)) {
     return [];
   }
 
-  return resolvedContentBlocks.flatMap((contentBlock) =>
-    contentBlock.type === 'tool_use' ? [convertToolUseBlock(contentBlock)] : [],
-  );
+  return resolvedContentBlocks.flatMap((contentBlock: unknown) => {
+    if (!isAnthropicToolUseBlock(contentBlock)) return [];
+    return [convertToolUseBlock(contentBlock)];
+  });
 }
 
 export function formatAnthropicToolResults(
@@ -154,7 +141,7 @@ function convertToAnthropic(tool: SerializedToolDefinition): AnthropicTool {
 function convertFromAnthropic(tool: AnthropicTool): ImportedToolConfiguration {
   return {
     name: tool.name,
-    description: tool.description,
+    description: tool.description ?? '',
     input: importToolSchema(tool.input_schema),
   };
 }
@@ -224,22 +211,43 @@ async function collectAsyncIterable(stream: AsyncIterable<unknown>): Promise<unk
   return chunks;
 }
 
-function extractAnthropicContentBlocks(
-  input: AnthropicToolCallSource,
-): AnthropicContentBlock[] | undefined | null {
+function extractAnthropicContentBlocks(input: unknown): readonly unknown[] | undefined | null {
   if (!input) {
-    return input;
+    return input === null ? null : undefined;
   }
   if (Array.isArray(input)) {
-    return input;
+    return input.map((value: unknown) => value);
   }
-  if ('content' in input) {
-    return input.content;
+  if (typeof input !== 'object' || input === null) {
+    return undefined;
   }
-  if ('message' in input) {
-    return input.message?.content;
+  const envelope = input as { content?: unknown; message?: { content?: unknown } | null };
+  if ('content' in envelope) {
+    return normalizeAnthropicContentBlocks(envelope.content);
+  }
+  if ('message' in envelope) {
+    return normalizeAnthropicContentBlocks(envelope.message?.content);
   }
   return undefined;
+}
+
+function normalizeAnthropicContentBlocks(input: unknown): readonly unknown[] | undefined | null {
+  if (input === null || input === undefined || Array.isArray(input)) return input;
+  return undefined;
+}
+
+function isAnthropicToolUseBlock(contentBlock: unknown): contentBlock is AnthropicToolUseBlock {
+  return (
+    typeof contentBlock === 'object' &&
+    contentBlock !== null &&
+    'type' in contentBlock &&
+    contentBlock.type === 'tool_use' &&
+    'id' in contentBlock &&
+    typeof contentBlock.id === 'string' &&
+    'name' in contentBlock &&
+    typeof contentBlock.name === 'string' &&
+    'input' in contentBlock
+  );
 }
 
 function getToolCallId(result: ToolResultLike): string {

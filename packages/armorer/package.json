@@ -201,7 +201,7 @@
   "scripts": {
     "bench": "bun run scripts/bench.ts",
     "build": "tsdown",
-    "check-types": "tsc --noEmit",
+    "check-types": "tsc --noEmit --incremental false",
     "check:boundaries": "bun run scripts/check-boundaries.ts",
     "clean": "rm -rf dist coverage tsconfig.tsbuildinfo",
     "ci": "bun run validate && bun run build",

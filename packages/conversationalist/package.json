@@ -209,6 +209,7 @@
     "zod": "^4.4.1"
   },
   "peerDependencies": {
+    "@anthropic-ai/sdk": "^0.71.2",
     "zod": "^4.4.1"
   },
   "engines": {

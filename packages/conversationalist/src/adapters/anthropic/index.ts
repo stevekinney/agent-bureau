@@ -1,3 +1,9 @@
+import type {
+  ContentBlockParam,
+  MessageParam,
+  TextBlockParam,
+} from '@anthropic-ai/sdk/resources/messages';
+
 import { appendMessages, createConversationHistory } from '../../conversation/index';
 import { assertConversationSafe } from '../../conversation/validation';
 import { type MultiModalContent, renderDocumentReferenceText } from '../../multi-modal';
@@ -225,6 +231,14 @@ export interface AnthropicSystemBlock {
 export interface AnthropicConversation {
   system?: string | AnthropicSystemBlock[];
   messages: AnthropicMessage[];
+}
+
+/**
+ * Anthropic Messages API request shapes from the official SDK.
+ */
+export interface AnthropicSdkConversation {
+  system?: string | TextBlockParam[];
+  messages: MessageParam[];
 }
 
 /**
@@ -708,6 +722,262 @@ export function toAnthropicMessages(
     result.system = system;
   }
   return capCacheBreakpoints(result);
+}
+
+/**
+ * Converts a conversation to shapes accepted by `@anthropic-ai/sdk`.
+ *
+ * The neutral adapter remains useful for other Anthropic-compatible clients;
+ * this helper makes the official SDK boundary explicit and keeps consumers
+ * from having to repeat a type assertion for the same wire-format data.
+ */
+export function toAnthropicMessagesForSdk(
+  conversation: Conversation,
+  options?: ToAnthropicMessagesOptions,
+): AnthropicSdkConversation {
+  const neutral = toAnthropicMessages(conversation, options);
+
+  return {
+    ...(neutral.system === undefined
+      ? {}
+      : {
+          system:
+            typeof neutral.system === 'string'
+              ? neutral.system
+              : neutral.system.map((block) => ({
+                  type: 'text' as const,
+                  text: block.text,
+                  ...(block.cache_control
+                    ? { cache_control: toSdkCacheControl(block.cache_control) }
+                    : {}),
+                })),
+        }),
+    messages: neutral.messages.map(
+      (message): MessageParam => ({
+        role: message.role,
+        content:
+          typeof message.content === 'string'
+            ? message.content
+            : message.content.map(toSdkContentBlock),
+      }),
+    ),
+  };
+}
+
+function toSdkCacheControl(cacheControl: AnthropicCacheControl) {
+  return {
+    type: 'ephemeral' as const,
+    ...(cacheControl.ttl === undefined ? {} : { ttl: cacheControl.ttl }),
+  };
+}
+
+function toSdkContentBlock(block: AnthropicContentBlock): ContentBlockParam {
+  const cacheControl = block.cache_control ? toSdkCacheControl(block.cache_control) : undefined;
+
+  switch (block.type) {
+    case 'text':
+      return {
+        type: 'text',
+        text: block.text,
+        ...(block.citations !== undefined ? { citations: toSdkCitations(block.citations) } : {}),
+        ...(cacheControl ? { cache_control: cacheControl } : {}),
+      };
+    case 'image':
+      if (block.source.type === 'url') {
+        return {
+          type: 'image',
+          source: { type: 'url', url: block.source.url },
+          ...(cacheControl ? { cache_control: cacheControl } : {}),
+        };
+      }
+      if (!isAnthropicImageMediaType(block.source.media_type)) {
+        throw new TypeError(
+          `Anthropic SDK does not support image media type ${block.source.media_type}.`,
+        );
+      }
+      return {
+        type: 'image',
+        source: {
+          type: 'base64',
+          media_type: block.source.media_type,
+          data: block.source.data,
+        },
+        ...(cacheControl ? { cache_control: cacheControl } : {}),
+      };
+    case 'document':
+      if (block.source.type === 'url') {
+        return {
+          type: 'document',
+          source: { type: 'url', url: block.source.url },
+          ...(block.title === undefined ? {} : { title: block.title }),
+          ...(cacheControl ? { cache_control: cacheControl } : {}),
+        };
+      }
+      if (block.source.type === 'file') {
+        throw new TypeError('Anthropic SDK document file sources are not request parameters.');
+      }
+      if (block.source.type === 'base64') {
+        if (block.source.media_type !== 'application/pdf') {
+          throw new TypeError(
+            `Anthropic SDK documents require application/pdf, got ${block.source.media_type}.`,
+          );
+        }
+        return {
+          type: 'document',
+          source: {
+            type: 'base64',
+            media_type: 'application/pdf',
+            data: block.source.data,
+          },
+          ...(block.title === undefined ? {} : { title: block.title }),
+          ...(cacheControl ? { cache_control: cacheControl } : {}),
+        };
+      }
+      if (block.source.media_type !== 'text/plain') {
+        throw new TypeError(
+          `Anthropic SDK text documents require text/plain, got ${block.source.media_type}.`,
+        );
+      }
+      return {
+        type: 'document',
+        source: { type: 'text', media_type: 'text/plain', data: block.source.data },
+        ...(block.title === undefined ? {} : { title: block.title }),
+        ...(cacheControl ? { cache_control: cacheControl } : {}),
+      };
+    case 'tool_use':
+      return {
+        type: 'tool_use',
+        id: block.id,
+        name: block.name,
+        input: block.input,
+        ...(cacheControl ? { cache_control: cacheControl } : {}),
+      };
+    case 'tool_result':
+      return {
+        type: 'tool_result',
+        tool_use_id: block.tool_use_id,
+        content: block.content,
+        ...(block.is_error === undefined ? {} : { is_error: block.is_error }),
+        ...(cacheControl ? { cache_control: cacheControl } : {}),
+      };
+    case 'thinking':
+      return { type: 'thinking', thinking: block.thinking, signature: block.signature };
+    case 'redacted_thinking':
+      return { type: 'redacted_thinking', data: block.data };
+    case 'server_tool_use':
+      if (block.name !== 'web_search') {
+        throw new TypeError(`Anthropic SDK does not support server tool ${block.name}.`);
+      }
+      return {
+        type: 'server_tool_use',
+        id: block.id,
+        name: 'web_search',
+        input: block.input,
+        ...(cacheControl ? { cache_control: cacheControl } : {}),
+      };
+    case 'web_search_tool_result':
+    case 'code_execution_tool_result':
+    case 'bash_code_execution_tool_result':
+    case 'text_editor_code_execution_tool_result':
+    case 'web_fetch_tool_result':
+    case 'container_upload':
+      throw new TypeError(`Anthropic SDK does not accept ${block.type} request blocks.`);
+  }
+}
+
+function isAnthropicImageMediaType(
+  mediaType: string,
+): mediaType is 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp' {
+  return ['image/jpeg', 'image/png', 'image/gif', 'image/webp'].includes(mediaType);
+}
+
+function toSdkCitations(citations: unknown): NonNullable<TextBlockParam['citations']> | null {
+  if (citations === null) return null;
+  if (!Array.isArray(citations)) {
+    throw new TypeError('Anthropic SDK citations must be an array or null.');
+  }
+
+  return citations.map((citation, index) => {
+    if (!isRecord(citation) || typeof citation['type'] !== 'string') {
+      throw new TypeError(`Invalid Anthropic citation at index ${index}.`);
+    }
+
+    switch (citation['type']) {
+      case 'char_location':
+        return {
+          type: 'char_location' as const,
+          cited_text: requiredString(citation, 'cited_text', index),
+          document_index: requiredNumber(citation, 'document_index', index),
+          document_title: nullableString(citation, 'document_title', index),
+          end_char_index: requiredNumber(citation, 'end_char_index', index),
+          start_char_index: requiredNumber(citation, 'start_char_index', index),
+        };
+      case 'page_location':
+        return {
+          type: 'page_location' as const,
+          cited_text: requiredString(citation, 'cited_text', index),
+          document_index: requiredNumber(citation, 'document_index', index),
+          document_title: nullableString(citation, 'document_title', index),
+          end_page_number: requiredNumber(citation, 'end_page_number', index),
+          start_page_number: requiredNumber(citation, 'start_page_number', index),
+        };
+      case 'content_block_location':
+        return {
+          type: 'content_block_location' as const,
+          cited_text: requiredString(citation, 'cited_text', index),
+          document_index: requiredNumber(citation, 'document_index', index),
+          document_title: nullableString(citation, 'document_title', index),
+          end_block_index: requiredNumber(citation, 'end_block_index', index),
+          start_block_index: requiredNumber(citation, 'start_block_index', index),
+        };
+      case 'web_search_result_location':
+        return {
+          type: 'web_search_result_location' as const,
+          cited_text: requiredString(citation, 'cited_text', index),
+          encrypted_index: requiredString(citation, 'encrypted_index', index),
+          title: nullableString(citation, 'title', index),
+          url: requiredString(citation, 'url', index),
+        };
+      case 'search_result_location':
+        return {
+          type: 'search_result_location' as const,
+          cited_text: requiredString(citation, 'cited_text', index),
+          end_block_index: requiredNumber(citation, 'end_block_index', index),
+          search_result_index: requiredNumber(citation, 'search_result_index', index),
+          source: requiredString(citation, 'source', index),
+          start_block_index: requiredNumber(citation, 'start_block_index', index),
+          title: nullableString(citation, 'title', index),
+        };
+      default:
+        throw new TypeError(`Unsupported Anthropic citation type ${citation['type']}.`);
+    }
+  });
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+function requiredString(record: Record<string, unknown>, key: string, index: number): string {
+  const value = record[key];
+  if (typeof value !== 'string') throw new TypeError(`Invalid ${key} in citation ${index}.`);
+  return value;
+}
+
+function requiredNumber(record: Record<string, unknown>, key: string, index: number): number {
+  const value = record[key];
+  if (typeof value !== 'number') throw new TypeError(`Invalid ${key} in citation ${index}.`);
+  return value;
+}
+
+function nullableString(
+  record: Record<string, unknown>,
+  key: string,
+  index: number,
+): string | null {
+  const value = record[key];
+  if (value === null || typeof value === 'string') return value;
+  throw new TypeError(`Invalid ${key} in citation ${index}.`);
 }
 
 function parseToolResultContent(callId: string, content: string, isError?: boolean): ToolResult {

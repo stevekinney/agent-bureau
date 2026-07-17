@@ -96,6 +96,7 @@ describe('toAnthropicTools', () => {
 });
 
 describe('parseAnthropicToolCalls', () => {
+  // The parser accepts provider SDK content blocks as well as armorer's own shapes.
   it('parses tool use blocks', () => {
     expect(
       parseAnthropicToolCalls([
