@@ -6,6 +6,7 @@
       "name": "agent-bureau",
       "devDependencies": {
         "@changesets/cli": "2.31.0",
+        "@changesets/parse": "0.4.3",
         "@eslint/compat": "^2.0.2",
         "@eslint/js": "^10.0.1",
         "eslint": "^10.0.0",
@@ -28,7 +29,7 @@
     },
     "packages/armorer": {
       "name": "armorer",
-      "version": "0.9.0",
+      "version": "0.10.1",
       "devDependencies": {
         "@anthropic-ai/claude-agent-sdk": "^0.2.39",
         "@eslint/compat": "^2.0.2",
@@ -78,7 +79,7 @@
     },
     "packages/bureau": {
       "name": "bureau",
-      "version": "0.0.2",
+      "version": "0.0.4",
       "dependencies": {
         "@lostgradient/weft": "^0.10.0",
         "armorer": "workspace:*",
@@ -132,7 +133,7 @@
     },
     "packages/conversationalist": {
       "name": "conversationalist",
-      "version": "0.3.0",
+      "version": "0.4.1",
       "dependencies": {
         "gray-matter": "^4.0.3",
       },
@@ -164,6 +165,7 @@
         "zod": "^4.4.1",
       },
       "peerDependencies": {
+        "@anthropic-ai/sdk": "^0.71.2",
         "zod": "^4.4.1",
       },
     },

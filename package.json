@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "build": "turbo run build",
+    "check-changesets": "bun run scripts/check-changesets.ts",
     "check-types": "turbo run check-types",
     "coverage:check": "turbo run coverage:check --filter=armorer --filter=conversationalist --filter=evaluation --filter=interoperability --filter=lifecycle --filter=memory --filter=operative --filter=skills",
     "dev": "turbo run dev",
@@ -11,9 +12,10 @@
     "format:check": "turbo run format:check",
     "integration": "turbo run integration --filter=integration",
     "lint": "turbo run lint",
-    "test": "turbo run test",
+    "test": "bun run check-changesets && turbo run test && bun run test:scripts",
+    "test:scripts": "bun test scripts",
     "prepare": "lefthook install",
-    "validate": "turbo run format:check lint check-types test",
+    "validate": "bun run check-changesets && turbo run format:check lint check-types test && bun run test:scripts",
     "changeset": "changeset",
     "version": "changeset version",
     "release": "bun run scripts/release.ts",
@@ -21,6 +23,7 @@
   },
   "devDependencies": {
     "@changesets/cli": "2.31.0",
+    "@changesets/parse": "0.4.3",
     "@eslint/compat": "^2.0.2",
     "@eslint/js": "^10.0.1",
     "eslint": "^10.0.0",
