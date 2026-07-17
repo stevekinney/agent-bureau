@@ -56,6 +56,9 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      - name: Validate changesets target publishable packages
+        run: bun run check-changesets
+
       - name: Build publishable packages
         run: bun run turbo run build --filter=armorer --filter=conversationalist
 
