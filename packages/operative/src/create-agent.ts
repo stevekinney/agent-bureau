@@ -198,7 +198,7 @@ export type { AgentRun };
  *
  * // Built once per process — the stable approvalSecret is what makes
  * // resumeApproval() work across separate HTTP requests.
- * const toolbox = createToolbox([deleteFileTool], { approvalSecret: process.env.APPROVAL_SECRET });
+ * const toolbox = createToolbox([deleteFileTool], { approvalSecret: Bun.env['APPROVAL_SECRET'] });
  *
  * const agent = createAgent({
  *   generate: myProvider,
@@ -212,11 +212,12 @@ export type { AgentRun };
  * const pending = result.steps.at(-1)?.results.find((r) => r.pendingApproval)?.pendingApproval;
  * // ...send `pending` to a human, store `result.conversation.current` server-side...
  *
- * // Later, on approval: resume on the SAME toolbox instance, then start a
- * // fresh run from the updated history.
+ * // Later, on approval: resume on the SAME toolbox instance, append the
+ * // resolved result to the stored `result.conversation`, then start a fresh
+ * // run from `.current` — the updated ConversationHistory.
  * const resumedResult = await toolbox.resumeApproval(signedApproval);
- * const updatedHistory = appendToolResult(storedHistory, resumedResult);
- * const nextRun = agent.run({ conversation: updatedHistory });
+ * result.conversation.appendToolResults([resumedResult]);
+ * const nextRun = agent.run({ conversation: result.conversation.current });
  * ```
  */
 export function createAgent(options: CreateAgentOptions): StandaloneAgent {

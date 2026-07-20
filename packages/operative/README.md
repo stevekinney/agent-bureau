@@ -156,7 +156,7 @@ import { createAgent, stopWhen } from 'operative';
 
 // Built once per process — the stable approvalSecret is what makes
 // resumeApproval() work across separate HTTP requests.
-const toolbox = createToolbox([deleteFileTool], { approvalSecret: process.env.APPROVAL_SECRET });
+const toolbox = createToolbox([deleteFileTool], { approvalSecret: Bun.env['APPROVAL_SECRET'] });
 
 const agent = createAgent({
   generate: myProvider,
