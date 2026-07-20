@@ -10,6 +10,7 @@ import type {
   Message,
   MessageInput,
 } from '../types';
+import type { AppendableMessageInput } from '../utilities';
 import { buildMessageFromInput, repositionMessage, toReadonly } from '../utilities';
 import { getOrderedMessages, toIdRecord } from '../utilities/message-store';
 import {
@@ -24,9 +25,9 @@ import { ensureConversationSafe } from './validation';
  * Separates message inputs from an optional trailing environment argument.
  */
 function partitionAppendArgs(
-  args: Array<MessageInput | Partial<ConversationEnvironment> | undefined>,
+  args: Array<AppendableMessageInput | Partial<ConversationEnvironment> | undefined>,
 ): {
-  inputs: MessageInput[];
+  inputs: AppendableMessageInput[];
   environment?: Partial<ConversationEnvironment> | undefined;
 } {
   const filtered = args.filter((arg) => arg !== undefined);
@@ -38,27 +39,52 @@ function partitionAppendArgs(
   const last = filtered[filtered.length - 1];
   if (isConversationEnvironmentParameter(last)) {
     return {
-      inputs: filtered.slice(0, -1) as MessageInput[],
+      inputs: filtered.slice(0, -1) as AppendableMessageInput[],
       environment: last,
     };
   }
 
-  return { inputs: filtered as MessageInput[] };
+  return { inputs: filtered as AppendableMessageInput[] };
 }
 
 /**
- * Appends one or more messages to a conversation.
+ * Runs conversation plugins over a MessageInput. Already-built messages
+ * (identified by having an `id`) are passed through untouched — they were
+ * presumably already processed once by `buildMessage`, and plugins are typed
+ * against `MessageInput`'s mutable shape, which a `Message`'s readonly
+ * `content` array isn't structurally assignable to anyway.
+ */
+function applyPlugins(
+  input: AppendableMessageInput,
+  plugins: ConversationEnvironment['plugins'],
+): AppendableMessageInput {
+  if ('id' in input) return input;
+  return plugins.reduce((acc, plugin) => plugin(acc), input);
+}
+
+/**
+ * Appends one or more messages to a conversation. Accepts raw `MessageInput`s
+ * or already-built `Message`s (e.g. from `buildMessage`) — a pre-built
+ * message's `id`/`createdAt` are preserved rather than re-minted, so a
+ * message dispatched/persisted before it's part of a conversation keeps the
+ * same identity once it's appended.
  * Validates that tool results reference existing function calls.
  * Returns a new immutable conversation with the messages added.
  */
-export function appendMessages(conversation: Conversation, ...inputs: MessageInput[]): Conversation;
 export function appendMessages(
   conversation: Conversation,
-  ...inputsAndEnvironment: [...MessageInput[], Partial<ConversationEnvironment> | undefined]
+  ...inputs: AppendableMessageInput[]
 ): Conversation;
 export function appendMessages(
   conversation: Conversation,
-  ...args: (MessageInput | Partial<ConversationEnvironment> | undefined)[]
+  ...inputsAndEnvironment: [
+    ...AppendableMessageInput[],
+    Partial<ConversationEnvironment> | undefined,
+  ]
+): Conversation;
+export function appendMessages(
+  conversation: Conversation,
+  ...args: (AppendableMessageInput | Partial<ConversationEnvironment> | undefined)[]
 ): Conversation {
   return appendMessagesInternal(conversation, args, true);
 }
@@ -69,7 +95,7 @@ export function appendMessages(
  */
 export function appendUnsafeMessage(
   conversation: Conversation,
-  input: MessageInput,
+  input: AppendableMessageInput,
   environment?: Partial<ConversationEnvironment>,
 ): Conversation {
   return appendMessagesInternal(conversation, [input, environment], false);
@@ -77,7 +103,7 @@ export function appendUnsafeMessage(
 
 const appendMessagesInternal = (
   conversation: Conversation,
-  args: Array<MessageInput | Partial<ConversationEnvironment> | undefined>,
+  args: Array<AppendableMessageInput | Partial<ConversationEnvironment> | undefined>,
   validate: boolean,
 ): Conversation => {
   const { inputs, environment } = partitionAppendArgs(args);
@@ -93,10 +119,7 @@ const appendMessagesInternal = (
     messages: Message[];
   }>(
     (state, input, index) => {
-      const processedInput = resolvedEnvironment.plugins.reduce(
-        (acc, plugin) => plugin(acc),
-        input,
-      );
+      const processedInput = applyPlugins(input, resolvedEnvironment.plugins);
 
       if (validate && processedInput.role === 'tool-result' && processedInput.toolResult) {
         assertToolReference(state.toolUses, processedInput.toolResult.callId);
@@ -154,25 +177,31 @@ const appendMessagesInternal = (
  * `appendMessages` relies on (`ensureConversationSafe`), since a tool-result
  * prepended ahead of its tool-call would be invalid regardless of how the
  * conversation was assembled.
+ *
+ * Accepts raw `MessageInput`s or already-built `Message`s, same as
+ * `appendMessages`.
  */
 export function prependMessages(
   conversation: Conversation,
-  ...inputs: MessageInput[]
+  ...inputs: AppendableMessageInput[]
 ): Conversation;
 export function prependMessages(
   conversation: Conversation,
-  ...inputsAndEnvironment: [...MessageInput[], Partial<ConversationEnvironment> | undefined]
+  ...inputsAndEnvironment: [
+    ...AppendableMessageInput[],
+    Partial<ConversationEnvironment> | undefined,
+  ]
 ): Conversation;
 export function prependMessages(
   conversation: Conversation,
-  ...args: (MessageInput | Partial<ConversationEnvironment> | undefined)[]
+  ...args: (AppendableMessageInput | Partial<ConversationEnvironment> | undefined)[]
 ): Conversation {
   const { inputs, environment } = partitionAppendArgs(args);
   const resolvedEnvironment = resolveConversationEnvironment(environment);
   const now = resolvedEnvironment.now();
 
   const newMessages = inputs.map((input, index) => {
-    const processedInput = resolvedEnvironment.plugins.reduce((acc, plugin) => plugin(acc), input);
+    const processedInput = applyPlugins(input, resolvedEnvironment.plugins);
     return buildMessageFromInput(processedInput, index, now, resolvedEnvironment);
   });
 
@@ -182,11 +211,18 @@ export function prependMessages(
   // same as `appendMessages`. Rebuilding from `getOrderedMessages` here would
   // silently drop dangling ids or unlisted messages instead of letting
   // `ensureConversationSafe` surface them as integrity violations below.
+  //
+  // Positions are assigned from the walk index, not `message.position +
+  // offset`: this function promises a dense, ordered `position` sequence
+  // across the whole result, and adding the offset to a possibly-already-
+  // sparse stale position would just carry the gaps forward.
   const renumbered: Record<string, Message> = {};
+  let index = 0;
   for (const id of conversation.ids) {
     const message = conversation.messages[id];
     if (message) {
-      renumbered[id] = repositionMessage(message, message.position + offset);
+      renumbered[id] = repositionMessage(message, offset + index);
+      index += 1;
     }
   }
 

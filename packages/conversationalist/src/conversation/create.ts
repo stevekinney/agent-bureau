@@ -1,4 +1,8 @@
-import { type ConversationEnvironment, resolveConversationEnvironment } from '../environment';
+import {
+  type ConversationEnvironment,
+  isConversationEnvironmentParameter,
+  resolveConversationEnvironment,
+} from '../environment';
 import type {
   ConversationHistory,
   ConversationStatus,
@@ -56,17 +60,25 @@ export function createConversationHistory(
  *
  * The returned message defaults to `position: 0`; pass `options.position` if
  * it needs to reflect where the message will ultimately live.
+ *
+ * Also accepts a bound `ConversationEnvironment` landing in the `options`
+ * position, matching every other builder in this module —
+ * `withEnvironment(env, buildMessage)` calls `fn(...args, env)`, so a
+ * no-options bound call lands the environment there instead of `environment`.
  */
 export function buildMessage(
   input: MessageInput,
   options?: BuildMessageOptions,
   environment?: Partial<ConversationEnvironment>,
 ): Message {
-  const resolvedEnvironment = resolveConversationEnvironment(environment);
+  const resolvedEnvironment = resolveConversationEnvironment(
+    isConversationEnvironmentParameter(options) ? options : environment,
+  );
+  const resolvedOptions = isConversationEnvironmentParameter(options) ? undefined : options;
   const processedInput = resolvedEnvironment.plugins.reduce((acc, plugin) => plugin(acc), input);
   const message = buildMessageFromInput(
     processedInput,
-    options?.position ?? 0,
+    resolvedOptions?.position ?? 0,
     resolvedEnvironment.now(),
     resolvedEnvironment,
   );

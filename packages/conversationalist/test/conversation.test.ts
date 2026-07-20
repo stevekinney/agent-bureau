@@ -23,6 +23,7 @@ import {
   replaceSystemMessage,
   searchConversationMessages,
   toChatMessages,
+  withEnvironment,
 } from '../src/conversation/index';
 import { ConversationalistError } from '../src/errors';
 import { messageSchema } from '../src/schemas';
@@ -923,11 +924,47 @@ describe('buildMessage', () => {
     expect(message.createdAt).toBe('2024-01-01T00:00:00.000Z');
   });
 
-  test('minted message can be handed to appendMessages/prependMessages', () => {
-    const message = buildMessage({ role: 'user', content: 'inbound' });
-    const c = appendMessages(createConversation(), message);
+  test('appendMessages preserves the id and createdAt of a pre-built message', () => {
+    const message = buildMessage({ role: 'user', content: 'inbound' }, undefined, {
+      now: () => '2024-03-01T00:00:00.000Z',
+      randomId: () => 'inbound-id',
+    });
 
-    expect(getOrderedMessages(c)[0]!.content).toBe('inbound');
+    const c = appendMessages(createConversation(), message);
+    const stored = getOrderedMessages(c)[0]!;
+
+    expect(stored.content).toBe('inbound');
+    expect(stored.id).toBe('inbound-id');
+    expect(stored.createdAt).toBe('2024-03-01T00:00:00.000Z');
+  });
+
+  test('prependMessages preserves the id and createdAt of a pre-built message', () => {
+    const message = buildMessage({ role: 'user', content: 'earlier' }, undefined, {
+      now: () => '2024-03-01T00:00:00.000Z',
+      randomId: () => 'earlier-id',
+    });
+
+    let c = createConversation();
+    c = appendUserMessage(c, 'existing');
+    c = prependMessages(c, message);
+    const stored = getOrderedMessages(c)[0]!;
+
+    expect(stored.content).toBe('earlier');
+    expect(stored.id).toBe('earlier-id');
+    expect(stored.createdAt).toBe('2024-03-01T00:00:00.000Z');
+    expect(stored.position).toBe(0);
+  });
+
+  test('accepts a bound environment via withEnvironment landing in the options position', () => {
+    const boundBuildMessage = withEnvironment(
+      { now: () => '2024-04-01T00:00:00.000Z', randomId: () => 'bound-id' },
+      buildMessage,
+    );
+
+    const message = boundBuildMessage({ role: 'user', content: 'bound' });
+
+    expect(message.id).toBe('bound-id');
+    expect(message.createdAt).toBe('2024-04-01T00:00:00.000Z');
   });
 });
 
@@ -1065,6 +1102,33 @@ describe('prependMessages', () => {
     }
 
     expect(caught).toBeInstanceOf(ConversationalistError);
+  });
+
+  test('renumbers existing messages densely from their ordered index, not stale position + offset', () => {
+    let c = createConversation();
+    c = appendMessages(c, { role: 'user', content: 'u1' }, { role: 'assistant', content: 'a1' });
+
+    // Simulate a conversation whose existing positions are already sparse
+    // (e.g. from an external source) — 52 and 53 rather than 0 and 1.
+    const [firstId, secondId] = c.ids;
+    const sparse: Conversation = {
+      ...c,
+      messages: {
+        ...c.messages,
+        [firstId!]: { ...c.messages[firstId!]!, position: 52 },
+        [secondId!]: { ...c.messages[secondId!]!, position: 53 },
+      },
+    };
+
+    const result = prependMessages(sparse, { role: 'system', content: 'new' });
+    const messages = getOrderedMessages(result);
+
+    // The full resulting sequence must be dense (0, 1, 2, ...), not carrying
+    // the stale 52/53 gap forward from the offset-based renumbering.
+    expect(messages.map((m) => m.position)).toEqual([0, 1, 2]);
+    expect(messages[0]!.content).toBe('new');
+    expect(messages[1]!.content).toBe('u1');
+    expect(messages[2]!.content).toBe('a1');
   });
 });
 
