@@ -248,10 +248,10 @@ interface RunSummary {
 
 ### Constants
 
-| Export                                                 | Value  | Description                   |
-| ------------------------------------------------------ | ------ | ----------------------------- |
-| `DEFAULT_PORT`                                         | `5555` | Default HTTP port             |
-| `DEFAULT_MAXIMUM_STEPS` (from `bureau`, not `gateway`) | `10`   | Default agentic loop step cap |
+| Export                                                              | Value  | Description                   |
+| ------------------------------------------------------------------- | ------ | ----------------------------- |
+| `DEFAULT_PORT`                                                      | `5555` | Default HTTP port             |
+| `DEFAULT_MAXIMUM_STEPS` (from `operative`, re-exported by `bureau`) | `25`   | Default agentic loop step cap |
 
 ### Events
 
