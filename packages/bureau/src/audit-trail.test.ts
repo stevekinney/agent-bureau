@@ -467,6 +467,71 @@ describe('createAuditTrail', () => {
     trail.dispose();
   });
 
+  describe('onDiagnostic', () => {
+    afterEach(() => {
+      (console.error as unknown as { mockRestore?: () => void }).mockRestore?.();
+    });
+
+    /** A `TextValueStore`-shaped stub whose `set` always rejects. */
+    function createFailingKv(): ReturnType<typeof textValueStore> {
+      const kv = textValueStore(new MemoryStorage());
+      return {
+        ...kv,
+        set: async () => {
+          throw new Error('disk full');
+        },
+      };
+    }
+
+    it('routes a persistence failure to the diagnostic sink instead of the console', async () => {
+      const errorSpy = spyOn(console, 'error').mockImplementation(() => {});
+      const kv = createFailingKv();
+      const { bureau, emit } = createStubBureau();
+      const received: unknown[] = [];
+      const trail = createAuditTrail(bureau, kv, (diagnostic) => received.push(diagnostic));
+
+      emit(
+        new ActionEvent({
+          type: 'tool.started',
+          timestamp: 5000,
+          sequence: 1,
+          runId: 'run-persist-fail',
+          detail: null,
+        }),
+      );
+
+      // The failing write is fire-and-forget; yield for the rejection to settle.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(received).toHaveLength(1);
+      expect(received[0]).toMatchObject({ level: 'error', scope: 'audit-trail' });
+      expect(errorSpy).not.toHaveBeenCalled();
+      trail.dispose();
+    });
+
+    it('with no sink configured, a persistence failure still logs to the console', async () => {
+      const errorSpy = spyOn(console, 'error').mockImplementation(() => {});
+      const kv = createFailingKv();
+      const { bureau, emit } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv);
+
+      emit(
+        new ActionEvent({
+          type: 'tool.started',
+          timestamp: 5000,
+          sequence: 1,
+          runId: 'run-persist-fail-default',
+          detail: null,
+        }),
+      );
+
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(errorSpy).toHaveBeenCalled();
+      trail.dispose();
+    });
+  });
+
   describe('same-millisecond manual-record ordering', () => {
     const originalDateNow = Date.now;
 
