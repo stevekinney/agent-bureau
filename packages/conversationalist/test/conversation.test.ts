@@ -1050,6 +1050,22 @@ describe('prependMessages', () => {
 
     expect(caught).toBeInstanceOf(ConversationalistError);
   });
+
+  test('surfaces a pre-existing missing-message integrity violation instead of silently dropping it', () => {
+    let c = createConversation();
+    c = appendUserMessage(c, 'u');
+    // Simulate a malformed conversation: an id listed with no backing message.
+    const malformed: Conversation = { ...c, ids: [...c.ids, 'dangling-id'] };
+
+    let caught: unknown;
+    try {
+      prependMessages(malformed, { role: 'system', content: 's' });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(ConversationalistError);
+  });
 });
 
 /**

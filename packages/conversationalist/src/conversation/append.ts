@@ -177,15 +177,23 @@ export function prependMessages(
   });
 
   const offset = newMessages.length;
-  const ordered = getOrderedMessages(conversation);
-  const renumbered = ordered.map((message) =>
-    repositionMessage(message, message.position + offset),
-  );
+  // Renumber only messages actually reachable through `conversation.ids`, and
+  // preserve `conversation.ids`/`conversation.messages` verbatim otherwise —
+  // same as `appendMessages`. Rebuilding from `getOrderedMessages` here would
+  // silently drop dangling ids or unlisted messages instead of letting
+  // `ensureConversationSafe` surface them as integrity violations below.
+  const renumbered: Record<string, Message> = {};
+  for (const id of conversation.ids) {
+    const message = conversation.messages[id];
+    if (message) {
+      renumbered[id] = repositionMessage(message, message.position + offset);
+    }
+  }
 
   const next: Conversation = {
     ...conversation,
-    ids: [...newMessages.map((message) => message.id), ...renumbered.map((message) => message.id)],
-    messages: { ...toIdRecord(newMessages), ...toIdRecord(renumbered) },
+    ids: [...newMessages.map((message) => message.id), ...conversation.ids],
+    messages: { ...conversation.messages, ...renumbered, ...toIdRecord(newMessages) },
     updatedAt: now,
   };
   return ensureConversationSafe(toReadonly(next));
