@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 
 import { classifyError } from '../src/errors';
+import { ToolCallParseError } from '../src/providers/errors';
 
 describe('classifyError', () => {
   it('ProviderError-like with retryable=true, statusCode=429 → rate-limit', () => {
@@ -140,5 +141,52 @@ describe('classifyError', () => {
     const classified = classifyError(error);
     expect(classified.statusCode).toBe(500);
     expect(classified.category).toBe('server');
+  });
+
+  it('ToolCallParseError → model-output, retryable=false, distinct from a generic ProviderError', () => {
+    const error = new ToolCallParseError({
+      provider: 'anthropic',
+      toolName: 'roll_dice',
+      toolCallId: 'toolu_x',
+      rawArguments: '{"sides": 2',
+      cause: new SyntaxError('Unexpected end of JSON input'),
+    });
+
+    const classified = classifyError(error);
+    expect(classified.category).toBe('model-output');
+    expect(classified.retryable).toBe(false);
+    expect(classified.statusCode).toBeUndefined();
+    expect(classified.provider).toBe('anthropic');
+    expect(classified.original).toBe(error);
+  });
+
+  it('a structurally-identical ToolCallParseError from a different bundle (not an instanceof match) still classifies as model-output', () => {
+    // operative bundles each public entrypoint (operative, operative/openai, operative/providers, ...)
+    // separately with no shared chunks, so a ToolCallParseError thrown from one entrypoint's
+    // bundle is NOT `instanceof` the ToolCallParseError class re-exported from another. classifyError
+    // must still recognize it via the structural fallback in `isToolCallParseError`.
+    class FakeCrossBundleToolCallParseError extends Error {
+      readonly toolName: string;
+      readonly toolCallId: string | undefined;
+      readonly rawArguments: string;
+      readonly provider: string;
+      readonly retryable = false;
+
+      constructor() {
+        super('[provider:openai] unparseable tool-call arguments for "roll_dice" (call_x): boom');
+        this.name = 'ToolCallParseError';
+        this.toolName = 'roll_dice';
+        this.toolCallId = 'call_x';
+        this.rawArguments = '{"sides": 2';
+        this.provider = 'openai';
+      }
+    }
+    const error = new FakeCrossBundleToolCallParseError();
+    expect(error).not.toBeInstanceOf(ToolCallParseError);
+
+    const classified = classifyError(error);
+    expect(classified.category).toBe('model-output');
+    expect(classified.retryable).toBe(false);
+    expect(classified.provider).toBe('openai');
   });
 });
