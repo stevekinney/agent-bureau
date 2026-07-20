@@ -25,6 +25,8 @@ export {
 export type { StandardSchemaV1 } from './standard-schema';
 export { isStandardSchema, validateStandardSchema } from './standard-schema';
 export type {
+  JSONArray,
+  JSONObject,
   JSONPrimitive,
   JSONValue,
   ToolAction,

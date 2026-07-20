@@ -15,7 +15,35 @@ export interface ToolPolicy {
 // ── JSON Types ────────────────────────────────────────────────────────
 
 export type JSONPrimitive = string | number | boolean | null;
-export type JSONValue = JSONPrimitive | ReadonlyArray<JSONValue> | { [key: string]: JSONValue };
+
+/**
+ * A JSON array, expressed as a named interface (rather than an inline
+ * `ReadonlyArray<JSONValue>`) so TypeScript can cache instantiations by
+ * type identity. Consumers that run `JSONValue` through another recursive
+ * generic — e.g. Svelte 5's `$state.Snapshot<T>` mapped type — hit
+ * TS2589 ("Type instantiation is excessively deep and possibly infinite")
+ * when the recursive branches are anonymous; naming them breaks the
+ * compound recursion. See conversationalist#245.
+ *
+ * The interface has no members of its own — that's the point. A plain
+ * `type JSONArray = ReadonlyArray<JSONValue>` alias reintroduces the
+ * TS2589 failure (verified empirically), because a type alias is
+ * structurally inlined at each recursive reference while a named
+ * interface has a stable identity TypeScript's instantiation cache can
+ * key on.
+ */
+// eslint-disable-next-line @typescript-eslint/no-empty-object-type
+export interface JSONArray extends ReadonlyArray<JSONValue> {}
+
+/**
+ * A JSON object, expressed as a named interface for the same reason as
+ * {@link JSONArray}.
+ */
+export interface JSONObject {
+  [key: string]: JSONValue;
+}
+
+export type JSONValue = JSONPrimitive | JSONArray | JSONObject;
 
 export type ToolErrorCategory =
   | 'validation'
