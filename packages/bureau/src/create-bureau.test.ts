@@ -26,6 +26,7 @@ import {
   RunAbortedEvent,
   StepCompletedEvent,
   stopWhen,
+  TaskDispatchedEvent,
 } from 'operative';
 import {
   type DurableRunDeps,
@@ -3918,7 +3919,9 @@ describe('createBureau flow control (AB-13)', () => {
   });
 
   it('covers scheduler-originated admission, and frees + reclaims the concurrency slot across a real preempt/resume cycle', async () => {
-    const { generate, resolve } = createBlockingGenerate();
+    // Task A's generate blocks until aborted, so A never settles on its own: it
+    // is only ever preempted (aborted) or cancelled at the end of the test.
+    const { generate } = createBlockingGenerate();
     const bureau = await createBureau({
       generate,
       toolbox: createEmptyToolbox(),
@@ -3944,8 +3947,17 @@ describe('createBureau flow control (AB-13)', () => {
     // Submit an IMMEDIATE task directly on the scheduler (bypassing bureau's
     // own admission gate — this is purely the mechanism to force a REAL
     // preemption of task A, not a flow-controlled trigger itself).
+    //
+    // The immediate task's generate BLOCKS until this test releases it. That is
+    // load-bearing: while the immediate task occupies the scheduler, requeued
+    // task A cannot be redispatched, so A stays parked — and its concurrency
+    // slot stays free — for the whole task C sequence below. With a
+    // self-completing generate here the scheduler was free to redispatch A (and
+    // reclaim A's slot via TaskDispatchedEvent) before task C was submitted,
+    // making C's admission a race that lost under CI contention (#246).
+    const immediate = createBlockingGenerate();
     const immediateResult = bureau.scheduler!.submitImmediate(() => ({
-      generate: createMockGenerate('immediate-done'),
+      generate: immediate.generate,
       toolbox: createEmptyToolbox(),
       conversation: new Conversation(),
       maximumSteps: 1,
@@ -3973,14 +3985,28 @@ describe('createBureau flow control (AB-13)', () => {
     // cancel rather than abort — TaskCancelledEvent settles it either way).
     bureau.scheduler!.cancel(taskC.taskId);
 
-    // Let the immediate task finish so the scheduler redispatches task A
-    // (requeued on preemption).
-    resolve({ content: 'immediate-done', toolCalls: [] });
+    // Arm the redispatch listener BEFORE releasing the immediate task, so the
+    // dispatch cannot slip through between the release and the subscription.
+    // Awaiting the real TaskDispatchedEvent is deterministic; polling
+    // `activeTask` instead raced the scheduler's redispatch timer and gave up
+    // while task A was still on its way in (#246).
+    const taskARedispatched = new Promise<void>((resolve) => {
+      const onDispatched = (event: Event) => {
+        if ((event as TaskDispatchedEvent).taskId !== taskA.taskId) return;
+
+        bureau.scheduler!.removeEventListener(TaskDispatchedEvent.type, onDispatched);
+        resolve();
+      };
+
+      bureau.scheduler!.addEventListener(TaskDispatchedEvent.type, onDispatched);
+    });
+
+    // Release the immediate task so the scheduler redispatches task A (requeued
+    // on preemption). Task A's own generate stays blocked, so A holds the
+    // reclaimed slot for the assertion below rather than settling.
+    immediate.resolve({ content: 'immediate-done', toolCalls: [] });
     await immediateResult;
-    await waitForCondition(
-      () => bureau.scheduler?.getState().activeTask?.id === taskA.taskId,
-      'task A was not redispatched after the immediate task completed',
-    );
+    await taskARedispatched;
 
     // AB-13 — task A's resume (TaskDispatchedEvent) reclaimed its slot: with
     // C already cancelled/settled, a fresh submission is rejected again only
