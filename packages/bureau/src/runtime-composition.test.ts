@@ -988,6 +988,267 @@ describe('createRuntimeComposition durable execution', () => {
     }
   });
 
+  it('recovers a stateless scheduled fire when Weft has a schedule-run marker OBJECT (Weft 0.10+ metadata)', async () => {
+    // REGRESSION (#235): Weft 0.10+ writes `KEYS.scheduleRun(...)` as a metadata
+    // object (`{ id, occurrence? }`) rather than the legacy plain string.
+    // `loadScheduleIdForRecoveredRun`'s old `typeof decoded === 'string'` check
+    // treated any object marker as missing.
+    //
+    // STATELESS on purpose (no `sessionId` on the input, no pre-existing session
+    // in the store): `resolveRunServices` has a second, independent way to prove
+    // a recovered run is a scheduled fire — a matching `lastScheduledFireRunId`
+    // on an already-existing session (see the "session proves the scheduled
+    // fire" test below). With no session to find, that fallback cannot fire, so
+    // this test is isolated to the marker decode alone: if
+    // `decodeScheduleRunMarker` regresses to string-only, `resolveRunServices`
+    // finds no way to classify this as scheduled, `isAgentRunWorkflowInput`
+    // rejects the `ScheduledAgentRunInput` shape too, and the run fails
+    // `unavailable` ("no recoverable session") instead of completing.
+    const databasePath = join(
+      tmpdir(),
+      `object-marker-stateless-input-${process.pid}-${durableDatabaseCounter++}.sqlite`,
+    );
+    const runId = 'object-marker-stateless-fire-run';
+    const scheduleId = 'object-marker-stateless-schedule';
+    const sessionId = `sched-${scheduleId}-${runId}`;
+    const scheduledPrompt = 'stateless digest prompt';
+    const recoveredAssistantContent = 'stateless recovered turn';
+
+    try {
+      const firstRuntime = await createRuntimeComposition({
+        generate: async () => new Promise<never>(() => {}),
+        toolbox: createToolbox([], { context: {} }),
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+      });
+
+      try {
+        expect(firstRuntime.durable).toBeDefined();
+        const toolbox = createToolbox([], { context: {} });
+        const services: DurableRunDeps = {
+          toolbox,
+          options: {
+            generate: async () => new Promise<never>(() => {}),
+            toolbox: toolbox as never,
+            conversation: createConversationHistory(),
+            stopWhen: stopWhen.noToolCalls(),
+          },
+        };
+
+        const handle = await firstRuntime.durable!.engine.start(
+          'agentRun',
+          { agentName: 'researcher', input: scheduledPrompt },
+          { id: runId, services },
+        );
+        void handle.result().catch(() => {});
+        // Weft 0.10+ native marker shape: an object, not a bare string.
+        await firstRuntime.durable!.engine.storage.put(
+          KEYS.scheduleRun(runId),
+          encode({ id: scheduleId, occurrence: Date.now() }),
+        );
+
+        const running = await pollUntil(async () => {
+          const state = await firstRuntime.durable!.engine.get(runId);
+          return state?.status === 'running';
+        });
+        expect(running).toBe(true);
+      } finally {
+        firstRuntime.durable?.engine[Symbol.dispose]?.();
+        firstRuntime.disposeStorage?.();
+      }
+
+      const secondRuntime = await createRuntimeComposition({
+        generate: async () => ({ content: recoveredAssistantContent, toolCalls: [] }),
+        toolbox: createToolbox([], { context: {} }),
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+        stopWhen: stopWhen.noToolCalls(),
+      });
+
+      try {
+        expect(secondRuntime.durable).toBeDefined();
+        await secondRuntime.durable!.engine.recoverAll();
+
+        const completed = await pollUntil(async () => {
+          const state = await secondRuntime.durable!.engine.get(runId);
+          return state?.status === 'completed';
+        });
+        expect(completed).toBe(true);
+
+        const session = await secondRuntime.sessionStore!.load(sessionId);
+        expect(session).toBeDefined();
+        const messages = getMessages(session!.conversationHistory);
+        expect(messages.some((message) => message.content === recoveredAssistantContent)).toBe(
+          true,
+        );
+      } finally {
+        secondRuntime.durable?.engine[Symbol.dispose]?.();
+        secondRuntime.disposeStorage?.();
+      }
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
+  it('recovers a scheduled fire and replaces its stale partial transcript even when the Weft resolver info carries live schedule metadata (#235)', async () => {
+    // REGRESSION (#235): Weft 0.10+ derives `info.schedule` from durable
+    // schedule metadata on recovery too, not just on a live tick (see
+    // `scheduleFromWorkflowState` in weft's `lifecycle/recovered-services.ts`,
+    // which reads the same `KEYS.scheduleRun(...)` marker and a matching
+    // `ScheduleState`). Before the fix, `buildScheduledRunServices` used
+    // `info.schedule === undefined` as its "is this a replay that needs the
+    // stale transcript stripped" signal — which broke the moment recovery ALSO
+    // started populating `info.schedule`, because the code would then skip the
+    // strip and let the recovering run see the pre-crash partial transcript
+    // untouched, duplicating the prompt.
+    //
+    // A REAL `ScheduleState` (via `engine.schedule(...)`) is required to make
+    // Weft itself populate `info.schedule` on recovery — a hand-written
+    // `KEYS.scheduleRun` marker alone is not enough (weft looks the schedule up
+    // by id and requires a workflow-type match). `overlap: 'allow'` plus a
+    // marker `occurrence` satisfies `scheduleFromWorkflowState`'s simplest
+    // acceptance path without needing the schedule to have ever actually fired
+    // for real, so this stays deterministic (no real-time wait). The crashed
+    // run's `generate` hangs on its very FIRST call — no step is committed, so
+    // there is no weft checkpoint replay to reconstruct the recovering
+    // generate's conversation; it sees exactly what the resolver seeded.
+    const databasePath = join(
+      tmpdir(),
+      `schedule-metadata-recovery-${process.pid}-${durableDatabaseCounter++}.sqlite`,
+    );
+    const runId = 'schedule-metadata-recovery-run';
+    const scheduleId = 'schedule-metadata-recovery-schedule';
+    const sessionId = 'schedule-metadata-recovery-session';
+    const scheduledPrompt = 'digest prompt';
+    const partialAssistantContent = 'old partial assistant turn';
+    const recoveredAssistantContent = 'recovered assistant turn';
+    let recoveredUserPromptCount = 0;
+    let recoveredSawOldPartial = false;
+
+    try {
+      const firstRuntime = await createRuntimeComposition({
+        generate: async () => new Promise<never>(() => {}),
+        toolbox: createToolbox([], { context: {} }),
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+      });
+
+      try {
+        expect(firstRuntime.durable).toBeDefined();
+        const partialConversation = new Conversation(createConversationHistory({ id: sessionId }));
+        partialConversation.appendUserMessage(scheduledPrompt);
+        partialConversation.appendAssistantMessage('prior completed fire');
+        partialConversation.appendUserMessage(scheduledPrompt, { scheduledFireRunId: runId });
+        partialConversation.appendAssistantMessage(partialAssistantContent);
+        await firstRuntime.sessionStore!.save(
+          createAgentSession({
+            id: sessionId,
+            agentName: 'researcher',
+            conversationHistory: partialConversation.current,
+            metadata: { lastScheduledFireRunId: runId },
+          }),
+        );
+
+        // A REAL ScheduleState, registered directly via weft's engine — far
+        // enough in the future (24h) that its poller never ticks during this
+        // test. `overlap: 'allow'` makes `scheduleFromWorkflowState` accept the
+        // marker purely on `occurrence` being present, without needing
+        // `currentWorkflowId`/`nextFireAt` bookkeeping to line up with a run
+        // that never actually went through the live scheduler.
+        await firstRuntime.durable!.engine.schedule(
+          'agentRun',
+          { agentName: 'researcher', input: scheduledPrompt, sessionId },
+          { every: '24h' },
+          { id: scheduleId, overlap: 'allow' },
+        );
+
+        const toolbox = createToolbox([], { context: {} });
+        const services: DurableRunDeps = {
+          toolbox,
+          options: {
+            generate: async () => new Promise<never>(() => {}),
+            toolbox: toolbox as never,
+            conversation: createConversationHistory(),
+            stopWhen: stopWhen.noToolCalls(),
+          },
+        };
+
+        const handle = await firstRuntime.durable!.engine.start(
+          'agentRun',
+          { agentName: 'researcher', input: scheduledPrompt, sessionId },
+          { id: runId, services },
+        );
+        void handle.result().catch(() => {});
+        await firstRuntime.durable!.engine.storage.put(
+          KEYS.scheduleRun(runId),
+          encode({ id: scheduleId, occurrence: 1 }),
+        );
+
+        const running = await pollUntil(async () => {
+          const state = await firstRuntime.durable!.engine.get(runId);
+          return state?.status === 'running';
+        });
+        expect(running).toBe(true);
+      } finally {
+        firstRuntime.durable?.engine[Symbol.dispose]?.();
+        firstRuntime.disposeStorage?.();
+      }
+
+      const secondRuntime = await createRuntimeComposition({
+        generate: async ({ conversation }) => {
+          const messages = conversation.getMessages();
+          recoveredUserPromptCount = messages.filter(
+            (message) => message.role === 'user' && message.content === scheduledPrompt,
+          ).length;
+          recoveredSawOldPartial = messages.some(
+            (message) => message.content === partialAssistantContent,
+          );
+          return { content: recoveredAssistantContent, toolCalls: [] };
+        },
+        toolbox: createToolbox([], { context: {} }),
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+        stopWhen: stopWhen.noToolCalls(),
+      });
+
+      try {
+        expect(secondRuntime.durable).toBeDefined();
+        await secondRuntime.durable!.engine.recoverAll();
+
+        const completed = await pollUntil(async () => {
+          const state = await secondRuntime.durable!.engine.get(runId);
+          return state?.status === 'completed';
+        });
+        expect(completed).toBe(true);
+        // Not duplicated: the recovering agent body saw the (correctly retained)
+        // prior completed fire's prompt plus its own fresh replay prompt — TWO
+        // occurrences, same as an unaffected recovery — and never saw the stale
+        // pre-crash partial turn from ITS OWN crashed attempt re-appended
+        // alongside the replay.
+        expect(recoveredUserPromptCount).toBe(2);
+        expect(recoveredSawOldPartial).toBe(false);
+
+        const session = await secondRuntime.sessionStore!.load(sessionId);
+        expect(session).toBeDefined();
+        const messages = getMessages(session!.conversationHistory);
+        expect(messages.some((message) => message.content === partialAssistantContent)).toBe(false);
+        expect(messages.filter((message) => message.content === scheduledPrompt)).toHaveLength(2);
+        expect(messages.some((message) => message.content === recoveredAssistantContent)).toBe(
+          true,
+        );
+      } finally {
+        secondRuntime.durable?.engine[Symbol.dispose]?.();
+        secondRuntime.disposeStorage?.();
+      }
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
   it('recovers markerless scheduled fires when the session proves the scheduled fire', async () => {
     const databasePath = join(
       tmpdir(),

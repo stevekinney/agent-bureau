@@ -237,6 +237,39 @@ function hasPersistedScheduleMarker(input: ScheduledAgentRunInput): boolean {
   return persistedScheduleMarker(input) !== undefined;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+/**
+ * Weft 0.10+ native `KEYS.scheduleRun(...)` marker: an object of shape
+ * `{ id, occurrence? }` written by `encodeScheduleRunMetadata` (see weft's
+ * `src/core/engine/schedule-run-metadata.ts`). Pre-0.10 stores may still hold
+ * the legacy plain-string marker, handled separately in
+ * {@link decodeScheduleRunMarker}.
+ */
+function isScheduleRunMarkerObject(value: unknown): value is { id: string; occurrence?: number } {
+  if (!isRecord(value)) return false;
+  const { id, occurrence } = value;
+  return typeof id === 'string' && (occurrence === undefined || typeof occurrence === 'number');
+}
+
+/**
+ * Decode a `KEYS.scheduleRun(...)` storage value (already `decode()`d from
+ * bytes) into its schedule id, accepting both the legacy plain-string marker
+ * and Weft 0.10+'s `{ id, occurrence? }` metadata object. Returns `undefined`
+ * when the value is neither shape, or the id is blank.
+ */
+export function decodeScheduleRunMarker(decoded: unknown): string | undefined {
+  if (typeof decoded === 'string') {
+    return decoded.trim().length > 0 ? decoded : undefined;
+  }
+  if (isScheduleRunMarkerObject(decoded)) {
+    return decoded.id.trim().length > 0 ? decoded.id : undefined;
+  }
+  return undefined;
+}
+
 type RecoveredScheduleMarker =
   | { status: 'found'; scheduleId: string }
   | { status: 'missing'; sessionId?: string }
@@ -1594,10 +1627,8 @@ export async function createRuntimeComposition(
     try {
       const value = await durableStorage.get(KEYS.scheduleRun(workflowId));
       if (!value) return { status: 'missing' };
-      const decoded = decode(value);
-      return typeof decoded === 'string' && decoded.trim().length > 0
-        ? { status: 'found', scheduleId: decoded }
-        : { status: 'missing' };
+      const scheduleId = decodeScheduleRunMarker(decode(value));
+      return scheduleId !== undefined ? { status: 'found', scheduleId } : { status: 'missing' };
     } catch (error) {
       return { status: 'read-error', error };
     }
@@ -1693,12 +1724,18 @@ export async function createRuntimeComposition(
   /**
    * Build fresh {@link DurableRunDeps} for a NATIVE WEFT SCHEDULE FIRE (#109).
    *
-   * Discriminated by `info.schedule !== undefined` on a live timer tick, or by a
-   * persisted `ScheduledAgentRunInput` that carries the schedule marker written by
-   * `createAgentSchedule()` during `recoverAll()` (Weft does not currently include
-   * `info.schedule` on recovered scheduled fires). It builds deps exactly as a
-   * fresh `createRun` would, seeding the conversation with the scheduled prompt
-   * and using `info.workflowId` (the per-fire id Weft minted) as the runId. The
+   * Reached whenever `resolveRunServices` classifies this run as scheduled — a
+   * live timer tick (`info.schedule` set), a recovered fire whose
+   * `resolveWorkflowServices` info now also carries `info.schedule` (Weft 0.10+
+   * derives it from durable schedule metadata on recovery, same as a live
+   * tick), or an older-store recovered fire identified only by the persisted
+   * `ScheduledAgentRunInput` / `KEYS.scheduleRun(...)` marker. `info.schedule`
+   * being set is therefore NOT a reliable live-vs-recovered signal — both cases
+   * populate it. Whether this is a *replay* of a fire that already persisted a
+   * partial session before crashing is instead read directly off the session:
+   * see `isRecoveredFireReplay` below. It builds deps exactly as a fresh
+   * `createRun` would, seeding the conversation with the scheduled prompt and
+   * using `info.workflowId` (the per-fire id Weft minted) as the runId. The
    * workflow body reads that same id back as `ctx.workflowId`.
    *
    * Session semantics (D6): `sessionId` present → continue that session's
@@ -1751,20 +1788,26 @@ export async function createRuntimeComposition(
       existingStatelessSessionId ??
       `sched-${recoveredScheduleId ?? 'unknown'}-${runId}`;
 
-    // A recurring fire continues its stored session; a fresh-per-fire (stateless)
-    // session never exists yet. A recurring schedule's FIRST fire into a new
-    // sessionId also has no stored session — that case must seed the systemPrompt
-    // too, exactly as createRunFromRequest does for any new session (a recurring
-    // session that already exists already carries the prompt from its first fire,
-    // so it is not re-seeded).
-    const existing =
-      recurring || info.schedule === undefined ? await store.load(sessionId) : undefined;
-    const replaceCurrentFireTranscript =
-      info.schedule === undefined && existing?.metadata['lastScheduledFireRunId'] === runId;
+    // Always check for an existing session at this id. A recurring fire
+    // continues its stored session; a fresh-per-fire (stateless) session's id
+    // embeds this exact runId, so a live (never-before-run) fire finds nothing
+    // here and this load is a harmless no-op. It only finds something for a
+    // recurring schedule's later fires, or a REPLAY of a fire that already
+    // persisted (partially or fully) before this resume — which is exactly the
+    // case `isRecoveredFireReplay` below needs to detect.
+    const existing = await store.load(sessionId);
+    // The session's own metadata — not `info.schedule` — is the source of
+    // truth for "have we already run this exact fire": `info.schedule` is
+    // populated on BOTH a live tick and a recovered one, so it cannot
+    // distinguish a fresh fire from a replay of one that crashed mid-flight.
+    // A match here means this runId already wrote to this session, so its
+    // transcript (and any committed active-skills snapshot) belongs to a
+    // stale, partial attempt that must be cleaned before replay re-appends.
+    const isRecoveredFireReplay = existing?.metadata['lastScheduledFireRunId'] === runId;
     let conversation: Conversation;
     if (existing) {
       conversation = new Conversation(
-        replaceCurrentFireTranscript
+        isRecoveredFireReplay
           ? removeLastScheduledFireTranscript(existing.conversationHistory, runId)
           : existing.conversationHistory,
       );
@@ -1783,7 +1826,7 @@ export async function createRuntimeComposition(
     const initialActiveSkills = await loadCommittedScheduledActiveSkills(
       existing,
       runId,
-      info.schedule === undefined,
+      isRecoveredFireReplay,
     );
 
     const runRuntime = await createRunRuntime(
@@ -1814,7 +1857,7 @@ export async function createRuntimeComposition(
             agentName,
             baseConversationHistory,
             runId,
-            replaceCurrentFireTranscript,
+            isRecoveredFireReplay,
             runRuntime.getActiveSkillEntries,
           ),
         ],
@@ -1865,10 +1908,14 @@ export async function createRuntimeComposition(
       return { status: 'unavailable', reason: 'no session store configured' };
     }
     // NATIVE SCHEDULED FIRE (#109/#126): Weft sets `info.schedule` for a live
-    // schedule tick, but recovered scheduled fires may only carry the persisted
-    // ScheduledAgentRunInput. Recovery must also see the persisted schedule marker
-    // written by createAgentSchedule(); the broad `{ agentName, input }` shape alone
-    // is not enough to bypass the interactive session-ownership guards below.
+    // schedule tick, and (Weft 0.10+) also derives it from durable schedule
+    // metadata when re-providing services on recovery — so `info.schedule` alone
+    // does not distinguish live from recovered. Some recovered fires (older
+    // stores, or a schedule whose metadata could not be resolved) may only carry
+    // the persisted ScheduledAgentRunInput, so recovery must also check the
+    // persisted schedule marker written by createAgentSchedule(); the broad
+    // `{ agentName, input }` shape alone is not enough to bypass the interactive
+    // session-ownership guards below.
     let recoveredScheduleMarker =
       info.schedule === undefined &&
       isScheduledAgentRunInput(info.input) &&

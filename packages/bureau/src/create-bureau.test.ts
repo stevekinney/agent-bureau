@@ -1140,6 +1140,96 @@ describe('createBureau', () => {
     }
   });
 
+  it('monitors markerless scheduled fires when Weft has a schedule-run marker OBJECT (Weft 0.10+ metadata)', async () => {
+    // REGRESSION (#235): Weft 0.10+ writes `KEYS.scheduleRun(...)` as a metadata
+    // object (`{ id, occurrence? }`), not the legacy plain string. Before the fix,
+    // `loadScheduleIdForRecoveredRun`'s `typeof decoded === 'string'` check treated
+    // any non-string marker as missing, so a recovered stateless scheduled fire
+    // whose only proof of ownership was this object marker was classified as an
+    // unowned foreign run and CANCELLED instead of monitored.
+    const databasePath = join(
+      tmpdir(),
+      `bureau-object-marker-scheduled-fire-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const runId = 'object-marker-scheduled-fire-run';
+    const scheduleId = 'object-marker-digest-schedule';
+    const sessionId = `sched-${scheduleId}-${runId}`;
+
+    try {
+      const firstRuntime = await createRuntimeComposition({
+        generate: async () => new Promise<never>(() => {}),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+      });
+
+      try {
+        expect(firstRuntime.durable).toBeDefined();
+        const toolbox = createEmptyToolbox();
+        const services: DurableRunDeps = {
+          toolbox,
+          options: {
+            generate: async () => new Promise<never>(() => {}),
+            toolbox: toolbox as never,
+            conversation: createConversationHistory(),
+            stopWhen: stopWhen.noToolCalls(),
+          },
+        };
+
+        const handle = await firstRuntime.durable!.engine.start(
+          'agentRun',
+          { agentName: 'researcher', input: 'object marker scheduled prompt' },
+          { id: runId, services },
+        );
+        void handle.result().catch(() => {});
+        // Weft 0.10+ native marker shape: an object, not a bare string.
+        await firstRuntime.durable!.engine.storage.put(
+          KEYS.scheduleRun(runId),
+          encode({ id: scheduleId, occurrence: Date.now() }),
+        );
+
+        const running = await pollUntil(async () => {
+          const state = await firstRuntime.durable!.engine.get(runId);
+          return state?.status === 'running';
+        });
+        expect(running).toBe(true);
+      } finally {
+        firstRuntime.durable?.engine[Symbol.dispose]?.();
+        firstRuntime.disposeStorage?.();
+      }
+
+      const bureau = await createBureau({
+        generate: async () => ({ content: 'object marker recovery completed', toolCalls: [] }),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+        stopWhen: stopWhen.noToolCalls(),
+      });
+
+      try {
+        const completed = await pollUntil(async () => {
+          const state = await bureau.getDurableRun(runId);
+          return state?.status === 'completed';
+        });
+        expect(completed).toBe(true);
+
+        const session = await bureau.getSession(sessionId);
+        expect(session).not.toBeNull();
+        expect(
+          getMessages(session!.conversationHistory).some(
+            (message) => message.content === 'object marker recovery completed',
+          ),
+        ).toBe(true);
+      } finally {
+        bureau.dispose();
+      }
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
   it('captures a recovered run that settles during boot in the durable audit trail (regression #114)', async () => {
     // REGRESSION (#114): the durable audit trail (Layer B) must be subscribed
     // BEFORE `recoverDurableRuns()` runs, not after. If recovery reattaches a run
