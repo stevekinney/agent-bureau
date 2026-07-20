@@ -192,15 +192,20 @@ describe('loadDataset', () => {
     // brick `turbo run` repo-wide until the leftover was removed by hand.
     const unreadableDirectory = await mkdtemp(join(tmpdir(), 'evaluation-unreadable-'));
     const unreadablePath = join(unreadableDirectory, 'unreadable.json');
-    await Bun.write(unreadablePath, JSON.stringify([{ name: 'case', input: 'test' }]));
-    await Bun.$`chmod 000 ${unreadablePath}`;
 
+    // The try starts immediately after mkdtemp so that a failure in the setup
+    // below (the write or the chmod) still cleans the directory up.
     try {
-      await loadDataset(unreadablePath);
-      expect.unreachable('Expected loadDataset to throw');
-    } catch (error: unknown) {
-      expect(error).toBeInstanceOf(Error);
-      expect((error as Error).message).toMatch(/failed to read dataset file/i);
+      await Bun.write(unreadablePath, JSON.stringify([{ name: 'case', input: 'test' }]));
+      await Bun.$`chmod 000 ${unreadablePath}`;
+
+      try {
+        await loadDataset(unreadablePath);
+        expect.unreachable('Expected loadDataset to throw');
+      } catch (error: unknown) {
+        expect(error).toBeInstanceOf(Error);
+        expect((error as Error).message).toMatch(/failed to read dataset file/i);
+      }
     } finally {
       // Restore readability before removing: rm cannot traverse a 000 entry.
       await Bun.$`chmod 644 ${unreadablePath}`.nothrow();

@@ -3992,7 +3992,7 @@ describe('createBureau flow control (AB-13)', () => {
     // while task A was still on its way in (#246).
     const taskARedispatched = new Promise<void>((resolve) => {
       const onDispatched = (event: Event) => {
-        if ((event as TaskDispatchedEvent).taskId !== taskA.taskId) return;
+        if (!(event instanceof TaskDispatchedEvent) || event.taskId !== taskA.taskId) return;
 
         bureau.scheduler!.removeEventListener(TaskDispatchedEvent.type, onDispatched);
         resolve();
