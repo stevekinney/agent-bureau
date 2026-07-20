@@ -487,7 +487,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
    * without seeding, `nextRunSeq` would restart a recovered run's sequence
    * at 1 — and a browser reconnecting with a pre-restart cursor like
    * `since: 25` would have every post-restart frame (runSeq 1, 2, 3, ...)
-   * filtered out by `getFramesSince`/`SubscriptionManager`, silently losing
+   * filtered out by `getFramesSince`/`LiveFrameBroker`, silently losing
    * them instead of replaying them.
    *
    * Seeding from the current wall-clock time (rather than 0) guarantees the

@@ -25,7 +25,9 @@ export class ProviderError extends Error {
     this.name = 'ProviderError';
     this.provider = options.provider;
     this.cause = options.cause;
-    this.statusCode = statusCode;
+    if (statusCode !== undefined) {
+      this.statusCode = statusCode;
+    }
     this.retryable = statusCode !== undefined && RETRYABLE_STATUS_CODES.has(statusCode);
   }
 }
@@ -36,6 +38,60 @@ export class ProviderError extends Error {
  */
 export function shouldRetryProviderError(error: unknown): boolean {
   return error instanceof ProviderError && error.retryable;
+}
+
+/**
+ * Thrown when a streaming provider successfully receives a response but the
+ * accumulated tool-call argument JSON cannot be parsed — i.e. the model
+ * streamed malformed output, not an API/HTTP failure. Extends `ProviderError`
+ * so existing `instanceof ProviderError` checks keep working, but carries
+ * enough detail (tool name/id, raw fragment) for callers that want to tell
+ * "the provider is down" apart from "the model emitted bad JSON".
+ */
+export class ToolCallParseError extends ProviderError {
+  readonly toolName: string;
+  readonly toolCallId: string | undefined;
+  readonly rawArguments: string;
+
+  constructor(options: {
+    provider: ProviderName;
+    toolName: string;
+    toolCallId: string | undefined;
+    rawArguments: string;
+    cause: unknown;
+  }) {
+    const idLabel = options.toolCallId ?? '(unknown id)';
+    super({
+      provider: options.provider,
+      cause: options.cause,
+      message: `[provider:${options.provider}] unparseable tool-call arguments for "${options.toolName}" (${idLabel}): ${extractMessage(options.cause)}`,
+    });
+    this.name = 'ToolCallParseError';
+    this.toolName = options.toolName;
+    this.toolCallId = options.toolCallId;
+    this.rawArguments = options.rawArguments;
+  }
+}
+
+/**
+ * Structural type guard for `ToolCallParseError`, for use alongside (not instead of)
+ * `instanceof`. Operative's build produces one bundle per public entrypoint (`operative`,
+ * `operative/openai`, `operative/providers`, ...) without shared chunks, so an error thrown
+ * from one entrypoint's bundle and an `instanceof` check imported from another entrypoint's
+ * bundle can reference distinct copies of this class — `instanceof` alone would miss it.
+ * Checks the same fields the constructor always sets.
+ */
+export function isToolCallParseError(error: unknown): error is ToolCallParseError {
+  if (error instanceof ToolCallParseError) return true;
+  if (typeof error !== 'object' || error === null) return false;
+
+  const candidate = error as Record<string, unknown>;
+  return (
+    candidate['name'] === 'ToolCallParseError' &&
+    typeof candidate['toolName'] === 'string' &&
+    typeof candidate['rawArguments'] === 'string' &&
+    typeof candidate['provider'] === 'string'
+  );
 }
 
 /**

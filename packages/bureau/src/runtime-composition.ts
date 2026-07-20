@@ -50,6 +50,7 @@ import {
   createPromptInjectionDetector,
   createScheduler,
   createSessionStore,
+  DEFAULT_MAXIMUM_STEPS,
   DEFAULT_PROMPT_INJECTION_TRIPWIRE_THRESHOLD,
   withCache,
   withEnhancedStreaming,
@@ -1003,7 +1004,7 @@ export async function createRuntimeComposition(
   options: BureauOptions,
   dependencies: RuntimeCompositionDependencies = defaultRuntimeCompositionDependencies,
 ): Promise<RuntimeComposition> {
-  const maximumSteps = options.maximumSteps ?? 10;
+  const maximumSteps = options.maximumSteps ?? DEFAULT_MAXIMUM_STEPS;
   const systemPrompt = options.systemPrompt;
 
   // Gate the resolver until the whole composition is assembled. In automatic

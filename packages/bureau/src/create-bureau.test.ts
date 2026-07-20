@@ -22,6 +22,7 @@ import type {
 } from 'operative';
 import {
   createSessionStore,
+  DEFAULT_MAXIMUM_STEPS,
   HumanWaitParkedEvent,
   RunAbortedEvent,
   StepCompletedEvent,
@@ -48,12 +49,7 @@ import {
 } from './create-bureau';
 import { createMemoryPersistHook, createRuntimeComposition } from './runtime-composition';
 import { waitForCondition, waitForRunState } from './test';
-import {
-  type Bureau,
-  type ConfigurationResponse,
-  DEFAULT_MAXIMUM_STEPS,
-  type ServerFrame,
-} from './types';
+import { type Bureau, type ConfigurationResponse, type ServerFrame } from './types';
 
 let recoveryDatabaseCounter = 0;
 
@@ -2128,6 +2124,31 @@ describe('createBureau', () => {
     expect(configuration.providers[0]?.provider).not.toHaveProperty('apiKey');
     expect(configurationProviderHasNoApiKey).toBeFalse();
     expect(routedConfigurationProviderHasNoApiKey).toBeFalse();
+  });
+
+  it("stops a run with no explicit maximumSteps at operative's DEFAULT_MAXIMUM_STEPS (regression #251: bureau must not silently diverge from operative's step cap)", async () => {
+    // REGRESSION: bureau exported its own DEFAULT_MAXIMUM_STEPS = 10 (dead code)
+    // and runtime-composition hardcoded `?? 10`, while operative's loop actually
+    // used DEFAULT_MAXIMUM_STEPS = 25. A bureau-created run silently capped at 10
+    // steps instead of the 25 the same agent would get through operative directly.
+    // This test drives a REAL run — not just getConfiguration() — past the
+    // boundary so any future re-divergence between the two entry points fails here.
+    const bureau = await createBureau({
+      generate: async () => ({
+        content: 'calling',
+        toolCalls: [{ name: 'next', arguments: {} }],
+      }),
+      toolbox: createToolbox([createNextTool()]) as unknown as Toolbox,
+      // No maximumSteps and no stopWhen — the run stops solely on the bureau's
+      // default step cap, exercising the exact seam that diverged.
+    });
+
+    const run = await bureau.createRun({ message: 'Never settles' });
+    await waitForRunCompletion(bureau, run.id);
+
+    const detail = bureau.getRun(run.id);
+    expect(detail?.finishReason).toBe('maximum-steps');
+    expect(detail?.steps).toBe(DEFAULT_MAXIMUM_STEPS);
   });
 
   it('configures a scheduler for routed multi-provider runtimes', async () => {
