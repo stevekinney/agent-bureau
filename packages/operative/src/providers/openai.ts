@@ -2,7 +2,7 @@ import { parseOpenAIToolCalls } from 'armorer/adapters/openai';
 import { toOpenAIMessagesGrouped } from 'conversationalist/adapters/openai';
 import type { ToolCallInput } from 'interoperability';
 
-import { ProviderError } from './errors.ts';
+import { ProviderError, ToolCallParseError } from './errors.ts';
 import { resolveOpenAIEffort } from './shared/effort.ts';
 import { resolveOpenAIModel } from './shared/model-registry.ts';
 import { resolveCommonParameters } from './shared/resolve-common-parameters.ts';
@@ -255,9 +255,20 @@ export function createOpenAIProviderStream(
       // Build completed tool calls
       const toolCalls: ToolCallInput[] = [];
       for (const pending of pendingToolCalls.values()) {
-        const parsedArguments = pending.arguments
-          ? (JSON.parse(pending.arguments) as unknown)
-          : undefined;
+        let parsedArguments: unknown;
+        if (pending.arguments) {
+          try {
+            parsedArguments = JSON.parse(pending.arguments) as unknown;
+          } catch (parseError) {
+            throw new ToolCallParseError({
+              provider: 'openai',
+              toolName: pending.name,
+              toolCallId: pending.id ?? '',
+              rawArguments: pending.arguments,
+              cause: parseError,
+            });
+          }
+        }
         toolCalls.push({
           id: pending.id,
           name: pending.name,
@@ -275,6 +286,7 @@ export function createOpenAIProviderStream(
         },
       };
     } catch (error) {
+      if (error instanceof ProviderError) throw error;
       throw new ProviderError({ provider: 'openai', cause: error });
     }
   };

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 
 import { classifyError } from '../src/errors';
+import { ToolCallParseError } from '../src/providers/errors';
 
 describe('classifyError', () => {
   it('ProviderError-like with retryable=true, statusCode=429 → rate-limit', () => {
@@ -140,5 +141,22 @@ describe('classifyError', () => {
     const classified = classifyError(error);
     expect(classified.statusCode).toBe(500);
     expect(classified.category).toBe('server');
+  });
+
+  it('ToolCallParseError → model-output, retryable=false, distinct from a generic ProviderError', () => {
+    const error = new ToolCallParseError({
+      provider: 'anthropic',
+      toolName: 'roll_dice',
+      toolCallId: 'toolu_x',
+      rawArguments: '{"sides": 2',
+      cause: new SyntaxError('Unexpected end of JSON input'),
+    });
+
+    const classified = classifyError(error);
+    expect(classified.category).toBe('model-output');
+    expect(classified.retryable).toBe(false);
+    expect(classified.statusCode).toBeUndefined();
+    expect(classified.provider).toBe('anthropic');
+    expect(classified.original).toBe(error);
   });
 });

@@ -25,7 +25,9 @@ export class ProviderError extends Error {
     this.name = 'ProviderError';
     this.provider = options.provider;
     this.cause = options.cause;
-    this.statusCode = statusCode;
+    if (statusCode !== undefined) {
+      this.statusCode = statusCode;
+    }
     this.retryable = statusCode !== undefined && RETRYABLE_STATUS_CODES.has(statusCode);
   }
 }
@@ -36,6 +38,38 @@ export class ProviderError extends Error {
  */
 export function shouldRetryProviderError(error: unknown): boolean {
   return error instanceof ProviderError && error.retryable;
+}
+
+/**
+ * Thrown when a streaming provider successfully receives a response but the
+ * accumulated tool-call argument JSON cannot be parsed — i.e. the model
+ * streamed malformed output, not an API/HTTP failure. Extends `ProviderError`
+ * so existing `instanceof ProviderError` checks keep working, but carries
+ * enough detail (tool name/id, raw fragment) for callers that want to tell
+ * "the provider is down" apart from "the model emitted bad JSON".
+ */
+export class ToolCallParseError extends ProviderError {
+  readonly toolName: string;
+  readonly toolCallId: string;
+  readonly rawArguments: string;
+
+  constructor(options: {
+    provider: ProviderName;
+    toolName: string;
+    toolCallId: string;
+    rawArguments: string;
+    cause: unknown;
+  }) {
+    super({
+      provider: options.provider,
+      cause: options.cause,
+      message: `[provider:${options.provider}] unparseable tool-call arguments for "${options.toolName}" (${options.toolCallId}): ${extractMessage(options.cause)}`,
+    });
+    this.name = 'ToolCallParseError';
+    this.toolName = options.toolName;
+    this.toolCallId = options.toolCallId;
+    this.rawArguments = options.rawArguments;
+  }
 }
 
 /**

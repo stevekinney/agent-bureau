@@ -7,7 +7,7 @@ import type { ToolCallInput } from 'interoperability';
 
 import type { TokenBudget } from '../context/token-budget.ts';
 import type { ContextAssembler } from '../context/types.ts';
-import { ProviderError } from './errors.ts';
+import { ProviderError, ToolCallParseError } from './errors.ts';
 import { resolveAnthropicEffort } from './shared/effort.ts';
 import { resolveAnthropicModel } from './shared/model-registry.ts';
 import { resolveCommonParameters } from './shared/resolve-common-parameters.ts';
@@ -353,9 +353,20 @@ export function createAnthropicProviderStream(
       // Build completed tool calls
       const toolCalls: ToolCallInput[] = [];
       for (const pending of pendingToolCalls.values()) {
-        const parsedArguments = pending.partialJson
-          ? (JSON.parse(pending.partialJson) as unknown)
-          : undefined;
+        let parsedArguments: unknown;
+        if (pending.partialJson) {
+          try {
+            parsedArguments = JSON.parse(pending.partialJson) as unknown;
+          } catch (parseError) {
+            throw new ToolCallParseError({
+              provider: 'anthropic',
+              toolName: pending.name,
+              toolCallId: pending.id ?? '',
+              rawArguments: pending.partialJson,
+              cause: parseError,
+            });
+          }
+        }
         toolCalls.push({
           id: pending.id,
           name: pending.name,
@@ -385,6 +396,7 @@ export function createAnthropicProviderStream(
         },
       };
     } catch (error) {
+      if (error instanceof ProviderError) throw error;
       throw new ProviderError({ provider: 'anthropic', cause: error });
     }
   };

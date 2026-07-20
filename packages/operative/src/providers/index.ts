@@ -24,7 +24,7 @@ export {
   createOpenAIEmbedder,
   createVoyageEmbedder,
 } from './embeddings/index.ts';
-export { ProviderError, shouldRetryProviderError } from './errors.ts';
+export { ProviderError, shouldRetryProviderError, ToolCallParseError } from './errors.ts';
 export type {
   ErrorClassification,
   FalloverEvent,

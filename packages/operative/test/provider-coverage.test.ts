@@ -11,6 +11,7 @@ import {
   extractStatusCode,
   ProviderError,
   shouldRetryProviderError,
+  ToolCallParseError,
 } from '../src/providers/errors.ts';
 import { createGeminiProvider, createGeminiProviderStream } from '../src/providers/gemini.ts';
 import { createOpenAIProvider, createOpenAIProviderStream } from '../src/providers/openai.ts';
@@ -61,6 +62,7 @@ import {
   createMockOpenAIClient,
   createMockOpenAIStreamingClient,
 } from '../src/providers/test/mock-clients.ts';
+import type { AnthropicStreamEvent } from '../src/providers/types.ts';
 import type { GenerateContext, StreamingHandle } from '../src/types.ts';
 
 const weatherTool = createTool({
@@ -402,6 +404,47 @@ describe('OpenAI provider coverage', () => {
       failingGenerate({ ...makeContext(), streaming: makeStreamingHandle() }),
     ).rejects.toMatchObject({ provider: 'openai' });
   });
+
+  it('surfaces malformed streamed tool-call JSON as a distinct ToolCallParseError, not a generic ProviderError', async () => {
+    const malformedToolCallChunks = [
+      {
+        choices: [
+          {
+            delta: {
+              tool_calls: [
+                {
+                  index: 0,
+                  id: 'call_bad_01',
+                  type: 'function',
+                  function: { name: 'roll_dice', arguments: '{"sides": 2' },
+                },
+              ],
+            },
+            finish_reason: null,
+          },
+        ],
+        usage: null,
+      },
+    ];
+    const client = createMockOpenAIStreamingClient([malformedToolCallChunks]);
+    const generate = createOpenAIProviderStream({ model: 'gpt-4o', client });
+
+    let caught: unknown;
+    try {
+      await generate({ ...makeContext(), streaming: makeStreamingHandle() });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(ToolCallParseError);
+    expect(caught).toBeInstanceOf(ProviderError);
+    const parseError = caught as ToolCallParseError;
+    expect(parseError.provider).toBe('openai');
+    expect(parseError.toolName).toBe('roll_dice');
+    expect(parseError.toolCallId).toBe('call_bad_01');
+    expect(parseError.rawArguments).toBe('{"sides": 2');
+    expect(parseError.retryable).toBe(false);
+  });
 });
 
 describe('Anthropic provider coverage', () => {
@@ -556,6 +599,44 @@ describe('Anthropic provider coverage', () => {
     await expect(
       failingGenerate({ ...makeContext(), streaming: makeStreamingHandle() }),
     ).rejects.toMatchObject({ provider: 'anthropic' });
+  });
+
+  it('surfaces malformed streamed tool-call JSON as a distinct ToolCallParseError, not a generic ProviderError', async () => {
+    const malformedToolUseEvents: AnthropicStreamEvent[] = [
+      {
+        type: 'content_block_start',
+        index: 0,
+        content_block: { type: 'tool_use', id: 'toolu_bad_01', name: 'roll_dice' },
+      },
+      {
+        type: 'content_block_delta',
+        index: 0,
+        delta: { type: 'input_json_delta', partial_json: '{"sides": 2' },
+      },
+      { type: 'content_block_stop', index: 0 },
+      { type: 'message_stop' },
+    ];
+    const client = createMockAnthropicStreamingClient([malformedToolUseEvents]);
+    const generate = createAnthropicProviderStream({
+      model: 'claude-3-5-sonnet-20241022',
+      client,
+    });
+
+    let caught: unknown;
+    try {
+      await generate({ ...makeContext(), streaming: makeStreamingHandle() });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(ToolCallParseError);
+    expect(caught).toBeInstanceOf(ProviderError);
+    const parseError = caught as ToolCallParseError;
+    expect(parseError.provider).toBe('anthropic');
+    expect(parseError.toolName).toBe('roll_dice');
+    expect(parseError.toolCallId).toBe('toolu_bad_01');
+    expect(parseError.rawArguments).toBe('{"sides": 2');
+    expect(parseError.retryable).toBe(false);
   });
 });
 

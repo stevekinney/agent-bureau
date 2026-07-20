@@ -550,6 +550,40 @@ object on the wire and can route/log on it, then either forward only
 forwarding. Don't pass arbitrary `requestMetadata` keys straight through to
 `api.anthropic.com` — only to a proxy that knows what to do with them.
 
+#### Provider Errors
+
+Every shipped provider throws `ProviderError` (`operative/providers`) for
+HTTP/SDK failures — it carries `provider`, `cause`, an optional
+`statusCode`, and `retryable` (true only for status codes in `{429, 500,
+502, 503, 504}`).
+
+`createAnthropicProviderStream` and `createOpenAIProviderStream` throw the
+more specific `ToolCallParseError` — a `ProviderError` subclass — when the
+model finishes a turn but the accumulated tool-call argument JSON it
+streamed doesn't parse. This is a malformed-output problem, not an API
+failure: the request succeeded, the model just emitted bad JSON. It carries
+`toolName`, `toolCallId`, and `rawArguments` (the unparsed fragment)
+alongside the inherited `ProviderError` fields, and `retryable` is always
+`false` since it never has a `statusCode`.
+
+```typescript
+import { ToolCallParseError } from 'operative/providers';
+
+try {
+  await generate(context);
+} catch (error) {
+  if (error instanceof ToolCallParseError) {
+    // The model streamed unparseable arguments for error.toolName —
+    // distinct from a provider outage.
+  }
+}
+```
+
+`classifyError` (from `operative`) recognizes `ToolCallParseError` and
+reports it under the `'model-output'` category, so error-classification and
+routing code can tell "the provider is down" apart from "the model emitted
+bad JSON" without an `instanceof` check.
+
 #### Backpressure
 
 ```typescript
