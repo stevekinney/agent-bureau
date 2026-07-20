@@ -1,4 +1,4 @@
-import { ToolCallParseError } from './providers/errors.ts';
+import { isToolCallParseError } from './providers/errors.ts';
 
 export class ElicitationDeniedError extends Error {
   constructor(message?: string) {
@@ -111,7 +111,7 @@ export function classifyError(error: unknown): ClassifiedError {
 
   if (error === null || error === undefined) return base;
 
-  if (error instanceof ToolCallParseError) {
+  if (isToolCallParseError(error)) {
     base.category = 'model-output';
     base.retryable = false;
     base.provider = error.provider;

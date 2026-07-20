@@ -580,10 +580,34 @@ try {
 }
 ```
 
+If the caller aborts `context.signal` mid-stream while a tool call's
+arguments are still accumulating, the truncated fragment is never parsed
+and never thrown as a `ToolCallParseError` — that's cancellation, not
+malformed model output, so the tool call is simply omitted from the
+response's `toolCalls`.
+
 `classifyError` (from `operative`) recognizes `ToolCallParseError` and
 reports it under the `'model-output'` category, so error-classification and
 routing code can tell "the provider is down" apart from "the model emitted
 bad JSON" without an `instanceof` check.
+
+**Cross-entrypoint `instanceof`.** Operative bundles each public entrypoint
+(`operative`, `operative/openai`, `operative/providers`, ...) separately
+with no shared chunks, so a `ToolCallParseError` thrown from one
+entrypoint's bundle is not `instanceof` the `ToolCallParseError` re-exported
+from a different entrypoint. `classifyError` accounts for this internally.
+If you need to check the error type yourself across entrypoints, use
+`isToolCallParseError` (`operative/providers`) instead of a bare
+`instanceof`:
+
+```typescript
+import { isToolCallParseError } from 'operative/providers';
+
+if (isToolCallParseError(error)) {
+  // Matches structurally even if `error` came from a different
+  // operative entrypoint's bundle than this check.
+}
+```
 
 #### Backpressure
 

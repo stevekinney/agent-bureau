@@ -350,28 +350,32 @@ export function createAnthropicProviderStream(
         }
       }
 
-      // Build completed tool calls
+      // Build completed tool calls. Skipped entirely when the caller aborted mid-stream:
+      // any accumulated partialJson is caller-truncated, not model-malformed, so it must
+      // never be parsed and misreported as a ToolCallParseError.
       const toolCalls: ToolCallInput[] = [];
-      for (const pending of pendingToolCalls.values()) {
-        let parsedArguments: unknown;
-        if (pending.partialJson) {
-          try {
-            parsedArguments = JSON.parse(pending.partialJson) as unknown;
-          } catch (parseError) {
-            throw new ToolCallParseError({
-              provider: 'anthropic',
-              toolName: pending.name,
-              toolCallId: pending.id,
-              rawArguments: pending.partialJson,
-              cause: parseError,
-            });
+      if (!context.signal?.aborted) {
+        for (const pending of pendingToolCalls.values()) {
+          let parsedArguments: unknown;
+          if (pending.partialJson) {
+            try {
+              parsedArguments = JSON.parse(pending.partialJson) as unknown;
+            } catch (parseError) {
+              throw new ToolCallParseError({
+                provider: 'anthropic',
+                toolName: pending.name,
+                toolCallId: pending.id,
+                rawArguments: pending.partialJson,
+                cause: parseError,
+              });
+            }
           }
+          toolCalls.push({
+            id: pending.id,
+            name: pending.name,
+            arguments: parsedArguments,
+          });
         }
-        toolCalls.push({
-          id: pending.id,
-          name: pending.name,
-          arguments: parsedArguments,
-        });
       }
 
       // Build usage
