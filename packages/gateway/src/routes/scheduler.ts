@@ -179,6 +179,11 @@ export function createSchedulerRoutes(
       // gate) throws synchronously, which surfaces here as a caught error
       // the same as an async rejection would.
       if (error instanceof BureauError) {
+        // NOT_CONFIGURED is unreachable here: `scheduler`/`submitSchedulerTask`
+        // are a fixed snapshot of `runtime.scheduler` taken once at bureau
+        // creation and never reassigned, so having passed the `!scheduler` guard
+        // above means `submitSchedulerTask`'s own `!runtime.scheduler` check can
+        // never fire. Kept as defense-in-depth rather than removed as dead code.
         if (error.code === 'NOT_CONFIGURED') {
           throw new HTTPException(503, { message: error.message });
         }

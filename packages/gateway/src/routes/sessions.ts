@@ -4,6 +4,16 @@ import { HTTPException } from 'hono/http-exception';
 
 import type { Bureau } from '../types';
 
+/**
+ * `list`/`get`/`delete` below reach NOT_CONFIGURED only via `requireSessionStore()`
+ * (subject: 'persistence' — 503, an operator-fixable misconfiguration, see #254).
+ * `signal`/`update`/`query` reach it only via the `!runtime.durable` guard
+ * (subject: 'durable' — 501, this deployment does not compose the capability at
+ * all). A durable engine cannot exist without a session store
+ * (runtime-composition.ts: `durable` ⟹ `durableStorage` ⟹ `kv` ⟹ `sessionStore`),
+ * so `requireSessionStore()` can never throw once the durable guard has passed —
+ * do not add a 503 branch to signal/update/query for that reason (see PR #259).
+ */
 export function createSessionsRoutes(bureau: Bureau) {
   const app = new Hono();
 

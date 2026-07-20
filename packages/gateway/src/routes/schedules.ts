@@ -33,7 +33,10 @@ const CreateScheduleSchema = z.object({
  * Creates the durable schedule management routes.
  *
  * All routes require a durable engine (`bureau.persistence` configured with a
- * `StorageConfiguration`). Routes return 501 when no engine is composed.
+ * `StorageConfiguration`). Routes return 501 when no engine is composed — this
+ * deployment does not have the capability at all. `POST /` additionally returns
+ * 503 when a durable engine exists but no generate function is configured: that
+ * capability is composed, just not usable yet, and the operator can fix it.
  *
  * - `POST   /schedules`        — register a new recurring schedule
  * - `GET    /schedules`        — list all schedules
@@ -67,11 +70,14 @@ export function createSchedulesRoutes(bureau: Bureau) {
       summary = await bureau.createSchedule(parsed.data);
     } catch (error) {
       if (error instanceof BureauError) {
-        // A durable bureau with no generate configured rejects NOT_CONFIGURED
-        // rather than register a schedule whose every fire would fail. Surface it
-        // the same way the no-durable-engine case below does (501 NOT_CONFIGURED).
-        if (error.code === 'NOT_CONFIGURED') {
-          return context.json({ error: { code: 'NOT_CONFIGURED', message: error.message } }, 501);
+        // `createSchedule` only throws NOT_CONFIGURED for a durable bureau with no
+        // generate function composed (subject: 'generate') — it returns `undefined`
+        // rather than throwing when the durable engine itself is missing (handled
+        // below). A missing generate function is an operator-fixable misconfiguration
+        // (the capability is composed, just not usable yet), not a capability the
+        // deployment lacks entirely — so this is 503, not 501.
+        if (error.code === 'NOT_CONFIGURED' && error.subject === 'generate') {
+          return context.json({ error: { code: 'NOT_CONFIGURED', message: error.message } }, 503);
         }
         // Incoherent definitions (blank recurring sessionId, overlap 'allow' with a
         // recurring sessionId) reject BAD_REQUEST → 400, matching the runs route.

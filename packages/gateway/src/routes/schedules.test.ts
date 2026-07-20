@@ -196,9 +196,12 @@ describe('schedules routes with durable engine (regression PRRT_kwDORvupsc6MXEmg
     gateway.bureau.dispose();
   });
 
-  it('POST /schedules returns 501 NOT_CONFIGURED on a durable bureau with no generate', async () => {
-    // createSchedule rejects NOT_CONFIGURED rather than registering a schedule
-    // whose every fire would fail; the route surfaces it as 501.
+  it('POST /schedules returns 503 NOT_CONFIGURED on a durable bureau with no generate (#264)', async () => {
+    // createSchedule rejects NOT_CONFIGURED (subject: 'generate') rather than
+    // registering a schedule whose every fire would fail. Unlike the no-durable-
+    // engine case, the durable engine here IS composed — the missing generate
+    // function is an operator-fixable misconfiguration, not a capability this
+    // deployment lacks entirely, so the route surfaces it as 503, not 501.
     const gateway = await createTestGateway({
       authToken: AUTH_TOKEN,
       storage: { type: 'memory' },
@@ -211,7 +214,7 @@ describe('schedules routes with durable engine (regression PRRT_kwDORvupsc6MXEmg
       body: JSON.stringify({ agentName: 'researcher', input: 'x', spec: '0 9 * * *' }),
     });
 
-    expect(response.status).toBe(501);
+    expect(response.status).toBe(503);
     const body = await response.json();
     expect(body.error.code).toBe('NOT_CONFIGURED');
     gateway.bureau.dispose();
