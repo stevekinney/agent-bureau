@@ -917,10 +917,6 @@ export type ServerFrame =
   | (StreamFrame & { runSeq: number })
   | RunEnvelopeFrame;
 
-// ── Constants ───────────────────────────────────────────────────────
-
-export const DEFAULT_MAXIMUM_STEPS = 10;
-
 // ── Durable Schedule ────────────────────────────────────────────────
 
 /**

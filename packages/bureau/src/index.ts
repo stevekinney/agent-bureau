@@ -85,7 +85,6 @@ export type {
   ToolPolicy,
   ToolSummary,
 } from './types';
-export { DEFAULT_MAXIMUM_STEPS } from './types';
 export type {
   WebhookDeliveryRecord,
   WebhookNotifier,
@@ -95,3 +94,4 @@ export type {
 } from './webhook-notifier';
 export { createWebhookNotifier } from './webhook-notifier';
 export { streamEventToFrame } from './websocket-frames';
+export { DEFAULT_MAXIMUM_STEPS } from 'operative';

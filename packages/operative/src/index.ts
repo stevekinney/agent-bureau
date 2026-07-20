@@ -399,6 +399,7 @@ export {
   summarizeToolInput,
   toolStatusSchema,
 } from './run-envelope';
+export { DEFAULT_MAXIMUM_STEPS } from './run-step';
 export type {
   CreateChunkedTaskOptions,
   CreateDurableHeartbeatOptions,
