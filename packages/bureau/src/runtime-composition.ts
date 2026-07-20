@@ -258,14 +258,18 @@ function isScheduleRunMarkerObject(value: unknown): value is { id: string; occur
  * Decode a `KEYS.scheduleRun(...)` storage value (already `decode()`d from
  * bytes) into its schedule id, accepting both the legacy plain-string marker
  * and Weft 0.10+'s `{ id, occurrence? }` metadata object. Returns `undefined`
- * when the value is neither shape, or the id is blank.
+ * when the value is neither shape, or the id is blank. The returned id is
+ * always trimmed, so accidental whitespace never propagates into downstream
+ * equality checks or embedded session ids.
  */
 export function decodeScheduleRunMarker(decoded: unknown): string | undefined {
   if (typeof decoded === 'string') {
-    return decoded.trim().length > 0 ? decoded : undefined;
+    const trimmed = decoded.trim();
+    return trimmed.length > 0 ? trimmed : undefined;
   }
   if (isScheduleRunMarkerObject(decoded)) {
-    return decoded.id.trim().length > 0 ? decoded.id : undefined;
+    const trimmed = decoded.id.trim();
+    return trimmed.length > 0 ? trimmed : undefined;
   }
   return undefined;
 }

@@ -19,7 +19,7 @@ import {
 } from 'operative/durable';
 import type { SkillProvider } from 'skills';
 
-import { createRuntimeComposition } from './runtime-composition';
+import { createRuntimeComposition, decodeScheduleRunMarker } from './runtime-composition';
 import type { GenerateProviderName, ProviderConfiguration } from './types';
 
 // Drain Weft's deferred inline-launch queue between tests — a pending setTimeout(0)
@@ -223,6 +223,55 @@ describe('createRuntimeComposition', () => {
     for (const name of embeddingOnlyNames) {
       expect(validProviders.includes(name as GenerateProviderName)).toBe(false);
     }
+  });
+});
+
+describe('decodeScheduleRunMarker', () => {
+  it('decodes a legacy plain-string marker', () => {
+    expect(decodeScheduleRunMarker('nightly-digest')).toBe('nightly-digest');
+  });
+
+  it('trims whitespace from a legacy plain-string marker', () => {
+    expect(decodeScheduleRunMarker('  nightly-digest  ')).toBe('nightly-digest');
+  });
+
+  it('rejects a blank (whitespace-only) plain-string marker', () => {
+    expect(decodeScheduleRunMarker('   ')).toBeUndefined();
+  });
+
+  it('decodes a Weft 0.10+ marker object', () => {
+    expect(decodeScheduleRunMarker({ id: 'nightly-digest', occurrence: 123 })).toBe(
+      'nightly-digest',
+    );
+  });
+
+  it('decodes a Weft 0.10+ marker object with no occurrence', () => {
+    expect(decodeScheduleRunMarker({ id: 'nightly-digest' })).toBe('nightly-digest');
+  });
+
+  it('trims whitespace from a Weft 0.10+ marker object id', () => {
+    expect(decodeScheduleRunMarker({ id: '  nightly-digest  ', occurrence: 123 })).toBe(
+      'nightly-digest',
+    );
+  });
+
+  it('rejects a marker object with a blank (whitespace-only) id', () => {
+    expect(decodeScheduleRunMarker({ id: '   ', occurrence: 123 })).toBeUndefined();
+  });
+
+  it('rejects a marker object with a non-string id', () => {
+    expect(decodeScheduleRunMarker({ id: 42 })).toBeUndefined();
+  });
+
+  it('rejects a marker object with a non-number occurrence', () => {
+    expect(decodeScheduleRunMarker({ id: 'nightly-digest', occurrence: 'soon' })).toBeUndefined();
+  });
+
+  it('rejects null, undefined, and unrelated shapes', () => {
+    expect(decodeScheduleRunMarker(null)).toBeUndefined();
+    expect(decodeScheduleRunMarker(undefined)).toBeUndefined();
+    expect(decodeScheduleRunMarker(42)).toBeUndefined();
+    expect(decodeScheduleRunMarker([])).toBeUndefined();
   });
 });
 
