@@ -72,7 +72,7 @@ import {
   createRunFrameForwarder,
 } from './run-envelope';
 import type { BureauToolbox } from './runtime-composition';
-import { createRuntimeComposition } from './runtime-composition';
+import { createRuntimeComposition, decodeScheduleRunMarker } from './runtime-composition';
 import {
   findRunAgentName,
   type RunAttribution,
@@ -384,10 +384,8 @@ async function loadScheduleIdForRecoveredRun(
   try {
     const value = await engine.storage.get(KEYS.scheduleRun(workflowId));
     if (!value) return { status: 'missing' };
-    const decoded = decode(value);
-    return typeof decoded === 'string' && decoded.trim().length > 0
-      ? { status: 'found', scheduleId: decoded }
-      : { status: 'missing' };
+    const scheduleId = decodeScheduleRunMarker(decode(value));
+    return scheduleId !== undefined ? { status: 'found', scheduleId } : { status: 'missing' };
   } catch (error) {
     return { status: 'read-error', error };
   }
