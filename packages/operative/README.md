@@ -152,7 +152,7 @@ A host with a browser- or client-owned conversation and an approval-gated toolbo
 
 ```typescript
 import { createToolbox } from 'armorer';
-import { createAgent, stopWhen } from 'operative';
+import { createAgent, resolvePendingApprovalResult, stopWhen } from 'operative';
 
 // Built once per process — the stable approvalSecret is what makes
 // resumeApproval() work across separate HTTP requests.
@@ -172,13 +172,17 @@ const pending = result.steps.at(-1)?.results.find((r) => r.pendingApproval)?.pen
 
 // Later, on approval: resume on the SAME toolbox instance...
 const resumedResult = await toolbox.resumeApproval(signedApproval);
-// ...append the resolved result to the stored history...
-result.conversation.appendToolResults([resumedResult]);
+// ...resolve the pending result IN PLACE on the stored conversation — this
+// replaces the action_required result the loop already appended, it does
+// NOT append a second result for the same call...
+resolvePendingApprovalResult(result.conversation, resumedResult);
 // ...and start a fresh run from the updated history. Fully stateless server-side.
 const nextRun = agent.run({ conversation: result.conversation.current });
 ```
 
-**Mutation ownership:** `agent.run({ conversation })` SNAPSHOTS the supplied `ConversationHistory` — it wraps the value in a fresh internal `Conversation` and never mutates the object you passed in, matching the durable path's existing snapshot semantics. `instructions` is not re-appended on this path; the supplied history is assumed to already carry whatever system context it needs, so resuming it repeatedly never duplicates system messages.
+The loop appends whatever tool result a call produces — including a pending approval's `action_required` result — before `stopWhen.pendingApproval()` ever runs, so the conversation already contains that pending result by the time you hold the `RunResult`. Appending the resumed result on top of it would leave two tool-results for the same call, which most providers reject on the next turn. `resolvePendingApprovalResult` undoes that pending-result commit and appends the resolved result in its place — but only when it's still the conversation's most recent message, so it's a safe no-op (returns `false`, changes nothing) if you don't call it immediately after resuming.
+
+**Mutation ownership:** `agent.run({ conversation })` SNAPSHOTS the supplied `ConversationHistory` — it clones the value before wrapping it in a fresh internal `Conversation`, so the run's state and the object you passed in are independent from the moment `run()` is called: the run never mutates your object, and mutations you make to it afterward (a stateless host commonly keeps a mutable reference between turns) never leak into an in-flight run. This matches the durable path's existing snapshot semantics. `instructions` is not re-appended on this path; the supplied history is assumed to already carry whatever system context it needs, so resuming it repeatedly never duplicates system messages.
 
 #### `createActiveRun(options)`
 

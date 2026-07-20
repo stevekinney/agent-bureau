@@ -13,6 +13,7 @@ import type {
   RetryOptions,
   RunOptions,
   StopCondition,
+  ToolExecutionResult,
 } from './types';
 
 // ---------------------------------------------------------------------------
@@ -149,12 +150,17 @@ export interface StandaloneAgent {
    *   message.
    * - `run({ conversation })` starts the loop from an existing
    *   `ConversationHistory` — the shape a stateless HTTP chat host holds
-   *   between requests. The history is SNAPSHOTTED: this run wraps it in a
-   *   fresh internal `Conversation` and never mutates the `ConversationHistory`
-   *   object the caller passed in (matching the durable path's snapshot
-   *   semantics). `instructions` is NOT re-appended in this form — the
-   *   supplied history is assumed to already carry whatever system context
-   *   it needs, so resuming it repeatedly never duplicates system messages.
+   *   between requests. The history is SNAPSHOTTED: this run CLONES it
+   *   before wrapping it in a fresh internal `Conversation`, so the run's
+   *   state and the caller's `ConversationHistory` object are independent
+   *   from the moment `run()` is called — the run never mutates the
+   *   caller's object, and later mutations by the caller (a stateless host
+   *   commonly holds a mutable reference it keeps touching between turns)
+   *   never affect an in-flight run. This matches the durable path's
+   *   existing snapshot semantics. `instructions` is NOT re-appended in
+   *   this form — the supplied history is assumed to already carry
+   *   whatever system context it needs, so resuming it repeatedly never
+   *   duplicates system messages.
    *
    * Returns an `AgentRun` handle — NOT a Promise (non-thenable by design).
    * Access the result via `handle.result()`.
@@ -165,6 +171,54 @@ export interface StandaloneAgent {
 // Re-export AgentRun from agent-run.ts so callers who import from create-agent
 // still get the canonical type.
 export type { AgentRun };
+
+// ---------------------------------------------------------------------------
+// resolvePendingApprovalResult — the park-on-approval resume helper
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolves a pending approval in a `Conversation` in place, for the
+ * `stopWhen.pendingApproval()` resume recipe (see `createAgent`'s stateless
+ * chat host example above).
+ *
+ * The agent loop unconditionally appends whatever `ToolExecutionResult` a
+ * tool call produced — including a pending approval's `action_required`
+ * result — to the conversation *before* evaluating stop conditions.
+ * `stopWhen.pendingApproval()` then stops the loop right there, so by the
+ * time a host holds the `RunResult`, the conversation already contains that
+ * pending result as a real message. Simply appending `toolbox.resumeApproval()`'s
+ * resolved result on top would leave TWO tool-result messages for the same
+ * call — most providers reject that (or behave unpredictably) on the next
+ * turn.
+ *
+ * This function undoes that pending-result commit and appends the resolved
+ * result in its place, so the conversation ends up with exactly one
+ * tool-result message for the call. It only undoes when the pending result
+ * is still the conversation's most recent message — a safety check, not an
+ * assumption: if anything else was appended after it (e.g. the host didn't
+ * call this immediately after resuming), undoing would remove the wrong
+ * commit, so this returns `false` and changes nothing instead.
+ *
+ * @returns `true` if the pending result was replaced; `false` if the
+ * conversation's last message wasn't the matching pending result (nothing
+ * was changed — inspect `conversation.current` before appending manually).
+ */
+export function resolvePendingApprovalResult(
+  conversation: Conversation,
+  resolvedResult: ToolExecutionResult,
+): boolean {
+  const history = conversation.current;
+  const lastId = history.ids.at(-1);
+  const lastMessage = lastId ? history.messages[lastId] : undefined;
+
+  if (lastMessage?.toolResult?.callId !== resolvedResult.callId) {
+    return false;
+  }
+
+  conversation.undo();
+  conversation.appendToolResults([resolvedResult]);
+  return true;
+}
 
 // ---------------------------------------------------------------------------
 // createAgent — the public factory
@@ -194,7 +248,7 @@ export type { AgentRun };
  * @example Stateless chat host with a shared toolbox and park-on-approval
  * ```ts
  * import { createToolbox } from 'armorer';
- * import { createAgent, stopWhen } from 'operative';
+ * import { createAgent, resolvePendingApprovalResult, stopWhen } from 'operative';
  *
  * // Built once per process — the stable approvalSecret is what makes
  * // resumeApproval() work across separate HTTP requests.
@@ -212,11 +266,11 @@ export type { AgentRun };
  * const pending = result.steps.at(-1)?.results.find((r) => r.pendingApproval)?.pendingApproval;
  * // ...send `pending` to a human, store `result.conversation.current` server-side...
  *
- * // Later, on approval: resume on the SAME toolbox instance, append the
- * // resolved result to the stored `result.conversation`, then start a fresh
- * // run from `.current` — the updated ConversationHistory.
+ * // Later, on approval: resume on the SAME toolbox instance, resolve the
+ * // pending result in place on the stored `result.conversation` — replacing
+ * // it, not appending alongside it — then start a fresh run from `.current`.
  * const resumedResult = await toolbox.resumeApproval(signedApproval);
- * result.conversation.appendToolResults([resumedResult]);
+ * resolvePendingApprovalResult(result.conversation, resumedResult);
  * const nextRun = agent.run({ conversation: result.conversation.current });
  * ```
  */
@@ -264,10 +318,20 @@ export function createAgent(options: CreateAgentOptions): StandaloneAgent {
               fresh.appendUserMessage(input);
               return fresh;
             })()
-          : // Snapshot semantics: wrap the supplied history in a fresh Conversation
-            // instance. The loop only ever appends to *this* instance — the
-            // caller's original ConversationHistory object is never mutated.
-            new Conversation(input.conversation);
+          : // Snapshot semantics: CLONE the supplied history before wrapping it
+            // in a fresh Conversation instance. `Conversation`'s constructor
+            // only validates its input — it does not copy it — so without the
+            // clone this run's initial node would alias the caller's own
+            // ConversationHistory object. A stateless host commonly holds a
+            // mutable reference it keeps touching between turns; aliasing
+            // would let either side's mutations leak into the other. The
+            // clone makes this run's state and the caller's object fully
+            // independent from the moment `run()` is called: later mutations
+            // by the caller (or by another run resuming the same object)
+            // never affect this in-flight run, and this run never mutates the
+            // caller's object (`ConversationHistory` is a structuredClone-safe
+            // tree — see `durable/types.ts`).
+            new Conversation(structuredClone(input.conversation));
 
       const runOptions: RunOptions = {
         generate,

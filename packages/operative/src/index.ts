@@ -66,7 +66,7 @@ export {
   getModelPricing,
 } from './cost-estimation';
 export type { CreateAgentOptions, StandaloneAgent } from './create-agent';
-export { createAgent } from './create-agent';
+export { createAgent, resolvePendingApprovalResult } from './create-agent';
 export type {
   AgentRegistry,
   AgentRegistryEntry,

@@ -19,7 +19,7 @@ import { Conversation } from 'conversationalist';
 import { z } from 'zod';
 
 import { noToolCalls, pendingApproval } from '../src/conditions/predicates';
-import { createAgent } from '../src/create-agent';
+import { createAgent, resolvePendingApprovalResult } from '../src/create-agent';
 import type { ConversationHistory, GenerateFunction, GenerateResponse } from '../src/types';
 
 // ---------------------------------------------------------------------------
@@ -668,6 +668,120 @@ describe('createAgent — conversation resume', () => {
     // But the ORIGINAL history object the caller passed in is untouched.
     expect(history).toEqual(beforeSnapshot);
   });
+
+  it("is not aliased to the caller's history object — mutating it after run() does not affect the in-flight run", async () => {
+    let receivedMessages: unknown[] = [];
+    let resolveGenerate!: () => void;
+    const generateGate = new Promise<void>((resolve) => {
+      resolveGenerate = resolve;
+    });
+
+    const agent = createAgent({
+      generate: async ({ conversation }) => {
+        // Read the conversation only after the caller has had a chance to
+        // mutate its own history object (see below) — if the run aliased
+        // the caller's object instead of cloning it, that mutation would be
+        // visible here.
+        await generateGate;
+        receivedMessages = conversation.getMessages();
+        return textResponse('done');
+      },
+      stopWhen: noToolCalls(),
+    });
+
+    const history = buildHistory('earlier turn');
+    const run = agent.run({ conversation: history });
+
+    // Mutate the caller's OWN history object directly (not through the
+    // Conversation class's immutable helpers) while the run is in flight.
+    const mutableHistory = history as { ids: string[] };
+    mutableHistory.ids = [...mutableHistory.ids, 'injected-id'];
+
+    resolveGenerate();
+    await run.result();
+
+    // The run's conversation never saw the injected id — it was cloned
+    // before the mutation happened.
+    expect(receivedMessages).toHaveLength(1);
+    expect((receivedMessages[0] as { content: string }).content).toBe('earlier turn');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resolvePendingApprovalResult (AB-258)
+// ---------------------------------------------------------------------------
+
+describe('resolvePendingApprovalResult', () => {
+  it('replaces the pending action_required result with the resolved result, leaving exactly one tool-result message for the call', () => {
+    const conversation = new Conversation();
+    conversation.appendUserMessage('Please charge $5.00');
+    conversation.appendToolCalls([
+      { id: 'call-1', name: 'charge-card', arguments: { cents: 500 } },
+    ]);
+    conversation.appendToolResults([
+      {
+        callId: 'call-1',
+        toolCallId: 'call-1',
+        toolName: 'charge-card',
+        outcome: 'action_required',
+        content: undefined,
+        result: undefined,
+      },
+    ]);
+
+    const resolved = resolvePendingApprovalResult(conversation, {
+      callId: 'call-1',
+      toolCallId: 'call-1',
+      toolName: 'charge-card',
+      outcome: 'success',
+      content: { charged: 500 },
+      result: { charged: 500 },
+    });
+
+    expect(resolved).toBe(true);
+
+    const toolResultMessages = conversation
+      .getMessages()
+      .filter((m) => m.role === 'tool-result') as unknown as { toolResult?: { outcome: string } }[];
+    expect(toolResultMessages).toHaveLength(1);
+    expect(toolResultMessages[0]?.toolResult?.outcome).toBe('success');
+  });
+
+  it("is a safe no-op when the pending result is not the conversation's last message", () => {
+    const conversation = new Conversation();
+    conversation.appendUserMessage('Please charge $5.00');
+    conversation.appendToolCalls([
+      { id: 'call-1', name: 'charge-card', arguments: { cents: 500 } },
+    ]);
+    conversation.appendToolResults([
+      {
+        callId: 'call-1',
+        toolCallId: 'call-1',
+        toolName: 'charge-card',
+        outcome: 'action_required',
+        content: undefined,
+        result: undefined,
+      },
+    ]);
+    // Something else got appended after the pending result — the pending
+    // result is no longer the last message.
+    conversation.appendUserMessage('unrelated follow-up');
+
+    const beforeCount = conversation.getMessages().length;
+
+    const resolved = resolvePendingApprovalResult(conversation, {
+      callId: 'call-1',
+      toolCallId: 'call-1',
+      toolName: 'charge-card',
+      outcome: 'success',
+      content: { charged: 500 },
+      result: { charged: 500 },
+    });
+
+    expect(resolved).toBe(false);
+    // Nothing was changed.
+    expect(conversation.getMessages()).toHaveLength(beforeCount);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -774,8 +888,11 @@ describe('createAgent — park-on-approval', () => {
 
     const resumed = await toolbox.resumeApproval(signed);
 
-    // Append the resumed result to the (snapshotted) conversation from the first run.
-    firstResult.conversation.appendToolResults([resumed]);
+    // Resolve the pending result IN PLACE on the (snapshotted) conversation
+    // from the first run — replacing the action_required result the loop
+    // already appended, not appending a second result alongside it.
+    const replaced = resolvePendingApprovalResult(firstResult.conversation, resumed);
+    expect(replaced).toBe(true);
     const updatedHistory = firstResult.conversation.current;
 
     await agent.run({ conversation: updatedHistory }).result();
@@ -783,9 +900,12 @@ describe('createAgent — park-on-approval', () => {
     expect(generateCallCount).toBe(2);
     const toolResultMessages = secondRunConversation.filter(
       (m) => (m as { role: string }).role === 'tool-result',
-    );
-    // Both the original pending result AND the resumed result are present —
-    // the model sees the resolved (`success`) outcome the host appended.
-    expect(toolResultMessages.length).toBeGreaterThanOrEqual(1);
+    ) as { toolResult?: { callId: string; outcome: string } }[];
+
+    // Exactly ONE tool-result — not two for the same call — and the model
+    // sees the RESOLVED (`success`) outcome, not the stale pending one.
+    expect(toolResultMessages).toHaveLength(1);
+    expect(toolResultMessages[0]?.toolResult?.outcome).toBe('success');
+    expect(toolResultMessages[0]?.toolResult?.callId).toBe(resumed.callId);
   });
 });
