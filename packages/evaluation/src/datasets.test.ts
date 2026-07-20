@@ -1,4 +1,6 @@
 import { rmSync } from 'node:fs';
+import { mkdtemp } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
@@ -184,18 +186,30 @@ describe('loadDataset', () => {
   });
 
   it('wraps filesystem read errors with the dataset path', async () => {
-    const unreadablePath = fixturePath('unreadable.json');
-    await Bun.write(unreadablePath, JSON.stringify([{ name: 'case', input: 'test' }]));
-    await Bun.$`chmod 000 ${unreadablePath}`;
+    // Deliberately OUTSIDE the repository. A chmod-000 file anywhere inside the
+    // working tree breaks Turborepo's git hashing ("I/O error: Permission
+    // denied") for every package, so an interrupted run of this test used to
+    // brick `turbo run` repo-wide until the leftover was removed by hand.
+    const unreadableDirectory = await mkdtemp(join(tmpdir(), 'evaluation-unreadable-'));
+    const unreadablePath = join(unreadableDirectory, 'unreadable.json');
 
+    // The try starts immediately after mkdtemp so that a failure in the setup
+    // below (the write or the chmod) still cleans the directory up.
     try {
-      await loadDataset(unreadablePath);
-      expect.unreachable('Expected loadDataset to throw');
-    } catch (error: unknown) {
-      expect(error).toBeInstanceOf(Error);
-      expect((error as Error).message).toMatch(/failed to read dataset file/i);
+      await Bun.write(unreadablePath, JSON.stringify([{ name: 'case', input: 'test' }]));
+      await Bun.$`chmod 000 ${unreadablePath}`;
+
+      try {
+        await loadDataset(unreadablePath);
+        expect.unreachable('Expected loadDataset to throw');
+      } catch (error: unknown) {
+        expect(error).toBeInstanceOf(Error);
+        expect((error as Error).message).toMatch(/failed to read dataset file/i);
+      }
     } finally {
-      await Bun.$`chmod 644 ${unreadablePath}`;
+      // Restore readability before removing: rm cannot traverse a 000 entry.
+      await Bun.$`chmod 644 ${unreadablePath}`.nothrow();
+      rmSync(unreadableDirectory, { recursive: true, force: true });
     }
   });
 });
