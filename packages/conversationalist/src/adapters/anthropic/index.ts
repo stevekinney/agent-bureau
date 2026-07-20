@@ -900,20 +900,31 @@ function toSdkContentBlock(block: AnthropicContentBlock): ContentBlockParam {
   }
 }
 
-const WEB_SEARCH_TOOL_ERROR_CODES = new Set([
-  'invalid_tool_input',
-  'unavailable',
-  'max_uses_exceeded',
-  'too_many_requests',
-  'query_too_long',
-]);
+/**
+ * Type guard mirroring {@link WebSearchToolRequestError}'s `error_code`
+ * union so the accepted codes stay in sync with the SDK type at compile
+ * time — an unrecognized code fails the `default` branch instead of
+ * silently drifting out of sync with a parallel string list.
+ */
+function isWebSearchToolErrorCode(value: string): value is WebSearchToolRequestError['error_code'] {
+  switch (value) {
+    case 'invalid_tool_input':
+    case 'unavailable':
+    case 'max_uses_exceeded':
+    case 'too_many_requests':
+    case 'query_too_long':
+      return true;
+    default:
+      return false;
+  }
+}
 
 function isWebSearchToolRequestError(value: unknown): value is WebSearchToolRequestError {
   return (
     isRecord(value) &&
     value['type'] === 'web_search_tool_result_error' &&
     typeof value['error_code'] === 'string' &&
-    WEB_SEARCH_TOOL_ERROR_CODES.has(value['error_code'])
+    isWebSearchToolErrorCode(value['error_code'])
   );
 }
 
