@@ -361,7 +361,7 @@ export function createAnthropicProviderStream(
             throw new ToolCallParseError({
               provider: 'anthropic',
               toolName: pending.name,
-              toolCallId: pending.id ?? '',
+              toolCallId: pending.id,
               rawArguments: pending.partialJson,
               cause: parseError,
             });

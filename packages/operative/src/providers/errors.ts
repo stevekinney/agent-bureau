@@ -50,20 +50,21 @@ export function shouldRetryProviderError(error: unknown): boolean {
  */
 export class ToolCallParseError extends ProviderError {
   readonly toolName: string;
-  readonly toolCallId: string;
+  readonly toolCallId: string | undefined;
   readonly rawArguments: string;
 
   constructor(options: {
     provider: ProviderName;
     toolName: string;
-    toolCallId: string;
+    toolCallId: string | undefined;
     rawArguments: string;
     cause: unknown;
   }) {
+    const idLabel = options.toolCallId ?? '(unknown id)';
     super({
       provider: options.provider,
       cause: options.cause,
-      message: `[provider:${options.provider}] unparseable tool-call arguments for "${options.toolName}" (${options.toolCallId}): ${extractMessage(options.cause)}`,
+      message: `[provider:${options.provider}] unparseable tool-call arguments for "${options.toolName}" (${idLabel}): ${extractMessage(options.cause)}`,
     });
     this.name = 'ToolCallParseError';
     this.toolName = options.toolName;

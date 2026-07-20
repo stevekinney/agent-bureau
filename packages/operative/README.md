@@ -562,9 +562,10 @@ more specific `ToolCallParseError` — a `ProviderError` subclass — when the
 model finishes a turn but the accumulated tool-call argument JSON it
 streamed doesn't parse. This is a malformed-output problem, not an API
 failure: the request succeeded, the model just emitted bad JSON. It carries
-`toolName`, `toolCallId`, and `rawArguments` (the unparsed fragment)
-alongside the inherited `ProviderError` fields, and `retryable` is always
-`false` since it never has a `statusCode`.
+`toolName`, `toolCallId` (`string | undefined` — the provider didn't always
+assign one before the parse failed), and `rawArguments` (the unparsed
+fragment) alongside the inherited `ProviderError` fields, and `retryable` is
+always `false` since it never has a `statusCode`.
 
 ```typescript
 import { ToolCallParseError } from 'operative/providers';

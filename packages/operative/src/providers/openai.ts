@@ -263,7 +263,7 @@ export function createOpenAIProviderStream(
             throw new ToolCallParseError({
               provider: 'openai',
               toolName: pending.name,
-              toolCallId: pending.id ?? '',
+              toolCallId: pending.id,
               rawArguments: pending.arguments,
               cause: parseError,
             });
