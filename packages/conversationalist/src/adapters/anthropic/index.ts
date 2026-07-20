@@ -2,6 +2,9 @@ import type {
   ContentBlockParam,
   MessageParam,
   TextBlockParam,
+  WebSearchResultBlockParam,
+  WebSearchToolRequestError,
+  WebSearchToolResultBlockParamContent,
 } from '@anthropic-ai/sdk/resources/messages';
 
 import { appendMessages, createConversationHistory } from '../../conversation/index';
@@ -876,13 +879,80 @@ function toSdkContentBlock(block: AnthropicContentBlock): ContentBlockParam {
         ...(cacheControl ? { cache_control: cacheControl } : {}),
       };
     case 'web_search_tool_result':
+      return {
+        type: 'web_search_tool_result',
+        tool_use_id: block.tool_use_id,
+        content: toSdkWebSearchToolResultContent(block.content),
+        ...(cacheControl ? { cache_control: cacheControl } : {}),
+      };
     case 'code_execution_tool_result':
     case 'bash_code_execution_tool_result':
     case 'text_editor_code_execution_tool_result':
     case 'web_fetch_tool_result':
     case 'container_upload':
+      // These server-tool result block types are response-only in the
+      // installed @anthropic-ai/sdk: they appear on `ContentBlock` (what the
+      // API returns) but not on the stable `ContentBlockParam` union (what a
+      // request accepts) — only `resources/beta/messages` defines request
+      // params for them. Reject instead of silently sending a block the SDK
+      // cannot submit.
       throw new TypeError(`Anthropic SDK does not accept ${block.type} request blocks.`);
   }
+}
+
+/**
+ * Type guard mirroring {@link WebSearchToolRequestError}'s `error_code`
+ * union so the accepted codes stay in sync with the SDK type at compile
+ * time — an unrecognized code fails the `default` branch instead of
+ * silently drifting out of sync with a parallel string list.
+ */
+function isWebSearchToolErrorCode(value: string): value is WebSearchToolRequestError['error_code'] {
+  switch (value) {
+    case 'invalid_tool_input':
+    case 'unavailable':
+    case 'max_uses_exceeded':
+    case 'too_many_requests':
+    case 'query_too_long':
+      return true;
+    default:
+      return false;
+  }
+}
+
+function isWebSearchToolRequestError(value: unknown): value is WebSearchToolRequestError {
+  return (
+    isRecord(value) &&
+    value['type'] === 'web_search_tool_result_error' &&
+    typeof value['error_code'] === 'string' &&
+    isWebSearchToolErrorCode(value['error_code'])
+  );
+}
+
+function isWebSearchResultBlockParam(value: unknown): value is WebSearchResultBlockParam {
+  return (
+    isRecord(value) &&
+    value['type'] === 'web_search_result' &&
+    typeof value['encrypted_content'] === 'string' &&
+    typeof value['title'] === 'string' &&
+    typeof value['url'] === 'string' &&
+    (value['page_age'] === undefined ||
+      value['page_age'] === null ||
+      typeof value['page_age'] === 'string')
+  );
+}
+
+/**
+ * Narrows the opaque `content` payload preserved on a
+ * {@link AnthropicWebSearchToolResultBlock} to the shape the Anthropic SDK's
+ * request param type requires: either an array of web search results or a
+ * tool-error object.
+ */
+function toSdkWebSearchToolResultContent(content: unknown): WebSearchToolResultBlockParamContent {
+  if (isWebSearchToolRequestError(content)) return content;
+  if (Array.isArray(content) && content.every(isWebSearchResultBlockParam)) return content;
+  throw new TypeError(
+    'Anthropic SDK web_search_tool_result content must be an array of web search results or a tool-error object.',
+  );
 }
 
 function isAnthropicImageMediaType(
