@@ -63,14 +63,14 @@ describe('GET /api/v1/sessions/:id/conversation', () => {
     expect(typeof history).toBe('object');
   });
 
-  it('returns 501 when no persistence is configured', async () => {
+  it('returns 503 when no persistence is configured', async () => {
     const gateway = await createTestGateway({ authToken: AUTH_TOKEN });
 
     const response = await requestJSON(gateway, '/api/v1/sessions/any/conversation', {
       headers: authHeaders,
     });
-    // No session store → the underlying getSession throws NOT_IMPLEMENTED.
-    expect(response.status).toBe(501);
+    // No session store → the underlying getSession throws NOT_CONFIGURED.
+    expect(response.status).toBe(503);
   });
 });
 

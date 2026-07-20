@@ -9,14 +9,14 @@ const authHeaders = { authorization: `Bearer ${AUTH_TOKEN}` };
 const sessionWriteHeaders = { ...authHeaders, 'content-type': 'application/json' };
 
 describe('sessions routes', () => {
-  it('returns 501 when no persistence adapter is configured', async () => {
+  it('returns 503 when no persistence adapter is configured', async () => {
     const gateway = await createTestGateway({ authToken: AUTH_TOKEN });
     const response = await requestJSON(gateway, '/api/v1/sessions', {
       headers: authHeaders,
     });
-    expect(response.status).toBe(501);
+    expect(response.status).toBe(503);
     const body = await response.json();
-    expect(body.error.code).toBe('NOT_IMPLEMENTED');
+    expect(body.error.code).toBe('SERVICE_UNAVAILABLE');
   });
 
   it('GET /api/v1/sessions returns session list', async () => {

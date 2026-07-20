@@ -2065,7 +2065,7 @@ describe('createBureau', () => {
     expect(() => bureau.deleteRun(run.id)).toThrow(BureauError);
   });
 
-  it('throws NOT_IMPLEMENTED for session APIs when persistence is not configured', async () => {
+  it('throws NOT_CONFIGURED for session APIs when persistence is not configured', async () => {
     const bureau = await createBureau();
 
     const error = await bureau.listSessions().then(
@@ -2074,7 +2074,7 @@ describe('createBureau', () => {
     );
 
     expect(error).toMatchObject({
-      code: 'NOT_IMPLEMENTED',
+      code: 'NOT_CONFIGURED',
     });
   });
 
