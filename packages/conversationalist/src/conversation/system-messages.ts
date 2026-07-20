@@ -3,9 +3,8 @@ import {
   isConversationEnvironmentParameter,
   resolveConversationEnvironment,
 } from '../environment';
-import { copyContent } from '../multi-modal';
 import type { ConversationHistory as Conversation, JSONValue, Message } from '../types';
-import { createMessage, toReadonly } from '../utilities';
+import { buildMessageFromInput, createMessage, repositionMessage, toReadonly } from '../utilities';
 import { getOrderedMessages, toIdRecord } from '../utilities/message-store';
 import { ensureConversationSafe } from './validation';
 
@@ -47,34 +46,16 @@ export function prependSystemMessage(
   const resolvedMetadata = isConversationEnvironmentParameter(metadata) ? undefined : metadata;
   const now = resolvedEnvironment.now();
 
-  const newMessage: Message = createMessage({
-    id: resolvedEnvironment.randomId(),
-    role: 'system',
-    content,
-    position: 0,
-    createdAt: now,
-    metadata: { ...(resolvedMetadata ?? {}) },
-    hidden: false,
-    toolCall: undefined,
-    toolResult: undefined,
-    tokenUsage: undefined,
-  });
+  const newMessage: Message = buildMessageFromInput(
+    { role: 'system', content, metadata: resolvedMetadata },
+    0,
+    now,
+    resolvedEnvironment,
+  );
 
   const ordered = getOrderedMessages(conversation);
   const renumberedMessages = ordered.map((message) =>
-    createMessage({
-      id: message.id,
-      role: message.role,
-      content: copyContent(message.content),
-      position: message.position + 1,
-      createdAt: message.createdAt,
-      metadata: { ...message.metadata },
-      hidden: message.hidden,
-      toolCall: message.toolCall,
-      toolResult: message.toolResult,
-      tokenUsage: message.tokenUsage,
-      cacheBoundary: message.cacheBoundary,
-    }),
+    repositionMessage(message, message.position + 1),
   );
 
   return ensureConversationSafe(
@@ -197,22 +178,7 @@ export function collapseSystemMessages(
     .filter((m) => !systemIdsToRemove.has(m.id))
     .map((m) => (m.id === firstSystemMsg.id ? collapsed : m));
 
-  const renumbered = messages.map((message, index) => {
-    if (message.position === index) return message;
-    return createMessage({
-      id: message.id,
-      role: message.role,
-      content: copyContent(message.content),
-      position: index,
-      createdAt: message.createdAt,
-      metadata: { ...message.metadata },
-      hidden: message.hidden,
-      toolCall: message.toolCall,
-      toolResult: message.toolResult,
-      tokenUsage: message.tokenUsage,
-      cacheBoundary: message.cacheBoundary,
-    });
-  });
+  const renumbered = messages.map((message, index) => repositionMessage(message, index));
 
   const next: Conversation = {
     ...conversation,

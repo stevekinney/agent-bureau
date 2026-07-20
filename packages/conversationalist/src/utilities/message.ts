@@ -1,7 +1,18 @@
 import type { MultiModalContent } from '../multi-modal';
 import { copyContent, renderDocumentReferenceText } from '../multi-modal';
-import type { AssistantMessage, Message } from '../types';
+import type { AssistantMessage, Message, MessageInput } from '../types';
+import { normalizeContent } from './content';
 import { toReadonly } from './type-helpers';
+
+/**
+ * The subset of a {@link ConversationEnvironment} needed to build a Message
+ * from a MessageInput. Kept minimal (rather than importing the full
+ * environment type) to avoid a type-only import cycle with `../environment`,
+ * which itself imports from this module.
+ */
+export interface MessageBuildEnvironment {
+  randomId: () => string;
+}
 
 /**
  * Creates an immutable Message from a JSON representation.
@@ -38,6 +49,107 @@ export function createMessage(props: Message | AssistantMessage): Message | Assi
   }
 
   return toReadonly(message);
+}
+
+/**
+ * Anything `buildMessageFromInput` can build from: a raw `MessageInput`, or an
+ * already-built `Message`/`AssistantMessage` (e.g. the result of
+ * `buildMessage`, or a message a caller received from elsewhere and wants to
+ * splice into a conversation with `appendMessages`/`prependMessages`).
+ */
+export type AppendableMessageInput = MessageInput | Message | AssistantMessage;
+
+/**
+ * Builds a single immutable Message from an already-processed
+ * MessageInput/Message: stamps `position` and, unless the input already
+ * carries its own `id`/`createdAt` (i.e. it's an already-built Message being
+ * re-inserted rather than raw MessageInput), assigns them via the
+ * environment/batch clock. Callers are responsible for running conversation
+ * plugins over the input first (if any apply) — this function only handles
+ * the id/position/timestamp/shape concerns, so it can be shared by
+ * `appendMessages`, `prependMessages`, and the standalone `buildMessage`
+ * builder without applying plugins twice.
+ *
+ * Preserving a pre-existing `id`/`createdAt` matters for the primary use case
+ * `buildMessage` exists for: minting a standalone Message to dispatch/persist
+ * (e.g. an inbound push handler), then later adding that exact message to a
+ * ConversationHistory. Without this, the stored message would silently get a
+ * different id than the one already handed to the caller.
+ */
+export function buildMessageFromInput(
+  input: AppendableMessageInput,
+  position: number,
+  createdAt: string,
+  environment: MessageBuildEnvironment,
+): Message {
+  const prebuiltId = 'id' in input && typeof input.id === 'string' ? input.id : undefined;
+  const prebuiltCreatedAt =
+    'createdAt' in input && typeof input.createdAt === 'string' ? input.createdAt : undefined;
+  const goalCompleted =
+    'goalCompleted' in input && typeof input.goalCompleted === 'boolean'
+      ? input.goalCompleted
+      : undefined;
+
+  // `MessageInput.content` is a mutable array; `Message.content` is a
+  // ReadonlyArray. Copy rather than reuse the reference so the result always
+  // satisfies the mutable shape `normalizeContent`/`createMessage` expect,
+  // regardless of which shape `input` was.
+  const content = typeof input.content === 'string' ? input.content : [...input.content];
+  const normalizedContent = normalizeContent(content) as string | MultiModalContent[];
+
+  const baseMessage = {
+    id: prebuiltId ?? environment.randomId(),
+    role: input.role,
+    content: normalizedContent,
+    position,
+    createdAt: prebuiltCreatedAt ?? createdAt,
+    metadata: { ...(input.metadata ?? {}) },
+    hidden: input.hidden ?? false,
+    toolCall: input.toolCall,
+    toolResult: input.toolResult,
+    tokenUsage: input.tokenUsage,
+    cacheBoundary: input.cacheBoundary,
+  };
+
+  if (input.role === 'assistant') {
+    return createMessage({
+      ...baseMessage,
+      role: 'assistant',
+      goalCompleted,
+    });
+  }
+
+  return createMessage(baseMessage);
+}
+
+/**
+ * Returns a copy of a Message with its `position` updated, preserving every
+ * other field — including `goalCompleted` on assistant messages. Used when
+ * splicing messages into a conversation shifts the positions of the messages
+ * already there (e.g. `prependMessages`, `prependSystemMessage`).
+ */
+export function repositionMessage(message: Message, position: number): Message {
+  if (message.position === position) return message;
+
+  const base = {
+    id: message.id,
+    role: message.role,
+    content: message.content,
+    position,
+    createdAt: message.createdAt,
+    metadata: { ...message.metadata },
+    hidden: message.hidden,
+    toolCall: message.toolCall,
+    toolResult: message.toolResult,
+    tokenUsage: message.tokenUsage,
+    cacheBoundary: message.cacheBoundary,
+  };
+
+  if (isAssistantMessage(message)) {
+    return createMessage({ ...base, role: 'assistant', goalCompleted: message.goalCompleted });
+  }
+
+  return createMessage(base);
 }
 
 /**
