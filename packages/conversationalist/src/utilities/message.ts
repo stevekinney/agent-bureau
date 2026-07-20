@@ -1,7 +1,18 @@
 import type { MultiModalContent } from '../multi-modal';
 import { copyContent, renderDocumentReferenceText } from '../multi-modal';
-import type { AssistantMessage, Message } from '../types';
+import type { AssistantMessage, Message, MessageInput } from '../types';
+import { normalizeContent } from './content';
 import { toReadonly } from './type-helpers';
+
+/**
+ * The subset of a {@link ConversationEnvironment} needed to build a Message
+ * from a MessageInput. Kept minimal (rather than importing the full
+ * environment type) to avoid a type-only import cycle with `../environment`,
+ * which itself imports from this module.
+ */
+export interface MessageBuildEnvironment {
+  randomId: () => string;
+}
 
 /**
  * Creates an immutable Message from a JSON representation.
@@ -38,6 +49,77 @@ export function createMessage(props: Message | AssistantMessage): Message | Assi
   }
 
   return toReadonly(message);
+}
+
+/**
+ * Builds a single immutable Message from an already-processed MessageInput:
+ * assigns `id` via the environment and stamps `position`/`createdAt`. Callers
+ * are responsible for running conversation plugins over the input first (if
+ * any apply) — this function only handles the id/position/timestamp/shape
+ * concerns, so it can be shared by `appendMessages`, `prependMessages`, and
+ * the standalone `buildMessage` builder without applying plugins twice.
+ */
+export function buildMessageFromInput(
+  input: MessageInput,
+  position: number,
+  createdAt: string,
+  environment: MessageBuildEnvironment,
+): Message {
+  const normalizedContent = normalizeContent(input.content) as string | MultiModalContent[];
+
+  const baseMessage = {
+    id: environment.randomId(),
+    role: input.role,
+    content: normalizedContent,
+    position,
+    createdAt,
+    metadata: { ...(input.metadata ?? {}) },
+    hidden: input.hidden ?? false,
+    toolCall: input.toolCall,
+    toolResult: input.toolResult,
+    tokenUsage: input.tokenUsage,
+    cacheBoundary: input.cacheBoundary,
+  };
+
+  if (input.role === 'assistant') {
+    return createMessage({
+      ...baseMessage,
+      role: 'assistant',
+      goalCompleted: input.goalCompleted,
+    });
+  }
+
+  return createMessage(baseMessage);
+}
+
+/**
+ * Returns a copy of a Message with its `position` updated, preserving every
+ * other field — including `goalCompleted` on assistant messages. Used when
+ * splicing messages into a conversation shifts the positions of the messages
+ * already there (e.g. `prependMessages`, `prependSystemMessage`).
+ */
+export function repositionMessage(message: Message, position: number): Message {
+  if (message.position === position) return message;
+
+  const base = {
+    id: message.id,
+    role: message.role,
+    content: message.content,
+    position,
+    createdAt: message.createdAt,
+    metadata: { ...message.metadata },
+    hidden: message.hidden,
+    toolCall: message.toolCall,
+    toolResult: message.toolResult,
+    tokenUsage: message.tokenUsage,
+    cacheBoundary: message.cacheBoundary,
+  };
+
+  if (isAssistantMessage(message)) {
+    return createMessage({ ...base, role: 'assistant', goalCompleted: message.goalCompleted });
+  }
+
+  return createMessage(base);
 }
 
 /**

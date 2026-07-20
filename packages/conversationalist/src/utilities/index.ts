@@ -4,7 +4,9 @@ export { normalizeContent, toMultiModalArray } from './content';
 // Markdown conversion is exported via `conversationalist/markdown`
 
 // Message utilities
+export type { MessageBuildEnvironment } from './message';
 export {
+  buildMessageFromInput,
   createMessage,
   isAssistantMessage,
   messageHasImages,
@@ -12,6 +14,7 @@ export {
   messageText,
   messageToJSON,
   messageToString,
+  repositionMessage,
 } from './message';
 
 // Tool call pairing

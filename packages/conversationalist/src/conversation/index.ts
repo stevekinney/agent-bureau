@@ -3,7 +3,8 @@ export type { ConversationEnvironment } from '../environment';
 export { withEnvironment } from '../environment';
 
 // Create
-export { createConversationHistory, createConversationHistoryUnsafe } from './create';
+export type { BuildMessageOptions } from './create';
+export { buildMessage, createConversationHistory, createConversationHistoryUnsafe } from './create';
 
 // Append
 export {
@@ -12,6 +13,7 @@ export {
   appendSystemMessage,
   appendUnsafeMessage,
   appendUserMessage,
+  prependMessages,
 } from './append';
 
 // Query

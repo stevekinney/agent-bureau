@@ -4,15 +4,13 @@ import {
   resolveConversationEnvironment,
 } from '../environment';
 import { createIntegrityError } from '../errors';
-import type { MultiModalContent } from '../multi-modal';
 import type {
-  AssistantMessage,
   ConversationHistory as Conversation,
   JSONValue,
   Message,
   MessageInput,
 } from '../types';
-import { createMessage, normalizeContent, toReadonly } from '../utilities';
+import { buildMessageFromInput, repositionMessage, toReadonly } from '../utilities';
 import { getOrderedMessages, toIdRecord } from '../utilities/message-store';
 import {
   assertToolReference,
@@ -104,42 +102,19 @@ const appendMessagesInternal = (
         assertToolReference(state.toolUses, processedInput.toolResult.callId);
       }
 
-      const normalizedContent = normalizeContent(processedInput.content) as
-        | string
-        | MultiModalContent[];
-
-      const baseMessage = {
-        id: resolvedEnvironment.randomId(),
-        role: processedInput.role,
-        content: normalizedContent,
-        position: startPosition + index,
-        createdAt: now,
-        metadata: { ...(processedInput.metadata ?? {}) },
-        hidden: processedInput.hidden ?? false,
-        toolCall: processedInput.toolCall,
-        toolResult: processedInput.toolResult,
-        tokenUsage: processedInput.tokenUsage,
-        cacheBoundary: processedInput.cacheBoundary,
-      };
-
-      let message: Message;
-      if (processedInput.role === 'assistant') {
-        const assistantMessage: AssistantMessage = {
-          ...baseMessage,
-          role: 'assistant',
-          goalCompleted: processedInput.goalCompleted,
-        };
-        message = createMessage(assistantMessage);
-      } else {
-        message = createMessage(baseMessage);
-      }
+      const message = buildMessageFromInput(
+        processedInput,
+        startPosition + index,
+        now,
+        resolvedEnvironment,
+      );
 
       let toolUses = state.toolUses;
       if (processedInput.role === 'tool-call' && processedInput.toolCall) {
         if (validate && state.toolUses.has(processedInput.toolCall.id)) {
           throw createIntegrityError('duplicate toolCall.id in conversation', {
             toolCallId: processedInput.toolCall.id,
-            messageId: baseMessage.id,
+            messageId: message.id,
           });
         }
 
@@ -166,6 +141,55 @@ const appendMessagesInternal = (
   const readonly = toReadonly(next);
   return validate ? ensureConversationSafe(readonly) : readonly;
 };
+
+/**
+ * Prepends one or more messages to the front of a conversation, mirroring
+ * `appendMessages` for the front-of-list case. Renumbers every existing
+ * message's `position` so `position` stays dense and ordered across the
+ * entire `ids` array — this is the internal-shape reach-in (hand-rolled
+ * `Message` construction plus manual `position` renumbering) that history
+ * pagination would otherwise have to do itself.
+ *
+ * Tool-call/tool-result ordering is verified by the same integrity check
+ * `appendMessages` relies on (`ensureConversationSafe`), since a tool-result
+ * prepended ahead of its tool-call would be invalid regardless of how the
+ * conversation was assembled.
+ */
+export function prependMessages(
+  conversation: Conversation,
+  ...inputs: MessageInput[]
+): Conversation;
+export function prependMessages(
+  conversation: Conversation,
+  ...inputsAndEnvironment: [...MessageInput[], Partial<ConversationEnvironment> | undefined]
+): Conversation;
+export function prependMessages(
+  conversation: Conversation,
+  ...args: (MessageInput | Partial<ConversationEnvironment> | undefined)[]
+): Conversation {
+  const { inputs, environment } = partitionAppendArgs(args);
+  const resolvedEnvironment = resolveConversationEnvironment(environment);
+  const now = resolvedEnvironment.now();
+
+  const newMessages = inputs.map((input, index) => {
+    const processedInput = resolvedEnvironment.plugins.reduce((acc, plugin) => plugin(acc), input);
+    return buildMessageFromInput(processedInput, index, now, resolvedEnvironment);
+  });
+
+  const offset = newMessages.length;
+  const ordered = getOrderedMessages(conversation);
+  const renumbered = ordered.map((message) =>
+    repositionMessage(message, message.position + offset),
+  );
+
+  const next: Conversation = {
+    ...conversation,
+    ids: [...newMessages.map((message) => message.id), ...renumbered.map((message) => message.id)],
+    messages: { ...toIdRecord(newMessages), ...toIdRecord(renumbered) },
+    updatedAt: now,
+  };
+  return ensureConversationSafe(toReadonly(next));
+}
 
 /**
  * Appends a user message to the conversation.

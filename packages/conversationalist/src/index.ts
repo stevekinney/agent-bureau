@@ -34,6 +34,7 @@ export {
 export type {
   AppendToolCallOptions,
   AppendToolResultOptions,
+  BuildMessageOptions,
   ConversationEnvironment,
   IntegrityIssue,
   IntegrityIssueCode,
@@ -54,6 +55,7 @@ export {
   appendUnsafeMessage,
   appendUserMessage,
   assertConversationHistoryIntegrity,
+  buildMessage,
   collapseSystemMessages,
   createConversationHistory,
   createConversationHistoryUnsafe,
@@ -74,6 +76,7 @@ export {
   materializeToolResultAsync,
   materializeToolResults,
   materializeToolResultsAsync,
+  prependMessages,
   prependSystemMessage,
   redactMessageAtPosition,
   replaceSystemMessage,
