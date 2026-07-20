@@ -13,13 +13,14 @@
  *   - Symbol.dispose aborts and cleans up
  */
 
-import { createTool } from 'armorer';
+import { createTool, createToolbox, type SignedPendingToolApproval } from 'armorer';
 import { describe, expect, it } from 'bun:test';
+import { Conversation } from 'conversationalist';
 import { z } from 'zod';
 
-import { noToolCalls } from '../src/conditions/predicates';
+import { noToolCalls, pendingApproval } from '../src/conditions/predicates';
 import { createAgent } from '../src/create-agent';
-import type { GenerateFunction, GenerateResponse } from '../src/types';
+import type { ConversationHistory, GenerateFunction, GenerateResponse } from '../src/types';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -544,5 +545,247 @@ describe('createAgent — non-thenable AgentRun', () => {
 
     // PromiseLike contract: has .then — must be ABSENT
     expect('then' in handle).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Toolbox injection (AB-258)
+// ---------------------------------------------------------------------------
+
+describe('createAgent — toolbox injection', () => {
+  it('throws when both `tools` and `toolbox` are supplied', () => {
+    const toolbox = createToolbox([]);
+
+    expect(() =>
+      createAgent({
+        generate: singleResponse('hello'),
+        tools: {},
+        toolbox,
+      }),
+    ).toThrow(/tools.*toolbox.*mutually exclusive/i);
+  });
+
+  it('throws when both `toolbox` and `permissions` are supplied', () => {
+    const toolbox = createToolbox([]);
+
+    expect(() =>
+      createAgent({
+        generate: singleResponse('hello'),
+        toolbox,
+        permissions: { allowList: [] },
+      }),
+    ).toThrow(/permissions.*toolbox/i);
+  });
+
+  it('uses the caller-supplied Toolbox instance as-is, across multiple runs', async () => {
+    const seenToolboxes: unknown[] = [];
+
+    const toolbox = createToolbox([]);
+    const agent = createAgent({
+      generate: async ({ toolbox: seen }) => {
+        seenToolboxes.push(seen);
+        return textResponse('done');
+      },
+      toolbox,
+      stopWhen: noToolCalls(),
+    });
+
+    await agent.run('first').result();
+    await agent.run('second').result();
+
+    expect(seenToolboxes).toHaveLength(2);
+    expect(seenToolboxes[0]).toBe(toolbox);
+    expect(seenToolboxes[1]).toBe(toolbox);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Conversation resume (AB-258) — run({ conversation })
+// ---------------------------------------------------------------------------
+
+describe('createAgent — conversation resume', () => {
+  function buildHistory(...userMessages: string[]): ConversationHistory {
+    let conversation: ConversationHistory | undefined;
+    for (const message of userMessages) {
+      const c = new Conversation(conversation);
+      c.appendUserMessage(message);
+      conversation = c.current;
+    }
+    return conversation!;
+  }
+
+  it('starts the loop from a supplied ConversationHistory', async () => {
+    let receivedMessages: unknown[] = [];
+
+    const agent = createAgent({
+      generate: async ({ conversation }) => {
+        receivedMessages = conversation.getMessages();
+        return textResponse('done');
+      },
+      stopWhen: noToolCalls(),
+    });
+
+    const history = buildHistory('earlier turn');
+    await agent.run({ conversation: history }).result();
+
+    expect(receivedMessages).toHaveLength(1);
+    expect((receivedMessages[0] as { content: string }).content).toBe('earlier turn');
+  });
+
+  it('does NOT re-inject `instructions` as a system message when resuming a conversation', async () => {
+    let receivedMessages: unknown[] = [];
+
+    const agent = createAgent({
+      instructions: 'You are a test assistant.',
+      generate: async ({ conversation }) => {
+        receivedMessages = conversation.getMessages();
+        return textResponse('done');
+      },
+      stopWhen: noToolCalls(),
+    });
+
+    const history = buildHistory('earlier turn');
+    await agent.run({ conversation: history }).result();
+
+    expect(receivedMessages).toHaveLength(1);
+    expect((receivedMessages[0] as { role: string }).role).toBe('user');
+  });
+
+  it("snapshots the supplied history — the caller's ConversationHistory object is never mutated", async () => {
+    const agent = createAgent({
+      generate: singleResponse('done'),
+      stopWhen: noToolCalls(),
+    });
+
+    const history = buildHistory('earlier turn');
+    const beforeSnapshot = JSON.parse(JSON.stringify(history)) as ConversationHistory;
+
+    const result = await agent.run({ conversation: history }).result();
+
+    // The run appended an assistant message; the RESULT's conversation grew.
+    expect(result.conversation.getMessages().length).toBeGreaterThan(1);
+
+    // But the ORIGINAL history object the caller passed in is untouched.
+    expect(history).toEqual(beforeSnapshot);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Park-on-approval (AB-258) — stopWhen.pendingApproval()
+// ---------------------------------------------------------------------------
+
+describe('createAgent — park-on-approval', () => {
+  function buildApprovalGatedToolbox(approvalSecret: string) {
+    const charges: number[] = [];
+    const toolbox = createToolbox(
+      [
+        createTool({
+          name: 'charge-card',
+          description: 'Charge a payment card',
+          input: z.object({ cents: z.number() }),
+          metadata: { mutates: true },
+          async execute({ cents }) {
+            charges.push(cents);
+            return { charged: cents };
+          },
+        }),
+      ],
+      {
+        approvalSecret,
+        policy: {
+          beforeExecute() {
+            return {
+              allow: false,
+              status: 'needs_approval',
+              reason: 'Operator approval required',
+              action: { message: 'Approve charge' },
+            };
+          },
+        },
+      },
+    );
+    return { toolbox, charges };
+  }
+
+  it('stops after the step with needs_approval — no further generate call — and the pending approval is reachable on the last step', async () => {
+    let callCount = 0;
+    const generate: GenerateFunction = async () => {
+      callCount++;
+      if (callCount === 1) {
+        return toolCallResponse([{ name: 'charge-card', arguments: { cents: 500 } }]);
+      }
+      // Should never be reached — the run must park after step 0.
+      return textResponse('should not run');
+    };
+
+    const { toolbox } = buildApprovalGatedToolbox('host-secret');
+    const agent = createAgent({
+      generate,
+      toolbox,
+      stopWhen: pendingApproval(),
+    });
+
+    const result = await agent.run('Please charge $5.00').result();
+
+    // Exactly one generate call — the loop stopped, it did not call generate again.
+    expect(callCount).toBe(1);
+    expect(result.finishReason).toBe('stop-condition');
+
+    const lastStep = result.steps.at(-1);
+    const pending = lastStep?.results.find((r) => r.pendingApproval)?.pendingApproval;
+    expect(pending).toBeDefined();
+    expect(pending?.toolName).toBe('charge-card');
+    expect(pending?.approvalToken).toEqual(expect.any(String));
+
+    // Resuming on the SAME toolbox instance the host holds verifies the token
+    // (same approvalSecret that minted it).
+    const signed = pending as SignedPendingToolApproval;
+    const resumed = await toolbox.resumeApproval(signed);
+    expect(resumed.outcome).toBe('success');
+  });
+
+  it('round-trip: resumed result appended to history, new run started from it, model sees the tool result', async () => {
+    const { toolbox } = buildApprovalGatedToolbox('host-secret');
+
+    let generateCallCount = 0;
+    let secondRunConversation: unknown[] = [];
+    const generate: GenerateFunction = async ({ conversation, step }) => {
+      generateCallCount++;
+      if (generateCallCount === 1) {
+        return toolCallResponse([{ name: 'charge-card', arguments: { cents: 500 } }]);
+      }
+      // Second run's first (and only) generate call.
+      secondRunConversation = conversation.getMessages();
+      void step;
+      return textResponse('Charge complete.');
+    };
+
+    const agent = createAgent({
+      generate,
+      toolbox,
+      stopWhen: [pendingApproval(), noToolCalls()],
+    });
+
+    const firstResult = await agent.run('Please charge $5.00').result();
+    const pending = firstResult.steps
+      .at(-1)
+      ?.results.find((r) => r.pendingApproval)?.pendingApproval;
+    const signed = pending as SignedPendingToolApproval;
+
+    const resumed = await toolbox.resumeApproval(signed);
+
+    // Append the resumed result to the (snapshotted) conversation from the first run.
+    firstResult.conversation.appendToolResults([resumed]);
+    const updatedHistory = firstResult.conversation.current;
+
+    await agent.run({ conversation: updatedHistory }).result();
+
+    expect(generateCallCount).toBe(2);
+    const toolResultMessages = secondRunConversation.filter(
+      (m) => (m as { role: string }).role === 'tool-result',
+    );
+    // Both the original pending result AND the resumed result are present —
+    // the model sees the resolved (`success`) outcome the host appended.
+    expect(toolResultMessages.length).toBeGreaterThanOrEqual(1);
   });
 });

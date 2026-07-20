@@ -105,6 +105,94 @@ const result = await activeRun.result;
 
 The main import surface for defining agents, running loops, managing sessions, backpressure, caching, context assembly, cost tracking, and multi-agent patterns.
 
+#### `createAgent(options)`
+
+The documented public factory for a standalone, bureau-less agent. `generate` is required — there's no bureau to inherit a provider from. Runs are in-memory and ephemeral by default (no durability, no session, no shared memory) unless you inject your own `Toolbox` and `ConversationHistory`, as below.
+
+```typescript
+import { createAgent } from 'operative';
+
+const agent = createAgent({
+  generate: myProvider, // GenerateFunction — required
+  instructions: 'You are a research assistant.',
+  tools: { search: searchTool }, // name-keyed map; the map key is canonical
+  stopWhen: (step) => step.toolCalls.length === 0,
+});
+
+const run = agent.run('Summarize the Q3 report.'); // fresh conversation
+for await (const event of run) {
+  /* iterate, OR */
+}
+const result = await run.result(); // await — same handle
+```
+
+**`CreateAgentOptions`** — key fields:
+
+| Field               | Type                                    | Description                                                                          |
+| ------------------- | --------------------------------------- | ------------------------------------------------------------------------------------ |
+| `generate`          | `GenerateFunction`                      | Required. The caller-supplied LLM call.                                              |
+| `tools`             | `Record<string, Tool>`                  | Name-keyed tool map. Mutually exclusive with `toolbox`.                              |
+| `toolbox`           | `Toolbox`                               | A pre-built `Toolbox`, used as-is across every run. Mutually exclusive with `tools`. |
+| `instructions`      | `string`                                | System prompt appended on fresh string-input runs only.                              |
+| `stopWhen`          | `StopCondition \| StopCondition[]`      | Loop exit predicates.                                                                |
+| `maximumSteps`      | `number`                                | Hard step cap.                                                                       |
+| `retry`             | `RetryOptions`                          | Transient generate failure retry policy.                                             |
+| `contextManagement` | `ContextManagementOptions`              | Automatic context compaction.                                                        |
+| `permissions`       | `HeadlessPermissionPolicyConfiguration` | Deny-by-default headless mode (AB-94). Mutually exclusive with `toolbox`.            |
+
+`agent.run(input)` accepts either a plain `string` (starts a fresh conversation — `instructions`, if given, is appended as a system message, then `input` as a user message) or `{ conversation: ConversationHistory }` (resumes an existing history — see the next section).
+
+##### Stateless chat host: resume a conversation, share a toolbox, park on approval
+
+A host with a browser- or client-owned conversation and an approval-gated toolbox — a stateless HTTP chat backend, for example — needs three things `createAgent` provides directly:
+
+1. **A conversation input**, not just a fresh string: `agent.run({ conversation })` starts the loop from an existing `ConversationHistory` — the shape a stateless backend POSTs and stores between turns.
+2. **A pre-built `Toolbox`**, not a freshly composed one: pass `toolbox` instead of `tools`. The same instance is reused across every `run()` call, which is required for armorer's cross-request approval flow — `toolbox.resumeApproval(signedApproval)` only verifies a token signed by the toolbox's own `approvalSecret`.
+3. **Park-on-approval**, not headless denial: `stopWhen: stopWhen.pendingApproval()` (from `operative/conditions`) stops the run cleanly after a step whose tool results include a pending approval — no further `generate` call happens, and the pending approval stays reachable on the final `RunResult`'s last step.
+
+```typescript
+import { createToolbox } from 'armorer';
+import { createAgent, stopWhen } from 'operative';
+
+// Built once per process — the stable approvalSecret is what makes
+// resumeApproval() work across separate HTTP requests.
+const toolbox = createToolbox([deleteFileTool], { approvalSecret: process.env.APPROVAL_SECRET });
+
+const agent = createAgent({
+  generate: myProvider,
+  toolbox,
+  stopWhen: stopWhen.pendingApproval(),
+});
+
+// Turn 1: run from the client-POSTed history.
+const run = agent.run({ conversation: clientHistory });
+const result = await run.result();
+const pending = result.steps.at(-1)?.results.find((r) => r.pendingApproval)?.pendingApproval;
+// ...send `pending` to a human, store `result.conversation.current` server-side...
+
+// Later, on approval: resume on the SAME toolbox instance...
+const resumedResult = await toolbox.resumeApproval(signedApproval);
+// ...append the resolved result to the stored history...
+result.conversation.appendToolResults([resumedResult]);
+// ...and start a fresh run from the updated history. Fully stateless server-side.
+const nextRun = agent.run({ conversation: result.conversation.current });
+```
+
+**Mutation ownership:** `agent.run({ conversation })` SNAPSHOTS the supplied `ConversationHistory` — it wraps the value in a fresh internal `Conversation` and never mutates the object you passed in, matching the durable path's existing snapshot semantics. `instructions` is not re-appended on this path; the supplied history is assumed to already carry whatever system context it needs, so resuming it repeatedly never duplicates system messages.
+
+#### `createActiveRun(options)`
+
+The full-control factory behind `createAgent`, `createSessionHandle`, and bureau-owned agents alike — documented, public API, not an internal implementation detail. It accepts the complete `RunOptions` bag directly: an existing `Conversation` instance (not just a `ConversationHistory`), a pre-built `Toolbox`, hooks, and durable routing (engine + checkpoint store + run id). `bureau` and `evaluation` both depend on it as first-party consumers.
+
+Most callers should reach for `createAgent({...}).run(...)` instead — it wraps `createActiveRun` in the higher-level `AgentRun` handle and covers the common cases. Reach for `createActiveRun` directly when you need something `createAgent` doesn't expose: an already-live `Conversation` instance, durable routing, or a pre-built emitter to bind tool dispatches to.
+
+```typescript
+import { createActiveRun } from 'operative';
+
+const activeRun = createActiveRun({ generate, toolbox, conversation });
+const result = await activeRun.result;
+```
+
 #### `defineAgent(options)`
 
 Creates a reusable `AgentDefinition` that can be invoked with `.run()` or `.createRun()`.
@@ -1119,6 +1207,12 @@ const affordable = stopWhen.costBudget({ budget: 0.05, model: 'claude-sonnet-4-2
 
 // Fork: stop condition for branching workflows
 const branchDone = stopWhen.forked();
+
+// Park cleanly after a step whose tool results include a pending approval —
+// no further generate call happens. See createAgent's stateless chat host
+// recipe above for the full resume flow (toolbox.resumeApproval + a fresh
+// run started from the updated conversation history).
+const parkOnApproval = stopWhen.pendingApproval();
 
 const agent = defineAgent({
   name: 'bounded-agent',

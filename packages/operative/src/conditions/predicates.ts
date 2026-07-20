@@ -36,6 +36,19 @@ export function contentMatches(predicate: (content: string) => boolean): StopCon
 }
 
 /**
+ * Stops when the just-completed step produced any tool result carrying a
+ * `pendingApproval` (armorer's `needs_approval` outcome). Use this to park an
+ * interactive run cleanly after the step: no further generate call occurs, and
+ * the pending approval stays reachable on the final `RunResult`'s last step —
+ * so a host can round-trip it to a human and resume with
+ * `toolbox.resumeApproval(signedApproval)` on a fresh run started from the
+ * updated conversation history.
+ */
+export function pendingApproval(): StopCondition {
+  return (context: StepResult) => context.results.some((result) => result.pendingApproval);
+}
+
+/**
  * Stops only when all conditions are met.
  */
 export function every(...conditions: StopCondition[]): StopCondition {
