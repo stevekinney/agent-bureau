@@ -160,6 +160,31 @@ export interface SchedulerConfiguration {
   idleDelay?: number;
 }
 
+// ── Diagnostics ──────────────────────────────────────────────────────
+
+/**
+ * A single operational diagnostic emitted by bureau internals — recovery
+ * failures, live-frame listener exceptions, dispose errors, and persistence
+ * failures. Distinct from {@link PersistenceOptions.onLog}: `onLog` carries
+ * only replay-safe `ctx.log` records emitted BY durable workflow code, while
+ * `BureauDiagnostic` covers bureau's own operational logging — the sites
+ * that today write straight to `console.error`/`console.warn`.
+ */
+export interface BureauDiagnostic {
+  level: 'warn' | 'error';
+  /**
+   * The subsystem the diagnostic originated from, e.g. `'recovery'`,
+   * `'live-frames'`, `'dispose'`, `'webhook'`, `'audit-trail'`, or
+   * `'session-persistence'`.
+   */
+  scope: string;
+  message: string;
+  cause?: unknown;
+}
+
+/** Sink for {@link BureauDiagnostic} events. See {@link BureauOptions.onDiagnostic}. */
+export type DiagnosticSink = (diagnostic: BureauDiagnostic) => void;
+
 // ── Persistence Options ─────────────────────────────────────────────
 
 /**
@@ -380,6 +405,17 @@ export interface BureauOptions {
    * disable — the default.
    */
   onlineEvals?: OnlineEvalSamplerOptions;
+  /**
+   * Host sink for internal operational diagnostics — recovery failures,
+   * live-frame listener exceptions, dispose errors, and persistence
+   * failures (see {@link BureauDiagnostic}). Distinct from {@link onLog},
+   * which only carries `ctx.log` records emitted by durable workflow code.
+   * Omit to log to the console exactly as before (`console.error`/
+   * `console.warn`, keyed by {@link BureauDiagnostic.level}). A throwing
+   * sink falls back to the console for that one diagnostic without failing
+   * the run.
+   */
+  onDiagnostic?: DiagnosticSink;
 }
 
 /**

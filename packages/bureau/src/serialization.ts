@@ -1,6 +1,6 @@
 import type { RunState } from 'operative/store';
 
-import type { RunDetail, RunSummary } from './types';
+import type { BureauDiagnostic, DiagnosticSink, RunDetail, RunSummary } from './types';
 
 function safeStringify(value: unknown): string {
   if (typeof value === 'string') return value;
@@ -111,6 +111,41 @@ export function serializeUnknownError(error: unknown): string {
   }
 
   return safeStringify(toJsonSafe(error));
+}
+
+// ── Diagnostics ──────────────────────────────────────────────────────
+
+/**
+ * Default diagnostic sink: writes to `console.error`/`console.warn`, exactly
+ * matching bureau's pre-`onDiagnostic` console output — a two-argument call
+ * (`message`, `cause`) when `cause` is present, a single-argument call
+ * otherwise.
+ */
+function writeDiagnosticToConsole(diagnostic: BureauDiagnostic): void {
+  const { level, message, cause } = diagnostic;
+  if (cause !== undefined) {
+    console[level](message, cause);
+  } else {
+    console[level](message);
+  }
+}
+
+/**
+ * Resolves a host-supplied {@link DiagnosticSink} into one that is always
+ * safe to call: a throwing sink, or no sink at all, falls back to
+ * {@link writeDiagnosticToConsole} so a diagnostic is never lost and a
+ * misbehaving sink can never crash the runtime.
+ */
+export function resolveDiagnosticSink(onDiagnostic: DiagnosticSink | undefined): DiagnosticSink {
+  if (!onDiagnostic) return writeDiagnosticToConsole;
+
+  return (diagnostic) => {
+    try {
+      onDiagnostic(diagnostic);
+    } catch {
+      writeDiagnosticToConsole(diagnostic);
+    }
+  };
 }
 
 /**
