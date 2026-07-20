@@ -42,7 +42,7 @@ export function createConversationRoutes(bureau: Bureau) {
    * without the full `AgentSession` envelope.
    *
    * Layer A: live session state. Returns 404 when the session does not exist,
-   * 501 when no session store is configured.
+   * 503 when no session store is configured.
    */
   app.get('/:id/conversation', async (context) => {
     const sessionId = context.req.param('id');
@@ -55,8 +55,8 @@ export function createConversationRoutes(bureau: Bureau) {
       return context.json(session.conversationHistory, 200);
     } catch (error) {
       if (error instanceof HTTPException) throw error;
-      if (error instanceof BureauError && error.code === 'NOT_IMPLEMENTED') {
-        throw new HTTPException(501, { message: error.message });
+      if (error instanceof BureauError && error.code === 'NOT_CONFIGURED') {
+        throw new HTTPException(503, { message: error.message });
       }
       throw error;
     }

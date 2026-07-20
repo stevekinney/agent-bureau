@@ -155,13 +155,7 @@ function appendConversationMessages(
 class BureauError extends Error {
   constructor(
     message: string,
-    readonly code:
-      | 'NOT_FOUND'
-      | 'CONFLICT'
-      | 'NOT_CONFIGURED'
-      | 'NOT_IMPLEMENTED'
-      | 'BAD_REQUEST'
-      | 'RATE_LIMITED',
+    readonly code: 'NOT_FOUND' | 'CONFLICT' | 'NOT_CONFIGURED' | 'BAD_REQUEST' | 'RATE_LIMITED',
   ) {
     super(message);
     this.name = 'BureauError';
@@ -671,7 +665,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     if (!runtime.sessionStore) {
       throw new BureauError(
         'No SessionStore configured (set options.persistence with a StorageConfiguration or PersistenceOptions)',
-        'NOT_IMPLEMENTED',
+        'NOT_CONFIGURED',
       );
     }
 

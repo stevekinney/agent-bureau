@@ -12,8 +12,8 @@ export function createSessionsRoutes(bureau: Bureau) {
       const sessions = await bureau.listSessions();
       return context.json(sessions, 200);
     } catch (error) {
-      if (error instanceof BureauError && error.code === 'NOT_IMPLEMENTED') {
-        throw new HTTPException(501, { message: error.message });
+      if (error instanceof BureauError && error.code === 'NOT_CONFIGURED') {
+        throw new HTTPException(503, { message: error.message });
       }
       throw error;
     }
@@ -25,8 +25,8 @@ export function createSessionsRoutes(bureau: Bureau) {
       if (!session) throw new HTTPException(404, { message: 'Session not found' });
       return context.json(session, 200);
     } catch (error) {
-      if (error instanceof BureauError && error.code === 'NOT_IMPLEMENTED') {
-        throw new HTTPException(501, { message: error.message });
+      if (error instanceof BureauError && error.code === 'NOT_CONFIGURED') {
+        throw new HTTPException(503, { message: error.message });
       }
       throw error;
     }
@@ -37,8 +37,8 @@ export function createSessionsRoutes(bureau: Bureau) {
       await bureau.deleteSession(context.req.param('id'));
       return context.body(null, 204);
     } catch (error) {
-      if (error instanceof BureauError && error.code === 'NOT_IMPLEMENTED') {
-        throw new HTTPException(501, { message: error.message });
+      if (error instanceof BureauError && error.code === 'NOT_CONFIGURED') {
+        throw new HTTPException(503, { message: error.message });
       }
       throw error;
     }
@@ -74,8 +74,6 @@ export function createSessionsRoutes(bureau: Bureau) {
         if (error.code === 'NOT_FOUND') throw new HTTPException(404, { message: error.message });
         if (error.code === 'NOT_CONFIGURED')
           return context.json({ error: { code: 'NOT_CONFIGURED', message: error.message } }, 501);
-        if (error.code === 'NOT_IMPLEMENTED')
-          throw new HTTPException(501, { message: error.message });
       }
       throw error;
     }
@@ -110,8 +108,6 @@ export function createSessionsRoutes(bureau: Bureau) {
         if (error.code === 'NOT_FOUND') throw new HTTPException(404, { message: error.message });
         if (error.code === 'NOT_CONFIGURED')
           return context.json({ error: { code: 'NOT_CONFIGURED', message: error.message } }, 501);
-        if (error.code === 'NOT_IMPLEMENTED')
-          throw new HTTPException(501, { message: error.message });
       }
       throw error;
     }
@@ -152,8 +148,6 @@ export function createSessionsRoutes(bureau: Bureau) {
         if (error.code === 'NOT_FOUND') throw new HTTPException(404, { message: error.message });
         if (error.code === 'NOT_CONFIGURED')
           return context.json({ error: { code: 'NOT_CONFIGURED', message: error.message } }, 501);
-        if (error.code === 'NOT_IMPLEMENTED')
-          throw new HTTPException(501, { message: error.message });
       }
       throw error;
     }
