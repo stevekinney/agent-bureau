@@ -81,7 +81,7 @@
       "name": "bureau",
       "version": "0.0.4",
       "dependencies": {
-        "@lostgradient/weft": "^0.10.0",
+        "@lostgradient/weft": "^0.11.0",
         "armorer": "workspace:*",
         "conversationalist": "workspace:*",
         "interoperability": "workspace:*",
@@ -118,7 +118,7 @@
       "name": "cloudflare",
       "version": "0.1.0",
       "dependencies": {
-        "@lostgradient/weft": "^0.10.0",
+        "@lostgradient/weft": "^0.11.0",
         "interoperability": "workspace:*",
         "memory": "workspace:*",
         "zod": "^4.4.1",
@@ -203,7 +203,7 @@
       "version": "0.0.1",
       "dependencies": {
         "@lostgradient/cinder": "^0.13.0",
-        "@lostgradient/weft": "^0.10.0",
+        "@lostgradient/weft": "^0.11.0",
         "armorer": "workspace:*",
         "bureau": "workspace:*",
         "conversationalist": "workspace:*",
@@ -281,7 +281,7 @@
       "name": "memory",
       "version": "0.0.1",
       "dependencies": {
-        "@lostgradient/weft": "^0.10.0",
+        "@lostgradient/weft": "^0.11.0",
         "armorer": "workspace:*",
         "interoperability": "workspace:*",
         "zod": "^4.4.1",
@@ -294,7 +294,7 @@
       "name": "operative",
       "version": "0.1.0",
       "dependencies": {
-        "@lostgradient/weft": "^0.10.0",
+        "@lostgradient/weft": "^0.11.0",
         "armorer": "workspace:*",
         "conversationalist": "workspace:*",
         "interoperability": "workspace:*",
@@ -342,7 +342,7 @@
       "name": "skills",
       "version": "0.0.1",
       "dependencies": {
-        "@lostgradient/weft": "^0.10.0",
+        "@lostgradient/weft": "^0.11.0",
         "armorer": "workspace:*",
         "gray-matter": "^4.0.3",
         "interoperability": "workspace:*",
@@ -498,7 +498,7 @@
 
     "@lostgradient/cinder": ["@lostgradient/cinder@0.13.0", "", { "dependencies": { "@floating-ui/dom": "1.7.6", "@modelcontextprotocol/sdk": "^1.29.0", "@shikijs/engine-oniguruma": "^3.21.0", "@shikijs/langs": "^3.21.0", "@shikijs/types": "^3.21.0", "@tanstack/virtual-core": "^3.17.1", "@types/hast": "^3.0.4", "@types/mdast": "^4.0.4", "@types/unist": "^3.0.0", "ajv": "^8", "comlink": "^4.4.2", "conversationalist": "^0.2.1", "diff-match-patch": "^1.0.5", "esm-env": "^1.2.0", "hast-util-sanitize": "^5.0.0", "js-yaml": "^4.1.0", "libphonenumber-js": "^1.13.3", "qrcode": "^1.5.4", "rehype-katex": "^7.0.1", "rehype-sanitize": "^6.0.0", "rehype-stringify": "^10.0.1", "remark-gfm": "^4.0.1", "remark-math": "^6.0.0", "remark-parse": "^11.0.0", "remark-rehype": "^11.1.2", "remark-stringify": "^11.0.0", "shiki": "^3.21.0", "unified": "^11.0.5", "unist-util-visit": "^5.0.0" }, "peerDependencies": { "@milkdown/ctx": "^7.17.3", "@milkdown/kit": "^7.17.3", "@milkdown/prose": "^7.17.3", "lucide-svelte": ">=0.400.0 <1", "prosemirror-inputrules": "^1.5.1", "prosemirror-model": "^1.25.4", "prosemirror-state": "^1.4.4", "prosemirror-view": "^1.41.3", "svelte": ">=5.56.0 <6", "zod": "4.4.1" }, "optionalPeers": ["@milkdown/ctx", "@milkdown/kit", "@milkdown/prose", "prosemirror-inputrules", "prosemirror-model", "prosemirror-state", "prosemirror-view"], "bin": { "cinder": "dist/cli/index.js" } }, "sha512-+Ag8C7PYdlFNJp7sg1QouaBJwiTlboseJOLskgEvZJEgZeQOvcPb3awGU73tGmXhTc9+ow2sVy9pfKSwhTiPDA=="],
 
-    "@lostgradient/weft": ["@lostgradient/weft@0.10.0", "", { "dependencies": { "@msgpack/msgpack": "^3.1.3", "zod": "^4.3.6" }, "optionalDependencies": { "@valibot/to-json-schema": "^1.7.0" }, "peerDependencies": { "@libsql/client": "^0.17.2", "@neondatabase/serverless": "^1.1.0", "@opentelemetry/api": "^1.0.0", "better-sqlite3": "^12.8.0", "lmdb": "^3.5.2" }, "optionalPeers": ["@libsql/client", "@neondatabase/serverless", "@opentelemetry/api", "better-sqlite3", "lmdb"], "bin": { "weft": "dist/cli-main.js", "weft-mcp": "dist/mcp/cli.js" } }, "sha512-lo2iwHM/nu23NoWtC0Gn92yHViJkmdSP0fQbyKt6jqZkZDG8pItiVDfqlYR3BPvoCzf3au7h9B8+g+2Y40bveQ=="],
+    "@lostgradient/weft": ["@lostgradient/weft@0.11.0", "", { "dependencies": { "@msgpack/msgpack": "^3.1.3", "zod": "^4.3.6" }, "optionalDependencies": { "@valibot/to-json-schema": "^1.7.0" }, "peerDependencies": { "@libsql/client": "^0.17.2", "@neondatabase/serverless": "^1.1.0", "@opentelemetry/api": "^1.0.0", "better-sqlite3": "^12.8.0", "lmdb": "^3.5.2", "pg": "^8.11.0" }, "optionalPeers": ["@libsql/client", "@neondatabase/serverless", "@opentelemetry/api", "better-sqlite3", "lmdb", "pg"], "bin": { "weft": "dist/cli-main.js", "weft-mcp": "dist/mcp/cli.js" } }, "sha512-SfrsvD31dCnrX08LU974IQT+y0ZWaUzIQrsXl+rXmSGi1mHmcJOevAgYDQ1FhgLv8qrqwgA0xvhGbeHm4UZ2+Q=="],
 
     "@manypkg/find-root": ["@manypkg/find-root@1.1.0", "", { "dependencies": { "@babel/runtime": "^7.5.5", "@types/node": "^12.7.1", "find-up": "^4.1.0", "fs-extra": "^8.1.0" } }, "sha512-mki5uBvhHzO8kYYix/WRy2WX8S3B5wdVSc9D6KcU5lQNglP2yt58/VfLuAK49glRXChosY8ap2oJ1qgma3GUVA=="],
 
