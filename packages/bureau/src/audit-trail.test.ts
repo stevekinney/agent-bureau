@@ -530,6 +530,63 @@ describe('createAuditTrail', () => {
       expect(errorSpy).toHaveBeenCalled();
       trail.dispose();
     });
+
+    it('routes an out-of-band record() persistence failure to the diagnostic sink (the review-decision write path, distinct from the passive action listener above)', async () => {
+      const errorSpy = spyOn(console, 'error').mockImplementation(() => {});
+      const kv = createFailingKv();
+      const { bureau } = createStubBureau();
+      const received: unknown[] = [];
+      const trail = createAuditTrail(bureau, kv, (diagnostic) => received.push(diagnostic));
+
+      // Must not throw even though the underlying kv.set rejects — a review
+      // decision that fails to persist must never fail the caller's
+      // approve/deny call.
+      await trail.record({
+        runId: 'run-review-persist-fail',
+        type: 'review.tool-approval.approved',
+        detail: { decision: 'approve' },
+      });
+
+      expect(received).toHaveLength(1);
+      expect(received[0]).toMatchObject({ level: 'error', scope: 'audit-trail' });
+      expect(errorSpy).not.toHaveBeenCalled();
+      trail.dispose();
+    });
+
+    it('with no sink configured, an out-of-band record() persistence failure still logs to the console', async () => {
+      const errorSpy = spyOn(console, 'error').mockImplementation(() => {});
+      const kv = createFailingKv();
+      const { bureau } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv);
+
+      await trail.record({
+        runId: 'run-review-persist-fail-default',
+        type: 'review.tool-approval.denied',
+        detail: {},
+      });
+
+      expect(errorSpy).toHaveBeenCalled();
+      trail.dispose();
+    });
+  });
+
+  describe('query() with a corrupted stored record', () => {
+    it('skips a record whose stored JSON is malformed instead of throwing', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      const { bureau } = createStubBureau();
+
+      // Seed one valid record and one whose stored value is not parseable
+      // JSON — simulates a corrupted/partial write reaching the store.
+      await seedRecord(kv, makeRecord(1, { timestampMs: 1000, runId: 'run-ok' }));
+      await kv.set('audit:v1:0000000000002000:000000000002:run-corrupt', '{not valid json');
+
+      const trail = createAuditTrail(bureau, kv);
+      const records = await trail.query();
+
+      expect(records).toHaveLength(1);
+      expect(records[0]?.runId).toBe('run-ok');
+      trail.dispose();
+    });
   });
 
   describe('same-millisecond manual-record ordering', () => {
