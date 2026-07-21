@@ -202,7 +202,8 @@
       "name": "gateway",
       "version": "0.0.1",
       "dependencies": {
-        "@lostgradient/cinder": "^0.13.0",
+        "@lostgradient/chat": "^0.1.1",
+        "@lostgradient/cinder": "^0.16.1",
         "@lostgradient/weft": "^0.12.0",
         "armorer": "workspace:*",
         "bureau": "workspace:*",
@@ -496,7 +497,9 @@
 
     "@jridgewell/trace-mapping": ["@jridgewell/trace-mapping@0.3.31", "", { "dependencies": { "@jridgewell/resolve-uri": "^3.1.0", "@jridgewell/sourcemap-codec": "^1.4.14" } }, "sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw=="],
 
-    "@lostgradient/cinder": ["@lostgradient/cinder@0.13.0", "", { "dependencies": { "@floating-ui/dom": "1.7.6", "@modelcontextprotocol/sdk": "^1.29.0", "@shikijs/engine-oniguruma": "^3.21.0", "@shikijs/langs": "^3.21.0", "@shikijs/types": "^3.21.0", "@tanstack/virtual-core": "^3.17.1", "@types/hast": "^3.0.4", "@types/mdast": "^4.0.4", "@types/unist": "^3.0.0", "ajv": "^8", "comlink": "^4.4.2", "conversationalist": "^0.2.1", "diff-match-patch": "^1.0.5", "esm-env": "^1.2.0", "hast-util-sanitize": "^5.0.0", "js-yaml": "^4.1.0", "libphonenumber-js": "^1.13.3", "qrcode": "^1.5.4", "rehype-katex": "^7.0.1", "rehype-sanitize": "^6.0.0", "rehype-stringify": "^10.0.1", "remark-gfm": "^4.0.1", "remark-math": "^6.0.0", "remark-parse": "^11.0.0", "remark-rehype": "^11.1.2", "remark-stringify": "^11.0.0", "shiki": "^3.21.0", "unified": "^11.0.5", "unist-util-visit": "^5.0.0" }, "peerDependencies": { "@milkdown/ctx": "^7.17.3", "@milkdown/kit": "^7.17.3", "@milkdown/prose": "^7.17.3", "lucide-svelte": ">=0.400.0 <1", "prosemirror-inputrules": "^1.5.1", "prosemirror-model": "^1.25.4", "prosemirror-state": "^1.4.4", "prosemirror-view": "^1.41.3", "svelte": ">=5.56.0 <6", "zod": "4.4.1" }, "optionalPeers": ["@milkdown/ctx", "@milkdown/kit", "@milkdown/prose", "prosemirror-inputrules", "prosemirror-model", "prosemirror-state", "prosemirror-view"], "bin": { "cinder": "dist/cli/index.js" } }, "sha512-+Ag8C7PYdlFNJp7sg1QouaBJwiTlboseJOLskgEvZJEgZeQOvcPb3awGU73tGmXhTc9+ow2sVy9pfKSwhTiPDA=="],
+    "@lostgradient/chat": ["@lostgradient/chat@0.1.1", "", { "peerDependencies": { "@lostgradient/cinder": "^0.16.0", "conversationalist": "^0.2.1 || ^0.4.1", "svelte": ">=5.56.0 <6", "zod": "4.4.1" } }, "sha512-XOnzRMV32MlgQLR0O/BB6w6t1du+UOp63WFdMNRxKjxCvjSrC08NWGu+0Ode935a1op3M7blGvDYyOyfWElvlg=="],
+
+    "@lostgradient/cinder": ["@lostgradient/cinder@0.16.1", "", { "dependencies": { "@floating-ui/dom": "1.7.6", "@modelcontextprotocol/sdk": "^1.29.0", "@shikijs/engine-oniguruma": "^3.21.0", "@shikijs/langs": "^3.21.0", "@shikijs/types": "^3.21.0", "@tanstack/virtual-core": "^3.17.1", "@types/hast": "^3.0.4", "@types/mdast": "^4.0.4", "@types/unist": "^3.0.0", "ajv": "^8", "comlink": "^4.4.2", "diff-match-patch": "^1.0.5", "esm-env": "^1.2.0", "hast-util-sanitize": "^5.0.0", "js-yaml": "^4.1.0", "libphonenumber-js": "^1.13.3", "qrcode": "^1.5.4", "rehype-katex": "^7.0.1", "rehype-sanitize": "^6.0.0", "rehype-stringify": "^10.0.1", "remark-gfm": "^4.0.1", "remark-math": "^6.0.0", "remark-parse": "^11.0.0", "remark-rehype": "^11.1.2", "remark-stringify": "^11.0.0", "shiki": "^3.21.0", "unified": "^11.0.5", "unist-util-visit": "^5.0.0", "zod": "4.4.1" }, "peerDependencies": { "@milkdown/ctx": "^7.17.3", "@milkdown/kit": "^7.17.3", "@milkdown/prose": "^7.17.3", "lucide-svelte": ">=0.400.0 <1", "prosemirror-inputrules": "^1.5.1", "prosemirror-model": "^1.25.4", "prosemirror-state": "^1.4.4", "prosemirror-view": "^1.41.3", "svelte": ">=5.56.0 <6" }, "optionalPeers": ["@milkdown/ctx", "@milkdown/kit", "@milkdown/prose", "prosemirror-inputrules", "prosemirror-model", "prosemirror-state", "prosemirror-view"], "bin": { "cinder": "dist/cli/index.js" } }, "sha512-C7nH7AzlYF2lV+mxLpJGxONqgkBUAR/AHC0LNgbjBydQmajFBX2zHYRxMkBnxR9rHR1dEdBp72SGArY9U9ygoA=="],
 
     "@lostgradient/weft": ["@lostgradient/weft@0.12.0", "", { "dependencies": { "@msgpack/msgpack": "^3.1.3", "zod": "^4.3.6" }, "optionalDependencies": { "@valibot/to-json-schema": "^1.7.0" }, "peerDependencies": { "@libsql/client": "^0.17.2", "@neondatabase/serverless": "^1.1.0", "@opentelemetry/api": "^1.0.0", "better-sqlite3": "^12.8.0", "lmdb": "^3.5.2", "pg": "^8.11.0" }, "optionalPeers": ["@libsql/client", "@neondatabase/serverless", "@opentelemetry/api", "better-sqlite3", "lmdb", "pg"], "bin": { "weft": "dist/cli-main.js", "weft-mcp": "dist/mcp/cli.js" } }, "sha512-m9gU+exgWNfvn7saYOEAAso7qV3qm+xOpD4YPAIoJVQSPUKtEesKuvupmgX+4Nm/h+a5z9k/nQicdf0bp40wtA=="],
 
@@ -1784,8 +1787,6 @@
 
     "@lostgradient/cinder/ajv": ["ajv@8.18.0", "", { "dependencies": { "fast-deep-equal": "^3.1.3", "fast-uri": "^3.0.1", "json-schema-traverse": "^1.0.0", "require-from-string": "^2.0.2" } }, "sha512-PlXPeEWMXMZ7sPYOHqmDyCJzcfNrUr3fGNKtezX14ykXOEIvyK81d+qydx89KY5O71FKMPaQ2vBfBFI5NHR63A=="],
 
-    "@lostgradient/cinder/conversationalist": ["conversationalist@0.2.1", "", { "dependencies": { "@lostgradient/weft": "^0.8.0", "gray-matter": "^4.0.3" }, "peerDependencies": { "zod": "^4.0.0" } }, "sha512-1nIeZ1HSya9CAAkSbiPDVC6BhLw1hr1B9tbsl3qxOG6GkQx4hUVogOdkMD+RumeG5S5dmZ+3Mzo6BKFI8NaeSQ=="],
-
     "@manypkg/find-root/@types/node": ["@types/node@12.20.55", "", {}, "sha512-J8xLz7q2OFulZ2cyGTLE1TbbZcjpno7FaN6zdJNrgAdrJ+DZzh/uFR6YrTb4C+nXakvud8Q4+rbhoIWlYQbUFQ=="],
 
     "@manypkg/find-root/find-up": ["find-up@4.1.0", "", { "dependencies": { "locate-path": "^5.0.0", "path-exists": "^4.0.0" } }, "sha512-PpOwAdQ/YlXQ2vj8a3h8IipDuYRi3wceVQQGYWxNINccq40Anw7BlsEXCMbt1Zt+OLA6Fq9suIpIWD0OsnISlw=="],
@@ -1871,8 +1872,6 @@
     "@eslint/eslintrc/minimatch/brace-expansion": ["brace-expansion@1.1.12", "", { "dependencies": { "balanced-match": "^1.0.0", "concat-map": "0.0.1" } }, "sha512-9T9UjW3r0UW5c1Q7GTwllptXwhvYmEzFhzMfZ9H7FQWt+uZePjZPjBP/W1ZEyZ1twGWom5/56TF4lPcqjnDHcg=="],
 
     "@lostgradient/cinder/ajv/json-schema-traverse": ["json-schema-traverse@1.0.0", "", {}, "sha512-NM8/P9n3XjXhIZn1lLhkFaACTOURQXjWhV4BA/RnOv8xvgqtqpAX9IO4mRQxSx1Rlo4tqzeqb0sOlruaOy3dug=="],
-
-    "@lostgradient/cinder/conversationalist/@lostgradient/weft": ["@lostgradient/weft@0.8.0", "", { "dependencies": { "@msgpack/msgpack": "^3.1.3", "zod": "^4.3.6" }, "optionalDependencies": { "@valibot/to-json-schema": "^1.7.0" }, "peerDependencies": { "@libsql/client": "^0.17.2", "@neondatabase/serverless": "^1.1.0", "@opentelemetry/api": "^1.0.0", "better-sqlite3": "^12.8.0", "lmdb": "^3.5.2" }, "optionalPeers": ["@libsql/client", "@neondatabase/serverless", "@opentelemetry/api", "better-sqlite3", "lmdb"], "bin": { "weft": "dist/cli-main.js", "weft-mcp": "dist/mcp/cli.js" } }, "sha512-fwCo8i3Ctg8+CSD1bS+L/z63B9RkkXs8j5lrvAopVTUsaJPLpQT+VMvrPikb+nk8f3YpJ3hVECEVLsdvQDC/Qw=="],
 
     "@manypkg/find-root/find-up/locate-path": ["locate-path@5.0.0", "", { "dependencies": { "p-locate": "^4.1.0" } }, "sha512-t7hw9pI+WvuwNJXwk5zVHpyhIqzg2qTlklJOf0mVxGSbe3Fp2VieZcduNYjaLDoy6p9uGpQEGWG87WpMKlNq8g=="],
 

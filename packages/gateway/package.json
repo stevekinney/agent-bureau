@@ -20,7 +20,8 @@
     "validate": "bun run format:check && bun run lint && bun run check-types && bun run test"
   },
   "dependencies": {
-    "@lostgradient/cinder": "^0.13.0",
+    "@lostgradient/chat": "^0.1.1",
+    "@lostgradient/cinder": "^0.16.1",
     "@lostgradient/weft": "^0.12.0",
     "armorer": "workspace:*",
     "bureau": "workspace:*",

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { Callout } from '@lostgradient/cinder/callout';
-  import { Chat } from '@lostgradient/cinder/chat';
-  import type { ChatSubmitEvent, MultiModalContent } from '@lostgradient/cinder/chat';
+  import { Chat } from '@lostgradient/chat';
+  import type { ChatSubmitEvent, MultiModalContent } from '@lostgradient/chat';
   import { SectionHeading } from '@lostgradient/cinder/section-heading';
 
   import ReviewRow from '../components/review-row.svelte';
