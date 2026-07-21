@@ -67,6 +67,12 @@ async function parseReviewBody<TSchema extends z.ZodTypeAny>(
 function toHttpException(error: unknown): HTTPException {
   if (error instanceof BureauError) {
     if (error.code === 'NOT_FOUND') return new HTTPException(404, { message: error.message });
+    // The only NOT_CONFIGURED cause reachable here is subject: 'approval' (a
+    // tool-approval resolveReview with no approvalSecret on the toolbox) — an
+    // operator-fixable misconfiguration, hence 503. subject: 'durable' cannot
+    // reach this path: a human-wait review only exists when `options.humanInput
+    // && runtime.durable` was true at run start (create-bureau.ts), and
+    // `runtime.durable` is never unset afterward.
     if (error.code === 'NOT_CONFIGURED') return new HTTPException(503, { message: error.message });
     if (error.code === 'BAD_REQUEST') return new HTTPException(400, { message: error.message });
     if (error.code === 'CONFLICT') return new HTTPException(409, { message: error.message });

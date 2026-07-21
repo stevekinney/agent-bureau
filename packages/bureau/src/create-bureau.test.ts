@@ -2653,6 +2653,7 @@ describe('createBureau', () => {
         );
       expect(error).toBeInstanceOf(BureauError);
       expect((error as BureauError).code).toBe('NOT_CONFIGURED');
+      expect((error as BureauError).subject).toBe('generate');
     } finally {
       bureau.dispose();
     }
@@ -3258,6 +3259,7 @@ describe('createBureau session signal/update/query without durable engine', () =
 
     expect(error).toBeInstanceOf(BureauError);
     expect((error as BureauError).code).toBe('NOT_CONFIGURED');
+    expect((error as BureauError).subject).toBe('durable');
   });
 
   it('updateSession throws NOT_CONFIGURED when no durable engine is composed', async () => {
@@ -3273,6 +3275,7 @@ describe('createBureau session signal/update/query without durable engine', () =
 
     expect(error).toBeInstanceOf(BureauError);
     expect((error as BureauError).code).toBe('NOT_CONFIGURED');
+    expect((error as BureauError).subject).toBe('durable');
   });
 
   it('querySession throws NOT_CONFIGURED when no durable engine is composed', async () => {
@@ -3288,6 +3291,7 @@ describe('createBureau session signal/update/query without durable engine', () =
 
     expect(error).toBeInstanceOf(BureauError);
     expect((error as BureauError).code).toBe('NOT_CONFIGURED');
+    expect((error as BureauError).subject).toBe('durable');
   });
 });
 

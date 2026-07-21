@@ -578,22 +578,24 @@ export interface Bureau {
   /**
    * Deliver a fire-and-forget signal to a session's current in-flight durable run.
    * Maps to `engine.signal(runId, name, payload)`. Requires a durable engine and a
-   * session store. Throws `BureauError('NOT_CONFIGURED')` when no durable engine is
-   * composed; throws `BureauError('NOT_FOUND')` when the session has no current run.
+   * session store. Throws `BureauError('NOT_CONFIGURED', subject: 'durable')` when no durable
+   * engine is composed; throws `BureauError('NOT_FOUND')` when the session has no current run.
    */
   signalSession(sessionId: string, name: string, payload?: unknown): Promise<void>;
 
   /**
    * Send a validated, request/response update to a session's current in-flight run.
    * Maps to `engine.update(runId, name, payload)`. Returns the update result.
-   * Throws `BureauError('NOT_CONFIGURED')` when no durable engine is composed.
+   * Throws `BureauError('NOT_CONFIGURED', subject: 'durable')` when no durable
+   * engine is composed.
    */
   updateSession(sessionId: string, name: string, payload?: unknown): Promise<unknown>;
 
   /**
    * Query live state from a session's current in-flight run without mutating it.
    * Maps to `engine.query(runId, name, input)`. Returns the query result.
-   * Throws `BureauError('NOT_CONFIGURED')` when no durable engine is composed.
+   * Throws `BureauError('NOT_CONFIGURED', subject: 'durable')` when no durable
+   * engine is composed.
    */
   querySession(sessionId: string, name: string, input?: unknown): Promise<unknown>;
 
