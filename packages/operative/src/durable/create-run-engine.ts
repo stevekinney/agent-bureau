@@ -211,8 +211,11 @@ export interface RunEngineObservability {
  * `Engine`'s generics are invariant, so the precisely-typed engine
  * `Engine.create` returns is not assignable to the bare `Engine` default. The
  * durable run layer only ever calls `engine.start(name, input)` and disposal —
- * it never inspects the registered workflow/activity types — so widening here is
- * safe and matches gateway's `Toolbox<any>` convention for invariant generics.
+ * it never inspects the registered workflow/activity types — so widening here
+ * is safe. `Engine` is a weft type we don't control; armorer's `Toolbox` has
+ * the analogous erased-supertype problem solved properly via `AnyToolbox`
+ * (see `create-toolbox.ts`) — this `any` is scoped to weft's invariant
+ * generics only.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Engine generics are invariant; the run layer never inspects the type parameters.
 export type AnyRunEngine = Engine<any, any>;

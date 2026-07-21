@@ -1,4 +1,4 @@
-import type { Toolbox, ToolExecutionResult } from 'armorer';
+import type { AnyToolbox, ToolExecutionResult } from 'armorer';
 import { Conversation, materializeToolCalls } from 'conversationalist';
 import type { ToolCall } from 'interoperability';
 import type { ZodType } from 'zod';
@@ -76,7 +76,7 @@ export const DEFAULT_MAXIMUM_STEPS = 25;
  */
 export interface StepDeps {
   readonly generate: RunOptions['generate'];
-  readonly toolbox: Toolbox;
+  readonly toolbox: AnyToolbox;
   readonly executeOptions: RunOptions['executeOptions'];
   readonly signal: AbortSignal | undefined;
   readonly collectAsync: boolean;
@@ -523,7 +523,7 @@ export async function runStep(
   emitter?.dispatch(new StepStartedEvent(conversation, step));
 
   // Resolve per-step toolbox
-  let stepToolbox: Toolbox = deps.toolbox;
+  let stepToolbox: AnyToolbox = deps.toolbox;
   for (const hook of deps.selectToolsHooks) {
     stepToolbox = await hook({ conversation, step, signal: stepSignal, abortStep, elicit });
   }

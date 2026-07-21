@@ -14,10 +14,10 @@ import {
 } from '@lostgradient/weft/storage';
 import type { ConditionalTextValueStore } from '@lostgradient/weft/storage/text-value-store';
 import {
+  type AnyToolbox,
   combineToolboxes,
   createTool,
   createToolbox,
-  type Toolbox,
   type ToolCallInput,
 } from 'armorer';
 import {
@@ -108,8 +108,7 @@ import type {
   ToolSummary,
 } from './types';
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any -- Toolbox generic variance; bureau never inspects the type parameter
-export type BureauToolbox = Toolbox<any>;
+export type BureauToolbox = AnyToolbox;
 
 /**
  * AB-40 — the enabled-by-default guardrail preset. Wired whenever
@@ -795,11 +794,7 @@ function createSkillStateSnapshotHook(
   };
 }
 
-function createSkillManagementToolbox(
-  provider: SkillProvider,
-  session: SkillSession,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Toolbox generic variance; bureau never inspects the type parameter
-): Toolbox<any> {
+function createSkillManagementToolbox(provider: SkillProvider, session: SkillSession): AnyToolbox {
   return createToolbox([
     createTool({
       name: 'activate_skill',
@@ -991,7 +986,7 @@ export interface RuntimeComposition {
     },
   ): Promise<{
     generate: GenerateFunction;
-    toolbox: Toolbox;
+    toolbox: AnyToolbox;
     prepareStep: PrepareStepHook[];
     onStep: OnStepHook[];
     validateResponse: ValidateResponseHook[];
@@ -1294,7 +1289,6 @@ export async function createRuntimeComposition(
     schedulerGenerate && options.scheduler?.enabled === true
       ? createScheduler({
           generate: schedulerGenerate,
-          // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment -- BureauToolbox variance; scheduler does not inspect tool tuple types
           toolbox: fallbackToolbox,
           idleDelay: options.scheduler?.idleDelay ?? 1000,
           // When a durable engine is composed, preemptable scheduler tasks run as
@@ -1372,8 +1366,7 @@ export async function createRuntimeComposition(
     // always creates a fresh toolbox — so cloning here also means the combined
     // result is based on a per-run clone, which is correct.
     //
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Toolbox generic variance; bureau never inspects the type parameter
-    let toolbox: Toolbox<any> =
+    let toolbox: AnyToolbox =
       options.toolbox !== undefined
         ? baseToolbox.extend()
         : hasSkillTools
@@ -1540,7 +1533,6 @@ export async function createRuntimeComposition(
       }),
       options: {
         generate: runRuntime.generate,
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment -- Toolbox generic variance; the durable layer never inspects the tool-tuple type parameter (matches createRunRuntime's internal Toolbox<any>).
         toolbox: runRuntime.toolbox,
         conversation: new Conversation(session.conversationHistory),
         maximumSteps: recoveredMaximumSteps,
@@ -1850,7 +1842,6 @@ export async function createRuntimeComposition(
       }),
       options: {
         generate: runRuntime.generate,
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment -- Toolbox generic variance; the durable layer never inspects the tool-tuple type parameter (matches createRunRuntime's internal Toolbox<any>).
         toolbox: runRuntime.toolbox,
         conversation,
         maximumSteps,

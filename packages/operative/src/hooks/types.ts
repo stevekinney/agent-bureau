@@ -1,4 +1,4 @@
-import type { Toolbox } from 'armorer';
+import type { AnyToolbox } from 'armorer';
 import type { Conversation } from 'conversationalist';
 
 import type { ResponseFormat, ToolChoice } from '../structured-output/types';
@@ -8,7 +8,7 @@ import type { GenerateResponse, RunResult, StepResult, TokenUsage } from '../typ
 export interface BeforeGenerateContext {
   conversation: Conversation;
   step: number;
-  toolbox: Toolbox;
+  toolbox: AnyToolbox;
   toolChoice?: ToolChoice;
   responseFormat?: ResponseFormat;
   signal?: AbortSignal;
@@ -42,7 +42,7 @@ export interface LLMOutputContext {
 /** Context passed to onRunStart hooks. */
 export interface RunStartContext {
   conversation: Conversation;
-  toolbox: Toolbox;
+  toolbox: AnyToolbox;
   maximumSteps: number;
 }
 

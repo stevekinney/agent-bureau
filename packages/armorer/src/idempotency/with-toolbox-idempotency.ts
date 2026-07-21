@@ -1,4 +1,4 @@
-import type { Toolbox } from '../create-toolbox';
+import type { AnyToolbox } from '../create-toolbox';
 import type { ToolCallInput, ToolExecutionResult } from '../types';
 import { claimCacheStarted, getCacheEntry } from './cache-operations';
 import { fullInputKey, namespacedKey } from './key-generators';
@@ -85,9 +85,9 @@ function shouldClearStartedStateForThrownError(error: unknown): boolean {
  * using `fullInputKey` as the default key generator.
  */
 export function withToolboxIdempotency(
-  toolbox: Toolbox,
+  toolbox: AnyToolbox,
   options: WithToolboxIdempotencyOptions,
-): Toolbox {
+): AnyToolbox {
   const { cache, defaultTTL = DEFAULT_TTL, requireExplicitKey = true } = options;
 
   function getKeyFn(toolName: string): ((input: unknown) => string) | undefined {

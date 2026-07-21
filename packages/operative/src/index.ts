@@ -507,6 +507,7 @@ export {
 export type {
   AfterGenerateHook,
   AfterToolExecutionHook,
+  AnyToolbox,
   BeforeGenerateHook,
   BeforeToolExecutionHook,
   ContextManagementOptions,
