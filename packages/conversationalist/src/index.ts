@@ -81,6 +81,7 @@ export {
   redactMessageAtPosition,
   replaceSystemMessage,
   resolveToolResult,
+  resolveToolResultAsync,
   searchConversationMessages,
   toChatMessages,
   validateConversationHistoryIntegrity,

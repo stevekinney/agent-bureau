@@ -83,4 +83,5 @@ export {
   materializeToolResults,
   materializeToolResultsAsync,
   resolveToolResult,
+  resolveToolResultAsync,
 } from './tool-interactions';

@@ -51,6 +51,7 @@ import {
   redactMessageAtPosition,
   replaceSystemMessage,
   resolveToolResult,
+  resolveToolResultAsync,
   searchConversationMessages,
   toChatMessages,
 } from './conversation/index';
@@ -1049,6 +1050,31 @@ export class Conversation {
   ): void {
     const previousConversation = this.current;
     const nextConversation = resolveToolResult(this.current, callId, toolResult, options, this.env);
+    this.pushWithEvents(
+      nextConversation,
+      'messages.updated',
+      this.createChangeContext(previousConversation, nextConversation, 'messages.updated'),
+    );
+  }
+
+  /**
+   * Async counterpart to {@link Conversation.resolveToolResult}: collects a
+   * streaming `toolResult` payload before replacing the pending result. See
+   * {@link resolveToolResultAsync}.
+   */
+  async resolveToolResultAsync(
+    callId: string,
+    toolResult: AppendableToolResult,
+    options?: Parameters<typeof resolveToolResultAsync>[3],
+  ): Promise<void> {
+    const previousConversation = this.current;
+    const nextConversation = await resolveToolResultAsync(
+      this.current,
+      callId,
+      toolResult,
+      options,
+      this.env,
+    );
     this.pushWithEvents(
       nextConversation,
       'messages.updated',

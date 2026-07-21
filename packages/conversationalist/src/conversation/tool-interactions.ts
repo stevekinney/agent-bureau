@@ -187,6 +187,105 @@ export async function appendToolResultsAsync(
 }
 
 /**
+ * Locates the single tool-result message for `callId`, or throws
+ * `error:not-found`/`error:integrity` per {@link resolveToolResult}'s
+ * documented not-found/ambiguous-match semantics. Shared by the sync and
+ * async entry points.
+ */
+function findToolResultMessageToReplace(
+  conversation: Conversation,
+  callId: string,
+): Message & { toolResult: ToolResult } {
+  const matches = getOrderedMessages(conversation).filter(
+    (message): message is Message & { toolResult: ToolResult } =>
+      message.role === 'tool-result' &&
+      message.toolResult !== undefined &&
+      message.toolResult.callId === callId,
+  );
+
+  const original = matches[0];
+  if (!original) {
+    throw createToolResultNotFoundError(callId);
+  }
+
+  if (matches.length > 1) {
+    throw createIntegrityError(`multiple tool-result messages found for callId: ${callId}`, {
+      callId,
+      messageIds: matches.map((message) => message.id),
+    });
+  }
+
+  return original;
+}
+
+/**
+ * Builds the replacement `Conversation` once a normalized `toolResult` and
+ * its target message have been resolved. Runs `environment.plugins` over a
+ * fresh `MessageInput` draft of the replacement content (the same pipeline
+ * `appendMessages` runs for newly-appended messages, e.g. PII redaction),
+ * then merges the processed result back onto the *original* message's
+ * `id`/`createdAt`/`position` — plugins can't run through
+ * `appendMessages`'s own pipeline here, since that pipeline treats any
+ * input carrying an `id` as an already-processed prebuilt `Message` and
+ * skips plugins entirely, which is exactly the case for this in-place
+ * replacement.
+ */
+function replaceToolResultMessage(
+  conversation: Conversation,
+  original: Message & { toolResult: ToolResult },
+  normalizedToolResult: ToolResult,
+  resolvedOptions: AppendToolResultOptions | undefined,
+  resolvedEnvironment: ConversationEnvironment,
+): Conversation {
+  const draftInput: MessageInput = {
+    role: 'tool-result',
+    content:
+      resolvedOptions?.content ??
+      (typeof original.content === 'string' ? original.content : [...original.content]),
+    metadata: { ...(resolvedOptions?.metadata ?? original.metadata) },
+    hidden: resolvedOptions?.hidden ?? original.hidden,
+    toolResult: normalizedToolResult,
+    tokenUsage: resolvedOptions?.tokenUsage ?? original.tokenUsage,
+    cacheBoundary: original.cacheBoundary,
+  };
+  const processedInput = resolvedEnvironment.plugins.reduce(
+    (acc, plugin) => plugin(acc),
+    draftInput,
+  );
+
+  const now = resolvedEnvironment.now();
+  const replaced = createMessage({
+    id: original.id,
+    role: original.role,
+    content: processedInput.content,
+    position: original.position,
+    createdAt: original.createdAt,
+    metadata: { ...(processedInput.metadata ?? {}) },
+    hidden: processedInput.hidden ?? false,
+    toolResult: processedInput.toolResult,
+    tokenUsage: processedInput.tokenUsage,
+    cacheBoundary: processedInput.cacheBoundary,
+  });
+
+  const next: Conversation = {
+    ...conversation,
+    ids: [...conversation.ids],
+    messages: { ...conversation.messages, [replaced.id]: replaced },
+    updatedAt: now,
+  };
+  return ensureConversationSafe(toReadonly(next));
+}
+
+function assertMatchingCallId(callId: string, normalizedToolResult: ToolResult): void {
+  if (normalizedToolResult.callId !== callId) {
+    throw createInvalidInputError(
+      `toolResult.callId (${normalizedToolResult.callId}) does not match callId (${callId})`,
+      { callId, toolResultCallId: normalizedToolResult.callId },
+    );
+  }
+}
+
+/**
  * Replaces the tool-result message for `callId` with a new result, in
  * place — producing exactly one tool-result message for that call
  * afterwards. This is the primitive a host needs to turn a pending
@@ -211,14 +310,17 @@ export async function appendToolResultsAsync(
  *
  * `content`/`metadata`/`hidden`/`tokenUsage` default to the original
  * message's values and can be overridden via `options`, same as
- * {@link appendToolResult}.
+ * {@link appendToolResult}. `environment.plugins` (e.g. PII redaction) run
+ * over the replacement content, same as a freshly appended tool result.
  *
  * Throws `error:not-found` if no tool-result message exists for `callId`,
  * `error:integrity` if more than one does (an already-malformed
  * conversation state — replacing one of several would silently guess which
  * one the caller meant), and `error:invalid-input` if `toolResult.callId`
  * disagrees with `callId` (replacing the wrong message silently would be
- * worse than refusing).
+ * worse than refusing). Rejects streaming `toolResult` payloads the same
+ * way {@link appendToolResult} does — use {@link resolveToolResultAsync}
+ * for those.
  */
 export function resolveToolResult(
   conversation: Conversation,
@@ -232,56 +334,51 @@ export function resolveToolResult(
     ? options
     : environment;
 
-  const matches = getOrderedMessages(conversation).filter(
-    (message): message is Message & { toolResult: ToolResult } =>
-      message.role === 'tool-result' &&
-      message.toolResult !== undefined &&
-      message.toolResult.callId === callId,
-  );
-
-  const original = matches[0];
-  if (!original) {
-    throw createToolResultNotFoundError(callId);
-  }
-
-  if (matches.length > 1) {
-    throw createIntegrityError(`multiple tool-result messages found for callId: ${callId}`, {
-      callId,
-      messageIds: matches.map((message) => message.id),
-    });
-  }
-
+  const original = findToolResultMessageToReplace(conversation, callId);
   const normalizedToolResult = materializeToolResult(toolResult);
-  if (normalizedToolResult.callId !== callId) {
-    throw createInvalidInputError(
-      `toolResult.callId (${normalizedToolResult.callId}) does not match callId (${callId})`,
-      { callId, toolResultCallId: normalizedToolResult.callId },
-    );
-  }
+  assertMatchingCallId(callId, normalizedToolResult);
 
   const resolvedEnvironment = resolveConversationEnvironment(resolvedEnvironmentInput);
-  const now = resolvedEnvironment.now();
+  return replaceToolResultMessage(
+    conversation,
+    original,
+    normalizedToolResult,
+    resolvedOptions,
+    resolvedEnvironment,
+  );
+}
 
-  const replaced = createMessage({
-    id: original.id,
-    role: original.role,
-    content: resolvedOptions?.content ?? original.content,
-    position: original.position,
-    createdAt: original.createdAt,
-    metadata: { ...(resolvedOptions?.metadata ?? original.metadata) },
-    hidden: resolvedOptions?.hidden ?? original.hidden,
-    toolResult: normalizedToolResult,
-    tokenUsage: resolvedOptions?.tokenUsage ?? original.tokenUsage,
-    cacheBoundary: original.cacheBoundary,
-  });
+/**
+ * Async counterpart to {@link resolveToolResult}: collects a streaming
+ * `toolResult` payload (as returned by `toolbox.resumeApproval()` when the
+ * resumed tool streams its output) before replacing the pending result, the
+ * same relationship {@link appendToolResultAsync} has to
+ * {@link appendToolResult}.
+ */
+export async function resolveToolResultAsync(
+  conversation: Conversation,
+  callId: string,
+  toolResult: AppendableToolResult,
+  options?: AppendToolResultOptions,
+  environment?: Partial<ConversationEnvironment>,
+): Promise<Conversation> {
+  const resolvedOptions = isConversationEnvironmentParameter(options) ? undefined : options;
+  const resolvedEnvironmentInput = isConversationEnvironmentParameter(options)
+    ? options
+    : environment;
 
-  const next: Conversation = {
-    ...conversation,
-    ids: [...conversation.ids],
-    messages: { ...conversation.messages, [replaced.id]: replaced },
-    updatedAt: now,
-  };
-  return ensureConversationSafe(toReadonly(next));
+  const original = findToolResultMessageToReplace(conversation, callId);
+  const normalizedToolResult = await materializeToolResultAsync(toolResult);
+  assertMatchingCallId(callId, normalizedToolResult);
+
+  const resolvedEnvironment = resolveConversationEnvironment(resolvedEnvironmentInput);
+  return replaceToolResultMessage(
+    conversation,
+    original,
+    normalizedToolResult,
+    resolvedOptions,
+    resolvedEnvironment,
+  );
 }
 
 /**
