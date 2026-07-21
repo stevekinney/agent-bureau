@@ -13,7 +13,6 @@ import type {
   RetryOptions,
   RunOptions,
   StopCondition,
-  ToolExecutionResult,
 } from './types';
 
 // ---------------------------------------------------------------------------
@@ -173,54 +172,6 @@ export interface StandaloneAgent {
 export type { AgentRun };
 
 // ---------------------------------------------------------------------------
-// resolvePendingApprovalResult — the park-on-approval resume helper
-// ---------------------------------------------------------------------------
-
-/**
- * Resolves a pending approval in a `Conversation` in place, for the
- * `stopWhen.pendingApproval()` resume recipe (see `createAgent`'s stateless
- * chat host example above).
- *
- * The agent loop unconditionally appends whatever `ToolExecutionResult` a
- * tool call produced — including a pending approval's `action_required`
- * result — to the conversation *before* evaluating stop conditions.
- * `stopWhen.pendingApproval()` then stops the loop right there, so by the
- * time a host holds the `RunResult`, the conversation already contains that
- * pending result as a real message. Simply appending `toolbox.resumeApproval()`'s
- * resolved result on top would leave TWO tool-result messages for the same
- * call — most providers reject that (or behave unpredictably) on the next
- * turn.
- *
- * This function undoes that pending-result commit and appends the resolved
- * result in its place, so the conversation ends up with exactly one
- * tool-result message for the call. It only undoes when the pending result
- * is still the conversation's most recent message — a safety check, not an
- * assumption: if anything else was appended after it (e.g. the host didn't
- * call this immediately after resuming), undoing would remove the wrong
- * commit, so this returns `false` and changes nothing instead.
- *
- * @returns `true` if the pending result was replaced; `false` if the
- * conversation's last message wasn't the matching pending result (nothing
- * was changed — inspect `conversation.current` before appending manually).
- */
-export function resolvePendingApprovalResult(
-  conversation: Conversation,
-  resolvedResult: ToolExecutionResult,
-): boolean {
-  const history = conversation.current;
-  const lastId = history.ids.at(-1);
-  const lastMessage = lastId ? history.messages[lastId] : undefined;
-
-  if (lastMessage?.toolResult?.callId !== resolvedResult.callId) {
-    return false;
-  }
-
-  conversation.undo();
-  conversation.appendToolResults([resolvedResult]);
-  return true;
-}
-
-// ---------------------------------------------------------------------------
 // createAgent — the public factory
 // ---------------------------------------------------------------------------
 
@@ -248,7 +199,7 @@ export function resolvePendingApprovalResult(
  * @example Stateless chat host with a shared toolbox and park-on-approval
  * ```ts
  * import { createToolbox } from 'armorer';
- * import { createAgent, resolvePendingApprovalResult, stopWhen } from 'operative';
+ * import { createAgent, stopWhen } from 'operative';
  *
  * // Built once per process — the stable approvalSecret is what makes
  * // resumeApproval() work across separate HTTP requests.
@@ -257,7 +208,10 @@ export function resolvePendingApprovalResult(
  * const agent = createAgent({
  *   generate: myProvider,
  *   toolbox,
- *   stopWhen: stopWhen.pendingApproval(),
+ *   // Combined with noToolCalls(): pendingApproval() alone never stops a
+ *   // normal, no-tool-call turn, so a plain text reply would otherwise run
+ *   // to maximumSteps instead of finishing.
+ *   stopWhen: [stopWhen.pendingApproval(), stopWhen.noToolCalls()],
  * });
  *
  * // Turn 1: run from the client-POSTed history.
@@ -266,12 +220,17 @@ export function resolvePendingApprovalResult(
  * const pending = result.steps.at(-1)?.results.find((r) => r.pendingApproval)?.pendingApproval;
  * // ...send `pending` to a human, store `result.conversation.current` server-side...
  *
- * // Later, on approval: resume on the SAME toolbox instance, resolve the
- * // pending result in place on the stored `result.conversation` — replacing
- * // it, not appending alongside it — then start a fresh run from `.current`.
+ * // Later, on approval: resume on the SAME toolbox instance.
  * const resumedResult = await toolbox.resumeApproval(signedApproval);
- * resolvePendingApprovalResult(result.conversation, resumedResult);
- * const nextRun = agent.run({ conversation: result.conversation.current });
+ * // `result.conversation` already has an `action_required` tool-result for
+ * // this call (the loop appends it before stopWhen ever runs) — appending
+ * // `resumedResult` on top would leave two results for the same call, which
+ * // most providers reject on the next turn. There is currently no public
+ * // API to replace it in place; see
+ * // https://github.com/stevekinney/agent-bureau/issues/267 for the missing
+ * // primitive. Until it lands, the host is responsible for reconciling
+ * // `resumedResult` into the stored history itself before starting the next
+ * // run — this package does not (yet) provide a safe helper for that step.
  * ```
  */
 export function createAgent(options: CreateAgentOptions): StandaloneAgent {

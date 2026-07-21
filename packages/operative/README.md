@@ -148,11 +148,11 @@ A host with a browser- or client-owned conversation and an approval-gated toolbo
 
 1. **A conversation input**, not just a fresh string: `agent.run({ conversation })` starts the loop from an existing `ConversationHistory` — the shape a stateless backend POSTs and stores between turns.
 2. **A pre-built `Toolbox`**, not a freshly composed one: pass `toolbox` instead of `tools`. The same instance is reused across every `run()` call, which is required for armorer's cross-request approval flow — `toolbox.resumeApproval(signedApproval)` only verifies a token signed by the toolbox's own `approvalSecret`.
-3. **Park-on-approval**, not headless denial: `stopWhen: stopWhen.pendingApproval()` (from `operative/conditions`) stops the run cleanly after a step whose tool results include a pending approval — no further `generate` call happens, and the pending approval stays reachable on the final `RunResult`'s last step.
+3. **Park-on-approval**, not headless denial: `stopWhen: [stopWhen.pendingApproval(), stopWhen.noToolCalls()]` (from `operative/conditions`) stops the run cleanly after a step whose tool results include a pending approval — no further `generate` call happens, and the pending approval stays reachable on the final `RunResult`'s last step. `noToolCalls()` has to be combined in: `pendingApproval()` alone never fires on a normal, no-tool-call turn, so a plain text reply would otherwise run to `maximumSteps` instead of finishing.
 
 ```typescript
 import { createToolbox } from 'armorer';
-import { createAgent, resolvePendingApprovalResult, stopWhen } from 'operative';
+import { createAgent, stopWhen } from 'operative';
 
 // Built once per process — the stable approvalSecret is what makes
 // resumeApproval() work across separate HTTP requests.
@@ -161,7 +161,7 @@ const toolbox = createToolbox([deleteFileTool], { approvalSecret: Bun.env['APPRO
 const agent = createAgent({
   generate: myProvider,
   toolbox,
-  stopWhen: stopWhen.pendingApproval(),
+  stopWhen: [stopWhen.pendingApproval(), stopWhen.noToolCalls()],
 });
 
 // Turn 1: run from the client-POSTed history.
@@ -170,17 +170,12 @@ const result = await run.result();
 const pending = result.steps.at(-1)?.results.find((r) => r.pendingApproval)?.pendingApproval;
 // ...send `pending` to a human, store `result.conversation.current` server-side...
 
-// Later, on approval: resume on the SAME toolbox instance...
+// Later, on approval: resume on the SAME toolbox instance.
 const resumedResult = await toolbox.resumeApproval(signedApproval);
-// ...resolve the pending result IN PLACE on the stored conversation — this
-// replaces the action_required result the loop already appended, it does
-// NOT append a second result for the same call...
-resolvePendingApprovalResult(result.conversation, resumedResult);
-// ...and start a fresh run from the updated history. Fully stateless server-side.
-const nextRun = agent.run({ conversation: result.conversation.current });
 ```
 
-The loop appends whatever tool result a call produces — including a pending approval's `action_required` result — before `stopWhen.pendingApproval()` ever runs, so the conversation already contains that pending result by the time you hold the `RunResult`. Appending the resumed result on top of it would leave two tool-results for the same call, which most providers reject on the next turn. `resolvePendingApprovalResult` undoes that pending-result commit and appends the resolved result in its place — but only when it's still the conversation's most recent message, so it's a safe no-op (returns `false`, changes nothing) if you don't call it immediately after resuming.
+> [!WARNING] Resuming into the conversation is not yet a supported recipe
+> `result.conversation` already has an `action_required` tool-result for this call — the loop appends it before `stopWhen` ever runs. Appending `resumedResult` on top of it would leave two tool-results for the same call, which most providers reject (or mishandle) on the next turn, and there is currently no public API to replace it in place instead. `Conversation.undo()` looked like a fix but isn't one: it operates on the in-process undo/redo graph, which a `Conversation` rehydrated from a persisted `ConversationHistory` (exactly the case on every resumed request) doesn't have in the same shape. [Issue #267](https://github.com/stevekinney/agent-bureau/issues/267) tracks the missing conversationalist primitive. Until it lands, reconciling `resumedResult` into the stored history before starting the next run is the host's responsibility.
 
 **Mutation ownership:** `agent.run({ conversation })` SNAPSHOTS the supplied `ConversationHistory` — it clones the value before wrapping it in a fresh internal `Conversation`, so the run's state and the object you passed in are independent from the moment `run()` is called: the run never mutates your object, and mutations you make to it afterward (a stateless host commonly keeps a mutable reference between turns) never leak into an in-flight run. This matches the durable path's existing snapshot semantics. `instructions` is not re-appended on this path; the supplied history is assumed to already carry whatever system context it needs, so resuming it repeatedly never duplicates system messages.
 

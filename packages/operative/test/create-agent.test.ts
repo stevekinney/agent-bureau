@@ -19,7 +19,7 @@ import { Conversation } from 'conversationalist';
 import { z } from 'zod';
 
 import { noToolCalls, pendingApproval } from '../src/conditions/predicates';
-import { createAgent, resolvePendingApprovalResult } from '../src/create-agent';
+import { createAgent } from '../src/create-agent';
 import type { ConversationHistory, GenerateFunction, GenerateResponse } from '../src/types';
 
 // ---------------------------------------------------------------------------
@@ -708,83 +708,6 @@ describe('createAgent — conversation resume', () => {
 });
 
 // ---------------------------------------------------------------------------
-// resolvePendingApprovalResult (AB-258)
-// ---------------------------------------------------------------------------
-
-describe('resolvePendingApprovalResult', () => {
-  it('replaces the pending action_required result with the resolved result, leaving exactly one tool-result message for the call', () => {
-    const conversation = new Conversation();
-    conversation.appendUserMessage('Please charge $5.00');
-    conversation.appendToolCalls([
-      { id: 'call-1', name: 'charge-card', arguments: { cents: 500 } },
-    ]);
-    conversation.appendToolResults([
-      {
-        callId: 'call-1',
-        toolCallId: 'call-1',
-        toolName: 'charge-card',
-        outcome: 'action_required',
-        content: undefined,
-        result: undefined,
-      },
-    ]);
-
-    const resolved = resolvePendingApprovalResult(conversation, {
-      callId: 'call-1',
-      toolCallId: 'call-1',
-      toolName: 'charge-card',
-      outcome: 'success',
-      content: { charged: 500 },
-      result: { charged: 500 },
-    });
-
-    expect(resolved).toBe(true);
-
-    const toolResultMessages = conversation
-      .getMessages()
-      .filter((m) => m.role === 'tool-result') as unknown as { toolResult?: { outcome: string } }[];
-    expect(toolResultMessages).toHaveLength(1);
-    expect(toolResultMessages[0]?.toolResult?.outcome).toBe('success');
-  });
-
-  it("is a safe no-op when the pending result is not the conversation's last message", () => {
-    const conversation = new Conversation();
-    conversation.appendUserMessage('Please charge $5.00');
-    conversation.appendToolCalls([
-      { id: 'call-1', name: 'charge-card', arguments: { cents: 500 } },
-    ]);
-    conversation.appendToolResults([
-      {
-        callId: 'call-1',
-        toolCallId: 'call-1',
-        toolName: 'charge-card',
-        outcome: 'action_required',
-        content: undefined,
-        result: undefined,
-      },
-    ]);
-    // Something else got appended after the pending result — the pending
-    // result is no longer the last message.
-    conversation.appendUserMessage('unrelated follow-up');
-
-    const beforeCount = conversation.getMessages().length;
-
-    const resolved = resolvePendingApprovalResult(conversation, {
-      callId: 'call-1',
-      toolCallId: 'call-1',
-      toolName: 'charge-card',
-      outcome: 'success',
-      content: { charged: 500 },
-      result: { charged: 500 },
-    });
-
-    expect(resolved).toBe(false);
-    // Nothing was changed.
-    expect(conversation.getMessages()).toHaveLength(beforeCount);
-  });
-});
-
-// ---------------------------------------------------------------------------
 // Park-on-approval (AB-258) — stopWhen.pendingApproval()
 // ---------------------------------------------------------------------------
 
@@ -836,7 +759,7 @@ describe('createAgent — park-on-approval', () => {
     const agent = createAgent({
       generate,
       toolbox,
-      stopWhen: pendingApproval(),
+      stopWhen: [pendingApproval(), noToolCalls()],
     });
 
     const result = await agent.run('Please charge $5.00').result();
@@ -858,20 +781,30 @@ describe('createAgent — park-on-approval', () => {
     expect(resumed.outcome).toBe('success');
   });
 
-  it('round-trip: resumed result appended to history, new run started from it, model sees the tool result', async () => {
+  it('pendingApproval() ALONE (not combined with noToolCalls()) never stops a normal, no-tool-call turn — regression for the documented recipe', async () => {
+    // A plain text-only reply: no tool call, no pending approval. Without
+    // noToolCalls() in the mix, stopWhen: pendingApproval() has no exit
+    // condition for this turn at all — the loop runs to maximumSteps instead
+    // of finishing normally. This is why the README/JSDoc recipe combines
+    // pendingApproval() with noToolCalls().
+    const agent = createAgent({
+      generate: singleResponse('Just a normal reply, no tools involved.'),
+      stopWhen: pendingApproval(),
+      maximumSteps: 3,
+    });
+
+    const result = await agent.run('hello').result();
+
+    expect(result.finishReason).toBe('maximum-steps');
+  });
+
+  it('resumeApproval on the SAME toolbox instance resolves the pending approval to a success outcome', async () => {
     const { toolbox } = buildApprovalGatedToolbox('host-secret');
 
     let generateCallCount = 0;
-    let secondRunConversation: unknown[] = [];
-    const generate: GenerateFunction = async ({ conversation, step }) => {
+    const generate: GenerateFunction = async () => {
       generateCallCount++;
-      if (generateCallCount === 1) {
-        return toolCallResponse([{ name: 'charge-card', arguments: { cents: 500 } }]);
-      }
-      // Second run's first (and only) generate call.
-      secondRunConversation = conversation.getMessages();
-      void step;
-      return textResponse('Charge complete.');
+      return toolCallResponse([{ name: 'charge-card', arguments: { cents: 500 } }]);
     };
 
     const agent = createAgent({
@@ -886,26 +819,20 @@ describe('createAgent — park-on-approval', () => {
       ?.results.find((r) => r.pendingApproval)?.pendingApproval;
     const signed = pending as SignedPendingToolApproval;
 
+    // Resuming on the host's own toolbox instance verifies the token (same
+    // approvalSecret that minted it) and actually executes the tool.
+    //
+    // NOTE: there is currently no supported public API to fold `resumed`
+    // back into `firstResult.conversation` without producing a malformed
+    // conversation (two tool-results for one callId) — see
+    // https://github.com/stevekinney/agent-bureau/issues/267. Reconciling
+    // the resumed result into a stored ConversationHistory before starting
+    // the next run is deliberately out of scope here until that primitive
+    // exists; this test covers what IS supported today: park-on-approval and
+    // toolbox-level resumption.
+    expect(generateCallCount).toBe(1);
     const resumed = await toolbox.resumeApproval(signed);
-
-    // Resolve the pending result IN PLACE on the (snapshotted) conversation
-    // from the first run — replacing the action_required result the loop
-    // already appended, not appending a second result alongside it.
-    const replaced = resolvePendingApprovalResult(firstResult.conversation, resumed);
-    expect(replaced).toBe(true);
-    const updatedHistory = firstResult.conversation.current;
-
-    await agent.run({ conversation: updatedHistory }).result();
-
-    expect(generateCallCount).toBe(2);
-    const toolResultMessages = secondRunConversation.filter(
-      (m) => (m as { role: string }).role === 'tool-result',
-    ) as { toolResult?: { callId: string; outcome: string } }[];
-
-    // Exactly ONE tool-result — not two for the same call — and the model
-    // sees the RESOLVED (`success`) outcome, not the stale pending one.
-    expect(toolResultMessages).toHaveLength(1);
-    expect(toolResultMessages[0]?.toolResult?.outcome).toBe('success');
-    expect(toolResultMessages[0]?.toolResult?.callId).toBe(resumed.callId);
+    expect(resumed.outcome).toBe('success');
+    expect(resumed.callId).toBe(signed.callId);
   });
 });
