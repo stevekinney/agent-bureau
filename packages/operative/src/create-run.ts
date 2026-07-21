@@ -66,10 +66,21 @@ export interface ActiveRun {
 /**
  * Creates an event-emitting agent loop run.
  *
- * Internal factory — NOT part of the public API. External callers should use
- * `createAgent` (which wraps this in an `AgentRun`) or `createSessionHandle`
- * (which also wraps the result). Scheduler and durable adapter consume this
- * directly because they need the raw event surface.
+ * Public, documented API — the full-control factory behind `createAgent`,
+ * `createSessionHandle`, and bureau-owned agents alike. It accepts the
+ * complete `RunOptions` bag directly: an existing `Conversation` or
+ * `ConversationHistory`, a pre-built `Toolbox` instance, hooks, and durable
+ * routing. `bureau` and `evaluation` both depend on it as first-party
+ * consumers, not just internal plumbing.
+ *
+ * Most callers should reach for `createAgent({...}).run(...)` instead — it
+ * wraps this in the higher-level `AgentRun` handle and covers the common
+ * bureau-less cases (fresh string input, name-keyed tools, headless
+ * permissions, or a resumed `ConversationHistory` with an injected
+ * `Toolbox`). Use `createActiveRun` directly when you need something
+ * `createAgent` doesn't expose — e.g. an already-live `Conversation`
+ * instance (rather than a plain `ConversationHistory`), durable routing, or
+ * a pre-built emitter to bind tool dispatches to.
  *
  * When `durable` is provided (engine + checkpoint store + runId), the run is
  * driven through the Weft durable engine so it survives a crash and resumes.
@@ -102,7 +113,13 @@ export function createActiveRun(options: RunOptions, durable?: DurableRunRouting
 
   const conversation = isConversation(options.conversation)
     ? options.conversation
-    : new Conversation(options.conversation);
+    : // Snapshot a plain `ConversationHistory` on the way in, matching
+      // `createAgent` and the durable path. `Conversation` keeps the object it
+      // is constructed with, and the run starts on a later microtask, so a
+      // stateless host that mutates its stored history after this returns would
+      // otherwise corrupt the in-flight run. `ConversationHistory` is a
+      // structuredClone-safe tree — see `durable/types.ts`.
+      new Conversation(structuredClone(options.conversation));
 
   const loopOptions: RunOptions = {
     ...options,

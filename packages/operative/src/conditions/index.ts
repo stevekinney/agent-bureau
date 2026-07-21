@@ -8,6 +8,7 @@ import {
   maximumSteps,
   not,
   noToolCalls,
+  pendingApproval,
   repeatingToolCalls,
   some,
   tokenBudget,
@@ -24,6 +25,7 @@ export {
   maximumSteps,
   not,
   noToolCalls,
+  pendingApproval,
   repeatingToolCalls,
   some,
   tokenBudget,
@@ -59,4 +61,5 @@ export const stopWhen = {
   tokenBudget,
   wallClockTimeout,
   costBudget,
+  pendingApproval,
 } as const;
