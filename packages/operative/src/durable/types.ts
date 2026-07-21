@@ -1,4 +1,4 @@
-import type { Toolbox, ToolExecutionResult } from 'armorer';
+import type { AnyToolbox, ToolExecutionResult } from 'armorer';
 import type { ConversationSnapshot } from 'conversationalist';
 import type { JSONValue, ToolCall } from 'interoperability';
 
@@ -77,9 +77,6 @@ export interface RunCheckpoint {
   /** Completed step records in step order. */
   steps: StepRecord[];
 }
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any -- Toolbox generic variance; the durable layer never inspects the tool-tuple type parameter (matches gateway's GatewayToolbox).
-type AnyToolbox = Toolbox<any>;
 
 /**
  * A pending self-wakeup registered by the `scheduleWakeup` tool during a run.

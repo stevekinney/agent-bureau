@@ -1,4 +1,3 @@
-import type { Toolbox } from 'armorer';
 import { createToolbox } from 'armorer';
 
 import type { GenerateFunction, RunOptions, StepContext } from './types';
@@ -33,7 +32,7 @@ export function createEarlyStoppingHandler(
       conversation: context.conversation,
       step: context.step,
       signal: context.signal,
-      toolbox: createToolbox() as unknown as Toolbox,
+      toolbox: createToolbox(),
     });
 
     return response.content;

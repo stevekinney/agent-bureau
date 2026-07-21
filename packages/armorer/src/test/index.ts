@@ -1,12 +1,10 @@
 import { z } from 'zod';
 
 import { createTool } from '../create-tool';
-import { createToolbox, type Toolbox, type ToolboxEntries } from '../create-toolbox';
+import { type AnyToolbox, createToolbox, type ToolboxEntries } from '../create-toolbox';
 import type { ToolboxEventMap } from '../events';
 import type { Tool, ToolCallWithArguments } from '../is-tool';
 import type { ToolExecutionResult } from '../types';
-
-type AnyToolbox = Toolbox<any>;
 
 export type MockToolOptions<TInput = any, TOutput = any> = {
   name?: string;
@@ -113,7 +111,7 @@ export function createTestRegistry(entries: ToolboxEntries = []): TestRegistry {
   return createTestToolbox(entries);
 }
 
-export function createToolboxRecorder(toolbox: Toolbox): ToolboxRecorder {
+export function createToolboxRecorder(toolbox: AnyToolbox): ToolboxRecorder {
   const events: ToolboxRecorder['events'] = [];
   const subscriptions = [
     toolbox.addEventListener('call', (event) => {

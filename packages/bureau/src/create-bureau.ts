@@ -1018,7 +1018,6 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       const activeRun = createActiveRun(
         {
           generate: runRuntime.generate,
-          // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment -- Toolbox generic variance; bureau never inspects the tool-tuple type parameter (matches createRunRuntime's internal Toolbox<any> usage elsewhere in this package).
           toolbox: runToolbox,
           conversation,
           maximumSteps: request.maximumSteps ?? runtime.maximumSteps,

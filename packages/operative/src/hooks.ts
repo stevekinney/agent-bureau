@@ -1,4 +1,4 @@
-import type { Toolbox, ToolExecutionResult } from 'armorer';
+import type { AnyToolbox, ToolExecutionResult } from 'armorer';
 import type { Message } from 'conversationalist';
 import type { ToolCall } from 'interoperability';
 import type { HookMap } from 'lifecycle';
@@ -219,7 +219,7 @@ export interface OperativeHookMap extends HookMap {
   beforeToolExecution: (context: ToolExecutionHookContext) => Promise<ToolCall[]>;
   afterToolExecution: (context: ToolExecutionResultContext) => Promise<void>;
   onStep: (result: StepResult) => Promise<void>;
-  selectTools: (context: StepContext) => Promise<Toolbox>;
+  selectTools: (context: StepContext) => Promise<AnyToolbox>;
   validateResponse: (
     response: GenerateResponse,
     context: StepContext,

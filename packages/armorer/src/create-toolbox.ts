@@ -547,6 +547,45 @@ export interface Toolbox<TTools extends readonly Tool[] = readonly Tool[]> {
   createLoopDetector: (options?: LoopDetectionOptions) => LoopDetectorInstance;
 }
 
+/**
+ * An erased `Toolbox` whose tool-tuple type parameter has been widened away.
+ *
+ * `Toolbox<TTools>` is invariant in `TTools`: the tuple appears in both input
+ * and output positions (the typed `execute` overloads, `extend`, `tools`,
+ * `getAvailable`, and `getTool`), so a concretely-typed
+ * `Toolbox<ConcreteTools>` (what `createToolbox([...])` returns) is not
+ * assignable to the bare `Toolbox<readonly Tool[]>` default — TypeScript has
+ * to check both directions, and the concrete tuple loses information in the
+ * direction that matters.
+ *
+ * `AnyToolbox` sidesteps that by being a genuine supertype instead of relying
+ * on the invariant generic's default: every member that doesn't depend on
+ * `TTools` is carried over unchanged via `Omit`, and the handful that do are
+ * redeclared against the untyped, tuple-independent overloads that already
+ * exist on `Toolbox` (its untyped `execute(call: ToolCallInput, ...)`
+ * overloads, `readonly Tool[]` for `tools`/`getAvailable`/`getTool`). Any
+ * `Toolbox<TTools>`, for any `TTools`, structurally satisfies `AnyToolbox`
+ * with no cast.
+ *
+ * Use `AnyToolbox` wherever a toolbox is accepted or stored but only ever
+ * executed generically — its tool tuple is never inspected for compile-time
+ * call/result typing (e.g. `CreateAgentOptions.toolbox`, a bureau's
+ * pre-built toolbox). Use `Toolbox<TTools>` (with an inferred `TTools`) when
+ * the tuple-aware `execute` overloads are actually exercised.
+ */
+export interface AnyToolbox extends Omit<
+  Toolbox,
+  'execute' | 'extend' | 'tools' | 'getAvailable' | 'getTool'
+> {
+  execute(call: ToolCallInput, options?: ToolboxExecuteOptions): Promise<ToolExecutionResult>;
+  execute(calls: ToolCallInput[], options?: ToolboxExecuteOptions): Promise<ToolExecutionResult[]>;
+  extend(...entries: ToolboxEntries): AnyToolbox;
+  extend(toolbox: Toolbox | AnyToolbox): AnyToolbox;
+  tools: () => readonly Tool[];
+  getAvailable: () => Promise<readonly Tool[]>;
+  getTool(nameOrId: string): Tool | undefined;
+}
+
 export interface LoopDetectorInstance {
   /**
    * Detect if a loop is currently happening.

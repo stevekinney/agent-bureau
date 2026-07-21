@@ -27,6 +27,7 @@ export type { ToolAvailabilityContext, ToolAvailabilityHook } from './core/tool-
 export type { CreateToolOptions, WithContext } from './create-tool';
 export { createTool, createToolCall, lazy, withContext } from './create-tool';
 export type {
+  AnyToolbox,
   ImportedToolboxOptions,
   ImportedToolConfiguration,
   LoopDetectionOptions,
@@ -40,6 +41,7 @@ export type {
   ToolboxEntries,
   ToolboxEntry,
   ToolboxEvents,
+  ToolboxExecuteOptions,
   ToolboxOptions,
   ToolboxRuntimeContext,
   ToolMiddleware,

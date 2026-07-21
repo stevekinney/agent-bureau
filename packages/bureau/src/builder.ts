@@ -29,7 +29,7 @@
  *   with bureau defaults, and an `AgentRun` is produced via `createActiveRun`.
  */
 
-import type { Tool, Toolbox } from 'armorer';
+import type { AnyToolbox, Tool } from 'armorer';
 import { combineToolboxes, createTool, createToolbox, isTool } from 'armorer';
 import { Conversation } from 'conversationalist';
 import type { AgentRun, GenerateFunction, PrepareStepHook, RunOptions } from 'operative';
@@ -62,7 +62,7 @@ interface AgentSpec {
   readonly generate?: GenerateFunction;
   readonly hooks?: PrepareStepHook | PrepareStepHook[];
   /** Agent-level toolbox built from the agent's own tools map. */
-  readonly toolbox?: Toolbox;
+  readonly toolbox?: AnyToolbox;
   /** Per-agent skill filtering policy. */
   readonly skillPolicy?: SkillPolicy;
 }
@@ -73,7 +73,7 @@ interface AgentSpec {
  */
 interface BureauState {
   /** The bureau-level toolbox (from accumulated `.tools()` calls). */
-  bureauToolbox: Toolbox | undefined;
+  bureauToolbox: AnyToolbox | undefined;
   /** The bureau's default generate function. */
   bureauGenerate: GenerateFunction | undefined;
   /** Bureau-level prepare-step hooks (run for every agent, bureau-first). */
@@ -112,7 +112,7 @@ interface BureauState {
  * with a name mismatch are re-configured via `createToolbox` with a
  * name-override entry.
  */
-function toolboxFromMap(toolsMap: Record<string, unknown>): Toolbox {
+function toolboxFromMap(toolsMap: Record<string, unknown>): AnyToolbox {
   const entries: Array<Tool | ({ name: string } & Record<string, unknown>)> = [];
 
   for (const [key, value] of Object.entries(toolsMap)) {
@@ -203,14 +203,14 @@ function toolboxFromMap(toolsMap: Record<string, unknown>): Toolbox {
  * per run).
  */
 function mergeToolboxes(
-  bureau: Toolbox | undefined,
-  agent: Toolbox | undefined,
-): Toolbox | undefined {
+  bureau: AnyToolbox | undefined,
+  agent: AnyToolbox | undefined,
+): AnyToolbox | undefined {
   if (bureau && agent) {
-    return combineToolboxes(bureau, agent) as unknown as Toolbox;
+    return combineToolboxes(bureau, agent);
   }
   const single = bureau ?? agent;
-  return single !== undefined ? (single.extend() as Toolbox) : undefined;
+  return single !== undefined ? single.extend() : undefined;
 }
 
 /**
@@ -346,10 +346,7 @@ function makeBureauHandle<
     tools<TNew extends ToolMapInput>(toolsMap: TNew) {
       const newToolbox = toolboxFromMap(toolsMap as Record<string, unknown>);
       if (state.bureauToolbox) {
-        state.bureauToolbox = combineToolboxes(
-          state.bureauToolbox,
-          newToolbox,
-        ) as unknown as Toolbox;
+        state.bureauToolbox = combineToolboxes(state.bureauToolbox, newToolbox);
       } else {
         state.bureauToolbox = newToolbox;
       }
@@ -445,10 +442,7 @@ function makeBureauHandle<
       conversation.appendUserMessage(input);
 
       // RunOptions.toolbox is required; use an empty toolbox when no tools exist.
-      // Cast needed: createToolbox([]) returns Toolbox<ToolsFromEntries<[]>> (a
-      // concrete zero-length tuple type) which is not assignable to Toolbox<readonly Tool[]>
-      // (the base type). The cast is safe — an empty toolbox is a valid Toolbox.
-      const toolboxForRun: Toolbox = effectiveToolbox ?? (createToolbox([]) as unknown as Toolbox);
+      const toolboxForRun: AnyToolbox = effectiveToolbox ?? createToolbox([]);
 
       // Stamp agentName and runId so curated tool.* bubble events carry
       // {agentName, runId, step} metadata on builder-driven runs, matching the

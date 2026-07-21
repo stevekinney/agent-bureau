@@ -1,4 +1,4 @@
-import type { HeadlessPermissionPolicyConfiguration, Tool, Toolbox } from 'armorer';
+import type { AnyToolbox, HeadlessPermissionPolicyConfiguration, Tool } from 'armorer';
 import { createHeadlessPermissionPolicyHooks, createToolbox } from 'armorer';
 import { Conversation } from 'conversationalist';
 
@@ -62,7 +62,7 @@ export interface CreateAgentOptions {
    * toolbox yourself and reusing it. If you don't need cross-run state
    * (approvals, budgets), use `tools` instead for per-run isolation.
    */
-  toolbox?: Toolbox;
+  toolbox?: AnyToolbox;
 
   /**
    * System instructions injected as a system message on step 0.

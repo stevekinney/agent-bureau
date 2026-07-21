@@ -8,7 +8,7 @@ import {
   startDurableRunResult,
 } from '../durable';
 import { executeLoop } from '../loop';
-import type { GenerateFunction, RunResult, Toolbox } from '../types';
+import type { AnyToolbox, GenerateFunction, RunResult } from '../types';
 import type { SchedulerEventMap, SchedulerEventType } from './events';
 import {
   SchedulerIdleEvent,
@@ -38,7 +38,7 @@ export interface CreateSchedulerOptions {
   /** The generate function shared across all runs. */
   generate: GenerateFunction;
   /** Default toolbox (tasks can override via their RunOptions). */
-  toolbox: Toolbox;
+  toolbox: AnyToolbox;
   /** How long to wait after a run completes before dispatching the next non-immediate task (ms). Default: 1000. */
   idleDelay?: number;
   /** AbortSignal to shut down the entire scheduler. */

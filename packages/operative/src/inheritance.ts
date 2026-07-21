@@ -16,7 +16,7 @@
  * the bureau exists here — operative stays bureau-agnostic.
  */
 
-import type { Toolbox } from 'armorer';
+import type { AnyToolbox } from 'armorer';
 import { combineToolboxes } from 'armorer';
 import type { JSONValue } from 'interoperability';
 
@@ -41,14 +41,11 @@ import type { GenerateFunction, PrepareStepHook } from './types';
  * ```
  */
 export function combineTools(
-  bureauTools: Toolbox | undefined,
-  agentTools: Toolbox | undefined,
-): Toolbox | undefined {
+  bureauTools: AnyToolbox | undefined,
+  agentTools: AnyToolbox | undefined,
+): AnyToolbox | undefined {
   if (bureauTools && agentTools) {
-    // combineToolboxes returns Toolbox<ConcatenateTools<...>> (a mutable tuple).
-    // We erase to Toolbox (readonly Tool[]) since our callers only need the
-    // runtime merged toolbox, not the precise tuple type.
-    return combineToolboxes(bureauTools, agentTools) as unknown as Toolbox;
+    return combineToolboxes(bureauTools, agentTools);
   }
   return bureauTools ?? agentTools;
 }
