@@ -156,7 +156,16 @@ import { createAgent, stopWhen } from 'operative';
 
 // Built once per process — the stable approvalSecret is what makes
 // resumeApproval() work across separate HTTP requests.
-const toolbox = createToolbox([deleteFileTool], { approvalSecret: Bun.env['APPROVAL_SECRET'] });
+//
+// `approvalPolicy` is load-bearing, not decoration: armorer only installs its
+// approval hook when a policy (or a registry/tool policy, or a deny flag) is
+// present. Without one, `allowMutation` and `allowDangerous` both default to
+// true and `deleteFileTool` would simply EXECUTE — `approvalSecret` alone only
+// signs a pending approval once something has produced one.
+const toolbox = createToolbox([deleteFileTool], {
+  approvalPolicy: { mode: 'on-mutation' },
+  approvalSecret: Bun.env['APPROVAL_SECRET'],
+});
 
 const agent = createAgent({
   generate: myProvider,
@@ -174,8 +183,12 @@ const pending = result.steps.at(-1)?.results.find((r) => r.pendingApproval)?.pen
 const resumedResult = await toolbox.resumeApproval(signedApproval);
 ```
 
-> [!WARNING] Resuming into the conversation is not yet a supported recipe
-> `result.conversation` already has an `action_required` tool-result for this call — the loop appends it before `stopWhen` ever runs. Appending `resumedResult` on top of it would leave two tool-results for the same call, which most providers reject (or mishandle) on the next turn, and there is currently no public API to replace it in place instead. `Conversation.undo()` looked like a fix but isn't one: it operates on the in-process undo/redo graph, which a `Conversation` rehydrated from a persisted `ConversationHistory` (exactly the case on every resumed request) doesn't have in the same shape. [Issue #267](https://github.com/stevekinney/agent-bureau/issues/267) tracks the missing conversationalist primitive. Until it lands, reconciling `resumedResult` into the stored history before starting the next run is the host's responsibility.
+> [!IMPORTANT] Reconcile the pending result — do not append on top of it
+> `result.conversation` already carries an `action_required` tool-result for this call: the loop appends it before `stopWhen` ever runs. Appending `resumedResult` alongside it leaves two tool-results for one call, which most providers reject or mishandle on the next turn.
+>
+> Replace it in place with conversationalist's `resolveToolResult(conversation, callId, resumedResult)`, which addresses the message by `callId` (not by position or recency) and therefore works identically on a `Conversation` rehydrated from a persisted `ConversationHistory` — the case a stateless host hits on every resumed request. `Conversation.undo()` is NOT a substitute: it walks the in-process undo/redo graph, which a rehydrated conversation does not have in the same shape.
+>
+> Start the next turn from the resolved history. This README does not yet carry a full worked example of that round trip; see conversationalist's own documentation for `resolveToolResult` until one lands here.
 
 **Mutation ownership:** `agent.run({ conversation })` SNAPSHOTS the supplied `ConversationHistory` — it clones the value before wrapping it in a fresh internal `Conversation`, so the run's state and the object you passed in are independent from the moment `run()` is called: the run never mutates your object, and mutations you make to it afterward (a stateless host commonly keeps a mutable reference between turns) never leak into an in-flight run. This matches the durable path's existing snapshot semantics. `instructions` is not re-appended on this path; the supplied history is assumed to already carry whatever system context it needs, so resuming it repeatedly never duplicates system messages.
 
@@ -186,11 +199,21 @@ The full-control factory behind `createAgent`, `createSessionHandle`, and bureau
 Most callers should reach for `createAgent({...}).run(...)` instead — it wraps `createActiveRun` in the higher-level `AgentRun` handle and covers the common cases. Reach for `createActiveRun` directly when you need something `createAgent` doesn't expose: an already-live `Conversation` instance, durable routing, or a pre-built emitter to bind tool dispatches to.
 
 ```typescript
-import { createActiveRun } from 'operative';
+import { createActiveRun, stopWhen } from 'operative';
 
-const activeRun = createActiveRun({ generate, toolbox, conversation });
+// `stopWhen` is required for the in-memory loop to finish on an ordinary turn:
+// without a stop condition, a text-only provider response keeps advancing until
+// `maximumSteps` (25) instead of returning after the first reply.
+const activeRun = createActiveRun({
+  generate,
+  toolbox,
+  conversation,
+  stopWhen: [stopWhen.noToolCalls()],
+});
 const result = await activeRun.result;
 ```
+
+Like `createAgent`, a plain `ConversationHistory` passed here is SNAPSHOTTED on the way in, so a host that keeps mutating its stored history between turns cannot corrupt an in-flight run. Pass an already-live `Conversation` instance instead when you deliberately want the run to share it.
 
 #### `defineAgent(options)`
 

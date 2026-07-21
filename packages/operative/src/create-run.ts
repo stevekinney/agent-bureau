@@ -113,7 +113,13 @@ export function createActiveRun(options: RunOptions, durable?: DurableRunRouting
 
   const conversation = isConversation(options.conversation)
     ? options.conversation
-    : new Conversation(options.conversation);
+    : // Snapshot a plain `ConversationHistory` on the way in, matching
+      // `createAgent` and the durable path. `Conversation` keeps the object it
+      // is constructed with, and the run starts on a later microtask, so a
+      // stateless host that mutates its stored history after this returns would
+      // otherwise corrupt the in-flight run. `ConversationHistory` is a
+      // structuredClone-safe tree — see `durable/types.ts`.
+      new Conversation(structuredClone(options.conversation));
 
   const loopOptions: RunOptions = {
     ...options,
