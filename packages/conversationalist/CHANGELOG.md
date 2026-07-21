@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.5.0
+
+### Minor Changes
+
+- 937bf55: Add `buildMessage` and `prependMessages` builders. `buildMessage(input, options?, environment?)` mints a standalone, schema-valid `Message` without requiring a `ConversationHistory` — useful for simulating an inbound message (e.g. an adapter push handler) or handing a pre-built message to `appendMessages`/`prependMessages`. `prependMessages(conversation, ...inputs)` mirrors `appendMessages` for the front of the list, renumbering every existing message's `position` so it stays dense and ordered across the whole `ids` array, instead of requiring callers to hand-roll `Message` construction and renumbering for history pagination.
+
+  Also fixes a pre-existing bug where `prependSystemMessage` and `collapseSystemMessages` dropped `goalCompleted` from assistant messages while renumbering their positions.
+
+- a526d23: Add `resolveToolResult(conversation, callId, toolResult, options?, environment?)` to replace the tool-result message for a `callId` with a new result, in place — producing exactly one tool-result message for that call afterwards. This is the primitive a host needs to turn a pending `action_required` result (appended before a run parks on approval) into the resolved result from `toolbox.resumeApproval()`, without ending up with two tool-result messages for the same call — a malformed conversation most providers reject or mishandle on the next turn.
+
+  The message is located purely by `toolResult.callId`, scanning `conversation.messages` — never by position or an undo/redo node graph — so it behaves identically on a freshly-built conversation and one rehydrated from a persisted `ConversationHistory`. The replacement keeps the original message's `id`, `createdAt`, and `position`, and runs `environment.plugins` (e.g. PII redaction) over the replacement content, same as a freshly appended tool result. Throws `error:not-found` if no tool-result message exists for the `callId`, `error:integrity` if more than one does, and `error:invalid-input` if the supplied `toolResult.callId` disagrees with the `callId` argument. The `Conversation` class gains a matching `resolveToolResult(callId, toolResult, options?)` method.
+
+  `resolveToolResultAsync` is the streaming counterpart — same relationship `appendToolResultAsync` has to `appendToolResult` — for resuming an approval whose tool streams its output. `Conversation` gains a matching `resolveToolResultAsync(callId, toolResult, options?)` method.
+
+  Also hardens `validateConversationHistoryIntegrity`/`assertConversationHistoryIntegrity` with a new `integrity:duplicate-tool-result` check, so appending a second tool-result for a `callId` that already has one (the malformed shape `resolveToolResult` exists to prevent) is now caught at the append boundary too, not just when a naive resume path re-derives it.
+
+### Patch Changes
+
+- aa8177e: Fix `ConversationHistory` blowing TypeScript's instantiation depth (`TS2589`) when run through Svelte 5's `$state.snapshot` mapped type. The underlying `JSONValue` type (shared with `interoperability` and inlined into this package's build) now expresses its recursive array and object branches as named interfaces (`JSONArray`, `JSONObject`) instead of anonymous mapped-type literals, so TypeScript can cache the recursive instantiations instead of re-expanding them. Svelte consumers no longer need `$state.snapshot(conversation as unknown) as ConversationHistory` — a plain `$state.snapshot(conversation)` now typechecks.
+- de85444: Convert `web_search_tool_result` Anthropic server-tool blocks through `toAnthropicMessagesForSdk` instead of throwing, since the installed `@anthropic-ai/sdk` accepts it as a request content block. Block types that remain response-only in the installed SDK (`code_execution_tool_result`, `bash_code_execution_tool_result`, `text_editor_code_execution_tool_result`, `web_fetch_tool_result`, `container_upload`) still throw, now with an explanatory comment documenting the SDK boundary.
+- 2b6debf: Raise the declared `engines.bun` floor to `>=1.3.13` to match the Bun engine requirement declared by `@lostgradient/weft`.
+
 ## 0.4.1
 
 ### Patch Changes
