@@ -238,6 +238,19 @@ describe('serializeActionDetail', () => {
     expect(() => JSON.stringify(result)).not.toThrow();
   });
 
+  it('strips conversation from run.completed details even when steps is not an array (e.g. an abrupt run.completed with no steps field)', () => {
+    const detail = {
+      conversation: { snapshot: () => ({}) },
+      content: 'done',
+      finishReason: 'error',
+    };
+
+    const result = serializeActionDetail('run.completed', detail) as Record<string, unknown>;
+    expect(result).not.toHaveProperty('conversation');
+    expect(result['content']).toBe('done');
+    expect(result['finishReason']).toBe('error');
+  });
+
   it('passes through other event types unchanged', () => {
     const detail = { some: 'data' };
     const result = serializeActionDetail('run.started', detail);
@@ -396,6 +409,25 @@ describe('serializeUnknownError', () => {
     expect(serializeUnknownError({ first: shared, second: shared })).toBe(
       '{"first":{"attempts":2,"ok":true},"second":{"attempts":2,"ok":true}}',
     );
+  });
+
+  it('returns "null" for a null error', () => {
+    expect(serializeUnknownError(null)).toBe('null');
+  });
+
+  it('returns "null" for an undefined error', () => {
+    expect(serializeUnknownError(undefined)).toBe('null');
+  });
+
+  it('serializes an object with a toJSON method by calling it instead of walking its own properties', () => {
+    const value = {
+      internal: 'should never be visible',
+      toJSON(): unknown {
+        return { summary: 'redacted view' };
+      },
+    };
+
+    expect(serializeUnknownError(value)).toBe('{"summary":"redacted view"}');
   });
 });
 
