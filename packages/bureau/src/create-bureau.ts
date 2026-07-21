@@ -168,13 +168,23 @@ export type BureauErrorNotConfiguredSubject =
   | 'approval';
 
 class BureauError extends Error {
+  readonly code: 'NOT_FOUND' | 'CONFLICT' | 'NOT_CONFIGURED' | 'BAD_REQUEST' | 'RATE_LIMITED';
+  readonly subject?: BureauErrorNotConfiguredSubject;
+
+  // `subject` is required for NOT_CONFIGURED and disallowed for every other
+  // code — a compile-time guarantee that a future NOT_CONFIGURED throw site
+  // cannot skip disambiguation and reintroduce the ambiguity #264 fixed.
+  constructor(message: string, code: Exclude<BureauError['code'], 'NOT_CONFIGURED'>);
+  constructor(message: string, code: 'NOT_CONFIGURED', subject: BureauErrorNotConfiguredSubject);
   constructor(
     message: string,
-    readonly code: 'NOT_FOUND' | 'CONFLICT' | 'NOT_CONFIGURED' | 'BAD_REQUEST' | 'RATE_LIMITED',
-    readonly subject?: BureauErrorNotConfiguredSubject,
+    code: 'NOT_FOUND' | 'CONFLICT' | 'NOT_CONFIGURED' | 'BAD_REQUEST' | 'RATE_LIMITED',
+    subject?: BureauErrorNotConfiguredSubject,
   ) {
     super(message);
     this.name = 'BureauError';
+    this.code = code;
+    this.subject = subject;
   }
 }
 
