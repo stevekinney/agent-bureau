@@ -27,6 +27,27 @@ describe('Anthropic SDK adapter', () => {
     });
   });
 
+  it('normalizes public Anthropic text document sources to SDK text blocks', () => {
+    const conversation = fromAnthropicMessages({
+      messages: [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'document',
+              title: 'inline.txt',
+              source: { type: 'text', media_type: 'text/plain', data: 'Plain text document' },
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(toAnthropicMessagesForSdk(conversation).messages).toEqual([
+      { role: 'user', content: 'Plain text document' },
+    ]);
+  });
+
   it('converts every request-safe block and cache-marked system segment', () => {
     const conversation = fromAnthropicMessages({
       system: [

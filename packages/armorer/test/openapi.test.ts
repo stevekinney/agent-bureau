@@ -219,6 +219,33 @@ describe('createToolboxFromOpenAPI', () => {
     expect(calls[0]?.url).toBe('https://petstore.swagger.io/v2/pets/42');
   });
 
+  it('rejects an absent required path parameter during public input validation', async () => {
+    const specification: OpenAPISpec = {
+      servers: [{ url: 'https://example.test' }],
+      paths: {
+        '/widgets/{id}': {
+          get: {
+            operationId: 'findWidget',
+            parameters: [{ name: 'id', in: 'path', required: true, schema: {} }],
+          },
+        },
+      },
+    };
+    const { fetch: fakeFetch, calls } = createFakeFetch({ status: 200, body: {} });
+    const [findWidget] = createToolboxFromOpenAPI(specification, { fetch: fakeFetch });
+
+    let caughtError: unknown;
+    try {
+      await findWidget?.execute({});
+    } catch (error) {
+      caughtError = error;
+    }
+
+    expect(String(caughtError)).toContain('expected nonoptional');
+    expect(String(caughtError)).toContain('id');
+    expect(calls).toHaveLength(0);
+  });
+
   it('appends query parameters, including arrays, to the request URL', async () => {
     const { fetch: fakeFetch, calls } = createFakeFetch({ status: 200, body: [] });
     const tools = createToolboxFromOpenAPI(spec, { fetch: fakeFetch });
