@@ -152,13 +152,39 @@ function appendConversationMessages(
   };
 }
 
+/**
+ * Discriminates *why* a `BureauError` with code `NOT_CONFIGURED` was thrown.
+ * `NOT_CONFIGURED` alone is not enough for a consumer to decide an HTTP status:
+ * some subjects mean "this deployment does not compose that capability at all"
+ * (`durable`, `scheduler` — a 501 case), others mean "the capability exists but
+ * is unconfigured, and the operator can fix it" (`generate`, `persistence`,
+ * `approval` — a 503 case). Only set on `NOT_CONFIGURED` errors.
+ */
+export type BureauErrorNotConfiguredSubject =
+  | 'generate'
+  | 'scheduler'
+  | 'durable'
+  | 'persistence'
+  | 'approval';
+
 class BureauError extends Error {
+  readonly code: 'NOT_FOUND' | 'CONFLICT' | 'NOT_CONFIGURED' | 'BAD_REQUEST' | 'RATE_LIMITED';
+  readonly subject?: BureauErrorNotConfiguredSubject;
+
+  // `subject` is required for NOT_CONFIGURED and disallowed for every other
+  // code — a compile-time guarantee that a future NOT_CONFIGURED throw site
+  // cannot skip disambiguation and reintroduce the ambiguity #264 fixed.
+  constructor(message: string, code: Exclude<BureauError['code'], 'NOT_CONFIGURED'>);
+  constructor(message: string, code: 'NOT_CONFIGURED', subject: BureauErrorNotConfiguredSubject);
   constructor(
     message: string,
-    readonly code: 'NOT_FOUND' | 'CONFLICT' | 'NOT_CONFIGURED' | 'BAD_REQUEST' | 'RATE_LIMITED',
+    code: 'NOT_FOUND' | 'CONFLICT' | 'NOT_CONFIGURED' | 'BAD_REQUEST' | 'RATE_LIMITED',
+    subject?: BureauErrorNotConfiguredSubject,
   ) {
     super(message);
     this.name = 'BureauError';
+    this.code = code;
+    this.subject = subject;
   }
 }
 
@@ -666,6 +692,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       throw new BureauError(
         'No SessionStore configured (set options.persistence with a StorageConfiguration or PersistenceOptions)',
         'NOT_CONFIGURED',
+        'persistence',
       );
     }
 
@@ -788,7 +815,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     validateCreateRunRequest(request);
 
     if (!runtime.ready) {
-      throw new BureauError('No generate function configured', 'NOT_CONFIGURED');
+      throw new BureauError('No generate function configured', 'NOT_CONFIGURED', 'generate');
     }
 
     const sessionId = request.sessionId?.trim() ?? crypto.randomUUID();
@@ -1683,7 +1710,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     validateSubmitSchedulerTaskRequest(request);
 
     if (!runtime.scheduler) {
-      throw new BureauError('Scheduler not configured', 'NOT_CONFIGURED');
+      throw new BureauError('Scheduler not configured', 'NOT_CONFIGURED', 'scheduler');
     }
 
     const taskId = `scheduler-task-${crypto.randomUUID()}`;
@@ -1897,7 +1924,8 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
   }
 
   async function signalSession(sessionId: string, name: string, payload?: unknown): Promise<void> {
-    if (!runtime.durable) throw new BureauError('Durable engine not configured', 'NOT_CONFIGURED');
+    if (!runtime.durable)
+      throw new BureauError('Durable engine not configured', 'NOT_CONFIGURED', 'durable');
     const runId = await requireSessionRunId(sessionId);
     await runtime.durable.engine.signal(runId, name, payload);
     // AB-13 — a signal is how a human-wait park is released (directly, or via
@@ -1913,13 +1941,15 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     name: string,
     payload?: unknown,
   ): Promise<unknown> {
-    if (!runtime.durable) throw new BureauError('Durable engine not configured', 'NOT_CONFIGURED');
+    if (!runtime.durable)
+      throw new BureauError('Durable engine not configured', 'NOT_CONFIGURED', 'durable');
     const runId = await requireSessionRunId(sessionId);
     return runtime.durable.engine.update(runId, name, payload);
   }
 
   async function querySession(sessionId: string, name: string, input?: unknown): Promise<unknown> {
-    if (!runtime.durable) throw new BureauError('Durable engine not configured', 'NOT_CONFIGURED');
+    if (!runtime.durable)
+      throw new BureauError('Durable engine not configured', 'NOT_CONFIGURED', 'durable');
     const runId = await requireSessionRunId(sessionId);
     return runtime.durable.engine.query(runId, name, input);
   }
@@ -2034,6 +2064,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
               'Cannot approve: the toolbox that executed this tool call has no ' +
                 'approvalSecret configured, so its pendingApproval was never signed.',
               'NOT_CONFIGURED',
+              'approval',
             );
           }
           result = await runtime.baseToolbox.resumeApproval(
@@ -2105,7 +2136,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     // guard so we surface NOT_CONFIGURED here instead of registering a broken
     // schedule that returns a healthy-looking summary (review: codex Mn69W).
     if (!runtime.ready) {
-      throw new BureauError('No generate function configured', 'NOT_CONFIGURED');
+      throw new BureauError('No generate function configured', 'NOT_CONFIGURED', 'generate');
     }
     // Register a native weft schedule that fires the `agentRun` workflow on each
     // tick. The fire path is wired through `resolveRunServices`' scheduled-fire

@@ -27,7 +27,11 @@ export type {
   ToolMap,
   ToolMapInput,
 } from './builder-types';
-export type { RecoveredRunSessionMetadata, SessionLoadOutcome } from './create-bureau';
+export type {
+  BureauErrorNotConfiguredSubject,
+  RecoveredRunSessionMetadata,
+  SessionLoadOutcome,
+} from './create-bureau';
 export { BureauError, classifyRecoveredRun, createBureau } from './create-bureau';
 export type { BureauEventMap } from './events';
 export { ActionEvent, BureauDisposedEvent, RunRegisteredEvent, RunRemovedEvent } from './events';
