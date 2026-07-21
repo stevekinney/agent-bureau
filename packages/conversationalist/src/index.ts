@@ -80,6 +80,8 @@ export {
   prependSystemMessage,
   redactMessageAtPosition,
   replaceSystemMessage,
+  resolveToolResult,
+  resolveToolResultAsync,
   searchConversationMessages,
   toChatMessages,
   validateConversationHistoryIntegrity,
@@ -96,6 +98,7 @@ export {
   createLockedError,
   createNotFoundError,
   createSerializationError,
+  createToolResultNotFoundError,
   createValidationError,
 } from './errors';
 export type { ConversationEventMap } from './events';

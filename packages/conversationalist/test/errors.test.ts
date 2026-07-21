@@ -10,6 +10,7 @@ import {
   createLockedError,
   createNotFoundError,
   createSerializationError,
+  createToolResultNotFoundError,
   createValidationError,
 } from '../src/errors';
 
@@ -47,6 +48,13 @@ describe('errors', () => {
   test('not found', () => {
     const e = createNotFoundError('id2');
     expect(e.code).toBe('error:not-found');
+  });
+
+  test('tool result not found', () => {
+    const e = createToolResultNotFoundError('call-1');
+    expect(e.code).toBe('error:not-found');
+    expect(e.message).toContain('call-1');
+    expect(e.context).toEqual({ callId: 'call-1' });
   });
 
   test('serialization', () => {

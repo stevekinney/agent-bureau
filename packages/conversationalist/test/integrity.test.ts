@@ -124,6 +124,37 @@ describe('integrity', () => {
     expect(issues.some((issue) => issue.code === 'integrity:duplicate-tool-call')).toBe(true);
   });
 
+  it('reports duplicate tool results for the same callId', () => {
+    const toolCall = createMessage({
+      id: 'm1',
+      role: 'tool-call',
+      toolCall: { id: 'call-1', name: 'tool', arguments: {} },
+    });
+    const firstResult = createMessage({
+      id: 'm2',
+      role: 'tool-result',
+      toolResult: { callId: 'call-1', outcome: 'action_required', content: null },
+    });
+    const secondResult = createMessage({
+      id: 'm3',
+      role: 'tool-result',
+      toolResult: { callId: 'call-1', outcome: 'success', content: { ok: true } },
+    });
+
+    const conv: Conversation = {
+      ...baseConversation(),
+      ids: [toolCall.id, firstResult.id, secondResult.id],
+      messages: {
+        [toolCall.id]: toolCall,
+        [firstResult.id]: firstResult,
+        [secondResult.id]: secondResult,
+      },
+    };
+
+    const issues = validateConversationIntegrity(conv);
+    expect(issues.some((issue) => issue.code === 'integrity:duplicate-tool-result')).toBe(true);
+  });
+
   it('throws an integrity error when violations exist', () => {
     const conv: Conversation = {
       ...baseConversation(),
