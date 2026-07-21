@@ -12,7 +12,11 @@ import {
   isConversationEnvironmentParameter,
   resolveConversationEnvironment,
 } from '../environment';
-import { createIntegrityError, createToolResultNotFoundError } from '../errors';
+import {
+  createIntegrityError,
+  createInvalidInputError,
+  createToolResultNotFoundError,
+} from '../errors';
 import type {
   AppendableToolCallInput,
   AppendableToolResult,
@@ -210,9 +214,11 @@ export async function appendToolResultsAsync(
  * {@link appendToolResult}.
  *
  * Throws `error:not-found` if no tool-result message exists for `callId`,
- * and `error:integrity` if more than one does (an already-malformed
+ * `error:integrity` if more than one does (an already-malformed
  * conversation state — replacing one of several would silently guess which
- * one the caller meant).
+ * one the caller meant), and `error:invalid-input` if `toolResult.callId`
+ * disagrees with `callId` (replacing the wrong message silently would be
+ * worse than refusing).
  */
 export function resolveToolResult(
   conversation: Conversation,
@@ -246,6 +252,12 @@ export function resolveToolResult(
   }
 
   const normalizedToolResult = materializeToolResult(toolResult);
+  if (normalizedToolResult.callId !== callId) {
+    throw createInvalidInputError(
+      `toolResult.callId (${normalizedToolResult.callId}) does not match callId (${callId})`,
+      { callId, toolResultCallId: normalizedToolResult.callId },
+    );
+  }
 
   const resolvedEnvironment = resolveConversationEnvironment(resolvedEnvironmentInput);
   const now = resolvedEnvironment.now();
