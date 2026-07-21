@@ -7,7 +7,7 @@
  * behavior never touches a real timer or the network.
  */
 import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
-import { describe, expect, it } from 'bun:test';
+import { afterEach, describe, expect, it, spyOn } from 'bun:test';
 import type { Action } from 'operative/store';
 
 import type { AuditTrail } from './audit-trail';
@@ -281,6 +281,73 @@ describe('createWebhookNotifier', () => {
     });
 
     notifier.dispose();
+  });
+
+  describe('onDiagnostic', () => {
+    afterEach(() => {
+      (console.error as unknown as { mockRestore?: () => void }).mockRestore?.();
+    });
+
+    /** A `TextValueStore`-shaped stub whose `set` always rejects. */
+    function createFailingKv(): ReturnType<typeof textValueStore> {
+      const kv = textValueStore(new MemoryStorage());
+      return {
+        ...kv,
+        set: async () => {
+          throw new Error('disk full');
+        },
+      };
+    }
+
+    it('routes a delivery-persistence failure to the diagnostic sink instead of the console', async () => {
+      const errorSpy = spyOn(console, 'error').mockImplementation(() => {});
+      const review = makeToolApprovalReview();
+      const { bureau, emit } = createStubBureau([review]);
+      const kv = createFailingKv();
+      const { fetch: fetchImpl } = okFetch();
+      const received: unknown[] = [];
+      const notifier = createWebhookNotifier(
+        bureau,
+        kv,
+        undefined,
+        { targets: [{ url: 'https://example.com/hook' }], fetch: fetchImpl },
+        (diagnostic) => received.push(diagnostic),
+      );
+
+      emit(makeAction({ type: 'step.completed', runId: 'run-1' }));
+      await notifier.flush();
+
+      // `persist()` is called once per delivery-state transition (e.g.
+      // pending → delivered), so a permanently-failing kv can surface more
+      // than one diagnostic for a single delivery — assert on their shape,
+      // not an exact count.
+      expect(received.length).toBeGreaterThan(0);
+      for (const diagnostic of received) {
+        expect(diagnostic).toMatchObject({ level: 'error', scope: 'webhook' });
+      }
+      expect(errorSpy).not.toHaveBeenCalled();
+
+      notifier.dispose();
+    });
+
+    it('with no sink configured, a delivery-persistence failure still logs to the console', async () => {
+      const errorSpy = spyOn(console, 'error').mockImplementation(() => {});
+      const review = makeToolApprovalReview();
+      const { bureau, emit } = createStubBureau([review]);
+      const kv = createFailingKv();
+      const { fetch: fetchImpl } = okFetch();
+      const notifier = createWebhookNotifier(bureau, kv, undefined, {
+        targets: [{ url: 'https://example.com/hook' }],
+        fetch: fetchImpl,
+      });
+
+      emit(makeAction({ type: 'step.completed', runId: 'run-1' }));
+      await notifier.flush();
+
+      expect(errorSpy).toHaveBeenCalled();
+
+      notifier.dispose();
+    });
   });
 
   it('retries a failing delivery with exponential backoff, then succeeds', async () => {

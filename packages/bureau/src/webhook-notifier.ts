@@ -43,7 +43,8 @@ import type { TextValueStore } from '@lostgradient/weft/storage';
 
 import type { AuditTrail } from './audit-trail';
 import type { ActionEvent } from './events';
-import type { Bureau, PendingReview } from './types';
+import { resolveDiagnosticSink } from './serialization';
+import type { Bureau, DiagnosticSink, PendingReview } from './types';
 
 // ── Public surface ──────────────────────────────────────────────────
 
@@ -211,13 +212,17 @@ function targetsFor(targets: WebhookTarget[], trigger: WebhookTriggerType): Webh
  *   the bureau's existing durable observability surface.
  * @param options - Targets + tuning knobs. Returns a no-op notifier when
  *   `options` is `undefined` or `options.targets` is empty.
+ * @param onDiagnostic - Host sink for operational diagnostics (persistence
+ *   failures). Omit to log to the console, matching prior behavior.
  */
 export function createWebhookNotifier(
   bureau: Bureau,
   kv: TextValueStore | undefined,
   auditTrail: AuditTrail | undefined,
   options: WebhookNotifierOptions | undefined,
+  onDiagnostic?: DiagnosticSink,
 ): WebhookNotifier {
+  const diagnose = resolveDiagnosticSink(onDiagnostic);
   const targets = options?.targets ?? [];
 
   if (targets.length === 0) {
@@ -277,7 +282,12 @@ export function createWebhookNotifier(
     try {
       await kv.set(encodeKey(record.id), JSON.stringify(record));
     } catch (error) {
-      console.error(`[webhook-notifier] Failed to persist delivery "${record.id}":`, error);
+      diagnose({
+        level: 'error',
+        scope: 'webhook',
+        message: `[webhook-notifier] Failed to persist delivery "${record.id}":`,
+        cause: error,
+      });
     }
   }
 

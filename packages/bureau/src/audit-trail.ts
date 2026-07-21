@@ -14,8 +14,8 @@
  */
 import type { TextValueStore } from '@lostgradient/weft/storage';
 
-import { serializeActionDetail } from './serialization';
-import type { Bureau } from './types';
+import { resolveDiagnosticSink, serializeActionDetail } from './serialization';
+import type { Bureau, DiagnosticSink } from './types';
 
 // ── Public surface ──────────────────────────────────────────────────
 
@@ -143,8 +143,15 @@ function encodeKey(timestampMs: number, sequence: number, runId: string): string
  * @param bureau - The bureau to observe.
  * @param kv - The KV store to persist audit records into. `undefined` when
  *   the bureau has no persistence configured.
+ * @param onDiagnostic - Host sink for operational diagnostics (persistence
+ *   failures). Omit to log to the console, matching prior behavior.
  */
-export function createAuditTrail(bureau: Bureau, kv: TextValueStore | undefined): AuditTrail {
+export function createAuditTrail(
+  bureau: Bureau,
+  kv: TextValueStore | undefined,
+  onDiagnostic?: DiagnosticSink,
+): AuditTrail {
+  const diagnose = resolveDiagnosticSink(onDiagnostic);
   // Determine which event types qualify as audit events.
   const auditEventSet = new Set<string>(AUDIT_EVENT_TYPES);
 
@@ -187,7 +194,12 @@ export function createAuditTrail(bureau: Bureau, kv: TextValueStore | undefined)
     // Fire-and-forget: a write failure must never crash the run. The audit
     // trail is best-effort — a gap is surfaced by log, never by a crash.
     kv.set(key, JSON.stringify(record)).catch((error: unknown) => {
-      console.error(`[audit-trail] Failed to persist audit record for key "${key}":`, error);
+      diagnose({
+        level: 'error',
+        scope: 'audit-trail',
+        message: `[audit-trail] Failed to persist audit record for key "${key}":`,
+        cause: error,
+      });
     });
   };
 
@@ -221,7 +233,12 @@ export function createAuditTrail(bureau: Bureau, kv: TextValueStore | undefined)
       } catch (error: unknown) {
         // Best-effort, matching the listener above: a write failure must
         // never fail the caller's approve/deny decision.
-        console.error(`[audit-trail] Failed to persist audit record for key "${key}":`, error);
+        diagnose({
+          level: 'error',
+          scope: 'audit-trail',
+          message: `[audit-trail] Failed to persist audit record for key "${key}":`,
+          cause: error,
+        });
       }
     },
 

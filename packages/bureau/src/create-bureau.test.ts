@@ -2296,6 +2296,86 @@ describe('createBureau', () => {
     }
   });
 
+  describe('onDiagnostic (#253)', () => {
+    afterEach(() => {
+      (console.error as unknown as { mockRestore?: () => void }).mockRestore?.();
+    });
+
+    it('routes a throwing subscribeLiveFrames listener to the diagnostic sink instead of the console', async () => {
+      const errorSpy = spyOn(console, 'error').mockImplementation(() => {});
+      const received: Array<{ level: string; scope: string; message: string; cause?: unknown }> =
+        [];
+
+      const bureau = await createBureau({
+        generate: createMockGenerate(),
+        toolbox: createEmptyToolbox(),
+        onDiagnostic: (diagnostic) => received.push(diagnostic),
+      });
+
+      bureau.subscribeLiveFrames(() => {
+        throw new Error('boom — a badly behaved subscriber');
+      });
+
+      try {
+        await bureau.createRun({ message: 'Route the throw to onDiagnostic' });
+
+        expect(received.length).toBeGreaterThan(0);
+        for (const diagnostic of received) {
+          expect(diagnostic).toMatchObject({ level: 'error', scope: 'live-frames' });
+        }
+        expect(errorSpy).not.toHaveBeenCalled();
+      } finally {
+        bureau.dispose();
+      }
+    });
+
+    it('with no sink configured, a throwing subscribeLiveFrames listener still logs to the console', async () => {
+      const errorSpy = spyOn(console, 'error').mockImplementation(() => {});
+
+      const bureau = await createBureau({
+        generate: createMockGenerate(),
+        toolbox: createEmptyToolbox(),
+      });
+
+      bureau.subscribeLiveFrames(() => {
+        throw new Error('boom — a badly behaved subscriber');
+      });
+
+      try {
+        await bureau.createRun({ message: 'Fall back to console with no sink' });
+
+        expect(errorSpy).toHaveBeenCalled();
+      } finally {
+        bureau.dispose();
+      }
+    });
+
+    it('falls back to the console for a diagnostic whose configured sink throws, without crashing the run', async () => {
+      const errorSpy = spyOn(console, 'error').mockImplementation(() => {});
+
+      const bureau = await createBureau({
+        generate: createMockGenerate(),
+        toolbox: createEmptyToolbox(),
+        onDiagnostic: () => {
+          throw new Error('a misbehaving diagnostic sink');
+        },
+      });
+
+      bureau.subscribeLiveFrames(() => {
+        throw new Error('boom — a badly behaved subscriber');
+      });
+
+      try {
+        const run = await bureau.createRun({ message: 'Survive a throwing sink' });
+
+        expect(bureau.getRun(run.id)).toBeDefined();
+        expect(errorSpy).toHaveBeenCalled();
+      } finally {
+        bureau.dispose();
+      }
+    });
+  });
+
   it('emits one scheduler preempted frame with current state', async () => {
     const { generate: slowGenerate, resolve } = createBlockingGenerate();
     const schedulerFrames: Extract<

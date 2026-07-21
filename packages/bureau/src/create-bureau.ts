@@ -75,6 +75,7 @@ import type { BureauToolbox } from './runtime-composition';
 import { createRuntimeComposition, decodeScheduleRunMarker } from './runtime-composition';
 import {
   findRunAgentName,
+  resolveDiagnosticSink,
   type RunAttribution,
   serializeActionDetail,
   serializeRunDetail,
@@ -86,6 +87,7 @@ import type {
   BureauOptions,
   ConfigurationResponse,
   CreateRunRequest,
+  DiagnosticSink,
   DurableScheduleDefinition,
   PendingReview,
   ResolveReviewInput,
@@ -429,7 +431,10 @@ async function loadExistingScheduledSessionId(
   )?.id;
 }
 
-export async function monitorRecoveredScheduledFire(handle: RecoveredRunHandle): Promise<void> {
+export async function monitorRecoveredScheduledFire(
+  handle: RecoveredRunHandle,
+  diagnose: DiagnosticSink = resolveDiagnosticSink(undefined),
+): Promise<void> {
   try {
     const result = await handle.result();
     if (
@@ -443,18 +448,23 @@ export async function monitorRecoveredScheduledFire(handle: RecoveredRunHandle):
         'errorMessage' in result && typeof result.errorMessage === 'string'
           ? `: ${result.errorMessage}`
           : '';
-      console.error(
-        `[bureau] Recovered scheduled fire "${handle.id}" finished with ${String(result.finishReason)}${errorMessage}`,
-      );
+      diagnose({
+        level: 'error',
+        scope: 'recovery',
+        message: `[bureau] Recovered scheduled fire "${handle.id}" finished with ${String(result.finishReason)}${errorMessage}`,
+      });
     }
   } catch (error) {
-    console.error(
-      `[bureau] Recovered scheduled fire "${handle.id}" failed: ${serializeUnknownError(error)}`,
-    );
+    diagnose({
+      level: 'error',
+      scope: 'recovery',
+      message: `[bureau] Recovered scheduled fire "${handle.id}" failed: ${serializeUnknownError(error)}`,
+    });
   }
 }
 
 export async function createBureau(options: BureauOptions = {}): Promise<Bureau> {
+  const diagnose = resolveDiagnosticSink(options.onDiagnostic);
   const ownsStore = !options.store;
   const store: Store = options.store ?? createStore();
   const emitter = new CompletableEventTarget<BureauEventMap>();
@@ -553,10 +563,12 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       try {
         listener(frame);
       } catch (error) {
-        console.error(
-          `[bureau] subscribeLiveFrames listener threw on a "${frame.type}" frame:`,
-          error,
-        );
+        diagnose({
+          level: 'error',
+          scope: 'live-frames',
+          message: `[bureau] subscribeLiveFrames listener threw on a "${frame.type}" frame:`,
+          cause: error,
+        });
       }
     }
   }
@@ -798,9 +810,11 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         }
       }
 
-      console.error(
-        `[bureau] Failed to persist ${context.status} session state for run ${context.runId} in session ${context.sessionId}: ${serializeUnknownError(lastError)}`,
-      );
+      diagnose({
+        level: 'error',
+        scope: 'session-persistence',
+        message: `[bureau] Failed to persist ${context.status} session state for run ${context.runId} in session ${context.sessionId}: ${serializeUnknownError(lastError)}`,
+      });
     })();
   }
 
@@ -1457,9 +1471,11 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     const outcomes = await Promise.allSettled(ids.map((id) => engine.cancel(id)));
     outcomes.forEach((outcome, index) => {
       if (outcome.status === 'rejected') {
-        console.error(
-          `[bureau] Failed to cancel suspended scheduler run "${ids[index]!}": ${serializeUnknownError(outcome.reason)}`,
-        );
+        diagnose({
+          level: 'error',
+          scope: 'recovery',
+          message: `[bureau] Failed to cancel suspended scheduler run "${ids[index]!}": ${serializeUnknownError(outcome.reason)}`,
+        });
       }
     });
   }
@@ -1485,9 +1501,11 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       const session = await runtime.sessionStore.load(info.input.sessionId);
       sessionLoad = { ok: true, session: session ? { ...session.metadata } : null };
     } catch (error) {
-      console.error(
-        `[bureau] Could not load owning session for recovered run "${info.workflowId}"; leaving it to resume without live visibility: ${serializeUnknownError(error)}`,
-      );
+      diagnose({
+        level: 'error',
+        scope: 'recovery',
+        message: `[bureau] Could not load owning session for recovered run "${info.workflowId}"; leaving it to resume without live visibility: ${serializeUnknownError(error)}`,
+      });
       return;
     }
 
@@ -1503,11 +1521,14 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     if (verdict !== 'reattach' && verdict !== 'reattach-version-mismatch') return;
 
     if (verdict === 'reattach-version-mismatch') {
-      console.warn(
-        `[bureau] Reattaching recovered run "${info.workflowId}" that resumed under a ` +
+      diagnose({
+        level: 'warn',
+        scope: 'recovery',
+        message:
+          `[bureau] Reattaching recovered run "${info.workflowId}" that resumed under a ` +
           `different workflow version than it was checkpointed with (pin-and-warn; ` +
           `see documentation/workflow-versioning.md).`,
-      );
+      });
     }
     if (info.services === undefined || info.services === null) {
       throw new Error(`Recovered run "${info.workflowId}" has no reconstructed services`);
@@ -1543,9 +1564,11 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     try {
       await sweepSuspendedSchedulerRuns(durable.engine);
     } catch (error) {
-      console.error(
-        `[bureau] Suspended scheduler-run sweep failed; session-run recovery continues: ${serializeUnknownError(error)}`,
-      );
+      diagnose({
+        level: 'error',
+        scope: 'recovery',
+        message: `[bureau] Suspended scheduler-run sweep failed; session-run recovery continues: ${serializeUnknownError(error)}`,
+      });
     }
 
     // recoverAll resumes the in-flight workflows (firing the services resolver per
@@ -1580,9 +1603,11 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
 
       const readError = 'error' in rest ? rest.error : undefined;
       if (readError !== undefined) {
-        console.error(
-          `[bureau] Could not read launch metadata for recovered run "${handle.id}"; cancelling: ${serializeUnknownError(readError)}`,
-        );
+        diagnose({
+          level: 'error',
+          scope: 'recovery',
+          message: `[bureau] Could not read launch metadata for recovered run "${handle.id}"; cancelling: ${serializeUnknownError(readError)}`,
+        });
       }
 
       // A run is bureau-owned only if its launch metadata narrows to an agentRun
@@ -1619,9 +1644,11 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
             handle.id,
           );
         } catch (error) {
-          console.error(
-            `[bureau] Could not inspect scheduled session proof for recovered run "${handle.id}"; continuing without scheduled-fire classification: ${serializeUnknownError(error)}`,
-          );
+          diagnose({
+            level: 'error',
+            scope: 'recovery',
+            message: `[bureau] Could not inspect scheduled session proof for recovered run "${handle.id}"; continuing without scheduled-fire classification: ${serializeUnknownError(error)}`,
+          });
         }
       }
       const scheduledFire =
@@ -1642,9 +1669,11 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
           const session = await sessionStore.load(ownedSessionId);
           sessionLoad = { ok: true, session: session ? { ...session.metadata } : null };
         } catch (error) {
-          console.error(
-            `[bureau] Could not load owning session for recovered run "${handle.id}"; leaving it to resume without live visibility: ${serializeUnknownError(error)}`,
-          );
+          diagnose({
+            level: 'error',
+            scope: 'recovery',
+            message: `[bureau] Could not load owning session for recovered run "${handle.id}"; leaving it to resume without live visibility: ${serializeUnknownError(error)}`,
+          });
           sessionLoad = { ok: false };
         }
       }
@@ -1661,11 +1690,14 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
 
       if (verdict === 'reattach' || verdict === 'reattach-version-mismatch') {
         if (verdict === 'reattach-version-mismatch') {
-          console.warn(
-            `[bureau] Reattaching recovered run "${handle.id}" that resumed under a ` +
+          diagnose({
+            level: 'warn',
+            scope: 'recovery',
+            message:
+              `[bureau] Reattaching recovered run "${handle.id}" that resumed under a ` +
               `different workflow version than it was checkpointed with (pin-and-warn; ` +
               `see documentation/workflow-versioning.md).`,
-          );
+          });
         }
         // A mocked/custom engine that does not invoke Weft's recovery hook can
         // still reattach terminal visibility here. Real Weft recovery has
@@ -1674,7 +1706,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       } else if (verdict === 'monitor') {
         // Scheduled fires have no ActiveRun surface, but the recovered Weft handle
         // still needs a detached result monitor so failures are visible.
-        void monitorRecoveredScheduledFire(handle);
+        void monitorRecoveredScheduledFire(handle, diagnose);
       } else {
         if (verdict === 'cancel') {
           // Collect the cancel (do NOT fire-and-forget swallow): a rejected cancel
@@ -1695,9 +1727,11 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       void Promise.allSettled(orphanCancellations.map(({ cancel }) => cancel)).then((outcomes) => {
         outcomes.forEach((outcome, index) => {
           if (outcome.status === 'rejected') {
-            console.error(
-              `[bureau] Failed to cancel unowned recovered run "${orphanCancellations[index]!.runId}" — it may still be running: ${serializeUnknownError(outcome.reason)}`,
-            );
+            diagnose({
+              level: 'error',
+              scope: 'recovery',
+              message: `[bureau] Failed to cancel unowned recovered run "${orphanCancellations[index]!.runId}" — it may still be running: ${serializeUnknownError(outcome.reason)}`,
+            });
           }
         });
       });
@@ -2263,9 +2297,11 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         }
         emitter.complete();
       } catch (error) {
-        console.error(
-          `[bureau] Error during dispose pre-teardown: ${serializeUnknownError(error)}`,
-        );
+        diagnose({
+          level: 'error',
+          scope: 'dispose',
+          message: `[bureau] Error during dispose pre-teardown: ${serializeUnknownError(error)}`,
+        });
       }
     } finally {
       // The per-run `resolveWorkflowServices` resolver is engine-scoped and is
@@ -2293,9 +2329,11 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         try {
           runtime.durable?.observability?.dispose();
         } catch (error) {
-          console.error(
-            `[bureau] Error disposing durable observability: ${serializeUnknownError(error)}`,
-          );
+          diagnose({
+            level: 'error',
+            scope: 'dispose',
+            message: `[bureau] Error disposing durable observability: ${serializeUnknownError(error)}`,
+          });
         }
         runtime.durable?.engine[Symbol.dispose]?.();
       } finally {
@@ -2397,7 +2435,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
   // settled, or settle during the awaits inside recoverDurableRuns() — are
   // captured in the durable trail rather than landing only in the live store.
   if (runtime.kv) {
-    auditTrailInstance = createAuditTrail(bureau, runtime.kv);
+    auditTrailInstance = createAuditTrail(bureau, runtime.kv, diagnose);
   }
 
   // Wire the webhook notifier (AB-21) now that the audit trail exists (an
@@ -2410,6 +2448,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       runtime.kv,
       auditTrailInstance,
       options.webhooks,
+      diagnose,
     );
   }
 
@@ -2437,9 +2476,11 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
   try {
     await recoverDurableRuns();
   } catch (error) {
-    console.error(
-      `[bureau] Durable run recovery failed during boot: ${serializeUnknownError(error)}`,
-    );
+    diagnose({
+      level: 'error',
+      scope: 'recovery',
+      message: `[bureau] Durable run recovery failed during boot: ${serializeUnknownError(error)}`,
+    });
   }
 
   return bureau;

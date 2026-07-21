@@ -1,13 +1,15 @@
-import { describe, expect, it } from 'bun:test';
+import { afterEach, describe, expect, it, spyOn } from 'bun:test';
 import type { ActiveRun } from 'operative';
 import type { RunState } from 'operative/store';
 
 import {
+  resolveDiagnosticSink,
   serializeActionDetail,
   serializeRunDetail,
   serializeRunState,
   serializeUnknownError,
 } from './serialization';
+import type { BureauDiagnostic } from './types';
 
 describe('serializeRunState', () => {
   it('maps RunState to a JSON-safe RunSummary', () => {
@@ -394,5 +396,51 @@ describe('serializeUnknownError', () => {
     expect(serializeUnknownError({ first: shared, second: shared })).toBe(
       '{"first":{"attempts":2,"ok":true},"second":{"attempts":2,"ok":true}}',
     );
+  });
+});
+
+describe('resolveDiagnosticSink', () => {
+  afterEach(() => {
+    // Every test here spies on console.error/warn — restore between tests so
+    // a spy from one test never leaks into the next.
+    (console.error as unknown as { mockRestore?: () => void }).mockRestore?.();
+    (console.warn as unknown as { mockRestore?: () => void }).mockRestore?.();
+  });
+
+  it('with no sink supplied, writes to console.error/console.warn — unchanged default behavior', () => {
+    const errorSpy = spyOn(console, 'error').mockImplementation(() => {});
+    const warnSpy = spyOn(console, 'warn').mockImplementation(() => {});
+    const diagnose = resolveDiagnosticSink(undefined);
+
+    diagnose({ level: 'error', scope: 'recovery', message: 'boom', cause: new Error('cause') });
+    diagnose({ level: 'warn', scope: 'recovery', message: 'careful' });
+
+    expect(errorSpy).toHaveBeenCalledWith('boom', expect.any(Error));
+    expect(warnSpy).toHaveBeenCalledWith('careful');
+  });
+
+  it('with a sink supplied, routes diagnostics to it instead of the console', () => {
+    const errorSpy = spyOn(console, 'error').mockImplementation(() => {});
+    const warnSpy = spyOn(console, 'warn').mockImplementation(() => {});
+    const received: BureauDiagnostic[] = [];
+    const diagnose = resolveDiagnosticSink((diagnostic) => received.push(diagnostic));
+
+    diagnose({ level: 'error', scope: 'webhook', message: 'delivery failed' });
+
+    expect(received).toEqual([{ level: 'error', scope: 'webhook', message: 'delivery failed' }]);
+    expect(errorSpy).not.toHaveBeenCalled();
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it('falls back to the console for a diagnostic whose sink throws, without crashing', () => {
+    const errorSpy = spyOn(console, 'error').mockImplementation(() => {});
+    const diagnose = resolveDiagnosticSink(() => {
+      throw new Error('a misbehaving sink');
+    });
+
+    expect(() =>
+      diagnose({ level: 'error', scope: 'dispose', message: 'teardown failed' }),
+    ).not.toThrow();
+    expect(errorSpy).toHaveBeenCalledWith('teardown failed');
   });
 });

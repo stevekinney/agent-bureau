@@ -93,7 +93,7 @@ import {
 } from 'skills';
 import { z } from 'zod';
 
-import { serializeUnknownError } from './serialization';
+import { resolveDiagnosticSink, serializeUnknownError } from './serialization';
 import type {
   BureauOptions,
   CacheConfiguration,
@@ -1006,6 +1006,7 @@ export async function createRuntimeComposition(
 ): Promise<RuntimeComposition> {
   const maximumSteps = options.maximumSteps ?? DEFAULT_MAXIMUM_STEPS;
   const systemPrompt = options.systemPrompt;
+  const diagnose = resolveDiagnosticSink(options.onDiagnostic);
 
   // Gate the resolver until the whole composition is assembled. In automatic
   // mode `createRunEngine` starts its scheduler before later consts (`sessionStore`,
@@ -1143,12 +1144,15 @@ export async function createRuntimeComposition(
           storedVersion: event.storedVersion,
           registeredVersion: event.registeredVersion,
         });
-        console.warn(
-          `[bureau] Recovered run "${event.runId}" was checkpointed under workflow version ` +
+        diagnose({
+          level: 'warn',
+          scope: 'recovery',
+          message:
+            `[bureau] Recovered run "${event.runId}" was checkpointed under workflow version ` +
             `"${event.storedVersion}" but is resuming under "${event.registeredVersion}". ` +
             `Recovery proceeds against the currently-deployed code (pin-and-warn) — see ` +
             `documentation/workflow-versioning.md.`,
-        );
+        });
       },
     });
   }
@@ -1941,9 +1945,11 @@ export async function createRuntimeComposition(
         if (sessionId !== undefined)
           recoveredScheduleMarker = { ...recoveredScheduleMarker, sessionId };
       } catch (error) {
-        console.error(
-          `[bureau] Could not inspect scheduled session proof for recovered run "${info.workflowId}"; continuing without scheduled-fire classification: ${serializeUnknownError(error)}`,
-        );
+        diagnose({
+          level: 'error',
+          scope: 'recovery',
+          message: `[bureau] Could not inspect scheduled session proof for recovered run "${info.workflowId}"; continuing without scheduled-fire classification: ${serializeUnknownError(error)}`,
+        });
       }
     }
     if (
@@ -2038,10 +2044,13 @@ export async function createRuntimeComposition(
         // of recovery — but it is NOT silent: a session left stale `running`
         // cannot be repaired by a later boot (the run is already terminal
         // `failed` and is skipped), so surface it for operators.
-        console.error(
-          `[bureau] Failed to reconcile unrecoverable run "${info.workflowId}" ` +
+        diagnose({
+          level: 'error',
+          scope: 'session-persistence',
+          message:
+            `[bureau] Failed to reconcile unrecoverable run "${info.workflowId}" ` +
             `(session ${sessionId}) to error: ${writeError instanceof Error ? writeError.message : String(writeError)}`,
-        );
+        });
       }
       return { status: 'unavailable', reason: `run ${info.workflowId} not reconstructable` };
     }
