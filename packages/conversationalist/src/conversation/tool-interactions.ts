@@ -12,19 +12,23 @@ import {
   isConversationEnvironmentParameter,
   resolveConversationEnvironment,
 } from '../environment';
+import { createIntegrityError, createToolResultNotFoundError } from '../errors';
 import type {
   AppendableToolCallInput,
   AppendableToolResult,
   ConversationHistory as Conversation,
   JSONValue,
+  Message,
   MessageInput,
   TokenUsage,
   ToolCall,
   ToolResult,
 } from '../types';
+import { createMessage, toReadonly } from '../utilities';
 import { getOrderedMessages } from '../utilities/message-store';
 import { pairToolCallsWithResults } from '../utilities/tool-calls';
 import { appendMessages } from './append';
+import { ensureConversationSafe } from './validation';
 export type { MaterializeToolCallOptions } from 'interoperability';
 export {
   materializeToolCall,
@@ -176,6 +180,96 @@ export async function appendToolResultsAsync(
   );
 
   return appendMessages(conversation, ...messageInputs, environment);
+}
+
+/**
+ * Replaces the tool-result message for `callId` with a new result, in
+ * place — producing exactly one tool-result message for that call
+ * afterwards. This is the primitive a host needs to turn a pending
+ * `action_required` result (appended before a run parks on approval) into
+ * the resolved result from `toolbox.resumeApproval()`, without ending up
+ * with two tool-result messages for the same call — a malformed
+ * conversation most providers reject or mishandle on the next turn.
+ *
+ * Locates the message purely by `toolResult.callId`, by scanning
+ * `conversation.messages` — never by position or by an undo/redo node
+ * graph — so it behaves identically on a freshly-built `Conversation` and
+ * one rehydrated from a persisted `ConversationHistory` (the exact case a
+ * stateless host hits on every resume, since it reconstructs the
+ * conversation from stored JSON each request).
+ *
+ * **Identity**: the replacement message keeps the original message's `id`,
+ * `createdAt`, and `position` — it is the same logical result being
+ * resolved, not a new message appended after it. This mirrors
+ * {@link redactMessageAtPosition}'s in-place replacement and means callers
+ * holding a reference to the pending result's message id keep a valid
+ * reference afterwards.
+ *
+ * `content`/`metadata`/`hidden`/`tokenUsage` default to the original
+ * message's values and can be overridden via `options`, same as
+ * {@link appendToolResult}.
+ *
+ * Throws `error:not-found` if no tool-result message exists for `callId`,
+ * and `error:integrity` if more than one does (an already-malformed
+ * conversation state — replacing one of several would silently guess which
+ * one the caller meant).
+ */
+export function resolveToolResult(
+  conversation: Conversation,
+  callId: string,
+  toolResult: AppendableToolResult,
+  options?: AppendToolResultOptions,
+  environment?: Partial<ConversationEnvironment>,
+): Conversation {
+  const resolvedOptions = isConversationEnvironmentParameter(options) ? undefined : options;
+  const resolvedEnvironmentInput = isConversationEnvironmentParameter(options)
+    ? options
+    : environment;
+
+  const matches = getOrderedMessages(conversation).filter(
+    (message): message is Message & { toolResult: ToolResult } =>
+      message.role === 'tool-result' &&
+      message.toolResult !== undefined &&
+      message.toolResult.callId === callId,
+  );
+
+  const original = matches[0];
+  if (!original) {
+    throw createToolResultNotFoundError(callId);
+  }
+
+  if (matches.length > 1) {
+    throw createIntegrityError(`multiple tool-result messages found for callId: ${callId}`, {
+      callId,
+      messageIds: matches.map((message) => message.id),
+    });
+  }
+
+  const normalizedToolResult = materializeToolResult(toolResult);
+
+  const resolvedEnvironment = resolveConversationEnvironment(resolvedEnvironmentInput);
+  const now = resolvedEnvironment.now();
+
+  const replaced = createMessage({
+    id: original.id,
+    role: original.role,
+    content: resolvedOptions?.content ?? original.content,
+    position: original.position,
+    createdAt: original.createdAt,
+    metadata: { ...(resolvedOptions?.metadata ?? original.metadata) },
+    hidden: resolvedOptions?.hidden ?? original.hidden,
+    toolResult: normalizedToolResult,
+    tokenUsage: resolvedOptions?.tokenUsage ?? original.tokenUsage,
+    cacheBoundary: original.cacheBoundary,
+  });
+
+  const next: Conversation = {
+    ...conversation,
+    ids: [...conversation.ids],
+    messages: { ...conversation.messages, [replaced.id]: replaced },
+    updatedAt: now,
+  };
+  return ensureConversationSafe(toReadonly(next));
 }
 
 /**

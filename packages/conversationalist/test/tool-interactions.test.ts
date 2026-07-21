@@ -8,12 +8,15 @@ import {
   appendToolResults,
   appendToolResultsAsync,
   createConversationHistory as createConversation,
+  deserializeConversationHistory,
   getPendingToolCalls,
   getToolInteractions,
   materializeToolCall,
   materializeToolResult,
   materializeToolResultAsync,
+  resolveToolResult,
 } from '../src/conversation/index';
+import { conversationSchema } from '../src/schemas';
 import type { ConversationHistory as Conversation, Message } from '../src/types';
 
 const testEnvironment = {
@@ -382,5 +385,158 @@ describe('tool interaction helpers', () => {
       outcome: 'success',
       content: 42,
     });
+  });
+});
+
+describe('resolveToolResult', () => {
+  const buildPendingConversation = (): Conversation => {
+    let conv = createConversation({ id: 'test' }, testEnvironment);
+    conv = appendToolCall(
+      conv,
+      { id: 'call-1', name: 'deploy', arguments: { environment: 'production' } },
+      undefined,
+      testEnvironment,
+    );
+    conv = appendToolResult(
+      conv,
+      {
+        callId: 'call-1',
+        outcome: 'action_required',
+        content: null,
+        action: { type: 'approval', message: 'Approve deploy to production?' },
+      },
+      undefined,
+      testEnvironment,
+    );
+    return conv;
+  };
+
+  it('replaces a pending tool-result with the resolved result, yielding exactly one tool-result for that callId', () => {
+    const conv = buildPendingConversation();
+
+    const resolved = resolveToolResult(
+      conv,
+      'call-1',
+      { callId: 'call-1', outcome: 'success', content: { deployed: true } },
+      undefined,
+      testEnvironment,
+    );
+
+    const toolResultMessages = getOrderedMessages(resolved).filter(
+      (message) => message.role === 'tool-result' && message.toolResult?.callId === 'call-1',
+    );
+    expect(toolResultMessages).toHaveLength(1);
+    expect(toolResultMessages[0]?.toolResult?.outcome).toBe('success');
+    expect(toolResultMessages[0]?.toolResult?.content).toEqual({ deployed: true });
+  });
+
+  it('preserves the original message id, createdAt, and position', () => {
+    const conv = buildPendingConversation();
+    const pending = getOrderedMessages(conv).find((message) => message.role === 'tool-result');
+    expect(pending).toBeDefined();
+
+    const resolved = resolveToolResult(
+      conv,
+      'call-1',
+      { callId: 'call-1', outcome: 'success', content: { deployed: true } },
+      undefined,
+      testEnvironment,
+    );
+    const replaced = getOrderedMessages(resolved).find((message) => message.role === 'tool-result');
+
+    expect(replaced?.id).toBe(pending!.id);
+    expect(replaced?.createdAt).toBe(pending!.createdAt);
+    expect(replaced?.position).toBe(pending!.position);
+  });
+
+  it('works identically on a Conversation rehydrated from serialized JSON', () => {
+    const conv = buildPendingConversation();
+
+    // Round-trip through JSON, exactly as a stateless host reconstructing a
+    // conversation from persisted storage would.
+    const rehydrated = deserializeConversationHistory(JSON.parse(JSON.stringify(conv)));
+
+    const resolved = resolveToolResult(
+      rehydrated,
+      'call-1',
+      { callId: 'call-1', outcome: 'success', content: { deployed: true } },
+      undefined,
+      testEnvironment,
+    );
+
+    const toolResultMessages = getOrderedMessages(resolved).filter(
+      (message) => message.role === 'tool-result' && message.toolResult?.callId === 'call-1',
+    );
+    expect(toolResultMessages).toHaveLength(1);
+    expect(toolResultMessages[0]?.toolResult?.outcome).toBe('success');
+  });
+
+  it('produces a schema-valid history with coherent ids and positions', () => {
+    const conv = buildPendingConversation();
+
+    const resolved = resolveToolResult(
+      conv,
+      'call-1',
+      { callId: 'call-1', outcome: 'success', content: { deployed: true } },
+      undefined,
+      testEnvironment,
+    );
+
+    expect(conversationSchema.safeParse(resolved).success).toBe(true);
+    expect(resolved.ids).toEqual(conv.ids);
+    resolved.ids.forEach((id, index) => {
+      expect(resolved.messages[id]?.position).toBe(index);
+    });
+  });
+
+  it('throws when no tool-result message exists for the callId', () => {
+    const conv = createConversation({ id: 'test' }, testEnvironment);
+
+    expect(() =>
+      resolveToolResult(
+        conv,
+        'missing-call',
+        { callId: 'missing-call', outcome: 'success', content: {} },
+        undefined,
+        testEnvironment,
+      ),
+    ).toThrow();
+  });
+
+  it('throws when the callId has no pending tool-result but a tool-call exists', () => {
+    let conv = createConversation({ id: 'test' }, testEnvironment);
+    conv = appendToolCall(
+      conv,
+      { id: 'call-1', name: 'deploy', arguments: {} },
+      undefined,
+      testEnvironment,
+    );
+
+    expect(() =>
+      resolveToolResult(
+        conv,
+        'call-1',
+        { callId: 'call-1', outcome: 'success', content: {} },
+        undefined,
+        testEnvironment,
+      ),
+    ).toThrow();
+  });
+
+  it('overrides content, metadata, hidden, and tokenUsage via options while defaulting to the original values otherwise', () => {
+    const conv = buildPendingConversation();
+
+    const resolved = resolveToolResult(
+      conv,
+      'call-1',
+      { callId: 'call-1', outcome: 'success', content: { deployed: true } },
+      { content: 'Deploy approved.', metadata: { approvedBy: 'user-1' }, hidden: true },
+      testEnvironment,
+    );
+
+    const replaced = getOrderedMessages(resolved).find((message) => message.role === 'tool-result');
+    expect(replaced?.content).toBe('Deploy approved.');
+    expect(replaced?.metadata).toEqual({ approvedBy: 'user-1' });
+    expect(replaced?.hidden).toBe(true);
   });
 });

@@ -7,7 +7,8 @@ export type IntegrityIssueCode =
   | 'integrity:duplicate-message-id'
   | 'integrity:orphan-tool-result'
   | 'integrity:tool-result-before-call'
-  | 'integrity:duplicate-tool-call';
+  | 'integrity:duplicate-tool-call'
+  | 'integrity:duplicate-tool-result';
 
 export interface IntegrityIssue {
   code: IntegrityIssueCode;
@@ -73,6 +74,8 @@ export function validateConversationHistoryIntegrity(
     }
   });
 
+  const toolResultsByCallId = new Map<string, { position: number; messageId: string }>();
+
   conversation.ids.forEach((id, index) => {
     const message = conversation.messages[id];
     if (!message) return;
@@ -94,6 +97,28 @@ export function validateConversationHistoryIntegrity(
             messageId: message.id,
             toolCallMessageId: toolCall.messageId,
           },
+        });
+      }
+
+      // A callId with more than one tool-result message is the malformed
+      // "two answers for one question" shape that resolveToolResult exists
+      // to prevent: most provider adapters reject or mishandle a duplicate
+      // tool-result on the next turn.
+      const existing = toolResultsByCallId.get(message.toolResult.callId);
+      if (existing) {
+        issues.push({
+          code: 'integrity:duplicate-tool-result',
+          message: `duplicate tool-result for callId ${message.toolResult.callId}`,
+          data: {
+            callId: message.toolResult.callId,
+            messageId: message.id,
+            previousMessageId: existing.messageId,
+          },
+        });
+      } else {
+        toolResultsByCallId.set(message.toolResult.callId, {
+          position: index,
+          messageId: message.id,
         });
       }
     }

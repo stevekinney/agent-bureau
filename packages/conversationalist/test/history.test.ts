@@ -757,6 +757,37 @@ describe('Conversation', () => {
       history.complete();
       expect(history.completed).toBe(true);
     });
+
+    it('resolves a pending tool-result by callId, keeping exactly one tool-result message', () => {
+      let messageIndex = 0;
+      const history = new ConversationHistory(createConversation(), {
+        randomId: () => `msg-${++messageIndex}`,
+      });
+
+      history.appendToolCall({
+        id: 'call-1',
+        name: 'deploy',
+        arguments: { environment: 'production' },
+      });
+      history.appendToolResult({
+        callId: 'call-1',
+        outcome: 'action_required',
+        content: null,
+        action: { type: 'approval', message: 'Approve deploy to production?' },
+      });
+
+      history.resolveToolResult('call-1', {
+        callId: 'call-1',
+        outcome: 'success',
+        content: { deployed: true },
+      });
+
+      const toolResultMessages = getOrderedMessages(history.current).filter(
+        (message) => message.role === 'tool-result' && message.toolResult?.callId === 'call-1',
+      );
+      expect(toolResultMessages).toHaveLength(1);
+      expect(toolResultMessages[0]?.toolResult?.outcome).toBe('success');
+    });
   });
 
   describe('maxHistoryDepth', () => {

@@ -139,6 +139,20 @@ export function createNotFoundError(id: string): ConversationalistError {
 }
 
 /**
+ * Creates a tool-result not found error (ERR_NOT_FOUND).
+ * Thrown when {@link resolveToolResult} is asked to replace a tool-result
+ * message for a `callId` that has no tool-result message in the
+ * conversation.
+ */
+export function createToolResultNotFoundError(callId: string): ConversationalistError {
+  return new ConversationalistError(
+    'error:not-found',
+    `no tool-result message found for callId: ${callId}`,
+    { context: { callId } },
+  );
+}
+
+/**
  * Creates a serialization error (ERR_SERIALIZATION).
  * Thrown when JSON serialization/deserialization fails.
  */
