@@ -17,7 +17,7 @@
 
 import { createTool } from 'armorer';
 import { describe, expect, it } from 'bun:test';
-import type { ToolStartedBubbleEvent } from 'operative';
+import type { GenerateFunction, ToolSettledBubbleEvent, ToolStartedBubbleEvent } from 'operative';
 import { createMockGenerate } from 'operative/test';
 import { z } from 'zod';
 
@@ -979,5 +979,171 @@ describe('createBureau (builder) — toolbox isolation for concurrent runs (PRRT
     // The params in each run's event must match its own tool call, not the sibling's.
     expect((eventsA[0]!.params as { text: string }).text).toBe('alpha');
     expect((eventsB[0]!.params as { text: string }).text).toBe('beta');
+  });
+});
+
+describe('createBureau (builder) — toolbox/hook/skill-policy merge branches', () => {
+  it('registers an armorer Tool under the map key when its canonical name differs (map key wins)', async () => {
+    // toolboxFromMap: when a full armorer Tool's own configuration.name
+    // doesn't match the key it's registered under, the tool is
+    // re-configured with the map key as its name rather than passed
+    // through as-is.
+    const internallyNamedTool = createTool({
+      name: 'internal-search-impl',
+      description: 'search implementation',
+      input: z.object({ query: z.string() }),
+      execute: async ({ query }) => `results for ${query}`,
+    });
+
+    const generate = createMockGenerate([
+      { content: '', toolCalls: [{ name: 'search', arguments: { query: 'agent bureau' } }] },
+      { content: 'done', toolCalls: [] },
+    ]);
+
+    const bureau = createBureau()
+      .tools({ search: internallyNamedTool })
+      .agent({ name: 'a', generate });
+
+    // The LLM calls the tool by the MAP KEY ('search'), not the tool's own
+    // configured name ('internal-search-impl') — this only resolves if the
+    // name-override branch actually renamed the registered tool.
+    const settledEvents: ToolSettledBubbleEvent[] = [];
+    for await (const event of bureau.run('a', 'find something')) {
+      if (event.type === 'tool.settled') settledEvents.push(event as ToolSettledBubbleEvent);
+    }
+
+    expect(settledEvents).toHaveLength(1);
+    expect(settledEvents[0]!.result).toBe('results for agent bureau');
+  });
+
+  it('combines bureau-level and agent-level toolboxes when both are present (agent wins on name collision, bureau-only tools still work)', async () => {
+    // Calls a BUREAU-ONLY tool first (proves the union side of the merge —
+    // a test that only exercised the colliding `echo` tool would still pass
+    // if mergeToolboxes() discarded every bureau-level tool whenever an
+    // agent toolbox exists), then the colliding `echo` tool (proves the
+    // collision side).
+    const sharedNameGenerate = createMockGenerate([
+      { content: '', toolCalls: [{ name: 'bureau-only', arguments: {} }] },
+      { content: '', toolCalls: [{ name: 'echo', arguments: { text: 'from agent tool' } }] },
+      { content: 'done', toolCalls: [] },
+    ]);
+
+    const bureauOnlyTool = createTool({
+      name: 'bureau-only',
+      description: 'exists only at the bureau level',
+      input: z.object({}),
+      execute: async () => 'bureau-only-result',
+    });
+    const bureauEcho = createTool({
+      name: 'echo',
+      description: 'bureau-level echo',
+      input: z.object({ text: z.string() }),
+      execute: async () => 'bureau-level result',
+    });
+    const agentEcho = createTool({
+      name: 'echo',
+      description: 'agent-level echo (should win)',
+      input: z.object({ text: z.string() }),
+      execute: async ({ text }) => `agent-level: ${text}`,
+    });
+
+    const bureau = createBureau()
+      .tools({ 'bureau-only': bureauOnlyTool, echo: bureauEcho })
+      .agent({ name: 'a', generate: sharedNameGenerate, tools: { echo: agentEcho } });
+
+    const settledEvents: ToolSettledBubbleEvent[] = [];
+    for await (const event of bureau.run('a', 'go')) {
+      if (event.type === 'tool.settled') settledEvents.push(event as ToolSettledBubbleEvent);
+    }
+
+    expect(settledEvents).toHaveLength(2);
+    const bureauOnlySettled = settledEvents.find((event) => event.toolName === 'bureau-only');
+    const echoSettled = settledEvents.find((event) => event.toolName === 'echo');
+
+    // The bureau-only tool survived the merge (union, not collision-only).
+    expect(bureauOnlySettled?.result).toBe('bureau-only-result');
+    // The agent-level tool wins the name collision over the bureau-level one.
+    expect(echoSettled?.result).toBe('agent-level: from agent tool');
+  });
+
+  it('accumulates tools across repeated .tools() calls at the bureau level', async () => {
+    const first = createTool({
+      name: 'first',
+      description: 'first tool',
+      input: z.object({}),
+      execute: async () => 'first-result',
+    });
+    const second = createTool({
+      name: 'second',
+      description: 'second tool',
+      input: z.object({}),
+      execute: async () => 'second-result',
+    });
+
+    const generate = createMockGenerate([
+      { content: '', toolCalls: [{ name: 'first', arguments: {} }] },
+      { content: '', toolCalls: [{ name: 'second', arguments: {} }] },
+      { content: 'done', toolCalls: [] },
+    ]);
+
+    // Two separate .tools() calls — the second must combine with, not
+    // replace, the first. Drain the run and assert BOTH tool calls actually
+    // resolved successfully — a test that only checked bureau.run() doesn't
+    // throw synchronously would still pass even if the second .tools() call
+    // replaced the first (the loop constructs an AgentRun synchronously
+    // either way; a missing tool only surfaces once the run executes).
+    const settledEvents: ToolSettledBubbleEvent[] = [];
+    for await (const event of createBureau()
+      .tools({ first })
+      .tools({ second })
+      .agent({ name: 'a', generate })
+      .run('a', 'go')) {
+      if (event.type === 'tool.settled') settledEvents.push(event as ToolSettledBubbleEvent);
+    }
+
+    expect(settledEvents).toHaveLength(2);
+    const firstSettled = settledEvents.find((event) => event.toolName === 'first');
+    const secondSettled = settledEvents.find((event) => event.toolName === 'second');
+    expect(firstSettled?.status).toBe('success');
+    expect(firstSettled?.result).toBe('first-result');
+    expect(secondSettled?.status).toBe('success');
+    expect(secondSettled?.result).toBe('second-result');
+  });
+
+  it('merges bureau and agent skill policies to undefined when neither carries an allow/deny list (unfiltered catalog)', async () => {
+    const mockProvider = {
+      listSkills: async () => [
+        { name: 'research', description: 'Research skills' },
+        { name: 'writing', description: 'Writing skills' },
+      ],
+      isEnabled: async () => true,
+    };
+
+    const capturedMessages: Array<{ role: string; content: unknown }> = [];
+    const base = makeGenerate();
+    const capturingGenerate: GenerateFunction = async (context) => {
+      if (capturedMessages.length === 0) {
+        for (const msg of context.conversation.getMessages()) {
+          capturedMessages.push({ role: msg.role, content: msg.content });
+        }
+      }
+      return base(context);
+    };
+
+    const bureau = createBureau()
+      .skills(mockProvider) // no bureau-level policy
+      .agent({ name: 'a', generate: capturingGenerate, skillPolicy: {} }); // empty agent policy
+
+    await bureau.run('a', 'input').result();
+
+    const systemMessages = capturedMessages.filter((m) => m.role === 'system');
+    const catalogMessage = systemMessages.find(
+      (m) => typeof m.content === 'string' && m.content.includes('<available_skills>'),
+    );
+    expect(catalogMessage).toBeDefined();
+    const catalog = catalogMessage?.content as string;
+    // Neither side restricted anything, so both skills are present.
+    expect(catalog).toContain('research');
+    expect(catalog).toContain('writing');
   });
 });

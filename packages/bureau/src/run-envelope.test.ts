@@ -8,12 +8,19 @@ import { createTool, createToolbox } from 'armorer';
 import { createTestToolbox } from 'armorer/test';
 import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
+import { TypedEventTarget } from 'lifecycle';
 import {
   type ActiveRun,
+  BudgetExceededEvent,
+  BudgetThresholdEvent,
+  ContextBudgetWarningEvent,
   createActiveRun,
+  ElicitationRequestedEvent,
   type GenerateFunction,
   type RunFrame,
   runFrameSchema,
+  StreamCustomEvent,
+  type StreamEventMap,
   type Toolbox,
 } from 'operative';
 import { z } from 'zod';
@@ -33,6 +40,39 @@ function createEmptyToolbox(): Toolbox {
 
 function roundTrip<T>(value: T): unknown {
   return JSON.parse(JSON.stringify(value));
+}
+
+/**
+ * A minimal `ActiveRun` stub for exercising `createRunFrameForwarder`'s
+ * notification-frame listeners directly, without driving a full agent loop
+ * through a real cost budget or context-window configuration. Only
+ * `addEventListener`/`removeEventListener` are real (backed by a plain
+ * `EventTarget`) — `createRunFrameForwarder` never calls anything else on
+ * its `activeRun` parameter, so the rest of the interface is stubbed out.
+ */
+function createEventDrivenActiveRun(): {
+  activeRun: ActiveRun;
+  dispatch: (event: Event) => void;
+} {
+  const target = new EventTarget();
+  const notImplemented = () => {
+    throw new Error('not implemented in this test stub');
+  };
+  const activeRun = {
+    result: new Promise<never>(() => {}),
+    abort: () => {},
+    addEventListener: target.addEventListener.bind(target),
+    removeEventListener: target.removeEventListener.bind(target),
+    on: notImplemented,
+    once: notImplemented,
+    subscribe: notImplemented,
+    events: notImplemented,
+    toObservable: notImplemented,
+    complete: () => {},
+    [Symbol.dispose]: () => {},
+  } as unknown as ActiveRun;
+
+  return { activeRun, dispatch: (event) => target.dispatchEvent(event) };
 }
 
 describe('createRunFrameForwarder', () => {
@@ -196,6 +236,129 @@ describe('createRunFrameForwarder', () => {
     expect(toolPostFrames.length).toBe(1);
     expect(toolPostFrames[0]?.status).toBe('denied');
     expect(toolPostFrames[0]?.error).toBe('not permitted');
+  });
+
+  it('emits a warning notification frame when the cost budget threshold is crossed', () => {
+    const { activeRun, dispatch } = createEventDrivenActiveRun();
+    const frames: RunFrame[] = [];
+    const dispose = createRunFrameForwarder('run-budget-threshold', activeRun, (frame) =>
+      frames.push(frame),
+    );
+
+    dispatch(
+      new BudgetThresholdEvent({
+        threshold: 0.8,
+        currentCost: 4,
+        budget: 5,
+        model: 'claude-sonnet-5',
+      }),
+    );
+    dispose();
+
+    const notification = frames.find((frame) => frame.type === 'notification');
+    expect(notification?.type).toBe('notification');
+    if (notification?.type === 'notification') {
+      expect(notification.level).toBe('warning');
+      expect(notification.code).toBe('budget.threshold');
+      expect(notification.message).toBe('Cost budget at 80% (4 of 5)');
+    }
+  });
+
+  it('emits an error notification frame when the cost budget is exceeded', () => {
+    const { activeRun, dispatch } = createEventDrivenActiveRun();
+    const frames: RunFrame[] = [];
+    const dispose = createRunFrameForwarder('run-budget-exceeded', activeRun, (frame) =>
+      frames.push(frame),
+    );
+
+    dispatch(new BudgetExceededEvent({ currentCost: 6, budget: 5, model: 'claude-sonnet-5' }));
+    dispose();
+
+    const notification = frames.find((frame) => frame.type === 'notification');
+    expect(notification?.type).toBe('notification');
+    if (notification?.type === 'notification') {
+      expect(notification.level).toBe('error');
+      expect(notification.code).toBe('budget.exceeded');
+      expect(notification.message).toBe('Cost budget exceeded (6 of 5)');
+    }
+  });
+
+  it('emits a warning notification frame when the context window budget is running low', () => {
+    const { activeRun, dispatch } = createEventDrivenActiveRun();
+    const frames: RunFrame[] = [];
+    const dispose = createRunFrameForwarder('run-context-budget', activeRun, (frame) =>
+      frames.push(frame),
+    );
+
+    dispatch(new ContextBudgetWarningEvent(2, 7_500, 500, 8_000));
+    dispose();
+
+    const notification = frames.find((frame) => frame.type === 'notification');
+    expect(notification?.type).toBe('notification');
+    if (notification?.type === 'notification') {
+      expect(notification.step).toBe(2);
+      expect(notification.level).toBe('warning');
+      expect(notification.code).toBe('context.budget-warning');
+      expect(notification.message).toBe('Context budget: 500 of 8000 tokens remaining');
+    }
+  });
+
+  it('emits an info notification frame for an elicitation request', () => {
+    const { activeRun, dispatch } = createEventDrivenActiveRun();
+    const frames: RunFrame[] = [];
+    const dispose = createRunFrameForwarder('run-elicitation', activeRun, (frame) =>
+      frames.push(frame),
+    );
+
+    dispatch(new ElicitationRequestedEvent(1, 'Do you want to proceed?'));
+    dispose();
+
+    const notification = frames.find((frame) => frame.type === 'notification');
+    expect(notification?.type).toBe('notification');
+    if (notification?.type === 'notification') {
+      expect(notification.step).toBe(1);
+      expect(notification.level).toBe('info');
+      expect(notification.code).toBe('elicitation.requested');
+      expect(notification.message).toBe('Do you want to proceed?');
+    }
+  });
+
+  it('forwards stream:text-delta events from an optional streamEventTarget into assistant-chunk frames', () => {
+    const { activeRun } = createEventDrivenActiveRun();
+    const streamEventTarget = new TypedEventTarget<StreamEventMap>();
+    const frames: RunFrame[] = [];
+    const dispose = createRunFrameForwarder(
+      'run-stream-chunk',
+      activeRun,
+      (frame) => frames.push(frame),
+      { streamEventTarget },
+    );
+
+    streamEventTarget.dispatchEvent(
+      new StreamCustomEvent('stream:text-delta', {
+        type: 'stream:text-delta',
+        content: 'Hel',
+        accumulated: 'Hel',
+      }),
+    );
+
+    const chunk = frames.find((frame) => frame.type === 'assistant-chunk');
+    expect(chunk?.type).toBe('assistant-chunk');
+    if (chunk?.type === 'assistant-chunk') {
+      expect(chunk.delta).toBe('Hel');
+      expect(chunk.accumulated).toBe('Hel');
+    }
+
+    // Disposing removes the streamEventTarget listener too — no more chunks after.
+    dispose();
+    streamEventTarget.dispatchEvent(
+      new StreamCustomEvent('stream:text-delta', {
+        type: 'stream:text-delta',
+        content: 'lo',
+        accumulated: 'Hello',
+      }),
+    );
+    expect(frames.filter((frame) => frame.type === 'assistant-chunk')).toHaveLength(1);
   });
 });
 
