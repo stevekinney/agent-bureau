@@ -12,7 +12,7 @@ import type {
 import type { ObservabilityOptions } from '@lostgradient/weft/observability';
 import type { Storage, StorageConfiguration, TextValueStore } from '@lostgradient/weft/storage';
 import type { ConditionalTextValueStore } from '@lostgradient/weft/storage/text-value-store';
-import type { PendingToolApproval, SignedPendingToolApproval, Toolbox } from 'armorer';
+import type { AnyToolbox, PendingToolApproval, SignedPendingToolApproval } from 'armorer';
 import type { ConversationSnapshot } from 'conversationalist';
 import type { ToolPolicy } from 'interoperability';
 import type {
@@ -240,8 +240,7 @@ export interface BureauOptions {
   provider?: ProviderConfiguration;
   providers?: ProviderRouteConfiguration[];
   routing?: RoutingConfiguration;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  toolbox?: Toolbox<any>;
+  toolbox?: AnyToolbox;
   store?: Store;
   /**
    * Persistence for this bureau. Accepts three forms:

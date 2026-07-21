@@ -1,4 +1,4 @@
-import type { Toolbox, ToolExecuteOptions, ToolExecutionResult } from 'armorer';
+import type { AnyToolbox, ToolExecuteOptions, ToolExecutionResult } from 'armorer';
 import type { Conversation, ConversationHistory, TokenUsage } from 'conversationalist';
 import type { JSONValue, ToolCall, ToolCallInput } from 'interoperability';
 import type { HookRegistry } from 'lifecycle';
@@ -11,7 +11,7 @@ import type { RetryMutator } from './retry/types';
 import type { ResponseSchemaInput } from './structured-output/response-schema';
 import type { ResponseFormat, ToolChoice } from './structured-output/types';
 
-export type { Toolbox, ToolExecuteOptions, ToolExecutionResult } from 'armorer';
+export type { AnyToolbox, Toolbox, ToolExecuteOptions, ToolExecutionResult } from 'armorer';
 export type { Conversation, ConversationHistory, TokenUsage } from 'conversationalist';
 export type { JSONValue, ToolCall, ToolCallInput } from 'interoperability';
 
@@ -86,7 +86,7 @@ export interface GenerateContext {
   conversation: Conversation;
   step: number;
   signal?: AbortSignal;
-  toolbox: Toolbox;
+  toolbox: AnyToolbox;
   toolChoice?: ToolChoice;
   responseFormat?: ResponseFormat;
   /**
@@ -175,7 +175,7 @@ export type PrepareStepHook = (context: StepContext) => Promise<void | GenerateR
 export type BeforeToolExecutionHook = (context: ToolExecutionHookContext) => Promise<ToolCall[]>;
 export type AfterToolExecutionHook = (context: ToolExecutionResultContext) => Promise<void>;
 export type OnStepHook = (context: StepResult) => Promise<void>;
-export type SelectToolsHook = (context: StepContext) => Promise<Toolbox> | Toolbox;
+export type SelectToolsHook = (context: StepContext) => Promise<AnyToolbox> | AnyToolbox;
 export type ValidateResponseHook = (
   response: GenerateResponse,
   context: StepContext,
@@ -249,7 +249,7 @@ export interface RunResult {
  */
 export interface RunOptions {
   generate: GenerateFunction;
-  toolbox: Toolbox;
+  toolbox: AnyToolbox;
   conversation: Conversation | ConversationHistory;
   stopWhen?: StopCondition | StopCondition[];
   maximumSteps?: number;

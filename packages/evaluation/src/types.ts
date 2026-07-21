@@ -1,4 +1,4 @@
-import type { Toolbox } from 'armorer';
+import type { AnyToolbox } from 'armorer';
 import type { FinishReason, GenerateFunction, RegistryAgent, RunResult } from 'operative';
 
 /**
@@ -265,7 +265,7 @@ export type EmbedderFunction = (text: string) => Promise<number[]>;
  */
 export type EvaluationAgentConfiguration =
   | RegistryAgent
-  | { generate: GenerateFunction; toolbox: Toolbox };
+  | { generate: GenerateFunction; toolbox: AnyToolbox };
 
 /**
  * Options for creating an agent evaluation runner.
