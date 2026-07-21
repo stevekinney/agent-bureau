@@ -4,7 +4,7 @@
 
 ## What It Does
 
-- Defines agents with `defineAgent()` and runs them with `run()` or `createRun()`.
+- Defines agents with `createAgent()` and drives the loop directly with `createActiveRun()`.
 - Executes tools through `armorer` and conversation history through `conversationalist`.
 - Accepts caller-provided generate functions instead of importing model SDKs.
 - Provides sessions, session stores, durable run support, scheduler primitives, and heartbeat utilities.
@@ -40,11 +40,10 @@ Everything provider-specific stays behind a narrow seam: the `operative/anthropi
 
 ## Quick Start
 
-Define an agent with a stub generate function and run it to completion:
+Create an agent with a stub generate function and run it to completion:
 
 ```typescript
-import { defineAgent } from 'operative';
-import { createToolbox } from 'armorer';
+import { createAgent } from 'operative';
 import type { GenerateFunction } from 'operative';
 
 // Minimal inline generate function — swap for a real provider in production.
@@ -56,32 +55,34 @@ const generate: GenerateFunction = async ({ conversation }) => {
   };
 };
 
-const toolbox = createToolbox([]);
-
-const assistant = defineAgent({
-  name: 'echo-assistant',
-  instructions: 'You are a helpful assistant.',
+const assistant = createAgent({
   generate,
-  toolbox,
+  instructions: 'You are a helpful assistant.',
 });
 
-const result = await assistant.run('Hello, agent!');
+const run = assistant.run('Hello, agent!');
+const result = await run.result();
 console.log(result.content); // "Echo: Hello, agent!"
 console.log(result.finishReason); // "stop-condition" | "maximum-steps" | …
 ```
 
-### Event-Driven Style with `createRun()`
+### Event-Driven Style with `createActiveRun()`
 
-`createRun()` returns an `ActiveRun` with a full event surface. Attach listeners before the promise settles—the loop defers its first microtask so you never miss the opening events:
+`createAgent().run()` returns a non-thenable `AgentRun` handle: iterate it directly for events, or call `.result()` for the terminal `RunResult`. For the full event-emitting surface (`addEventListener`, `on`, `subscribe`, …) reach for `createActiveRun()` — the lower-level factory `createAgent` builds on — which returns an `ActiveRun` instead. Attach listeners before awaiting `result`—the loop defers its first microtask so you never miss the opening events:
 
 ```typescript
-import { createRun } from 'operative';
 import { Conversation } from 'conversationalist';
+import { createActiveRun, stopWhen } from 'operative';
 
 const conversation = new Conversation();
 conversation.appendUserMessage('Summarize the docs.');
 
-const activeRun = createRun({ generate, toolbox, conversation });
+const activeRun = createActiveRun({
+  generate,
+  toolbox, // a Toolbox from armorer's createToolbox() — empty or populated
+  conversation,
+  stopWhen: stopWhen.noToolCalls(),
+});
 
 activeRun.addEventListener('step.completed', (event) => {
   console.log(`Step ${event.step} done — ${event.content}`);
@@ -196,7 +197,7 @@ const resumedResult = await toolbox.resumeApproval(signedApproval);
 
 The full-control factory behind `createAgent`, `createSessionHandle`, and bureau-owned agents alike — documented, public API, not an internal implementation detail. It accepts the complete `RunOptions` bag directly: an existing `Conversation` instance (not just a `ConversationHistory`), a pre-built `Toolbox`, hooks, and durable routing (engine + checkpoint store + run id). `bureau` and `evaluation` both depend on it as first-party consumers.
 
-Most callers should reach for `createAgent({...}).run(...)` instead — it wraps `createActiveRun` in the higher-level `AgentRun` handle and covers the common cases. Reach for `createActiveRun` directly when you need something `createAgent` doesn't expose: an already-live `Conversation` instance, durable routing, or a pre-built emitter to bind tool dispatches to.
+Most callers should reach for `createAgent({...}).run(...)` instead — it wraps `createActiveRun` in the higher-level `AgentRun` handle and covers the common cases. Reach for `createActiveRun` directly when you need something `createAgent` doesn't expose: an already-live `Conversation` instance, durable routing, hooks (`prepareStep`, `onStep`, `validateResponse`, …), structured output via `responseSchema`, or a pre-built emitter to bind tool dispatches to.
 
 ```typescript
 import { createActiveRun, stopWhen } from 'operative';
@@ -211,96 +212,36 @@ const activeRun = createActiveRun({
   stopWhen: [stopWhen.noToolCalls()],
 });
 const result = await activeRun.result;
+console.log(result.content, result.usage.total);
 ```
 
 Like `createAgent`, a plain `ConversationHistory` passed here is SNAPSHOTTED on the way in, so a host that keeps mutating its stored history between turns cannot corrupt an in-flight run. Pass an already-live `Conversation` instance instead when you deliberately want the run to share it.
 
-#### `defineAgent(options)`
+**`RunOptions`** — the complete options bag accepted by `createActiveRun`; key fields:
 
-Creates a reusable `AgentDefinition` that can be invoked with `.run()` or `.createRun()`.
-
-```typescript
-import { defineAgent } from 'operative';
-
-const agent = defineAgent({
-  name: 'my-agent',
-  instructions: 'You are a concise assistant.',
-  generate, // GenerateFunction — required
-  toolbox, // Toolbox — required
-  maximumSteps: 10,
-  stopWhen: (step) => step.toolCalls.length === 0,
-});
-
-// Fire-and-forget: resolves to RunResult
-const result = await agent.run('What is the capital of France?');
-
-// Event-driven: returns ActiveRun
-const activeRun = agent.createRun({ conversation: 'What is 2 + 2?' });
-await activeRun.result;
-```
-
-**`DefineAgentOptions`** — key fields:
-
-| Field                 | Type                                                   | Description                               |
-| --------------------- | ------------------------------------------------------ | ----------------------------------------- |
-| `name`                | `string`                                               | Agent identifier.                         |
-| `instructions`        | `string \| { render(): string }`                       | System prompt or renderable template.     |
-| `generate`            | `GenerateFunction`                                     | The caller-supplied LLM call.             |
-| `toolbox`             | `Toolbox`                                              | Tool registry from `armorer`.             |
-| `stopWhen`            | `StopCondition \| StopCondition[]`                     | Loop exit predicates.                     |
-| `maximumSteps`        | `number`                                               | Hard step cap (default: `25`).            |
-| `prepareStep`         | `PrepareStepHook \| PrepareStepHook[]`                 | Runs before each generate call.           |
-| `beforeToolExecution` | `BeforeToolExecutionHook \| BeforeToolExecutionHook[]` | Modifies tool call list before execution. |
-| `afterToolExecution`  | `AfterToolExecutionHook \| AfterToolExecutionHook[]`   | Inspects/modifies tool results.           |
-| `onStep`              | `OnStepHook \| OnStepHook[]`                           | Called after each step completes.         |
-| `retry`               | `RetryOptions`                                         | Transient generate failure retry policy.  |
-| `contextManagement`   | `ContextManagementOptions`                             | Automatic context compaction.             |
-| `responseSchema`      | `ZodType`                                              | Structured output schema with retry.      |
-| `hooks`               | `HookRegistry<OperativeHookMap>`                       | Typed priority-ordered hook registry.     |
-| `persistence`         | Conditional text-value store                           | Session persistence backend.              |
-| `sessionId`           | `string`                                               | Session key for persistence.              |
-| `autoSave`            | `'step' \| 'completion' \| false`                      | When to flush to `persistence`.           |
-
-**`AgentRunOptions`** — override at call time:
-
-```typescript
-await agent.run({
-  conversation: existingConversation, // Conversation | ConversationHistory | string
-  signal: abortController.signal,
-  stopWhen: myExtraCondition,
-});
-```
-
-#### `run(options)`
-
-Drives the agent loop to completion without an event surface. Use when you only need the final `RunResult`:
-
-```typescript
-import { run } from 'operative';
-
-const result = await run({ generate, toolbox, conversation });
-console.log(result.content, result.usage.total);
-```
-
-**`RunOptions`** — the standalone options interface accepted by `run()` and `createRun()`:
-
-| Field                | Type                                                 | Description                              |
-| -------------------- | ---------------------------------------------------- | ---------------------------------------- |
-| `generate`           | `GenerateFunction`                                   | Required. LLM call.                      |
-| `toolbox`            | `Toolbox`                                            | Required. Tool registry.                 |
-| `conversation`       | `Conversation \| ConversationHistory`                | Required. Seed conversation.             |
-| `stopWhen`           | `StopCondition \| StopCondition[]`                   | Loop exit predicates.                    |
-| `maximumSteps`       | `number`                                             | Hard step cap (default: `25`).           |
-| `retry`              | `RetryOptions`                                       | Retry policy for transient errors.       |
-| `backpressure`       | `BackpressureStrategy`                               | Delay strategy applied before each step. |
-| `validateResponse`   | `ValidateResponseHook \| ValidateResponseHook[]`     | Post-generate response validation.       |
-| `validateToolResult` | `ValidateToolResultHook \| ValidateToolResultHook[]` | Post-execute result validation.          |
-| `selectTools`        | `SelectToolsHook \| SelectToolsHook[]`               | Per-step dynamic tool filtering.         |
-| `onElicitation`      | `OnElicitation`                                      | Human-in-the-loop input handler.         |
-| `contextManagement`  | `ContextManagementOptions`                           | Auto compaction settings.                |
-| `responseSchema`     | `ZodType`                                            | Enforce structured output via Zod.       |
-| `hooks`              | `HookRegistry<OperativeHookMap>`                     | Typed hook registry.                     |
-| `signal`             | `AbortSignal`                                        | External cancellation signal.            |
+| Field                 | Type                                                   | Description                                                                          |
+| --------------------- | ------------------------------------------------------ | ------------------------------------------------------------------------------------ |
+| `generate`            | `GenerateFunction`                                     | Required. The caller-supplied LLM call.                                              |
+| `toolbox`             | `Toolbox`                                              | Required. Tool registry.                                                             |
+| `conversation`        | `Conversation \| ConversationHistory`                  | Required. Seed conversation.                                                         |
+| `stopWhen`            | `StopCondition \| StopCondition[]`                     | Loop exit predicates.                                                                |
+| `maximumSteps`        | `number`                                               | Hard step cap (default: `25`).                                                       |
+| `prepareStep`         | `PrepareStepHook \| PrepareStepHook[]`                 | Runs before each generate call.                                                      |
+| `beforeToolExecution` | `BeforeToolExecutionHook \| BeforeToolExecutionHook[]` | Modifies tool call list before execution.                                            |
+| `afterToolExecution`  | `AfterToolExecutionHook \| AfterToolExecutionHook[]`   | Inspects/modifies tool results.                                                      |
+| `onStep`              | `OnStepHook \| OnStepHook[]`                           | Called after each step completes.                                                    |
+| `retry`               | `RetryOptions`                                         | Transient generate failure retry policy.                                             |
+| `backpressure`        | `BackpressureStrategy`                                 | Delay strategy applied before each step.                                             |
+| `validateResponse`    | `ValidateResponseHook \| ValidateResponseHook[]`       | Post-generate response validation.                                                   |
+| `validateToolResult`  | `ValidateToolResultHook \| ValidateToolResultHook[]`   | Post-execute result validation.                                                      |
+| `selectTools`         | `SelectToolsHook \| SelectToolsHook[]`                 | Per-step dynamic tool filtering.                                                     |
+| `onElicitation`       | `OnElicitation`                                        | Human-in-the-loop input handler.                                                     |
+| `contextManagement`   | `ContextManagementOptions`                             | Automatic context compaction.                                                        |
+| `responseSchema`      | `ZodType`                                              | Structured output schema with retry.                                                 |
+| `schemaRetries`       | `number`                                               | Retry attempts on schema validation failure.                                         |
+| `onMaximumSteps`      | `(context) => Promise<string \| void>`                 | Called when the loop exits on `maximumSteps` — a returned string replaces `content`. |
+| `hooks`               | `HookRegistry<OperativeHookMap>`                       | Typed priority-ordered hook registry.                                                |
+| `signal`              | `AbortSignal`                                          | External cancellation signal.                                                        |
 
 **`RunResult`:**
 
@@ -316,11 +257,7 @@ interface RunResult {
 }
 ```
 
-#### `createRun(options)`
-
-Returns an `ActiveRun` — the event-emitting entry point. Attach listeners before awaiting `result`:
-
-**`ActiveRun` interface:**
+**`ActiveRun` interface** — returned by `createActiveRun`, the event-emitting entry point. Attach listeners before awaiting `result`:
 
 | Member                                | Description                                            |
 | ------------------------------------- | ------------------------------------------------------ |
@@ -391,7 +328,7 @@ For richer session management, `createSessionStore()` and `resumeSession()` are 
 #### `createSessionStore()` and `resumeSession()`
 
 ```typescript
-import { createSessionStore, resumeSession } from 'operative';
+import { createActiveRun, createSessionStore, resumeSession, stopWhen } from 'operative';
 
 // createSessionStore wraps Weft's conditional TextValueStore.
 const sessions = createSessionStore(kvStore);
@@ -408,8 +345,17 @@ const { session, conversation, isNew } = await resumeSession(sessions, 'session-
   agentName: 'my-agent',
 });
 
-// Then run the agent with the restored conversation
-const result = await agent.run({ conversation });
+// Then drive a run from the restored, already-live Conversation instance.
+// createAgent().run() only accepts a plain ConversationHistory (it snapshots
+// its own fresh Conversation internally); createActiveRun accepts a live
+// Conversation directly, which is what resumeSession returns.
+const activeRun = createActiveRun({
+  generate,
+  toolbox,
+  conversation,
+  stopWhen: stopWhen.noToolCalls(),
+});
+const result = await activeRun.result;
 ```
 
 **`SessionStore` interface:**
@@ -436,8 +382,15 @@ references, and metadata instead of silently dropping one writer's turns.
 Hooks plug into the loop lifecycle. Register them on `RunOptions.hooks` using a `HookRegistry`, or use the simpler array fields (`prepareStep`, `onStep`, etc.).
 
 ```typescript
-import { defineAgent } from 'operative';
-import { composeHooks, onlyOnStep, runOnce, withTimeout, everyNSteps } from 'operative';
+import {
+  composeHooks,
+  createActiveRun,
+  onlyOnStep,
+  runOnce,
+  withTimeout,
+  everyNSteps,
+  stopWhen,
+} from 'operative';
 
 // Compose two prepare-step hooks into one
 const combined = composeHooks(
@@ -449,10 +402,11 @@ const combined = composeHooks(
   }),
 );
 
-const agent = defineAgent({
-  name: 'hooked-agent',
+const activeRun = createActiveRun({
   generate,
   toolbox,
+  conversation,
+  stopWhen: stopWhen.noToolCalls(),
   prepareStep: [
     combined,
     everyNSteps(3, async (ctx) => {
@@ -481,16 +435,13 @@ See [`operative/guardrails`](#operativeguardrails--guardrails) below for the tri
 
 ```typescript
 import {
+  createActiveRun,
   createGuardrails,
   createPromptInjectionDetector,
   createInputLengthDetector,
   createTopicBoundaryDetector,
-  createInputGuardrail,
-  createOutputGuardrail,
   createOutputPIIValidator,
-  createGroundingValidator,
-  createCodeSafetyValidator,
-  createSessionTaintTracker,
+  stopWhen,
 } from 'operative';
 
 // Injection detection on inputs
@@ -511,10 +462,11 @@ const guardrails = createGuardrails({
   output: { validators: [createOutputPIIValidator()] },
 });
 
-const agent = defineAgent({
-  name: 'safe-agent',
+const activeRun = createActiveRun({
   generate,
   toolbox,
+  conversation,
+  stopWhen: stopWhen.noToolCalls(),
   prepareStep: guardrails.prepareStep,
   validateResponse: guardrails.validateResponse,
 });
@@ -722,24 +674,37 @@ if (isToolCallParseError(error)) {
 #### Backpressure
 
 ```typescript
-import { createSlidingWindow, createTokenBucket, createAdaptiveBackoff } from 'operative';
+import {
+  createActiveRun,
+  createSlidingWindow,
+  createTokenBucket,
+  createAdaptiveBackoff,
+  stopWhen,
+} from 'operative';
 
 // Smooth out burst traffic with a sliding window
-const backpressure = createSlidingWindow({ windowMs: 60_000, maxRequests: 20 });
+const backpressure = createSlidingWindow({ windowSize: 60_000, maximumRequests: 20 });
 
 // Token bucket for sustained rate control
-const bucket = createTokenBucket({ capacity: 10, refillRate: 1 }); // 1 token/sec
+const bucket = createTokenBucket({ tokensPerInterval: 1, interval: 1000 }); // 1 token/sec
 
 // Exponential backoff that self-adjusts based on error rate
-const adaptive = createAdaptiveBackoff({ initialDelayMs: 500, maxDelayMs: 30_000 });
+const adaptive = createAdaptiveBackoff({ initialDelay: 500, maximumDelay: 30_000 });
 
-const result = await run({ generate, toolbox, conversation, backpressure });
+const activeRun = createActiveRun({
+  generate,
+  toolbox,
+  conversation,
+  stopWhen: stopWhen.noToolCalls(),
+  backpressure,
+});
+const result = await activeRun.result;
 ```
 
 #### Caching
 
 ```typescript
-import { withCache, withCacheMetrics } from 'operative';
+import { createActiveRun, stopWhen, withCache, withCacheMetrics } from 'operative';
 
 // withCache requires a TextValueStore backend (e.g. from Weft)
 const cachedGenerate = withCache(generate, {
@@ -755,7 +720,13 @@ const { generate: metered, metrics } = withCacheMetrics(generate, {
   model: 'claude-sonnet-4-20250514', // optional, for cost-savings estimation
 });
 
-const result = await run({ generate: metered, toolbox, conversation });
+const activeRun = createActiveRun({
+  generate: metered,
+  toolbox,
+  conversation,
+  stopWhen: stopWhen.noToolCalls(),
+});
+const result = await activeRun.result;
 // metrics.hits, metrics.misses, metrics.hitRate, metrics.totalSavedTokens
 metrics.reset(); // clear counters between test runs
 ```
@@ -782,24 +753,28 @@ const withFallback = createFallbackGenerate({
 
 #### Multi-Agent Patterns
 
+The registry-based patterns below (`createSupervisor`, `createHandoffTool`, `createAgentRegistry`) predate `createAgent` and are built around the older `RegistryAgent` shape — `{ name, run(input, context?): Promise<unknown> }`. A `StandaloneAgent` from `createAgent` doesn't expose `.name`, and its `.run(input)` returns a non-thenable `AgentRun` rather than a `Promise` directly, so wrap it in a thin adapter (`{ name, run: (input) => agent.run(input).result() }`) wherever one of these APIs expects a `RegistryAgent`.
+
 **Subagents:**
 
 ```typescript
-import { createSubagentTool } from 'operative';
+import { createAgent, createSubagentTool } from 'operative';
+import { z } from 'zod';
 
 const researcherTool = createSubagentTool({
   name: 'research',
   description: 'Delegates a research task to a specialist agent.',
   agentName: 'researcher',
-  run: (prompt, context) => researcherAgent.run(prompt, context),
+  run: (prompt) => researcherAgent.run(prompt).result(),
   input: z.object({ query: z.string() }),
-  mapInput: ({ query }) => query,
+  // mapInput receives the tool's raw, Zod-validated arguments as `unknown` —
+  // narrow to the schema shape declared above.
+  mapInput: (input) => (input as { query: string }).query,
 });
 
-const orchestrator = defineAgent({
-  name: 'orchestrator',
+const orchestrator = createAgent({
   generate,
-  toolbox: createToolbox([researcherTool]),
+  tools: { research: researcherTool },
 });
 ```
 
@@ -830,9 +805,11 @@ const researcherTool = createSubagentTool({
   name: 'research',
   description: 'Delegates a research task to a specialist agent.',
   agentName: 'researcher',
-  run: (prompt, context) => researcherAgent.run(prompt, context),
+  run: (prompt) => researcherAgent.run(prompt).result(),
   input: z.object({ query: z.string() }),
-  mapInput: ({ query }) => query,
+  // mapInput receives the tool's raw, Zod-validated arguments as `unknown` —
+  // narrow to the schema shape declared above.
+  mapInput: (input) => (input as { query: string }).query,
   // returnMode: 'summary' is the default — shown explicitly here.
   returnMode: 'summary',
   summaryTokenCap: 300,
@@ -852,11 +829,24 @@ const researcherTool = createSubagentTool({
 import { createSupervisor, createRoundRobinRouting, createCapabilityRouting } from 'operative';
 import type { AgentRegistryEntry } from 'operative';
 
-// Agents are wrapped as AgentRegistryEntry objects
+// Agents are wrapped as AgentRegistryEntry objects; `.agent` is a
+// RegistryAgent adapter over each StandaloneAgent (see the note above).
 const agentPool: AgentRegistryEntry[] = [
-  { agent: writerAgent, description: 'Writes prose', capabilities: ['writing'] },
-  { agent: researcherAgent, description: 'Finds facts', capabilities: ['research'] },
-  { agent: editorAgent, description: 'Edits copy', capabilities: ['editing'] },
+  {
+    agent: { name: 'writer', run: (input) => writerAgent.run(input).result() },
+    description: 'Writes prose',
+    capabilities: ['writing'],
+  },
+  {
+    agent: { name: 'researcher', run: (input) => researcherAgent.run(input).result() },
+    description: 'Finds facts',
+    capabilities: ['research'],
+  },
+  {
+    agent: { name: 'editor', run: (input) => editorAgent.run(input).result() },
+    description: 'Edits copy',
+    capabilities: ['editing'],
+  },
 ];
 
 const supervisor = createSupervisor({
@@ -915,11 +905,18 @@ import { createHandoffTool, extractHandoffTarget, HANDOFF_MARKER } from 'operati
 const escalateToSupport = createHandoffTool({
   name: 'escalate-to-support',
   description: 'Transfer the conversation to the human support agent.',
-  agent: supportAgent,
+  agent: { name: 'support', run: (input) => supportAgent.run(input).result() },
 });
 
-// After a run, check whether a handoff occurred
-const target = extractHandoffTarget(result.steps);
+// After a run, check whether a handoff occurred. extractHandoffTarget expects
+// each step's tool-result content as a string — true for any tool built with
+// createTool() (execute always returns a string), but RunResult.steps carries
+// the wider ToolExecutionResult.content (JSONValue), so narrow it first.
+const target = extractHandoffTarget(
+  result.steps.map((step) => ({
+    results: step.results.map((r) => ({ content: String(r.content) })),
+  })),
+);
 if (target) {
   // target is the agent name that was handed off to
 }
@@ -931,8 +928,18 @@ if (target) {
 import { createAgentRegistry, createAgentDiscoveryTool } from 'operative';
 
 const registry = createAgentRegistry();
-registry.register({ name: 'researcher', agent: researcherAgent, tags: ['research'] });
-registry.register({ name: 'writer', agent: writerAgent, tags: ['writing'] });
+registry.register({
+  agent: { name: 'researcher', run: (input) => researcherAgent.run(input).result() },
+  description: 'Finds facts',
+  capabilities: ['research'],
+  tags: ['research'],
+});
+registry.register({
+  agent: { name: 'writer', run: (input) => writerAgent.run(input).result() },
+  description: 'Writes prose',
+  capabilities: ['writing'],
+  tags: ['writing'],
+});
 
 // Let an orchestrator discover agents dynamically
 const discoveryTool = createAgentDiscoveryTool(registry);
@@ -941,7 +948,7 @@ const discoveryTool = createAgentDiscoveryTool(registry);
 #### Scheduler
 
 ```typescript
-import { createScheduler, createHeartbeat, createChunkedTask, sleep } from 'operative';
+import { createScheduler, createHeartbeat, createChunkedTask, stopWhen } from 'operative';
 import type { SchedulerTask } from 'operative';
 
 // The scheduler shares a generate function and toolbox across all its tasks.
@@ -1019,8 +1026,7 @@ const monitor = createCostBudgetMonitor({
 #### Structured Output
 
 ```typescript
-import { defineAgent } from 'operative';
-import { zodToJsonSchema } from 'operative';
+import { createActiveRun, stopWhen } from 'operative';
 import { z } from 'zod';
 
 const OutputSchema = z.object({
@@ -1029,10 +1035,11 @@ const OutputSchema = z.object({
   confidence: z.number().min(0).max(1),
 });
 
-const agent = defineAgent({
-  name: 'structured-agent',
+const activeRun = createActiveRun({
   generate,
   toolbox,
+  conversation,
+  stopWhen: stopWhen.noToolCalls(),
   responseSchema: OutputSchema,
   schemaRetries: 2,
 });
@@ -1041,24 +1048,28 @@ const agent = defineAgent({
 #### Scratchpad
 
 ```typescript
-import { createScratchpad, createScratchpadReadTool, createScratchpadWriteTool } from 'operative';
+import {
+  createAgent,
+  createScratchpad,
+  createScratchpadReadTool,
+  createScratchpadWriteTool,
+} from 'operative';
 
 const scratchpad = createScratchpad({ initialValues: { step: 0 } });
 
 const readTool = createScratchpadReadTool(scratchpad);
 const writeTool = createScratchpadWriteTool(scratchpad);
 
-const agent = defineAgent({
-  name: 'scratchpad-agent',
+const agent = createAgent({
   generate,
-  toolbox: createToolbox([readTool, writeTool]),
+  tools: { 'scratchpad-read': readTool, 'scratchpad-write': writeTool },
 });
 ```
 
 #### Context Compaction
 
 ```typescript
-import { createContextCompactor } from 'operative';
+import { createActiveRun, createContextCompactor, stopWhen } from 'operative';
 
 // createContextCompactor returns an onCompact function for contextManagement.
 // The summarize callback receives an array of Message objects (not a Conversation).
@@ -1070,10 +1081,11 @@ const onCompact = createContextCompactor({
   retainRecentMessages: 6,
 });
 
-const agent = defineAgent({
-  name: 'compacting-agent',
+const activeRun = createActiveRun({
   generate,
   toolbox,
+  conversation,
+  stopWhen: stopWhen.noToolCalls(),
   contextManagement: {
     maxTokens: 80_000,
     onCompact,
@@ -1084,14 +1096,7 @@ const agent = defineAgent({
 #### Memory Bridge
 
 ```typescript
-import {
-  createMemoryBridge,
-  createScratchpad,
-  createScratchpadReadTool,
-  createScratchpadWriteTool,
-  defineAgent,
-} from 'operative';
-import { createToolbox } from 'armorer';
+import { createActiveRun, createMemoryBridge, createScratchpad, stopWhen } from 'operative';
 import type { GenerateFunction, MemoryLike } from 'operative';
 
 declare const generate: GenerateFunction;
@@ -1101,6 +1106,8 @@ declare const myMemoryAdapter: MemoryLike;
 // createMemoryBridge returns { prepareStep, onStep }.
 // prepareStep recalls memories into the scratchpad on step 0.
 // onStep persists scratchpad entries back to long-term memory on the final step.
+// Register createScratchpadReadTool(scratchpad) / createScratchpadWriteTool(scratchpad)
+// on the toolbox you pass below so the model can read and write it.
 const scratchpad = createScratchpad();
 const bridge = createMemoryBridge({
   memory: myMemoryAdapter, // satisfies MemoryLike
@@ -1109,13 +1116,11 @@ const bridge = createMemoryBridge({
   scratchpadKey: 'memories',
 });
 
-const agent = defineAgent({
-  name: 'memory-agent',
+const activeRun = createActiveRun({
   generate,
-  toolbox: createToolbox([
-    createScratchpadReadTool(scratchpad),
-    createScratchpadWriteTool(scratchpad),
-  ]),
+  toolbox,
+  conversation,
+  stopWhen: stopWhen.noToolCalls(),
   prepareStep: bridge.prepareStep,
   onStep: bridge.onStep,
 });
@@ -1124,16 +1129,17 @@ const agent = defineAgent({
 #### Identity Hook
 
 ```typescript
-import { createIdentityHook } from 'operative';
+import { createActiveRun, createIdentityHook, stopWhen } from 'operative';
 
 const identityHook = createIdentityHook({
   resolve: async () => 'You are Aria, a friendly customer success agent.',
 });
 
-const agent = defineAgent({
-  name: 'aria',
+const activeRun = createActiveRun({
   generate,
   toolbox,
+  conversation,
+  stopWhen: stopWhen.noToolCalls(),
   prepareStep: identityHook,
 });
 ```
@@ -1165,7 +1171,7 @@ const allowedTools = enforcePolicy(allTools);
 #### Early Stopping
 
 ```typescript
-import { createEarlyStoppingHandler } from 'operative';
+import { createActiveRun, createEarlyStoppingHandler, stopWhen } from 'operative';
 
 // Creates an onMaximumSteps callback that calls the model one final time
 // without tools, prompting it to summarize findings before the loop ends.
@@ -1173,10 +1179,11 @@ const onMaximumSteps = createEarlyStoppingHandler(generate, {
   message: 'Summarize your findings so far in one paragraph.',
 });
 
-const agent = defineAgent({
-  name: 'bounded-agent',
+const activeRun = createActiveRun({
   generate,
   toolbox,
+  conversation,
+  stopWhen: stopWhen.noToolCalls(),
   maximumSteps: 10,
   onMaximumSteps,
 });
@@ -1189,6 +1196,7 @@ const agent = defineAgent({
 Composable predicates for loop exit. All are available on the `stopWhen` namespace object, or can be imported individually.
 
 ```typescript
+import { createActiveRun } from 'operative';
 import { stopWhen } from 'operative/conditions';
 
 // Stop when the model produces no tool calls (each predicate is a factory — call it)
@@ -1236,10 +1244,10 @@ const branchDone = stopWhen.forked();
 // run started from the updated conversation history).
 const parkOnApproval = stopWhen.pendingApproval();
 
-const agent = defineAgent({
-  name: 'bounded-agent',
+const activeRun = createActiveRun({
   generate,
   toolbox,
+  conversation,
   stopWhen: [noTools, maxSteps],
 });
 ```
@@ -1321,6 +1329,7 @@ import {
   createOutputPIIValidator,
   withMinimumTripwireConfidence,
 } from 'operative/guardrails';
+import { createActiveRun, stopWhen } from 'operative';
 
 const guardrails = createGuardrails({
   mode: 'tripwire',
@@ -1330,10 +1339,11 @@ const guardrails = createGuardrails({
   output: { validators: [createOutputPIIValidator()] },
 });
 
-const agent = defineAgent({
-  name: 'safe-agent',
+const activeRun = createActiveRun({
   generate,
   toolbox,
+  conversation,
+  stopWhen: stopWhen.noToolCalls(),
   prepareStep: guardrails.prepareStep,
   validateResponse: guardrails.validateResponse,
 });
@@ -1351,11 +1361,16 @@ Observes one or more `ActiveRun` instances, accumulating steps, usage, and the a
 
 ```typescript
 import { createStore } from 'operative/store';
-import { createRun } from 'operative';
+import { createActiveRun, stopWhen } from 'operative';
 
 const store = createStore({ maxActions: 500, maxSnapshots: 10 });
 
-const activeRun = createRun({ generate, toolbox, conversation });
+const activeRun = createActiveRun({
+  generate,
+  toolbox,
+  conversation,
+  stopWhen: stopWhen.noToolCalls(),
+});
 const runId = store.register(activeRun, 'run-001');
 
 // Subscribe to all store mutations
@@ -1419,6 +1434,7 @@ Wraps a streaming generate function into the standard `GenerateFunction` contrac
 Adapts a `StreamingGenerateFunction` (one that receives a `StreamingHandle`) into a standard `GenerateFunction`. The helper manages `appendStreamingMessage → updateStreamingMessage → finalizeStreamingMessage` on the conversation so the loop never sees raw streaming state:
 
 ```typescript
+import { createActiveRun, stopWhen } from 'operative';
 import { withStreaming } from 'operative/streaming';
 import type { StreamingGenerateFunction } from 'operative';
 
@@ -1436,44 +1452,60 @@ const streamingGenerate: StreamingGenerateFunction = async ({ conversation, stre
 const generate = withStreaming(streamingGenerate);
 
 // `generate` is now a standard GenerateFunction — pass it anywhere.
-const result = await run({ generate, toolbox, conversation });
+const activeRun = createActiveRun({
+  generate,
+  toolbox,
+  conversation,
+  stopWhen: stopWhen.noToolCalls(),
+});
+const result = await activeRun.result;
 ```
 
-#### `withEnhancedStreaming(options)`
+#### `withEnhancedStreaming(fn, options?)`
 
-Provides a full streaming pipeline with state machines, block parsing, and backpressure:
+Wraps a `StreamingGenerateFunction` (like `withStreaming`, above) but also drives a `StreamStateMachine` internally and calls fine-grained callbacks as text and tool-call deltas arrive:
 
 ```typescript
 import { withEnhancedStreaming } from 'operative/streaming';
+import type { StreamingGenerateFunction } from 'operative';
 
-const enhanced = withEnhancedStreaming({
-  onBlock: (block) => {
-    if (block.type === 'text') console.log('Text chunk:', block.content);
-    if (block.type === 'tool_use') console.log('Tool block:', block.toolName);
-  },
-  onComplete: () => console.log('Stream done'),
+declare const streamingGenerate: StreamingGenerateFunction;
+
+const generate = withEnhancedStreaming(streamingGenerate, {
+  onTextDelta: (delta, accumulated) => console.log('Text delta:', delta, accumulated),
+  onToolCallStart: (toolName) => console.log('Tool call started:', toolName),
+  onToolCallDelta: (_toolName, partialArgs) => console.log('Tool call args so far:', partialArgs),
 });
 ```
 
 #### `createBackpressureBuffer(options)`
 
-Creates a backpressure-aware buffer for streaming chunks:
+Creates a backpressure-aware buffer for streaming events — queues, coalesces, and drops `StreamEvent`s under load:
 
 ```typescript
 import { createBackpressureBuffer } from 'operative/streaming';
 
-const buffer = createBackpressureBuffer({ highWaterMark: 100, strategy: 'drop' });
+const buffer = createBackpressureBuffer({
+  maxBufferSize: 100,
+  coalesceDeltas: true,
+  onOverflow: (droppedCount) => console.warn(`Dropped ${droppedCount} buffered events`),
+  onEmit: (event) => console.log('Emit:', event.type),
+});
+
+buffer.push({ type: 'stream:text-delta', content: 'Hello', accumulated: 'Hello' });
 ```
 
 #### `createStreamStateMachine()`
 
-Parses a raw token stream into typed blocks (`text`, `tool_use`, `tool_result`):
+Parses a raw token stream into typed blocks (`text`, `tool-call`, `thinking`, `metadata`):
 
 ```typescript
 import { createStreamStateMachine } from 'operative/streaming';
 
 const machine = createStreamStateMachine();
-machine.transition('text-delta', { content: 'Hello' });
+const state = machine.process({ type: 'block-start', id: 'block-1', blockType: 'text' });
+machine.process({ type: 'block-delta', id: 'block-1', delta: 'Hello' });
+console.log(state.textContent);
 ```
 
 **Exported types:** `StreamBlock`, `StreamCommand`, `StreamEvent`, `StreamEventMap`, `StreamState`, `StreamStateMachine`, `BlockType`, `EnhancedStreamingOptions`, `BackpressureBuffer`, `BackpressureBufferOptions`, `StreamCustomEvent`.
@@ -1492,14 +1524,12 @@ import {
   createToolRemovalMutator,
   createOverflowMutator,
   addJitter,
-  RETRY_TEMPERATURE_KEY,
 } from 'operative/retry';
-import type { RetryMutator } from 'operative/retry';
+import { createActiveRun, stopWhen } from 'operative';
 
-// Start at 0.7, add 0.1 per attempt up to 1.0
+// Increase by 0.2 per attempt (default), capped at 1.0
 const escalate = createTemperatureEscalationMutator({
-  initial: 0.7,
-  increment: 0.1,
+  increment: 0.2,
   max: 1.0,
 });
 
@@ -1510,23 +1540,25 @@ const schemaFeedback = createSchemaErrorMutator();
 const dropBadTools = createToolRemovalMutator();
 
 // Handle context-window overflow by trimming early messages
-const overflow = createOverflowMutator({ keepMessages: 10 });
-
-// Add random jitter to any delay function
-const withJitter = addJitter({ maxJitter: 200 });
+const overflow = createOverflowMutator({
+  summarize: async (messages) => `Summary of ${messages.length} trimmed messages.`,
+  retainRecentMessages: 10,
+});
 
 // Compose into a single mutator
-const mutator = composeMutators(escalate, schemaFeedback, dropBadTools);
+const mutator = composeMutators(escalate, schemaFeedback, dropBadTools, overflow);
 
-const agent = defineAgent({
-  name: 'resilient-agent',
+const activeRun = createActiveRun({
   generate,
   toolbox,
+  conversation,
+  stopWhen: stopWhen.noToolCalls(),
   retry: {
     attempts: 3,
-    delay: 1000,
+    // addJitter(delay, options) is a plain function, not a factory — apply it
+    // inside your own delay function to jitter each computed backoff.
+    delay: (attempt) => addJitter(1000 * attempt, { maxJitter: 200 }),
     mutate: mutator,
-    jitter: true,
   },
 });
 ```
@@ -1551,10 +1583,15 @@ Attaches OpenTelemetry spans to an `ActiveRun`, mirroring the agent loop lifecyc
 
 ```typescript
 import { instrument } from 'operative/instrumentation';
-import { createRun } from 'operative';
+import { createActiveRun, stopWhen } from 'operative';
 import { trace } from '@opentelemetry/api';
 
-const activeRun = createRun({ generate, toolbox, conversation });
+const activeRun = createActiveRun({
+  generate,
+  toolbox,
+  conversation,
+  stopWhen: stopWhen.noToolCalls(),
+});
 
 // Wire up OTel spans
 const stopInstrumentation = instrument(activeRun, {
@@ -1650,22 +1687,19 @@ When the pinned spec revision changes, re-diff these two files against the new c
 
 ### `operative/durable` — Durable Runs
 
-Drives agent runs through the Weft durable execution engine—checkpointed, crash-recoverable, and resumable. The `ActiveRun` surface is identical to the in-memory path; only the second argument to `createRun()` or `run()` changes.
+Drives agent runs through the Weft durable execution engine—checkpointed, crash-recoverable, and resumable. The `ActiveRun` surface is identical to the in-memory path; only the second argument to `createActiveRun()` changes.
 
 ```typescript
-import { createRun } from 'operative';
+import { createActiveRun } from 'operative';
 import type { DurableRunRouting } from 'operative';
-import {
-  createRunEngine,
-  createCheckpointStore,
-  createRunWorkflow,
-  createDurableActiveRun,
-  reattachDurableActiveRun,
-} from 'operative/durable';
+import { createCheckpointStore, createRunEngine, createRunWorkflow } from 'operative/durable';
 
-// Build the durable substrate once at startup
-const engine = await createRunEngine({ storage: kvStore });
+// Build the durable substrate once at startup. createRunEngine returns
+// { engine, checkpointStore } — `storage` is Weft's raw Storage backend;
+// `checkpointStore` wraps a TextValueStore over that same backend.
 const checkpointStore = createCheckpointStore(kvStore);
+const runWorkflow = createRunWorkflow(checkpointStore);
+const { engine } = await createRunEngine({ storage: rawStorage, runWorkflow, checkpointStore });
 
 // Start a new durable run — survives crashes and resumes automatically
 const durable: DurableRunRouting = {
@@ -1675,19 +1709,12 @@ const durable: DurableRunRouting = {
   prompt: 'Summarize the annual report.',
 };
 
-const activeRun = createRun({ generate, toolbox, conversation }, durable);
+const activeRun = createActiveRun({ generate, toolbox, conversation }, durable);
 const result = await activeRun.result;
-
-// Reattach after a server restart to observe a recovered run
-const recovered = reattachDurableActiveRun(
-  { engine, checkpointStore },
-  {
-    runId: 'run-2024-001',
-    sessionId: 'session-001',
-    options: { generate, toolbox, conversation },
-  },
-);
 ```
+
+> [!NOTE] Reattaching after a restart
+> `reattachDurableActiveRun` wraps a handle already returned by `engine.recoverAll()` — it does not take a `sessionId`/`options` bag. `createRunEngine`'s default `recover: true` runs recovery during construction and does not surface the handles, so observing a recovered run as a live `ActiveRun` requires `recover: false` plus calling `engine.recoverAll()` yourself and reattaching each returned handle. See `reattachDurableActiveRun`'s own JSDoc and `bureau`'s `create-bureau.ts` (`reattachRecoveredRun`) for the full recovery-driven flow.
 
 **Exported functions:**
 
@@ -1719,12 +1746,12 @@ import {
   createMockGenerateOnce,
   createRunRecorder,
   createMockScratchpad,
-  createMockAgentDefinition,
+  createMockRegistryAgent,
   createMockAgentRegistry,
   createTestStore,
 } from 'operative/test';
 import type { RunRecorder } from 'operative/test';
-import type { GenerateResponse } from 'operative';
+import { createActiveRun, stopWhen } from 'operative';
 
 // Replay pre-canned responses in sequence
 const generate = createMockGenerate([
@@ -1732,7 +1759,12 @@ const generate = createMockGenerate([
   { content: 'Step 2 response', toolCalls: [], usage: { prompt: 5, completion: 8, total: 13 } },
 ]);
 
-const activeRun = createRun({ generate, toolbox, conversation });
+const activeRun = createActiveRun({
+  generate,
+  toolbox,
+  conversation,
+  stopWhen: stopWhen.noToolCalls(),
+});
 
 // Record every event for assertion
 const recorder: RunRecorder = createRunRecorder(activeRun);
@@ -1748,30 +1780,25 @@ const once = createMockGenerateOnce({ content: 'Only once', toolCalls: [] });
 // In-memory store for testing operative/store consumers
 const store = createTestStore();
 
-// Mock agent definition for registry tests
-const mockAgent = createMockAgentDefinition('test-agent', {
-  run: async () => ({
-    content: 'custom',
-    steps: [],
-    usage: { prompt: 0, completion: 0, total: 0 },
-    finishReason: 'stop-condition',
-    conversation: {} as never,
-  }),
+// Mock RegistryAgent for createSupervisor / createAgentRegistry consumer tests
+const mockAgent = createMockRegistryAgent('test-agent', {
+  run: async () => 'custom',
 });
 ```
 
 **Exported:**
 
-| Symbol                                        | Description                                                                                    |
-| --------------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| `createMockGenerate(responses)`               | Replays `GenerateResponse[]` in sequence; exposes `.calls` and `.callCount`.                   |
-| `createMockGenerateOnce(response)`            | Returns response once; throws on subsequent calls.                                             |
-| `createRunRecorder(activeRun)`                | Records all events from an `ActiveRun` for assertion. Exposes `.events`, `.steps`, `.clear()`. |
-| `createMockScratchpad(initialValues?)`        | In-memory `Scratchpad` for testing scratchpad-dependent agents.                                |
-| `createMockAgentDefinition(name, overrides?)` | Minimal `AgentDefinition` with a stub `run` and `createRun`.                                   |
-| `createMockAgentRegistry(entries?)`           | Pre-populated `AgentRegistry` for registry consumer tests.                                     |
-| `createTestStore()`                           | In-memory `Store` instance from `operative/store`.                                             |
-| `RunRecorder`                                 | Interface for the recorder object.                                                             |
+| Symbol                                      | Description                                                                                    |
+| ------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `createMockGenerate(responses)`             | Replays `GenerateResponse[]` in sequence; exposes `.calls` and `.callCount`.                   |
+| `createMockGenerateOnce(response)`          | Returns response once; throws on subsequent calls.                                             |
+| `createRunRecorder(activeRun)`              | Records all events from an `ActiveRun` for assertion. Exposes `.events`, `.steps`, `.clear()`. |
+| `createMockScratchpad(initialValues?)`      | In-memory `Scratchpad` for testing scratchpad-dependent agents.                                |
+| `createMockRegistryAgent(name, overrides?)` | Minimal `RegistryAgent` with a stub `run`, for `createSupervisor`/registry consumer tests.     |
+| `createMockAgentRegistry(entries?)`         | Pre-populated `AgentRegistry` for registry consumer tests.                                     |
+| `createTestStore()`                         | In-memory `Store` instance from `operative/store`.                                             |
+
+| `RunRecorder`
 
 ---
 
