@@ -1,4 +1,4 @@
-import { getMessageText } from '@lostgradient/cinder/chat';
+import { getMessageText } from '@lostgradient/chat';
 import { afterEach, describe, expect, it, mock } from 'bun:test';
 
 import type { RunSummary } from '../../types';

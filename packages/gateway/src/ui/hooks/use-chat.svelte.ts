@@ -3,7 +3,7 @@ import {
   appendUserMessage,
   type ConversationHistory,
   createConversation,
-} from '@lostgradient/cinder/chat';
+} from '@lostgradient/chat';
 
 import type { RunSummary, ServerFrame } from '../../types';
 import {
