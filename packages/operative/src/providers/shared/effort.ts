@@ -51,7 +51,7 @@ export function resolveAnthropicEffort(
   const requestedIndex = EFFORT_ORDER.indexOf(requested);
   return (
     EFFORT_ORDER.slice(0, requestedIndex)
-      .toReversed()
+      .reverse()
       .find((tier) => supported.includes(tier)) ?? supported[0]
   );
 }
