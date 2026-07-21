@@ -21,6 +21,7 @@ import {
   createMcpElicitationHandler,
   createMcpToolElicitationRequester,
   fromMcpTools,
+  internalMcpTestUtilities,
   toMcpTools,
 } from '../src/integrations/mcp';
 import type { ToolElicitationRequest, ToolElicitationRequester } from '../src/is-tool';
@@ -89,7 +90,7 @@ class LoopbackTransport {
   }
 }
 
-const connect = async (toolbox: ReturnType<typeof createToolbox>, options = {}) => {
+const connect = async (toolbox: Parameters<typeof createMCP>[0], options = {}) => {
   const server = await createMCP(toolbox, options);
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: 'toolbox-test-client', version: '0.0.0' });
@@ -1233,13 +1234,15 @@ describe('createMCP', () => {
   });
 
   it('supports single tool-like inputs in toMcpTools()', async () => {
+    let receivedExecuteOptions: Record<string, unknown> | undefined;
     const toolLike = {
       name: 'single-tool-like',
       description: 'single tool-like input',
       input: z.object({}),
-      metadata: undefined,
+      metadata: { mcp: { execution: { taskSupport: 'optional' } } },
       tags: [],
-      async executeWith() {
+      async executeWith(options: Record<string, unknown>) {
+        receivedExecuteOptions = options;
         return {
           outcome: 'success',
           toolCallId: 'single-tool-like-call',
@@ -1252,8 +1255,22 @@ describe('createMCP', () => {
 
     const [mcpTool] = toMcpTools(toolLike);
     expect(mcpTool?.name).toBe('single-tool-like');
-    await expect(mcpTool!.handler({})).resolves.toMatchObject({
+    expect(mcpTool?.execution).toEqual({ taskSupport: 'optional' });
+    const controller = new AbortController();
+    await expect(
+      mcpTool!.handler({}, {
+        requestId: 'single-tool-like-request',
+        signal: controller.signal,
+        sendRequest: async () => ({ action: 'accept', content: {} }),
+        sendNotification: async () => {},
+      } as never),
+    ).resolves.toMatchObject({
       structuredContent: { ok: true },
+    });
+    expect(receivedExecuteOptions).toMatchObject({
+      callId: 'single-tool-like-request',
+      signal: controller.signal,
+      elicit: expect.any(Function),
     });
   });
 
@@ -1484,6 +1501,66 @@ describe('MCP elicitation', () => {
     expect(sendRequestCalls).toHaveLength(1);
     expect(sendRequestCalls[0]?.options).toEqual({ signal: controller.signal });
   });
+
+  it('translates URL elicitation requests and decline/cancel responses', async () => {
+    const requests: unknown[] = [];
+    const responses = [{ action: 'decline' as const }, { action: 'cancel' as const }];
+    const fakeExtra = {
+      signal: new AbortController().signal,
+      sendRequest: async (request: unknown) => {
+        requests.push(request);
+        return responses.shift();
+      },
+      sendNotification: async () => {},
+      requestId: 'url-elicitation-request',
+    } as unknown as Parameters<typeof createMcpToolElicitationRequester>[0];
+    const requester = createMcpToolElicitationRequester(fakeExtra);
+
+    await expect(requester({ message: 'Open approval page', mode: 'url' })).rejects.toThrow(
+      'requires a `url`',
+    );
+    await expect(
+      requester({
+        message: 'Open approval page',
+        mode: 'url',
+        url: 'https://app.example.com/approve',
+      }),
+    ).resolves.toEqual({ action: 'decline' });
+    await expect(requester({ message: 'Cancel?', mode: 'form' })).resolves.toEqual({
+      action: 'cancel',
+    });
+    expect(requests[0]).toMatchObject({
+      method: 'elicitation/create',
+      params: {
+        mode: 'url',
+        message: 'Open approval page',
+        url: 'https://app.example.com/approve',
+      },
+    });
+
+    let translatedRequest: ToolElicitationRequest | undefined;
+    const handler = createMcpElicitationHandler(async (request) => {
+      translatedRequest = request;
+      return { action: 'cancel' };
+    });
+    await handler(
+      {
+        method: 'elicitation/create',
+        params: {
+          mode: 'url',
+          message: 'Review request',
+          url: 'https://app.example.com/review',
+          elicitationId: 'elicit-1',
+        },
+      },
+      {} as never,
+    );
+    expect(translatedRequest).toEqual({
+      mode: 'url',
+      message: 'Review request',
+      url: 'https://app.example.com/review',
+    });
+  });
 });
 
 function createDeferred<T>() {
@@ -1575,6 +1652,9 @@ describe('task-based tools (MCP Tasks extension)', () => {
 
       const polledWhileWorking = await client.experimental.tasks.getTask(taskId);
       expect(polledWhileWorking.status).toBe('working');
+
+      const listedTasks = await client.experimental.tasks.listTasks();
+      expect(listedTasks.tasks.some((task) => task.taskId === taskId)).toBe(true);
 
       deferred.resolve({ done: true });
 
@@ -1681,7 +1761,9 @@ describe('task-based tools (MCP Tasks extension)', () => {
         name: 'quick-task',
         description: 'a task-based tool',
         input: z.object({}),
-        metadata: { mcp: { execution: { taskSupport: 'required' } } },
+        metadata: {
+          mcp: { title: 'Quick Task', execution: { taskSupport: 'required' } },
+        },
         async execute() {
           return { ok: true };
         },
@@ -1692,6 +1774,9 @@ describe('task-based tools (MCP Tasks extension)', () => {
     const { client, server } = await connect(toolbox);
 
     try {
+      const tools = await client.listTools();
+      expect(tools.tools.find((tool) => tool.name === 'quick-task')?.title).toBe('Quick Task');
+
       const createResult = await client.request(
         { method: 'tools/call', params: { name: 'quick-task', arguments: {}, task: {} } },
         CreateTaskResultSchema,
@@ -1700,6 +1785,288 @@ describe('task-based tools (MCP Tasks extension)', () => {
     } finally {
       await client.close();
       await server.close();
+    }
+  });
+
+  it('automatically polls an optional task tool for a plain tools/call request', async () => {
+    const toolbox = createToolbox();
+    createTool(
+      {
+        name: 'optional-task',
+        description: 'an optional task-backed tool',
+        input: z.object({}),
+        metadata: { mcp: { execution: { taskSupport: 'optional' } } },
+        async execute() {
+          return { completed: true };
+        },
+      },
+      toolbox,
+    );
+    const { client, server } = await connect(toolbox);
+
+    try {
+      const result = await client.callTool({ name: 'optional-task', arguments: {} });
+      expect(result.structuredContent).toEqual({ completed: true });
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  it('runs task tools from a minimal toolbox through the tool executeWith fallback', async () => {
+    const successfulTool = createTool({
+      name: 'fallback-task',
+      description: 'a task that runs without toolbox execute/getTool methods',
+      input: z.object({ value: z.number() }),
+      metadata: { mcp: { execution: { taskSupport: 'required' } } },
+      async execute({ value }) {
+        return { doubled: value * 2 };
+      },
+    });
+    const failingTool = createTool({
+      name: 'failing-fallback-task',
+      description: 'a failing task that runs without toolbox execute/getTool methods',
+      input: z.object({}),
+      metadata: { mcp: { execution: { taskSupport: 'required' } } },
+      async execute() {
+        return { unreachable: true };
+      },
+    });
+    const primitiveFailingTool = createTool({
+      name: 'primitive-failing-fallback-task',
+      description: 'a task that rejects with a non-Error reason',
+      input: z.object({}),
+      metadata: { mcp: { execution: { taskSupport: 'required' } } },
+      async execute() {
+        return { unreachable: true };
+      },
+    });
+    const successConnection = await connect({ tools: () => [successfulTool] });
+
+    try {
+      const successfulCreate = await successConnection.client.request(
+        {
+          method: 'tools/call',
+          params: { name: 'fallback-task', arguments: { value: 4 }, task: {} },
+        },
+        CreateTaskResultSchema,
+      );
+      expect(
+        await waitForTerminalTaskStatus(successConnection.client, successfulCreate.task.taskId),
+      ).toBe('completed');
+      const successfulResult = await successConnection.client.experimental.tasks.getTaskResult(
+        successfulCreate.task.taskId,
+        CallToolResultSchema,
+      );
+      expect(successfulResult.structuredContent).toEqual({ doubled: 8 });
+    } finally {
+      await successConnection.client.close();
+      await successConnection.server.close();
+    }
+
+    const failingTools = [failingTool, primitiveFailingTool];
+    const failureConnection = await connect({
+      tools: () => failingTools,
+      getTool: (name) => failingTools.find((tool) => tool.name === name),
+      execute: (call) => {
+        if (call.name === failingTool.name) {
+          return Promise.reject(new Error('fallback task failed'));
+        }
+        if (call.name === primitiveFailingTool.name) {
+          return Promise.reject('primitive fallback task failed');
+        }
+        throw new Error(`Unexpected task tool: ${call.name}`);
+      },
+    });
+
+    try {
+      const failingCreate = await failureConnection.client.request(
+        {
+          method: 'tools/call',
+          params: { name: 'failing-fallback-task', arguments: {}, task: {} },
+        },
+        CreateTaskResultSchema,
+      );
+      expect(
+        await waitForTerminalTaskStatus(failureConnection.client, failingCreate.task.taskId),
+      ).toBe('failed');
+      const failingResult = await failureConnection.client.experimental.tasks.getTaskResult(
+        failingCreate.task.taskId,
+        CallToolResultSchema,
+      );
+      expect(failingResult).toMatchObject({
+        isError: true,
+        content: [{ type: 'text', text: 'fallback task failed' }],
+      });
+
+      const primitiveFailingCreate = await failureConnection.client.request(
+        {
+          method: 'tools/call',
+          params: { name: 'primitive-failing-fallback-task', arguments: {}, task: {} },
+        },
+        CreateTaskResultSchema,
+      );
+      expect(
+        await waitForTerminalTaskStatus(
+          failureConnection.client,
+          primitiveFailingCreate.task.taskId,
+        ),
+      ).toBe('failed');
+      const primitiveFailingResult =
+        await failureConnection.client.experimental.tasks.getTaskResult(
+          primitiveFailingCreate.task.taskId,
+          CallToolResultSchema,
+        );
+      expect(primitiveFailingResult).toMatchObject({
+        isError: true,
+        content: [{ type: 'text', text: 'primitive fallback task failed' }],
+      });
+    } finally {
+      await failureConnection.client.close();
+      await failureConnection.server.close();
+    }
+  });
+
+  it('keeps non-task execution metadata on the plain MCP registration path', async () => {
+    const toolbox = createToolbox();
+    createTool(
+      {
+        name: 'forbidden-task',
+        description: 'a plain tool that explicitly forbids task augmentation',
+        input: z.object({}),
+        metadata: { mcp: { execution: { taskSupport: 'forbidden' } } },
+        async execute() {
+          return { ok: true };
+        },
+      },
+      toolbox,
+    );
+    const { client, server } = await connect(toolbox);
+
+    try {
+      const tools = await client.listTools();
+      expect(tools.tools.find((tool) => tool.name === 'forbidden-task')?.execution).toEqual({
+        taskSupport: 'forbidden',
+      });
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  it('implements every SDK task-handler callback for request-scoped task stores', async () => {
+    type CapturedTaskHandler = {
+      createTask: (args: unknown, extra: never) => Promise<{ task: unknown }>;
+      getTask: (args: unknown, extra: never) => Promise<unknown>;
+      getTaskResult: (args: unknown, extra: never) => Promise<unknown>;
+    };
+
+    let capturedHandler: CapturedTaskHandler | undefined;
+    let capturedPlainHandler: ((args: unknown, extra?: unknown) => Promise<unknown>) | undefined;
+    class CapturingMcpServer {
+      readonly server = { getClientCapabilities: () => ({}) };
+      readonly experimental = {
+        tasks: {
+          registerToolTask: (
+            _name: string,
+            _configuration: unknown,
+            handler: CapturedTaskHandler,
+          ) => {
+            capturedHandler = handler;
+            return { remove() {} };
+          },
+        },
+      };
+
+      registerTool(
+        _name: string,
+        _configuration: unknown,
+        handler: (args: unknown, extra?: unknown) => Promise<unknown>,
+      ) {
+        capturedPlainHandler = handler;
+        return { remove() {} };
+      }
+    }
+
+    internalMcpTestUtilities.resetModuleState();
+    internalMcpTestUtilities.setModuleLoader(() => ({ McpServer: CapturingMcpServer }) as never);
+
+    try {
+      const toolbox = createToolbox();
+      createTool(
+        {
+          name: 'captured-task',
+          description: 'a task whose SDK handler contract is inspected',
+          input: z.object({}),
+          metadata: { mcp: { execution: { taskSupport: 'required' } } },
+          async execute() {
+            return { ok: true };
+          },
+        },
+        toolbox,
+      );
+      createTool(
+        {
+          name: 'captured-plain-tool',
+          description: 'a plain tool whose SDK handler contract is inspected',
+          input: z.object({}),
+          metadata: { mcp: { execution: { taskSupport: 'forbidden' } } },
+          async execute() {
+            return { plain: true };
+          },
+        },
+        toolbox,
+      );
+      await createMCP(toolbox);
+      if (!capturedHandler) throw new Error('Task handler was not registered.');
+      if (!capturedPlainHandler) throw new Error('Plain tool handler was not registered.');
+
+      expect(await capturedPlainHandler({}, undefined)).toMatchObject({
+        structuredContent: { plain: true },
+      });
+
+      const task = {
+        taskId: 'captured-task-id',
+        status: 'working' as const,
+        ttl: null,
+        createdAt: new Date(0).toISOString(),
+        lastUpdatedAt: new Date(0).toISOString(),
+      };
+      let storedResult: unknown = { content: [{ type: 'text', text: 'complete' }] };
+      const taskStore = {
+        async createTask() {
+          return task;
+        },
+        async getTask() {
+          return task;
+        },
+        async storeTaskResult() {},
+        async getTaskResult() {
+          return storedResult;
+        },
+        async updateTaskStatus() {},
+      };
+      const controller = new AbortController();
+      controller.abort(new Error('request already cancelled'));
+
+      const createResult = await capturedHandler.createTask({}, {
+        signal: controller.signal,
+        taskStore,
+      } as never);
+      expect(createResult.task).toEqual(task);
+      expect(
+        await capturedHandler.getTask({}, { taskId: task.taskId, taskStore } as never),
+      ).toEqual(task);
+      expect(
+        await capturedHandler.getTaskResult({}, { taskId: task.taskId, taskStore } as never),
+      ).toEqual(storedResult);
+
+      storedResult = { unexpected: true };
+      await expect(
+        capturedHandler.getTaskResult({}, { taskId: task.taskId, taskStore } as never),
+      ).rejects.toThrow('Task result store returned a value that is not a CallToolResult.');
+    } finally {
+      internalMcpTestUtilities.resetModuleState();
     }
   });
 

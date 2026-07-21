@@ -11,9 +11,11 @@ import {
   createMCP,
   createMcpOAuthProvider,
   fromMcpClientTools,
+  internalMcpOAuthTestUtilities,
   isMcpUnauthorizedError,
   McpAuthorizationIssuerValidationError,
   parseMcpAuthorizationCallback,
+  validateMcpAuthorizationResponseIssuer,
 } from '../src/integrations/mcp';
 
 /**
@@ -461,5 +463,141 @@ describe('createMcpOAuthProvider state()', () => {
 
     expect(await provider.state?.()).toBe('');
     expect(await provider.state?.()).toBe('');
+  });
+});
+
+describe('MCP OAuth state and callback edges', () => {
+  const redirectUrl = 'http://127.0.0.1:9999/callback';
+  const clientMetadata = { redirect_uris: [redirectUrl] };
+
+  it('clears selected keys from the in-memory storage', async () => {
+    const storage = createInMemoryMcpOAuthTokenStorage();
+    await storage.save({ state: 'state', codeVerifier: 'verifier' });
+
+    await storage.clear?.(['state']);
+
+    expect(await storage.load()).toEqual({ codeVerifier: 'verifier' });
+  });
+
+  it('round-trips provider state and invalidates every credential scope', async () => {
+    const storage = createInMemoryMcpOAuthTokenStorage();
+    const addClientAuthentication = () => {};
+    const validateResourceURL = () => {};
+    const provider = createMcpOAuthProvider({
+      redirectUrl,
+      clientMetadata,
+      clientMetadataUrl: 'https://app.example.com/oauth-client.json',
+      addClientAuthentication,
+      validateResourceURL,
+      tokenStorage: storage,
+      onAuthorizationRequired: () => {},
+    });
+
+    await expect(provider.codeVerifier()).rejects.toThrow('No PKCE code verifier');
+    await provider.saveCodeVerifier('verifier');
+    expect(await provider.codeVerifier()).toBe('verifier');
+
+    const discovery = { authorizationServerUrl: 'https://auth.example.com' } as never;
+    await provider.saveDiscoveryState?.(discovery);
+    expect(await provider.discoveryState?.()).toEqual(discovery);
+    expect(provider.clientMetadataUrl).toBe('https://app.example.com/oauth-client.json');
+    expect(provider.addClientAuthentication).toBe(addClientAuthentication);
+    expect(provider.validateResourceURL).toBe(validateResourceURL);
+
+    await provider.invalidateCredentials?.('verifier');
+    const stateWithoutVerifier = await storage.load();
+    expect(stateWithoutVerifier.codeVerifier).toBeUndefined();
+    await storage.save({ tokens: { access_token: 'token', token_type: 'Bearer' } });
+    await provider.invalidateCredentials?.('tokens');
+    const stateWithoutTokens = await storage.load();
+    expect(stateWithoutTokens.tokens).toBeUndefined();
+    await storage.save({ clientInformation: { client_id: 'client' } });
+    await provider.invalidateCredentials?.('client');
+    const stateWithoutClient = await storage.load();
+    expect(stateWithoutClient.clientInformation).toBeUndefined();
+    await storage.save({ discovery });
+    await provider.invalidateCredentials?.('discovery');
+    const stateWithoutDiscovery = await storage.load();
+    expect(stateWithoutDiscovery.discovery).toBeUndefined();
+    await storage.save({ state: 'state', codeVerifier: 'verifier', discovery });
+    await provider.invalidateCredentials?.('all');
+    expect(await storage.load()).toEqual({ tokens: undefined, clientInformation: undefined });
+  });
+
+  it('does nothing when credential invalidation storage has no clear hook', async () => {
+    const provider = createMcpOAuthProvider({
+      redirectUrl,
+      clientMetadata,
+      tokenStorage: { load: () => ({}), save: () => {} },
+      onAuthorizationRequired: () => {},
+    });
+
+    await expect(provider.invalidateCredentials?.('all')).resolves.toBeUndefined();
+  });
+
+  it('validates issuer metadata absence deterministically', () => {
+    expect(() =>
+      validateMcpAuthorizationResponseIssuer({ discoveryState: undefined, iss: undefined }),
+    ).not.toThrow();
+    expect(() =>
+      validateMcpAuthorizationResponseIssuer({
+        discoveryState: { authorizationServerMetadata: {} } as never,
+        iss: 'https://auth.example.com',
+      }),
+    ).toThrow(McpAuthorizationIssuerValidationError);
+  });
+
+  it('rejects state mismatches, OAuth errors, and missing codes before token exchange', async () => {
+    const storage = createInMemoryMcpOAuthTokenStorage();
+    await storage.save({ state: 'expected' });
+    const provider = createMcpOAuthProvider({
+      redirectUrl,
+      clientMetadata,
+      tokenStorage: storage,
+      onAuthorizationRequired: () => {},
+    });
+    const options = { serverUrl: 'https://mcp.example.com', tokenStorage: storage };
+
+    await expect(
+      completeMcpOAuthAuthorization(provider, {
+        ...options,
+        callbackUrl: `${redirectUrl}?code=code&state=wrong`,
+      }),
+    ).rejects.toThrow('state');
+    await storage.save({ state: undefined });
+    await expect(
+      completeMcpOAuthAuthorization(provider, {
+        ...options,
+        callbackUrl: `${redirectUrl}?error=access_denied&error_description=Nope`,
+      }),
+    ).rejects.toThrow('access_denied (Nope)');
+    await expect(
+      completeMcpOAuthAuthorization(provider, { ...options, callbackUrl: redirectUrl }),
+    ).rejects.toThrow('missing the required `code`');
+  });
+
+  it('adds the optional dependency hint when the OAuth SDK loader throws a non-Error', async () => {
+    const storage = createInMemoryMcpOAuthTokenStorage();
+    const provider = createMcpOAuthProvider({
+      redirectUrl,
+      clientMetadata,
+      tokenStorage: storage,
+      onAuthorizationRequired: () => {},
+    });
+    internalMcpOAuthTestUtilities.setClientAuthLoader(() => {
+      throw 'sdk missing';
+    });
+
+    try {
+      await expect(
+        completeMcpOAuthAuthorization(provider, {
+          serverUrl: 'https://mcp.example.com',
+          callbackUrl: `${redirectUrl}?code=code`,
+          tokenStorage: storage,
+        }),
+      ).rejects.toThrow('Install it to use armorer/mcp OAuth support');
+    } finally {
+      internalMcpOAuthTestUtilities.resetModuleState();
+    }
   });
 });

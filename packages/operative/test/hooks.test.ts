@@ -416,6 +416,7 @@ describe('step hooks', () => {
         toolbox: createTestToolbox([tool]),
         conversation: new Conversation(),
         stopWhen: noToolCalls(),
+        collectAsync: true,
         beforeToolExecution: async () => {
           throw new Error('beforeToolExecution failed');
         },

@@ -238,6 +238,22 @@ describe('registry helpers', () => {
     expect(untrusted[0]?.tags).toContain('untrusted-output');
   });
 
+  it('requires every requested risk permission', () => {
+    const toolbox = createToolbox();
+    toolbox.register(
+      makeTool('filesystem', { risk: { permissions: ['read', 'write'] } }),
+      makeTool('read-only', { risk: { permissions: ['read'] } }),
+      makeTool('unspecified'),
+    );
+
+    expect(
+      queryTools(toolbox, { risk: { permissions: ['read', 'write'] } }).map((tool) => tool.name),
+    ).toEqual(['filesystem']);
+    expect(
+      queryTools(toolbox, { risk: { permissions: ['execute'] } }).map((tool) => tool.name),
+    ).toEqual([]);
+  });
+
   it('generates risk tags for defineTool registration paths', () => {
     const definition = defineTool({
       name: 'document-loader',

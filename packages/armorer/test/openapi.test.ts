@@ -16,7 +16,12 @@ function createFakeFetch(response: { status: number; body?: unknown; contentType
   const calls: Array<{ url: string; init: RequestInit | undefined }> = [];
   const fakeFetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     calls.push({ url: String(input), init });
-    const bodyText = response.body !== undefined ? JSON.stringify(response.body) : '';
+    const bodyText =
+      typeof response.body === 'string' && response.contentType !== 'application/json'
+        ? response.body
+        : response.body !== undefined
+          ? JSON.stringify(response.body)
+          : '';
     return new Response(bodyText, {
       status: response.status,
       headers: {
@@ -132,6 +137,26 @@ describe('createToolboxFromOpenAPI', () => {
     expect(caught).toBeInstanceOf(Error);
   });
 
+  it('rejects non-local $refs', () => {
+    const specification = {
+      servers: [{ url: 'https://example.test' }],
+      paths: {
+        '/widgets': {
+          post: {
+            operationId: 'createWidget',
+            requestBody: {
+              content: {
+                'application/json': { schema: { $ref: 'https://example.test/widget.json' } },
+              },
+            },
+          },
+        },
+      },
+    } as OpenAPISpec;
+
+    expect(() => createToolboxFromOpenAPI(specification)).toThrow('cannot resolve non-local $ref');
+  });
+
   it('builds a Zod input schema from query parameters', () => {
     const tools = createToolboxFromOpenAPI(spec);
     const findPets = tools.find((tool) => tool.name === 'find-pets');
@@ -194,6 +219,33 @@ describe('createToolboxFromOpenAPI', () => {
     expect(calls[0]?.url).toBe('https://petstore.swagger.io/v2/pets/42');
   });
 
+  it('rejects an absent required path parameter during public input validation', async () => {
+    const specification: OpenAPISpec = {
+      servers: [{ url: 'https://example.test' }],
+      paths: {
+        '/widgets/{id}': {
+          get: {
+            operationId: 'findWidget',
+            parameters: [{ name: 'id', in: 'path', required: true, schema: {} }],
+          },
+        },
+      },
+    };
+    const { fetch: fakeFetch, calls } = createFakeFetch({ status: 200, body: {} });
+    const [findWidget] = createToolboxFromOpenAPI(specification, { fetch: fakeFetch });
+
+    let caughtError: unknown;
+    try {
+      await findWidget?.execute({});
+    } catch (error) {
+      caughtError = error;
+    }
+
+    expect(String(caughtError)).toContain('expected nonoptional');
+    expect(String(caughtError)).toContain('id');
+    expect(calls).toHaveLength(0);
+  });
+
   it('appends query parameters, including arrays, to the request URL', async () => {
     const { fetch: fakeFetch, calls } = createFakeFetch({ status: 200, body: [] });
     const tools = createToolboxFromOpenAPI(spec, { fetch: fakeFetch });
@@ -204,6 +256,43 @@ describe('createToolboxFromOpenAPI', () => {
     const url = new URL(calls[0]?.url ?? '');
     expect(url.searchParams.getAll('tags')).toEqual(['dog', 'cat']);
     expect(url.searchParams.get('limit')).toBe('5');
+  });
+
+  it('serializes null and object query parameters without implicit object coercion', async () => {
+    const specification: OpenAPISpec = {
+      servers: [{ url: 'https://example.test' }],
+      paths: {
+        '/widgets': {
+          get: {
+            operationId: 'findWidgets',
+            parameters: [
+              { name: 'nullable', in: 'query', schema: {} },
+              { name: 'filter', in: 'query', schema: {} },
+            ],
+          },
+        },
+      },
+    };
+    const { fetch: fakeFetch, calls } = createFakeFetch({ status: 200, body: [] });
+    const [findWidgets] = createToolboxFromOpenAPI(specification, { fetch: fakeFetch });
+
+    await findWidgets?.execute({ nullable: null, filter: { status: 'active' } });
+
+    const url = new URL(calls[0]?.url ?? '');
+    expect(url.searchParams.get('nullable')).toBe('');
+    expect(url.searchParams.get('filter')).toBe('{"status":"active"}');
+  });
+
+  it('returns non-JSON response bodies as text', async () => {
+    const { fetch: fakeFetch } = createFakeFetch({
+      status: 200,
+      body: 'plain response',
+      contentType: 'text/plain',
+    });
+    const tools = createToolboxFromOpenAPI(spec, { fetch: fakeFetch });
+    const findPets = tools.find((tool) => tool.name === 'find-pets');
+
+    await expect(findPets?.execute({})).resolves.toEqual({ status: 200, data: 'plain response' });
   });
 
   it('sends the request body as JSON with a content-type header', async () => {

@@ -172,7 +172,10 @@ describe('validateToolResult guardrail', () => {
     expect(result.steps[0].results).toHaveLength(1);
   });
 
-  it('terminates the loop when throwing', async () => {
+  it.each([
+    ['synchronous collection', false],
+    ['asynchronous collection', true],
+  ] as const)('terminates the loop when throwing with %s', async (_name, collectAsync) => {
     let callIndex = 0;
     const generate = async () => {
       callIndex++;
@@ -185,6 +188,7 @@ describe('validateToolResult guardrail', () => {
       toolbox: createTestToolbox([weatherTool]),
       conversation: new Conversation(),
       stopWhen: noToolCalls(),
+      collectAsync,
       validateToolResult: async () => {
         throw new Error('Tool result rejected');
       },

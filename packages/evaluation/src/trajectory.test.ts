@@ -150,6 +150,18 @@ describe('matchTrajectory', () => {
       expect(result.pass).toBe(false);
     });
 
+    it('passes without a score penalty when extra calls are disallowed but none occur', () => {
+      const steps = [createMockStep([{ name: 'search' }, { name: 'save' }])];
+      const golden: GoldenTrajectoryStep[] = [{ name: 'search' }, { name: 'save' }];
+      const result = matchTrajectory(createMockRunResult({ steps }), golden, {
+        allowExtraCalls: false,
+      });
+
+      expect(result.pass).toBe(true);
+      expect(result.score).toBe(1);
+      expect(result.extraCallCount).toBe(0);
+    });
+
     it('fails when extra calls exceed maxExtraCalls', () => {
       const steps = [
         createMockStep([
@@ -269,12 +281,14 @@ describe('judgeTrajectoryQuality', () => {
       { judge: mockJudge, rubric: 'Rate whether the path taken was efficient' },
       'Find and save the report',
       createMockRunResult({ steps }),
+      [{ name: 'search' }, { name: 'save' }],
     );
 
     expect(result.score).toBe(4);
     expect(result.reasoning).toBe('Sensible path');
     expect(capturedOutput).toContain('1. search({})');
     expect(capturedOutput).toContain('2. save({})');
+    expect(capturedOutput).toContain('Reference answer: 1. search\n2. save');
   });
 });
 

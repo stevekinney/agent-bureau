@@ -1,20 +1,38 @@
 import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
 import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
-import { createTool, createToolbox } from 'armorer';
+import {
+  createTool,
+  createToolbox,
+  ToolboxExecuteStartEvent,
+  ToolboxPolicyDeniedEvent,
+  ToolboxProgressEvent,
+  ToolboxSettledEvent,
+} from 'armorer';
 import { afterEach, describe, expect, it } from 'bun:test';
-import { createConversationHistory } from 'conversationalist';
+import { Conversation, createConversationHistory } from 'conversationalist';
 import { HookRegistry } from 'lifecycle';
 import { z } from 'zod';
 
 import { stopWhen } from '../conditions/index';
 import { createActiveRun } from '../create-run';
 import { BudgetExceededError, ElicitationDeniedError, GuardrailTripwireError } from '../errors';
-import { ToolErrorBubbleEvent, ToolSettledBubbleEvent, ToolStartedBubbleEvent } from '../events';
+import {
+  StepStartedEvent,
+  ToolErrorBubbleEvent,
+  ToolPolicyDeniedBubbleEvent,
+  ToolProgressBubbleEvent,
+  ToolSettledBubbleEvent,
+  ToolStartedBubbleEvent,
+} from '../events';
 import type { OperativeHookMap } from '../hooks';
 import { createManualDurableEngine, spyEngine } from '../test/durable-engine';
 import { createMockGenerate } from '../test/index';
 import type { RunOptions, RunResult } from '../types';
-import { createDurableActiveRun, reattachDurableActiveRun } from './active-run-adapter';
+import {
+  createDurableActiveRun,
+  createRecoveredRunEventSurface,
+  reattachDurableActiveRun,
+} from './active-run-adapter';
 import { createCheckpointStore } from './checkpoint-store';
 import type { AnyRunEngine } from './create-run-engine';
 import { createRunEngine } from './create-run-engine';
@@ -1120,6 +1138,102 @@ describe('createRun with durable routing', () => {
     // Falls back gracefully — no throw, result still reflects the abort
     expect(result.finishReason).toBe('aborted');
     expect(result.steps).toHaveLength(0);
+  });
+});
+
+describe('createRecoveredRunEventSurface', () => {
+  it('rebuilds curated and forwarded toolbox events with recovery stamps and cleanup', () => {
+    const tool = createTool({
+      name: 'recovered-tool',
+      description: 'A recovered-run event source',
+      input: z.object({ value: z.string() }),
+      async execute({ value }) {
+        return { value };
+      },
+    });
+    const toolbox = createToolbox([tool]);
+    const options = {
+      ...runOptions(async () => ({ content: 'unused', toolCalls: [] })),
+      toolbox: toolbox as unknown as RunOptions['toolbox'],
+    };
+    const services = { options, toolbox };
+    const surface = createRecoveredRunEventSurface(services, 'recovered-run-id', 'recovered-agent');
+
+    const started: ToolStartedBubbleEvent[] = [];
+    const settled: ToolSettledBubbleEvent[] = [];
+    const errors: ToolErrorBubbleEvent[] = [];
+    const progress: ToolProgressBubbleEvent[] = [];
+    const denials: ToolPolicyDeniedBubbleEvent[] = [];
+    const forwardedTypes: string[] = [];
+    surface.emitter.addEventListener('tool.started', (event) => started.push(event));
+    surface.emitter.addEventListener('tool.settled', (event) => settled.push(event));
+    surface.emitter.addEventListener('tool.error', (event) => errors.push(event));
+    surface.emitter.addEventListener('tool.progress', (event) => progress.push(event));
+    surface.emitter.addEventListener('tool.policy-denied', (event) => denials.push(event));
+    surface.emitter.toObservable().subscribe((event) => forwardedTypes.push(event.type));
+
+    const conversation = new Conversation();
+    surface.emitter.dispatchEvent(new StepStartedEvent(conversation, 3));
+    const call = {
+      id: 'recovered-call-id',
+      name: tool.name,
+      arguments: { value: 'hello' },
+    };
+    toolbox.dispatchEvent(new ToolboxExecuteStartEvent({ tool, call, params: { value: 'hello' } }));
+    toolbox.dispatchEvent(
+      new ToolboxProgressEvent({ tool, call, percent: 50, message: 'halfway' }),
+    );
+    toolbox.dispatchEvent(
+      new ToolboxPolicyDeniedEvent({
+        tool,
+        call,
+        params: { value: 'hello' },
+        reason: 'approval required',
+      }),
+    );
+    toolbox.dispatchEvent(new ToolboxSettledEvent({ tool, call, result: { value: 'hello' } }));
+    const failure = new Error('recovered tool failed');
+    toolbox.dispatchEvent(new ToolboxSettledEvent({ tool, call, error: failure }));
+
+    expect(services.options.toolbox).toBe(toolbox);
+    expect(services).toMatchObject({ emitter: surface.emitter });
+    expect(forwardedTypes).toEqual(
+      expect.arrayContaining([
+        'toolbox.execute-start',
+        'toolbox.progress',
+        'toolbox.policy-denied',
+        'toolbox.settled',
+      ]),
+    );
+    expect(started).toHaveLength(1);
+    expect(started[0]).toMatchObject({
+      agentName: 'recovered-agent',
+      runId: 'recovered-run-id',
+      step: 3,
+      toolName: tool.name,
+      toolCallId: call.id,
+      params: { value: 'hello' },
+    });
+    expect(progress[0]).toMatchObject({
+      step: 3,
+      percent: 50,
+      message: 'halfway',
+    });
+    expect(denials[0]).toMatchObject({ step: 3, reason: 'approval required' });
+    expect(settled).toHaveLength(2);
+    expect(settled[0]).toMatchObject({ step: 3, status: 'success', result: { value: 'hello' } });
+    expect(settled[1]).toMatchObject({ step: 3, status: 'error', error: failure });
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatchObject({ step: 3, error: failure });
+
+    surface.stopToolboxForward();
+    const eventCountAfterCleanup = forwardedTypes.length;
+    surface.emitter.dispatchEvent(new StepStartedEvent(conversation, 9));
+    toolbox.dispatchEvent(
+      new ToolboxProgressEvent({ tool, call, percent: 100, message: 'after cleanup' }),
+    );
+    expect(forwardedTypes).toHaveLength(eventCountAfterCleanup + 1);
+    expect(progress).toHaveLength(1);
   });
 });
 

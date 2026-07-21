@@ -879,6 +879,21 @@ describe('system message management', () => {
 });
 
 describe('buildMessage', () => {
+  test('rejects a standalone message that fails schema validation', () => {
+    expect(() =>
+      buildMessage({
+        role: 'user',
+        content: [
+          {
+            type: 'document',
+            name: 'missing-mime-type',
+            source: { kind: 'base64', data: 'cGRm' },
+          },
+        ],
+      } as never),
+    ).toThrow('message failed schema validation');
+  });
+
   test('mints a standalone, schema-valid Message without a ConversationHistory', () => {
     const message = buildMessage({ role: 'user', content: 'hello' });
 
@@ -922,6 +937,14 @@ describe('buildMessage', () => {
 
     expect(message.id).toBe('fixed-id');
     expect(message.createdAt).toBe('2024-01-01T00:00:00.000Z');
+  });
+
+  test('applies environment plugins before validating the standalone message', () => {
+    const message = buildMessage({ role: 'user', content: 'before plugin' }, undefined, {
+      plugins: [(input) => ({ ...input, content: 'after plugin' })],
+    });
+
+    expect(message.content).toBe('after plugin');
   });
 
   test('appendMessages preserves the id and createdAt of a pre-built message', () => {

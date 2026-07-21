@@ -25,6 +25,9 @@ describe('createFlowController', () => {
       expect(first.allowed).toBe(true);
       expect(second.allowed).toBe(true);
       expect(third).toEqual({ allowed: false, reason: 'concurrency' });
+
+      controller.settle('run-1');
+      expect(controller.admit(trigger({ runId: 'run-4' })).allowed).toBe(true);
     });
 
     it('frees a slot once a run settles, admitting the next trigger', () => {

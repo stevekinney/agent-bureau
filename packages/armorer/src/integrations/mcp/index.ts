@@ -973,16 +973,11 @@ let mcpLoader: () => McpSdk | Promise<McpSdk> = defaultMcpLoader;
 
 async function requireMcp(): Promise<McpSdk> {
   if (cachedMcpSdk) return cachedMcpSdk;
-  try {
-    cachedMcpSdk = await mcpLoader();
-    return cachedMcpSdk;
-  } catch (error) {
-    const hint =
-      'Missing peer dependency "@modelcontextprotocol/sdk". Install it to use armorer/mcp.';
-    const wrapped = error instanceof Error ? error : new Error(String(error));
-    wrapped.message = `${hint}\n${wrapped.message}`;
-    throw wrapped;
-  }
+  cachedMcpSdk = await loadMcpSdk(
+    mcpLoader,
+    'Missing peer dependency "@modelcontextprotocol/sdk". Install it to use armorer/mcp.',
+  );
+  return cachedMcpSdk;
 }
 
 type McpTypesSdk = typeof import('@modelcontextprotocol/sdk/types.js');
@@ -997,16 +992,11 @@ let mcpTypesLoader: () => McpTypesSdk | Promise<McpTypesSdk> = defaultMcpTypesLo
 
 async function requireMcpTypes(): Promise<McpTypesSdk> {
   if (cachedMcpTypesSdk) return cachedMcpTypesSdk;
-  try {
-    cachedMcpTypesSdk = await mcpTypesLoader();
-    return cachedMcpTypesSdk;
-  } catch (error) {
-    const hint =
-      'Missing peer dependency "@modelcontextprotocol/sdk". Install it to use armorer/mcp elicitation.';
-    const wrapped = error instanceof Error ? error : new Error(String(error));
-    wrapped.message = `${hint}\n${wrapped.message}`;
-    throw wrapped;
-  }
+  cachedMcpTypesSdk = await loadMcpSdk(
+    mcpTypesLoader,
+    'Missing peer dependency "@modelcontextprotocol/sdk". Install it to use armorer/mcp elicitation.',
+  );
+  return cachedMcpTypesSdk;
 }
 
 type McpTasksSdk = typeof import('@modelcontextprotocol/sdk/experimental/tasks');
@@ -1021,14 +1011,22 @@ let mcpTasksLoader: () => McpTasksSdk | Promise<McpTasksSdk> = defaultMcpTasksLo
 
 async function requireMcpTasks(): Promise<McpTasksSdk> {
   if (cachedMcpTasksSdk) return cachedMcpTasksSdk;
+  cachedMcpTasksSdk = await loadMcpSdk(
+    mcpTasksLoader,
+    'Missing peer dependency "@modelcontextprotocol/sdk". Install it to use armorer/mcp task-based tools.',
+  );
+  return cachedMcpTasksSdk;
+}
+
+async function loadMcpSdk<T>(
+  loader: () => T | Promise<T>,
+  missingPeerDependencyHint: string,
+): Promise<T> {
   try {
-    cachedMcpTasksSdk = await mcpTasksLoader();
-    return cachedMcpTasksSdk;
+    return await loader();
   } catch (error) {
-    const hint =
-      'Missing peer dependency "@modelcontextprotocol/sdk". Install it to use armorer/mcp task-based tools.';
     const wrapped = error instanceof Error ? error : new Error(String(error));
-    wrapped.message = `${hint}\n${wrapped.message}`;
+    wrapped.message = `${missingPeerDependencyHint}\n${wrapped.message}`;
     throw wrapped;
   }
 }

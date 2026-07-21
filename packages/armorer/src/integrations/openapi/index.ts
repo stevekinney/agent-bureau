@@ -426,9 +426,6 @@ function buildRequestUrl(
   let interpolated = path;
   for (const { name, key } of pathParameters) {
     const value = params[key];
-    if (value === undefined) {
-      throw new Error(`Missing required path parameter "${name}"`);
-    }
     interpolated = interpolated.replaceAll(
       `{${name}}`,
       encodeURIComponent(toParameterString(value)),

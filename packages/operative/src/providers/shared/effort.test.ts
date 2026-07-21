@@ -16,8 +16,14 @@ describe('resolveAnthropicEffort', () => {
   });
 
   it('degrades xhigh to high on a model without xhigh support', () => {
+    const supportedEfforts = ANTHROPIC_EFFORT_SUPPORT['claude-opus-4-6'];
+    expect(supportedEfforts).toBeDefined();
+    if (!supportedEfforts) throw new Error('Expected the Opus 4.6 capability fixture');
+    const originalSupportedEfforts = [...supportedEfforts];
+
     expect(resolveAnthropicEffort('xhigh', 'claude-opus-4-6')).toBe('high');
     expect(resolveAnthropicEffort('xhigh', 'claude-sonnet-4-6')).toBe('high');
+    expect(supportedEfforts).toEqual(originalSupportedEfforts);
   });
 
   it('exposes the documented capability table for a model without xhigh support', () => {
