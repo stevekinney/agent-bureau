@@ -1,6 +1,6 @@
 {
   "name": "armorer",
-  "version": "0.10.1",
+  "version": "0.11.0",
   "description": "A lightweight registry for validated AI tools. Build tools with Zod schemas and metadata, register them in a toolbox, and execute/query them with event hooks.",
   "keywords": [
     "ai",

@@ -1,6 +1,6 @@
 {
   "name": "conversationalist",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "A TypeScript library for managing AI conversation state",
   "keywords": [
     "conversation",
