@@ -5,7 +5,7 @@
  * without starting a live bureau or durable engine.
  */
 import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
-import { afterEach, describe, expect, it, spyOn } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test';
 import type { Action } from 'operative/store';
 
 import { type AuditRecord, createAuditTrail } from './audit-trail';
@@ -468,8 +468,22 @@ describe('createAuditTrail', () => {
   });
 
   describe('onDiagnostic', () => {
+    // A fresh spy is created before EVERY test and fully restored after —
+    // Bun's spyOn() returns the SAME mock (with its accumulated call
+    // history) when called again on an already-spied function, so relying
+    // on each test to spy-and-restore itself is fragile: a restore that's
+    // skipped (or reordered) leaks one test's call count into the next
+    // test's `not.toHaveBeenCalled()` assertion. beforeEach/afterEach here
+    // makes the fresh-spy-per-test guarantee explicit and order-independent
+    // rather than an artifact of each test remembering to spy correctly.
+    let errorSpy: ReturnType<typeof spyOn<Console, 'error'>>;
+
+    beforeEach(() => {
+      errorSpy = spyOn(console, 'error').mockImplementation(() => {});
+    });
+
     afterEach(() => {
-      (console.error as unknown as { mockRestore?: () => void }).mockRestore?.();
+      errorSpy.mockRestore();
     });
 
     /** A `TextValueStore`-shaped stub whose `set` always rejects. */
@@ -484,7 +498,6 @@ describe('createAuditTrail', () => {
     }
 
     it('routes a persistence failure to the diagnostic sink instead of the console', async () => {
-      const errorSpy = spyOn(console, 'error').mockImplementation(() => {});
       const kv = createFailingKv();
       const { bureau, emit } = createStubBureau();
       const received: unknown[] = [];
@@ -510,7 +523,6 @@ describe('createAuditTrail', () => {
     });
 
     it('with no sink configured, a persistence failure still logs to the console', async () => {
-      const errorSpy = spyOn(console, 'error').mockImplementation(() => {});
       const kv = createFailingKv();
       const { bureau, emit } = createStubBureau();
       const trail = createAuditTrail(bureau, kv);
@@ -532,7 +544,6 @@ describe('createAuditTrail', () => {
     });
 
     it('routes an out-of-band record() persistence failure to the diagnostic sink (the review-decision write path, distinct from the passive action listener above)', async () => {
-      const errorSpy = spyOn(console, 'error').mockImplementation(() => {});
       const kv = createFailingKv();
       const { bureau } = createStubBureau();
       const received: unknown[] = [];
@@ -554,7 +565,6 @@ describe('createAuditTrail', () => {
     });
 
     it('with no sink configured, an out-of-band record() persistence failure still logs to the console', async () => {
-      const errorSpy = spyOn(console, 'error').mockImplementation(() => {});
       const kv = createFailingKv();
       const { bureau } = createStubBureau();
       const trail = createAuditTrail(bureau, kv);

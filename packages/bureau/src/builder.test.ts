@@ -1016,12 +1016,24 @@ describe('createBureau (builder) — toolbox/hook/skill-policy merge branches', 
     expect(settledEvents[0]!.result).toBe('results for agent bureau');
   });
 
-  it('combines bureau-level and agent-level toolboxes when both are present (agent wins on name collision)', async () => {
+  it('combines bureau-level and agent-level toolboxes when both are present (agent wins on name collision, bureau-only tools still work)', async () => {
+    // Calls a BUREAU-ONLY tool first (proves the union side of the merge —
+    // a test that only exercised the colliding `echo` tool would still pass
+    // if mergeToolboxes() discarded every bureau-level tool whenever an
+    // agent toolbox exists), then the colliding `echo` tool (proves the
+    // collision side).
     const sharedNameGenerate = createMockGenerate([
+      { content: '', toolCalls: [{ name: 'bureau-only', arguments: {} }] },
       { content: '', toolCalls: [{ name: 'echo', arguments: { text: 'from agent tool' } }] },
       { content: 'done', toolCalls: [] },
     ]);
 
+    const bureauOnlyTool = createTool({
+      name: 'bureau-only',
+      description: 'exists only at the bureau level',
+      input: z.object({}),
+      execute: async () => 'bureau-only-result',
+    });
     const bureauEcho = createTool({
       name: 'echo',
       description: 'bureau-level echo',
@@ -1036,7 +1048,7 @@ describe('createBureau (builder) — toolbox/hook/skill-policy merge branches', 
     });
 
     const bureau = createBureau()
-      .tools({ echo: bureauEcho })
+      .tools({ 'bureau-only': bureauOnlyTool, echo: bureauEcho })
       .agent({ name: 'a', generate: sharedNameGenerate, tools: { echo: agentEcho } });
 
     const settledEvents: ToolSettledBubbleEvent[] = [];
@@ -1044,12 +1056,17 @@ describe('createBureau (builder) — toolbox/hook/skill-policy merge branches', 
       if (event.type === 'tool.settled') settledEvents.push(event as ToolSettledBubbleEvent);
     }
 
-    expect(settledEvents).toHaveLength(1);
+    expect(settledEvents).toHaveLength(2);
+    const bureauOnlySettled = settledEvents.find((event) => event.toolName === 'bureau-only');
+    const echoSettled = settledEvents.find((event) => event.toolName === 'echo');
+
+    // The bureau-only tool survived the merge (union, not collision-only).
+    expect(bureauOnlySettled?.result).toBe('bureau-only-result');
     // The agent-level tool wins the name collision over the bureau-level one.
-    expect(settledEvents[0]!.result).toBe('agent-level: from agent tool');
+    expect(echoSettled?.result).toBe('agent-level: from agent tool');
   });
 
-  it('accumulates tools across repeated .tools() calls at the bureau level', () => {
+  it('accumulates tools across repeated .tools() calls at the bureau level', async () => {
     const first = createTool({
       name: 'first',
       description: 'first tool',
@@ -1070,10 +1087,27 @@ describe('createBureau (builder) — toolbox/hook/skill-policy merge branches', 
     ]);
 
     // Two separate .tools() calls — the second must combine with, not
-    // replace, the first.
-    const bureau = createBureau().tools({ first }).tools({ second }).agent({ name: 'a', generate });
+    // replace, the first. Drain the run and assert BOTH tool calls actually
+    // resolved successfully — a test that only checked bureau.run() doesn't
+    // throw synchronously would still pass even if the second .tools() call
+    // replaced the first (the loop constructs an AgentRun synchronously
+    // either way; a missing tool only surfaces once the run executes).
+    const settledEvents: ToolSettledBubbleEvent[] = [];
+    for await (const event of createBureau()
+      .tools({ first })
+      .tools({ second })
+      .agent({ name: 'a', generate })
+      .run('a', 'go')) {
+      if (event.type === 'tool.settled') settledEvents.push(event as ToolSettledBubbleEvent);
+    }
 
-    expect(() => bureau.run('a', 'go')).not.toThrow();
+    expect(settledEvents).toHaveLength(2);
+    const firstSettled = settledEvents.find((event) => event.toolName === 'first');
+    const secondSettled = settledEvents.find((event) => event.toolName === 'second');
+    expect(firstSettled?.status).toBe('success');
+    expect(firstSettled?.result).toBe('first-result');
+    expect(secondSettled?.status).toBe('success');
+    expect(secondSettled?.result).toBe('second-result');
   });
 
   it('merges bureau and agent skill policies to undefined when neither carries an allow/deny list (unfiltered catalog)', async () => {
