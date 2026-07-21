@@ -23,6 +23,7 @@ import {
   RUN_ENVELOPE_SCHEMA_VERSION,
   runFrameSchema,
   runReportSchema,
+  stringifyError,
   summarizeToolInput,
 } from '../src/run-envelope';
 
@@ -60,6 +61,26 @@ describe('summarizeToolInput', () => {
     const parsed = JSON.parse(JSON.stringify(summary)) as Record<string, unknown>;
     expect(parsed['failure']).toBe('boom');
     expect(typeof parsed['callback']).toBe('string');
+  });
+
+  it('summarizes invalid dates and truncates oversized objects', () => {
+    expect(summarizeToolInput(new Date(Number.NaN))).toBe('Invalid Date');
+    expect(summarizeToolInput({ a: 1, b: 2, c: 3 }, { maxObjectKeys: 2 })).toEqual({
+      a: 1,
+      b: 2,
+      '…': '(1 more keys)',
+    });
+  });
+});
+
+describe('stringifyError', () => {
+  it('normalizes string, null, serializable, and circular non-Error values', () => {
+    expect(stringifyError('plain failure')).toBe('plain failure');
+    expect(stringifyError(null)).toBe('null');
+    expect(stringifyError({ code: 'FAILED' })).toBe('{"code":"FAILED"}');
+    const circular: Record<string, unknown> = {};
+    circular['self'] = circular;
+    expect(stringifyError(circular)).toBe('[unserializable error]');
   });
 });
 

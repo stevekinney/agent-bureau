@@ -273,6 +273,17 @@ describe('createProjection', () => {
     expect(projection.processedCount).toBe(2);
     expect(isProjectionPrefixExtension(['1'], ['1', '2'])).toBe(true);
     expect(isProjectionPrefixExtension(['1', '2'], ['1', '3'])).toBe(false);
+    expect(isProjectionPrefixExtension(['1', '2'], ['1'])).toBe(false);
+  });
+
+  it('resets the accumulated conversation and processed count', () => {
+    const projection = createTranscriptProjection();
+    projection.apply([{ id: '1', kind: 'user.message', content: 'Start the task.' }]);
+
+    projection.reset();
+
+    expect(projection.snapshot()).toEqual(createSeed());
+    expect(projection.processedCount).toBe(0);
   });
 
   it('uses log keys to refold independent logs with colliding event identities', () => {

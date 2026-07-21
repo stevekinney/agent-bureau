@@ -3,6 +3,7 @@ import { CompletableEventTarget } from 'lifecycle';
 import { z } from 'zod';
 
 import { createSubagentTool, defaultSubagentSummarizer } from './create-subagent-tool';
+import { GuardrailTripwireError } from './errors';
 import type { CombinedOperativeEventMap } from './events';
 import { ChildWorkflowStartedEvent } from './events';
 import type { RunResult } from './types';
@@ -154,6 +155,40 @@ describe('createSubagentTool', () => {
         caughtError = error;
       }
       expect(String(caughtError)).toContain('elicitation');
+    });
+
+    it('names the guardrail when the sub-agent finishes on a tripwire', async () => {
+      const tool = createSubagentTool({
+        name: 'researcher',
+        description: 'Research a topic',
+        agentName: 'researcher',
+        input: z.object({ topic: z.string() }),
+        run: () =>
+          Promise.resolve({
+            conversation: {} as never,
+            content: '',
+            finishReason: 'tripwire',
+            steps: [],
+            usage: { prompt: 0, completion: 0, total: 0 },
+            error: new GuardrailTripwireError('Prompt injection detected', {
+              guardrailName: 'prompt-injection',
+              category: 'prompt-injection',
+              phase: 'input',
+              confidence: 1,
+            }),
+          } as RunResult),
+      });
+
+      let caughtError: unknown;
+      try {
+        await (tool as unknown as { execute: (params: unknown) => Promise<unknown> }).execute({
+          topic: 'AI',
+        });
+      } catch (error) {
+        caughtError = error;
+      }
+
+      expect(String(caughtError)).toContain('guardrail tripwire "prompt-injection"');
     });
 
     it('throws when maximum-steps is treated as an error', async () => {

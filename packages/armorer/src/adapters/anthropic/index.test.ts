@@ -149,6 +149,8 @@ describe('parseAnthropicToolCalls', () => {
   });
 
   it('returns an empty array for unsupported Anthropic envelope shapes', () => {
+    expect(parseAnthropicToolCalls('not-an-envelope' as never)).toEqual([]);
+    expect(parseAnthropicToolCalls({ content: 'not-content-blocks' } as never)).toEqual([]);
     expect(parseAnthropicToolCalls({ message: undefined })).toEqual([]);
     expect(parseAnthropicToolCalls({ unrelated: true } as never)).toEqual([]);
   });

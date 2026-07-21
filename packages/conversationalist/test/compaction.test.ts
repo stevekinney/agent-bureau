@@ -75,6 +75,31 @@ describe('summarizer-based compaction', () => {
       }
     });
 
+    test('preserves a tool result paired with a policy-selected tool call', () => {
+      let c = createConversation();
+      c = appendMessages(
+        c,
+        {
+          role: 'tool-call',
+          content: '',
+          metadata: { pinned: true },
+          toolCall: { id: 'tc-policy-selected', name: 'tool', arguments: {} },
+        },
+        {
+          role: 'tool-result',
+          content: 'result',
+          toolResult: { callId: 'tc-policy-selected', outcome: 'success', content: 'data' },
+        },
+      );
+
+      const { preserved } = partitionMessages(c, {
+        preserveRecentCount: 0,
+        preserveToolPairs: true,
+      });
+
+      expect(preserved.map((message) => message.role)).toEqual(['tool-call', 'tool-result']);
+    });
+
     test('returns all messages as preserved when fewer than preserveRecentCount', () => {
       let c = createConversation();
       c = appendUserMessage(c, 'only one');

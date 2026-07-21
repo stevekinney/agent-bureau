@@ -438,6 +438,33 @@ describe('simpleTokenEstimator', () => {
     // 11 chars / 4 = 2.75, ceil = 3
     expect(tokens).toBe(3);
   });
+
+  it('counts base64 and referenced document payloads', () => {
+    const message = createMessage({
+      id: 'documents',
+      role: 'user',
+      content: [
+        {
+          type: 'document',
+          name: 'inline.pdf',
+          mimeType: 'application/pdf',
+          source: { kind: 'base64', data: 'cGRm' },
+        },
+        {
+          type: 'document',
+          name: 'remote.pdf',
+          mimeType: 'application/pdf',
+          source: { kind: 'reference', uri: 'https://example.com/remote.pdf' },
+        },
+      ],
+      position: 0,
+      createdAt: '2024-01-01T00:00:00.000Z',
+      metadata: {},
+      hidden: false,
+    });
+
+    expect(simpleTokenEstimator(message)).toBe(21);
+  });
 });
 
 describe('truncateToTokenLimit', () => {

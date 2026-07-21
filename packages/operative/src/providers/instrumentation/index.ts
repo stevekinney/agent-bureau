@@ -39,10 +39,6 @@ function toGenAiProviderName(provider: ProviderName): string {
       // No well-known value is registered for these providers; a custom
       // value is explicitly permitted by the conventions.
       return provider;
-    default: {
-      const exhaustive: never = provider;
-      return exhaustive;
-    }
   }
 }
 

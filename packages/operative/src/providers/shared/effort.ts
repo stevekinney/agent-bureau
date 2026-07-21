@@ -49,11 +49,11 @@ export function resolveAnthropicEffort(
   if (supported.includes(requested)) return requested;
 
   const requestedIndex = EFFORT_ORDER.indexOf(requested);
-  for (let index = requestedIndex - 1; index >= 0; index--) {
-    const lowerTier = EFFORT_ORDER[index];
-    if (lowerTier && supported.includes(lowerTier)) return lowerTier;
-  }
-  return supported[0];
+  return (
+    EFFORT_ORDER.slice(0, requestedIndex)
+      .toReversed()
+      .find((tier) => supported.includes(tier)) ?? supported[0]
+  );
 }
 
 /**

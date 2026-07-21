@@ -98,22 +98,17 @@ export function summarizeToolInput(value: unknown, options: SummarizeOptions = {
       return Number.isNaN(input.getTime()) ? 'Invalid Date' : input.toISOString();
     }
 
-    if (typeof input === 'object') {
-      const entries = Object.entries(input as Record<string, unknown>);
-      const result: Record<string, JSONValue> = {};
-      for (const [key, entryValue] of entries.slice(0, maxObjectKeys)) {
-        result[key] = summarize(entryValue, depth + 1, key);
-      }
-      if (entries.length > maxObjectKeys) {
-        result['…'] = `(${entries.length - maxObjectKeys} more keys)`;
-      }
-      return result;
+    // Every non-object `typeof` branch returned above, and null was handled
+    // first, so the only remaining runtime category is an object.
+    const entries = Object.entries(input as Record<string, unknown>);
+    const result: Record<string, JSONValue> = {};
+    for (const [key, entryValue] of entries.slice(0, maxObjectKeys)) {
+      result[key] = summarize(entryValue, depth + 1, key);
     }
-
-    // Every `typeof` branch (string, number, boolean, bigint, function,
-    // symbol, object, undefined) is handled above — this is unreachable in
-    // practice, but `input: unknown` means TypeScript can't prove it.
-    return '[unknown]';
+    if (entries.length > maxObjectKeys) {
+      result['…'] = `(${entries.length - maxObjectKeys} more keys)`;
+    }
+    return result;
   }
 
   return summarize(value, 0);
@@ -501,10 +496,6 @@ export function mapFinishReasonToStatus(finishReason: FinishReason): RunReportSt
     case 'error':
     case 'tripwire':
       return 'failed';
-    default: {
-      const exhaustive: never = finishReason;
-      return exhaustive;
-    }
   }
 }
 

@@ -419,6 +419,28 @@ describe('fetchFromRegistry integrity', () => {
     expect(result.errors[0]?.error).toContain('Signature verification failed');
   });
 
+  it('rejects signed content when the configured public key is malformed', async () => {
+    const provider = createMockSkillProvider();
+    const { privateKey } = generateEd25519KeyPair();
+    const signature = signContent(VALID_SKILL_MD, privateKey);
+    const fetchFunction = createMockFetch({
+      [`${baseUrl}/test-skill/SKILL.md`]: { status: 200, body: VALID_SKILL_MD },
+      [`${baseUrl}/test-skill/SKILL.md.sig`]: { status: 200, body: signature },
+    });
+
+    const result = await fetchFromRegistry({
+      baseUrl,
+      names: ['test-skill'],
+      provider,
+      fetchFunction,
+      publicKey: 'not-a-public-key',
+    });
+
+    expect(result.loaded).toHaveLength(0);
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0]?.error).toContain('Signature verification failed');
+  });
+
   it('rejects when publicKey is configured but no signature is served', async () => {
     const provider = createMockSkillProvider();
     const { publicKey } = generateEd25519KeyPair();

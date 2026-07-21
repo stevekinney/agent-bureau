@@ -267,6 +267,32 @@ describe('createTool', () => {
     expect(executed).toBe(false);
   });
 
+  it('cancels after policy context resolution but before execution starts', async () => {
+    const controller = new AbortController();
+    let executed = false;
+    const tool = createTool({
+      name: 'abort-after-policy-context',
+      description: 'aborts after policy context resolution',
+      input: z.object({}),
+      policyContext: () => {
+        controller.abort('cancelled by policy context');
+        return {};
+      },
+      async execute() {
+        executed = true;
+        return 'should not run';
+      },
+    });
+
+    const result = await tool.execute(createToolCall('abort-after-policy-context', {}), {
+      signal: controller.signal,
+    });
+
+    expect(result.outcome).toBe('error');
+    expect(result.errorMessage).toBe('cancelled by policy context');
+    expect(executed).toBe(false);
+  });
+
   it('returns an error when lazy execute rejects', async () => {
     const tool = createTool({
       name: 'lazy-reject',

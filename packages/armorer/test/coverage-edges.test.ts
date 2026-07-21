@@ -9,6 +9,7 @@ import {
   toOpenAIAgentTools,
 } from '../src/adapters/open-ai/agents';
 import { formatOpenAIToolResults, formatOpenAIToolResultsAsync } from '../src/adapters/openai';
+import { createCodingToolbox } from '../src/coding';
 import { defineTool, serializeToolDefinition } from '../src/core';
 import { normalizeIdentity } from '../src/core/identity';
 import { internalQueryPredicateTestUtilities } from '../src/core/query-predicates';
@@ -43,6 +44,11 @@ const { resolveRetryDelay, toError, wait } = internalRetryTestUtilities;
 
 describe('coverage edges', () => {
   it('covers toolbox policy and schema helper branches', async () => {
+    expect(createCodingToolbox({ root: import.meta.dir }).map((tool) => tool.name)).toEqual([
+      'read-file',
+      'grep',
+      'glob',
+    ]);
     expect(
       toPolicyContextProvider(['invalid'] as unknown as Record<string, unknown>),
     ).toBeUndefined();
@@ -310,6 +316,7 @@ describe('coverage edges', () => {
     expect(defaultErrorCode('validation')).toBe('VALIDATION_ERROR');
     expect(defaultErrorCode('permission')).toBe('PERMISSION_DENIED');
     expect(defaultErrorCode('not_found')).toBe('NOT_FOUND');
+    expect(defaultErrorCode('unavailable')).toBe('TOOL_UNAVAILABLE');
     expect(defaultErrorCode('conflict')).toBe('CONFLICT');
     expect(defaultErrorCode('transient')).toBe('TRANSIENT_ERROR');
     expect(defaultErrorCode('timeout')).toBe('TIMEOUT');

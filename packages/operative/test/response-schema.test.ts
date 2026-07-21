@@ -6,6 +6,7 @@ import { z } from 'zod';
 
 import { noToolCalls } from '../src/conditions/predicates';
 import { createActiveRun } from '../src/create-run';
+import { resolveResponseFormat } from '../src/structured-output/response-schema';
 import { createRunRecorder } from '../src/test/index';
 import type { GenerateResponse } from '../src/types';
 const run = (options: Parameters<typeof createActiveRun>[0]) => createActiveRun(options).result;
@@ -267,6 +268,20 @@ describe('structured output enforcement', () => {
 });
 
 describe('structured output — non-Zod Standard Schema validator', () => {
+  it('uses an explicit JSON Schema as the provider response format', () => {
+    const responseJsonSchema = {
+      type: 'object',
+      required: ['answer'],
+      properties: { answer: { type: 'string' } },
+    };
+
+    expect(resolveResponseFormat(confidentAnswerSchema(), responseJsonSchema)).toEqual({
+      type: 'json_schema',
+      schema: responseJsonSchema,
+      name: 'response',
+    });
+  });
+
   it('validates via `~standard.validate` and surfaces its TRANSFORMED output as structuredOutput', async () => {
     const result = await run({
       generate: async () =>

@@ -272,6 +272,12 @@ describe('createToolbox', () => {
         message: 'Tool unavailable: macos-only',
       },
     });
+    await expect(
+      toolbox.execute(
+        { id: 'call-2', name: 'macos-only', arguments: {} },
+        { errorMode: 'failFast' },
+      ),
+    ).rejects.toMatchObject({ code: 'TOOL_UNAVAILABLE' });
   });
 
   it('returns a serializable pending approval descriptor and resumes with edited arguments', async () => {

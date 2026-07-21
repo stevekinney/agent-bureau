@@ -816,9 +816,6 @@ function toSdkContentBlock(block: AnthropicContentBlock): ContentBlockParam {
           ...(cacheControl ? { cache_control: cacheControl } : {}),
         };
       }
-      if (block.source.type === 'file') {
-        throw new TypeError('Anthropic SDK document file sources are not request parameters.');
-      }
       if (block.source.type === 'base64') {
         if (block.source.media_type !== 'application/pdf') {
           throw new TypeError(
@@ -836,17 +833,9 @@ function toSdkContentBlock(block: AnthropicContentBlock): ContentBlockParam {
           ...(cacheControl ? { cache_control: cacheControl } : {}),
         };
       }
-      if (block.source.media_type !== 'text/plain') {
-        throw new TypeError(
-          `Anthropic SDK text documents require text/plain, got ${block.source.media_type}.`,
-        );
-      }
-      return {
-        type: 'document',
-        source: { type: 'text', media_type: 'text/plain', data: block.source.data },
-        ...(block.title === undefined ? {} : { title: block.title }),
-        ...(cacheControl ? { cache_control: cacheControl } : {}),
-      };
+      throw new TypeError(
+        `Anthropic SDK document ${block.source.type} sources cannot be submitted through this adapter.`,
+      );
     case 'tool_use':
       return {
         type: 'tool_use',

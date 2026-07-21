@@ -332,19 +332,14 @@ export function evaluateHeadlessPermission(
     return { status: 'deny', reason: redactGateReason(gateResult.reason) };
   }
 
-  if (capabilityStatus === 'ask' || capabilityStatus === 'deny') {
-    const tierLabel = capabilityResult?.tier ?? 'unrecognized';
-    const reason =
-      capabilityStatus === 'ask'
-        ? `Tool "${toolName}" (${tierLabel} tier) would require human approval, but this run is headless (approvalMode: never) — denying instead of parking.`
-        : `Tool "${toolName}" (${tierLabel} tier) is denied by the capability-tier policy (mode: ${capabilityResult?.mode}).`;
-    return { status: 'deny', reason };
-  }
-
-  return {
-    status: 'deny',
-    reason: `Tool "${toolName}" is denied by the headless permission policy.`,
-  };
+  // Name-list and gate denials returned above, so a remaining denial can only
+  // come from the capability policy.
+  const tierLabel = capabilityResult?.tier ?? 'unrecognized';
+  const reason =
+    capabilityStatus === 'ask'
+      ? `Tool "${toolName}" (${tierLabel} tier) would require human approval, but this run is headless (approvalMode: never) — denying instead of parking.`
+      : `Tool "${toolName}" (${tierLabel} tier) is denied by the capability-tier policy (mode: ${capabilityResult?.mode}).`;
+  return { status: 'deny', reason };
 }
 
 /**

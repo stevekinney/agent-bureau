@@ -122,6 +122,24 @@ describe('createGeminiProviderStream — client injection (baseline)', () => {
     expect(updates.length).toBeGreaterThan(0);
     expect(updates[updates.length - 1]).toBe('Hello from Gemini!');
   });
+
+  it('sends the resolved thinking budget in streaming generation configuration', async () => {
+    const client = createMockGeminiStreamingModel([geminiStreamTextChunks]);
+    const generate = createGeminiProviderStream({
+      model: 'gemini-2.5-pro',
+      effort: 'high',
+      client,
+    });
+
+    await generate({
+      ...makeContext(),
+      streaming: { update: () => undefined },
+    });
+
+    expect(client._calls[0]?.['generationConfig']).toMatchObject({
+      thinkingConfig: { thinkingBudget: 16_384 },
+    });
+  });
 });
 
 // ── createGeminiProviderStream — API key handling ─────────────────────
