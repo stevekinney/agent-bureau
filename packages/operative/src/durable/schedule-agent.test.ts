@@ -30,7 +30,7 @@ const mockSummary: ScheduleSummary = {
   updatedAt: 0,
   missedFireCount: 0,
   nextFireAt: null,
-  queuedRuns: 0,
+  queuedRuns: [],
 };
 
 interface ScheduleCall {

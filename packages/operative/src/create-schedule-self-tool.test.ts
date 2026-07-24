@@ -17,7 +17,7 @@ const mockSummary: ScheduleSummary = {
   updatedAt: 0,
   missedFireCount: 0,
   nextFireAt: null,
-  queuedRuns: 0,
+  queuedRuns: [],
 };
 
 function makeHandle(id = 'sched-1'): AgentScheduleHandle {
