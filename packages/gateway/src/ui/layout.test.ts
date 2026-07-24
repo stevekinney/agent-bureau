@@ -24,4 +24,11 @@ describe('Gateway layout responsive contract', () => {
     expect(layoutSource).toContain('aria-controls="agent-bureau-sidebar"');
     expect(layoutSource).toContain('aria-expanded={!sidebarCollapsed}');
   });
+
+  it('composes the expanded brand inside the supported navigation snippet', () => {
+    expect(layoutSource).not.toContain('{#snippet brand()}');
+    expect(layoutSource).toMatch(
+      /\{#snippet navigation\(\)\}[\s\S]*\{#if !sidebarCollapsed\}[\s\S]*class="sidebar-title"[\s\S]*Agent Bureau[\s\S]*\{\/if\}[\s\S]*<SideNavigation/,
+    );
+  });
 });
