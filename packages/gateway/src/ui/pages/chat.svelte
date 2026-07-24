@@ -1,5 +1,6 @@
 <script lang="ts">
   import { Callout } from '@lostgradient/cinder/callout';
+  import { PageHeader } from '@lostgradient/cinder/page-header';
   import { Chat } from '@lostgradient/chat';
   import type { ChatSubmitEvent, MultiModalContent } from '@lostgradient/chat';
   import { SectionHeading } from '@lostgradient/cinder/section-heading';
@@ -57,7 +58,7 @@
 </script>
 
 <main class="page-chat">
-  <SectionHeading level={2} title="Chat" />
+  <PageHeader title="Chat" />
 
   {#if chat.error}
     <Callout variant="danger" title="Chat error">{chat.error}</Callout>
@@ -69,7 +70,7 @@
 
   {#if pendingReviews.length > 0}
     <section class="chat-pending-input" aria-live="polite">
-      <SectionHeading level={3} title="Needs your input" />
+      <SectionHeading level={2} title="Needs your input" />
       <div class="chat-pending-input-list">
         {#each pendingReviews as review (review.id)}
           <ReviewRow
@@ -96,7 +97,7 @@
 
   {#if chat.toolActivity.length > 0}
     <section class="chat-tool-activity">
-      <SectionHeading level={3} title="Tool Activity" />
+      <SectionHeading level={2} title="Tool Activity" />
       <ul>
         {#each chat.toolActivity as entry, index (`${entry}-${index}`)}
           <li>{entry}</li>

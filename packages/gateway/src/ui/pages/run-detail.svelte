@@ -11,6 +11,7 @@
     StreamEvent,
   } from '@lostgradient/cinder/event-stream-viewer';
   import { PayloadInspector } from '@lostgradient/cinder/payload-inspector';
+  import { PageHeader } from '@lostgradient/cinder/page-header';
   import { RunStepTimeline } from '@lostgradient/cinder/run-step-timeline';
   import type { RunStep, RunStepStatus } from '@lostgradient/cinder/run-step-timeline';
   import { SectionHeading } from '@lostgradient/cinder/section-heading';
@@ -355,12 +356,12 @@
 
 <main class="page-run-detail">
   <div class="run-detail-heading">
-    <SectionHeading level={2} title={`Run ${run.id}`} />
+    <PageHeader title={`Run ${run.id}`} />
     <StatusBadge status={run.status} />
   </div>
 
   <section>
-    <SectionHeading level={3} title="Summary" />
+    <SectionHeading level={2} title="Summary" />
     <DescriptionList items={summaryItems} variant="two-column" />
     <StatGroup columns={3} variant="cards" label="Token usage">
       <Stat label="Prompt" value={run.usage.prompt} />
@@ -371,7 +372,7 @@
 
   {#if parkedReview}
     <section>
-      <SectionHeading level={3} title="Awaiting Human Input" />
+      <SectionHeading level={2} title="Awaiting Human Input" />
       <ReviewRow
         review={parkedReview}
         pending={reviews?.pendingId === parkedReview.id}
@@ -382,7 +383,7 @@
   {/if}
 
   <section>
-    <SectionHeading level={3} title="Timeline" />
+    <SectionHeading level={2} title="Timeline" />
     {#if milestoneEntries.length === 0}
       <EmptyState
         title="No milestone events yet."
@@ -400,14 +401,14 @@
 
   {#if streamingAssistantContent}
     <section>
-      <SectionHeading level={3} title="Streaming Output" />
+      <SectionHeading level={2} title="Streaming Output" />
       <CodeBlock code={streamingAssistantContent} highlight={false} />
     </section>
   {/if}
 
   {#if toolActivity.length > 0}
     <section>
-      <SectionHeading level={3} title="Tool Activity" />
+      <SectionHeading level={2} title="Tool Activity" />
       <ul class="run-tool-activity">
         {#each toolActivity as entry, index (`${entry}-${index}`)}
           <li>{entry}</li>
@@ -417,7 +418,7 @@
   {/if}
 
   <section>
-    <SectionHeading level={3} title="Steps" />
+    <SectionHeading level={2} title="Steps" />
     {#if runSteps.length === 0}
       <EmptyState title="No completed steps yet." />
     {:else}
@@ -426,7 +427,7 @@
   </section>
 
   <section>
-    <SectionHeading level={3} title="Latest Snapshot" />
+    <SectionHeading level={2} title="Latest Snapshot" />
     {#if run.latestSnapshot === undefined}
       <EmptyState title="No snapshot yet." />
     {:else}
@@ -438,7 +439,7 @@
   </section>
 
   <section>
-    <SectionHeading level={3} title="Event Stream" />
+    <SectionHeading level={2} title="Event Stream" />
     <EventStreamViewer
       events={visibleStreamEvents}
       connectionState={eventStreamConnectionState}

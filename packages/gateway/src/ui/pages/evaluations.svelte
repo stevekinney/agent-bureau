@@ -1,6 +1,7 @@
 <script lang="ts">
   import { EmptyState } from '@lostgradient/cinder/empty-state';
   import { LineChart } from '@lostgradient/cinder/line-chart';
+  import { PageHeader } from '@lostgradient/cinder/page-header';
   import { SectionHeading } from '@lostgradient/cinder/section-heading';
   import { Table } from '@lostgradient/cinder/table';
   import { TableBody } from '@lostgradient/cinder/table-body';
@@ -54,7 +55,7 @@
 </script>
 
 <main class="page-evaluations">
-  <SectionHeading level={2} title="Evaluations" />
+  <PageHeader title="Evaluations" />
 
   {#if !hasReports}
     <EmptyState
@@ -63,7 +64,7 @@
     />
   {:else}
     <section>
-      <SectionHeading level={3} title="Pass rate over time" />
+      <SectionHeading level={2} title="Pass rate over time" />
       <LineChart
         label="Pass rate over time"
         series={passRateSeries}
@@ -72,7 +73,7 @@
     </section>
 
     <section>
-      <SectionHeading level={3} title="Average token cost over time" />
+      <SectionHeading level={2} title="Average token cost over time" />
       <LineChart
         label="Average token cost over time"
         series={costSeries}
@@ -81,7 +82,7 @@
     </section>
 
     <section>
-      <SectionHeading level={3} title="Reports" />
+      <SectionHeading level={2} title="Reports" />
       <Table caption="Evaluation reports">
         <TableHeader>
           <TableRow>
