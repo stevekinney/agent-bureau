@@ -17,6 +17,13 @@ describe('operative package exports', () => {
     expect(packageJson.engines?.node).toBe('>=20.19.0');
   });
 
+  it('keeps conversationalist external for every output format', async () => {
+    const buildConfiguration = await Bun.file(join(packageRoot, 'tsdown.config.ts')).text();
+
+    expect(buildConfiguration).toContain("'conversationalist',");
+    expect(buildConfiguration).toContain("'conversationalist/*',");
+  });
+
   // This assertion requires a prior build. It passes when run via `turbo run test`
   // (which declares "build" as a dependency) but is skipped on a clean checkout
   // where dist/ has not yet been produced.

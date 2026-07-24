@@ -21,6 +21,7 @@
 import type {
   CombinedOperativeEventMap,
   GenerateFunction,
+  OperativeEventEmitter,
   RunOptions,
 } from '@lostgradient/operative';
 import { createActiveRun } from '@lostgradient/operative';
@@ -41,6 +42,11 @@ import { CompletableEventTarget } from 'lifecycle';
 import { z } from 'zod';
 const run = (opts: Parameters<typeof createActiveRun>[0]) => createActiveRun(opts).result;
 const createRun = createActiveRun;
+
+const acceptsDurableEmitter = (_emitter: OperativeEventEmitter): void => {};
+acceptsDurableEmitter(new CompletableEventTarget<CombinedOperativeEventMap>());
+// @ts-expect-error Durable routing requires the full event target surface.
+acceptsDurableEmitter({ dispatch: () => true });
 
 // ---------------------------------------------------------------------------
 // Shared helpers

@@ -48,6 +48,8 @@ export default defineConfig({
   deps: {
     neverBundle: [
       'armorer',
+      'conversationalist',
+      'conversationalist/*',
       '@lostgradient/weft',
       'zod',
       '@anthropic-ai/sdk',
