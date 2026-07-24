@@ -211,7 +211,12 @@ describe('SSR pages', () => {
     });
     // The Svelte page actually rendered the report into the trend chart /
     // table server-side, not just the empty-state fallback.
-    expect(extractRootMarkup(html)).toContain('2026-01-01T00:00:00.000Z');
+    const rootMarkup = extractRootMarkup(html);
+    expect(rootMarkup).toContain('2026-01-01T00:00:00.000Z');
+    expect(rootMarkup).toContain('role="region"');
+    expect(rootMarkup).toContain('aria-label="Evaluation reports table scroll area"');
+    expect(rootMarkup).toContain('tabindex="0"');
+    expect(rootMarkup).toMatch(/<caption[^>]*>Evaluation reports<\/caption>/);
   });
 
   it('links the cinder stylesheet and the hydration module script on every page', async () => {
