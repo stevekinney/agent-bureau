@@ -3,7 +3,8 @@ import { defineConfig } from 'tsdown';
 /**
  * Each entry mirrors a public export in package.json. The foundation workspace packages are
  * intentionally not externalized so lifecycle and interoperability are inlined into both the
- * runtime and declaration output.
+ * runtime and declaration output. Conversationalist remains external: it is a declared runtime
+ * dependency, and its ESM-only package is supported by Operative's declared Node floor.
  */
 const entry = {
   index: './src/index.ts',
@@ -47,7 +48,6 @@ export default defineConfig({
   deps: {
     neverBundle: [
       'armorer',
-      'conversationalist',
       '@lostgradient/weft',
       'zod',
       '@anthropic-ai/sdk',

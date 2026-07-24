@@ -1,7 +1,7 @@
 import type { ToolboxEvents, ToolExecutionResult } from 'armorer';
 import type { Conversation, ConversationEvents } from 'conversationalist';
 import type { ToolCall } from 'interoperability';
-import type { EventMap, ForwardedEvent } from 'lifecycle';
+import type { CompletableEventTarget, EventMap, ForwardedEvent } from 'lifecycle';
 
 import type { CostBudgetExceededEvent, CostBudgetThresholdEvent } from './cost-budget-monitor';
 import { estimateCacheHitRate } from './cost-estimation';
@@ -1016,6 +1016,25 @@ export interface ForwardedEvents extends PrefixedToolboxEvents, PrefixedConversa
 export interface CombinedOperativeEventMap extends OperativeEventMap, ForwardedEvents {}
 
 export type CombinedOperativeEventType = keyof CombinedOperativeEventMap;
+
+/**
+ * The complete event surface accepted by durable routing. This deliberately
+ * omits CompletableEventTarget's private state while retaining every method
+ * the durable adapter calls; a dispatch-only object is not a valid emitter.
+ */
+export type OperativeEventEmitter = Pick<
+  CompletableEventTarget<CombinedOperativeEventMap>,
+  | 'addEventListener'
+  | 'removeEventListener'
+  | 'dispatch'
+  | 'dispatchEvent'
+  | 'on'
+  | 'once'
+  | 'subscribe'
+  | 'events'
+  | 'toObservable'
+  | 'complete'
+>;
 
 // Backward-compatible aliases
 export type OperativeEvents = {

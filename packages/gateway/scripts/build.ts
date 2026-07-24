@@ -46,7 +46,7 @@ const serverResult = await Bun.build({
     '@hono/node-server/*',
     'svelte',
     'svelte/*',
-    'operative',
+    '@lostgradient/operative',
     '@lostgradient/operative/*',
     'armorer',
     'bureau',

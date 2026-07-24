@@ -6,7 +6,7 @@ import { CompletableEventTarget, forwardEvents } from 'lifecycle';
 
 import type { ActiveRun } from '../create-run';
 import { BudgetExceededError, ElicitationDeniedError, GuardrailTripwireError } from '../errors';
-import type { CombinedOperativeEventMap } from '../events';
+import type { CombinedOperativeEventMap, OperativeEventEmitter } from '../events';
 import {
   StepStartedEvent,
   ToolErrorBubbleEvent,
@@ -91,7 +91,7 @@ export interface DurableActiveRunOptions {
    * exposes via `addEventListener`/`toObservable`. Omit for a fresh internal
    * emitter (the pre-existing default behavior).
    */
-  emitter?: CompletableEventTarget<CombinedOperativeEventMap>;
+  emitter?: OperativeEventEmitter;
   /**
    * Optional synchronous hook invoked with the freshly-built per-run
    * {@link DurableRunDeps} — the exact object Weft hands back as `ctx.services`
@@ -471,7 +471,7 @@ export interface RecoveredRunHandle {
 }
 
 export interface RecoveredRunEventSurface {
-  emitter: CompletableEventTarget<CombinedOperativeEventMap>;
+  emitter: OperativeEventEmitter;
   stopToolboxForward: () => void;
 }
 
@@ -627,7 +627,7 @@ export function reattachDurableActiveRun(
      * surface, so `runStep` events are observable before resumed user code can
      * advance. Omit when reattaching outside that recovery hook.
      */
-    emitter?: CompletableEventTarget<CombinedOperativeEventMap>;
+    emitter?: OperativeEventEmitter;
     /**
      * Cleanup for the `toolbox → emitter` forwarding the recovery hook wired.
      * Reattach owns it and runs it when the recovered run completes.
@@ -842,7 +842,7 @@ async function driveReattachedRun(
   context: DurableActiveRunContext,
   runId: string,
   handle: RecoveredRunHandle,
-  emitter: CompletableEventTarget<CombinedOperativeEventMap>,
+  emitter: OperativeEventEmitter,
   abortOutcome: () => Promise<boolean> | undefined,
 ): Promise<RunResult> {
   const runStartTime = performance.now();
@@ -960,7 +960,7 @@ async function driveDurableRun(
   options: RunOptions,
   conversation: Conversation,
   signal: AbortSignal,
-  emitter: CompletableEventTarget<CombinedOperativeEventMap>,
+  emitter: OperativeEventEmitter,
   prompt: string | undefined,
   onServices: ((services: DurableRunDeps) => void) | undefined,
 ): Promise<RunResult> {
@@ -1196,7 +1196,7 @@ interface FinalizeArgs {
   runState: RunState;
   conversation: Conversation;
   hooks: RunOptions['hooks'];
-  emitter: CompletableEventTarget<CombinedOperativeEventMap>;
+  emitter: OperativeEventEmitter;
   runStartTime: number;
   /** Serialized terminal error message (when the durable run errored). */
   errorMessage?: string;

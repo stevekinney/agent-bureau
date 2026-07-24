@@ -29,7 +29,7 @@ const esmExternal = [
   'lifecycle/*',
   'memory',
   'memory/*',
-  'operative',
+  '@lostgradient/operative',
   '@lostgradient/operative/*',
   'skills',
   'skills/*',

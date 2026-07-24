@@ -18,6 +18,7 @@ import { createActiveRun } from '../create-run';
 import { BudgetExceededError, ElicitationDeniedError, GuardrailTripwireError } from '../errors';
 import {
   type CombinedOperativeEventMap,
+  RunCompletedEvent,
   StepStartedEvent,
   ToolErrorBubbleEvent,
   ToolPolicyDeniedBubbleEvent,
@@ -89,6 +90,8 @@ describe('createRun with durable routing', () => {
   it('forwards a supplied durable emitter through createActiveRun', async () => {
     const context = await buildContext();
     const emitter = new CompletableEventTarget<CombinedOperativeEventMap>();
+    const completed: Event[] = [];
+    emitter.addEventListener(RunCompletedEvent.type, (event) => completed.push(event));
 
     try {
       const result = await run(
@@ -102,6 +105,7 @@ describe('createRun with durable routing', () => {
       );
 
       expect(result.content).toBe('durable emitter');
+      expect(completed).toHaveLength(1);
     } finally {
       context.engine[Symbol.dispose]();
     }

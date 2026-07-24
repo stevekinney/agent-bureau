@@ -6,7 +6,11 @@ import { CompletableEventTarget, forwardEvents } from 'lifecycle';
 import type { DurableActiveRunContext } from './durable/active-run-adapter';
 import { createDurableActiveRun } from './durable/active-run-adapter';
 import type { DurableRunDeps } from './durable/types';
-import type { CombinedOperativeEventMap, CombinedOperativeEventType } from './events';
+import type {
+  CombinedOperativeEventMap,
+  CombinedOperativeEventType,
+  OperativeEventEmitter,
+} from './events';
 import {
   StepStartedEvent,
   ToolErrorBubbleEvent,
@@ -16,7 +20,6 @@ import {
   ToolStartedBubbleEvent,
 } from './events';
 import { executeLoop } from './loop';
-import type { EventDispatcher } from './run-step';
 import type { RunOptions, RunResult } from './types';
 
 /**
@@ -101,7 +104,7 @@ export function createActiveRun(options: RunOptions, durable?: DurableRunRouting
         prompt: durable.prompt,
         ...(durable.emitter
           ? {
-              emitter: durable.emitter as CompletableEventTarget<CombinedOperativeEventMap>,
+              emitter: durable.emitter,
             }
           : {}),
         ...(durable.onServices ? { onServices: durable.onServices } : {}),
@@ -314,7 +317,7 @@ export interface DurableRunRouting extends DurableActiveRunContext {
    * `requestHumanInput`'s `HumanWaitParkedEvent`, to the exact emitter this
    * `ActiveRun` exposes).
    */
-  emitter?: EventDispatcher;
+  emitter?: OperativeEventEmitter;
   /**
    * Synchronous hook invoked with the freshly-built per-run `DurableRunDeps`
    * (`ctx.services`) right before `engine.start`. See

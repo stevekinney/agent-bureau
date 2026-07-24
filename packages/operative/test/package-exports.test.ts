@@ -12,6 +12,11 @@ const distBuilt = existsSync(distDir);
 const exports = packageJson.exports as Record<string, Record<string, string> | string>;
 
 describe('operative package exports', () => {
+  it('declares the Node floor required by external ESM-only conversationalist', () => {
+    expect(packageJson.dependencies?.conversationalist).toBe('^0.5.0');
+    expect(packageJson.engines?.node).toBe('>=20.19.0');
+  });
+
   // This assertion requires a prior build. It passes when run via `turbo run test`
   // (which declares "build" as a dependency) but is skipped on a clean checkout
   // where dist/ has not yet been produced.
