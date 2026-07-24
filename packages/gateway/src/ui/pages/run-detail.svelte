@@ -34,6 +34,8 @@
   };
 
   type SerializedRunStepDetail = RunDetailResponse['stepDetails'][number];
+  const MAX_CODE_BLOCK_PAYLOAD_BYTES = 1_048_576;
+  const PAYLOAD_TRUNCATION_SUFFIX = '\n[Payload truncated at 1 MiB]';
 
   /**
    * Run detail page. Renders the rich view of a single run: summary, usage
@@ -156,14 +158,25 @@
     return { datetime, label: `${datetime.slice(11, 19)} UTC` };
   }
 
-  function stringifyPayload(value: unknown): string {
+  function stringifyPayload(value: unknown, maxBytes?: number): string {
     if (value === undefined) return '';
-    if (typeof value === 'string') return value;
-    try {
-      return JSON.stringify(value, null, 2) ?? String(value);
-    } catch {
-      return String(value);
-    }
+    const serialized = (() => {
+      if (typeof value === 'string') return value;
+      try {
+        return JSON.stringify(value, null, 2) ?? String(value);
+      } catch {
+        return String(value);
+      }
+    })();
+
+    if (maxBytes === undefined) return serialized;
+
+    const encoded = new TextEncoder().encode(serialized);
+    if (encoded.byteLength <= maxBytes) return serialized;
+
+    const suffix = new TextEncoder().encode(PAYLOAD_TRUNCATION_SUFFIX);
+    const contentBytes = Math.max(0, maxBytes - suffix.byteLength);
+    return `${new TextDecoder().decode(encoded.slice(0, contentBytes))}${PAYLOAD_TRUNCATION_SUFFIX}`;
   }
 
   function stepStatus(step: SerializedRunStepDetail): RunStepStatus {
@@ -320,13 +333,21 @@
     {#if detail.toolCalls.length > 0}
       <div class="run-step-payload">
         <h4>{step.label} tool calls</h4>
-        <CodeBlock code={stringifyPayload(detail.toolCalls)} language="json" highlight={false} />
+        <CodeBlock
+          code={stringifyPayload(detail.toolCalls, MAX_CODE_BLOCK_PAYLOAD_BYTES)}
+          language="json"
+          highlight={false}
+        />
       </div>
     {/if}
     {#if detail.results.length > 0}
       <div class="run-step-payload">
         <h4>{step.label} results</h4>
-        <CodeBlock code={stringifyPayload(detail.results)} language="json" highlight={false} />
+        <CodeBlock
+          code={stringifyPayload(detail.results, MAX_CODE_BLOCK_PAYLOAD_BYTES)}
+          language="json"
+          highlight={false}
+        />
       </div>
     {/if}
   {/if}

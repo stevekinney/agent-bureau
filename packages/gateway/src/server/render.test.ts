@@ -327,6 +327,32 @@ describe('renderPage with a populated run-detail page', () => {
     expect(rootMarkup).toContain('run.completed');
   });
 
+  it('bounds large tool-result CodeBlock output during SSR', async () => {
+    const resultTail = 'RESULT-END';
+    const firstStep = populatedRun.stepDetails[0]!;
+    const finalStep = populatedRun.stepDetails[1]!;
+    const largeResultRun: RunDetailResponse = {
+      ...populatedRun,
+      stepDetails: [
+        {
+          ...firstStep,
+          results: [{ toolName: 'read_file', result: `${'x'.repeat(1_100_000)}${resultTail}` }],
+        },
+        finalStep,
+      ],
+    };
+    const html = await renderPage({
+      title: 'Run run-populated',
+      component: RunDetailPage,
+      props: { ...props, run: largeResultRun },
+    });
+    const rootMarkup = extractRootMarkup(html);
+
+    expect(rootMarkup).toContain('[Payload truncated at 1 MiB]');
+    expect(rootMarkup).not.toContain(resultTail);
+    expect(new TextEncoder().encode(rootMarkup).byteLength).toBeLessThan(1_200_000);
+  });
+
   // AB-12 — the run-inspector Timeline section renders every milestone kind
   // classified from the run's event log: checkpoint boundaries,
   // HumanWaitParkedEvent, ChildWorkflowStartedEvent, HandoffOccurredEvent,
