@@ -1,8 +1,12 @@
+import type {
+  ActiveRun,
+  CombinedOperativeEventMap,
+  GenerateFunction,
+} from '@lostgradient/operative';
+import { HumanWaitParkedEvent } from '@lostgradient/operative';
 import { describe, expect, it, spyOn } from 'bun:test';
 import type { Bureau } from 'bureau';
 import { CompletableEventTarget } from 'lifecycle';
-import type { ActiveRun, CombinedOperativeEventMap, GenerateFunction } from 'operative';
-import { HumanWaitParkedEvent } from 'operative';
 
 import { createTestGateway, requestJSON } from '../test';
 

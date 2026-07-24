@@ -199,7 +199,7 @@ export type { AgentRun };
  * @example Stateless chat host with a shared toolbox and park-on-approval
  * ```ts
  * import { createToolbox } from 'armorer';
- * import { createAgent, stopWhen } from 'operative';
+ * import { createAgent, stopWhen } from '@lostgradient/operative';
  *
  * // Built once per process — the stable approvalSecret is what makes
  * // resumeApproval() work across separate HTTP requests.

@@ -1,5 +1,3 @@
-import { Conversation } from 'conversationalist';
-import type { TypedEventTarget } from 'lifecycle';
 import {
   type ActiveRun,
   buildRunReport,
@@ -19,14 +17,16 @@ import {
   type StreamEventMap,
   type SummarizeOptions,
   type ToolFrameStatus,
-} from 'operative';
-import type { RunState } from 'operative/store';
+} from '@lostgradient/operative';
+import type { RunState } from '@lostgradient/operative/store';
+import { Conversation } from 'conversationalist';
+import type { TypedEventTarget } from 'lifecycle';
 
 import { serializeUnknownError } from './serialization';
 
 /**
  * AB-96 — bureau-side wiring of operative's versioned run envelope
- * (`operative/run-envelope`). Extends `websocket-frames.ts`'s
+ * (`@lostgradient/operative/run-envelope`). Extends `websocket-frames.ts`'s
  * `streamEventToFrame` concept with the fuller, documented lifecycle frame
  * set (run-started, step, assistant-chunk/final, tool-pre/post,
  * notification, run-finished), and builds the terminal `RunReport` for every

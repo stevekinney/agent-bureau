@@ -1,5 +1,5 @@
+import type { GenerateFunction } from '@lostgradient/operative';
 import { describe, expect, it } from 'bun:test';
-import type { GenerateFunction } from 'operative';
 
 import { createTestGateway, requestJSON } from '../test';
 

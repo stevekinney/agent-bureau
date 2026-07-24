@@ -31,7 +31,7 @@ export type {
   ToolEntryInput,
   ToolMap,
   ToolMapInput,
-} from 'operative/bureau-types';
+} from '@lostgradient/operative/bureau-types';
 
 // Re-export operative's run types for bureau consumers who iterate runs.
-export type { AgentRun, RunEvent, RunResult } from 'operative';
+export type { AgentRun, RunEvent, RunResult } from '@lostgradient/operative';

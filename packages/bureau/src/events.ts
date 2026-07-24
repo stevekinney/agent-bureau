@@ -1,5 +1,5 @@
+import type { Action } from '@lostgradient/operative/store';
 import type { EventMap } from 'lifecycle';
-import type { Action } from 'operative/store';
 
 /**
  * Fired when the store records an action from a run.

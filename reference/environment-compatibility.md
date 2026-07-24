@@ -110,7 +110,7 @@ Add `"browser"` condition to `package.json` exports for packages that should wor
 }
 ```
 
-Packages to update: `interoperability`, `armorer`, `storage`, `memory`, `conversationalist`, `lifecycle`, `operative`, `operative/store`, `herald`.
+Packages to update: `interoperability`, `armorer`, `storage`, `memory`, `conversationalist`, `lifecycle`, `operative`, `@lostgradient/operative/store`, `herald`.
 
 Packages to skip (server-only by design): `gateway`, `integration`.
 

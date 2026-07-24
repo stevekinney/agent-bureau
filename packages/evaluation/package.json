@@ -38,7 +38,7 @@
     "validate": "bun run format:check && bun run lint && bun run check-types && bun run test"
   },
   "dependencies": {
-    "operative": "workspace:*",
+    "@lostgradient/operative": "workspace:*",
     "armorer": "workspace:*",
     "conversationalist": "workspace:*"
   },

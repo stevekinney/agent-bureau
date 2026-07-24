@@ -1,7 +1,7 @@
+import type { GenerateContext, GenerateFunction } from '@lostgradient/operative';
+import { noToolCalls } from '@lostgradient/operative/conditions';
 import { createTool, createToolbox } from 'armorer';
 import { describe, expect, it } from 'bun:test';
-import type { GenerateContext, GenerateFunction } from 'operative';
-import { noToolCalls } from 'operative/conditions';
 import { z } from 'zod';
 
 import { createTestGateway, requestJSON } from '../test';

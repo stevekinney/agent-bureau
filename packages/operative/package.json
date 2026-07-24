@@ -1,6 +1,5 @@
 {
-  "name": "operative",
-  "private": true,
+  "name": "@lostgradient/operative",
   "version": "0.1.0",
   "description": "A composable agent loop that wires Armorer and Conversationalist into the standard agentic cycle. Includes provider subpaths for Anthropic, OpenAI, and Gemini (dynamically imported — zero-SDK-if-unused).",
   "keywords": [
@@ -18,7 +17,17 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/stevekinney/agent-bureau.git"
+    "url": "git+https://github.com/stevekinney/agent-bureau.git",
+    "directory": "packages/operative"
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
   },
   "license": "MIT",
   "author": "Steve Kinney <hello@stevekinney.net>",
@@ -26,18 +35,16 @@
   "exports": {
     ".": {
       "bun": "./dist/index.js",
-      "browser": "./dist/index.js",
       "import": "./dist/index.js",
       "require": "./dist/index.cjs",
       "default": "./dist/index.js",
       "types": "./dist/index.d.ts"
     },
     "./bureau-types": {
-      "types": "./src/bureau-types.ts"
+      "types": "./dist/bureau-types.d.ts"
     },
     "./conditions": {
       "bun": "./dist/conditions/index.js",
-      "browser": "./dist/conditions/index.js",
       "import": "./dist/conditions/index.js",
       "require": "./dist/conditions/index.cjs",
       "default": "./dist/conditions/index.js",
@@ -45,7 +52,6 @@
     },
     "./durable": {
       "bun": "./dist/durable/index.js",
-      "browser": "./dist/durable/index.js",
       "import": "./dist/durable/index.js",
       "require": "./dist/durable/index.cjs",
       "default": "./dist/durable/index.js",
@@ -53,7 +59,6 @@
     },
     "./guardrails": {
       "bun": "./dist/guardrails/index.js",
-      "browser": "./dist/guardrails/index.js",
       "import": "./dist/guardrails/index.js",
       "require": "./dist/guardrails/index.cjs",
       "default": "./dist/guardrails/index.js",
@@ -61,7 +66,6 @@
     },
     "./instrumentation": {
       "bun": "./dist/instrumentation/index.js",
-      "browser": "./dist/instrumentation/index.js",
       "import": "./dist/instrumentation/index.js",
       "require": "./dist/instrumentation/index.cjs",
       "default": "./dist/instrumentation/index.js",
@@ -69,7 +73,6 @@
     },
     "./retry": {
       "bun": "./dist/retry/index.js",
-      "browser": "./dist/retry/index.js",
       "import": "./dist/retry/index.js",
       "require": "./dist/retry/index.cjs",
       "default": "./dist/retry/index.js",
@@ -77,7 +80,6 @@
     },
     "./streaming": {
       "bun": "./dist/streaming/index.js",
-      "browser": "./dist/streaming/index.js",
       "import": "./dist/streaming/index.js",
       "require": "./dist/streaming/index.cjs",
       "default": "./dist/streaming/index.js",
@@ -85,7 +87,6 @@
     },
     "./store": {
       "bun": "./dist/store/index.js",
-      "browser": "./dist/store/index.js",
       "import": "./dist/store/index.js",
       "require": "./dist/store/index.cjs",
       "default": "./dist/store/index.js",
@@ -93,7 +94,6 @@
     },
     "./test": {
       "bun": "./dist/test/index.js",
-      "browser": "./dist/test/index.js",
       "import": "./dist/test/index.js",
       "require": "./dist/test/index.cjs",
       "default": "./dist/test/index.js",
@@ -101,7 +101,6 @@
     },
     "./anthropic": {
       "bun": "./dist/anthropic.js",
-      "browser": "./dist/anthropic.js",
       "import": "./dist/anthropic.js",
       "require": "./dist/anthropic.cjs",
       "default": "./dist/anthropic.js",
@@ -109,7 +108,6 @@
     },
     "./openai": {
       "bun": "./dist/openai.js",
-      "browser": "./dist/openai.js",
       "import": "./dist/openai.js",
       "require": "./dist/openai.cjs",
       "default": "./dist/openai.js",
@@ -117,7 +115,6 @@
     },
     "./gemini": {
       "bun": "./dist/gemini.js",
-      "browser": "./dist/gemini.js",
       "import": "./dist/gemini.js",
       "require": "./dist/gemini.cjs",
       "default": "./dist/gemini.js",
@@ -125,7 +122,6 @@
     },
     "./providers": {
       "bun": "./dist/providers/index.js",
-      "browser": "./dist/providers/index.js",
       "import": "./dist/providers/index.js",
       "require": "./dist/providers/index.cjs",
       "default": "./dist/providers/index.js",
@@ -133,7 +129,6 @@
     },
     "./providers/anthropic": {
       "bun": "./dist/providers/anthropic.js",
-      "browser": "./dist/providers/anthropic.js",
       "import": "./dist/providers/anthropic.js",
       "require": "./dist/providers/anthropic.cjs",
       "default": "./dist/providers/anthropic.js",
@@ -141,7 +136,6 @@
     },
     "./providers/openai": {
       "bun": "./dist/providers/openai.js",
-      "browser": "./dist/providers/openai.js",
       "import": "./dist/providers/openai.js",
       "require": "./dist/providers/openai.cjs",
       "default": "./dist/providers/openai.js",
@@ -149,7 +143,6 @@
     },
     "./providers/gemini": {
       "bun": "./dist/providers/gemini.js",
-      "browser": "./dist/providers/gemini.js",
       "import": "./dist/providers/gemini.js",
       "require": "./dist/providers/gemini.cjs",
       "default": "./dist/providers/gemini.js",
@@ -157,7 +150,6 @@
     },
     "./providers/fallover": {
       "bun": "./dist/providers/fallover/index.js",
-      "browser": "./dist/providers/fallover/index.js",
       "import": "./dist/providers/fallover/index.js",
       "require": "./dist/providers/fallover/index.cjs",
       "default": "./dist/providers/fallover/index.js",
@@ -165,7 +157,6 @@
     },
     "./providers/routing": {
       "bun": "./dist/providers/routing/index.js",
-      "browser": "./dist/providers/routing/index.js",
       "import": "./dist/providers/routing/index.js",
       "require": "./dist/providers/routing/index.cjs",
       "default": "./dist/providers/routing/index.js",
@@ -173,7 +164,6 @@
     },
     "./providers/streaming": {
       "bun": "./dist/providers/streaming/index.js",
-      "browser": "./dist/providers/streaming/index.js",
       "import": "./dist/providers/streaming/index.js",
       "require": "./dist/providers/streaming/index.cjs",
       "default": "./dist/providers/streaming/index.js",
@@ -181,7 +171,6 @@
     },
     "./providers/embeddings": {
       "bun": "./dist/providers/embeddings/index.js",
-      "browser": "./dist/providers/embeddings/index.js",
       "import": "./dist/providers/embeddings/index.js",
       "require": "./dist/providers/embeddings/index.cjs",
       "default": "./dist/providers/embeddings/index.js",
@@ -189,7 +178,6 @@
     },
     "./providers/embeddings/openai": {
       "bun": "./dist/providers/embeddings/openai.js",
-      "browser": "./dist/providers/embeddings/openai.js",
       "import": "./dist/providers/embeddings/openai.js",
       "require": "./dist/providers/embeddings/openai.cjs",
       "default": "./dist/providers/embeddings/openai.js",
@@ -197,7 +185,6 @@
     },
     "./providers/embeddings/gemini": {
       "bun": "./dist/providers/embeddings/gemini.js",
-      "browser": "./dist/providers/embeddings/gemini.js",
       "import": "./dist/providers/embeddings/gemini.js",
       "require": "./dist/providers/embeddings/gemini.cjs",
       "default": "./dist/providers/embeddings/gemini.js",
@@ -205,7 +192,6 @@
     },
     "./providers/embeddings/voyage": {
       "bun": "./dist/providers/embeddings/voyage.js",
-      "browser": "./dist/providers/embeddings/voyage.js",
       "import": "./dist/providers/embeddings/voyage.js",
       "require": "./dist/providers/embeddings/voyage.cjs",
       "default": "./dist/providers/embeddings/voyage.js",
@@ -213,7 +199,6 @@
     },
     "./providers/embeddings/ollama": {
       "bun": "./dist/providers/embeddings/ollama.js",
-      "browser": "./dist/providers/embeddings/ollama.js",
       "import": "./dist/providers/embeddings/ollama.js",
       "require": "./dist/providers/embeddings/ollama.cjs",
       "default": "./dist/providers/embeddings/ollama.js",
@@ -221,7 +206,6 @@
     },
     "./providers/instrumentation": {
       "bun": "./dist/providers/instrumentation/index.js",
-      "browser": "./dist/providers/instrumentation/index.js",
       "import": "./dist/providers/instrumentation/index.js",
       "require": "./dist/providers/instrumentation/index.cjs",
       "default": "./dist/providers/instrumentation/index.js",
@@ -229,7 +213,6 @@
     },
     "./providers/test": {
       "bun": "./dist/providers/test/index.js",
-      "browser": "./dist/providers/test/index.js",
       "import": "./dist/providers/test/index.js",
       "require": "./dist/providers/test/index.cjs",
       "default": "./dist/providers/test/index.js",
@@ -240,8 +223,8 @@
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "scripts": {
-    "build": "bun run scripts/build.ts",
-    "check-types": "tsc --noEmit",
+    "build": "tsdown",
+    "check-types": "tsc --noEmit --incremental false",
     "clean": "rm -rf dist coverage tsconfig.tsbuildinfo",
     "ci": "bun run validate && bun run build",
     "coverage:check": "bun run ../../scripts/check-coverage.ts",
@@ -257,10 +240,8 @@
   },
   "dependencies": {
     "@lostgradient/weft": "^0.15.0",
-    "armorer": "workspace:*",
-    "conversationalist": "workspace:*",
-    "interoperability": "workspace:*",
-    "lifecycle": "workspace:*"
+    "armorer": "^0.11.0",
+    "conversationalist": "^0.5.0"
   },
   "devDependencies": {
     "@anthropic-ai/sdk": "^0.71.2",
@@ -282,7 +263,10 @@
     "eslint-plugin-unicorn": "^63.0.0",
     "eslint-plugin-unused-imports": "^4.4.1",
     "globals": "^17.3.0",
+    "interoperability": "0.0.1",
     "openai": "^6.15.0",
+    "lifecycle": "0.0.1",
+    "tsdown": "^0.22.1",
     "typescript-eslint": "^8.55.0",
     "zod": "^4.4.1"
   },

@@ -1,7 +1,12 @@
+import type {
+  GenerateFunction,
+  GenerateResponse,
+  RegistryAgent,
+  RunResult,
+} from '@lostgradient/operative';
+import { createMockGenerate } from '@lostgradient/operative/test';
 import { createMockTool, createTestToolbox } from 'armorer/test';
 import { describe, expect, it } from 'bun:test';
-import type { GenerateFunction, GenerateResponse, RegistryAgent, RunResult } from 'operative';
-import { createMockGenerate } from 'operative/test';
 
 import { createAgentEvaluation } from './create-agent-evaluation';
 import type { EvaluationCase } from './types';

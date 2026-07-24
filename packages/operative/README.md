@@ -1,6 +1,23 @@
 # Operative
 
-`operative` is the provider-agnostic agent runtime for Agent Bureau. It owns the loop that assembles context, calls a generate function, executes tools, records steps, handles stop conditions, emits events, manages sessions, and coordinates advanced runtime behavior.
+`@lostgradient/operative` is the provider-agnostic agent runtime for Agent Bureau. It owns the loop that assembles context, calls a generate function, executes tools, records steps, handles stop conditions, emits events, manages sessions, and coordinates advanced runtime behavior.
+
+## Installation
+
+```bash
+bun add @lostgradient/operative zod armorer conversationalist @lostgradient/weft
+```
+
+Operative supports Bun and Node.js runtimes. `zod` is required. Provider SDKs and OpenTelemetry
+are optional peers: install only the SDKs for the provider subpaths you use, and no provider SDK is
+loaded when its provider is unused.
+
+The public package exports are `@lostgradient/operative`, `bureau-types`, `conditions`, `durable`,
+`guardrails`, `instrumentation`, `retry`, `streaming`, `store`, `test`, `anthropic`, `openai`,
+`gemini`, `providers`, `providers/anthropic`, `providers/openai`, `providers/gemini`,
+`providers/fallover`, `providers/routing`, `providers/streaming`, `providers/embeddings`,
+`providers/embeddings/openai`, `providers/embeddings/gemini`, `providers/embeddings/voyage`,
+`providers/embeddings/ollama`, `providers/instrumentation`, and `providers/test`.
 
 ## What It Does
 
@@ -15,27 +32,27 @@
 
 The core loop starts with an agent definition, a conversation, tools, and a `GenerateFunction`. For each step, it prepares context, calls the generate function, validates the response, executes requested tools, appends tool results back to the conversation, emits typed events, and evaluates stop conditions.
 
-Everything provider-specific stays behind a narrow seam: the `operative/anthropic`, `operative/openai`, and `operative/gemini` subpaths (plus fallover, routing, and embedding factories under `operative/providers/*`) supply ready-made generate functions, but callers can pass any function that satisfies the `GenerateFunction` type. Durable execution, scheduler tasks, and session persistence build on the same loop so product surfaces can recover or resume runs without changing agent code.
+Everything provider-specific stays behind a narrow seam: the `@lostgradient/operative/anthropic`, `@lostgradient/operative/openai`, and `@lostgradient/operative/gemini` subpaths (plus fallover, routing, and embedding factories under `@lostgradient/operative/providers/*`) supply ready-made generate functions, but callers can pass any function that satisfies the `GenerateFunction` type. Durable execution, scheduler tasks, and session persistence build on the same loop so product surfaces can recover or resume runs without changing agent code.
 
 ## Project Role
 
-`operative` is the center of the Agent Bureau runtime graph. `gateway` uses it to run requests and scheduler tasks, `operative/store` observes run state and action history, `memory` and `skills` attach through hooks and tools, `armorer` supplies actions, and `conversationalist` supplies the conversation model.
+`operative` is the center of the Agent Bureau runtime graph. `gateway` uses it to run requests and scheduler tasks, `@lostgradient/operative/store` observes run state and action history, `memory` and `skills` attach through hooks and tools, `armorer` supplies actions, and `conversationalist` supplies the conversation model.
 
 ## Table of Contents
 
 - [Quick Start](#quick-start)
 - [Public API](#public-api)
   - [`operative` — Core Entry Point](#operative--core-entry-point)
-  - [`operative/conditions` — Stop Conditions](#operativeconditions--stop-conditions)
-  - [`operative/guardrails` — Guardrails](#operativeguardrails--guardrails)
-  - [`operative/store` — Run Store](#operativestore--run-store)
-  - [`operative/streaming` — Streaming Helpers](#operativestreaming--streaming-helpers)
-  - [`operative/retry` — Retry Mutators](#operativeretry--retry-mutators)
-  - [`operative/instrumentation` — OpenTelemetry](#operativeinstrumentation--opentelemetry)
-  - [`operative/providers/instrumentation` — OpenTelemetry (Inference Calls)](#operativeprovidersinstrumentation--opentelemetry-inference-calls)
+  - [`@lostgradient/operative/conditions` — Stop Conditions](#operativeconditions--stop-conditions)
+  - [`@lostgradient/operative/guardrails` — Guardrails](#operativeguardrails--guardrails)
+  - [`@lostgradient/operative/store` — Run Store](#operativestore--run-store)
+  - [`@lostgradient/operative/streaming` — Streaming Helpers](#operativestreaming--streaming-helpers)
+  - [`@lostgradient/operative/retry` — Retry Mutators](#operativeretry--retry-mutators)
+  - [`@lostgradient/operative/instrumentation` — OpenTelemetry](#operativeinstrumentation--opentelemetry)
+  - [`@lostgradient/operative/providers/instrumentation` — OpenTelemetry (Inference Calls)](#operativeprovidersinstrumentation--opentelemetry-inference-calls)
   - [OTel GenAI Semantic Conventions](#otel-genai-semantic-conventions)
-  - [`operative/durable` — Durable Runs](#operativedurable--durable-runs)
-  - [`operative/test` — Test Utilities](#operativetest--test-utilities)
+  - [`@lostgradient/operative/durable` — Durable Runs](#operativedurable--durable-runs)
+  - [`@lostgradient/operative/test` — Test Utilities](#operativetest--test-utilities)
 - [Development](#development)
 
 ## Quick Start
@@ -43,8 +60,8 @@ Everything provider-specific stays behind a narrow seam: the `operative/anthropi
 Create an agent with a stub generate function and run it to completion:
 
 ```typescript
-import { createAgent } from 'operative';
-import type { GenerateFunction } from 'operative';
+import { createAgent } from '@lostgradient/operative';
+import type { GenerateFunction } from '@lostgradient/operative';
 
 // Minimal inline generate function — swap for a real provider in production.
 const generate: GenerateFunction = async ({ conversation }) => {
@@ -72,7 +89,7 @@ console.log(result.finishReason); // "stop-condition" | "maximum-steps" | …
 
 ```typescript
 import { Conversation } from 'conversationalist';
-import { createActiveRun, stopWhen } from 'operative';
+import { createActiveRun, stopWhen } from '@lostgradient/operative';
 
 const conversation = new Conversation();
 conversation.appendUserMessage('Summarize the docs.');
@@ -111,7 +128,7 @@ The main import surface for defining agents, running loops, managing sessions, b
 The documented public factory for a standalone, bureau-less agent. `generate` is required — there's no bureau to inherit a provider from. Runs are in-memory and ephemeral by default (no durability, no session, no shared memory) unless you inject your own `Toolbox` and `ConversationHistory`, as below.
 
 ```typescript
-import { createAgent } from 'operative';
+import { createAgent } from '@lostgradient/operative';
 
 const agent = createAgent({
   generate: myProvider, // GenerateFunction — required
@@ -149,11 +166,11 @@ A host with a browser- or client-owned conversation and an approval-gated toolbo
 
 1. **A conversation input**, not just a fresh string: `agent.run({ conversation })` starts the loop from an existing `ConversationHistory` — the shape a stateless backend POSTs and stores between turns.
 2. **A pre-built `Toolbox`**, not a freshly composed one: pass `toolbox` instead of `tools`. The same instance is reused across every `run()` call, which is required for armorer's cross-request approval flow — `toolbox.resumeApproval(signedApproval)` only verifies a token signed by the toolbox's own `approvalSecret`.
-3. **Park-on-approval**, not headless denial: `stopWhen: [stopWhen.pendingApproval(), stopWhen.noToolCalls()]` (from `operative/conditions`) stops the run cleanly after a step whose tool results include a pending approval — no further `generate` call happens, and the pending approval stays reachable on the final `RunResult`'s last step. `noToolCalls()` has to be combined in: `pendingApproval()` alone never fires on a normal, no-tool-call turn, so a plain text reply would otherwise run to `maximumSteps` instead of finishing.
+3. **Park-on-approval**, not headless denial: `stopWhen: [stopWhen.pendingApproval(), stopWhen.noToolCalls()]` (from `@lostgradient/operative/conditions`) stops the run cleanly after a step whose tool results include a pending approval — no further `generate` call happens, and the pending approval stays reachable on the final `RunResult`'s last step. `noToolCalls()` has to be combined in: `pendingApproval()` alone never fires on a normal, no-tool-call turn, so a plain text reply would otherwise run to `maximumSteps` instead of finishing.
 
 ```typescript
 import { createToolbox } from 'armorer';
-import { createAgent, stopWhen } from 'operative';
+import { createAgent, stopWhen } from '@lostgradient/operative';
 
 // Built once per process — the stable approvalSecret is what makes
 // resumeApproval() work across separate HTTP requests.
@@ -200,7 +217,7 @@ The full-control factory behind `createAgent`, `createSessionHandle`, and bureau
 Most callers should reach for `createAgent({...}).run(...)` instead — it wraps `createActiveRun` in the higher-level `AgentRun` handle and covers the common cases. Reach for `createActiveRun` directly when you need something `createAgent` doesn't expose: an already-live `Conversation` instance, durable routing, hooks (`prepareStep`, `onStep`, `validateResponse`, …), structured output via `responseSchema`, or a pre-built emitter to bind tool dispatches to.
 
 ```typescript
-import { createActiveRun, stopWhen } from 'operative';
+import { createActiveRun, stopWhen } from '@lostgradient/operative';
 
 // `stopWhen` is required for the in-memory loop to finish on an ordinary turn:
 // without a stop condition, a text-only provider response keeps advancing until
@@ -289,7 +306,7 @@ for await (const event of activeRun.events('step.completed')) {
 The interface operative never provides for you. Wire in any provider:
 
 ```typescript
-import type { GenerateFunction } from 'operative';
+import type { GenerateFunction } from '@lostgradient/operative';
 
 // Stub for tests or demos
 const generate: GenerateFunction = async ({ conversation, toolbox }) => ({
@@ -299,7 +316,7 @@ const generate: GenerateFunction = async ({ conversation, toolbox }) => ({
 });
 ```
 
-In production, `operative`'s own provider subpaths (`operative/anthropic`, `operative/openai`, `operative/gemini`) provide ready-made generate functions for Anthropic, OpenAI, and Gemini.
+In production, `operative`'s own provider subpaths (`@lostgradient/operative/anthropic`, `@lostgradient/operative/openai`, `@lostgradient/operative/gemini`) provide ready-made generate functions for Anthropic, OpenAI, and Gemini.
 
 #### Sessions
 
@@ -310,7 +327,7 @@ The main entry point exposes session helpers for direct session management witho
 - **`saveAgentSession(persistence, session)`**: Persists an `AgentSession` through conflict-aware session storage.
 
 ```typescript
-import { createAgentSession, loadAgentSession, saveAgentSession } from 'operative';
+import { createAgentSession, loadAgentSession, saveAgentSession } from '@lostgradient/operative';
 
 // Direct persistence (use createSessionStore from session/index for the full API)
 const session = createAgentSession({
@@ -328,7 +345,12 @@ For richer session management, `createSessionStore()` and `resumeSession()` are 
 #### `createSessionStore()` and `resumeSession()`
 
 ```typescript
-import { createActiveRun, createSessionStore, resumeSession, stopWhen } from 'operative';
+import {
+  createActiveRun,
+  createSessionStore,
+  resumeSession,
+  stopWhen,
+} from '@lostgradient/operative';
 
 // createSessionStore wraps Weft's conditional TextValueStore.
 const sessions = createSessionStore(kvStore);
@@ -390,7 +412,7 @@ import {
   withTimeout,
   everyNSteps,
   stopWhen,
-} from 'operative';
+} from '@lostgradient/operative';
 
 // Compose two prepare-step hooks into one
 const combined = composeHooks(
@@ -431,7 +453,7 @@ const activeRun = createActiveRun({
 
 #### Guardrails
 
-See [`operative/guardrails`](#operativeguardrails--guardrails) below for the tripwire model, the detector/validator catalog, provenance and the three retrieval surfaces, and the `bureau` default preset. This is a quick-start example; import from either `operative` or `operative/guardrails` — they're the same implementation.
+See [`@lostgradient/operative/guardrails`](#operativeguardrails--guardrails) below for the tripwire model, the detector/validator catalog, provenance and the three retrieval surfaces, and the `bureau` default preset. This is a quick-start example; import from either `operative` or `@lostgradient/operative/guardrails` — they're the same implementation.
 
 ```typescript
 import {
@@ -442,7 +464,7 @@ import {
   createTopicBoundaryDetector,
   createOutputPIIValidator,
   stopWhen,
-} from 'operative';
+} from '@lostgradient/operative';
 
 // Injection detection on inputs
 const injectionDetector = createPromptInjectionDetector();
@@ -479,7 +501,7 @@ budget, partitions messages into system / retrieved / history slices and
 trims each to fit:
 
 ```typescript
-import { createContextAssembler, createTokenBudget } from 'operative';
+import { createContextAssembler, createTokenBudget } from '@lostgradient/operative';
 
 const budget = createTokenBudget({
   maxTokens: 100_000,
@@ -516,7 +538,11 @@ breakpoint (`toAnthropicMessages`). `createAnthropicProvider` and
 of sending the conversation verbatim:
 
 ```typescript
-import { createAnthropicProvider, createContextAssembler, createTokenBudget } from 'operative';
+import {
+  createAnthropicProvider,
+  createContextAssembler,
+  createTokenBudget,
+} from '@lostgradient/operative';
 
 const generate = createAnthropicProvider({
   model: 'claude-sonnet-4-20250514',
@@ -614,7 +640,7 @@ forwarding. Don't pass arbitrary `requestMetadata` keys straight through to
 
 #### Provider Errors
 
-Every shipped provider throws `ProviderError` (`operative/providers`) for
+Every shipped provider throws `ProviderError` (`@lostgradient/operative/providers`) for
 HTTP/SDK failures — it carries `provider`, `cause`, an optional
 `statusCode`, and `retryable` (true only for status codes in `{429, 500,
 502, 503, 504}`).
@@ -630,7 +656,7 @@ fragment) alongside the inherited `ProviderError` fields, and `retryable` is
 always `false` since it never has a `statusCode`.
 
 ```typescript
-import { ToolCallParseError } from 'operative/providers';
+import { ToolCallParseError } from '@lostgradient/operative/providers';
 
 try {
   await generate(context);
@@ -654,16 +680,16 @@ routing code can tell "the provider is down" apart from "the model emitted
 bad JSON" without an `instanceof` check.
 
 **Cross-entrypoint `instanceof`.** Operative bundles each public entrypoint
-(`operative`, `operative/openai`, `operative/providers`, ...) separately
+(`operative`, `@lostgradient/operative/openai`, `@lostgradient/operative/providers`, ...) separately
 with no shared chunks, so a `ToolCallParseError` thrown from one
 entrypoint's bundle is not `instanceof` the `ToolCallParseError` re-exported
 from a different entrypoint. `classifyError` accounts for this internally.
 If you need to check the error type yourself across entrypoints, use
-`isToolCallParseError` (`operative/providers`) instead of a bare
+`isToolCallParseError` (`@lostgradient/operative/providers`) instead of a bare
 `instanceof`:
 
 ```typescript
-import { isToolCallParseError } from 'operative/providers';
+import { isToolCallParseError } from '@lostgradient/operative/providers';
 
 if (isToolCallParseError(error)) {
   // Matches structurally even if `error` came from a different
@@ -680,7 +706,7 @@ import {
   createTokenBucket,
   createAdaptiveBackoff,
   stopWhen,
-} from 'operative';
+} from '@lostgradient/operative';
 
 // Smooth out burst traffic with a sliding window
 const backpressure = createSlidingWindow({ windowSize: 60_000, maximumRequests: 20 });
@@ -704,7 +730,7 @@ const result = await activeRun.result;
 #### Caching
 
 ```typescript
-import { createActiveRun, stopWhen, withCache, withCacheMetrics } from 'operative';
+import { createActiveRun, stopWhen, withCache, withCacheMetrics } from '@lostgradient/operative';
 
 // withCache requires a TextValueStore backend (e.g. from Weft)
 const cachedGenerate = withCache(generate, {
@@ -734,8 +760,8 @@ metrics.reset(); // clear counters between test runs
 #### Generate Middleware
 
 ```typescript
-import { composeGenerate, createFallbackGenerate } from 'operative';
-import type { GenerateMiddleware } from 'operative';
+import { composeGenerate, createFallbackGenerate } from '@lostgradient/operative';
+import type { GenerateMiddleware } from '@lostgradient/operative';
 
 // composeGenerate(base, ...middleware) applies middleware right-to-left (outermost first)
 const loggingMiddleware: GenerateMiddleware = (next) => async (context) => {
@@ -758,7 +784,7 @@ The registry-based patterns below (`createSupervisor`, `createHandoffTool`, `cre
 **Subagents:**
 
 ```typescript
-import { createAgent, createSubagentTool } from 'operative';
+import { createAgent, createSubagentTool } from '@lostgradient/operative';
 import { z } from 'zod';
 
 const researcherTool = createSubagentTool({
@@ -826,8 +852,12 @@ const researcherTool = createSubagentTool({
 **Supervisor:**
 
 ```typescript
-import { createSupervisor, createRoundRobinRouting, createCapabilityRouting } from 'operative';
-import type { AgentRegistryEntry } from 'operative';
+import {
+  createSupervisor,
+  createRoundRobinRouting,
+  createCapabilityRouting,
+} from '@lostgradient/operative';
+import type { AgentRegistryEntry } from '@lostgradient/operative';
 
 // Agents are wrapped as AgentRegistryEntry objects; `.agent` is a
 // RegistryAgent adapter over each StandaloneAgent (see the note above).
@@ -872,8 +902,8 @@ scale, supply a custom `SynthesisStrategy` that applies the same discipline
 output before returning it:
 
 ```typescript
-import { createFanOutRouting, defaultSubagentSummarizer } from 'operative';
-import type { SynthesisStrategy } from 'operative';
+import { createFanOutRouting, defaultSubagentSummarizer } from '@lostgradient/operative';
+import type { SynthesisStrategy } from '@lostgradient/operative';
 
 const cappedSynthesis: SynthesisStrategy = async (results) => {
   const summaries = await Promise.all(
@@ -899,7 +929,7 @@ const supervisor = createSupervisor({
 **Handoffs:**
 
 ```typescript
-import { createHandoffTool, extractHandoffTarget, HANDOFF_MARKER } from 'operative';
+import { createHandoffTool, extractHandoffTarget, HANDOFF_MARKER } from '@lostgradient/operative';
 
 // Each handoff targets one specific agent
 const escalateToSupport = createHandoffTool({
@@ -925,7 +955,7 @@ if (target) {
 **Agent Registry:**
 
 ```typescript
-import { createAgentRegistry, createAgentDiscoveryTool } from 'operative';
+import { createAgentRegistry, createAgentDiscoveryTool } from '@lostgradient/operative';
 
 const registry = createAgentRegistry();
 registry.register({
@@ -948,8 +978,13 @@ const discoveryTool = createAgentDiscoveryTool(registry);
 #### Scheduler
 
 ```typescript
-import { createScheduler, createHeartbeat, createChunkedTask, stopWhen } from 'operative';
-import type { SchedulerTask } from 'operative';
+import {
+  createScheduler,
+  createHeartbeat,
+  createChunkedTask,
+  stopWhen,
+} from '@lostgradient/operative';
+import type { SchedulerTask } from '@lostgradient/operative';
 
 // The scheduler shares a generate function and toolbox across all its tasks.
 const scheduler = createScheduler({
@@ -1006,7 +1041,7 @@ await runChunked(scheduler);
 #### Cost Estimation and Budget
 
 ```typescript
-import { estimateCost, createCostBudgetMonitor } from 'operative';
+import { estimateCost, createCostBudgetMonitor } from '@lostgradient/operative';
 
 const estimate = estimateCost(
   { prompt: 5000, completion: 800, total: 5800 },
@@ -1026,7 +1061,7 @@ const monitor = createCostBudgetMonitor({
 #### Structured Output
 
 ```typescript
-import { createActiveRun, stopWhen } from 'operative';
+import { createActiveRun, stopWhen } from '@lostgradient/operative';
 import { z } from 'zod';
 
 const OutputSchema = z.object({
@@ -1053,7 +1088,7 @@ import {
   createScratchpad,
   createScratchpadReadTool,
   createScratchpadWriteTool,
-} from 'operative';
+} from '@lostgradient/operative';
 
 const scratchpad = createScratchpad({ initialValues: { step: 0 } });
 
@@ -1069,7 +1104,7 @@ const agent = createAgent({
 #### Context Compaction
 
 ```typescript
-import { createActiveRun, createContextCompactor, stopWhen } from 'operative';
+import { createActiveRun, createContextCompactor, stopWhen } from '@lostgradient/operative';
 
 // createContextCompactor returns an onCompact function for contextManagement.
 // The summarize callback receives an array of Message objects (not a Conversation).
@@ -1096,8 +1131,13 @@ const activeRun = createActiveRun({
 #### Memory Bridge
 
 ```typescript
-import { createActiveRun, createMemoryBridge, createScratchpad, stopWhen } from 'operative';
-import type { GenerateFunction, MemoryLike } from 'operative';
+import {
+  createActiveRun,
+  createMemoryBridge,
+  createScratchpad,
+  stopWhen,
+} from '@lostgradient/operative';
+import type { GenerateFunction, MemoryLike } from '@lostgradient/operative';
 
 declare const generate: GenerateFunction;
 declare const myMemoryAdapter: MemoryLike;
@@ -1129,7 +1169,7 @@ const activeRun = createActiveRun({
 #### Identity Hook
 
 ```typescript
-import { createActiveRun, createIdentityHook, stopWhen } from 'operative';
+import { createActiveRun, createIdentityHook, stopWhen } from '@lostgradient/operative';
 
 const identityHook = createIdentityHook({
   resolve: async () => 'You are Aria, a friendly customer success agent.',
@@ -1147,8 +1187,8 @@ const activeRun = createActiveRun({
 #### Policy Enforcement
 
 ```typescript
-import { createPolicyEnforcementHook } from 'operative';
-import type { ToolLike } from 'operative';
+import { createPolicyEnforcementHook } from '@lostgradient/operative';
+import type { ToolLike } from '@lostgradient/operative';
 
 // createPolicyEnforcementHook returns a tool-filtering function:
 //   (tools: T[]) => T[]
@@ -1171,7 +1211,7 @@ const allowedTools = enforcePolicy(allTools);
 #### Early Stopping
 
 ```typescript
-import { createActiveRun, createEarlyStoppingHandler, stopWhen } from 'operative';
+import { createActiveRun, createEarlyStoppingHandler, stopWhen } from '@lostgradient/operative';
 
 // Creates an onMaximumSteps callback that calls the model one final time
 // without tools, prompting it to summarize findings before the loop ends.
@@ -1191,13 +1231,13 @@ const activeRun = createActiveRun({
 
 ---
 
-### `operative/conditions` — Stop Conditions
+### `@lostgradient/operative/conditions` — Stop Conditions
 
 Composable predicates for loop exit. All are available on the `stopWhen` namespace object, or can be imported individually.
 
 ```typescript
-import { createActiveRun } from 'operative';
-import { stopWhen } from 'operative/conditions';
+import { createActiveRun } from '@lostgradient/operative';
+import { stopWhen } from '@lostgradient/operative/conditions';
 
 // Stop when the model produces no tool calls (each predicate is a factory — call it)
 const noTools = stopWhen.noToolCalls();
@@ -1272,9 +1312,9 @@ const activeRun = createActiveRun({
 
 ---
 
-### `operative/guardrails` — Guardrails
+### `@lostgradient/operative/guardrails` — Guardrails
 
-Guardrails are the trust boundary between the agent loop and everything that can inject untrusted content into it — the user, retrieved memories, ingested documents, and skill resources. Detectors live in `armorer` (shared with the retrieval surfaces); `operative/guardrails` wires them into the loop as `prepareStep`/`validateResponse` hooks. The same functions are also re-exported from the root `operative` entry point (see [Guardrails](#guardrails) under Public API) — import from either path, they're the same implementation.
+Guardrails are the trust boundary between the agent loop and everything that can inject untrusted content into it — the user, retrieved memories, ingested documents, and skill resources. Detectors live in `armorer` (shared with the retrieval surfaces); `@lostgradient/operative/guardrails` wires them into the loop as `prepareStep`/`validateResponse` hooks. The same functions are also re-exported from the root `operative` entry point (see [Guardrails](#guardrails) under Public API) — import from either path, they're the same implementation.
 
 #### The Tripwire Model (AB-40)
 
@@ -1328,8 +1368,8 @@ import {
   createPromptInjectionDetector,
   createOutputPIIValidator,
   withMinimumTripwireConfidence,
-} from 'operative/guardrails';
-import { createActiveRun, stopWhen } from 'operative';
+} from '@lostgradient/operative/guardrails';
+import { createActiveRun, stopWhen } from '@lostgradient/operative';
 
 const guardrails = createGuardrails({
   mode: 'tripwire',
@@ -1355,13 +1395,13 @@ const activeRun = createActiveRun({
 
 ---
 
-### `operative/store` — Run Store
+### `@lostgradient/operative/store` — Run Store
 
 Observes one or more `ActiveRun` instances, accumulating steps, usage, and the action log. Use this to build dashboards, replay UIs, or cross-run analytics.
 
 ```typescript
-import { createStore } from 'operative/store';
-import { createActiveRun, stopWhen } from 'operative';
+import { createStore } from '@lostgradient/operative/store';
+import { createActiveRun, stopWhen } from '@lostgradient/operative';
 
 const store = createStore({ maxActions: 500, maxSnapshots: 10 });
 
@@ -1425,7 +1465,7 @@ store.dispose();
 
 ---
 
-### `operative/streaming` — Streaming Helpers
+### `@lostgradient/operative/streaming` — Streaming Helpers
 
 Wraps a streaming generate function into the standard `GenerateFunction` contract, and provides enhanced streaming primitives with state machines and backpressure buffers.
 
@@ -1434,9 +1474,9 @@ Wraps a streaming generate function into the standard `GenerateFunction` contrac
 Adapts a `StreamingGenerateFunction` (one that receives a `StreamingHandle`) into a standard `GenerateFunction`. The helper manages `appendStreamingMessage → updateStreamingMessage → finalizeStreamingMessage` on the conversation so the loop never sees raw streaming state:
 
 ```typescript
-import { createActiveRun, stopWhen } from 'operative';
-import { withStreaming } from 'operative/streaming';
-import type { StreamingGenerateFunction } from 'operative';
+import { createActiveRun, stopWhen } from '@lostgradient/operative';
+import { withStreaming } from '@lostgradient/operative/streaming';
+import type { StreamingGenerateFunction } from '@lostgradient/operative';
 
 const streamingGenerate: StreamingGenerateFunction = async ({ conversation, streaming }) => {
   // Push incremental tokens through streaming.update()
@@ -1466,8 +1506,8 @@ const result = await activeRun.result;
 Wraps a `StreamingGenerateFunction` (like `withStreaming`, above) but also drives a `StreamStateMachine` internally and calls fine-grained callbacks as text and tool-call deltas arrive:
 
 ```typescript
-import { withEnhancedStreaming } from 'operative/streaming';
-import type { StreamingGenerateFunction } from 'operative';
+import { withEnhancedStreaming } from '@lostgradient/operative/streaming';
+import type { StreamingGenerateFunction } from '@lostgradient/operative';
 
 declare const streamingGenerate: StreamingGenerateFunction;
 
@@ -1483,7 +1523,7 @@ const generate = withEnhancedStreaming(streamingGenerate, {
 Creates a backpressure-aware buffer for streaming events — queues, coalesces, and drops `StreamEvent`s under load:
 
 ```typescript
-import { createBackpressureBuffer } from 'operative/streaming';
+import { createBackpressureBuffer } from '@lostgradient/operative/streaming';
 
 const buffer = createBackpressureBuffer({
   maxBufferSize: 100,
@@ -1500,7 +1540,7 @@ buffer.push({ type: 'stream:text-delta', content: 'Hello', accumulated: 'Hello' 
 Parses a raw token stream into typed blocks (`text`, `tool-call`, `thinking`, `metadata`):
 
 ```typescript
-import { createStreamStateMachine } from 'operative/streaming';
+import { createStreamStateMachine } from '@lostgradient/operative/streaming';
 
 const machine = createStreamStateMachine();
 const state = machine.process({ type: 'block-start', id: 'block-1', blockType: 'text' });
@@ -1512,7 +1552,7 @@ console.log(state.textContent);
 
 ---
 
-### `operative/retry` — Retry Mutators
+### `@lostgradient/operative/retry` — Retry Mutators
 
 Transforms the generate context before each retry attempt—escalate temperature, drop bad tools, inject schema error feedback, or add jitter to delays.
 
@@ -1524,8 +1564,8 @@ import {
   createToolRemovalMutator,
   createOverflowMutator,
   addJitter,
-} from 'operative/retry';
-import { createActiveRun, stopWhen } from 'operative';
+} from '@lostgradient/operative/retry';
+import { createActiveRun, stopWhen } from '@lostgradient/operative';
 
 // Increase by 0.2 per attempt (default), capped at 1.0
 const escalate = createTemperatureEscalationMutator({
@@ -1577,13 +1617,13 @@ const activeRun = createActiveRun({
 
 ---
 
-### `operative/instrumentation` — OpenTelemetry
+### `@lostgradient/operative/instrumentation` — OpenTelemetry
 
 Attaches OpenTelemetry spans to an `ActiveRun`, mirroring the agent loop lifecycle as nested spans. Requires `@opentelemetry/api` (peer dependency, optional).
 
 ```typescript
-import { instrument } from 'operative/instrumentation';
-import { createActiveRun, stopWhen } from 'operative';
+import { instrument } from '@lostgradient/operative/instrumentation';
+import { createActiveRun, stopWhen } from '@lostgradient/operative';
 import { trace } from '@opentelemetry/api';
 
 const activeRun = createActiveRun({
@@ -1624,13 +1664,13 @@ See [OTel GenAI Semantic Conventions](#otel-genai-semantic-conventions) below fo
 
 ---
 
-### `operative/providers/instrumentation` — OpenTelemetry (Inference Calls)
+### `@lostgradient/operative/providers/instrumentation` — OpenTelemetry (Inference Calls)
 
-Wraps a `GenerateFunction` with a single CLIENT span per call, following the OTel GenAI "Inference" (chat) span convention. Use this when you want the canonical, spec-compliant span for the actual LLM request — with model, provider, and token usage — as opposed to the loop-level `generate` span from `operative/instrumentation`, which has no model/provider visibility.
+Wraps a `GenerateFunction` with a single CLIENT span per call, following the OTel GenAI "Inference" (chat) span convention. Use this when you want the canonical, spec-compliant span for the actual LLM request — with model, provider, and token usage — as opposed to the loop-level `generate` span from `@lostgradient/operative/instrumentation`, which has no model/provider visibility.
 
 ```typescript
-import { instrument } from 'operative/providers/instrumentation';
-import { createAnthropicProvider } from 'operative/anthropic';
+import { instrument } from '@lostgradient/operative/providers/instrumentation';
+import { createAnthropicProvider } from '@lostgradient/operative/anthropic';
 import { trace } from '@opentelemetry/api';
 
 const rawGenerate = createAnthropicProvider({ model: 'claude-sonnet-5' });
@@ -1655,21 +1695,21 @@ const generate = instrument(rawGenerate, {
 
 ### OTel GenAI Semantic Conventions
 
-Spans and attributes across `operative/instrumentation`, `operative/providers/instrumentation`, and `armorer/instrumentation` follow the [OpenTelemetry GenAI semantic conventions](https://github.com/open-telemetry/semantic-conventions-genai) wherever a direct mapping exists. The conventions are still in **Development** status (no tagged release as of this writing) and can change — this table is pinned to:
+Spans and attributes across `@lostgradient/operative/instrumentation`, `@lostgradient/operative/providers/instrumentation`, and `armorer/instrumentation` follow the [OpenTelemetry GenAI semantic conventions](https://github.com/open-telemetry/semantic-conventions-genai) wherever a direct mapping exists. The conventions are still in **Development** status (no tagged release as of this writing) and can change — this table is pinned to:
 
 - `open-telemetry/semantic-conventions-genai` commit [`63f8200`](https://github.com/open-telemetry/semantic-conventions-genai/commit/63f8200eee093730ce845d26ce2aafb621b0807e) (`docs/gen-ai/gen-ai-spans.md`, `docs/gen-ai/gen-ai-agent-spans.md`)
 - general attributes (`error.*`, `server.*`) cross-referenced against semantic-conventions [v1.43.0](https://github.com/open-telemetry/semantic-conventions/tree/v1.43.0)
 
 When the pinned spec revision changes, re-diff these two files against the new commit and update this table alongside the code.
 
-| Our span (package)                                                         | OTel GenAI span                                | Span name                         | Kind     | Key attributes                                                                                                                                                                    | Divergence                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| -------------------------------------------------------------------------- | ---------------------------------------------- | --------------------------------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `invoke_agent` (`operative/instrumentation`)                               | Invoke agent (internal)                        | `invoke_agent [{agentName}]`      | INTERNAL | `gen_ai.operation.name=invoke_agent`, `gen_ai.agent.name`, `gen_ai.usage.*`                                                                                                       | `operative.finish_reason`/`operative.total_steps`/`operative.abort_reason` are documented custom extensions. `event.finishReason` (`stop-condition`, `maximum-steps`, `budget-exceeded`, `aborted`, ...) is intentionally kept OFF `gen_ai.response.finish_reasons` — it is operative's own agent-loop control-flow reason, not a provider-reported model completion reason, and mapping it there would mislead OTel GenAI backends that expect well-known provider stop reasons. |
-| `step` (`operative/instrumentation`)                                       | _(none)_                                       | `step`                            | INTERNAL | `operative.step.index`                                                                                                                                                            | **Divergent.** No spec equivalent for a single loop iteration. Kept as a non-normative structural span; name held constant (not `step {n}`) to avoid unbounded span-name cardinality.                                                                                                                                                                                                                                                                                             |
-| `generate` (`operative/instrumentation`)                                   | _(none — see `providers/instrumentation` row)_ | `generate`                        | INTERNAL | `operative.usage.*`, `operative.generate.duration_ms`                                                                                                                             | **Divergent, intentionally.** Observes the loop's call boundary without model/provider visibility. NOT labeled `gen_ai.operation.name=chat` and usage is namespaced under `operative.*` (not `gen_ai.*`) so it never double-reports usage against the canonical chat span below when both instrumentation points are wired to the same call.                                                                                                                                      |
-| `tool_calls` (`operative/instrumentation`)                                 | _(none)_                                       | `tool_calls`                      | INTERNAL | `operative.tools.count`, `operative.tools.names`, `operative.tools.results_count`                                                                                                 | **Divergent.** The spec defines a per-call `execute_tool` span (see below), not a batch wrapper for the calls issued in one step.                                                                                                                                                                                                                                                                                                                                                 |
-| `{chat\|generate_content} {model}` (`operative/providers/instrumentation`) | Inference                                      | `{gen_ai.operation.name} {model}` | CLIENT   | `gen_ai.operation.name` (`chat`, or `generate_content` for Gemini), `gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.request.max_tokens`, `gen_ai.usage.*`                 | None — full compliance. This is the canonical span for a single LLM inference call.                                                                                                                                                                                                                                                                                                                                                                                               |
-| `execute_tool {name}` (`armorer/instrumentation`)                          | Execute tool                                   | `execute_tool {gen_ai.tool.name}` | INTERNAL | `gen_ai.operation.name=execute_tool`, `gen_ai.tool.name`, `gen_ai.tool.call.id`, `gen_ai.tool.call.arguments`, `gen_ai.tool.call.result`, `gen_ai.tool.description`, `error.type` | None — full compliance. `armorer.tool.*` carries duration/digest/status extensions the spec doesn't define.                                                                                                                                                                                                                                                                                                                                                                       |
+| Our span (package)                                                                       | OTel GenAI span                                | Span name                         | Kind     | Key attributes                                                                                                                                                                    | Divergence                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| ---------------------------------------------------------------------------------------- | ---------------------------------------------- | --------------------------------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `invoke_agent` (`@lostgradient/operative/instrumentation`)                               | Invoke agent (internal)                        | `invoke_agent [{agentName}]`      | INTERNAL | `gen_ai.operation.name=invoke_agent`, `gen_ai.agent.name`, `gen_ai.usage.*`                                                                                                       | `operative.finish_reason`/`operative.total_steps`/`operative.abort_reason` are documented custom extensions. `event.finishReason` (`stop-condition`, `maximum-steps`, `budget-exceeded`, `aborted`, ...) is intentionally kept OFF `gen_ai.response.finish_reasons` — it is operative's own agent-loop control-flow reason, not a provider-reported model completion reason, and mapping it there would mislead OTel GenAI backends that expect well-known provider stop reasons. |
+| `step` (`@lostgradient/operative/instrumentation`)                                       | _(none)_                                       | `step`                            | INTERNAL | `operative.step.index`                                                                                                                                                            | **Divergent.** No spec equivalent for a single loop iteration. Kept as a non-normative structural span; name held constant (not `step {n}`) to avoid unbounded span-name cardinality.                                                                                                                                                                                                                                                                                             |
+| `generate` (`@lostgradient/operative/instrumentation`)                                   | _(none — see `providers/instrumentation` row)_ | `generate`                        | INTERNAL | `operative.usage.*`, `operative.generate.duration_ms`                                                                                                                             | **Divergent, intentionally.** Observes the loop's call boundary without model/provider visibility. NOT labeled `gen_ai.operation.name=chat` and usage is namespaced under `operative.*` (not `gen_ai.*`) so it never double-reports usage against the canonical chat span below when both instrumentation points are wired to the same call.                                                                                                                                      |
+| `tool_calls` (`@lostgradient/operative/instrumentation`)                                 | _(none)_                                       | `tool_calls`                      | INTERNAL | `operative.tools.count`, `operative.tools.names`, `operative.tools.results_count`                                                                                                 | **Divergent.** The spec defines a per-call `execute_tool` span (see below), not a batch wrapper for the calls issued in one step.                                                                                                                                                                                                                                                                                                                                                 |
+| `{chat\|generate_content} {model}` (`@lostgradient/operative/providers/instrumentation`) | Inference                                      | `{gen_ai.operation.name} {model}` | CLIENT   | `gen_ai.operation.name` (`chat`, or `generate_content` for Gemini), `gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.request.max_tokens`, `gen_ai.usage.*`                 | None — full compliance. This is the canonical span for a single LLM inference call.                                                                                                                                                                                                                                                                                                                                                                                               |
+| `execute_tool {name}` (`armorer/instrumentation`)                                        | Execute tool                                   | `execute_tool {gen_ai.tool.name}` | INTERNAL | `gen_ai.operation.name=execute_tool`, `gen_ai.tool.name`, `gen_ai.tool.call.id`, `gen_ai.tool.call.arguments`, `gen_ai.tool.call.result`, `gen_ai.tool.description`, `error.type` | None — full compliance. `armorer.tool.*` carries duration/digest/status extensions the spec doesn't define.                                                                                                                                                                                                                                                                                                                                                                       |
 
 `gen_ai.provider.name` values are mapped from operative's internal `ProviderName` to the conventions' well-known values where one is registered:
 
@@ -1685,14 +1725,18 @@ When the pinned spec revision changes, re-diff these two files against the new c
 
 ---
 
-### `operative/durable` — Durable Runs
+### `@lostgradient/operative/durable` — Durable Runs
 
 Drives agent runs through the Weft durable execution engine—checkpointed, crash-recoverable, and resumable. The `ActiveRun` surface is identical to the in-memory path; only the second argument to `createActiveRun()` changes.
 
 ```typescript
-import { createActiveRun } from 'operative';
-import type { DurableRunRouting } from 'operative';
-import { createCheckpointStore, createRunEngine, createRunWorkflow } from 'operative/durable';
+import { createActiveRun } from '@lostgradient/operative';
+import type { DurableRunRouting } from '@lostgradient/operative';
+import {
+  createCheckpointStore,
+  createRunEngine,
+  createRunWorkflow,
+} from '@lostgradient/operative/durable';
 
 // Build the durable substrate once at startup. createRunEngine returns
 // { engine, checkpointStore } — `storage` is Weft's raw Storage backend;
@@ -1736,7 +1780,7 @@ const result = await activeRun.result;
 
 ---
 
-### `operative/test` — Test Utilities
+### `@lostgradient/operative/test` — Test Utilities
 
 Test helpers for the agent loop. Import in test files only.
 
@@ -1749,9 +1793,9 @@ import {
   createMockRegistryAgent,
   createMockAgentRegistry,
   createTestStore,
-} from 'operative/test';
-import type { RunRecorder } from 'operative/test';
-import { createActiveRun, stopWhen } from 'operative';
+} from '@lostgradient/operative/test';
+import type { RunRecorder } from '@lostgradient/operative/test';
+import { createActiveRun, stopWhen } from '@lostgradient/operative';
 
 // Replay pre-canned responses in sequence
 const generate = createMockGenerate([
@@ -1796,7 +1840,7 @@ const mockAgent = createMockRegistryAgent('test-agent', {
 | `createMockScratchpad(initialValues?)`      | In-memory `Scratchpad` for testing scratchpad-dependent agents.                                |
 | `createMockRegistryAgent(name, overrides?)` | Minimal `RegistryAgent` with a stub `run`, for `createSupervisor`/registry consumer tests.     |
 | `createMockAgentRegistry(entries?)`         | Pre-populated `AgentRegistry` for registry consumer tests.                                     |
-| `createTestStore()`                         | In-memory `Store` instance from `operative/store`.                                             |
+| `createTestStore()`                         | In-memory `Store` instance from `@lostgradient/operative/store`.                               |
 
 | `RunRecorder`
 

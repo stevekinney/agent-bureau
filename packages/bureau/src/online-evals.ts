@@ -18,8 +18,8 @@
  * `sampleRate` is deterministic and testable — a fake RNG that returns a
  * fixed sequence exercises "sampled" and "not sampled" runs exactly.
  */
+import type { RunResult } from '@lostgradient/operative';
 import { Conversation } from 'conversationalist';
-import type { RunResult } from 'operative';
 
 import type { AuditTrail } from './audit-trail';
 import type { ActionEvent } from './events';

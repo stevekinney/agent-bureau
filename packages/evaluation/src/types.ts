@@ -1,5 +1,10 @@
+import type {
+  FinishReason,
+  GenerateFunction,
+  RegistryAgent,
+  RunResult,
+} from '@lostgradient/operative';
 import type { AnyToolbox } from 'armorer';
-import type { FinishReason, GenerateFunction, RegistryAgent, RunResult } from 'operative';
 
 /**
  * An expected tool call that the agent should make during evaluation.

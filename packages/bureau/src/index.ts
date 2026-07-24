@@ -98,4 +98,4 @@ export type {
 } from './webhook-notifier';
 export { createWebhookNotifier } from './webhook-notifier';
 export { streamEventToFrame } from './websocket-frames';
-export { DEFAULT_MAXIMUM_STEPS } from 'operative';
+export { DEFAULT_MAXIMUM_STEPS } from '@lostgradient/operative';

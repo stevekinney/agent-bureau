@@ -2,11 +2,16 @@ import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import type {
+  GenerateContext,
+  GenerateFunction,
+  GenerateResponse,
+  Toolbox,
+} from '@lostgradient/operative';
+import { stopWhen } from '@lostgradient/operative';
 import { createTool, createToolbox } from 'armorer';
 import { describe, expect, it } from 'bun:test';
 import { getMessages } from 'conversationalist';
-import type { GenerateContext, GenerateFunction, GenerateResponse, Toolbox } from 'operative';
-import { stopWhen } from 'operative';
 import { z } from 'zod';
 
 import { createBureau } from './create-bureau';

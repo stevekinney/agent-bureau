@@ -1,7 +1,7 @@
+import type { GenerateResponse, JSONValue, RunResult, StepResult } from '@lostgradient/operative';
+import { createMockGenerate } from '@lostgradient/operative/test';
 import { createMockTool, createTestToolbox } from 'armorer/test';
 import { describe, expect, it } from 'bun:test';
-import type { GenerateResponse, JSONValue, RunResult, StepResult } from 'operative';
-import { createMockGenerate } from 'operative/test';
 
 import { createAgentEvaluation } from './create-agent-evaluation';
 import { promoteRunToCase } from './promote-run';

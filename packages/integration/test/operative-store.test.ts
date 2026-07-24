@@ -1,9 +1,9 @@
+import { createActiveRun, type GenerateResponse, stopWhen } from '@lostgradient/operative';
+import { createMockGenerate, createTestStore } from '@lostgradient/operative/test';
 import { createTool, createToolbox } from 'armorer';
 import { createTestToolbox } from 'armorer/test';
 import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
-import { createActiveRun, type GenerateResponse, stopWhen } from 'operative';
-import { createMockGenerate, createTestStore } from 'operative/test';
 import { z } from 'zod';
 
 const createRun = createActiveRun;

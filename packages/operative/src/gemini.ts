@@ -1,5 +1,5 @@
 /**
- * Gemini provider subpath — `operative/gemini`.
+ * Gemini provider subpath — `@lostgradient/operative/gemini`.
  *
  * Dynamically imports `@google/generative-ai` on first call (zero-SDK-if-unused).
  * This is the preferred import for consumers who only use Gemini, avoiding

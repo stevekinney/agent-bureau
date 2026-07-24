@@ -76,7 +76,7 @@ export class ToolCallParseError extends ProviderError {
 /**
  * Structural type guard for `ToolCallParseError`, for use alongside (not instead of)
  * `instanceof`. Operative's build produces one bundle per public entrypoint (`operative`,
- * `operative/openai`, `operative/providers`, ...) without shared chunks, so an error thrown
+ * `@lostgradient/operative/openai`, `@lostgradient/operative/providers`, ...) without shared chunks, so an error thrown
  * from one entrypoint's bundle and an `instanceof` check imported from another entrypoint's
  * bundle can reference distinct copies of this class — `instanceof` alone would miss it.
  * Checks the same fields the constructor always sets.

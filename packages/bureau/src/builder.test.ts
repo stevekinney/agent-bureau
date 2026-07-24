@@ -15,10 +15,14 @@
  *   - generate wired per-agent (via AgentOptions.generate) drives the run
  */
 
+import type {
+  GenerateFunction,
+  ToolSettledBubbleEvent,
+  ToolStartedBubbleEvent,
+} from '@lostgradient/operative';
+import { createMockGenerate } from '@lostgradient/operative/test';
 import { createTool } from 'armorer';
 import { describe, expect, it } from 'bun:test';
-import type { GenerateFunction, ToolSettledBubbleEvent, ToolStartedBubbleEvent } from 'operative';
-import { createMockGenerate } from 'operative/test';
 import { z } from 'zod';
 
 import { createBureau } from './builder';

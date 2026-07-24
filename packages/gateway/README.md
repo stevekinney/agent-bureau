@@ -14,7 +14,7 @@
 
 `createGateway(bureau, options)` is the outer composition point, but it does **not** build the runtime itself — it takes an already-constructed `Bureau` as its first argument and wraps it: creates a live-frame broker, mounts Hono middleware, attaches API routes, renders UI pages, serves built assets, and chooses a Bun or Node server adapter at runtime. `options` (`GatewayOptions`) is transport-only (port, host, auth, runtime) — it carries no brain/runtime configuration.
 
-`createBureau()`, imported from the `bureau` package, is the runtime composition point — the caller builds this first and passes it to `createGateway()`. It resolves providers through `operative`'s provider factories (`operative/anthropic`, `operative/openai`, `operative/gemini`, plus fallover, routing, and embeddings under `operative/providers/*`), tools through `armorer`, conversation state through `conversationalist`, run execution through `operative`, state tracking through `operative/store`, memory through `memory`, and skills through `skills`. It also owns session persistence and recovered-run classification when durable execution is configured.
+`createBureau()`, imported from the `bureau` package, is the runtime composition point — the caller builds this first and passes it to `createGateway()`. It resolves providers through `operative`'s provider factories (`@lostgradient/operative/anthropic`, `@lostgradient/operative/openai`, `@lostgradient/operative/gemini`, plus fallover, routing, and embeddings under `@lostgradient/operative/providers/*`), tools through `armorer`, conversation state through `conversationalist`, run execution through `operative`, state tracking through `@lostgradient/operative/store`, memory through `memory`, and skills through `skills`. It also owns session persistence and recovered-run classification when durable execution is configured.
 
 ## Project Role
 
@@ -94,7 +94,7 @@ const generate = resolveGenerate({
 
 ### Serializing run state
 
-`serializeRunState()` converts an internal `RunState` (which holds live objects) into the JSON-safe `RunSummary` DTO used by the REST API. It lives in the `bureau` package — call it when you hold a `RunState` from `operative/store` and need a wire-safe representation.
+`serializeRunState()` converts an internal `RunState` (which holds live objects) into the JSON-safe `RunSummary` DTO used by the REST API. It lives in the `bureau` package — call it when you hold a `RunState` from `@lostgradient/operative/store` and need a wire-safe representation.
 
 ```typescript
 import { serializeRunState } from 'bureau';

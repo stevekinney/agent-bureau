@@ -14,17 +14,17 @@
  *    exactly the "kill mid-step, still get usage + transcript" contract
  *    `run-agent.mjs`'s own `terminateListener` depends on.
  */
+import type { GenerateFunction, Toolbox } from '@lostgradient/operative';
+import { createActiveRun, stopWhen } from '@lostgradient/operative';
+import type { AnthropicMessageResponse } from '@lostgradient/operative/anthropic';
+import { createAnthropicProvider } from '@lostgradient/operative/anthropic';
+import { createMockAnthropicClient } from '@lostgradient/operative/providers/test';
 import { createTool, createToolbox } from 'armorer';
 import { createCodingToolbox } from 'armorer/coding';
 import { createTestToolbox } from 'armorer/test';
 import { describe, expect, it } from 'bun:test';
 import { createBureau } from 'bureau';
 import { Conversation } from 'conversationalist';
-import type { GenerateFunction, Toolbox } from 'operative';
-import { createActiveRun, stopWhen } from 'operative';
-import type { AnthropicMessageResponse } from 'operative/anthropic';
-import { createAnthropicProvider } from 'operative/anthropic';
-import { createMockAnthropicClient } from 'operative/providers/test';
 import { z } from 'zod';
 
 import { createTribunalFixtureRepo } from './fixtures/tribunal-fixture-repo';

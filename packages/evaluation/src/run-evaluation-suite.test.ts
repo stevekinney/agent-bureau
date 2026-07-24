@@ -1,10 +1,10 @@
 import { existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 
+import type { GenerateResponse } from '@lostgradient/operative';
+import { createMockGenerate } from '@lostgradient/operative/test';
 import { createTestToolbox } from 'armorer/test';
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import type { GenerateResponse } from 'operative';
-import { createMockGenerate } from 'operative/test';
 
 import { runEvaluationSuite } from './run-evaluation-suite';
 import type { EvaluationReport } from './types';

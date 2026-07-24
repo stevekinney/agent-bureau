@@ -189,7 +189,7 @@ export interface CreateDurableMultiAgentHarnessOptions {
  * @example
  * ```ts
  * import { workflow } from '@lostgradient/weft';
- * import { createDurableMultiAgentHarness } from 'operative/test';
+ * import { createDurableMultiAgentHarness } from '@lostgradient/operative/test';
  *
  * // A minimal HITL probe: parks until a 'human-response' signal arrives.
  * const hitlWorkflow = workflow({ name: 'agentRun' })

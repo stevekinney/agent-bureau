@@ -18,7 +18,7 @@ Hooks are stored in registries keyed by hook maps. Packages such as `operative` 
 
 ## Project Role
 
-`lifecycle` is the shared substrate for observability and extension. `conversationalist`, `armorer`, `operative`, `operative/store`, and `gateway` all rely on event streams or hooks, and this package keeps those mechanics consistent across the workspace.
+`lifecycle` is the shared substrate for observability and extension. `conversationalist`, `armorer`, `operative`, `@lostgradient/operative/store`, and `gateway` all rely on event streams or hooks, and this package keeps those mechanics consistent across the workspace.
 
 ## Public API
 

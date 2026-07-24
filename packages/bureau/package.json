@@ -75,7 +75,7 @@
     "interoperability": "workspace:*",
     "lifecycle": "workspace:*",
     "memory": "workspace:*",
-    "operative": "workspace:*",
+    "@lostgradient/operative": "workspace:*",
     "skills": "workspace:*",
     "zod": "^4.4.1"
   },

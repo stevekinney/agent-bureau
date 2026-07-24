@@ -1,10 +1,15 @@
+import type {
+  ActiveRun,
+  CombinedOperativeEventMap,
+  GenerateFunction,
+  Toolbox,
+} from '@lostgradient/operative';
+import { HumanWaitParkedEvent, stopWhen } from '@lostgradient/operative';
 import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
 import { createTool, createToolbox } from 'armorer';
 import { describe, expect, it } from 'bun:test';
 import { createBureau } from 'bureau';
 import { CompletableEventTarget } from 'lifecycle';
-import type { ActiveRun, CombinedOperativeEventMap, GenerateFunction, Toolbox } from 'operative';
-import { HumanWaitParkedEvent, stopWhen } from 'operative';
 import { z } from 'zod';
 
 import { createTestGateway, requestJSON, waitForRunState } from '../test';

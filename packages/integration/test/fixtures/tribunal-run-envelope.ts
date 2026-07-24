@@ -18,7 +18,7 @@ import type {
   CombinedOperativeEventType,
   RunFrame,
   RunReport,
-} from 'operative';
+} from '@lostgradient/operative';
 import {
   buildRunReport,
   createNotificationFrame,
@@ -28,7 +28,7 @@ import {
   createToolPostFrame,
   createToolPreFrame,
   mapFinishReasonToStatus,
-} from 'operative';
+} from '@lostgradient/operative';
 
 type BuildTribunalRunReportOptionalKeys =
   | 'costEstimate'

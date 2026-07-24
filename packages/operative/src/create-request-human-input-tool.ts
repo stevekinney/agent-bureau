@@ -1,9 +1,11 @@
-import type { CompletableEventTarget } from 'lifecycle';
 import { z } from 'zod';
 
 import type { PendingHumanWait } from './durable/types';
-import type { CombinedOperativeEventMap } from './events';
 import { HumanWaitParkedEvent } from './events';
+
+type HumanInputEventDispatcher = {
+  dispatchEvent(event: Event): boolean;
+};
 
 /**
  * Input shape for the `requestHumanInput` tool.
@@ -68,7 +70,7 @@ export interface CreateRequestHumanInputToolOptions {
    * dispatched each time the tool executes (C3 completeness rule — every state
    * transition emits an event).
    */
-  emitter?: CompletableEventTarget<CombinedOperativeEventMap>;
+  emitter?: HumanInputEventDispatcher;
 }
 
 /**

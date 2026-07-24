@@ -468,7 +468,7 @@ interface MemoryHookOptions {
 
 ```typescript
 import { createMemoryHooks } from 'memory';
-import { createRun } from 'operative';
+import { createRun } from '@lostgradient/operative';
 
 const hooks = createMemoryHooks({ memory, recallLimit: 10 });
 
@@ -504,7 +504,7 @@ function summarizeRun(result: StepResultLike): string;
 
 ```typescript
 import { createRunCaptureHook } from 'memory';
-import { createRun } from 'operative';
+import { createRun } from '@lostgradient/operative';
 
 const captureHook = createRunCaptureHook({
   memory,

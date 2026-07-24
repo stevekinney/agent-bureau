@@ -1,5 +1,5 @@
+import type { StreamEvent } from '@lostgradient/operative';
 import { describe, expect, it } from 'bun:test';
-import type { StreamEvent } from 'operative';
 
 import { parseClientFrame, streamEventToFrame } from './protocol';
 

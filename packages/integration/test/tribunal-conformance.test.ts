@@ -16,9 +16,6 @@
  * (`fixtures/tribunal-schemas.ts`) are still a faithful, dated copy — see
  * that file's header.
  */
-import { createHeadlessPermissionPolicyHooks, createTool, createToolbox } from 'armorer';
-import { describe, expect, it } from 'bun:test';
-import { Conversation } from 'conversationalist';
 import {
   BudgetExceededError,
   createActiveRun,
@@ -26,10 +23,13 @@ import {
   createCostBudgetMonitor,
   createTokenBudget,
   stopWhen,
-} from 'operative';
-import type { AnthropicMessageResponse } from 'operative/anthropic';
-import { createAnthropicProvider } from 'operative/anthropic';
-import { createMockAnthropicClient } from 'operative/providers/test';
+} from '@lostgradient/operative';
+import type { AnthropicMessageResponse } from '@lostgradient/operative/anthropic';
+import { createAnthropicProvider } from '@lostgradient/operative/anthropic';
+import { createMockAnthropicClient } from '@lostgradient/operative/providers/test';
+import { createHeadlessPermissionPolicyHooks, createTool, createToolbox } from 'armorer';
+import { describe, expect, it } from 'bun:test';
+import { Conversation } from 'conversationalist';
 import { z } from 'zod';
 
 import { createTribunalFixtureRepo } from './fixtures/tribunal-fixture-repo';

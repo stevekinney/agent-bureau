@@ -1,5 +1,6 @@
 /**
- * Package-shape gate for the publishable packages (`armorer`, `conversationalist`).
+ * Package-shape gate for the publishable artifact targets (`armorer`, `conversationalist`,
+ * `operative`). Keep this list aligned with the package names passed by the root script and CI.
  *
  * Builds nothing itself — it runs against an already-built package directory. For the target
  * package it produces a REAL tarball with `npm pack`, extracts it, and asserts the published
@@ -230,7 +231,9 @@ async function checkPackage(packageName: string): Promise<void> {
 
   // npm tarballs extract under a top-level `package/` directory.
   const packageRoot = join(extractDirectory, 'package');
-  const packedManifest = (await Bun.file(join(packageRoot, 'package.json')).json()) as PackageManifest;
+  const packedManifest = (await Bun.file(
+    join(packageRoot, 'package.json'),
+  ).json()) as PackageManifest;
   const shippedFiles = await listFiles(packageRoot);
   const shippedSet = new Set(shippedFiles);
 

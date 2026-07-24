@@ -1,5 +1,5 @@
 /**
- * OTel GenAI conventions coverage for `operative/providers/instrumentation`.
+ * OTel GenAI conventions coverage for `@lostgradient/operative/providers/instrumentation`.
  *
  * Spec: the wrapped GenerateFunction emits a single CLIENT span per call,
  * following the OTel GenAI "Inference" span shape — span name
@@ -7,7 +7,7 @@
  * = `chat`, `gen_ai.provider.name` mapped from operative's internal
  * ProviderName, and `gen_ai.usage.*` token attributes (including the
  * provider cache fields). See the mapping table in the package README
- * (`operative/instrumentation` section) for the pinned conventions version.
+ * (`@lostgradient/operative/instrumentation` section) for the pinned conventions version.
  */
 import type { Context, Span, SpanOptions, Tracer } from '@opentelemetry/api';
 import { SpanKind, SpanStatusCode } from '@opentelemetry/api';

@@ -2,7 +2,7 @@ name: CI
 
 # Pull-request checks. release.yml only runs on push to main, so this is where per-PR validation
 # happens: full build/lint/types/tests plus the publishable-package shape gate (the regression guard
-# that fails if armorer/conversationalist ever ship a foundation-package leak or undeclared external).
+# that fails if a publishable package ever ships a foundation-package leak or undeclared external).
 
 on:
   pull_request:
@@ -45,7 +45,7 @@ jobs:
         run: bun run validate
 
       - name: Build publishable packages
-        run: bun run turbo run build --filter=armorer --filter=conversationalist
+        run: bun run turbo run build --filter=armorer --filter=conversationalist --filter=@lostgradient/operative
 
       - name: Package-shape gate (no foundation leaks, no undeclared externals)
         run: bun run check-package-shape

@@ -16,6 +16,7 @@ import {
   ToolStartedBubbleEvent,
 } from './events';
 import { executeLoop } from './loop';
+import type { EventDispatcher } from './run-step';
 import type { RunOptions, RunResult } from './types';
 
 /**
@@ -98,7 +99,11 @@ export function createActiveRun(options: RunOptions, durable?: DurableRunRouting
         agentName: options.agentName,
         options,
         prompt: durable.prompt,
-        ...(durable.emitter ? { emitter: durable.emitter } : {}),
+        ...(durable.emitter
+          ? {
+              emitter: durable.emitter as CompletableEventTarget<CombinedOperativeEventMap>,
+            }
+          : {}),
         ...(durable.onServices ? { onServices: durable.onServices } : {}),
       },
     );
@@ -151,14 +156,9 @@ export function createActiveRun(options: RunOptions, durable?: DurableRunRouting
     const agentName = options.agentName ?? '';
     const runId = options.runId ?? '';
     let currentStep = 0;
-
-    // Track step number from StepStartedEvents
-    const stepListener = (e: StepStartedEvent) => {
-      currentStep = e.step;
-    };
+    const stepListener = (e: StepStartedEvent) => (currentStep = e.step);
     emitter.addEventListener(StepStartedEvent.type, stepListener);
     cleanups.push(() => emitter.removeEventListener(StepStartedEvent.type, stepListener));
-
     // Wire the curated toolbox events onto the run emitter.
     // The toolbox addEventListener returns a cleanup function and also accepts
     // an AbortSignal for automatic cleanup. We guard against mock/custom toolboxes
@@ -314,7 +314,7 @@ export interface DurableRunRouting extends DurableActiveRunContext {
    * `requestHumanInput`'s `HumanWaitParkedEvent`, to the exact emitter this
    * `ActiveRun` exposes).
    */
-  emitter?: CompletableEventTarget<CombinedOperativeEventMap>;
+  emitter?: EventDispatcher;
   /**
    * Synchronous hook invoked with the freshly-built per-run `DurableRunDeps`
    * (`ctx.services`) right before `engine.start`. See

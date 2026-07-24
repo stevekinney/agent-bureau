@@ -1,5 +1,5 @@
+import type { RunResult } from '@lostgradient/operative';
 import { describe, expect, it } from 'bun:test';
-import type { RunResult } from 'operative';
 
 import {
   matchCustomAssertion,

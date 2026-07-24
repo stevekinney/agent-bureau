@@ -1,4 +1,4 @@
-import type { RunResult } from 'operative';
+import type { RunResult } from '@lostgradient/operative';
 
 import { createLLMJudge } from './llm-judge';
 import { deepEqual, extractToolCallSequence } from './metrics';

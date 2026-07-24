@@ -18,21 +18,21 @@
  *      causes the in-flight step (including its tools) to re-run on recovery.
  */
 
-import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
-import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
-import { createTool, createToolbox } from 'armorer';
-import { afterEach, describe, expect, it } from 'bun:test';
-import { createConversationHistory } from 'conversationalist';
-import type { GenerateFunction, RunOptions } from 'operative';
-import { createActiveRun } from 'operative';
-import { stopWhen } from 'operative/conditions';
-import type { DurableRunDeps } from 'operative/durable';
+import type { GenerateFunction, RunOptions } from '@lostgradient/operative';
+import { createActiveRun } from '@lostgradient/operative';
+import { stopWhen } from '@lostgradient/operative/conditions';
+import type { DurableRunDeps } from '@lostgradient/operative/durable';
 import {
   createCheckpointStore,
   createDurableActiveRun,
   createRunEngine,
   createRunWorkflow,
-} from 'operative/durable';
+} from '@lostgradient/operative/durable';
+import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
+import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
+import { createTool, createToolbox } from 'armorer';
+import { afterEach, describe, expect, it } from 'bun:test';
+import { createConversationHistory } from 'conversationalist';
 import { z } from 'zod';
 const run = (opts: Parameters<typeof createActiveRun>[0]) => createActiveRun(opts).result;
 const createRun = createActiveRun;

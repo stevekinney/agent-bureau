@@ -8,16 +8,19 @@
  * option is shared between the two runs, proving `RunOptions` genuinely
  * abstracts over the provider.
  */
+import type { GenerateFunction } from '@lostgradient/operative';
+import { createActiveRun, resolveResponseFormat, stopWhen } from '@lostgradient/operative';
+import type { AnthropicClient, AnthropicMessageResponse } from '@lostgradient/operative/anthropic';
+import { createAnthropicProvider } from '@lostgradient/operative/anthropic';
+import type { OpenAIChatCompletion, OpenAIClient } from '@lostgradient/operative/openai';
+import { createOpenAIProvider } from '@lostgradient/operative/openai';
+import {
+  createMockAnthropicClient,
+  createMockOpenAIClient,
+} from '@lostgradient/operative/providers/test';
 import { createHeadlessPermissionPolicyHooks, createToolbox } from 'armorer';
 import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
-import type { GenerateFunction } from 'operative';
-import { createActiveRun, resolveResponseFormat, stopWhen } from 'operative';
-import type { AnthropicClient, AnthropicMessageResponse } from 'operative/anthropic';
-import { createAnthropicProvider } from 'operative/anthropic';
-import type { OpenAIChatCompletion, OpenAIClient } from 'operative/openai';
-import { createOpenAIProvider } from 'operative/openai';
-import { createMockAnthropicClient, createMockOpenAIClient } from 'operative/providers/test';
 
 import { createTribunalFixtureRepo } from './fixtures/tribunal-fixture-repo';
 import { buildTribunalRunReport, mapFinishReasonToStatus } from './fixtures/tribunal-run-envelope';

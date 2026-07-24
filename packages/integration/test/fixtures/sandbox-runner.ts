@@ -20,11 +20,11 @@
  * "signal in, clean exit out" shape `packages/gateway/src/start.ts` uses
  * (AB-96), scaled down to a process with no server or storage to close.
  */
+import { createActiveRun, stopWhen } from '@lostgradient/operative';
+import { createAnthropicProvider } from '@lostgradient/operative/anthropic';
 import { createToolbox } from 'armorer';
 import { createCodingToolbox } from 'armorer/coding';
 import { Conversation } from 'conversationalist';
-import { createActiveRun, stopWhen } from 'operative';
-import { createAnthropicProvider } from 'operative/anthropic';
 
 /**
  * Reads a required env var, treating a blank/whitespace-only value the same

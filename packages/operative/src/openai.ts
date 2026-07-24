@@ -1,5 +1,5 @@
 /**
- * OpenAI provider subpath — `operative/openai`.
+ * OpenAI provider subpath — `@lostgradient/operative/openai`.
  *
  * Dynamically imports `openai` on first call (zero-SDK-if-unused).
  * This is the preferred import for consumers who only use OpenAI, avoiding

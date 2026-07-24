@@ -1,7 +1,7 @@
+import { createAgentSession, createSessionStore } from '@lostgradient/operative';
 import { textValueStore } from '@lostgradient/weft/storage/text-value-store';
 import { describe, expect, it } from 'bun:test';
 import { Conversation, createConversationHistory } from 'conversationalist';
-import { createAgentSession, createSessionStore } from 'operative';
 
 import { createCloudflareSqliteStorage } from '../src/create-cloudflare-sqlite-storage';
 import { createSqliteDouble } from '../src/test/sqlite-double';

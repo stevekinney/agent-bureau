@@ -62,8 +62,8 @@ Rationale: deluxe (live step events while the recovered generator advances) requ
 
 ## Files touched
 
-- `operative/src/durable/run-workflow.ts` — `AgentRunWorkflowInput.sessionId`; read nothing new in the body (sessionId is for the resolver/recovery, not the workflow logic) — actually the body ignores it. Add the field + `isAgentRunWorkflowInput` guard (exported for the gateway).
-- `operative/src/durable/active-run-adapter.ts` — `DurableActiveRunOptions.sessionId`; thread into `engine.start` input; new `reattachDurableActiveRun`; export it + the guard.
+- `@lostgradient/operative/src/durable/run-workflow.ts` — `AgentRunWorkflowInput.sessionId`; read nothing new in the body (sessionId is for the resolver/recovery, not the workflow logic) — actually the body ignores it. Add the field + `isAgentRunWorkflowInput` guard (exported for the gateway).
+- `@lostgradient/operative/src/durable/active-run-adapter.ts` — `DurableActiveRunOptions.sessionId`; thread into `engine.start` input; new `reattachDurableActiveRun`; export it + the guard.
 - `gateway/src/create-bureau.ts` — pass `sessionId` into `createDurableActiveRun`; rewrite `recoverDurableRuns` (drop `recovered` Map + `settleRecoveredRun`, use `getLaunchMetadata` + `reattachDurableActiveRun` + `store.register`).
 - `gateway/src/runtime-composition.ts` — `resolveRunServices` reads `info.input.sessionId` (via guard), drops the `list()` scan.
 

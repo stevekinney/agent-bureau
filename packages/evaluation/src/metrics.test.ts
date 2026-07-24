@@ -1,5 +1,5 @@
+import type { JSONValue, RunResult, StepResult, TokenUsage } from '@lostgradient/operative';
 import { describe, expect, it } from 'bun:test';
-import type { JSONValue, RunResult, StepResult, TokenUsage } from 'operative';
 
 import { extractStepCount, extractTokenUsage, matchToolCalls } from './metrics';
 import type { ExpectedToolCall } from './types';

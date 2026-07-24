@@ -1,4 +1,4 @@
-import type { RunResult, TokenUsage } from 'operative';
+import type { RunResult, TokenUsage } from '@lostgradient/operative';
 
 import type { ExpectedToolCall } from './types';
 

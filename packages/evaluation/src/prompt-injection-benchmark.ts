@@ -4,8 +4,11 @@ import {
   type DetectorContext,
   type InputDetector,
   withMinimumTripwireConfidence,
-} from 'operative';
-import { PROMPT_INJECTION_FIXTURES, type PromptInjectionFixtureCase } from 'operative/test';
+} from '@lostgradient/operative';
+import {
+  PROMPT_INJECTION_FIXTURES,
+  type PromptInjectionFixtureCase,
+} from '@lostgradient/operative/test';
 
 import { computeSummary } from './create-agent-evaluation';
 import type {

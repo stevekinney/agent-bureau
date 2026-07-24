@@ -15,7 +15,7 @@
     "armorer": "workspace:*",
     "bureau": "workspace:*",
     "conversationalist": "workspace:*",
-    "operative": "workspace:*",
+    "@lostgradient/operative": "workspace:*",
     "zod": "^4.4.1"
   },
   "devDependencies": {

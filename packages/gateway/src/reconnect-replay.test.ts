@@ -1,10 +1,10 @@
+import { stopWhen, type Toolbox } from '@lostgradient/operative';
+import { createStepwiseBlockingGenerate } from '@lostgradient/operative/test';
 import { createTool, createToolbox } from 'armorer';
 import type { ServerWebSocket } from 'bun';
 import { describe, expect, it } from 'bun:test';
 import { createBureau } from 'bureau';
 import { waitForCondition, waitForRunState } from 'bureau/test';
-import { stopWhen, type Toolbox } from 'operative';
-import { createStepwiseBlockingGenerate } from 'operative/test';
 import { z } from 'zod';
 
 import { LiveFrameBroker } from './live-events';

@@ -1,7 +1,7 @@
-import type { GenerateFunction } from 'operative';
-import { createAnthropicProvider } from 'operative/anthropic';
-import { createGeminiProvider } from 'operative/gemini';
-import { createOpenAIProvider } from 'operative/openai';
+import type { GenerateFunction } from '@lostgradient/operative';
+import { createAnthropicProvider } from '@lostgradient/operative/anthropic';
+import { createGeminiProvider } from '@lostgradient/operative/gemini';
+import { createOpenAIProvider } from '@lostgradient/operative/openai';
 
 import type { ProviderConfiguration } from './types';
 
