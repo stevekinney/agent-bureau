@@ -6,10 +6,10 @@
  * durable pipeline. Sampling is driven by an injected RNG so `sampleRate` is
  * exercised deterministically: no test depends on `Math.random`.
  */
+import type { RunResult } from '@lostgradient/operative';
+import type { Action } from '@lostgradient/operative/store';
 import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
-import type { RunResult } from 'operative';
-import type { Action } from 'operative/store';
 
 import type { AuditTrail } from './audit-trail';
 import { ActionEvent } from './events';

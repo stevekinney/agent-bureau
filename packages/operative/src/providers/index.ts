@@ -3,9 +3,9 @@
  *
  * These are re-exported from the three provider subpaths for consumers who want
  * all providers at once. For tree-shaking, prefer the individual subpaths:
- *   import { createAnthropicProvider } from 'operative/anthropic'
- *   import { createOpenAIProvider }    from 'operative/openai'
- *   import { createGeminiProvider }    from 'operative/gemini'
+ *   import { createAnthropicProvider } from '@lostgradient/operative/anthropic'
+ *   import { createOpenAIProvider }    from '@lostgradient/operative/openai'
+ *   import { createGeminiProvider }    from '@lostgradient/operative/gemini'
  */
 
 export { createAnthropicProvider, createAnthropicProviderStream } from './anthropic.ts';

@@ -1,8 +1,11 @@
 import { join } from 'node:path';
 
+import {
+  DEFAULT_PROMPT_INJECTION_TRIPWIRE_THRESHOLD,
+  type InputDetector,
+} from '@lostgradient/operative';
+import type { PromptInjectionFixtureCase } from '@lostgradient/operative/test';
 import { describe, expect, it } from 'bun:test';
-import { DEFAULT_PROMPT_INJECTION_TRIPWIRE_THRESHOLD, type InputDetector } from 'operative';
-import type { PromptInjectionFixtureCase } from 'operative/test';
 
 import { compareEvaluationReports } from './comparison';
 import {

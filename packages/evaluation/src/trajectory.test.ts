@@ -1,5 +1,5 @@
+import type { GenerateFunction, JSONValue, RunResult, StepResult } from '@lostgradient/operative';
 import { describe, expect, it } from 'bun:test';
-import type { GenerateFunction, JSONValue, RunResult, StepResult } from 'operative';
 
 import {
   computeTrajectoryRegression,

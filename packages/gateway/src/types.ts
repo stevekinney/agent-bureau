@@ -1,6 +1,6 @@
+import type { Store } from '@lostgradient/operative/store';
 import type { EvaluationReportSummary } from 'evaluation';
 import type { Hono } from 'hono';
-import type { Store } from 'operative/store';
 
 export type {
   AuditEventType,

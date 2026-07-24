@@ -1,4 +1,4 @@
-import type { RunState } from 'operative/store';
+import type { RunState } from '@lostgradient/operative/store';
 
 import type { BureauDiagnostic, DiagnosticSink, RunDetail, RunSummary } from './types';
 

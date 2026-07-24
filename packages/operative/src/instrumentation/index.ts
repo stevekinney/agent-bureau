@@ -37,7 +37,7 @@ type InstrumentableActiveRun = {
  * mapping exists (the run span is `invoke_agent`); spans with no spec
  * equivalent (step, generate, tool batch) are kept as documented,
  * non-normative extensions. See the mapping table in the package README
- * (`operative/instrumentation` section) for the full rationale and the
+ * (`@lostgradient/operative/instrumentation` section) for the full rationale and the
  * pinned conventions version.
  *
  * Returns an unsubscribe function that removes all listeners and ends
@@ -145,7 +145,7 @@ export function instrument(
       // details. It is intentionally NOT labeled with `gen_ai.operation.name`
       // or a `chat`-style span name: the canonical, spec-compliant chat span
       // (with model, provider, and gen_ai.usage.*) comes from
-      // `operative/providers/instrumentation`, wrapped around the same
+      // `@lostgradient/operative/providers/instrumentation`, wrapped around the same
       // GenerateFunction. Usage here is namespaced under `operative.*` so
       // the two instrumentation points never double-report gen_ai.usage.*
       // for the same call when both are wired up.

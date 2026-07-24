@@ -1,6 +1,6 @@
+import type { ActiveRun } from '@lostgradient/operative';
+import type { RunState } from '@lostgradient/operative/store';
 import { afterEach, describe, expect, it, spyOn } from 'bun:test';
-import type { ActiveRun } from 'operative';
-import type { RunState } from 'operative/store';
 
 import {
   resolveDiagnosticSink,

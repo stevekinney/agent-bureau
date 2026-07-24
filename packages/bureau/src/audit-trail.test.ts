@@ -4,9 +4,9 @@
  * Uses a hand-crafted `TextValueStore` stub so tests are fully deterministic
  * without starting a live bureau or durable engine.
  */
+import type { Action } from '@lostgradient/operative/store';
 import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
 import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test';
-import type { Action } from 'operative/store';
 
 import { type AuditRecord, createAuditTrail } from './audit-trail';
 import { ActionEvent } from './events';

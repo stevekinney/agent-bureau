@@ -43,7 +43,7 @@ export interface CreateMcpElicitationResponderOptions {
  * ```ts
  * import { ElicitRequestSchema } from '@modelcontextprotocol/sdk/types.js';
  * import { createMcpElicitationHandler } from 'armorer/mcp';
- * import { createMcpElicitationResponder } from 'operative';
+ * import { createMcpElicitationResponder } from '@lostgradient/operative';
  *
  * let currentContext: StepContext = { conversation, step: 0 };
  *

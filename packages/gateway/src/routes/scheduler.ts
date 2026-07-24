@@ -1,7 +1,7 @@
+import type { Scheduler, SchedulerPriority } from '@lostgradient/operative';
 import { BureauError } from 'bureau';
 import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
-import type { Scheduler, SchedulerPriority } from 'operative';
 import { z } from 'zod';
 
 import type { SubmitSchedulerTaskRequest, SubmitSchedulerTaskResponse } from '../types';

@@ -6,7 +6,7 @@
     "build": "turbo run build",
     "check-changesets": "bun run scripts/check-changesets.ts",
     "check-types": "turbo run check-types",
-    "coverage:check": "turbo run coverage:check --filter=armorer --filter=conversationalist --filter=evaluation --filter=interoperability --filter=lifecycle --filter=memory --filter=operative --filter=skills",
+    "coverage:check": "turbo run coverage:check --filter=armorer --filter=conversationalist --filter=evaluation --filter=interoperability --filter=lifecycle --filter=memory --filter=@lostgradient/operative --filter=skills",
     "dev": "turbo run dev",
     "format": "prettier --write \"**/*.{ts,tsx,md}\"",
     "format:check": "turbo run format:check",
@@ -19,7 +19,7 @@
     "changeset": "changeset",
     "version": "changeset version",
     "release": "bun run scripts/release.ts",
-    "check-package-shape": "bun run scripts/check-package-shape.ts armorer conversationalist"
+    "check-package-shape": "bun run scripts/check-package-shape.ts armorer conversationalist operative"
   },
   "devDependencies": {
     "@changesets/cli": "2.31.0",

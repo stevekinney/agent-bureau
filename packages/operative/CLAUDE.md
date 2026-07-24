@@ -9,10 +9,10 @@ This package lives in the `agent-bureau` monorepo under `packages/operative/`. T
 ### From the monorepo root (preferred)
 
 ```bash
-turbo run build --filter=operative        # Build this package
-turbo run test --filter=operative         # Run tests
-turbo run lint --filter=operative         # Lint
-turbo run check-types --filter=operative  # Type-check
+turbo run build --filter=@lostgradient/operative        # Build this package
+turbo run test --filter=@lostgradient/operative         # Run tests
+turbo run lint --filter=@lostgradient/operative         # Lint
+turbo run check-types --filter=@lostgradient/operative  # Type-check
 ```
 
 ### Within this package directory

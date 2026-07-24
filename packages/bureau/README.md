@@ -37,7 +37,7 @@ Everything else in the workspace is a library: `operative` runs one agent loop, 
 
 ## How It Works
 
-`createBureau(options)` is async because composing the runtime may involve resolving a Weft storage backend, building a durable engine, and loading a session store. The returned `Bureau` object wraps an `operative/store` `Store` (the live run/action registry), an optional `Memory`, an optional `Scheduler`, and the resolved runtime composition (generate function, toolbox, session store, durable engine).
+`createBureau(options)` is async because composing the runtime may involve resolving a Weft storage backend, building a durable engine, and loading a session store. The returned `Bureau` object wraps an `@lostgradient/operative/store` `Store` (the live run/action registry), an optional `Memory`, an optional `Scheduler`, and the resolved runtime composition (generate function, toolbox, session store, durable engine).
 
 `createRun(request)` loads or creates a session, appends the request message to its conversation, builds an `ActiveRun` via `operative`'s `createActiveRun`, and registers it with the store. If a durable engine is composed, the run is routed through it instead of the in-memory loop, so it can crash and resume from its last completed step. Terminal run events (`run.completed`, `run.aborted`) persist the session's status with a bounded retry.
 
@@ -97,7 +97,7 @@ All fields are optional.
 | `provider`                                                             | `ProviderConfiguration`                                                   | Resolve a single provider (`'anthropic' \| 'openai' \| 'gemini'`) to a generate function.                                                                                              |
 | `providers` / `routing`                                                | `ProviderRouteConfiguration[]` / `RoutingConfiguration`                   | Resolve multiple named providers with fallover or step-based routing between them.                                                                                                     |
 | `toolbox`                                                              | `Toolbox`                                                                 | The bureau-level toolbox available to every run.                                                                                                                                       |
-| `store`                                                                | `Store`                                                                   | Supply your own `operative/store` `Store` instead of letting `bureau` create one.                                                                                                      |
+| `store`                                                                | `Store`                                                                   | Supply your own `@lostgradient/operative/store` `Store` instead of letting `bureau` create one.                                                                                        |
 | `persistence` / `storage`                                              | `PersistenceOptions \| StorageConfiguration \| ConditionalTextValueStore` | Configure session and key-value persistence. `storage` is shorthand for the common case; `persistence` is the full options-object form.                                                |
 | `durableExecution`                                                     | `boolean`                                                                 | Override the default (on for persistent `storage`, off for `memory`) for Weft-backed crash-and-resume execution.                                                                       |
 | `memory`                                                               | `CreateMemoryOptions \| Memory`                                           | Attach recall/persistence hooks backed by the `memory` package.                                                                                                                        |
@@ -174,7 +174,7 @@ trail.dispose();
 
 `createBureau()` builds an audit trail automatically whenever persistence is configured — it's exposed as `bureau.auditTrail`. It listens to the bureau's `action` events and, for a fixed set of event types (`tool.started`, `tool.settled`, `tool.error`, `run.completed`, `run.error`, `run.aborted`, `step.completed` — see `AUDIT_EVENT_TYPES`), writes an append-only `AuditRecord` into the key-value store under an `audit:v1:` prefix, key-encoded so natural sort order is chronological.
 
-This is a second, durable layer alongside the in-memory `operative/store` ring buffer (which is bounded by `maxActions` and lost on restart): the operative store is the live/glass-box view, the audit trail is the durable/queryable one. `trail.query(options)` filters by `since`, `runId`, and `type`, returning up to `limit` records (default 500) oldest-first. Without a `kv` store, the trail still subscribes (so `dispose()` is always safe) but writes nothing.
+This is a second, durable layer alongside the in-memory `@lostgradient/operative/store` ring buffer (which is bounded by `maxActions` and lost on restart): the operative store is the live/glass-box view, the audit trail is the durable/queryable one. `trail.query(options)` filters by `since`, `runId`, and `type`, returning up to `limit` records (default 500) oldest-first. Without a `kv` store, the trail still subscribes (so `dispose()` is always safe) but writes nothing.
 
 ## `bureau/builder` — the Typed Fleet Builder
 
@@ -216,7 +216,7 @@ This builder is a distinct export (`bureau/builder`, not `bureau`'s top-level `c
 import { createBureau, waitForCondition, waitForRunState } from 'bureau/test';
 ```
 
-Re-exports `createBureau` (identical to the top-level export — useful when a test file already imports other test utilities from this subpath) alongside `operative/test`'s `waitForCondition` and `waitForRunState`, which poll a run/condition without a fixed sleep.
+Re-exports `createBureau` (identical to the top-level export — useful when a test file already imports other test utilities from this subpath) alongside `@lostgradient/operative/test`'s `waitForCondition` and `waitForRunState`, which poll a run/condition without a fixed sleep.
 
 ## Development
 

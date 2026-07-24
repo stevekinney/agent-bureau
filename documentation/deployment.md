@@ -460,7 +460,7 @@ shape, exercised end-to-end by
   jailed to a declared root, so the tool surface itself enforces the
   filesystem boundary rather than relying on process-level sandboxing alone.
 - `operative`'s agent loop (`createActiveRun` + `stopWhen.noToolCalls()`).
-- `operative/anthropic`'s `createAnthropicProvider`, pointed at a
+- `@lostgradient/operative/anthropic`'s `createAnthropicProvider`, pointed at a
   `baseURL` (a credential-injecting proxy in production, per AB-93's
   "Providers Behind a Proxy" pattern documented in `operative`'s README —
   the sandboxed process never needs a real API key, only a placeholder
@@ -500,7 +500,7 @@ Build with `bun build --target=bun <entry> --outfile=<outfile>` (or the
 needs to travel with it inside the sandbox image.
 
 The one thing worth verifying for your own entrypoint: `operative`'s
-Anthropic provider (`operative/anthropic`) lazily `import()`s
+Anthropic provider (`@lostgradient/operative/anthropic`) lazily `import()`s
 `@anthropic-ai/sdk` on first call — a zero-SDK-if-unused optimization for
 consumers who only use OpenAI or Gemini. AB-97 proved this dynamic import
 **survives** `bun build --target=bun` bundling: the SDK is inlined into the

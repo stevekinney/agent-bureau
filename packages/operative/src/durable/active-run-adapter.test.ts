@@ -10,13 +10,15 @@ import {
 } from 'armorer';
 import { afterEach, describe, expect, it } from 'bun:test';
 import { Conversation, createConversationHistory } from 'conversationalist';
-import { HookRegistry } from 'lifecycle';
+import { CompletableEventTarget, HookRegistry } from 'lifecycle';
 import { z } from 'zod';
 
 import { stopWhen } from '../conditions/index';
 import { createActiveRun } from '../create-run';
 import { BudgetExceededError, ElicitationDeniedError, GuardrailTripwireError } from '../errors';
 import {
+  type CombinedOperativeEventMap,
+  RunCompletedEvent,
   StepStartedEvent,
   ToolErrorBubbleEvent,
   ToolPolicyDeniedBubbleEvent,
@@ -85,6 +87,30 @@ function runOptions(generate: RunOptions['generate']): RunOptions {
 }
 
 describe('createRun with durable routing', () => {
+  it('forwards a supplied durable emitter through createActiveRun', async () => {
+    const context = await buildContext();
+    const emitter = new CompletableEventTarget<CombinedOperativeEventMap>();
+    const completed: Event[] = [];
+    emitter.addEventListener(RunCompletedEvent.type, (event) => completed.push(event));
+
+    try {
+      const result = await run(
+        runOptions(async () => ({ content: 'durable emitter', toolCalls: [] })),
+        {
+          ...context,
+          runId: 'run-wrapper-emitter',
+          prompt: 'Hello',
+          emitter,
+        },
+      );
+
+      expect(result.content).toBe('durable emitter');
+      expect(completed).toHaveLength(1);
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+
   it('runs through the durable routing overload of run()', async () => {
     const context = await buildContext();
     try {

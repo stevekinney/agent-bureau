@@ -4,11 +4,6 @@
  * `buildTerminalReportFromAbortedEvent`, `buildPartialRunReport`, and the
  * `Bureau.getRunReport` / `run-envelope` `ServerFrame` surface they feed.
  */
-import { createTool, createToolbox } from 'armorer';
-import { createTestToolbox } from 'armorer/test';
-import { describe, expect, it } from 'bun:test';
-import { Conversation } from 'conversationalist';
-import { TypedEventTarget } from 'lifecycle';
 import {
   type ActiveRun,
   BudgetExceededEvent,
@@ -22,7 +17,12 @@ import {
   StreamCustomEvent,
   type StreamEventMap,
   type Toolbox,
-} from 'operative';
+} from '@lostgradient/operative';
+import { createTool, createToolbox } from 'armorer';
+import { createTestToolbox } from 'armorer/test';
+import { describe, expect, it } from 'bun:test';
+import { Conversation } from 'conversationalist';
+import { TypedEventTarget } from 'lifecycle';
 import { z } from 'zod';
 
 import { createBureau } from './create-bureau';

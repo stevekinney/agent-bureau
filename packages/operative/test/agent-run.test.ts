@@ -34,6 +34,24 @@ function makeRun(responses: GenerateResponse[] = [textResponse('Hello')]) {
 // ---------------------------------------------------------------------------
 
 describe('AgentRun.result()', () => {
+  it('stamps events when an active run has identity metadata', async () => {
+    const activeRun = createRun({
+      generate: createMockGenerate([textResponse('metadata')]),
+      toolbox: createTestToolbox([]),
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+      agentName: 'agent',
+      runId: 'run-1',
+    });
+    const run = createAgentRun(activeRun);
+    const events: string[] = [];
+
+    for await (const event of run) events.push(event.type);
+
+    expect(events).toContain('run.started');
+    expect(events).toContain('step.started');
+  });
+
   it('resolves to the terminal RunResult', async () => {
     const run = makeRun([textResponse('done')]);
     const result = await run.result();

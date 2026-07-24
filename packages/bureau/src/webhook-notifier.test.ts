@@ -6,9 +6,9 @@
  * engine. `fetch`, `sleep`, and `now` are all injected so retry/backoff
  * behavior never touches a real timer or the network.
  */
+import type { Action } from '@lostgradient/operative/store';
 import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
 import { afterEach, describe, expect, it, spyOn } from 'bun:test';
-import type { Action } from 'operative/store';
 
 import type { AuditTrail } from './audit-trail';
 import { ActionEvent } from './events';

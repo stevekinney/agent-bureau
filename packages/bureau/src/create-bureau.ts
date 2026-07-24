@@ -1,19 +1,4 @@
 import {
-  decode,
-  type ListFilter,
-  type ListOptions,
-  type RecoveredWorkflowInfo,
-  type ScheduleSpec,
-} from '@lostgradient/weft';
-import { KEYS } from '@lostgradient/weft/storage';
-import { combineToolboxes, createTool, createToolbox } from 'armorer';
-import {
-  Conversation,
-  type ConversationHistory,
-  createConversationHistory,
-} from 'conversationalist';
-import { CompletableEventTarget } from 'lifecycle';
-import {
   type ActiveRun,
   type AgentSession,
   type CombinedOperativeEventMap,
@@ -35,7 +20,7 @@ import {
   TaskCancelledEvent,
   TaskDispatchedEvent,
   TaskPreemptedEvent,
-} from 'operative';
+} from '@lostgradient/operative';
 import {
   createAgentScheduler,
   createRecoveredRunEventSurface,
@@ -47,14 +32,29 @@ import {
   type RecoveredRunHandle,
   type ScheduledAgentRunInput,
   SCHEDULER_RUN_ID_PREFIX,
-} from 'operative/durable';
+} from '@lostgradient/operative/durable';
 import {
   createStore,
   RunRegisteredEvent as StoreRunRegisteredEvent,
   RunRemovedEvent as StoreRunRemovedEvent,
   type Store,
   StoreActionEvent,
-} from 'operative/store';
+} from '@lostgradient/operative/store';
+import {
+  decode,
+  type ListFilter,
+  type ListOptions,
+  type RecoveredWorkflowInfo,
+  type ScheduleSpec,
+} from '@lostgradient/weft';
+import { KEYS } from '@lostgradient/weft/storage';
+import { combineToolboxes, createTool, createToolbox } from 'armorer';
+import {
+  Conversation,
+  type ConversationHistory,
+  createConversationHistory,
+} from 'conversationalist';
+import { CompletableEventTarget } from 'lifecycle';
 
 import { type AuditTrail, createAuditTrail } from './audit-trail';
 import {

@@ -21,7 +21,7 @@ export type InstrumentableGenerateOptions = {
  * well-known value pass through unchanged — the conventions explicitly
  * allow a custom value when none of the predefined ones applies.
  *
- * See the mapping table in the package README (`operative/instrumentation`
+ * See the mapping table in the package README (`@lostgradient/operative/instrumentation`
  * section) for the pinned conventions version.
  */
 function toGenAiProviderName(provider: ProviderName): string {

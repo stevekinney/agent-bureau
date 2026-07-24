@@ -1,4 +1,4 @@
-import type { StreamEvent } from 'operative';
+import type { StreamEvent } from '@lostgradient/operative';
 
 import type { StreamFrame } from './types';
 

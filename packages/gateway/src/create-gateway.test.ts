@@ -1,6 +1,6 @@
+import { createStore } from '@lostgradient/operative/store';
 import { describe, expect, it } from 'bun:test';
 import { createBureau } from 'bureau';
-import { createStore } from 'operative/store';
 
 import { createBunAdapter, handleWsUpgrade } from './adapters/bun-adapter';
 import { buildWsAuthenticate, createGateway } from './create-gateway';

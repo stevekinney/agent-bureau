@@ -1,4 +1,18 @@
 import type {
+  GenerateFunction as OperativeGenerateFunction,
+  RunResult as OperativeRunResult,
+  StepResult as OperativeStepResult,
+  StopCondition as OperativeStopCondition,
+  ToolCall as OperativeToolCall,
+} from '@lostgradient/operative';
+// Operative store type compatibility assertions
+import type {
+  Action as OperativeStoreAction,
+  RunState as OperativeStoreRunState,
+  Store as OperativeStore,
+  StoreState as OperativeStoreState,
+} from '@lostgradient/operative/store';
+import type {
   ToolCall as ArmorerToolCall,
   ToolError as ArmorerToolError,
   ToolResult as ArmorerToolResult,
@@ -25,20 +39,6 @@ import {
   appendToolResults,
   appendToolResultsAsync,
 } from 'conversationalist/conversation';
-import type {
-  GenerateFunction as OperativeGenerateFunction,
-  RunResult as OperativeRunResult,
-  StepResult as OperativeStepResult,
-  StopCondition as OperativeStopCondition,
-  ToolCall as OperativeToolCall,
-} from 'operative';
-// Operative store type compatibility assertions
-import type {
-  Action as OperativeStoreAction,
-  RunState as OperativeStoreRunState,
-  Store as OperativeStore,
-  StoreState as OperativeStoreState,
-} from 'operative/store';
 
 type Assert<T extends true> = T;
 type IsAssignable<From, To> = [From] extends [To] ? true : false;

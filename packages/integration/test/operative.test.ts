@@ -1,9 +1,14 @@
+import {
+  createActiveRun,
+  type GenerateResponse,
+  stopWhen,
+  withStreaming,
+} from '@lostgradient/operative';
+import { createMockGenerate, createRunRecorder } from '@lostgradient/operative/test';
 import { createTool, createToolbox } from 'armorer';
 import { createTestToolbox, createToolboxRecorder } from 'armorer/test';
 import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
-import { createActiveRun, type GenerateResponse, stopWhen, withStreaming } from 'operative';
-import { createMockGenerate, createRunRecorder } from 'operative/test';
 import { z } from 'zod';
 
 const run = (options: Parameters<typeof createActiveRun>[0]) => createActiveRun(options).result;

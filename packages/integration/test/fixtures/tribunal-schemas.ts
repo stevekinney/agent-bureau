@@ -14,7 +14,7 @@
  * agent-bureau `RunReport` into Tribunal's `agentResult` shape produces
  * something Tribunal's own validator accepts.
  */
-import type { RunReport } from 'operative';
+import type { RunReport } from '@lostgradient/operative';
 import { z } from 'zod';
 
 export const effortSchema = z.enum(['low', 'medium', 'high', 'xhigh', 'max']);
@@ -67,7 +67,7 @@ export type AgentRunRole = 'triage' | 'specialist' | 'verifier';
  * Raw JSON Schema (AB-95) per-role output contracts — copied verbatim from
  * `run-agent.mjs`'s `outputSchemaForRole(role)`. Passed straight through as
  * `RunOptions.responseSchema` (a "raw JSON Schema object" per the matrix in
- * `operative/structured-output/response-schema.ts`).
+ * `@lostgradient/operative/structured-output/response-schema.ts`).
  */
 export function tribunalOutputSchemaForRole(role: AgentRunRole): Record<string, unknown> {
   if (role === 'triage') {

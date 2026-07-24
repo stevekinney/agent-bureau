@@ -2,6 +2,14 @@ import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import type { GenerateFunction, SessionStore } from '@lostgradient/operative';
+import { createAgentSession, GuardrailTripwireError, stopWhen } from '@lostgradient/operative';
+import {
+  createDurableActiveRun,
+  type DurableRunDeps,
+  SCHEDULER_ORIGIN_TAG,
+  startDurableRunResult,
+} from '@lostgradient/operative/durable';
 import { encode } from '@lostgradient/weft';
 import type { StorageConfiguration } from '@lostgradient/weft/storage';
 import { KEYS, MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
@@ -9,14 +17,6 @@ import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
 import { createToolbox } from 'armorer';
 import { afterEach, describe, expect, it } from 'bun:test';
 import { Conversation, createConversationHistory, getMessages } from 'conversationalist';
-import type { GenerateFunction, SessionStore } from 'operative';
-import { createAgentSession, GuardrailTripwireError, stopWhen } from 'operative';
-import {
-  createDurableActiveRun,
-  type DurableRunDeps,
-  SCHEDULER_ORIGIN_TAG,
-  startDurableRunResult,
-} from 'operative/durable';
 import type { SkillProvider } from 'skills';
 
 import { createRuntimeComposition, decodeScheduleRunMarker } from './runtime-composition';

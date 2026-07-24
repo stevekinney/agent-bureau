@@ -7,7 +7,7 @@
 // *closed-registry path* (bare `run('name')`, no `TExtra`) the only compile-time
 // barrier between a typo and a runtime throw.
 //
-// The A4 spike (`operative/src/bureau.test-d.ts`) asserts this against
+// The A4 spike (`@lostgradient/operative/src/bureau.test-d.ts`) asserts this against
 // operative's INTERNAL `createBureau`. This file guards the SAME boundary at the
 // public surface consumers actually import — the `bureau/builder` subpath
 // (`./builder/index.ts`, mapped to `exports["./builder"]`). Importing through

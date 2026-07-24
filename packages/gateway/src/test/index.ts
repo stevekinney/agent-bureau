@@ -1,6 +1,6 @@
+import { waitForCondition, waitForRunState } from '@lostgradient/operative/test';
 import type { Bureau, BureauOptions } from 'bureau';
 import { createBureau } from 'bureau';
-import { waitForCondition, waitForRunState } from 'operative/test';
 
 import { createGateway } from '../create-gateway';
 import type { Gateway, GatewayOptions } from '../types';

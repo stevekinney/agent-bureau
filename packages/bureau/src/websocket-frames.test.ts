@@ -4,8 +4,8 @@
  * function had no test coverage at all before this file — it's a plain
  * switch with no I/O, no timers, and every branch is trivially reachable.
  */
+import type { StreamEvent } from '@lostgradient/operative';
 import { describe, expect, it } from 'bun:test';
-import type { StreamEvent } from 'operative';
 
 import { streamEventToFrame } from './websocket-frames';
 

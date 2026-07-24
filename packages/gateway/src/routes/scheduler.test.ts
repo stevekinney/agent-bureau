@@ -1,11 +1,11 @@
+import type { GenerateResponse, Scheduler, SchedulerPriority } from '@lostgradient/operative';
+import { createScheduler } from '@lostgradient/operative';
+import { createMockGenerate } from '@lostgradient/operative/test';
 import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
 import { createTestToolbox } from 'armorer/test';
 import { describe, expect, it } from 'bun:test';
 import { Conversation, createConversationHistory } from 'conversationalist';
 import { Hono } from 'hono';
-import type { GenerateResponse, Scheduler, SchedulerPriority } from 'operative';
-import { createScheduler } from 'operative';
-import { createMockGenerate } from 'operative/test';
 
 import type { SubmitSchedulerTaskRequest, SubmitSchedulerTaskResponse } from '../types';
 import { createSchedulerRoutes } from './scheduler';

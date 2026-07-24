@@ -1,5 +1,5 @@
 /**
- * Anthropic provider subpath — `operative/anthropic`.
+ * Anthropic provider subpath — `@lostgradient/operative/anthropic`.
  *
  * Dynamically imports `@anthropic-ai/sdk` on first call (zero-SDK-if-unused).
  * This is the preferred import for consumers who only use Anthropic, avoiding

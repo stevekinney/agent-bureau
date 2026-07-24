@@ -71,7 +71,7 @@ Wire `createCloudflareSqliteStorage` into `operative`'s `createSessionStore` thr
 ```typescript
 import { textValueStore } from '@lostgradient/weft/storage/text-value-store';
 import { createCloudflareSqliteStorage } from 'cloudflare';
-import { createSessionStore } from 'operative';
+import { createSessionStore } from '@lostgradient/operative';
 
 export class SessionDurableObject {
   private readonly sessions: ReturnType<typeof createSessionStore>;

@@ -6,7 +6,11 @@ import { CompletableEventTarget, forwardEvents } from 'lifecycle';
 import type { DurableActiveRunContext } from './durable/active-run-adapter';
 import { createDurableActiveRun } from './durable/active-run-adapter';
 import type { DurableRunDeps } from './durable/types';
-import type { CombinedOperativeEventMap, CombinedOperativeEventType } from './events';
+import type {
+  CombinedOperativeEventMap,
+  CombinedOperativeEventType,
+  OperativeEventEmitter,
+} from './events';
 import {
   StepStartedEvent,
   ToolErrorBubbleEvent,
@@ -98,7 +102,11 @@ export function createActiveRun(options: RunOptions, durable?: DurableRunRouting
         agentName: options.agentName,
         options,
         prompt: durable.prompt,
-        ...(durable.emitter ? { emitter: durable.emitter } : {}),
+        ...(durable.emitter
+          ? {
+              emitter: durable.emitter,
+            }
+          : {}),
         ...(durable.onServices ? { onServices: durable.onServices } : {}),
       },
     );
@@ -151,14 +159,9 @@ export function createActiveRun(options: RunOptions, durable?: DurableRunRouting
     const agentName = options.agentName ?? '';
     const runId = options.runId ?? '';
     let currentStep = 0;
-
-    // Track step number from StepStartedEvents
-    const stepListener = (e: StepStartedEvent) => {
-      currentStep = e.step;
-    };
+    const stepListener = (e: StepStartedEvent) => (currentStep = e.step);
     emitter.addEventListener(StepStartedEvent.type, stepListener);
     cleanups.push(() => emitter.removeEventListener(StepStartedEvent.type, stepListener));
-
     // Wire the curated toolbox events onto the run emitter.
     // The toolbox addEventListener returns a cleanup function and also accepts
     // an AbortSignal for automatic cleanup. We guard against mock/custom toolboxes
@@ -314,7 +317,7 @@ export interface DurableRunRouting extends DurableActiveRunContext {
    * `requestHumanInput`'s `HumanWaitParkedEvent`, to the exact emitter this
    * `ActiveRun` exposes).
    */
-  emitter?: CompletableEventTarget<CombinedOperativeEventMap>;
+  emitter?: OperativeEventEmitter;
   /**
    * Synchronous hook invoked with the freshly-built per-run `DurableRunDeps`
    * (`ctx.services`) right before `engine.start`. See

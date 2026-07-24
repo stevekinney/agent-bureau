@@ -32,6 +32,14 @@ import type { createBureau as CreateBureau } from './index';
 // type-checks independent of build order; the explicit cast below recovers
 // the real type for the assertions that follow.
 describe('dist bundling (built output, not source)', () => {
+  it('keeps the scoped Operative root and subpaths external', async () => {
+    const buildSource = await readFile(new URL('../scripts/build.ts', import.meta.url), 'utf-8');
+
+    expect(buildSource).toContain("'@lostgradient/operative',");
+    expect(buildSource).toContain("'@lostgradient/operative/*',");
+    expect(buildSource).not.toContain("'operative',");
+  });
+
   it('resolves sqlite storage from the built dist without a bundling error', async () => {
     const databasePath = join(tmpdir(), `bureau-dist-bundling-${process.pid}-${Date.now()}.sqlite`);
 

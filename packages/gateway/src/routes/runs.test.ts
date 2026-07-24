@@ -1,6 +1,6 @@
+import type { GenerateFunction, Toolbox } from '@lostgradient/operative';
 import { createToolbox } from 'armorer';
 import { describe, expect, it } from 'bun:test';
-import type { GenerateFunction, Toolbox } from 'operative';
 
 import { createTestGateway, requestJSON, waitForRunState } from '../test';
 import type { PendingReview, PendingToolApprovalReview, RunEventRecord } from '../types';

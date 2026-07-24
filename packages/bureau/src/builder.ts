@@ -29,11 +29,13 @@
  *   with bureau defaults, and an `AgentRun` is produced via `createActiveRun`.
  */
 
-import type { AnyToolbox, Tool } from 'armorer';
-import { combineToolboxes, createTool, createToolbox, isTool } from 'armorer';
-import { Conversation } from 'conversationalist';
-import type { AgentRun, GenerateFunction, PrepareStepHook, RunOptions } from 'operative';
-import { createActiveRun, createAgentRun } from 'operative';
+import type {
+  AgentRun,
+  GenerateFunction,
+  PrepareStepHook,
+  RunOptions,
+} from '@lostgradient/operative';
+import { createActiveRun, createAgentRun } from '@lostgradient/operative';
 import type {
   AgentNameFor,
   AgentOptions,
@@ -45,7 +47,10 @@ import type {
   SkillProviderLike,
   ToolMap,
   ToolMapInput,
-} from 'operative/bureau-types';
+} from '@lostgradient/operative/bureau-types';
+import type { AnyToolbox, Tool } from 'armorer';
+import { combineToolboxes, createTool, createToolbox, isTool } from 'armorer';
+import { Conversation } from 'conversationalist';
 import { z } from 'zod';
 
 // ---------------------------------------------------------------------------
@@ -374,7 +379,7 @@ function makeBureauHandle<
       const { name, tools: agentToolsMap, instructions, skillPolicy } = options;
       // `generate` from AgentOptions is an `AgentGenerateFunction` (type alias).
       // At runtime it is structurally identical to `GenerateFunction`.
-      const agentGenerate = options.generate as GenerateFunction | undefined;
+      const agentGenerate = options.generate;
 
       const agentToolbox =
         agentToolsMap && Object.keys(agentToolsMap).length > 0
@@ -515,7 +520,7 @@ export function createBureau<
       const { tools: agentToolsMap, instructions, skillPolicy } = agentOptions;
       // `generate` from AgentOptions is AgentGenerateFunction; structurally
       // identical to GenerateFunction at runtime.
-      const agentGenerate = agentOptions.generate as GenerateFunction | undefined;
+      const agentGenerate = agentOptions.generate;
 
       const agentToolbox =
         agentToolsMap && Object.keys(agentToolsMap).length > 0

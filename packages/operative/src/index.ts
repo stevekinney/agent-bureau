@@ -159,6 +159,7 @@ export type {
   CombinedOperativeEvents,
   CombinedOperativeEventType,
   ForwardedEvents,
+  OperativeEventEmitter,
   OperativeEventMap,
   OperativeEvents,
   OperativeEventType,

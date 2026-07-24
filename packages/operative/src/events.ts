@@ -1,7 +1,7 @@
 import type { ToolboxEvents, ToolExecutionResult } from 'armorer';
 import type { Conversation, ConversationEvents } from 'conversationalist';
 import type { ToolCall } from 'interoperability';
-import type { EventMap, ForwardedEvent } from 'lifecycle';
+import type { EventMap, ForwardedEvent, ObservableLike, Observer, Subscription } from 'lifecycle';
 
 import type { CostBudgetExceededEvent, CostBudgetThresholdEvent } from './cost-budget-monitor';
 import { estimateCacheHitRate } from './cost-estimation';
@@ -1001,7 +1001,7 @@ export interface OperativeEventMap extends EventMap {
   [HumanWaitParkedEvent.type]: HumanWaitParkedEvent;
 }
 
-export type OperativeEventType = keyof OperativeEventMap;
+export type OperativeEventType = Extract<keyof OperativeEventMap, string>;
 
 type PrefixedToolboxEvents = {
   [K in keyof ToolboxEvents as `toolbox.${K & string}`]: ForwardedEvent;
@@ -1015,7 +1015,63 @@ export interface ForwardedEvents extends PrefixedToolboxEvents, PrefixedConversa
 
 export interface CombinedOperativeEventMap extends OperativeEventMap, ForwardedEvents {}
 
-export type CombinedOperativeEventType = keyof CombinedOperativeEventMap;
+export type CombinedOperativeEventType = Extract<keyof CombinedOperativeEventMap, string>;
+
+/**
+ * The full public event-target surface accepted by durable routing. Listing
+ * the public members explicitly avoids making consumers share lifecycle's
+ * private class identity while still rejecting dispatch-only objects.
+ */
+export interface OperativeEventEmitter {
+  readonly completed: boolean;
+  readonly signal: AbortSignal;
+  addEventListener<K extends CombinedOperativeEventType>(
+    type: K,
+    listener: ((event: CombinedOperativeEventMap[K]) => void) | null,
+    options?: boolean | AddEventListenerOptions,
+  ): void;
+  addEventListener(
+    type: string,
+    listener: EventListenerOrEventListenerObject | null,
+    options?: boolean | AddEventListenerOptions,
+  ): void;
+  removeEventListener<K extends CombinedOperativeEventType>(
+    type: K,
+    listener: ((event: CombinedOperativeEventMap[K]) => void) | null,
+    options?: boolean | EventListenerOptions,
+  ): void;
+  removeEventListener(
+    type: string,
+    listener: EventListenerOrEventListenerObject | null,
+    options?: boolean | EventListenerOptions,
+  ): void;
+  dispatch<K extends CombinedOperativeEventType>(
+    event: CombinedOperativeEventMap[K] & { type: K },
+  ): boolean;
+  dispatchEvent(event: Event): boolean;
+  on<K extends CombinedOperativeEventType>(
+    type: K,
+    options?: { signal?: AbortSignal; bufferSize?: number },
+  ): ObservableLike<CombinedOperativeEventMap[K]>;
+  once<K extends CombinedOperativeEventType>(
+    type: K,
+    listener: (event: CombinedOperativeEventMap[K]) => void,
+  ): void;
+  subscribe<K extends CombinedOperativeEventType>(
+    type: K,
+    observerOrNext?:
+      | Observer<CombinedOperativeEventMap[K]>
+      | ((value: CombinedOperativeEventMap[K]) => void),
+    error?: (err: unknown) => void,
+    complete?: () => void,
+  ): Subscription;
+  events<K extends CombinedOperativeEventType>(
+    type: K,
+    options?: { signal?: AbortSignal; bufferSize?: number },
+  ): AsyncIterableIterator<CombinedOperativeEventMap[K]>;
+  toObservable(): ObservableLike<CombinedOperativeEventMap[CombinedOperativeEventType]>;
+  complete(): void;
+}
 
 // Backward-compatible aliases
 export type OperativeEvents = {

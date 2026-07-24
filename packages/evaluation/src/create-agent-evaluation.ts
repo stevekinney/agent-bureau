@@ -1,6 +1,6 @@
+import type { RunResult } from '@lostgradient/operative';
+import { createActiveRun, stopWhen } from '@lostgradient/operative';
 import { Conversation } from 'conversationalist';
-import type { RunResult } from 'operative';
-import { createActiveRun, stopWhen } from 'operative';
 
 import { matchOutput } from './matchers';
 import {
