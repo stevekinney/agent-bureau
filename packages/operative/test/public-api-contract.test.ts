@@ -18,7 +18,11 @@
  *      causes the in-flight step (including its tools) to re-run on recovery.
  */
 
-import type { GenerateFunction, RunOptions } from '@lostgradient/operative';
+import type {
+  CombinedOperativeEventMap,
+  GenerateFunction,
+  RunOptions,
+} from '@lostgradient/operative';
 import { createActiveRun } from '@lostgradient/operative';
 import { stopWhen } from '@lostgradient/operative/conditions';
 import type { DurableRunDeps } from '@lostgradient/operative/durable';
@@ -33,6 +37,7 @@ import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
 import { createTool, createToolbox } from 'armorer';
 import { afterEach, describe, expect, it } from 'bun:test';
 import { createConversationHistory } from 'conversationalist';
+import { CompletableEventTarget } from 'lifecycle';
 import { z } from 'zod';
 const run = (opts: Parameters<typeof createActiveRun>[0]) => createActiveRun(opts).result;
 const createRun = createActiveRun;
@@ -166,6 +171,28 @@ describe('loop completion — the agent loop runs to a stop condition', () => {
       expect(result.finishReason).toBe('stop-condition');
       expect(result.content).toBe('durable done');
       expect(result.steps).toHaveLength(1);
+    } finally {
+      engine[Symbol.dispose]();
+    }
+  });
+
+  it('createActiveRun forwards a supplied durable emitter', async () => {
+    const { engine, checkpointStore } = await buildEngine(new MemoryStorage());
+    const emitter = new CompletableEventTarget<CombinedOperativeEventMap>();
+
+    try {
+      const activeRun = createActiveRun(
+        baseRunOptions(async () => ({ content: 'emitted', toolCalls: [] })),
+        {
+          engine,
+          checkpointStore,
+          runId: 'contract-durable-emitter',
+          emitter,
+        },
+      );
+
+      const result = await activeRun.result;
+      expect(result.content).toBe('emitted');
     } finally {
       engine[Symbol.dispose]();
     }
