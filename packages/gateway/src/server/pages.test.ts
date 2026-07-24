@@ -24,11 +24,38 @@ function extractInitialData(html: string): unknown {
   return JSON.parse(match[1]);
 }
 
+function expectPageHeading(html: string, title: string): void {
+  const rootMarkup = extractRootMarkup(html);
+  expect(rootMarkup.match(/<h1\b/g)).toHaveLength(1);
+  expect(rootMarkup).toContain(
+    `<h1 class="cinder-page-header__title">${title.replaceAll('&', '&amp;')}</h1>`,
+  );
+  expect(rootMarkup.match(/<h[1-4]\b/)?.[0]).toBe('<h1');
+}
+
 afterEach(() => {
   rmSync(evaluationsFixturesDirectory, { recursive: true, force: true });
 });
 
 describe('SSR pages', () => {
+  it('renders one page-level h1 for every non-run production route', async () => {
+    const gateway = await createTestGateway();
+    const routes = [
+      ['/dashboard', 'Dashboard'],
+      ['/configuration', 'Configuration'],
+      ['/usage', 'Usage & Cost'],
+      ['/chat', 'Chat'],
+      ['/evaluations', 'Evaluations'],
+      ['/reviews', 'Review Queue'],
+    ] as const;
+
+    for (const [route, title] of routes) {
+      const response = await gateway.app.request(route);
+      expect(response.status).toBe(200);
+      expectPageHeading(await response.text(), title);
+    }
+  });
+
   it('GET / redirects to /dashboard', async () => {
     const gateway = await createTestGateway();
     const response = await gateway.app.request('/');

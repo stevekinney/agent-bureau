@@ -1,6 +1,6 @@
 <script lang="ts">
   import { EmptyState } from '@lostgradient/cinder/empty-state';
-  import { SectionHeading } from '@lostgradient/cinder/section-heading';
+  import { PageHeader } from '@lostgradient/cinder/page-header';
   import { Table } from '@lostgradient/cinder/table';
   import { TableBody } from '@lostgradient/cinder/table-body';
   import { TableHeader } from '@lostgradient/cinder/table-header';
@@ -20,7 +20,7 @@
 </script>
 
 <main class="page-dashboard">
-  <SectionHeading level={2} title="Dashboard" />
+  <PageHeader title="Dashboard" />
 
   {#if runs.length === 0}
     <EmptyState title="No runs yet." description="Started runs will appear here as they execute." />
