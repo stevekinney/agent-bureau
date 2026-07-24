@@ -80,6 +80,11 @@ describe('SSR pages', () => {
     expect(html).toContain('href="#main-content"');
     expect(html).toContain('id="main-content"');
     expect(html).toContain('tabindex="-1"');
+    expect(html).toContain('Agent Bureau');
+    expect((html.match(/<nav\b/g) ?? []).length).toBe(1);
+    expect(html).not.toMatch(/<nav\b[\s\S]*<nav\b/);
+    expect(html).toContain('aria-controls="agent-bureau-sidebar"');
+    expect(html).toContain('role="status"');
 
     const data = extractInitialData(html);
     expect(data).toHaveProperty('runs');

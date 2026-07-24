@@ -129,11 +129,10 @@
       label="Agent Bureau"
       class="sidebar"
     >
-      {#snippet brand()}
-        <div class="sidebar-title">Agent Bureau</div>
-      {/snippet}
-
       {#snippet navigation()}
+        {#if !sidebarCollapsed}
+          <div class="sidebar-title">Agent Bureau</div>
+        {/if}
         <SideNavigation ariaLabel="Primary navigation">
           {#each navigationLinks as link (link.href)}
             <SideNavigationItem
