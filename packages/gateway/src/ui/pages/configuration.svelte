@@ -2,6 +2,7 @@
   import { DataList } from '@lostgradient/cinder/data-list';
   import { DescriptionList } from '@lostgradient/cinder/description-list';
   import { EmptyState } from '@lostgradient/cinder/empty-state';
+  import { PageHeader } from '@lostgradient/cinder/page-header';
   import { SectionHeading } from '@lostgradient/cinder/section-heading';
   import { StackedListItem } from '@lostgradient/cinder/stacked-list-item';
 
@@ -36,10 +37,10 @@
 </script>
 
 <main class="page-configuration">
-  <SectionHeading level={2} title="Configuration" />
+  <PageHeader title="Configuration" />
 
   <section>
-    <SectionHeading level={3} title="Provider" />
+    <SectionHeading level={2} title="Provider" />
     {#if config.provider}
       <DescriptionList items={providerItems} variant="two-column" />
     {:else}
@@ -48,13 +49,13 @@
   </section>
 
   <section>
-    <SectionHeading level={3} title="Settings" />
+    <SectionHeading level={2} title="Settings" />
     <DescriptionList items={settingsItems} variant="two-column" />
   </section>
 
   {#if config.tools.length > 0}
     <section>
-      <SectionHeading level={3} title={`Tools (${config.tools.length})`} />
+      <SectionHeading level={2} title={`Tools (${config.tools.length})`} />
       <DataList items={config.tools} key={(tool: ToolSummary) => tool.name}>
         {#snippet children(tool: ToolSummary)}
           <StackedListItem>

@@ -11,6 +11,7 @@
     StreamEvent,
   } from '@lostgradient/cinder/event-stream-viewer';
   import { PayloadInspector } from '@lostgradient/cinder/payload-inspector';
+  import { PageHeader } from '@lostgradient/cinder/page-header';
   import { RunStepTimeline } from '@lostgradient/cinder/run-step-timeline';
   import type { RunStep, RunStepStatus } from '@lostgradient/cinder/run-step-timeline';
   import { SectionHeading } from '@lostgradient/cinder/section-heading';
@@ -33,7 +34,9 @@
     sequence?: number;
   };
 
-  type SerializedRunStepDetail = RunDetail['stepDetails'][number];
+  type SerializedRunStepDetail = RunDetailResponse['stepDetails'][number];
+  const MAX_CODE_BLOCK_PAYLOAD_BYTES = 1_048_576;
+  const PAYLOAD_TRUNCATION_SUFFIX = '\n[Payload truncated at 1 MiB]';
 
   /**
    * Run detail page. Renders the rich view of a single run: summary, usage
@@ -156,14 +159,25 @@
     return { datetime, label: `${datetime.slice(11, 19)} UTC` };
   }
 
-  function stringifyPayload(value: unknown): string {
+  function stringifyPayload(value: unknown, maxBytes?: number): string {
     if (value === undefined) return '';
-    if (typeof value === 'string') return value;
-    try {
-      return JSON.stringify(value, null, 2) ?? String(value);
-    } catch {
-      return String(value);
-    }
+    const serialized = (() => {
+      if (typeof value === 'string') return value;
+      try {
+        return JSON.stringify(value, null, 2) ?? String(value);
+      } catch {
+        return String(value);
+      }
+    })();
+
+    if (maxBytes === undefined) return serialized;
+
+    const encoded = new TextEncoder().encode(serialized);
+    if (encoded.byteLength <= maxBytes) return serialized;
+
+    const suffix = new TextEncoder().encode(PAYLOAD_TRUNCATION_SUFFIX);
+    const contentBytes = Math.max(0, maxBytes - suffix.byteLength);
+    return `${new TextDecoder().decode(encoded.slice(0, contentBytes))}${PAYLOAD_TRUNCATION_SUFFIX}`;
   }
 
   function stepStatus(step: SerializedRunStepDetail): RunStepStatus {
@@ -318,32 +332,36 @@
   {@const detail = stepDetailFor(step)}
   {#if detail}
     {#if detail.toolCalls.length > 0}
-      <PayloadInspector
-        value={detail.toolCalls}
-        activeView="raw"
-        label={`${step.label} tool calls`}
-        meta={{ contentType: 'application/json', source: step.label }}
-      />
+      <div class="run-step-payload">
+        <h4>{step.label} tool calls</h4>
+        <CodeBlock
+          code={stringifyPayload(detail.toolCalls, MAX_CODE_BLOCK_PAYLOAD_BYTES)}
+          language="json"
+          highlight={false}
+        />
+      </div>
     {/if}
     {#if detail.results.length > 0}
-      <PayloadInspector
-        value={detail.results}
-        activeView="raw"
-        label={`${step.label} results`}
-        meta={{ contentType: 'application/json', source: step.label }}
-      />
+      <div class="run-step-payload">
+        <h4>{step.label} results</h4>
+        <CodeBlock
+          code={stringifyPayload(detail.results, MAX_CODE_BLOCK_PAYLOAD_BYTES)}
+          language="json"
+          highlight={false}
+        />
+      </div>
     {/if}
   {/if}
 {/snippet}
 
 <main class="page-run-detail">
   <div class="run-detail-heading">
-    <SectionHeading level={2} title={`Run ${run.id}`} />
+    <PageHeader title={`Run ${run.id}`} />
     <StatusBadge status={run.status} />
   </div>
 
   <section>
-    <SectionHeading level={3} title="Summary" />
+    <SectionHeading level={2} title="Summary" />
     <DescriptionList items={summaryItems} variant="two-column" />
     <StatGroup columns={3} variant="cards" label="Token usage">
       <Stat label="Prompt" value={run.usage.prompt} />
@@ -354,7 +372,7 @@
 
   {#if parkedReview}
     <section>
-      <SectionHeading level={3} title="Awaiting Human Input" />
+      <SectionHeading level={2} title="Awaiting Human Input" />
       <ReviewRow
         review={parkedReview}
         pending={reviews?.pendingId === parkedReview.id}
@@ -365,7 +383,7 @@
   {/if}
 
   <section>
-    <SectionHeading level={3} title="Timeline" />
+    <SectionHeading level={2} title="Timeline" />
     {#if milestoneEntries.length === 0}
       <EmptyState
         title="No milestone events yet."
@@ -383,14 +401,14 @@
 
   {#if streamingAssistantContent}
     <section>
-      <SectionHeading level={3} title="Streaming Output" />
+      <SectionHeading level={2} title="Streaming Output" />
       <CodeBlock code={streamingAssistantContent} highlight={false} />
     </section>
   {/if}
 
   {#if toolActivity.length > 0}
     <section>
-      <SectionHeading level={3} title="Tool Activity" />
+      <SectionHeading level={2} title="Tool Activity" />
       <ul class="run-tool-activity">
         {#each toolActivity as entry, index (`${entry}-${index}`)}
           <li>{entry}</li>
@@ -400,7 +418,7 @@
   {/if}
 
   <section>
-    <SectionHeading level={3} title="Steps" />
+    <SectionHeading level={2} title="Steps" />
     {#if runSteps.length === 0}
       <EmptyState title="No completed steps yet." />
     {:else}
@@ -409,21 +427,19 @@
   </section>
 
   <section>
-    <SectionHeading level={3} title="Latest Snapshot" />
+    <SectionHeading level={2} title="Latest Snapshot" />
     {#if run.latestSnapshot === undefined}
       <EmptyState title="No snapshot yet." />
     {:else}
       <PayloadInspector
         value={run.latestSnapshot}
-        activeView="tree"
         label="Latest conversation snapshot"
-        meta={{ contentType: 'application/json', source: 'conversation snapshot' }}
       />
     {/if}
   </section>
 
   <section>
-    <SectionHeading level={3} title="Event Stream" />
+    <SectionHeading level={2} title="Event Stream" />
     <EventStreamViewer
       events={visibleStreamEvents}
       connectionState={eventStreamConnectionState}

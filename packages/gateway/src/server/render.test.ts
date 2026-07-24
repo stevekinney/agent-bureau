@@ -250,11 +250,22 @@ describe('renderPage with a populated run-detail page', () => {
         results: [],
       },
     ],
-    // The page passes latestSnapshot straight to JsonViewer (opaque object) or
-    // renders an EmptyState when undefined. Its internal shape is irrelevant to
-    // what this test proves, so leave it undefined and let the tool
-    // calls/results/timeline detail exercise JsonViewer instead.
-    latestSnapshot: undefined,
+    latestSnapshot: {
+      root: {
+        conversation: {
+          schemaVersion: 5,
+          id: 'conversation-1',
+          status: 'active',
+          metadata: {},
+          ids: [],
+          messages: {},
+          createdAt: '2026-01-01T00:00:00.000Z',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+        },
+        children: [],
+      },
+      currentPath: [],
+    },
     events: populatedRunEvents,
     timeline: assembleRunTimeline(populatedRunEvents),
   };
@@ -269,7 +280,7 @@ describe('renderPage with a populated run-detail page', () => {
     })),
     streamingAssistantContent: 'const greeting = "hello";\nconsole.log(greeting);\n',
     toolActivity: ['read_file → completed'],
-    connectionStatus: 'connected',
+    connectionStatus: 'connected' as const,
   };
 
   it('server-renders the heavy cinder components without throwing', async () => {
@@ -282,6 +293,11 @@ describe('renderPage with a populated run-detail page', () => {
   it('renders populated run details through the event, step, payload, code, and usage surfaces', async () => {
     const html = await renderPage({ title: 'Run run-populated', component: RunDetailPage, props });
     const rootMarkup = extractRootMarkup(html);
+
+    const pageHeadings = [...rootMarkup.matchAll(/<h1\b[^>]*>(.*?)<\/h1>/gs)];
+    expect(pageHeadings).toHaveLength(1);
+    expect(pageHeadings[0]?.[1]).toBe('Run run-populated');
+    expect(rootMarkup.match(/<h[1-4]\b/)?.[0]).toBe('<h1');
 
     // Section headings the page composes around the heavy components.
     expect(rootMarkup).toContain('Summary');
@@ -304,8 +320,42 @@ describe('renderPage with a populated run-detail page', () => {
     expect(rootMarkup).toContain('Step 2 (final)');
     expect(rootMarkup).toContain('Step 1 tool calls');
     expect(rootMarkup).toContain('Step 1 results');
+    expect(rootMarkup).toContain('"name": "read_file"');
+    expect(rootMarkup).toContain('"path": "src/index.ts"');
+    expect(rootMarkup).toContain('"toolName": "read_file"');
+    expect(rootMarkup).toContain('"contents": "export const answer = 42;\\n"');
+    expect(rootMarkup).toContain('Latest conversation snapshot');
+    expect(rootMarkup).toContain('aria-label="JSON tree"');
+    expect(rootMarkup).not.toContain('activeview');
+    expect(rootMarkup).not.toContain('meta="[object Object]"');
     expect(rootMarkup).toContain('aria-label="Run event stream"');
     expect(rootMarkup).toContain('run.completed');
+  });
+
+  it('bounds large tool-result CodeBlock output during SSR', async () => {
+    const resultTail = 'RESULT-END';
+    const firstStep = populatedRun.stepDetails[0]!;
+    const finalStep = populatedRun.stepDetails[1]!;
+    const largeResultRun: RunDetailResponse = {
+      ...populatedRun,
+      stepDetails: [
+        {
+          ...firstStep,
+          results: [{ toolName: 'read_file', result: `${'x'.repeat(1_100_000)}${resultTail}` }],
+        },
+        finalStep,
+      ],
+    };
+    const html = await renderPage({
+      title: 'Run run-populated',
+      component: RunDetailPage,
+      props: { ...props, run: largeResultRun },
+    });
+    const rootMarkup = extractRootMarkup(html);
+
+    expect(rootMarkup).toContain('[Payload truncated at 1 MiB]');
+    expect(rootMarkup).not.toContain(resultTail);
+    expect(new TextEncoder().encode(rootMarkup).byteLength).toBeLessThan(1_200_000);
   });
 
   // AB-12 — the run-inspector Timeline section renders every milestone kind

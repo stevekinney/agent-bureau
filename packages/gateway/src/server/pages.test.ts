@@ -24,11 +24,37 @@ function extractInitialData(html: string): unknown {
   return JSON.parse(match[1]);
 }
 
+function expectPageHeading(html: string, title: string): void {
+  const rootMarkup = extractRootMarkup(html);
+  const pageHeadings = [...rootMarkup.matchAll(/<h1\b[^>]*>(.*?)<\/h1>/gs)];
+  expect(pageHeadings).toHaveLength(1);
+  expect(pageHeadings[0]?.[1]).toBe(title.replaceAll('&', '&amp;'));
+  expect(rootMarkup.match(/<h[1-4]\b/)?.[0]).toBe('<h1');
+}
+
 afterEach(() => {
   rmSync(evaluationsFixturesDirectory, { recursive: true, force: true });
 });
 
 describe('SSR pages', () => {
+  it('renders one page-level h1 for every non-run production route', async () => {
+    const gateway = await createTestGateway();
+    const routes = [
+      ['/dashboard', 'Dashboard'],
+      ['/configuration', 'Configuration'],
+      ['/usage', 'Usage & Cost'],
+      ['/chat', 'Chat'],
+      ['/evaluations', 'Evaluations'],
+      ['/reviews', 'Review Queue'],
+    ] as const;
+
+    for (const [route, title] of routes) {
+      const response = await gateway.app.request(route);
+      expect(response.status).toBe(200);
+      expectPageHeading(await response.text(), title);
+    }
+  });
+
   it('GET / redirects to /dashboard', async () => {
     const gateway = await createTestGateway();
     const response = await gateway.app.request('/');
@@ -54,6 +80,11 @@ describe('SSR pages', () => {
     expect(html).toContain('href="#main-content"');
     expect(html).toContain('id="main-content"');
     expect(html).toContain('tabindex="-1"');
+    expect(html).toContain('Agent Bureau');
+    expect((html.match(/<nav\b/g) ?? []).length).toBe(1);
+    expect(html).not.toMatch(/<nav\b[\s\S]*<nav\b/);
+    expect(html).toContain('aria-controls="agent-bureau-sidebar"');
+    expect(html).toContain('role="status"');
 
     const data = extractInitialData(html);
     expect(data).toHaveProperty('runs');
@@ -180,7 +211,12 @@ describe('SSR pages', () => {
     });
     // The Svelte page actually rendered the report into the trend chart /
     // table server-side, not just the empty-state fallback.
-    expect(extractRootMarkup(html)).toContain('2026-01-01T00:00:00.000Z');
+    const rootMarkup = extractRootMarkup(html);
+    expect(rootMarkup).toContain('2026-01-01T00:00:00.000Z');
+    expect(rootMarkup).toContain('role="region"');
+    expect(rootMarkup).toContain('aria-label="Evaluation reports table scroll area"');
+    expect(rootMarkup).toContain('tabindex="0"');
+    expect(rootMarkup).toMatch(/<caption[^>]*>Evaluation reports<\/caption>/);
   });
 
   it('links the cinder stylesheet and the hydration module script on every page', async () => {

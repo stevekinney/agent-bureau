@@ -1,5 +1,6 @@
 <script lang="ts">
   import { Callout } from '@lostgradient/cinder/callout';
+  import { PageHeader } from '@lostgradient/cinder/page-header';
   import { Chat } from '@lostgradient/chat';
   import type { ChatSubmitEvent, MultiModalContent } from '@lostgradient/chat';
   import { SectionHeading } from '@lostgradient/cinder/section-heading';
@@ -7,6 +8,7 @@
   import ReviewRow from '../components/review-row.svelte';
   import type { ChatStore } from '../hooks/use-chat.svelte';
   import type { ReviewsStore } from '../hooks/use-reviews.svelte';
+  import { announcePendingReviews } from './chat-review-announcements';
 
   /**
    * Chat page. Adopts cinder's full {@link Chat} component for the transcript,
@@ -29,10 +31,18 @@
    */
   let { chat, reviews }: { chat: ChatStore; reviews: ReviewsStore } = $props();
 
+  let chatComponent = $state<ReturnType<typeof Chat> | undefined>();
+  const announcedReviewKeys = new Set<string>();
+
   /** Pending reviews belonging to the chat's active run, oldest first. */
   let pendingReviews = $derived(
     chat.runId === undefined ? [] : reviews.reviews.filter((review) => review.runId === chat.runId),
   );
+
+  $effect(() => {
+    if (!chatComponent || chat.runId === undefined) return;
+    announcePendingReviews(chat.runId, pendingReviews, announcedReviewKeys, chatComponent.announce);
+  });
 
   /** Extracts plain text from a submitted message's content. */
   function extractText(content: string | MultiModalContent[]): string {
@@ -57,7 +67,7 @@
 </script>
 
 <main class="page-chat">
-  <SectionHeading level={2} title="Chat" />
+  <PageHeader title="Chat" />
 
   {#if chat.error}
     <Callout variant="danger" title="Chat error">{chat.error}</Callout>
@@ -68,8 +78,8 @@
   {/if}
 
   {#if pendingReviews.length > 0}
-    <section class="chat-pending-input" aria-live="polite">
-      <SectionHeading level={3} title="Needs your input" />
+    <section class="chat-pending-input">
+      <SectionHeading level={2} title="Needs your input" />
       <div class="chat-pending-input-list">
         {#each pendingReviews as review (review.id)}
           <ReviewRow
@@ -84,6 +94,7 @@
   {/if}
 
   <Chat
+    bind:this={chatComponent}
     id="gateway-chat"
     class="gateway-chat-surface"
     conversation={chat.conversation}
@@ -96,7 +107,7 @@
 
   {#if chat.toolActivity.length > 0}
     <section class="chat-tool-activity">
-      <SectionHeading level={3} title="Tool Activity" />
+      <SectionHeading level={2} title="Tool Activity" />
       <ul>
         {#each chat.toolActivity as entry, index (`${entry}-${index}`)}
           <li>{entry}</li>

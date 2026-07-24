@@ -1,6 +1,7 @@
 <script lang="ts">
   import { Callout } from '@lostgradient/cinder/callout';
   import { EmptyState } from '@lostgradient/cinder/empty-state';
+  import { PageHeader } from '@lostgradient/cinder/page-header';
   import { SectionHeading } from '@lostgradient/cinder/section-heading';
 
   import ReviewRow from '../components/review-row.svelte';
@@ -17,29 +18,32 @@
 </script>
 
 <main class="page-reviews">
-  <SectionHeading level={2} title="Review Queue" />
+  <PageHeader title="Review Queue" />
 
   {#if reviews.error}
     <Callout variant="danger" title="Review queue error">{reviews.error}</Callout>
   {/if}
 
-  {#if reviews.reviews.length === 0}
-    <EmptyState
-      title="Nothing pending review."
-      description="Tool calls awaiting approval and runs parked on human input appear here."
-    />
-  {:else}
-    <div class="review-list">
-      {#each reviews.reviews as review (review.id)}
-        <ReviewRow
-          {review}
-          pending={reviews.pendingId === review.id}
-          onapprove={(id, payload) => void reviews.approve(id, { payload })}
-          ondeny={(id, reason) => void reviews.deny(id, { reason })}
-        />
-      {/each}
-    </div>
-  {/if}
+  <section>
+    <SectionHeading level={2} title="Pending Reviews" />
+    {#if reviews.reviews.length === 0}
+      <EmptyState
+        title="Nothing pending review."
+        description="Tool calls awaiting approval and runs parked on human input appear here."
+      />
+    {:else}
+      <div class="review-list">
+        {#each reviews.reviews as review (review.id)}
+          <ReviewRow
+            {review}
+            pending={reviews.pendingId === review.id}
+            onapprove={(id, payload) => void reviews.approve(id, { payload })}
+            ondeny={(id, reason) => void reviews.deny(id, { reason })}
+          />
+        {/each}
+      </div>
+    {/if}
+  </section>
 </main>
 
 <style>

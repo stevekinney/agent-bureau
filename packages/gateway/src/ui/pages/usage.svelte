@@ -1,5 +1,6 @@
 <script lang="ts">
   import { EmptyState } from '@lostgradient/cinder/empty-state';
+  import { PageHeader } from '@lostgradient/cinder/page-header';
   import { SectionHeading } from '@lostgradient/cinder/section-heading';
   import { Stat } from '@lostgradient/cinder/stat';
   import { StatGroup } from '@lostgradient/cinder/stat-group';
@@ -45,7 +46,7 @@
 </script>
 
 <main class="page-usage">
-  <SectionHeading level={2} title="Usage & Cost" />
+  <PageHeader title="Usage & Cost" />
 
   {#if usage.aggregate.runCount === 0}
     <EmptyState
@@ -66,8 +67,8 @@
     </StatGroup>
 
     <section>
-      <SectionHeading level={3} title="By Agent" />
-      <Table caption="Usage by agent">
+      <SectionHeading level={2} title="By Agent" />
+      <Table caption="Usage by agent" scrollable>
         <TableHeader>
           <TableRow>
             <TableHeaderCell>Agent</TableHeaderCell>
@@ -90,8 +91,8 @@
     </section>
 
     <section>
-      <SectionHeading level={3} title="By Principal" />
-      <Table caption="Usage by authenticated principal">
+      <SectionHeading level={2} title="By Principal" />
+      <Table caption="Usage by authenticated principal" scrollable>
         <TableHeader>
           <TableRow>
             <TableHeaderCell>Principal</TableHeaderCell>
@@ -114,8 +115,8 @@
     </section>
 
     <section>
-      <SectionHeading level={3} title="By Time Window (UTC day)" />
-      <Table caption="Usage by time window">
+      <SectionHeading level={2} title="By Time Window (UTC day)" />
+      <Table caption="Usage by time window" scrollable>
         <TableHeader>
           <TableRow>
             <TableHeaderCell>Window</TableHeaderCell>
