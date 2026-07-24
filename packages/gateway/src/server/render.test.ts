@@ -294,8 +294,9 @@ describe('renderPage with a populated run-detail page', () => {
     const html = await renderPage({ title: 'Run run-populated', component: RunDetailPage, props });
     const rootMarkup = extractRootMarkup(html);
 
-    expect(rootMarkup.match(/<h1\b/g)).toHaveLength(1);
-    expect(rootMarkup).toContain('<h1 class="cinder-page-header__title">Run run-populated</h1>');
+    const pageHeadings = [...rootMarkup.matchAll(/<h1\b[^>]*>(.*?)<\/h1>/gs)];
+    expect(pageHeadings).toHaveLength(1);
+    expect(pageHeadings[0]?.[1]).toBe('Run run-populated');
     expect(rootMarkup.match(/<h[1-4]\b/)?.[0]).toBe('<h1');
 
     // Section headings the page composes around the heavy components.

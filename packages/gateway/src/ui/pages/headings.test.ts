@@ -34,9 +34,11 @@ describe('Gateway page heading contract', () => {
   it('keeps every remaining page section heading at level 2', () => {
     for (const page of Object.keys(pages)) {
       const source = readFileSync(join(pageDirectory, `${page}.svelte`), 'utf8');
+      const sectionHeadings = source.match(/<SectionHeading\b[^>]*\/>/g) ?? [];
+      const sectionHeadingInstances = source.match(/<SectionHeading\b/g) ?? [];
 
-      expect(source).not.toContain('<SectionHeading level={3}');
-      expect(source.match(/<SectionHeading\b/g)?.every((heading) => heading) ?? true).toBe(true);
+      expect(sectionHeadings).toHaveLength(sectionHeadingInstances.length);
+      expect(sectionHeadings.every((heading) => heading.includes('level={2}'))).toBe(true);
     }
   });
 });

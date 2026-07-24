@@ -26,10 +26,9 @@ function extractInitialData(html: string): unknown {
 
 function expectPageHeading(html: string, title: string): void {
   const rootMarkup = extractRootMarkup(html);
-  expect(rootMarkup.match(/<h1\b/g)).toHaveLength(1);
-  expect(rootMarkup).toContain(
-    `<h1 class="cinder-page-header__title">${title.replaceAll('&', '&amp;')}</h1>`,
-  );
+  const pageHeadings = [...rootMarkup.matchAll(/<h1\b[^>]*>(.*?)<\/h1>/gs)];
+  expect(pageHeadings).toHaveLength(1);
+  expect(pageHeadings[0]?.[1]).toBe(title.replaceAll('&', '&amp;'));
   expect(rootMarkup.match(/<h[1-4]\b/)?.[0]).toBe('<h1');
 }
 

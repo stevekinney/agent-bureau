@@ -401,14 +401,14 @@
 
   {#if streamingAssistantContent}
     <section>
-    <SectionHeading level={2} title="Streaming Output" />
+      <SectionHeading level={2} title="Streaming Output" />
       <CodeBlock code={streamingAssistantContent} highlight={false} />
     </section>
   {/if}
 
   {#if toolActivity.length > 0}
     <section>
-    <SectionHeading level={2} title="Tool Activity" />
+      <SectionHeading level={2} title="Tool Activity" />
       <ul class="run-tool-activity">
         {#each toolActivity as entry, index (`${entry}-${index}`)}
           <li>{entry}</li>
