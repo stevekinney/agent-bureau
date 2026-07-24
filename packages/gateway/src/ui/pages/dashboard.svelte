@@ -25,7 +25,7 @@
   {#if runs.length === 0}
     <EmptyState title="No runs yet." description="Started runs will appear here as they execute." />
   {:else}
-    <Table caption="Agent runs">
+    <Table caption="Agent runs" scrollable>
       <TableHeader>
         <TableRow>
           <TableHeaderCell>ID</TableHeaderCell>

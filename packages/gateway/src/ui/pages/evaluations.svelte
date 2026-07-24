@@ -83,7 +83,7 @@
 
     <section>
       <SectionHeading level={2} title="Reports" />
-      <Table caption="Evaluation reports">
+      <Table caption="Evaluation reports" scrollable>
         <TableHeader>
           <TableRow>
             <TableHeaderCell>Timestamp</TableHeaderCell>

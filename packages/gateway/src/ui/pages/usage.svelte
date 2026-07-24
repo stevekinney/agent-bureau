@@ -68,7 +68,7 @@
 
     <section>
       <SectionHeading level={2} title="By Agent" />
-      <Table caption="Usage by agent">
+      <Table caption="Usage by agent" scrollable>
         <TableHeader>
           <TableRow>
             <TableHeaderCell>Agent</TableHeaderCell>
@@ -92,7 +92,7 @@
 
     <section>
       <SectionHeading level={2} title="By Principal" />
-      <Table caption="Usage by authenticated principal">
+      <Table caption="Usage by authenticated principal" scrollable>
         <TableHeader>
           <TableRow>
             <TableHeaderCell>Principal</TableHeaderCell>
@@ -116,7 +116,7 @@
 
     <section>
       <SectionHeading level={2} title="By Time Window (UTC day)" />
-      <Table caption="Usage by time window">
+      <Table caption="Usage by time window" scrollable>
         <TableHeader>
           <TableRow>
             <TableHeaderCell>Window</TableHeaderCell>
