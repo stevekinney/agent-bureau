@@ -33,7 +33,7 @@
     sequence?: number;
   };
 
-  type SerializedRunStepDetail = RunDetail['stepDetails'][number];
+  type SerializedRunStepDetail = RunDetailResponse['stepDetails'][number];
 
   /**
    * Run detail page. Renders the rich view of a single run: summary, usage
@@ -318,20 +318,16 @@
   {@const detail = stepDetailFor(step)}
   {#if detail}
     {#if detail.toolCalls.length > 0}
-      <PayloadInspector
-        value={detail.toolCalls}
-        activeView="raw"
-        label={`${step.label} tool calls`}
-        meta={{ contentType: 'application/json', source: step.label }}
-      />
+      <div class="run-step-payload">
+        <h4>{step.label} tool calls</h4>
+        <CodeBlock code={stringifyPayload(detail.toolCalls)} language="json" highlight={false} />
+      </div>
     {/if}
     {#if detail.results.length > 0}
-      <PayloadInspector
-        value={detail.results}
-        activeView="raw"
-        label={`${step.label} results`}
-        meta={{ contentType: 'application/json', source: step.label }}
-      />
+      <div class="run-step-payload">
+        <h4>{step.label} results</h4>
+        <CodeBlock code={stringifyPayload(detail.results)} language="json" highlight={false} />
+      </div>
     {/if}
   {/if}
 {/snippet}
@@ -415,9 +411,7 @@
     {:else}
       <PayloadInspector
         value={run.latestSnapshot}
-        activeView="tree"
         label="Latest conversation snapshot"
-        meta={{ contentType: 'application/json', source: 'conversation snapshot' }}
       />
     {/if}
   </section>

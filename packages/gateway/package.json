@@ -7,7 +7,8 @@
   "main": "./src/index.ts",
   "scripts": {
     "build": "bun run scripts/build.ts",
-    "check-types": "tsc --noEmit",
+    "check-svelte": "svelte-check --tsconfig ./tsconfig.json",
+    "check-types": "tsc --noEmit && bun run check-svelte",
     "clean": "rm -rf dist coverage tsconfig.tsbuildinfo",
     "dev": "bun --watch run src/start.ts",
     "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md,css}\"",
@@ -42,6 +43,7 @@
     "@types/bun": "^1.3.9",
     "bun-plugin-svelte": "0.0.6",
     "eslint": "^10.0.0",
+    "svelte-check": "^4.7.3",
     "typescript": "5.9.2",
     "typescript-eslint": "^8.55.0"
   },

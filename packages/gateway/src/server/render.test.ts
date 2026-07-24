@@ -250,11 +250,22 @@ describe('renderPage with a populated run-detail page', () => {
         results: [],
       },
     ],
-    // The page passes latestSnapshot straight to JsonViewer (opaque object) or
-    // renders an EmptyState when undefined. Its internal shape is irrelevant to
-    // what this test proves, so leave it undefined and let the tool
-    // calls/results/timeline detail exercise JsonViewer instead.
-    latestSnapshot: undefined,
+    latestSnapshot: {
+      root: {
+        conversation: {
+          schemaVersion: 5,
+          id: 'conversation-1',
+          status: 'active',
+          metadata: {},
+          ids: [],
+          messages: {},
+          createdAt: '2026-01-01T00:00:00.000Z',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+        },
+        children: [],
+      },
+      currentPath: [],
+    },
     events: populatedRunEvents,
     timeline: assembleRunTimeline(populatedRunEvents),
   };
@@ -269,7 +280,7 @@ describe('renderPage with a populated run-detail page', () => {
     })),
     streamingAssistantContent: 'const greeting = "hello";\nconsole.log(greeting);\n',
     toolActivity: ['read_file → completed'],
-    connectionStatus: 'connected',
+    connectionStatus: 'connected' as const,
   };
 
   it('server-renders the heavy cinder components without throwing', async () => {
@@ -304,6 +315,14 @@ describe('renderPage with a populated run-detail page', () => {
     expect(rootMarkup).toContain('Step 2 (final)');
     expect(rootMarkup).toContain('Step 1 tool calls');
     expect(rootMarkup).toContain('Step 1 results');
+    expect(rootMarkup).toContain('"name": "read_file"');
+    expect(rootMarkup).toContain('"path": "src/index.ts"');
+    expect(rootMarkup).toContain('"toolName": "read_file"');
+    expect(rootMarkup).toContain('"contents": "export const answer = 42;\\n"');
+    expect(rootMarkup).toContain('Latest conversation snapshot');
+    expect(rootMarkup).toContain('aria-label="JSON tree"');
+    expect(rootMarkup).not.toContain('activeview');
+    expect(rootMarkup).not.toContain('meta="[object Object]"');
     expect(rootMarkup).toContain('aria-label="Run event stream"');
     expect(rootMarkup).toContain('run.completed');
   });
