@@ -91,7 +91,7 @@ import type {
   ToolPolicyDecision,
   ToolPolicyHooks,
 } from './is-tool';
-import { isTool } from './is-tool';
+import { isTool, resolveToolPolicyAllow } from './is-tool';
 import { resolveFuzzyToolName } from './resolution/index';
 import { isAsyncIterable, isPromise, isTestRuntime } from './type-guards';
 import type {
@@ -2058,7 +2058,7 @@ async function resolvePolicyDecision(
   if (typeof decision === 'boolean') {
     return { allow: decision };
   }
-  return decision;
+  return resolveToolPolicyAllow(decision);
 }
 
 function isMutatingToolContext(context: ToolPolicyContext): boolean {

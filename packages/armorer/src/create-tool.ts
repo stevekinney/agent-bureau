@@ -66,6 +66,7 @@ import type {
   ToolRepairHint,
   ToolValidationReport,
 } from './is-tool';
+import { resolveToolPolicyAllow } from './is-tool';
 import { isAsyncIterable, isPromise, isTestRuntime } from './type-guards';
 import type { ToolAction, ToolCall, ToolExecutionResult } from './types';
 import { createConcurrencyLimiter, normalizeConcurrency } from './utilities/concurrency';
@@ -597,7 +598,7 @@ export function createTool<
     if (typeof decision === 'boolean') {
       return { allow: decision };
     }
-    return decision;
+    return resolveToolPolicyAllow(decision);
   };
 
   const runPolicyAfter = async (context: ToolPolicyAfterContext): Promise<void> => {

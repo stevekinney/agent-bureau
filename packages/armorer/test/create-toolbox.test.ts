@@ -3725,4 +3725,120 @@ describe('createToolbox', () => {
       expect(toolbox.getContext?.()).toEqual({ workspace: 'agent-bureau' });
     });
   });
+
+  describe('status-only policy decisions', () => {
+    it('pauses for approval when a tool policy returns status without allow', async () => {
+      const toolbox = createToolbox(
+        [
+          createTool({
+            name: 'sensitive-op',
+            description: 'requires sign-off',
+            input: z.object({ value: z.string() }),
+            policy: {
+              beforeExecute: () => ({ status: 'needs_approval', reason: 'Sign off first' }),
+            },
+            async execute({ value }) {
+              return { value };
+            },
+          }),
+        ],
+        { approvalSecret: 'status-only-secret' },
+      );
+
+      const result = await toolbox.execute({
+        id: 'call-status-1',
+        name: 'sensitive-op',
+        arguments: { value: 'x' },
+      });
+
+      expect(result.outcome).toBe('action_required');
+      expect(result.action?.type).toBe('approval');
+      expect(result.pendingApproval?.reason).toBe('Sign off first');
+    });
+
+    it('denies when a registry policy returns status deny without allow', async () => {
+      let executed = false;
+      const toolbox = createToolbox(
+        [
+          createTool({
+            name: 'blocked-op',
+            description: 'never runs',
+            input: z.object({ value: z.string() }),
+            async execute({ value }) {
+              executed = true;
+              return { value };
+            },
+          }),
+        ],
+        {
+          policy: {
+            beforeExecute: () => ({ status: 'deny', reason: 'Registry says no' }),
+          },
+        },
+      );
+
+      const result = await toolbox.execute({
+        id: 'call-status-2',
+        name: 'blocked-op',
+        arguments: { value: 'x' },
+      });
+
+      expect(executed).toBe(false);
+      expect(result.outcome).toBe('error');
+      expect(result.error?.message).toBe('Registry says no');
+    });
+
+    it('executes when a policy returns status allow without allow', async () => {
+      const toolbox = createToolbox([
+        createTool({
+          name: 'open-op',
+          description: 'always runs',
+          input: z.object({ value: z.string() }),
+          policy: {
+            beforeExecute: () => ({ status: 'allow' }),
+          },
+          async execute({ value }) {
+            return { echoed: value };
+          },
+        }),
+      ]);
+
+      const result = await toolbox.execute({
+        id: 'call-status-3',
+        name: 'open-op',
+        arguments: { value: 'hello' },
+      });
+
+      expect(result.outcome).toBe('success');
+      expect(result.result).toEqual({ echoed: 'hello' });
+    });
+
+    it('still honors an explicit allow=false with no status', async () => {
+      let executed = false;
+      const toolbox = createToolbox([
+        createTool({
+          name: 'legacy-deny',
+          description: 'explicit allow false',
+          input: z.object({ value: z.string() }),
+          policy: {
+            beforeExecute: () => ({ allow: false, reason: 'Explicitly denied' }),
+          },
+          async execute({ value }) {
+            executed = true;
+            return { value };
+          },
+        }),
+      ]);
+
+      const result = await toolbox.execute({
+        id: 'call-status-4',
+        name: 'legacy-deny',
+        arguments: { value: 'x' },
+      });
+
+      expect(executed).toBe(false);
+      expect(result.outcome).toBe('error');
+      expect(result.error?.message).toBe('Explicitly denied');
+    });
+  });
 });
