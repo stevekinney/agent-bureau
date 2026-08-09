@@ -97,11 +97,13 @@ export type ToolMetadata = JsonObject & {
 
 export type ToolPolicyDecision = {
   /**
-   * Whether the call may proceed. Optional when `status` is present: a
-   * decision that only sets `status` derives `allow` from it (`'allow'` →
-   * `true`; `'deny'`, `'needs_approval'`, `'needs_input'` → `false`). When
-   * both are given, `status` is the more specific signal and `allow` must
-   * agree with it.
+   * Whether the call may proceed. Optional: when omitted, it is derived from
+   * `status` (`'allow'` or no status → `true`; `'deny'`, `'needs_approval'`,
+   * `'needs_input'` → `false`). An explicit `allow` is used as-is — no
+   * agreement with `status` is validated. The two answer different
+   * questions: `status: 'needs_approval'`/`'needs_input'` pauses the call
+   * regardless of `allow`, while `allow: false` denies outright when no
+   * pause is requested.
    */
   allow?: boolean;
   reason?: string;
