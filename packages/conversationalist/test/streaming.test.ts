@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 
 import {
+  appendMessages,
   appendUnsafeMessage,
   createConversationHistory as createConversation,
   type IntegrityIssue,
@@ -124,6 +125,36 @@ describe('unsafe streaming primitives', () => {
     expect(streamingMessage?.metadata.rendered).toBe(true);
     expect(streamingMessage && isStreamingMessage(streamingMessage)).toBe(false);
   });
+
+  it('still writes content to a finalized message, as the documented escape hatch', () => {
+    const conv = createConversation({ id: 'test' }, testEnvironment);
+    const { conversation, messageId } = appendStreamingMessage(
+      conv,
+      'assistant',
+      undefined,
+      testEnvironment,
+    );
+
+    const finalized = finalizeStreamingMessage(
+      conversation,
+      messageId,
+      { tokenUsage: { prompt: 1, completion: 2, total: 3 } },
+      testEnvironment,
+    );
+    const reprojected = updateUnsafeStreamingMessage(
+      finalized,
+      messageId,
+      'Reprojected',
+      testEnvironment,
+    );
+
+    expect(reprojected.messages[messageId]?.content).toBe('Reprojected');
+    expect(reprojected.messages[messageId]?.tokenUsage).toEqual({
+      prompt: 1,
+      completion: 2,
+      total: 3,
+    });
+  });
 });
 
 describe('updateStreamingMessage', () => {
@@ -183,6 +214,31 @@ describe('updateStreamingMessage', () => {
   });
 
   it('preserves token usage when updating content', () => {
+    // A streaming placeholder that already carries token usage (a provider can
+    // report usage mid-stream), so the update path has something to preserve.
+    const conversation = appendMessages(
+      createConversation({ id: 'test' }, testEnvironment),
+      {
+        role: 'assistant',
+        content: '',
+        metadata: { __streaming: true },
+        tokenUsage: { prompt: 1, completion: 2, total: 3 },
+      },
+      testEnvironment,
+    );
+    const messageId = getOrderedMessages(conversation)[0]!.id;
+
+    const updated = updateStreamingMessage(conversation, messageId, 'Updated', testEnvironment);
+
+    expect(getOrderedMessages(updated)[0]?.content).toBe('Updated');
+    expect(getOrderedMessages(updated)[0]?.tokenUsage).toEqual({
+      prompt: 1,
+      completion: 2,
+      total: 3,
+    });
+  });
+
+  it('ignores a late token that arrives after the message was finalized', () => {
     const conv = createConversation({ id: 'test' }, testEnvironment);
     const { conversation, messageId } = appendStreamingMessage(
       conv,
@@ -191,20 +247,114 @@ describe('updateStreamingMessage', () => {
       testEnvironment,
     );
 
+    const streamed = updateStreamingMessage(conversation, messageId, 'Frozen', testEnvironment);
     const finalized = finalizeStreamingMessage(
-      conversation,
+      streamed,
       messageId,
       { tokenUsage: { prompt: 1, completion: 2, total: 3 } },
       testEnvironment,
     );
 
-    const updated = updateStreamingMessage(finalized, messageId, 'Updated', testEnvironment);
+    const late = updateStreamingMessage(finalized, messageId, 'Frozen and then some');
 
-    expect(getOrderedMessages(updated)[0]?.tokenUsage).toEqual({
+    // The very same conversation object comes back, so `updatedAt` cannot have
+    // been bumped and no consumer holding a reference sees a change.
+    expect(late).toBe(finalized);
+    expect(late.updatedAt).toBe(finalized.updatedAt);
+    expect(getOrderedMessages(late)[0]?.content).toBe('Frozen');
+    expect(getOrderedMessages(late)[0]?.tokenUsage).toEqual({
       prompt: 1,
       completion: 2,
       total: 3,
     });
+  });
+
+  it('ignores a late token that arrives after the message was cancelled', () => {
+    const conv = createConversation({ id: 'test' }, testEnvironment);
+    const { conversation, messageId } = appendStreamingMessage(
+      conv,
+      'assistant',
+      undefined,
+      testEnvironment,
+    );
+
+    const streamed = updateStreamingMessage(conversation, messageId, 'Partial', testEnvironment);
+    const cancelled = cancelStreamingMessage(streamed, messageId, testEnvironment);
+
+    const late = updateStreamingMessage(cancelled, messageId, 'Partial and then some');
+
+    expect(late).toBe(cancelled);
+    expect(late.ids).toHaveLength(0);
+  });
+
+  it('does not resurrect a non-streaming message that never streamed', () => {
+    const conversation = appendMessages(
+      createConversation({ id: 'test' }, testEnvironment),
+      { role: 'assistant', content: 'Settled' },
+      testEnvironment,
+    );
+    const messageId = getOrderedMessages(conversation)[0]!.id;
+
+    const updated = updateStreamingMessage(conversation, messageId, 'Rewritten', testEnvironment);
+
+    expect(updated).toBe(conversation);
+    expect(getOrderedMessages(updated)[0]?.content).toBe('Settled');
+  });
+
+  it('does not read the injected clock when it rejects a late token', () => {
+    const conv = createConversation({ id: 'test' }, testEnvironment);
+    const { conversation, messageId } = appendStreamingMessage(
+      conv,
+      'assistant',
+      undefined,
+      testEnvironment,
+    );
+    const finalized = finalizeStreamingMessage(
+      updateStreamingMessage(conversation, messageId, 'Frozen', testEnvironment),
+      messageId,
+      undefined,
+      testEnvironment,
+    );
+
+    let clockReads = 0;
+    const countingEnvironment = {
+      ...testEnvironment,
+      now: () => {
+        clockReads += 1;
+        return testEnvironment.now();
+      },
+    };
+
+    // Rejected: the target is finalized, and the id is unknown.
+    updateStreamingMessage(finalized, messageId, 'Late', countingEnvironment);
+    updateStreamingMessage(finalized, 'no-such-message', 'Late', countingEnvironment);
+    expect(clockReads).toBe(0);
+
+    // Accepted updates still stamp `updatedAt`, so the clock is read exactly once.
+    updateStreamingMessage(conversation, messageId, 'Streaming', countingEnvironment);
+    expect(clockReads).toBe(1);
+  });
+
+  it('does not propagate a throwing clock when it rejects a late token', () => {
+    const conv = createConversation({ id: 'test' }, testEnvironment);
+    const { conversation, messageId } = appendStreamingMessage(
+      conv,
+      'assistant',
+      undefined,
+      testEnvironment,
+    );
+    const finalized = finalizeStreamingMessage(conversation, messageId, undefined, testEnvironment);
+
+    const explodingEnvironment = {
+      ...testEnvironment,
+      now: (): string => {
+        throw new Error('clock should not be read for a rejected update');
+      },
+    };
+
+    expect(updateStreamingMessage(finalized, messageId, 'Late', explodingEnvironment)).toBe(
+      finalized,
+    );
   });
 });
 

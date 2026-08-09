@@ -141,6 +141,14 @@ const appendStreamingMessageInternal = (
 /**
  * Updates the content of a streaming message.
  * This replaces the existing content (use for accumulating streamed tokens).
+ *
+ * Only a message that is still streaming accepts streamed content: if
+ * `messageId` is unknown, or names a message that has already been finalized by
+ * {@link finalizeStreamingMessage}, the conversation is returned unchanged. That
+ * makes the late-token race — a chunk arriving after the user hits stop — a
+ * no-op instead of silently growing a message the UI already presented as final.
+ * Use {@link updateUnsafeStreamingMessage} when you deliberately need to write
+ * content to a non-streaming message.
  */
 export function updateStreamingMessage(
   conversation: Conversation,
@@ -152,9 +160,12 @@ export function updateStreamingMessage(
 }
 
 /**
- * Updates a streaming message without validating the resulting conversation.
+ * Updates a streaming message without validating the resulting conversation,
+ * and without requiring the target message to still be streaming.
  * Use only for render-side projections that can contain structurally incomplete
- * tool-call/tool-result pairs.
+ * tool-call/tool-result pairs, or that reproject content onto a message whose
+ * streaming flag has already been cleared. This is the documented escape hatch
+ * from the streaming-status guard on {@link updateStreamingMessage}.
  */
 export function updateUnsafeStreamingMessage(
   conversation: Conversation,
@@ -172,13 +183,26 @@ const updateStreamingMessageInternal = (
   environment: Partial<ConversationEnvironment> | undefined,
   validate: boolean,
 ): Conversation => {
-  const resolvedEnvironment = resolveConversationEnvironment(environment);
-  const now = resolvedEnvironment.now();
-
   const original = conversation.messages[messageId];
   if (!original) {
     return validate ? ensureConversationSafe(conversation) : conversation;
   }
+
+  // Lifecycle guard for the safe variant: only a streaming placeholder accepts
+  // streamed content. Without this, a token that lands after
+  // finalizeStreamingMessage grows a message the UI already froze. A cancelled
+  // message is removed outright, so that race falls into the branch above; this
+  // covers the post-finalize half. No-op rather than throw, so the two halves of
+  // the same race behave identically and a stop-button race cannot crash a
+  // stream. `updateUnsafeStreamingMessage` (validate === false) opts out.
+  if (validate && !isStreamingMessage(original)) {
+    return ensureConversationSafe(conversation);
+  }
+
+  // Resolved only once the update is known to apply: a rejected late token must
+  // not consume a tick from a stateful injected clock, nor propagate a throw
+  // from a fallible one.
+  const now = resolveConversationEnvironment(environment).now();
 
   const overrides: {
     content?: string | MultiModalContent[];

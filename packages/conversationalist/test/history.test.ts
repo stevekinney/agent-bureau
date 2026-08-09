@@ -332,6 +332,55 @@ describe('Conversation', () => {
       expect(history.current.ids.length).toBe(1);
     });
 
+    it('should not emit any event when a late token is rejected', () => {
+      const history = new ConversationHistory(createConversation());
+      const messageId = history.appendStreamingMessage('assistant');
+      history.updateStreamingMessage(messageId, 'Frozen');
+      history.finalizeStreamingMessage(messageId);
+
+      const observed: string[] = [];
+      for (const type of ['change', 'push', 'messages.updated', 'stream.updated'] as const) {
+        history.addEventListener(type, () => observed.push(type));
+      }
+
+      history.updateStreamingMessage(messageId, 'Frozen and then some');
+      history.updateStreamingMessage('no-such-message', 'Never existed');
+
+      expect(observed).toEqual([]);
+      expect(getOrderedMessages(history.current)[0].content).toBe('Frozen');
+    });
+
+    it('should not add an undo entry when a late token is rejected', () => {
+      const countUndoSteps = (subject: ConversationHistory): number => {
+        let steps = 0;
+        while (subject.canUndo) {
+          subject.undo();
+          steps += 1;
+        }
+        return steps;
+      };
+
+      const build = (): ConversationHistory => {
+        const subject = new ConversationHistory(createConversation());
+        const messageId = subject.appendStreamingMessage('assistant');
+        subject.updateStreamingMessage(messageId, 'Frozen');
+        subject.finalizeStreamingMessage(messageId);
+        return subject;
+      };
+
+      const baseline = build();
+      const flooded = build();
+      const finalizedState = flooded.current;
+      const messageId = finalizedState.ids[0]!;
+      for (let index = 0; index < 5; index += 1) {
+        flooded.updateStreamingMessage(messageId, `late token ${index}`);
+      }
+
+      // The flood left the state and the undo chain exactly as finalize did.
+      expect(flooded.current).toBe(finalizedState);
+      expect(countUndoSteps(flooded)).toBe(countUndoSteps(baseline));
+    });
+
     it('should support serialization and deserialization of the full history tree', () => {
       const history = new ConversationHistory(createConversation({ title: 'Root' }));
       history.appendUserMessage('V1');
