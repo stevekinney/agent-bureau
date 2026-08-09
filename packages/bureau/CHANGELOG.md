@@ -1,5 +1,15 @@
 # bureau
 
+## 0.0.6
+
+### Patch Changes
+
+- Updated dependencies [b6f2b94]
+  - armorer@0.12.0
+  - memory@0.0.1
+  - @lostgradient/operative@0.1.0
+  - skills@0.0.1
+
 ## 0.0.5
 
 ### Patch Changes
