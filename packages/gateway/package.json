@@ -24,7 +24,7 @@
     "@lostgradient/chat": "^0.2.0",
     "@lostgradient/cinder": "^0.17.0",
     "@lostgradient/markdown": "^0.1.0",
-    "@lostgradient/weft": "^0.15.0",
+    "@lostgradient/weft": "^0.16.0",
     "armorer": "workspace:*",
     "bureau": "workspace:*",
     "conversationalist": "workspace:*",
