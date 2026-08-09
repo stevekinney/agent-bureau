@@ -1,6 +1,12 @@
 import { $ } from 'bun';
 import { SveltePlugin } from 'bun-plugin-svelte';
 
+import {
+  assertComponentStylesBundled,
+  collectPublishedComponentStyles,
+  createCinderSpecifierRecorder,
+} from './style-contract';
+
 /**
  * Gateway build: one unified pipeline that emits both the server bundle and
  * the hydration client bundle, then writes a single `dist/manifest.json`
@@ -70,7 +76,10 @@ if (!serverResult.success) {
 // `target: 'browser'` makes the Svelte plugin emit `generate: 'client'`.
 // Bundle the Svelte runtime and Cinder's component graph because browsers
 // cannot resolve bare specifiers. Component CSS flows through this pass's
-// CSS outputs.
+// CSS outputs, and the recorder notes which Cinder entrypoints the graph
+// reached so the style contract below can be checked against them.
+const cinderSpecifiers = createCinderSpecifierRecorder();
+
 const clientResult = await Bun.build({
   entrypoints: ['./src/client/entry.ts'],
   outdir: './dist/public',
@@ -80,7 +89,7 @@ const clientResult = await Bun.build({
   naming: '[name]-[hash].[ext]',
   sourcemap: 'external',
   minify: true,
-  plugins: [SveltePlugin()],
+  plugins: [SveltePlugin(), cinderSpecifiers.plugin],
 });
 
 if (!clientResult.success) {
@@ -127,14 +136,22 @@ for (const path of stylePaths) {
   cssBundle += '\n';
 }
 
-// These selectors come from components rendered by the Gateway client. Keep
-// this check in the production build so missing Cinder side effects fail the
-// artifact-producing path itself rather than a second, test-only Svelte build.
-for (const selector of ['.cinder-card', '.cinder-textarea']) {
-  if (!cssBundle.includes(selector)) {
-    throw new Error(`Client CSS bundle is missing required selector: ${selector}`);
-  }
-}
+// Guard the artifact-producing path itself — not a second, test-only Svelte
+// build — against Cinder component CSS silently dropping out of the client
+// graph. Every Cinder component the client build resolved must have its
+// published `<component>/styles` CSS represented in the emitted stylesheet,
+// measured through Cinder's public `cinder.components` cascade layer. Cinder's
+// base entrypoint is excluded from that set so its own component-layer CSS
+// cannot stand in for the component CSS this check exists to find. See
+// scripts/style-contract.ts for why this replaced literal class-name checks.
+const census = await collectPublishedComponentStyles({
+  specifiers: cinderSpecifiers.specifiers,
+  resolveFrom: import.meta.dir,
+});
+const styleAudit = assertComponentStylesBundled({
+  bundleCss: cssBundle,
+  published: census.published,
+});
 
 await Bun.write('./dist/public/styles.css', cssBundle);
 manifest['styles.css'] = '/public/styles.css';
@@ -152,5 +169,19 @@ console.log(
   'client +',
   stylePaths.length,
   'app sources',
+);
+console.log(
+  '  Cinder component layer:',
+  `${styleAudit.bundle.blocks} blocks / ${styleAudit.bundle.size} chars,`,
+  'verified against',
+  styleAudit.present.length,
+  'published Cinder component stylesheet(s)',
+);
+console.log(
+  '  Cinder components without component-layer CSS:',
+  census.withoutComponentLayer.length,
+  'empty sidecar(s),',
+  census.withoutStylesheet.length,
+  'with no published stylesheet',
 );
 console.log('  Manifest:', Object.keys(manifest).length, 'entries');
