@@ -3,3 +3,11 @@
 
 [run]
 bun = true
+
+[test]
+# `bun test packages/gateway/...` from the repo root does not pick up
+# packages/gateway/bunfig.toml, so the Svelte runtime loader that Gateway's SSR
+# tests rely on never registers and those tests fail with 500s. Registering it
+# here makes root-level runs behave like `turbo run test`. Packages without
+# `.svelte` files are unaffected — the plugin only claims `.svelte` imports.
+preload = ["./packages/gateway/scripts/svelte-preload.ts"]
