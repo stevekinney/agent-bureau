@@ -743,8 +743,14 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
       ...options,
       signal: options?.signal ? AbortSignal.any([options.signal, emitter.signal]) : emitter.signal,
     };
-    emitter.addEventListener(type, listener as EventListener, mergedOptions);
-    return () => emitter.removeEventListener(type, listener as EventListener, options);
+    // Async listeners are fire-and-forget by contract. Wrap so the returned
+    // promise is explicitly discarded instead of being handed to a slot that
+    // expects a void return, and keep one stable reference so removal works.
+    const wrapped = (event: ToolboxEventMap[K]): void => {
+      void listener(event);
+    };
+    emitter.addEventListener(type, wrapped, mergedOptions);
+    return () => emitter.removeEventListener(type, wrapped, options);
   };
 
   function complete() {
@@ -1080,7 +1086,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
               }
             : {};
 
-        const result = await tool.execute(toolCall as ToolCallWithArguments, executeOptions);
+        const result = await tool.execute(toolCall, executeOptions);
         if (result.pendingApproval && approvalSecret) {
           result.pendingApproval.approvalToken = signPendingApproval(result.pendingApproval);
         }
@@ -1461,7 +1467,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
       if (isPromise(created)) {
         return created.then((tool) => {
           legacyApi.register(tool.configuration);
-          return (getTool(tool.name) ?? tool) as Tool;
+          return getTool(tool.name) ?? tool;
         }) as ReturnType<typeof createToolFactory>;
       }
       legacyApi.register(created.configuration);
@@ -1576,8 +1582,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
       options.diagnostics = configuration.diagnostics;
     }
     const configIdempotencyKey = (configuration as Record<string, unknown>)['idempotencyKey'] as
-      | ((input: unknown) => string)
-      | undefined;
+      ((input: unknown) => string) | undefined;
     if (configIdempotencyKey) {
       options.idempotencyKey = configIdempotencyKey;
     }
@@ -1589,7 +1594,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
       ToolMetadata | undefined,
       ToolContext<ToolEventsMap>,
       unknown
-    >(options) as unknown as Tool;
+    >(options);
   }
 
   function normalizeConfiguration(configuration: ToolConfiguration): ToolConfiguration {
@@ -1686,7 +1691,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
     if (!options.getTool) {
       return configuration;
     }
-    const execute = options.getTool(configuration as Omit<ToolConfiguration, 'execute'>);
+    const execute = options.getTool(configuration);
     return { ...configuration, execute };
   }
 

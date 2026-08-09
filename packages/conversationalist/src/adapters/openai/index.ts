@@ -94,10 +94,7 @@ export interface OpenAIToolMessage {
  * OpenAI message format for the Chat Completions API.
  */
 export type OpenAIMessage =
-  | OpenAISystemMessage
-  | OpenAIUserMessage
-  | OpenAIAssistantMessage
-  | OpenAIToolMessage;
+  OpenAISystemMessage | OpenAIUserMessage | OpenAIAssistantMessage | OpenAIToolMessage;
 
 /**
  * Converts internal multi-modal content to OpenAI content parts format.
@@ -133,7 +130,7 @@ function toOpenAIContent(
     return parts[0].text;
   }
 
-  return allowImages ? parts : (parts as OpenAITextContentPart[]);
+  return allowImages ? parts : parts;
 }
 
 /**

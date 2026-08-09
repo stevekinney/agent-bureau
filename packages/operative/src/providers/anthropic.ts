@@ -1,4 +1,3 @@
-import type { AnthropicContentBlock } from 'armorer/adapters/anthropic';
 import { parseAnthropicToolCalls } from 'armorer/adapters/anthropic';
 import type { ConversationHistory, Message, MessageInput } from 'conversationalist';
 import { appendMessages, createProjection } from 'conversationalist';
@@ -188,9 +187,7 @@ export function createAnthropicProvider(options: AnthropicProviderOptions): Gene
         }
       }
 
-      const toolCalls = parseAnthropicToolCalls(
-        response.content as unknown as AnthropicContentBlock[],
-      );
+      const toolCalls = parseAnthropicToolCalls(response.content);
 
       const usage = response.usage ? buildAnthropicUsage(response.usage) : undefined;
 

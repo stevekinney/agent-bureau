@@ -16,10 +16,10 @@
     "bureau": "workspace:*",
     "conversationalist": "workspace:*",
     "@lostgradient/operative": "workspace:*",
-    "zod": "^4.4.1"
+    "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@anthropic-ai/sdk": "^0.71.2",
-    "@types/bun": "^1.3.9"
+    "@anthropic-ai/sdk": "^0.116.0",
+    "@types/bun": "^1.3.14"
   }
 }

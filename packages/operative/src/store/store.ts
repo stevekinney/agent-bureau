@@ -167,7 +167,7 @@ export function createStore(options: StoreOptions = {}): Store {
             const snapshot = stepEvent.conversation.snapshot();
             updated = {
               ...updated,
-              steps: [...updated.steps, stepEvent as unknown as StepResult],
+              steps: [...updated.steps, stepEvent],
               snapshots: [...updated.snapshots, snapshot],
             };
             break;
@@ -220,8 +220,7 @@ export function createStore(options: StoreOptions = {}): Store {
   }
 
   type StoreEventObserverOrNext<K extends StoreEventType> =
-    | Observer<StoreEventMap[K]>
-    | ((value: StoreEventMap[K]) => void);
+    Observer<StoreEventMap[K]> | ((value: StoreEventMap[K]) => void);
 
   function subscribe(listener: StoreListener): Unsubscribe;
   function subscribe<K extends StoreEventType>(

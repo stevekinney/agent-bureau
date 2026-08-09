@@ -1,5 +1,3 @@
-import { z } from 'zod';
-
 import type { AnyTool, ComposedTool, InferToolInput, InferToolOutput } from '../compose-types';
 import { createTool, type CreateToolOptions } from '../create-tool';
 import type { DefaultToolEvents, ToolContext, ToolMetadata } from '../is-tool';
@@ -72,7 +70,7 @@ export function postprocess<TTool extends AnyTool, TNewOutput>(
   } = {
     name,
     description,
-    input: tool.input as z.ZodType<InferToolInput<TTool>>,
+    input: tool.input,
     async execute(params, context) {
       return runPostprocess(params, context);
     },

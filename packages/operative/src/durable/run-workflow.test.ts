@@ -31,7 +31,7 @@ const nextTool = createTool({
 
 /** A toolbox with one no-op `next` tool that lets a run take multiple steps. */
 function continuingToolbox(): RegistryToolbox {
-  return createToolbox([nextTool]) as RegistryToolbox;
+  return createToolbox([nextTool]);
 }
 
 /**
@@ -523,7 +523,7 @@ describe('durable agentRun workflow', () => {
         execute: async (params) => {
           if (depsContainer.ref) {
             depsContainer.ref.pendingWakeup = {
-              duration: (params as { duration: number }).duration,
+              duration: params.duration,
               note: 'check later',
             };
           }
@@ -869,7 +869,7 @@ describe('durable agentRun workflow', () => {
         execute: async (params) => {
           if (depsA.ref) {
             depsA.ref.pendingHumanWait = {
-              signalName: (params as { signalName: string }).signalName,
+              signalName: params.signalName,
             };
           }
           return 'parked';
@@ -1014,7 +1014,7 @@ describe('durable agentRun workflow', () => {
         execute: async (params) => {
           if (depsA.ref) {
             depsA.ref.pendingWakeup = {
-              duration: (params as { duration: number }).duration,
+              duration: params.duration,
               note: 'wakeup note',
             };
           }
@@ -1135,7 +1135,7 @@ describe('durable agentRun workflow', () => {
         execute: async (params) => {
           if (depsContainer.ref) {
             depsContainer.ref.pendingHumanWait = {
-              signalName: (params as { signalName: string }).signalName,
+              signalName: params.signalName,
             };
           }
           return 'parked';
@@ -1260,7 +1260,7 @@ describe('durable agentRun workflow', () => {
         execute: async (params) => {
           if (depsContainer.ref) {
             depsContainer.ref.pendingWakeup = {
-              duration: (params as { duration: number }).duration,
+              duration: params.duration,
             };
           }
           return 'scheduled';
@@ -1275,7 +1275,7 @@ describe('durable agentRun workflow', () => {
         execute: async (params) => {
           if (depsContainer.ref) {
             depsContainer.ref.pendingHumanWait = {
-              signalName: (params as { signalName: string }).signalName,
+              signalName: params.signalName,
             };
           }
           return 'parked';
@@ -1373,7 +1373,7 @@ describe('durable agentRun workflow', () => {
         execute: async (params) => {
           if (depsContainer.ref) {
             depsContainer.ref.pendingWakeup = {
-              duration: (params as { duration: number }).duration,
+              duration: params.duration,
               note: 'check later',
             };
           }
@@ -1462,7 +1462,7 @@ describe('durable agentRun workflow', () => {
         execute: async (params) => {
           if (depsContainer.ref) {
             depsContainer.ref.pendingWakeup = {
-              duration: (params as { duration: number }).duration,
+              duration: params.duration,
               note: 'check later',
             };
           }
@@ -1525,7 +1525,7 @@ describe('durable agentRun workflow', () => {
         execute: async (params) => {
           if (depsContainer.ref) {
             depsContainer.ref.pendingWakeup = {
-              duration: (params as { duration: number }).duration,
+              duration: params.duration,
               note: 'check later',
             };
           }
@@ -1582,7 +1582,7 @@ describe('durable agentRun workflow', () => {
         execute: async (params) => {
           if (depsContainer.ref) {
             depsContainer.ref.pendingHumanWait = {
-              signalName: (params as { signalName: string }).signalName,
+              signalName: params.signalName,
             };
           }
           return 'parked';
@@ -1644,7 +1644,7 @@ describe('durable agentRun workflow', () => {
         execute: async (params) => {
           if (depsContainer.ref) {
             depsContainer.ref.pendingWakeup = {
-              duration: (params as { duration: number }).duration,
+              duration: params.duration,
               note: 'wake me later',
             };
           }

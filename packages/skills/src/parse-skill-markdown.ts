@@ -37,7 +37,7 @@ export function isValidSkillName(name: string): boolean {
 function extractFrontmatter(content: string): { data: Record<string, unknown>; body: string } {
   try {
     const result = matter(content);
-    return { data: result.data as Record<string, unknown>, body: result.content };
+    return { data: result.data, body: result.content };
   } catch (strictError) {
     // Lenient retry: wrap values containing unquoted colons in quotes
     try {
@@ -67,7 +67,7 @@ function extractFrontmatter(content: string): { data: Record<string, unknown>; b
       );
 
       const result = matter(fixedContent);
-      return { data: result.data as Record<string, unknown>, body: result.content };
+      return { data: result.data, body: result.content };
     } catch {
       throw new SkillParseError(
         'Failed to parse SKILL.md frontmatter',

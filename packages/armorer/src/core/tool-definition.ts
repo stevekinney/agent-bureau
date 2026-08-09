@@ -137,7 +137,7 @@ export function defineTool<
     ...(risk !== undefined ? { risk } : {}),
     ...(lifecycle !== undefined ? { lifecycle } : {}),
     ...(availability !== undefined ? { availability } : {}),
-    input: normalizedInput as z.ZodType<TInput>,
+    input: normalizedInput,
     ...(inputJsonSchema !== undefined ? { inputJsonSchema } : {}),
   };
 }

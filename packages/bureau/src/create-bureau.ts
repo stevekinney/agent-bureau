@@ -163,11 +163,7 @@ function appendConversationMessages(
  * `approval` — a 503 case). Only set on `NOT_CONFIGURED` errors.
  */
 export type BureauErrorNotConfiguredSubject =
-  | 'generate'
-  | 'scheduler'
-  | 'durable'
-  | 'persistence'
-  | 'approval';
+  'generate' | 'scheduler' | 'durable' | 'persistence' | 'approval';
 
 class BureauError extends Error {
   readonly code: 'NOT_FOUND' | 'CONFLICT' | 'NOT_CONFIGURED' | 'BAD_REQUEST' | 'RATE_LIMITED';
@@ -2119,7 +2115,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
             result !== null &&
             typeof result === 'object' &&
             'outcome' in result &&
-            (result as { outcome: unknown }).outcome === 'action_required'
+            result.outcome === 'action_required'
           ) {
             resolvedReviewIds.delete(review.id);
           }

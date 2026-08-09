@@ -269,8 +269,7 @@ export type EmbedderFunction = (text: string) => Promise<number[]>;
  * Configuration for the agent under evaluation.
  */
 export type EvaluationAgentConfiguration =
-  | RegistryAgent
-  | { generate: GenerateFunction; toolbox: AnyToolbox };
+  RegistryAgent | { generate: GenerateFunction; toolbox: AnyToolbox };
 
 /**
  * Options for creating an agent evaluation runner.

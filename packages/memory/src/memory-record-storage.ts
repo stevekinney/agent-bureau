@@ -69,8 +69,7 @@ export interface MemoryVectorSearchResult {
  * that created the record; duplicate callers receive the existing live record.
  */
 export type MemoryRecordPutOnceResult =
-  | { record: MemoryRecord; inserted: true }
-  | { record: MemoryRecord; inserted: false };
+  { record: MemoryRecord; inserted: true } | { record: MemoryRecord; inserted: false };
 
 /**
  * Persistence contract for memory records.

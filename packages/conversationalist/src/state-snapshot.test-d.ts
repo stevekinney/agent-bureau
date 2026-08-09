@@ -35,14 +35,7 @@ type Primitive = string | number | bigint | boolean | null | undefined;
 
 /** Structural stand-in for `$state.Cloneable` (the structuredClone-able builtins). */
 type Cloneable =
-  | ArrayBuffer
-  | DataView
-  | Date
-  | Error
-  | Map<unknown, unknown>
-  | RegExp
-  | Set<unknown>
-  | Blob;
+  ArrayBuffer | DataView | Date | Error | Map<unknown, unknown> | RegExp | Set<unknown> | Blob;
 
 type NonReactive<T> = T extends Date
   ? Date

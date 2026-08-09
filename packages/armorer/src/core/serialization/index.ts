@@ -70,8 +70,8 @@ export function serializeToolDefinition(
     description: definition.display.description,
     ...(definition.tags?.length ? { tags: [...definition.tags] } : {}),
     ...(normalizedMetadata ? { metadata: normalizedMetadata } : {}),
-    ...(normalizedRisk ? { risk: normalizedRisk as ToolRisk } : {}),
-    ...(normalizedLifecycle ? { lifecycle: normalizedLifecycle as ToolLifecycle } : {}),
+    ...(normalizedRisk ? { risk: normalizedRisk } : {}),
+    ...(normalizedLifecycle ? { lifecycle: normalizedLifecycle } : {}),
     aliases: options?.aliases ? [...options.aliases].sort() : [],
     input,
   };

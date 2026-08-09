@@ -2,7 +2,7 @@ import { Conversation } from 'conversationalist';
 
 import type { RunResult } from '../types';
 import type { Scheduler } from './create-scheduler';
-import type { SchedulerPriority, SchedulerTask } from './types';
+import type { SchedulerPriority, SchedulerRunOptions, SchedulerTask } from './types';
 
 /**
  * Options for creating a chunked background task.
@@ -79,11 +79,14 @@ export function createChunkedTask<TState>(
               }
               return { content: '', toolCalls: [] };
             },
+            // A chunk never dispatches a tool, so this stub covers only the
+            // three members the loop touches. The cast records that the rest
+            // of the Toolbox surface is deliberately absent rather than missed.
             toolbox: {
               tools: () => [],
               execute: () => Promise.resolve([]),
               toObservable: () => ({ subscribe: () => ({ unsubscribe: () => {} }) }),
-            } as never,
+            } as unknown as SchedulerRunOptions['toolbox'],
             conversation: new Conversation(),
             maximumSteps: 1,
           };

@@ -160,14 +160,12 @@ export function createScratchpad(options?: CreateScratchpadOptions): Scratchpad 
       events.dispatch(new ScratchpadClearedEvent(previousEntries));
     },
 
-    addEventListener: events.addEventListener.bind(events) as Scratchpad['addEventListener'],
-    removeEventListener: events.removeEventListener.bind(
-      events,
-    ) as Scratchpad['removeEventListener'],
+    addEventListener: events.addEventListener.bind(events),
+    removeEventListener: events.removeEventListener.bind(events),
     on: events.on.bind(events) as Scratchpad['on'],
     once: events.once.bind(events) as Scratchpad['once'],
     subscribe: events.subscribe.bind(events) as Scratchpad['subscribe'],
-    toObservable: events.toObservable.bind(events) as Scratchpad['toObservable'],
+    toObservable: events.toObservable.bind(events),
   };
 }
 

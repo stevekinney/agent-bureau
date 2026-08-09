@@ -17,15 +17,28 @@ export function toJSONValue(value: unknown): JSONValue {
     return value.map((item) => toJSONValue(item));
   }
 
-  if (value && typeof value === 'object') {
+  // `null` returned above, so this is a non-null, non-array object.
+  if (typeof value === 'object') {
     const record: Record<string, JSONValue> = {};
-    for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    for (const [key, entry] of Object.entries(value)) {
       record[key] = toJSONValue(entry);
     }
     return record;
   }
 
-  return String(value as string);
+  // Only `undefined`, `bigint`, `symbol`, and functions remain — none are JSON
+  // values, so they degrade to their string form rather than silently vanish.
+  // Each is narrowed explicitly so the call resolves to that type's own
+  // `toString`, never `Object.prototype.toString`.
+  if (typeof value === 'bigint' || typeof value === 'symbol' || typeof value === 'function') {
+    return value.toString();
+  }
+
+  // Every other `typeof` result is handled above, so only `undefined` reaches
+  // here. The compiler still sees `unknown` — narrowing `unknown` only refines
+  // the positive branch — so return the string form directly instead of
+  // calling `String` on a value whose type says it could be anything.
+  return 'undefined';
 }
 
 /**

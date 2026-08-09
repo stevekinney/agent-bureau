@@ -5,10 +5,9 @@ import type { BaseProviderOptions } from '../types.ts';
  * stopSequences is omitted when it is an empty array.
  */
 export type ResolvedCommonParameters = {
-  [K in keyof Pick<
-    BaseProviderOptions,
-    'maximumTokens' | 'temperature' | 'topP' | 'stopSequences'
-  >]?: NonNullable<BaseProviderOptions[K]>;
+  [
+    K in keyof Pick<BaseProviderOptions, 'maximumTokens' | 'temperature' | 'topP' | 'stopSequences'>
+  ]?: NonNullable<BaseProviderOptions[K]>;
 };
 
 /**

@@ -36,14 +36,7 @@ export type OpenAPIOperation = {
 
 /** HTTP methods that can appear under an OpenAPI path item. */
 export type OpenAPIHttpMethod =
-  | 'get'
-  | 'put'
-  | 'post'
-  | 'delete'
-  | 'options'
-  | 'head'
-  | 'patch'
-  | 'trace';
+  'get' | 'put' | 'post' | 'delete' | 'options' | 'head' | 'patch' | 'trace';
 
 export type OpenAPIPathItem = Partial<Record<OpenAPIHttpMethod, OpenAPIOperation>> & {
   /** May contain Reference Objects pointing at `#/components/parameters/...`. */

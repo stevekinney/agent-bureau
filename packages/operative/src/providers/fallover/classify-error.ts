@@ -47,7 +47,7 @@ function extractFullMessage(error: unknown): string {
       parts.push(error.cause.message);
     }
   } else if (error && typeof error === 'object' && 'message' in error) {
-    const message = (error as { message: unknown }).message;
+    const message = error.message;
     if (typeof message === 'string') parts.push(message);
   }
 

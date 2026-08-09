@@ -64,7 +64,13 @@ export function getStatistics(conversation: Conversation): {
   withImages: number;
 } {
   const ordered = getOrderedMessages(conversation);
-  const stats = ordered.reduce(
+  // The accumulator is annotated explicitly: inferring it from the seed makes
+  // `byRole` an empty object type, so indexing it by role yields an error type.
+  const stats = ordered.reduce<{
+    byRole: Record<string, number>;
+    hidden: number;
+    withImages: number;
+  }>(
     (acc, message) => {
       const byRole = {
         ...acc.byRole,
@@ -77,7 +83,7 @@ export function getStatistics(conversation: Conversation): {
         withImages: acc.withImages + (messageHasImages(message) ? 1 : 0),
       };
     },
-    { byRole: {} as Record<string, number>, hidden: 0, withImages: 0 },
+    { byRole: {}, hidden: 0, withImages: 0 },
   );
   return { total: ordered.length, ...stats };
 }

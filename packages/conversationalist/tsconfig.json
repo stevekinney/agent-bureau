@@ -6,7 +6,6 @@
     "declarationMap": true,
     "declarationDir": "dist",
     "tsBuildInfoFile": "node_modules/.cache/tsconfig.tsbuildinfo",
-    "baseUrl": ".",
     "rootDir": ".",
     "paths": {
       "@/*": ["./src/*"]

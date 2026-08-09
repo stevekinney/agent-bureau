@@ -1081,7 +1081,7 @@ describe('createBureau', () => {
           toolbox,
           options: {
             generate: async () => new Promise<never>(() => {}),
-            toolbox: toolbox as never,
+            toolbox: toolbox,
             conversation: createConversationHistory(),
             stopWhen: stopWhen.noToolCalls(),
           },
@@ -1167,7 +1167,7 @@ describe('createBureau', () => {
           toolbox,
           options: {
             generate: async () => new Promise<never>(() => {}),
-            toolbox: toolbox as never,
+            toolbox: toolbox,
             conversation: createConversationHistory(),
             stopWhen: stopWhen.noToolCalls(),
           },
@@ -2848,7 +2848,7 @@ describe('createBureau scheduler-origin crash semantics (#25)', () => {
       const legacyRunId = 'scheduler-run-legacy-untagged-9';
       const composition = await createRuntimeComposition({
         generate: async () => new Promise<never>(() => {}), // hang so it stays in flight
-        toolbox: createToolbox([]) as unknown as Toolbox,
+        toolbox: createToolbox([]),
         storage: { type: 'sqlite', path: databasePath },
         durableExecution: true,
       });
@@ -2868,7 +2868,7 @@ describe('createBureau scheduler-origin crash semantics (#25)', () => {
           tags: [SCHEDULER_ORIGIN_TAG],
           options: {
             generate: async () => new Promise<never>(() => {}),
-            toolbox: createToolbox([]) as unknown as Toolbox,
+            toolbox: createToolbox([]),
             conversation: new Conversation(),
             stopWhen: stopWhen.noToolCalls(),
           },
@@ -2882,7 +2882,7 @@ describe('createBureau scheduler-origin crash semantics (#25)', () => {
           // NO tags — legacy residue from before SCHEDULER_ORIGIN_TAG existed.
           options: {
             generate: async () => new Promise<never>(() => {}),
-            toolbox: createToolbox([]) as unknown as Toolbox,
+            toolbox: createToolbox([]),
             conversation: new Conversation(),
             stopWhen: stopWhen.noToolCalls(),
           },
@@ -3434,13 +3434,11 @@ function createParkedActiveRun(): {
   const activeRun: ActiveRun = {
     result: new Promise<never>(() => {}),
     abort: () => {},
-    addEventListener: emitter.addEventListener.bind(emitter) as ActiveRun['addEventListener'],
-    removeEventListener: emitter.removeEventListener.bind(
-      emitter,
-    ) as ActiveRun['removeEventListener'],
-    on: emitter.on.bind(emitter) as ActiveRun['on'],
-    once: emitter.once.bind(emitter) as ActiveRun['once'],
-    subscribe: emitter.subscribe.bind(emitter) as ActiveRun['subscribe'],
+    addEventListener: emitter.addEventListener.bind(emitter),
+    removeEventListener: emitter.removeEventListener.bind(emitter),
+    on: emitter.on.bind(emitter),
+    once: emitter.once.bind(emitter),
+    subscribe: emitter.subscribe.bind(emitter),
     events: emitter.events.bind(emitter) as ActiveRun['events'],
     toObservable: emitter.toObservable.bind(emitter),
     complete: emitter.complete.bind(emitter),

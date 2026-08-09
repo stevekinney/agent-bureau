@@ -586,7 +586,7 @@ function parseMarkdownWithMetadata(trimmed: string): Conversation {
   }
 
   const frontmatter = stripUnknownFrontmatterKeys(
-    parsed.data as Record<string, unknown>,
+    parsed.data,
   ) as unknown as ConversationFrontmatter;
   const body = parsed.content.trim();
 
@@ -648,7 +648,7 @@ function parseMarkdownWithMetadata(trimmed: string): Conversation {
       };
     }
 
-    messages.push(toReadonly(message) as Message);
+    messages.push(toReadonly(message));
   }
 
   const conversation: Conversation = {
@@ -663,7 +663,7 @@ function parseMarkdownWithMetadata(trimmed: string): Conversation {
     updatedAt: frontmatter.updatedAt,
   };
 
-  return toReadonly(conversation) as Conversation;
+  return toReadonly(conversation);
 }
 
 /**
@@ -697,7 +697,7 @@ function parseMarkdownSimple(body: string): Conversation {
       hidden: false,
     };
 
-    messages.push(toReadonly(message) as Message);
+    messages.push(toReadonly(message));
     position++;
   }
 
@@ -712,5 +712,5 @@ function parseMarkdownSimple(body: string): Conversation {
     updatedAt: now,
   };
 
-  return toReadonly(conversation) as Conversation;
+  return toReadonly(conversation);
 }

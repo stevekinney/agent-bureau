@@ -310,7 +310,7 @@ describe('formatOpenAIToolResultsAsync', () => {
       result: { ok: true },
     };
 
-    const messages = await formatOpenAIToolResultsAsync(result as any);
+    const messages = await formatOpenAIToolResultsAsync(result);
     expect(messages).toEqual([
       {
         role: 'tool',
@@ -341,7 +341,7 @@ describe('formatOpenAIToolResultsAsync', () => {
       },
     };
 
-    const messages = await formatOpenAIToolResultsAsync(result as any);
+    const messages = await formatOpenAIToolResultsAsync(result);
     expect(messages).toEqual([
       {
         role: 'tool',
@@ -366,7 +366,7 @@ describe('formatOpenAIToolResultsAsync', () => {
       },
     };
 
-    const messages = await formatOpenAIToolResultsAsync(result as any);
+    const messages = await formatOpenAIToolResultsAsync(result);
     expect(messages).toEqual([
       {
         role: 'tool',

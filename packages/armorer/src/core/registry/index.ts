@@ -194,9 +194,7 @@ export type ToolQuery<TTool extends ToolDefinition = ToolDefinition> = ToolQuery
 export type QueryResult<TTool extends ToolDefinition = ToolDefinition> = TTool[];
 
 export type QuerySelectionResult<TTool extends ToolDefinition = ToolDefinition> =
-  | TTool[]
-  | string[]
-  | ToolSummary<TTool>[];
+  TTool[] | string[] | ToolSummary<TTool>[];
 
 export type ToolSearchRank = {
   /** Prefer tools with these tags. */
@@ -253,9 +251,7 @@ export type ToolRanker<TTool extends ToolDefinition = ToolDefinition> = (
 export type ToolSearchRanker<TTool extends ToolDefinition = ToolDefinition> = ToolRanker<TTool>;
 
 export type ToolTieBreaker<TTool extends ToolDefinition = ToolDefinition> =
-  | 'name'
-  | 'none'
-  | ((a: ToolMatch<TTool>, b: ToolMatch<TTool>) => number);
+  'name' | 'none' | ((a: ToolMatch<TTool>, b: ToolMatch<TTool>) => number);
 
 export type ToolSearchOptions<TTool extends ToolDefinition = ToolDefinition> = {
   /** Filter tools before ranking. */
@@ -293,10 +289,7 @@ export type ToolRegistryLike<TTool extends ToolDefinition = ToolDefinition> = {
 };
 
 export type ToolQueryInput<TTool extends ToolDefinition = ToolDefinition> =
-  | TTool
-  | ToolRegistryLike<TTool>
-  | Iterable<TTool>
-  | readonly TTool[];
+  TTool | ToolRegistryLike<TTool> | Iterable<TTool> | readonly TTool[];
 
 export type { Embedder, EmbeddingEntry, EmbeddingVector };
 
@@ -612,7 +605,7 @@ function resolveTools(input: ToolQueryInput): {
   };
 
   if (isToolRegistry(input)) {
-    const embedder = getRegistryEmbedder(input as object);
+    const embedder = getRegistryEmbedder(input);
     const tools = input.tools();
     const registry = input as object;
     const dispatchEvent = input.dispatchEvent
@@ -2381,7 +2374,7 @@ function metadataContains(
         if (!arrayValue.includes(needle)) return false;
       }
     } else if (Array.isArray(needle)) {
-      if (!needle.includes(value as MetadataPrimitive)) return false;
+      if (!needle.includes(value)) return false;
     } else {
       if (value !== needle) return false;
     }

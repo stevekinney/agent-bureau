@@ -61,9 +61,9 @@ export function createConversationRecorder(conversation: Conversation): Conversa
     events.push(event);
   };
 
-  conversation.addEventListener('change', changeHandler as any);
-  conversation.addEventListener('push', pushHandler as any);
-  conversation.addEventListener('undo', undoHandler as any);
+  conversation.addEventListener('change', changeHandler);
+  conversation.addEventListener('push', pushHandler);
+  conversation.addEventListener('undo', undoHandler);
 
   return {
     events,
@@ -71,9 +71,9 @@ export function createConversationRecorder(conversation: Conversation): Conversa
       events.length = 0;
     },
     [Symbol.dispose]: () => {
-      conversation.removeEventListener('change', changeHandler as any);
-      conversation.removeEventListener('push', pushHandler as any);
-      conversation.removeEventListener('undo', undoHandler as any);
+      conversation.removeEventListener('change', changeHandler);
+      conversation.removeEventListener('push', pushHandler);
+      conversation.removeEventListener('undo', undoHandler);
     },
   } as ConversationRecorder;
 }

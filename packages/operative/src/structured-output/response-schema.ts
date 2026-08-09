@@ -31,8 +31,7 @@ export function isNonZodStandardResponseSchema(
 }
 
 export type ResponseSchemaValidationResult =
-  | { success: true; value: unknown }
-  | { success: false; error: unknown };
+  { success: true; value: unknown } | { success: false; error: unknown };
 
 /**
  * Validates `input` (the model's parsed structured output) against a

@@ -25,9 +25,9 @@ Add `toolChoice` to all provider option types:
 
 ```typescript
 type ToolChoice =
-  | 'auto'      // Model decides (current default behavior)
-  | 'required'  // Model MUST call at least one tool
-  | 'none'      // Model must NOT call any tools
+  | 'auto' // Model decides (current default behavior)
+  | 'required' // Model MUST call at least one tool
+  | 'none' // Model must NOT call any tools
   | { tool: string }; // Model must call this specific tool
 
 interface BaseProviderOptions {
@@ -53,8 +53,8 @@ Add `responseFormat` to provider options for native structured output:
 
 ```typescript
 type ResponseFormat =
-  | { type: 'text' }       // Default, no constraints
-  | { type: 'json' }       // Force JSON output (OpenAI json_mode)
+  | { type: 'text' } // Default, no constraints
+  | { type: 'json' } // Force JSON output (OpenAI json_mode)
   | { type: 'json_schema'; schema: Record<string, unknown>; name?: string }; // Strict schema
 
 interface BaseProviderOptions {
@@ -86,6 +86,7 @@ interface GenerateContext {
 ```
 
 This enables patterns like:
+
 - Step 0: `toolChoice: { tool: 'search' }` — force the agent to search first
 - Step N (final): `toolChoice: 'none'` — force a text-only summary
 

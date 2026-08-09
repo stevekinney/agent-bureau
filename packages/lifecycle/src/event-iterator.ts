@@ -43,7 +43,7 @@ export function eventIterator<E extends Event>(
     if (resolve) {
       const pending = resolve;
       resolve = null;
-      pending({ value: undefined as unknown as E, done: true });
+      pending({ value: undefined, done: true });
     }
   }
 

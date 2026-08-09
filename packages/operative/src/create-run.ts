@@ -1,6 +1,6 @@
 import type { ToolboxEventMap } from 'armorer';
 import { Conversation, isConversation } from 'conversationalist';
-import type { ForwardableSource, ObservableLike, Observer, Subscription } from 'lifecycle';
+import type { ObservableLike, Observer, Subscription } from 'lifecycle';
 import { CompletableEventTarget, forwardEvents } from 'lifecycle';
 
 import type { DurableActiveRunContext } from './durable/active-run-adapter';
@@ -53,8 +53,7 @@ export interface ActiveRun {
   subscribe: <K extends CombinedOperativeEventType>(
     type: K,
     observerOrNext?:
-      | Observer<CombinedOperativeEventMap[K]>
-      | ((value: CombinedOperativeEventMap[K]) => void),
+      Observer<CombinedOperativeEventMap[K]> | ((value: CombinedOperativeEventMap[K]) => void),
     error?: (err: unknown) => void,
     complete?: () => void,
   ) => Subscription;
@@ -137,18 +136,10 @@ export function createActiveRun(options: RunOptions, durable?: DurableRunRouting
 
   const cleanups: (() => void)[] = [];
 
-  const toolboxForward = forwardEvents(
-    options.toolbox as unknown as ForwardableSource,
-    emitter,
-    'toolbox',
-  );
+  const toolboxForward = forwardEvents(options.toolbox, emitter, 'toolbox');
   cleanups.push(() => toolboxForward.stop());
 
-  const conversationForward = forwardEvents(
-    conversation as unknown as ForwardableSource,
-    emitter,
-    'conversation',
-  );
+  const conversationForward = forwardEvents(conversation, emitter, 'conversation');
   cleanups.push(() => conversationForward.stop());
 
   // C3 — curated tool.* bubble events stamped with {agentName, runId, step}.
@@ -279,15 +270,13 @@ export function createActiveRun(options: RunOptions, durable?: DurableRunRouting
   return {
     result,
     abort,
-    addEventListener: emitter.addEventListener.bind(emitter) as ActiveRun['addEventListener'],
-    removeEventListener: emitter.removeEventListener.bind(
-      emitter,
-    ) as ActiveRun['removeEventListener'],
-    on: emitter.on.bind(emitter) as ActiveRun['on'],
-    once: emitter.once.bind(emitter) as ActiveRun['once'],
-    subscribe: emitter.subscribe.bind(emitter) as ActiveRun['subscribe'],
+    addEventListener: emitter.addEventListener.bind(emitter),
+    removeEventListener: emitter.removeEventListener.bind(emitter),
+    on: emitter.on.bind(emitter),
+    once: emitter.once.bind(emitter),
+    subscribe: emitter.subscribe.bind(emitter),
     events: emitter.events.bind(emitter) as ActiveRun['events'],
-    toObservable: emitter.toObservable.bind(emitter) as ActiveRun['toObservable'],
+    toObservable: emitter.toObservable.bind(emitter),
     complete,
     [Symbol.dispose](): void {
       abort();

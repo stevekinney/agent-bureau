@@ -53,10 +53,7 @@ interface CacheMissEvent {
   duration: number; // ms the generate call took
 }
 
-function withCache(
-  generate: GenerateFunction,
-  options: CacheOptions,
-): GenerateFunction;
+function withCache(generate: GenerateFunction, options: CacheOptions): GenerateFunction;
 ```
 
 ### PR-2: Cache Key Strategies

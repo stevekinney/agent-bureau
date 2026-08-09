@@ -72,6 +72,7 @@ When `action` is `'block'`, the hook returns a `GenerateResponse` with a refusal
 Ship detectors for common threat patterns:
 
 **Prompt injection detector**: Pattern-matching for known injection techniques:
+
 - System prompt override attempts (`"ignore previous instructions"`, `"you are now"`, `"new instructions:"`)
 - Role confusion attacks (`"as an AI language model"`, `"[SYSTEM]"`, delimiter injection)
 - Encoding-based attacks (base64-encoded instructions, unicode smuggling)

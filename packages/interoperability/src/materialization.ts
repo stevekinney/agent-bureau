@@ -128,7 +128,9 @@ function normalizeJSONValue(value: unknown): JSONValue {
   } catch {
     try {
       const serialized = JSON.stringify(value);
-      return serialized === undefined ? stringifyNonJSON(value) : (JSON.parse(serialized) as JSONValue);
+      return serialized === undefined
+        ? stringifyNonJSON(value)
+        : (JSON.parse(serialized) as JSONValue);
     } catch {
       return stringifyNonJSON(value);
     }

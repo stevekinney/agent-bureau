@@ -655,18 +655,14 @@ export function createSessionHandle(
           abortController.abort(reason);
           activeInnerRun?.abort(reason);
         },
-        addEventListener: outerEmitter.addEventListener.bind(
-          outerEmitter,
-        ) as ActiveRun['addEventListener'],
-        removeEventListener: outerEmitter.removeEventListener.bind(
-          outerEmitter,
-        ) as ActiveRun['removeEventListener'],
-        on: outerEmitter.on.bind(outerEmitter) as ActiveRun['on'],
-        once: outerEmitter.once.bind(outerEmitter) as ActiveRun['once'],
-        subscribe: outerEmitter.subscribe.bind(outerEmitter) as ActiveRun['subscribe'],
+        addEventListener: outerEmitter.addEventListener.bind(outerEmitter),
+        removeEventListener: outerEmitter.removeEventListener.bind(outerEmitter),
+        on: outerEmitter.on.bind(outerEmitter),
+        once: outerEmitter.once.bind(outerEmitter),
+        subscribe: outerEmitter.subscribe.bind(outerEmitter),
         events: outerEmitter.events.bind(outerEmitter) as ActiveRun['events'],
-        toObservable: outerEmitter.toObservable.bind(outerEmitter) as ActiveRun['toObservable'],
-        complete: outerEmitter.complete.bind(outerEmitter) as ActiveRun['complete'],
+        toObservable: outerEmitter.toObservable.bind(outerEmitter),
+        complete: outerEmitter.complete.bind(outerEmitter),
         [Symbol.dispose](): void {
           // Mirror abort(): fire the outer AbortController (stops billing) and
           // forward to the inner run so engine.cancel() is also triggered for
@@ -723,10 +719,7 @@ export function createSessionHandle(
               { engine, checkpointStore },
               {
                 runId,
-                handle: recoveredHandle as {
-                  readonly id: string;
-                  result(): Promise<unknown>;
-                },
+                handle: recoveredHandle,
               },
             );
             const agentRun = createAgentRun(activeRun);

@@ -258,5 +258,5 @@ export function parallel(...tools: AnyTool[]): AnyTool {
     async execute(input: unknown, context: ToolContext<DefaultToolEvents>) {
       return runParallel(input, context);
     },
-  }) as AnyTool;
+  });
 }

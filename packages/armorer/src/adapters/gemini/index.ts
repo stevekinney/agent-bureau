@@ -148,7 +148,7 @@ function convertToGeminiFunctionDeclaration(
   return {
     name: tool.identity.name,
     description: tool.display.description,
-    parameters: transformToGeminiSchema(tool.input as Record<string, unknown>),
+    parameters: transformToGeminiSchema(tool.input),
   };
 }
 
@@ -170,7 +170,7 @@ function transformToGeminiSchema(schema: Record<string, unknown>): GeminiSchema 
   // Remove $schema if present to keep Gemini schema clean.
   const { $schema, ...rest } = schema;
 
-  return rest as GeminiSchema;
+  return rest;
 }
 
 function convertFunctionCallPart(part: GeminiFunctionCallPart): ToolCallInput {
@@ -249,9 +249,9 @@ function normalizeAsyncContent(chunks: unknown[]): ToolResultLike['content'] {
         typeof chunk === 'object',
     )
   ) {
-    return chunks as ToolResultLike['content'];
+    return chunks;
   }
-  return chunks.map((chunk) => String(chunk)) as ToolResultLike['content'];
+  return chunks.map((chunk) => String(chunk));
 }
 
 async function collectAsyncIterable(stream: AsyncIterable<unknown>): Promise<unknown[]> {

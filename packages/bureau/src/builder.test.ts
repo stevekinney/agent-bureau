@@ -435,7 +435,7 @@ describe('createBureau (builder) — tool registration', () => {
       .tools({
         add: {
           execute: async (params: { a: number; b: number }) => {
-            capturedArgs = params as Record<string, unknown>;
+            capturedArgs = params;
             return params.a + params.b;
           },
           input: z.object({ a: z.number(), b: z.number() }),
@@ -471,7 +471,7 @@ describe('createBureau (builder) — tool registration', () => {
       .tools({
         add: {
           execute: async (params: { a: number; b: number }) => {
-            capturedArgs = params as Record<string, unknown>;
+            capturedArgs = params;
             return params.a + params.b;
           },
           input: z.object({ a: z.number(), b: z.number() }),
@@ -514,7 +514,7 @@ describe('createBureau (builder) — tool registration', () => {
       .tools({
         add: {
           execute: async (params: { a: number; b: number }) => {
-            capturedArgs = params as Record<string, unknown>;
+            capturedArgs = params;
             return params.a + params.b;
           },
         } as unknown as typeof echoTool,

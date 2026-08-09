@@ -20,6 +20,29 @@ import type {
 } from './types.ts';
 
 /**
+ * The Gemini SDK models a response part as a single object with every field
+ * optional, while armorer's `GeminiPart` is a union whose variants each require
+ * their own field. Narrow the SDK shape into that union, dropping parts that
+ * carry neither text nor a function call.
+ */
+function toGeminiParts(
+  parts: ReadonlyArray<{
+    text?: string | undefined;
+    functionCall?: { name: string; args: Record<string, unknown> } | undefined;
+  }>,
+): GeminiPart[] {
+  const narrowed: GeminiPart[] = [];
+  for (const part of parts) {
+    if (part.functionCall) {
+      narrowed.push({ functionCall: part.functionCall });
+    } else if (part.text !== undefined) {
+      narrowed.push({ text: part.text });
+    }
+  }
+  return narrowed;
+}
+
+/**
  * Creates a GenerateFunction backed by the Google Gemini API.
  *
  * When no `client` (a GenerativeModel instance) is provided, dynamically
@@ -112,7 +135,7 @@ export function createGeminiProvider(options: GeminiProviderOptions): GenerateFu
         }
       }
 
-      const toolCalls = parseGeminiToolCalls(parts as unknown as GeminiPart[]);
+      const toolCalls = parseGeminiToolCalls(toGeminiParts(parts));
 
       const usageMetadata = result.response.usageMetadata;
       const usage = usageMetadata
@@ -245,7 +268,7 @@ export function createGeminiProviderStream(
             streaming.update(accumulatedText);
           }
           if (part.functionCall) {
-            accumulatedFunctionCallParts.push(part as unknown as GeminiPart);
+            accumulatedFunctionCallParts.push({ functionCall: part.functionCall });
           }
         }
 

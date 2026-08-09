@@ -120,7 +120,7 @@ function convertToAnthropic(tool: SerializedToolDefinition): AnthropicTool {
 
   const inputSchema: AnthropicTool['input_schema'] = {
     type: 'object',
-    properties: (params['properties'] ?? {}) as AnthropicTool['input_schema']['properties'],
+    properties: params['properties'] ?? {},
   };
 
   if (params['required']) {

@@ -61,7 +61,7 @@ export function everyNSteps<H extends (...args: any[]) => any>(n: number, hook: 
   return ((...args: unknown[]) => {
     const context = args[0] as { step?: number } | undefined;
     if (context && typeof context === 'object' && 'step' in context) {
-      const step = (context as { step?: number }).step;
+      const step = context.step;
       if (typeof step === 'number' && Number.isFinite(step) && step % n === 0) {
         // eslint-disable-next-line @typescript-eslint/no-unsafe-return
         return hook(...args);

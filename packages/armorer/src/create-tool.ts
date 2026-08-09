@@ -57,7 +57,6 @@ import type {
   ToolExecuteOptions,
   ToolExecuteWithOptions,
   ToolMetadata,
-  ToolParametersSchema,
   ToolPolicyAfterContext,
   ToolPolicyContext,
   ToolPolicyContextProvider,
@@ -165,12 +164,10 @@ export interface CreateToolOptions<
 export type SyncToolMetadataInput<M extends ToolMetadata | undefined> = M | (() => M);
 
 export type AsyncToolMetadataInput<M extends ToolMetadata | undefined> =
-  | Promise<M>
-  | (() => Promise<M>);
+  Promise<M> | (() => Promise<M>);
 
 export type ToolMetadataInput<M extends ToolMetadata | undefined> =
-  | SyncToolMetadataInput<M>
-  | AsyncToolMetadataInput<M>;
+  SyncToolMetadataInput<M> | AsyncToolMetadataInput<M>;
 
 type SchemaInput = z.ZodTypeAny | z.ZodRawShape;
 
@@ -496,7 +493,7 @@ export function createTool<
     assertJsonValue(toolInputJsonSchema, `Tool "${name}": inputSchema`);
   }
 
-  const customMetadata = resolvedMetadata ?? (undefined as M);
+  const customMetadata = resolvedMetadata ?? undefined;
   // NOTE: `defineTool` below calls `normalizeSchema(toolInput)` itself — do
   // not pre-normalize here too. `normalizeSchema` is idempotent for a plain
   // Zod object schema (a passthrough), but NOT for a wrapped Standard Schema
@@ -514,7 +511,7 @@ export function createTool<
   const emit = (type: string, detail: unknown) => {
     const cls = toolEventClassMap[type];
     if (cls) {
-      return emitter.dispatchEvent(new (cls as unknown as new (d: unknown) => Event)(detail));
+      return emitter.dispatchEvent(new cls(detail));
     }
     // For custom / unknown event types, dispatch a plain Event so listeners
     // that registered for arbitrary type strings still fire.
@@ -527,7 +524,7 @@ export function createTool<
     return emitter.dispatchEvent(event);
   };
 
-  const metadataValue = customMetadata ?? (undefined as M);
+  const metadataValue = customMetadata ?? undefined;
   const resolvedRisk = mergeRisk(metadataValue, risk);
   const normalizedTags = normalizeTagsWithRisk(tags, resolvedRisk, name);
   const telemetryEnabled = telemetry === true;
@@ -558,7 +555,7 @@ export function createTool<
     ...(toolInputJsonSchema !== undefined ? { inputJsonSchema: toolInputJsonSchema } : {}),
   }) as AnyToolDefinition;
 
-  const inputSchema = definition.input as unknown as ToolParametersSchema;
+  const inputSchema = definition.input;
   const schema = inputSchema;
   const typedSchema = inputSchema as unknown as z.ZodType<TInput>;
 
@@ -629,7 +626,7 @@ export function createTool<
   };
 
   const executeParams = async (params: TInput, options?: ToolExecuteOptions): Promise<TReturn> => {
-    const toolCall = createToolCall(name, normalizeToolContent(params)) as ToolCallWithArguments;
+    const toolCall = createToolCall(name, normalizeToolContent(params));
     const result = await executeCall(toolCall, options);
     const errorMessage = result.error?.message ?? result.errorMessage;
     if (errorMessage) {
@@ -731,7 +728,7 @@ export function createTool<
         errorMessage: toolError.message,
         errorCategory: toolError.category,
         inputDigest,
-      } as ToolExecutionResult;
+      };
     };
 
     if (options.signal?.aborted) {
@@ -816,7 +813,7 @@ export function createTool<
               metadata: normalizeToolContent(configuration.metadata ?? {}),
             },
             inputDigest,
-          } as ToolExecutionResult;
+          };
         }
       }
 
@@ -857,7 +854,7 @@ export function createTool<
           errorMessage: toolError.message,
           errorCategory: toolError.category,
           inputDigest,
-        } as ToolExecutionResult;
+        };
       }
       const meta: { toolName: string; callId?: string } = { toolName: name };
       if (typedToolCall.id) {
@@ -1039,7 +1036,7 @@ export function createTool<
             stream,
             executedArgumentsEdited,
             inputDigest,
-          } as ToolExecutionResult;
+          };
         }
 
         emit('stream-start', { mode: 'collect' });
@@ -1097,7 +1094,7 @@ export function createTool<
         executedArgumentsEdited,
         inputDigest,
         outputDigest,
-      } as ToolExecutionResult;
+      };
     } catch (error) {
       if (isAbortRejection(error)) {
         return handleCancellation(error.reason);
@@ -1195,7 +1192,7 @@ export function createTool<
         errorMessage: toolError.message,
         errorCategory: toolError.category,
         inputDigest,
-      } as ToolExecutionResult;
+      };
     }
   };
 
@@ -1298,11 +1295,11 @@ export function createTool<
       if (Object.prototype.hasOwnProperty.call(bag, prop)) {
         return bag[prop];
       }
-      return Reflect.get(target as object, prop, receiver as unknown as object) as unknown;
+      return Reflect.get(target, prop, receiver as unknown) as unknown;
     },
     has(_target, prop) {
       if (Object.prototype.hasOwnProperty.call(bag, prop)) return true;
-      return Reflect.has(callable as unknown as object, prop);
+      return Reflect.has(callable, prop);
     },
     apply(_target, _thisArg, argArray) {
       return callable(argArray[0]);
@@ -1327,11 +1324,7 @@ export function createTool<
   };
 
   bag['executeWith'] = (options: ToolExecuteWithOptions) => {
-    const toolCall = createToolCall(
-      name,
-      normalizeToolContent(options.params),
-      options.callId,
-    ) as ToolCallWithArguments;
+    const toolCall = createToolCall(name, normalizeToolContent(options.params), options.callId);
     const resolvedTimeout = options.timeout ?? timeout;
     const executeOptions: ToolExecuteOptions = {
       ...options,
@@ -1340,10 +1333,10 @@ export function createTool<
     return runWithConcurrency(() => executeInner(toolCall, executeOptions));
   };
 
-  const finalTool = tool as unknown as Tool<z.ZodType<TInput>, E, TReturn, M>;
+  const finalTool = tool;
 
   if (isTestRuntime() && hasLegacyRegister(legacyToolbox)) {
-    legacyToolbox.register(finalTool as unknown as Tool);
+    legacyToolbox.register(finalTool);
   }
 
   return finalTool as CreateToolReturn<
@@ -1830,8 +1823,7 @@ type ToolExecute<TInput, TOutput, TContext> = (
 ) => Promise<TOutput>;
 
 type LazyToolExecute<TInput, TOutput, TContext> =
-  | ToolExecute<TInput, TOutput, TContext>
-  | Promise<ToolExecute<TInput, TOutput, TContext>>;
+  ToolExecute<TInput, TOutput, TContext> | Promise<ToolExecute<TInput, TOutput, TContext>>;
 
 function createLazyExecuteResolver<TInput, TOutput, TContext>(
   execute: LazyToolExecute<TInput, TOutput, TContext>,

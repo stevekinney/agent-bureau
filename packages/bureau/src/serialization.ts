@@ -242,7 +242,7 @@ export function findRunAgentName(runState: {
       detail !== null &&
       typeof detail === 'object' &&
       'agentName' in detail &&
-      typeof (detail as { agentName: unknown }).agentName === 'string'
+      typeof detail.agentName === 'string'
     ) {
       return (detail as { agentName: string }).agentName;
     }

@@ -176,10 +176,7 @@ Add utilities for common hook patterns:
  * Creates a hook that only runs on specific steps.
  * Example: onlyOnStep(0, identityInjectionHook)
  */
-function onlyOnStep<H extends (...args: any[]) => any>(
-  step: number,
-  hook: H,
-): H;
+function onlyOnStep<H extends (...args: any[]) => any>(step: number, hook: H): H;
 
 /**
  * Creates a hook that runs at most once per run.
@@ -191,10 +188,7 @@ function runOnce<H extends (...args: any[]) => any>(hook: H): H;
  * Creates a hook that runs every N steps.
  * Useful for periodic tasks (e.g., save checkpoint every 5 steps).
  */
-function everyNSteps<H extends (...args: any[]) => any>(
-  n: number,
-  hook: H,
-): H;
+function everyNSteps<H extends (...args: any[]) => any>(n: number, hook: H): H;
 
 /**
  * Creates a hook with a timeout. If the hook doesn't resolve within
@@ -211,9 +205,7 @@ function withTimeout<H extends (...args: any[]) => any>(
  * For modifying hooks, the output of one is the input to the next.
  * For void hooks, all run in parallel.
  */
-function composeHooks<H extends (...args: any[]) => any>(
-  ...hooks: H[]
-): H;
+function composeHooks<H extends (...args: any[]) => any>(...hooks: H[]): H;
 ```
 
 ## Architecture
@@ -236,17 +228,17 @@ In `packages/operative/src/hooks/`:
 
 ### Hook Execution Semantics
 
-| Hook | Execution | Can Modify? | Error Handling |
-|---|---|---|---|
-| `beforeGenerate` | Sequential (waterfall) | Yes — return modified context | Error aborts step |
-| `afterGenerate` | Sequential (waterfall) | Yes — return modified response | Error aborts step |
-| `onLLMInput` | Parallel (`allSettled`) | No — read-only | Errors caught silently |
-| `onLLMOutput` | Parallel (`allSettled`) | No — read-only | Errors caught silently |
-| `onRunStart` | Sequential | No | Error aborts run |
-| `onRunComplete` | Parallel (`allSettled`) | No | Errors caught silently |
-| `onRunError` | Parallel (`allSettled`) | No | Errors caught silently |
-| `onRunAbort` | Parallel (`allSettled`) | No | Errors caught silently |
-| `onError` | Sequential (first-wins) | Yes — return action | Error propagates |
+| Hook             | Execution               | Can Modify?                    | Error Handling         |
+| ---------------- | ----------------------- | ------------------------------ | ---------------------- |
+| `beforeGenerate` | Sequential (waterfall)  | Yes — return modified context  | Error aborts step      |
+| `afterGenerate`  | Sequential (waterfall)  | Yes — return modified response | Error aborts step      |
+| `onLLMInput`     | Parallel (`allSettled`) | No — read-only                 | Errors caught silently |
+| `onLLMOutput`    | Parallel (`allSettled`) | No — read-only                 | Errors caught silently |
+| `onRunStart`     | Sequential              | No                             | Error aborts run       |
+| `onRunComplete`  | Parallel (`allSettled`) | No                             | Errors caught silently |
+| `onRunError`     | Parallel (`allSettled`) | No                             | Errors caught silently |
+| `onRunAbort`     | Parallel (`allSettled`) | No                             | Errors caught silently |
+| `onError`        | Sequential (first-wins) | Yes — return action            | Error propagates       |
 
 ## Implementation Order (TDD)
 

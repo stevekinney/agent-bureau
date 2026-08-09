@@ -11,7 +11,6 @@ import {
   startDurableRunResult,
 } from '@lostgradient/operative/durable';
 import { encode } from '@lostgradient/weft';
-import type { StorageConfiguration } from '@lostgradient/weft/storage';
 import { KEYS, MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
 import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
 import { createToolbox } from 'armorer';
@@ -492,7 +491,7 @@ describe('createRuntimeComposition durable execution', () => {
         prompt: 'Hello',
         options: {
           generate: async () => ({ content: 'durable result', toolCalls: [] }),
-          toolbox: createToolbox([], { context: {} }) as never,
+          toolbox: createToolbox([], { context: {} }),
           conversation: createConversationHistory(),
           // The durable driver honors RunOptions.stopWhen exactly like the
           // in-memory loop: settle on the first turn with no tool calls.
@@ -567,7 +566,7 @@ describe('createRuntimeComposition durable execution', () => {
           agentName: 'recovery-agent',
           options: {
             generate: async () => new Promise<never>(() => {}),
-            toolbox: createToolbox([], { context: {} }) as never,
+            toolbox: createToolbox([], { context: {} }),
             conversation: createConversationHistory(),
             stopWhen: stopWhen.noToolCalls(),
           },
@@ -689,7 +688,7 @@ describe('createRuntimeComposition durable execution', () => {
           sessionId: runId,
           options: {
             generate: async () => new Promise<never>(() => {}),
-            toolbox: createToolbox([], { context: {} }) as never,
+            toolbox: createToolbox([], { context: {} }),
             conversation: createConversationHistory(),
             stopWhen: stopWhen.noToolCalls(),
           },
@@ -771,7 +770,7 @@ describe('createRuntimeComposition durable execution', () => {
           tags: [SCHEDULER_ORIGIN_TAG],
           options: {
             generate: async () => new Promise<never>(() => {}),
-            toolbox: createToolbox([], { context: {} }) as never,
+            toolbox: createToolbox([], { context: {} }),
             conversation: createConversationHistory(),
             stopWhen: stopWhen.noToolCalls(),
           },
@@ -840,7 +839,7 @@ describe('createRuntimeComposition durable execution', () => {
           toolbox,
           options: {
             generate: async () => new Promise<never>(() => {}),
-            toolbox: toolbox as never,
+            toolbox: toolbox,
             conversation: createConversationHistory(),
             stopWhen: stopWhen.noToolCalls(),
           },
@@ -953,7 +952,7 @@ describe('createRuntimeComposition durable execution', () => {
           toolbox,
           options: {
             generate: async () => new Promise<never>(() => {}),
-            toolbox: toolbox as never,
+            toolbox: toolbox,
             conversation: createConversationHistory(),
             stopWhen: stopWhen.noToolCalls(),
           },
@@ -1078,7 +1077,7 @@ describe('createRuntimeComposition durable execution', () => {
           toolbox,
           options: {
             generate: async () => new Promise<never>(() => {}),
-            toolbox: toolbox as never,
+            toolbox: toolbox,
             conversation: createConversationHistory(),
             stopWhen: stopWhen.noToolCalls(),
           },
@@ -1218,7 +1217,7 @@ describe('createRuntimeComposition durable execution', () => {
           toolbox,
           options: {
             generate: async () => new Promise<never>(() => {}),
-            toolbox: toolbox as never,
+            toolbox: toolbox,
             conversation: createConversationHistory(),
             stopWhen: stopWhen.noToolCalls(),
           },
@@ -1334,7 +1333,7 @@ describe('createRuntimeComposition durable execution', () => {
           toolbox,
           options: {
             generate: async () => new Promise<never>(() => {}),
-            toolbox: toolbox as never,
+            toolbox: toolbox,
             conversation: createConversationHistory(),
             stopWhen: stopWhen.noToolCalls(),
           },
@@ -1435,7 +1434,7 @@ describe('createRuntimeComposition durable execution', () => {
           toolbox,
           options: {
             generate: async () => new Promise<never>(() => {}),
-            toolbox: toolbox as never,
+            toolbox: toolbox,
             conversation: createConversationHistory(),
             stopWhen: stopWhen.noToolCalls(),
           },
@@ -1546,7 +1545,7 @@ describe('createRuntimeComposition durable execution', () => {
           toolbox,
           options: {
             generate: async () => new Promise<never>(() => {}),
-            toolbox: toolbox as never,
+            toolbox: toolbox,
             conversation: createConversationHistory(),
             stopWhen: stopWhen.noToolCalls(),
           },
@@ -1666,7 +1665,7 @@ describe('createRuntimeComposition durable execution', () => {
           toolbox,
           options: {
             generate: async () => new Promise<never>(() => {}),
-            toolbox: toolbox as never,
+            toolbox: toolbox,
             conversation: createConversationHistory(),
             stopWhen: stopWhen.noToolCalls(),
           },
@@ -1779,7 +1778,7 @@ describe('createRuntimeComposition durable execution', () => {
           toolbox,
           options: {
             generate: async () => new Promise<never>(() => {}),
-            toolbox: toolbox as never,
+            toolbox: toolbox,
             conversation: createConversationHistory(),
             stopWhen: stopWhen.noToolCalls(),
           },
@@ -1907,7 +1906,7 @@ describe('createRuntimeComposition durable execution', () => {
           toolbox,
           options: {
             generate: async () => new Promise<never>(() => {}),
-            toolbox: toolbox as never,
+            toolbox: toolbox,
             conversation: createConversationHistory(),
             stopWhen: stopWhen.noToolCalls(),
           },
@@ -2031,7 +2030,7 @@ describe('createRuntimeComposition durable execution', () => {
           toolbox,
           options: {
             generate: async () => new Promise<never>(() => {}),
-            toolbox: toolbox as never,
+            toolbox: toolbox,
             conversation: createConversationHistory(),
             stopWhen: stopWhen.noToolCalls(),
           },
@@ -2155,7 +2154,7 @@ describe('createRuntimeComposition durable execution', () => {
           toolbox,
           options: {
             generate: async () => new Promise<never>(() => {}),
-            toolbox: toolbox as never,
+            toolbox: toolbox,
             conversation: createConversationHistory(),
             stopWhen: stopWhen.noToolCalls(),
           },
@@ -2285,7 +2284,7 @@ describe('createRuntimeComposition durable execution', () => {
           toolbox,
           options: {
             generate: async () => new Promise<never>(() => {}),
-            toolbox: toolbox as never,
+            toolbox: toolbox,
             conversation: createConversationHistory(),
             stopWhen: stopWhen.noToolCalls(),
           },
@@ -2394,7 +2393,7 @@ describe('createRuntimeComposition durable execution', () => {
           toolbox,
           options: {
             generate: async () => new Promise<never>(() => {}),
-            toolbox: toolbox as never,
+            toolbox: toolbox,
             conversation: createConversationHistory(),
             stopWhen: stopWhen.noToolCalls(),
           },
@@ -2479,7 +2478,7 @@ describe('createRuntimeComposition PersistenceOptions form', () => {
     // Bare StorageConfiguration is shorthand for PersistenceOptions { store: config }.
     const runtime = await createRuntimeComposition({
       generate: async () => ({ content: 'x', toolCalls: [] }),
-      persistence: { type: 'memory' } as StorageConfiguration,
+      persistence: { type: 'memory' },
       durableExecution: true,
     });
     try {

@@ -755,15 +755,13 @@ export function toAnthropicMessagesForSdk(
                     : {}),
                 })),
         }),
-    messages: neutral.messages.map(
-      (message): MessageParam => ({
-        role: message.role,
-        content:
-          typeof message.content === 'string'
-            ? message.content
-            : message.content.map(toSdkContentBlock),
-      }),
-    ),
+    messages: neutral.messages.map((message): MessageParam => ({
+      role: message.role,
+      content:
+        typeof message.content === 'string'
+          ? message.content
+          : message.content.map(toSdkContentBlock),
+    })),
   };
 }
 

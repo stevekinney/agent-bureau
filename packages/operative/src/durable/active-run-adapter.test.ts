@@ -80,7 +80,7 @@ async function buildContextWithHistoryLimit(maxEvents: number) {
 function runOptions(generate: RunOptions['generate']): RunOptions {
   return {
     generate,
-    toolbox: createToolbox([]) as unknown as RunOptions['toolbox'],
+    toolbox: createToolbox([]),
     conversation: createConversationHistory(),
     stopWhen: stopWhen.noToolCalls(),
   };
@@ -319,7 +319,7 @@ describe('createRun with durable routing', () => {
             }
             throw new Error('boom');
           },
-          toolbox: createToolbox([]) as unknown as RunOptions['toolbox'],
+          toolbox: createToolbox([]),
           conversation: createConversationHistory(),
           costEstimation: { model: 'gpt-4o' },
         },
@@ -358,7 +358,7 @@ describe('createRun with durable routing', () => {
                 { once: true },
               );
             }),
-          toolbox: createToolbox([]) as unknown as RunOptions['toolbox'],
+          toolbox: createToolbox([]),
           conversation: createConversationHistory(),
           stopWhen: stopWhen.noToolCalls(),
         },
@@ -407,7 +407,7 @@ describe('createRun with durable routing', () => {
               );
             });
           },
-          toolbox: createToolbox([]) as unknown as RunOptions['toolbox'],
+          toolbox: createToolbox([]),
           conversation: createConversationHistory(),
           costEstimation: { model: 'gpt-4o' },
         },
@@ -450,7 +450,7 @@ describe('createRun with durable routing', () => {
                 { once: true },
               );
             }),
-          toolbox: createToolbox([]) as unknown as RunOptions['toolbox'],
+          toolbox: createToolbox([]),
           conversation: createConversationHistory(),
           stopWhen: stopWhen.noToolCalls(),
         },
@@ -480,7 +480,7 @@ describe('createRun with durable routing', () => {
                 once: true,
               });
             }),
-          toolbox: createToolbox([]) as unknown as RunOptions['toolbox'],
+          toolbox: createToolbox([]),
           conversation: createConversationHistory(),
           stopWhen: stopWhen.noToolCalls(),
         },
@@ -625,7 +625,7 @@ describe('createRun with durable routing', () => {
       const activeRun = createRun(
         {
           generate: async () => ({ content: 'Hello', toolCalls: [] }),
-          toolbox: createToolbox([]) as unknown as RunOptions['toolbox'],
+          toolbox: createToolbox([]),
           conversation: createConversationHistory(),
           stopWhen: stopWhen.noToolCalls(),
           prepareStep: async () => {
@@ -650,7 +650,7 @@ describe('createRun with durable routing', () => {
       const activeRun = createRun(
         {
           generate: async () => ({ content: 'Hello', toolCalls: [] }),
-          toolbox: createToolbox([]) as unknown as RunOptions['toolbox'],
+          toolbox: createToolbox([]),
           conversation: createConversationHistory(),
           stopWhen: stopWhen.noToolCalls(),
           prepareStep: async () => {
@@ -681,7 +681,7 @@ describe('createRun with durable routing', () => {
       const activeRun = createRun(
         {
           generate: async () => ({ content: 'Hello', toolCalls: [] }),
-          toolbox: createToolbox([]) as unknown as RunOptions['toolbox'],
+          toolbox: createToolbox([]),
           conversation: createConversationHistory(),
           stopWhen: stopWhen.noToolCalls(),
           prepareStep: async () => {
@@ -705,15 +705,7 @@ describe('createRun with durable routing', () => {
         detail?: string;
       }> = [];
       activeRun.addEventListener('run.tripwire', (event) => {
-        tripwireEvents.push(
-          event as unknown as {
-            guardrailName: string;
-            category: string;
-            phase: string;
-            confidence: number;
-            detail?: string;
-          },
-        );
+        tripwireEvents.push(event);
       });
 
       const result = await activeRun.result;
@@ -748,7 +740,7 @@ describe('createRun with durable routing', () => {
       const activeRun = createRun(
         {
           generate: async () => ({ content: 'never gets far', toolCalls: [] }),
-          toolbox: createToolbox([]) as unknown as RunOptions['toolbox'],
+          toolbox: createToolbox([]),
           conversation: createConversationHistory(),
           stopWhen: stopWhen.noToolCalls(),
         },
@@ -780,7 +772,7 @@ describe('createRun with durable routing', () => {
       const activeRun = createRun(
         {
           generate: async () => ({ content: '{"answer":"42"}', toolCalls: [] }),
-          toolbox: createToolbox([]) as unknown as RunOptions['toolbox'],
+          toolbox: createToolbox([]),
           conversation: createConversationHistory(),
           stopWhen: stopWhen.noToolCalls(),
           responseSchema: z.object({ answer: z.string() }),
@@ -808,7 +800,7 @@ describe('createRun with durable routing', () => {
       const activeRun = createRun(
         {
           generate: async () => ({ content: '{"answer":"42"}', toolCalls: [] }),
-          toolbox: createToolbox([]) as unknown as RunOptions['toolbox'],
+          toolbox: createToolbox([]),
           conversation: createConversationHistory(),
           stopWhen: stopWhen.noToolCalls(),
           responseSchema: z.object({ answer: z.string() }),
@@ -834,7 +826,7 @@ describe('createRun with durable routing', () => {
       const activeRun = createRun(
         {
           generate: async () => ({ content: '{"answer":42}', toolCalls: [] }),
-          toolbox: createToolbox([]) as unknown as RunOptions['toolbox'],
+          toolbox: createToolbox([]),
           conversation: createConversationHistory(),
           stopWhen: stopWhen.noToolCalls(),
           responseSchema: z.object({ answer: z.string() }),
@@ -973,7 +965,13 @@ describe('createRun with durable routing', () => {
     const generateStarted = new Promise<void>((resolve) => {
       markGenerateStarted = resolve;
     });
-    const toolbox = createToolbox([]);
+    const durableTool = createTool({
+      name: 'durable_tool',
+      description: 'Stands in as the subject of the forwarded toolbox events.',
+      input: z.object({}),
+      execute: async () => 'ok',
+    });
+    const toolbox = createToolbox([durableTool]);
 
     try {
       const activeRun = createRun(
@@ -983,7 +981,7 @@ describe('createRun with durable routing', () => {
               resolveGenerate = resolve;
               markGenerateStarted?.();
             }),
-          toolbox: toolbox as unknown as RunOptions['toolbox'],
+          toolbox: toolbox,
           conversation: createConversationHistory(),
           stopWhen: stopWhen.noToolCalls(),
         },
@@ -997,21 +995,18 @@ describe('createRun with durable routing', () => {
       });
 
       await generateStarted;
-      toolbox.emit(
-        'progress' as never,
-        {
-          call: { id: 'call-1', name: 'durable_tool' },
-          percent: 25,
-          message: 'started',
-        } as never,
-      );
-      toolbox.emit(
-        'policy-denied' as never,
-        {
-          call: { id: 'call-1', name: 'durable_tool' },
-          reason: 'blocked',
-        } as never,
-      );
+      toolbox.emit('progress', {
+        tool: durableTool,
+        call: { id: 'call-1', name: 'durable_tool', arguments: {} },
+        percent: 25,
+        message: 'started',
+      });
+      toolbox.emit('policy-denied', {
+        tool: durableTool,
+        call: { id: 'call-1', name: 'durable_tool', arguments: {} },
+        params: {},
+        reason: 'blocked',
+      });
       resolveGenerate?.({ content: 'done', toolCalls: [] });
 
       await activeRun.result;
@@ -1830,7 +1825,7 @@ describe('B6 — abort-into-generate load-bearing abort', () => {
         sessionId: runId,
         options: {
           generate,
-          toolbox: createToolbox([]) as unknown as RunOptions['toolbox'],
+          toolbox: createToolbox([]),
           conversation: createConversationHistory(),
           stopWhen: stopWhen.noToolCalls(),
         },
@@ -1882,7 +1877,7 @@ describe('B6 — abort-into-generate load-bearing abort', () => {
         sessionId: runId,
         options: {
           generate,
-          toolbox: createToolbox([]) as unknown as RunOptions['toolbox'],
+          toolbox: createToolbox([]),
           conversation: createConversationHistory(),
           stopWhen: stopWhen.noToolCalls(),
         },
@@ -1917,7 +1912,7 @@ describe('B6 — abort-into-generate load-bearing abort', () => {
 
     const activeRun = createRun({
       generate,
-      toolbox: createToolbox([]) as unknown as RunOptions['toolbox'],
+      toolbox: createToolbox([]),
       conversation: createConversationHistory(),
       stopWhen: stopWhen.noToolCalls(),
     });

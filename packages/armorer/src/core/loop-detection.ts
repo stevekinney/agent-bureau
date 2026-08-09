@@ -330,7 +330,7 @@ export function stableStringify(value: unknown): string {
   if (value === null || value === undefined) return JSON.stringify(value);
   if (typeof value !== 'object') return JSON.stringify(value);
   if (Array.isArray(value)) return '[' + value.map(stableStringify).join(',') + ']';
-  const sorted = Object.keys(value as Record<string, unknown>).sort();
+  const sorted = Object.keys(value).sort();
   return (
     '{' +
     sorted

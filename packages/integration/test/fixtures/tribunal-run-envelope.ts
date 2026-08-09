@@ -31,10 +31,7 @@ import {
 } from '@lostgradient/operative';
 
 type BuildTribunalRunReportOptionalKeys =
-  | 'costEstimate'
-  | 'structuredOutput'
-  | 'effectiveModel'
-  | 'effectiveEffort';
+  'costEstimate' | 'structuredOutput' | 'effectiveModel' | 'effectiveEffort';
 
 /**
  * Thin wrapper over `buildRunReport` that omits its optional fields entirely

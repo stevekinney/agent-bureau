@@ -2,18 +2,8 @@ import { describe, expect, it } from 'bun:test';
 
 import type { GenerateContext, GenerateFunction, GenerateResponse } from '../types.ts';
 import { createRoutingGenerate } from './create-routing-generate.ts';
+import { makeContext } from './strategies/test-helpers.ts';
 import type { ModelRoute, RoutingEvent } from './types.ts';
-
-function makeContext(overrides?: Partial<GenerateContext>): GenerateContext {
-  return {
-    conversation: {
-      current: { ids: [], messages: {} },
-    } as unknown as GenerateContext['conversation'],
-    step: 0,
-    toolbox: { tools: () => [] } as unknown as GenerateContext['toolbox'],
-    ...overrides,
-  };
-}
 
 function makeResponse(content: string): GenerateResponse {
   return { content, toolCalls: [] };

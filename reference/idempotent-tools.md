@@ -84,13 +84,11 @@ interface IdempotencyOptions {
   onCacheHit?: (key: string, result: CachedToolResult) => void;
 }
 
-function withIdempotency<T extends ToolDefinition>(
-  tool: T,
-  options: IdempotencyOptions,
-): T;
+function withIdempotency<T extends ToolDefinition>(tool: T, options: IdempotencyOptions): T;
 ```
 
 The wrapper intercepts `execute()`:
+
 1. Compute idempotency key from input
 2. Check cache for existing result
 3. If cached and not expired → return cached result
