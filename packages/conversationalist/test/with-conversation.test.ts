@@ -202,3 +202,36 @@ describe('withConversation context window management', () => {
     expect(lastTwo[1]!.content).toBe('New response');
   });
 });
+
+describe('withConversation branch rewinds', () => {
+  test('rewindBeforePosition drops the boundary message and everything after it', async () => {
+    const base = createConversation({ title: 'Rewind' });
+
+    const result = await withConversation(base, (c) => {
+      c.appendUserMessage('Message 0')
+        .appendAssistantMessage('Message 1')
+        .appendUserMessage('Message 2')
+        .appendAssistantMessage('Message 3')
+        .rewindBeforePosition(2);
+    });
+
+    expect(getOrderedMessages(result).map((message) => message.content)).toEqual([
+      'Message 0',
+      'Message 1',
+    ]);
+  });
+
+  test('rewindBeforeMessage drops the named message and everything after it', async () => {
+    const seeded = appendAssistantMessage(
+      appendUserMessage(createConversation({ title: 'RewindById' }), 'Message 0'),
+      'Message 1',
+    );
+    const target = getOrderedMessages(seeded)[1];
+
+    const result = await withConversation(seeded, (c) => {
+      c.rewindBeforeMessage(target!.id);
+    });
+
+    expect(getOrderedMessages(result).map((message) => message.content)).toEqual(['Message 0']);
+  });
+});

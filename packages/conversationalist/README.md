@@ -370,6 +370,8 @@ Context-window management helpers that estimate token counts and trim messages t
 import {
   estimateConversationTokens,
   getRecentMessages,
+  rewindBeforeMessage,
+  rewindBeforePosition,
   simpleTokenEstimator,
   truncateFromPosition,
   truncateToTokenLimit,
@@ -404,9 +406,26 @@ const recent = getRecentMessages(history, 10);
 
 // Drop everything before position 20
 const sliced = truncateFromPosition(history, 20);
+
+// Rewind a branch: drop position 20 and everything after it. The mirror image
+// of truncateFromPosition, which keeps that same tail.
+const rewound = rewindBeforePosition(history, 20);
+
+// Edit flows usually hold a message id rather than a position.
+const beforeEdit = rewindBeforeMessage(history, editedMessageId);
 ```
 
-**Key exports:** `estimateConversationTokens`, `truncateToTokenLimit`, `getRecentMessages`, `truncateFromPosition`, `simpleTokenEstimator`. Also exports `EstimateConversationTokensOptions`, `AsyncEstimateConversationTokensOptions`, `TruncateOptions`, and `AsyncTruncateOptions` types.
+The two directions are easy to confuse, so pick by what you are trying to do:
+
+| Goal                                        | Helper                                        | Drops  |
+| ------------------------------------------- | --------------------------------------------- | ------ |
+| Fit a context window                        | `truncateToTokenLimit`, `getRecentMessages`   | Oldest |
+| Keep only the tail from a point onwards     | `truncateFromPosition`                        | Oldest |
+| Undo a branch (edit-and-resend, regenerate) | `rewindBeforePosition`, `rewindBeforeMessage` | Newest |
+
+Both rewind helpers renumber positions from zero and keep `ids`/`messages`/`updatedAt` consistent, so edit flows never assemble a `ConversationHistory` by hand. A tool-call/tool-result pair straddling the boundary is dropped whole by default; pass `preserveToolPairs: false` to cut strictly at the boundary and leave the call pending. A boundary at or past the end returns the same conversation reference, so a no-op rewind adds no history entry.
+
+**Key exports:** `estimateConversationTokens`, `truncateToTokenLimit`, `getRecentMessages`, `truncateFromPosition`, `rewindBeforePosition`, `rewindBeforeMessage`, `simpleTokenEstimator`. Also exports `EstimateConversationTokensOptions`, `AsyncEstimateConversationTokensOptions`, `TruncateOptions`, `AsyncTruncateOptions`, and `RewindOptions` types.
 
 ---
 
