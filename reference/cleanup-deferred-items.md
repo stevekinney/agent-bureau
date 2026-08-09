@@ -21,15 +21,6 @@ Real, gated commits across every dependency layer (all behind the full `validate
 
 ## Deferred — do NOT polish before the integration rewrites them
 
-### gateway `src/ui/*` + dual server/client build (`scripts/build.ts`)
-
-**cinder (Svelte UI) replaces this entire React tree today.** It is _wired and live_ (client/entry.tsx
-hydrates ui/app; build.ts compiles the browser bundle + SSR pages) — NOT dead code, despite knip
-false positives. Do not delete it ahead of cinder, do not write tests for use-chat/use-runs/
-use-websocket/run-detail, do not extract `formatDetail`. The dual-build (Hono server target:bun +
-React client target:browser) is structurally unique; tsdown's single-entry model doesn't fit.
-Reassess the build approach once cinder defines the new client output format (Svelte, not tsx).
-
 ### operative run-runtime (weft lands here)
 
 - `create-run.ts` `forwardEvents` uses `as unknown as ForwardableSource` casts (lines ~74, 81) to
@@ -53,7 +44,28 @@ durable-execution concerns that may reshape this suite — revisit the conversio
 (A) migrate all to tsdown, (B) extract a shared `buildLibrary()` helper, (C) leave as-is.
 **Deferred** — it touches every package's build at once, eases nothing for cinder/weft specifically,
 and is risky right before a refactor. Decide A-vs-B during stabilization. gateway stays special
-regardless (dual build).
+regardless: its two-pass SSR + hydration Svelte build does not fit tsdown's single-entry model.
+
+## Resolved since the cleanup pass (not todos)
+
+### gateway UI + dual server/client build — the cinder migration has landed
+
+_Historical context:_ the 2026-06-02 pass deferred all cleanup of gateway's UI tree and build script
+because a cinder-based rewrite was pending and expected to delete the code. **That constraint is
+over — do not apply it to current work.**
+
+Gateway's UI is Svelte today:
+
+- `packages/gateway/src/ui/*` holds `.svelte` components/pages plus rune-based hooks
+  (`use-chat.svelte.ts`, `use-runs.svelte.ts`, `use-websocket.svelte.ts`, `use-run-detail.svelte.ts`).
+- `packages/gateway/src/client/entry.ts` is the hydration entry.
+- `packages/gateway/scripts/build.ts` runs one pipeline with two `Bun.build` passes — an SSR pass
+  (`target: 'bun'`) and a hydration pass (`target: 'browser'`), both loading `SveltePlugin()` — then
+  writes `dist/manifest.json` and `dist/public/styles.css`.
+
+Consequences for cleanup work: this is live production code, so test it and clean it like any other
+package. The UI hooks and pages already carry `*.test.ts` coverage; keep adding to it. The two-pass
+build remains structurally unique (see below) and stays on its own `scripts/build.ts`.
 
 ## Closed decisions (not todos)
 
