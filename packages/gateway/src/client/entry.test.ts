@@ -103,7 +103,10 @@ describe('collectPublishedComponentStyles discovery outcomes', () => {
           './styles': './styles.css',
           './paint': './paint/paint.js',
           './paint/styles': './paint/paint.css',
+          // Empty, and NOT on the known-empty list — must be rejected.
           './hollow/styles': './hollow/hollow.css',
+          // Empty, but a real Table subcomponent, so the exemption applies.
+          './table-row/styles': './table-row/table-row.css',
           // Declared, but the file it points at does not exist.
           './phantom/styles': './phantom/phantom.css',
         },
@@ -117,6 +120,10 @@ describe('collectPublishedComponentStyles discovery outcomes', () => {
     await Bun.write(
       join(packageDirectory, 'hollow', 'hollow.css'),
       '@layer cinder.components{/* visual treatment lives elsewhere */}',
+    );
+    await Bun.write(
+      join(packageDirectory, 'table-row', 'table-row.css'),
+      '@layer cinder.components{/* styled by the parent table stylesheet */}',
     );
   });
 
@@ -155,14 +162,31 @@ describe('collectPublishedComponentStyles discovery outcomes', () => {
     expect(census.published).toEqual([]);
   });
 
-  it('reports a published stylesheet that declares no component-layer CSS', async () => {
+  it('accepts an empty stylesheet from a component known to be styled elsewhere', async () => {
     const census = await collectPublishedComponentStyles({
-      specifiers: ['@lostgradient/cinder/hollow'],
+      specifiers: ['@lostgradient/cinder/table-row'],
       resolveFrom,
     });
 
-    expect(census.withoutComponentLayer).toEqual(['hollow']);
+    expect(census.withoutComponentLayer).toEqual(['table-row']);
     expect(census.published).toEqual([]);
+  });
+
+  it('fails loudly when an unexpected component stylesheet builds to nothing', async () => {
+    // `paint` still resolves, so dropping `hollow` would leave a nonempty
+    // expected set and let the audit pass while `hollow` ships unstyled.
+    const failure: unknown = await collectPublishedComponentStyles({
+      specifiers: ['@lostgradient/cinder/paint', '@lostgradient/cinder/hollow'],
+      resolveFrom,
+    }).then(
+      (census) => census,
+      (error: unknown) => error,
+    );
+
+    expect(failure).toBeInstanceOf(Error);
+    expect(String(failure)).toMatch(
+      /publishes @lostgradient\/cinder\/hollow\/styles, but it builds to no/,
+    );
   });
 
   it('fails loudly when a declared component stylesheet cannot be built', async () => {

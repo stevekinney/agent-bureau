@@ -283,9 +283,38 @@ export interface ComponentStylesheetCensus {
   readonly published: readonly PublishedComponentStylesheet[];
   /** Observed components Cinder publishes no `<component>/styles` subpath for. */
   readonly withoutStylesheet: readonly string[];
-  /** Observed components whose published stylesheet carries no component-layer CSS. */
+  /**
+   * Observed components whose published stylesheet carries no component-layer
+   * CSS *and* that are known to be styled elsewhere. An unexpected empty
+   * stylesheet throws rather than landing here — see
+   * {@link KNOWN_EMPTY_COMPONENT_STYLESHEETS}.
+   */
   readonly withoutComponentLayer: readonly string[];
 }
+
+/**
+ * Components Cinder publishes a `<component>/styles` subpath for even though it
+ * contributes no `cinder.components` CSS of its own.
+ *
+ * These are the Table subcomponents. Cinder styles them from the parent
+ * `table` stylesheet using descendant selectors — verified against 0.21.0,
+ * where the emitted bundle contains `.cinder-table` but no `.cinder-table-cell`
+ * or `.cinder-table-row` rules anywhere. The subpaths exist for API symmetry,
+ * not because they carry styles.
+ *
+ * Anything NOT on this list that builds to an empty component layer is treated
+ * as a break rather than as one fewer thing to verify: a sidecar that silently
+ * became empty is exactly the upstream regression this audit exists to catch.
+ * Adding an entry here is a deliberate statement that the component is styled
+ * elsewhere — confirm that before you add one.
+ */
+const KNOWN_EMPTY_COMPONENT_STYLESHEETS: ReadonlySet<string> = new Set([
+  'table-body',
+  'table-cell',
+  'table-header',
+  'table-header-cell',
+  'table-row',
+]);
 
 /** Inputs for {@link collectPublishedComponentStyles}. */
 export interface PublishedComponentStylesRequest {
@@ -305,9 +334,12 @@ export interface PublishedComponentStylesRequest {
  *     CSS of its own (`icons`, `focus-trap`, `skip-link` in 0.17.0). Nothing to
  *     look for, so it is reported in `withoutStylesheet`.
  *   - The subpath is declared and builds to no `cinder.components` CSS. Cinder
- *     ships these deliberately as "empty registry entries" (`table-row`, whose
- *     visual treatment lives in `table.css`). Reported in
- *     `withoutComponentLayer`.
+ *     ships a few deliberately as "empty registry entries" (the Table
+ *     subcomponents, whose visual treatment lives in `table.css`). Only the
+ *     components named in {@link KNOWN_EMPTY_COMPONENT_STYLESHEETS} are
+ *     accepted this way and reported in `withoutComponentLayer`; any other
+ *     empty stylesheet throws, because silently dropping it would let the
+ *     audit pass while that component ships unstyled.
  *   - The subpath is declared but cannot be resolved or built. That is a break
  *     in the published contract, so it throws instead of quietly shrinking the
  *     set the bundle is measured against.
@@ -356,9 +388,20 @@ export async function collectPublishedComponentStyles({
 
     if (blocks.length > 0) {
       published.push({ specifier, blocks });
-    } else {
-      withoutComponentLayer.push(component);
+      continue;
     }
+
+    if (!KNOWN_EMPTY_COMPONENT_STYLESHEETS.has(component)) {
+      throw new Error(
+        `Cinder publishes ${specifier}, but it builds to no \`cinder.components\` CSS. ` +
+          'An empty sidecar silently drops this component from the production check, so ' +
+          'the audit would keep passing while the component ships unstyled. Either the ' +
+          'component moved its styles elsewhere — in which case add it to ' +
+          'KNOWN_EMPTY_COMPONENT_STYLESHEETS with the evidence — or Cinder regressed.',
+      );
+    }
+
+    withoutComponentLayer.push(component);
   }
 
   return { published, withoutStylesheet, withoutComponentLayer };
