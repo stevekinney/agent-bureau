@@ -339,7 +339,7 @@ Messages flagged as streaming (`isStreamingMessage` returns `true`) are automati
 - **Compaction**: `partitionMessages` adds streaming messages to the preserved set so they are never summarized away.
 - **Truncation**: `truncateToTokenLimit` locks streaming message blocks alongside system and protected blocks. `truncateFromPosition` preserves streaming messages that fall below the cutoff position.
 - **Adapters**: All three provider adapters (OpenAI, Anthropic, Gemini) skip streaming messages during export so that incomplete content is never sent to an API. Once a streaming message is finalized via `finalizeStreamingMessage`, the streaming flag is removed and the message participates normally in all subsystems.
-- **Late updates**: `updateStreamingMessage` writes only to a message that is still streaming. After `finalizeStreamingMessage` (or `cancelStreamingMessage`, which removes the message), it returns the conversation unchanged rather than appending to a message the UI has already presented as final. `updateUnsafeStreamingMessage` skips that check for render-side projections.
+- **Late updates**: `updateStreamingMessage` writes only to a message that is still streaming. After `finalizeStreamingMessage` (or `cancelStreamingMessage`, which removes the message), it returns the conversation unchanged rather than appending to a message the UI has already presented as final, and it does not read `environment.now()` on that path. `Conversation.updateStreamingMessage` propagates the rejection: it skips the commit when the returned conversation is the one it passed in, so no history node is recorded and no event is emitted. `updateUnsafeStreamingMessage` skips the streaming-status check for render-side projections.
 
 ## `conversationalist/projection`
 

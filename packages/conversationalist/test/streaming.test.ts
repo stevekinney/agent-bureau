@@ -255,11 +255,12 @@ describe('updateStreamingMessage', () => {
       testEnvironment,
     );
 
-    // No environment: the guard must return before anything reads the clock, so
-    // the identity check below also proves `updatedAt` was left alone.
     const late = updateStreamingMessage(finalized, messageId, 'Frozen and then some');
 
+    // The very same conversation object comes back, so `updatedAt` cannot have
+    // been bumped and no consumer holding a reference sees a change.
     expect(late).toBe(finalized);
+    expect(late.updatedAt).toBe(finalized.updatedAt);
     expect(getOrderedMessages(late)[0]?.content).toBe('Frozen');
     expect(getOrderedMessages(late)[0]?.tokenUsage).toEqual({
       prompt: 1,
@@ -298,6 +299,62 @@ describe('updateStreamingMessage', () => {
 
     expect(updated).toBe(conversation);
     expect(getOrderedMessages(updated)[0]?.content).toBe('Settled');
+  });
+
+  it('does not read the injected clock when it rejects a late token', () => {
+    const conv = createConversation({ id: 'test' }, testEnvironment);
+    const { conversation, messageId } = appendStreamingMessage(
+      conv,
+      'assistant',
+      undefined,
+      testEnvironment,
+    );
+    const finalized = finalizeStreamingMessage(
+      updateStreamingMessage(conversation, messageId, 'Frozen', testEnvironment),
+      messageId,
+      undefined,
+      testEnvironment,
+    );
+
+    let clockReads = 0;
+    const countingEnvironment = {
+      ...testEnvironment,
+      now: () => {
+        clockReads += 1;
+        return testEnvironment.now();
+      },
+    };
+
+    // Rejected: the target is finalized, and the id is unknown.
+    updateStreamingMessage(finalized, messageId, 'Late', countingEnvironment);
+    updateStreamingMessage(finalized, 'no-such-message', 'Late', countingEnvironment);
+    expect(clockReads).toBe(0);
+
+    // Accepted updates still stamp `updatedAt`, so the clock is read exactly once.
+    updateStreamingMessage(conversation, messageId, 'Streaming', countingEnvironment);
+    expect(clockReads).toBe(1);
+  });
+
+  it('does not propagate a throwing clock when it rejects a late token', () => {
+    const conv = createConversation({ id: 'test' }, testEnvironment);
+    const { conversation, messageId } = appendStreamingMessage(
+      conv,
+      'assistant',
+      undefined,
+      testEnvironment,
+    );
+    const finalized = finalizeStreamingMessage(conversation, messageId, undefined, testEnvironment);
+
+    const explodingEnvironment = {
+      ...testEnvironment,
+      now: (): string => {
+        throw new Error('clock should not be read for a rejected update');
+      },
+    };
+
+    expect(updateStreamingMessage(finalized, messageId, 'Late', explodingEnvironment)).toBe(
+      finalized,
+    );
   });
 });
 

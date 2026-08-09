@@ -954,9 +954,19 @@ export class Conversation {
 
   /**
    * Updates a streaming message's content.
+   *
+   * A message that is unknown or no longer streaming rejects the content (see
+   * {@link updateStreamingMessage}); the rejection is a no-op all the way out,
+   * so no history node is recorded and no event is emitted. Without that, a
+   * post-stop token flood would add one undo entry and one round of events per
+   * ignored token — and, under `maxHistoryDepth`, prune real ancestors to make
+   * room for states that never differed.
    */
   updateStreamingMessage(messageId: string, content: string): void {
     const nextConversation = updateStreamingMessage(this.current, messageId, content, this.env);
+    if (nextConversation === this.current) {
+      return;
+    }
     this.commit(
       nextConversation,
       'stream.updated',

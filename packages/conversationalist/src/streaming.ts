@@ -183,9 +183,6 @@ const updateStreamingMessageInternal = (
   environment: Partial<ConversationEnvironment> | undefined,
   validate: boolean,
 ): Conversation => {
-  const resolvedEnvironment = resolveConversationEnvironment(environment);
-  const now = resolvedEnvironment.now();
-
   const original = conversation.messages[messageId];
   if (!original) {
     return validate ? ensureConversationSafe(conversation) : conversation;
@@ -201,6 +198,11 @@ const updateStreamingMessageInternal = (
   if (validate && !isStreamingMessage(original)) {
     return ensureConversationSafe(conversation);
   }
+
+  // Resolved only once the update is known to apply: a rejected late token must
+  // not consume a tick from a stateful injected clock, nor propagate a throw
+  // from a fallible one.
+  const now = resolveConversationEnvironment(environment).now();
 
   const overrides: {
     content?: string | MultiModalContent[];
