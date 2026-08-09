@@ -9,3 +9,17 @@ export function extractRootMarkup(html: string): string {
   }
   return match[1] ?? '';
 }
+
+/** Svelte SSR anchor comments that delimit a hydratable dynamic region. */
+const hydrationMarker = /<!--[[\]][^>]*-->/g;
+
+/**
+ * Strips the Svelte SSR hydration anchors (`<!--[-->`, `<!--[0-->`, `<!--]-->`)
+ * that wrap dynamic regions in server-rendered markup. They contribute no text
+ * and are invisible to the accessibility tree, so assertions about rendered
+ * copy should compare against the stripped form rather than coupling to a
+ * component's internal choice of static text versus a dynamic expression.
+ */
+export function stripHydrationMarkers(markup: string): string {
+  return markup.replaceAll(hydrationMarker, '');
+}

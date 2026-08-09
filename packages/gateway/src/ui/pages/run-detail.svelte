@@ -15,9 +15,9 @@
   import { RunStepTimeline } from '@lostgradient/cinder/run-step-timeline';
   import type { RunStep, RunStepStatus } from '@lostgradient/cinder/run-step-timeline';
   import { SectionHeading } from '@lostgradient/cinder/section-heading';
-  import { Stat } from '@lostgradient/cinder/stat';
-  import { StatGroup } from '@lostgradient/cinder/stat-group';
   import { StackedListItem } from '@lostgradient/cinder/stacked-list-item';
+  import { Statistic } from '@lostgradient/cinder/statistic';
+  import { StatisticGroup } from '@lostgradient/cinder/statistic-group';
 
   import type { RunDetailResponse } from '../../routes/runs';
   import { assembleRunTimeline } from '../../timeline';
@@ -363,11 +363,11 @@
   <section>
     <SectionHeading level={2} title="Summary" />
     <DescriptionList items={summaryItems} variant="two-column" />
-    <StatGroup columns={3} variant="cards" label="Token usage">
-      <Stat label="Prompt" value={run.usage.prompt} />
-      <Stat label="Completion" value={run.usage.completion} />
-      <Stat label="Total" value={run.usage.total} />
-    </StatGroup>
+    <StatisticGroup columns={3} variant="cards" label="Token usage">
+      <Statistic label="Prompt" value={run.usage.prompt} />
+      <Statistic label="Completion" value={run.usage.completion} />
+      <Statistic label="Total" value={run.usage.total} />
+    </StatisticGroup>
   </section>
 
   {#if parkedReview}
@@ -444,7 +444,7 @@
       events={visibleStreamEvents}
       connectionState={eventStreamConnectionState}
       filterQuery={eventFilterQuery}
-      onfilter={(query) => {
+      onFilter={(query) => {
         eventFilterQuery = query;
       }}
       label="Run event stream"

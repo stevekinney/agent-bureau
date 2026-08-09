@@ -2,8 +2,8 @@
   import { EmptyState } from '@lostgradient/cinder/empty-state';
   import { PageHeader } from '@lostgradient/cinder/page-header';
   import { SectionHeading } from '@lostgradient/cinder/section-heading';
-  import { Stat } from '@lostgradient/cinder/stat';
-  import { StatGroup } from '@lostgradient/cinder/stat-group';
+  import { Statistic } from '@lostgradient/cinder/statistic';
+  import { StatisticGroup } from '@lostgradient/cinder/statistic-group';
   import { Table } from '@lostgradient/cinder/table';
   import { TableBody } from '@lostgradient/cinder/table-body';
   import { TableCell } from '@lostgradient/cinder/table-cell';
@@ -54,17 +54,17 @@
       description="Token usage and estimated cost will appear here once runs complete."
     />
   {:else}
-    <StatGroup columns="auto" variant="cards" label="Usage totals">
-      <Stat label="Runs" value={usage.aggregate.runCount} />
-      <Stat label="Prompt Tokens" value={usage.aggregate.promptTokens} />
-      <Stat label="Completion Tokens" value={usage.aggregate.completionTokens} />
-      <Stat label="Total Tokens" value={usage.aggregate.totalTokens} />
+    <StatisticGroup columns="auto" variant="cards" label="Usage totals">
+      <Statistic label="Runs" value={usage.aggregate.runCount} />
+      <Statistic label="Prompt Tokens" value={usage.aggregate.promptTokens} />
+      <Statistic label="Completion Tokens" value={usage.aggregate.completionTokens} />
+      <Statistic label="Total Tokens" value={usage.aggregate.totalTokens} />
       {#if hasCacheActivity}
-        <Stat label="Cache Write Tokens" value={usage.aggregate.cacheCreationTokens} />
-        <Stat label="Cache Read Tokens" value={usage.aggregate.cacheReadTokens} />
+        <Statistic label="Cache Write Tokens" value={usage.aggregate.cacheCreationTokens} />
+        <Statistic label="Cache Read Tokens" value={usage.aggregate.cacheReadTokens} />
       {/if}
-      <Stat label="Estimated Cost" value={formatCost(usage.aggregate)} />
-    </StatGroup>
+      <Statistic label="Estimated Cost" value={formatCost(usage.aggregate)} />
+    </StatisticGroup>
 
     <section>
       <SectionHeading level={2} title="By Agent" />

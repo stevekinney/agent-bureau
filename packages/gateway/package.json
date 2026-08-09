@@ -21,9 +21,9 @@
     "validate": "bun run format:check && bun run lint && bun run check-types && bun run test"
   },
   "dependencies": {
-    "@lostgradient/chat": "^0.2.0",
-    "@lostgradient/cinder": "^0.17.0",
-    "@lostgradient/markdown": "^0.1.0",
+    "@lostgradient/chat": "^0.6.0",
+    "@lostgradient/cinder": "^0.21.0",
+    "@lostgradient/markdown": "^0.2.0",
     "@lostgradient/weft": "^0.16.0",
     "armorer": "workspace:*",
     "bureau": "workspace:*",

@@ -1,12 +1,14 @@
 import { describe, expect, it } from 'bun:test';
 
 import { assembleRunTimeline, type RunDetailResponse } from '../routes/runs';
+import type { UsageResponse } from '../routes/usage';
 import type { PendingReview } from '../types';
 import { createReviewsStore } from '../ui/hooks/use-reviews.svelte';
 import RunDetailPage from '../ui/pages/run-detail.svelte';
+import UsagePage from '../ui/pages/usage.svelte';
 import { renderPage } from './render';
 import Fixture from './test-fixtures/render-fixture.svelte';
-import { extractRootMarkup } from './test-utilities';
+import { extractRootMarkup, stripHydrationMarkers } from './test-utilities';
 
 const baseProps = { initialData: { label: 'hello' }, pathname: '/dashboard' };
 
@@ -136,7 +138,7 @@ describe('renderPage', () => {
 describe('renderPage with a populated run-detail page', () => {
   // The run-detail route is the heaviest cinder surface in the migration:
   // CodeBlock (streaming output), PayloadInspector (tool calls / results),
-  // RunStepTimeline, EventStreamViewer, and StatGroup. Empty-state rendering of
+  // RunStepTimeline, EventStreamViewer, and StatisticGroup. Empty-state rendering of
   // the other routes proves none of this, so this test renders the REAL page
   // with fully populated data — including a tool call carrying a code string to
   // hit the payload/code path — to prove SSR does not throw and emits the
@@ -296,7 +298,7 @@ describe('renderPage with a populated run-detail page', () => {
 
     const pageHeadings = [...rootMarkup.matchAll(/<h1\b[^>]*>(.*?)<\/h1>/gs)];
     expect(pageHeadings).toHaveLength(1);
-    expect(pageHeadings[0]?.[1]).toBe('Run run-populated');
+    expect(stripHydrationMarkers(pageHeadings[0]?.[1] ?? '')).toBe('Run run-populated');
     expect(rootMarkup.match(/<h[1-4]\b/)?.[0]).toBe('<h1');
 
     // Section headings the page composes around the heavy components.
@@ -526,5 +528,75 @@ describe('renderPage with a populated run-detail page', () => {
 
     expect(rootMarkup).toContain('aria-label="Status: Succeeded"');
     expect(rootMarkup).not.toContain('aria-label="Status: Failed"');
+  });
+});
+
+describe('renderPage with a populated usage page', () => {
+  // The `/usage` route's aggregate tiles are the other Cinder StatisticGroup
+  // surface. The `/usage` SSR coverage elsewhere only exercises the zero-run
+  // empty state, which renders no statistics at all — so this test pins the
+  // public contract of the populated view: the group's accessible name, every
+  // tile label, and every formatted value.
+  const usage: UsageResponse = {
+    aggregate: {
+      promptTokens: 1200,
+      completionTokens: 850,
+      totalTokens: 2050,
+      cacheCreationTokens: 300,
+      cacheReadTokens: 150,
+      runCount: 7,
+      totalCost: 1.2345,
+      costComplete: true,
+    },
+    analytics: { byAgent: [], byPrincipal: [], byWindow: [] },
+    runs: [],
+  };
+
+  it('renders every aggregate statistic under the "Usage totals" group', async () => {
+    const html = await renderPage({
+      title: 'Usage & Cost',
+      component: UsagePage,
+      props: { initialData: { usage }, pathname: '/usage', usage },
+    });
+    const rootMarkup = extractRootMarkup(html);
+
+    const pageHeadings = [...rootMarkup.matchAll(/<h1\b[^>]*>(.*?)<\/h1>/gs)];
+    expect(pageHeadings).toHaveLength(1);
+    expect(stripHydrationMarkers(pageHeadings[0]?.[1] ?? '')).toBe('Usage &amp; Cost');
+
+    // The accessible name of the statistic group, not just its visual variant.
+    expect(rootMarkup).toContain('aria-label="Usage totals"');
+
+    expect(rootMarkup).toContain('Runs');
+    expect(rootMarkup).toContain('7');
+    expect(rootMarkup).toContain('Prompt Tokens');
+    expect(rootMarkup).toContain('1,200');
+    expect(rootMarkup).toContain('Completion Tokens');
+    expect(rootMarkup).toContain('850');
+    expect(rootMarkup).toContain('Total Tokens');
+    expect(rootMarkup).toContain('2,050');
+    expect(rootMarkup).toContain('Cache Write Tokens');
+    expect(rootMarkup).toContain('300');
+    expect(rootMarkup).toContain('Cache Read Tokens');
+    expect(rootMarkup).toContain('150');
+    expect(rootMarkup).toContain('Estimated Cost');
+    expect(rootMarkup).toContain('$1.2345');
+  });
+
+  it('omits the cache statistics when no run touched the prompt cache', async () => {
+    const withoutCache: UsageResponse = {
+      ...usage,
+      aggregate: { ...usage.aggregate, cacheCreationTokens: 0, cacheReadTokens: 0 },
+    };
+    const html = await renderPage({
+      title: 'Usage & Cost',
+      component: UsagePage,
+      props: { initialData: { usage: withoutCache }, pathname: '/usage', usage: withoutCache },
+    });
+    const rootMarkup = extractRootMarkup(html);
+
+    expect(rootMarkup).toContain('aria-label="Usage totals"');
+    expect(rootMarkup).not.toContain('Cache Write Tokens');
+    expect(rootMarkup).not.toContain('Cache Read Tokens');
   });
 });
