@@ -1,0 +1,8 @@
+# Structured config that only carries a .md extension. Prettier parses it as
+# prose and de-indents the YAML sequences, which silently turns nested list
+# items into top-level keys.
+.claude/ralph-pipeline.config.md
+
+# Generated build output and coverage reports.
+**/dist/**
+**/coverage/**
