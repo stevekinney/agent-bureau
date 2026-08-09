@@ -319,9 +319,9 @@ const results = await toolbox.execute([call1, call2, call3], {
 ## Approval Flows
 
 Policies can pause execution for human approval or input.
-Return `allow: false` with `status: 'needs_approval'` to pause a call; the
-status selects the approval action while `allow` supplies the required policy
-decision.
+Return `status: 'needs_approval'` to pause a call. `allow` may be omitted
+whenever `status` is present — it is derived from the status (`'allow'` →
+`true`; `'deny'`, `'needs_approval'`, `'needs_input'` → `false`).
 
 ```ts
 const toolbox = createToolbox([], {
@@ -331,7 +331,6 @@ const toolbox = createToolbox([], {
     async beforeExecute(context) {
       if (context.metadata?.sensitive) {
         return {
-          allow: false,
           status: 'needs_approval',
           reason: 'Sensitive action requires confirmation',
         };

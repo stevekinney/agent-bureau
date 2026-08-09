@@ -96,7 +96,14 @@ export type ToolMetadata = JsonObject & {
 };
 
 export type ToolPolicyDecision = {
-  allow: boolean;
+  /**
+   * Whether the call may proceed. Optional when `status` is present: a
+   * decision that only sets `status` derives `allow` from it (`'allow'` →
+   * `true`; `'deny'`, `'needs_approval'`, `'needs_input'` → `false`). When
+   * both are given, `status` is the more specific signal and `allow` must
+   * agree with it.
+   */
+  allow?: boolean;
   reason?: string;
   status?: 'allow' | 'deny' | 'needs_approval' | 'needs_input';
   action?: {
@@ -104,6 +111,29 @@ export type ToolPolicyDecision = {
     schema?: unknown;
   };
 };
+
+/**
+ * A `ToolPolicyDecision` whose `allow` has been resolved — what the policy
+ * pipeline consumes after `resolveToolPolicyAllow` fills in an omitted
+ * `allow` from `status`.
+ */
+export type ResolvedToolPolicyDecision = ToolPolicyDecision & {
+  allow: boolean;
+};
+
+/**
+ * Fill in an omitted `allow` from `status`: `'deny'`, `'needs_approval'`,
+ * and `'needs_input'` resolve to `allow: false`; `'allow'` (or no status —
+ * a decision carrying only, say, a `reason`) resolves to `allow: true`.
+ * A decision that already sets `allow` is returned unchanged.
+ */
+export function resolveToolPolicyAllow(decision: ToolPolicyDecision): ResolvedToolPolicyDecision {
+  if (decision.allow !== undefined) {
+    return decision as ResolvedToolPolicyDecision;
+  }
+  const allow = decision.status === undefined || decision.status === 'allow';
+  return { ...decision, allow };
+}
 
 export type ToolPolicyContext = {
   toolName: string;

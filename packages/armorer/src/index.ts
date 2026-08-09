@@ -150,6 +150,7 @@ export type {
   MinimalAbortSignal,
   ObservableLike,
   Observer,
+  ResolvedToolPolicyDecision,
   Subscription,
   Tool,
   ToolCallWithArguments,
@@ -178,7 +179,7 @@ export type {
   ToolValidationReport,
   ToolValidationWarning,
 } from './is-tool';
-export { isTool } from './is-tool';
+export { isTool, resolveToolPolicyAllow } from './is-tool';
 export {
   materializeToolCall,
   materializeToolCalls,
