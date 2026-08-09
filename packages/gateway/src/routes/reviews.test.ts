@@ -74,13 +74,11 @@ function createParkedActiveRun(): {
   const activeRun: ActiveRun = {
     result: new Promise<never>(() => {}),
     abort: () => {},
-    addEventListener: emitter.addEventListener.bind(emitter) as ActiveRun['addEventListener'],
-    removeEventListener: emitter.removeEventListener.bind(
-      emitter,
-    ) as ActiveRun['removeEventListener'],
-    on: emitter.on.bind(emitter) as ActiveRun['on'],
-    once: emitter.once.bind(emitter) as ActiveRun['once'],
-    subscribe: emitter.subscribe.bind(emitter) as ActiveRun['subscribe'],
+    addEventListener: emitter.addEventListener.bind(emitter),
+    removeEventListener: emitter.removeEventListener.bind(emitter),
+    on: emitter.on.bind(emitter),
+    once: emitter.once.bind(emitter),
+    subscribe: emitter.subscribe.bind(emitter),
     events: emitter.events.bind(emitter) as ActiveRun['events'],
     toObservable: emitter.toObservable.bind(emitter),
     complete: emitter.complete.bind(emitter),

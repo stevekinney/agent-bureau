@@ -1,6 +1,6 @@
 ---
 description: TypeScript patterns and conventions enforced across all packages
-globs: "**/*.ts"
+globs: '**/*.ts'
 ---
 
 # TypeScript Conventions
@@ -43,14 +43,14 @@ Order enforced by `simple-import-sort`:
 
 ## Bun Preferences
 
-| Task          | Use (Bun)                                 | Avoid (Node)                      |
-| ------------- | ----------------------------------------- | --------------------------------- |
-| Read file     | `Bun.file(path).text()`                   | `fs.readFileSync(path, 'utf-8')`  |
-| Write file    | `Bun.write(path, data)`                   | `fs.writeFileSync(path, data)`    |
-| HTTP server   | `Bun.serve()`                             | `http.createServer()` or Express  |
-| Hashing       | `Bun.hash()` or `new Bun.CryptoHasher()` | `crypto.createHash()`             |
-| Spawn process | `Bun.spawn()` or `Bun.$`                  | `child_process.spawn()`           |
-| Environment   | `Bun.env.VAR`                             | `process.env.VAR`                 |
+| Task          | Use (Bun)                                | Avoid (Node)                     |
+| ------------- | ---------------------------------------- | -------------------------------- |
+| Read file     | `Bun.file(path).text()`                  | `fs.readFileSync(path, 'utf-8')` |
+| Write file    | `Bun.write(path, data)`                  | `fs.writeFileSync(path, data)`   |
+| HTTP server   | `Bun.serve()`                            | `http.createServer()` or Express |
+| Hashing       | `Bun.hash()` or `new Bun.CryptoHasher()` | `crypto.createHash()`            |
+| Spawn process | `Bun.spawn()` or `Bun.$`                 | `child_process.spawn()`          |
+| Environment   | `Bun.env.VAR`                            | `process.env.VAR`                |
 
 When Bun has no equivalent, use the `node:` prefix for clarity.
 

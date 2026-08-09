@@ -136,7 +136,7 @@ export function withIdempotency<T extends Tool>(tool: T, options: IdempotencyOpt
           return executeWithCache(input);
         };
       }
-      return Reflect.get(target as object, prop, receiver as object) as unknown;
+      return Reflect.get(target, prop, receiver as object) as unknown;
     },
   });
 }

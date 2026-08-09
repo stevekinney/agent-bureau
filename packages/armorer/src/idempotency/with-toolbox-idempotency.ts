@@ -95,8 +95,7 @@ export function withToolboxIdempotency(
     if (!tool) return undefined;
 
     const explicitKey = (tool as unknown as Record<string, unknown>)['idempotencyKey'] as
-      | ((input: unknown) => string)
-      | undefined;
+      ((input: unknown) => string) | undefined;
 
     if (explicitKey) return explicitKey;
     if (!requireExplicitKey) return fullInputKey;
@@ -137,7 +136,7 @@ export function withToolboxIdempotency(
         message:
           'This idempotency key has an unknown outcome. Re-approve before retrying the side effect.',
       },
-    } as ToolExecutionResult;
+    };
   }
 
   function createDedupedResult(
@@ -156,7 +155,7 @@ export function withToolboxIdempotency(
         key: cacheKey,
         outcome: 'deduped',
       },
-    } as ToolExecutionResult;
+    };
   }
 
   async function executeWithCache(
@@ -281,7 +280,7 @@ export function withToolboxIdempotency(
           return executeWithCache(input, originalExecute, executeOptions);
         };
       }
-      return Reflect.get(target as object, prop, receiver as object) as unknown;
+      return Reflect.get(target, prop, receiver as object) as unknown;
     },
   });
 }

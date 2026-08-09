@@ -155,7 +155,7 @@ function toolboxFromMap(toolsMap: Record<string, unknown>): AnyToolbox {
       typeof value === 'object' &&
       value !== null &&
       'execute' in value &&
-      typeof (value as { execute: unknown }).execute === 'function'
+      typeof value.execute === 'function'
     ) {
       // Plain { execute } object: normalize to an armorer Tool.
       // Cast is justified: execute is validated as a function above.
@@ -349,7 +349,7 @@ function makeBureauHandle<
     // ----- tools() --------------------------------------------------------
 
     tools<TNew extends ToolMapInput>(toolsMap: TNew) {
-      const newToolbox = toolboxFromMap(toolsMap as Record<string, unknown>);
+      const newToolbox = toolboxFromMap(toolsMap);
       if (state.bureauToolbox) {
         state.bureauToolbox = combineToolboxes(state.bureauToolbox, newToolbox);
       } else {
@@ -383,7 +383,7 @@ function makeBureauHandle<
 
       const agentToolbox =
         agentToolsMap && Object.keys(agentToolsMap).length > 0
-          ? toolboxFromMap(agentToolsMap as Record<string, unknown>)
+          ? toolboxFromMap(agentToolsMap)
           : undefined;
 
       const spec: AgentSpec = {
@@ -524,7 +524,7 @@ export function createBureau<
 
       const agentToolbox =
         agentToolsMap && Object.keys(agentToolsMap).length > 0
-          ? toolboxFromMap(agentToolsMap as Record<string, unknown>)
+          ? toolboxFromMap(agentToolsMap)
           : undefined;
 
       state.agents.set(name, {

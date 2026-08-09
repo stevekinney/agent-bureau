@@ -1,19 +1,8 @@
 import { describe, expect, it } from 'bun:test';
 
-import type { GenerateContext } from '../types.ts';
 import { withRoutingMetrics } from './routing-metrics.ts';
+import { makeContext } from './strategies/test-helpers.ts';
 import type { ModelRoute } from './types.ts';
-
-function makeContext(overrides?: Partial<GenerateContext>): GenerateContext {
-  return {
-    conversation: {
-      current: { ids: [], messages: {} },
-    } as unknown as GenerateContext['conversation'],
-    step: 0,
-    toolbox: { tools: () => [] } as unknown as GenerateContext['toolbox'],
-    ...overrides,
-  };
-}
 
 function makeRoute(name: string, content: string, costPerMillionTokens?: number): ModelRoute {
   return {

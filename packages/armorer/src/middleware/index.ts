@@ -406,7 +406,7 @@ async function* createFencedAsyncIterable<T>(
   yield `${options.preamble}\n${options.startDelimiter}\n`;
   for await (const chunk of source) {
     if (typeof chunk === 'string') {
-      yield escapeFenceText(chunk, options.endDelimiter) as T | string;
+      yield escapeFenceText(chunk, options.endDelimiter);
     } else {
       yield chunk;
     }

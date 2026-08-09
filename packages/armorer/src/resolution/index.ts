@@ -1,8 +1,7 @@
 export type ResolutionTier = 'exact' | 'case-insensitive' | 'normalized' | 'suffix';
 
 export type ResolutionResult =
-  | { resolved: string; tier: ResolutionTier }
-  | { resolved: null; ambiguous?: string[] };
+  { resolved: string; tier: ResolutionTier } | { resolved: null; ambiguous?: string[] };
 
 export function normalizeName(name: string): string {
   // Lowercase, replace . / _ with -, trim whitespace. Idempotent.

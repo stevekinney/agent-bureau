@@ -41,7 +41,14 @@ describe('Anthropic SDK interoperability', () => {
 
     const blocks: ContentBlock[] = [
       { type: 'text', text: 'Calling a tool.', citations: null },
-      { type: 'tool_use', id: 'toolu_123', name: 'weather', input: { city: 'Denver' } },
+      // `caller` became required on ToolUseBlock in @anthropic-ai/sdk 0.116.
+      {
+        type: 'tool_use',
+        id: 'toolu_123',
+        name: 'weather',
+        input: { city: 'Denver' },
+        caller: { type: 'direct' },
+      },
     ];
 
     expect(parseAnthropicToolCalls(blocks)).toEqual([

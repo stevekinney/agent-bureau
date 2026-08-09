@@ -350,8 +350,7 @@ export interface BlockAccumulator {
  * content blocks (`[text, tool_use, text]`).
  */
 export type StreamSegment =
-  | { kind: 'content'; content: MultiModalContent[] }
-  | { kind: 'tool-call'; toolCall: ToolCall };
+  { kind: 'content'; content: MultiModalContent[] } | { kind: 'tool-call'; toolCall: ToolCall };
 
 /**
  * The result of finalizing a streamed message: an ordered list of

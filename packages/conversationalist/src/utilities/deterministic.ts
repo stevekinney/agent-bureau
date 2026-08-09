@@ -25,7 +25,7 @@ export function sortObjectKeys<T>(obj: T): T {
   }
 
   const sorted: Record<string, unknown> = {};
-  const keys = Object.keys(obj as object).sort();
+  const keys = Object.keys(obj).sort();
 
   for (const key of keys) {
     sorted[key] = sortObjectKeys((obj as Record<string, unknown>)[key]);

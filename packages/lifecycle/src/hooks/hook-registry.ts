@@ -27,12 +27,12 @@ export class HookRegistry<M extends HookMap> {
       list = [];
       this.handlers.set(hookName, list);
     }
-    list.push(entry as RegisteredHandler<M[keyof M & string]>);
+    list.push(entry);
 
     return () => {
       const current = this.handlers.get(hookName);
       if (!current) return;
-      const index = current.indexOf(entry as RegisteredHandler<M[keyof M & string]>);
+      const index = current.indexOf(entry);
       if (index !== -1) {
         current.splice(index, 1);
       }

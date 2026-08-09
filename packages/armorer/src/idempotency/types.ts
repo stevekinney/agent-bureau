@@ -18,8 +18,7 @@ export type StartedToolExecution = {
 
 export type ToolResultCacheEntry = CachedToolResult | StartedToolExecution;
 export type ToolResultCacheClaimResult =
-  | { outcome: 'claimed' }
-  | { outcome: 'existing'; entry: ToolResultCacheEntry };
+  { outcome: 'claimed' } | { outcome: 'existing'; entry: ToolResultCacheEntry };
 
 /**
  * Cache interface for storing and retrieving idempotent tool results.

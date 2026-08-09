@@ -275,7 +275,7 @@ export function estimateConversationTokens(
     ) {
       env = optionsOrEstimator;
     } else {
-      options = optionsOrEstimator as EstimateOptions;
+      options = optionsOrEstimator;
     }
   }
 

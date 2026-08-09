@@ -1152,9 +1152,7 @@ export class Conversation {
   ): Promise<OpenAIMessage[] | AnthropicConversation | GeminiConversation> {
     const adapter = await loadConversationAdapter(provider);
     return adapter.export(this.current, options) as
-      | OpenAIMessage[]
-      | AnthropicConversation
-      | GeminiConversation;
+      OpenAIMessage[] | AnthropicConversation | GeminiConversation;
   }
 
   async appendProvider(

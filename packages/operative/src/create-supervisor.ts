@@ -334,14 +334,12 @@ export function createSupervisor(options: CreateSupervisorOptions): Supervisor {
       return { task, agentResults: allStageResults, synthesis: finalContent };
     },
 
-    addEventListener: events.addEventListener.bind(events) as Supervisor['addEventListener'],
-    removeEventListener: events.removeEventListener.bind(
-      events,
-    ) as Supervisor['removeEventListener'],
+    addEventListener: events.addEventListener.bind(events),
+    removeEventListener: events.removeEventListener.bind(events),
     on: events.on.bind(events) as Supervisor['on'],
     once: events.once.bind(events) as Supervisor['once'],
     subscribe: events.subscribe.bind(events) as Supervisor['subscribe'],
-    toObservable: events.toObservable.bind(events) as Supervisor['toObservable'],
+    toObservable: events.toObservable.bind(events),
   };
 }
 

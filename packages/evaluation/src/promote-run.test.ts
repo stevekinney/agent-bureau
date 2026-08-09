@@ -17,7 +17,7 @@ function createMockStep(
     toolCalls: toolCalls.map((tc) => ({
       id: `call-${tc.name}`,
       name: tc.name,
-      arguments: (tc.arguments ?? {}) as JSONValue,
+      arguments: tc.arguments ?? {},
     })),
     results: [],
     final: false,

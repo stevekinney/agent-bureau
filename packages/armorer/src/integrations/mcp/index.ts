@@ -325,8 +325,7 @@ function resolveMcpToolShape(
         ...(configuration.annotations?.readOnlyHint === undefined ? { readOnlyHint: true } : {}),
       }
     : configuration.annotations;
-  const resolvedInputSchema =
-    resolveMcpSchema(configuration.schema) ?? (tool.input as unknown as AnySchema);
+  const resolvedInputSchema = resolveMcpSchema(configuration.schema) ?? tool.input;
 
   const shape: ResolvedMcpToolShape = {
     description: configuration.description ?? tool.description,
@@ -939,12 +938,12 @@ function applyRegistrars(
 
 function resolveMcpSchema(schema: unknown): AnySchema | undefined {
   if (schema === undefined) return undefined;
-  if (isZodSchema(schema)) return schema as unknown as AnySchema;
+  if (isZodSchema(schema)) return schema;
   if (isZodRawShape(schema)) {
-    return z.object(schema) as unknown as AnySchema;
+    return z.object(schema);
   }
   const converted = jsonSchemaToZod(schema);
-  return converted ? (converted as unknown as AnySchema) : undefined;
+  return converted ? converted : undefined;
 }
 
 function isZodRawShape(value: unknown): value is Record<string, z.ZodTypeAny> {
@@ -1051,7 +1050,7 @@ function toElicitRequestParams(
       // spec's zod schema; our generic request only carries the plain fields
       // that schema requires, so this cast is a boundary translation, not a
       // type-safety escape hatch.
-    } as ElicitRequestURLParams;
+    };
   }
   return {
     mode: 'form',
@@ -1060,7 +1059,7 @@ function toElicitRequestParams(
       type: 'object',
       properties: {},
     }) as ElicitRequestFormParams['requestedSchema'],
-  } as ElicitRequestFormParams;
+  };
 }
 
 /**
@@ -1177,7 +1176,7 @@ export function createMcpToolElicitationRequester(
       // leaving it pending until the client answers or it times out.
       extra.signal ? { signal: extra.signal } : undefined,
     );
-    return fromElicitResult(result as ElicitResult, request);
+    return fromElicitResult(result, request);
   };
 }
 

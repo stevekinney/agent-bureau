@@ -191,7 +191,7 @@ export function createOpenAICompatRoutes(bureau: Bureau) {
     let message: string;
     let systemPrompt: string | undefined;
     try {
-      const prompt = messagesToPrompt(messages as ChatMessage[]);
+      const prompt = messagesToPrompt(messages);
       message = prompt.message;
       systemPrompt = prompt.systemPrompt;
     } catch (error) {

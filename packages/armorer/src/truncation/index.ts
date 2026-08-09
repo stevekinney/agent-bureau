@@ -113,9 +113,9 @@ export async function* createTruncatingAsyncIterable<T>(
       } else {
         // Partial yield: safely slice at the remaining boundary
         if (remaining > 0) {
-          yield safeSlice(chunk, remaining) as T;
+          yield safeSlice(chunk, remaining);
         }
-        yield marker as T | string;
+        yield marker;
         return;
       }
     } else {
@@ -128,7 +128,7 @@ export async function* createTruncatingAsyncIterable<T>(
         yield chunk;
       } else {
         // Non-string chunk exceeds limit — emit marker and stop
-        yield marker as T | string;
+        yield marker;
         return;
       }
     }

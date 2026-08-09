@@ -83,7 +83,7 @@ describe('pipe()', () => {
       const pipeline = pipe(parseNumber, double);
       // Pass wrong type - str should be string, not number
       // eslint-disable-next-line @typescript-eslint/await-thenable
-      await expect(pipeline({ str: 123 } as unknown as { str: string })).rejects.toThrow();
+      await expect(pipeline({ str: 123 })).rejects.toThrow();
     });
 
     it('validates intermediate results at each step', async () => {

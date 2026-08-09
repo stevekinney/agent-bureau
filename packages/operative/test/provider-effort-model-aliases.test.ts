@@ -270,8 +270,7 @@ describe('effort tiers — Gemini', () => {
     const result = await generate(makeContext());
 
     const generationConfig = client._calls[0]?.['generationConfig'] as
-      | Record<string, unknown>
-      | undefined;
+      Record<string, unknown> | undefined;
     expect(generationConfig?.['thinkingConfig']).toBeUndefined();
     expect(result.metadata?.['effectiveEffort']).toBe('none');
   });

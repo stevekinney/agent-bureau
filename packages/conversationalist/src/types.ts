@@ -1,6 +1,5 @@
 import type {
-  JSONPrimitive as SharedJSONPrimitive,
-  JSONValue as SharedJSONValue,
+  JSONValue,
   ToolAction as SharedToolAction,
   ToolActionInput as SharedToolActionInput,
   ToolCall as SharedToolCall,
@@ -22,9 +21,14 @@ export const CURRENT_SCHEMA_VERSION = 5;
 
 /**
  * JSON-serializable value types.
+ *
+ * Re-exported directly rather than aliased: the tsdown build inlines
+ * `interoperability`, and an alias makes the bundler emit two distinct symbols
+ * (the inlined original plus the alias). Only the alias ended up exported, so
+ * any consumer whose inferred type reached the original could not name it —
+ * TS2883 under TypeScript 6's declaration-portability check.
  */
-export type JSONPrimitive = SharedJSONPrimitive;
-export type JSONValue = SharedJSONValue;
+export type { JSONPrimitive, JSONValue } from 'interoperability';
 
 export type ConversationProvider = 'openai' | 'anthropic' | 'gemini';
 export type ChatMessageRole = 'user' | 'assistant' | 'system';
@@ -38,13 +42,7 @@ export interface ChatMessage {
  * Supported message roles in a conversation.
  */
 export type MessageRole =
-  | 'user'
-  | 'assistant'
-  | 'system'
-  | 'developer'
-  | 'tool-call'
-  | 'tool-result'
-  | 'snapshot';
+  'user' | 'assistant' | 'system' | 'developer' | 'tool-call' | 'tool-result' | 'snapshot';
 
 /**
  * Tool call metadata for tool-call messages.

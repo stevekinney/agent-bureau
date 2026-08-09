@@ -1060,8 +1060,7 @@ export interface OperativeEventEmitter {
   subscribe<K extends CombinedOperativeEventType>(
     type: K,
     observerOrNext?:
-      | Observer<CombinedOperativeEventMap[K]>
-      | ((value: CombinedOperativeEventMap[K]) => void),
+      Observer<CombinedOperativeEventMap[K]> | ((value: CombinedOperativeEventMap[K]) => void),
     error?: (err: unknown) => void,
     complete?: () => void,
   ): Subscription;

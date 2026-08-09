@@ -159,7 +159,7 @@ describe('createSessionHandle', () => {
       agentName: 'test-agent',
       runOptions: {
         generate: createInstantGenerate(),
-        toolbox: createToolbox([]) as unknown as Toolbox,
+        toolbox: createToolbox([]),
       },
     });
 
@@ -336,7 +336,7 @@ describe('session.run()', () => {
       agentName: 'f1-agent',
       runOptions: {
         generate: capturingGenerate,
-        toolbox: createToolbox([]) as unknown as Toolbox,
+        toolbox: createToolbox([]),
         maximumSteps: 1,
       },
     });
@@ -383,7 +383,7 @@ describe('session.run()', () => {
       agentName: 'test-agent',
       runOptions: {
         generate: blockingGenerate,
-        toolbox: createToolbox([]) as unknown as Toolbox,
+        toolbox: createToolbox([]),
         maximumSteps: 1,
       },
     });
@@ -541,7 +541,7 @@ describe('session.run()', () => {
         fakeCheckpointStore as unknown as import('../durable/checkpoint-store').CheckpointStore,
       runOptions: {
         generate: createInstantGenerate(),
-        toolbox: createToolbox([]) as unknown as Toolbox,
+        toolbox: createToolbox([]),
         maximumSteps: 1,
       },
     });
@@ -584,7 +584,7 @@ describe('session.recover()', () => {
       agentName: 'test-agent',
       runOptions: {
         generate: blockingGenerate,
-        toolbox: createToolbox([]) as unknown as Toolbox,
+        toolbox: createToolbox([]),
         maximumSteps: 1,
       },
     });
@@ -652,7 +652,7 @@ describe('session.cancel()', () => {
       agentName: 'cancel-agent',
       runOptions: {
         generate: blockingGenerate,
-        toolbox: createToolbox([]) as unknown as Toolbox,
+        toolbox: createToolbox([]),
         maximumSteps: 1,
       },
     });
@@ -719,7 +719,7 @@ describe('session.cancel()', () => {
       engine: fakeEngine,
       runOptions: {
         generate: createInstantGenerate(),
-        toolbox: createToolbox([]) as unknown as Toolbox,
+        toolbox: createToolbox([]),
       },
     });
 
@@ -1065,7 +1065,7 @@ describe('session.signal()', () => {
       agentName: 'agent',
       runOptions: {
         generate: createInstantGenerate(),
-        toolbox: createToolbox([]) as unknown as Toolbox,
+        toolbox: createToolbox([]),
       },
     });
 
@@ -1109,7 +1109,7 @@ describe('session.signal()', () => {
       engine: fakeEngine,
       runOptions: {
         generate: createInstantGenerate(),
-        toolbox: createToolbox([]) as unknown as Toolbox,
+        toolbox: createToolbox([]),
       },
     });
 
@@ -1157,7 +1157,7 @@ describe('session.signal()', () => {
       engine: fakeEngine,
       runOptions: {
         generate: createInstantGenerate(),
-        toolbox: createToolbox([]) as unknown as Toolbox,
+        toolbox: createToolbox([]),
       },
     });
 
@@ -1211,7 +1211,7 @@ describe('session.signal()', () => {
       engine: fakeEngine,
       runOptions: {
         generate: createInstantGenerate(),
-        toolbox: createToolbox([]) as unknown as Toolbox,
+        toolbox: createToolbox([]),
       },
     });
 
@@ -1257,7 +1257,7 @@ describe('session.update()', () => {
       agentName: 'agent',
       runOptions: {
         generate: createInstantGenerate(),
-        toolbox: createToolbox([]) as unknown as Toolbox,
+        toolbox: createToolbox([]),
       },
     });
 
@@ -1301,7 +1301,7 @@ describe('session.update()', () => {
       engine: fakeEngine,
       runOptions: {
         generate: createInstantGenerate(),
-        toolbox: createToolbox([]) as unknown as Toolbox,
+        toolbox: createToolbox([]),
       },
     });
 
@@ -1477,7 +1477,7 @@ describe('session.query()', () => {
       agentName: 'agent',
       runOptions: {
         generate: createInstantGenerate(),
-        toolbox: createToolbox([]) as unknown as Toolbox,
+        toolbox: createToolbox([]),
       },
     });
 
@@ -1512,7 +1512,7 @@ describe('session.query()', () => {
       engine: fakeEngine,
       runOptions: {
         generate: createInstantGenerate(),
-        toolbox: createToolbox([]) as unknown as Toolbox,
+        toolbox: createToolbox([]),
       },
     });
 
@@ -1556,7 +1556,7 @@ describe('session.query()', () => {
       engine: fakeEngine,
       runOptions: {
         generate: createInstantGenerate(),
-        toolbox: createToolbox([]) as unknown as Toolbox,
+        toolbox: createToolbox([]),
       },
     });
 
@@ -1594,7 +1594,7 @@ describe('session.query()', () => {
       engine: fakeEngine,
       runOptions: {
         generate: createInstantGenerate(),
-        toolbox: createToolbox([]) as unknown as Toolbox,
+        toolbox: createToolbox([]),
       },
     });
 
@@ -1623,7 +1623,7 @@ describe('session full lifecycle', () => {
       agentName: 'lifecycle-agent',
       runOptions: {
         generate: blockingGenerate,
-        toolbox: createToolbox([]) as unknown as Toolbox,
+        toolbox: createToolbox([]),
         maximumSteps: 1,
       },
     });
@@ -2666,7 +2666,7 @@ describe('regression: abort() forwards to the durable inner run (PRRT_kwDORvupsc
         fakeCheckpointStore as unknown as import('../durable/checkpoint-store').CheckpointStore,
       runOptions: {
         generate: createInstantGenerate(),
-        toolbox: createToolbox([]) as unknown as Toolbox,
+        toolbox: createToolbox([]),
         maximumSteps: 1,
       },
     });
@@ -2760,7 +2760,7 @@ describe('regression: [Symbol.dispose]() forwards to the durable inner run (PRRT
         fakeCheckpointStore as unknown as import('../durable/checkpoint-store').CheckpointStore,
       runOptions: {
         generate: createInstantGenerate(),
-        toolbox: createToolbox([]) as unknown as Toolbox,
+        toolbox: createToolbox([]),
         maximumSteps: 1,
       },
     });
@@ -2827,7 +2827,7 @@ describe('regression: cancel() only persists aborted status when engine.cancel()
       engine: fakeEngine,
       runOptions: {
         generate: createInstantGenerate(),
-        toolbox: createToolbox([]) as unknown as Toolbox,
+        toolbox: createToolbox([]),
       },
     });
 
@@ -3192,7 +3192,7 @@ describe('regression: tool.* bubble events carry the session run id (PRRT_kwDORv
       // No engine/checkpointStore → forces the in-memory createActiveRun path.
       runOptions: {
         generate,
-        toolbox: createToolbox([echoTool]) as unknown as Toolbox,
+        toolbox: createToolbox([echoTool]),
         maximumSteps: 2,
       },
     });

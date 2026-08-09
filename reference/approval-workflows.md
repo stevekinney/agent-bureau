@@ -30,10 +30,7 @@ interface RiskClassification {
   reason: string;
 }
 
-type RiskClassifier = (
-  toolCall: ToolCall,
-  context: ToolExecutionHookContext,
-) => RiskClassification;
+type RiskClassifier = (toolCall: ToolCall, context: ToolExecutionHookContext) => RiskClassification;
 ```
 
 - **`auto`**: Execute immediately without human involvement.
@@ -45,9 +42,9 @@ type RiskClassifier = (
 ```typescript
 /** Classify by tool name patterns. */
 function createToolNameClassifier(rules: {
-  approve?: string[];   // Tool names requiring approval
-  notify?: string[];    // Tool names requiring notification
-  auto?: string[];      // Tool names that auto-execute (default for unlisted)
+  approve?: string[]; // Tool names requiring approval
+  notify?: string[]; // Tool names requiring notification
+  auto?: string[]; // Tool names that auto-execute (default for unlisted)
 }): RiskClassifier;
 
 /** Classify by argument patterns. */
@@ -85,6 +82,7 @@ type ApprovalHandler = (request: ApprovalRequest) => Promise<ApprovalDecision>;
 ```
 
 Approval handlers are pluggable. Implementations might include:
+
 - CLI prompt (for local development)
 - WebSocket notification via gateway (for web UI)
 - External webhook (for Slack/Teams approval flows)
@@ -94,9 +92,7 @@ Approval handlers are pluggable. Implementations might include:
 function createCLIApprovalHandler(): ApprovalHandler;
 
 /** Approval via elicitation (uses operative's OnElicitation). */
-function createElicitationApprovalHandler(
-  onElicitation: OnElicitation,
-): ApprovalHandler;
+function createElicitationApprovalHandler(onElicitation: OnElicitation): ApprovalHandler;
 ```
 
 ### PR-4: Approval Hook
@@ -121,6 +117,7 @@ function createApprovalHook(options: ApprovalHookOptions): BeforeToolExecutionHo
 ```
 
 The hook:
+
 1. Classifies each tool call in the step
 2. For `auto` tools: pass through unchanged
 3. For `notify` tools: pass through, schedule async notification

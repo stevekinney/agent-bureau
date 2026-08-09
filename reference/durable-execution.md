@@ -24,11 +24,7 @@ Define the state captured at each checkpoint:
 
 ```typescript
 type CheckpointPhase =
-  | 'step-start'
-  | 'generate-complete'
-  | 'tool-execution-complete'
-  | 'step-complete'
-  | 'run-complete';
+  'step-start' | 'generate-complete' | 'tool-execution-complete' | 'step-complete' | 'run-complete';
 
 interface Checkpoint {
   id: string;
@@ -104,10 +100,13 @@ interface ResumeOptions {
   runOptions: Omit<RunOptions, 'conversation'>;
 }
 
-function resumeFromCheckpoint(options: ResumeOptions): Promise<{
-  activeRun: ActiveRun;
-  resumedFrom: Checkpoint;
-} | undefined>;
+function resumeFromCheckpoint(options: ResumeOptions): Promise<
+  | {
+      activeRun: ActiveRun;
+      resumedFrom: Checkpoint;
+    }
+  | undefined
+>;
 ```
 
 Resume logic by checkpoint phase:

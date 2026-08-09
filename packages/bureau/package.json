@@ -77,22 +77,22 @@
     "memory": "workspace:*",
     "@lostgradient/operative": "workspace:*",
     "skills": "workspace:*",
-    "zod": "^4.4.1"
+    "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@anthropic-ai/sdk": "^0.71.2",
+    "@anthropic-ai/sdk": "^0.116.0",
     "@eslint/js": "^10.0.1",
     "@google/generative-ai": "^0.24.1",
-    "@opentelemetry/api": "^1.9.0",
-    "@types/bun": "^1.3.9",
-    "eslint": "^10.0.0",
-    "typescript": "5.9.2",
-    "typescript-eslint": "^8.55.0"
+    "@opentelemetry/api": "^1.9.1",
+    "@types/bun": "^1.3.14",
+    "eslint": "^10.8.1",
+    "typescript": "6.0.3",
+    "typescript-eslint": "^8.66.0"
   },
   "peerDependencies": {
     "@anthropic-ai/sdk": ">=0.50.0",
     "@google/generative-ai": ">=0.20.0",
-    "@opentelemetry/api": "^1.9.0",
+    "@opentelemetry/api": "^1.9.1",
     "openai": ">=4.0.0"
   },
   "peerDependenciesMeta": {

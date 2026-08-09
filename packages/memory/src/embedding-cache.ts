@@ -144,7 +144,7 @@ export function withEmbeddingCache(
       return results as EmbeddingVector[];
     },
     {
-      cache: cache as ReadonlyMap<string, EmbeddingVector>,
+      cache: cache,
 
       clearCache(): void {
         cache.clear();

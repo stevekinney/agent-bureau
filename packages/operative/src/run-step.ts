@@ -647,9 +647,7 @@ export async function runStep(
               response,
               duration: durationMilliseconds,
             };
-            const handlerResult = await (
-              entry.handler as (context: typeof afterGenContext) => Promise<GenerateResponse | void>
-            )(afterGenContext);
+            const handlerResult = await entry.handler(afterGenContext);
             if (handlerResult !== undefined) {
               response = handlerResult;
             }
@@ -883,21 +881,18 @@ export async function runStep(
         const executeResult =
           deps.parentContext !== undefined && deps.withTraceContext !== undefined
             ? await deps.withTraceContext(deps.parentContext, () =>
-                stepToolbox.execute(
-                  callsToExecute as Parameters<typeof stepToolbox.execute>[0],
-                  {
-                    ...deps.executeOptions,
-                    signal: stepSignal,
-                    ...(deps.durableOperationKeys &&
-                    deps.runId !== undefined &&
-                    deps.executeOptions?.durableOperationKey === undefined
-                      ? {
-                          durableOperationKey: (call: ToolCall, index: number) =>
-                            `schedule-safe:${deps.runId}:step-${step}:tool-${index}:${call.name}`,
-                        }
-                      : {}),
-                  } as Parameters<typeof stepToolbox.execute>[1],
-                ),
+                stepToolbox.execute(callsToExecute as Parameters<typeof stepToolbox.execute>[0], {
+                  ...deps.executeOptions,
+                  signal: stepSignal,
+                  ...(deps.durableOperationKeys &&
+                  deps.runId !== undefined &&
+                  deps.executeOptions?.durableOperationKey === undefined
+                    ? {
+                        durableOperationKey: (call: ToolCall, index: number) =>
+                          `schedule-safe:${deps.runId}:step-${step}:tool-${index}:${call.name}`,
+                      }
+                    : {}),
+                }),
               )
             : await stepToolbox.execute(
                 callsToExecute as Parameters<typeof stepToolbox.execute>[0],
@@ -912,7 +907,7 @@ export async function runStep(
                           `schedule-safe:${deps.runId}:step-${step}:tool-${index}:${call.name}`,
                       }
                     : {}),
-                } as Parameters<typeof stepToolbox.execute>[1],
+                },
               );
 
         results = Array.isArray(executeResult) ? executeResult : [executeResult];

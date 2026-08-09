@@ -184,7 +184,9 @@ interface LLMJudgeOptions {
   scale?: { min: number; max: number };
 }
 
-function createLLMJudge(options: LLMJudgeOptions): (
+function createLLMJudge(
+  options: LLMJudgeOptions,
+): (
   input: string,
   output: string,
   reference?: string,

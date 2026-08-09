@@ -4,19 +4,13 @@ import type { ToolChoice } from './types.ts';
  * Anthropic tool_choice parameter shape.
  */
 type AnthropicToolChoice =
-  | { type: 'auto' }
-  | { type: 'any' }
-  | { type: 'tool'; name: string }
-  | undefined;
+  { type: 'auto' } | { type: 'any' } | { type: 'tool'; name: string } | undefined;
 
 /**
  * OpenAI tool_choice parameter shape.
  */
 type OpenAIToolChoice =
-  | 'auto'
-  | 'required'
-  | 'none'
-  | { type: 'function'; function: { name: string } };
+  'auto' | 'required' | 'none' | { type: 'function'; function: { name: string } };
 
 /**
  * Gemini toolConfig parameter shape (camelCase per @google/generative-ai SDK).

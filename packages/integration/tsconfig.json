@@ -3,7 +3,6 @@
   "compilerOptions": {
     "exactOptionalPropertyTypes": true,
     "tsBuildInfoFile": "node_modules/.cache/tsconfig.tsbuildinfo",
-    "baseUrl": ".",
     "typeRoots": ["node_modules/@types"],
     "types": ["bun"]
   },

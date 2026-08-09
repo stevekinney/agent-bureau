@@ -144,7 +144,7 @@ export function createToolResultCache(options: CreateToolResultCacheOptions): To
 
   function encodeEntry(entry: ToolResultCacheEntry): Record<string, unknown> {
     if (entry.status === 'started' || entry.result !== undefined) {
-      return entry as unknown as Record<string, unknown>;
+      return entry;
     }
 
     const { result: _result, ...encoded } = entry;

@@ -626,8 +626,7 @@ Either an `AgentDefinition` (from `operative`) or a bare `{ generate, toolbox }`
 
 ```typescript
 type EvaluationAgentConfiguration =
-  | AgentDefinition
-  | { generate: GenerateFunction; toolbox: Toolbox };
+  AgentDefinition | { generate: GenerateFunction; toolbox: Toolbox };
 ```
 
 ### `EmbedderFunction`

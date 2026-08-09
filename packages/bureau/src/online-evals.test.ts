@@ -67,7 +67,7 @@ function createStubAuditTrail(): { auditTrail: AuditTrail; records: Record<strin
   const records: Record<string, unknown>[] = [];
   const auditTrail: AuditTrail = {
     async record(entry) {
-      records.push(entry as Record<string, unknown>);
+      records.push(entry);
     },
     async query() {
       return [];

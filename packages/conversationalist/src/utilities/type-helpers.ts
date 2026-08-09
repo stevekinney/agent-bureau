@@ -14,5 +14,5 @@ export function hasOwnProperty<X extends object, Y extends PropertyKey>(
  * Used to enforce immutability at the type level.
  */
 export function toReadonly<T>(value: T): Readonly<T> {
-  return value as Readonly<T>;
+  return value;
 }

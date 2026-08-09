@@ -58,6 +58,7 @@ function sha256HexSync(text: string): string;
 ```
 
 Runtime detection order:
+
 1. `typeof Bun !== 'undefined'` → `new Bun.CryptoHasher('sha256').update(text).digest('hex')`
 2. Otherwise → dynamically cached `createHash` from `node:crypto` (resolved once via a module-level variable populated by a self-invoking async import, or eagerly if `globalThis.process` is available)
 3. Neither available → throw `Error('sha256HexSync requires Bun or Node.js. Use sha256Hex() for browser environments.')`

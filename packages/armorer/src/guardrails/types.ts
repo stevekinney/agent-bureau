@@ -8,10 +8,7 @@
  * and may have been crafted specifically to manipulate the model.
  */
 export type GuardrailProvenance =
-  | 'user-input'
-  | 'recalled-memory'
-  | 'ingested-document'
-  | 'skill-resource';
+  'user-input' | 'recalled-memory' | 'ingested-document' | 'skill-resource';
 
 /** Context provided to detectors for situational awareness. */
 export interface DetectorContext {

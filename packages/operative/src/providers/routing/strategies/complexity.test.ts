@@ -1,8 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 
-import type { GenerateContext } from '../../types.ts';
 import { createComplexityStrategy, extractComplexitySignals } from './complexity.ts';
-import { makeContext, makeContextWithMessages, makeRoutes } from './test-helpers.ts';
+import { makeContext, makeContextWithMessages, makeRoutes, makeToolbox } from './test-helpers.ts';
 
 describe('extractComplexitySignals', () => {
   it('returns zero-valued signals for empty context', () => {
@@ -30,7 +29,7 @@ describe('extractComplexitySignals', () => {
   it('counts tools from toolbox', () => {
     const tools = [{ name: 'tool1' }, { name: 'tool2' }, { name: 'tool3' }];
     const context = makeContext({
-      toolbox: { tools: () => tools } as unknown as GenerateContext['toolbox'],
+      toolbox: makeToolbox(tools.map((tool) => tool.name)),
     });
 
     const signals = extractComplexitySignals(context);
@@ -137,7 +136,7 @@ describe('createComplexityStrategy', () => {
     const context = makeContextWithMessages(
       [{ role: 'user', content: 'Please analyze this data and generate a report' }],
       {
-        toolbox: { tools: () => tools } as unknown as GenerateContext['toolbox'],
+        toolbox: makeToolbox(tools.map((tool) => tool.name)),
         step: 3,
       },
     );
@@ -157,7 +156,7 @@ describe('createComplexityStrategy', () => {
     // Very long message, many tools, deep conversation
     const tools = Array.from({ length: 12 }, (_, i) => ({ name: `tool-${i}` }));
     const context = makeContextWithMessages([{ role: 'user', content: 'x'.repeat(2500) }], {
-      toolbox: { tools: () => tools } as unknown as GenerateContext['toolbox'],
+      toolbox: makeToolbox(tools.map((tool) => tool.name)),
       step: 25,
     });
 
@@ -172,7 +171,7 @@ describe('createComplexityStrategy', () => {
     // Frontier-level signals but no frontier route configured
     const tools = Array.from({ length: 12 }, (_, i) => ({ name: `tool-${i}` }));
     const context = makeContextWithMessages([{ role: 'user', content: 'x'.repeat(2500) }], {
-      toolbox: { tools: () => tools } as unknown as GenerateContext['toolbox'],
+      toolbox: makeToolbox(tools.map((tool) => tool.name)),
       step: 25,
     });
 
@@ -203,7 +202,7 @@ describe('createComplexityStrategy', () => {
     // Exactly 3 tools — should be complex (not simple, since simple requires < 3)
     const tools = Array.from({ length: 3 }, (_, i) => ({ name: `tool-${i}` }));
     const context = makeContextWithMessages([{ role: 'user', content: 'Short' }], {
-      toolbox: { tools: () => tools } as unknown as GenerateContext['toolbox'],
+      toolbox: makeToolbox(tools.map((tool) => tool.name)),
     });
 
     const decision = strategy(context, routes);
@@ -230,7 +229,7 @@ describe('createComplexityStrategy', () => {
     const context = makeContextWithMessages(
       [{ role: 'user', content: 'What is the capital of France?' }],
       {
-        toolbox: { tools: () => tools } as unknown as GenerateContext['toolbox'],
+        toolbox: makeToolbox(tools.map((tool) => tool.name)),
         step: 2,
       },
     );

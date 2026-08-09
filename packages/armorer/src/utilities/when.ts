@@ -1,5 +1,3 @@
-import { z } from 'zod';
-
 import type {
   AnyTool,
   ComposedTool,
@@ -94,7 +92,7 @@ export function when<
   return createTool({
     name,
     description,
-    input: whenTrue.input as z.ZodTypeAny,
+    input: whenTrue.input,
     async execute(params, context) {
       return runWhen(params, context);
     },

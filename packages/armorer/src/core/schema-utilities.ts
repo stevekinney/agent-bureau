@@ -145,7 +145,7 @@ export function isZodObjectSchema(value: unknown): value is ToolSchema {
 
 function asSchemaLike(value: unknown): ZodSchemaLike | undefined {
   if (!value || typeof value !== 'object') return undefined;
-  return value as ZodSchemaLike;
+  return value;
 }
 
 function resolveShape(value: ZodShape | (() => ZodShape) | undefined): ZodShape | undefined {

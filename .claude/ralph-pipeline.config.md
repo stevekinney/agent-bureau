@@ -4,10 +4,12 @@ on_stuck: skip
 max_parallel: 4
 
 verify:
-  - turbo run validate
+
+- turbo run validate
 
 reviewers:
-  - copilot
+
+- copilot
 
 work_max_iterations: 15
 branch_prefix: ralph/

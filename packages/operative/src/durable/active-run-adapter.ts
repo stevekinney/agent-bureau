@@ -1,7 +1,6 @@
 import { HISTORY_CIRCUIT_BREAKER_REASON, isWeftErrorLike } from '@lostgradient/weft';
 import type { ToolboxEventMap } from 'armorer';
 import { Conversation, isConversation } from 'conversationalist';
-import type { ForwardableSource } from 'lifecycle';
 import { CompletableEventTarget, forwardEvents } from 'lifecycle';
 
 import type { ActiveRun } from '../create-run';
@@ -260,11 +259,7 @@ export function createDurableActiveRun(
   // inert (no events ever fire). Durable per-step conversation streaming is
   // TODO(weft-integration): #10 (in-process streaming progress).
   const cleanups: (() => void)[] = [];
-  const toolboxForward = forwardEvents(
-    options.toolbox as unknown as ForwardableSource,
-    emitter,
-    'toolbox',
-  );
+  const toolboxForward = forwardEvents(options.toolbox, emitter, 'toolbox');
   cleanups.push(() => toolboxForward.stop());
 
   // C3 — curated tool.* bubble events stamped with {agentName, runId, step}.
@@ -442,15 +437,13 @@ export function createDurableActiveRun(
   return {
     result,
     abort,
-    addEventListener: emitter.addEventListener.bind(emitter) as ActiveRun['addEventListener'],
-    removeEventListener: emitter.removeEventListener.bind(
-      emitter,
-    ) as ActiveRun['removeEventListener'],
-    on: emitter.on.bind(emitter) as ActiveRun['on'],
-    once: emitter.once.bind(emitter) as ActiveRun['once'],
-    subscribe: emitter.subscribe.bind(emitter) as ActiveRun['subscribe'],
+    addEventListener: emitter.addEventListener.bind(emitter),
+    removeEventListener: emitter.removeEventListener.bind(emitter),
+    on: emitter.on.bind(emitter),
+    once: emitter.once.bind(emitter),
+    subscribe: emitter.subscribe.bind(emitter),
     events: emitter.events.bind(emitter) as ActiveRun['events'],
-    toObservable: emitter.toObservable.bind(emitter) as ActiveRun['toObservable'],
+    toObservable: emitter.toObservable.bind(emitter),
     complete,
     [Symbol.dispose](): void {
       abort();
@@ -487,11 +480,7 @@ export function createRecoveredRunEventSurface(
   const emitter = new CompletableEventTarget<CombinedOperativeEventMap>();
   services.emitter = emitter;
   const cleanups: Array<(() => void) | undefined> = [];
-  const toolboxForward = forwardEvents(
-    services.toolbox as unknown as ForwardableSource,
-    emitter,
-    'toolbox',
-  );
+  const toolboxForward = forwardEvents(services.toolbox, emitter, 'toolbox');
   cleanups.push(() => toolboxForward.stop());
 
   let currentStep = 0;
@@ -695,15 +684,13 @@ export function reattachDurableActiveRun(
   return {
     result,
     abort,
-    addEventListener: emitter.addEventListener.bind(emitter) as ActiveRun['addEventListener'],
-    removeEventListener: emitter.removeEventListener.bind(
-      emitter,
-    ) as ActiveRun['removeEventListener'],
-    on: emitter.on.bind(emitter) as ActiveRun['on'],
-    once: emitter.once.bind(emitter) as ActiveRun['once'],
-    subscribe: emitter.subscribe.bind(emitter) as ActiveRun['subscribe'],
+    addEventListener: emitter.addEventListener.bind(emitter),
+    removeEventListener: emitter.removeEventListener.bind(emitter),
+    on: emitter.on.bind(emitter),
+    once: emitter.once.bind(emitter),
+    subscribe: emitter.subscribe.bind(emitter),
     events: emitter.events.bind(emitter) as ActiveRun['events'],
-    toObservable: emitter.toObservable.bind(emitter) as ActiveRun['toObservable'],
+    toObservable: emitter.toObservable.bind(emitter),
     complete,
     [Symbol.dispose](): void {
       // Cancel the durable run at the engine BEFORE completing the local emitter,

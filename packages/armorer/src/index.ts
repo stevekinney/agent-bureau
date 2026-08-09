@@ -23,7 +23,14 @@ export {
 } from './approval-policy';
 export { combineToolboxes } from './combine-toolboxes';
 export type { ToolError, ToolErrorCategory } from './core/errors';
-export type { ToolAvailabilityContext, ToolAvailabilityHook } from './core/tool-definition';
+// `ToolDefinition` is part of the public `Tool` type's structure, so downstream
+// packages must be able to name it to emit their own declarations (TS2883).
+export type {
+  AnyToolDefinition,
+  ToolAvailabilityContext,
+  ToolAvailabilityHook,
+  ToolDefinition,
+} from './core/tool-definition';
 export type { CreateToolOptions, WithContext } from './create-tool';
 export { createTool, createToolCall, lazy, withContext } from './create-tool';
 export type {
@@ -147,6 +154,7 @@ export type {
   AddEventListenerOptionsLike,
   AsyncIteratorOptions,
   DefaultToolEvents,
+  EventIteratorOptions,
   MinimalAbortSignal,
   ObservableLike,
   Observer,

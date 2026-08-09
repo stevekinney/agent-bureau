@@ -1,5 +1,3 @@
-import { z } from 'zod';
-
 import type {
   AnyTool,
   ComposedTool,
@@ -223,12 +221,12 @@ export function pipe(...tools: AnyTool[]): AnyTool {
   return createTool({
     name: `pipe(${toolNames.join(', ')})`,
     description: `Composed pipeline: ${toolNames.join(' → ')}`,
-    input: first.input as z.ZodTypeAny,
+    input: first.input,
 
     async execute(input: unknown, context: ToolContext<DefaultToolEvents>) {
       return runPipeline(input, context);
     },
-  }) as AnyTool;
+  });
 }
 
 function toError(error: unknown): Error {
@@ -285,7 +283,7 @@ export function bind<TTool extends AnyTool, TBound extends BindParams<TTool>>(
   } = {
     name,
     description,
-    input: input as z.ZodType<BindInput<TTool, TBound>>,
+    input: input,
     async execute(params, context) {
       const merged = mergeBoundParams(params, bound);
       const executeOptions =
@@ -310,7 +308,7 @@ export function bind<TTool extends AnyTool, TBound extends BindParams<TTool>>(
     ToolMetadata | undefined,
     ToolContext<DefaultToolEvents>,
     InferToolOutput<TTool>
-  >(toolOptions) as ComposedTool<BindInput<TTool, TBound>, InferToolOutput<TTool>>;
+  >(toolOptions);
 }
 
 function resolveBoundSchema(schema: ToolParametersSchema, bound: unknown): ToolParametersSchema {

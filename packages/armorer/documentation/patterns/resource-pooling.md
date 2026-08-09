@@ -161,9 +161,7 @@ const dbTool = createResourceTool({
   input: z.object({ query: z.string() }),
   setup: async () => {
     console.log('Opening database connection...');
-    return {
-      /* connection */
-    };
+    return {/* connection */};
   },
   execute: async ({ query }, connection) => {
     // Use connection

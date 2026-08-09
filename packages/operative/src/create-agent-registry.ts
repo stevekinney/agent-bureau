@@ -104,8 +104,7 @@ export interface AgentRegistry {
   subscribe: <K extends AgentRegistryEventType>(
     type: K,
     observerOrNext?:
-      | Observer<AgentRegistryEventMap[K]>
-      | ((value: AgentRegistryEventMap[K]) => void),
+      Observer<AgentRegistryEventMap[K]> | ((value: AgentRegistryEventMap[K]) => void),
     error?: (err: unknown) => void,
     complete?: () => void,
   ) => Subscription;
@@ -192,14 +191,12 @@ export function createAgentRegistry(): AgentRegistry {
       return results;
     },
 
-    addEventListener: events.addEventListener.bind(events) as AgentRegistry['addEventListener'],
-    removeEventListener: events.removeEventListener.bind(
-      events,
-    ) as AgentRegistry['removeEventListener'],
+    addEventListener: events.addEventListener.bind(events),
+    removeEventListener: events.removeEventListener.bind(events),
     on: events.on.bind(events) as AgentRegistry['on'],
     once: events.once.bind(events) as AgentRegistry['once'],
     subscribe: events.subscribe.bind(events) as AgentRegistry['subscribe'],
-    toObservable: events.toObservable.bind(events) as AgentRegistry['toObservable'],
+    toObservable: events.toObservable.bind(events),
   };
 
   return registry;

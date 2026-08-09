@@ -215,8 +215,7 @@ describe('AB-99 Tribunal conformance — two-provider parity', () => {
       expect(openaiCalls.length).toBeGreaterThan(0);
       for (const call of openaiCalls) {
         const responseFormat = call['response_format'] as
-          | { type?: string; json_schema?: { schema?: unknown } }
-          | undefined;
+          { type?: string; json_schema?: { schema?: unknown } } | undefined;
         expect(responseFormat?.type).toBe('json_schema');
         expect(responseFormat?.json_schema?.schema).toEqual(
           tribunalOutputSchemaForRole('specialist'),

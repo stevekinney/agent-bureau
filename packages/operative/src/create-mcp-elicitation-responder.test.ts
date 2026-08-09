@@ -17,7 +17,7 @@ describe('createMcpElicitationResponder', () => {
 
     const responder = createMcpElicitationResponder({
       onElicitation: async (request) => {
-        seen.push(request as ElicitationRequest);
+        seen.push(request);
         return { data: { approved: true } } as any;
       },
       getContext: makeContext,

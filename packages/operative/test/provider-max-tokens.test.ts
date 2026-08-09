@@ -173,8 +173,7 @@ describe('providers — toolbox availability gating', () => {
 
     const call = client._calls[0];
     const tools = call?.['tools'] as
-      | Array<{ functionDeclarations: Array<{ name: string }> }>
-      | undefined;
+      Array<{ functionDeclarations: Array<{ name: string }> }> | undefined;
     expect(tools?.flatMap((tool) => tool.functionDeclarations.map((entry) => entry.name))).toEqual([
       'available-tool',
     ]);

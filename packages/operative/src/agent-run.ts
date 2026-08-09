@@ -248,7 +248,7 @@ export function createAgentRun(
             const resolve = waitResolve;
             waitResolve = null;
             waitReject = null;
-            resolve({ value: undefined as unknown as RunEvent, done: true });
+            resolve({ value: undefined, done: true });
           }
         },
       });
@@ -273,7 +273,7 @@ export function createAgentRun(
             const resolve = waitResolve;
             waitResolve = null;
             waitReject = null;
-            resolve({ value: undefined as unknown as RunEvent, done: true });
+            resolve({ value: undefined, done: true });
           }
         }
       });

@@ -58,3 +58,13 @@ export function makeRoutes(names: string[] = ['fast', 'smart', 'frontier']): Mod
     generate: () => Promise.resolve({ content: '', toolCalls: [] }),
   }));
 }
+
+/**
+ * Creates a minimal toolbox fake exposing only `tools()` — the one method the
+ * routing strategies read. Entries carry just a name, so the cast documents
+ * that the rest of the Toolbox surface is intentionally absent.
+ */
+export function makeToolbox(names: readonly string[]): GenerateContext['toolbox'] {
+  const tools = names.map((name) => ({ name }));
+  return { tools: () => tools } as unknown as GenerateContext['toolbox'];
+}

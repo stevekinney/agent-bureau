@@ -50,10 +50,7 @@ import type { Bureau, DiagnosticSink, PendingReview } from './types';
 
 /** The trigger types that fire a configured webhook. */
 export type WebhookTriggerType =
-  | 'elicitation.requested'
-  | 'approval-pending'
-  | 'human-wait.parked'
-  | 'eval.threshold-breached';
+  'elicitation.requested' | 'approval-pending' | 'human-wait.parked' | 'eval.threshold-breached';
 
 /** A configured webhook delivery target. */
 export interface WebhookTarget {

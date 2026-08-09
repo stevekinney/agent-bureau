@@ -115,8 +115,7 @@ function getSchedulerHistory(scheduler: Scheduler): SchedulerHistoryEntry[] {
 export function createSchedulerRoutes(
   scheduler: Scheduler | undefined,
   submitSchedulerTask:
-    | ((request: SubmitSchedulerTaskRequest) => Promise<SubmitSchedulerTaskResponse>)
-    | undefined,
+    ((request: SubmitSchedulerTaskRequest) => Promise<SubmitSchedulerTaskResponse>) | undefined,
 ) {
   const app = new Hono();
   const history = scheduler ? getSchedulerHistory(scheduler) : [];

@@ -25,8 +25,7 @@ const runtimeOverrideSymbol = Symbol.for('agent-bureau.interoperability.hash.run
 
 function getHashRuntimeOverride(): HashRuntimeOverride | undefined {
   return (globalThis as Record<PropertyKey, unknown>)[runtimeOverrideSymbol] as
-    | HashRuntimeOverride
-    | undefined;
+    HashRuntimeOverride | undefined;
 }
 
 function getBunRuntime(): Pick<typeof Bun, 'CryptoHasher'> | undefined {

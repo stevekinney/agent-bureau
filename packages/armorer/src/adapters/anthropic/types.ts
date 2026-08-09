@@ -58,6 +58,4 @@ export interface AnthropicToolResultBlock {
 }
 
 export type AnthropicContentBlock =
-  | AnthropicTextBlock
-  | AnthropicToolUseBlock
-  | AnthropicToolResultBlock;
+  AnthropicTextBlock | AnthropicToolUseBlock | AnthropicToolResultBlock;

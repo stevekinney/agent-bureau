@@ -49,10 +49,7 @@ interface RoutingEvent {
   step: number;
 }
 
-type RoutingStrategy = (
-  context: GenerateContext,
-  routes: readonly ModelRoute[],
-) => RoutingDecision;
+type RoutingStrategy = (context: GenerateContext, routes: readonly ModelRoute[]) => RoutingDecision;
 
 interface RoutingDecision {
   route: string;
@@ -89,6 +86,7 @@ function createComplexityStrategy(options: {
 ```
 
 Default scoring heuristic:
+
 - Simple: < 3 tools, last message < 500 chars, no code, < 5 conversation turns
 - Complex: 3-10 tools, or code content, or > 500 char message
 - Frontier: > 10 tools, or > 2000 char message, or > 20 conversation turns

@@ -9,7 +9,7 @@ import {
   rejectSoulUpdate,
   unpinSoulItem,
 } from './soul-approval';
-import type { IdentityProvider, PersonaDescriptor } from './types';
+import type { IdentityProvider } from './types';
 
 // ── Soul Tools ─────────────────────────────────────────────────────
 
@@ -184,7 +184,7 @@ export function createPersonaCreateTool(provider: IdentityProvider) {
     }),
     async execute(params) {
       await provider.savePersona(params.agentId, {
-        descriptor: params.descriptor as PersonaDescriptor,
+        descriptor: params.descriptor,
         text: params.text,
       });
       return { created: true, agentId: params.agentId };

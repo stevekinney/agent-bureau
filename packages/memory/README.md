@@ -386,8 +386,7 @@ interface MemoryVectorSearchResult {
 }
 
 type MemoryRecordPutOnceResult =
-  | { record: MemoryRecord; inserted: true }
-  | { record: MemoryRecord; inserted: false };
+  { record: MemoryRecord; inserted: true } | { record: MemoryRecord; inserted: false };
 ```
 
 ### `createWeftMemoryRecordStorage(storage, options?)`

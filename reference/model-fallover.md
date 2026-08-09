@@ -30,14 +30,14 @@ Read these files to understand the current state:
 
 Error classification rules:
 
-| Error Type | Action |
-|---|---|
-| Auth error (401, 403) | Skip to next provider immediately |
-| Rate limit (429) | Skip to next provider immediately |
-| Server error (500, 502, 503, 504) | Retry with backoff on same provider up to `retriesPerProvider`, then skip |
+| Error Type                                                       | Action                                                                                     |
+| ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| Auth error (401, 403)                                            | Skip to next provider immediately                                                          |
+| Rate limit (429)                                                 | Skip to next provider immediately                                                          |
+| Server error (500, 502, 503, 504)                                | Retry with backoff on same provider up to `retriesPerProvider`, then skip                  |
 | Overflow / context too long (400 with specific message patterns) | Do NOT fall over — this is a content problem, not a provider problem. Rethrow immediately. |
-| Network error (no status code) | Retry once on same provider, then skip |
-| Unknown error | Skip to next provider |
+| Network error (no status code)                                   | Retry once on same provider, then skip                                                     |
+| Unknown error                                                    | Skip to next provider                                                                      |
 
 ### PR-2: Provider Health Tracking
 
@@ -93,12 +93,7 @@ interface FalloverEvent {
 }
 
 type ErrorClassification =
-  | 'auth'
-  | 'rate-limit'
-  | 'server-error'
-  | 'overflow'
-  | 'network'
-  | 'unknown';
+  'auth' | 'rate-limit' | 'server-error' | 'overflow' | 'network' | 'unknown';
 ```
 
 ### PR-4: Error Classification Utility
@@ -110,6 +105,7 @@ function classifyProviderError(error: unknown): ErrorClassification;
 ```
 
 This function checks:
+
 1. If it's a `HeraldError`, use `statusCode` and `retryable`
 2. If it has a `status` or `statusCode` property, use that
 3. If the error message matches overflow patterns (`"context_length_exceeded"`, `"max_tokens"`, etc.), classify as `'overflow'`

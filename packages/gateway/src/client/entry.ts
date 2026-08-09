@@ -37,7 +37,7 @@ declare global {
  * hydration.
  */
 function toInitialData(value: unknown): InitialData {
-  return typeof value === 'object' && value !== null ? (value as InitialData) : {};
+  return typeof value === 'object' && value !== null ? value : {};
 }
 
 const root = document.getElementById('root');

@@ -190,7 +190,7 @@ export function messageToJSON(message: Message | AssistantMessage): Message | As
  */
 export function messageParts(message: Message): ReadonlyArray<MultiModalContent> {
   if (typeof message.content === 'string') {
-    return message.content ? [{ type: 'text', text: message.content } as MultiModalContent] : [];
+    return message.content ? [{ type: 'text', text: message.content }] : [];
   }
   return message.content;
 }

@@ -296,11 +296,11 @@ export function stripToolResultDetails(messages: Message[]): Message[] {
           ...message.toolResult,
           content: STRIPPED_PLACEHOLDER,
         },
-      } as Message;
+      };
     }
     // Structural tool-result blocks live inside assistant content; strip them too.
     if (typeof message.content !== 'string') {
-      return { ...message, content: stripStructuralToolBlocks(message.content) } as Message;
+      return { ...message, content: stripStructuralToolBlocks(message.content) };
     }
     return message;
   });

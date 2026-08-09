@@ -13,7 +13,7 @@ export type ToolParametersSchema = z.ZodTypeAny;
 export type AddEventListenerOptionsLike = AddEventListenerOptions;
 /** @deprecated Use EventIteratorOptions from lifecycle instead. */
 export type AsyncIteratorOptions = EventIteratorOptions;
-export type { ObservableLike, Observer, Subscription } from 'lifecycle';
+export type { EventIteratorOptions, ObservableLike, Observer, Subscription } from 'lifecycle';
 
 export type MinimalAbortSignal = AbortSignal;
 export type TimeoutHandle = unknown;

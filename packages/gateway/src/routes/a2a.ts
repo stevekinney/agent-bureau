@@ -474,9 +474,7 @@ export function createA2ARoutes(bureau: Bureau) {
     const envelope = JsonRpcRequestSchema.safeParse(rawBody);
     if (!envelope.success) {
       const maybeId =
-        rawBody !== null && typeof rawBody === 'object' && 'id' in rawBody
-          ? (rawBody as { id: unknown }).id
-          : null;
+        rawBody !== null && typeof rawBody === 'object' && 'id' in rawBody ? rawBody.id : null;
       const id = JsonRpcIdSchema.safeParse(maybeId);
       return context.json(jsonRpcError(id.success ? id.data : null, INVALID_REQUEST), 200);
     }
