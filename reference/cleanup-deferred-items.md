@@ -40,11 +40,30 @@ durable-execution concerns that may reshape this suite — revisit the conversio
 
 ### build-toolchain standardization (open A/B/C decision)
 
-11 packages use a hand-rolled `scripts/build.ts`; armorer/conversationalist use `tsdown`. Options:
-(A) migrate all to tsdown, (B) extract a shared `buildLibrary()` helper, (C) leave as-is.
+Eight packages use a hand-rolled `scripts/build.ts` (bureau, cloudflare, evaluation, gateway,
+interoperability, lifecycle, memory, skills); armorer, conversationalist, and operative use `tsdown`.
+Options: (A) migrate all to tsdown, (B) extract a shared `buildLibrary()` helper, (C) leave as-is.
 **Deferred** — it touches every package's build at once, eases nothing for cinder/weft specifically,
-and is risky right before a refactor. Decide A-vs-B during stabilization. gateway stays special
-regardless: its two-pass SSR + hydration Svelte build does not fit tsdown's single-entry model.
+and is risky right before a refactor. Decide A-vs-B during stabilization.
+
+gateway stays special regardless — but _not_ because of entry count. Every tsdown config in the repo
+already hands `defineConfig` a multi-entry map (`packages/armorer/tsdown.config.ts`,
+`packages/conversationalist/tsdown.config.ts`, `packages/operative/tsdown.config.ts` declare
+20, 19, and 27 entries respectively), so "one entry per build" is not a real tsdown constraint and
+must not be used to justify the exemption. The actual reason is that
+`packages/gateway/scripts/build.ts` is not a library build at all. It:
+
+- runs two `Bun.build` passes over different graphs with `SveltePlugin()` — `target: 'bun'` for the
+  SSR pass (which compiles `.svelte` to server output) and `target: 'browser'` for the hydration pass
+  (which compiles the same components to client output);
+- concatenates the client pass's CSS outputs with `packages/gateway/src/ui/styles/*.css` into a single
+  `dist/public/styles.css`, and fails the build if required Cinder selectors are missing from it;
+- writes `dist/manifest.json` mapping logical names to content-hashed client filenames, which
+  `src/server/render.ts` reads to emit script/style URLs.
+
+tsdown's job is emitting a library's ESM/CJS/`.d.ts` from source entries; it produces none of that
+application output (dual-target Svelte compilation, a composed stylesheet, a hash manifest). Revisit
+the exemption only if the CSS pipeline and manifest move out of the build script — not on entry count.
 
 ## Resolved since the cleanup pass (not todos)
 
@@ -56,8 +75,15 @@ over — do not apply it to current work.**
 
 Gateway's UI is Svelte today:
 
-- `packages/gateway/src/ui/*` holds `.svelte` components/pages plus rune-based hooks
-  (`use-chat.svelte.ts`, `use-runs.svelte.ts`, `use-websocket.svelte.ts`, `use-run-detail.svelte.ts`).
+- `packages/gateway/src/ui/*` holds `.svelte` components (`components/`) and pages (`pages/`), plus
+  app stylesheets in `packages/gateway/src/ui/styles/`.
+- The rune-based hooks live in `packages/gateway/src/ui/hooks/`:
+  `packages/gateway/src/ui/hooks/use-chat.svelte.ts`,
+  `packages/gateway/src/ui/hooks/use-runs.svelte.ts`,
+  `packages/gateway/src/ui/hooks/use-run-detail.svelte.ts`,
+  `packages/gateway/src/ui/hooks/use-reviews.svelte.ts`,
+  `packages/gateway/src/ui/hooks/use-websocket.svelte.ts`, and the plain (non-rune) helper
+  `packages/gateway/src/ui/hooks/tool-activity.ts`.
 - `packages/gateway/src/client/entry.ts` is the hydration entry.
 - `packages/gateway/scripts/build.ts` runs one pipeline with two `Bun.build` passes — an SSR pass
   (`target: 'bun'`) and a hydration pass (`target: 'browser'`), both loading `SveltePlugin()` — then
@@ -65,7 +91,8 @@ Gateway's UI is Svelte today:
 
 Consequences for cleanup work: this is live production code, so test it and clean it like any other
 package. The UI hooks and pages already carry `*.test.ts` coverage; keep adding to it. The two-pass
-build remains structurally unique (see below) and stays on its own `scripts/build.ts`.
+build remains structurally unique (see the build-toolchain note above) and stays on its own
+`scripts/build.ts`.
 
 ## Closed decisions (not todos)
 
