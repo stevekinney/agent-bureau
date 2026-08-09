@@ -18,6 +18,9 @@ import {
 import {
   estimateConversationTokens,
   getRecentMessages,
+  rewindBeforeMessage,
+  rewindBeforePosition,
+  type RewindOptions,
   truncateFromPosition,
   type TruncateOptions,
   truncateToTokenLimit,
@@ -885,6 +888,38 @@ export class Conversation {
   ): void {
     const previousConversation = this.current;
     const nextConversation = truncateFromPosition(this.current, position, options, this.env);
+    this.pushWithEvents(
+      nextConversation,
+      'messages.removed',
+      this.createChangeContext(previousConversation, nextConversation, 'messages.removed'),
+    );
+  }
+
+  /**
+   * Drops the message at `position` and everything after it — the branch-rewind
+   * counterpart to {@link Conversation.truncateFromPosition}, which keeps the
+   * opposite tail.
+   */
+  rewindBeforePosition(position: number, options?: RewindOptions): void {
+    const previousConversation = this.current;
+    const nextConversation = rewindBeforePosition(this.current, position, options, this.env);
+    if (nextConversation === previousConversation) return;
+    this.pushWithEvents(
+      nextConversation,
+      'messages.removed',
+      this.createChangeContext(previousConversation, nextConversation, 'messages.removed'),
+    );
+  }
+
+  /**
+   * Drops `messageId` and everything after it. The id-keyed form of
+   * {@link Conversation.rewindBeforePosition}, for edit flows that hold a
+   * message id rather than a position. An unknown id is a no-op.
+   */
+  rewindBeforeMessage(messageId: string, options?: RewindOptions): void {
+    const previousConversation = this.current;
+    const nextConversation = rewindBeforeMessage(this.current, messageId, options, this.env);
+    if (nextConversation === previousConversation) return;
     this.pushWithEvents(
       nextConversation,
       'messages.removed',

@@ -222,6 +222,8 @@ This document tracks the published export map in [package.json](/Users/stevekinn
 - `collapseSystemMessages()`
 - `redactMessageAtPosition(position, options?)`
 - `truncateFromPosition(position, options?)`
+- `rewindBeforePosition(position, options?)`
+- `rewindBeforeMessage(messageId, options?)`
 - `truncateToTokenLimit(maxTokens, options?)`
 - `appendStreamingMessage(role, metadata?)`
 - `updateStreamingMessage(messageId, content)`
@@ -309,6 +311,8 @@ This document tracks the published export map in [package.json](/Users/stevekinn
 
 - `estimateConversationTokens`
 - `getRecentMessages`
+- `rewindBeforeMessage`
+- `rewindBeforePosition`
 - `simpleTokenEstimator`
 - `truncateFromPosition`
 - `truncateToTokenLimit`
@@ -318,6 +322,7 @@ This document tracks the published export map in [package.json](/Users/stevekinn
 - `AsyncEstimateConversationTokensOptions`
 - `AsyncTruncateOptions`
 - `EstimateConversationTokensOptions`
+- `RewindOptions`
 - `TruncateOptions`
 
 ## `conversationalist/streaming`

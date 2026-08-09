@@ -1,4 +1,10 @@
-import { truncateFromPosition, truncateToTokenLimit } from './context';
+import {
+  rewindBeforeMessage,
+  rewindBeforePosition,
+  type RewindOptions,
+  truncateFromPosition,
+  truncateToTokenLimit,
+} from './context';
 import type { RedactMessageOptions } from './conversation/index';
 import {
   appendAssistantMessage,
@@ -157,6 +163,21 @@ export interface ConversationHistoryDraft {
   ) => ConversationHistoryDraft;
 
   /**
+   * Drops the message at `position` and everything after it — the branch-rewind
+   * counterpart to `truncateFromPosition`, which keeps the opposite tail.
+   * @param position - The boundary; messages before it are kept.
+   * @param options - Options for tool-pair handling.
+   */
+  rewindBeforePosition: (position: number, options?: RewindOptions) => ConversationHistoryDraft;
+
+  /**
+   * Drops `messageId` and everything after it. An unknown id is a no-op.
+   * @param messageId - The message to rewind to just before.
+   * @param options - Options for tool-pair handling.
+   */
+  rewindBeforeMessage: (messageId: string, options?: RewindOptions) => ConversationHistoryDraft;
+
+  /**
    * Truncates the conversation to fit within a token limit.
    * Removes oldest messages first while preserving system messages and optionally the last N messages.
    * @param maxTokens - Maximum token count to target.
@@ -244,6 +265,14 @@ function createDraft(initial: ConversationHistory): ConversationHistoryDraft {
     // Context window management
     truncateFromPosition: (position, options) => {
       current = truncateFromPosition(current, position, options);
+      return draft;
+    },
+    rewindBeforePosition: (position, options) => {
+      current = rewindBeforePosition(current, position, options);
+      return draft;
+    },
+    rewindBeforeMessage: (messageId, options) => {
+      current = rewindBeforeMessage(current, messageId, options);
       return draft;
     },
     truncateToTokenLimit: (maxTokens, options) => {

@@ -953,3 +953,56 @@ describe('Conversation', () => {
     });
   });
 });
+
+describe('Conversation rewind methods', () => {
+  const seedFourMessages = (): ConversationHistory => {
+    const history = new ConversationHistory(createConversation());
+    history.appendUserMessage('Message 0');
+    history.appendAssistantMessage('Message 1');
+    history.appendUserMessage('Message 2');
+    history.appendAssistantMessage('Message 3');
+    return history;
+  };
+
+  it('rewindBeforePosition drops the boundary message and everything after it', () => {
+    const history = seedFourMessages();
+
+    history.rewindBeforePosition(2);
+
+    expect(getOrderedMessages(history.current).map((message) => message.content)).toEqual([
+      'Message 0',
+      'Message 1',
+    ]);
+  });
+
+  it('rewindBeforeMessage drops the named message and everything after it', () => {
+    const history = seedFourMessages();
+    const target = getOrderedMessages(history.current)[1];
+
+    history.rewindBeforeMessage(target.id);
+
+    expect(getOrderedMessages(history.current).map((message) => message.content)).toEqual([
+      'Message 0',
+    ]);
+  });
+
+  it('records a rewind as an undoable step', () => {
+    const history = seedFourMessages();
+
+    history.rewindBeforePosition(1);
+    expect(history.current.ids).toHaveLength(1);
+
+    history.undo();
+    expect(history.current.ids).toHaveLength(4);
+  });
+
+  it('adds no history entry when the rewind changes nothing', () => {
+    const history = seedFourMessages();
+    const before = history.current;
+
+    history.rewindBeforePosition(4);
+    history.rewindBeforeMessage('not-a-real-id');
+
+    expect(history.current).toBe(before);
+  });
+});

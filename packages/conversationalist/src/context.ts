@@ -219,7 +219,7 @@ const collectMessagesFromBlocks = (blocks: ReadonlyArray<MessageBlock>): Message
 const ensureTruncationSafe = (
   conversation: Conversation,
   preserveToolPairs: boolean,
-  operation: 'truncateToTokenLimit' | 'truncateFromPosition',
+  operation: 'truncateToTokenLimit' | 'truncateFromPosition' | 'rewindBeforePosition',
 ): Conversation => {
   try {
     return ensureConversationSafe(conversation);
@@ -676,4 +676,108 @@ export function truncateFromPosition(
     updatedAt: now,
   });
   return ensureTruncationSafe(next, preserveToolPairs, 'truncateFromPosition');
+}
+
+/** Options for {@link rewindBeforePosition} and {@link rewindBeforeMessage}. */
+export interface RewindOptions {
+  /**
+   * Keep tool-call/tool-result pairs atomic. A pair that straddles the
+   * boundary — the call kept, its result dropped — is discarded whole, so a
+   * rewind never leaves behind a call whose answer was rewound away.
+   *
+   * Set `false` to cut strictly at the boundary instead. The call then survives
+   * without its result, which is a *pending* tool call rather than invalid
+   * linkage, so nothing throws; the transcript simply reads as though the tool
+   * was invoked and never answered.
+   *
+   * @default true
+   */
+  preserveToolPairs?: boolean;
+}
+
+/**
+ * Drops the message at `position` and everything after it, returning the
+ * conversation as it stood immediately before that point.
+ *
+ * This is the branch-rewind counterpart to {@link truncateFromPosition}, which
+ * keeps the opposite tail: `truncateFromPosition` retains messages **from**
+ * `position` onwards, while this retains messages **before** it. Reach for this
+ * when implementing message-edit semantics — rewind to just before the edited
+ * message, discard the superseded branch, re-send — rather than assembling
+ * `ids`/`messages`/`updatedAt` by hand.
+ *
+ * Unlike the context-window helpers ({@link getRecentMessages},
+ * {@link truncateToTokenLimit}), which drop the oldest messages to fit a
+ * budget, this drops the newest to undo a branch.
+ *
+ * Positions are renumbered from zero, so the result is a well-formed
+ * transcript rather than one with a gap. A `position` at or past the end
+ * returns the conversation unchanged; a `position` of `0` or less empties it.
+ * System messages are not exempt: one that lives after the boundary is part of
+ * the branch being discarded and goes with it.
+ */
+export function rewindBeforePosition(
+  conversation: Conversation,
+  position: number,
+  options?: RewindOptions,
+  environment?: Partial<ConversationEnvironment>,
+): Conversation {
+  assertConversationSafe(conversation);
+  const preserveToolPairs = options?.preserveToolPairs ?? true;
+  const resolvedEnvironment = resolveConversationEnvironment(environment);
+
+  const ordered = getOrderedMessages(conversation);
+  const kept = ordered.filter((message) => message.position < position);
+
+  // Nothing crossed the boundary, so the transcript is already what was asked
+  // for. Returning the same reference keeps a no-op rewind free of a history
+  // entry and a spurious `updatedAt` bump.
+  if (kept.length === ordered.length) return conversation;
+
+  let retained: ReadonlyArray<Message> = kept;
+
+  if (preserveToolPairs) {
+    const { messageToBlock } = buildMessageBlocks(ordered, () => 0, preserveToolPairs);
+    // Keep a block only when all of it sits before the boundary. Expanding to
+    // whole blocks the way `truncateFromPosition` does would pull dropped
+    // messages back in, which is the wrong direction for a rewind.
+    retained = kept.filter((message) => {
+      const block = messageToBlock.get(message.id);
+      return block === undefined || block.maxPosition < position;
+    });
+  }
+
+  const renumbered = retained.map((message, index) =>
+    cloneMessageWithPosition(message, index, copyContent(message.content)),
+  );
+
+  const next = toReadonly({
+    ...conversation,
+    ids: renumbered.map((message) => message.id),
+    messages: toIdRecord(renumbered),
+    updatedAt: resolvedEnvironment.now(),
+  });
+
+  return ensureTruncationSafe(next, preserveToolPairs, 'rewindBeforePosition');
+}
+
+/**
+ * {@link rewindBeforePosition} keyed by message id: drops `messageId` and
+ * everything after it.
+ *
+ * This is the form edit flows usually want, since an adapter command such as
+ * Chat's `editMessage` hands you the id of the message being edited rather than
+ * its position. An unknown id returns the conversation unchanged — a message
+ * that is not in the transcript has nothing after it to rewind.
+ */
+export function rewindBeforeMessage(
+  conversation: Conversation,
+  messageId: string,
+  options?: RewindOptions,
+  environment?: Partial<ConversationEnvironment>,
+): Conversation {
+  assertConversationSafe(conversation);
+  const target = conversation.messages[messageId];
+  if (target === undefined) return conversation;
+  return rewindBeforePosition(conversation, target.position, options, environment);
 }
