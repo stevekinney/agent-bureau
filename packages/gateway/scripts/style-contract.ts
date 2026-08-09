@@ -12,25 +12,56 @@ import type { BunPlugin } from 'bun';
  *
  * The contract used instead is one Cinder publishes:
  *
- *   1. Every Cinder component exposes a `<component>/styles` CSS subpath in its
- *      `exports` map, and that subpath is the component's own stylesheet.
+ *   1. A component that ships CSS of its own exposes it at the
+ *      `<component>/styles` subpath of Cinder's `exports` map. The map is the
+ *      published contract, so it — not a guess — decides which components are
+ *      expected to contribute CSS.
  *   2. Component CSS lives in the documented `cinder.components` cascade layer
  *      (`cinder.tokens, cinder.foundation, cinder.components, cinder.utilities`).
  *
- * So the check is: record which Cinder entrypoints the client build actually
+ * So the check is: record which Cinder components the client build actually
  * reached, build each one's published stylesheet through the same Bun CSS
  * pipeline, and require every one of those `cinder.components` blocks to be
  * present in the emitted bundle. Nothing here knows or cares what is *inside* a
  * block — a Cinder release that renames a class moves both sides of the
  * comparison together and changes nothing. A build that drops a component's CSS
  * side effect fails, and the error names the entrypoint that went missing.
+ *
+ * Two exclusions keep the check from passing vacuously:
+ *
+ *   - The base cascade entrypoint (`@lostgradient/cinder/styles`) is never
+ *     treated as a component stylesheet. It documents that it "does NOT import
+ *     per-component CSS", yet it does contribute `cinder.components` blocks for
+ *     shared internal chrome. Counting it would mean a client graph that stopped
+ *     resolving every component entrypoint still satisfied the audit on the
+ *     strength of base CSS alone.
+ *   - A `<component>/styles` subpath that Cinder declares but that fails to
+ *     resolve or build is a hard error, never a silently shrunken expectation.
+ *     Only components with no such subpath at all — Cinder ships several, e.g.
+ *     `icons` and `focus-trap` — are skipped, because they publish no stylesheet
+ *     to look for.
  */
 
 /** Matches the opening of a `@layer cinder.components { … }` block. */
 const COMPONENT_LAYER_BLOCK = /@layer\s+cinder\.components\s*\{/g;
 
-/** Matches any bare specifier into the Cinder package. */
-const CINDER_SPECIFIER = /^@lostgradient\/cinder\/.+$/;
+/**
+ * Matches subpath specifiers into the Cinder package (`@lostgradient/cinder/x`),
+ * capturing the subpath. The bare package root is deliberately excluded: the
+ * contract above is derived per component subpath, so a root-barrel import
+ * yields no `<component>/styles` to check and recording it would add a specifier
+ * nothing can be derived from. A graph that stopped resolving component subpaths
+ * — whether by switching to the root barrel or by losing the CSS side effect
+ * entirely — is caught by the empty-set guard in
+ * {@link assertComponentStylesBundled}, not by widening this filter.
+ */
+const CINDER_SUBPATH_SPECIFIER = /^@lostgradient\/cinder\/(.+)$/;
+
+/**
+ * First subpath segment of Cinder's base cascade entrypoints (`styles`,
+ * `styles/all`, `styles/tokens`, …). See the exclusion note above.
+ */
+const BASE_CASCADE_SEGMENT = 'styles';
 
 /** How much CSS a stylesheet contributes to Cinder's `cinder.components` layer. */
 export interface ComponentLayerMeasurement {
@@ -130,13 +161,13 @@ export function measureComponentLayer(css: string): ComponentLayerMeasurement {
 export interface CinderSpecifierRecorder {
   /** Attach to a `Bun.build` call to observe its module graph. */
   readonly plugin: BunPlugin;
-  /** Cinder specifiers resolved during that build, populated as it runs. */
+  /** Cinder subpath specifiers resolved during that build, populated as it runs. */
   readonly specifiers: ReadonlySet<string>;
 }
 
 /**
- * Records every `@lostgradient/cinder/*` specifier a build resolves, so the
- * style contract is checked against the entrypoints the client bundle really
+ * Records every `@lostgradient/cinder/*` subpath specifier a build resolves, so
+ * the style contract is checked against the entrypoints the client bundle really
  * pulled in rather than a hand-maintained list. The plugin never resolves
  * anything itself — it returns `undefined` so Bun's default resolution runs.
  */
@@ -146,7 +177,7 @@ export function createCinderSpecifierRecorder(): CinderSpecifierRecorder {
   const plugin: BunPlugin = {
     name: 'cinder-specifier-recorder',
     setup(build) {
-      build.onResolve({ filter: CINDER_SPECIFIER }, (arguments_) => {
+      build.onResolve({ filter: CINDER_SUBPATH_SPECIFIER }, (arguments_) => {
         specifiers.add(arguments_.path);
         return undefined;
       });
@@ -154,6 +185,24 @@ export function createCinderSpecifierRecorder(): CinderSpecifierRecorder {
   };
 
   return { plugin, specifiers };
+}
+
+/**
+ * Reduces an observed Cinder specifier to the component it belongs to, or
+ * `undefined` when it names no component. `@lostgradient/cinder/card` and
+ * `@lostgradient/cinder/card/schema` both belong to `card`; the base cascade
+ * entrypoints under `styles` belong to no component and are excluded.
+ */
+export function toCinderComponentName(specifier: string): string | undefined {
+  const subpath = CINDER_SUBPATH_SPECIFIER.exec(specifier)?.[1];
+  if (subpath === undefined) return undefined;
+
+  const segment = subpath.split('/')[0];
+  if (segment === undefined || segment === '' || segment === BASE_CASCADE_SEGMENT) {
+    return undefined;
+  }
+
+  return segment;
 }
 
 /** Which published stylesheet to build, and where to resolve it from. */
@@ -191,6 +240,35 @@ export async function buildPublishedStylesheet({
   return css;
 }
 
+/**
+ * Narrows a parsed `package.json` to the set of subpaths in its `exports` map
+ * (`'./card/styles'`, …). An absent or malformed map yields an empty set, which
+ * makes every component look stylesheet-free and is caught downstream by the
+ * empty-set guard rather than passing silently.
+ */
+function toExportedSubpaths(manifest: unknown): ReadonlySet<string> {
+  if (typeof manifest !== 'object' || manifest === null || !('exports' in manifest)) {
+    return new Set();
+  }
+
+  const { exports } = manifest;
+  if (typeof exports !== 'object' || exports === null) return new Set();
+
+  return new Set(Object.keys(exports));
+}
+
+/**
+ * Reads the subpaths Cinder publishes. `./package.json` is itself an entry in
+ * that map, so this stays inside the package's supported surface.
+ */
+export async function readCinderExportedSubpaths(
+  resolveFrom: string,
+): Promise<ReadonlySet<string>> {
+  const manifestPath = Bun.resolveSync('@lostgradient/cinder/package.json', resolveFrom);
+
+  return toExportedSubpaths(await Bun.file(manifestPath).json());
+}
+
 /** One published Cinder stylesheet the emitted bundle is expected to carry. */
 export interface PublishedComponentStylesheet {
   /** The `<component>/styles` entrypoint the CSS came from. */
@@ -199,15 +277,14 @@ export interface PublishedComponentStylesheet {
   readonly blocks: readonly string[];
 }
 
-/**
- * Maps a Cinder specifier onto the published CSS subpath that carries its
- * styles: CSS entrypoints stand for themselves, component entrypoints delegate
- * to their `<component>/styles` sibling.
- */
-function toStylesheetSpecifier(specifier: string): string {
-  return specifier.endsWith('/styles') || specifier.endsWith('.css')
-    ? specifier
-    : `${specifier}/styles`;
+/** What component discovery found for the observed client graph. */
+export interface ComponentStylesheetCensus {
+  /** Component stylesheets the emitted bundle is expected to carry. */
+  readonly published: readonly PublishedComponentStylesheet[];
+  /** Observed components Cinder publishes no `<component>/styles` subpath for. */
+  readonly withoutStylesheet: readonly string[];
+  /** Observed components whose published stylesheet carries no component-layer CSS. */
+  readonly withoutComponentLayer: readonly string[];
 }
 
 /** Inputs for {@link collectPublishedComponentStyles}. */
@@ -219,40 +296,79 @@ export interface PublishedComponentStylesRequest {
 }
 
 /**
- * Builds the published stylesheet behind each observed Cinder specifier and
- * keeps the ones that contribute component-layer CSS. Specifiers with no
- * published stylesheet, or whose stylesheet declares no component layer, ship
- * no component CSS of their own and are skipped rather than treated as errors.
+ * Builds the published stylesheet behind each observed Cinder component and
+ * reports what it found.
+ *
+ * Three outcomes, and the difference between them is the point:
+ *
+ *   - Cinder declares no `./<component>/styles` subpath — the component ships no
+ *     CSS of its own (`icons`, `focus-trap`, `skip-link` in 0.17.0). Nothing to
+ *     look for, so it is reported in `withoutStylesheet`.
+ *   - The subpath is declared and builds to no `cinder.components` CSS. Cinder
+ *     ships these deliberately as "empty registry entries" (`table-row`, whose
+ *     visual treatment lives in `table.css`). Reported in
+ *     `withoutComponentLayer`.
+ *   - The subpath is declared but cannot be resolved or built. That is a break
+ *     in the published contract, so it throws instead of quietly shrinking the
+ *     set the bundle is measured against.
  */
 export async function collectPublishedComponentStyles({
   specifiers,
   resolveFrom,
-}: PublishedComponentStylesRequest): Promise<PublishedComponentStylesheet[]> {
-  const stylesheetSpecifiers = [...new Set([...specifiers].map(toStylesheetSpecifier))].sort();
-  const published: PublishedComponentStylesheet[] = [];
+}: PublishedComponentStylesRequest): Promise<ComponentStylesheetCensus> {
+  const exportedSubpaths = await readCinderExportedSubpaths(resolveFrom);
 
-  for (const specifier of stylesheetSpecifiers) {
-    try {
-      Bun.resolveSync(specifier, resolveFrom);
-    } catch {
+  const components = [
+    ...new Set(
+      [...specifiers]
+        .map((specifier) => toCinderComponentName(specifier))
+        .filter((component) => component !== undefined),
+    ),
+  ].sort();
+
+  const published: PublishedComponentStylesheet[] = [];
+  const withoutStylesheet: string[] = [];
+  const withoutComponentLayer: string[] = [];
+
+  for (const component of components) {
+    if (!exportedSubpaths.has(`./${component}/styles`)) {
+      withoutStylesheet.push(component);
       continue;
     }
 
-    const blocks = extractComponentLayerBlocks(
-      await buildPublishedStylesheet({ specifier, resolveFrom }),
-    );
+    const specifier = `@lostgradient/cinder/${component}/styles`;
+    let css: string;
 
-    if (blocks.length > 0) published.push({ specifier, blocks });
+    try {
+      css = await buildPublishedStylesheet({ specifier, resolveFrom });
+    } catch (cause) {
+      throw new Error(
+        `Cinder publishes ${specifier} in its exports map, but the Gateway build could not ` +
+          'build it. The production stylesheet cannot be verified against a component whose ' +
+          'published stylesheet is unavailable, so this is a hard failure rather than one ' +
+          'fewer thing to check.',
+        { cause },
+      );
+    }
+
+    // A block whose body is blank would match any bundle, so it proves nothing.
+    const blocks = extractComponentLayerBlocks(css).filter((block) => block.trim() !== '');
+
+    if (blocks.length > 0) {
+      published.push({ specifier, blocks });
+    } else {
+      withoutComponentLayer.push(component);
+    }
   }
 
-  return published;
+  return { published, withoutStylesheet, withoutComponentLayer };
 }
 
 /** Both sides of the production comparison. */
 export interface ComponentStyleAuditInput {
   /** The stylesheet the build is about to write to `dist/public/styles.css`. */
   readonly bundleCss: string;
-  /** What the observed Cinder entrypoints publish, from
+  /** What the observed Cinder components publish, from
    * {@link collectPublishedComponentStyles}. */
   readonly published: readonly PublishedComponentStylesheet[];
 }
@@ -284,7 +400,7 @@ export function auditComponentStyles({
 }
 
 /**
- * Throws unless every Cinder entrypoint in the client graph has its published
+ * Throws unless every Cinder component in the client graph has its published
  * component CSS in the emitted bundle. Returns the audit so the caller can
  * report it.
  */
@@ -295,15 +411,17 @@ export function assertComponentStylesBundled(input: ComponentStyleAuditInput): C
   if (present.length === 0 && missing.length === 0) {
     throw new Error(
       'No Cinder component stylesheets were found for the client graph, so the production ' +
-        'stylesheet cannot be verified. Check that the client build still resolves ' +
-        '@lostgradient/cinder component entrypoints.',
+        "stylesheet cannot be verified. Cinder's base entrypoint " +
+        "(`@lostgradient/cinder/styles`) does not count here — it ships no component's CSS. " +
+        'Check that the client build still resolves `@lostgradient/cinder/<component>` ' +
+        'entrypoints and that they still carry their CSS side effects.',
     );
   }
 
   if (missing.length > 0) {
     throw new Error(
       `Production stylesheet is missing Cinder component CSS from ${missing.length} of ` +
-        `${present.length + missing.length} entrypoint(s) in the client graph: ` +
+        `${present.length + missing.length} component entrypoint(s) in the client graph: ` +
         `${missing.join(', ')}. The emitted bundle contributes ${bundle.blocks} block(s) / ` +
         `${bundle.size} characters to the cinder.components cascade layer. Components rendered ` +
         'by the Gateway client are not contributing their CSS side effects to the client bundle.',

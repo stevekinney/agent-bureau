@@ -138,15 +138,20 @@ for (const path of stylePaths) {
 
 // Guard the artifact-producing path itself — not a second, test-only Svelte
 // build — against Cinder component CSS silently dropping out of the client
-// graph. Every Cinder entrypoint the client build resolved must have its
+// graph. Every Cinder component the client build resolved must have its
 // published `<component>/styles` CSS represented in the emitted stylesheet,
-// measured through Cinder's public `cinder.components` cascade layer. See
+// measured through Cinder's public `cinder.components` cascade layer. Cinder's
+// base entrypoint is excluded from that set so its own component-layer CSS
+// cannot stand in for the component CSS this check exists to find. See
 // scripts/style-contract.ts for why this replaced literal class-name checks.
-const published = await collectPublishedComponentStyles({
+const census = await collectPublishedComponentStyles({
   specifiers: cinderSpecifiers.specifiers,
   resolveFrom: import.meta.dir,
 });
-const styleAudit = assertComponentStylesBundled({ bundleCss: cssBundle, published });
+const styleAudit = assertComponentStylesBundled({
+  bundleCss: cssBundle,
+  published: census.published,
+});
 
 await Bun.write('./dist/public/styles.css', cssBundle);
 manifest['styles.css'] = '/public/styles.css';
@@ -170,6 +175,13 @@ console.log(
   `${styleAudit.bundle.blocks} blocks / ${styleAudit.bundle.size} chars,`,
   'verified against',
   styleAudit.present.length,
-  'published Cinder stylesheet(s)',
+  'published Cinder component stylesheet(s)',
+);
+console.log(
+  '  Cinder components without component-layer CSS:',
+  census.withoutComponentLayer.length,
+  'empty sidecar(s),',
+  census.withoutStylesheet.length,
+  'with no published stylesheet',
 );
 console.log('  Manifest:', Object.keys(manifest).length, 'entries');
