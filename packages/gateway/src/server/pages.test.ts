@@ -7,7 +7,7 @@ import { createBureau } from 'bureau';
 
 import { createApiKeyStore } from '../keys/create-api-key-store';
 import { createTestGateway } from '../test';
-import { extractRootMarkup } from './test-utilities';
+import { extractRootMarkup, stripHydrationMarkers } from './test-utilities';
 
 const evaluationsFixturesDirectory = join(import.meta.dir, '__evaluations-fixtures__');
 
@@ -28,7 +28,7 @@ function expectPageHeading(html: string, title: string): void {
   const rootMarkup = extractRootMarkup(html);
   const pageHeadings = [...rootMarkup.matchAll(/<h1\b[^>]*>(.*?)<\/h1>/gs)];
   expect(pageHeadings).toHaveLength(1);
-  expect(pageHeadings[0]?.[1]).toBe(title.replaceAll('&', '&amp;'));
+  expect(stripHydrationMarkers(pageHeadings[0]?.[1] ?? '')).toBe(title.replaceAll('&', '&amp;'));
   expect(rootMarkup.match(/<h[1-4]\b/)?.[0]).toBe('<h1');
 }
 
