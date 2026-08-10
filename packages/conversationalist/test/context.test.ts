@@ -1295,6 +1295,35 @@ describe('rewindBeforePosition', () => {
       'tool-result',
     ]);
   });
+
+  it('decides prefix membership by transcript order, not stored positions', () => {
+    // Schema-valid histories can carry stored positions that disagree with
+    // `ids` order (stale snapshots, hand-assembled transcripts). The second
+    // message carries a LARGER stored position than the later third message;
+    // cutting by stored position would drop the second but retain the third,
+    // which sits after it in the transcript.
+    let conv = createConversation({ id: 'test' }, testEnvironment);
+    conv = appendMessages(
+      conv,
+      { role: 'user', content: 'Message A' },
+      { role: 'assistant', content: 'Message B' },
+      { role: 'user', content: 'Message C' },
+      testEnvironment,
+    );
+    const [, bId, cId] = conv.ids;
+    const drifted: Conversation = {
+      ...conv,
+      messages: {
+        ...conv.messages,
+        [bId!]: { ...conv.messages[bId!]!, position: 9 },
+        [cId!]: { ...conv.messages[cId!]!, position: 3 },
+      },
+    };
+
+    const rewound = rewindBeforePosition(drifted, 9, undefined, testEnvironment);
+
+    expect(getOrderedMessages(rewound).map((message) => message.content)).toEqual(['Message A']);
+  });
 });
 
 describe('rewindBeforeMessage', () => {
@@ -1319,5 +1348,68 @@ describe('rewindBeforeMessage', () => {
     conv = appendMessages(conv, { role: 'user', content: 'Message 0' }, testEnvironment);
 
     expect(rewindBeforeMessage(conv, 'nope', undefined, testEnvironment)).toBe(conv);
+  });
+
+  it('locates the target by transcript order, not its stored position', () => {
+    // The id names a place in the transcript; a stale stored position on the
+    // target must not decide what survives. The target (second message)
+    // carries a larger stored position than the later third message —
+    // delegating via `target.position` would keep that later message.
+    let conv = createConversation({ id: 'test' }, testEnvironment);
+    conv = appendMessages(
+      conv,
+      { role: 'user', content: 'Message A' },
+      { role: 'assistant', content: 'Message B' },
+      { role: 'user', content: 'Message C' },
+      testEnvironment,
+    );
+    const [, bId, cId] = conv.ids;
+    const drifted: Conversation = {
+      ...conv,
+      messages: {
+        ...conv.messages,
+        [bId!]: { ...conv.messages[bId!]!, position: 9 },
+        [cId!]: { ...conv.messages[cId!]!, position: 3 },
+      },
+    };
+
+    const rewound = rewindBeforeMessage(drifted, bId!, undefined, testEnvironment);
+
+    expect(getOrderedMessages(rewound).map((message) => message.content)).toEqual(['Message A']);
+  });
+
+  it('drops a straddling tool pair by ordered extent even with drifted positions', () => {
+    // ids order: user, tool-call, tool-result — but the call's stored
+    // position is inflated past the result's. Rewinding before the result
+    // must still discard the whole pair: block extents are measured by
+    // transcript order, so the call cannot survive on the strength of a
+    // stale position comparison.
+    let conv = createConversation({ id: 'test' }, testEnvironment);
+    conv = appendMessages(conv, { role: 'user', content: 'Weather?' }, testEnvironment);
+    conv = appendToolCall(
+      conv,
+      { id: 'call-1', name: 'lookup-weather', arguments: { city: 'Denver' } },
+      undefined,
+      testEnvironment,
+    );
+    conv = appendToolResult(
+      conv,
+      { callId: 'call-1', outcome: 'success', content: { forecast: 'sunny' } },
+      undefined,
+      testEnvironment,
+    );
+    const [, callId, resultId] = conv.ids;
+    const drifted: Conversation = {
+      ...conv,
+      messages: {
+        ...conv.messages,
+        [callId!]: { ...conv.messages[callId!]!, position: 9 },
+        [resultId!]: { ...conv.messages[resultId!]!, position: 3 },
+      },
+    };
+
+    const rewound = rewindBeforeMessage(drifted, resultId!, undefined, testEnvironment);
+
+    expect(getOrderedMessages(rewound).map((message) => message.role)).toEqual(['user']);
   });
 });
