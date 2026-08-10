@@ -14,14 +14,14 @@ const exports = packageJson.exports as Record<string, Record<string, string> | s
 
 describe('operative package exports', () => {
   it('declares the Node floor required by external ESM-only conversationalist', () => {
-    // Tracks the workspace version rather than a literal range: `changeset
-    // version` rewrites this dependency range in the same commit that bumps
-    // conversationalist itself, so a hardcoded range breaks the release
-    // gate — which runs the suite on the already-versioned tree — on every
-    // conversationalist minor (agent-bureau#314).
-    expect(packageJson.dependencies?.conversationalist).toBe(
-      `^${conversationalistPackageJson.version}`,
-    );
+    // Asserts range/workspace compatibility rather than a literal range: the
+    // release gate runs this suite on the already-versioned tree, where
+    // `changeset version` may have rewritten the range (minor bumps) or left
+    // it alone (patch bumps a caret range already covers), so any exact
+    // string comparison breaks the gate by construction (agent-bureau#314).
+    const declaredRange = packageJson.dependencies?.conversationalist;
+    expect(declaredRange).toBeDefined();
+    expect(Bun.semver.satisfies(conversationalistPackageJson.version, declaredRange!)).toBe(true);
     expect(packageJson.engines?.node).toBe('>=20.19.0');
   });
 
