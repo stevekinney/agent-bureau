@@ -1,5 +1,13 @@
 # bureau
 
+## 0.0.8
+
+### Patch Changes
+
+- Updated dependencies [537e5bc]
+  - conversationalist@0.6.1
+  - @lostgradient/operative@0.1.0
+
 ## 0.0.7
 
 ### Patch Changes
