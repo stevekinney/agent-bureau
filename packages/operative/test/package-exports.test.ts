@@ -3,6 +3,7 @@ import { join } from 'node:path';
 
 import { describe, expect, it } from 'bun:test';
 
+import conversationalistPackageJson from '../../conversationalist/package.json';
 import packageJson from '../package.json';
 
 const packageRoot = join(import.meta.dir, '..');
@@ -13,7 +14,14 @@ const exports = packageJson.exports as Record<string, Record<string, string> | s
 
 describe('operative package exports', () => {
   it('declares the Node floor required by external ESM-only conversationalist', () => {
-    expect(packageJson.dependencies?.conversationalist).toBe('^0.5.0');
+    // Tracks the workspace version rather than a literal range: `changeset
+    // version` rewrites this dependency range in the same commit that bumps
+    // conversationalist itself, so a hardcoded range breaks the release
+    // gate — which runs the suite on the already-versioned tree — on every
+    // conversationalist minor (agent-bureau#314).
+    expect(packageJson.dependencies?.conversationalist).toBe(
+      `^${conversationalistPackageJson.version}`,
+    );
     expect(packageJson.engines?.node).toBe('>=20.19.0');
   });
 
