@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.6.0
+
+### Minor Changes
+
+- 48a3f10: Add `rewindBeforePosition(conversation, position, options?)` and `rewindBeforeMessage(conversation, messageId, options?)` to `conversationalist/context`, plus matching `Conversation` methods and `withConversation` draft builders.
+
+  Both drop the message at the boundary **and everything after it** — the branch-rewind counterpart to `truncateFromPosition`, which keeps that same tail. Edit-and-resend flows previously had no helper for this direction and hand-rolled the immutable surgery over `ids`/`messages`/`updatedAt`, which is exactly the assembly the builder API exists to avoid. `rewindBeforeMessage` is the form edit flows usually want, since an adapter command hands you the id of the edited message rather than its position.
+
+  Positions are renumbered from zero. A tool-call/tool-result pair straddling the boundary is dropped whole by default, so a rewind never strands a call whose answer was rewound away; `preserveToolPairs: false` cuts strictly at the boundary and leaves the call pending. A boundary at or past the end returns the same conversation reference, so a no-op rewind adds no history entry and fires no events. An unknown message id is likewise a no-op.
+
+  Existing behavior is unchanged — this is purely additive.
+
+- 408d49d: Guard `updateStreamingMessage` against writing to a message that is no longer streaming. Previously it cloned the target message by id and applied the new content unconditionally, so a token that arrived after `finalizeStreamingMessage` — the classic late-arriving-chunk race after a user hits stop — silently grew a message the UI had already presented as final. Every consumer had to hand-roll the guard; the post-cancel half of the same race already no-opped, because `cancelStreamingMessage` removes the message outright.
+
+  `updateStreamingMessage` now returns the conversation unchanged when the target message is not flagged as streaming, matching how it already handles an unknown message id. It stays a no-op rather than a thrown error so both halves of the race behave identically and a stop-button race cannot crash a stream. The rejected update also no longer reads `environment.now()`, so a stateful or fallible injected clock is left untouched.
+
+  `Conversation.updateStreamingMessage` (the stateful class wrapper) rejects the same updates without recording history: when the underlying call returns the conversation it was given, the wrapper skips the commit entirely. Previously each rejected chunk still pushed an undo node and emitted `change`, `messages.updated`, and `stream.updated`, so a post-stop token flood inflated the undo stack and — under `maxHistoryDepth` — could prune real ancestors to make room for states that never differed.
+
+  Consumers relying on the old behavior — render-side projections that reproject content onto an already-finalized message — should call `updateUnsafeStreamingMessage`, which keeps applying content regardless of streaming status and is now the documented escape hatch. Consumers with their own `shouldStop()`-style guard around `updateStreamingMessage` can drop it; the guard is now enforced at the library boundary.
+
+- af3bb6d: Re-export `JSONValue` and `JSONPrimitive` from `interoperability` directly instead of aliasing them. The alias made the bundler emit two distinct symbols in the published declarations — the inlined original plus the alias — and only the alias was exported. Any consumer whose inferred type reached the original could not name it, which TypeScript 6 reports as TS2883. Downstream packages building against `conversationalist/schemas` were the visible casualty.
+
+  `toJSONValue` now narrows `bigint`, `symbol`, and function inputs explicitly so each uses its own `toString` rather than falling through to a generic coercion. Output is unchanged for every input.
+
+  Also raises the `@anthropic-ai/sdk` peer range to `^0.116.0` and `zod` to `^4.4.3`. The Anthropic bump is consumer-visible: `ToolUseBlock` gained a required `caller` field in 0.116, so code constructing those blocks by hand needs updating.
+
+### Patch Changes
+
+- 4141caa: `rewindBeforePosition` and `rewindBeforeMessage` now decide what survives a rewind by transcript order (`ids` order) rather than by comparing stored `message.position` values. Schema-valid histories can carry stale or sparse positions that disagree with the id order; the old position-based filter could retain messages that sit _after_ the boundary in the transcript, and tool-block preservation could keep a straddling pair alive on the strength of a stale position comparison. The boundary itself is still identified by stored position for `rewindBeforePosition` (the value a caller read off a message) and by id for `rewindBeforeMessage`; only prefix membership and tool-block extents now come from the ordered transcript. Well-formed histories — positions matching id order — behave exactly as before.
+
 ## 0.5.0
 
 ### Minor Changes
