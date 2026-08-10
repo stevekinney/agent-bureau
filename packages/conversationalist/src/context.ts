@@ -219,7 +219,11 @@ const collectMessagesFromBlocks = (blocks: ReadonlyArray<MessageBlock>): Message
 const ensureTruncationSafe = (
   conversation: Conversation,
   preserveToolPairs: boolean,
-  operation: 'truncateToTokenLimit' | 'truncateFromPosition' | 'rewindBeforePosition',
+  operation:
+    | 'truncateToTokenLimit'
+    | 'truncateFromPosition'
+    | 'rewindBeforePosition'
+    | 'rewindBeforeMessage',
 ): Conversation => {
   try {
     return ensureConversationSafe(conversation);
@@ -710,6 +714,11 @@ export interface RewindOptions {
  * {@link truncateToTokenLimit}), which drop the oldest messages to fit a
  * budget, this drops the newest to undo a branch.
  *
+ * The boundary message is the first message in transcript order whose stored
+ * position is at or past `position`; what gets dropped is that message and
+ * everything after it *in the transcript*, even in histories whose stored
+ * positions have drifted out of step with the id order.
+ *
  * Positions are renumbered from zero, so the result is a well-formed
  * transcript rather than one with a gap. A `position` at or past the end
  * returns the conversation unchanged; a `position` of `0` or less empties it.
@@ -723,42 +732,29 @@ export function rewindBeforePosition(
   environment?: Partial<ConversationEnvironment>,
 ): Conversation {
   assertConversationSafe(conversation);
-  const preserveToolPairs = options?.preserveToolPairs ?? true;
-  const resolvedEnvironment = resolveConversationEnvironment(environment);
 
+  // The boundary is *identified* by stored position — the value a caller read
+  // off a message — but everything past identification works in transcript
+  // order. Schema-valid histories can carry stale or sparse positions that
+  // disagree with `ids` order, and deciding prefix membership by comparing
+  // stored positions would then retain messages that sit after the boundary
+  // in the transcript (agent-bureau#313).
   const ordered = getOrderedMessages(conversation);
-  const kept = ordered.filter((message) => message.position < position);
+  const boundaryIndex = ordered.findIndex((message) => message.position >= position);
 
-  // Nothing crossed the boundary, so the transcript is already what was asked
-  // for. Returning the same reference keeps a no-op rewind free of a history
-  // entry and a spurious `updatedAt` bump.
-  if (kept.length === ordered.length) return conversation;
+  // Nothing sits at or past the boundary, so the transcript is already what
+  // was asked for. Returning the same reference keeps a no-op rewind free of
+  // a history entry and a spurious `updatedAt` bump.
+  if (boundaryIndex === -1) return conversation;
 
-  let retained: ReadonlyArray<Message> = kept;
-
-  if (preserveToolPairs) {
-    const { messageToBlock } = buildMessageBlocks(ordered, () => 0, preserveToolPairs);
-    // Keep a block only when all of it sits before the boundary. Expanding to
-    // whole blocks the way `truncateFromPosition` does would pull dropped
-    // messages back in, which is the wrong direction for a rewind.
-    retained = kept.filter((message) => {
-      const block = messageToBlock.get(message.id);
-      return block === undefined || block.maxPosition < position;
-    });
-  }
-
-  const renumbered = retained.map((message, index) =>
-    cloneMessageWithPosition(message, index, copyContent(message.content)),
+  return rewindBeforeOrderedIndex(
+    conversation,
+    ordered,
+    boundaryIndex,
+    options,
+    environment,
+    'rewindBeforePosition',
   );
-
-  const next = toReadonly({
-    ...conversation,
-    ids: renumbered.map((message) => message.id),
-    messages: toIdRecord(renumbered),
-    updatedAt: resolvedEnvironment.now(),
-  });
-
-  return ensureTruncationSafe(next, preserveToolPairs, 'rewindBeforePosition');
 }
 
 /**
@@ -777,7 +773,74 @@ export function rewindBeforeMessage(
   environment?: Partial<ConversationEnvironment>,
 ): Conversation {
   assertConversationSafe(conversation);
-  const target = conversation.messages[messageId];
-  if (target === undefined) return conversation;
-  return rewindBeforePosition(conversation, target.position, options, environment);
+
+  // Locate the target in the ordered transcript rather than delegating via
+  // its stored position: with stale positions the two disagree, and the id
+  // the caller handed us names a place in the transcript, not a position
+  // value (agent-bureau#313).
+  const ordered = getOrderedMessages(conversation);
+  const boundaryIndex = ordered.findIndex((message) => message.id === messageId);
+  if (boundaryIndex === -1) return conversation;
+
+  return rewindBeforeOrderedIndex(
+    conversation,
+    ordered,
+    boundaryIndex,
+    options,
+    environment,
+    'rewindBeforeMessage',
+  );
 }
+
+/**
+ * Shared tail of the rewind helpers: drops `ordered[boundaryIndex]` and
+ * everything after it *in transcript order*, optionally discarding tool
+ * blocks that straddle the boundary, then renumbers positions from zero.
+ */
+const rewindBeforeOrderedIndex = (
+  conversation: Conversation,
+  ordered: ReadonlyArray<Message>,
+  boundaryIndex: number,
+  options: RewindOptions | undefined,
+  environment: Partial<ConversationEnvironment> | undefined,
+  operation: 'rewindBeforePosition' | 'rewindBeforeMessage',
+): Conversation => {
+  const preserveToolPairs = options?.preserveToolPairs ?? true;
+  const resolvedEnvironment = resolveConversationEnvironment(environment);
+
+  let retained: ReadonlyArray<Message> = ordered.slice(0, boundaryIndex);
+
+  if (preserveToolPairs) {
+    const { messageToBlock } = buildMessageBlocks(ordered, () => 0, preserveToolPairs);
+    // Keep a block only when all of it sits before the boundary. Expanding to
+    // whole blocks the way `truncateFromPosition` does would pull dropped
+    // messages back in, which is the wrong direction for a rewind. Block
+    // extents are measured by ordered index, not by the block's stored
+    // min/max positions, for the same reason as above: stale positions must
+    // not let a block retain a member that follows the boundary in the
+    // transcript.
+    const orderedIndexById = new Map(ordered.map((message, index) => [message.id, index]));
+    retained = retained.filter((message) => {
+      const block = messageToBlock.get(message.id);
+      return (
+        block === undefined ||
+        block.messages.every(
+          (member) => (orderedIndexById.get(member.id) ?? Number.POSITIVE_INFINITY) < boundaryIndex,
+        )
+      );
+    });
+  }
+
+  const renumbered = retained.map((message, index) =>
+    cloneMessageWithPosition(message, index, copyContent(message.content)),
+  );
+
+  const next = toReadonly({
+    ...conversation,
+    ids: renumbered.map((message) => message.id),
+    messages: toIdRecord(renumbered),
+    updatedAt: resolvedEnvironment.now(),
+  });
+
+  return ensureTruncationSafe(next, preserveToolPairs, operation);
+};
