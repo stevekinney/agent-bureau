@@ -215,9 +215,6 @@
   "peerDependenciesMeta": {
     "@anthropic-ai/sdk": {
       "optional": true
-    },
-    "zod": {
-      "optional": true
     }
   },
   "engines": {

@@ -736,6 +736,15 @@ const restored = await Conversation.fromProvider('openai', { messages: openAIMes
 
 Anthropic Messages API format adapter.
 
+`@anthropic-ai/sdk` is an **optional** peer dependency — it is not installed
+automatically, and only this entry point needs it. Install it alongside
+conversationalist before importing the adapter (the SDK-typed exports such as
+`AnthropicSdkConversation` resolve their types from it):
+
+```bash
+bun add @anthropic-ai/sdk
+```
+
 ```typescript
 import {
   appendAnthropicMessages,
