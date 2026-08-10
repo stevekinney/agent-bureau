@@ -21,6 +21,11 @@ describe('operative package exports', () => {
     // string comparison breaks the gate by construction (agent-bureau#314).
     const declaredRange = packageJson.dependencies?.conversationalist;
     expect(declaredRange).toBeDefined();
+    // A single caret range only — `satisfies` alone would also accept
+    // over-broad declarations like `*`, `>=0`, or unioned carets, which
+    // would let published operative installs resolve releases outside the
+    // intended compatible train.
+    expect(declaredRange).toMatch(/^\^\d+\.\d+\.\d+$/);
     expect(Bun.semver.satisfies(conversationalistPackageJson.version, declaredRange!)).toBe(true);
     expect(packageJson.engines?.node).toBe('>=20.19.0');
   });
