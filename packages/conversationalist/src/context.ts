@@ -219,7 +219,11 @@ const collectMessagesFromBlocks = (blocks: ReadonlyArray<MessageBlock>): Message
 const ensureTruncationSafe = (
   conversation: Conversation,
   preserveToolPairs: boolean,
-  operation: 'truncateToTokenLimit' | 'truncateFromPosition' | 'rewindBeforePosition',
+  operation:
+    | 'truncateToTokenLimit'
+    | 'truncateFromPosition'
+    | 'rewindBeforePosition'
+    | 'rewindBeforeMessage',
 ): Conversation => {
   try {
     return ensureConversationSafe(conversation);
@@ -743,7 +747,14 @@ export function rewindBeforePosition(
   // a history entry and a spurious `updatedAt` bump.
   if (boundaryIndex === -1) return conversation;
 
-  return rewindBeforeOrderedIndex(conversation, ordered, boundaryIndex, options, environment);
+  return rewindBeforeOrderedIndex(
+    conversation,
+    ordered,
+    boundaryIndex,
+    options,
+    environment,
+    'rewindBeforePosition',
+  );
 }
 
 /**
@@ -771,7 +782,14 @@ export function rewindBeforeMessage(
   const boundaryIndex = ordered.findIndex((message) => message.id === messageId);
   if (boundaryIndex === -1) return conversation;
 
-  return rewindBeforeOrderedIndex(conversation, ordered, boundaryIndex, options, environment);
+  return rewindBeforeOrderedIndex(
+    conversation,
+    ordered,
+    boundaryIndex,
+    options,
+    environment,
+    'rewindBeforeMessage',
+  );
 }
 
 /**
@@ -785,6 +803,7 @@ const rewindBeforeOrderedIndex = (
   boundaryIndex: number,
   options: RewindOptions | undefined,
   environment: Partial<ConversationEnvironment> | undefined,
+  operation: 'rewindBeforePosition' | 'rewindBeforeMessage',
 ): Conversation => {
   const preserveToolPairs = options?.preserveToolPairs ?? true;
   const resolvedEnvironment = resolveConversationEnvironment(environment);
@@ -823,5 +842,5 @@ const rewindBeforeOrderedIndex = (
     updatedAt: resolvedEnvironment.now(),
   });
 
-  return ensureTruncationSafe(next, preserveToolPairs, 'rewindBeforePosition');
+  return ensureTruncationSafe(next, preserveToolPairs, operation);
 };
