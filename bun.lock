@@ -168,6 +168,9 @@
         "@anthropic-ai/sdk": "^0.116.0",
         "zod": "^4.4.3",
       },
+      "optionalPeers": [
+        "@anthropic-ai/sdk",
+      ],
     },
     "packages/evaluation": {
       "name": "evaluation",
