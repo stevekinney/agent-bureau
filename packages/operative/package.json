@@ -241,7 +241,7 @@
   "dependencies": {
     "@lostgradient/weft": "^0.16.0",
     "armorer": "^0.13.0",
-    "conversationalist": "^0.6.0"
+    "conversationalist": "^0.6.1"
   },
   "devDependencies": {
     "@anthropic-ai/sdk": "^0.116.0",
