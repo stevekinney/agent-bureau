@@ -3,6 +3,7 @@ import { join } from 'node:path';
 
 import { describe, expect, it } from 'bun:test';
 
+import conversationalistPackageJson from '../../conversationalist/package.json';
 import packageJson from '../package.json';
 
 const packageRoot = join(import.meta.dir, '..');
@@ -13,7 +14,19 @@ const exports = packageJson.exports as Record<string, Record<string, string> | s
 
 describe('operative package exports', () => {
   it('declares the Node floor required by external ESM-only conversationalist', () => {
-    expect(packageJson.dependencies?.conversationalist).toBe('^0.5.0');
+    // Asserts range/workspace compatibility rather than a literal range: the
+    // release gate runs this suite on the already-versioned tree, where
+    // `changeset version` may have rewritten the range (minor bumps) or left
+    // it alone (patch bumps a caret range already covers), so any exact
+    // string comparison breaks the gate by construction (agent-bureau#314).
+    const declaredRange = packageJson.dependencies?.conversationalist;
+    expect(declaredRange).toBeDefined();
+    // A single caret range only — `satisfies` alone would also accept
+    // over-broad declarations like `*`, `>=0`, or unioned carets, which
+    // would let published operative installs resolve releases outside the
+    // intended compatible train.
+    expect(declaredRange).toMatch(/^\^\d+\.\d+\.\d+$/);
+    expect(Bun.semver.satisfies(conversationalistPackageJson.version, declaredRange!)).toBe(true);
     expect(packageJson.engines?.node).toBe('>=20.19.0');
   });
 
