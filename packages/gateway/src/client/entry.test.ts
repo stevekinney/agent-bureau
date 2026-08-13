@@ -103,6 +103,8 @@ describe('collectPublishedComponentStyles discovery outcomes', () => {
           './styles': './styles.css',
           './paint': './paint/paint.js',
           './paint/styles': './paint/paint.css',
+          './table': './table/table.js',
+          './table/styles': './table/table.css',
           // Empty, and NOT on the known-empty list — must be rejected.
           './hollow/styles': './hollow/hollow.css',
           // Empty, but a real Table subcomponent, so the exemption applies.
@@ -116,6 +118,10 @@ describe('collectPublishedComponentStyles discovery outcomes', () => {
     await Bun.write(
       join(packageDirectory, 'paint', 'paint.css'),
       '@layer cinder.components{.paint{color:red}}',
+    );
+    await Bun.write(
+      join(packageDirectory, 'table', 'table.css'),
+      '@layer cinder.components{.table{display:grid}}',
     );
     await Bun.write(
       join(packageDirectory, 'hollow', 'hollow.css'),
@@ -162,14 +168,34 @@ describe('collectPublishedComponentStyles discovery outcomes', () => {
     expect(census.published).toEqual([]);
   });
 
-  it('accepts an empty stylesheet from a component known to be styled elsewhere', async () => {
-    const census = await collectPublishedComponentStyles({
+  it('fails when a Table sidecar is observed without the parent Table stylesheet', async () => {
+    const failure: unknown = await collectPublishedComponentStyles({
       specifiers: ['@lostgradient/cinder/table-row'],
+      resolveFrom,
+    }).then(
+      (census) => census,
+      (error: unknown) => error,
+    );
+
+    expect(failure).toBeInstanceOf(Error);
+    expect(String(failure)).toMatch(
+      /table-row\/styles.*requires @lostgradient\/cinder\/table to be present/,
+    );
+  });
+
+  it('accepts a Table sidecar only when the parent stylesheet is also observed', async () => {
+    const census = await collectPublishedComponentStyles({
+      specifiers: ['@lostgradient/cinder/table', '@lostgradient/cinder/table-row'],
       resolveFrom,
     });
 
     expect(census.withoutComponentLayer).toEqual(['table-row']);
-    expect(census.published).toEqual([]);
+    expect(census.published).toEqual([
+      {
+        specifier: '@lostgradient/cinder/table/styles',
+        blocks: ['.table{display:grid}'],
+      },
+    ]);
   });
 
   it('fails loudly when an unexpected component stylesheet builds to nothing', async () => {

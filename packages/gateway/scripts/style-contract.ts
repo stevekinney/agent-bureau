@@ -285,9 +285,9 @@ export interface ComponentStylesheetCensus {
   readonly withoutStylesheet: readonly string[];
   /**
    * Observed components whose published stylesheet carries no component-layer
-   * CSS *and* that are known to be styled elsewhere. An unexpected empty
+   * CSS *and* whose parent stylesheet was observed. An unexpected empty
    * stylesheet throws rather than landing here — see
-   * {@link KNOWN_EMPTY_COMPONENT_STYLESHEETS}.
+   * {@link EMPTY_COMPONENT_STYLESHEET_PARENTS}.
    */
   readonly withoutComponentLayer: readonly string[];
 }
@@ -308,12 +308,12 @@ export interface ComponentStylesheetCensus {
  * Adding an entry here is a deliberate statement that the component is styled
  * elsewhere — confirm that before you add one.
  */
-const KNOWN_EMPTY_COMPONENT_STYLESHEETS: ReadonlySet<string> = new Set([
-  'table-body',
-  'table-cell',
-  'table-header',
-  'table-header-cell',
-  'table-row',
+const EMPTY_COMPONENT_STYLESHEET_PARENTS: ReadonlyMap<string, string> = new Map([
+  ['table-body', 'table'],
+  ['table-cell', 'table'],
+  ['table-header', 'table'],
+  ['table-header-cell', 'table'],
+  ['table-row', 'table'],
 ]);
 
 /** Inputs for {@link collectPublishedComponentStyles}. */
@@ -336,10 +336,11 @@ export interface PublishedComponentStylesRequest {
  *   - The subpath is declared and builds to no `cinder.components` CSS. Cinder
  *     ships a few deliberately as "empty registry entries" (the Table
  *     subcomponents, whose visual treatment lives in `table.css`). Only the
- *     components named in {@link KNOWN_EMPTY_COMPONENT_STYLESHEETS} are
- *     accepted this way and reported in `withoutComponentLayer`; any other
- *     empty stylesheet throws, because silently dropping it would let the
- *     audit pass while that component ships unstyled.
+ *     components named in {@link EMPTY_COMPONENT_STYLESHEET_PARENTS} are
+ *     accepted only when their parent component was also observed. The parent
+ *     is then included in `published`, so the later bundle audit requires its
+ *     CSS. Any other empty stylesheet throws, because silently dropping it
+ *     would let the audit pass while that component ships unstyled.
  *   - The subpath is declared but cannot be resolved or built. That is a break
  *     in the published contract, so it throws instead of quietly shrinking the
  *     set the bundle is measured against.
@@ -391,13 +392,23 @@ export async function collectPublishedComponentStyles({
       continue;
     }
 
-    if (!KNOWN_EMPTY_COMPONENT_STYLESHEETS.has(component)) {
+    const parentComponent = EMPTY_COMPONENT_STYLESHEET_PARENTS.get(component);
+    if (parentComponent === undefined) {
       throw new Error(
         `Cinder publishes ${specifier}, but it builds to no \`cinder.components\` CSS. ` +
           'An empty sidecar silently drops this component from the production check, so ' +
           'the audit would keep passing while the component ships unstyled. Either the ' +
-          'component moved its styles elsewhere — in which case add it to ' +
-          'KNOWN_EMPTY_COMPONENT_STYLESHEETS with the evidence — or Cinder regressed.',
+          'component moved its styles elsewhere — in which case add its required parent to ' +
+          'EMPTY_COMPONENT_STYLESHEET_PARENTS with the evidence — or Cinder regressed.',
+      );
+    }
+
+    if (!components.includes(parentComponent)) {
+      throw new Error(
+        `Cinder publishes ${specifier}, but it builds to no \`cinder.components\` CSS and ` +
+          `requires @lostgradient/cinder/${parentComponent} to be present in the client graph. ` +
+          `Its visual treatment lives in the parent stylesheet, so the production audit cannot ` +
+          'exempt this sidecar unless it also verifies that parent stylesheet in the bundle.',
       );
     }
 
