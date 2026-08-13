@@ -943,7 +943,7 @@ function resolveMcpSchema(schema: unknown): AnySchema | undefined {
     return z.object(schema);
   }
   const converted = jsonSchemaToZod(schema);
-  return converted ? converted : undefined;
+  return converted || undefined;
 }
 
 function isZodRawShape(value: unknown): value is Record<string, z.ZodTypeAny> {

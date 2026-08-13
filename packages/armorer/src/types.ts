@@ -50,6 +50,11 @@ export interface ToolExecutionResult extends ToolResult {
 
 export type ToolResultLike = ToolResultInput | ToolExecutionResult;
 
+export type SatisfiedPolicyPause = {
+  action: ToolAction;
+  reason?: string;
+};
+
 export type PendingToolApproval = {
   callId: string;
   toolName: string;
@@ -57,6 +62,7 @@ export type PendingToolApproval = {
   action: ToolAction;
   reason?: string;
   metadata?: JSONValue;
+  satisfiedPolicyPauses?: readonly SatisfiedPolicyPause[];
   approvalToken?: string;
 };
 

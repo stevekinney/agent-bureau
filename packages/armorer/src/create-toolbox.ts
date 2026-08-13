@@ -73,7 +73,11 @@ import {
   ToolboxValidateErrorEvent,
   ToolboxValidateSuccessEvent,
 } from './events';
-import { type ApprovalResumeState, approvalResumeSymbol } from './internal/approval-resume';
+import {
+  type ApprovalResumeState,
+  approvalResumeSymbol,
+  policyPauseDecisionsSymbol,
+} from './internal/approval-resume';
 import type {
   DefaultToolEvents,
   MinimalAbortSignal,
@@ -1177,6 +1181,13 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
           approvedAction: approval.action,
           proposedArguments: approval.arguments,
           reason: approval.reason,
+          satisfiedPauses: [
+            ...(approval.satisfiedPolicyPauses ?? []),
+            {
+              action: approval.action,
+              ...(approval.reason !== undefined ? { reason: approval.reason } : {}),
+            },
+          ],
         },
       } as InternalToolboxExecuteOptions,
     );
@@ -2015,26 +2026,34 @@ function mergePolicies(
       // never silently skipped just because the capability tier already
       // asked. Skipping them would let a human's approval of the capability
       // ask bypass a registry/tool deny that was never even evaluated.
-      let capabilityAskDecision: ToolPolicyDecision | undefined;
+      const pendingPauseDecisions: ToolPolicyDecision[] = [];
       if (approvalPolicy) {
         const result = evaluateCapabilityApproval(context, approvalPolicy);
         if (result.status === 'deny') {
           return approvalStatusToDecision(context.toolName, result);
         }
         if (result.status === 'ask') {
-          capabilityAskDecision = approvalStatusToDecision(context.toolName, result);
+          pendingPauseDecisions.push(approvalStatusToDecision(context.toolName, result));
         }
       }
       const registryDecision = await resolvePolicyDecision(registryPolicy?.beforeExecute, context);
-      if (registryDecision?.allow === false) {
+      if (isPausePolicyDecision(registryDecision)) {
+        pendingPauseDecisions.push(registryDecision);
+      } else if (registryDecision?.allow === false) {
         return registryDecision;
       }
       const toolDecision = await resolvePolicyDecision(toolPolicy?.beforeExecute, context);
-      if (toolDecision?.allow === false) {
+      if (isPausePolicyDecision(toolDecision)) {
+        pendingPauseDecisions.push(toolDecision);
+      } else if (toolDecision?.allow === false) {
         return toolDecision;
       }
-      if (capabilityAskDecision) {
-        return capabilityAskDecision;
+      const firstPauseDecision = pendingPauseDecisions[0];
+      if (firstPauseDecision) {
+        return {
+          ...firstPauseDecision,
+          [policyPauseDecisionsSymbol]: pendingPauseDecisions,
+        };
       }
       return { allow: true } satisfies ToolPolicyDecision;
     },
@@ -2047,6 +2066,12 @@ function mergePolicies(
       }
     },
   };
+}
+
+function isPausePolicyDecision(
+  decision: ToolPolicyDecision | undefined,
+): decision is ToolPolicyDecision & { status: 'needs_approval' | 'needs_input' } {
+  return decision?.status === 'needs_approval' || decision?.status === 'needs_input';
 }
 
 async function resolvePolicyDecision(

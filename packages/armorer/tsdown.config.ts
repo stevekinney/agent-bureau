@@ -45,12 +45,14 @@ export default defineConfig({
   tsconfig: './tsconfig.build.json',
   // Real externals: peer dependencies and the runtime. The foundation workspace packages are
   // deliberately NOT listed here, so tsdown inlines them into both the JS and the declarations.
-  external: [
-    'zod',
-    '@modelcontextprotocol/sdk',
-    '@openai/agents',
-    '@opentelemetry/api',
-    /^bun(:|$)/,
-    /^node:/,
-  ],
+  deps: {
+    neverBundle: [
+      'zod',
+      '@modelcontextprotocol/sdk',
+      '@openai/agents',
+      '@opentelemetry/api',
+      /^bun(:|$)/,
+      /^node:/,
+    ],
+  },
 });
