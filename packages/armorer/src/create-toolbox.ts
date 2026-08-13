@@ -2015,26 +2015,30 @@ function mergePolicies(
       // never silently skipped just because the capability tier already
       // asked. Skipping them would let a human's approval of the capability
       // ask bypass a registry/tool deny that was never even evaluated.
-      let capabilityAskDecision: ToolPolicyDecision | undefined;
+      let pendingPauseDecision: ToolPolicyDecision | undefined;
       if (approvalPolicy) {
         const result = evaluateCapabilityApproval(context, approvalPolicy);
         if (result.status === 'deny') {
           return approvalStatusToDecision(context.toolName, result);
         }
         if (result.status === 'ask') {
-          capabilityAskDecision = approvalStatusToDecision(context.toolName, result);
+          pendingPauseDecision = approvalStatusToDecision(context.toolName, result);
         }
       }
       const registryDecision = await resolvePolicyDecision(registryPolicy?.beforeExecute, context);
-      if (registryDecision?.allow === false) {
+      if (isPausePolicyDecision(registryDecision)) {
+        pendingPauseDecision = registryDecision;
+      } else if (registryDecision?.allow === false) {
         return registryDecision;
       }
       const toolDecision = await resolvePolicyDecision(toolPolicy?.beforeExecute, context);
-      if (toolDecision?.allow === false) {
+      if (isPausePolicyDecision(toolDecision)) {
+        pendingPauseDecision = toolDecision;
+      } else if (toolDecision?.allow === false) {
         return toolDecision;
       }
-      if (capabilityAskDecision) {
-        return capabilityAskDecision;
+      if (pendingPauseDecision) {
+        return pendingPauseDecision;
       }
       return { allow: true } satisfies ToolPolicyDecision;
     },
@@ -2047,6 +2051,12 @@ function mergePolicies(
       }
     },
   };
+}
+
+function isPausePolicyDecision(
+  decision: ToolPolicyDecision | undefined,
+): decision is ToolPolicyDecision & { status: 'needs_approval' | 'needs_input' } {
+  return decision?.status === 'needs_approval' || decision?.status === 'needs_input';
 }
 
 async function resolvePolicyDecision(

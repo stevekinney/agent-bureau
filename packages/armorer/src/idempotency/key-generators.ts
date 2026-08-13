@@ -33,7 +33,7 @@ function extractField(input: unknown, fieldName: string): unknown {
   }
 
   const value = (input as Record<string, unknown>)[fieldName];
-  return value === null || value === undefined ? '' : value;
+  return value ?? '';
 }
 
 /**
