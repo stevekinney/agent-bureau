@@ -88,34 +88,41 @@ describe('toCinderComponentName', () => {
  */
 describe('collectPublishedComponentStyles discovery outcomes', () => {
   let resolveFrom = '';
+  let packageManifest = '';
 
   beforeAll(async () => {
     resolveFrom = await mkdtemp(join(tmpdir(), 'gateway-style-contract-'));
     const packageDirectory = join(resolveFrom, 'node_modules', '@lostgradient', 'cinder');
 
-    await Bun.write(
-      join(packageDirectory, 'package.json'),
-      JSON.stringify({
-        name: '@lostgradient/cinder',
-        version: '0.0.0-fixture',
-        exports: {
-          './package.json': './package.json',
-          './styles': './styles.css',
-          './paint': './paint/paint.js',
-          './paint/styles': './paint/paint.css',
-          // Empty, and NOT on the known-empty list — must be rejected.
-          './hollow/styles': './hollow/hollow.css',
-          // Empty, but a real Table subcomponent, so the exemption applies.
-          './table-row/styles': './table-row/table-row.css',
-          // Declared, but the file it points at does not exist.
-          './phantom/styles': './phantom/phantom.css',
-        },
-      }),
-    );
+    packageManifest = JSON.stringify({
+      name: '@lostgradient/cinder',
+      version: '0.0.0-fixture',
+      exports: {
+        './package.json': './package.json',
+        './styles': './styles.css',
+        './paint': './paint/paint.js',
+        './paint/styles': './paint/paint.css',
+        './table': './table/table.js',
+        './table/styles': './table/table.css',
+        // Empty, and NOT on the known-empty list — must be rejected.
+        './hollow/styles': './hollow/hollow.css',
+        // Empty, but a real Table subcomponent, so the exemption applies.
+        './table-row/styles': './table-row/table-row.css',
+        // Declared, but the file it points at does not exist.
+        './phantom/styles': './phantom/phantom.css',
+      },
+    });
+    await Bun.write(join(packageDirectory, 'package.json'), packageManifest);
     await Bun.write(join(packageDirectory, 'styles.css'), '@layer cinder.components{.base{gap:0}}');
     await Bun.write(
       join(packageDirectory, 'paint', 'paint.css'),
       '@layer cinder.components{.paint{color:red}}',
+    );
+    await Bun.write(join(packageDirectory, 'paint', 'paint.js'), 'export const paint = true;');
+    await Bun.write(join(packageDirectory, 'table', 'table.js'), 'export const table = true;');
+    await Bun.write(
+      join(packageDirectory, 'table', 'table.css'),
+      '@layer cinder.components{.table{display:grid}}',
     );
     await Bun.write(
       join(packageDirectory, 'hollow', 'hollow.css'),
@@ -162,14 +169,62 @@ describe('collectPublishedComponentStyles discovery outcomes', () => {
     expect(census.published).toEqual([]);
   });
 
-  it('accepts an empty stylesheet from a component known to be styled elsewhere', async () => {
-    const census = await collectPublishedComponentStyles({
+  it('fails when a Table sidecar is observed without the parent Table stylesheet', async () => {
+    const failure: unknown = await collectPublishedComponentStyles({
       specifiers: ['@lostgradient/cinder/table-row'],
+      resolveFrom,
+    }).then(
+      (census) => census,
+      (error: unknown) => error,
+    );
+
+    expect(failure).toBeInstanceOf(Error);
+    expect(String(failure)).toMatch(
+      /table-row\/styles.*requires @lostgradient\/cinder\/table to be present/,
+    );
+  });
+
+  it('accepts a Table sidecar only when the parent stylesheet enters the published census', async () => {
+    const census = await collectPublishedComponentStyles({
+      specifiers: ['@lostgradient/cinder/table', '@lostgradient/cinder/table-row'],
       resolveFrom,
     });
 
     expect(census.withoutComponentLayer).toEqual(['table-row']);
-    expect(census.published).toEqual([]);
+    expect(census.published).toEqual([
+      {
+        specifier: '@lostgradient/cinder/table/styles',
+        blocks: ['.table{display:grid}'],
+      },
+    ]);
+  });
+
+  it('fails when the parent Table stylesheet is unavailable', async () => {
+    const packageDirectory = join(resolveFrom, 'node_modules', '@lostgradient', 'cinder');
+    await Bun.write(
+      join(packageDirectory, 'package.json'),
+      JSON.stringify({
+        name: '@lostgradient/cinder',
+        version: '0.0.0-fixture',
+        exports: {
+          './package.json': './package.json',
+          './table': './table/table.js',
+          './table-row/styles': './table-row/table-row.css',
+        },
+      }),
+    );
+
+    const failure: unknown = await collectPublishedComponentStyles({
+      specifiers: ['@lostgradient/cinder/table', '@lostgradient/cinder/table-row'],
+      resolveFrom,
+    }).then(
+      (census) => census,
+      (error: unknown) => error,
+    );
+    await Bun.write(join(packageDirectory, 'package.json'), packageManifest);
+
+    expect(failure).toBeInstanceOf(Error);
+    expect(String(failure)).toMatch(/table\/styles did not produce component-layer CSS/);
   });
 
   it('fails loudly when an unexpected component stylesheet builds to nothing', async () => {
