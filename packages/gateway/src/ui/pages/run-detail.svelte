@@ -37,6 +37,7 @@
     source?: string;
     summary: string;
     details: unknown;
+    detailsText: string;
   };
 
   type SerializedRunStepDetail = RunDetailResponse['stepDetails'][number];
@@ -259,6 +260,7 @@
         source: eventSource(event.event),
         summary: event.event,
         details: event.detail,
+        detailsText: stringifyPayload(event.detail),
       };
     }),
   );
@@ -457,8 +459,8 @@
         >
           <strong>{event.summary}</strong>
           <span>{event.source}</span>
-          {#if stringifyPayload(event.details) !== ''}
-            <span>{stringifyPayload(event.details)}</span>
+          {#if event.detailsText !== ''}
+            <span>{event.detailsText}</span>
           {/if}
         </Feed.Event>
       {/each}
