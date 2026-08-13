@@ -285,8 +285,8 @@ export interface ComponentStylesheetCensus {
   readonly withoutStylesheet: readonly string[];
   /**
    * Observed components whose published stylesheet carries no component-layer
-   * CSS *and* whose parent stylesheet was observed. An unexpected empty
-   * stylesheet throws rather than landing here — see
+   * CSS *and* whose parent stylesheet was observed and published. An
+   * unexpected empty stylesheet throws rather than landing here — see
    * {@link EMPTY_COMPONENT_STYLESHEET_PARENTS}.
    */
   readonly withoutComponentLayer: readonly string[];
@@ -306,7 +306,7 @@ export interface ComponentStylesheetCensus {
  * as a break rather than as one fewer thing to verify: a sidecar that silently
  * became empty is exactly the upstream regression this audit exists to catch.
  * Adding an entry here is a deliberate statement that the component is styled
- * elsewhere — confirm that before you add one.
+ * by its named parent — confirm that before you add one.
  */
 const EMPTY_COMPONENT_STYLESHEET_PARENTS: ReadonlyMap<string, string> = new Map([
   ['table-body', 'table'],
@@ -337,10 +337,10 @@ export interface PublishedComponentStylesRequest {
  *     ships a few deliberately as "empty registry entries" (the Table
  *     subcomponents, whose visual treatment lives in `table.css`). Only the
  *     components named in {@link EMPTY_COMPONENT_STYLESHEET_PARENTS} are
- *     accepted only when their parent component was also observed. The parent
- *     is then included in `published`, so the later bundle audit requires its
- *     CSS. Any other empty stylesheet throws, because silently dropping it
- *     would let the audit pass while that component ships unstyled.
+ *     accepted only when their parent component's stylesheet entered
+ *     `published`, so the later bundle audit requires its CSS. Any other empty
+ *     stylesheet throws, because silently dropping it would let the audit pass
+ *     while that component ships unstyled.
  *   - The subpath is declared but cannot be resolved or built. That is a break
  *     in the published contract, so it throws instead of quietly shrinking the
  *     set the bundle is measured against.
@@ -403,16 +403,32 @@ export async function collectPublishedComponentStyles({
       );
     }
 
+    const parentStylesheet = `@lostgradient/cinder/${parentComponent}/styles`;
     if (!components.includes(parentComponent)) {
       throw new Error(
         `Cinder publishes ${specifier}, but it builds to no \`cinder.components\` CSS and ` +
           `requires @lostgradient/cinder/${parentComponent} to be present in the client graph. ` +
-          `Its visual treatment lives in the parent stylesheet, so the production audit cannot ` +
+          `Its visual treatment lives in ${parentStylesheet}, so the production audit cannot ` +
           'exempt this sidecar unless it also verifies that parent stylesheet in the bundle.',
       );
     }
 
     withoutComponentLayer.push(component);
+  }
+
+  for (const component of withoutComponentLayer) {
+    const parentComponent = EMPTY_COMPONENT_STYLESHEET_PARENTS.get(component);
+    if (parentComponent === undefined) continue;
+
+    const parentStylesheet = `@lostgradient/cinder/${parentComponent}/styles`;
+    if (!published.some((stylesheet) => stylesheet.specifier === parentStylesheet)) {
+      throw new Error(
+        `Cinder publishes @lostgradient/cinder/${component}/styles, but its required parent ` +
+          `${parentStylesheet} did not produce component-layer CSS for the production audit. ` +
+          'The sidecar cannot be exempt unless the audit can verify that parent stylesheet in ' +
+          'the emitted bundle.',
+      );
+    }
   }
 
   return { published, withoutStylesheet, withoutComponentLayer };
