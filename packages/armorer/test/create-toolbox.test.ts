@@ -3727,6 +3727,78 @@ describe('createToolbox', () => {
   });
 
   describe('status-only policy decisions', () => {
+    it('requires distinct registry and tool pauses to be satisfied in policy order', async () => {
+      let executed = false;
+      const toolbox = createToolbox(
+        [
+          createTool({
+            name: 'multi-pause-operation',
+            description: 'requires approval and input',
+            input: z.object({}),
+            policy: {
+              beforeExecute: () => ({
+                status: 'needs_input',
+                reason: 'Tool needs input',
+                action: { message: 'Provide tool input' },
+              }),
+            },
+            async execute() {
+              executed = true;
+              return 'completed';
+            },
+          }),
+        ],
+        {
+          approvalSecret: 'multi-pause-secret',
+          policy: {
+            beforeExecute: () => ({
+              status: 'needs_approval',
+              reason: 'Registry needs approval',
+              action: { message: 'Approve registry policy' },
+            }),
+          },
+        },
+      );
+
+      const registryPaused = await toolbox.execute({
+        id: 'call-multi-pause',
+        name: 'multi-pause-operation',
+        arguments: {},
+      });
+      const toolPaused = await toolbox.resumeApproval(
+        registryPaused.pendingApproval! as SignedPendingToolApproval,
+      );
+      const resumed = await toolbox.resumeApproval(
+        toolPaused.pendingApproval! as SignedPendingToolApproval,
+      );
+
+      expect(registryPaused.outcome).toBe('action_required');
+      expect(registryPaused.action).toMatchObject({
+        type: 'approval',
+        message: 'Approve registry policy',
+      });
+      expect(toolPaused.outcome).toBe('action_required');
+      expect(toolPaused.action).toMatchObject({
+        type: 'input',
+        message: 'Provide tool input',
+      });
+      expect(toolPaused.pendingApproval?.satisfiedPolicyPauses).toEqual([
+        {
+          action: { type: 'approval', message: 'Approve registry policy' },
+          reason: 'Registry needs approval',
+        },
+      ]);
+      expect(() =>
+        toolbox.resumeApproval({
+          ...(toolPaused.pendingApproval! as SignedPendingToolApproval),
+          satisfiedPolicyPauses: [],
+        }),
+      ).toThrow('invalid approval token');
+      expect(resumed.outcome).toBe('success');
+      expect(resumed.result).toBe('completed');
+      expect(executed).toBe(true);
+    });
+
     for (const status of ['needs_approval', 'needs_input'] as const) {
       it(`lets a tool policy deny a registry ${status} decision`, async () => {
         let toolPolicyCalls = 0;

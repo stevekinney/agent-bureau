@@ -43,7 +43,11 @@ import {
   ToolValidateErrorEvent,
   ToolValidateSuccessEvent,
 } from './events';
-import { type ApprovalResumeState, approvalResumeSymbol } from './internal/approval-resume';
+import {
+  type ApprovalResumeState,
+  approvalResumeSymbol,
+  policyPauseDecisionsSymbol,
+} from './internal/approval-resume';
 import type {
   DefaultToolEvents,
   MinimalAbortSignal,
@@ -761,7 +765,7 @@ export function createTool<
         }
       }
       const approvalResume = options[approvalResumeSymbol];
-      const decision = await resolvePolicyDecision(policyContext);
+      let decision = await resolvePolicyDecision(policyContext);
       const parsedArgumentsDigest = stableStringifyJson(normalizeToolContent(parsed));
       const proposedArgumentsDigest =
         approvalResume === undefined
@@ -769,6 +773,28 @@ export function createTool<
           : stableStringifyJson(normalizeToolContent(approvalResume.proposedArguments));
       const executedArgumentsEdited =
         approvalResume !== undefined && proposedArgumentsDigest !== parsedArgumentsDigest;
+
+      const policyPauseDecisions = decision?.[policyPauseDecisionsSymbol];
+      if (
+        policyPauseDecisions !== undefined &&
+        approvalResume !== undefined &&
+        !executedArgumentsEdited
+      ) {
+        let satisfiedPauseIndex = 0;
+        decision = { allow: true, status: 'allow' };
+        for (const pauseDecision of policyPauseDecisions) {
+          const satisfiedPause = approvalResume.satisfiedPauses[satisfiedPauseIndex];
+          if (
+            satisfiedPause !== undefined &&
+            policyPauseMatchesSatisfiedPause(pauseDecision, satisfiedPause)
+          ) {
+            satisfiedPauseIndex += 1;
+            continue;
+          }
+          decision = pauseDecision;
+          break;
+        }
+      }
 
       let resumedApprovalIsSatisfied = false;
       if (decision?.status === 'needs_approval' || decision?.status === 'needs_input') {
@@ -811,6 +837,9 @@ export function createTool<
               action,
               reason,
               metadata: normalizeToolContent(configuration.metadata ?? {}),
+              ...(approvalResume !== undefined && !executedArgumentsEdited
+                ? { satisfiedPolicyPauses: approvalResume.satisfiedPauses }
+                : {}),
             },
             inputDigest,
           };
@@ -1650,6 +1679,20 @@ function createToolAction(
   }
 
   return action;
+}
+
+function policyPauseMatchesSatisfiedPause(
+  decision: ToolPolicyDecision,
+  satisfiedPause: { action: ToolAction; reason?: string },
+): boolean {
+  const type = decision.status === 'needs_input' ? 'input' : 'approval';
+  const reason = decision.reason ?? `Tool execution requires ${type}`;
+  const action = createToolAction(type, decision, reason);
+  return (
+    satisfiedPause.reason === reason &&
+    stableStringifyJson(normalizeToolContent(satisfiedPause.action)) ===
+      stableStringifyJson(normalizeToolContent(action))
+  );
 }
 
 function stableStringify(value: unknown): string {
