@@ -12,10 +12,10 @@
     "integration": "bun run validate"
   },
   "dependencies": {
+    "@lostgradient/operative": "workspace:*",
     "armorer": "workspace:*",
     "bureau": "workspace:*",
     "conversationalist": "workspace:*",
-    "@lostgradient/operative": "workspace:*",
     "zod": "^4.4.3"
   },
   "devDependencies": {

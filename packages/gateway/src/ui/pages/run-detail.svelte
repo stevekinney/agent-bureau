@@ -4,12 +4,8 @@
   import { DataList } from '@lostgradient/cinder/data-list';
   import { DescriptionList } from '@lostgradient/cinder/description-list';
   import { EmptyState } from '@lostgradient/cinder/empty-state';
-  import { EventStreamViewer } from '@lostgradient/cinder/event-stream-viewer';
-  import type {
-    EventSeverity,
-    EventStreamState,
-    StreamEvent,
-  } from '@lostgradient/cinder/event-stream-viewer';
+  import { Feed } from '@lostgradient/cinder/feed';
+  import type { FeedEventTone } from '@lostgradient/cinder/feed-event';
   import { PayloadInspector } from '@lostgradient/cinder/payload-inspector';
   import { PageHeader } from '@lostgradient/cinder/page-header';
   import { RunStepTimeline } from '@lostgradient/cinder/run-step-timeline';
@@ -32,6 +28,16 @@
     detail: unknown;
     timestamp: number;
     sequence?: number;
+  };
+  type StreamEvent = {
+    id: string;
+    datetime: string;
+    timestamp: string;
+    severity: FeedEventTone;
+    source?: string;
+    summary: string;
+    details: unknown;
+    detailsText: string;
   };
 
   type SerializedRunStepDetail = RunDetailResponse['stepDetails'][number];
@@ -73,8 +79,8 @@
 
   let eventFilterQuery = $state('');
 
-  /** Maps an event name onto an EventStreamViewer severity. */
-  function eventSeverity(event: string): EventSeverity {
+  /** Maps an event name onto a Feed event tone. */
+  function eventSeverity(event: string): FeedEventTone {
     if (event.endsWith('.completed')) return 'success';
     if (event.endsWith('.error') || event === 'stream:error') return 'error';
     if (event.endsWith('.aborted')) return 'warning';
@@ -254,6 +260,7 @@
         source: eventSource(event.event),
         summary: event.event,
         details: event.detail,
+        detailsText: stringifyPayload(event.detail),
       };
     }),
   );
@@ -265,8 +272,6 @@
     }
     return streamEvents.filter((event) => eventMatchesQuery(event, query));
   });
-
-  let eventStreamConnectionState = $derived<EventStreamState>(connectionStatus);
 
   // AB-12 run-inspector: the milestone timeline — checkpoint boundaries,
   // multi-agent delegation transitions, human-wait parks, recovery/reattach
@@ -440,14 +445,25 @@
 
   <section>
     <SectionHeading level={2} title="Event Stream" />
-    <EventStreamViewer
-      events={visibleStreamEvents}
-      connectionState={eventStreamConnectionState}
-      filterQuery={eventFilterQuery}
-      onFilter={(query) => {
-        eventFilterQuery = query;
-      }}
-      label="Run event stream"
-    />
+    <label>
+      Filter events
+      <input aria-label="Filter events" bind:value={eventFilterQuery} />
+    </label>
+    <Feed kind="log" connectionState={connectionStatus} label="Run event stream">
+      {#each visibleStreamEvents as event (event.id)}
+        <Feed.Event
+          variant="minimal"
+          datetime={event.datetime}
+          timestamp={event.timestamp}
+          tone={event.severity}
+        >
+          <strong>{event.summary}</strong>
+          <span>{event.source}</span>
+          {#if event.detailsText !== ''}
+            <span>{event.detailsText}</span>
+          {/if}
+        </Feed.Event>
+      {/each}
+    </Feed>
   </section>
 </main>

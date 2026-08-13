@@ -69,13 +69,13 @@
     "validate": "bun run format:check && bun run lint && bun run check-types && bun run test"
   },
   "dependencies": {
-    "@lostgradient/weft": "^0.16.0",
+    "@lostgradient/operative": "workspace:*",
+    "@lostgradient/weft": "^0.18.0",
     "armorer": "workspace:*",
     "conversationalist": "workspace:*",
     "interoperability": "workspace:*",
     "lifecycle": "workspace:*",
     "memory": "workspace:*",
-    "@lostgradient/operative": "workspace:*",
     "skills": "workspace:*",
     "zod": "^4.4.3"
   },
@@ -87,7 +87,7 @@
     "@types/bun": "^1.3.14",
     "eslint": "^10.8.1",
     "typescript": "6.0.3",
-    "typescript-eslint": "^8.66.0"
+    "typescript-eslint": "^8.67.0"
   },
   "peerDependencies": {
     "@anthropic-ai/sdk": ">=0.50.0",
