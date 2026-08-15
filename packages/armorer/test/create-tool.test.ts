@@ -5,6 +5,7 @@ import { z } from 'zod';
 
 import type { ToolExecuteOptions } from '../src';
 import { createTool, createToolCall, isTool, lazy, withContext } from '../src';
+import { type ApprovalResumeState, approvalResumeSymbol } from '../src/internal/approval-resume';
 
 async function drainMicrotasks(): Promise<void> {
   for (let index = 0; index < 5; index++) {
@@ -1434,6 +1435,43 @@ describe('isTool', () => {
     const result = await (tool as any).executeWith({ params: { a: 'x' } });
     expect(result.error?.message).toBe('nope');
     expect(denied).toBe(1);
+  });
+
+  it('resumes a directly executed tool after its policy pause is satisfied', async () => {
+    const tool = createTool({
+      name: 'approved-tool',
+      description: 'requires operator approval',
+      input: z.object({ value: z.string() }),
+      policy: {
+        beforeExecute: () => ({
+          status: 'needs_approval' as const,
+          reason: 'Operator approval required',
+          action: { message: 'Approve direct execution' },
+        }),
+      },
+      async execute({ value }) {
+        return value.toUpperCase();
+      },
+    });
+    const toolCall = createToolCall('approved-tool', { value: 'approved' });
+
+    const paused = await tool.execute(toolCall);
+    expect(paused.outcome).toBe('action_required');
+    if (paused.action === undefined || paused.pendingApproval === undefined) {
+      throw new Error('Expected the direct tool policy to return a pending approval');
+    }
+    const resumeOptions = {
+      [approvalResumeSymbol]: {
+        approvedAction: paused.action,
+        proposedArguments: toolCall.arguments,
+        reason: paused.pendingApproval.reason,
+        satisfiedPauses: [],
+      },
+    } satisfies ToolExecuteOptions & { [approvalResumeSymbol]: ApprovalResumeState };
+    const resumed = await tool.execute(toolCall, resumeOptions);
+
+    expect(resumed.outcome).toBe('success');
+    expect(resumed.result).toBe('APPROVED');
   });
 
   it('emits telemetry events when enabled', async () => {
