@@ -317,7 +317,7 @@ This document tracks the published export map in [package.json](../package.json)
 
 ### Immutable mutation contracts
 
-- `updateMessage(history, messageId, updates, environment?)` replaces editable content, metadata, visibility, token usage, or cache-boundary fields while preserving message identity and order.
+- `updateMessage(history, messageId, updates, environment?)` replaces editable content, metadata, visibility, token usage, or cache-boundary fields while preserving message identity and order. Explicit `undefined` clears optional token-usage and cache-boundary fields.
 - `removeMessage(history, messageId, environment?)` removes one message and restores contiguous positions across the survivors.
 - `setMessageHidden(history, messageId, hidden, environment?)` changes visibility without removing the stored message.
 - `replaceToolResult(history, toolCallId, toolResult, environment?)` replaces the result paired with a tool-call identifier while preserving the result message's identity and position. The replacement `callId` must match `toolCallId`.

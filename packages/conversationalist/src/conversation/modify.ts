@@ -5,7 +5,13 @@ import {
 } from '../environment';
 import { createInvalidInputError, createInvalidPositionError } from '../errors';
 import type { ConversationHistory as Conversation, Message, ToolResult } from '../types';
-import { createMessage, isAssistantMessage, repositionMessage, toReadonly } from '../utilities';
+import {
+  createMessage,
+  hasOwnProperty,
+  isAssistantMessage,
+  repositionMessage,
+  toReadonly,
+} from '../utilities';
 import { redactToolResult } from '../utilities/tool-results';
 import { ensureConversationSafe } from './validation';
 
@@ -27,8 +33,10 @@ const createUpdatedMessage = (message: Message, updates: InternalMessageUpdate):
     hidden: updates.hidden ?? message.hidden,
     toolCall: message.toolCall,
     toolResult: updates.toolResult ?? message.toolResult,
-    tokenUsage: updates.tokenUsage ?? message.tokenUsage,
-    cacheBoundary: updates.cacheBoundary ?? message.cacheBoundary,
+    tokenUsage: hasOwnProperty(updates, 'tokenUsage') ? updates.tokenUsage : message.tokenUsage,
+    cacheBoundary: hasOwnProperty(updates, 'cacheBoundary')
+      ? updates.cacheBoundary
+      : message.cacheBoundary,
   };
 
   return isAssistantMessage(message)
@@ -64,6 +72,7 @@ export function updateMessage(
   updates: MessageUpdate,
   environment?: Partial<ConversationEnvironment>,
 ): Conversation {
+  if (!hasOwnProperty(conversation.messages, messageId)) return conversation;
   const message = conversation.messages[messageId];
   return message ? replaceKnownMessage(conversation, message, updates, environment) : conversation;
 }
@@ -78,7 +87,7 @@ export function removeMessage(
   messageId: string,
   environment?: Partial<ConversationEnvironment>,
 ): Conversation {
-  if (!conversation.messages[messageId]) return conversation;
+  if (!hasOwnProperty(conversation.messages, messageId)) return conversation;
 
   const ids = conversation.ids.filter((id) => id !== messageId);
   const messages: Record<string, Message> = { ...conversation.messages };

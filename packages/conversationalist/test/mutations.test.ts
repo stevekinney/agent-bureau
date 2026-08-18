@@ -77,6 +77,44 @@ describe('immutable transcript mutations', () => {
     expect(updateMessage(history, 'missing', { content: 'No change' }, environment)).toBe(history);
   });
 
+  it('clears optional message fields when they are explicitly undefined', () => {
+    let history = createConversationHistory({}, environment);
+    history = appendMessages(
+      history,
+      {
+        role: 'user',
+        content: 'Clear fields',
+        tokenUsage: { prompt: 1, completion: 2, total: 3 },
+        cacheBoundary: true,
+      },
+      environment,
+    );
+    const messageId = history.ids[0]!;
+
+    const updated = updateMessage(
+      history,
+      messageId,
+      { tokenUsage: undefined, cacheBoundary: undefined },
+      environment,
+    );
+
+    expect(updated.messages[messageId]?.tokenUsage).toBeUndefined();
+    expect(updated.messages[messageId]?.cacheBoundary).toBeUndefined();
+    expect(history.messages[messageId]?.tokenUsage).toEqual({ prompt: 1, completion: 2, total: 3 });
+    expect(history.messages[messageId]?.cacheBoundary).toBeTrue();
+    expectValid(updated);
+  });
+
+  it('treats inherited object keys as unknown message identifiers', () => {
+    const history = createConversationHistory({}, environment);
+
+    expect(updateMessage(history, 'constructor', { content: 'No change' }, environment)).toBe(
+      history,
+    );
+    expect(removeMessage(history, 'toString', environment)).toBe(history);
+    expect(setMessageHidden(history, '__proto__', true, environment)).toBe(history);
+  });
+
   it('removes a message and restores contiguous positions without mutating survivors', () => {
     let history = createConversationHistory({}, environment);
     history = appendUserMessage(history, 'First', undefined, environment);
