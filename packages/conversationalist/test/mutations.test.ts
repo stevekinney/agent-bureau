@@ -206,6 +206,29 @@ describe('immutable transcript mutations', () => {
     expectValid(history);
   });
 
+  it('rejects non-idempotent plugin output conditional on the updated input', () => {
+    const processEditedContentTwice: MessagePlugin = (input) => ({
+      ...input,
+      content:
+        input.content === 'Edited'
+          ? 'processed:Edited'
+          : input.content === 'processed:Edited'
+            ? 'final:Edited'
+            : input.content,
+    });
+    const pluginEnvironment = { ...environment, plugins: [processEditedContentTwice] };
+    let history = createConversationHistory({}, pluginEnvironment);
+    history = appendUserMessage(history, 'Original', undefined, pluginEnvironment);
+    const messageId = history.ids[0]!;
+    const originalSnapshot = structuredClone(history);
+
+    expect(() =>
+      updateMessage(history, messageId, { content: 'Edited' }, pluginEnvironment),
+    ).toThrow(ConversationalistError);
+    expect(history).toEqual(originalSnapshot);
+    expectValid(history);
+  });
+
   it('preserves cross-field plugin transformations caused by an update', () => {
     const hideBlockedContent: MessagePlugin = (input) => ({
       ...input,
