@@ -1,4 +1,5 @@
 import { describe, expect, expectTypeOf, it } from 'bun:test';
+import { hmacSha256HexSync } from 'interoperability';
 import { z } from 'zod';
 
 import {
@@ -14,6 +15,7 @@ import { toAnthropicTools } from '../src/adapters/anthropic';
 import { toGeminiTools } from '../src/adapters/gemini';
 import { toOpenAITools } from '../src/adapters/openai';
 import { queryTools, reindexSearchIndex, searchTools } from '../src/core/registry';
+import { stableStringifyJson } from '../src/core/serialization/json';
 import { internalToolboxTestUtilities } from '../src/create-toolbox';
 import { createTruncatingAsyncIterable } from '../src/truncation/index';
 
@@ -339,6 +341,7 @@ describe('createToolbox', () => {
       },
       reason: 'Operator approval required',
       metadata: { mutates: true },
+      policyPauseTier: 'registry',
     });
     expect(Object.hasOwn(paused.pendingApproval!.action, 'schema')).toBe(false);
     expect(JSON.parse(JSON.stringify(paused.pendingApproval))).toEqual(paused.pendingApproval);
@@ -3777,6 +3780,7 @@ describe('createToolbox', () => {
         type: 'approval',
         message: 'Approve registry policy',
       });
+      expect(registryPaused.pendingApproval?.policyPauseTier).toBe('registry');
       expect(toolPaused.outcome).toBe('action_required');
       expect(toolPaused.action).toMatchObject({
         type: 'input',
@@ -3786,6 +3790,7 @@ describe('createToolbox', () => {
         {
           action: { type: 'approval', message: 'Approve registry policy' },
           reason: 'Registry needs approval',
+          tier: 'registry',
         },
       ]);
       expect(() =>
@@ -3797,6 +3802,158 @@ describe('createToolbox', () => {
       expect(resumed.outcome).toBe('success');
       expect(resumed.result).toBe('completed');
       expect(executed).toBe(true);
+    });
+
+    it('does not let a disappeared registry pause satisfy an identical tool pause', async () => {
+      let registryChecks = 0;
+      let executed = false;
+      const toolbox = createToolbox(
+        [
+          createTool({
+            name: 'tier-bound-pause',
+            description: 'requires a tool-level approval',
+            input: z.object({}),
+            policy: {
+              beforeExecute: () => ({
+                status: 'needs_approval',
+                reason: 'Approval required',
+                action: { message: 'Approve operation' },
+              }),
+            },
+            async execute() {
+              executed = true;
+              return 'completed';
+            },
+          }),
+        ],
+        {
+          approvalSecret: 'tier-bound-pause-secret',
+          policy: {
+            beforeExecute: () => {
+              registryChecks += 1;
+              return registryChecks === 1
+                ? {
+                    status: 'needs_approval',
+                    reason: 'Approval required',
+                    action: { message: 'Approve operation' },
+                  }
+                : { allow: true };
+            },
+          },
+        },
+      );
+
+      const registryPaused = await toolbox.execute({
+        id: 'call-tier-bound-pause',
+        name: 'tier-bound-pause',
+        arguments: {},
+      });
+      const toolPaused = await toolbox.resumeApproval(
+        registryPaused.pendingApproval! as SignedPendingToolApproval,
+      );
+
+      expect(registryPaused.pendingApproval?.policyPauseTier).toBe('registry');
+      expect(toolPaused.outcome).toBe('action_required');
+      expect(toolPaused.pendingApproval?.policyPauseTier).toBe('tool');
+      expect(toolPaused.pendingApproval?.satisfiedPolicyPauses).toEqual([
+        {
+          action: { type: 'approval', message: 'Approve operation' },
+          reason: 'Approval required',
+          tier: 'registry',
+        },
+      ]);
+      expect(executed).toBe(false);
+    });
+
+    it('does not let a stale capability pause bypass a later tool pause after policy changes', async () => {
+      const policy = {
+        beforeExecute: () => ({
+          status: 'needs_approval' as const,
+          reason: 'Approval required',
+          action: { message: 'Approve operation' },
+        }),
+      };
+      const tool = createTool({
+        name: 'stale-capability-pause',
+        description: 'requires layered approval',
+        input: z.object({}),
+        policy,
+        async execute() {
+          return 'completed';
+        },
+      });
+      const originalToolbox = createToolbox([tool], {
+        approvalSecret: 'stale-capability-pause-secret',
+        approvalPolicy: { mode: 'always' },
+        policy,
+      });
+      const updatedToolbox = createToolbox([tool], {
+        approvalSecret: 'stale-capability-pause-secret',
+        policy,
+      });
+
+      const capabilityPaused = await originalToolbox.execute({
+        id: 'call-stale-capability-pause',
+        name: 'stale-capability-pause',
+        arguments: {},
+      });
+      const registryPaused = await updatedToolbox.resumeApproval(
+        capabilityPaused.pendingApproval! as SignedPendingToolApproval,
+      );
+      const toolPaused = await updatedToolbox.resumeApproval(
+        registryPaused.pendingApproval! as SignedPendingToolApproval,
+      );
+
+      expect(capabilityPaused.pendingApproval?.policyPauseTier).toBe('capability');
+      expect(registryPaused.pendingApproval?.policyPauseTier).toBe('registry');
+      expect(toolPaused.outcome).toBe('action_required');
+      expect(toolPaused.pendingApproval?.policyPauseTier).toBe('tool');
+    });
+
+    it('resumes a uniquely matching approval issued before policy pause tiers existed', async () => {
+      const approvalSecret = 'legacy-tierless-pause-secret';
+      const policy = {
+        beforeExecute: () => ({
+          status: 'needs_approval' as const,
+          reason: 'Approval required',
+          action: { message: 'Approve operation' },
+        }),
+      };
+      const toolbox = createToolbox(
+        [
+          createTool({
+            name: 'legacy-tierless-pause',
+            description: 'requires approval',
+            input: z.object({}),
+            async execute() {
+              return 'completed';
+            },
+          }),
+        ],
+        { approvalSecret, policy },
+      );
+
+      const paused = await toolbox.execute({
+        id: 'call-legacy-tierless-pause',
+        name: 'legacy-tierless-pause',
+        arguments: {},
+      });
+      const {
+        approvalToken: _approvalToken,
+        policyPauseTier: _tier,
+        ...legacyApproval
+      } = paused.pendingApproval!;
+      const legacyApprovalToken = hmacSha256HexSync(
+        approvalSecret,
+        stableStringifyJson(JSON.parse(JSON.stringify(legacyApproval))),
+      );
+      const resumed = await toolbox.resumeApproval({
+        ...legacyApproval,
+        approvalToken: legacyApprovalToken,
+      } as SignedPendingToolApproval);
+
+      expect(resumed.outcome).toBe('success');
+      expect(resumed.result).toBe('completed');
     });
 
     for (const status of ['needs_approval', 'needs_input'] as const) {

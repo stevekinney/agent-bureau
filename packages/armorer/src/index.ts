@@ -206,6 +206,7 @@ export type {
   JSONValue,
   MinimalToolConfiguration,
   PendingToolApproval,
+  PolicyPauseTier,
   SatisfiedPolicyPause,
   SignedPendingToolApproval,
   ToolAction,

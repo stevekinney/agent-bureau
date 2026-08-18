@@ -47,6 +47,7 @@ import {
   type ApprovalResumeState,
   approvalResumeSymbol,
   policyPauseDecisionsSymbol,
+  policyPauseTierSymbol,
 } from './internal/approval-resume';
 import type {
   DefaultToolEvents,
@@ -71,7 +72,7 @@ import type {
 } from './is-tool';
 import { resolveToolPolicyAllow } from './is-tool';
 import { isAsyncIterable, isPromise, isTestRuntime } from './type-guards';
-import type { ToolAction, ToolCall, ToolExecutionResult } from './types';
+import type { SatisfiedPolicyPause, ToolAction, ToolCall, ToolExecutionResult } from './types';
 import { createConcurrencyLimiter, normalizeConcurrency } from './utilities/concurrency';
 
 type InternalToolExecuteOptions = ToolExecuteOptions & {
@@ -780,15 +781,13 @@ export function createTool<
         approvalResume !== undefined &&
         !executedArgumentsEdited
       ) {
-        let satisfiedPauseIndex = 0;
         decision = { allow: true, status: 'allow' };
         for (const pauseDecision of policyPauseDecisions) {
-          const satisfiedPause = approvalResume.satisfiedPauses[satisfiedPauseIndex];
           if (
-            satisfiedPause !== undefined &&
-            policyPauseMatchesSatisfiedPause(pauseDecision, satisfiedPause)
+            approvalResume.satisfiedPauses.some((satisfiedPause) =>
+              policyPauseMatchesSatisfiedPause(pauseDecision, satisfiedPause, policyPauseDecisions),
+            )
           ) {
-            satisfiedPauseIndex += 1;
             continue;
           }
           decision = pauseDecision;
@@ -802,8 +801,22 @@ export function createTool<
         const reason = decision.reason ?? `Tool execution requires ${type}`;
         const action = createToolAction(type, decision, reason);
         const resumedArgumentsMatchApproval = proposedArgumentsDigest === parsedArgumentsDigest;
+        const approvedPolicyPauseTierMatches =
+          approvalResume === undefined
+            ? false
+            : approvalResume.approvedPolicyPauseTier === undefined
+              ? policyPauseDecisions === undefined ||
+                policyPauseDecisions.filter((pauseDecision) =>
+                  policyPauseMatchesDescriptor(
+                    pauseDecision,
+                    approvalResume.approvedAction,
+                    approvalResume.reason,
+                  ),
+                ).length === 1
+              : approvalResume.approvedPolicyPauseTier === decision[policyPauseTierSymbol];
         resumedApprovalIsSatisfied =
           approvalResume !== undefined &&
+          approvedPolicyPauseTierMatches &&
           approvalResume.approvedAction.type === type &&
           resumedArgumentsMatchApproval &&
           approvalResume.reason === reason &&
@@ -837,6 +850,9 @@ export function createTool<
               action,
               reason,
               metadata: normalizeToolContent(configuration.metadata ?? {}),
+              ...(decision[policyPauseTierSymbol] !== undefined
+                ? { policyPauseTier: decision[policyPauseTierSymbol] }
+                : {}),
               ...(approvalResume !== undefined && !executedArgumentsEdited
                 ? { satisfiedPolicyPauses: approvalResume.satisfiedPauses }
                 : {}),
@@ -1683,15 +1699,34 @@ function createToolAction(
 
 function policyPauseMatchesSatisfiedPause(
   decision: ToolPolicyDecision,
-  satisfiedPause: { action: ToolAction; reason?: string },
+  satisfiedPause: SatisfiedPolicyPause,
+  policyPauseDecisions: readonly ToolPolicyDecision[],
+): boolean {
+  if (!policyPauseMatchesDescriptor(decision, satisfiedPause.action, satisfiedPause.reason)) {
+    return false;
+  }
+  if (satisfiedPause.tier !== undefined) {
+    return satisfiedPause.tier === decision[policyPauseTierSymbol];
+  }
+  return (
+    policyPauseDecisions.filter((pauseDecision) =>
+      policyPauseMatchesDescriptor(pauseDecision, satisfiedPause.action, satisfiedPause.reason),
+    ).length === 1
+  );
+}
+
+function policyPauseMatchesDescriptor(
+  decision: ToolPolicyDecision,
+  action: ToolAction,
+  reason: string | undefined,
 ): boolean {
   const type = decision.status === 'needs_input' ? 'input' : 'approval';
-  const reason = decision.reason ?? `Tool execution requires ${type}`;
-  const action = createToolAction(type, decision, reason);
+  const decisionReason = decision.reason ?? `Tool execution requires ${type}`;
+  const decisionAction = createToolAction(type, decision, decisionReason);
   return (
-    satisfiedPause.reason === reason &&
-    stableStringifyJson(normalizeToolContent(satisfiedPause.action)) ===
-      stableStringifyJson(normalizeToolContent(action))
+    reason === decisionReason &&
+    stableStringifyJson(normalizeToolContent(action)) ===
+      stableStringifyJson(normalizeToolContent(decisionAction))
   );
 }
 

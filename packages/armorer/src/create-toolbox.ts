@@ -77,6 +77,7 @@ import {
   type ApprovalResumeState,
   approvalResumeSymbol,
   policyPauseDecisionsSymbol,
+  policyPauseTierSymbol,
 } from './internal/approval-resume';
 import type {
   DefaultToolEvents,
@@ -1179,6 +1180,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
         ...executeOptions,
         [approvalResumeSymbol]: {
           approvedAction: approval.action,
+          approvedPolicyPauseTier: approval.policyPauseTier,
           proposedArguments: approval.arguments,
           reason: approval.reason,
           satisfiedPauses: [
@@ -1186,6 +1188,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
             {
               action: approval.action,
               ...(approval.reason !== undefined ? { reason: approval.reason } : {}),
+              ...(approval.policyPauseTier !== undefined ? { tier: approval.policyPauseTier } : {}),
             },
           ],
         },
@@ -2033,18 +2036,21 @@ function mergePolicies(
           return approvalStatusToDecision(context.toolName, result);
         }
         if (result.status === 'ask') {
-          pendingPauseDecisions.push(approvalStatusToDecision(context.toolName, result));
+          pendingPauseDecisions.push({
+            ...approvalStatusToDecision(context.toolName, result),
+            [policyPauseTierSymbol]: 'capability',
+          });
         }
       }
       const registryDecision = await resolvePolicyDecision(registryPolicy?.beforeExecute, context);
       if (isPausePolicyDecision(registryDecision)) {
-        pendingPauseDecisions.push(registryDecision);
+        pendingPauseDecisions.push({ ...registryDecision, [policyPauseTierSymbol]: 'registry' });
       } else if (registryDecision?.allow === false) {
         return registryDecision;
       }
       const toolDecision = await resolvePolicyDecision(toolPolicy?.beforeExecute, context);
       if (isPausePolicyDecision(toolDecision)) {
-        pendingPauseDecisions.push(toolDecision);
+        pendingPauseDecisions.push({ ...toolDecision, [policyPauseTierSymbol]: 'tool' });
       } else if (toolDecision?.allow === false) {
         return toolDecision;
       }
