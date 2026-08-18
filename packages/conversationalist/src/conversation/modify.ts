@@ -79,7 +79,6 @@ const createUpdatedMessage = (
   const applyPlugins = (input: MessageInput): MessageInput =>
     environment.plugins.reduce((current, plugin) => plugin(current), input);
   const originalInput = createPluginInput(message, {});
-  const updatedInput = createPluginInput(message, updates);
   const baselineInput = applyPlugins(createPluginInput(message, {}));
   const repeatedBaselineInput = applyPlugins(createPluginInput(message, {}));
   if (!arePluginValuesEqual(baselineInput, repeatedBaselineInput)) {
@@ -110,21 +109,9 @@ const createUpdatedMessage = (
       },
     );
   }
-  const explicitlyUpdatedFields: (keyof MessageInput)[] = [
-    ...(updates.content !== undefined ? (['content'] as const) : []),
-    ...(updates.metadata !== undefined ? (['metadata'] as const) : []),
-    ...(updates.hidden !== undefined ? (['hidden'] as const) : []),
-    ...(hasOwnProperty(updates, 'toolResult') ? (['toolResult'] as const) : []),
-    ...(hasOwnProperty(updates, 'tokenUsage') ? (['tokenUsage'] as const) : []),
-    ...(hasOwnProperty(updates, 'cacheBoundary') ? (['cacheBoundary'] as const) : []),
-  ];
-  const pluginTransformedUpdatedField = explicitlyUpdatedFields.some(
-    (field) => !arePluginValuesEqual(updatedInput[field], processedInput[field]),
-  );
   const pluginChanged = (field: keyof MessageInput): boolean =>
     !arePluginValuesEqual(baselineInput[field], processedInput[field]) ||
-    (pluginTransformedUpdatedField &&
-      !arePluginValuesEqual(originalInput[field], processedInput[field]));
+    (field === 'hidden' && !arePluginValuesEqual(originalInput.hidden, processedInput.hidden));
   const updated = {
     id: message.id,
     content:

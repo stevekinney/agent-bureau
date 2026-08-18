@@ -223,6 +223,26 @@ describe('immutable transcript mutations', () => {
     expectValid(updated);
   });
 
+  it('preserves plugin visibility when a stored marker masks the edited field', () => {
+    const markProcessedAndHideBlockedContent: MessagePlugin = (input) => ({
+      ...input,
+      metadata: { ...input.metadata, processed: true },
+      hidden: input.metadata?.processed === true || input.content === 'Blocked',
+    });
+    const pluginEnvironment = { ...environment, plugins: [markProcessedAndHideBlockedContent] };
+    let history = createConversationHistory({}, pluginEnvironment);
+    history = appendUserMessage(history, 'Allowed', undefined, pluginEnvironment);
+    const messageId = history.ids[0]!;
+
+    const updated = updateMessage(history, messageId, { content: 'Blocked' }, pluginEnvironment);
+
+    expect(history.messages[messageId]?.metadata).toEqual({ processed: true });
+    expect(history.messages[messageId]?.hidden).toBeFalse();
+    expect(updated.messages[messageId]?.content).toBe('Blocked');
+    expect(updated.messages[messageId]?.hidden).toBeTrue();
+    expectValid(updated);
+  });
+
   it('includes preserved assistant completion state in plugin inputs', () => {
     const hideBlockedCompletedAssistant: MessagePlugin = (input) => ({
       ...input,
