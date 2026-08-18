@@ -59,6 +59,7 @@ const createPluginInput = (message: Message, updates: InternalMessageUpdate): Me
     content: typeof content === 'string' ? content : structuredClone([...content]),
     metadata: structuredClone(updates.metadata ?? message.metadata),
     hidden: updates.hidden ?? message.hidden,
+    goalCompleted: isAssistantMessage(message) ? message.goalCompleted : undefined,
     toolCall: message.toolCall ? structuredClone(message.toolCall) : undefined,
     toolResult: structuredClone(updates.toolResult ?? message.toolResult),
     tokenUsage: structuredClone(
@@ -78,6 +79,13 @@ const createUpdatedMessage = (
   const applyPlugins = (input: MessageInput): MessageInput =>
     environment.plugins.reduce((current, plugin) => plugin(current), input);
   const baselineInput = applyPlugins(createPluginInput(message, {}));
+  const repeatedBaselineInput = applyPlugins(createPluginInput(message, {}));
+  if (!arePluginValuesEqual(baselineInput, repeatedBaselineInput)) {
+    throw createInvalidInputError(
+      'Message plugins must return deterministic output for transcript mutations',
+      { messageId: message.id },
+    );
+  }
   const processedInput = applyPlugins(createPluginInput(message, updates));
   const pluginChanged = (field: keyof MessageInput): boolean =>
     !arePluginValuesEqual(baselineInput[field], processedInput[field]);

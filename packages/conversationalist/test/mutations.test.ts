@@ -203,6 +203,51 @@ describe('immutable transcript mutations', () => {
     expectValid(updated);
   });
 
+  it('includes preserved assistant completion state in plugin inputs', () => {
+    const hideBlockedCompletedAssistant: MessagePlugin = (input) => ({
+      ...input,
+      hidden:
+        input.role === 'assistant' && input.goalCompleted && input.content === 'Blocked'
+          ? true
+          : input.hidden,
+    });
+    const pluginEnvironment = { ...environment, plugins: [hideBlockedCompletedAssistant] };
+    let history = createConversationHistory({}, pluginEnvironment);
+    history = appendMessages(
+      history,
+      { role: 'assistant', content: 'Allowed', goalCompleted: true },
+      pluginEnvironment,
+    );
+    const messageId = history.ids[0]!;
+
+    const updated = updateMessage(history, messageId, { content: 'Blocked' }, pluginEnvironment);
+
+    expect(updated.messages[messageId]?.hidden).toBeTrue();
+    expect((updated.messages[messageId] as AssistantMessage).goalCompleted).toBeTrue();
+    expectValid(updated);
+  });
+
+  it('rejects nondeterministic message plugins instead of manufacturing mutation deltas', () => {
+    let sequence = 0;
+    const statefulMetadata: MessagePlugin = (input) => ({
+      ...input,
+      metadata: { ...input.metadata, sequence: ++sequence },
+    });
+    let history = createConversationHistory({}, environment);
+    history = appendUserMessage(history, 'Original', undefined, environment);
+    const messageId = history.ids[0]!;
+    const originalSnapshot = structuredClone(history);
+
+    expect(() =>
+      setMessageHidden(history, messageId, true, {
+        ...environment,
+        plugins: [statefulMetadata],
+      }),
+    ).toThrow(ConversationalistError);
+    expect(history).toEqual(originalSnapshot);
+    expectValid(history);
+  });
+
   it('removes a message and restores contiguous positions without mutating survivors', () => {
     let history = createConversationHistory({}, environment);
     history = appendUserMessage(history, 'First', undefined, environment);
