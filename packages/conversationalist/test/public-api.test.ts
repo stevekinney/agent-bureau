@@ -46,6 +46,10 @@ describe('public API export map', () => {
     expect(root.materializeToolCalls).toBeDefined();
     expect(root.materializeToolResult).toBeDefined();
     expect(root.materializeToolResultsAsync).toBeDefined();
+    expect(root.updateMessage).toBeDefined();
+    expect(root.removeMessage).toBeDefined();
+    expect(root.setMessageHidden).toBeDefined();
+    expect(root.replaceToolResult).toBeDefined();
     expect(root.withConversationHistory).toBeDefined();
     expect(root.pipeConversationHistory).toBeDefined();
     expect(root.createProjection).toBeDefined();
