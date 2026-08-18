@@ -87,6 +87,23 @@ const createUpdatedMessage = (
     );
   }
   const processedInput = applyPlugins(createPluginInput(message, updates));
+  const repeatedProcessedInput = applyPlugins(createPluginInput(message, updates));
+  if (!arePluginValuesEqual(processedInput, repeatedProcessedInput)) {
+    throw createInvalidInputError(
+      'Message plugins must return deterministic output for transcript mutations',
+      { messageId: message.id },
+    );
+  }
+  if (updates.toolResult && processedInput.toolResult?.callId !== updates.toolResult.callId) {
+    throw createInvalidInputError(
+      `Processed toolResult.callId (${processedInput.toolResult?.callId ?? 'missing'}) does not match the replacement callId (${updates.toolResult.callId})`,
+      {
+        messageId: message.id,
+        replacementCallId: updates.toolResult.callId,
+        processedCallId: processedInput.toolResult?.callId,
+      },
+    );
+  }
   const pluginChanged = (field: keyof MessageInput): boolean =>
     !arePluginValuesEqual(baselineInput[field], processedInput[field]);
   const updated = {

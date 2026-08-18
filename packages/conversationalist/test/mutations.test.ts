@@ -248,6 +248,33 @@ describe('immutable transcript mutations', () => {
     expectValid(history);
   });
 
+  it('rejects nondeterministic plugin output conditional on the updated input', () => {
+    let sequence = 0;
+    const statefulEditedMetadata: MessagePlugin = (input) => ({
+      ...input,
+      metadata:
+        input.content === 'Edited' ? { ...input.metadata, sequence: ++sequence } : input.metadata,
+    });
+    let history = createConversationHistory({}, environment);
+    history = appendUserMessage(history, 'Original', undefined, environment);
+    const messageId = history.ids[0]!;
+    const originalSnapshot = structuredClone(history);
+
+    expect(() =>
+      updateMessage(
+        history,
+        messageId,
+        { content: 'Edited' },
+        {
+          ...environment,
+          plugins: [statefulEditedMetadata],
+        },
+      ),
+    ).toThrow(ConversationalistError);
+    expect(history).toEqual(originalSnapshot);
+    expectValid(history);
+  });
+
   it('removes a message and restores contiguous positions without mutating survivors', () => {
     let history = createConversationHistory({}, environment);
     history = appendUserMessage(history, 'First', undefined, environment);
@@ -499,6 +526,45 @@ describe('immutable transcript mutations', () => {
         environment,
       ),
     ).toThrow(ConversationalistError);
+    expectValid(history);
+  });
+
+  it('rejects a plugin that retargets a replacement result after processing', () => {
+    const retargetResult: MessagePlugin = (input) => ({
+      ...input,
+      toolResult: input.toolResult ? { ...input.toolResult, callId: 'call-2' } : undefined,
+    });
+    let history = createConversationHistory({}, environment);
+    history = appendMessages(
+      history,
+      {
+        role: 'tool-call',
+        content: '',
+        toolCall: { id: 'call-1', name: 'lookup', arguments: {} },
+      },
+      {
+        role: 'tool-call',
+        content: '',
+        toolCall: { id: 'call-2', name: 'lookup', arguments: {} },
+      },
+      {
+        role: 'tool-result',
+        content: '',
+        toolResult: { callId: 'call-1', outcome: 'action_required', content: null },
+      },
+      environment,
+    );
+    const originalSnapshot = structuredClone(history);
+
+    expect(() =>
+      replaceToolResult(
+        history,
+        'call-1',
+        { callId: 'call-1', outcome: 'success', content: null },
+        { ...environment, plugins: [retargetResult] },
+      ),
+    ).toThrow(ConversationalistError);
+    expect(history).toEqual(originalSnapshot);
     expectValid(history);
   });
 });
