@@ -203,6 +203,26 @@ describe('immutable transcript mutations', () => {
     expectValid(updated);
   });
 
+  it('preserves cross-field changes when plugins transform stored input again', () => {
+    const prefixAndHideBlockedContent: MessagePlugin = (input) => ({
+      ...input,
+      content: typeof input.content === 'string' ? `processed:${input.content}` : input.content,
+      hidden: input.content === 'Allowed' ? input.hidden : true,
+    });
+    const pluginEnvironment = { ...environment, plugins: [prefixAndHideBlockedContent] };
+    let history = createConversationHistory({}, pluginEnvironment);
+    history = appendUserMessage(history, 'Allowed', undefined, pluginEnvironment);
+    const messageId = history.ids[0]!;
+
+    const updated = updateMessage(history, messageId, { content: 'Blocked' }, pluginEnvironment);
+
+    expect(history.messages[messageId]?.content).toBe('processed:Allowed');
+    expect(history.messages[messageId]?.hidden).toBeFalse();
+    expect(updated.messages[messageId]?.content).toBe('processed:Blocked');
+    expect(updated.messages[messageId]?.hidden).toBeTrue();
+    expectValid(updated);
+  });
+
   it('includes preserved assistant completion state in plugin inputs', () => {
     const hideBlockedCompletedAssistant: MessagePlugin = (input) => ({
       ...input,
@@ -593,6 +613,52 @@ describe('immutable transcript mutations', () => {
         role: 'tool-result',
         content: '',
         toolResult: { callId: 'call-1', outcome: 'action_required', content: null },
+      },
+      environment,
+    );
+    const resultMessageId = history.ids[2]!;
+    const originalSnapshot = structuredClone(history);
+
+    expect(() =>
+      updateMessage(
+        history,
+        resultMessageId,
+        { content: 'Edited' },
+        {
+          ...environment,
+          plugins: [retargetEditedResult],
+        },
+      ),
+    ).toThrow(ConversationalistError);
+    expect(history).toEqual(originalSnapshot);
+    expectValid(history);
+  });
+
+  it('rejects plugin retargeting when the preserved call identifier is empty', () => {
+    const retargetEditedResult: MessagePlugin = (input) => ({
+      ...input,
+      toolResult:
+        input.content === 'Edited' && input.toolResult
+          ? { ...input.toolResult, callId: 'call-2' }
+          : input.toolResult,
+    });
+    let history = createConversationHistory({}, environment);
+    history = appendMessages(
+      history,
+      {
+        role: 'tool-call',
+        content: '',
+        toolCall: { id: '', name: 'lookup', arguments: {} },
+      },
+      {
+        role: 'tool-call',
+        content: '',
+        toolCall: { id: 'call-2', name: 'lookup', arguments: {} },
+      },
+      {
+        role: 'tool-result',
+        content: '',
+        toolResult: { callId: '', outcome: 'action_required', content: null },
       },
       environment,
     );

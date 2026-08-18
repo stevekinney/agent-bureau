@@ -78,6 +78,8 @@ const createUpdatedMessage = (
 ): Message => {
   const applyPlugins = (input: MessageInput): MessageInput =>
     environment.plugins.reduce((current, plugin) => plugin(current), input);
+  const originalInput = createPluginInput(message, {});
+  const updatedInput = createPluginInput(message, updates);
   const baselineInput = applyPlugins(createPluginInput(message, {}));
   const repeatedBaselineInput = applyPlugins(createPluginInput(message, {}));
   if (!arePluginValuesEqual(baselineInput, repeatedBaselineInput)) {
@@ -95,7 +97,10 @@ const createUpdatedMessage = (
     );
   }
   const expectedToolResultCallId = updates.toolResult?.callId ?? message.toolResult?.callId;
-  if (expectedToolResultCallId && processedInput.toolResult?.callId !== expectedToolResultCallId) {
+  if (
+    expectedToolResultCallId !== undefined &&
+    processedInput.toolResult?.callId !== expectedToolResultCallId
+  ) {
     throw createInvalidInputError(
       `Processed toolResult.callId (${processedInput.toolResult?.callId ?? 'missing'}) does not match the preserved callId (${expectedToolResultCallId})`,
       {
@@ -105,8 +110,21 @@ const createUpdatedMessage = (
       },
     );
   }
+  const explicitlyUpdatedFields: (keyof MessageInput)[] = [
+    ...(updates.content !== undefined ? (['content'] as const) : []),
+    ...(updates.metadata !== undefined ? (['metadata'] as const) : []),
+    ...(updates.hidden !== undefined ? (['hidden'] as const) : []),
+    ...(hasOwnProperty(updates, 'toolResult') ? (['toolResult'] as const) : []),
+    ...(hasOwnProperty(updates, 'tokenUsage') ? (['tokenUsage'] as const) : []),
+    ...(hasOwnProperty(updates, 'cacheBoundary') ? (['cacheBoundary'] as const) : []),
+  ];
+  const pluginTransformedUpdatedField = explicitlyUpdatedFields.some(
+    (field) => !arePluginValuesEqual(updatedInput[field], processedInput[field]),
+  );
   const pluginChanged = (field: keyof MessageInput): boolean =>
-    !arePluginValuesEqual(baselineInput[field], processedInput[field]);
+    !arePluginValuesEqual(baselineInput[field], processedInput[field]) ||
+    (pluginTransformedUpdatedField &&
+      !arePluginValuesEqual(originalInput[field], processedInput[field]));
   const updated = {
     id: message.id,
     content:
