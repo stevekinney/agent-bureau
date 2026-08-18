@@ -1,4 +1,5 @@
 import { describe, expect, expectTypeOf, it } from 'bun:test';
+import { hmacSha256HexSync } from 'interoperability';
 import { z } from 'zod';
 
 import {
@@ -14,6 +15,7 @@ import { toAnthropicTools } from '../src/adapters/anthropic';
 import { toGeminiTools } from '../src/adapters/gemini';
 import { toOpenAITools } from '../src/adapters/openai';
 import { queryTools, reindexSearchIndex, searchTools } from '../src/core/registry';
+import { stableStringifyJson } from '../src/core/serialization/json';
 import { internalToolboxTestUtilities } from '../src/create-toolbox';
 import { createTruncatingAsyncIterable } from '../src/truncation/index';
 
@@ -3906,6 +3908,52 @@ describe('createToolbox', () => {
       expect(registryPaused.pendingApproval?.policyPauseTier).toBe('registry');
       expect(toolPaused.outcome).toBe('action_required');
       expect(toolPaused.pendingApproval?.policyPauseTier).toBe('tool');
+    });
+
+    it('resumes a uniquely matching approval issued before policy pause tiers existed', async () => {
+      const approvalSecret = 'legacy-tierless-pause-secret';
+      const policy = {
+        beforeExecute: () => ({
+          status: 'needs_approval' as const,
+          reason: 'Approval required',
+          action: { message: 'Approve operation' },
+        }),
+      };
+      const toolbox = createToolbox(
+        [
+          createTool({
+            name: 'legacy-tierless-pause',
+            description: 'requires approval',
+            input: z.object({}),
+            async execute() {
+              return 'completed';
+            },
+          }),
+        ],
+        { approvalSecret, policy },
+      );
+
+      const paused = await toolbox.execute({
+        id: 'call-legacy-tierless-pause',
+        name: 'legacy-tierless-pause',
+        arguments: {},
+      });
+      const {
+        approvalToken: _approvalToken,
+        policyPauseTier: _tier,
+        ...legacyApproval
+      } = paused.pendingApproval!;
+      const legacyApprovalToken = hmacSha256HexSync(
+        approvalSecret,
+        stableStringifyJson(JSON.parse(JSON.stringify(legacyApproval))),
+      );
+      const resumed = await toolbox.resumeApproval({
+        ...legacyApproval,
+        approvalToken: legacyApprovalToken,
+      } as SignedPendingToolApproval);
+
+      expect(resumed.outcome).toBe('success');
+      expect(resumed.result).toBe('completed');
     });
 
     for (const status of ['needs_approval', 'needs_input'] as const) {
