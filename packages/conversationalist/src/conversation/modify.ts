@@ -78,7 +78,6 @@ const createUpdatedMessage = (
 ): Message => {
   const applyPlugins = (input: MessageInput): MessageInput =>
     environment.plugins.reduce((current, plugin) => plugin(current), input);
-  const originalInput = createPluginInput(message, {});
   const baselineInput = applyPlugins(createPluginInput(message, {}));
   const repeatedBaselineInput = applyPlugins(createPluginInput(message, {}));
   if (!arePluginValuesEqual(baselineInput, repeatedBaselineInput)) {
@@ -87,11 +86,25 @@ const createUpdatedMessage = (
       { messageId: message.id },
     );
   }
+  const reprocessedBaselineInput = applyPlugins(structuredClone(baselineInput));
+  if (!arePluginValuesEqual(baselineInput, reprocessedBaselineInput)) {
+    throw createInvalidInputError(
+      'Message plugins must return idempotent output for transcript mutations',
+      { messageId: message.id },
+    );
+  }
   const processedInput = applyPlugins(createPluginInput(message, updates));
   const repeatedProcessedInput = applyPlugins(createPluginInput(message, updates));
   if (!arePluginValuesEqual(processedInput, repeatedProcessedInput)) {
     throw createInvalidInputError(
       'Message plugins must return deterministic output for transcript mutations',
+      { messageId: message.id },
+    );
+  }
+  const reprocessedInput = applyPlugins(structuredClone(processedInput));
+  if (!arePluginValuesEqual(processedInput, reprocessedInput)) {
+    throw createInvalidInputError(
+      'Message plugins must return idempotent output for transcript mutations',
       { messageId: message.id },
     );
   }
@@ -120,38 +133,17 @@ const createUpdatedMessage = (
       },
     );
   }
-  const pluginChanged = (field: keyof MessageInput): boolean =>
-    !arePluginValuesEqual(baselineInput[field], processedInput[field]) ||
-    (field === 'hidden' && !arePluginValuesEqual(originalInput.hidden, processedInput.hidden));
   const updated = {
     id: message.id,
-    content:
-      updates.content !== undefined || pluginChanged('content')
-        ? processedInput.content
-        : message.content,
+    content: processedInput.content,
     position: message.position,
     createdAt: message.createdAt,
-    metadata:
-      updates.metadata !== undefined || pluginChanged('metadata')
-        ? { ...(processedInput.metadata ?? {}) }
-        : message.metadata,
-    hidden:
-      updates.hidden !== undefined || pluginChanged('hidden')
-        ? (processedInput.hidden ?? false)
-        : message.hidden,
-    toolCall: pluginChanged('toolCall') ? processedInput.toolCall : message.toolCall,
-    toolResult:
-      hasOwnProperty(updates, 'toolResult') || pluginChanged('toolResult')
-        ? processedInput.toolResult
-        : message.toolResult,
-    tokenUsage:
-      hasOwnProperty(updates, 'tokenUsage') || pluginChanged('tokenUsage')
-        ? processedInput.tokenUsage
-        : message.tokenUsage,
-    cacheBoundary:
-      hasOwnProperty(updates, 'cacheBoundary') || pluginChanged('cacheBoundary')
-        ? processedInput.cacheBoundary
-        : message.cacheBoundary,
+    metadata: { ...(processedInput.metadata ?? {}) },
+    hidden: processedInput.hidden ?? false,
+    toolCall: processedInput.toolCall,
+    toolResult: processedInput.toolResult,
+    tokenUsage: processedInput.tokenUsage,
+    cacheBoundary: processedInput.cacheBoundary,
   };
 
   return isAssistantMessage(message)

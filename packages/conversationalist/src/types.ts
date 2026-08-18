@@ -195,7 +195,8 @@ export type AsyncConversationTokenEstimator = (messages: ReadonlyArray<Message>)
 
 /**
  * A deterministic, side-effect-free plugin that can transform a MessageInput
- * before it is appended or immutably updated.
+ * before it is appended or immutably updated. Plugins used by transcript
+ * mutation helpers must also be idempotent.
  */
 export type MessagePlugin = (input: MessageInput) => MessageInput;
 
