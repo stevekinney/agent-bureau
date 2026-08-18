@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.0
+
+### Minor Changes
+
+- 6f5912e: Add immutable helpers for updating, removing, hiding, and replacing tool results in conversation transcripts.
+
 ## 0.6.1
 
 ### Patch Changes
