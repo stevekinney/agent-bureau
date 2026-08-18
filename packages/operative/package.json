@@ -240,7 +240,7 @@
   },
   "dependencies": {
     "@lostgradient/weft": "^0.18.0",
-    "armorer": "^0.13.0",
+    "armorer": "^0.14.0",
     "conversationalist": "^0.7.0"
   },
   "devDependencies": {
