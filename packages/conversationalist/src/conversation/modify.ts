@@ -3,7 +3,7 @@ import {
   isConversationEnvironmentParameter,
   resolveConversationEnvironment,
 } from '../environment';
-import { createInvalidPositionError } from '../errors';
+import { createInvalidInputError, createInvalidPositionError } from '../errors';
 import type { ConversationHistory as Conversation, Message, ToolResult } from '../types';
 import { createMessage, isAssistantMessage, repositionMessage, toReadonly } from '../utilities';
 import { redactToolResult } from '../utilities/tool-results';
@@ -115,7 +115,8 @@ export function setMessageHidden(
 /**
  * Returns a new history with the result for `toolCallId` replaced in place.
  * The result message keeps its identity and order. An unknown tool-call
- * identifier returns the original history unchanged.
+ * identifier returns the original history unchanged. Throws when the
+ * replacement result identifies a different tool call.
  */
 export function replaceToolResult(
   conversation: Conversation,
@@ -130,9 +131,15 @@ export function replaceToolResult(
         candidate?.role === 'tool-result' && candidate.toolResult?.callId === toolCallId,
     );
 
-  return message
-    ? replaceKnownMessage(conversation, message, { toolResult }, environment)
-    : conversation;
+  if (!message) return conversation;
+  if (toolResult.callId !== toolCallId) {
+    throw createInvalidInputError(
+      `toolResult.callId (${toolResult.callId}) does not match toolCallId (${toolCallId})`,
+      { toolCallId, toolResultCallId: toolResult.callId },
+    );
+  }
+
+  return replaceKnownMessage(conversation, message, { toolResult }, environment);
 }
 
 export interface RedactMessageOptions {

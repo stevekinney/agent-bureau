@@ -100,7 +100,7 @@ history = replaceToolResult(history, 'call-account', {
 history = removeMessage(history, assistantMessageId!);
 ```
 
-`updateMessage` preserves the message identifier, role, position, and creation time. `removeMessage` closes the position gap left by the removed row. `replaceToolResult` targets the result paired with a tool-call identifier. Passing an unknown message or tool-call identifier is a no-op, so event handlers can safely ignore stale work.
+`updateMessage` preserves the message identifier, role, position, and creation time. `removeMessage` closes the position gap left by the removed row. `replaceToolResult` targets the result paired with a tool-call identifier and rejects a replacement whose `callId` differs from that target. Passing an unknown message or tool-call identifier is a no-op, so event handlers can safely ignore stale work.
 
 ## Rebuilding From an Append-Only Event Log
 

@@ -229,4 +229,37 @@ describe('immutable transcript mutations', () => {
     ).toThrow(ConversationalistError);
     expectValid(history);
   });
+
+  it('rejects retargeting a result to another existing tool call', () => {
+    let history = createConversationHistory({}, environment);
+    history = appendMessages(
+      history,
+      {
+        role: 'tool-call',
+        content: '',
+        toolCall: { id: 'call-1', name: 'lookup', arguments: {} },
+      },
+      {
+        role: 'tool-call',
+        content: '',
+        toolCall: { id: 'call-2', name: 'lookup', arguments: {} },
+      },
+      {
+        role: 'tool-result',
+        content: '',
+        toolResult: { callId: 'call-1', outcome: 'action_required', content: null },
+      },
+      environment,
+    );
+
+    expect(() =>
+      replaceToolResult(
+        history,
+        'call-1',
+        { callId: 'call-2', outcome: 'success', content: null },
+        environment,
+      ),
+    ).toThrow(ConversationalistError);
+    expectValid(history);
+  });
 });
