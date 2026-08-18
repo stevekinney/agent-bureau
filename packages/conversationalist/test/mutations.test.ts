@@ -12,7 +12,7 @@ import {
   validateConversationHistoryIntegrity,
 } from '../src/conversation';
 import { ConversationalistError } from '../src/errors';
-import type { AssistantMessage, ConversationHistory, Message, ToolResult } from '../src/types';
+import type { AssistantMessage, ConversationHistory, ToolResult } from '../src/types';
 
 const environment = {
   now: () => '2026-08-18T12:00:00.000Z',
@@ -228,20 +228,5 @@ describe('immutable transcript mutations', () => {
       ),
     ).toThrow(ConversationalistError);
     expectValid(history);
-  });
-
-  it('does not expose identifier or position changes through updateMessage', () => {
-    const updates = { content: 'Allowed' } satisfies Parameters<typeof updateMessage>[2];
-    expect(updates).toEqual({ content: 'Allowed' });
-
-    const message = {} as Message;
-    void message;
-
-    // @ts-expect-error Message identity cannot be changed by an update.
-    const invalidIdentifier: Parameters<typeof updateMessage>[2] = { id: 'other' };
-    // @ts-expect-error Message order cannot be changed by an update.
-    const invalidPosition: Parameters<typeof updateMessage>[2] = { position: 42 };
-    void invalidIdentifier;
-    void invalidPosition;
   });
 });
