@@ -1,6 +1,8 @@
 import type { MessageUpdate } from './conversation';
+import type { MessageUpdate as RootMessageUpdate } from './index';
 
 const allowedUpdate = { content: 'Allowed' } satisfies MessageUpdate;
+const allowedRootUpdate = { hidden: true } satisfies RootMessageUpdate;
 
 // @ts-expect-error Message identity cannot be changed by an update.
 const invalidIdentifier: MessageUpdate = { id: 'other' };
@@ -9,5 +11,6 @@ const invalidIdentifier: MessageUpdate = { id: 'other' };
 const invalidPosition: MessageUpdate = { position: 42 };
 
 void allowedUpdate;
+void allowedRootUpdate;
 void invalidIdentifier;
 void invalidPosition;
