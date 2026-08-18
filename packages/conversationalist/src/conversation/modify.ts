@@ -4,7 +4,12 @@ import {
   resolveConversationEnvironment,
 } from '../environment';
 import { createInvalidInputError, createInvalidPositionError } from '../errors';
-import type { ConversationHistory as Conversation, Message, ToolResult } from '../types';
+import type {
+  ConversationHistory as Conversation,
+  Message,
+  MessageInput,
+  ToolResult,
+} from '../types';
 import {
   createMessage,
   hasOwnProperty,
@@ -22,13 +27,15 @@ export type MessageUpdate = Partial<
 
 type InternalMessageUpdate = MessageUpdate & { toolResult?: ToolResult | undefined };
 
-const createUpdatedMessage = (message: Message, updates: InternalMessageUpdate): Message => {
-  const updated = {
-    id: message.id,
+const createUpdatedMessage = (
+  message: Message,
+  updates: InternalMessageUpdate,
+  environment: ConversationEnvironment,
+): Message => {
+  const content = updates.content ?? message.content;
+  const draftInput: MessageInput = {
     role: message.role,
-    content: updates.content ?? message.content,
-    position: message.position,
-    createdAt: message.createdAt,
+    content: typeof content === 'string' ? content : [...content],
     metadata: structuredClone(updates.metadata ?? message.metadata),
     hidden: updates.hidden ?? message.hidden,
     toolCall: message.toolCall,
@@ -38,10 +45,23 @@ const createUpdatedMessage = (message: Message, updates: InternalMessageUpdate):
       ? updates.cacheBoundary
       : message.cacheBoundary,
   };
+  const processedInput = environment.plugins.reduce((input, plugin) => plugin(input), draftInput);
+  const updated = {
+    id: message.id,
+    content: processedInput.content,
+    position: message.position,
+    createdAt: message.createdAt,
+    metadata: { ...(processedInput.metadata ?? {}) },
+    hidden: processedInput.hidden ?? false,
+    toolCall: processedInput.toolCall,
+    toolResult: processedInput.toolResult,
+    tokenUsage: processedInput.tokenUsage,
+    cacheBoundary: processedInput.cacheBoundary,
+  };
 
   return isAssistantMessage(message)
     ? createMessage({ ...updated, role: 'assistant', goalCompleted: message.goalCompleted })
-    : createMessage(updated);
+    : createMessage({ ...updated, role: message.role });
 };
 
 const replaceKnownMessage = (
@@ -50,12 +70,13 @@ const replaceKnownMessage = (
   updates: InternalMessageUpdate,
   environment?: Partial<ConversationEnvironment>,
 ): Conversation => {
-  const updatedMessage = createUpdatedMessage(message, updates);
+  const resolvedEnvironment = resolveConversationEnvironment(environment);
+  const updatedMessage = createUpdatedMessage(message, updates, resolvedEnvironment);
   const next: Conversation = {
     ...conversation,
     ids: [...conversation.ids],
     messages: { ...conversation.messages, [message.id]: updatedMessage },
-    updatedAt: resolveConversationEnvironment(environment).now(),
+    updatedAt: resolvedEnvironment.now(),
   };
 
   return ensureConversationSafe(toReadonly(next));

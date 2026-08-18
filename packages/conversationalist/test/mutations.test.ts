@@ -12,6 +12,7 @@ import {
   validateConversationHistoryIntegrity,
 } from '../src/conversation';
 import { ConversationalistError } from '../src/errors';
+import { redactPii } from '../src/plugins/pii-redaction';
 import type { AssistantMessage, ConversationHistory, ToolResult } from '../src/types';
 
 const environment = {
@@ -113,6 +114,24 @@ describe('immutable transcript mutations', () => {
     );
     expect(removeMessage(history, 'toString', environment)).toBe(history);
     expect(setMessageHidden(history, '__proto__', true, environment)).toBe(history);
+  });
+
+  it('runs message plugins over updated content', () => {
+    const pluginEnvironment = { ...environment, plugins: [redactPii] };
+    let history = createConversationHistory({}, pluginEnvironment);
+    history = appendUserMessage(history, 'Original', undefined, pluginEnvironment);
+    const messageId = history.ids[0]!;
+
+    const updated = updateMessage(
+      history,
+      messageId,
+      { content: 'Contact user@example.com' },
+      pluginEnvironment,
+    );
+
+    expect(updated.messages[messageId]?.content).toBe('Contact [EMAIL_REDACTED]');
+    expect(history.messages[messageId]?.content).toBe('Original');
+    expectValid(updated);
   });
 
   it('removes a message and restores contiguous positions without mutating survivors', () => {
@@ -238,6 +257,38 @@ describe('immutable transcript mutations', () => {
     };
 
     expect(replaceToolResult(history, 'missing', replacement, environment)).toBe(history);
+  });
+
+  it('runs message plugins over replacement tool results', () => {
+    const pluginEnvironment = { ...environment, plugins: [redactPii] };
+    let history = createConversationHistory({}, pluginEnvironment);
+    history = appendMessages(
+      history,
+      {
+        role: 'tool-call',
+        content: '',
+        toolCall: { id: 'call-1', name: 'lookup', arguments: {} },
+      },
+      {
+        role: 'tool-result',
+        content: '',
+        toolResult: { callId: 'call-1', outcome: 'action_required', content: null },
+      },
+      pluginEnvironment,
+    );
+
+    const updated = replaceToolResult(
+      history,
+      'call-1',
+      { callId: 'call-1', outcome: 'success', content: { email: 'user@example.com' } },
+      pluginEnvironment,
+    );
+
+    expect(updated.messages[history.ids[1]!]?.toolResult?.content).toEqual({
+      email: '[EMAIL_REDACTED]',
+    });
+    expect(history.messages[history.ids[1]!]?.toolResult?.content).toBeNull();
+    expectValid(updated);
   });
 
   it('rejects a replacement whose call identifier does not match the target', () => {
