@@ -95,6 +95,17 @@ const createUpdatedMessage = (
       { messageId: message.id },
     );
   }
+  const expectedToolCallId = message.toolCall?.id;
+  if (expectedToolCallId !== undefined && processedInput.toolCall?.id !== expectedToolCallId) {
+    throw createInvalidInputError(
+      `Processed toolCall.id (${processedInput.toolCall?.id ?? 'missing'}) does not match the preserved id (${expectedToolCallId})`,
+      {
+        messageId: message.id,
+        expectedToolCallId,
+        processedToolCallId: processedInput.toolCall?.id,
+      },
+    );
+  }
   const expectedToolResultCallId = updates.toolResult?.callId ?? message.toolResult?.callId;
   if (
     expectedToolResultCallId !== undefined &&
@@ -128,7 +139,7 @@ const createUpdatedMessage = (
       updates.hidden !== undefined || pluginChanged('hidden')
         ? (processedInput.hidden ?? false)
         : message.hidden,
-    toolCall: message.toolCall,
+    toolCall: pluginChanged('toolCall') ? processedInput.toolCall : message.toolCall,
     toolResult:
       hasOwnProperty(updates, 'toolResult') || pluginChanged('toolResult')
         ? processedInput.toolResult

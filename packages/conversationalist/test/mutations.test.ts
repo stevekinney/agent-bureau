@@ -243,6 +243,74 @@ describe('immutable transcript mutations', () => {
     expectValid(updated);
   });
 
+  it('preserves cross-field plugin transformations to a tool-call payload', () => {
+    const clearBlockedToolArguments: MessagePlugin = (input) => ({
+      ...input,
+      toolCall:
+        input.content === 'Blocked' && input.toolCall
+          ? { ...input.toolCall, arguments: {} }
+          : input.toolCall,
+    });
+    const pluginEnvironment = { ...environment, plugins: [clearBlockedToolArguments] };
+    let history = createConversationHistory({}, pluginEnvironment);
+    history = appendMessages(
+      history,
+      {
+        role: 'tool-call',
+        content: 'Allowed',
+        toolCall: { id: 'call-1', name: 'lookup', arguments: { secret: 'value' } },
+      },
+      pluginEnvironment,
+    );
+    const messageId = history.ids[0]!;
+
+    const updated = updateMessage(history, messageId, { content: 'Blocked' }, pluginEnvironment);
+
+    expect(history.messages[messageId]?.toolCall?.arguments).toEqual({ secret: 'value' });
+    expect(updated.messages[messageId]?.toolCall).toEqual({
+      id: 'call-1',
+      name: 'lookup',
+      arguments: {},
+    });
+    expectValid(updated);
+  });
+
+  it('rejects a plugin that retargets a tool call during an update', () => {
+    const retargetBlockedToolCall: MessagePlugin = (input) => ({
+      ...input,
+      toolCall:
+        input.content === 'Blocked' && input.toolCall
+          ? { ...input.toolCall, id: 'call-2' }
+          : input.toolCall,
+    });
+    let history = createConversationHistory({}, environment);
+    history = appendMessages(
+      history,
+      {
+        role: 'tool-call',
+        content: 'Allowed',
+        toolCall: { id: 'call-1', name: 'lookup', arguments: {} },
+      },
+      environment,
+    );
+    const messageId = history.ids[0]!;
+    const originalSnapshot = structuredClone(history);
+
+    expect(() =>
+      updateMessage(
+        history,
+        messageId,
+        { content: 'Blocked' },
+        {
+          ...environment,
+          plugins: [retargetBlockedToolCall],
+        },
+      ),
+    ).toThrow(ConversationalistError);
+    expect(history).toEqual(originalSnapshot);
+    expectValid(history);
+  });
+
   it('includes preserved assistant completion state in plugin inputs', () => {
     const hideBlockedCompletedAssistant: MessagePlugin = (input) => ({
       ...input,
