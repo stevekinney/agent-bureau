@@ -3,11 +3,261 @@ import {
   isConversationEnvironmentParameter,
   resolveConversationEnvironment,
 } from '../environment';
-import { createInvalidPositionError } from '../errors';
-import type { ConversationHistory as Conversation, Message } from '../types';
-import { createMessage, toReadonly } from '../utilities';
+import { createInvalidInputError, createInvalidPositionError } from '../errors';
+import type {
+  ConversationHistory as Conversation,
+  Message,
+  MessageInput,
+  ToolResult,
+} from '../types';
+import {
+  createMessage,
+  hasOwnProperty,
+  isAssistantMessage,
+  repositionMessage,
+  toReadonly,
+} from '../utilities';
 import { redactToolResult } from '../utilities/tool-results';
 import { ensureConversationSafe } from './validation';
+
+/** Message fields that can be changed without changing message identity or order. */
+export type MessageUpdate = Partial<
+  Pick<Message, 'content' | 'metadata' | 'hidden' | 'tokenUsage' | 'cacheBoundary'>
+>;
+
+type InternalMessageUpdate = MessageUpdate & { toolResult?: ToolResult | undefined };
+
+const arePluginValuesEqual = (left: unknown, right: unknown): boolean => {
+  if (Object.is(left, right)) return true;
+  if (!left || !right || typeof left !== 'object' || typeof right !== 'object') return false;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return (
+      Array.isArray(left) &&
+      Array.isArray(right) &&
+      left.length === right.length &&
+      left.every((value, index) => arePluginValuesEqual(value, right[index]))
+    );
+  }
+
+  const leftRecord = left as Record<string, unknown>;
+  const rightRecord = right as Record<string, unknown>;
+  const leftKeys = Object.keys(leftRecord);
+  const rightKeys = Object.keys(rightRecord);
+  return (
+    leftKeys.length === rightKeys.length &&
+    leftKeys.every(
+      (key) =>
+        hasOwnProperty(rightRecord, key) && arePluginValuesEqual(leftRecord[key], rightRecord[key]),
+    )
+  );
+};
+
+const createPluginInput = (message: Message, updates: InternalMessageUpdate): MessageInput => {
+  const content = updates.content ?? message.content;
+  return {
+    role: message.role,
+    content: typeof content === 'string' ? content : structuredClone([...content]),
+    metadata: structuredClone(updates.metadata ?? message.metadata),
+    hidden: updates.hidden ?? message.hidden,
+    goalCompleted: isAssistantMessage(message) ? message.goalCompleted : undefined,
+    toolCall: message.toolCall ? structuredClone(message.toolCall) : undefined,
+    toolResult: structuredClone(updates.toolResult ?? message.toolResult),
+    tokenUsage: structuredClone(
+      hasOwnProperty(updates, 'tokenUsage') ? updates.tokenUsage : message.tokenUsage,
+    ),
+    cacheBoundary: hasOwnProperty(updates, 'cacheBoundary')
+      ? updates.cacheBoundary
+      : message.cacheBoundary,
+  };
+};
+
+const createUpdatedMessage = (
+  message: Message,
+  updates: InternalMessageUpdate,
+  environment: ConversationEnvironment,
+): Message => {
+  const applyPlugins = (input: MessageInput): MessageInput =>
+    environment.plugins.reduce((current, plugin) => plugin(current), input);
+  const baselineInput = applyPlugins(createPluginInput(message, {}));
+  const repeatedBaselineInput = applyPlugins(createPluginInput(message, {}));
+  if (!arePluginValuesEqual(baselineInput, repeatedBaselineInput)) {
+    throw createInvalidInputError(
+      'Message plugins must return deterministic output for transcript mutations',
+      { messageId: message.id },
+    );
+  }
+  const reprocessedBaselineInput = applyPlugins(structuredClone(baselineInput));
+  if (!arePluginValuesEqual(baselineInput, reprocessedBaselineInput)) {
+    throw createInvalidInputError(
+      'Message plugins must return idempotent output for transcript mutations',
+      { messageId: message.id },
+    );
+  }
+  const processedInput = applyPlugins(createPluginInput(message, updates));
+  const repeatedProcessedInput = applyPlugins(createPluginInput(message, updates));
+  if (!arePluginValuesEqual(processedInput, repeatedProcessedInput)) {
+    throw createInvalidInputError(
+      'Message plugins must return deterministic output for transcript mutations',
+      { messageId: message.id },
+    );
+  }
+  const reprocessedInput = applyPlugins(structuredClone(processedInput));
+  if (!arePluginValuesEqual(processedInput, reprocessedInput)) {
+    throw createInvalidInputError(
+      'Message plugins must return idempotent output for transcript mutations',
+      { messageId: message.id },
+    );
+  }
+  const expectedToolCallId = message.toolCall?.id;
+  if (expectedToolCallId !== undefined && processedInput.toolCall?.id !== expectedToolCallId) {
+    throw createInvalidInputError(
+      `Processed toolCall.id (${processedInput.toolCall?.id ?? 'missing'}) does not match the preserved id (${expectedToolCallId})`,
+      {
+        messageId: message.id,
+        expectedToolCallId,
+        processedToolCallId: processedInput.toolCall?.id,
+      },
+    );
+  }
+  const expectedToolResultCallId = updates.toolResult?.callId ?? message.toolResult?.callId;
+  if (
+    expectedToolResultCallId !== undefined &&
+    processedInput.toolResult?.callId !== expectedToolResultCallId
+  ) {
+    throw createInvalidInputError(
+      `Processed toolResult.callId (${processedInput.toolResult?.callId ?? 'missing'}) does not match the preserved callId (${expectedToolResultCallId})`,
+      {
+        messageId: message.id,
+        expectedCallId: expectedToolResultCallId,
+        processedCallId: processedInput.toolResult?.callId,
+      },
+    );
+  }
+  const updated = {
+    id: message.id,
+    content: processedInput.content,
+    position: message.position,
+    createdAt: message.createdAt,
+    metadata: { ...(processedInput.metadata ?? {}) },
+    hidden: processedInput.hidden ?? false,
+    toolCall: processedInput.toolCall,
+    toolResult: processedInput.toolResult,
+    tokenUsage: processedInput.tokenUsage,
+    cacheBoundary: processedInput.cacheBoundary,
+  };
+
+  return isAssistantMessage(message)
+    ? createMessage({ ...updated, role: 'assistant', goalCompleted: message.goalCompleted })
+    : createMessage({ ...updated, role: message.role });
+};
+
+const replaceKnownMessage = (
+  conversation: Conversation,
+  message: Message,
+  updates: InternalMessageUpdate,
+  environment?: Partial<ConversationEnvironment>,
+): Conversation => {
+  const resolvedEnvironment = resolveConversationEnvironment(environment);
+  const updatedMessage = createUpdatedMessage(message, updates, resolvedEnvironment);
+  const next: Conversation = {
+    ...conversation,
+    ids: [...conversation.ids],
+    messages: { ...conversation.messages, [message.id]: updatedMessage },
+    updatedAt: resolvedEnvironment.now(),
+  };
+
+  return ensureConversationSafe(toReadonly(next));
+};
+
+/**
+ * Returns a new history with editable fields replaced on the identified message.
+ * Message identity, role, order, and creation time are preserved. An unknown
+ * message identifier returns the original history unchanged.
+ */
+export function updateMessage(
+  conversation: Conversation,
+  messageId: string,
+  updates: MessageUpdate,
+  environment?: Partial<ConversationEnvironment>,
+): Conversation {
+  if (!hasOwnProperty(conversation.messages, messageId)) return conversation;
+  const message = conversation.messages[messageId];
+  return message ? replaceKnownMessage(conversation, message, updates, environment) : conversation;
+}
+
+/**
+ * Returns a new history without the identified message and renumbers every
+ * surviving message to keep positions contiguous. An unknown identifier
+ * returns the original history unchanged.
+ */
+export function removeMessage(
+  conversation: Conversation,
+  messageId: string,
+  environment?: Partial<ConversationEnvironment>,
+): Conversation {
+  if (!hasOwnProperty(conversation.messages, messageId)) return conversation;
+
+  const ids = conversation.ids.filter((id) => id !== messageId);
+  const messages: Record<string, Message> = { ...conversation.messages };
+  delete messages[messageId];
+
+  for (const [position, id] of ids.entries()) {
+    const message = messages[id];
+    if (message) messages[id] = repositionMessage(message, position);
+  }
+
+  const next: Conversation = {
+    ...conversation,
+    ids,
+    messages,
+    updatedAt: resolveConversationEnvironment(environment).now(),
+  };
+
+  return ensureConversationSafe(toReadonly(next));
+}
+
+/**
+ * Returns a new history with the identified message hidden or visible.
+ * An unknown message identifier returns the original history unchanged.
+ */
+export function setMessageHidden(
+  conversation: Conversation,
+  messageId: string,
+  hidden: boolean,
+  environment?: Partial<ConversationEnvironment>,
+): Conversation {
+  return updateMessage(conversation, messageId, { hidden }, environment);
+}
+
+/**
+ * Returns a new history with the result for `toolCallId` replaced in place.
+ * The result message keeps its identity and order. An unknown tool-call
+ * identifier returns the original history unchanged. Throws when the
+ * replacement result identifies a different tool call.
+ */
+export function replaceToolResult(
+  conversation: Conversation,
+  toolCallId: string,
+  toolResult: ToolResult,
+  environment?: Partial<ConversationEnvironment>,
+): Conversation {
+  const message = conversation.ids
+    .map((id) => conversation.messages[id])
+    .find(
+      (candidate): candidate is Message & { toolResult: ToolResult } =>
+        candidate?.role === 'tool-result' && candidate.toolResult?.callId === toolCallId,
+    );
+
+  if (!message) return conversation;
+  if (toolResult.callId !== toolCallId) {
+    throw createInvalidInputError(
+      `toolResult.callId (${toolResult.callId}) does not match toolCallId (${toolCallId})`,
+      { toolCallId, toolResultCallId: toolResult.callId },
+    );
+  }
+
+  return replaceKnownMessage(conversation, message, { toolResult }, environment);
+}
 
 export interface RedactMessageOptions {
   placeholder?: string;

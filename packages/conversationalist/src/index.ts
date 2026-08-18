@@ -39,6 +39,7 @@ export type {
   IntegrityIssue,
   IntegrityIssueCode,
   MaterializeToolCallOptions,
+  MessageUpdate,
   RedactMessageOptions,
   ToolInteraction,
 } from './conversation/index';
@@ -79,11 +80,15 @@ export {
   prependMessages,
   prependSystemMessage,
   redactMessageAtPosition,
+  removeMessage,
   replaceSystemMessage,
+  replaceToolResult,
   resolveToolResult,
   resolveToolResultAsync,
   searchConversationMessages,
+  setMessageHidden,
   toChatMessages,
+  updateMessage,
   validateConversationHistoryIntegrity,
 } from './conversation/index';
 export type { SessionInfo } from './environment';

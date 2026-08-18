@@ -194,7 +194,9 @@ export type ConversationTokenEstimator = (messages: ReadonlyArray<Message>) => n
 export type AsyncConversationTokenEstimator = (messages: ReadonlyArray<Message>) => Promise<number>;
 
 /**
- * A plugin that can transform a MessageInput before it is appended.
+ * A deterministic, side-effect-free plugin that can transform a MessageInput
+ * before it is appended or immutably updated. Plugins used by transcript
+ * mutation helpers must also be idempotent.
  */
 export type MessagePlugin = (input: MessageInput) => MessageInput;
 

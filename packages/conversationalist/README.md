@@ -55,6 +55,53 @@ const openAIRequest = await conversation.toProvider('openai');
 - **`Message`**: ordered conversation entry with roles such as `user`, `assistant`, `system`, `developer`, `tool-call`, `tool-result`, and `snapshot`.
 - **`ToolCall`** and **`ToolResult`**: canonical, JSON-safe tool interaction payloads shared with `armorer` through `interoperability`.
 
+## Updating a Transcript
+
+Use the immutable mutation helpers when a user edits a message, a row leaves the transcript, visibility changes, or a pending tool approval resolves. Each helper returns a validated `ConversationHistory`; the history and messages you pass in stay untouched.
+
+```typescript
+import {
+  appendMessages,
+  createConversationHistory,
+  removeMessage,
+  replaceToolResult,
+  setMessageHidden,
+  updateMessage,
+} from 'conversationalist';
+
+let history = appendMessages(
+  createConversationHistory(),
+  { role: 'user', content: 'Look up account acct_123.' },
+  { role: 'assistant', content: 'I can do that.' },
+  {
+    role: 'tool-call',
+    content: '',
+    toolCall: { id: 'call-account', name: 'lookupAccount', arguments: { id: 'acct_123' } },
+  },
+  {
+    role: 'tool-result',
+    content: '',
+    toolResult: { callId: 'call-account', outcome: 'action_required', content: null },
+  },
+);
+
+const [userMessageId, assistantMessageId] = history.ids;
+
+history = updateMessage(history, userMessageId!, {
+  content: 'Look up account acct_456.',
+  metadata: { edited: true },
+});
+history = setMessageHidden(history, assistantMessageId!, true);
+history = replaceToolResult(history, 'call-account', {
+  callId: 'call-account',
+  outcome: 'success',
+  content: { status: 'active' },
+});
+history = removeMessage(history, assistantMessageId!);
+```
+
+`updateMessage` preserves the message identifier, role, position, creation time, assistant completion state, and all tool identifiers; explicitly setting `tokenUsage` or `cacheBoundary` to `undefined` clears that optional field. `updateMessage`, `setMessageHidden`, and `replaceToolResult` run configured message plugins and apply the complete processed mutable payload. That preserves cross-field policies such as hiding newly blocked content or clearing sensitive tool data. Message plugins used by mutation helpers must be deterministic, side-effect-free, and idempotent. The helpers verify repeatable and idempotent output for both the stored and updated inputs, rejecting invalid plugins rather than reprocessing unchanged values. `removeMessage` closes the position gap left by the removed row. `replaceToolResult` targets the result paired with a tool-call identifier and rejects a caller or plugin result whose `callId` differs from that target. Plugin-processed tool calls and results must retain their existing identifiers. Passing an unknown message or tool-call identifier is a no-op, so event handlers can safely ignore stale work.
+
 ## Rebuilding From an Append-Only Event Log
 
 If your worker stores durable transcript rows instead of a serialized `ConversationHistory`, replay those rows through the immutable append helpers after a restart. The helpers rebuild the ordered message list and validate that every tool result references an earlier tool call.
@@ -285,6 +332,10 @@ import {
   hasSystemMessage,
   pipeConversationHistory,
   prependSystemMessage,
+  removeMessage,
+  replaceToolResult,
+  setMessageHidden,
+  updateMessage,
   validateConversationHistoryIntegrity,
   withConversationHistory,
 } from 'conversationalist';
@@ -304,7 +355,7 @@ import {
 - Validation: `validateConversationHistoryIntegrity`, `assertConversationHistoryIntegrity`.
 - Builder helpers: `withConversationHistory`, `pipeConversationHistory`.
 - Projection helpers: `createProjection`, `isProjectionPrefixExtension`.
-- Modify: `redactMessageAtPosition`.
+- Mutation helpers: `updateMessage`, `removeMessage`, `setMessageHidden`, `replaceToolResult`, `redactMessageAtPosition`.
 - Guards: `isConversation`, `isConversationHistory`, `isMessage`, `isToolCall`, `isToolResult`, and more.
 - Error constructors: `ConversationalistError`, `createNotFoundError`, `createValidationError`, and others.
 - Composition exports: `createInstructionComposer`, `createInstructionTemplate`, `createConditionalInstructionComposer`, `whenStep`, `whenToolsAvailable`, `whenAnyToolAvailable`, `whenMetadata`, `whenMetadataPresent`.
@@ -324,12 +375,16 @@ import {
   getPendingToolCalls,
   getSystemMessages,
   prependSystemMessage,
+  removeMessage,
+  replaceToolResult,
   searchConversationMessages,
+  setMessageHidden,
+  updateMessage,
   validateConversationHistoryIntegrity,
 } from 'conversationalist/conversation';
 ```
 
-**Key exports:** `createConversationHistory`, `createConversationHistoryUnsafe`, `appendMessages`, `appendUserMessage`, `appendAssistantMessage`, `appendSystemMessage`, `appendUnsafeMessage`, `getMessages`, `getMessageById`, `getMessageAtPosition`, `getMessageIds`, `getStatistics`, `searchConversationMessages`, `getSystemMessages`, `getFirstSystemMessage`, `hasSystemMessage`, `prependSystemMessage`, `replaceSystemMessage`, `collapseSystemMessages`, `redactMessageAtPosition`, `deserializeConversationHistory`, `validateConversationHistoryIntegrity`, `assertConversationHistoryIntegrity`, `toChatMessages`, `appendToolCall`, `appendToolCalls`, `appendToolResult`, `appendToolResultAsync`, `appendToolResults`, `appendToolResultsAsync`, `getPendingToolCalls`, `getToolInteractions`, `materializeToolCall`, `materializeToolCalls`, `materializeToolResult`, `materializeToolResultAsync`, `materializeToolResults`, `materializeToolResultsAsync`, `withEnvironment`.
+**Key exports:** `createConversationHistory`, `createConversationHistoryUnsafe`, `appendMessages`, `appendUserMessage`, `appendAssistantMessage`, `appendSystemMessage`, `appendUnsafeMessage`, `updateMessage`, `removeMessage`, `setMessageHidden`, `replaceToolResult`, `getMessages`, `getMessageById`, `getMessageAtPosition`, `getMessageIds`, `getStatistics`, `searchConversationMessages`, `getSystemMessages`, `getFirstSystemMessage`, `hasSystemMessage`, `prependSystemMessage`, `replaceSystemMessage`, `collapseSystemMessages`, `redactMessageAtPosition`, `deserializeConversationHistory`, `validateConversationHistoryIntegrity`, `assertConversationHistoryIntegrity`, `toChatMessages`, `appendToolCall`, `appendToolCalls`, `appendToolResult`, `appendToolResultAsync`, `appendToolResults`, `appendToolResultsAsync`, `getPendingToolCalls`, `getToolInteractions`, `materializeToolCall`, `materializeToolCalls`, `materializeToolResult`, `materializeToolResultAsync`, `materializeToolResults`, `materializeToolResultsAsync`, `withEnvironment`.
 
 ---
 

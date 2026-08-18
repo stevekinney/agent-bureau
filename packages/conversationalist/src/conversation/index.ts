@@ -37,8 +37,14 @@ export {
 } from './system-messages';
 
 // Modify
-export type { RedactMessageOptions } from './modify';
-export { redactMessageAtPosition } from './modify';
+export type { MessageUpdate, RedactMessageOptions } from './modify';
+export {
+  redactMessageAtPosition,
+  removeMessage,
+  replaceToolResult,
+  setMessageHidden,
+  updateMessage,
+} from './modify';
 
 // Serialization
 export { deserializeConversationHistory } from './serialization';

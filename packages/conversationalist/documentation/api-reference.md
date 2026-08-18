@@ -1,6 +1,6 @@
 # Conversationalist Public API Reference
 
-This document tracks the published export map in [package.json](/Users/stevekinney/Developer/agent-bureau/packages/conversationalist/package.json).
+This document tracks the published export map in [package.json](../package.json).
 
 ## Export Map
 
@@ -64,9 +64,13 @@ This document tracks the published export map in [package.json](/Users/stevekinn
 - `pipeConversationHistory`
 - `prependSystemMessage`
 - `redactMessageAtPosition`
+- `removeMessage`
+- `replaceToolResult`
 - `replaceSystemMessage`
 - `searchConversationMessages`
+- `setMessageHidden`
 - `toChatMessages`
+- `updateMessage`
 - `validateConversationHistoryIntegrity`
 - `withConversationHistory`
 
@@ -133,6 +137,7 @@ This document tracks the published export map in [package.json](/Users/stevekinn
 - `MaterializeToolCallOptions`
 - `Message`
 - `MessageInput`
+- `MessageUpdate`
 - `MessageRole`
 - `MultiModalContent`
 - `RedactMessageOptions`
@@ -283,9 +288,13 @@ This document tracks the published export map in [package.json](/Users/stevekinn
 - `materializeToolResultsAsync`
 - `prependSystemMessage`
 - `redactMessageAtPosition`
+- `removeMessage`
+- `replaceToolResult`
 - `replaceSystemMessage`
 - `searchConversationMessages`
+- `setMessageHidden`
 - `toChatMessages`
+- `updateMessage`
 - `validateConversationHistoryIntegrity`
 - `withEnvironment`
 
@@ -301,9 +310,19 @@ This document tracks the published export map in [package.json](/Users/stevekinn
 - `IntegrityIssue`
 - `IntegrityIssueCode`
 - `MaterializeToolCallOptions`
+- `MessageUpdate`
 - `RedactMessageOptions`
 - `ToolCallInput`
 - `ToolInteraction`
+
+### Immutable mutation contracts
+
+- `updateMessage(history, messageId, updates, environment?)` replaces editable content, metadata, visibility, token usage, or cache-boundary fields while preserving message identity and order. Explicit `undefined` clears optional token-usage and cache-boundary fields.
+- `removeMessage(history, messageId, environment?)` removes one message and restores contiguous positions across the survivors.
+- `setMessageHidden(history, messageId, hidden, environment?)` changes visibility without removing the stored message.
+- `replaceToolResult(history, toolCallId, toolResult, environment?)` replaces the result paired with a tool-call identifier while preserving the result message's identity and position. The replacement `callId` must match `toolCallId`.
+
+All four helpers return the original history unchanged for an unknown target. Successful mutations return a new immutable history after schema and integrity validation. Helpers that create an updated message run configured message plugins against the stored and updated inputs before validation, then apply the complete processed mutable payload. They preserve assistant completion state in plugin inputs and verify repeatable, idempotent plugin output for both inputs. Message plugins used by mutation helpers must be deterministic, side-effect-free, and idempotent. Plugin-processed tool calls and results must retain their identifiers, regardless of whether the edit uses `updateMessage` or `replaceToolResult`.
 
 ## `conversationalist/context`
 
