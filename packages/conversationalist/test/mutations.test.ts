@@ -13,7 +13,12 @@ import {
 } from '../src/conversation';
 import { ConversationalistError } from '../src/errors';
 import { redactPii } from '../src/plugins/pii-redaction';
-import type { AssistantMessage, ConversationHistory, ToolResult } from '../src/types';
+import type {
+  AssistantMessage,
+  ConversationHistory,
+  MessagePlugin,
+  ToolResult,
+} from '../src/types';
 
 const environment = {
   now: () => '2026-08-18T12:00:00.000Z',
@@ -132,6 +137,24 @@ describe('immutable transcript mutations', () => {
     expect(updated.messages[messageId]?.content).toBe('Contact [EMAIL_REDACTED]');
     expect(history.messages[messageId]?.content).toBe('Original');
     expectValid(updated);
+  });
+
+  it('does not reprocess unchanged fields through message plugins', () => {
+    const prefixContent: MessagePlugin = (input) => ({
+      ...input,
+      content: typeof input.content === 'string' ? `processed:${input.content}` : input.content,
+    });
+    const pluginEnvironment = { ...environment, plugins: [prefixContent] };
+    let history = createConversationHistory({}, pluginEnvironment);
+    history = appendUserMessage(history, 'Original', undefined, pluginEnvironment);
+    const messageId = history.ids[0]!;
+
+    const hidden = setMessageHidden(history, messageId, true, pluginEnvironment);
+
+    expect(history.messages[messageId]?.content).toBe('processed:Original');
+    expect(hidden.messages[messageId]?.content).toBe('processed:Original');
+    expect(hidden.messages[messageId]?.hidden).toBeTrue();
+    expectValid(hidden);
   });
 
   it('removes a message and restores contiguous positions without mutating survivors', () => {

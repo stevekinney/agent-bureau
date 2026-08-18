@@ -35,12 +35,14 @@ const createUpdatedMessage = (
   const content = updates.content ?? message.content;
   const draftInput: MessageInput = {
     role: message.role,
-    content: typeof content === 'string' ? content : [...content],
+    content: typeof content === 'string' ? content : structuredClone([...content]),
     metadata: structuredClone(updates.metadata ?? message.metadata),
     hidden: updates.hidden ?? message.hidden,
-    toolCall: message.toolCall,
-    toolResult: updates.toolResult ?? message.toolResult,
-    tokenUsage: hasOwnProperty(updates, 'tokenUsage') ? updates.tokenUsage : message.tokenUsage,
+    toolCall: message.toolCall ? structuredClone(message.toolCall) : undefined,
+    toolResult: structuredClone(updates.toolResult ?? message.toolResult),
+    tokenUsage: structuredClone(
+      hasOwnProperty(updates, 'tokenUsage') ? updates.tokenUsage : message.tokenUsage,
+    ),
     cacheBoundary: hasOwnProperty(updates, 'cacheBoundary')
       ? updates.cacheBoundary
       : message.cacheBoundary,
@@ -48,15 +50,22 @@ const createUpdatedMessage = (
   const processedInput = environment.plugins.reduce((input, plugin) => plugin(input), draftInput);
   const updated = {
     id: message.id,
-    content: processedInput.content,
+    content: updates.content !== undefined ? processedInput.content : message.content,
     position: message.position,
     createdAt: message.createdAt,
-    metadata: { ...(processedInput.metadata ?? {}) },
-    hidden: processedInput.hidden ?? false,
-    toolCall: processedInput.toolCall,
-    toolResult: processedInput.toolResult,
-    tokenUsage: processedInput.tokenUsage,
-    cacheBoundary: processedInput.cacheBoundary,
+    metadata:
+      updates.metadata !== undefined ? { ...(processedInput.metadata ?? {}) } : message.metadata,
+    hidden: updates.hidden !== undefined ? (processedInput.hidden ?? false) : message.hidden,
+    toolCall: message.toolCall,
+    toolResult: hasOwnProperty(updates, 'toolResult')
+      ? processedInput.toolResult
+      : message.toolResult,
+    tokenUsage: hasOwnProperty(updates, 'tokenUsage')
+      ? processedInput.tokenUsage
+      : message.tokenUsage,
+    cacheBoundary: hasOwnProperty(updates, 'cacheBoundary')
+      ? processedInput.cacheBoundary
+      : message.cacheBoundary,
   };
 
   return isAssistantMessage(message)
