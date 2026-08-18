@@ -27,13 +27,34 @@ export type MessageUpdate = Partial<
 
 type InternalMessageUpdate = MessageUpdate & { toolResult?: ToolResult | undefined };
 
-const createUpdatedMessage = (
-  message: Message,
-  updates: InternalMessageUpdate,
-  environment: ConversationEnvironment,
-): Message => {
+const arePluginValuesEqual = (left: unknown, right: unknown): boolean => {
+  if (Object.is(left, right)) return true;
+  if (!left || !right || typeof left !== 'object' || typeof right !== 'object') return false;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return (
+      Array.isArray(left) &&
+      Array.isArray(right) &&
+      left.length === right.length &&
+      left.every((value, index) => arePluginValuesEqual(value, right[index]))
+    );
+  }
+
+  const leftRecord = left as Record<string, unknown>;
+  const rightRecord = right as Record<string, unknown>;
+  const leftKeys = Object.keys(leftRecord);
+  const rightKeys = Object.keys(rightRecord);
+  return (
+    leftKeys.length === rightKeys.length &&
+    leftKeys.every(
+      (key) =>
+        hasOwnProperty(rightRecord, key) && arePluginValuesEqual(leftRecord[key], rightRecord[key]),
+    )
+  );
+};
+
+const createPluginInput = (message: Message, updates: InternalMessageUpdate): MessageInput => {
   const content = updates.content ?? message.content;
-  const draftInput: MessageInput = {
+  return {
     role: message.role,
     content: typeof content === 'string' ? content : structuredClone([...content]),
     metadata: structuredClone(updates.metadata ?? message.metadata),
@@ -47,25 +68,48 @@ const createUpdatedMessage = (
       ? updates.cacheBoundary
       : message.cacheBoundary,
   };
-  const processedInput = environment.plugins.reduce((input, plugin) => plugin(input), draftInput);
+};
+
+const createUpdatedMessage = (
+  message: Message,
+  updates: InternalMessageUpdate,
+  environment: ConversationEnvironment,
+): Message => {
+  const applyPlugins = (input: MessageInput): MessageInput =>
+    environment.plugins.reduce((current, plugin) => plugin(current), input);
+  const baselineInput = applyPlugins(createPluginInput(message, {}));
+  const processedInput = applyPlugins(createPluginInput(message, updates));
+  const pluginChanged = (field: keyof MessageInput): boolean =>
+    !arePluginValuesEqual(baselineInput[field], processedInput[field]);
   const updated = {
     id: message.id,
-    content: updates.content !== undefined ? processedInput.content : message.content,
+    content:
+      updates.content !== undefined || pluginChanged('content')
+        ? processedInput.content
+        : message.content,
     position: message.position,
     createdAt: message.createdAt,
     metadata:
-      updates.metadata !== undefined ? { ...(processedInput.metadata ?? {}) } : message.metadata,
-    hidden: updates.hidden !== undefined ? (processedInput.hidden ?? false) : message.hidden,
+      updates.metadata !== undefined || pluginChanged('metadata')
+        ? { ...(processedInput.metadata ?? {}) }
+        : message.metadata,
+    hidden:
+      updates.hidden !== undefined || pluginChanged('hidden')
+        ? (processedInput.hidden ?? false)
+        : message.hidden,
     toolCall: message.toolCall,
-    toolResult: hasOwnProperty(updates, 'toolResult')
-      ? processedInput.toolResult
-      : message.toolResult,
-    tokenUsage: hasOwnProperty(updates, 'tokenUsage')
-      ? processedInput.tokenUsage
-      : message.tokenUsage,
-    cacheBoundary: hasOwnProperty(updates, 'cacheBoundary')
-      ? processedInput.cacheBoundary
-      : message.cacheBoundary,
+    toolResult:
+      hasOwnProperty(updates, 'toolResult') || pluginChanged('toolResult')
+        ? processedInput.toolResult
+        : message.toolResult,
+    tokenUsage:
+      hasOwnProperty(updates, 'tokenUsage') || pluginChanged('tokenUsage')
+        ? processedInput.tokenUsage
+        : message.tokenUsage,
+    cacheBoundary:
+      hasOwnProperty(updates, 'cacheBoundary') || pluginChanged('cacheBoundary')
+        ? processedInput.cacheBoundary
+        : message.cacheBoundary,
   };
 
   return isAssistantMessage(message)

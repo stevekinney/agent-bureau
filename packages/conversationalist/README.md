@@ -100,7 +100,7 @@ history = replaceToolResult(history, 'call-account', {
 history = removeMessage(history, assistantMessageId!);
 ```
 
-`updateMessage` preserves the message identifier, role, position, and creation time; explicitly setting `tokenUsage` or `cacheBoundary` to `undefined` clears that optional field. `updateMessage`, `setMessageHidden`, and `replaceToolResult` run configured message plugins over supplied replacement fields, matching the append helpers without reprocessing unchanged values. `removeMessage` closes the position gap left by the removed row. `replaceToolResult` targets the result paired with a tool-call identifier and rejects a replacement whose `callId` differs from that target. Passing an unknown message or tool-call identifier is a no-op, so event handlers can safely ignore stale work.
+`updateMessage` preserves the message identifier, role, position, and creation time; explicitly setting `tokenUsage` or `cacheBoundary` to `undefined` clears that optional field. `updateMessage`, `setMessageHidden`, and `replaceToolResult` run configured message plugins against the original and updated inputs, applying transformations caused by the replacement without reprocessing unchanged values. That preserves cross-field policies such as hiding newly blocked content. `removeMessage` closes the position gap left by the removed row. `replaceToolResult` targets the result paired with a tool-call identifier and rejects a replacement whose `callId` differs from that target. Passing an unknown message or tool-call identifier is a no-op, so event handlers can safely ignore stale work.
 
 ## Rebuilding From an Append-Only Event Log
 

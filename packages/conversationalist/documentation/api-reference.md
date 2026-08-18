@@ -322,7 +322,7 @@ This document tracks the published export map in [package.json](../package.json)
 - `setMessageHidden(history, messageId, hidden, environment?)` changes visibility without removing the stored message.
 - `replaceToolResult(history, toolCallId, toolResult, environment?)` replaces the result paired with a tool-call identifier while preserving the result message's identity and position. The replacement `callId` must match `toolCallId`.
 
-All four helpers return the original history unchanged for an unknown target. Successful mutations return a new immutable history after schema and integrity validation. Helpers that create an updated message run configured message plugins over supplied replacement fields before validation without reprocessing unchanged values.
+All four helpers return the original history unchanged for an unknown target. Successful mutations return a new immutable history after schema and integrity validation. Helpers that create an updated message run configured message plugins against the original and updated inputs before validation. They apply direct and cross-field transformations caused by the replacement without reprocessing unchanged values.
 
 ## `conversationalist/context`
 

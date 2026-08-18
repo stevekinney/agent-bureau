@@ -157,6 +157,52 @@ describe('immutable transcript mutations', () => {
     expectValid(hidden);
   });
 
+  it('does not rebuild unchanged multimodal content', () => {
+    const prefixTextBlocks: MessagePlugin = (input) => ({
+      ...input,
+      content:
+        typeof input.content === 'string'
+          ? input.content
+          : input.content.map((part) =>
+              part.type === 'text' ? { ...part, text: `processed:${part.text}` } : part,
+            ),
+    });
+    const pluginEnvironment = { ...environment, plugins: [prefixTextBlocks] };
+    let history = createConversationHistory({}, pluginEnvironment);
+    history = appendUserMessage(
+      history,
+      [{ type: 'text', text: 'Original' }],
+      undefined,
+      pluginEnvironment,
+    );
+    const messageId = history.ids[0]!;
+    const originalContent = history.messages[messageId]?.content;
+
+    const hidden = setMessageHidden(history, messageId, true, pluginEnvironment);
+
+    expect(originalContent).toEqual([{ type: 'text', text: 'processed:Original' }]);
+    expect(hidden.messages[messageId]?.content).toEqual(originalContent);
+    expectValid(hidden);
+  });
+
+  it('preserves cross-field plugin transformations caused by an update', () => {
+    const hideBlockedContent: MessagePlugin = (input) => ({
+      ...input,
+      hidden: input.content === 'Blocked' ? true : input.hidden,
+    });
+    const pluginEnvironment = { ...environment, plugins: [hideBlockedContent] };
+    let history = createConversationHistory({}, pluginEnvironment);
+    history = appendUserMessage(history, 'Allowed', undefined, pluginEnvironment);
+    const messageId = history.ids[0]!;
+
+    const updated = updateMessage(history, messageId, { content: 'Blocked' }, pluginEnvironment);
+
+    expect(history.messages[messageId]?.hidden).toBeFalse();
+    expect(updated.messages[messageId]?.content).toBe('Blocked');
+    expect(updated.messages[messageId]?.hidden).toBeTrue();
+    expectValid(updated);
+  });
+
   it('removes a message and restores contiguous positions without mutating survivors', () => {
     let history = createConversationHistory({}, environment);
     history = appendUserMessage(history, 'First', undefined, environment);
@@ -311,6 +357,42 @@ describe('immutable transcript mutations', () => {
       email: '[EMAIL_REDACTED]',
     });
     expect(history.messages[history.ids[1]!]?.toolResult?.content).toBeNull();
+    expectValid(updated);
+  });
+
+  it('preserves cross-field plugin transformations caused by a replacement tool result', () => {
+    const annotateSuccessfulResult: MessagePlugin = (input) => ({
+      ...input,
+      metadata:
+        input.toolResult?.outcome === 'success' ? { reviewed: true } : { actionRequired: true },
+    });
+    const pluginEnvironment = { ...environment, plugins: [annotateSuccessfulResult] };
+    let history = createConversationHistory({}, pluginEnvironment);
+    history = appendMessages(
+      history,
+      {
+        role: 'tool-call',
+        content: '',
+        toolCall: { id: 'call-1', name: 'lookup', arguments: {} },
+      },
+      {
+        role: 'tool-result',
+        content: '',
+        toolResult: { callId: 'call-1', outcome: 'action_required', content: null },
+      },
+      pluginEnvironment,
+    );
+    const resultMessageId = history.ids[1]!;
+
+    const updated = replaceToolResult(
+      history,
+      'call-1',
+      { callId: 'call-1', outcome: 'success', content: null },
+      pluginEnvironment,
+    );
+
+    expect(history.messages[resultMessageId]?.metadata).toEqual({ actionRequired: true });
+    expect(updated.messages[resultMessageId]?.metadata).toEqual({ reviewed: true });
     expectValid(updated);
   });
 
