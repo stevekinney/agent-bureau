@@ -72,7 +72,7 @@ import type {
 } from './is-tool';
 import { resolveToolPolicyAllow } from './is-tool';
 import { isAsyncIterable, isPromise, isTestRuntime } from './type-guards';
-import type { ToolAction, ToolCall, ToolExecutionResult } from './types';
+import type { SatisfiedPolicyPause, ToolAction, ToolCall, ToolExecutionResult } from './types';
 import { createConcurrencyLimiter, normalizeConcurrency } from './utilities/concurrency';
 
 type InternalToolExecuteOptions = ToolExecuteOptions & {
@@ -781,15 +781,13 @@ export function createTool<
         approvalResume !== undefined &&
         !executedArgumentsEdited
       ) {
-        let satisfiedPauseIndex = 0;
         decision = { allow: true, status: 'allow' };
         for (const pauseDecision of policyPauseDecisions) {
-          const satisfiedPause = approvalResume.satisfiedPauses[satisfiedPauseIndex];
           if (
-            satisfiedPause !== undefined &&
-            policyPauseMatchesSatisfiedPause(pauseDecision, satisfiedPause)
+            approvalResume.satisfiedPauses.some((satisfiedPause) =>
+              policyPauseMatchesSatisfiedPause(pauseDecision, satisfiedPause),
+            )
           ) {
-            satisfiedPauseIndex += 1;
             continue;
           }
           decision = pauseDecision;
@@ -1688,7 +1686,7 @@ function createToolAction(
 
 function policyPauseMatchesSatisfiedPause(
   decision: ToolPolicyDecision,
-  satisfiedPause: { action: ToolAction; reason?: string; tier?: string },
+  satisfiedPause: SatisfiedPolicyPause,
 ): boolean {
   const type = decision.status === 'needs_input' ? 'input' : 'approval';
   const reason = decision.reason ?? `Tool execution requires ${type}`;

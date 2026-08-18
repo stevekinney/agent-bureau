@@ -3863,6 +3863,51 @@ describe('createToolbox', () => {
       expect(executed).toBe(false);
     });
 
+    it('does not let a stale capability pause bypass a later tool pause after policy changes', async () => {
+      const policy = {
+        beforeExecute: () => ({
+          status: 'needs_approval' as const,
+          reason: 'Approval required',
+          action: { message: 'Approve operation' },
+        }),
+      };
+      const tool = createTool({
+        name: 'stale-capability-pause',
+        description: 'requires layered approval',
+        input: z.object({}),
+        policy,
+        async execute() {
+          return 'completed';
+        },
+      });
+      const originalToolbox = createToolbox([tool], {
+        approvalSecret: 'stale-capability-pause-secret',
+        approvalPolicy: { mode: 'always' },
+        policy,
+      });
+      const updatedToolbox = createToolbox([tool], {
+        approvalSecret: 'stale-capability-pause-secret',
+        policy,
+      });
+
+      const capabilityPaused = await originalToolbox.execute({
+        id: 'call-stale-capability-pause',
+        name: 'stale-capability-pause',
+        arguments: {},
+      });
+      const registryPaused = await updatedToolbox.resumeApproval(
+        capabilityPaused.pendingApproval! as SignedPendingToolApproval,
+      );
+      const toolPaused = await updatedToolbox.resumeApproval(
+        registryPaused.pendingApproval! as SignedPendingToolApproval,
+      );
+
+      expect(capabilityPaused.pendingApproval?.policyPauseTier).toBe('capability');
+      expect(registryPaused.pendingApproval?.policyPauseTier).toBe('registry');
+      expect(toolPaused.outcome).toBe('action_required');
+      expect(toolPaused.pendingApproval?.policyPauseTier).toBe('tool');
+    });
+
     for (const status of ['needs_approval', 'needs_input'] as const) {
       it(`lets a tool policy deny a registry ${status} decision`, async () => {
         let toolPolicyCalls = 0;
