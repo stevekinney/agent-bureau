@@ -47,6 +47,7 @@ import {
   type ApprovalResumeState,
   approvalResumeSymbol,
   policyPauseDecisionsSymbol,
+  policyPauseTierSymbol,
 } from './internal/approval-resume';
 import type {
   DefaultToolEvents,
@@ -804,6 +805,7 @@ export function createTool<
         const resumedArgumentsMatchApproval = proposedArgumentsDigest === parsedArgumentsDigest;
         resumedApprovalIsSatisfied =
           approvalResume !== undefined &&
+          approvalResume.approvedPolicyPauseTier === decision[policyPauseTierSymbol] &&
           approvalResume.approvedAction.type === type &&
           resumedArgumentsMatchApproval &&
           approvalResume.reason === reason &&
@@ -837,6 +839,9 @@ export function createTool<
               action,
               reason,
               metadata: normalizeToolContent(configuration.metadata ?? {}),
+              ...(decision[policyPauseTierSymbol] !== undefined
+                ? { policyPauseTier: decision[policyPauseTierSymbol] }
+                : {}),
               ...(approvalResume !== undefined && !executedArgumentsEdited
                 ? { satisfiedPolicyPauses: approvalResume.satisfiedPauses }
                 : {}),
@@ -1683,12 +1688,13 @@ function createToolAction(
 
 function policyPauseMatchesSatisfiedPause(
   decision: ToolPolicyDecision,
-  satisfiedPause: { action: ToolAction; reason?: string },
+  satisfiedPause: { action: ToolAction; reason?: string; tier?: string },
 ): boolean {
   const type = decision.status === 'needs_input' ? 'input' : 'approval';
   const reason = decision.reason ?? `Tool execution requires ${type}`;
   const action = createToolAction(type, decision, reason);
   return (
+    satisfiedPause.tier === decision[policyPauseTierSymbol] &&
     satisfiedPause.reason === reason &&
     stableStringifyJson(normalizeToolContent(satisfiedPause.action)) ===
       stableStringifyJson(normalizeToolContent(action))

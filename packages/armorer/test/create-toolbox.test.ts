@@ -339,6 +339,7 @@ describe('createToolbox', () => {
       },
       reason: 'Operator approval required',
       metadata: { mutates: true },
+      policyPauseTier: 'registry',
     });
     expect(Object.hasOwn(paused.pendingApproval!.action, 'schema')).toBe(false);
     expect(JSON.parse(JSON.stringify(paused.pendingApproval))).toEqual(paused.pendingApproval);
@@ -3777,6 +3778,7 @@ describe('createToolbox', () => {
         type: 'approval',
         message: 'Approve registry policy',
       });
+      expect(registryPaused.pendingApproval?.policyPauseTier).toBe('registry');
       expect(toolPaused.outcome).toBe('action_required');
       expect(toolPaused.action).toMatchObject({
         type: 'input',
@@ -3786,6 +3788,7 @@ describe('createToolbox', () => {
         {
           action: { type: 'approval', message: 'Approve registry policy' },
           reason: 'Registry needs approval',
+          tier: 'registry',
         },
       ]);
       expect(() =>
@@ -3797,6 +3800,67 @@ describe('createToolbox', () => {
       expect(resumed.outcome).toBe('success');
       expect(resumed.result).toBe('completed');
       expect(executed).toBe(true);
+    });
+
+    it('does not let a disappeared registry pause satisfy an identical tool pause', async () => {
+      let registryChecks = 0;
+      let executed = false;
+      const toolbox = createToolbox(
+        [
+          createTool({
+            name: 'tier-bound-pause',
+            description: 'requires a tool-level approval',
+            input: z.object({}),
+            policy: {
+              beforeExecute: () => ({
+                status: 'needs_approval',
+                reason: 'Approval required',
+                action: { message: 'Approve operation' },
+              }),
+            },
+            async execute() {
+              executed = true;
+              return 'completed';
+            },
+          }),
+        ],
+        {
+          approvalSecret: 'tier-bound-pause-secret',
+          policy: {
+            beforeExecute: () => {
+              registryChecks += 1;
+              return registryChecks === 1
+                ? {
+                    status: 'needs_approval',
+                    reason: 'Approval required',
+                    action: { message: 'Approve operation' },
+                  }
+                : { allow: true };
+            },
+          },
+        },
+      );
+
+      const registryPaused = await toolbox.execute({
+        id: 'call-tier-bound-pause',
+        name: 'tier-bound-pause',
+        arguments: {},
+      });
+      const toolPaused = await toolbox.resumeApproval(
+        registryPaused.pendingApproval! as SignedPendingToolApproval,
+      );
+
+      expect(registryPaused.pendingApproval?.policyPauseTier).toBe('registry');
+      expect(toolPaused.outcome).toBe('action_required');
+      expect(toolPaused.pendingApproval?.policyPauseTier).toBe('tool');
+      expect(toolPaused.pendingApproval?.satisfiedPolicyPauses).toEqual([
+        {
+          action: { type: 'approval', message: 'Approve operation' },
+          reason: 'Approval required',
+          tier: 'registry',
+        },
+      ]);
+      expect(executed).toBe(false);
     });
 
     for (const status of ['needs_approval', 'needs_input'] as const) {

@@ -6,8 +6,8 @@ import type { ToolErrorCategory } from './core/errors';
 import type { JsonObject } from './core/serialization/json';
 import type { ToolAvailabilityHook, ToolDefinition } from './core/tool-definition';
 import type { ToolEventMap } from './events';
-import { policyPauseDecisionsSymbol } from './internal/approval-resume';
-import type { ToolCall, ToolExecutionResult } from './types';
+import { policyPauseDecisionsSymbol, policyPauseTierSymbol } from './internal/approval-resume';
+import type { PolicyPauseTier, ToolCall, ToolExecutionResult } from './types';
 
 export type ToolParametersSchema = z.ZodTypeAny;
 /** @deprecated Use standard AddEventListenerOptions instead. */
@@ -98,6 +98,7 @@ export type ToolMetadata = JsonObject & {
 
 export type ToolPolicyDecision = {
   [policyPauseDecisionsSymbol]?: readonly ToolPolicyDecision[];
+  [policyPauseTierSymbol]?: PolicyPauseTier;
   /**
    * Whether the call may proceed. Optional: when omitted, it is derived from
    * `status` (`'allow'` or no status → `true`; `'deny'`, `'needs_approval'`,
