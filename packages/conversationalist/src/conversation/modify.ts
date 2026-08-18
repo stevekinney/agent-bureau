@@ -94,12 +94,13 @@ const createUpdatedMessage = (
       { messageId: message.id },
     );
   }
-  if (updates.toolResult && processedInput.toolResult?.callId !== updates.toolResult.callId) {
+  const expectedToolResultCallId = updates.toolResult?.callId ?? message.toolResult?.callId;
+  if (expectedToolResultCallId && processedInput.toolResult?.callId !== expectedToolResultCallId) {
     throw createInvalidInputError(
-      `Processed toolResult.callId (${processedInput.toolResult?.callId ?? 'missing'}) does not match the replacement callId (${updates.toolResult.callId})`,
+      `Processed toolResult.callId (${processedInput.toolResult?.callId ?? 'missing'}) does not match the preserved callId (${expectedToolResultCallId})`,
       {
         messageId: message.id,
-        replacementCallId: updates.toolResult.callId,
+        expectedCallId: expectedToolResultCallId,
         processedCallId: processedInput.toolResult?.callId,
       },
     );

@@ -567,4 +567,50 @@ describe('immutable transcript mutations', () => {
     expect(history).toEqual(originalSnapshot);
     expectValid(history);
   });
+
+  it('rejects a plugin that retargets an existing result during a general update', () => {
+    const retargetEditedResult: MessagePlugin = (input) => ({
+      ...input,
+      toolResult:
+        input.content === 'Edited' && input.toolResult
+          ? { ...input.toolResult, callId: 'call-2' }
+          : input.toolResult,
+    });
+    let history = createConversationHistory({}, environment);
+    history = appendMessages(
+      history,
+      {
+        role: 'tool-call',
+        content: '',
+        toolCall: { id: 'call-1', name: 'lookup', arguments: {} },
+      },
+      {
+        role: 'tool-call',
+        content: '',
+        toolCall: { id: 'call-2', name: 'lookup', arguments: {} },
+      },
+      {
+        role: 'tool-result',
+        content: '',
+        toolResult: { callId: 'call-1', outcome: 'action_required', content: null },
+      },
+      environment,
+    );
+    const resultMessageId = history.ids[2]!;
+    const originalSnapshot = structuredClone(history);
+
+    expect(() =>
+      updateMessage(
+        history,
+        resultMessageId,
+        { content: 'Edited' },
+        {
+          ...environment,
+          plugins: [retargetEditedResult],
+        },
+      ),
+    ).toThrow(ConversationalistError);
+    expect(history).toEqual(originalSnapshot);
+    expectValid(history);
+  });
 });
