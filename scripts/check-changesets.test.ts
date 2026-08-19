@@ -5,28 +5,29 @@ import { findChangesetTargetErrors } from './check-changesets';
 const workspacePackages = new Map([
   ['armorer', { private: false }],
   ['conversationalist', { private: false }],
-  ['operative', { private: true }],
+  ['@lostgradient/operative', { private: false }],
+  ['gateway', { private: true }],
 ]);
 
 const policy = {
-  ignoredPackageNames: new Set(['operative']),
+  ignoredPackageNames: new Set(['gateway']),
   workspacePackages,
 };
 
 describe('findChangesetTargetErrors', () => {
-  test('rejects the private ignored changeset that caused the main release failure', () => {
+  test('rejects a changeset targeting an ignored, private package', () => {
     const errors = findChangesetTargetErrors(
       [
         {
           id: 'phase-f-durable-multi-agent',
-          releases: [{ name: 'operative', type: 'minor' }],
+          releases: [{ name: 'gateway', type: 'minor' }],
         },
       ],
       policy,
     );
 
     expect(errors).toEqual([
-      'phase-f-durable-multi-agent targets "operative", which is ignored and private',
+      'phase-f-durable-multi-agent targets "gateway", which is ignored and private',
     ]);
   });
 
@@ -37,14 +38,14 @@ describe('findChangesetTargetErrors', () => {
           id: 'mixed-release',
           releases: [
             { name: 'armorer', type: 'patch' },
-            { name: 'operative', type: 'minor' },
+            { name: 'gateway', type: 'minor' },
           ],
         },
       ],
       policy,
     );
 
-    expect(errors).toEqual(['mixed-release targets "operative", which is ignored and private']);
+    expect(errors).toEqual(['mixed-release targets "gateway", which is ignored and private']);
   });
 
   test('accepts changesets for publishable packages', () => {
@@ -53,6 +54,20 @@ describe('findChangesetTargetErrors', () => {
         {
           id: 'publish-armorer',
           releases: [{ name: 'armorer', type: 'patch' }],
+        },
+      ],
+      policy,
+    );
+
+    expect(errors).toEqual([]);
+  });
+
+  test('accepts changesets targeting the newly wired operative package', () => {
+    const errors = findChangesetTargetErrors(
+      [
+        {
+          id: 'publish-operative',
+          releases: [{ name: '@lostgradient/operative', type: 'minor' }],
         },
       ],
       policy,

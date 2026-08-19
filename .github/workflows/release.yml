@@ -60,7 +60,7 @@ jobs:
         run: bun run check-changesets
 
       - name: Build publishable packages
-        run: bun run turbo run build --filter=armorer --filter=conversationalist
+        run: bun run turbo run build --filter=armorer --filter=conversationalist --filter=@lostgradient/operative
 
       - name: Create Version Packages PR or publish
         uses: changesets/action@v1

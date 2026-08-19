@@ -1,13 +1,15 @@
 # Changesets
 
 This folder is managed by [Changesets](https://github.com/changesets/changesets). It drives
-releases for the two published packages — **`armorer`** and **`conversationalist`**. Every other
-workspace package is listed under `ignore` in `config.json` and is never versioned or published.
+releases for the published packages — **`armorer`**, **`conversationalist`**, and
+**`@lostgradient/operative`** (the full list is `RELEASE_INVENTORY` in `scripts/release.ts`). Every
+other workspace package is listed under `ignore` in `config.json` and is never versioned or
+published.
 
 ## Add a changeset
 
-When a pull request changes `armorer` or `conversationalist` in a way that should ship, add a
-changeset:
+When a pull request changes `armorer`, `conversationalist`, or `operative` in a way that should
+ship, add a changeset:
 
 ```bash
 bun run changeset
@@ -18,7 +20,7 @@ generated markdown file is committed with your PR.
 
 > A change to an inlined foundation package (`lifecycle`, `interoperability`, `storage`) that
 > alters a published package's output is captured by a changeset on the **product** (`armorer` /
-> `conversationalist`) — not on the foundation package, which is never published.
+> `conversationalist` / `operative`) — not on the foundation package, which is never published.
 
 ## What happens next
 
