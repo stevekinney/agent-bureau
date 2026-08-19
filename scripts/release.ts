@@ -28,7 +28,18 @@ import { resolve } from 'node:path';
 
 import { $ } from 'bun';
 
-const PUBLISHABLE_PACKAGES = ['armorer', 'conversationalist'] as const;
+export type ReleaseTarget = {
+  /** The package's directory under `packages/`, e.g. `operative`. */
+  directory: string;
+  /** The name the package publishes under on npm, e.g. `@lostgradient/operative`. */
+  packageName: string;
+};
+
+export const RELEASE_INVENTORY: readonly ReleaseTarget[] = [
+  { directory: 'armorer', packageName: 'armorer' },
+  { directory: 'conversationalist', packageName: 'conversationalist' },
+  { directory: 'operative', packageName: '@lostgradient/operative' },
+];
 
 const MINIMUM_NPM_VERSION = [11, 5, 1] as const;
 
@@ -87,8 +98,9 @@ async function readLocalVersion(packageDirectory: string): Promise<string> {
   return manifest.version;
 }
 
-async function publishPackage(packageName: string): Promise<PublishOutcome> {
-  const packageDirectory = resolve(repositoryRoot, 'packages', packageName);
+async function publishPackage(target: ReleaseTarget): Promise<PublishOutcome> {
+  const { directory, packageName } = target;
+  const packageDirectory = resolve(repositoryRoot, 'packages', directory);
   const localVersion = await readLocalVersion(packageDirectory);
   const published = await publishedVersions(packageName);
 
@@ -99,7 +111,7 @@ async function publishPackage(packageName: string): Promise<PublishOutcome> {
 
   console.log(`• ${packageName}@${localVersion}: validating package shape…`);
   const gate =
-    await $`bun run ${resolve(repositoryRoot, 'scripts/check-package-shape.ts')} ${packageName}`
+    await $`bun run ${resolve(repositoryRoot, 'scripts/check-package-shape.ts')} ${directory}`
       .cwd(repositoryRoot)
       .nothrow();
   if (gate.exitCode !== 0) {
@@ -120,56 +132,64 @@ async function publishPackage(packageName: string): Promise<PublishOutcome> {
   return 'published';
 }
 
-// Publishing is opt-in. Until the npm trusted publishers are registered and you're ready to ship,
-// leave `RELEASE_ENABLED` unset so a merge to main lands the pipeline without attempting to publish
-// (which would otherwise fail auth and turn the run red). Set the `RELEASE_ENABLED` repository
-// variable to `true` in the release workflow's env to arm publishing.
-if (process.env['RELEASE_ENABLED'] !== 'true') {
-  console.log(
-    'Publishing is disabled (RELEASE_ENABLED is not "true"). ' +
-      'Set the RELEASE_ENABLED repository variable once the npm trusted publishers are configured. ' +
-      'Skipping publish.',
-  );
-  process.exit(0);
-}
-
-await assertNpmVersion();
-
-const outcomes: Array<{ package: string; outcome: PublishOutcome }> = [];
-let aborted = false;
-
-for (const packageName of PUBLISHABLE_PACKAGES) {
-  const outcome = await publishPackage(packageName);
-  outcomes.push({ package: packageName, outcome });
-  if (outcome === 'failed') {
-    aborted = true;
-    break;
+async function main(): Promise<void> {
+  // Publishing is opt-in. Until the npm trusted publishers are registered and you're ready to ship,
+  // leave `RELEASE_ENABLED` unset so a merge to main lands the pipeline without attempting to publish
+  // (which would otherwise fail auth and turn the run red). Set the `RELEASE_ENABLED` repository
+  // variable to `true` in the release workflow's env to arm publishing.
+  if (process.env['RELEASE_ENABLED'] !== 'true') {
+    console.log(
+      'Publishing is disabled (RELEASE_ENABLED is not "true"). ' +
+        'Set the RELEASE_ENABLED repository variable once the npm trusted publishers are configured. ' +
+        'Skipping publish.',
+    );
+    process.exit(0);
   }
+
+  await assertNpmVersion();
+
+  const outcomes: Array<{ package: string; outcome: PublishOutcome }> = [];
+  let aborted = false;
+
+  for (const target of RELEASE_INVENTORY) {
+    const outcome = await publishPackage(target);
+    outcomes.push({ package: target.packageName, outcome });
+    if (outcome === 'failed') {
+      aborted = true;
+      break;
+    }
+  }
+
+  const published = outcomes
+    .filter((entry) => entry.outcome === 'published')
+    .map((entry) => entry.package);
+  const skipped = outcomes
+    .filter((entry) => entry.outcome === 'skipped')
+    .map((entry) => entry.package);
+  const failed = outcomes
+    .filter((entry) => entry.outcome === 'failed')
+    .map((entry) => entry.package);
+
+  console.log('\nRelease summary:');
+  console.log(`  published: ${published.length ? published.join(', ') : '(none)'}`);
+  console.log(`  skipped:   ${skipped.length ? skipped.join(', ') : '(none)'}`);
+  if (failed.length) console.log(`  failed:    ${failed.join(', ')}`);
+
+  if (aborted) {
+    const notAttempted = RELEASE_INVENTORY.filter(
+      (target) => !outcomes.some((entry) => entry.package === target.packageName),
+    ).map((target) => target.packageName);
+    if (notAttempted.length) console.error(`  not attempted: ${notAttempted.join(', ')}`);
+    console.error(
+      '\n✖ Release aborted on failure. Already-published packages are left as-is (no unpublish). ' +
+        'Fix forward and re-run — published versions are skipped automatically.',
+    );
+    process.exit(1);
+  }
+
+  console.log('\n✓ Release complete.');
 }
 
-const published = outcomes
-  .filter((entry) => entry.outcome === 'published')
-  .map((entry) => entry.package);
-const skipped = outcomes
-  .filter((entry) => entry.outcome === 'skipped')
-  .map((entry) => entry.package);
-const failed = outcomes.filter((entry) => entry.outcome === 'failed').map((entry) => entry.package);
-
-console.log('\nRelease summary:');
-console.log(`  published: ${published.length ? published.join(', ') : '(none)'}`);
-console.log(`  skipped:   ${skipped.length ? skipped.join(', ') : '(none)'}`);
-if (failed.length) console.log(`  failed:    ${failed.join(', ')}`);
-
-if (aborted) {
-  const notAttempted = PUBLISHABLE_PACKAGES.filter(
-    (name) => !outcomes.some((entry) => entry.package === name),
-  );
-  if (notAttempted.length) console.error(`  not attempted: ${notAttempted.join(', ')}`);
-  console.error(
-    '\n✖ Release aborted on failure. Already-published packages are left as-is (no unpublish). ' +
-      'Fix forward and re-run — published versions are skipped automatically.',
-  );
-  process.exit(1);
+if (import.meta.main) {
+  await main();
 }
-
-console.log('\n✓ Release complete.');
