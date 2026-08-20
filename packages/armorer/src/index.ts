@@ -221,7 +221,3 @@ export type {
   ToolResultInput,
   ToolResultLike,
 } from './types';
-
-export function __deliberatelyUncoveredForGateVerification(): string {
-  return 'never called';
-}
