@@ -1,13 +1,15 @@
 name: CI
 
 # Pull-request checks. release.yml only runs on push to main, so this is where per-PR validation
-# happens: full build/lint/types/tests plus the publishable-package shape gate (the regression guard
-# that fails if a publishable package ever ships a foundation-package leak or undeclared external).
+# happens: full build/lint/types/tests, the 100% coverage gate on the packages listed in the root
+# coverage:check filter, plus the publishable-package shape gate (the regression guard that fails if
+# a publishable package ever ships a foundation-package leak or undeclared external).
 
 on:
   pull_request:
     branches:
       - main
+  merge_group:
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -43,6 +45,9 @@ jobs:
 
       - name: Validate (format, lint, types, test)
         run: bun run validate
+
+      - name: Coverage gate (100% on gated packages)
+        run: bun run coverage:check
 
       - name: Build publishable packages
         run: bun run turbo run build --filter=armorer --filter=conversationalist --filter=@lostgradient/operative

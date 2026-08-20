@@ -3956,6 +3956,60 @@ describe('createToolbox', () => {
       expect(resumed.result).toBe('completed');
     });
 
+    it('does not resume a legacy tierless approval when its descriptor now matches more than one pending pause', async () => {
+      const approvalSecret = 'ambiguous-tierless-pause-secret';
+      const ambiguousDecision = {
+        status: 'needs_approval' as const,
+        reason: 'Ambiguous approval required',
+        action: { message: 'Approve ambiguous action' },
+      };
+      const toolbox = createToolbox(
+        [
+          createTool({
+            name: 'ambiguous-tierless-pause',
+            description: 'requires approval from two tiers with an identical descriptor',
+            input: z.object({}),
+            policy: {
+              beforeExecute: () => ambiguousDecision,
+            },
+            async execute() {
+              return 'completed';
+            },
+          }),
+        ],
+        {
+          approvalSecret,
+          policy: {
+            beforeExecute: () => ambiguousDecision,
+          },
+        },
+      );
+
+      const registryPaused = await toolbox.execute({
+        id: 'call-ambiguous-tierless-pause',
+        name: 'ambiguous-tierless-pause',
+        arguments: {},
+      });
+      expect(registryPaused.pendingApproval?.policyPauseTier).toBe('registry');
+
+      const {
+        approvalToken: _approvalToken,
+        policyPauseTier: _tier,
+        ...legacyApproval
+      } = registryPaused.pendingApproval!;
+      const legacyApprovalToken = hmacSha256HexSync(
+        approvalSecret,
+        stableStringifyJson(JSON.parse(JSON.stringify(legacyApproval))),
+      );
+      const resumed = await toolbox.resumeApproval({
+        ...legacyApproval,
+        approvalToken: legacyApprovalToken,
+      } as SignedPendingToolApproval);
+
+      expect(resumed.outcome).toBe('action_required');
+      expect(resumed.pendingApproval?.policyPauseTier).toBe('registry');
+    });
+
     for (const status of ['needs_approval', 'needs_input'] as const) {
       it(`lets a tool policy deny a registry ${status} decision`, async () => {
         let toolPolicyCalls = 0;
