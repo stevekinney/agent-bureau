@@ -107,7 +107,7 @@ load-bearing behavior (it is threaded into the abort event and the eventual
 error), and nothing in this contract removes it.
 
 ```ts
-export interface RunResult<O = never, H extends boolean = false> {
+interface RunResultBase {
   conversation: Conversation;
   steps: readonly StepResult[];
   content: string;
@@ -116,15 +116,26 @@ export interface RunResult<O = never, H extends boolean = false> {
   finishReason: FinishReason;
   error?: unknown;
   schemaValidation?: { success: boolean; error?: unknown };
-  /**
-   * The schema-validated success value. Present only when `H` is `true` AND
-   * `schemaValidation.success` is `true`. This is the ONE public name for a
-   * run's validated output — `structuredOutput` is never exposed anywhere in
-   * this API (today's operative `RunResult.structuredOutput` is renamed as
-   * part of this contract, tracked by `AB-17`).
-   */
-  output?: [H] extends [true] ? O : never;
 }
+
+/**
+ * The schema-validated success value lives on `output`, present only when
+ * `H` is `true` AND `schemaValidation.success` is `true` — this is the ONE
+ * public name for a run's validated output; `structuredOutput` is never
+ * exposed anywhere in this API (today's operative `RunResult.structuredOutput`
+ * is renamed as part of this contract, tracked by `AB-17`).
+ *
+ * This is a conditional INTERSECTION, not `output?: […] ? O : never` on a
+ * single interface. TypeScript resolves an optional property typed `never`
+ * to `undefined`, not to "the property does not exist" — so a single-interface
+ * version would let `result().output` be accessed (as `undefined`) even when
+ * `H` is `false`, which is not the intended contract. The intersection form
+ * below only ADDS the `output` key in the `H = true` branch — accessing
+ * `.output` when `H` is `false` (or the un-narrowed `boolean`) is a compile
+ * error, not a value typed `undefined`.
+ */
+export type RunResult<O = never, H extends boolean = false> = RunResultBase &
+  ([H] extends [true] ? { output?: O } : {});
 ```
 
 `run.output()` (present only when `H` is `true`) is the typed convenience path:
@@ -587,8 +598,9 @@ const run = bureau.run('plugin', 'do the thing');
 
 // `H = boolean` (not the literal `true`) resolves `OutputMethod<unknown, boolean>`
 // to `{}` — `run.output()` does not exist on this handle, a compile error, not
-// a runtime one. `result().output` is typed `never` for the same reason: no
-// schema is provably present, so no output value is fabricated as `unknown`.
+// a runtime one. `result().output` doesn't exist either (RunResult's `output`
+// key is only added by the `H = true` branch of its conditional intersection)
+// — accessing it is a compile error, not a value fabricated as `unknown`.
 const text = await run.unwrap(); // string — UnwrappedValue<unknown, boolean> is `string`
 ```
 
