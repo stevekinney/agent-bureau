@@ -1,3 +1,4 @@
+import type { WorkflowState } from '@lostgradient/weft';
 import type { ConversationHistory } from 'conversationalist';
 import { Conversation, createConversationHistory } from 'conversationalist';
 import { CompletableEventTarget, TypedEventTarget } from 'lifecycle';
@@ -11,6 +12,7 @@ import { createActiveRun } from '../create-run';
 import { reattachDurableActiveRun } from '../durable/active-run-adapter';
 import type { CheckpointStore } from '../durable/checkpoint-store';
 import type { AnyRunEngine } from '../durable/create-run-engine';
+import type { AgentRunWorkflowResult } from '../durable/run-workflow';
 import type { CombinedOperativeEventMap, OperativeEventMap } from '../events';
 import {
   SessionCancelEvent,
@@ -390,6 +392,133 @@ function finishReasonToStatus(finishReason: string): RunRef['status'] {
     return 'error';
   }
   return 'completed';
+}
+
+/**
+ * Map a genuine Weft-level terminal `WorkflowStatus` — one reached WITHOUT the
+ * `agentRun` workflow ever returning an {@link AgentRunWorkflowResult} (a real
+ * engine failure, an operator/adapter cancellation, or a circuit-breaker /
+ * deadline timeout) — to the matching `RunRef` status. `run-workflow.ts`
+ * always RETURNS normally, even for an operative-level failure (it encodes
+ * that in `finishReason`, see `finishReasonToStatus`), so this only fires for
+ * a failure the workflow itself could not have produced.
+ */
+function engineStatusToRunRefStatus(
+  status: 'failed' | 'cancelled' | 'timed-out',
+): RunRef['status'] {
+  return status === 'cancelled' ? 'aborted' : 'error';
+}
+
+/**
+ * Load a terminal run's conversation history straight from its checkpoint,
+ * without resuming it. Returns `undefined` when no transcript was ever
+ * checkpointed (e.g. the run failed before its first step) or the checkpoint
+ * read fails — mirroring the "tolerate a missing conversation" behavior of
+ * the settle path in `recover()`'s success branch.
+ */
+async function loadTerminalConversationHistory(
+  checkpointStore: CheckpointStore,
+  runId: string,
+): Promise<ConversationHistory | undefined> {
+  try {
+    const checkpoint = await checkpointStore.loadCheckpoint(runId);
+    if (checkpoint.conversation === null) return undefined;
+    return Conversation.from(checkpoint.conversation).current;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Read a terminal run's outcome (status + conversation) directly from the
+ * engine/checkpoint store, WITHOUT resuming it (AB-28). Used when
+ * `engine.resume(runId)` rejects: that rejection means either the workflow is
+ * already terminal, or the engine has no record of it at all — `engine.get()`
+ * distinguishes the two (it never throws for a terminal run, and returns
+ * `null` for an unknown one), so only a genuinely terminal run is reconciled.
+ *
+ * Returns `null` when the engine has no record of this workflow (an unknown
+ * runId must NOT be marked terminal) or when `engine.get()` reports it as
+ * still non-terminal (`resume()` should have succeeded in that case — leave
+ * the RunRef alone rather than guessing at a status).
+ */
+async function readTerminalRunOutcome(
+  engine: AnyRunEngine,
+  checkpointStore: CheckpointStore,
+  runId: string,
+): Promise<{ status: RunRef['status']; conversation?: ConversationHistory } | null> {
+  let state: WorkflowState | null;
+  try {
+    state = await engine.get(runId);
+  } catch {
+    return null;
+  }
+  if (!state) return null;
+  if (state.status === 'pending' || state.status === 'running' || state.status === 'suspended') {
+    return null;
+  }
+
+  const conversation = await loadTerminalConversationHistory(checkpointStore, runId);
+
+  if (state.status !== 'completed') {
+    return { status: engineStatusToRunRefStatus(state.status), conversation };
+  }
+
+  // The workflow's own declared return type — the same trusted-internal-
+  // contract cast `active-run-adapter.ts` makes after `handle.result()`.
+  const summary = state.result as AgentRunWorkflowResult;
+  return { status: finishReasonToStatus(summary.finishReason), conversation };
+}
+
+/**
+ * Reconcile a stranded 'running' `RunRef` whose durable workflow already
+ * reached a terminal state before `recover()` could resume it (AB-28) —
+ * closing the gap the terminal-status write below (`recover()`'s success
+ * branch) does not cover, and the gap left by a store failure in that same
+ * write. Mirrors that write's conflict-aware `store.update` + conversation-
+ * history reconciliation exactly, so a stranded session converges the same
+ * way a live recovered run does.
+ *
+ * Idempotent: re-checks the ref's status inside the updater, so a session
+ * already reconciled by a prior `recover()` call (or a concurrent one) is
+ * left untouched rather than reprocessed.
+ */
+async function reconcileTerminalRunRef(
+  store: SessionStore,
+  engine: AnyRunEngine,
+  checkpointStore: CheckpointStore,
+  sessionId: string,
+  runningRef: RunRef,
+): Promise<void> {
+  const outcome = await readTerminalRunOutcome(engine, checkpointStore, runningRef.runId);
+  if (!outcome) return;
+
+  try {
+    await store.update(sessionId, (freshSession) => {
+      if (!freshSession) return undefined;
+      const current = freshSession.runs.find((r) => r.runId === runningRef.runId);
+      if (!current || current.status !== 'running') return undefined;
+      const terminalRef: RunRef = { ...current, status: outcome.status };
+      return {
+        ...freshSession,
+        ...(outcome.conversation !== undefined
+          ? {
+              conversationHistory: appendConversationMessages(
+                freshSession.conversationHistory,
+                outcome.conversation,
+                outcome.conversation,
+              ),
+            }
+          : {}),
+        runs: freshSession.runs.map((r) => (r.runId === runningRef.runId ? terminalRef : r)),
+      };
+    });
+  } catch {
+    // Store failure is non-fatal: the caller already returns null for this
+    // terminal run either way; a stale 'running' ref is tolerable vs.
+    // crashing the handle (mirrors the settle path in recover()'s success
+    // branch).
+  }
 }
 
 /**
@@ -778,7 +907,12 @@ export function createSessionHandle(
             return agentRun;
           } catch {
             // engine.resume() throws when the run is already terminal or the
-            // engine doesn't have it. Try older running refs before giving up.
+            // engine doesn't have it. Reconcile the persisted RunRef in the
+            // former case (AB-28) — otherwise it is stranded at 'running'
+            // forever, and every later recover()/signal()/update() targets a
+            // workflow that is already dead. reconcileTerminalRunRef() is a
+            // no-op for an unknown runId. Try older running refs either way.
+            await reconcileTerminalRunRef(store, engine, checkpointStore, sessionId, runningRef);
           }
         }
       }

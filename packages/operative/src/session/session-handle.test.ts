@@ -2269,6 +2269,19 @@ describe('D2 — Recovery-on-boot: session.recover() durable re-attach path', ()
       const result = await reattached!.result();
       // finishReason proves the run completed (not errored, not aborted).
       expect(result.finishReason).toBe('stop-condition');
+
+      // AB-28 acceptance: unchanged existing behavior for a run still in
+      // flight at recover() time — the RunRef transitions to 'completed' on
+      // settle (via the success branch's fire-and-forget write, so poll for
+      // it rather than reading the store synchronously).
+      let persistedStatus: string | undefined;
+      for (let attempt = 0; attempt < 5; attempt++) {
+        const persisted = await secondStore.load(sessionId);
+        persistedStatus = persisted?.runs.find((r) => r.runId === runId)?.status;
+        if (persistedStatus === 'completed') break;
+        await yieldToPortableEventLoop();
+      }
+      expect(persistedStatus).toBe('completed');
     } finally {
       engine2[Symbol.dispose]();
     }
@@ -2398,8 +2411,424 @@ describe('D2 — Recovery-on-boot: session.recover() durable re-attach path', ()
       // recover() must return null rather than propagating the error.
       const reattached = await h.recover();
       expect(reattached).toBeNull();
+
+      // AB-28: an unknown runId must NOT be reconciled to a terminal status —
+      // engine.get() also returns null for it, so the RunRef is left exactly
+      // as it was.
+      const persisted = await store.load(sessionId);
+      expect(persisted?.runs[0]?.status).toBe('running');
     } finally {
       engine[Symbol.dispose]();
+    }
+  });
+});
+
+// AB-28 — reconcile the RunRef when a recovered run is already terminal
+//
+// Weft's recoverAll() resumes an in-flight workflow on boot. If that recovered
+// run settles BEFORE the host calls session.recover(), engine.resume(runId)
+// rejects because the workflow is already terminal. Without reconciliation the
+// persisted RunRef stays stranded at 'running' forever. These tests drive that
+// rejection with a fake engine (mirroring the "tries older running refs" fake
+// above) so the terminal state can be asserted precisely, independent of
+// Weft's own timing.
+// ---------------------------------------------------------------------------
+
+describe('AB-28: recover() reconciles a RunRef whose recovered run is already terminal', () => {
+  function alreadyTerminalError(runId: string, status: string): Error {
+    return new Error(
+      `Cannot resume workflow "${runId}": status is "${status}", expected "running" or "suspended"`,
+    );
+  }
+
+  async function seedRunningSession(sessionId: string, runId: string): Promise<SessionStore> {
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+    const session = createAgentSession({
+      agentName: 'agent',
+      conversationHistory: createConversationHistory(),
+      id: sessionId,
+      runs: [
+        {
+          runId,
+          sequence: 0,
+          status: 'running',
+          startedAt: new Date().toISOString(),
+          agentName: '',
+        },
+      ],
+    });
+    await store.save(session);
+    return store;
+  }
+
+  it('reconciles a completed recovered run to "completed" and applies its conversation history', async () => {
+    const sessionId = 'ab-28-completed-session';
+    const runId = `${sessionId}:0`;
+    const store = await seedRunningSession(sessionId, runId);
+
+    const recoveredConversation = new Conversation(createConversationHistory());
+    recoveredConversation.appendUserMessage('hi');
+    recoveredConversation.appendAssistantMessage('hello');
+
+    const fakeEngine = {
+      resume: async () => {
+        throw alreadyTerminalError(runId, 'completed');
+      },
+      get: async (id: string) => ({
+        id,
+        status: 'completed',
+        result: { runId: id, steps: 1, content: 'hello', finishReason: 'stop-condition' },
+      }),
+    } as unknown as AnyRunEngine;
+    const fakeCheckpointStore = {
+      loadCheckpoint: async (_id: string) => ({
+        conversation: recoveredConversation.snapshot(),
+        cursor: { totalUsage: {}, lastContent: 'hello', schemaAttempts: 0 },
+        steps: [],
+      }),
+    } as unknown as import('../durable/checkpoint-store').CheckpointStore;
+
+    const h = createSessionHandle(sessionId, {
+      store,
+      agentName: 'agent',
+      engine: fakeEngine,
+      checkpointStore: fakeCheckpointStore,
+      runOptions: createTestRunOptions(),
+    });
+
+    // Reconciliation is a side effect — recover() still returns null for a
+    // terminal run; it does not resurrect it into a live AgentRun.
+    expect(await h.recover()).toBeNull();
+
+    const persisted = await store.load(sessionId);
+    expect(persisted?.runs.find((r) => r.runId === runId)?.status).toBe('completed');
+    const contents = Object.values(persisted?.conversationHistory.messages ?? {}).map(
+      (m) => m.content,
+    );
+    expect(contents).toContain('hi');
+    expect(contents).toContain('hello');
+  });
+
+  it('reconciles a recovered run whose finishReason was "error" to "error", not "completed"', async () => {
+    const sessionId = 'ab-28-error-session';
+    const runId = `${sessionId}:0`;
+    const store = await seedRunningSession(sessionId, runId);
+
+    const fakeEngine = {
+      resume: async () => {
+        throw alreadyTerminalError(runId, 'completed');
+      },
+      get: async (id: string) => ({
+        id,
+        status: 'completed',
+        result: { runId: id, steps: 1, content: '', finishReason: 'error', errorMessage: 'boom' },
+      }),
+    } as unknown as AnyRunEngine;
+    const fakeCheckpointStore = {
+      loadCheckpoint: async (_id: string) => ({
+        conversation: null,
+        cursor: { totalUsage: {}, lastContent: '', schemaAttempts: 0 },
+        steps: [],
+      }),
+    } as unknown as import('../durable/checkpoint-store').CheckpointStore;
+
+    const h = createSessionHandle(sessionId, {
+      store,
+      agentName: 'agent',
+      engine: fakeEngine,
+      checkpointStore: fakeCheckpointStore,
+      runOptions: createTestRunOptions(),
+    });
+
+    expect(await h.recover()).toBeNull();
+
+    const persisted = await store.load(sessionId);
+    expect(persisted?.runs.find((r) => r.runId === runId)?.status).toBe('error');
+  });
+
+  it('reconciles a genuinely cancelled Weft-level workflow to "aborted"', async () => {
+    const sessionId = 'ab-28-cancelled-session';
+    const runId = `${sessionId}:0`;
+    const store = await seedRunningSession(sessionId, runId);
+
+    const fakeEngine = {
+      resume: async () => {
+        throw alreadyTerminalError(runId, 'cancelled');
+      },
+      get: async (id: string) => ({ id, status: 'cancelled' }),
+    } as unknown as AnyRunEngine;
+    const fakeCheckpointStore = {
+      loadCheckpoint: async (_id: string) => ({
+        conversation: null,
+        cursor: { totalUsage: {}, lastContent: '', schemaAttempts: 0 },
+        steps: [],
+      }),
+    } as unknown as import('../durable/checkpoint-store').CheckpointStore;
+
+    const h = createSessionHandle(sessionId, {
+      store,
+      agentName: 'agent',
+      engine: fakeEngine,
+      checkpointStore: fakeCheckpointStore,
+      runOptions: createTestRunOptions(),
+    });
+
+    expect(await h.recover()).toBeNull();
+
+    const persisted = await store.load(sessionId);
+    expect(persisted?.runs.find((r) => r.runId === runId)?.status).toBe('aborted');
+  });
+
+  it('reconciles a genuinely failed Weft-level workflow to "error"', async () => {
+    const sessionId = 'ab-28-failed-session';
+    const runId = `${sessionId}:0`;
+    const store = await seedRunningSession(sessionId, runId);
+
+    const fakeEngine = {
+      resume: async () => {
+        throw alreadyTerminalError(runId, 'failed');
+      },
+      get: async (id: string) => ({ id, status: 'failed', error: 'engine blew up' }),
+    } as unknown as AnyRunEngine;
+    const fakeCheckpointStore = {
+      loadCheckpoint: async (_id: string) => {
+        throw new Error('no checkpoint was ever written for this run');
+      },
+    } as unknown as import('../durable/checkpoint-store').CheckpointStore;
+
+    const h = createSessionHandle(sessionId, {
+      store,
+      agentName: 'agent',
+      engine: fakeEngine,
+      checkpointStore: fakeCheckpointStore,
+      runOptions: createTestRunOptions(),
+    });
+
+    expect(await h.recover()).toBeNull();
+
+    const persisted = await store.load(sessionId);
+    expect(persisted?.runs.find((r) => r.runId === runId)?.status).toBe('error');
+  });
+
+  it('leaves the RunRef untouched when engine.get() reports it as still non-terminal', async () => {
+    // A defensive case: engine.resume() rejected for some other reason (a
+    // transient error, a race), but engine.get() says the workflow is still
+    // suspended/running/pending. resume() should have succeeded for a
+    // genuinely non-terminal workflow, so reconciliation must not guess at a
+    // status here — it leaves the RunRef alone.
+    const sessionId = 'ab-28-still-suspended-session';
+    const runId = `${sessionId}:0`;
+    const store = await seedRunningSession(sessionId, runId);
+
+    const fakeEngine = {
+      resume: async () => {
+        throw new Error('transient resume failure');
+      },
+      get: async (id: string) => ({ id, status: 'suspended' }),
+    } as unknown as AnyRunEngine;
+    const fakeCheckpointStore = {
+      loadCheckpoint: async (_id: string) => ({
+        conversation: null,
+        cursor: { totalUsage: {}, lastContent: '', schemaAttempts: 0 },
+        steps: [],
+      }),
+    } as unknown as import('../durable/checkpoint-store').CheckpointStore;
+
+    const h = createSessionHandle(sessionId, {
+      store,
+      agentName: 'agent',
+      engine: fakeEngine,
+      checkpointStore: fakeCheckpointStore,
+      runOptions: createTestRunOptions(),
+    });
+
+    expect(await h.recover()).toBeNull();
+
+    const persisted = await store.load(sessionId);
+    expect(persisted?.runs.find((r) => r.runId === runId)?.status).toBe('running');
+  });
+
+  it('leaves the RunRef untouched when engine.get() itself throws', async () => {
+    const sessionId = 'ab-28-get-throws-session';
+    const runId = `${sessionId}:0`;
+    const store = await seedRunningSession(sessionId, runId);
+
+    const fakeEngine = {
+      resume: async () => {
+        throw alreadyTerminalError(runId, 'completed');
+      },
+      get: async () => {
+        throw new Error('storage unavailable');
+      },
+    } as unknown as AnyRunEngine;
+    const fakeCheckpointStore = {
+      loadCheckpoint: async (_id: string) => ({
+        conversation: null,
+        cursor: { totalUsage: {}, lastContent: '', schemaAttempts: 0 },
+        steps: [],
+      }),
+    } as unknown as import('../durable/checkpoint-store').CheckpointStore;
+
+    const h = createSessionHandle(sessionId, {
+      store,
+      agentName: 'agent',
+      engine: fakeEngine,
+      checkpointStore: fakeCheckpointStore,
+      runOptions: createTestRunOptions(),
+    });
+
+    expect(await h.recover()).toBeNull();
+
+    const persisted = await store.load(sessionId);
+    expect(persisted?.runs.find((r) => r.runId === runId)?.status).toBe('running');
+  });
+
+  it('is idempotent: calling recover() twice on a reconciled session appends no runs and does not duplicate messages', async () => {
+    const sessionId = 'ab-28-idempotent-session';
+    const runId = `${sessionId}:0`;
+    const store = await seedRunningSession(sessionId, runId);
+
+    const recoveredConversation = new Conversation(createConversationHistory());
+    recoveredConversation.appendUserMessage('once');
+
+    let getCalls = 0;
+    const fakeEngine = {
+      resume: async () => {
+        throw alreadyTerminalError(runId, 'completed');
+      },
+      get: async (id: string) => {
+        getCalls += 1;
+        return {
+          id,
+          status: 'completed',
+          result: { runId: id, steps: 1, content: 'once', finishReason: 'stop-condition' },
+        };
+      },
+    } as unknown as AnyRunEngine;
+    const fakeCheckpointStore = {
+      loadCheckpoint: async (_id: string) => ({
+        conversation: recoveredConversation.snapshot(),
+        cursor: { totalUsage: {}, lastContent: 'once', schemaAttempts: 0 },
+        steps: [],
+      }),
+    } as unknown as import('../durable/checkpoint-store').CheckpointStore;
+
+    const h = createSessionHandle(sessionId, {
+      store,
+      agentName: 'agent',
+      engine: fakeEngine,
+      checkpointStore: fakeCheckpointStore,
+      runOptions: createTestRunOptions(),
+    });
+
+    expect(await h.recover()).toBeNull();
+    const afterFirst = await store.load(sessionId);
+    expect(afterFirst?.runs).toHaveLength(1);
+    expect(afterFirst?.runs[0]?.status).toBe('completed');
+
+    // A second call must not find a 'running' ref to reconcile at all — the
+    // first call's write already flipped it to 'completed'.
+    expect(await h.recover()).toBeNull();
+    const afterSecond = await store.load(sessionId);
+
+    expect(afterSecond?.runs).toEqual(afterFirst?.runs);
+    expect(afterSecond?.conversationHistory).toEqual(afterFirst?.conversationHistory);
+    // Only the first call's fallback loop ever called engine.get() for this
+    // run — the second call's session load shows no running ref to retry.
+    expect(getCalls).toBe(1);
+  });
+
+  it('reconciles the RunRef against a REAL Weft engine when the recovered run settles before recover() is called', async () => {
+    // The reproduction from the issue (CHR-15): process A crashes mid-run,
+    // process B resumes it on boot, and it settles to terminal BEFORE the
+    // host calls session.recover(). The fake-engine tests above assume a
+    // particular shape for engine.get()'s `.result` on a completed workflow
+    // — this test exercises the REAL Weft engine to prove that assumption.
+    const SLEEP_MS = 20;
+    const storage = new MemoryStorage();
+    const sessionId = 'ab-28-real-engine-session';
+    const runId = `${sessionId}:0`;
+
+    const firstKv = textValueStore(storage, { disposeUnderlyingStorage: false });
+    const firstStore = createSessionStore(firstKv);
+    const { engine: engine1 } = await createRunEngine({
+      storage,
+      runWorkflow: makeParkingWorkflow(SLEEP_MS),
+      recover: false,
+      startScheduler: false,
+    });
+
+    const session = createAgentSession({
+      agentName: 'agent',
+      conversationHistory: createConversationHistory(),
+      id: sessionId,
+      runs: [
+        {
+          runId,
+          sequence: 0,
+          status: 'running',
+          startedAt: new Date().toISOString(),
+          agentName: '',
+        },
+      ],
+    });
+    await firstStore.save(session);
+
+    const firstHandle = await engine1.start('agentRun', {}, { id: runId });
+    for (let i = 0; i < 10; i++) await yieldToPortableEventLoop();
+    engine1[Symbol.dispose]();
+    void firstHandle.result().catch(() => {});
+
+    const secondKv = textValueStore(storage, { disposeUnderlyingStorage: false });
+    const secondStore = createSessionStore(secondKv);
+    const secondCheckpointStore = createCheckpointStore(
+      textValueStore(storage, { disposeUnderlyingStorage: false }),
+    );
+    // Default recover:true resumes the parked workflow synchronously during
+    // creation; startScheduler:true (with a short poll interval) arms the
+    // timer so its ctx.sleep actually fires within this test's window.
+    const { engine: engine2 } = await createRunEngine({
+      storage,
+      runWorkflow: makeParkingWorkflow(SLEEP_MS),
+      startScheduler: true,
+      schedulerPollIntervalMs: 5,
+    });
+
+    try {
+      // Poll engine.get() until the recovered run settles to terminal BEFORE
+      // calling recover() — the exact race the issue describes. Capped at 5
+      // attempts per this repo's polling-loop convention.
+      let state: Awaited<ReturnType<typeof engine2.get>> = null;
+      for (let attempt = 0; attempt < 5; attempt++) {
+        state = await engine2.get(runId);
+        if (state && state.status !== 'running' && state.status !== 'pending') break;
+        await new Promise((resolve) => setTimeout(resolve, SLEEP_MS * 2));
+      }
+
+      expect(state?.status).toBe('completed');
+      // The real shape engine.get() returns .result in — this is exactly
+      // what readTerminalRunOutcome() reads to derive the RunRef status.
+      const summary = state?.result as { finishReason?: string } | undefined;
+      expect(summary?.finishReason).toBe('stop-condition');
+
+      const h = createSessionHandle(sessionId, {
+        store: secondStore,
+        agentName: 'agent',
+        engine: engine2,
+        checkpointStore: secondCheckpointStore,
+        runOptions: createTestRunOptions(),
+      });
+
+      // recover() must still return null for a terminal run — reconciliation
+      // is a side effect, not a resurrection into a live AgentRun.
+      const reattached = await h.recover();
+      expect(reattached).toBeNull();
+
+      const persisted = await secondStore.load(sessionId);
+      expect(persisted?.runs.find((r) => r.runId === runId)?.status).toBe('completed');
+    } finally {
+      engine2[Symbol.dispose]();
     }
   });
 });
