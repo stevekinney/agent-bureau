@@ -64,22 +64,26 @@ export interface CreateAgentOptionsBase {
  * `toolbox` is accepted — `tools`/`permissions` combined with `toolbox` is a
  * type error, not just a runtime throw.
  *
- * Each variant types the fields it excludes as `?: never` rather than
+ * Each variant types the fields it excludes as `?: undefined` rather than
  * omitting them, so an explicitly `undefined` value for an excluded field
  * (e.g. `{ toolbox, tools: undefined }`) is still accepted — `undefined` is
  * treated as omitted, matching the runtime guards in
- * `validateCreateAgentOptions`.
+ * `validateCreateAgentOptions`. `?: undefined` (rather than `?: never`) keeps
+ * this true even under `exactOptionalPropertyTypes: true`, where an optional
+ * property no longer implicitly includes `undefined` — this repo currently
+ * disables that flag (`tsconfig.base.json`), but the excluded fields don't
+ * depend on it either way.
  */
 export type CreateAgentToolConfiguration =
-  | { tools?: never; toolbox?: never; permissions?: never }
-  | { tools: Record<string, Tool>; toolbox?: never; permissions?: never }
-  | { tools?: never; toolbox?: never; permissions: HeadlessPermissionPolicyConfiguration }
+  | { tools?: undefined; toolbox?: undefined; permissions?: undefined }
+  | { tools: Record<string, Tool>; toolbox?: undefined; permissions?: undefined }
+  | { tools?: undefined; toolbox?: undefined; permissions: HeadlessPermissionPolicyConfiguration }
   | {
       tools: Record<string, Tool>;
-      toolbox?: never;
+      toolbox?: undefined;
       permissions: HeadlessPermissionPolicyConfiguration;
     }
-  | { tools?: never; toolbox: AnyToolbox; permissions?: never };
+  | { tools?: undefined; toolbox: AnyToolbox; permissions?: undefined };
 
 /**
  * Options for `createAgent({...})`. Distinct from the old `DefineAgentOptions`
