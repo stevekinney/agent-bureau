@@ -2360,8 +2360,102 @@ describe('D2 — Recovery-on-boot: session.recover() durable re-attach path', ()
       expect(recoverEvents).toHaveLength(1);
       expect(recoverEvents[0]!.sessionId).toBe(sessionId);
       expect(recoverEvents[0]!.runId).toBe(runId);
+      // AB-29: the successful re-attach path reports no failures.
+      expect(recoverEvents[0]!.failures).toHaveLength(0);
 
       // Let the recovered run finish so no dangling promises.
+      await reattached!.result();
+    } finally {
+      engine2[Symbol.dispose]();
+    }
+  });
+
+  it('AB-29: a mixed outcome reports the newer rejection alongside the older successful reattach', async () => {
+    const storage = new MemoryStorage();
+    const sessionId = 'd2-mixed-outcome-session';
+    const olderRunId = `${sessionId}:0`;
+    // Never actually started durably — engine.resume() will reject for this one.
+    const newerRunId = `${sessionId}:1`;
+    const SLEEP_MS = 50;
+
+    const kv = textValueStore(storage, { disposeUnderlyingStorage: false });
+    const store = createSessionStore(kv);
+    await store.save(
+      createAgentSession({
+        agentName: 'agent',
+        conversationHistory: createConversationHistory(),
+        id: sessionId,
+        runs: [
+          {
+            runId: olderRunId,
+            sequence: 0,
+            status: 'running',
+            startedAt: new Date().toISOString(),
+            agentName: '',
+          },
+          {
+            runId: newerRunId,
+            sequence: 1,
+            status: 'running',
+            startedAt: new Date().toISOString(),
+            agentName: '',
+          },
+        ],
+      }),
+    );
+
+    // Only the OLDER run is actually started durably and parked.
+    const { engine: engine1 } = await createRunEngine({
+      storage,
+      runWorkflow: makeParkingWorkflow(SLEEP_MS),
+      recover: false,
+      startScheduler: false,
+    });
+    const firstHandle = await engine1.start('agentRun', {}, { id: olderRunId });
+    for (let i = 0; i < 10; i++) await yieldToPortableEventLoop();
+    engine1[Symbol.dispose]();
+    void firstHandle.result().catch(() => {});
+
+    const kv2 = textValueStore(storage, { disposeUnderlyingStorage: false });
+    const store2 = createSessionStore(kv2);
+    const cs2 = createCheckpointStore(textValueStore(storage, { disposeUnderlyingStorage: false }));
+    const { engine: engine2 } = await createRunEngine({
+      storage,
+      runWorkflow: makeParkingWorkflow(SLEEP_MS),
+      recover: false,
+      startScheduler: true,
+    });
+
+    try {
+      await engine2.recoverAll();
+
+      const emitter = new TypedEventTarget<OperativeEventMap>();
+      const recoverEvents: SessionRecoverEvent[] = [];
+      emitter.addEventListener('session.recover', (e) => {
+        recoverEvents.push(e);
+      });
+
+      const h = createSessionHandle(sessionId, {
+        store: store2,
+        agentName: 'agent',
+        engine: engine2,
+        checkpointStore: cs2,
+        emitter,
+        runOptions: createTestRunOptions(),
+      });
+
+      const reattached = await h.recover();
+
+      // The newer ref's rejection doesn't prevent falling through to the
+      // older, resumable ref.
+      expect(reattached).not.toBeNull();
+
+      expect(recoverEvents).toHaveLength(1);
+      expect(recoverEvents[0]!.runId).toBe(olderRunId);
+      // The newer ref's rejection is still reported, not silently dropped.
+      expect(recoverEvents[0]!.failures).toHaveLength(1);
+      expect(recoverEvents[0]!.failures[0]!.runId).toBe(newerRunId);
+
       await reattached!.result();
     } finally {
       engine2[Symbol.dispose]();
@@ -2420,6 +2514,199 @@ describe('D2 — Recovery-on-boot: session.recover() durable re-attach path', ()
     } finally {
       engine[Symbol.dispose]();
     }
+  });
+
+  // AB-29: a failed durable re-attach must be observable through the
+  // handle's emitter, distinguishable from the benign "nothing to resume"
+  // outcome, without reading the durable store.
+  const fakeCheckpointStore = {
+    loadCheckpoint: async (_runId: string) => ({
+      conversation: null,
+      cursor: { totalUsage: {}, lastContent: '', schemaAttempts: 0 },
+      steps: [],
+    }),
+  } as unknown as import('../durable/checkpoint-store').CheckpointStore;
+
+  it('reports a rejected engine.resume() as an observable failure, and recover() still returns null', async () => {
+    const sessionId = 'ab29-failed-reattach';
+    const runId = `${sessionId}:0`;
+    const resumeError = new Error('resolveWorkflowServices returned an unusable shape');
+
+    const fakeEngine = {
+      resume: async (_workflowId: string) => {
+        throw resumeError;
+      },
+      cancel: async () => {},
+      signal: async () => {},
+      update: async () => {},
+      query: async () => {},
+    } as unknown as AnyRunEngine;
+
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+    await store.save(
+      createAgentSession({
+        agentName: 'agent',
+        conversationHistory: createConversationHistory(),
+        id: sessionId,
+        runs: [
+          {
+            runId,
+            sequence: 0,
+            status: 'running',
+            startedAt: new Date().toISOString(),
+            agentName: '',
+          },
+        ],
+      }),
+    );
+
+    const emitter = new TypedEventTarget<OperativeEventMap>();
+    const recoverEvents: SessionRecoverEvent[] = [];
+    emitter.addEventListener('session.recover', (e) => {
+      recoverEvents.push(e);
+    });
+
+    const h = createSessionHandle(sessionId, {
+      store,
+      agentName: 'agent',
+      engine: fakeEngine,
+      checkpointStore: fakeCheckpointStore,
+      emitter,
+      runOptions: createTestRunOptions(),
+    });
+
+    const reattached = await h.recover();
+
+    // recover() keeps its documented disconnect-is-not-an-error contract.
+    expect(reattached).toBeNull();
+
+    // The failure is observable from the emitter alone, with the runId and
+    // underlying error attached — no durable-store read required.
+    expect(recoverEvents).toHaveLength(1);
+    expect(recoverEvents[0]!.sessionId).toBe(sessionId);
+    expect(recoverEvents[0]!.runId).toBeNull();
+    expect(recoverEvents[0]!.failures).toHaveLength(1);
+    expect(recoverEvents[0]!.failures[0]!.runId).toBe(runId);
+    expect(recoverEvents[0]!.failures[0]!.error).toBe(resumeError);
+  });
+
+  it('distinguishes "nothing to resume" from a failed reattach via an empty failures array', async () => {
+    const sessionId = 'ab29-nothing-to-resume';
+
+    const fakeEngine = {
+      resume: async (_workflowId: string) => {
+        throw new Error('should never be called: there is no running ref');
+      },
+      cancel: async () => {},
+      signal: async () => {},
+      update: async () => {},
+      query: async () => {},
+    } as unknown as AnyRunEngine;
+
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+    // No runs at all — the benign "no in-flight run" case.
+    await store.save(
+      createAgentSession({
+        agentName: 'agent',
+        conversationHistory: createConversationHistory(),
+        id: sessionId,
+        runs: [],
+      }),
+    );
+
+    const emitter = new TypedEventTarget<OperativeEventMap>();
+    const recoverEvents: SessionRecoverEvent[] = [];
+    emitter.addEventListener('session.recover', (e) => {
+      recoverEvents.push(e);
+    });
+
+    const h = createSessionHandle(sessionId, {
+      store,
+      agentName: 'agent',
+      engine: fakeEngine,
+      checkpointStore: fakeCheckpointStore,
+      emitter,
+      runOptions: createTestRunOptions(),
+    });
+
+    const reattached = await h.recover();
+
+    expect(reattached).toBeNull();
+    expect(recoverEvents).toHaveLength(1);
+    expect(recoverEvents[0]!.runId).toBeNull();
+    // Distinguishable from the failure case: no attempt was made, so no
+    // failures were recorded.
+    expect(recoverEvents[0]!.failures).toHaveLength(0);
+  });
+
+  it('reports every rejected runId when multiple running refs are walked', async () => {
+    const sessionId = 'ab29-multiple-running-refs';
+    const olderRunId = `${sessionId}:0`;
+    const newerRunId = `${sessionId}:1`;
+    const attemptedRunIds: string[] = [];
+
+    const fakeEngine = {
+      resume: async (workflowId: string) => {
+        attemptedRunIds.push(workflowId);
+        throw new Error(`engine rejected resume for "${workflowId}"`);
+      },
+      cancel: async () => {},
+      signal: async () => {},
+      update: async () => {},
+      query: async () => {},
+    } as unknown as AnyRunEngine;
+
+    const kv = textValueStore(new MemoryStorage());
+    const store = createSessionStore(kv);
+    await store.save(
+      createAgentSession({
+        agentName: 'agent',
+        conversationHistory: createConversationHistory(),
+        id: sessionId,
+        runs: [
+          {
+            runId: olderRunId,
+            sequence: 0,
+            status: 'running',
+            startedAt: new Date().toISOString(),
+            agentName: '',
+          },
+          {
+            runId: newerRunId,
+            sequence: 1,
+            status: 'running',
+            startedAt: new Date().toISOString(),
+            agentName: '',
+          },
+        ],
+      }),
+    );
+
+    const emitter = new TypedEventTarget<OperativeEventMap>();
+    const recoverEvents: SessionRecoverEvent[] = [];
+    emitter.addEventListener('session.recover', (e) => {
+      recoverEvents.push(e);
+    });
+
+    const h = createSessionHandle(sessionId, {
+      store,
+      agentName: 'agent',
+      engine: fakeEngine,
+      checkpointStore: fakeCheckpointStore,
+      emitter,
+      runOptions: createTestRunOptions(),
+    });
+
+    const reattached = await h.recover();
+
+    expect(reattached).toBeNull();
+    // Walked newest-first, same order as the resume attempts.
+    expect(attemptedRunIds).toEqual([newerRunId, olderRunId]);
+    expect(recoverEvents).toHaveLength(1);
+    expect(recoverEvents[0]!.failures).toHaveLength(2);
+    expect(recoverEvents[0]!.failures.map((f) => f.runId)).toEqual([newerRunId, olderRunId]);
   });
 });
 

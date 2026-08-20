@@ -32,6 +32,20 @@ describe('session verb events (C3 completeness rule)', () => {
     expect(e.runId).toBeNull();
   });
 
+  it('SessionRecoverEvent defaults failures to an empty array', () => {
+    const e = new SessionRecoverEvent('session-1', null);
+    expect(e.failures).toEqual([]);
+  });
+
+  it('SessionRecoverEvent carries failures for a failed durable re-attach (AB-29)', () => {
+    const error = new Error('engine rejected the resume');
+    const e = new SessionRecoverEvent('session-1', null, [{ runId: 'session-1:0', error }]);
+    expect(e.runId).toBeNull();
+    expect(e.failures).toHaveLength(1);
+    expect(e.failures[0]!.runId).toBe('session-1:0');
+    expect(e.failures[0]!.error).toBe(error);
+  });
+
   it('SessionCancelEvent carries sessionId and runId', () => {
     const e = new SessionCancelEvent('session-2', 'run-2');
     expect(e.type).toBe('session.cancel');
