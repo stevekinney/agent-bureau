@@ -139,6 +139,16 @@ export type CreateAgentToolConfiguration =
  *   `stopWhen: stopWhen.pendingApproval()`. `permissions` only configures a
  *   toolbox this factory builds itself, so it's mutually exclusive with
  *   `toolbox`.
+ *
+ * This is a `type` (intersecting `CreateAgentOptionsBase` with the
+ * `CreateAgentToolConfiguration` union), not an `interface`, as of AB-16 —
+ * enforcing exclusivity requires a union, and TypeScript interfaces can't
+ * `extends` a type containing a union, nor declaration-merge into one. A
+ * consumer that previously wrote `interface MyOptions extends
+ * CreateAgentOptions` for the full options bag needs `MyOptions =
+ * CreateAgentOptions & { ... }` instead; extending or declaration-merging
+ * onto just the non-exclusive fields still works via the separately
+ * exported `CreateAgentOptionsBase` interface.
  */
 export type CreateAgentOptions = CreateAgentOptionsBase & CreateAgentToolConfiguration;
 
