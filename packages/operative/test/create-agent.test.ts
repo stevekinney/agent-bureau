@@ -577,6 +577,22 @@ describe('createAgent — toolbox injection', () => {
     ).toThrow(/permissions.*toolbox/i);
   });
 
+  it('throws when `tools`, `toolbox`, and `permissions` are all supplied — regression for cast/JS callers bypassing the type-level exclusivity', () => {
+    const toolbox = createToolbox([]);
+
+    expect(() =>
+      // A cast is required here: `CreateAgentOptions` rejects this combination
+      // at the type level (see create-agent.test-d.ts), so this exercises the
+      // runtime guard a JS caller or a `as CreateAgentOptions` cast would hit.
+      createAgent({
+        generate: singleResponse('hello'),
+        tools: {},
+        toolbox,
+        permissions: { allowList: [] },
+      } as Parameters<typeof createAgent>[0]),
+    ).toThrow(/tools.*toolbox.*mutually exclusive/i);
+  });
+
   it('uses the caller-supplied Toolbox instance as-is, across multiple runs', async () => {
     const seenToolboxes: unknown[] = [];
 

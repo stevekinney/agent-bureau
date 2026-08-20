@@ -67,3 +67,108 @@ const runOptions: RunOptions = {
   conversation: runConversation,
 };
 void runOptions;
+
+// ---------------------------------------------------------------------------
+// 3. AB-16 — CreateAgentOptions tool-configuration exclusivity.
+//
+// Standalone `createAgent`'s `tools`, `toolbox`, and `permissions` fields are
+// mutually exclusive at runtime (see `validateCreateAgentOptions` in
+// `create-agent.ts`). This section pins that the SAME exclusivity is now
+// enforced at the type level: every valid combination assigns with no cast,
+// and every invalid combination is a type error (verified with
+// `// @ts-expect-error`). One case per matrix row from AB-16's acceptance
+// criteria.
+// ---------------------------------------------------------------------------
+
+declare const somePermissions: NonNullable<CreateAgentOptions['permissions']>;
+declare const someTools: Record<string, typeof weatherTool>;
+
+// --- Positive: no tool configuration at all. -------------------------------
+const optionsNone: CreateAgentOptions = {
+  generate: mockGenerate,
+};
+void optionsNone;
+
+// --- Positive: `tools` alone. -----------------------------------------------
+const optionsTools: CreateAgentOptions = {
+  generate: mockGenerate,
+  tools: someTools,
+};
+void optionsTools;
+
+// --- Positive: `permissions` alone. -----------------------------------------
+const optionsPermissions: CreateAgentOptions = {
+  generate: mockGenerate,
+  permissions: somePermissions,
+};
+void optionsPermissions;
+
+// --- Positive: `tools` + `permissions`. -------------------------------------
+const optionsToolsAndPermissions: CreateAgentOptions = {
+  generate: mockGenerate,
+  tools: someTools,
+  permissions: somePermissions,
+};
+void optionsToolsAndPermissions;
+
+// --- Positive: `toolbox` alone. ---------------------------------------------
+const optionsToolboxOnly: CreateAgentOptions = {
+  generate: mockGenerate,
+  toolbox: concreteToolbox,
+};
+void optionsToolboxOnly;
+
+// --- Positive: an explicitly `undefined` excluded field is treated as
+//     omitted, not as "present" for exclusivity purposes.
+const optionsToolboxWithExplicitUndefined: CreateAgentOptions = {
+  generate: mockGenerate,
+  toolbox: concreteToolbox,
+  tools: undefined,
+  permissions: undefined,
+};
+void optionsToolboxWithExplicitUndefined;
+
+const optionsToolsWithExplicitUndefinedToolbox: CreateAgentOptions = {
+  generate: mockGenerate,
+  tools: someTools,
+  toolbox: undefined,
+};
+void optionsToolsWithExplicitUndefinedToolbox;
+
+// --- Negative: `tools` + `toolbox` is rejected. -----------------------------
+// @ts-expect-error — `tools` and `toolbox` are mutually exclusive.
+const optionsToolsAndToolbox: CreateAgentOptions = {
+  generate: mockGenerate,
+  tools: someTools,
+  toolbox: concreteToolbox,
+};
+void optionsToolsAndToolbox;
+
+// --- Negative: `toolbox` + `permissions` is rejected. -----------------------
+// @ts-expect-error — `toolbox` and `permissions` are mutually exclusive.
+const optionsToolboxAndPermissions: CreateAgentOptions = {
+  generate: mockGenerate,
+  toolbox: concreteToolbox,
+  permissions: somePermissions,
+};
+void optionsToolboxAndPermissions;
+
+// --- Negative: all three together is rejected. ------------------------------
+// @ts-expect-error — `tools`/`permissions` combined with `toolbox` are mutually exclusive.
+const optionsAllThree: CreateAgentOptions = {
+  generate: mockGenerate,
+  tools: someTools,
+  toolbox: concreteToolbox,
+  permissions: somePermissions,
+};
+void optionsAllThree;
+
+// `createAgent(...)` itself rejects the same invalid combinations end-to-end,
+// not just the bare options object.
+// @ts-expect-error — `tools` and `toolbox` are mutually exclusive.
+const agentWithToolsAndToolbox = createAgent({
+  generate: mockGenerate,
+  tools: someTools,
+  toolbox: concreteToolbox,
+});
+void agentWithToolsAndToolbox;
