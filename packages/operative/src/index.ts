@@ -207,6 +207,7 @@ export {
   ToolStartedBubbleEvent,
 } from './events';
 // C3 — session verb events
+export type { SessionRecoverFailure } from './events';
 export {
   SessionCancelEvent,
   SessionForkEvent,

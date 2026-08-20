@@ -13,7 +13,11 @@ import { reattachDurableActiveRun } from '../durable/active-run-adapter';
 import type { CheckpointStore } from '../durable/checkpoint-store';
 import type { AnyRunEngine } from '../durable/create-run-engine';
 import type { AgentRunWorkflowResult } from '../durable/run-workflow';
-import type { CombinedOperativeEventMap, OperativeEventMap } from '../events';
+import type {
+  CombinedOperativeEventMap,
+  OperativeEventMap,
+  SessionRecoverFailure,
+} from '../events';
 import {
   SessionCancelEvent,
   SessionForkEvent,
@@ -126,7 +130,13 @@ export interface SessionHandle {
    * to `recover()` return the same handle without another engine call.
    *
    * Returns `null` when there is no in-flight run to reattach to (disconnect =
-   * keep going; this is NOT "resume from the last message").
+   * keep going; this is NOT "resume from the last message"). This is also the
+   * return value when a durable re-attach was ATTEMPTED and every candidate
+   * `running` ref rejected — `recover()` never throws for this. To tell the
+   * two apart, read `emitter`: the dispatched `session.recover`
+   * `SessionRecoverEvent` carries an empty `failures` array for "nothing to
+   * resume" and a non-empty one (each entry with the rejected `runId` and its
+   * `error`) for "resume was attempted and failed".
    *
    * Over HTTP: a client reconnecting after a network drop calls `recover()` to
    * re-subscribe to the in-flight run's event stream.
@@ -840,6 +850,12 @@ export function createSessionHandle(
         const runningRefs = [...(session?.runs ?? [])]
           .reverse()
           .filter((runRef) => runRef.status === 'running');
+        // Every engine.resume() rejection encountered below, keyed by the
+        // runId that failed. Reported on the final SessionRecoverEvent so a
+        // failed re-attach is distinguishable from the benign "no running
+        // refs at all" outcome, which reports the identical runId: null but
+        // an empty failures array.
+        const failures: SessionRecoverFailure[] = [];
         for (const runningRef of runningRefs) {
           const runId = runningRef.runId;
           try {
@@ -903,17 +919,31 @@ export function createSessionHandle(
                 }
               }
             })();
-            emitter.dispatchEvent(new SessionRecoverEvent(sessionId, runId));
+            // Pass along `failures` accumulated from any NEWER running refs
+            // that rejected before this (older) one succeeded — a mixed
+            // outcome must still surface those rejections, not just the
+            // all-fail case.
+            emitter.dispatchEvent(new SessionRecoverEvent(sessionId, runId, failures));
             return agentRun;
-          } catch {
+          } catch (error) {
             // engine.resume() throws when the run is already terminal or the
-            // engine doesn't have it. Reconcile the persisted RunRef in the
-            // former case (AB-28) — otherwise it is stranded at 'running'
-            // forever, and every later recover()/signal()/update() targets a
-            // workflow that is already dead. reconcileTerminalRunRef() is a
-            // no-op for an unknown runId. Try older running refs either way.
+            // engine doesn't have it, or when recovery itself is broken (e.g.
+            // a malformed resolveWorkflowServices result). Reconcile the
+            // persisted RunRef in the terminal case (AB-28) — otherwise it is
+            // stranded at 'running' forever, and every later
+            // recover()/signal()/update() targets a workflow that is already
+            // dead. reconcileTerminalRunRef() is a no-op for an unknown runId
+            // or a genuine (non-terminal) failure. Record which runId
+            // rejected and why regardless — the caller learns about every
+            // rejection via `failures` on the event dispatched below, not
+            // just the last one — then try older running refs either way.
             await reconcileTerminalRunRef(store, engine, checkpointStore, sessionId, runningRef);
+            failures.push({ runId, error });
           }
+        }
+        if (failures.length > 0) {
+          emitter.dispatchEvent(new SessionRecoverEvent(sessionId, null, failures));
+          return null;
         }
       }
 

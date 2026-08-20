@@ -640,14 +640,52 @@ export class ToolPolicyDeniedBubbleEvent extends Event {
 // human-wait-parked) are implemented below in the Phase F section.
 // ---------------------------------------------------------------------------
 
+/**
+ * One rejected `engine.resume(runId)` attempt encountered while `recover()`
+ * walked a session's `running` refs looking for a durable run to re-attach
+ * to. A run can end up here for reasons that range from benign (the run is
+ * already terminal — the case `AB-28` reconciles by fixing the persisted
+ * ref) to genuinely broken (the workflow's services could not be resolved,
+ * the engine rejected the resume outright, etc.). This shape does not
+ * distinguish those causes — Weft's `engine.resume()` throws a plain `Error`
+ * for both, with no typed discriminant to key off of (tracked upstream:
+ * weft task 8d22de1e-d4d9-43f5-bccb-56d25e104d7f) — it only guarantees the
+ * `runId` and `error` are observable, so a consumer that cares about the
+ * difference inspects `error` itself.
+ */
+export interface SessionRecoverFailure {
+  readonly runId: string;
+  readonly error: unknown;
+}
+
 export class SessionRecoverEvent extends Event {
   static readonly type = 'session.recover' as const;
   readonly sessionId: string;
   readonly runId: string | null;
-  constructor(sessionId: string, runId: string | null) {
+  /**
+   * Every `engine.resume(runId)` rejection encountered during this
+   * `recover()` call, in the order they were tried (newest `running` ref
+   * first). Empty only when NO resume attempt rejected — that covers both
+   * "no durable re-attach was attempted" (in-process fast path or no
+   * `running` refs, where `runId` is also `null`) and a clean successful
+   * reattach on the first try. It is NOT empty on a mixed outcome, where a
+   * newer `running` ref rejected before an older one succeeded — that event
+   * carries the successful `runId` alongside the accumulated failures from
+   * the refs tried before it, so neither signal is lost.
+   */
+  readonly failures: readonly SessionRecoverFailure[];
+  constructor(
+    sessionId: string,
+    runId: string | null,
+    failures: readonly SessionRecoverFailure[] = [],
+  ) {
     super(SessionRecoverEvent.type);
     this.sessionId = sessionId;
     this.runId = runId;
+    // Copy (and freeze) so a caller that mutates the array it passed in — or
+    // that `recover()` keeps accumulating into across older running refs —
+    // cannot retroactively change an already-dispatched event's payload.
+    this.failures = Object.freeze([...failures]);
   }
 }
 
