@@ -8,9 +8,9 @@ settles.
 
 This document changes documentation only. It does not describe today's
 runtime code in `packages/operative` and `packages/bureau` — it describes
-where that code is headed. Where the current implementation differs (the
-existing `AgentRegistry`, the `BureauBuilder` chain, `RunResult.structuredOutput`),
-the difference is called out explicitly rather than glossed over.
+where that code is headed. The [Removed surface](#removed-surface) section
+names every current API this contract replaces; nowhere else in this
+document is a today-only name offered as a supported alternative.
 
 ## Agent input and run context
 
@@ -84,11 +84,15 @@ export interface RunOutcomeBase<
   unwrap(): Promise<UnwrappedValue<O, H>>;
 }
 
-export interface AgentRun<O = never, H extends boolean = false>
-  extends RunOutcomeBase<O, H>, OutputMethod<O, H> {
-  abort(reason?: string): void;
-  [Symbol.dispose](): void;
-}
+// A type alias, not an `interface extends` — `OutputMethod<O, H>` is a
+// conditional type, and TypeScript rejects an interface extending an
+// unresolved conditional (`TS2312`). The intersection form has no such
+// restriction and is otherwise identical for callers.
+export type AgentRun<O = never, H extends boolean = false> = RunOutcomeBase<O, H> &
+  OutputMethod<O, H> & {
+    abort(reason?: string): void;
+    [Symbol.dispose](): void;
+  };
 ```
 
 `AgentRun` is deliberately **not** `Promise`/`PromiseLike`. A thenable handle
@@ -96,6 +100,11 @@ is auto-unwrapped at every `async` boundary (`return run`, `Promise.all([run])`,
 `Promise.resolve(run)`), which would silently destroy the event stream. The
 cost of avoiding that is one explicit method call — `run.result()`,
 `run.unwrap()`, or `run.output()` — never a bare `await run`.
+
+`abort` keeps today's operative `abort(reason?: string): void` signature
+rather than a bare `abort(): void` — the optional reason is existing,
+load-bearing behavior (it is threaded into the abort event and the eventual
+error), and nothing in this contract removes it.
 
 ```ts
 export interface RunResult<O = never, H extends boolean = false> {
@@ -454,17 +463,19 @@ rather than requiring every consumer of, say, `getRun` to know `D`.
 ## Events
 
 ```ts
-export interface RunCompletedEvent<O = never, H extends boolean = false> {
-  readonly type: 'run.completed';
-  readonly result: RunResult<O, H>;
-}
+export type RunCompletedEvent<O = never, H extends boolean = false> = {
+  result: RunResult<O, H>;
+};
 ```
 
 `RunCompletedEvent<O, H>` carries its payload as one nested `result` object —
 not the flattened `conversation`/`steps`/`content`/`usage`/... properties
 today's operative `RunCompletedEvent` class exposes directly. A listener reads
 `event.result.output`, never `event.structuredOutput` or `event.output`
-directly on the event.
+directly on the event. The runtime event's own `type: 'run.completed'`
+discriminant comes from the `Event` base class it extends (as it does today),
+not from this alias — this alias specifies only the new `result`-nested
+payload shape.
 
 ## Compile-ready examples
 
@@ -472,7 +483,8 @@ directly on the event.
 
 ```ts
 import { z } from 'zod';
-import { createAgent, createBureau } from '@lostgradient/operative';
+import { createAgent } from '@lostgradient/operative';
+import { createBureau } from 'bureau';
 
 const researcher = createAgent({
   name: 'researcher',
@@ -507,7 +519,7 @@ export { writer } from './writer';
 
 // bureau.ts
 import * as agents from './agents';
-import { createBureau } from '@lostgradient/operative';
+import { createBureau } from 'bureau';
 
 const bureau = await createBureau({ agents });
 // bureau.run('researcher', ...) still infers the exact `researcher` output
@@ -518,7 +530,8 @@ const bureau = await createBureau({ agents });
 ### Literal dynamic imports
 
 ```ts
-import { createLazyAgent, createBureau } from '@lostgradient/operative';
+import { createLazyAgent } from '@lostgradient/operative';
+import { createBureau } from 'bureau';
 
 const researcher = createLazyAgent(() =>
   import('./agents/researcher').then((module) => module.researcher),
@@ -556,11 +569,13 @@ const agent = createAgent({
 
 ```ts
 import { createLazyAgent, type RunnableAgent } from '@lostgradient/operative';
+import { createBureau } from 'bureau';
 
 // `pluginPath` is resolved at runtime (a config value, a directory scan) —
 // TypeScript has no literal specifier to resolve a module type from, so the
-// loader is annotated explicitly and the output type is intentionally
-// widened to `unknown` rather than guessed.
+// loader is annotated explicitly. `H` is left as the un-narrowed `boolean`
+// (not pinned to `true`), because whether the plugin even HAS an output
+// schema is exactly what's unknown here, same as the schema's shape.
 declare const pluginPath: string;
 
 const plugin = createLazyAgent<unknown, boolean>(
@@ -569,10 +584,19 @@ const plugin = createLazyAgent<unknown, boolean>(
 
 const bureau = await createBureau({ agents: { plugin } });
 const run = bureau.run('plugin', 'do the thing');
-// `run.result()` is available; `run.output()` is only usable after narrowing
-// `result().output` (typed `unknown`) at the boundary — this widened path
-// never fabricates a false sense of a known schema.
+
+// `H = boolean` (not the literal `true`) resolves `OutputMethod<unknown, boolean>`
+// to `{}` — `run.output()` does not exist on this handle, a compile error, not
+// a runtime one. `result().output` is typed `never` for the same reason: no
+// schema is provably present, so no output value is fabricated as `unknown`.
+const text = await run.unwrap(); // string — UnwrappedValue<unknown, boolean> is `string`
 ```
+
+This is the honest floor for a schema you cannot verify statically:
+`unwrap()` always resolves to the model's plain text, and a caller who wants
+structure out of it validates the text at the boundary themselves (their own
+`JSON.parse` plus their own schema), rather than this API asserting a
+compile-time `unknown` it has no basis for.
 
 ## Removed surface
 
