@@ -59,29 +59,38 @@ export interface CreateAgentOptionsBase {
 
 /**
  * The exclusive tool-configuration surface of `CreateAgentOptions`. Encodes
- * the runtime-enforced exclusivity at the type level: exactly one of "no
- * tool configuration", `tools`, `permissions`, `tools` + `permissions`, or
- * `toolbox` is accepted — `tools`/`permissions` combined with `toolbox` is a
- * type error, not just a runtime throw.
+ * the runtime-enforced exclusivity at the type level: `toolbox` is exclusive
+ * with BOTH `tools` and `permissions`, which may otherwise be combined
+ * freely (including "neither" — no tool configuration at all) —
+ * `tools`/`permissions` combined with `toolbox` is a type error, not just a
+ * runtime throw.
  *
- * Each variant types the fields it excludes as `?: undefined` rather than
- * omitting them, so an explicitly `undefined` value for an excluded field
- * (e.g. `{ toolbox, tools: undefined }`) is still accepted — `undefined` is
- * treated as omitted, matching the runtime guards in
- * `validateCreateAgentOptions`. `?: undefined` (rather than `?: never`) keeps
- * this true even under `exactOptionalPropertyTypes: true`, where an optional
- * property no longer implicitly includes `undefined` — this repo currently
- * disables that flag (`tsconfig.base.json`), but the excluded fields don't
- * depend on it either way.
+ * Deliberately just two variants, not one per row of the accepted matrix
+ * ("no tool configuration", `tools`, `permissions`, `tools` + `permissions`,
+ * `toolbox`): a caller commonly forwards an already-optional value, e.g.
+ * `const tools: Record<string, Tool> | undefined = maybeTools();
+ * createAgent({ generate, tools })`. A one-variant-per-row union rejects
+ * that — `tools: X | undefined` doesn't structurally match either "tools
+ * required" or "tools absent". Widening `tools` and `permissions` to
+ * `T | undefined` within a single non-toolbox variant accepts every
+ * combination of "present, absent, or explicitly undefined" for both at
+ * once, while the separate toolbox variant still excludes both.
+ *
+ * The excluded `toolbox`/`tools`/`permissions` fields in each variant are
+ * typed `?: undefined` rather than omitted, so an explicitly `undefined`
+ * value (e.g. `{ toolbox, tools: undefined }`) is still accepted —
+ * `undefined` is treated as omitted, matching the runtime guards in
+ * `validateCreateAgentOptions`. `?: undefined` (rather than `?: never`)
+ * keeps this true even under `exactOptionalPropertyTypes: true`, where an
+ * optional property no longer implicitly includes `undefined` — this repo
+ * currently disables that flag (`tsconfig.base.json`), but the excluded
+ * fields don't depend on it either way.
  */
 export type CreateAgentToolConfiguration =
-  | { tools?: undefined; toolbox?: undefined; permissions?: undefined }
-  | { tools: Record<string, Tool>; toolbox?: undefined; permissions?: undefined }
-  | { tools?: undefined; toolbox?: undefined; permissions: HeadlessPermissionPolicyConfiguration }
   | {
-      tools: Record<string, Tool>;
+      tools?: Record<string, Tool> | undefined;
       toolbox?: undefined;
-      permissions: HeadlessPermissionPolicyConfiguration;
+      permissions?: HeadlessPermissionPolicyConfiguration | undefined;
     }
   | { tools?: undefined; toolbox: AnyToolbox; permissions?: undefined };
 

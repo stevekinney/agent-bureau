@@ -16,6 +16,7 @@
 // structurally satisfies — this pins that a real `createToolbox([...])`
 // result assigns to both with no cast and no `any`.
 
+import type { HeadlessPermissionPolicyConfiguration } from 'armorer';
 import { createTool, createToolbox } from 'armorer';
 import { z } from 'zod';
 
@@ -134,6 +135,26 @@ const optionsToolsWithExplicitUndefinedToolbox: CreateAgentOptions = {
   toolbox: undefined,
 };
 void optionsToolsWithExplicitUndefinedToolbox;
+
+// --- Positive: forwarding an already-optional (`T | undefined`-typed)
+//     `tools`/`permissions` value, as a caller commonly does when threading
+//     an upstream optional through unchanged, is accepted — not just a
+//     literal `undefined` or a concretely-present value.
+declare const maybeTools: Record<string, typeof weatherTool> | undefined;
+declare const maybePermissions: HeadlessPermissionPolicyConfiguration | undefined;
+
+const optionsForwardedOptionalTools: CreateAgentOptions = {
+  generate: mockGenerate,
+  tools: maybeTools,
+};
+void optionsForwardedOptionalTools;
+
+const optionsForwardedOptionalToolsAndPermissions: CreateAgentOptions = {
+  generate: mockGenerate,
+  tools: maybeTools,
+  permissions: maybePermissions,
+};
+void optionsForwardedOptionalToolsAndPermissions;
 
 // --- Negative: `tools` + `toolbox` is rejected. -----------------------------
 // @ts-expect-error — `tools` and `toolbox` are mutually exclusive.
