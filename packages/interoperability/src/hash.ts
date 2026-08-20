@@ -19,6 +19,7 @@ export type IncrementalHash = {
 type HashRuntimeOverride = {
   Bun?: Pick<typeof Bun, 'CryptoHasher'> | undefined;
   require?: ((specifier: string) => unknown) | undefined;
+  getBuiltinModule?: ((specifier: string) => unknown) | undefined;
 };
 
 const runtimeOverrideSymbol = Symbol.for('agent-bureau.interoperability.hash.runtime');
@@ -37,6 +38,15 @@ function getBunRuntime(): Pick<typeof Bun, 'CryptoHasher'> | undefined {
   return typeof Bun !== 'undefined' ? Bun : undefined;
 }
 
+function getBuiltinModuleFn(): ((specifier: string) => unknown) | undefined {
+  const runtimeOverride = getHashRuntimeOverride();
+  if (runtimeOverride && 'getBuiltinModule' in runtimeOverride) {
+    return runtimeOverride.getBuiltinModule;
+  }
+
+  return globalThis.process?.getBuiltinModule?.bind(globalThis.process);
+}
+
 function requireNodeCrypto(): typeof import('node:crypto') {
   const runtimeOverride = getHashRuntimeOverride();
   if (runtimeOverride?.require) {
@@ -47,9 +57,9 @@ function requireNodeCrypto(): typeof import('node:crypto') {
   // so ESM bundlers never see a reason to inject a `createRequire` shim for this file — a plain
   // `require('node:crypto')` here would force that shim into every consumer's bundle, browser
   // builds included, even when this function is never reached at runtime.
-  const builtinModule = globalThis.process?.getBuiltinModule?.('node:crypto');
+  const builtinModule = getBuiltinModuleFn()?.('node:crypto');
   if (builtinModule) {
-    return builtinModule;
+    return builtinModule as typeof import('node:crypto');
   }
 
   throw new Error('node:crypto is not available in this environment.');
