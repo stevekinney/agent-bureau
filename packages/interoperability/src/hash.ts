@@ -43,8 +43,16 @@ function requireNodeCrypto(): typeof import('node:crypto') {
     return runtimeOverride.require('node:crypto') as typeof import('node:crypto');
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  return require('node:crypto') as typeof import('node:crypto');
+  // `process.getBuiltinModule` reads a Node/Bun builtin without a literal `require(...)` call,
+  // so ESM bundlers never see a reason to inject a `createRequire` shim for this file — a plain
+  // `require('node:crypto')` here would force that shim into every consumer's bundle, browser
+  // builds included, even when this function is never reached at runtime.
+  const builtinModule = globalThis.process?.getBuiltinModule?.('node:crypto');
+  if (builtinModule) {
+    return builtinModule;
+  }
+
+  throw new Error('node:crypto is not available in this environment.');
 }
 
 /**

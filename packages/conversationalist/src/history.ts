@@ -6,7 +6,7 @@ import {
   type Subscription,
 } from 'lifecycle';
 
-import type { AnthropicConversation } from './adapters/anthropic';
+import type { AnthropicConversation } from './adapters/anthropic/types';
 import type { GeminiConversation } from './adapters/gemini';
 import type { OpenAIMessage } from './adapters/openai';
 import {
