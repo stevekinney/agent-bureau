@@ -2,10 +2,22 @@
  * Cross-platform cryptographic hashing utilities.
  *
  * - `sha256Hex` uses the Web Crypto API and works in all environments (browser, Node, Bun, Deno).
- * - `sha256HexSync` is synchronous and works in Node.js and Bun (throws in browsers).
- * - `hmacSha256HexSync` signs text with HMAC-SHA-256 in Node.js and Bun.
- * - `timingSafeEqualHex` compares hex digests without leaking the first differing byte.
- * - `createIncrementalHash` returns a streaming hasher for accumulating data across multiple `.update()` calls.
+ * - `sha256HexSync` is synchronous and works in Bun and in Node.js 20.16.0+ (20.x line) or 22.3.0+ (throws in browsers
+ *   and in older Node.js, where `process.getBuiltinModule` does not exist — use the async `sha256Hex`
+ *   there instead, or supply a `require`-based runtime override; see below).
+ * - `hmacSha256HexSync` signs text with HMAC-SHA-256 under the same Bun/Node 20.16.0+ (20.x) or 22.3.0+ requirement.
+ * - `timingSafeEqualHex` compares hex digests without leaking the first differing byte (same
+ *   Bun/Node 20.16.0+ (20.x) or 22.3.0+ requirement as the other synchronous helpers).
+ * - `createIncrementalHash` returns a streaming hasher for accumulating data across multiple
+ *   `.update()` calls (same Bun/Node 20.16.0+ (20.x) or 22.3.0+ requirement).
+ *
+ * The synchronous helpers read `node:crypto` via `process.getBuiltinModule` rather than a literal
+ * `require(...)` call, specifically so that bundling this package for a browser build never injects
+ * a `createRequire`/`node:module` shim (see AB-31). That trades away support for Node.js versions
+ * outside `^20.16.0 || >=22.3.0` for the synchronous path; a caller that must support older Node can
+ * still supply its own loader via the `agent-bureau.interoperability.hash.runtime` global override
+ * (see `getHashRuntimeOverride` below) — set `{ require: (specifier) => require(specifier) }` from
+ * a CommonJS entry point where a real `require` exists.
  */
 
 /** Interface for an incremental (streaming) hash that accumulates data via `.update()`. */
@@ -19,6 +31,7 @@ export type IncrementalHash = {
 type HashRuntimeOverride = {
   Bun?: Pick<typeof Bun, 'CryptoHasher'> | undefined;
   require?: ((specifier: string) => unknown) | undefined;
+  getBuiltinModule?: ((specifier: string) => unknown) | undefined;
 };
 
 const runtimeOverrideSymbol = Symbol.for('agent-bureau.interoperability.hash.runtime');
@@ -37,14 +50,31 @@ function getBunRuntime(): Pick<typeof Bun, 'CryptoHasher'> | undefined {
   return typeof Bun !== 'undefined' ? Bun : undefined;
 }
 
+function getBuiltinModuleFn(): ((specifier: string) => unknown) | undefined {
+  const runtimeOverride = getHashRuntimeOverride();
+  if (runtimeOverride && 'getBuiltinModule' in runtimeOverride) {
+    return runtimeOverride.getBuiltinModule;
+  }
+
+  return globalThis.process?.getBuiltinModule?.bind(globalThis.process);
+}
+
 function requireNodeCrypto(): typeof import('node:crypto') {
   const runtimeOverride = getHashRuntimeOverride();
   if (runtimeOverride?.require) {
     return runtimeOverride.require('node:crypto') as typeof import('node:crypto');
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  return require('node:crypto') as typeof import('node:crypto');
+  // `process.getBuiltinModule` reads a Node/Bun builtin without a literal `require(...)` call,
+  // so ESM bundlers never see a reason to inject a `createRequire` shim for this file — a plain
+  // `require('node:crypto')` here would force that shim into every consumer's bundle, browser
+  // builds included, even when this function is never reached at runtime.
+  const builtinModule = getBuiltinModuleFn()?.('node:crypto');
+  if (builtinModule) {
+    return builtinModule as typeof import('node:crypto');
+  }
+
+  throw new Error('node:crypto is not available in this environment.');
 }
 
 /**

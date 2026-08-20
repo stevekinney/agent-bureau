@@ -13,6 +13,7 @@ import {
 type HashRuntimeOverride = {
   Bun?: { CryptoHasher: typeof Bun.CryptoHasher } | undefined;
   require?: ((specifier: string) => unknown) | undefined;
+  getBuiltinModule?: ((specifier: string) => unknown) | undefined;
 };
 
 const runtimeOverrideSymbol = Symbol.for('agent-bureau.interoperability.hash.runtime');
@@ -135,6 +136,20 @@ describe('sha256HexSync', () => {
         require: () => {
           throw new Error('runtime unavailable');
         },
+      },
+      () => {
+        expect(() => sha256HexSync('hello')).toThrow(
+          'sha256HexSync is not available in this environment. Use the async sha256Hex instead, which works everywhere via Web Crypto.',
+        );
+      },
+    );
+  });
+
+  test('throws a helpful error when neither require nor process.getBuiltinModule are available', async () => {
+    await withRuntimeOverride(
+      {
+        Bun: undefined,
+        getBuiltinModule: () => undefined,
       },
       () => {
         expect(() => sha256HexSync('hello')).toThrow(
