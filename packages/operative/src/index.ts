@@ -65,7 +65,12 @@ export {
   estimateCost,
   getModelPricing,
 } from './cost-estimation';
-export type { CreateAgentOptions, StandaloneAgent } from './create-agent';
+export type {
+  CreateAgentOptions,
+  CreateAgentOptionsBase,
+  CreateAgentToolConfiguration,
+  StandaloneAgent,
+} from './create-agent';
 export { createAgent } from './create-agent';
 export type {
   AgentRegistry,

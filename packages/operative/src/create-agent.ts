@@ -24,45 +24,16 @@ import type {
 // ---------------------------------------------------------------------------
 
 /**
- * Options for `createAgent({...})`. Distinct from the old `DefineAgentOptions`
- * (which requires a `toolbox`). Here `tools` is a name-keyed map and `generate`
- * is unconditionally required — there is no bureau to inherit a provider from.
+ * Fields shared by every `CreateAgentOptions` tool-configuration variant.
+ * Split out from `CreateAgentOptions` so the exclusive tool-configuration
+ * union below can be intersected with it.
  */
-export interface CreateAgentOptions {
+export interface CreateAgentOptionsBase {
   /**
    * The LLM provider function. REQUIRED — no bureau to inherit from.
    * Receives a `GenerateContext` and returns a `GenerateResponse`.
    */
   generate: GenerateFunction;
-
-  /**
-   * Agent tools as a name-keyed map. The map key is the canonical tool name;
-   * the tool's own `.name` property is ignored (key wins). Optional — an
-   * agent with no tools is valid for pure-generation tasks. Mutually
-   * exclusive with `toolbox`.
-   */
-  tools?: Record<string, Tool>;
-
-  /**
-   * A pre-built `Toolbox` instance, used as-is for every run started by this
-   * agent. Mutually exclusive with `tools` (which composes a fresh internal
-   * toolbox instead).
-   *
-   * Unlike `tools`, a `toolbox` you pass here is NOT rebuilt per run — every
-   * `run()` call shares this exact instance. That's required for armorer's
-   * cross-request approval flow: `toolbox.resumeApproval(signedApproval)`
-   * only verifies a `SignedPendingToolApproval` signed by the *same*
-   * `approvalSecret` the toolbox was created with. A host that owns a
-   * module-scoped toolbox (stable `approvalSecret` per process) passes it
-   * here so approvals minted on one run can be resumed on the next.
-   *
-   * Because the instance is shared, concurrent runs against the same
-   * `StandaloneAgent` will cross-fire each other's toolbox events and share
-   * budget/loop-detection counters — the same tradeoff as constructing the
-   * toolbox yourself and reusing it. If you don't need cross-run state
-   * (approvals, budgets), use `tools` instead for per-run isolation.
-   */
-  toolbox?: AnyToolbox;
 
   /**
    * System instructions injected as a system message on step 0.
@@ -84,25 +55,102 @@ export interface CreateAgentOptions {
 
   /** Context window management (compaction). */
   contextManagement?: ContextManagementOptions;
-
-  /**
-   * Headless deny-by-default permission mode (AB-94, armorer's
-   * `createHeadlessPermissionPolicyHooks`). When set, every tool call is
-   * checked against an explicit allowlist/denylist and an optional
-   * capability-tier policy and synchronous per-call gate — anything unlisted
-   * or that would otherwise require human approval is denied outright (this
-   * run never parks on a human). A denial feeds the model a tool-error
-   * result and the loop continues; it never throws and never terminates the
-   * run.
-   *
-   * For the opposite mode — parking on a pending approval instead of denying
-   * it — pass a pre-built `toolbox` (with its own approval policy) and use
-   * `stopWhen: stopWhen.pendingApproval()`. `permissions` only configures a
-   * toolbox this factory builds itself, so it's mutually exclusive with
-   * `toolbox`.
-   */
-  permissions?: HeadlessPermissionPolicyConfiguration;
 }
+
+/**
+ * The exclusive tool-configuration surface of `CreateAgentOptions`. Encodes
+ * the runtime-enforced exclusivity at the type level: `toolbox` is exclusive
+ * with BOTH `tools` and `permissions`, which may otherwise be combined
+ * freely (including "neither" — no tool configuration at all) —
+ * `tools`/`permissions` combined with `toolbox` is a type error, not just a
+ * runtime throw.
+ *
+ * Deliberately just two variants, not one per row of the accepted matrix
+ * ("no tool configuration", `tools`, `permissions`, `tools` + `permissions`,
+ * `toolbox`): a caller commonly forwards an already-optional value, e.g.
+ * `const tools: Record<string, Tool> | undefined = maybeTools();
+ * createAgent({ generate, tools })`. A one-variant-per-row union rejects
+ * that — `tools: X | undefined` doesn't structurally match either "tools
+ * required" or "tools absent". Widening `tools` and `permissions` to
+ * `T | undefined` within a single non-toolbox variant accepts every
+ * combination of "present, absent, or explicitly undefined" for both at
+ * once, while the separate toolbox variant still excludes both.
+ *
+ * The excluded `toolbox`/`tools`/`permissions` fields in each variant are
+ * typed `?: undefined` rather than omitted, so an explicitly `undefined`
+ * value (e.g. `{ toolbox, tools: undefined }`) is still accepted —
+ * `undefined` is treated as omitted, matching the runtime guards in
+ * `validateCreateAgentOptions`. `?: undefined` (rather than `?: never`)
+ * keeps this true even under `exactOptionalPropertyTypes: true`, where an
+ * optional property no longer implicitly includes `undefined` — this repo
+ * currently disables that flag (`tsconfig.base.json`), but the excluded
+ * fields don't depend on it either way.
+ */
+export type CreateAgentToolConfiguration =
+  | {
+      tools?: Record<string, Tool> | undefined;
+      toolbox?: undefined;
+      permissions?: HeadlessPermissionPolicyConfiguration | undefined;
+    }
+  | { tools?: undefined; toolbox: AnyToolbox; permissions?: undefined };
+
+/**
+ * Options for `createAgent({...})`. Distinct from the old `DefineAgentOptions`
+ * (which requires a `toolbox`). Here `tools` is a name-keyed map and `generate`
+ * is unconditionally required — there is no bureau to inherit a provider from.
+ *
+ * The tool-configuration fields (`tools`, `toolbox`, `permissions`) are
+ * mutually exclusive along the axes documented on
+ * `CreateAgentToolConfiguration`:
+ *
+ * - `tools` — agent tools as a name-keyed map. The map key is the canonical
+ *   tool name; the tool's own `.name` property is ignored (key wins).
+ *   Optional — an agent with no tools is valid for pure-generation tasks.
+ *   Mutually exclusive with `toolbox`.
+ * - `toolbox` — a pre-built `Toolbox` instance, used as-is for every run
+ *   started by this agent. Mutually exclusive with `tools` (which composes a
+ *   fresh internal toolbox instead) and with `permissions` (which configures
+ *   a toolbox this factory builds itself).
+ *
+ *   Unlike `tools`, a `toolbox` you pass here is NOT rebuilt per run — every
+ *   `run()` call shares this exact instance. That's required for armorer's
+ *   cross-request approval flow: `toolbox.resumeApproval(signedApproval)`
+ *   only verifies a `SignedPendingToolApproval` signed by the *same*
+ *   `approvalSecret` the toolbox was created with. A host that owns a
+ *   module-scoped toolbox (stable `approvalSecret` per process) passes it
+ *   here so approvals minted on one run can be resumed on the next.
+ *
+ *   Because the instance is shared, concurrent runs against the same
+ *   `StandaloneAgent` will cross-fire each other's toolbox events and share
+ *   budget/loop-detection counters — the same tradeoff as constructing the
+ *   toolbox yourself and reusing it. If you don't need cross-run state
+ *   (approvals, budgets), use `tools` instead for per-run isolation.
+ * - `permissions` — headless deny-by-default permission mode (AB-94,
+ *   armorer's `createHeadlessPermissionPolicyHooks`). When set, every tool
+ *   call is checked against an explicit allowlist/denylist and an optional
+ *   capability-tier policy and synchronous per-call gate — anything unlisted
+ *   or that would otherwise require human approval is denied outright (this
+ *   run never parks on a human). A denial feeds the model a tool-error
+ *   result and the loop continues; it never throws and never terminates the
+ *   run.
+ *
+ *   For the opposite mode — parking on a pending approval instead of denying
+ *   it — pass a pre-built `toolbox` (with its own approval policy) and use
+ *   `stopWhen: stopWhen.pendingApproval()`. `permissions` only configures a
+ *   toolbox this factory builds itself, so it's mutually exclusive with
+ *   `toolbox`.
+ *
+ * This is a `type` (intersecting `CreateAgentOptionsBase` with the
+ * `CreateAgentToolConfiguration` union), not an `interface`, as of AB-16 —
+ * enforcing exclusivity requires a union, and TypeScript interfaces can't
+ * `extends` a type containing a union, nor declaration-merge into one. A
+ * consumer that previously wrote `interface MyOptions extends
+ * CreateAgentOptions` for the full options bag needs `MyOptions =
+ * CreateAgentOptions & { ... }` instead; extending or declaration-merging
+ * onto just the non-exclusive fields still works via the separately
+ * exported `CreateAgentOptionsBase` interface.
+ */
+export type CreateAgentOptions = CreateAgentOptionsBase & CreateAgentToolConfiguration;
 
 /**
  * Validates the mutually-exclusive option combinations in
