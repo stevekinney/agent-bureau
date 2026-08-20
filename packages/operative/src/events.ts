@@ -665,10 +665,13 @@ export class SessionRecoverEvent extends Event {
   /**
    * Every `engine.resume(runId)` rejection encountered during this
    * `recover()` call, in the order they were tried (newest `running` ref
-   * first). Empty when no durable re-attach was attempted (in-process fast
-   * path, no `running` refs, or a successful reattach) — this is what
-   * distinguishes "nothing to resume" from "resume was attempted and
-   * failed" for an otherwise-identical `runId: null` event.
+   * first). Empty only when NO resume attempt rejected — that covers both
+   * "no durable re-attach was attempted" (in-process fast path or no
+   * `running` refs, where `runId` is also `null`) and a clean successful
+   * reattach on the first try. It is NOT empty on a mixed outcome, where a
+   * newer `running` ref rejected before an older one succeeded — that event
+   * carries the successful `runId` alongside the accumulated failures from
+   * the refs tried before it, so neither signal is lost.
    */
   readonly failures: readonly SessionRecoverFailure[];
   constructor(
@@ -679,7 +682,10 @@ export class SessionRecoverEvent extends Event {
     super(SessionRecoverEvent.type);
     this.sessionId = sessionId;
     this.runId = runId;
-    this.failures = failures;
+    // Copy (and freeze) so a caller that mutates the array it passed in — or
+    // that `recover()` keeps accumulating into across older running refs —
+    // cannot retroactively change an already-dispatched event's payload.
+    this.failures = Object.freeze([...failures]);
   }
 }
 
