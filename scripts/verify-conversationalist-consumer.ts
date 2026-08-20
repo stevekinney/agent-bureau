@@ -22,7 +22,7 @@
  */
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 
 import { $ } from 'bun';
 
@@ -39,13 +39,17 @@ const CONVERSATIONALIST_DIRECTORY = join(REPO_ROOT, 'packages', 'conversationali
 const REAL_NODE_ENV: Record<string, string | undefined> = {
   ...process.env,
   PATH: (process.env['PATH'] ?? '')
-    .split(':')
+    .split(delimiter)
     .filter((segment) => !segment.includes('bun-node-'))
-    .join(':'),
+    .join(delimiter),
 };
 
 /** Absolute path to the real Node.js binary, resolved with the filtered `PATH` above. */
-const NODE_BINARY = (await $`which node`.env(REAL_NODE_ENV).quiet().text()).trim();
+const resolvedNodeBinary = Bun.which('node', { PATH: REAL_NODE_ENV['PATH'] ?? '' });
+if (!resolvedNodeBinary) {
+  throw new Error('Could not locate a "node" executable on PATH (after filtering Bun\'s shim).');
+}
+const NODE_BINARY: string = resolvedNodeBinary;
 
 const ZOD_VERSION = '4.4.3';
 const TYPESCRIPT_VERSION = '6.0.3';

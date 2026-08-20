@@ -2,10 +2,22 @@
  * Cross-platform cryptographic hashing utilities.
  *
  * - `sha256Hex` uses the Web Crypto API and works in all environments (browser, Node, Bun, Deno).
- * - `sha256HexSync` is synchronous and works in Node.js and Bun (throws in browsers).
- * - `hmacSha256HexSync` signs text with HMAC-SHA-256 in Node.js and Bun.
- * - `timingSafeEqualHex` compares hex digests without leaking the first differing byte.
- * - `createIncrementalHash` returns a streaming hasher for accumulating data across multiple `.update()` calls.
+ * - `sha256HexSync` is synchronous and works in Bun and in Node.js 20.16+/22.3+ (throws in browsers
+ *   and in older Node.js, where `process.getBuiltinModule` does not exist — use the async `sha256Hex`
+ *   there instead, or supply a `require`-based runtime override; see below).
+ * - `hmacSha256HexSync` signs text with HMAC-SHA-256 under the same Bun/Node 20.16+ requirement.
+ * - `timingSafeEqualHex` compares hex digests without leaking the first differing byte (same
+ *   Bun/Node 20.16+ requirement as the other synchronous helpers).
+ * - `createIncrementalHash` returns a streaming hasher for accumulating data across multiple
+ *   `.update()` calls (same Bun/Node 20.16+ requirement).
+ *
+ * The synchronous helpers read `node:crypto` via `process.getBuiltinModule` rather than a literal
+ * `require(...)` call, specifically so that bundling this package for a browser build never injects
+ * a `createRequire`/`node:module` shim (see AB-31). That trades away support for Node.js versions
+ * older than 20.16.0/22.3.0 for the synchronous path; a caller that must support older Node can
+ * still supply its own loader via the `agent-bureau.interoperability.hash.runtime` global override
+ * (see `getHashRuntimeOverride` below) — set `{ require: (specifier) => require(specifier) }` from
+ * a CommonJS entry point where a real `require` exists.
  */
 
 /** Interface for an incremental (streaming) hash that accumulates data via `.update()`. */
