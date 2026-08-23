@@ -15,7 +15,13 @@ import { z } from 'zod';
 
 import { stopWhen } from '../conditions/index';
 import { createActiveRun } from '../create-run';
-import { BudgetExceededError, ElicitationDeniedError, GuardrailTripwireError } from '../errors';
+import {
+  AbortAgentRunError,
+  AgentRunError,
+  BudgetExceededError,
+  ElicitationDeniedError,
+  GuardrailTripwireError,
+} from '../errors';
 import {
   type CombinedOperativeEventMap,
   RunCompletedEvent,
@@ -34,6 +40,7 @@ import {
   createDurableActiveRun,
   createRecoveredRunEventSurface,
   reattachDurableActiveRun,
+  startDurableRunResult,
 } from './active-run-adapter';
 import { createCheckpointStore } from './checkpoint-store';
 import type { AnyRunEngine } from './create-run-engine';
@@ -272,19 +279,26 @@ describe('createRun with durable routing', () => {
   it('propagates the real generate error through the run lifecycle (not a placeholder)', async () => {
     const context = await buildContext();
     try {
+      const thrownError = new Error('generate exploded: model unavailable');
+      let runError: AgentRunError | undefined;
       let errorMessage: string | undefined;
       let completedFinishReason: RunResult['finishReason'] | undefined;
+      let completedError: unknown;
 
       const activeRun = createRun(
         runOptions(async () => {
-          throw new Error('generate exploded: model unavailable');
+          throw thrownError;
         }),
         { ...context, runId: 'error-run', prompt: 'Hello' },
       );
+      activeRun.addEventListener('run.error', (event) => {
+        runError = event.error;
+      });
       // A generate error ends the run via run.completed with finishReason 'error'
       // (executeLoop parity — it does not throw out of the run).
       activeRun.addEventListener('run.completed', (event) => {
         completedFinishReason = event.finishReason;
+        completedError = event.error;
         errorMessage = event.error instanceof Error ? event.error.message : String(event.error);
       });
 
@@ -295,8 +309,34 @@ describe('createRun with durable routing', () => {
       // The REAL cause survives the workflow→adapter boundary, not a synthetic
       // "Durable run error" placeholder.
       expect(errorMessage).toBe('generate exploded: model unavailable');
-      expect(result.error).toBeInstanceOf(Error);
+      expect(result.error).toBeInstanceOf(AgentRunError);
+      expect(result.error).toBe(runError);
+      expect(completedError).toBe(runError);
+      expect(runError?.kind).toBe('generate');
+      expect(runError?.code).toBe('UNKNOWN');
+      expect(runError?.cause).toBe(thrownError);
       expect((result.error as Error).message).toBe('generate exploded: model unavailable');
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+
+  it('reconstructs typed terminal errors on result-only durable runs', async () => {
+    const context = await buildContext();
+    try {
+      const result = await startDurableRunResult(context, {
+        runId: 'result-only-error-run',
+        sessionId: 'result-only-error-run',
+        options: runOptions(async () => {
+          throw new Error('result-only generate exploded');
+        }),
+      });
+
+      expect(result.finishReason).toBe('error');
+      expect(result.error).toBeInstanceOf(AgentRunError);
+      expect((result.error as AgentRunError).kind).toBe('generate');
+      expect((result.error as AgentRunError).code).toBe('UNKNOWN');
+      expect((result.error as Error).message).toBe('result-only generate exploded');
     } finally {
       context.engine[Symbol.dispose]();
     }
@@ -345,6 +385,7 @@ describe('createRun with durable routing', () => {
     try {
       let abortedReason: string | undefined;
       let aborted = false;
+      let abortedError: unknown;
 
       // generate blocks until the run-level signal aborts, then rejects — so the
       // run is in-flight when we call abort().
@@ -368,6 +409,7 @@ describe('createRun with durable routing', () => {
       activeRun.addEventListener('run.aborted', (event) => {
         aborted = true;
         abortedReason = event.reason;
+        abortedError = event.error;
       });
 
       // Abort after the deferred-microtask start has begun the run.
@@ -380,6 +422,10 @@ describe('createRun with durable routing', () => {
       expect(aborted).toBe(true);
       // The real abort reason survives the workflow→adapter boundary.
       expect(abortedReason).toBe('user requested stop');
+      expect(result.error).toBeInstanceOf(AbortAgentRunError);
+      expect(result.error).toBe(abortedError);
+      expect((result.error as AbortAgentRunError).kind).toBe('abort');
+      expect((result.error as AbortAgentRunError).code).toBe('ABORTED');
     } finally {
       context.engine[Symbol.dispose]();
     }
@@ -634,11 +680,18 @@ describe('createRun with durable routing', () => {
         },
         { ...context, runId: 'budget-run', prompt: 'Hello' },
       );
+      let runError: AgentRunError | undefined;
+      activeRun.addEventListener('run.error', (event) => {
+        runError = event.error;
+      });
 
       const result = await activeRun.result;
 
       expect(result.finishReason).toBe('budget-exceeded');
       expect(result.error).toBeInstanceOf(BudgetExceededError);
+      expect(result.error).toBe(runError);
+      expect((result.error as BudgetExceededError).kind).toBe('policy');
+      expect((result.error as BudgetExceededError).code).toBe('BUDGET_EXCEEDED');
     } finally {
       context.engine[Symbol.dispose]();
     }
@@ -659,11 +712,18 @@ describe('createRun with durable routing', () => {
         },
         { ...context, runId: 'elicitation-run', prompt: 'Hello' },
       );
+      let runError: AgentRunError | undefined;
+      activeRun.addEventListener('run.error', (event) => {
+        runError = event.error;
+      });
 
       const result = await activeRun.result;
 
       expect(result.finishReason).toBe('elicitation-denied');
       expect(result.error).toBeInstanceOf(ElicitationDeniedError);
+      expect(result.error).toBe(runError);
+      expect((result.error as ElicitationDeniedError).kind).toBe('policy');
+      expect((result.error as ElicitationDeniedError).code).toBe('ELICITATION_DENIED');
     } finally {
       context.engine[Symbol.dispose]();
     }
@@ -707,12 +767,19 @@ describe('createRun with durable routing', () => {
       activeRun.addEventListener('run.tripwire', (event) => {
         tripwireEvents.push(event);
       });
+      let runError: AgentRunError | undefined;
+      activeRun.addEventListener('run.error', (event) => {
+        runError = event.error;
+      });
 
       const result = await activeRun.result;
 
       expect(result.finishReason).toBe('tripwire');
       expect(result.error).toBeInstanceOf(GuardrailTripwireError);
+      expect(result.error).toBe(runError);
       const error = result.error as GuardrailTripwireError;
+      expect(error.kind).toBe('policy');
+      expect(error.code).toBe('TRIPWIRE');
       expect(error.guardrailName).toBe('prompt-injection');
       expect(error.phase).toBe('input');
       expect(error.confidence).toBe(0.95);
@@ -1693,7 +1760,9 @@ describe('reattachDurableActiveRun', () => {
 
       const result = await recoveredRun.result;
       expect(result.schemaValidation?.success).toBe(false);
-      expect(result.schemaValidation?.error).toBeInstanceOf(Error);
+      expect(result.schemaValidation?.error).toBeInstanceOf(AgentRunError);
+      expect((result.schemaValidation?.error as AgentRunError).kind).toBe('output');
+      expect((result.schemaValidation?.error as AgentRunError).code).toBe('INVALID_OUTPUT');
       expect((result.schemaValidation?.error as Error).message).toBe('schema failed');
     } finally {
       context.engine[Symbol.dispose]();

@@ -3,10 +3,12 @@ import type { Conversation } from 'conversationalist';
 import { estimateCost, getModelPricing } from './cost-estimation';
 import {
   AbortAgentRunError,
+  type AgentRunError,
   BudgetExceededError,
   ElicitationDeniedError,
   GuardrailTripwireError,
   MaximumStepsExceededError,
+  toAgentRunError,
 } from './errors';
 import {
   RunAbortedEvent,
@@ -94,9 +96,10 @@ export function makeAbortResult(
   step: number,
   reason?: string,
   costEstimation?: RunOptions['costEstimation'],
+  terminalError?: AgentRunError,
 ): RunResult {
   const costEstimate = computeCostEstimate(runState.totalUsage, costEstimation);
-  const error = new AbortAgentRunError(reason);
+  const error = terminalError ?? new AbortAgentRunError(reason);
   emitter?.dispatch(
     new RunAbortedEvent(step, conversation, error, runState.totalUsage, costEstimate),
   );
@@ -136,18 +139,19 @@ export function makeErrorResult(
   error: unknown,
   costEstimation?: RunOptions['costEstimation'],
 ): RunResult {
+  const runError = toAgentRunError(error);
   runHookSilently(hooks, 'onRunError', {
-    error,
+    error: runError,
     partialSteps: [...runState.steps],
     conversation,
   });
 
   const finishReason: FinishReason =
-    error instanceof ElicitationDeniedError
+    runError instanceof ElicitationDeniedError
       ? 'elicitation-denied'
-      : error instanceof BudgetExceededError
+      : runError instanceof BudgetExceededError
         ? 'budget-exceeded'
-        : error instanceof GuardrailTripwireError
+        : runError instanceof GuardrailTripwireError
           ? 'tripwire'
           : 'error';
 
@@ -159,16 +163,16 @@ export function makeErrorResult(
     usage: runState.totalUsage,
     ...(costEstimate ? { costEstimate } : {}),
     finishReason,
-    error,
+    error: runError,
   };
-  if (error instanceof GuardrailTripwireError) {
+  if (runError instanceof GuardrailTripwireError) {
     emitter?.dispatch(
       new RunTripwireEvent(runState.steps.length, {
-        guardrailName: error.guardrailName,
-        category: error.category,
-        phase: error.phase,
-        confidence: error.confidence,
-        detail: error.detail,
+        guardrailName: runError.guardrailName,
+        category: runError.category,
+        phase: runError.phase,
+        confidence: runError.confidence,
+        detail: runError.detail,
       }),
     );
   }
@@ -192,11 +196,12 @@ export function makeCompletedResult(
   schemaValidation?: { success: boolean; error?: unknown },
   output?: unknown,
   costEstimation?: RunOptions['costEstimation'],
+  terminalError?: AgentRunError,
 ): RunResult {
   const costEstimate = computeCostEstimate(runState.totalUsage, costEstimation);
   const maximumStepsError =
     finishReason === 'maximum-steps'
-      ? new MaximumStepsExceededError(runState.steps.length)
+      ? (terminalError ?? new MaximumStepsExceededError(runState.steps.length))
       : undefined;
   const result: RunResult = {
     conversation,

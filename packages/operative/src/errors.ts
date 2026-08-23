@@ -5,7 +5,15 @@ export type AgentRunErrorKind =
 
 export type AsyncDefinitionLoadCode = 'INVALID_EXPORT' | 'LOAD_FAILED';
 
-export type AgentRunErrorCode = AsyncDefinitionLoadCode | 'ABORTED' | 'MAXIMUM_STEPS' | 'UNKNOWN';
+export type AgentRunErrorCode =
+  | AsyncDefinitionLoadCode
+  | 'ABORTED'
+  | 'BUDGET_EXCEEDED'
+  | 'ELICITATION_DENIED'
+  | 'INVALID_OUTPUT'
+  | 'MAXIMUM_STEPS'
+  | 'TRIPWIRE'
+  | 'UNKNOWN';
 
 export class AgentRunError extends Error {
   readonly kind: AgentRunErrorKind;
@@ -24,6 +32,25 @@ export class AgentRunError extends Error {
   }
 }
 
+function formatUnknownErrorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === 'string') return error;
+  if (error == null) return 'Unknown error';
+  if (
+    typeof error === 'number' ||
+    typeof error === 'boolean' ||
+    typeof error === 'bigint' ||
+    typeof error === 'symbol'
+  ) {
+    return String(error);
+  }
+  try {
+    return JSON.stringify(error) ?? Object.prototype.toString.call(error);
+  } catch {
+    return Object.prototype.toString.call(error);
+  }
+}
+
 export function toAgentRunError(
   error: unknown,
   options: {
@@ -34,9 +61,7 @@ export function toAgentRunError(
 ): AgentRunError {
   if (error instanceof AgentRunError) return error;
 
-  const message =
-    options.message ??
-    (error instanceof Error ? error.message : typeof error === 'string' ? error : String(error));
+  const message = options.message ?? formatUnknownErrorMessage(error);
 
   return new AgentRunError(message, {
     kind: options.kind ?? 'generate',
@@ -55,16 +80,16 @@ export class MaximumStepsExceededError extends AgentRunError {
   }
 }
 
-export class ElicitationDeniedError extends Error {
+export class ElicitationDeniedError extends AgentRunError {
   constructor(message?: string) {
-    super(message);
+    super(message ?? '', { kind: 'policy', code: 'ELICITATION_DENIED' });
     this.name = 'ElicitationDeniedError';
   }
 }
 
-export class BudgetExceededError extends Error {
+export class BudgetExceededError extends AgentRunError {
   constructor(message?: string) {
-    super(message);
+    super(message ?? '', { kind: 'policy', code: 'BUDGET_EXCEEDED' });
     this.name = 'BudgetExceededError';
   }
 }
@@ -91,7 +116,7 @@ export class AbortAgentRunError extends AgentRunError {
  * validator's raw `issues` array (per the Standard Schema spec) so callers
  * that inspect the error programmatically don't need to guess the shape.
  */
-export class StandardSchemaValidationError extends Error {
+export class StandardSchemaValidationError extends AgentRunError {
   readonly issues: ReadonlyArray<{ message: string; path?: ReadonlyArray<PropertyKey> }>;
 
   constructor(issues: ReadonlyArray<{ message: string; path?: ReadonlyArray<PropertyKey> }>) {
@@ -99,6 +124,7 @@ export class StandardSchemaValidationError extends Error {
       issues.length > 0
         ? `Response failed schema validation: ${issues.map((issue) => issue.message).join('; ')}`
         : 'Response failed schema validation',
+      { kind: 'output', code: 'INVALID_OUTPUT' },
     );
     this.name = 'StandardSchemaValidationError';
     this.issues = issues;
@@ -125,7 +151,7 @@ export interface GuardrailTripwireDetail {
  * mirroring the `ElicitationDeniedError`/`BudgetExceededError` pattern — the run
  * terminates cleanly (a `RunCompletedEvent` + `RunTripwireEvent`, not a crash).
  */
-export class GuardrailTripwireError extends Error implements GuardrailTripwireDetail {
+export class GuardrailTripwireError extends AgentRunError implements GuardrailTripwireDetail {
   readonly guardrailName: string;
   readonly category: string;
   readonly phase: 'input' | 'output';
@@ -133,7 +159,7 @@ export class GuardrailTripwireError extends Error implements GuardrailTripwireDe
   readonly detail?: string;
 
   constructor(message: string, info: GuardrailTripwireDetail) {
-    super(message);
+    super(message, { kind: 'policy', code: 'TRIPWIRE' });
     this.name = 'GuardrailTripwireError';
     this.guardrailName = info.guardrailName;
     this.category = info.category;
