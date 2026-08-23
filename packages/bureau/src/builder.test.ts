@@ -157,6 +157,27 @@ describe('createBureau (builder) — Tier 2 (.agent() chained accretion)', () =>
     expect(resultA.content).toBe('from A');
     expect(resultB.content).toBe('from B');
   });
+
+  it('runs agent prepare-step hooks in declared array order', async () => {
+    const calls: string[] = [];
+    const generate = createMockGenerate([{ content: 'hooked', toolCalls: [] }]);
+    const firstHook = async ({ step }: { step: number }) => {
+      calls.push(`${step}:first-hook`);
+    };
+    const secondHook = async ({ step }: { step: number }) => {
+      calls.push(`${step}:second-hook`);
+    };
+
+    const bureau = createBureau().agent({
+      name: 'hooked',
+      generate,
+      hooks: [firstHook, secondHook],
+    });
+
+    await bureau.run('hooked', 'input').result();
+
+    expect(calls).toEqual(['0:first-hook', '0:second-hook', '1:first-hook', '1:second-hook']);
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -7,19 +7,26 @@ import type {
   CombinedOperativeEventMap,
   GenerateFunction,
   GenerateResponse,
+  StreamEventMap,
   Toolbox,
 } from '@lostgradient/operative';
 import {
+  createAgentSession,
   createSessionStore,
   DEFAULT_MAXIMUM_STEPS,
   HumanWaitParkedEvent,
   RunAbortedEvent,
+  SchedulerTaskCompletedEvent,
+  SchedulerTaskFailedEvent,
   StepCompletedEvent,
   stopWhen,
+  TaskCancelledEvent,
   TaskDispatchedEvent,
+  TaskPreemptedEvent,
 } from '@lostgradient/operative';
 import {
   type DurableRunDeps,
+  type ScheduledAgentRunInput,
   SCHEDULER_ORIGIN_TAG,
   startDurableRunResult,
 } from '@lostgradient/operative/durable';
@@ -33,7 +40,7 @@ import { createTool, createToolbox } from 'armorer';
 import { createMockTool, createTestToolbox } from 'armorer/test';
 import { afterEach, describe, expect, it, mock, spyOn } from 'bun:test';
 import { Conversation, createConversationHistory, getMessages } from 'conversationalist';
-import { CompletableEventTarget } from 'lifecycle';
+import { CompletableEventTarget, TypedEventTarget } from 'lifecycle';
 import { createMemory, type Memory } from 'memory';
 import { createInMemoryMemoryRecordStorage, createMockEmbedder } from 'memory/test';
 import { z } from 'zod';
@@ -44,8 +51,14 @@ import {
   BureauError,
   classifyRecoveredRun,
   createBureau,
+  createHumanWaitContext,
+  defaultSessionPersistenceSleep,
+  detachBestEffortPromise,
   isRecoverableScheduledFireInput,
+  loadExistingScheduledSessionId,
   monitorRecoveredScheduledFire,
+  wireFlowControlSchedulerEvents,
+  wireStreamEventTargetFrames,
 } from './create-bureau';
 import { createMemoryPersistHook, createRuntimeComposition } from './runtime-composition';
 import { waitForCondition, waitForRunState } from './test';
@@ -157,6 +170,232 @@ afterEach(async () => {
   await yieldToPortableEventLoop();
 });
 
+describe('create-bureau helper coverage', () => {
+  it('detaches best-effort promises without surfacing rejected cleanup work', async () => {
+    detachBestEffortPromise(Promise.resolve('done'));
+    detachBestEffortPromise(Promise.reject(new Error('best-effort failure')));
+
+    await Promise.resolve();
+  });
+
+  it('uses the default session persistence sleep timer with the requested delay', async () => {
+    const originalSetTimeout = globalThis.setTimeout;
+    const timerCalls: Array<number | undefined> = [];
+    globalThis.setTimeout = ((handler: TimerHandler, timeout?: number) => {
+      timerCalls.push(timeout);
+      expect(typeof handler).toBe('function');
+      (handler as (...args: unknown[]) => void)();
+      return 1 as unknown as ReturnType<typeof setTimeout>;
+    }) as unknown as typeof setTimeout;
+
+    try {
+      await defaultSessionPersistenceSleep(42);
+    } finally {
+      globalThis.setTimeout = originalSetTimeout;
+    }
+
+    expect(timerCalls).toEqual([42]);
+  });
+
+  it('wires scheduler lifecycle events to the flow controller and removes the listeners on dispose', () => {
+    const scheduler = new EventTarget();
+    const calls: string[] = [];
+    const cleanup = wireFlowControlSchedulerEvents(scheduler, {
+      settle: (taskId) => calls.push(`settle:${taskId}`),
+      markParked: (taskId) => calls.push(`park:${taskId}`),
+      markResumed: (taskId) => calls.push(`resume:${taskId}`),
+    });
+
+    scheduler.dispatchEvent(new SchedulerTaskCompletedEvent('completed-task', {} as never));
+    scheduler.dispatchEvent(new SchedulerTaskFailedEvent('failed-task', new Error('boom')));
+    scheduler.dispatchEvent(new TaskCancelledEvent('cancelled-task', 'queued'));
+    scheduler.dispatchEvent(new TaskPreemptedEvent('requeued-task', 'higher priority task', true));
+    scheduler.dispatchEvent(
+      new TaskPreemptedEvent('dropped-task', 'cancelled during preemption', false),
+    );
+    scheduler.dispatchEvent(new TaskDispatchedEvent('dispatched-task', 'background'));
+
+    expect(calls).toEqual([
+      'settle:completed-task',
+      'settle:failed-task',
+      'settle:cancelled-task',
+      'park:requeued-task',
+      'settle:dropped-task',
+      'resume:dispatched-task',
+    ]);
+
+    cleanup.forEach((dispose) => dispose());
+    scheduler.dispatchEvent(new TaskDispatchedEvent('ignored-after-cleanup', 'background'));
+    expect(calls).toEqual([
+      'settle:completed-task',
+      'settle:failed-task',
+      'settle:cancelled-task',
+      'park:requeued-task',
+      'settle:dropped-task',
+      'resume:dispatched-task',
+    ]);
+  });
+
+  it('finds recovered scheduled sessions by explicit id and stateless session naming', async () => {
+    const kv = textValueStore(new MemoryStorage());
+    const sessionStore = createSessionStore(kv);
+    const runId = 'scheduled-run-id';
+
+    await sessionStore.save(
+      createAgentSession({
+        id: 'explicit-scheduled-session',
+        agentName: 'scheduler',
+        conversationHistory: createConversationHistory({ id: 'explicit-scheduled-session' }),
+        metadata: { lastScheduledFireRunId: runId },
+      }),
+    );
+    await sessionStore.save(
+      createAgentSession({
+        id: `sched-nightly-${runId}`,
+        agentName: 'scheduler',
+        conversationHistory: createConversationHistory({ id: `sched-nightly-${runId}` }),
+        metadata: { lastScheduledFireRunId: runId },
+      }),
+    );
+
+    const explicitInput: ScheduledAgentRunInput = {
+      agentName: 'scheduler',
+      input: 'run nightly',
+      sessionId: 'explicit-scheduled-session',
+    };
+    const statelessInput: ScheduledAgentRunInput = {
+      agentName: 'scheduler',
+      input: 'run nightly',
+    };
+
+    expect(await loadExistingScheduledSessionId(sessionStore, explicitInput, runId)).toBe(
+      'explicit-scheduled-session',
+    );
+    expect(await loadExistingScheduledSessionId(sessionStore, statelessInput, runId)).toBe(
+      `sched-nightly-${runId}`,
+    );
+    expect(
+      await loadExistingScheduledSessionId(
+        sessionStore,
+        { ...explicitInput, sessionId: 'missing-session' },
+        runId,
+      ),
+    ).toBeUndefined();
+  });
+
+  it('wires stream events to live frames and removes every listener on dispose', () => {
+    const streamEventTarget = new TypedEventTarget<StreamEventMap>();
+    const frames: ServerFrame[] = [];
+    let sequence = 0;
+    const dispose = wireStreamEventTargetFrames(
+      streamEventTarget,
+      'run-stream',
+      (frame) => frames.push(frame),
+      () => ++sequence,
+    );
+
+    streamEventTarget.dispatchEvent(
+      new CustomEvent('stream:text-delta', {
+        detail: {
+          type: 'stream:text-delta',
+          content: 'Hel',
+          accumulated: 'Hel',
+        },
+      }),
+    );
+    streamEventTarget.dispatchEvent(
+      new CustomEvent('stream:tool-call-start', {
+        detail: {
+          type: 'stream:tool-call-start',
+          toolName: 'lookup',
+          blockId: 'block-1',
+        },
+      }),
+    );
+    streamEventTarget.dispatchEvent(
+      new CustomEvent('stream:tool-call-delta', {
+        detail: {
+          type: 'stream:tool-call-delta',
+          toolName: 'lookup',
+          blockId: 'block-1',
+          partialArguments: '{"id"',
+        },
+      }),
+    );
+    streamEventTarget.dispatchEvent(
+      new CustomEvent('stream:tool-call-complete', {
+        detail: {
+          type: 'stream:tool-call-complete',
+          toolName: 'lookup',
+          blockId: 'block-1',
+          arguments: { id: '123' },
+        },
+      }),
+    );
+    streamEventTarget.dispatchEvent(
+      new CustomEvent('stream:complete', {
+        detail: {
+          type: 'stream:complete',
+          state: 'done',
+        },
+      }),
+    );
+    streamEventTarget.dispatchEvent(
+      new CustomEvent('stream:error', {
+        detail: {
+          type: 'stream:error',
+          error: new Error('stream failed'),
+        },
+      }),
+    );
+
+    expect(frames.map((frame) => frame.type)).toEqual([
+      'stream:text-delta',
+      'stream:tool-call-start',
+      'stream:tool-call-delta',
+      'stream:tool-call-complete',
+      'stream:complete',
+      'stream:error',
+    ]);
+    expect(frames.map((frame) => ('runSeq' in frame ? frame.runSeq : undefined))).toEqual([
+      1, 2, 3, 4, 5, 6,
+    ]);
+
+    dispose();
+    streamEventTarget.dispatchEvent(
+      new CustomEvent('stream:complete', {
+        detail: {
+          type: 'stream:complete',
+          state: 'done',
+        },
+      }),
+    );
+
+    expect(frames).toHaveLength(6);
+  });
+
+  it('binds the human wait context to the durable services reference once available', () => {
+    const servicesRef: { current?: DurableRunDeps } = {};
+    const context = createHumanWaitContext(servicesRef, 'run-human-wait');
+
+    expect(context.runId).toBe('run-human-wait');
+    expect(context.pendingHumanWait).toBeUndefined();
+
+    const pendingWait = {
+      prompt: 'Need approval',
+      signalName: 'human-input:run-human-wait',
+    } as DurableRunDeps['pendingHumanWait'];
+
+    context.pendingHumanWait = pendingWait;
+    expect(context.pendingHumanWait).toBeUndefined();
+
+    servicesRef.current = {} as DurableRunDeps;
+    context.pendingHumanWait = pendingWait;
+    expect(servicesRef.current.pendingHumanWait).toBe(pendingWait);
+    expect(context.pendingHumanWait).toBe(pendingWait);
+  });
+});
+
 describe('createBureau', () => {
   it('is not ready when no generate function is configured', async () => {
     const bureau = await createBureau();
@@ -172,6 +411,27 @@ describe('createBureau', () => {
     const store = createStore();
     const bureau = await createBureau({ store });
     expect(bureau.store).toBe(store);
+  });
+
+  it('exposes the event facade through the public bureau surface', async () => {
+    const bureau = await createBureau();
+    const listener = () => {};
+
+    bureau.addEventListener('bureau.disposed', listener);
+    bureau.removeEventListener('bureau.disposed', listener);
+    bureau.on('bureau.disposed');
+    bureau.once('bureau.disposed', listener);
+    const subscription = bureau.subscribe('bureau.disposed', listener);
+    const observableSubscription = bureau.toObservable().subscribe(listener);
+    const iterator = bureau.events('bureau.disposed');
+
+    subscription.unsubscribe();
+    observableSubscription.unsubscribe();
+    await iterator.return?.();
+    bureau.complete();
+
+    expect(bureau.completed).toBe(true);
+    expect(bureau.signal.aborted).toBe(true);
   });
 
   it('throws NOT_CONFIGURED when createRun is called without a generate function', async () => {
@@ -1545,6 +1805,74 @@ describe('createBureau', () => {
           expect(stamp.agentName).toBe('recovery-agent');
           expect(stamp.runId).toBe(run.id);
         }
+      } finally {
+        bureauB.dispose();
+      }
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
+  it('persists aborted metadata when a recovered run is aborted after reattach', async () => {
+    const databasePath = join(
+      tmpdir(),
+      `bureau-recovery-abort-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+
+    try {
+      let bureauAReachedStep1 = false;
+      const bureauA = await createBureau({
+        generate: async ({ step, signal }) => {
+          if (step === 0) {
+            return { content: 'A step 0', toolCalls: [{ name: 'next', arguments: {} }] };
+          }
+          bureauAReachedStep1 = true;
+          return new Promise<GenerateResponse>((resolve) => {
+            signal?.addEventListener(
+              'abort',
+              () => resolve({ content: 'aborted before crash', toolCalls: [] }),
+              { once: true },
+            );
+          });
+        },
+        toolbox: createToolbox([createNextTool()]) as unknown as Toolbox,
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+        stopWhen: stopWhen.noToolCalls(),
+      });
+
+      const run = await bureauA.createRun({ message: 'Recover then abort' });
+      await pollUntil(() => bureauAReachedStep1);
+      bureauA.dispose();
+
+      const bureauB = await createBureau({
+        generate: async ({ signal }) =>
+          new Promise<GenerateResponse>((resolve) => {
+            signal?.addEventListener(
+              'abort',
+              () => resolve({ content: 'aborted after recovery', toolCalls: [] }),
+              { once: true },
+            );
+          }),
+        toolbox: createToolbox([createNextTool()]) as unknown as Toolbox,
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+        stopWhen: stopWhen.noToolCalls(),
+      });
+
+      try {
+        await pollUntil(() => bureauB.getRun(run.id)?.status === 'running');
+        bureauB.abortRun(run.id);
+        await pollUntil(async () => {
+          const current = await bureauB.getSession(run.sessionId);
+          return current?.metadata['lastRunStatus'] === 'aborted';
+        });
+
+        const session = await bureauB.getSession(run.sessionId);
+        expect(session?.metadata['lastRunStatus']).toBe('aborted');
+        expect(session?.metadata['lastFinishReason']).toBe('aborted');
       } finally {
         bureauB.dispose();
       }

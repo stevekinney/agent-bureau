@@ -2,23 +2,38 @@ import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import type { GenerateFunction, SessionStore } from '@lostgradient/operative';
+import type { GenerateFunction, SessionStore, StreamEventMap } from '@lostgradient/operative';
 import { createAgentSession, GuardrailTripwireError, stopWhen } from '@lostgradient/operative';
 import {
   createDurableActiveRun,
   type DurableRunDeps,
   SCHEDULER_ORIGIN_TAG,
   startDurableRunResult,
+  type StepRecord,
 } from '@lostgradient/operative/durable';
-import { encode } from '@lostgradient/weft';
+import { createCheckpoint, encode, serializeCheckpoint } from '@lostgradient/weft';
 import { KEYS, MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
 import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
 import { createToolbox } from 'armorer';
 import { afterEach, describe, expect, it } from 'bun:test';
 import { Conversation, createConversationHistory, getMessages } from 'conversationalist';
+import { TypedEventTarget } from 'lifecycle';
+import type { Memory } from 'memory';
 import type { SkillProvider } from 'skills';
 
-import { createRuntimeComposition, decodeScheduleRunMarker } from './runtime-composition';
+import {
+  activeSkillsFromStepMetadata,
+  applyCache,
+  createMemoryPersistHook,
+  createMemoryRecallHook,
+  createRoutingStrategy,
+  createRuntimeComposition,
+  decodeScheduleRunMarker,
+  isActiveSkillEntryArray,
+  recordedAgentStep,
+  removeLastScheduledFireTranscript,
+  resolveProviderGenerate,
+} from './runtime-composition';
 import type { GenerateProviderName, ProviderConfiguration } from './types';
 
 // Drain Weft's deferred inline-launch queue between tests — a pending setTimeout(0)
@@ -91,6 +106,60 @@ describe('createRuntimeComposition', () => {
     });
 
     expect(runRuntime.streamEventTarget).toBeUndefined();
+  });
+
+  it('maps configured toolbox tools into public tool summaries', async () => {
+    const { createTool } = await import('armorer');
+    const { z } = await import('zod');
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'ok', toolCalls: [] }),
+      toolbox: createToolbox([
+        createTool({
+          name: 'lookup_record',
+          description: 'Look up a record by id.',
+          input: z.object({ id: z.string() }),
+          async execute({ id }) {
+            return id;
+          },
+        }),
+      ]),
+    });
+
+    expect(runtime.getToolSummaries()).toContainEqual({
+      name: 'lookup_record',
+      description: 'Look up a record by id.',
+    });
+  });
+
+  it('wires identity resolution into prepare-step hooks when configured', async () => {
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'ok', toolCalls: [] }),
+      toolbox: createToolbox([], { context: {} }),
+      identity: {
+        async resolve() {
+          return 'user-123';
+        },
+      },
+    });
+    const runRuntime = await runtime.createRunRuntime({
+      message: 'Hello',
+      sessionId: 'identity-session',
+    });
+    const conversation = new Conversation();
+    conversation.appendUserMessage('Hello');
+
+    for (const hook of runRuntime.prepareStep) {
+      await hook({ step: 0, conversation });
+    }
+
+    expect(
+      conversation
+        .getMessages()
+        .some(
+          (message) =>
+            message.role === 'system' && extractMessageText(message.content).includes('user-123'),
+        ),
+    ).toBe(true);
   });
 
   it('reuses cost-aware routing budget across separate run runtimes', async () => {
@@ -234,6 +303,177 @@ describe('createRuntimeComposition', () => {
       expect(validProviders.includes(name as GenerateProviderName)).toBe(false);
     }
   });
+
+  it('composes the default streaming provider factories for every generate-capable backend', async () => {
+    const runtime = await createRuntimeComposition({
+      providers: [
+        {
+          name: 'anthropic',
+          provider: { provider: 'anthropic', model: 'claude-test', apiKey: 'test' },
+        },
+        { name: 'openai', provider: { provider: 'openai', model: 'gpt-test', apiKey: 'test' } },
+        { name: 'gemini', provider: { provider: 'gemini', model: 'gemini-test', apiKey: 'test' } },
+      ],
+      toolbox: createToolbox([], { context: {} }),
+      guardrails: { mode: 'tripwire', output: { validators: [] } },
+    });
+
+    const runRuntime = await runtime.createRunRuntime({
+      message: 'Hello',
+      sessionId: 'default-streaming-providers',
+    });
+
+    expect(runRuntime.streamEventTarget).toBeDefined();
+  });
+
+  it('falls through streaming provider resolution before rejecting an unknown provider', async () => {
+    const error = await createRuntimeComposition({
+      provider: { provider: 'voyage', model: 'voyage-test' } as unknown as ProviderConfiguration,
+      toolbox: createToolbox([], { context: {} }),
+      guardrails: { mode: 'tripwire', output: { validators: [] } },
+    }).then(
+      async (runtime) =>
+        runtime.createRunRuntime({
+          message: 'Hello',
+          sessionId: 'streaming-unknown-provider',
+        }),
+      (rejection: unknown) => rejection,
+    );
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain('Unknown provider');
+  });
+
+  it('composes the default non-streaming Gemini provider factory', async () => {
+    const runtime = await createRuntimeComposition({
+      provider: { provider: 'gemini', model: 'gemini-test', apiKey: 'test' },
+      streaming: { enabled: false },
+      toolbox: createToolbox([], { context: {} }),
+      guardrails: false,
+    });
+
+    const runRuntime = await runtime.createRunRuntime({
+      message: 'Hello',
+      sessionId: 'default-gemini-provider',
+    });
+
+    expect(runRuntime.streamEventTarget).toBeUndefined();
+  });
+
+  it('keeps cost-aware routing budget unchanged when a provider omits usage', async () => {
+    const runtime = await createRuntimeComposition(
+      {
+        providers: [
+          { name: 'cheap', provider: { provider: 'openai', model: 'cheap-model' } },
+          { name: 'expensive', provider: { provider: 'openai', model: 'expensive-model' } },
+        ],
+        routing: {
+          type: 'cost-aware',
+          cheap: 'cheap',
+          expensive: 'expensive',
+          budget: 100,
+          thresholdRatio: 0.5,
+        },
+        toolbox: createToolbox([], { context: {} }),
+      },
+      {
+        resolveProviderGenerate(provider) {
+          return async () => ({ content: provider.model, toolCalls: [] });
+        },
+      },
+    );
+
+    const firstRunRuntime = await runtime.createRunRuntime({
+      message: 'Hello',
+      sessionId: 'cost-aware-no-usage-1',
+    });
+    const secondRunRuntime = await runtime.createRunRuntime({
+      message: 'Hello again',
+      sessionId: 'cost-aware-no-usage-2',
+    });
+    const conversation = new Conversation();
+    conversation.appendUserMessage('Hello');
+
+    const firstResult = await firstRunRuntime.generate({
+      conversation,
+      step: 0,
+      toolbox: firstRunRuntime.toolbox,
+    });
+    const secondResult = await secondRunRuntime.generate({
+      conversation,
+      step: 0,
+      toolbox: secondRunRuntime.toolbox,
+    });
+
+    expect(firstResult.content).toBe('expensive-model');
+    expect(secondResult.content).toBe('expensive-model');
+  });
+
+  it('covers direct routing strategy branches for simple, frontier, and zero-budget cost decisions', () => {
+    const conversation = new Conversation();
+    conversation.appendUserMessage('short');
+    const context = {
+      conversation,
+      step: 0,
+      toolbox: createToolbox([], { context: {} }),
+    };
+
+    const simpleStrategy = createRoutingStrategy({
+      type: 'complexity',
+      simple: 'simple',
+      complex: 'complex',
+      frontier: 'frontier',
+      simpleMaxLength: 10,
+    });
+    if (simpleStrategy.kind !== 'direct') throw new Error('expected direct strategy');
+    expect(simpleStrategy.strategy(context, [])).toMatchObject({ route: 'simple' });
+
+    const frontierConversation = new Conversation();
+    for (let index = 0; index < 11; index += 1) {
+      frontierConversation.appendUserMessage(
+        `this prompt is deliberately longer than ten characters ${index}`,
+      );
+      frontierConversation.appendAssistantMessage(`response ${index}`);
+    }
+    expect(
+      simpleStrategy.strategy({ ...context, conversation: frontierConversation, step: 21 }, []),
+    ).toMatchObject({
+      route: 'frontier',
+    });
+
+    const costAwareStrategy = createRoutingStrategy({
+      type: 'cost-aware',
+      cheap: 'cheap',
+      expensive: 'expensive',
+      budget: 0,
+    });
+    if (costAwareStrategy.kind !== 'cost-aware') throw new Error('expected cost-aware strategy');
+    expect(costAwareStrategy.strategy(context, [])).toMatchObject({ route: 'cheap' });
+    costAwareStrategy.onUsage(undefined);
+    costAwareStrategy.onUsage({ total: 0 });
+  });
+
+  it('applies cache only when configuration and a store are available', () => {
+    const generate: GenerateFunction = async () => ({ content: 'fresh', toolCalls: [] });
+    const kv = textValueStore(new MemoryStorage());
+
+    expect(applyCache(generate, undefined, undefined)).toBe(generate);
+    expect(applyCache(generate, { enabled: false }, kv)).toBe(generate);
+    expect(applyCache(generate, { enabled: true }, undefined)).toBe(generate);
+    expect(applyCache(generate, { enabled: true, store: kv }, undefined)).not.toBe(generate);
+  });
+
+  it('falls through streaming resolution before rejecting an unknown provider directly', () => {
+    const streamEventTarget = new TypedEventTarget<StreamEventMap>();
+
+    expect(() =>
+      resolveProviderGenerate(
+        { provider: 'voyage', model: 'voyage-test' } as unknown as ProviderConfiguration,
+        streamEventTarget,
+        {},
+      ),
+    ).toThrow('Unknown provider');
+  });
 });
 
 describe('decodeScheduleRunMarker', () => {
@@ -282,6 +522,205 @@ describe('decodeScheduleRunMarker', () => {
     expect(decodeScheduleRunMarker(undefined)).toBeUndefined();
     expect(decodeScheduleRunMarker(42)).toBeUndefined();
     expect(decodeScheduleRunMarker([])).toBeUndefined();
+  });
+});
+
+function createMemoryDouble(options: {
+  recalls?: Array<{ content: string }>;
+  remember?: (content: string, metadata: unknown) => Promise<void>;
+  rememberOnce?: (content: string, metadata: unknown) => Promise<void>;
+}): Memory {
+  return {
+    recall: async () => options.recalls ?? [],
+    remember: options.remember ?? (async () => {}),
+    rememberOnce: options.rememberOnce ?? (async () => {}),
+  } as unknown as Memory;
+}
+
+describe('memory hook coverage', () => {
+  it('skips memory recall after step 0, without a latest text user message, and without recalls', async () => {
+    const memory = createMemoryDouble({ recalls: [] });
+    const hook = createMemoryRecallHook(memory, 'session-memory');
+
+    const stepOneConversation = new Conversation();
+    stepOneConversation.appendUserMessage('remember this later');
+    await hook({ step: 1, conversation: stepOneConversation });
+    expect(
+      stepOneConversation.getMessages().filter((message) => message.role === 'system'),
+    ).toEqual([]);
+
+    const noUserConversation = new Conversation();
+    await hook({ step: 0, conversation: noUserConversation });
+    expect(noUserConversation.getMessages()).toEqual([]);
+
+    const noRecallConversation = new Conversation();
+    noRecallConversation.appendUserMessage('nothing relevant');
+    await hook({ step: 0, conversation: noRecallConversation });
+    expect(
+      noRecallConversation.getMessages().filter((message) => message.role === 'system'),
+    ).toEqual([]);
+  });
+
+  it('injects recalled memories as one system message on step 0', async () => {
+    const memory = createMemoryDouble({
+      recalls: [{ content: 'first fact' }, { content: 'second fact' }],
+    });
+    const hook = createMemoryRecallHook(memory, 'session-memory');
+    const conversation = new Conversation();
+    conversation.appendUserMessage('what do you know?');
+
+    await hook({ step: 0, conversation });
+
+    const systemMessages = conversation
+      .getMessages()
+      .filter((message) => message.role === 'system');
+    expect(systemMessages).toHaveLength(1);
+    expect(extractMessageText(systemMessages[0]!.content)).toContain('1. first fact');
+    expect(extractMessageText(systemMessages[0]!.content)).toContain('2. second fact');
+    expect(systemMessages[0]!.metadata).toMatchObject({
+      _memoryInjected: true,
+      _memorySessionId: 'session-memory',
+    });
+  });
+
+  it('skips blank or non-final memory persistence and uses remember when no run id is present', async () => {
+    const remembered: Array<{ content: string; metadata: unknown }> = [];
+    const rememberedOnce: Array<{ content: string; metadata: unknown }> = [];
+    const memory = createMemoryDouble({
+      remember: async (content, metadata) => {
+        remembered.push({ content, metadata });
+      },
+      rememberOnce: async (content, metadata) => {
+        rememberedOnce.push({ content, metadata });
+      },
+    });
+    const hook = createMemoryPersistHook(memory, 'session-memory');
+    const conversation = new Conversation();
+
+    await hook({
+      step: 0,
+      conversation,
+      content: 'not final',
+      toolCalls: [],
+      results: [],
+      final: false,
+    });
+    await hook({ step: 1, conversation, content: '   ', toolCalls: [], results: [], final: true });
+    await hook({
+      step: 2,
+      conversation,
+      content: 'remember this',
+      toolCalls: [],
+      results: [],
+      final: true,
+    });
+
+    expect(remembered).toHaveLength(1);
+    expect(remembered[0]!.content).toBe('remember this');
+    expect(remembered[0]!.metadata).toMatchObject({
+      namespace: 'session-memory',
+      source: 'experiential',
+      step: 2,
+      replay: 'effectful',
+    });
+    expect(rememberedOnce).toEqual([]);
+  });
+});
+
+describe('active skill metadata validation', () => {
+  it('removes the final scheduled-fire transcript segment when no later user turn exists', () => {
+    const conversation = new Conversation(createConversationHistory({ id: 'scheduled-session' }));
+    conversation.appendUserMessage('manual turn');
+    conversation.appendAssistantMessage('manual response');
+    conversation.appendUserMessage('scheduled prompt', { scheduledFireRunId: 'scheduled-run' });
+    conversation.appendAssistantMessage('scheduled response');
+
+    const trimmed = removeLastScheduledFireTranscript(conversation.current, 'scheduled-run');
+    const messages = getMessages(trimmed);
+
+    expect(messages.map((message) => message.content)).toEqual(['manual turn', 'manual response']);
+  });
+
+  it('accepts valid active skill entries and rejects malformed policy metadata', () => {
+    expect(isActiveSkillEntryArray([{ name: 'research' }])).toBe(true);
+    expect(
+      isActiveSkillEntryArray([
+        { name: 'research', toolPolicy: { allowList: ['read'], denyList: ['write'] } },
+      ]),
+    ).toBe(true);
+
+    expect(isActiveSkillEntryArray('nope')).toBe(false);
+    expect(isActiveSkillEntryArray([null])).toBe(false);
+    expect(isActiveSkillEntryArray([{ name: 42 }])).toBe(false);
+    expect(isActiveSkillEntryArray([{ name: 'research', toolPolicy: null }])).toBe(false);
+    expect(isActiveSkillEntryArray([{ name: 'research', toolPolicy: { allowList: 'read' } }])).toBe(
+      false,
+    );
+    expect(isActiveSkillEntryArray([{ name: 'research', toolPolicy: { denyList: 'write' } }])).toBe(
+      false,
+    );
+  });
+
+  it('reads active skills from committed step metadata only when the shape is valid', () => {
+    const metadata = {
+      __bureauActiveSkills: {
+        version: 1,
+        entries: [{ name: 'research', toolPolicy: { allowList: ['read'] } }],
+      },
+    };
+
+    expect(activeSkillsFromStepMetadata(metadata)).toEqual([
+      { name: 'research', toolPolicy: { allowList: ['read'] } },
+    ]);
+    expect(activeSkillsFromStepMetadata(undefined)).toBeUndefined();
+    expect(activeSkillsFromStepMetadata({ __bureauActiveSkills: [] })).toBeUndefined();
+    expect(
+      activeSkillsFromStepMetadata({ __bureauActiveSkills: { version: 2, entries: [] } }),
+    ).toBeUndefined();
+    expect(
+      activeSkillsFromStepMetadata({
+        __bureauActiveSkills: { version: 1, entries: [{ name: 'research', toolPolicy: null }] },
+      }),
+    ).toBeUndefined();
+  });
+
+  it('accepts only complete recorded agent step shapes from checkpoints', () => {
+    const validRecord = {
+      conversationSnapshot: {},
+      nextAccumulators: {},
+      record: {
+        step: 0,
+        content: 'done',
+        toolCalls: [],
+        results: [],
+        final: true,
+        metadata: { ok: true },
+      },
+    };
+
+    expect(recordedAgentStep(validRecord)).toEqual(validRecord.record);
+    expect(recordedAgentStep(null)).toBeUndefined();
+    expect(recordedAgentStep({ ...validRecord, conversationSnapshot: null })).toBeUndefined();
+    expect(recordedAgentStep({ ...validRecord, nextAccumulators: null })).toBeUndefined();
+    expect(recordedAgentStep({ ...validRecord, record: null })).toBeUndefined();
+    expect(
+      recordedAgentStep({ ...validRecord, record: { ...validRecord.record, step: -1 } }),
+    ).toBeUndefined();
+    expect(
+      recordedAgentStep({ ...validRecord, record: { ...validRecord.record, content: 1 } }),
+    ).toBeUndefined();
+    expect(
+      recordedAgentStep({ ...validRecord, record: { ...validRecord.record, toolCalls: {} } }),
+    ).toBeUndefined();
+    expect(
+      recordedAgentStep({ ...validRecord, record: { ...validRecord.record, results: {} } }),
+    ).toBeUndefined();
+    expect(
+      recordedAgentStep({ ...validRecord, record: { ...validRecord.record, final: 'yes' } }),
+    ).toBeUndefined();
+    expect(
+      recordedAgentStep({ ...validRecord, record: { ...validRecord.record, metadata: [] } }),
+    ).toBeUndefined();
   });
 });
 
@@ -427,6 +866,331 @@ describe('createRuntimeComposition durable execution', () => {
     } finally {
       runtime.durable?.engine[Symbol.dispose]?.();
       storage[Symbol.dispose]();
+    }
+  });
+
+  it('exposes resolver guards for not-ready and no-session-store states', async () => {
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'x', toolCalls: [] }),
+      toolbox: createToolbox([], { context: {} }),
+    });
+
+    runtime.__testing.setCompositionReady(false);
+    expect(
+      await runtime.__testing.resolveRunServices({
+        workflowId: 'run-not-ready',
+        workflowType: 'agentRun',
+        input: { runId: 'run-not-ready', sessionId: 'session', agentName: 'agent' },
+      }),
+    ).toMatchObject({ status: 'unavailable', reason: 'run run-not-ready: composition not ready' });
+
+    runtime.__testing.setCompositionReady(true);
+    expect(
+      await runtime.__testing.resolveRunServices({
+        workflowId: 'run-no-store',
+        workflowType: 'agentRun',
+        input: { runId: 'run-no-store', sessionId: 'session', agentName: 'agent' },
+      }),
+    ).toMatchObject({ status: 'unavailable', reason: 'no session store configured' });
+  });
+
+  it('exposes scheduled-run resolver guards for invalid input and missing persisted markers', async () => {
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'x', toolCalls: [] }),
+      toolbox: createToolbox([], { context: {} }),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+
+    try {
+      expect(runtime.sessionStore).toBeDefined();
+      expect(
+        await runtime.__testing.buildScheduledRunServices(
+          {
+            workflowId: 'scheduled-invalid',
+            workflowType: 'other',
+            input: { agentName: 'agent', input: 'run' },
+            schedule: { id: 'nightly' },
+          },
+          runtime.sessionStore!,
+        ),
+      ).toMatchObject({
+        status: 'unavailable',
+        reason: 'scheduled fire scheduled-invalid has an unrecognized workflow type or input',
+      });
+
+      expect(
+        await runtime.__testing.buildScheduledRunServices(
+          {
+            workflowId: 'scheduled-missing-marker',
+            workflowType: 'agentRun',
+            input: { agentName: 'agent', input: 'run' },
+          },
+          runtime.sessionStore!,
+        ),
+      ).toMatchObject({
+        status: 'unavailable',
+        reason: 'scheduled fire scheduled-missing-marker is missing a persisted schedule marker',
+      });
+    } finally {
+      runtime.durable?.engine[Symbol.dispose]?.();
+    }
+  });
+
+  it('uses an explicit scheduled session id as proof for markerless recovered fires', async () => {
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'x', toolCalls: [] }),
+      toolbox: createToolbox([], { context: {} }),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+
+    try {
+      expect(runtime.sessionStore).toBeDefined();
+      await runtime.sessionStore!.save(
+        createAgentSession({
+          id: 'explicit-scheduled-session',
+          agentName: 'agent',
+          conversationHistory: createConversationHistory({ id: 'explicit-scheduled-session' }),
+          metadata: { lastScheduledFireRunId: 'scheduled-run' },
+        }),
+      );
+
+      expect(
+        await runtime.__testing.resolveRunServices({
+          workflowId: 'scheduled-run',
+          workflowType: 'agentRun',
+          input: {
+            agentName: 'agent',
+            input: 'run',
+            sessionId: 'explicit-scheduled-session',
+          },
+        }),
+      ).toMatchObject({
+        status: 'available',
+      });
+    } finally {
+      runtime.durable?.engine[Symbol.dispose]?.();
+    }
+  });
+
+  it('diagnoses scheduled proof inspection failures and then falls back to interactive guards', async () => {
+    const diagnostics: string[] = [];
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'x', toolCalls: [] }),
+      toolbox: createToolbox([], { context: {} }),
+      storage: { type: 'memory' },
+      durableExecution: true,
+      onDiagnostic(event) {
+        diagnostics.push(event.message);
+      },
+    });
+
+    try {
+      runtime.__testing.setSessionStore({
+        async list() {
+          throw new Error('list failed');
+        },
+      } as unknown as SessionStore);
+
+      const result = await runtime.__testing.resolveRunServices({
+        workflowId: 'scheduled-proof-fails',
+        workflowType: 'agentRun',
+        input: { agentName: 'agent', input: 'run' },
+      });
+
+      expect(result).toMatchObject({
+        status: 'unavailable',
+        reason: 'run scheduled-proof-fails has no recoverable session',
+      });
+      expect(
+        diagnostics.some((message) =>
+          message.includes('Could not inspect scheduled session proof'),
+        ),
+      ).toBe(true);
+    } finally {
+      runtime.durable?.engine[Symbol.dispose]?.();
+    }
+  });
+
+  it('exposes interactive resolver ownership and reconstruction failure guards', async () => {
+    const diagnostics: string[] = [];
+    const session = createAgentSession({
+      id: 'session-owned',
+      agentName: 'agent',
+      conversationHistory: createConversationHistory({ id: 'session-owned' }),
+      metadata: { lastRunId: 'run-owned', lastRunStatus: 'running', lastUserMessage: 'resume' },
+    });
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'x', toolCalls: [] }),
+      toolbox: createToolbox([], { context: {} }),
+      storage: { type: 'memory' },
+      durableExecution: true,
+      onDiagnostic(event) {
+        diagnostics.push(event.message);
+      },
+    });
+
+    try {
+      expect(
+        await runtime.__testing.resolveRunServices({
+          workflowId: 'run-real',
+          workflowType: 'agentRun',
+          input: { runId: 'run-other', sessionId: 'session-owned', agentName: 'agent' },
+        }),
+      ).toMatchObject({ status: 'unavailable', reason: 'run run-real input runId mismatch' });
+
+      runtime.__testing.setSessionStore({
+        async load() {
+          return undefined;
+        },
+      } as unknown as SessionStore);
+      expect(
+        await runtime.__testing.resolveRunServices({
+          workflowId: 'run-missing-session',
+          workflowType: 'agentRun',
+          input: { runId: 'run-missing-session', sessionId: 'session-missing', agentName: 'agent' },
+        }),
+      ).toMatchObject({
+        status: 'unavailable',
+        reason: 'run run-missing-session not owned by a running session',
+      });
+
+      runtime.__testing.setSessionStore({
+        async load() {
+          return session;
+        },
+        async updateMetadata() {
+          throw new Error('write failed');
+        },
+      } as unknown as SessionStore);
+      runtime.__testing.setBuildRunDepsFromSession(async () => {
+        throw new Error('cannot rebuild');
+      });
+      expect(
+        await runtime.__testing.resolveRunServices({
+          workflowId: 'run-owned',
+          workflowType: 'agentRun',
+          input: { runId: 'run-owned', sessionId: 'session-owned', agentName: 'agent' },
+        }),
+      ).toMatchObject({ status: 'unavailable', reason: 'run run-owned not reconstructable' });
+      expect(
+        diagnostics.some((message) => message.includes('Failed to reconcile unrecoverable run')),
+      ).toBe(true);
+
+      runtime.__testing.setBuildRunDepsFromSession(async () => null);
+      expect(
+        await runtime.__testing.resolveRunServices({
+          workflowId: 'run-owned',
+          workflowType: 'agentRun',
+          input: { runId: 'run-owned', sessionId: 'session-owned', agentName: 'agent' },
+        }),
+      ).toMatchObject({ status: 'unavailable', reason: 'run run-owned not reconstructable' });
+    } finally {
+      runtime.durable?.engine[Symbol.dispose]?.();
+    }
+  });
+
+  it('logs and skips committed scheduled active skills when checkpoint verification throws', async () => {
+    const logs: string[] = [];
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'x', toolCalls: [] }),
+      toolbox: createToolbox([], { context: {} }),
+      storage: { type: 'memory' },
+      durableExecution: true,
+      onLog(record) {
+        logs.push(record.message);
+      },
+    });
+    const session = createAgentSession({
+      id: 'scheduled-session',
+      agentName: 'agent',
+      conversationHistory: createConversationHistory({ id: 'scheduled-session' }),
+      metadata: {
+        lastScheduledFireRunId: 'scheduled-run',
+        lastActiveSkillsRunId: 'scheduled-run',
+        lastActiveSkillsStep: 0,
+        lastActiveSkills: [{ name: 'research' }],
+      },
+    });
+
+    try {
+      const storage = runtime.durable!.engine.storage as unknown as {
+        get(key: string): Promise<Uint8Array | null>;
+      };
+      const originalGet = storage.get.bind(runtime.durable!.engine.storage);
+      storage.get = async () => {
+        throw new Error('checkpoint read failed');
+      };
+
+      expect(
+        await runtime.__testing.loadCommittedScheduledActiveSkills(session, 'scheduled-run', true),
+      ).toBeUndefined();
+      expect(
+        logs.some((message) => message.includes('Unable to verify scheduled fire skill snapshot')),
+      ).toBe(true);
+
+      storage.get = originalGet;
+    } finally {
+      runtime.durable?.engine[Symbol.dispose]?.();
+    }
+  });
+
+  it('recovers committed scheduled active skills from accumulated Weft checkpoint results', async () => {
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'x', toolCalls: [] }),
+      toolbox: createToolbox([], { context: {} }),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+    const runId = 'scheduled-run-with-accumulated-results';
+    const activeSkills = [{ name: 'research' }];
+    const stepRecord: StepRecord = {
+      step: 0,
+      content: 'checkpointed',
+      toolCalls: [],
+      results: [],
+      metadata: { __bureauActiveSkills: { version: 1, entries: activeSkills } },
+      final: false,
+    };
+    const checkpoint = {
+      ...createCheckpoint(runId, '1.0.0'),
+      accumulatedResults: [
+        [
+          0,
+          {
+            conversationSnapshot: {},
+            nextAccumulators: {},
+            record: stepRecord,
+          },
+        ],
+      ] as [number, unknown][],
+    };
+    const session = createAgentSession({
+      id: 'scheduled-session-with-accumulated-results',
+      agentName: 'agent',
+      conversationHistory: createConversationHistory({
+        id: 'scheduled-session-with-accumulated-results',
+      }),
+      metadata: {
+        lastScheduledFireRunId: runId,
+        lastActiveSkillsRunId: runId,
+        lastActiveSkillsStep: 0,
+        lastActiveSkills: activeSkills,
+      },
+    });
+
+    try {
+      await runtime.durable!.engine.storage.put(
+        KEYS.checkpoint(runId),
+        serializeCheckpoint(checkpoint),
+      );
+
+      expect(
+        await runtime.__testing.loadCommittedScheduledActiveSkills(session, runId, true),
+      ).toEqual(activeSkills);
+    } finally {
+      runtime.durable?.engine[Symbol.dispose]?.();
     }
   });
 
@@ -2878,6 +3642,75 @@ describe('D4: skills catalog injection', () => {
     expect(toolNames).not.toContain('deactivate_skill');
     expect(toolNames).not.toContain('list_skills');
     expect(toolNames).not.toContain('load_skill_resource');
+  });
+
+  it('returns explicit skill-tool errors for disabled, missing, inactive, and missing-resource paths', async () => {
+    const provider: SkillProvider = {
+      ...createMockSkillProvider([
+        { name: 'enabled', description: 'Enabled skill' },
+        { name: 'disabled', description: 'Disabled skill' },
+      ]),
+      async isEnabled(name) {
+        return name !== 'disabled';
+      },
+      async listResources(name) {
+        return name === 'enabled' ? ['docs/<intro>.md'] : [];
+      },
+      async loadResource() {
+        return undefined;
+      },
+    };
+
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'ok', toolCalls: [] }),
+      skills: { provider },
+    });
+
+    const runRuntime = await runtime.createRunRuntime({
+      message: 'Hello',
+      sessionId: 'skill-tool-errors',
+    });
+
+    const inactiveResource = (await runRuntime.toolbox.execute({
+      name: 'load_skill_resource',
+      arguments: { skillName: 'enabled', path: 'docs/<intro>.md' },
+    })) as { result: { error?: string } };
+    expect(inactiveResource.result.error).toBe('Skill is not active');
+
+    const disabled = (await runRuntime.toolbox.execute({
+      name: 'activate_skill',
+      arguments: { name: 'disabled' },
+    })) as { result: { error?: string } };
+    expect(disabled.result.error).toBe('Skill is disabled');
+
+    const missing = (await runRuntime.toolbox.execute({
+      name: 'activate_skill',
+      arguments: { name: 'missing' },
+    })) as { result: { error?: string } };
+    expect(missing.result.error).toBe('Skill not found');
+
+    const activated = (await runRuntime.toolbox.execute({
+      name: 'activate_skill',
+      arguments: { name: 'enabled' },
+    })) as { result: string };
+    expect(activated.result).toContain('<skill_content name="enabled">');
+    expect(activated.result).toContain('<file>docs/&lt;intro&gt;.md</file>');
+
+    const alreadyActive = (await runRuntime.toolbox.execute({
+      name: 'activate_skill',
+      arguments: { name: 'enabled' },
+    })) as { result: { alreadyActive?: boolean; name?: string } };
+    expect(alreadyActive.result).toEqual({ alreadyActive: true, name: 'enabled' });
+
+    const missingResource = (await runRuntime.toolbox.execute({
+      name: 'load_skill_resource',
+      arguments: { skillName: 'enabled', path: 'docs/<intro>.md' },
+    })) as { result: { error?: string; skillName?: string; path?: string } };
+    expect(missingResource.result).toEqual({
+      error: 'Resource not found',
+      skillName: 'enabled',
+      path: 'docs/<intro>.md',
+    });
   });
 });
 

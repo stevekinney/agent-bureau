@@ -375,8 +375,10 @@ function makeBureauHandle<
 
     // ----- agent() --------------------------------------------------------
 
-    agent<TName extends string>(options: AgentOptions & { name: TName }) {
-      const { name, tools: agentToolsMap, instructions, skillPolicy } = options;
+    agent<TName extends string>(
+      options: AgentOptions & { name: TName; hooks?: PrepareStepHook | PrepareStepHook[] },
+    ) {
+      const { name, tools: agentToolsMap, instructions, skillPolicy, hooks } = options;
       // `generate` from AgentOptions is an `AgentGenerateFunction` (type alias).
       // At runtime it is structurally identical to `GenerateFunction`.
       const agentGenerate = options.generate;
@@ -390,6 +392,7 @@ function makeBureauHandle<
         name,
         instructions,
         generate: agentGenerate,
+        hooks,
         toolbox: agentToolbox,
         skillPolicy,
       };

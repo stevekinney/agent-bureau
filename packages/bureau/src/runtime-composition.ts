@@ -310,7 +310,7 @@ function removeConversationIndexRange(
   return { ...history, ids, messages };
 }
 
-function removeLastScheduledFireTranscript(
+export function removeLastScheduledFireTranscript(
   history: ConversationHistory,
   runId: string,
 ): ConversationHistory {
@@ -320,11 +320,8 @@ function removeLastScheduledFireTranscript(
     if (index <= promptIndex) return false;
     return history.messages[id]?.role === 'user';
   });
-  return removeConversationIndexRange(
-    history,
-    promptIndex,
-    nextUserIndex === -1 ? history.ids.length - 1 : nextUserIndex - 1,
-  );
+  const endIndex = nextUserIndex === -1 ? history.ids.length - 1 : nextUserIndex - 1;
+  return removeConversationIndexRange(history, promptIndex, endIndex);
 }
 
 function redactProvider(provider: ProviderConfiguration): RedactedProviderConfiguration {
@@ -339,7 +336,7 @@ function redactProvider(provider: ProviderConfiguration): RedactedProviderConfig
  * `Conversation.from(snapshot)` per step, so a recovery re-fire just re-injects
  * into that step's conversation; no external side effect, no idempotency needed).
  */
-function createMemoryRecallHook(memory: Memory, sessionId: string): PrepareStepHook {
+export function createMemoryRecallHook(memory: Memory, sessionId: string): PrepareStepHook {
   return async (context) => {
     if (context.step !== 0) {
       return;
@@ -430,7 +427,7 @@ export function createMemoryPersistHook(
   };
 }
 
-function resolveProviderGenerate(
+export function resolveProviderGenerate(
   provider: ProviderConfiguration,
   streamEventTarget: TypedEventTarget<StreamEventMap> | undefined,
   streamingConfiguration: BureauOptions['streaming'],
@@ -477,6 +474,24 @@ type RoutingResult =
       onUsage: (usage: { total: number } | undefined) => void;
     };
 
+function createCostAwareRoutingStrategy(
+  configuration: Extract<RoutingConfiguration, { type: 'cost-aware' }>,
+): RoutingResult {
+  let spent = 0;
+  return {
+    kind: 'cost-aware',
+    strategy: createCostAwareStrategy({
+      cheap: configuration.cheap,
+      expensive: configuration.expensive,
+      thresholdRatio: configuration.thresholdRatio ?? 0.8,
+      getBudgetState: () => ({ spent, budget: configuration.budget }),
+    }),
+    onUsage(usage: { total: number } | undefined) {
+      spent += usage?.total ?? 0;
+    },
+  };
+}
+
 export function createRoutingStrategy(configuration: RoutingConfiguration): RoutingResult {
   switch (configuration.type) {
     case 'step-based':
@@ -497,35 +512,19 @@ export function createRoutingStrategy(configuration: RoutingConfiguration): Rout
           complex: configuration.complex,
           frontier: configuration.frontier,
           scorer(signals) {
-            if (signals.toolCount <= (configuration.simpleMaxTools ?? 2)) {
-              if (signals.lastMessageLength <= (configuration.simpleMaxLength ?? 500)) {
-                return 'simple';
-              }
-            }
+            const useSimple =
+              signals.toolCount <= (configuration.simpleMaxTools ?? 2) &&
+              signals.lastMessageLength <= (configuration.simpleMaxLength ?? 500);
+            if (useSimple) return 'simple';
 
-            if (configuration.frontier && signals.conversationDepth > 20) {
-              return 'frontier';
-            }
-
-            return 'complex';
+            const useFrontier =
+              configuration.frontier !== undefined && signals.conversationDepth > 20;
+            return useFrontier ? 'frontier' : 'complex';
           },
         }),
       };
-    case 'cost-aware': {
-      let spent = 0;
-      return {
-        kind: 'cost-aware',
-        strategy: createCostAwareStrategy({
-          cheap: configuration.cheap,
-          expensive: configuration.expensive,
-          thresholdRatio: configuration.thresholdRatio ?? 0.8,
-          getBudgetState: () => ({ spent, budget: configuration.budget }),
-        }),
-        onUsage(usage: { total: number } | undefined) {
-          spent += usage?.total ?? 0;
-        },
-      };
-    }
+    case 'cost-aware':
+      return createCostAwareRoutingStrategy(configuration);
   }
 }
 
@@ -540,7 +539,7 @@ function withUsageTracking(
   };
 }
 
-function applyCache(
+export function applyCache(
   generate: GenerateFunction,
   configuration: CacheConfiguration | undefined,
   store: TextValueStore | undefined,
@@ -636,7 +635,7 @@ function activeSkillsStepMetadata(entries: ActiveSkillEntry[]): JSONValue {
   };
 }
 
-function activeSkillsFromStepMetadata(
+export function activeSkillsFromStepMetadata(
   metadata: StepRecord['metadata'],
 ): ActiveSkillEntry[] | undefined {
   const raw = metadata?.[activeSkillsStepMetadataKey];
@@ -651,7 +650,7 @@ function activeSkillsFromStepMetadata(
  * Validate that a value is a valid {@link ActiveSkillEntry} array for deserialization
  * from session metadata.
  */
-function isActiveSkillEntryArray(value: unknown): value is ActiveSkillEntry[] {
+export function isActiveSkillEntryArray(value: unknown): value is ActiveSkillEntry[] {
   if (!Array.isArray(value)) return false;
   for (const item of value) {
     if (typeof item !== 'object' || item === null) return false;
@@ -684,7 +683,7 @@ function activeSkillSessionMetadataForStep(
   };
 }
 
-function recordedAgentStep(value: unknown): StepRecord | undefined {
+export function recordedAgentStep(value: unknown): StepRecord | undefined {
   if (typeof value !== 'object' || value === null) return undefined;
   const candidate = value as Record<string, unknown>;
   if (
@@ -740,26 +739,25 @@ interface TrackedSkillSession extends SkillSession {
 function createTrackedSkillSession(): TrackedSkillSession {
   const inner = createSkillSession();
   const policyMap = new Map<string, ToolPolicy | undefined>();
+  const activate = inner.activate.bind(inner);
+  const deactivate = inner.deactivate.bind(inner);
 
-  return {
-    getActiveSkills: () => inner.getActiveSkills(),
-    isActive: (name) => inner.isActive(name),
+  return Object.assign(inner, {
     activate(name, toolPolicy) {
       policyMap.set(name, toolPolicy);
-      inner.activate(name, toolPolicy);
+      activate(name, toolPolicy);
     },
     deactivate(name) {
       policyMap.delete(name);
-      inner.deactivate(name);
+      deactivate(name);
     },
-    getActiveToolPolicy: () => inner.getActiveToolPolicy(),
     getActiveEntries(): ActiveSkillEntry[] {
       return inner.getActiveSkills().map((name) => {
         const toolPolicy = policyMap.get(name);
         return toolPolicy !== undefined ? { name, toolPolicy } : { name };
       });
     },
-  };
+  } satisfies Pick<TrackedSkillSession, 'activate' | 'deactivate' | 'getActiveEntries'>);
 }
 
 /**
@@ -996,6 +994,30 @@ export interface RuntimeComposition {
     streamEventTarget: TypedEventTarget<StreamEventMap> | undefined;
     getActiveSkillEntries: () => ActiveSkillEntry[];
   }>;
+  __testing: {
+    resolveRunServices(info: WorkflowServicesResolverInfo): Promise<WorkflowServicesResolution>;
+    buildScheduledRunServices(
+      info: WorkflowServicesResolverInfo,
+      store: SessionStore,
+      recoveredScheduleMarker?: RecoveredScheduleMarker,
+    ): Promise<WorkflowServicesResolution>;
+    loadCommittedScheduledActiveSkills(
+      session: Awaited<ReturnType<SessionStore['load']>> | undefined,
+      runId: string,
+      recovering: boolean,
+    ): Promise<ActiveSkillEntry[] | undefined>;
+    setCompositionReady(value: boolean): void;
+    setSessionStore(store: SessionStore | undefined): void;
+    setBuildRunDepsFromSession(
+      override:
+        | ((
+            session: Awaited<ReturnType<SessionStore['load']>>,
+            runId?: string,
+            agentName?: string,
+          ) => Promise<DurableRunDeps | null>)
+        | undefined,
+    ): void;
+  };
 }
 
 export async function createRuntimeComposition(
@@ -1175,7 +1197,7 @@ export async function createRuntimeComposition(
     (options.skills?.provider as SkillsPackageProvider | undefined) ??
     (options.skills !== undefined && kv !== undefined ? createStorageSkillProvider(kv) : undefined);
 
-  const sessionStore = kv ? createSessionStore(kv) : undefined;
+  let sessionStore = kv ? createSessionStore(kv) : undefined;
   const baseToolbox: BureauToolbox = options.toolbox ?? createToolbox([], { context: {} });
   const hasSkillTools = options.skills !== undefined && options.skills.includeTools !== false;
   const fallbackToolbox: BureauToolbox =
@@ -1554,6 +1576,13 @@ export async function createRuntimeComposition(
       },
     };
   }
+  let buildRunDepsFromSessionOverride:
+    | ((
+        session: Awaited<ReturnType<NonNullable<typeof sessionStore>['load']>>,
+        runId?: string,
+        agentName?: string,
+      ) => Promise<DurableRunDeps | null>)
+    | undefined;
 
   /**
    * Persist a scheduled run's conversation back to its session after EVERY
@@ -2017,7 +2046,11 @@ export async function createRuntimeComposition(
       // recovered run's memory-persist idempotency key matches its pre-crash key.
       // info.input.agentName is guaranteed non-empty here: isAgentRunWorkflowInput
       // requires a non-empty string (the guard returned earlier if it's missing).
-      services = await buildRunDepsFromSession(session, info.workflowId, info.input.agentName);
+      services = await (buildRunDepsFromSessionOverride ?? buildRunDepsFromSession)(
+        session,
+        info.workflowId,
+        info.input.agentName,
+      );
     } catch (error) {
       // The session exists, but its deps cannot be rebuilt on this process (e.g.
       // no `generate`/provider configured here, so `createRunRuntime` throws).
@@ -2091,5 +2124,19 @@ export async function createRuntimeComposition(
     systemPrompt,
     getToolSummaries,
     createRunRuntime,
+    __testing: {
+      resolveRunServices,
+      buildScheduledRunServices,
+      loadCommittedScheduledActiveSkills,
+      setCompositionReady(value: boolean) {
+        compositionReady = value;
+      },
+      setSessionStore(store: SessionStore | undefined) {
+        sessionStore = store;
+      },
+      setBuildRunDepsFromSession(override) {
+        buildRunDepsFromSessionOverride = override;
+      },
+    },
   };
 }

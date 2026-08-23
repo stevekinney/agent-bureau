@@ -11,7 +11,7 @@
 
 import type { Tool } from 'armorer';
 
-import type { GenerateFunction } from './types';
+import type { GenerateFunction, PrepareStepHook } from './types';
 
 /**
  * Any armorer Tool, regardless of its concrete schema/event parameters. The
@@ -213,6 +213,8 @@ export interface AgentOptions {
    * supply a concrete `GenerateFunction` from operative.
    */
   generate?: AgentGenerateFunction;
+  /** Agent-level prepare-step hooks, run after bureau-level hooks. */
+  hooks?: PrepareStepHook | PrepareStepHook[];
   /**
    * Per-agent skill policy. Restricts the bureau's base skill catalog for
    * this specific agent. The bureau-level catalog is inherited; this policy
@@ -371,7 +373,7 @@ export interface BureauBuilder<
    * Tier 1 (construction-time) registration.
    */
   agent<TName extends string>(
-    options: AgentOptions & { name: TName },
+    options: AgentOptions & { name: TName; hooks?: PrepareStepHook | PrepareStepHook[] },
   ): BureauBuilder<TTools, TAgents & Record<TName, AgentConfig<TTools>>>;
 
   /**
