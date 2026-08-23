@@ -50,7 +50,7 @@ function toMemoryMetadata(record: MemoryRecord): MemoryMetadata {
  */
 function buildStoredMetadata(metadata: Partial<MemoryMetadata>): Record<string, unknown> {
   // `namespace` lives on the record's own field; `supersedes` is a write-only
-  // directive consumed by remember() (AB-61 spike) and never persisted.
+  // directive consumed by remember() and never persisted.
   const { namespace: _namespace, supersedes: _supersedes, ...rest } = metadata;
   return { source: 'manual', ...rest };
 }
@@ -86,7 +86,7 @@ export function createMemory(options: CreateMemoryOptions): Memory {
     requireNamespace = false,
     conflictThreshold,
     onConflict,
-    experimentalTemporalValidity = false,
+    temporalValidity = false,
   } = options;
 
   if (conflictThreshold !== undefined && conflictThreshold >= deduplicationThreshold) {
@@ -150,10 +150,8 @@ export function createMemory(options: CreateMemoryOptions): Memory {
         );
       }
 
-      if (metadata?.supersedes !== undefined && !experimentalTemporalValidity) {
-        throw new Error(
-          'metadata.supersedes requires experimentalTemporalValidity to be enabled (AB-61 spike).',
-        );
+      if (metadata?.supersedes !== undefined && !temporalValidity) {
+        throw new Error('metadata.supersedes requires temporalValidity to be enabled.');
       }
 
       const namespace = metadata?.namespace ?? defaultNamespace;
@@ -238,10 +236,10 @@ export function createMemory(options: CreateMemoryOptions): Memory {
         await textSearchProvider.index(id, content, namespace);
       }
 
-      // AB-61 spike: stamp the superseded record as invalidated, pointing at
-      // the new record. Runs after the new record is durably stored so a
-      // failed stamp never leaves an orphaned fact with no successor.
-      if (experimentalTemporalValidity && metadata?.supersedes !== undefined) {
+      // Stamp the superseded record as invalidated, pointing at the new record.
+      // Runs after the new record is durably stored so a failed stamp never
+      // leaves an orphaned fact with no successor.
+      if (temporalValidity && metadata?.supersedes !== undefined) {
         const superseded = await storage.get(metadata.supersedes, scope);
         if (!superseded) {
           throw new Error(
@@ -320,15 +318,18 @@ export function createMemory(options: CreateMemoryOptions): Memory {
 
       const queryVector = await embed(query);
       const candidateMultiplier = 3;
-      const vectorResultLimit = limit * candidateMultiplier;
 
-      // AB-61 spike: resolve once so both search branches filter to the same
-      // instant. Only active when the flag is set — otherwise `asOf` is inert.
-      const asOf = experimentalTemporalValidity ? (mergedOptions.asOf ?? Date.now()) : undefined;
+      // Resolve once so both search branches filter to the same instant. Only
+      // active when the flag is set — otherwise `asOf` is inert.
+      const asOf = temporalValidity ? (mergedOptions.asOf ?? Date.now()) : undefined;
 
       // When vectorOnly is set, skip BM25 and return pure cosine similarity
       // scores filtered by the (cosine-semantics) threshold.
       if (mergedOptions.vectorOnly) {
+        // Validity filtering happens after vector ranking. Over-fetch the full
+        // scope when enabled so invalid records cannot shrink the final K.
+        const vectorResultLimit =
+          asOf === undefined ? limit * candidateMultiplier : await storage.count(scope);
         const hits = await storage.searchByVector(queryVector, scope, {
           limit: vectorResultLimit,
           threshold,
@@ -367,6 +368,9 @@ export function createMemory(options: CreateMemoryOptions): Memory {
       // through storage, then merge.
       const corpus = await storage.list(scope);
       if (corpus.length === 0) return [];
+      // Validity filtering happens after hybrid ranking. Over-fetch the full
+      // scope when enabled so invalid records cannot shrink the final K.
+      const vectorResultLimit = asOf === undefined ? limit * candidateMultiplier : corpus.length;
 
       const recordsById = new Map(corpus.map((record) => [record.id, record]));
       const candidates: HybridSearchCandidate[] = corpus.map((record) => ({
@@ -420,7 +424,7 @@ export function createMemory(options: CreateMemoryOptions): Memory {
       const hybridResults = mergeHybridResults(vectorResults, textScores, candidates, {
         vectorWeight,
         textWeight,
-        limit: limit * candidateMultiplier,
+        limit: vectorResultLimit,
         threshold,
       });
 

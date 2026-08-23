@@ -1,6 +1,6 @@
 # AB-61 — Temporal fact-validity spike (Zep-style validity windows on our own memory records)
 
-Status: SPIKE, complete. Prototype merged behind `CreateMemoryOptions.experimentalTemporalValidity` (default `false`). This document is the design writeup + go/no-go recommendation for Steve.
+Status: Historical design note. Temporal validity is available behind `CreateMemoryOptions.temporalValidity` (default `false`).
 
 Per the AB-65 ruling, this is first-party only: no Zep client, no vendored Zep concepts beyond the general idea ("facts have a validity window; a new fact can supersede an old one; recall can be asked what was true at a point in time"). Everything here is implemented against our own `MemoryRecordStorage` / `createMemory` pipeline.
 
@@ -36,7 +36,7 @@ No classes, no new abstraction layer — three functions, mirroring the existing
 
 ### Fact supersession — `remember()` extension
 
-`createMemory({ ..., experimentalTemporalValidity: true })` unlocks:
+`createMemory({ ..., temporalValidity: true })` unlocks:
 
 ```ts
 const original = await memory.remember('The team lead is Alex');
@@ -55,11 +55,11 @@ const successor = await memory.remember('The team lead is Jordan', {
 
 Chains work by construction: superseding B (which already supersedes A) just stamps B, leaving A's existing `supersededBy: B` alone. Walking a chain is `id -> supersededBy -> supersededBy -> …` until unset, or reconstructable purely from `asOf` recall (see below) without ever walking pointers by hand.
 
-Calling `remember()` with `supersedes` while the flag is off throws immediately — the option is inert by default, so existing `createMemory()` consumers see zero behavior change.
+Calling `remember()` with `supersedes` while the flag is off throws immediately. The option remains default-off.
 
 ### As-of recall — `recall({ asOf })` extension
 
-`MemorySearchOptions.asOf?: number` (epoch ms). When `experimentalTemporalValidity` is on:
+`MemorySearchOptions.asOf?: number` (epoch ms). When `temporalValidity` is on:
 
 - `asOf` defaults to `Date.now()` when omitted — i.e. plain `recall()` with the flag on shows only currently-valid facts, which is almost certainly what a caller wants by default (a superseded fact competing with its own successor for the same query is the exact staleness problem this spike targets).
 - `asOf` set to a past instant answers "what was true then," including facts that have since been superseded.
@@ -76,7 +76,7 @@ searchByVector / hybrid merge
 
 This is the same shape `temporalDecay` and `diversify` already use (opt-in, one extra `apply*`-style stage), applied identically in both the `vectorOnly` branch and the hybrid BM25+vector branch, so both recall modes get consistent as-of semantics. Nothing about hybrid merging, BM25 scoring, or MMR needed to change — validity is a pre-filter on the candidate pool, exactly like a threshold cut.
 
-One caveat worth flagging for the go/no-go: because filtering happens _after_ the vector/BM25 top-K cutoff (`limit * candidateMultiplier` candidates are fetched before filtering), a query where most of the top-K matches happen to be invalidated at the requested `asOf` can return fewer than `limit` results, or even zero, despite valid matches existing further down the similarity ranking. This is the same class of limitation the existing source-document dedup step already has (dedup also shrinks the post-cutoff pool) — acceptable for a spike, worth a widened candidate multiplier or two-pass fetch if this graduates.
+Validity filtering happens after vector/BM25 ranking, so temporal recall over-fetches the full scoped corpus before filtering and truncating. This guarantees that invalid high-ranked records cannot shrink a requested result limit; source-document deduplication may still reduce the final result count afterward.
 
 ### Why metadata, not a schema change
 
@@ -89,7 +89,7 @@ Considered and rejected: adding `validFrom`/`invalidatedAt` as first-class `Memo
 ## What was prototyped
 
 - `packages/memory/src/temporal-validity.ts` — the three pure functions above.
-- `packages/memory/src/types.ts` — `MemoryMetadata.{validFrom,invalidatedAt,supersededBy,supersedes}`, `MemorySearchOptions.asOf`, `CreateMemoryOptions.experimentalTemporalValidity`.
+  - `packages/memory/src/types.ts` — `MemoryMetadata.{validFrom,invalidatedAt,supersededBy,supersedes}`, `MemorySearchOptions.asOf`, `CreateMemoryOptions.temporalValidity`.
 - `packages/memory/src/create-memory.ts` — supersession stamping in `remember()`, as-of filtering in both `recall()` branches, all behind the flag.
 - Tests:
   - `packages/memory/test/temporal-validity.test.ts` — pure-function unit tests (window edges, chain overwrite, non-mutation).
@@ -115,9 +115,9 @@ Use a **subset of LongMemEval** (the temporal-reasoning-focused subset, plus the
 1. **Scope**: pull the `temporal-reasoning` and `knowledge-update` question categories only (these are the ones that actually exercise validity windows and supersession — the other LongMemEval categories, e.g. multi-session reasoning or abstention, aren't targeted by this spike).
 2. **Corpus construction**: ingest each session's memories via `memory.remember()` in session order, using `metadata.supersedes` wherever a later session's fact contradicts an earlier one (LongMemEval's knowledge-update items are explicitly constructed this way — the "old" and "new" fact pairs are labeled in the dataset).
 3. **Two conditions, same corpus**:
-   - **Baseline**: `experimentalTemporalValidity: false`, plain `recall()`.
-   - **Treatment**: `experimentalTemporalValidity: true`, `recall()` with no `asOf` (defaults to now) for "what's true now" questions, and `recall({ asOf: <question's reference timestamp> })` for explicit as-of questions.
+   - **Baseline**: `temporalValidity: false`, plain `recall()`.
+   - **Treatment**: `temporalValidity: true`, `recall()` with no `asOf` (defaults to now) for "what's true now" questions, and `recall({ asOf: <question's reference timestamp> })` for explicit as-of questions.
 4. **Metric**: accuracy against LongMemEval's provided gold answers, comparing baseline vs. treatment on the same question set. Secondary metric: candidate-pool starvation rate (how often as-of filtering returns fewer than `limit` results) to validate or dismiss the cutoff-order caveat above.
-5. **Decision rule**: if treatment shows a material accuracy lift on the temporal-reasoning/knowledge-update subset with no regression elsewhere (run the full LongMemEval subset list, not just these two categories, to check for regressions on categories the flag shouldn't touch), graduate `experimentalTemporalValidity` toward default-on and consider first-class storage fields. If the lift is marginal or absent, keep it as an opt-in escape hatch (or shelve it) rather than investing further.
+5. **Decision rule**: if treatment shows a material accuracy lift on the temporal-reasoning/knowledge-update subset with no regression elsewhere, consider making `temporalValidity` default-on and consider first-class storage fields.
 
 This spike deliberately stops before running that benchmark — implementing it is the recommended next step, not part of AB-61's scope.

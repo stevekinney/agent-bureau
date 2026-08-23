@@ -1,5 +1,5 @@
 /**
- * Temporal fact-validity (AB-61 spike).
+ * Temporal fact-validity.
  *
  * Pure functions layered on top of the existing recall pipeline (hybrid
  * search → temporal decay → MMR) rather than forking it. A memory record is
@@ -12,8 +12,7 @@
  *   {@link stampSupersession} when a newer fact supersedes this one.
  *
  * This is opt-in and additive: nothing here is called unless
- * `CreateMemoryOptions.experimentalTemporalValidity` is `true`, so existing
- * consumers see no behavior change.
+ * `CreateMemoryOptions.temporalValidity` is `true`.
  */
 
 export interface TemporalValidityMetadata {
