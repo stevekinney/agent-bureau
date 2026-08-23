@@ -11,7 +11,9 @@ import type {
 } from './types';
 
 const KEY_PREFIX = 'agent-session:';
+const SUMMARY_KEY_PREFIX = 'agent-session-index:';
 const MAXIMUM_SAVE_ATTEMPTS = 5;
+const SUMMARY_FORMAT_VERSION = 1;
 
 export class SessionConflictError extends Error {
   readonly code = 'SessionConflictError';
@@ -166,6 +168,40 @@ function toSummary(session: AgentSession): SessionSummary {
   };
 }
 
+function parseSummary(raw: string | null): SessionSummary | undefined {
+  if (!raw) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (
+      typeof parsed !== 'object' ||
+      parsed === null ||
+      (parsed as Record<string, unknown>)['formatVersion'] !== SUMMARY_FORMAT_VERSION ||
+      typeof (parsed as Record<string, unknown>)['id'] !== 'string' ||
+      typeof (parsed as Record<string, unknown>)['agentName'] !== 'string' ||
+      typeof (parsed as Record<string, unknown>)['messageCount'] !== 'number' ||
+      !isValidDate((parsed as Record<string, unknown>)['createdAt']) ||
+      !isValidDate((parsed as Record<string, unknown>)['updatedAt'])
+    )
+      return undefined;
+    const record = parsed as Record<string, unknown>;
+    return {
+      id: record['id'] as string,
+      agentName: record['agentName'] as string,
+      messageCount: record['messageCount'] as number,
+      createdAt: record['createdAt'] as string,
+      updatedAt: record['updatedAt'] as string,
+      metadata:
+        typeof record['metadata'] === 'object' &&
+        record['metadata'] !== null &&
+        !Array.isArray(record['metadata'])
+          ? (record['metadata'] as Record<string, JSONValue>)
+          : {},
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Creates a SessionStore backed by the given ConditionalTextValueStore.
  *
@@ -181,11 +217,16 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
     return `${KEY_PREFIX}${id}`;
   }
 
+  function summaryKeyFor(id: string): string {
+    return `${SUMMARY_KEY_PREFIX}${id}`;
+  }
+
   async function commit(
     session: AgentSession,
     expectedValue: string | null,
     currentRevision: number,
     refreshUpdatedAt: boolean,
+    expectedSummaryValue: string | null,
   ): Promise<AgentSession | undefined> {
     const next: AgentSession = {
       ...session,
@@ -193,8 +234,18 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
       updatedAt: refreshUpdatedAt ? new Date().toISOString() : session.updatedAt,
     };
     const committed = await store.conditionalBatch(
-      [{ key: keyFor(next.id), expectedValue }],
-      [{ type: 'set', key: keyFor(next.id), value: JSON.stringify(next) }],
+      [
+        { key: keyFor(next.id), expectedValue },
+        { key: summaryKeyFor(next.id), expectedValue: expectedSummaryValue },
+      ],
+      [
+        { type: 'set', key: keyFor(next.id), value: JSON.stringify(next) },
+        {
+          type: 'set',
+          key: summaryKeyFor(next.id),
+          value: JSON.stringify({ formatVersion: SUMMARY_FORMAT_VERSION, ...toSummary(next) }),
+        },
+      ],
     );
     return committed ? next : undefined;
   }
@@ -202,10 +253,13 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
   const sessionStore: SessionStore = {
     async save(session: AgentSession): Promise<void> {
       for (let attempt = 1; attempt <= MAXIMUM_SAVE_ATTEMPTS; attempt += 1) {
-        const raw = await store.get(keyFor(session.id));
+        const [raw, summaryRaw] = await Promise.all([
+          store.get(keyFor(session.id)),
+          store.get(summaryKeyFor(session.id)),
+        ]);
         const current = parseSession(raw);
         const candidate = current ? mergeSessions(current, session) : session;
-        const committed = await commit(candidate, raw, current?.revision ?? 0, true);
+        const committed = await commit(candidate, raw, current?.revision ?? 0, true, summaryRaw);
         if (committed) {
           Object.assign(session, committed);
           return;
@@ -222,13 +276,16 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
       ) => AgentSession | undefined | Promise<AgentSession | undefined>,
     ): Promise<AgentSession | undefined> {
       for (let attempt = 1; attempt <= MAXIMUM_SAVE_ATTEMPTS; attempt += 1) {
-        const raw = await store.get(keyFor(id));
+        const [raw, summaryRaw] = await Promise.all([
+          store.get(keyFor(id)),
+          store.get(summaryKeyFor(id)),
+        ]);
         const current = parseSession(raw);
         const candidate = await updater(current);
         if (!candidate) return undefined;
 
         const next = current ? mergeSessions(current, candidate) : candidate;
-        const committed = await commit(next, raw, current?.revision ?? 0, true);
+        const committed = await commit(next, raw, current?.revision ?? 0, true, summaryRaw);
         if (committed) return committed;
       }
 
@@ -241,23 +298,72 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
     },
 
     async delete(id: string): Promise<void> {
-      await store.delete(keyFor(id));
+      for (let attempt = 1; attempt <= MAXIMUM_SAVE_ATTEMPTS; attempt += 1) {
+        const [raw, summaryRaw] = await Promise.all([
+          store.get(keyFor(id)),
+          store.get(summaryKeyFor(id)),
+        ]);
+        const deleted = await store.conditionalBatch(
+          [
+            { key: keyFor(id), expectedValue: raw },
+            { key: summaryKeyFor(id), expectedValue: summaryRaw },
+          ],
+          [
+            { type: 'delete', key: keyFor(id) },
+            { type: 'delete', key: summaryKeyFor(id) },
+          ],
+        );
+        if (deleted) return;
+      }
+      throw new SessionConflictError(id);
     },
 
     async list(options?: SessionListOptions): Promise<SessionSummary[]> {
-      const keys = await store.list(KEY_PREFIX);
-      const sessions: AgentSession[] = [];
-
-      for (const key of keys) {
-        const raw = await store.get(key);
-        const session = parseSession(raw);
-        if (session) sessions.push(session);
-      }
+      const [dataKeys, summaryKeys] = await Promise.all([
+        store.list(KEY_PREFIX),
+        store.list(SUMMARY_KEY_PREFIX),
+      ]);
+      const summaries = new Map<string, SessionSummary>();
+      const summaryRaws = new Map<string, string | null>();
+      await Promise.all(
+        summaryKeys.map(async (key) => {
+          const id = key.slice(SUMMARY_KEY_PREFIX.length);
+          const raw = await store.get(key);
+          summaryRaws.set(id, raw);
+          const summary = parseSummary(raw);
+          if (summary) summaries.set(id, summary);
+        }),
+      );
+      const missingKeys = dataKeys.filter((key) => !summaries.has(key.slice(KEY_PREFIX.length)));
+      await Promise.all(
+        missingKeys.map(async (key) => {
+          const id = key.slice(KEY_PREFIX.length);
+          const raw = await store.get(key);
+          const session = parseSession(raw);
+          if (!session) return;
+          const summary = toSummary(session);
+          summaries.set(id, summary);
+          const repaired = await store.conditionalBatch(
+            [
+              { key, expectedValue: raw },
+              { key: summaryKeyFor(id), expectedValue: summaryRaws.get(id) ?? null },
+            ],
+            [
+              {
+                type: 'set',
+                key: summaryKeyFor(id),
+                value: JSON.stringify({ formatVersion: SUMMARY_FORMAT_VERSION, ...summary }),
+              },
+            ],
+          );
+          if (!repaired) summaryRaws.delete(id);
+        }),
+      );
 
       // Filter by agentName when requested
       let filtered = options?.agentName
-        ? sessions.filter((s) => s.agentName === options.agentName)
-        : sessions;
+        ? [...summaries.values()].filter((s) => s.agentName === options.agentName)
+        : [...summaries.values()];
 
       // Sort
       const sortBy = options?.sortBy ?? 'updatedAt';
@@ -265,7 +371,9 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
       filtered.sort((a, b) => {
         const aVal = new Date(a[sortBy]).getTime();
         const bVal = new Date(b[sortBy]).getTime();
-        return sortOrder === 'asc' ? aVal - bVal : bVal - aVal;
+        const primary = sortOrder === 'asc' ? aVal - bVal : bVal - aVal;
+        if (primary !== 0) return primary;
+        return sortOrder === 'asc' ? a.id.localeCompare(b.id) : b.id.localeCompare(a.id);
       });
 
       // Paginate
@@ -273,7 +381,7 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
       const limit = options?.limit ?? filtered.length;
       filtered = filtered.slice(offset, offset + limit);
 
-      return filtered.map(toSummary);
+      return filtered;
     },
 
     async exists(id: string): Promise<boolean> {
@@ -307,8 +415,18 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
 
         const updatedAt = new Date(session.updatedAt).getTime();
         if (updatedAt < cutoff) {
-          await store.delete(key);
-          deleted++;
+          const summaryRaw = await store.get(summaryKeyFor(session.id));
+          const removed = await store.conditionalBatch(
+            [
+              { key, expectedValue: raw },
+              { key: summaryKeyFor(session.id), expectedValue: summaryRaw },
+            ],
+            [
+              { type: 'delete', key },
+              { type: 'delete', key: summaryKeyFor(session.id) },
+            ],
+          );
+          if (removed) deleted++;
         }
       }
 

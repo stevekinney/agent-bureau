@@ -405,7 +405,8 @@ describe('createSessionStore', () => {
   });
 
   it('delete removes a session', async () => {
-    const store = createSessionStore(textValueStore(new MemoryStorage()));
+    const rawStore = textValueStore(new MemoryStorage());
+    const store = createSessionStore(rawStore);
     const session = makeSession({});
 
     await store.save(session);
@@ -413,6 +414,7 @@ describe('createSessionStore', () => {
 
     await store.delete(session.id);
     expect(await store.load(session.id)).toBeUndefined();
+    expect(await rawStore.has(`agent-session-index:${session.id}`)).toBe(false);
   });
 
   it('delete is a no-op for nonexistent session', async () => {
@@ -468,6 +470,63 @@ describe('createSessionStore', () => {
     expect(summaries[0]!.id).toBe('session-2');
     expect(summaries[1]!.id).toBe('session-3');
     expect(summaries[2]!.id).toBe('session-1');
+  });
+
+  it('lists current-format sessions through the summary index without reading bodies', async () => {
+    const backingStore = textValueStore(new MemoryStorage());
+    const getKeys: string[] = [];
+    const instrumentedStore = {
+      ...backingStore,
+      get: async (key: string) => {
+        getKeys.push(key);
+        return backingStore.get(key);
+      },
+    };
+    const store = createSessionStore(instrumentedStore);
+
+    for (let index = 0; index < 25; index += 1) {
+      await store.save(makeSession({ id: `indexed-${index}` }));
+    }
+    getKeys.length = 0;
+
+    const summaries = await store.list({ limit: 5 });
+
+    expect(summaries).toHaveLength(5);
+    expect(getKeys).toHaveLength(25);
+    expect(getKeys.every((key) => key.startsWith('agent-session-index:'))).toBe(true);
+  });
+
+  it('uses the session id as a deterministic tie-break in either sort direction', async () => {
+    const rawStore = textValueStore(new MemoryStorage());
+    const store = createSessionStore(rawStore);
+    for (const id of ['same-c', 'same-a', 'same-b']) {
+      await seedStoredSession(
+        rawStore,
+        makeSession({
+          id,
+          createdAt: '2025-01-01T00:00:00.000Z',
+          updatedAt: '2025-01-01T00:00:00.000Z',
+        }),
+      );
+    }
+
+    const ascending = await store.list({ sortOrder: 'asc' });
+    expect(ascending.map((summary) => summary.id)).toEqual(['same-a', 'same-b', 'same-c']);
+    const descending = await store.list({ sortOrder: 'desc' });
+    expect(descending.map((summary) => summary.id)).toEqual(['same-c', 'same-b', 'same-a']);
+  });
+
+  it('backfills a missing legacy summary index on the first list', async () => {
+    const rawStore = textValueStore(new MemoryStorage());
+    const store = createSessionStore(rawStore);
+    const session = makeSession({ id: 'legacy-index-session' });
+    await seedStoredSession(rawStore, session);
+
+    const summaries = await store.list();
+    expect(summaries[0]!.id).toBe(session.id);
+    expect(await rawStore.has(`agent-session-index:${session.id}`)).toBe(true);
+    const backfilled = await store.list();
+    expect(backfilled[0]!.messageCount).toBe(0);
   });
 
   it('list filters by agentName', async () => {
