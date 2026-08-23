@@ -5,6 +5,22 @@ import type { GenerateFunction } from './types';
 
 const response = { content: 'loaded', toolCalls: [] };
 
+async function expectResolves<T>(promise: Promise<T>, expected: Awaited<T>): Promise<void> {
+  expect(await promise).toEqual(expected);
+}
+
+async function expectRejects(
+  promise: Promise<unknown>,
+  expected: Record<string, unknown>,
+): Promise<void> {
+  try {
+    await promise;
+    throw new Error('Expected promise to reject');
+  } catch (error) {
+    expect(error).toMatchObject(expected);
+  }
+}
+
 describe('createLazyGenerate', () => {
   it('loads a direct function once and caches it', async () => {
     let loads = 0;
@@ -14,8 +30,8 @@ describe('createLazyGenerate', () => {
       return generate;
     });
 
-    expect(lazy({} as never)).resolves.toEqual(response);
-    expect(lazy({} as never)).resolves.toEqual(response);
+    await expectResolves(lazy({} as never), response);
+    await expectResolves(lazy({} as never), response);
     expect(loads).toBe(1);
   });
 
@@ -32,7 +48,7 @@ describe('createLazyGenerate', () => {
     const first = lazy({} as never);
     const second = lazy({} as never);
     release();
-    expect(Promise.all([first, second])).resolves.toEqual([response, response]);
+    await expectResolves(Promise.all([first, second]), [response, response]);
     expect(loads).toBe(1);
   });
 
@@ -45,12 +61,12 @@ describe('createLazyGenerate', () => {
       return async () => response;
     });
 
-    expect(lazy({} as never)).rejects.toMatchObject({
+    await expectRejects(lazy({} as never), {
       name: 'AsyncDefinitionLoadError',
       code: 'LOAD_FAILED',
       cause,
     });
-    expect(lazy({} as never)).resolves.toEqual(response);
+    await expectResolves(lazy({} as never), response);
     expect(loads).toBe(2);
   });
 
@@ -61,11 +77,12 @@ describe('createLazyGenerate', () => {
       return loads === 1 ? ({ default: 42 } as never) : async () => response;
     });
 
-    expect(lazy({} as never)).rejects.toMatchObject({
+    await expectRejects(lazy({} as never), {
       name: 'AsyncDefinitionLoadError',
       code: 'INVALID_MODULE',
     });
-    expect(lazy({} as never)).resolves.toEqual(response);
+    await expectResolves(lazy({} as never), response);
+    expect(loads).toBe(2);
   });
 
   it('handles synchronous loader throws', async () => {
@@ -74,7 +91,7 @@ describe('createLazyGenerate', () => {
       throw cause;
     });
 
-    expect(lazy({} as never)).rejects.toMatchObject({ code: 'LOAD_FAILED', cause });
+    await expectRejects(lazy({} as never), { code: 'LOAD_FAILED', cause });
   });
 
   it('honors pre-aborted and during-load signals', async () => {
@@ -89,7 +106,7 @@ describe('createLazyGenerate', () => {
       },
       { signal: pre.signal },
     );
-    expect(lazy({} as never)).rejects.toMatchObject({ code: 'ABORTED', cause: 'before' });
+    await expectRejects(lazy({} as never), { code: 'ABORTED', cause: 'before' });
     expect(loads).toBe(0);
 
     const during = new AbortController();
@@ -106,8 +123,37 @@ describe('createLazyGenerate', () => {
     const pendingResult = retryable({} as never);
     during.abort('during');
     release();
-    expect(pendingResult).rejects.toMatchObject({ code: 'ABORTED', cause: 'during' });
+    await expectRejects(pendingResult, { code: 'ABORTED', cause: 'during' });
     expect(loads).toBe(1);
+  });
+
+  it('aborts one concurrent caller without poisoning another caller', async () => {
+    const first = new AbortController();
+    const second = new AbortController();
+    let loads = 0;
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => (release = resolve));
+    const lazy = createLazyGenerate(async () => {
+      loads += 1;
+      await pending;
+      return async () => response;
+    });
+
+    const firstResult = lazy({ signal: first.signal } as never);
+    const secondResult = lazy({ signal: second.signal } as never);
+    first.abort('first caller');
+    release();
+    await expectRejects(firstResult, { code: 'ABORTED', cause: 'first caller' });
+    await expectResolves(secondResult, response);
+    expect(loads).toBe(1);
+  });
+
+  it('forwards a shared load failure to an active caller', async () => {
+    const lazy = createLazyGenerate(async () => {
+      throw new Error('shared failure');
+    });
+    const caller = new AbortController();
+    await expectRejects(lazy({ signal: caller.signal } as never), { code: 'LOAD_FAILED' });
   });
 
   it('returns the exact GenerateFunction type', () => {

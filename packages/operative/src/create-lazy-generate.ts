@@ -35,6 +35,32 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
   }
 }
 
+function awaitWithAbort<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  if (!signal) return promise;
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => {
+      signal.removeEventListener('abort', onAbort);
+      reject(
+        new AsyncDefinitionLoadError(
+          'ABORTED',
+          'Loading the lazy generate function was aborted',
+          signal.reason,
+        ),
+      );
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    void promise
+      .then((value) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      })
+      .catch((error: unknown) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(error instanceof Error ? error : new Error(String(error), { cause: error }));
+      });
+  });
+}
+
 /** Lazily loads and memoizes a GenerateFunction, sharing its first load across concurrent calls. */
 export function createLazyGenerate(
   loader: () => Promise<GenerateModule>,
@@ -43,17 +69,7 @@ export function createLazyGenerate(
   let loaded: GenerateFunction | undefined;
   let loading: Promise<GenerateFunction> | undefined;
 
-  const resolve = (signal: AbortSignal | undefined): Promise<GenerateFunction> => {
-    if (signal?.aborted) {
-      return Promise.reject(
-        new AsyncDefinitionLoadError(
-          'ABORTED',
-          'Loading the lazy generate function was aborted',
-          signal.reason,
-        ),
-      );
-    }
-
+  const resolve = (): Promise<GenerateFunction> => {
     if (loaded) return Promise.resolve(loaded);
     if (!loading) {
       const current = (async () => {
@@ -67,7 +83,6 @@ export function createLazyGenerate(
             cause,
           );
         }
-        throwIfAborted(signal);
         return getGenerateFunction(module);
       })();
       loading = current;
@@ -88,7 +103,8 @@ export function createLazyGenerate(
 
   return async (context) => {
     const signal = options.signal ?? context.signal;
-    const generate = await resolve(signal);
+    throwIfAborted(signal);
+    const generate = await awaitWithAbort(resolve(), signal);
     throwIfAborted(signal);
     return generate(context);
   };
