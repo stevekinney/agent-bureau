@@ -555,6 +555,46 @@ describe('createSessionStore', () => {
     expect(afterRepair.map((summary) => summary.id)).toEqual([retained.id]);
   });
 
+  it('keeps a concurrent save that wins during orphan repair', async () => {
+    const rawStore = textValueStore(new MemoryStorage());
+    const concurrentStore = createSessionStore(rawStore);
+    const concurrent = makeSession({ id: 'concurrent-repair-session' });
+    const orphanIndex = summaryIndexPayload('orphan-session');
+    await rawStore.set('agent-session-index', orphanIndex);
+    let injectSave = true;
+    const instrumentedStore = {
+      ...rawStore,
+      conditionalBatch: async (
+        conditions: Parameters<typeof rawStore.conditionalBatch>[0],
+        operations: Parameters<typeof rawStore.conditionalBatch>[1],
+      ) => {
+        const repairsIndex = operations.some(
+          (operation) => operation.type === 'set' && operation.key === 'agent-session-index',
+        );
+        if (
+          injectSave &&
+          repairsIndex &&
+          conditions.some(
+            (condition) =>
+              condition.key === 'agent-session-index' && condition.expectedValue === orphanIndex,
+          )
+        ) {
+          injectSave = false;
+          await concurrentStore.save(concurrent);
+        }
+        return rawStore.conditionalBatch(conditions, operations);
+      },
+    };
+    const store = createSessionStore(instrumentedStore);
+
+    const summaries = await store.list();
+
+    expect(summaries.map((summary) => summary.id)).toEqual([concurrent.id]);
+    expect(JSON.parse((await rawStore.get('agent-session-index'))!).summaries).toHaveProperty(
+      concurrent.id,
+    );
+  });
+
   it('rebuilds array-shaped malformed indexes before list, save, and update', async () => {
     for (const malformed of ['[]', '{"formatVersion":1,"summaries":[]}']) {
       for (const operation of ['list', 'save', 'update'] as const) {

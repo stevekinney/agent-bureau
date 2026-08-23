@@ -399,7 +399,7 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
     },
 
     async list(options?: SessionListOptions): Promise<SessionSummary[]> {
-      const dataKeys = await store.list(KEY_PREFIX);
+      let dataKeys = await store.list(KEY_PREFIX);
       let summaryRaw = await store.get(SUMMARY_INDEX_KEY);
       let summaries = parseSummaryIndex(summaryRaw);
       if (!summaries) {
@@ -423,8 +423,8 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
       // An index entry must never make a deleted or otherwise missing body
       // visible. This also keeps orphaned records from surviving migrations
       // from stores that predate the atomic data/index writes.
-      const dataIds = new Set(dataKeys.map((key) => key.slice(KEY_PREFIX.length)));
       for (let attempt = 0; attempt < MAXIMUM_SAVE_ATTEMPTS; attempt += 1) {
+        const dataIds = new Set(dataKeys.map((key) => key.slice(KEY_PREFIX.length)));
         const repaired = new Map(summaries);
         for (const id of repaired.keys()) {
           if (!dataIds.has(id)) repaired.delete(id);
@@ -440,7 +440,10 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
           break;
         }
 
-        summaryRaw = await store.get(SUMMARY_INDEX_KEY);
+        [dataKeys, summaryRaw] = await Promise.all([
+          store.list(KEY_PREFIX),
+          store.get(SUMMARY_INDEX_KEY),
+        ]);
         summaries = parseSummaryIndex(summaryRaw);
         if (!summaries) summaries = await summariesForMutation(summaryRaw);
       }
