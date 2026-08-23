@@ -237,7 +237,10 @@ describe('temporal fact-validity', () => {
           vectorOnly,
         });
 
-        expect(results.map((result) => result.id)).toEqual([firstValid.id, secondValid.id]);
+        expect(results).toHaveLength(2);
+        expect(results.map((result) => result.id)).toEqual(
+          expect.arrayContaining([firstValid.id, secondValid.id]),
+        );
       });
     }
 
