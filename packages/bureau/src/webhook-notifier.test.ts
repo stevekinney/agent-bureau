@@ -383,6 +383,28 @@ describe('createWebhookNotifier', () => {
     notifier.dispose();
   });
 
+  it('uses the non-blocking default timer when no sleep implementation is injected', async () => {
+    const review = makeToolApprovalReview();
+    const { bureau, emit } = createStubBureau([review]);
+    let attempts = 0;
+    const fetchImpl = (async () => {
+      attempts++;
+      return new Response(null, { status: attempts === 1 ? 503 : 200 });
+    }) as unknown as typeof fetch;
+    const notifier = createWebhookNotifier(bureau, undefined, undefined, {
+      targets: [{ url: 'https://example.com/hook' }],
+      fetch: fetchImpl,
+      maxAttempts: 2,
+      backoffBaseMilliseconds: 0,
+    });
+
+    emit(makeAction({ type: 'step.completed', runId: 'run-1' }));
+    await notifier.flush();
+
+    expect(attempts).toBe(2);
+    notifier.dispose();
+  });
+
   it('surfaces a delivery in the audit trail after exhausting retries (neuter-verified)', async () => {
     const review = makeToolApprovalReview();
     const { bureau, emit } = createStubBureau([review]);

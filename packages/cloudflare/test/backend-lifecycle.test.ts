@@ -5,6 +5,7 @@ import {
   createCloudflareMemoryRecordStorage,
   MAX_SEARCH_LIMIT,
 } from '../src/create-cloudflare-memory-record-storage';
+import type { Sql, SqlValue } from '../src/sql';
 import { createCloudflareMemoryTestHarness } from '../src/test';
 import { createFakeVectorize } from '../src/test/fake-vectorize';
 import { createSqliteDouble } from '../src/test/sqlite-double';
@@ -113,6 +114,35 @@ describe('createCloudflareMemoryTestHarness', () => {
 });
 
 describe('Cloudflare memory dedupe keys', () => {
+  it('fails loudly if a successful dedupe insert cannot be read back', async () => {
+    const underlying = createSqliteDouble();
+    let inserted = false;
+    const inconsistentSql: Sql = {
+      exec<Row extends Record<string, SqlValue>>(query: string, ...bindings: SqlValue[]) {
+        const cursor = underlying.exec<Row>(query, ...bindings);
+        if (query.includes('INSERT OR IGNORE INTO memory_records')) {
+          inserted = true;
+        }
+        if (
+          inserted &&
+          query.includes('WHERE tenant_id = ? AND namespace = ? AND dedupe_key = ?')
+        ) {
+          return { toArray: () => [] };
+        }
+        return cursor;
+      },
+    };
+    const storage = createCloudflareMemoryRecordStorage({
+      sql: inconsistentSql,
+      vectorize: createFakeVectorize(),
+    });
+    await storage.init();
+
+    await expect(
+      storage.putOnce!(makeRecord('inconsistent', { metadata: { dedupeKey: 'missing' } })),
+    ).rejects.toThrow('dedupeKey "missing" exists but its memory record is missing');
+  });
+
   it('returns an existing record for duplicate putOnce without a second Vectorize upsert', async () => {
     const vectorize = createFakeVectorize();
     const storage = createCloudflareMemoryRecordStorage({

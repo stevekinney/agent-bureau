@@ -66,3 +66,28 @@ describe('CloudflareSqliteStorage supports manual Weft maintenance', () => {
     }
   });
 });
+
+describe('CloudflareSqliteStorage extensions', () => {
+  it('rejects unsafe table names before issuing SQL', () => {
+    expect(() =>
+      createCloudflareSqliteStorage({
+        sql: createSqliteDouble(),
+        tableName: 'storage; DROP TABLE storage',
+      }),
+    ).toThrow(/tableName must be a valid SQL identifier/);
+  });
+
+  it('supports has, count, and bounded prefix deletion', async () => {
+    const storage = createCloudflareSqliteStorage({ sql: createSqliteDouble() });
+    await storage.put('alpha:one', new Uint8Array([1]));
+    await storage.put('alpha:two', new Uint8Array([2]));
+    await storage.put('beta:one', new Uint8Array([3]));
+
+    expect(await storage.has?.('alpha:one')).toBe(true);
+    expect(await storage.has?.('missing')).toBe(false);
+    expect(await storage.count?.('alpha:')).toBe(2);
+    expect(await storage.deletePrefix?.('alpha:')).toBe(2);
+    expect(await storage.count?.('alpha:')).toBe(0);
+    expect(await storage.has?.('beta:one')).toBe(true);
+  });
+});

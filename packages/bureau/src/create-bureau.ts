@@ -17,6 +17,7 @@ import {
   SchedulerTaskFailedEvent,
   type SessionStore,
   type SessionSummary,
+  type StreamEventMap,
   TaskCancelledEvent,
   TaskDispatchedEvent,
   TaskPreemptedEvent,
@@ -54,7 +55,7 @@ import {
   type ConversationHistory,
   createConversationHistory,
 } from 'conversationalist';
-import { CompletableEventTarget } from 'lifecycle';
+import { CompletableEventTarget, type TypedEventTarget } from 'lifecycle';
 
 import { type AuditTrail, createAuditTrail } from './audit-trail';
 import {
@@ -105,6 +106,62 @@ const BUREAU_AGENT_NAME = 'bureau';
 const SESSION_PERSISTENCE_MAXIMUM_ATTEMPTS = 3;
 const SESSION_PERSISTENCE_RETRY_DELAY_MILLISECONDS = 10;
 const SCHEDULER_PRIORITIES = ['immediate', 'scheduled', 'background', 'ambient'] as const;
+
+export function defaultSessionPersistenceSleep(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function ignoreBestEffortPromiseRejection(): void {}
+
+export function detachBestEffortPromise(promise: Promise<unknown>): void {
+  void promise.catch(ignoreBestEffortPromiseRejection);
+}
+
+type FlowControlScheduler = Pick<EventTarget, 'addEventListener' | 'removeEventListener'>;
+
+type FlowControlSchedulerEvent =
+  | SchedulerTaskCompletedEvent
+  | SchedulerTaskFailedEvent
+  | TaskCancelledEvent
+  | TaskPreemptedEvent
+  | TaskDispatchedEvent;
+
+export function wireFlowControlSchedulerEvents(
+  scheduler: FlowControlScheduler,
+  flowController: Pick<FlowController, 'settle' | 'markParked' | 'markResumed'>,
+): Array<() => void> {
+  function settleScheduledTask(
+    event: SchedulerTaskCompletedEvent | SchedulerTaskFailedEvent | TaskCancelledEvent,
+  ) {
+    flowController.settle(event.taskId);
+  }
+
+  function handlePreemptedTask(event: TaskPreemptedEvent) {
+    if (event.requeued) {
+      flowController.markParked(event.taskId);
+      return;
+    }
+
+    flowController.settle(event.taskId);
+  }
+
+  function handleDispatchedTask(event: TaskDispatchedEvent) {
+    flowController.markResumed(event.taskId);
+  }
+
+  const listeners: ReadonlyArray<readonly [FlowControlSchedulerEvent['type'], EventListener]> = [
+    [SchedulerTaskCompletedEvent.type, settleScheduledTask as EventListener],
+    [SchedulerTaskFailedEvent.type, settleScheduledTask as EventListener],
+    [TaskCancelledEvent.type, settleScheduledTask as EventListener],
+    [TaskPreemptedEvent.type, handlePreemptedTask as EventListener],
+    [TaskDispatchedEvent.type, handleDispatchedTask as EventListener],
+  ];
+
+  return listeners.map(([eventType, listener]) => {
+    scheduler.addEventListener(eventType, listener);
+    return () => scheduler.removeEventListener(eventType, listener);
+  });
+}
 
 function messagesAreEqual(
   left: ConversationHistory['messages'][string],
@@ -409,7 +466,7 @@ async function loadScheduleIdForRecoveredRun(
   }
 }
 
-async function loadExistingScheduledSessionId(
+export async function loadExistingScheduledSessionId(
   store: SessionStore,
   input: ScheduledAgentRunInput,
   runId: string,
@@ -425,6 +482,59 @@ async function loadExistingScheduledSessionId(
       session.id.endsWith(`-${runId}`) &&
       session.metadata['lastScheduledFireRunId'] === runId,
   )?.id;
+}
+
+export function wireStreamEventTargetFrames(
+  streamEventTarget: TypedEventTarget<StreamEventMap>,
+  runId: string,
+  emitLiveFrame: (frame: ServerFrame) => void,
+  nextRunSeq: (runId: string) => number,
+): () => void {
+  const streamEventTypes = [
+    'stream:text-delta',
+    'stream:tool-call-start',
+    'stream:tool-call-delta',
+    'stream:tool-call-complete',
+    'stream:complete',
+    'stream:error',
+  ] as const;
+  const disposers: Array<() => void> = [];
+
+  for (const eventType of streamEventTypes) {
+    const listener = (event: Event) => {
+      const detail = (event as Event & { detail: Parameters<typeof streamEventToFrame>[1] }).detail;
+      const frame = streamEventToFrame(runId, detail);
+      if (frame) {
+        emitLiveFrame({ ...frame, runSeq: nextRunSeq(runId) });
+      }
+    };
+
+    streamEventTarget.addEventListener(eventType, listener);
+    disposers.push(() => streamEventTarget.removeEventListener(eventType, listener));
+  }
+
+  return () => {
+    for (const dispose of disposers.splice(0)) {
+      dispose();
+    }
+  };
+}
+
+export function createHumanWaitContext(
+  servicesRef: { current?: DurableRunDeps },
+  runId: string,
+): RequestHumanInputContext {
+  return {
+    get pendingHumanWait() {
+      return servicesRef.current?.pendingHumanWait;
+    },
+    set pendingHumanWait(value) {
+      if (servicesRef.current) {
+        servicesRef.current.pendingHumanWait = value;
+      }
+    },
+    runId,
+  };
 }
 
 export async function monitorRecoveredScheduledFire(
@@ -536,9 +646,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
   const sessionPersistenceRetryDelayMilliseconds =
     options.sessionPersistenceRetryDelayMilliseconds ??
     SESSION_PERSISTENCE_RETRY_DELAY_MILLISECONDS;
-  const sessionPersistenceSleep =
-    options.sessionPersistenceSleep ??
-    ((milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
+  const sessionPersistenceSleep = options.sessionPersistenceSleep ?? defaultSessionPersistenceSleep;
 
   function getRunSessionIdentifier(runState: { activeRun: ActiveRun }): string {
     return runSessionIdentifiers.get(runState.activeRun) ?? '';
@@ -624,30 +732,30 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     'scheduler.stopped',
   ] as const;
 
+  function emitSchedulerLiveFrame(event: Event): void {
+    if (event.type === 'task.preempted') {
+      const preemptedEvent = event as Event & { taskId: string; reason: string };
+      emitLiveFrame({
+        type: 'scheduler.task.preempted',
+        taskId: preemptedEvent.taskId,
+        reason: preemptedEvent.reason,
+        state: runtime.scheduler!.getState(),
+      });
+      return;
+    }
+
+    emitLiveFrame({
+      type: 'scheduler.state',
+      state: runtime.scheduler!.getState(),
+    });
+  }
+
   const schedulerCleanup =
     runtime.scheduler === undefined
       ? []
       : schedulerEventTypes.map((eventType) => {
-          const listener = (event: Event) => {
-            if (eventType === 'task.preempted') {
-              const preemptedEvent = event as Event & { taskId: string; reason: string };
-              emitLiveFrame({
-                type: 'scheduler.task.preempted',
-                taskId: preemptedEvent.taskId,
-                reason: preemptedEvent.reason,
-                state: runtime.scheduler!.getState(),
-              });
-              return;
-            }
-
-            emitLiveFrame({
-              type: 'scheduler.state',
-              state: runtime.scheduler!.getState(),
-            });
-          };
-
-          runtime.scheduler!.addEventListener(eventType, listener);
-          return () => runtime.scheduler?.removeEventListener(eventType, listener);
+          runtime.scheduler!.addEventListener(eventType, emitSchedulerLiveFrame);
+          return () => runtime.scheduler?.removeEventListener(eventType, emitSchedulerLiveFrame);
         });
 
   // AB-13 — enforce the flow-control lifecycle for scheduler-originated
@@ -660,40 +768,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
   const flowControlSchedulerCleanup: Array<() => void> =
     flowController === undefined || runtime.scheduler === undefined
       ? []
-      : (
-          [
-            [
-              SchedulerTaskCompletedEvent.type,
-              (event: SchedulerTaskCompletedEvent) => flowController.settle(event.taskId),
-            ],
-            [
-              SchedulerTaskFailedEvent.type,
-              (event: SchedulerTaskFailedEvent) => flowController.settle(event.taskId),
-            ],
-            [
-              TaskCancelledEvent.type,
-              (event: TaskCancelledEvent) => flowController.settle(event.taskId),
-            ],
-            [
-              TaskPreemptedEvent.type,
-              (event: TaskPreemptedEvent) => {
-                if (event.requeued) {
-                  flowController.markParked(event.taskId);
-                } else {
-                  flowController.settle(event.taskId);
-                }
-              },
-            ],
-            [
-              TaskDispatchedEvent.type,
-              (event: TaskDispatchedEvent) => flowController.markResumed(event.taskId),
-            ],
-          ] as const
-        ).map(([eventType, listener]) => {
-          const boundListener = listener as (event: Event) => void;
-          runtime.scheduler!.addEventListener(eventType, boundListener);
-          return () => runtime.scheduler?.removeEventListener(eventType, boundListener);
-        });
+      : wireFlowControlSchedulerEvents(runtime.scheduler, flowController);
 
   function requireSessionStore() {
     if (!runtime.sessionStore) {
@@ -890,30 +965,9 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       const disposeStreamListeners: Array<() => void> = [];
       const streamEventTarget = runRuntime.streamEventTarget;
       if (streamEventTarget) {
-        const streamEventTypes = [
-          'stream:text-delta',
-          'stream:tool-call-start',
-          'stream:tool-call-delta',
-          'stream:tool-call-complete',
-          'stream:complete',
-          'stream:error',
-        ] as const;
-
-        for (const eventType of streamEventTypes) {
-          const listener = (event: Event) => {
-            const detail = (event as Event & { detail: Parameters<typeof streamEventToFrame>[1] })
-              .detail;
-            const frame = streamEventToFrame(runId, detail);
-            if (frame) {
-              emitLiveFrame({ ...frame, runSeq: nextRunSeq(runId) });
-            }
-          };
-
-          streamEventTarget.addEventListener(eventType, listener);
-          disposeStreamListeners.push(() =>
-            streamEventTarget.removeEventListener(eventType, listener),
-          );
-        }
+        disposeStreamListeners.push(
+          wireStreamEventTargetFrames(streamEventTarget, runId, emitLiveFrame, nextRunSeq),
+        );
       }
 
       await saveSession(
@@ -976,17 +1030,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       if (options.humanInput && runtime.durable) {
         const servicesRef: { current?: DurableRunDeps } = {};
         humanInputEmitter = new CompletableEventTarget<CombinedOperativeEventMap>();
-        const humanWaitContext: RequestHumanInputContext = {
-          get pendingHumanWait() {
-            return servicesRef.current?.pendingHumanWait;
-          },
-          set pendingHumanWait(value) {
-            if (servicesRef.current) {
-              servicesRef.current.pendingHumanWait = value;
-            }
-          },
-          runId,
-        };
+        const humanWaitContext = createHumanWaitContext(servicesRef, runId);
         const rawHumanInputTool = createRequestHumanInputTool({
           context: humanWaitContext,
           emitter: humanInputEmitter,
@@ -1808,7 +1852,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       },
     };
 
-    void runtime.scheduler.submit(task).catch(() => {});
+    detachBestEffortPromise(runtime.scheduler.submit(task));
 
     return Promise.resolve({
       taskId,
@@ -2267,11 +2311,11 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     // "toObservable subscriber throws during dispose" regression test.
     try {
       if (runtime.scheduler) {
-        void runtime.scheduler.stop().catch(() => {});
+        detachBestEffortPromise(runtime.scheduler.stop());
       }
 
       if (runtime.memory) {
-        void runtime.memory.close().catch(() => {});
+        detachBestEffortPromise(runtime.memory.close());
       }
 
       try {
