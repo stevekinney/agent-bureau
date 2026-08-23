@@ -805,6 +805,19 @@ describe('createSessionStore', () => {
     expect(backfilled[0]!.messageCount).toBe(0);
   });
 
+  it('backfills a legacy session whose id matches the reserved index suffix', async () => {
+    const rawStore = textValueStore(new MemoryStorage());
+    const store = createSessionStore(rawStore);
+    const session = makeSession({ id: 'summary-index' });
+    await seedStoredSession(rawStore, session);
+
+    const summaries = await store.list();
+
+    expect(summaries.map((summary) => summary.id)).toEqual([session.id]);
+    expect(await store.load(session.id)).toBeDefined();
+    expect(await rawStore.get(SUMMARY_INDEX_KEY)).toContain('"summaries"');
+  });
+
   it('does not read or overwrite the old un-namespaced collision key', async () => {
     const rawStore = textValueStore(new MemoryStorage());
     const store = createSessionStore(rawStore);

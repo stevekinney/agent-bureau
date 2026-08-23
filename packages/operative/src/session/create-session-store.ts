@@ -455,6 +455,11 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
         const listedKeys = await store.list(KEY_PREFIX);
         const dataKeys = dataKeysForStore(listedKeys);
         const rebuiltSummaries = new Map<string, SessionSummary>();
+        const legacyIndexSession = parseSession(summaryRaw);
+        const migratesLegacyIndexSession = legacyIndexSession?.id === 'summary-index';
+        if (migratesLegacyIndexSession) {
+          rebuiltSummaries.set(legacyIndexSession.id, toSummary(legacyIndexSession));
+        }
         await Promise.all(
           dataKeys.map(async (key) => {
             const id = idForDataKey(key);
@@ -465,8 +470,22 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
           }),
         );
         const rebuilt = await store.conditionalBatch(
-          [{ key: SUMMARY_INDEX_KEY, expectedValue: summaryRaw }],
           [
+            { key: SUMMARY_INDEX_KEY, expectedValue: summaryRaw },
+            ...(migratesLegacyIndexSession
+              ? [{ key: keyFor(legacyIndexSession.id), expectedValue: null }]
+              : []),
+          ],
+          [
+            ...(migratesLegacyIndexSession
+              ? [
+                  {
+                    type: 'set' as const,
+                    key: keyFor(legacyIndexSession.id),
+                    value: JSON.stringify(legacyIndexSession),
+                  },
+                ]
+              : []),
             {
               type: 'set',
               key: SUMMARY_INDEX_KEY,
