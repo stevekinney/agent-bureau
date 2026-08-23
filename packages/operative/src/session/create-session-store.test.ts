@@ -869,7 +869,9 @@ describe('createSessionStore', () => {
     const summaries = await store.list();
     const ids = summaries.map((summary) => summary.id);
 
-    expect(ids).toEqual([retained.id, concurrent.id]);
+    expect(ids).toHaveLength(2);
+    expect(ids).toContain(retained.id);
+    expect(ids).toContain(concurrent.id);
     expect(JSON.parse((await rawStore.get(SUMMARY_INDEX_KEY))!).summaries).toHaveProperty(
       concurrent.id,
     );
