@@ -42,7 +42,7 @@ export interface SessionCleanupOptions {
  * Provides CRUD operations plus listing, filtering, metadata updates,
  * and time-based cleanup. Session bodies are namespaced under `agent-session:`
  * in the underlying store; the summary index is stored in the reserved
- * `agent-session-index` key.
+ * `agent-session:summary-index` key.
  */
 export interface SessionStore {
   /** Persist a session, merging on optimistic-concurrency conflicts. */

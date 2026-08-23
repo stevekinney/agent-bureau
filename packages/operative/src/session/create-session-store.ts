@@ -241,7 +241,7 @@ function serializeSummaryIndex(summaries: Map<string, SessionSummary>): string {
  * Creates a SessionStore backed by the given ConditionalTextValueStore.
  *
  * Session bodies are prefixed with `agent-session:` and the aggregate summary
- * index uses the reserved `agent-session-index` key so both can coexist with
+ * index uses the reserved `agent-session:summary-index` key so both can coexist with
  * other data in the same store.
  */
 export function createSessionStore(store: ConditionalTextValueStore): SessionStore {
