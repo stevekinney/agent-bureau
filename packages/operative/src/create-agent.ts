@@ -365,7 +365,9 @@ export function createAgent(options: CreateAgentOptions): StandaloneAgent<unknow
       };
 
       const activeRun = createActiveRun(runOptions);
-      const run = createAgentRun<unknown, boolean>(activeRun);
+      const run = createAgentRun<unknown, boolean>(activeRun, {
+        hasOutput: output !== undefined,
+      });
       // Keep the runtime surface aligned with the type-level contract:
       // `output()` exists only for agents configured with a response schema.
       if (!output) {

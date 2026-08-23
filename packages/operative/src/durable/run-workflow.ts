@@ -220,6 +220,30 @@ export interface AgentRunWorkflowResult {
   };
 }
 
+/**
+ * Normalize a workflow summary at the durable trust boundary.
+ *
+ * Version 1 persisted the validated value as `structuredOutput`; current
+ * summaries use `output`. Keep old terminal checkpoints readable when a
+ * resumed handle crosses the workflow boundary after an upgrade.
+ */
+export function normalizeAgentRunWorkflowResult(value: unknown): AgentRunWorkflowResult {
+  if (typeof value !== 'object' || value === null) {
+    throw new Error('Invalid durable agent run workflow result');
+  }
+
+  const summary = value as Record<string, unknown>;
+  if (summary['output'] === undefined && 'structuredOutput' in summary) {
+    const { structuredOutput: _legacyStructuredOutput, ...current } = summary;
+    return {
+      ...current,
+      ...(_legacyStructuredOutput !== undefined ? { output: _legacyStructuredOutput } : {}),
+    } as AgentRunWorkflowResult;
+  }
+
+  return value as AgentRunWorkflowResult;
+}
+
 /** Serialize an unknown error to a stable message string for the checkpoint. */
 function serializeError(error: unknown): string {
   if (error instanceof Error) return error.message;

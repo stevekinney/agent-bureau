@@ -121,6 +121,8 @@ export interface CreateAgentRunOptions {
    * - `'empty'` — returns immediately without yielding any events.
    */
   onCompletedIteration?: 'error' | 'empty';
+  /** Whether this handle has a configured schema-backed output accessor. */
+  hasOutput?: boolean;
 }
 
 /**
@@ -162,6 +164,7 @@ export function createAgentRun<O = never, H extends boolean = false>(
   options: CreateAgentRunOptions = {},
 ): AgentRun<O, H> {
   const { onCompletedIteration = 'error' } = options;
+  const hasOutput = options.hasOutput ?? false;
 
   // Cache the result promise so result() is idempotent across all calls
   // (before, during, and after iteration).
@@ -209,9 +212,19 @@ export function createAgentRun<O = never, H extends boolean = false>(
             ? result.schemaValidation.error
             : new Error('Agent run output failed schema validation');
         }
-        return (
-          'output' in result && result.output !== undefined ? result.output : result.content
-        ) as UnwrappedValue<O, H>;
+        if (hasOutput) {
+          if (
+            !result.schemaValidation?.success ||
+            !('output' in result) ||
+            result.output === undefined
+          ) {
+            throw result.schemaValidation?.error instanceof Error
+              ? result.schemaValidation.error
+              : new Error('Agent run has no validated output');
+          }
+          return result.output as UnwrappedValue<O, H>;
+        }
+        return result.content as UnwrappedValue<O, H>;
       });
     },
 
@@ -222,7 +235,11 @@ export function createAgentRun<O = never, H extends boolean = false>(
             ? result.error
             : new Error(`Agent run did not finish successfully: ${result.finishReason}`);
         }
-        if (!result.schemaValidation?.success || !('output' in result)) {
+        if (
+          !result.schemaValidation?.success ||
+          !('output' in result) ||
+          result.output === undefined
+        ) {
           throw result.schemaValidation?.error instanceof Error
             ? result.schemaValidation.error
             : new Error('Agent run has no validated output');

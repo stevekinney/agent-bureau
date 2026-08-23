@@ -12,7 +12,10 @@ import { createActiveRun } from '../create-run';
 import { reattachDurableActiveRun } from '../durable/active-run-adapter';
 import type { CheckpointStore } from '../durable/checkpoint-store';
 import type { AnyRunEngine } from '../durable/create-run-engine';
-import type { AgentRunWorkflowResult } from '../durable/run-workflow';
+import {
+  type AgentRunWorkflowResult,
+  normalizeAgentRunWorkflowResult,
+} from '../durable/run-workflow';
 import type {
   CombinedOperativeEventMap,
   OperativeEventMap,
@@ -476,7 +479,7 @@ async function readTerminalRunOutcome(
 
   // The workflow's own declared return type — the same trusted-internal-
   // contract cast `active-run-adapter.ts` makes after `handle.result()`.
-  const summary = state.result as AgentRunWorkflowResult;
+  const summary = normalizeAgentRunWorkflowResult(state.result);
   return { status: finishReasonToStatus(summary.finishReason), conversation };
 }
 

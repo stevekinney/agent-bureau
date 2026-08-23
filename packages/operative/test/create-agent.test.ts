@@ -66,6 +66,18 @@ describe('createAgent', () => {
     expect(await run.output()).toEqual({ answer: 'hello' });
   });
 
+  it('does not unwrap unvalidated output after maximum steps', async () => {
+    const agent = createAgent({
+      generate: singleResponse('{"answer":"hello"}'),
+      output: z.object({ answer: z.string() }),
+      stopWhen: pendingApproval(),
+      maximumSteps: 1,
+    });
+
+    const run = agent.run('test');
+    await expect(run.unwrap()).rejects.toThrow('Agent run has no validated output');
+  });
+
   it('run() returns an AgentRun handle (not a Promise)', () => {
     const agent = createAgent({
       generate: singleResponse('hello'),

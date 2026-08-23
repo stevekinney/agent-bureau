@@ -25,7 +25,7 @@ import type { RunState } from '../run-step';
 import type { FinishReason, RunOptions, RunResult } from '../types';
 import type { CheckpointStore } from './checkpoint-store';
 import type { AnyRunEngine } from './create-run-engine';
-import type { AgentRunWorkflowResult } from './run-workflow';
+import { type AgentRunWorkflowResult, normalizeAgentRunWorkflowResult } from './run-workflow';
 import type { DurableRunDeps } from './types';
 
 /**
@@ -722,7 +722,7 @@ export async function resumeDurableRunResult(
   runId: string,
 ): Promise<RunResult> {
   const handle = await context.engine.resume(runId);
-  const summary = (await (handle as RecoveredRunHandle).result()) as AgentRunWorkflowResult;
+  const summary = normalizeAgentRunWorkflowResult(await (handle as RecoveredRunHandle).result());
   const { result } = await reconstructRunResult(context, runId, summary);
   return result;
 }
@@ -811,7 +811,7 @@ export async function startDurableRunResult(
       },
     },
   );
-  const summary = (await (handle as RecoveredRunHandle).result()) as AgentRunWorkflowResult;
+  const summary = normalizeAgentRunWorkflowResult(await (handle as RecoveredRunHandle).result());
   const { result } = await reconstructRunResult(context, runId, summary);
   return result;
 }
@@ -834,7 +834,7 @@ async function driveReattachedRun(
 
   let summary: AgentRunWorkflowResult;
   try {
-    summary = (await handle.result()) as AgentRunWorkflowResult;
+    summary = normalizeAgentRunWorkflowResult(await handle.result());
   } catch (error) {
     // An ADAPTER-INITIATED abort (bureau.abortRun → engine.cancel) that ACTUALLY
     // terminalized this run is a real terminal: fire `run.aborted` so the gateway
@@ -1012,7 +1012,7 @@ async function driveDurableRun(
 
   let summary: AgentRunWorkflowResult;
   try {
-    summary = (await handle.result()) as AgentRunWorkflowResult;
+    summary = normalizeAgentRunWorkflowResult(await handle.result());
   } catch (error) {
     // The engine was disposed while this run was still in flight — i.e. the
     // bureau (or process) is tearing down mid-run. This is the CRASH semantic,
