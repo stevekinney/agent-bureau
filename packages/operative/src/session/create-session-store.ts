@@ -360,6 +360,14 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
         }),
       );
 
+      // An index entry must never make a deleted or otherwise missing body
+      // visible. This also keeps orphaned records from surviving migrations
+      // from stores that predate the atomic data/index writes.
+      const dataIds = new Set(dataKeys.map((key) => key.slice(KEY_PREFIX.length)));
+      for (const id of summaries.keys()) {
+        if (!dataIds.has(id)) summaries.delete(id);
+      }
+
       // Filter by agentName when requested
       let filtered = options?.agentName
         ? [...summaries.values()].filter((s) => s.agentName === options.agentName)

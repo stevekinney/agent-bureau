@@ -423,6 +423,28 @@ describe('createSessionStore', () => {
     await store.delete('nonexistent');
   });
 
+  it('delete cleans up an orphan summary when the session body is missing', async () => {
+    const rawStore = textValueStore(new MemoryStorage());
+    const store = createSessionStore(rawStore);
+    await rawStore.set(
+      'agent-session-index:orphan-session',
+      JSON.stringify({
+        formatVersion: 1,
+        id: 'orphan-session',
+        agentName: 'test-agent',
+        messageCount: 0,
+        createdAt: '2025-01-01T00:00:00.000Z',
+        updatedAt: '2025-01-01T00:00:00.000Z',
+        metadata: {},
+      }),
+    );
+
+    await store.delete('orphan-session');
+
+    expect(await rawStore.has('agent-session:orphan-session')).toBe(false);
+    expect(await rawStore.has('agent-session-index:orphan-session')).toBe(false);
+  });
+
   it('exists returns true for saved sessions', async () => {
     const store = createSessionStore(textValueStore(new MemoryStorage()));
     const session = makeSession({});
@@ -494,6 +516,25 @@ describe('createSessionStore', () => {
     expect(summaries).toHaveLength(5);
     expect(getKeys).toHaveLength(25);
     expect(getKeys.every((key) => key.startsWith('agent-session-index:'))).toBe(true);
+  });
+
+  it('does not list an orphan summary when its session body is missing', async () => {
+    const rawStore = textValueStore(new MemoryStorage());
+    const store = createSessionStore(rawStore);
+    await rawStore.set(
+      'agent-session-index:orphan-session',
+      JSON.stringify({
+        formatVersion: 1,
+        id: 'orphan-session',
+        agentName: 'test-agent',
+        messageCount: 0,
+        createdAt: '2025-01-01T00:00:00.000Z',
+        updatedAt: '2025-01-01T00:00:00.000Z',
+        metadata: {},
+      }),
+    );
+
+    expect(await store.list()).toEqual([]);
   });
 
   it('uses the session id as a deterministic tie-break in either sort direction', async () => {
