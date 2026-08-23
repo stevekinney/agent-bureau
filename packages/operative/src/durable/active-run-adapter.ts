@@ -4,7 +4,12 @@ import { Conversation, isConversation } from 'conversationalist';
 import { CompletableEventTarget, forwardEvents } from 'lifecycle';
 
 import type { ActiveRun } from '../create-run';
-import { BudgetExceededError, ElicitationDeniedError, GuardrailTripwireError } from '../errors';
+import {
+  BudgetExceededError,
+  ElicitationDeniedError,
+  GuardrailTripwireError,
+  MaximumStepsExceededError,
+} from '../errors';
 import type { CombinedOperativeEventMap, OperativeEventEmitter } from '../events';
 import {
   StepStartedEvent,
@@ -25,7 +30,11 @@ import type { RunState } from '../run-step';
 import type { FinishReason, RunOptions, RunResult } from '../types';
 import type { CheckpointStore } from './checkpoint-store';
 import type { AnyRunEngine } from './create-run-engine';
-import { type AgentRunWorkflowResult, normalizeAgentRunWorkflowResult } from './run-workflow';
+import {
+  AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION,
+  type AgentRunWorkflowResult,
+  normalizeAgentRunWorkflowResult,
+} from './run-workflow';
 import type { DurableRunDeps } from './types';
 
 /**
@@ -182,6 +191,9 @@ async function reconstructRunResult(
     content: summary.content,
     usage: runState.totalUsage,
     finishReason: summary.finishReason,
+    ...(summary.finishReason === 'maximum-steps'
+      ? { error: new MaximumStepsExceededError(summary.steps) }
+      : {}),
     // Mirror the in-memory loop and `finalizeRunResult`: a successful
     // `responseSchema` run's validated value must survive result-only durable
     // paths (`resumeDurableRunResult`, `startDurableRunResult`), not just the
@@ -1048,6 +1060,7 @@ async function driveDurableRun(
       let cancelledConversation = conversation;
       try {
         const reconstructed = await reconstructRunResult(context, runId, {
+          schemaVersion: AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION,
           runId,
           steps: 0,
           content: '',

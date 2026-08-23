@@ -38,7 +38,7 @@ import {
 import { createCheckpointStore } from './checkpoint-store';
 import type { AnyRunEngine } from './create-run-engine';
 import { createRunEngine } from './create-run-engine';
-import { createRunWorkflow } from './run-workflow';
+import { AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION, createRunWorkflow } from './run-workflow';
 
 const run = (...args: Parameters<typeof createActiveRun>) => createActiveRun(...args).result;
 const createRun = createActiveRun;
@@ -1312,6 +1312,7 @@ describe('reattachDurableActiveRun', () => {
         id: 'reattach-event-facade',
         result: () =>
           Promise.resolve({
+            schemaVersion: AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION,
             runId: 'reattach-event-facade',
             steps: 0,
             content: 'reattached',
@@ -1642,6 +1643,7 @@ describe('reattachDurableActiveRun', () => {
         id: 'reattach-dispose',
         result: () =>
           Promise.resolve({
+            schemaVersion: AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION,
             runId: 'reattach-dispose',
             steps: 0,
             content: '',
@@ -1672,6 +1674,7 @@ describe('reattachDurableActiveRun', () => {
         id: 'reattach-schema-error',
         result: () =>
           Promise.resolve({
+            schemaVersion: AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION,
             runId: 'reattach-schema-error',
             steps: 0,
             content: '',

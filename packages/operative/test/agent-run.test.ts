@@ -18,6 +18,7 @@ import {
 } from '../src/agent-run';
 import { noToolCalls } from '../src/conditions/predicates';
 import { type ActiveRun, createActiveRun as createRun } from '../src/create-run';
+import { MaximumStepsExceededError } from '../src/errors';
 import { createMockGenerate } from '../src/test/index';
 import type { GenerateResponse } from '../src/types';
 
@@ -140,6 +141,20 @@ describe('AgentRun.unwrap() and output()', () => {
     await expect(run.output()).resolves.toEqual({ answer: 'validated' });
   });
 
+  it('throws a synthesized missing-output error when unwrap() expects output but none exists', async () => {
+    const activeRun = createResolvedActiveRun({
+      content: '{"answer":"missing"}',
+      conversation: {} as never,
+      finishReason: 'stop-condition',
+      steps: [],
+      usage: { prompt: 0, completion: 0, total: 0 },
+      schemaValidation: { success: true },
+    });
+    const run = createAgentRun<{ answer: string }, true>(activeRun, { hasOutput: true });
+
+    await expect(run.unwrap()).rejects.toThrow('Agent run has no validated output');
+  });
+
   it('throws the terminal run error when unwrap() is called on a failed run', async () => {
     const failure = new Error('provider failed');
     const activeRun = createResolvedActiveRun({
@@ -227,11 +242,11 @@ describe('AgentRun.unwrap() and output()', () => {
     await expect(run.output()).rejects.toBe(validationError);
   });
 
-  it('throws a synthesized missing-output error when output() has no validation error', async () => {
+  it('throws a synthesized missing-output error when output() has no schema error', async () => {
     const activeRun = createResolvedActiveRun({
       content: '{"answer":"missing"}',
       conversation: {} as never,
-      finishReason: 'maximum-steps',
+      finishReason: 'stop-condition',
       steps: [],
       usage: { prompt: 0, completion: 0, total: 0 },
       schemaValidation: { success: true },
@@ -239,6 +254,22 @@ describe('AgentRun.unwrap() and output()', () => {
     const run = createAgentRun<{ answer: string }, true>(activeRun, { hasOutput: true });
 
     await expect(run.output()).rejects.toThrow('Agent run has no validated output');
+  });
+
+  it('throws the maximum-steps policy error when output() is called on a capped run', async () => {
+    const maximumStepsError = new MaximumStepsExceededError(3);
+    const activeRun = createResolvedActiveRun({
+      content: '{"answer":"missing"}',
+      conversation: {} as never,
+      finishReason: 'maximum-steps',
+      steps: [],
+      usage: { prompt: 0, completion: 0, total: 0 },
+      schemaValidation: { success: true },
+      error: maximumStepsError,
+    });
+    const run = createAgentRun<{ answer: string }, true>(activeRun, { hasOutput: true });
+
+    await expect(run.output()).rejects.toBe(maximumStepsError);
   });
 });
 

@@ -121,9 +121,8 @@ interface RunResultBase {
 /**
  * The schema-validated success value lives on `output`, present only when
  * `H` is `true` AND `schemaValidation.success` is `true` — this is the ONE
- * public name for a run's validated output; `structuredOutput` is never
- * exposed anywhere in this API (today's operative `RunResult.structuredOutput`
- * is renamed as part of this contract, tracked by `AB-17`).
+ * public name for a run's validated output; the previous `structuredOutput`
+ * field is not exposed anywhere in this API.
  *
  * This is a conditional INTERSECTION, not `output?: […] ? O : never` on a
  * single interface. TypeScript resolves an optional property typed `never`
@@ -479,11 +478,9 @@ export type RunCompletedEvent<O = never, H extends boolean = false> = {
 };
 ```
 
-`RunCompletedEvent<O, H>` carries its payload as one nested `result` object —
-not the flattened `conversation`/`steps`/`content`/`usage`/... properties
-today's operative `RunCompletedEvent` class exposes directly. A listener reads
-`event.result.output`, never `event.structuredOutput` or `event.output`
-directly on the event. The runtime event's own `type: 'run.completed'`
+`RunCompletedEvent<O, H>` carries its payload as one nested `result` object.
+A listener reads `event.result.output`, not a separate structured-output field
+on the event. The runtime event's own `type: 'run.completed'`
 discriminant comes from the `Event` base class it extends (as it does today),
 not from this alias — this alias specifies only the new `result`-nested
 payload shape.

@@ -1,5 +1,32 @@
 import { isToolCallParseError } from './providers/errors.ts';
 
+export type AgentRunErrorKind =
+  'load' | 'contract' | 'generate' | 'tool' | 'abort' | 'output' | 'policy';
+
+export type AgentRunErrorCode = 'MAXIMUM_STEPS';
+
+export class AgentRunError extends Error {
+  readonly kind: AgentRunErrorKind;
+  readonly code: AgentRunErrorCode;
+
+  constructor(message: string, options: { kind: AgentRunErrorKind; code: AgentRunErrorCode }) {
+    super(message);
+    this.name = 'AgentRunError';
+    this.kind = options.kind;
+    this.code = options.code;
+  }
+}
+
+export class MaximumStepsExceededError extends AgentRunError {
+  constructor(maximumSteps: number) {
+    super(`Agent run exceeded maximumSteps (${maximumSteps}).`, {
+      kind: 'policy',
+      code: 'MAXIMUM_STEPS',
+    });
+    this.name = 'MaximumStepsExceededError';
+  }
+}
+
 export class ElicitationDeniedError extends Error {
   constructor(message?: string) {
     super(message);

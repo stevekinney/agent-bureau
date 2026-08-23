@@ -4,6 +4,7 @@ import { Conversation, isConversation } from 'conversationalist';
 import { BudgetExceededError, ElicitationDeniedError, GuardrailTripwireError } from '../errors';
 import { RunErrorEvent } from '../events';
 import { buildStepDeps, createRunState } from '../loop';
+import { UnsupportedRunResultVersionError } from '../run-envelope';
 import { DEFAULT_MAXIMUM_STEPS, runStep } from '../run-step';
 import type { FinishReason } from '../types';
 import type { CheckpointStore } from './checkpoint-store';
@@ -143,7 +144,10 @@ export function isAgentRunWorkflowInput(value: unknown): value is AgentRunWorkfl
 }
 
 /** Plain, cloneable summary returned when the durable run completes. */
+export const AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION = 2 as const;
+
 export interface AgentRunWorkflowResult {
+  schemaVersion: typeof AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION;
   runId: string;
   steps: number;
   content: string;
@@ -222,10 +226,6 @@ export interface AgentRunWorkflowResult {
 
 /**
  * Normalize a workflow summary at the durable trust boundary.
- *
- * Version 1 persisted the validated value as `structuredOutput`; current
- * summaries use `output`. Keep old terminal checkpoints readable when a
- * resumed handle crosses the workflow boundary after an upgrade.
  */
 export function normalizeAgentRunWorkflowResult(value: unknown): AgentRunWorkflowResult {
   if (typeof value !== 'object' || value === null) {
@@ -233,12 +233,11 @@ export function normalizeAgentRunWorkflowResult(value: unknown): AgentRunWorkflo
   }
 
   const summary = value as Record<string, unknown>;
-  if (summary['output'] === undefined && 'structuredOutput' in summary) {
-    const { structuredOutput: _legacyStructuredOutput, ...current } = summary;
-    return {
-      ...current,
-      ...(_legacyStructuredOutput !== undefined ? { output: _legacyStructuredOutput } : {}),
-    } as AgentRunWorkflowResult;
+  if (summary['schemaVersion'] !== AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION) {
+    throw new UnsupportedRunResultVersionError(summary['schemaVersion']);
+  }
+  if ('structuredOutput' in summary) {
+    throw new UnsupportedRunResultVersionError(summary['schemaVersion']);
   }
 
   return value as AgentRunWorkflowResult;
@@ -713,7 +712,7 @@ export function createRunWorkflow(
         // it guarantees exactly one park primitive fires regardless of accumulation
         // state, so the workflow cannot sleep AND then wait for a signal in sequence.
         //
-        // CRITICAL: Only park on successful / maximum-steps outcomes. A terminal
+        // CRITICAL: Only park on non-failed stop-condition / maximum-steps outcomes. A terminal
         // failure (`error`, `aborted`, `elicitation-denied`, `budget-exceeded`,
         // `tripwire`) must return immediately — parking on a failed/aborted run
         // would leave the Weft workflow status as `running` until the sleep/signal
@@ -738,6 +737,7 @@ export function createRunWorkflow(
         ctx.setAttribute('runId', runId);
 
         return {
+          schemaVersion: AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION,
           runId,
           steps: cursor.step,
           content: cursor.lastContent,

@@ -24,7 +24,7 @@ import type {
   OperativeEventEmitter,
   RunOptions,
 } from '@lostgradient/operative';
-import { createActiveRun } from '@lostgradient/operative';
+import { createActiveRun, MaximumStepsExceededError } from '@lostgradient/operative';
 import { stopWhen } from '@lostgradient/operative/conditions';
 import type { DurableRunDeps } from '@lostgradient/operative/durable';
 import {
@@ -133,7 +133,7 @@ describe('loop completion — the agent loop runs to a stop condition', () => {
     expect(result.steps).toHaveLength(3);
   });
 
-  it('a run that never settles stops at maximumSteps with finishReason maximum-steps', async () => {
+  it('a run that never settles stops at maximumSteps with a policy error', async () => {
     const result = await run({
       ...baseRunOptions(async () => ({
         content: 'looping',
@@ -143,6 +143,9 @@ describe('loop completion — the agent loop runs to a stop condition', () => {
     });
 
     expect(result.finishReason).toBe('maximum-steps');
+    expect(result.error).toBeInstanceOf(MaximumStepsExceededError);
+    expect((result.error as MaximumStepsExceededError).kind).toBe('policy');
+    expect((result.error as MaximumStepsExceededError).code).toBe('MAXIMUM_STEPS');
     expect(result.steps).toHaveLength(2);
   });
 

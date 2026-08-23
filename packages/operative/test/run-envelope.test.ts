@@ -26,6 +26,7 @@ import {
   runReportSchema,
   stringifyError,
   summarizeToolInput,
+  UnsupportedRunResultVersionError,
 } from '../src/run-envelope';
 
 function roundTrip<T>(value: T): unknown {
@@ -86,9 +87,12 @@ describe('stringifyError', () => {
 });
 
 describe('mapFinishReasonToStatus', () => {
-  it('maps stop-condition and maximum-steps to succeeded', () => {
+  it('maps stop-condition to succeeded', () => {
     expect(mapFinishReasonToStatus('stop-condition')).toBe('succeeded');
-    expect(mapFinishReasonToStatus('maximum-steps')).toBe('succeeded');
+  });
+
+  it('maps maximum-steps to failed', () => {
+    expect(mapFinishReasonToStatus('maximum-steps')).toBe('failed');
   });
 
   it('maps aborted to aborted', () => {
@@ -171,6 +175,19 @@ describe('buildRunReport', () => {
     expect(report.error).toBe('provider timed out');
   });
 
+  it('drops output for non-success reports', () => {
+    const report = buildRunReport({
+      runId: 'run-2b',
+      status: 'failed',
+      finishReason: 'maximum-steps',
+      usage,
+      output: { answer: 4 },
+      error: new Error('too many steps'),
+    });
+    expect(report.output).toBeUndefined();
+    expect(report.error).toBe('too many steps');
+  });
+
   it('drops a output value that cannot round-trip through JSON', () => {
     const circular: Record<string, unknown> = {};
     circular['self'] = circular;
@@ -213,60 +230,86 @@ describe('buildRunReport', () => {
   });
 });
 
-describe('versioned frame migration', () => {
-  it('migrates a persisted v1 structuredOutput report to v2 output', () => {
-    const frame = parseRunFrame({
-      schemaVersion: 1,
-      type: 'run-finished',
-      runId: 'legacy-run',
-      timestamp: 1,
-      report: {
+describe('versioned frame parsing', () => {
+  it('rejects a persisted v1 structuredOutput report explicitly', () => {
+    expect(() =>
+      parseRunFrame({
         schemaVersion: 1,
+        type: 'run-finished',
         runId: 'legacy-run',
-        status: 'succeeded',
-        usage: { prompt: 1, completion: 2, total: 3 },
-        structuredOutput: { answer: 'legacy' },
-      },
-    });
+        timestamp: 1,
+        report: {
+          schemaVersion: 1,
+          runId: 'legacy-run',
+          status: 'succeeded',
+          usage: { prompt: 1, completion: 2, total: 3 },
+          structuredOutput: { answer: 'legacy' },
+        },
+      }),
+    ).toThrow(UnsupportedRunResultVersionError);
+  });
 
-    expect(frame.schemaVersion).toBe(RUN_ENVELOPE_SCHEMA_VERSION);
-    expect(frame.type).toBe('run-finished');
-    expect(frame.report.output).toEqual({ answer: 'legacy' });
-    expect('structuredOutput' in frame.report).toBe(false);
+  it('rejects non-terminal v1 frames explicitly', () => {
+    expect(() =>
+      parseRunFrame({
+        schemaVersion: 1,
+        type: 'notification',
+        runId: 'legacy-run',
+        timestamp: 1,
+        level: 'info',
+        code: 'legacy.notice',
+        message: 'legacy frame',
+      }),
+    ).toThrow(UnsupportedRunResultVersionError);
+  });
+
+  it('rejects missing envelope versions explicitly', () => {
+    expect(() =>
+      parseRunFrame({
+        type: 'run-finished',
+        runId: 'legacy-run',
+        timestamp: 1,
+        report: {
+          runId: 'legacy-run',
+          status: 'succeeded',
+          usage: { prompt: 1, completion: 2, total: 3 },
+          structuredOutput: { answer: 'legacy' },
+        },
+      }),
+    ).toThrow(UnsupportedRunResultVersionError);
   });
 
   it('rejects unknown envelope versions', () => {
     expect(() => parseRunFrame({ schemaVersion: 99, type: 'run-started' })).toThrow(
-      'Unsupported run envelope schema version 99',
+      UnsupportedRunResultVersionError,
     );
-  });
-
-  it('migrates non-terminal v1 frames by updating only the schema version', () => {
-    const frame = parseRunFrame({
-      schemaVersion: 1,
-      type: 'notification',
-      runId: 'legacy-run',
-      timestamp: 1,
-      level: 'info',
-      code: 'legacy.notice',
-      message: 'legacy frame',
-    });
-
-    expect(frame).toEqual({
-      schemaVersion: RUN_ENVELOPE_SCHEMA_VERSION,
-      type: 'notification',
-      runId: 'legacy-run',
-      timestamp: 1,
-      level: 'info',
-      code: 'legacy.notice',
-      message: 'legacy frame',
-    });
   });
 
   it('rethrows current-version validation errors instead of version errors', () => {
     expect(() =>
       parseRunFrame({ schemaVersion: RUN_ENVELOPE_SCHEMA_VERSION, type: 'run-started' }),
     ).toThrow('timestamp');
+  });
+
+  it('accepts current-version output reports', () => {
+    const frame = parseRunFrame({
+      schemaVersion: RUN_ENVELOPE_SCHEMA_VERSION,
+      type: 'run-finished',
+      runId: 'legacy-run',
+      timestamp: 1,
+      report: {
+        schemaVersion: RUN_ENVELOPE_SCHEMA_VERSION,
+        runId: 'legacy-run',
+        status: 'succeeded',
+        usage: { prompt: 1, completion: 2, total: 3 },
+        output: { answer: 'current' },
+      },
+    });
+
+    expect(frame.schemaVersion).toBe(RUN_ENVELOPE_SCHEMA_VERSION);
+    expect(frame.type).toBe('run-finished');
+    expect(frame.report.output).toEqual({ answer: 'current' });
+    expect('structuredOutput' in frame.report).toBe(false);
   });
 });
 

@@ -162,6 +162,8 @@ export {
 } from './create-supervisor';
 export type {
   AsyncDefinitionLoadCode,
+  AgentRunErrorCode,
+  AgentRunErrorKind,
   ClassifiedError,
   ErrorCategory,
   GuardrailTripwireDetail,
@@ -169,10 +171,12 @@ export type {
 export {
   AbortAgentRunError,
   AsyncDefinitionLoadError,
+  AgentRunError,
   BudgetExceededError,
   classifyError,
   ElicitationDeniedError,
   GuardrailTripwireError,
+  MaximumStepsExceededError,
   StandardSchemaValidationError,
 } from './errors';
 export type {
@@ -422,6 +426,7 @@ export {
   stringifyError,
   summarizeToolInput,
   toolStatusSchema,
+  UnsupportedRunResultVersionError,
 } from './run-envelope';
 export { DEFAULT_MAXIMUM_STEPS } from './run-step';
 export type {

@@ -202,7 +202,7 @@ export function createAgentRun<O = never, H extends boolean = false>(
 
     unwrap(): Promise<UnwrappedValue<O, H>> {
       return cachedResult.then((result) => {
-        if (result.finishReason !== 'stop-condition' && result.finishReason !== 'maximum-steps') {
+        if (result.finishReason !== 'stop-condition') {
           throw result.error instanceof Error
             ? result.error
             : new Error(`Agent run did not finish successfully: ${result.finishReason}`);
@@ -230,7 +230,7 @@ export function createAgentRun<O = never, H extends boolean = false>(
 
     output(): Promise<O> {
       return cachedResult.then((result) => {
-        if (result.finishReason !== 'stop-condition' && result.finishReason !== 'maximum-steps') {
+        if (result.finishReason !== 'stop-condition') {
           throw result.error instanceof Error
             ? result.error
             : new Error(`Agent run did not finish successfully: ${result.finishReason}`);

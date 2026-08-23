@@ -14,6 +14,7 @@ import {
   type GenerateFunction,
   type RunFrame,
   runFrameSchema,
+  stopWhen,
   StreamCustomEvent,
   type StreamEventMap,
   type Toolbox,
@@ -376,6 +377,7 @@ describe('buildTerminalReportFromCompletedEvent / buildTerminalReportFromAborted
       toolbox: createEmptyToolbox(),
       conversation: new Conversation(),
       maximumSteps: 1,
+      stopWhen: stopWhen.noToolCalls(),
       runId: 'run-completed-1',
       costEstimation: { model: 'claude-sonnet-5' },
     });
@@ -386,7 +388,7 @@ describe('buildTerminalReportFromCompletedEvent / buildTerminalReportFromAborted
     });
 
     const result = await activeRun.result;
-    expect(result.finishReason).toBe('maximum-steps');
+    expect(result.finishReason).toBe('stop-condition');
     expect(captured).toBeDefined();
 
     const report = buildTerminalReportFromCompletedEvent('run-completed-1', captured!);
@@ -553,6 +555,7 @@ describe('Bureau.getRunReport', () => {
     const bureau = await createBureau({
       generate: async () => ({ content: 'Done.', toolCalls: [] }),
       toolbox: createEmptyToolbox(),
+      stopWhen: stopWhen.noToolCalls(),
     });
 
     const runEnvelopeFrames: Extract<ServerFrame, { type: 'run-envelope' }>[] = [];

@@ -20,6 +20,7 @@ import { z } from 'zod';
 
 import { noToolCalls, pendingApproval } from '../src/conditions/predicates';
 import { createAgent } from '../src/create-agent';
+import { MaximumStepsExceededError } from '../src/errors';
 import type { ConversationHistory, GenerateFunction, GenerateResponse } from '../src/types';
 
 // ---------------------------------------------------------------------------
@@ -66,7 +67,7 @@ describe('createAgent', () => {
     expect(await run.output()).toEqual({ answer: 'hello' });
   });
 
-  it('does not unwrap unvalidated output after maximum steps', async () => {
+  it('rejects unwrap with a maximum-steps policy error', async () => {
     const agent = createAgent({
       generate: singleResponse('{"answer":"hello"}'),
       output: z.object({ answer: z.string() }),
@@ -75,7 +76,7 @@ describe('createAgent', () => {
     });
 
     const run = agent.run('test');
-    await expect(run.unwrap()).rejects.toThrow('Agent run has no validated output');
+    await expect(run.unwrap()).rejects.toThrow(MaximumStepsExceededError);
   });
 
   it('run() returns an AgentRun handle (not a Promise)', () => {
@@ -835,6 +836,9 @@ describe('createAgent — park-on-approval', () => {
     const result = await agent.run('hello').result();
 
     expect(result.finishReason).toBe('maximum-steps');
+    expect(result.error).toBeInstanceOf(MaximumStepsExceededError);
+    expect((result.error as MaximumStepsExceededError).kind).toBe('policy');
+    expect((result.error as MaximumStepsExceededError).code).toBe('MAXIMUM_STEPS');
   });
 
   it('resumeApproval on the SAME toolbox instance resolves the pending approval to a success outcome', async () => {

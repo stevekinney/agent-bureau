@@ -8,8 +8,13 @@ import { z } from 'zod';
 import { createCheckpointStore } from '../../src/durable/checkpoint-store';
 import { createRunEngine } from '../../src/durable/create-run-engine';
 import { resumeDurableRunResult, startDurableRunResult } from '../../src/durable/index';
-import { createRunWorkflow, normalizeAgentRunWorkflowResult } from '../../src/durable/run-workflow';
+import {
+  AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION,
+  createRunWorkflow,
+  normalizeAgentRunWorkflowResult,
+} from '../../src/durable/run-workflow';
 import { stopWhen } from '../../src/index';
+import { UnsupportedRunResultVersionError } from '../../src/run-envelope';
 
 // Drain Weft's deferred inline-launch queue between tests (see other durable
 // suites) — a pending setTimeout(0) inline-launch left by one durable run can
@@ -27,58 +32,71 @@ describe('durable workflow result migration', () => {
     );
   });
 
-  it('migrates a legacy terminal summary before resumed result reconstruction', () => {
+  it('rejects a legacy terminal summary before resumed result reconstruction', () => {
+    expect(() =>
+      normalizeAgentRunWorkflowResult({
+        runId: 'legacy-summary-run',
+        steps: 1,
+        content: '{"answer":"legacy"}',
+        finishReason: 'stop-condition',
+        structuredOutput: { answer: 'legacy' },
+      }),
+    ).toThrow(UnsupportedRunResultVersionError);
+  });
+
+  it('rejects an explicitly versioned current summary that still has structuredOutput', () => {
+    expect(() =>
+      normalizeAgentRunWorkflowResult({
+        schemaVersion: AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION,
+        runId: 'legacy-summary-run',
+        steps: 1,
+        content: '{"answer":"legacy"}',
+        finishReason: 'stop-condition',
+        structuredOutput: { answer: 'legacy' },
+      }),
+    ).toThrow(UnsupportedRunResultVersionError);
+  });
+
+  it('accepts a current terminal summary with output', () => {
     const summary = normalizeAgentRunWorkflowResult({
+      schemaVersion: AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION,
       runId: 'legacy-summary-run',
       steps: 1,
       content: '{"answer":"legacy"}',
       finishReason: 'stop-condition',
-      structuredOutput: { answer: 'legacy' },
+      output: { answer: 'current' },
     });
 
-    expect(summary.output).toEqual({ answer: 'legacy' });
+    expect(summary.output).toEqual({ answer: 'current' });
     expect('structuredOutput' in summary).toBe(false);
   });
 
-  it('drops an explicitly undefined legacy structuredOutput field', () => {
-    const summary = normalizeAgentRunWorkflowResult({
-      runId: 'legacy-empty-summary-run',
-      steps: 1,
-      content: 'plain legacy',
-      finishReason: 'stop-condition',
-      structuredOutput: undefined,
-    });
-
-    expect(summary.output).toBeUndefined();
-    expect('structuredOutput' in summary).toBe(false);
-  });
-
-  it('migrates a legacy summary returned by a resumed terminal workflow', async () => {
-    const result = await resumeDurableRunResult(
-      {
-        engine: {
-          resume: async () => ({
-            result: async () => ({
-              runId: 'legacy-resumed-run',
-              steps: 1,
-              content: '{"answer":"legacy"}',
-              finishReason: 'stop-condition',
-              structuredOutput: { answer: 'legacy' },
+  it('rejects a legacy summary returned by a resumed terminal workflow', async () => {
+    await expect(
+      resumeDurableRunResult(
+        {
+          engine: {
+            resume: async () => ({
+              result: async () => ({
+                runId: 'legacy-resumed-run',
+                steps: 1,
+                content: '{"answer":"legacy"}',
+                finishReason: 'stop-condition',
+                structuredOutput: { answer: 'legacy' },
+              }),
             }),
-          }),
-        } as never,
-        checkpointStore: {
-          loadCheckpoint: async () => ({
-            conversation: null,
-            cursor: { totalUsage: {}, lastContent: '{"answer":"legacy"}', schemaAttempts: 0 },
-            steps: [],
-          }),
-        } as never,
-      },
-      'legacy-resumed-run',
-    );
-
-    expect(result.output).toEqual({ answer: 'legacy' });
+          } as never,
+          checkpointStore: {
+            loadCheckpoint: async () => ({
+              conversation: null,
+              cursor: { totalUsage: {}, lastContent: '{"answer":"legacy"}', schemaAttempts: 0 },
+              steps: [],
+            }),
+          } as never,
+        },
+        'legacy-resumed-run',
+      ),
+    ).rejects.toThrow(UnsupportedRunResultVersionError);
   });
 });
 

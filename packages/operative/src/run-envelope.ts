@@ -21,7 +21,18 @@ import type { FinishReason } from './types';
  * rather than assume the current shape.
  */
 export const RUN_ENVELOPE_SCHEMA_VERSION = 2 as const;
-const LEGACY_RUN_ENVELOPE_SCHEMA_VERSION = 1 as const;
+
+export class UnsupportedRunResultVersionError extends Error {
+  readonly version: unknown;
+
+  constructor(version: unknown) {
+    super(
+      `Unsupported run result schema version ${String(version)}; expected ${RUN_ENVELOPE_SCHEMA_VERSION}`,
+    );
+    this.name = 'UnsupportedRunResultVersionError';
+    this.version = version;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Redacted tool input/output summaries
@@ -148,7 +159,7 @@ const costEstimateSchema = z.object({
 /**
  * The terminal, JSON-serializable summary of a completed (or partially-
  * completed, on abrupt shutdown) run. Emitted for every exit path —
- * `succeeded` (stop-condition / maximum-steps), `failed` (error /
+ * `succeeded` (stop-condition), `failed` (maximum-steps / error /
  * elicitation-denied), `aborted`, and `budget_stopped` (budget-exceeded).
  *
  * `transcript` is conversationalist's plain-object `ConversationHistory`
@@ -265,102 +276,8 @@ export const runFrameSchema = z.discriminatedUnion('type', [
   runFinishedFrameSchema,
 ]) satisfies z.ZodType<RunFrame>;
 
-// Version 1 used `structuredOutput`. It remains readable, but is never emitted
-// again. Keeping this schema separate makes the migration explicit and avoids
-// accidentally accepting a v1 payload as a v2 frame.
-const legacyRunReportSchema = z.object({
-  schemaVersion: z.literal(LEGACY_RUN_ENVELOPE_SCHEMA_VERSION),
-  runId: z.string(),
-  status: runReportStatusSchema,
-  finishReason: z.string().optional(),
-  usage: tokenUsageSchema,
-  costEstimate: costEstimateSchema.optional(),
-  effectiveModel: z.string().optional(),
-  effectiveEffort: z.string().optional(),
-  structuredOutput: jsonValueSchema.optional(),
-  error: z.string().optional(),
-  transcript: conversationSchema.optional(),
-});
-const legacyFrameBaseSchema = z.object({
-  schemaVersion: z.literal(LEGACY_RUN_ENVELOPE_SCHEMA_VERSION),
-  runId: z.string(),
-  timestamp: z.number(),
-});
-const legacyRunFrameSchema = z.discriminatedUnion('type', [
-  legacyFrameBaseSchema.extend({
-    type: z.literal('run-started'),
-    sessionId: z.string().optional(),
-    agentName: z.string().optional(),
-  }),
-  legacyFrameBaseSchema.extend({
-    type: z.literal('step'),
-    step: z.number().int().min(0),
-    phase: z.enum(['started', 'completed']),
-    usage: tokenUsageSchema.optional(),
-  }),
-  legacyFrameBaseSchema.extend({
-    type: z.literal('assistant-chunk'),
-    step: z.number().int().min(0),
-    delta: z.string(),
-    accumulated: z.string(),
-  }),
-  legacyFrameBaseSchema.extend({
-    type: z.literal('assistant-final'),
-    step: z.number().int().min(0),
-    content: z.string(),
-  }),
-  legacyFrameBaseSchema.extend({
-    type: z.literal('tool-pre'),
-    step: z.number().int().min(0),
-    toolCallId: z.string(),
-    toolName: z.string(),
-    inputSummary: jsonValueSchema,
-  }),
-  legacyFrameBaseSchema.extend({
-    type: z.literal('tool-post'),
-    step: z.number().int().min(0),
-    toolCallId: z.string(),
-    toolName: z.string(),
-    status: toolStatusSchema,
-    durationMs: z.number().optional(),
-    resultSummary: jsonValueSchema.optional(),
-    error: z.string().optional(),
-  }),
-  legacyFrameBaseSchema.extend({
-    type: z.literal('notification'),
-    step: z.number().int().min(0).optional(),
-    level: notificationLevelSchema,
-    code: z.string(),
-    message: z.string(),
-  }),
-  legacyFrameBaseSchema.extend({ type: z.literal('run-finished'), report: legacyRunReportSchema }),
-]);
-
 /** Parse a durable frame and reject frames from an incompatible schema era. */
 export function parseRunFrame(input: unknown): RunFrame {
-  if (
-    typeof input === 'object' &&
-    input !== null &&
-    (input as { schemaVersion?: unknown }).schemaVersion === LEGACY_RUN_ENVELOPE_SCHEMA_VERSION
-  ) {
-    const legacy = legacyRunFrameSchema.parse(input);
-    if (legacy.type === 'run-finished') {
-      const { structuredOutput, ...report } = legacy.report;
-      return {
-        ...legacy,
-        schemaVersion: RUN_ENVELOPE_SCHEMA_VERSION,
-        report: {
-          ...report,
-          schemaVersion: RUN_ENVELOPE_SCHEMA_VERSION,
-          ...(structuredOutput !== undefined ? { output: structuredOutput } : {}),
-        },
-      };
-    }
-    return {
-      ...legacy,
-      schemaVersion: RUN_ENVELOPE_SCHEMA_VERSION,
-    };
-  }
   const parsed = runFrameSchema.safeParse(input);
   if (parsed.success) return parsed.data;
   const version =
@@ -368,9 +285,7 @@ export function parseRunFrame(input: unknown): RunFrame {
       ? (input as { schemaVersion?: unknown }).schemaVersion
       : undefined;
   if (version !== RUN_ENVELOPE_SCHEMA_VERSION) {
-    throw new Error(
-      `Unsupported run envelope schema version ${String(version)}; expected ${RUN_ENVELOPE_SCHEMA_VERSION}`,
-    );
+    throw new UnsupportedRunResultVersionError(version);
   }
   throw parsed.error;
 }
@@ -588,8 +503,8 @@ function toJsonSafeOrUndefined(value: unknown): JSONValue | undefined {
 
 /**
  * Maps a loop {@link FinishReason} to the envelope's coarser {@link
- * RunReportStatus}. `stop-condition` and `maximum-steps` both count as a
- * successful exit; `elicitation-denied`, `error`, and `tripwire` (a guardrail
+ * RunReportStatus}. Only `stop-condition` counts as a successful exit;
+ * `maximum-steps`, `elicitation-denied`, `error`, and `tripwire` (a guardrail
  * hard-halt — see AB-40) are all `'failed'`; `budget-exceeded` gets its own
  * status so a budget-triggered stop is distinguishable from a genuine
  * failure; `aborted` maps directly.
@@ -597,8 +512,9 @@ function toJsonSafeOrUndefined(value: unknown): JSONValue | undefined {
 export function mapFinishReasonToStatus(finishReason: FinishReason): RunReportStatus {
   switch (finishReason) {
     case 'stop-condition':
-    case 'maximum-steps':
       return 'succeeded';
+    case 'maximum-steps':
+      return 'failed';
     case 'aborted':
       return 'aborted';
     case 'budget-exceeded':
@@ -639,7 +555,10 @@ export function buildRunReport(input: BuildRunReportInput): RunReport {
     costEstimate: input.costEstimate,
     effectiveModel: input.effectiveModel,
     effectiveEffort: input.effectiveEffort,
-    output: toJsonSafeOrUndefined(input.output),
+    output:
+      input.status === 'succeeded' && input.finishReason === 'stop-condition'
+        ? toJsonSafeOrUndefined(input.output)
+        : undefined,
     error: input.error !== undefined ? stringifyError(input.error) : undefined,
     transcript: input.transcript,
   };

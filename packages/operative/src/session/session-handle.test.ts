@@ -12,6 +12,7 @@ import { createAgentSession } from '../agent-session';
 import { createCheckpointStore } from '../durable/checkpoint-store';
 import type { AnyRunEngine } from '../durable/create-run-engine';
 import { createRunEngine } from '../durable/create-run-engine';
+import { AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION } from '../durable/run-workflow';
 import type {
   OperativeEventMap,
   SessionCancelEvent,
@@ -1966,7 +1967,13 @@ function makeProbeWorkflow() {
     .activities({ probe })
     .execute(async function* (ctx) {
       yield* ctx.run('probe', {});
-      return { runId: '', steps: 1, content: 'done', finishReason: 'stop-condition' as const };
+      return {
+        schemaVersion: AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION,
+        runId: '',
+        steps: 1,
+        content: 'done',
+        finishReason: 'stop-condition' as const,
+      };
     });
 }
 
@@ -1977,7 +1984,13 @@ function makeProbeWorkflow() {
 function makeParkingWorkflow(sleepMs: number) {
   return workflow({ name: 'agentRun' }).execute(async function* (ctx) {
     yield* ctx.sleep(sleepMs);
-    return { runId: '', steps: 1, content: 'resumed', finishReason: 'stop-condition' as const };
+    return {
+      schemaVersion: AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION,
+      runId: '',
+      steps: 1,
+      content: 'resumed',
+      finishReason: 'stop-condition' as const,
+    };
   });
 }
 
@@ -2765,7 +2778,13 @@ describe('AB-28: recover() reconciles a RunRef whose recovered run is already te
       get: async (id: string) => ({
         id,
         status: 'completed',
-        result: { runId: id, steps: 1, content: 'hello', finishReason: 'stop-condition' },
+        result: {
+          schemaVersion: AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION,
+          runId: id,
+          steps: 1,
+          content: 'hello',
+          finishReason: 'stop-condition',
+        },
       }),
     } as unknown as AnyRunEngine;
     const fakeCheckpointStore = {
@@ -2809,7 +2828,14 @@ describe('AB-28: recover() reconciles a RunRef whose recovered run is already te
       get: async (id: string) => ({
         id,
         status: 'completed',
-        result: { runId: id, steps: 1, content: '', finishReason: 'error', errorMessage: 'boom' },
+        result: {
+          schemaVersion: AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION,
+          runId: id,
+          steps: 1,
+          content: '',
+          finishReason: 'error',
+          errorMessage: 'boom',
+        },
       }),
     } as unknown as AnyRunEngine;
     const fakeCheckpointStore = {
@@ -2989,7 +3015,13 @@ describe('AB-28: recover() reconciles a RunRef whose recovered run is already te
         return {
           id,
           status: 'completed',
-          result: { runId: id, steps: 1, content: 'once', finishReason: 'stop-condition' },
+          result: {
+            schemaVersion: AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION,
+            runId: id,
+            steps: 1,
+            content: 'once',
+            finishReason: 'stop-condition',
+          },
         };
       },
     } as unknown as AnyRunEngine;

@@ -102,8 +102,9 @@ export class StepCompletedEvent extends Event {
   }
 }
 
-export class RunCompletedEvent extends Event {
+export class RunCompletedEvent<O = unknown, H extends boolean = true> extends Event {
   static readonly type = 'run.completed' as const;
+  readonly result: RunResult<O, H>;
   readonly conversation: Conversation;
   readonly steps: readonly StepResult[];
   readonly content: string;
@@ -115,8 +116,9 @@ export class RunCompletedEvent extends Event {
   readonly costEstimate?: RunResult['costEstimate'];
   /** See {@link RunResult.output}. */
   readonly output?: unknown;
-  constructor(data: RunResult) {
+  constructor(data: RunResult<O, H>) {
     super(RunCompletedEvent.type);
+    this.result = data;
     this.conversation = data.conversation;
     this.steps = data.steps;
     this.content = data.content;
@@ -125,7 +127,7 @@ export class RunCompletedEvent extends Event {
     this.error = data.error;
     this.schemaValidation = data.schemaValidation;
     this.costEstimate = data.costEstimate;
-    this.output = data.output;
+    this.output = 'output' in data ? data.output : undefined;
   }
 }
 

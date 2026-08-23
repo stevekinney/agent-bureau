@@ -1,7 +1,12 @@
 import type { Conversation } from 'conversationalist';
 
 import { estimateCost, getModelPricing } from './cost-estimation';
-import { BudgetExceededError, ElicitationDeniedError, GuardrailTripwireError } from './errors';
+import {
+  BudgetExceededError,
+  ElicitationDeniedError,
+  GuardrailTripwireError,
+  MaximumStepsExceededError,
+} from './errors';
 import {
   RunAbortedEvent,
   RunCompletedEvent,
@@ -186,6 +191,10 @@ export function makeCompletedResult(
   costEstimation?: RunOptions['costEstimation'],
 ): RunResult {
   const costEstimate = computeCostEstimate(runState.totalUsage, costEstimation);
+  const maximumStepsError =
+    finishReason === 'maximum-steps'
+      ? new MaximumStepsExceededError(runState.steps.length)
+      : undefined;
   const result: RunResult = {
     conversation,
     steps: runState.steps,
@@ -193,8 +202,9 @@ export function makeCompletedResult(
     usage: runState.totalUsage,
     ...(costEstimate ? { costEstimate } : {}),
     finishReason,
+    ...(maximumStepsError ? { error: maximumStepsError } : {}),
     ...(schemaValidation ? { schemaValidation } : {}),
-    ...(output !== undefined ? { output } : {}),
+    ...(finishReason === 'stop-condition' && output !== undefined ? { output } : {}),
   };
   emitter?.dispatch(new RunCompletedEvent(result));
   runHookSilently(hooks, 'onRunComplete', {
