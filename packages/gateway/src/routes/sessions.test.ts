@@ -44,6 +44,51 @@ describe('sessions routes', () => {
     expect(body[0].id).toBe(createdRun.sessionId);
   });
 
+  it('GET /api/v1/sessions forwards limit and offset pagination', async () => {
+    const gateway = await createTestGateway({
+      authToken: AUTH_TOKEN,
+      persistence: textValueStore(new MemoryStorage()),
+      generate: async () => ({ content: 'Done.', toolCalls: [] }),
+    });
+
+    const createdIds: string[] = [];
+    for (let index = 0; index < 3; index += 1) {
+      const response = await requestJSON(gateway, '/api/v1/runs', {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify({ message: `Hello ${index}` }),
+      });
+      const run = await response.json();
+      createdIds.push(run.sessionId);
+      await waitForRunState(gateway.bureau, run.id);
+    }
+
+    const response = await requestJSON(gateway, '/api/v1/sessions?limit=1&offset=1', {
+      headers: authHeaders,
+    });
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body).toHaveLength(1);
+    expect(createdIds).toContain(body[0].id);
+  });
+
+  it('rejects invalid session pagination parameters', async () => {
+    const gateway = await createTestGateway({
+      authToken: AUTH_TOKEN,
+      persistence: textValueStore(new MemoryStorage()),
+    });
+
+    const invalidLimit = await requestJSON(gateway, '/api/v1/sessions?limit=0', {
+      headers: authHeaders,
+    });
+    expect(invalidLimit.status).toBe(400);
+
+    const invalidOffset = await requestJSON(gateway, '/api/v1/sessions?offset=-1', {
+      headers: authHeaders,
+    });
+    expect(invalidOffset.status).toBe(400);
+  });
+
   it('GET /api/v1/sessions/:id returns a session', async () => {
     const gateway = await createTestGateway({
       authToken: AUTH_TOKEN,

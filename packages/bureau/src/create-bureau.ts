@@ -15,6 +15,7 @@ import {
   type RunReport,
   SchedulerTaskCompletedEvent,
   SchedulerTaskFailedEvent,
+  type SessionListOptions,
   type SessionStore,
   type SessionSummary,
   type StreamEventMap,
@@ -1969,8 +1970,8 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
     return true;
   }
 
-  async function listSessions() {
-    return requireSessionStore().list();
+  async function listSessions(options?: SessionListOptions) {
+    return requireSessionStore().list(options);
   }
 
   async function getSession(id: string) {

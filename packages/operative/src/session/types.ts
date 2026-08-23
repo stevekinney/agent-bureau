@@ -40,8 +40,9 @@ export interface SessionCleanupOptions {
  * A high-level store for agent sessions, built on top of ConditionalTextValueStore.
  *
  * Provides CRUD operations plus listing, filtering, metadata updates,
- * and time-based cleanup. All keys are namespaced under `agent-session:`
- * in the underlying store.
+ * and time-based cleanup. Session bodies are namespaced under `agent-session:`
+ * in the underlying store; the summary index is stored in the reserved
+ * `agent-session:summary-index` key.
  */
 export interface SessionStore {
   /** Persist a session, merging on optimistic-concurrency conflicts. */
@@ -61,7 +62,11 @@ export interface SessionStore {
   /** Load a session by id. Returns undefined when no session exists. */
   load(id: string): Promise<AgentSession | undefined>;
 
-  /** Delete a session by id. No-op if the session does not exist. */
+  /**
+   * Delete a session by id. No-op if the session does not exist. Rejects with
+   * SessionConflictError when repeated conflicts prevent removing its body and
+   * summary atomically, so a live summary is never silently left behind.
+   */
   delete(id: string): Promise<void>;
 
   /** List sessions with optional filtering, pagination, and sorting. */

@@ -103,7 +103,7 @@ describe('saveAgentSession', () => {
 
     await saveAgentSession(store, session);
 
-    const raw = await store.get('agent-session:conv-1');
+    const raw = await store.get('agent-session-v2:body:0063006f006e0076002d0031');
     expect(raw).toBeDefined();
     const parsed = JSON.parse(raw!) as Record<string, unknown>;
     expect(parsed['id']).toBe('conv-1');
