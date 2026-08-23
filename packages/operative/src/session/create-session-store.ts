@@ -11,6 +11,7 @@ import type {
 } from './types';
 
 const KEY_PREFIX = 'agent-session:';
+const BODY_PREFIX = 'agent-session:body:';
 const SUMMARY_INDEX_KEY = 'agent-session:summary-index';
 const MAXIMUM_SAVE_ATTEMPTS = 5;
 const MAXIMUM_INDEX_CONTENTION_ATTEMPTS = 50;
@@ -242,10 +243,25 @@ function dataKeysForStore(keys: string[]): string[] {
   return keys.filter((key) => key !== SUMMARY_INDEX_KEY);
 }
 
+function idForDataKey(key: string): string | undefined {
+  if (key.startsWith(BODY_PREFIX)) {
+    try {
+      return decodeURIComponent(key.slice(BODY_PREFIX.length));
+    } catch {
+      return undefined;
+    }
+  }
+  if (key.startsWith(KEY_PREFIX) && key !== SUMMARY_INDEX_KEY) {
+    return key.slice(KEY_PREFIX.length);
+  }
+  return undefined;
+}
+
 /**
  * Creates a SessionStore backed by the given ConditionalTextValueStore.
  *
- * Session bodies are prefixed with `agent-session:` and the aggregate summary
+ * Session bodies are stored under the encoded `agent-session:body:` namespace
+ * (with legacy `agent-session:<id>` lookup for pre-index records) and the aggregate summary
  * index uses the reserved `agent-session:summary-index` key so both can coexist with
  * other data in the same store.
  */
@@ -255,7 +271,20 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
   }
 
   function keyFor(id: string): string {
+    return `${BODY_PREFIX}${encodeURIComponent(id)}`;
+  }
+
+  function legacyKeyFor(id: string): string {
     return `${KEY_PREFIX}${id}`;
+  }
+
+  async function readBody(id: string): Promise<{ raw: string | null; key: string }> {
+    const key = keyFor(id);
+    const raw = await store.get(key);
+    if (raw !== null) return { raw, key };
+    const legacyKey = legacyKeyFor(id);
+    const legacyRaw = await store.get(legacyKey);
+    return legacyRaw === null ? { raw: null, key } : { raw: legacyRaw, key: legacyKey };
   }
 
   async function summariesForMutation(
@@ -269,11 +298,12 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
     // the source of truth before applying the requested mutation.
     const summaries = new Map<string, SessionSummary>();
     const listedKeys = await store.list(KEY_PREFIX);
-    const dataKeys = listedKeys.filter((key) => key !== SUMMARY_INDEX_KEY);
+    const dataKeys = dataKeysForStore(listedKeys);
     await Promise.all(
       dataKeys.map(async (key) => {
+        const id = idForDataKey(key);
         const session = parseSession(await store.get(key));
-        if (session) summaries.set(session.id, toSummary(session));
+        if (id && session && session.id === id) summaries.set(id, toSummary(session));
       }),
     );
     return summaries;
@@ -281,6 +311,7 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
 
   async function commit(
     session: AgentSession,
+    bodyKey: string,
     expectedValue: string | null,
     currentRevision: number,
     refreshUpdatedAt: boolean,
@@ -294,11 +325,11 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
     };
     const committed = await store.conditionalBatch(
       [
-        { key: keyFor(next.id), expectedValue },
+        { key: bodyKey, expectedValue },
         { key: SUMMARY_INDEX_KEY, expectedValue: expectedSummaryValue },
       ],
       [
-        { type: 'set', key: keyFor(next.id), value: JSON.stringify(next) },
+        { type: 'set', key: bodyKey, value: JSON.stringify(next) },
         {
           type: 'set',
           key: SUMMARY_INDEX_KEY,
@@ -314,14 +345,16 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
       let saveConflicts = 0;
       let previousBodyRaw: string | null | undefined;
       for (let attempt = 1; attempt <= MAXIMUM_INDEX_CONTENTION_ATTEMPTS; attempt += 1) {
-        const [raw, summaryRaw] = await Promise.all([
-          store.get(keyFor(session.id)),
+        const [body, summaryRaw] = await Promise.all([
+          readBody(session.id),
           store.get(SUMMARY_INDEX_KEY),
         ]);
+        const { raw, key: bodyKey } = body;
         const current = parseSession(raw);
         const candidate = current ? mergeSessions(current, session) : session;
         const committed = await commit(
           candidate,
+          bodyKey,
           raw,
           current?.revision ?? 0,
           true,
@@ -349,10 +382,8 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
       let saveConflicts = 0;
       let previousBodyRaw: string | null | undefined;
       for (let attempt = 1; attempt <= MAXIMUM_INDEX_CONTENTION_ATTEMPTS; attempt += 1) {
-        const [raw, summaryRaw] = await Promise.all([
-          store.get(keyFor(id)),
-          store.get(SUMMARY_INDEX_KEY),
-        ]);
+        const [body, summaryRaw] = await Promise.all([readBody(id), store.get(SUMMARY_INDEX_KEY)]);
+        const { raw, key: bodyKey } = body;
         const current = parseSession(raw);
         const candidate = await updater(current);
         if (!candidate) return undefined;
@@ -360,6 +391,7 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
         const next = current ? mergeSessions(current, candidate) : candidate;
         const committed = await commit(
           next,
+          bodyKey,
           raw,
           current?.revision ?? 0,
           true,
@@ -376,7 +408,7 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
     },
 
     async load(id: string): Promise<AgentSession | undefined> {
-      const raw = await store.get(keyFor(id));
+      const { raw } = await readBody(id);
       return parseSession(raw);
     },
 
@@ -384,10 +416,8 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
       let deleteConflicts = 0;
       let previousBodyRaw: string | null | undefined;
       for (let attempt = 1; attempt <= MAXIMUM_INDEX_CONTENTION_ATTEMPTS; attempt += 1) {
-        const [raw, summaryRaw] = await Promise.all([
-          store.get(keyFor(id)),
-          store.get(SUMMARY_INDEX_KEY),
-        ]);
+        const [body, summaryRaw] = await Promise.all([readBody(id), store.get(SUMMARY_INDEX_KEY)]);
+        const { raw, key: bodyKey } = body;
         const nextSummaries = await summariesForMutation(summaryRaw);
         nextSummaries.delete(id);
         const operations =
@@ -402,10 +432,10 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
             : [{ type: 'delete' as const, key: SUMMARY_INDEX_KEY }];
         const deleted = await store.conditionalBatch(
           [
-            { key: keyFor(id), expectedValue: raw },
+            { key: bodyKey, expectedValue: raw },
             { key: SUMMARY_INDEX_KEY, expectedValue: summaryRaw },
           ],
-          [{ type: 'delete', key: keyFor(id) }, ...operations],
+          [{ type: 'delete', key: bodyKey }, ...operations],
         );
         if (deleted) return;
         if (previousBodyRaw !== undefined && previousBodyRaw !== raw) deleteConflicts += 1;
@@ -422,14 +452,14 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
       let summaries = parseSummaryIndex(summaryRaw);
       if (!summaries) {
         const listedKeys = await store.list(KEY_PREFIX);
-        const dataKeys = listedKeys.filter((key) => key !== SUMMARY_INDEX_KEY);
+        const dataKeys = dataKeysForStore(listedKeys);
         const rebuiltSummaries = new Map<string, SessionSummary>();
         await Promise.all(
           dataKeys.map(async (key) => {
-            const id = key.slice(KEY_PREFIX.length);
+            const id = idForDataKey(key);
             const raw = await store.get(key);
             const session = parseSession(raw);
-            if (!session || session.id !== id) return;
+            if (!id || !session || session.id !== id) return;
             rebuiltSummaries.set(id, toSummary(session));
           }),
         );
@@ -454,43 +484,6 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
             summaryRaw = latestRaw;
           } else {
             summaries = rebuiltSummaries;
-          }
-        }
-      } else {
-        const indexedIds = new Set(summaries.keys());
-        const unindexedKeys = dataKeysForStore(await store.list(KEY_PREFIX)).filter(
-          (key) => !indexedIds.has(key.slice(KEY_PREFIX.length)),
-        );
-        if (unindexedKeys.length > 0) {
-          const rebuiltSummaries = new Map<string, SessionSummary>();
-          const allDataKeys = dataKeysForStore(await store.list(KEY_PREFIX));
-          await Promise.all(
-            allDataKeys.map(async (key) => {
-              const id = key.slice(KEY_PREFIX.length);
-              const session = parseSession(await store.get(key));
-              if (session && session.id === id) rebuiltSummaries.set(id, toSummary(session));
-            }),
-          );
-          const rebuilt = await store.conditionalBatch(
-            [{ key: SUMMARY_INDEX_KEY, expectedValue: summaryRaw }],
-            [
-              {
-                type: 'set',
-                key: SUMMARY_INDEX_KEY,
-                value: serializeSummaryIndex(rebuiltSummaries),
-              },
-            ],
-          );
-          if (rebuilt) {
-            summaries = rebuiltSummaries;
-            summaryRaw = serializeSummaryIndex(summaries);
-          } else {
-            const latestRaw = await store.get(SUMMARY_INDEX_KEY);
-            const latestSummaries = parseSummaryIndex(latestRaw);
-            if (latestSummaries) {
-              summaries = latestSummaries;
-              summaryRaw = latestRaw;
-            }
           }
         }
       }
@@ -522,7 +515,7 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
       const missingIds: string[] = [];
       let seen = 0;
       for (const summary of filtered) {
-        const body = await store.get(keyFor(summary.id));
+        const { raw: body } = await readBody(summary.id);
         const session = parseSession(body);
         if (!session || session.id !== summary.id) {
           missingIds.push(summary.id);
@@ -548,7 +541,7 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
         if (!current) break;
         const stillMissing: string[] = [];
         for (const id of missingIds) {
-          const body = await store.get(keyFor(id));
+          const { raw: body } = await readBody(id);
           const session = parseSession(body);
           if (!session || session.id !== id) stillMissing.push(id);
         }
@@ -569,7 +562,7 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
     async exists(id: string): Promise<boolean> {
       // `has` is a required member of Weft's TextValueStore (0.2.1), so the
       // existence check needs no get-based fallback.
-      return store.has(keyFor(id));
+      return (await store.has(keyFor(id))) || (await store.has(legacyKeyFor(id)));
     },
 
     async updateMetadata(id: string, metadata: Record<string, JSONValue>): Promise<void> {
@@ -585,15 +578,15 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
 
     async cleanup(options: SessionCleanupOptions): Promise<number> {
       const listedKeys = await store.list(KEY_PREFIX);
-      const keys = listedKeys.filter((key) => key !== SUMMARY_INDEX_KEY);
+      const keys = dataKeysForStore(listedKeys);
       const cutoff = Date.now() - options.olderThan;
       let deleted = 0;
 
       for (const key of keys) {
         const raw = await store.get(key);
-        const id = key.slice(KEY_PREFIX.length);
+        const id = idForDataKey(key);
         const session = parseSession(raw);
-        if (!session || session.id !== id) continue;
+        if (!id || !session || session.id !== id) continue;
 
         if (options.agentName && session.agentName !== options.agentName) continue;
 

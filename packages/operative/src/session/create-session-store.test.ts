@@ -545,7 +545,7 @@ describe('createSessionStore', () => {
     expect(
       getKeys.filter((key) => key.startsWith('agent-session:') && key !== SUMMARY_INDEX_KEY),
     ).toHaveLength(5);
-    expect(listCalls).toBe(1);
+    expect(listCalls).toBe(0);
 
     const smallerBackingStore = textValueStore(new MemoryStorage());
     const smallerGetKeys: string[] = [];
@@ -570,7 +570,7 @@ describe('createSessionStore', () => {
     await smallerStore.list({ limit: 5 });
     expect(smallerGetKeys).toHaveLength(6);
     expect(smallerGetKeys[0]).toBe(SUMMARY_INDEX_KEY);
-    expect(smallerListCalls).toBe(1);
+    expect(smallerListCalls).toBe(0);
   });
 
   it('does not list an orphan summary when its session body is missing', async () => {
@@ -587,22 +587,6 @@ describe('createSessionStore', () => {
     await store.save(retained);
     const afterRepair = await store.list();
     expect(afterRepair.map((summary) => summary.id)).toEqual([retained.id]);
-  });
-
-  it('reconciles bodies written by an older writer after the index exists', async () => {
-    const rawStore = textValueStore(new MemoryStorage());
-    const store = createSessionStore(rawStore);
-    const indexed = makeSession({ id: 'indexed-before-upgrade' });
-    const legacy = makeSession({ id: 'legacy-during-upgrade' });
-    await store.save(indexed);
-    await rawStore.set(`agent-session:${legacy.id}`, JSON.stringify(legacy));
-
-    const summaries = await store.list({ limit: 10 });
-    const ids = summaries.map((summary) => summary.id);
-
-    expect(ids).toEqual([legacy.id, indexed.id]);
-    const index = JSON.parse((await rawStore.get(SUMMARY_INDEX_KEY))!);
-    expect(index.summaries).toHaveProperty(legacy.id);
   });
 
   it('does not advertise an indexed summary whose body id does not match', async () => {
@@ -1058,6 +1042,21 @@ describe('createSessionStore', () => {
     expect(keys.length).toBeGreaterThan(0);
     expect(keys.every((k) => k.startsWith('agent-session:'))).toBe(true);
     expect(await kv.has(SUMMARY_INDEX_KEY)).toBe(true);
+  });
+
+  it('supports a session id that matches the reserved index suffix', async () => {
+    const rawStore = textValueStore(new MemoryStorage());
+    const store = createSessionStore(rawStore);
+    const session = makeSession({ id: 'summary-index' });
+
+    await store.save(session);
+
+    expect(await store.load(session.id)).toBeDefined();
+    const summaries = await store.list({ limit: 10 });
+    expect(summaries.map((summary) => summary.id)).toEqual([session.id]);
+    await store.delete(session.id);
+    expect(await store.load(session.id)).toBeUndefined();
+    expect(await rawStore.has(SUMMARY_INDEX_KEY)).toBe(false);
   });
 
   it('list returns correct messageCount from conversation history', async () => {
