@@ -1,44 +1,158 @@
 import { isToolCallParseError } from './providers/errors.ts';
 
-export class ElicitationDeniedError extends Error {
+export type AgentRunErrorKind =
+  'load' | 'contract' | 'generate' | 'tool' | 'abort' | 'output' | 'policy';
+
+export type AsyncDefinitionLoadCode = 'INVALID_EXPORT' | 'LOAD_FAILED';
+
+export type AgentRunErrorCode =
+  | AsyncDefinitionLoadCode
+  | 'ABORTED'
+  | 'BUDGET_EXCEEDED'
+  | 'ELICITATION_DENIED'
+  | 'INVALID_OUTPUT'
+  | 'MAXIMUM_STEPS'
+  | 'TRIPWIRE'
+  | 'UNKNOWN';
+
+export class AgentRunError extends Error {
+  readonly kind: AgentRunErrorKind;
+  readonly code: AgentRunErrorCode;
+  override readonly cause: unknown;
+
+  constructor(
+    message: string,
+    options: { kind: AgentRunErrorKind; code: AgentRunErrorCode; cause?: unknown },
+  ) {
+    super(message, { cause: options.cause });
+    this.name = 'AgentRunError';
+    this.kind = options.kind;
+    this.code = options.code;
+    this.cause = options.cause;
+  }
+}
+
+export type SerializedAgentRunError = {
+  name: string;
+  message: string;
+  kind: AgentRunErrorKind;
+  code: AgentRunErrorCode;
+  cause?: unknown;
+};
+
+function serializeAgentRunErrorCause(cause: unknown): unknown {
+  if (cause === undefined) return undefined;
+  if (cause instanceof AgentRunError) return agentRunErrorToJSON(cause);
+  if (cause instanceof Error) return { name: cause.name, message: cause.message };
+  if (
+    cause === null ||
+    typeof cause === 'string' ||
+    typeof cause === 'number' ||
+    typeof cause === 'boolean'
+  ) {
+    return cause;
+  }
+  if (typeof cause === 'bigint' || typeof cause === 'symbol') return String(cause);
+  try {
+    return JSON.parse(JSON.stringify(cause));
+  } catch {
+    return Object.prototype.toString.call(cause);
+  }
+}
+
+/** Converts an AgentRunError to a stable JSON-safe diagnostic shape. */
+export function agentRunErrorToJSON(error: AgentRunError): SerializedAgentRunError {
+  const serialized: SerializedAgentRunError = {
+    name: error.name,
+    message: error.message,
+    kind: error.kind,
+    code: error.code,
+  };
+  const cause = serializeAgentRunErrorCause(error.cause);
+  if (cause !== undefined) serialized.cause = cause;
+  return serialized;
+}
+
+/** Serializes an AgentRunError without dropping kind/code/cause metadata. */
+export function serializeAgentRunError(error: AgentRunError): string {
+  return JSON.stringify(agentRunErrorToJSON(error));
+}
+
+function formatUnknownErrorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === 'string') return error;
+  if (error == null) return 'Unknown error';
+  if (
+    typeof error === 'number' ||
+    typeof error === 'boolean' ||
+    typeof error === 'bigint' ||
+    typeof error === 'symbol'
+  ) {
+    return String(error);
+  }
+  try {
+    return JSON.stringify(error) ?? Object.prototype.toString.call(error);
+  } catch {
+    return Object.prototype.toString.call(error);
+  }
+}
+
+export function toAgentRunError(
+  error: unknown,
+  options: {
+    kind?: AgentRunErrorKind;
+    code?: AgentRunErrorCode;
+    message?: string;
+  } = {},
+): AgentRunError {
+  if (error instanceof AgentRunError) return error;
+
+  const message = options.message ?? formatUnknownErrorMessage(error);
+
+  return new AgentRunError(message, {
+    kind: options.kind ?? 'generate',
+    code: options.code ?? 'UNKNOWN',
+    cause: error,
+  });
+}
+
+export class MaximumStepsExceededError extends AgentRunError {
+  constructor(maximumSteps: number) {
+    super(`Agent run exceeded maximumSteps (${maximumSteps}).`, {
+      kind: 'policy',
+      code: 'MAXIMUM_STEPS',
+    });
+    this.name = 'MaximumStepsExceededError';
+  }
+}
+
+export class ElicitationDeniedError extends AgentRunError {
   constructor(message?: string) {
-    super(message);
+    super(message ?? '', { kind: 'policy', code: 'ELICITATION_DENIED' });
     this.name = 'ElicitationDeniedError';
   }
 }
 
-export class BudgetExceededError extends Error {
+export class BudgetExceededError extends AgentRunError {
   constructor(message?: string) {
-    super(message);
+    super(message ?? '', { kind: 'policy', code: 'BUDGET_EXCEEDED' });
     this.name = 'BudgetExceededError';
   }
 }
 
-export type AsyncDefinitionLoadCode = 'INVALID_EXPORT' | 'LOAD_FAILED';
-
 /** Raised when a lazily loaded agent definition cannot be resolved. */
-export class AsyncDefinitionLoadError extends Error {
-  readonly kind = 'load';
-  readonly code: AsyncDefinitionLoadCode;
-  override readonly cause: unknown;
-
+export class AsyncDefinitionLoadError extends AgentRunError {
   constructor(code: AsyncDefinitionLoadCode, message: string, cause?: unknown) {
-    super(message, { cause });
+    super(message, { kind: 'load', code, cause });
     this.name = 'AsyncDefinitionLoadError';
-    this.code = code;
-    this.cause = cause;
   }
 }
 
 /** Raised when an agent run is aborted before lazy generate loading can complete. */
-export class AbortAgentRunError extends Error {
-  readonly kind = 'abort';
-  override readonly cause: unknown;
-
+export class AbortAgentRunError extends AgentRunError {
   constructor(message = 'The agent run was aborted', cause?: unknown) {
-    super(message, { cause });
+    super(message, { kind: 'abort', code: 'ABORTED', cause });
     this.name = 'AbortAgentRunError';
-    this.cause = cause;
   }
 }
 
@@ -48,7 +162,7 @@ export class AbortAgentRunError extends Error {
  * validator's raw `issues` array (per the Standard Schema spec) so callers
  * that inspect the error programmatically don't need to guess the shape.
  */
-export class StandardSchemaValidationError extends Error {
+export class StandardSchemaValidationError extends AgentRunError {
   readonly issues: ReadonlyArray<{ message: string; path?: ReadonlyArray<PropertyKey> }>;
 
   constructor(issues: ReadonlyArray<{ message: string; path?: ReadonlyArray<PropertyKey> }>) {
@@ -56,6 +170,7 @@ export class StandardSchemaValidationError extends Error {
       issues.length > 0
         ? `Response failed schema validation: ${issues.map((issue) => issue.message).join('; ')}`
         : 'Response failed schema validation',
+      { kind: 'output', code: 'INVALID_OUTPUT' },
     );
     this.name = 'StandardSchemaValidationError';
     this.issues = issues;
@@ -82,7 +197,7 @@ export interface GuardrailTripwireDetail {
  * mirroring the `ElicitationDeniedError`/`BudgetExceededError` pattern — the run
  * terminates cleanly (a `RunCompletedEvent` + `RunTripwireEvent`, not a crash).
  */
-export class GuardrailTripwireError extends Error implements GuardrailTripwireDetail {
+export class GuardrailTripwireError extends AgentRunError implements GuardrailTripwireDetail {
   readonly guardrailName: string;
   readonly category: string;
   readonly phase: 'input' | 'output';
@@ -90,7 +205,7 @@ export class GuardrailTripwireError extends Error implements GuardrailTripwireDe
   readonly detail?: string;
 
   constructor(message: string, info: GuardrailTripwireDetail) {
-    super(message);
+    super(message, { kind: 'policy', code: 'TRIPWIRE' });
     this.name = 'GuardrailTripwireError';
     this.guardrailName = info.guardrailName;
     this.category = info.category;

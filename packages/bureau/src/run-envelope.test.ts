@@ -5,6 +5,7 @@
  * `Bureau.getRunReport` / `run-envelope` `ServerFrame` surface they feed.
  */
 import {
+  AbortAgentRunError,
   type ActiveRun,
   BudgetExceededEvent,
   BudgetThresholdEvent,
@@ -14,6 +15,7 @@ import {
   type GenerateFunction,
   type RunFrame,
   runFrameSchema,
+  stopWhen,
   StreamCustomEvent,
   type StreamEventMap,
   type Toolbox,
@@ -376,6 +378,7 @@ describe('buildTerminalReportFromCompletedEvent / buildTerminalReportFromAborted
       toolbox: createEmptyToolbox(),
       conversation: new Conversation(),
       maximumSteps: 1,
+      stopWhen: stopWhen.noToolCalls(),
       runId: 'run-completed-1',
       costEstimation: { model: 'claude-sonnet-5' },
     });
@@ -386,7 +389,7 @@ describe('buildTerminalReportFromCompletedEvent / buildTerminalReportFromAborted
     });
 
     const result = await activeRun.result;
-    expect(result.finishReason).toBe('maximum-steps');
+    expect(result.finishReason).toBe('stop-condition');
     expect(captured).toBeDefined();
 
     const report = buildTerminalReportFromCompletedEvent('run-completed-1', captured!);
@@ -427,13 +430,19 @@ describe('buildTerminalReportFromCompletedEvent / buildTerminalReportFromAborted
     const report = buildTerminalReportFromAbortedEvent('run-aborted-1', {
       usage: { prompt: 4, completion: 2, total: 6 },
       reason: 'user cancelled',
+      error: new AbortAgentRunError('user cancelled'),
       steps: [],
       conversation,
     });
 
     expect(report.status).toBe('aborted');
     expect(report.finishReason).toBe('aborted');
-    expect(report.error).toBe('user cancelled');
+    expect(JSON.parse(report.error ?? '')).toMatchObject({
+      name: 'AbortAgentRunError',
+      message: 'user cancelled',
+      kind: 'abort',
+      code: 'ABORTED',
+    });
     expect(report.usage).toEqual({ prompt: 4, completion: 2, total: 6 });
     expect(report.transcript?.ids.length).toBeGreaterThan(0);
   });
@@ -553,6 +562,7 @@ describe('Bureau.getRunReport', () => {
     const bureau = await createBureau({
       generate: async () => ({ content: 'Done.', toolCalls: [] }),
       toolbox: createEmptyToolbox(),
+      stopWhen: stopWhen.noToolCalls(),
     });
 
     const runEnvelopeFrames: Extract<ServerFrame, { type: 'run-envelope' }>[] = [];

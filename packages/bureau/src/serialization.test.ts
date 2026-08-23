@@ -1,4 +1,4 @@
-import type { ActiveRun } from '@lostgradient/operative';
+import { AbortAgentRunError, type ActiveRun } from '@lostgradient/operative';
 import type { RunState } from '@lostgradient/operative/store';
 import { afterEach, describe, expect, it, spyOn } from 'bun:test';
 
@@ -133,12 +133,19 @@ describe('serializeActionDetail', () => {
       step: 2,
       conversation: { snapshot: () => ({}) },
       reason: 'cancelled',
+      error: new AbortAgentRunError('cancelled'),
     };
 
     const result = serializeActionDetail('run.aborted', detail) as Record<string, unknown>;
     expect(result).not.toHaveProperty('conversation');
     expect(result['step']).toBe(2);
     expect(result['reason']).toBe('cancelled');
+    expect(JSON.parse(result['error'] as string)).toMatchObject({
+      name: 'AbortAgentRunError',
+      message: 'cancelled',
+      kind: 'abort',
+      code: 'ABORTED',
+    });
   });
 
   it('strips conversation from run.completed details', () => {
@@ -192,6 +199,40 @@ describe('serializeActionDetail', () => {
     }
     expect(steps[0]!['content']).toBe('a');
     expect(steps[1]!['content']).toBe('b');
+  });
+
+  it('projects nested run.completed result without conversation graphs', () => {
+    const detail = {
+      conversation: { snapshot: () => ({}) },
+      result: {
+        conversation: { snapshot: () => ({}) },
+        steps: [
+          {
+            step: 1,
+            conversation: { snapshot: () => ({}) },
+            content: 'nested',
+            toolCalls: [],
+            results: [],
+            final: true,
+          },
+        ],
+        content: 'done',
+        usage: { prompt: 1, completion: 2, total: 3 },
+        finishReason: 'stop-condition',
+      },
+      steps: [],
+      content: 'done',
+      usage: { prompt: 1, completion: 2, total: 3 },
+      finishReason: 'stop-condition',
+    };
+
+    const result = serializeActionDetail('run.completed', detail) as Record<string, unknown>;
+    const nestedResult = result['result'] as Record<string, unknown>;
+    const nestedSteps = nestedResult['steps'] as Record<string, unknown>[];
+
+    expect(nestedResult).not.toHaveProperty('conversation');
+    expect(nestedSteps[0]).not.toHaveProperty('conversation');
+    expect(nestedResult['content']).toBe('done');
   });
 
   it('keeps run.completed details JSON-safe after stripping conversations', () => {
@@ -255,6 +296,14 @@ describe('serializeActionDetail', () => {
     const detail = { some: 'data' };
     const result = serializeActionDetail('run.started', detail);
     expect(result).toEqual(detail);
+  });
+
+  it('serializes nested ordinary errors in other event details', () => {
+    expect(
+      serializeActionDetail('custom.event', {
+        nested: { error: new Error('nested failure') },
+      }),
+    ).toEqual({ nested: { error: 'nested failure' } });
   });
 
   it('passes through primitives unchanged', () => {
@@ -444,6 +493,21 @@ describe('serializeUnknownError', () => {
     };
 
     expect(serializeUnknownError(value)).toBe('{"summary":"redacted view"}');
+  });
+
+  it('preserves typed AgentRunError details', () => {
+    const error = new AbortAgentRunError('cancelled', new Error('socket closed'));
+
+    expect(JSON.parse(serializeUnknownError(error))).toMatchObject({
+      name: 'AbortAgentRunError',
+      message: 'cancelled',
+      kind: 'abort',
+      code: 'ABORTED',
+      cause: {
+        name: 'Error',
+        message: 'socket closed',
+      },
+    });
   });
 });
 

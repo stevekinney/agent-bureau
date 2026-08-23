@@ -1,4 +1,8 @@
-import type { GenerateContext, GenerateFunction } from '@lostgradient/operative';
+import {
+  AbortAgentRunError,
+  type GenerateContext,
+  type GenerateFunction,
+} from '@lostgradient/operative';
 import { noToolCalls } from '@lostgradient/operative/conditions';
 import { createTool, createToolbox } from 'armorer';
 import { describe, expect, it } from 'bun:test';
@@ -683,6 +687,77 @@ describe('OpenAI-compat route (POST /v1/chat/completions)', () => {
       expect(text).toContain('"error"');
       expect(text).toContain('settled with error');
       expect(text).toContain('[DONE]');
+
+      realGateway.bureau.dispose();
+    });
+
+    it('emits the typed abort error message when an aborted run settled before subscribe', async () => {
+      const realGateway = await createTestGateway({ generate: createMockGenerate() });
+      const { runState } = gatewayWithPreSettledRun({
+        status: 'aborted',
+        finishReason: 'aborted',
+        error: new AbortAgentRunError('operator stopped it'),
+      });
+
+      const fakeBureau = {
+        ...realGateway.bureau,
+        createRun: async () => ({ id: 'pre-settled-run', sessionId: 'sess-1' }),
+        store: {
+          ...realGateway.bureau.store,
+          getRun: (id: string) =>
+            id === 'pre-settled-run' ? runState : realGateway.bureau.store.getRun(id),
+        },
+      } as unknown as typeof realGateway.bureau;
+
+      const gateway = await createTestGateway(fakeBureau);
+      const response = await requestJSON(gateway, '/v1/chat/completions', {
+        method: 'POST',
+        body: JSON.stringify({
+          model: 'bureau',
+          messages: [{ role: 'user', content: 'Fast abort' }],
+          stream: true,
+        }),
+      });
+
+      expect(response.status).toBe(200);
+      const text = await response.text();
+      expect(text).toContain('"error"');
+      expect(text).toContain('operator stopped it');
+      expect(text).toContain('[DONE]');
+
+      realGateway.bureau.dispose();
+    });
+
+    it('extracts the message from a serialized abort diagnostic on the non-streaming path', async () => {
+      const realGateway = await createTestGateway({ generate: createMockGenerate() });
+      const { runState } = gatewayWithPreSettledRun({
+        status: 'aborted',
+        finishReason: 'aborted',
+        error: JSON.stringify({
+          name: 'AbortAgentRunError',
+          message: 'operator stopped it',
+          kind: 'abort',
+          code: 'ABORTED',
+        }),
+      });
+
+      const fakeBureau = {
+        ...realGateway.bureau,
+        createRun: async () => ({ id: 'pre-settled-run', sessionId: 'sess-1' }),
+        getRun: (id: string) =>
+          id === 'pre-settled-run' ? runState : realGateway.bureau.getRun(id),
+      } as unknown as typeof realGateway.bureau;
+
+      const gateway = await createTestGateway(fakeBureau);
+      const response = await requestJSON(gateway, '/v1/chat/completions', {
+        method: 'POST',
+        body: minimalRequest('bureau', 'Fast abort'),
+      });
+
+      expect(response.status).toBe(500);
+      const text = await response.text();
+      expect(text).toContain('operator stopped it');
+      expect(text).not.toContain('AbortAgentRunError');
 
       realGateway.bureau.dispose();
     });

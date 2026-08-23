@@ -1,6 +1,9 @@
 import type { CheckpointStore } from '../durable/checkpoint-store';
 import type { AnyRunEngine } from '../durable/create-run-engine';
-import type { AgentRunWorkflowResult } from '../durable/run-workflow';
+import {
+  AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION,
+  type AgentRunWorkflowResult,
+} from '../durable/run-workflow';
 
 /**
  * Counts calls to an engine's `suspend`/`resume`/`cancel` so tests can prove
@@ -77,6 +80,7 @@ export function createManualDurableEngine(): {
     engine,
     resolveResult: () =>
       resolveResult?.({
+        schemaVersion: AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION,
         runId: 'manual-run',
         steps: 0,
         content: 'manual',

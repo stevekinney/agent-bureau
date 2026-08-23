@@ -141,6 +141,33 @@ function formatSseErrorChunk(model: string, message: string): string {
   return `data: ${JSON.stringify(chunk)}\n\n`;
 }
 
+function formatRunErrorMessage(error: unknown, fallback: string): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === 'string' && error.length > 0) {
+    try {
+      const diagnostic = JSON.parse(error) as unknown;
+      if (
+        typeof diagnostic === 'object' &&
+        diagnostic !== null &&
+        'name' in diagnostic &&
+        typeof diagnostic.name === 'string' &&
+        'message' in diagnostic &&
+        typeof diagnostic.message === 'string' &&
+        'kind' in diagnostic &&
+        typeof diagnostic.kind === 'string' &&
+        'code' in diagnostic &&
+        typeof diagnostic.code === 'string'
+      ) {
+        return diagnostic.message;
+      }
+    } catch {
+      // Ordinary non-JSON error strings remain the public message.
+    }
+    return error;
+  }
+  return fallback;
+}
+
 /**
  * SSE heartbeat interval in milliseconds.
  *
@@ -308,7 +335,7 @@ export function createOpenAICompatRoutes(bureau: Bureau) {
             outcome:
               | { kind: 'success'; content: string }
               | { kind: 'error'; message: string }
-              | { kind: 'aborted' },
+              | { kind: 'aborted'; message: string },
           ): void => {
             if (settled) return;
             settled = true;
@@ -318,7 +345,7 @@ export function createOpenAICompatRoutes(bureau: Bureau) {
             } else if (outcome.kind === 'error') {
               enqueue(formatSseErrorChunk(agentName, outcome.message));
             } else {
-              enqueue(formatSseErrorChunk(agentName, 'Run was aborted before completion'));
+              enqueue(formatSseErrorChunk(agentName, outcome.message));
             }
             enqueue('data: [DONE]\n\n');
             close();
@@ -351,8 +378,14 @@ export function createOpenAICompatRoutes(bureau: Bureau) {
 
           // `run.aborted` fires when the run is aborted (no `run.completed`
           // counterpart is dispatched on the abort path).
-          const onAborted = (): void => {
-            emitTerminal({ kind: 'aborted' });
+          const onAborted = (event: { error?: unknown; reason?: string }): void => {
+            emitTerminal({
+              kind: 'aborted',
+              message: formatRunErrorMessage(
+                event.error ?? event.reason,
+                'Run was aborted before completion',
+              ),
+            });
           };
           runState.activeRun.addEventListener('run.aborted', onAborted);
 
@@ -380,7 +413,13 @@ export function createOpenAICompatRoutes(bureau: Bureau) {
             // would emit a content chunk where the listener emits an error chunk.
             const isError = isRunFailure(settledState);
             if (settledState.status === 'aborted') {
-              emitTerminal({ kind: 'aborted' });
+              emitTerminal({
+                kind: 'aborted',
+                message: formatRunErrorMessage(
+                  settledState.error,
+                  'Run was aborted before completion',
+                ),
+              });
             } else if (isError) {
               const error = settledState.error;
               emitTerminal({
@@ -441,7 +480,9 @@ export function createOpenAICompatRoutes(bureau: Bureau) {
     }
 
     if (runDetail.status === 'aborted') {
-      throw new HTTPException(500, { message: 'Run was aborted before completion' });
+      throw new HTTPException(500, {
+        message: formatRunErrorMessage(runDetail.error, 'Run was aborted before completion'),
+      });
     }
 
     // Reject ALL failure finish reasons, not just store status 'error'. A run

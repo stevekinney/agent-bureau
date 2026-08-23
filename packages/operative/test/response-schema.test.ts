@@ -17,7 +17,7 @@ const run = (options: Parameters<typeof createActiveRun>[0]) => createActiveRun(
  * shape). Rejects a low `confidence`, mirroring a real business rule a Zod
  * schema alone couldn't express as cleanly, and returns a NEW object (not
  * the raw parsed JSON) so a passing test proves the validator's OUTPUT
- * reaches `structuredOutput`, not just the raw parsed JSON.
+ * reaches `output`, not just the raw parsed JSON.
  */
 function confidentAnswerSchema(): StandardSchemaV1<
   unknown,
@@ -236,7 +236,7 @@ describe('structured output enforcement', () => {
     expect(result.schemaValidation).toBeUndefined();
   });
 
-  it('puts the validated value on the distinct structuredOutput field for a Zod schema', async () => {
+  it('puts the validated value on the distinct output field for a Zod schema', async () => {
     const validJson = JSON.stringify({ answer: 'Hello', confidence: 0.95 });
 
     const result = await run({
@@ -247,12 +247,12 @@ describe('structured output enforcement', () => {
       responseSchema: schema,
     });
 
-    expect(result.structuredOutput).toEqual({ answer: 'Hello', confidence: 0.95 });
+    expect(result.output).toEqual({ answer: 'Hello', confidence: 0.95 });
     // Distinct from `content` — the raw model text — not merely equal to it.
-    expect(result.structuredOutput).not.toBe(result.content);
+    expect(result.output).not.toBe(result.content);
   });
 
-  it('does not set structuredOutput when validation fails', async () => {
+  it('does not set output when validation fails', async () => {
     const result = await run({
       generate: async () => textResponse('not valid json'),
       toolbox: createTestToolbox([]),
@@ -263,7 +263,7 @@ describe('structured output enforcement', () => {
     });
 
     expect(result.schemaValidation?.success).toBe(false);
-    expect(result.structuredOutput).toBeUndefined();
+    expect(result.output).toBeUndefined();
   });
 });
 
@@ -282,7 +282,7 @@ describe('structured output — non-Zod Standard Schema validator', () => {
     });
   });
 
-  it('validates via `~standard.validate` and surfaces its TRANSFORMED output as structuredOutput', async () => {
+  it('validates via `~standard.validate` and surfaces its TRANSFORMED output as output', async () => {
     const result = await run({
       generate: async () =>
         textResponse(JSON.stringify({ answer: 'Hi', confidence: 0.9, junk: 1 })),
@@ -294,9 +294,9 @@ describe('structured output — non-Zod Standard Schema validator', () => {
 
     expect(result.finishReason).toBe('stop-condition');
     expect(result.schemaValidation?.success).toBe(true);
-    // The validator's output strips `junk` — proves structuredOutput is the
+    // The validator's output strips `junk` — proves output is the
     // VALIDATOR's value, not merely the raw JSON.parse of model content.
-    expect(result.structuredOutput).toEqual({ answer: 'Hi', confidence: 0.9 });
+    expect(result.output).toEqual({ answer: 'Hi', confidence: 0.9 });
   });
 
   it('rejects invalid output and drives the schemaRetries repair loop', async () => {
@@ -320,10 +320,10 @@ describe('structured output — non-Zod Standard Schema validator', () => {
 
     expect(result.schemaValidation?.success).toBe(true);
     expect(callCount).toBe(2);
-    expect(result.structuredOutput).toEqual({ answer: 'Sure', confidence: 0.9 });
+    expect(result.output).toEqual({ answer: 'Sure', confidence: 0.9 });
   });
 
-  it('NEUTER CHECK: a validator that always rejects never produces structuredOutput, even with retries', async () => {
+  it('NEUTER CHECK: a validator that always rejects never produces output, even with retries', async () => {
     // Confirms the previous test's success is driven by the validator's real
     // pass/fail logic, not by the retry loop unconditionally succeeding.
     const alwaysRejects: StandardSchemaV1<unknown, never> = {
@@ -344,7 +344,7 @@ describe('structured output — non-Zod Standard Schema validator', () => {
     });
 
     expect(result.schemaValidation?.success).toBe(false);
-    expect(result.structuredOutput).toBeUndefined();
+    expect(result.output).toBeUndefined();
   });
 });
 
@@ -375,7 +375,7 @@ describe('structured output — raw JSON Schema responseSchema (AB-95)', () => {
     },
   };
 
-  it('validates a valid response and surfaces the parsed value as structuredOutput', async () => {
+  it('validates a valid response and surfaces the parsed value as output', async () => {
     const finding = {
       path: 'a.ts',
       startLine: 1,
@@ -396,7 +396,7 @@ describe('structured output — raw JSON Schema responseSchema (AB-95)', () => {
 
     expect(result.finishReason).toBe('stop-condition');
     expect(result.schemaValidation?.success).toBe(true);
-    expect(result.structuredOutput).toEqual({ findings: [finding] });
+    expect(result.output).toEqual({ findings: [finding] });
   });
 
   it('rejects a response with a bad enum value and drives the schemaRetries repair loop', async () => {
@@ -429,7 +429,7 @@ describe('structured output — raw JSON Schema responseSchema (AB-95)', () => {
 
     expect(result.schemaValidation?.success).toBe(true);
     expect(callCount).toBe(2);
-    expect(result.structuredOutput).toEqual({ findings: [goodFinding] });
+    expect(result.output).toEqual({ findings: [goodFinding] });
   });
 
   it('NEUTER CHECK: exhausts retries and reports failure when every response is invalid', async () => {
@@ -450,7 +450,7 @@ describe('structured output — raw JSON Schema responseSchema (AB-95)', () => {
     });
 
     expect(result.schemaValidation?.success).toBe(false);
-    expect(result.structuredOutput).toBeUndefined();
+    expect(result.output).toBeUndefined();
     // 1 original + 1 retry = 2 calls
     expect(callCount).toBe(2);
   });
@@ -494,7 +494,7 @@ describe('structured output — raw JSON Schema responseSchema (AB-95)', () => {
       });
 
       expect(result.schemaValidation?.success).toBe(true);
-      expect(result.structuredOutput).toEqual(decision);
+      expect(result.output).toEqual(decision);
     });
 
     it('round-trips a valid verifier-verdict response', async () => {
@@ -508,7 +508,7 @@ describe('structured output — raw JSON Schema responseSchema (AB-95)', () => {
       });
 
       expect(result.schemaValidation?.success).toBe(true);
-      expect(result.structuredOutput).toEqual(verdict);
+      expect(result.output).toEqual(verdict);
     });
 
     it('round-trips a valid specialist findings response', async () => {
@@ -535,7 +535,7 @@ describe('structured output — raw JSON Schema responseSchema (AB-95)', () => {
       });
 
       expect(result.schemaValidation?.success).toBe(true);
-      expect(result.structuredOutput).toEqual(findings);
+      expect(result.output).toEqual(findings);
     });
 
     it('rejects a triage response with an extra property (additionalProperties: false)', async () => {
@@ -550,7 +550,7 @@ describe('structured output — raw JSON Schema responseSchema (AB-95)', () => {
       });
 
       expect(result.schemaValidation?.success).toBe(false);
-      expect(result.structuredOutput).toBeUndefined();
+      expect(result.output).toBeUndefined();
     });
   });
 });

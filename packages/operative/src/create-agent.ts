@@ -1,6 +1,7 @@
 import type { AnyToolbox, HeadlessPermissionPolicyConfiguration, Tool } from 'armorer';
 import { createHeadlessPermissionPolicyHooks, createToolbox } from 'armorer';
 import { Conversation } from 'conversationalist';
+import type { ZodType } from 'zod';
 
 import type { AgentRun } from './agent-run';
 import { createAgentRun } from './agent-run';
@@ -55,6 +56,9 @@ export interface CreateAgentOptionsBase {
 
   /** Context window management (compaction). */
   contextManagement?: ContextManagementOptions;
+
+  /** Zod schema for the validated terminal `output` value. */
+  output?: ZodType<unknown>;
 }
 
 /**
@@ -188,7 +192,7 @@ function validateCreateAgentOptions(options: CreateAgentOptions): void {
  * The runtime agent returned by `createAgent({...})`. Bureau-less, in-memory
  * only. Calling `.run(input)` starts a new ephemeral run each time.
  */
-export interface StandaloneAgent {
+export interface StandaloneAgent<O = never, H extends boolean = false> {
   /**
    * Start a new in-memory run.
    *
@@ -212,7 +216,7 @@ export interface StandaloneAgent {
    * Returns an `AgentRun` handle — NOT a Promise (non-thenable by design).
    * Access the result via `handle.result()`.
    */
-  run(input: string | { conversation: ConversationHistory }): AgentRun;
+  run(input: string | { conversation: ConversationHistory }): AgentRun<O, H>;
 }
 
 // Re-export AgentRun from agent-run.ts so callers who import from create-agent
@@ -281,10 +285,23 @@ export type { AgentRun };
  * // run — this package does not (yet) provide a safe helper for that step.
  * ```
  */
-export function createAgent(options: CreateAgentOptions): StandaloneAgent {
+export function createAgent<O>(
+  options: CreateAgentOptions & { output: ZodType<O> },
+): StandaloneAgent<O, true>;
+export function createAgent(options: CreateAgentOptions & { output?: undefined }): StandaloneAgent;
+export function createAgent(options: CreateAgentOptions): StandaloneAgent<unknown, boolean>;
+export function createAgent(options: CreateAgentOptions): StandaloneAgent<unknown, boolean> {
   validateCreateAgentOptions(options);
 
-  const { generate, tools, toolbox: providedToolbox, instructions, permissions, ...rest } = options;
+  const {
+    generate,
+    tools,
+    toolbox: providedToolbox,
+    instructions,
+    permissions,
+    output,
+    ...rest
+  } = options;
 
   // Pre-compute tool entries once (pure transform — no per-run state).
   // The map key is canonical — override each tool's inner `.name` with the
@@ -299,7 +316,7 @@ export function createAgent(options: CreateAgentOptions): StandaloneAgent {
     : [];
 
   return {
-    run(input: string | { conversation: ConversationHistory }): AgentRun {
+    run(input: string | { conversation: ConversationHistory }): AgentRun<unknown, boolean> {
       // A caller-supplied `toolbox` is used AS-IS, shared across every run —
       // that's the point (see the `toolbox` option's doc comment: it's what
       // makes armorer's cross-request approval flow possible). Otherwise
@@ -344,11 +361,14 @@ export function createAgent(options: CreateAgentOptions): StandaloneAgent {
         generate,
         toolbox,
         conversation,
+        ...(output ? { responseSchema: output } : {}),
         ...rest,
       };
 
       const activeRun = createActiveRun(runOptions);
-      return createAgentRun(activeRun);
+      return createAgentRun<unknown, boolean>(activeRun, {
+        hasOutput: output !== undefined,
+      });
     },
   };
 }

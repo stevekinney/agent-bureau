@@ -11,9 +11,14 @@ import { createTestToolbox } from 'armorer/test';
 import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
 
-import { CompletedRunIterationError, createAgentRun } from '../src/agent-run';
+import {
+  CompletedRunIterationError,
+  createAgentRun,
+  createDiagnosticAgentRun,
+} from '../src/agent-run';
 import { noToolCalls } from '../src/conditions/predicates';
 import { type ActiveRun, createActiveRun as createRun } from '../src/create-run';
+import { AbortAgentRunError, MaximumStepsExceededError } from '../src/errors';
 import { createMockGenerate } from '../src/test/index';
 import type { GenerateResponse } from '../src/types';
 
@@ -27,6 +32,19 @@ function makeRun(responses: GenerateResponse[] = [textResponse('Hello')]) {
   const conversation = new Conversation();
   const activeRun = createRun({ generate, toolbox, conversation, stopWhen: noToolCalls() });
   return createAgentRun(activeRun);
+}
+
+function createResolvedActiveRun(result: Awaited<ActiveRun['result']>): ActiveRun {
+  return {
+    result: Promise.resolve(result),
+    abort: () => undefined,
+    [Symbol.dispose]: () => undefined,
+    toObservable: () => ({
+      subscribe() {
+        return { unsubscribe: () => undefined };
+      },
+    }),
+  } as unknown as ActiveRun;
 }
 
 // ---------------------------------------------------------------------------
@@ -97,6 +115,207 @@ describe('AgentRun.result()', () => {
 
     // generate was called exactly once (no re-run on result() calls).
     expect(generate.callCount).toBe(1);
+  });
+});
+
+describe('AgentRun.unwrap() and output()', () => {
+  it('unwraps plain text for an untyped successful run', async () => {
+    const run = makeRun([textResponse('plain text')]);
+
+    await expect(run.unwrap()).resolves.toBe('plain text');
+  });
+
+  it('unwraps schema-backed output when output is configured', async () => {
+    const activeRun = createResolvedActiveRun({
+      content: '{"answer":"validated"}',
+      conversation: {} as never,
+      finishReason: 'stop-condition',
+      steps: [],
+      usage: { prompt: 0, completion: 0, total: 0 },
+      schemaValidation: { success: true },
+      output: { answer: 'validated' },
+    });
+    const run = createAgentRun<{ answer: string }, true>(activeRun, { hasOutput: true });
+
+    await expect(run.unwrap()).resolves.toEqual({ answer: 'validated' });
+    await expect(run.output()).resolves.toEqual({ answer: 'validated' });
+  });
+
+  it('preserves a validated undefined output', async () => {
+    const activeRun = createResolvedActiveRun({
+      content: '{"answer":"validated"}',
+      conversation: {} as never,
+      finishReason: 'stop-condition',
+      steps: [],
+      usage: { prompt: 0, completion: 0, total: 0 },
+      schemaValidation: { success: true },
+      output: undefined,
+    });
+    const run = createAgentRun<undefined, true>(activeRun, { hasOutput: true });
+
+    await expect(run.unwrap()).resolves.toBeUndefined();
+    await expect(run.output()).resolves.toBeUndefined();
+  });
+
+  it('omits output() from direct handles when no output schema is configured', () => {
+    const activeRun = createResolvedActiveRun({
+      content: 'plain text',
+      conversation: {} as never,
+      finishReason: 'stop-condition',
+      steps: [],
+      usage: { prompt: 0, completion: 0, total: 0 },
+    });
+    const run = createAgentRun(activeRun);
+
+    expect('output' in run).toBe(false);
+  });
+
+  it('throws a synthesized missing-output error when unwrap() expects output but none exists', async () => {
+    const activeRun = createResolvedActiveRun({
+      content: '{"answer":"missing"}',
+      conversation: {} as never,
+      finishReason: 'stop-condition',
+      steps: [],
+      usage: { prompt: 0, completion: 0, total: 0 },
+      schemaValidation: { success: true },
+    });
+    const run = createAgentRun<{ answer: string }, true>(activeRun, { hasOutput: true });
+
+    await expect(run.unwrap()).rejects.toThrow('Agent run has no validated output');
+  });
+
+  it('throws the terminal run error when unwrap() is called on a failed run', async () => {
+    const failure = new Error('provider failed');
+    const activeRun = createResolvedActiveRun({
+      content: '',
+      conversation: {} as never,
+      finishReason: 'error',
+      steps: [],
+      usage: { prompt: 0, completion: 0, total: 0 },
+      error: failure,
+    });
+    const run = createAgentRun(activeRun);
+
+    await expect(run.unwrap()).rejects.toBe(failure);
+  });
+
+  it('throws a synthesized failure when unwrap() is called on an unsuccessful run without an Error', async () => {
+    const activeRun = createResolvedActiveRun({
+      content: '',
+      conversation: {} as never,
+      finishReason: 'aborted',
+      steps: [],
+      usage: { prompt: 0, completion: 0, total: 0 },
+    });
+    const run = createAgentRun(activeRun);
+
+    await expect(run.unwrap()).rejects.toThrow('Agent run did not finish successfully: aborted');
+  });
+
+  it('throws a synthesized failure when output() is called on an unsuccessful run without an Error', async () => {
+    const activeRun = createResolvedActiveRun({
+      content: '',
+      conversation: {} as never,
+      finishReason: 'budget-exceeded',
+      steps: [],
+      usage: { prompt: 0, completion: 0, total: 0 },
+    });
+    const run = createAgentRun<{ answer: string }, true>(activeRun, { hasOutput: true });
+
+    await expect(run.output()).rejects.toThrow(
+      'Agent run did not finish successfully: budget-exceeded',
+    );
+  });
+
+  it('throws the schema validation error before returning content from unwrap()', async () => {
+    const validationError = new Error('invalid answer');
+    const activeRun = createResolvedActiveRun({
+      content: '{"answer":1}',
+      conversation: {} as never,
+      finishReason: 'stop-condition',
+      steps: [],
+      usage: { prompt: 0, completion: 0, total: 0 },
+      schemaValidation: { success: false, error: validationError },
+    });
+    const run = createAgentRun(activeRun);
+
+    await expect(run.unwrap()).rejects.toBe(validationError);
+  });
+
+  it('throws a synthesized schema failure when unwrap() sees failed validation without an Error', async () => {
+    const activeRun = createResolvedActiveRun({
+      content: '{"answer":1}',
+      conversation: {} as never,
+      finishReason: 'stop-condition',
+      steps: [],
+      usage: { prompt: 0, completion: 0, total: 0 },
+      schemaValidation: { success: false, error: 'wrong shape' },
+    });
+    const run = createAgentRun(activeRun);
+
+    await expect(run.unwrap()).rejects.toThrow('Agent run output failed schema validation');
+  });
+
+  it('throws the schema validation error when output() has no validated output', async () => {
+    const validationError = new Error('missing output');
+    const activeRun = createResolvedActiveRun({
+      content: '{"answer":"missing"}',
+      conversation: {} as never,
+      finishReason: 'stop-condition',
+      steps: [],
+      usage: { prompt: 0, completion: 0, total: 0 },
+      schemaValidation: { success: false, error: validationError },
+    });
+    const run = createAgentRun<{ answer: string }, true>(activeRun, { hasOutput: true });
+
+    await expect(run.output()).rejects.toBe(validationError);
+  });
+
+  it('throws a synthesized missing-output error when output() has no schema error', async () => {
+    const activeRun = createResolvedActiveRun({
+      content: '{"answer":"missing"}',
+      conversation: {} as never,
+      finishReason: 'stop-condition',
+      steps: [],
+      usage: { prompt: 0, completion: 0, total: 0 },
+      schemaValidation: { success: true },
+    });
+    const run = createAgentRun<{ answer: string }, true>(activeRun, { hasOutput: true });
+
+    await expect(run.output()).rejects.toThrow('Agent run has no validated output');
+  });
+
+  it('throws the maximum-steps policy error when output() is called on a capped run', async () => {
+    const maximumStepsError = new MaximumStepsExceededError(3);
+    const activeRun = createResolvedActiveRun({
+      content: '{"answer":"missing"}',
+      conversation: {} as never,
+      finishReason: 'maximum-steps',
+      steps: [],
+      usage: { prompt: 0, completion: 0, total: 0 },
+      schemaValidation: { success: true },
+      error: maximumStepsError,
+    });
+    const run = createAgentRun<{ answer: string }, true>(activeRun, { hasOutput: true });
+
+    await expect(run.output()).rejects.toBe(maximumStepsError);
+  });
+});
+
+describe('createDiagnosticAgentRun()', () => {
+  it('removes schema-specific accessors from a recovered diagnostic run', async () => {
+    const activeRun = createResolvedActiveRun({
+      content: 'diagnostic result',
+      conversation: {} as never,
+      finishReason: 'stop-condition',
+      steps: [],
+      usage: { prompt: 0, completion: 0, total: 0 },
+    });
+    const run = createDiagnosticAgentRun(activeRun);
+
+    expect('unwrap' in run).toBe(false);
+    expect('output' in run).toBe(false);
+    await expect(run.result()).resolves.toMatchObject({ content: 'diagnostic result' });
   });
 });
 
@@ -395,6 +614,43 @@ describe('AgentRun.abort()', () => {
     ]);
     expect(['resolved', 'rejected']).toContain(settled);
     expect(abortSignal?.aborted).toBe(true);
+  });
+
+  it('emits a typed abort error and resolves result() with the same abort error contract', async () => {
+    let eventError: AbortAgentRunError | undefined;
+    const parkingGenerate = async (context: { signal?: AbortSignal }) => {
+      await new Promise<void>((_resolve, reject) => {
+        context.signal?.addEventListener(
+          'abort',
+          () => reject(new Error('generate observed abort')),
+          { once: true },
+        );
+      });
+      return textResponse('unreachable');
+    };
+
+    const activeRun = createRun({
+      generate: parkingGenerate,
+      toolbox: createTestToolbox([]),
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+    });
+    activeRun.addEventListener('run.aborted', (event) => {
+      eventError = event.error;
+    });
+    const run = createAgentRun(activeRun);
+
+    setTimeout(() => run.abort('user cancelled'), 10);
+
+    const result = await run.result();
+
+    expect(result.finishReason).toBe('aborted');
+    expect(result.error).toBeInstanceOf(AbortAgentRunError);
+    expect((result.error as AbortAgentRunError).kind).toBe('abort');
+    expect((result.error as AbortAgentRunError).code).toBe('ABORTED');
+    expect((result.error as AbortAgentRunError).message).toBe('user cancelled');
+    expect(eventError).toBeInstanceOf(AbortAgentRunError);
+    expect(eventError).toBe(result.error);
   });
 });
 

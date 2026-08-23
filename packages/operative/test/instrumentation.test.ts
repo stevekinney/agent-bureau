@@ -8,6 +8,7 @@ import { z } from 'zod';
 
 import { noToolCalls } from '../src/conditions/predicates.ts';
 import { createActiveRun } from '../src/create-run.ts';
+import { AbortAgentRunError } from '../src/errors.ts';
 import { instrument } from '../src/instrumentation/index.ts';
 import type { GenerateResponse, TokenUsage } from '../src/types.ts';
 
@@ -481,6 +482,8 @@ describe('instrument', () => {
     expect(runSpan.status.code).toBe(SpanStatusCode.ERROR);
     expect(runSpan.status.message).toBe('LLM service unavailable');
     expect(runSpan.attributes['error.type']).toBe('Error');
+    expect(runSpan.attributes['operative.error.kind']).toBe('generate');
+    expect(runSpan.attributes['operative.error.code']).toBe('UNKNOWN');
     expect(runSpan.exceptions).toHaveLength(1);
     expect(runSpan.ended).toBe(true);
 
@@ -519,6 +522,13 @@ describe('instrument', () => {
     const runSpan = findSpan(tracer, 'invoke_agent')!;
     expect(runSpan).toBeDefined();
     expect(runSpan.attributes['operative.abort_reason']).toBe('user cancelled');
+    expect(runSpan.attributes['operative.error.kind']).toBe('abort');
+    expect(runSpan.attributes['operative.error.code']).toBe('ABORTED');
+    expect(runSpan.attributes['error.type']).toBe('AbortAgentRunError');
+    expect(runSpan.status.code).toBe(SpanStatusCode.ERROR);
+    expect(runSpan.status.message).toBe('user cancelled');
+    expect(runSpan.exceptions).toHaveLength(1);
+    expect(runSpan.exceptions[0]).toBeInstanceOf(AbortAgentRunError);
     expect(runSpan.ended).toBe(true);
 
     // All spans should be ended

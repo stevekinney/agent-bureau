@@ -31,7 +31,7 @@ import {
 } from '@lostgradient/operative';
 
 type BuildTribunalRunReportOptionalKeys =
-  'costEstimate' | 'structuredOutput' | 'effectiveModel' | 'effectiveEffort';
+  'costEstimate' | 'output' | 'effectiveModel' | 'effectiveEffort';
 
 /**
  * Thin wrapper over `buildRunReport` that omits its optional fields entirely
@@ -44,16 +44,16 @@ type BuildTribunalRunReportOptionalKeys =
 export function buildTribunalRunReport(
   input: Omit<BuildRunReportInput, BuildTribunalRunReportOptionalKeys> & {
     costEstimate?: BuildRunReportInput['costEstimate'] | undefined;
-    structuredOutput?: unknown;
+    output?: unknown;
     effectiveModel?: string | undefined;
     effectiveEffort?: string | undefined;
   },
 ): RunReport {
-  const { costEstimate, structuredOutput, effectiveModel, effectiveEffort, ...rest } = input;
+  const { costEstimate, output, effectiveModel, effectiveEffort, ...rest } = input;
   return buildRunReport({
     ...rest,
     ...(costEstimate !== undefined ? { costEstimate } : {}),
-    ...(structuredOutput !== undefined ? { structuredOutput } : {}),
+    ...(output !== undefined ? { output } : {}),
     ...(effectiveModel !== undefined ? { effectiveModel } : {}),
     ...(effectiveEffort !== undefined ? { effectiveEffort } : {}),
   });

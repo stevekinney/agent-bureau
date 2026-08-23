@@ -131,7 +131,7 @@ describe('AB-99 Tribunal conformance — generality (non-PR runs)', () => {
     const result = await activeRun.result;
 
     expect(result.finishReason).toBe('stop-condition');
-    const triage = triageDecisionSchema.parse(result.structuredOutput);
+    const triage = triageDecisionSchema.parse(result.output);
     expect(triage.skip).toBe(true);
     expect(triage.riskFlags).toEqual([]);
 
@@ -140,7 +140,7 @@ describe('AB-99 Tribunal conformance — generality (non-PR runs)', () => {
       status: mapFinishReasonToStatus(result.finishReason),
       finishReason: result.finishReason,
       usage: result.usage,
-      structuredOutput: result.structuredOutput,
+      output: result.output,
       transcript: result.conversation.current,
     });
     const agentResult = mapRunReportToTribunalAgentResult(report, {

@@ -4,7 +4,15 @@ import { Conversation, isConversation } from 'conversationalist';
 import { CompletableEventTarget, forwardEvents } from 'lifecycle';
 
 import type { ActiveRun } from '../create-run';
-import { BudgetExceededError, ElicitationDeniedError, GuardrailTripwireError } from '../errors';
+import {
+  AbortAgentRunError,
+  AgentRunError,
+  BudgetExceededError,
+  ElicitationDeniedError,
+  GuardrailTripwireError,
+  MaximumStepsExceededError,
+  toAgentRunError,
+} from '../errors';
 import type { CombinedOperativeEventMap, OperativeEventEmitter } from '../events';
 import {
   StepStartedEvent,
@@ -15,6 +23,7 @@ import {
   ToolStartedBubbleEvent,
 } from '../events';
 import { createRunState } from '../loop';
+import { UnsupportedRunResultVersionError } from '../run-envelope';
 import {
   makeAbortResult,
   makeCompletedResult,
@@ -25,7 +34,11 @@ import type { RunState } from '../run-step';
 import type { FinishReason, RunOptions, RunResult } from '../types';
 import type { CheckpointStore } from './checkpoint-store';
 import type { AnyRunEngine } from './create-run-engine';
-import type { AgentRunWorkflowResult } from './run-workflow';
+import {
+  AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION,
+  type AgentRunWorkflowResult,
+  normalizeAgentRunWorkflowResult,
+} from './run-workflow';
 import type { DurableRunDeps } from './types';
 
 /**
@@ -175,6 +188,15 @@ async function reconstructRunResult(
   summary: AgentRunWorkflowResult,
 ): Promise<{ result: RunResult; runState: RunState; conversation: Conversation }> {
   const { runState, conversation } = await loadRunStateFromCheckpoint(context, runId);
+  const terminalError = reconstructTerminalRunError({
+    finishReason: summary.finishReason,
+    steps: summary.steps,
+    errorMessage: summary.errorMessage,
+    abortReason: summary.abortReason,
+    schemaValidation: summary.schemaValidation,
+    tripwire: summary.tripwire,
+  });
+  const schemaValidation = reconstructSchemaValidation(summary.schemaValidation, terminalError);
 
   const result: RunResult = {
     conversation,
@@ -182,16 +204,72 @@ async function reconstructRunResult(
     content: summary.content,
     usage: runState.totalUsage,
     finishReason: summary.finishReason,
+    ...(terminalError ? { error: terminalError } : {}),
+    ...(schemaValidation ? { schemaValidation } : {}),
     // Mirror the in-memory loop and `finalizeRunResult`: a successful
     // `responseSchema` run's validated value must survive result-only durable
     // paths (`resumeDurableRunResult`, `startDurableRunResult`), not just the
     // full lifecycle/finalize path (`driveReattachedRun`/`driveDurableRun`).
-    ...(summary.structuredOutput !== undefined
-      ? { structuredOutput: summary.structuredOutput }
-      : {}),
+    ...('output' in summary ? { output: summary.output } : {}),
   };
 
   return { result, runState, conversation };
+}
+
+interface ReconstructTerminalRunErrorArgs {
+  finishReason: FinishReason;
+  steps: number;
+  errorMessage?: string;
+  abortReason?: string;
+  schemaValidation?: { success: boolean; error?: string };
+  tripwire?: AgentRunWorkflowResult['tripwire'];
+}
+
+function reconstructTerminalRunError(
+  args: ReconstructTerminalRunErrorArgs,
+): AgentRunError | undefined {
+  if (args.finishReason === 'maximum-steps') {
+    return new MaximumStepsExceededError(args.steps);
+  }
+  if (args.finishReason === 'aborted') {
+    return new AbortAgentRunError(args.abortReason);
+  }
+  if (args.finishReason === 'elicitation-denied') {
+    return new ElicitationDeniedError(args.errorMessage);
+  }
+  if (args.finishReason === 'budget-exceeded') {
+    return new BudgetExceededError(args.errorMessage);
+  }
+  if (args.finishReason === 'tripwire') {
+    return new GuardrailTripwireError(args.errorMessage ?? 'Durable run tripwire', {
+      guardrailName: args.tripwire?.guardrailName ?? 'unknown',
+      category: args.tripwire?.category ?? 'unknown',
+      phase: args.tripwire?.phase ?? 'input',
+      confidence: args.tripwire?.confidence ?? 0,
+      detail: args.tripwire?.detail,
+    });
+  }
+  if (args.finishReason === 'error') {
+    const message =
+      args.errorMessage ?? args.schemaValidation?.error ?? `Durable run ${args.finishReason}`;
+    const kind = args.schemaValidation?.success === false ? 'output' : 'generate';
+    const code = args.schemaValidation?.success === false ? 'INVALID_OUTPUT' : 'UNKNOWN';
+    return new AgentRunError(message, { kind, code });
+  }
+  return undefined;
+}
+
+function reconstructSchemaValidation(
+  schemaValidation: AgentRunWorkflowResult['schemaValidation'],
+  terminalError: AgentRunError | undefined,
+): RunResult['schemaValidation'] {
+  if (!schemaValidation) return undefined;
+  if (schemaValidation.error === undefined) return { success: schemaValidation.success };
+  const error =
+    terminalError?.kind === 'output'
+      ? terminalError
+      : new AgentRunError(schemaValidation.error, { kind: 'output', code: 'INVALID_OUTPUT' });
+  return { success: schemaValidation.success, error };
 }
 
 /**
@@ -724,7 +802,7 @@ export async function resumeDurableRunResult(
   runId: string,
 ): Promise<RunResult> {
   const handle = await context.engine.resume(runId);
-  const summary = (await (handle as RecoveredRunHandle).result()) as AgentRunWorkflowResult;
+  const summary = normalizeAgentRunWorkflowResult(await (handle as RecoveredRunHandle).result());
   const { result } = await reconstructRunResult(context, runId, summary);
   return result;
 }
@@ -813,7 +891,7 @@ export async function startDurableRunResult(
       },
     },
   );
-  const summary = (await (handle as RecoveredRunHandle).result()) as AgentRunWorkflowResult;
+  const summary = normalizeAgentRunWorkflowResult(await (handle as RecoveredRunHandle).result());
   const { result } = await reconstructRunResult(context, runId, summary);
   return result;
 }
@@ -836,8 +914,11 @@ async function driveReattachedRun(
 
   let summary: AgentRunWorkflowResult;
   try {
-    summary = (await handle.result()) as AgentRunWorkflowResult;
+    summary = normalizeAgentRunWorkflowResult(await handle.result());
   } catch (error) {
+    if (error instanceof UnsupportedRunResultVersionError) {
+      throw error;
+    }
     // An ADAPTER-INITIATED abort (bureau.abortRun → engine.cancel) that ACTUALLY
     // terminalized this run is a real terminal: fire `run.aborted` so the gateway
     // listener persists `aborted`, rather than leaving the session looking
@@ -863,6 +944,12 @@ async function driveReattachedRun(
         emitter,
         lastStep ? lastStep.step + 1 : 0,
         'aborted',
+        undefined,
+        reconstructTerminalRunError({
+          finishReason: 'aborted',
+          steps: runState.steps.length,
+          abortReason: 'aborted',
+        }),
       );
     }
     // A `history.maxEvents` circuit-breaker (or a genuine execution-deadline
@@ -928,8 +1015,9 @@ async function driveReattachedRun(
     errorMessage: summary.errorMessage,
     abortReason: summary.abortReason,
     schemaValidation: summary.schemaValidation,
-    structuredOutput: summary.structuredOutput,
+    output: summary.output,
     tripwire: summary.tripwire,
+    terminalError: result.error instanceof AgentRunError ? result.error : undefined,
   });
 }
 
@@ -953,6 +1041,10 @@ async function driveDurableRun(
 ): Promise<RunResult> {
   const runStartTime = performance.now();
   const { hooks } = options;
+  let terminalErrorFromEvent: AgentRunError | undefined;
+  emitter.addEventListener('run.error', (event) => {
+    terminalErrorFromEvent = event.error;
+  });
 
   // RunStartedEvent + onRunStart (an onRunStart error aborts the run).
   const startError = await startRunLifecycle(options, conversation, emitter);
@@ -962,7 +1054,7 @@ async function driveDurableRun(
       conversation,
       hooks,
       emitter,
-      startError,
+      terminalErrorFromEvent ?? toAgentRunError(startError),
       options.costEstimation,
     );
   }
@@ -1014,7 +1106,7 @@ async function driveDurableRun(
 
   let summary: AgentRunWorkflowResult;
   try {
-    summary = (await handle.result()) as AgentRunWorkflowResult;
+    summary = normalizeAgentRunWorkflowResult(await handle.result());
   } catch (error) {
     // The engine was disposed while this run was still in flight — i.e. the
     // bureau (or process) is tearing down mid-run. This is the CRASH semantic,
@@ -1050,6 +1142,7 @@ async function driveDurableRun(
       let cancelledConversation = conversation;
       try {
         const reconstructed = await reconstructRunResult(context, runId, {
+          schemaVersion: AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION,
           runId,
           steps: 0,
           content: '',
@@ -1068,8 +1161,10 @@ async function driveDurableRun(
         hooks,
         emitter,
         runStartTime,
-        abortReason: signal.aborted ? String(signal.reason) : undefined,
+        abortReason:
+          signal.aborted && typeof signal.reason === 'string' ? signal.reason : undefined,
         costEstimation: options.costEstimation,
+        terminalError: terminalErrorFromEvent,
       });
     }
     // A `history.maxEvents` circuit-breaker (or a genuine execution-deadline
@@ -1123,9 +1218,11 @@ async function driveDurableRun(
     errorMessage: summary.errorMessage,
     abortReason: summary.abortReason,
     schemaValidation: summary.schemaValidation,
-    structuredOutput: summary.structuredOutput,
+    output: summary.output,
     tripwire: summary.tripwire,
     costEstimation: options.costEstimation,
+    terminalError:
+      terminalErrorFromEvent ?? (result.error instanceof AgentRunError ? result.error : undefined),
   });
 }
 
@@ -1187,6 +1284,8 @@ interface FinalizeArgs {
   runStartTime: number;
   /** Serialized terminal error message (when the durable run errored). */
   errorMessage?: string;
+  /** The exact terminal error object captured from the live run event, when available. */
+  terminalError?: AgentRunError;
   /** The abort reason (when the durable run was aborted). */
   abortReason?: string;
   /**
@@ -1197,11 +1296,11 @@ interface FinalizeArgs {
   schemaValidation?: { success: boolean; error?: string };
   /**
    * The `responseSchema`-validated structured output carried out of the
-   * workflow, mirroring `RunResult.structuredOutput` on the in-memory path.
+   * workflow, mirroring `RunResult.output` on the in-memory path.
    * Unlike `schemaValidation.error`, this crosses the checkpoint as plain
    * (already-JSON) data, so no reconstruction is needed here.
    */
-  structuredOutput?: unknown;
+  output?: unknown;
   /** Forwarded from `RunOptions.costEstimation` so a durable run's terminal
    * `RunResult.costEstimate` matches the in-memory loop's. */
   costEstimation?: RunOptions['costEstimation'];
@@ -1228,6 +1327,16 @@ interface FinalizeArgs {
  */
 function finalizeRunResult(args: FinalizeArgs): RunResult {
   const { finishReason, runState, conversation, hooks, emitter, runStartTime } = args;
+  const terminalError =
+    args.terminalError ??
+    reconstructTerminalRunError({
+      finishReason,
+      steps: runState.steps.length,
+      errorMessage: args.errorMessage,
+      abortReason: args.abortReason,
+      schemaValidation: args.schemaValidation,
+      tripwire: args.tripwire,
+    });
 
   if (finishReason === 'aborted') {
     const lastStep = runState.steps[runState.steps.length - 1];
@@ -1239,6 +1348,7 @@ function finalizeRunResult(args: FinalizeArgs): RunResult {
       lastStep ? lastStep.step + 1 : 0,
       args.abortReason,
       args.costEstimation,
+      terminalError,
     );
   }
   if (
@@ -1247,41 +1357,16 @@ function finalizeRunResult(args: FinalizeArgs): RunResult {
     finishReason === 'budget-exceeded' ||
     finishReason === 'tripwire'
   ) {
-    // Rebuild an Error from the serialized message so consumers see the real
-    // cause (gateway's `lastError: serializeUnknownError(event.error)`).
-    // Rebuild the SAME error SUBCLASS the workflow classified, so
-    // `makeErrorResult`'s `instanceof` re-classification lands on the same
-    // `finishReason` — otherwise a plain `Error` would always flatten back to
-    // `'error'` and lose the elicitation-denied / budget-exceeded / tripwire
-    // distinction. For `tripwire`, the guardrail's identity also has to be
-    // rebuilt from `args.tripwire` (carried out of the workflow summary) so
-    // `RunTripwireEvent` (dispatched inside `makeErrorResult`) names the real
-    // guardrail rather than a placeholder.
-    const message = args.errorMessage ?? `Durable run ${finishReason}`;
-    const error =
-      finishReason === 'elicitation-denied'
-        ? new ElicitationDeniedError(message)
-        : finishReason === 'budget-exceeded'
-          ? new BudgetExceededError(message)
-          : finishReason === 'tripwire'
-            ? new GuardrailTripwireError(message, {
-                guardrailName: args.tripwire?.guardrailName ?? 'unknown',
-                category: args.tripwire?.category ?? 'unknown',
-                phase: args.tripwire?.phase ?? 'input',
-                confidence: args.tripwire?.confidence ?? 0,
-                detail: args.tripwire?.detail,
-              })
-            : new Error(message);
-    return makeErrorResult(runState, conversation, hooks, emitter, error, args.costEstimation);
+    return makeErrorResult(
+      runState,
+      conversation,
+      hooks,
+      emitter,
+      terminalError,
+      args.costEstimation,
+    );
   }
-  const schemaValidation = args.schemaValidation
-    ? {
-        success: args.schemaValidation.success,
-        ...(args.schemaValidation.error !== undefined
-          ? { error: new Error(args.schemaValidation.error) }
-          : {}),
-      }
-    : undefined;
+  const schemaValidation = reconstructSchemaValidation(args.schemaValidation, terminalError);
 
   return makeCompletedResult(
     runState,
@@ -1291,7 +1376,8 @@ function finalizeRunResult(args: FinalizeArgs): RunResult {
     finishReason === 'stop-condition' ? 'stop-condition' : 'maximum-steps',
     runStartTime,
     schemaValidation,
-    args.structuredOutput,
+    args.output,
     args.costEstimation,
+    terminalError,
   );
 }

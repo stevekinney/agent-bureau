@@ -12,7 +12,10 @@ import { createActiveRun } from '../create-run';
 import { reattachDurableActiveRun } from '../durable/active-run-adapter';
 import type { CheckpointStore } from '../durable/checkpoint-store';
 import type { AnyRunEngine } from '../durable/create-run-engine';
-import type { AgentRunWorkflowResult } from '../durable/run-workflow';
+import {
+  type AgentRunWorkflowResult,
+  normalizeAgentRunWorkflowResult,
+} from '../durable/run-workflow';
 import type {
   CombinedOperativeEventMap,
   OperativeEventMap,
@@ -476,7 +479,7 @@ async function readTerminalRunOutcome(
 
   // The workflow's own declared return type — the same trusted-internal-
   // contract cast `active-run-adapter.ts` makes after `handle.result()`.
-  const summary = state.result as AgentRunWorkflowResult;
+  const summary = normalizeAgentRunWorkflowResult(state.result);
   return { status: finishReasonToStatus(summary.finishReason), conversation };
 }
 
@@ -937,8 +940,12 @@ export function createSessionHandle(
             // rejected and why regardless — the caller learns about every
             // rejection via `failures` on the event dispatched below, not
             // just the last one — then try older running refs either way.
-            await reconcileTerminalRunRef(store, engine, checkpointStore, sessionId, runningRef);
-            failures.push({ runId, error });
+            try {
+              await reconcileTerminalRunRef(store, engine, checkpointStore, sessionId, runningRef);
+              failures.push({ runId, error });
+            } catch (reconciliationError) {
+              failures.push({ runId, error: reconciliationError });
+            }
           }
         }
         if (failures.length > 0) {

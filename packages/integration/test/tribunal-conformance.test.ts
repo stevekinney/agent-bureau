@@ -173,7 +173,7 @@ describe('AB-99 Tribunal conformance — single provider (Anthropic mock)', () =
           typeof lastStepMetadata?.['effectiveEffort'] === 'string'
             ? lastStepMetadata['effectiveEffort']
             : undefined,
-        structuredOutput: result.structuredOutput,
+        output: result.output,
         transcript: result.conversation.current,
       });
 

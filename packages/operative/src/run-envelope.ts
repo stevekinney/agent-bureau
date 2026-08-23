@@ -3,6 +3,7 @@ import { conversationSchema, jsonValueSchema, tokenUsageSchema } from 'conversat
 import { z } from 'zod';
 
 import type { CostEstimate } from './cost-estimation';
+import { AgentRunError, serializeAgentRunError } from './errors';
 import type { FinishReason } from './types';
 
 /**
@@ -20,7 +21,39 @@ import type { FinishReason } from './types';
  * reading frames over a pipe or WebSocket) should branch on `schemaVersion`
  * rather than assume the current shape.
  */
-export const RUN_ENVELOPE_SCHEMA_VERSION = 1 as const;
+export const RUN_ENVELOPE_SCHEMA_VERSION = 2 as const;
+
+export class UnsupportedRunResultVersionError extends Error {
+  readonly version: unknown;
+
+  constructor(version: unknown) {
+    super(
+      `Unsupported run result schema version ${String(version)}; expected ${RUN_ENVELOPE_SCHEMA_VERSION}`,
+    );
+    this.name = 'UnsupportedRunResultVersionError';
+    this.version = version;
+  }
+}
+
+export class UnsupportedRunResultLegacyFieldError extends UnsupportedRunResultVersionError {
+  readonly field: string;
+
+  constructor(field: string, version: unknown = RUN_ENVELOPE_SCHEMA_VERSION) {
+    super(version);
+    this.name = 'UnsupportedRunResultLegacyFieldError';
+    this.field = field;
+    this.message = `Unsupported run result legacy field "${field}" in schema version ${String(
+      version,
+    )}; expected current field "output".`;
+  }
+}
+
+function hasLegacyStructuredOutput(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null) return false;
+  const record = value as Record<string, unknown>;
+  if ('structuredOutput' in record) return true;
+  return hasLegacyStructuredOutput(record['report']);
+}
 
 // ---------------------------------------------------------------------------
 // Redacted tool input/output summaries
@@ -147,7 +180,7 @@ const costEstimateSchema = z.object({
 /**
  * The terminal, JSON-serializable summary of a completed (or partially-
  * completed, on abrupt shutdown) run. Emitted for every exit path —
- * `succeeded` (stop-condition / maximum-steps), `failed` (error /
+ * `succeeded` (stop-condition), `failed` (maximum-steps / error /
  * elicitation-denied), `aborted`, and `budget_stopped` (budget-exceeded).
  *
  * `transcript` is conversationalist's plain-object `ConversationHistory`
@@ -165,30 +198,32 @@ export interface RunReport {
   costEstimate?: CostEstimate | undefined;
   effectiveModel?: string | undefined;
   effectiveEffort?: string | undefined;
-  structuredOutput?: JSONValue | undefined;
+  output?: JSONValue | undefined;
   error?: string | undefined;
   transcript?: ConversationHistory | undefined;
 }
 
 /**
- * Zod schema for the terminal {@link RunReport}. `structuredOutput` is a
+ * Zod schema for the terminal {@link RunReport}. `output` is a
  * generic `jsonValueSchema` — the run's `responseSchema` shape is caller-
  * defined, so the envelope only guarantees JSON-safety, not the caller's
  * specific structured-output schema.
  */
-export const runReportSchema = z.object({
-  schemaVersion: z.literal(RUN_ENVELOPE_SCHEMA_VERSION),
-  runId: z.string(),
-  status: runReportStatusSchema,
-  finishReason: z.string().optional(),
-  usage: tokenUsageSchema,
-  costEstimate: costEstimateSchema.optional(),
-  effectiveModel: z.string().optional(),
-  effectiveEffort: z.string().optional(),
-  structuredOutput: jsonValueSchema.optional(),
-  error: z.string().optional(),
-  transcript: conversationSchema.optional(),
-}) satisfies z.ZodType<RunReport>;
+export const runReportSchema = z
+  .object({
+    schemaVersion: z.literal(RUN_ENVELOPE_SCHEMA_VERSION),
+    runId: z.string(),
+    status: runReportStatusSchema,
+    finishReason: z.string().optional(),
+    usage: tokenUsageSchema,
+    costEstimate: costEstimateSchema.optional(),
+    effectiveModel: z.string().optional(),
+    effectiveEffort: z.string().optional(),
+    output: jsonValueSchema.optional(),
+    error: z.string().optional(),
+    transcript: conversationSchema.optional(),
+  })
+  .strict() satisfies z.ZodType<RunReport>;
 
 const runStartedFrameSchema = frameBaseSchema.extend({
   type: z.literal('run-started'),
@@ -243,10 +278,12 @@ const notificationFrameSchema = frameBaseSchema.extend({
   message: z.string(),
 });
 
-const runFinishedFrameSchema = frameBaseSchema.extend({
-  type: z.literal('run-finished'),
-  report: runReportSchema,
-}) satisfies z.ZodType<RunFinishedFrame>;
+const runFinishedFrameSchema = frameBaseSchema
+  .extend({
+    type: z.literal('run-finished'),
+    report: runReportSchema,
+  })
+  .strict() satisfies z.ZodType<RunFinishedFrame>;
 
 /**
  * Discriminated union of every versioned run-lifecycle frame. Every variant
@@ -263,6 +300,27 @@ export const runFrameSchema = z.discriminatedUnion('type', [
   notificationFrameSchema,
   runFinishedFrameSchema,
 ]) satisfies z.ZodType<RunFrame>;
+
+/** Parse a durable frame and reject frames from an incompatible schema era. */
+export function parseRunFrame(input: unknown): RunFrame {
+  if (hasLegacyStructuredOutput(input)) {
+    const version =
+      typeof input === 'object' && input !== null && 'schemaVersion' in input
+        ? (input as { schemaVersion?: unknown }).schemaVersion
+        : undefined;
+    throw new UnsupportedRunResultLegacyFieldError('structuredOutput', version);
+  }
+  const parsed = runFrameSchema.safeParse(input);
+  if (parsed.success) return parsed.data;
+  const version =
+    typeof input === 'object' && input !== null && 'schemaVersion' in input
+      ? (input as { schemaVersion?: unknown }).schemaVersion
+      : undefined;
+  if (version !== RUN_ENVELOPE_SCHEMA_VERSION) {
+    throw new UnsupportedRunResultVersionError(version);
+  }
+  throw parsed.error;
+}
 
 export type RunStartedFrame = z.infer<typeof runStartedFrameSchema>;
 export type StepFrame = z.infer<typeof stepFrameSchema>;
@@ -455,6 +513,7 @@ export function createRunFinishedFrame(
 
 /** Stringifies an arbitrary caught value into the `RunReport.error` string field. */
 export function stringifyError(error: unknown): string {
+  if (error instanceof AgentRunError) return serializeAgentRunError(error);
   if (error instanceof Error) return error.message;
   if (typeof error === 'string') return error;
   if (error === null || error === undefined) return 'null';
@@ -477,8 +536,8 @@ function toJsonSafeOrUndefined(value: unknown): JSONValue | undefined {
 
 /**
  * Maps a loop {@link FinishReason} to the envelope's coarser {@link
- * RunReportStatus}. `stop-condition` and `maximum-steps` both count as a
- * successful exit; `elicitation-denied`, `error`, and `tripwire` (a guardrail
+ * RunReportStatus}. Only `stop-condition` counts as a successful exit;
+ * `maximum-steps`, `elicitation-denied`, `error`, and `tripwire` (a guardrail
  * hard-halt — see AB-40) are all `'failed'`; `budget-exceeded` gets its own
  * status so a budget-triggered stop is distinguishable from a genuine
  * failure; `aborted` maps directly.
@@ -486,8 +545,9 @@ function toJsonSafeOrUndefined(value: unknown): JSONValue | undefined {
 export function mapFinishReasonToStatus(finishReason: FinishReason): RunReportStatus {
   switch (finishReason) {
     case 'stop-condition':
-    case 'maximum-steps':
       return 'succeeded';
+    case 'maximum-steps':
+      return 'failed';
     case 'aborted':
       return 'aborted';
     case 'budget-exceeded':
@@ -507,14 +567,14 @@ export interface BuildRunReportInput {
   costEstimate?: CostEstimate;
   effectiveModel?: string;
   effectiveEffort?: string;
-  structuredOutput?: unknown;
+  output?: unknown;
   error?: unknown;
   transcript?: ConversationHistory;
 }
 
 /**
  * Builds a JSON-safe {@link RunReport} from the pieces the loop (or a partial
- * accumulator on abrupt shutdown) has available. `structuredOutput` is passed
+ * accumulator on abrupt shutdown) has available. `output` is passed
  * through a JSON round-trip and silently dropped (not thrown) if it can't
  * serialize — the report itself must always be constructible.
  */
@@ -528,7 +588,10 @@ export function buildRunReport(input: BuildRunReportInput): RunReport {
     costEstimate: input.costEstimate,
     effectiveModel: input.effectiveModel,
     effectiveEffort: input.effectiveEffort,
-    structuredOutput: toJsonSafeOrUndefined(input.structuredOutput),
+    output:
+      input.status === 'succeeded' && input.finishReason === 'stop-condition'
+        ? toJsonSafeOrUndefined(input.output)
+        : undefined,
     error: input.error !== undefined ? stringifyError(input.error) : undefined,
     transcript: input.transcript,
   };

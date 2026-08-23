@@ -212,7 +212,7 @@ export type StopCondition = (context: StepResult) => boolean | Promise<boolean>;
 /**
  * Result of a completed agent loop run.
  */
-export interface RunResult {
+export interface RunResultBase {
   conversation: Conversation;
   steps: readonly StepResult[];
   content: string;
@@ -241,8 +241,15 @@ export interface RunResult {
    * JSON Schema. Absent when there's no `responseSchema`, or when
    * validation failed.
    */
-  structuredOutput?: unknown;
 }
+
+/**
+ * Terminal result. The validated value is exposed under `output`; the
+ * conditional intersection keeps the property out of untyped (`H = false`)
+ * results while retaining the historical, unparameterized internal shape.
+ */
+export type RunResult<O = unknown, H extends boolean = true> = RunResultBase &
+  ([H] extends [true] ? { output?: O } : Record<never, never>);
 
 /**
  * Options for the agent loop.

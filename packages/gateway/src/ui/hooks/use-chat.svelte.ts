@@ -190,6 +190,8 @@ export function createChatStore({
         }
 
         if (frame.event === 'run.aborted') {
+          const detail = frame.detail as { error?: string; reason?: string };
+          error = detail.error ?? detail.reason ?? 'Run aborted';
           streamingContent = '';
           streamingAssistantContent = '';
         }

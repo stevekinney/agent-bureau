@@ -96,19 +96,20 @@ describe('createRunsStore', () => {
     expect(store.runs[0]?.error).toBe('boom');
   });
 
-  it('marks a run aborted', () => {
+  it('marks a run aborted and preserves the typed abort error string', () => {
     const store = createRunsStore([makeRun({ id: 'run-1' })]);
     store.handleMessage({
       type: 'event',
       runId: 'run-1',
       event: 'run.aborted',
-      detail: {},
+      detail: { error: '{"kind":"abort","code":"ABORTED","message":"cancelled"}' },
       sequence: 1,
       runSeq: 1,
       timestamp: 1,
     });
 
     expect(store.runs[0]?.status).toBe('aborted');
+    expect(store.runs[0]?.error).toBe('{"kind":"abort","code":"ABORTED","message":"cancelled"}');
   });
 
   it('ignores non-event frames', () => {

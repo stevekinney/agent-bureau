@@ -60,29 +60,46 @@ export type RunEvent = CombinedOperativeEventMap[CombinedOperativeEventType];
  * run.abort('user cancelled');
  * ```
  */
-export interface AgentRun extends AsyncIterable<RunEvent> {
-  /**
-   * Returns a `Promise` that resolves to the terminal `RunResult`. The promise
-   * is cached after first resolution — calling `result()` multiple times,
-   * before/during/after iteration, always returns the same promise.
-   *
-   * This is the ONLY path to a `RunResult`. `AgentRun` is non-thenable by
-   * design; `await agentRun` is a type error (it doesn't extend
-   * `PromiseLike`).
-   */
-  result(): Promise<RunResult>;
+export type OutputMethod<O, H extends boolean> = [H] extends [true]
+  ? { output(): Promise<O> }
+  : Record<never, never>;
 
-  /**
-   * Abort the in-flight run. The abort signal fires immediately; the provider
-   * connection drops within ~1s. Any pending `result()` promise rejects with
-   * an abort reason.
-   */
+export type UnwrappedValue<O, H extends boolean> = [H] extends [true] ? O : string;
+
+export type AgentRun<O = never, H extends boolean = false> = AsyncIterable<RunEvent> &
+  OutputMethod<O, H> & {
+    /**
+     * Returns a `Promise` that resolves to the terminal `RunResult`. The promise
+     * is cached after first resolution — calling `result()` multiple times,
+     * before/during/after iteration, always returns the same promise.
+     *
+     * This is the ONLY path to a `RunResult`. `AgentRun` is non-thenable by
+     * design; `await agentRun` is a type error (it doesn't extend
+     * `PromiseLike`).
+     */
+    result(): Promise<RunResult<O, H>>;
+
+    /** Resolve the validated output, or plain text for an untyped agent. */
+    unwrap(): Promise<UnwrappedValue<O, H>>;
+
+    /**
+     * Abort the in-flight run. The abort signal fires immediately; the provider
+     * connection drops within ~1s. Any pending `result()` promise rejects with
+     * an abort reason.
+     */
+    abort(reason?: string): void;
+
+    /**
+     * Dispose the run handle and release internal resources. Equivalent to
+     * `abort()` when the run is still in flight.
+     */
+    [Symbol.dispose](): void;
+  };
+
+/** A durable run recovered without a trusted live agent definition. */
+export interface DiagnosticAgentRun extends AsyncIterable<RunEvent> {
+  result(): Promise<RunResult<unknown, false>>;
   abort(reason?: string): void;
-
-  /**
-   * Dispose the run handle and release internal resources. Equivalent to
-   * `abort()` when the run is still in flight.
-   */
   [Symbol.dispose](): void;
 }
 
@@ -104,6 +121,8 @@ export interface CreateAgentRunOptions {
    * - `'empty'` — returns immediately without yielding any events.
    */
   onCompletedIteration?: 'error' | 'empty';
+  /** Whether this handle has a configured schema-backed output accessor. */
+  hasOutput?: boolean;
 }
 
 /**
@@ -140,15 +159,16 @@ function emptyIterator(): AsyncIterator<RunEvent> {
  * @param activeRun - The internal run to wrap.
  * @param options - Controls behaviour on a completed-run iteration attempt.
  */
-export function createAgentRun(
+export function createAgentRun<O = never, H extends boolean = false>(
   activeRun: ActiveRun,
   options: CreateAgentRunOptions = {},
-): AgentRun {
+): AgentRun<O, H> {
   const { onCompletedIteration = 'error' } = options;
+  const hasOutput = options.hasOutput ?? false;
 
   // Cache the result promise so result() is idempotent across all calls
   // (before, during, and after iteration).
-  const cachedResult: Promise<RunResult> = activeRun.result;
+  const cachedResult: Promise<RunResult<O, H>> = activeRun.result as Promise<RunResult<O, H>>;
 
   // Track whether the run has finished. We attach to the result promise so this
   // flag is set regardless of whether anyone is iterating — this covers the case
@@ -175,10 +195,54 @@ export function createAgentRun(
     return runSettled || streamConsumed;
   }
 
-  return {
-    result(): Promise<RunResult> {
+  const handle = {
+    result(): Promise<RunResult<O, H>> {
       return cachedResult;
     },
+
+    unwrap(): Promise<UnwrappedValue<O, H>> {
+      return cachedResult.then((result) => {
+        if (result.finishReason !== 'stop-condition') {
+          throw result.error instanceof Error
+            ? result.error
+            : new Error(`Agent run did not finish successfully: ${result.finishReason}`);
+        }
+        if (result.schemaValidation && !result.schemaValidation.success) {
+          throw result.schemaValidation.error instanceof Error
+            ? result.schemaValidation.error
+            : new Error('Agent run output failed schema validation');
+        }
+        if (hasOutput) {
+          if (!result.schemaValidation?.success || !('output' in result)) {
+            throw result.schemaValidation?.error instanceof Error
+              ? result.schemaValidation.error
+              : new Error('Agent run has no validated output');
+          }
+          return result.output as UnwrappedValue<O, H>;
+        }
+        return result.content as UnwrappedValue<O, H>;
+      });
+    },
+
+    ...(hasOutput
+      ? {
+          output(): Promise<O> {
+            return cachedResult.then((result) => {
+              if (result.finishReason !== 'stop-condition') {
+                throw result.error instanceof Error
+                  ? result.error
+                  : new Error(`Agent run did not finish successfully: ${result.finishReason}`);
+              }
+              if (!result.schemaValidation?.success || !('output' in result)) {
+                throw result.schemaValidation?.error instanceof Error
+                  ? result.schemaValidation.error
+                  : new Error('Agent run has no validated output');
+              }
+              return result.output as O;
+            });
+          },
+        }
+      : {}),
 
     abort(reason?: string): void {
       activeRun.abort(reason);
@@ -312,5 +376,22 @@ export function createAgentRun(
         },
       };
     },
+  } as AgentRun<O, H>;
+
+  return handle;
+}
+
+/**
+ * Wrap a recovered active run without offering an output or unwrap accessor.
+ * A diagnostic run is intentionally useful for inspection and cancellation
+ * only: its originating schema may no longer be available to validate data.
+ */
+export function createDiagnosticAgentRun(activeRun: ActiveRun): DiagnosticAgentRun {
+  const run = createAgentRun<unknown, false>(activeRun) as unknown as DiagnosticAgentRun & {
+    unwrap?: () => Promise<string>;
+    output?: () => Promise<unknown>;
   };
+  delete run.unwrap;
+  delete run.output;
+  return run;
 }

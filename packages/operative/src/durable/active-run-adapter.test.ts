@@ -15,7 +15,13 @@ import { z } from 'zod';
 
 import { stopWhen } from '../conditions/index';
 import { createActiveRun } from '../create-run';
-import { BudgetExceededError, ElicitationDeniedError, GuardrailTripwireError } from '../errors';
+import {
+  AbortAgentRunError,
+  AgentRunError,
+  BudgetExceededError,
+  ElicitationDeniedError,
+  GuardrailTripwireError,
+} from '../errors';
 import {
   type CombinedOperativeEventMap,
   RunCompletedEvent,
@@ -27,6 +33,7 @@ import {
   ToolStartedBubbleEvent,
 } from '../events';
 import type { OperativeHookMap } from '../hooks';
+import { UnsupportedRunResultVersionError } from '../run-envelope';
 import { createManualDurableEngine, spyEngine } from '../test/durable-engine';
 import { createMockGenerate } from '../test/index';
 import type { RunOptions, RunResult } from '../types';
@@ -34,11 +41,12 @@ import {
   createDurableActiveRun,
   createRecoveredRunEventSurface,
   reattachDurableActiveRun,
+  startDurableRunResult,
 } from './active-run-adapter';
 import { createCheckpointStore } from './checkpoint-store';
 import type { AnyRunEngine } from './create-run-engine';
 import { createRunEngine } from './create-run-engine';
-import { createRunWorkflow } from './run-workflow';
+import { AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION, createRunWorkflow } from './run-workflow';
 
 const run = (...args: Parameters<typeof createActiveRun>) => createActiveRun(...args).result;
 const createRun = createActiveRun;
@@ -272,19 +280,26 @@ describe('createRun with durable routing', () => {
   it('propagates the real generate error through the run lifecycle (not a placeholder)', async () => {
     const context = await buildContext();
     try {
+      const thrownError = new Error('generate exploded: model unavailable');
+      let runError: AgentRunError | undefined;
       let errorMessage: string | undefined;
       let completedFinishReason: RunResult['finishReason'] | undefined;
+      let completedError: unknown;
 
       const activeRun = createRun(
         runOptions(async () => {
-          throw new Error('generate exploded: model unavailable');
+          throw thrownError;
         }),
         { ...context, runId: 'error-run', prompt: 'Hello' },
       );
+      activeRun.addEventListener('run.error', (event) => {
+        runError = event.error;
+      });
       // A generate error ends the run via run.completed with finishReason 'error'
       // (executeLoop parity — it does not throw out of the run).
       activeRun.addEventListener('run.completed', (event) => {
         completedFinishReason = event.finishReason;
+        completedError = event.error;
         errorMessage = event.error instanceof Error ? event.error.message : String(event.error);
       });
 
@@ -295,8 +310,34 @@ describe('createRun with durable routing', () => {
       // The REAL cause survives the workflow→adapter boundary, not a synthetic
       // "Durable run error" placeholder.
       expect(errorMessage).toBe('generate exploded: model unavailable');
-      expect(result.error).toBeInstanceOf(Error);
+      expect(result.error).toBeInstanceOf(AgentRunError);
+      expect(result.error).toBe(runError);
+      expect(completedError).toBe(runError);
+      expect(runError?.kind).toBe('generate');
+      expect(runError?.code).toBe('UNKNOWN');
+      expect(runError?.cause).toBe(thrownError);
       expect((result.error as Error).message).toBe('generate exploded: model unavailable');
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+
+  it('reconstructs typed terminal errors on result-only durable runs', async () => {
+    const context = await buildContext();
+    try {
+      const result = await startDurableRunResult(context, {
+        runId: 'result-only-error-run',
+        sessionId: 'result-only-error-run',
+        options: runOptions(async () => {
+          throw new Error('result-only generate exploded');
+        }),
+      });
+
+      expect(result.finishReason).toBe('error');
+      expect(result.error).toBeInstanceOf(AgentRunError);
+      expect((result.error as AgentRunError).kind).toBe('generate');
+      expect((result.error as AgentRunError).code).toBe('UNKNOWN');
+      expect((result.error as Error).message).toBe('result-only generate exploded');
     } finally {
       context.engine[Symbol.dispose]();
     }
@@ -345,6 +386,7 @@ describe('createRun with durable routing', () => {
     try {
       let abortedReason: string | undefined;
       let aborted = false;
+      let abortedError: unknown;
 
       // generate blocks until the run-level signal aborts, then rejects — so the
       // run is in-flight when we call abort().
@@ -368,6 +410,7 @@ describe('createRun with durable routing', () => {
       activeRun.addEventListener('run.aborted', (event) => {
         aborted = true;
         abortedReason = event.reason;
+        abortedError = event.error;
       });
 
       // Abort after the deferred-microtask start has begun the run.
@@ -380,6 +423,10 @@ describe('createRun with durable routing', () => {
       expect(aborted).toBe(true);
       // The real abort reason survives the workflow→adapter boundary.
       expect(abortedReason).toBe('user requested stop');
+      expect(result.error).toBeInstanceOf(AbortAgentRunError);
+      expect(result.error).toBe(abortedError);
+      expect((result.error as AbortAgentRunError).kind).toBe('abort');
+      expect((result.error as AbortAgentRunError).code).toBe('ABORTED');
     } finally {
       context.engine[Symbol.dispose]();
     }
@@ -634,11 +681,18 @@ describe('createRun with durable routing', () => {
         },
         { ...context, runId: 'budget-run', prompt: 'Hello' },
       );
+      let runError: AgentRunError | undefined;
+      activeRun.addEventListener('run.error', (event) => {
+        runError = event.error;
+      });
 
       const result = await activeRun.result;
 
       expect(result.finishReason).toBe('budget-exceeded');
       expect(result.error).toBeInstanceOf(BudgetExceededError);
+      expect(result.error).toBe(runError);
+      expect((result.error as BudgetExceededError).kind).toBe('policy');
+      expect((result.error as BudgetExceededError).code).toBe('BUDGET_EXCEEDED');
     } finally {
       context.engine[Symbol.dispose]();
     }
@@ -659,11 +713,18 @@ describe('createRun with durable routing', () => {
         },
         { ...context, runId: 'elicitation-run', prompt: 'Hello' },
       );
+      let runError: AgentRunError | undefined;
+      activeRun.addEventListener('run.error', (event) => {
+        runError = event.error;
+      });
 
       const result = await activeRun.result;
 
       expect(result.finishReason).toBe('elicitation-denied');
       expect(result.error).toBeInstanceOf(ElicitationDeniedError);
+      expect(result.error).toBe(runError);
+      expect((result.error as ElicitationDeniedError).kind).toBe('policy');
+      expect((result.error as ElicitationDeniedError).code).toBe('ELICITATION_DENIED');
     } finally {
       context.engine[Symbol.dispose]();
     }
@@ -707,12 +768,19 @@ describe('createRun with durable routing', () => {
       activeRun.addEventListener('run.tripwire', (event) => {
         tripwireEvents.push(event);
       });
+      let runError: AgentRunError | undefined;
+      activeRun.addEventListener('run.error', (event) => {
+        runError = event.error;
+      });
 
       const result = await activeRun.result;
 
       expect(result.finishReason).toBe('tripwire');
       expect(result.error).toBeInstanceOf(GuardrailTripwireError);
+      expect(result.error).toBe(runError);
       const error = result.error as GuardrailTripwireError;
+      expect(error.kind).toBe('policy');
+      expect(error.code).toBe('TRIPWIRE');
       expect(error.guardrailName).toBe('prompt-injection');
       expect(error.phase).toBe('input');
       expect(error.confidence).toBe(0.95);
@@ -790,8 +858,8 @@ describe('createRun with durable routing', () => {
     }
   });
 
-  it('carries structuredOutput through to the durable RunResult (durable parity)', async () => {
-    // A run with a `responseSchema` produces `RunResult.structuredOutput` on the
+  it('carries output through to the durable RunResult (durable parity)', async () => {
+    // A run with a `responseSchema` produces `RunResult.output` on the
     // in-memory path (AB-95's "distinct field" requirement); the durable path
     // must surface the SAME validated value, unchanged (it's already plain JSON,
     // so unlike `schemaValidation.error` it needs no reconstruction).
@@ -811,15 +879,15 @@ describe('createRun with durable routing', () => {
       const result = await activeRun.result;
 
       expect(result.finishReason).toBe('stop-condition');
-      expect(result.structuredOutput).toEqual({ answer: '42' });
+      expect(result.output).toEqual({ answer: '42' });
     } finally {
       context.engine[Symbol.dispose]();
     }
   });
 
-  it('NEUTER CHECK: structuredOutput is absent on the durable path when validation fails', async () => {
+  it('NEUTER CHECK: output is absent on the durable path when validation fails', async () => {
     // Confirms the parity test above is exercising the real success path (a
-    // structuredOutput field that's ALWAYS present regardless of validation
+    // output field that's ALWAYS present regardless of validation
     // outcome would trivially pass the previous test too).
     const context = await buildContext();
     try {
@@ -839,7 +907,7 @@ describe('createRun with durable routing', () => {
 
       expect(result.finishReason).toBe('stop-condition');
       expect(result.schemaValidation?.success).toBe(false);
-      expect(result.structuredOutput).toBeUndefined();
+      expect(result.output).toBeUndefined();
     } finally {
       context.engine[Symbol.dispose]();
     }
@@ -1259,6 +1327,31 @@ describe('createRecoveredRunEventSurface', () => {
 });
 
 describe('reattachDurableActiveRun', () => {
+  it('rethrows unsupported recovered result versions', async () => {
+    const context = await buildContext();
+    try {
+      const handle = {
+        id: 'reattach-unsupported-version',
+        result: () =>
+          Promise.resolve({
+            schemaVersion: AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION + 1,
+            runId: 'reattach-unsupported-version',
+            steps: 0,
+            content: 'legacy',
+            finishReason: 'stop-condition',
+          }),
+      };
+      const recoveredRun = reattachDurableActiveRun(
+        { engine: context.engine, checkpointStore: context.checkpointStore },
+        { runId: 'reattach-unsupported-version', handle },
+      );
+
+      expect(recoveredRun.result).rejects.toThrow(UnsupportedRunResultVersionError);
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+
   it('fires run.aborted when the run is aborted via the adapter (committee round-2 finding 2)', async () => {
     const context = await buildContext();
     try {
@@ -1312,6 +1405,7 @@ describe('reattachDurableActiveRun', () => {
         id: 'reattach-event-facade',
         result: () =>
           Promise.resolve({
+            schemaVersion: AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION,
             runId: 'reattach-event-facade',
             steps: 0,
             content: 'reattached',
@@ -1642,6 +1736,7 @@ describe('reattachDurableActiveRun', () => {
         id: 'reattach-dispose',
         result: () =>
           Promise.resolve({
+            schemaVersion: AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION,
             runId: 'reattach-dispose',
             steps: 0,
             content: '',
@@ -1672,6 +1767,7 @@ describe('reattachDurableActiveRun', () => {
         id: 'reattach-schema-error',
         result: () =>
           Promise.resolve({
+            schemaVersion: AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION,
             runId: 'reattach-schema-error',
             steps: 0,
             content: '',
@@ -1690,7 +1786,9 @@ describe('reattachDurableActiveRun', () => {
 
       const result = await recoveredRun.result;
       expect(result.schemaValidation?.success).toBe(false);
-      expect(result.schemaValidation?.error).toBeInstanceOf(Error);
+      expect(result.schemaValidation?.error).toBeInstanceOf(AgentRunError);
+      expect((result.schemaValidation?.error as AgentRunError).kind).toBe('output');
+      expect((result.schemaValidation?.error as AgentRunError).code).toBe('INVALID_OUTPUT');
       expect((result.schemaValidation?.error as Error).message).toBe('schema failed');
     } finally {
       context.engine[Symbol.dispose]();

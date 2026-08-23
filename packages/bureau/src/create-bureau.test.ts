@@ -11,6 +11,7 @@ import type {
   Toolbox,
 } from '@lostgradient/operative';
 import {
+  AbortAgentRunError,
   createAgentSession,
   createSessionStore,
   DEFAULT_MAXIMUM_STEPS,
@@ -576,6 +577,7 @@ describe('createBureau', () => {
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
       persistence: textValueStore(new MemoryStorage()),
+      stopWhen: stopWhen.noToolCalls(),
     });
 
     const run = await bureau.createRun({ message: 'Named dispatch', agentName: 'researcher' });
@@ -723,6 +725,7 @@ describe('createBureau', () => {
       generate: createMockGenerate(),
       toolbox: createEmptyToolbox(),
       persistence: textValueStore(new MemoryStorage()),
+      stopWhen: stopWhen.noToolCalls(),
     });
 
     const run = await bureau.createRun({ message: 'Fast completion' });
@@ -944,6 +947,7 @@ describe('createBureau', () => {
       toolbox: createEmptyToolbox(),
       persistence: flakyStore,
       sessionPersistenceSleep: async () => {},
+      stopWhen: stopWhen.noToolCalls(),
     });
 
     const run = await bureau.createRun({ message: 'Retry completion' });
@@ -1281,6 +1285,7 @@ describe('createBureau', () => {
       toolbox: createEmptyToolbox(),
       storage: { type: 'memory' },
       durableExecution: true,
+      stopWhen: stopWhen.noToolCalls(),
     });
     const enginePrototype = Object.getPrototypeOf(probe.durable!.engine) as {
       recoverAll: () => Promise<unknown[]>;
@@ -2082,6 +2087,7 @@ describe('createBureau', () => {
           retrySleepCount += 1;
           throw new Error('retry sleep aborted');
         },
+        stopWhen: stopWhen.noToolCalls(),
       });
 
       const run = await bureau.createRun({ message: 'Retry sleep failure' });
@@ -2151,7 +2157,16 @@ describe('createBureau', () => {
     const session = await bureau.getSession(run.sessionId);
     expect(session?.metadata['lastRunId']).toBe(run.id);
     expect(session?.metadata['lastRunStatus']).toBe('error');
-    expect(session?.metadata['lastError']).toBe('Explode');
+    expect(JSON.parse(session?.metadata['lastError'] as string)).toMatchObject({
+      name: 'AgentRunError',
+      message: 'Explode',
+      kind: 'generate',
+      code: 'UNKNOWN',
+      cause: {
+        name: 'Error',
+        message: 'Explode',
+      },
+    });
   });
 
   it('persists a guardrail tripwire halt as lastRunStatus: error with lastError set (regression PRRT_kwDORvupsc6PxCXP)', async () => {
@@ -2322,6 +2337,11 @@ describe('createBureau', () => {
     const session = await bureau.getSession(run.sessionId);
     expect(session?.metadata['lastRunStatus']).toBe('aborted');
     expect(session?.metadata['lastFinishReason']).toBe('aborted');
+    expect(JSON.parse(session?.metadata['lastError'] as string)).toMatchObject({
+      name: 'AbortAgentRunError',
+      kind: 'abort',
+      code: 'ABORTED',
+    });
   });
 
   it('persists the checkpointed conversation when a durable run is aborted after a checkpoint (regression PRRT_kwDORvupsc6Mddv3 / #113)', async () => {
@@ -2467,6 +2487,7 @@ describe('createBureau', () => {
         toolCalls: [{ name: 'next', arguments: {} }],
       }),
       toolbox: createToolbox([createNextTool()]) as unknown as Toolbox,
+      persistence: textValueStore(new MemoryStorage()),
       // No maximumSteps and no stopWhen — the run stops solely on the bureau's
       // default step cap, exercising the exact seam that diverged.
     });
@@ -2477,6 +2498,13 @@ describe('createBureau', () => {
     const detail = bureau.getRun(run.id);
     expect(detail?.finishReason).toBe('maximum-steps');
     expect(detail?.steps).toBe(DEFAULT_MAXIMUM_STEPS);
+
+    const session = await bureau.getSession(run.sessionId);
+    expect(session?.metadata['lastRunStatus']).toBe('error');
+    expect(session?.metadata['lastFinishReason']).toBe('maximum-steps');
+    expect(session?.metadata['lastError']).toContain(
+      `Agent run exceeded maximumSteps (${DEFAULT_MAXIMUM_STEPS}).`,
+    );
   });
 
   it('configures a scheduler for routed multi-provider runtimes', async () => {
@@ -2862,6 +2890,7 @@ describe('createBureau', () => {
       toolbox: createEmptyToolbox(),
       storage: { type: 'memory' },
       durableExecution: true,
+      stopWhen: stopWhen.noToolCalls(),
     });
 
     try {
@@ -2919,6 +2948,7 @@ describe('createBureau', () => {
       toolbox: createEmptyToolbox(),
       storage: { type: 'memory' },
       durableExecution: true,
+      stopWhen: stopWhen.noToolCalls(),
     });
 
     try {
@@ -3588,6 +3618,29 @@ describe('monitorRecoveredScheduledFire', () => {
     expect(messages[0]).toContain('finished with error');
     expect(messages[0]).toContain('generate failed');
   });
+
+  it('logs maximum-steps from recovered scheduled fires as failures', async () => {
+    const messages: string[] = [];
+
+    await monitorRecoveredScheduledFire(
+      {
+        id: 'scheduled-fire-maximum',
+        result: async () => ({
+          runId: 'scheduled-fire-maximum',
+          steps: 3,
+          content: 'looping',
+          finishReason: 'maximum-steps',
+        }),
+      },
+      (diagnostic) => {
+        messages.push(diagnostic.message);
+      },
+    );
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toContain('scheduled-fire-maximum');
+    expect(messages[0]).toContain('finished with maximum-steps');
+  });
 });
 
 describe('createBureau session signal/update/query without durable engine', () => {
@@ -3666,6 +3719,7 @@ describe('createBureau session signal/update/query with terminal sessions', () =
       toolbox: createEmptyToolbox(),
       storage: { type: 'memory' },
       durableExecution: true,
+      stopWhen: stopWhen.noToolCalls(),
     });
 
     // Complete a run — the session listener writes lastRunStatus: 'completed'.
@@ -3977,7 +4031,9 @@ describe('createBureau review queue (AB-20)', () => {
     // Resuming a `ctx.waitForSignal` park runs the durable workflow straight
     // through to completion (it does not start a new step) — the run's
     // status leaving `'running'` is what marks it no longer parked.
-    emitter.dispatchEvent(new RunAbortedEvent(1, new Conversation(), 'resumed'));
+    emitter.dispatchEvent(
+      new RunAbortedEvent(1, new Conversation(), new AbortAgentRunError('resumed')),
+    );
 
     expect(bureau.listPendingReviews()).toHaveLength(0);
 
@@ -4200,7 +4256,9 @@ describe('createBureau review queue (AB-20)', () => {
     expect(bureau.listPendingReviews()).toHaveLength(0);
 
     // Terminate and delete the run — deleteRun refuses a still-`running` run.
-    first.emitter.dispatchEvent(new RunAbortedEvent(0, new Conversation(), 'test-cleanup'));
+    first.emitter.dispatchEvent(
+      new RunAbortedEvent(0, new Conversation(), new AbortAgentRunError('test-cleanup')),
+    );
     bureau.deleteRun(runId);
 
     // A new run REUSES the same run id and produces the exact same review id

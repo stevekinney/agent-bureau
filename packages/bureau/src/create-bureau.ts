@@ -537,6 +537,16 @@ export function createHumanWaitContext(
   };
 }
 
+function isRunFailureFinishReason(finishReason: unknown): boolean {
+  return (
+    finishReason === 'error' ||
+    finishReason === 'tripwire' ||
+    finishReason === 'maximum-steps' ||
+    finishReason === 'elicitation-denied' ||
+    finishReason === 'budget-exceeded'
+  );
+}
+
 export async function monitorRecoveredScheduledFire(
   handle: RecoveredRunHandle,
   diagnose: DiagnosticSink = resolveDiagnosticSink(undefined),
@@ -547,8 +557,7 @@ export async function monitorRecoveredScheduledFire(
       typeof result === 'object' &&
       result !== null &&
       'finishReason' in result &&
-      result.finishReason !== 'stop-condition' &&
-      result.finishReason !== 'maximum-steps'
+      isRunFailureFinishReason(result.finishReason)
     ) {
       const errorMessage =
         'errorMessage' in result && typeof result.errorMessage === 'string'
@@ -1129,8 +1138,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         flowController?.settle(runId);
 
         const finishReason = event.finishReason;
-        const lastRunStatus =
-          finishReason === 'error' || finishReason === 'tripwire' ? 'error' : 'completed';
+        const lastRunStatus = isRunFailureFinishReason(finishReason) ? 'error' : 'completed';
 
         const report = buildTerminalReportFromCompletedEvent(runId, event);
         runReports.set(runId, report);
@@ -1149,7 +1157,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
                 lastRunId: runId,
                 lastRunStatus,
                 lastFinishReason: event.finishReason,
-                ...(event.finishReason === 'error' || event.finishReason === 'tripwire'
+                ...(isRunFailureFinishReason(event.finishReason)
                   ? { lastError: serializeUnknownError(event.error) }
                   : {}),
               },
@@ -1172,6 +1180,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
           usage: event.usage,
           costEstimate: event.costEstimate,
           reason: event.reason,
+          error: event.error,
           steps: store.getRun(runId)?.steps ?? [],
           conversation: event.conversation,
         });
@@ -1205,6 +1214,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
                 // aborts settles through THIS listener (settleRecoveredRun is gone),
                 // so the field must be written here, not only on the old recovery path.
                 lastFinishReason: 'aborted',
+                lastError: serializeUnknownError(event.error),
               },
               request.agentName,
               baseConversationHistory,
@@ -1307,10 +1317,8 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
       disposeRecoveredRunFrameForwarder();
       const completedConversation = event.conversation;
       const finishReason = event.finishReason;
-      const lastRunStatus =
-        finishReason === 'error' || finishReason === 'tripwire' ? 'error' : 'completed';
-      const lastError =
-        finishReason === 'error' || finishReason === 'tripwire' ? event.error : undefined;
+      const lastRunStatus = isRunFailureFinishReason(finishReason) ? 'error' : 'completed';
+      const lastError = isRunFailureFinishReason(finishReason) ? event.error : undefined;
 
       const report = buildTerminalReportFromCompletedEvent(runId, event);
       runReports.set(runId, report);
@@ -1326,7 +1334,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
             lastRunId: runId,
             lastRunStatus,
             lastFinishReason: finishReason,
-            ...(finishReason === 'error' || finishReason === 'tripwire'
+            ...(isRunFailureFinishReason(finishReason)
               ? { lastError: serializeUnknownError(lastError) }
               : {}),
           }),
@@ -1342,6 +1350,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         usage: event.usage,
         costEstimate: event.costEstimate,
         reason: event.reason,
+        error: event.error,
         steps: store.getRun(runId)?.steps ?? [],
         conversation: event.conversation,
       });
@@ -1361,6 +1370,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
             lastRunId: runId,
             lastRunStatus: 'aborted',
             lastFinishReason: 'aborted',
+            lastError: serializeUnknownError(event.error),
           }),
         { runId, sessionId, status: 'aborted' },
       );

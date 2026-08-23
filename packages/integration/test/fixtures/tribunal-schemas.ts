@@ -144,8 +144,8 @@ export function mapRunReportToTribunalAgentResult(
   context: { agentSlug: string; findings: FindingLike[]; costEstimateUsd?: number },
 ): unknown {
   const structured =
-    report.structuredOutput && typeof report.structuredOutput === 'object'
-      ? (report.structuredOutput as Record<string, unknown>)
+    report.output && typeof report.output === 'object'
+      ? (report.output as Record<string, unknown>)
       : undefined;
 
   return {

@@ -1,7 +1,16 @@
 import type { Conversation } from 'conversationalist';
 
 import { estimateCost, getModelPricing } from './cost-estimation';
-import { BudgetExceededError, ElicitationDeniedError, GuardrailTripwireError } from './errors';
+import {
+  AbortAgentRunError,
+  type AgentRunError,
+  type AgentRunErrorKind,
+  BudgetExceededError,
+  ElicitationDeniedError,
+  GuardrailTripwireError,
+  MaximumStepsExceededError,
+  toAgentRunError,
+} from './errors';
 import {
   RunAbortedEvent,
   RunCompletedEvent,
@@ -69,7 +78,7 @@ export async function startRunLifecycle(
         maximumSteps: options.maximumSteps ?? DEFAULT_MAXIMUM_STEPS,
       });
     } catch (error) {
-      emitter?.dispatch(new RunErrorEvent(0, error));
+      emitter?.dispatch(new RunErrorEvent(0, error, 'contract'));
       return error;
     }
   }
@@ -88,13 +97,24 @@ export function makeAbortResult(
   step: number,
   reason?: string,
   costEstimation?: RunOptions['costEstimation'],
+  terminalError?: AgentRunError,
 ): RunResult {
   const costEstimate = computeCostEstimate(runState.totalUsage, costEstimation);
+  const explicitReason = typeof reason === 'string' ? reason : undefined;
+  const error = terminalError ?? new AbortAgentRunError(explicitReason);
   emitter?.dispatch(
-    new RunAbortedEvent(step, conversation, reason, runState.totalUsage, costEstimate),
+    new RunAbortedEvent(
+      step,
+      conversation,
+      error,
+      runState.totalUsage,
+      costEstimate,
+      explicitReason,
+    ),
   );
   runHookSilently(hooks, 'onRunAbort', {
-    reason,
+    reason: explicitReason,
+    error,
     partialSteps: [...runState.steps],
     conversation,
   });
@@ -105,6 +125,7 @@ export function makeAbortResult(
     usage: runState.totalUsage,
     ...(costEstimate ? { costEstimate } : {}),
     finishReason: 'aborted',
+    error,
   };
 }
 
@@ -127,19 +148,21 @@ export function makeErrorResult(
   emitter: EventDispatcher | undefined,
   error: unknown,
   costEstimation?: RunOptions['costEstimation'],
+  errorKind?: AgentRunErrorKind,
 ): RunResult {
+  const runError = toAgentRunError(error, { kind: errorKind });
   runHookSilently(hooks, 'onRunError', {
-    error,
+    error: runError,
     partialSteps: [...runState.steps],
     conversation,
   });
 
   const finishReason: FinishReason =
-    error instanceof ElicitationDeniedError
+    runError instanceof ElicitationDeniedError
       ? 'elicitation-denied'
-      : error instanceof BudgetExceededError
+      : runError instanceof BudgetExceededError
         ? 'budget-exceeded'
-        : error instanceof GuardrailTripwireError
+        : runError instanceof GuardrailTripwireError
           ? 'tripwire'
           : 'error';
 
@@ -151,16 +174,16 @@ export function makeErrorResult(
     usage: runState.totalUsage,
     ...(costEstimate ? { costEstimate } : {}),
     finishReason,
-    error,
+    error: runError,
   };
-  if (error instanceof GuardrailTripwireError) {
+  if (runError instanceof GuardrailTripwireError) {
     emitter?.dispatch(
       new RunTripwireEvent(runState.steps.length, {
-        guardrailName: error.guardrailName,
-        category: error.category,
-        phase: error.phase,
-        confidence: error.confidence,
-        detail: error.detail,
+        guardrailName: runError.guardrailName,
+        category: runError.category,
+        phase: runError.phase,
+        confidence: runError.confidence,
+        detail: runError.detail,
       }),
     );
   }
@@ -169,8 +192,8 @@ export function makeErrorResult(
 }
 
 /**
- * Build a successful terminal {@link RunResult} (`stop-condition` or
- * `maximum-steps`): emit `RunCompletedEvent` and fire the `onRunComplete` hook
+ * Build a terminal {@link RunResult} (`stop-condition` or `maximum-steps`):
+ * emit `RunCompletedEvent` and fire the appropriate run hook
  * with the total run duration. Mirrors `executeLoop`'s stop / maximum-steps
  * result construction.
  */
@@ -182,10 +205,15 @@ export function makeCompletedResult(
   finishReason: Extract<FinishReason, 'stop-condition' | 'maximum-steps'>,
   runStartTime: number,
   schemaValidation?: { success: boolean; error?: unknown },
-  structuredOutput?: unknown,
+  output?: unknown,
   costEstimation?: RunOptions['costEstimation'],
+  terminalError?: AgentRunError,
 ): RunResult {
   const costEstimate = computeCostEstimate(runState.totalUsage, costEstimation);
+  const maximumStepsError =
+    finishReason === 'maximum-steps'
+      ? (terminalError ?? new MaximumStepsExceededError(runState.steps.length))
+      : undefined;
   const result: RunResult = {
     conversation,
     steps: runState.steps,
@@ -193,13 +221,22 @@ export function makeCompletedResult(
     usage: runState.totalUsage,
     ...(costEstimate ? { costEstimate } : {}),
     finishReason,
+    ...(maximumStepsError ? { error: maximumStepsError } : {}),
     ...(schemaValidation ? { schemaValidation } : {}),
-    ...(structuredOutput !== undefined ? { structuredOutput } : {}),
+    ...(finishReason === 'stop-condition' && schemaValidation?.success ? { output } : {}),
   };
   emitter?.dispatch(new RunCompletedEvent(result));
-  runHookSilently(hooks, 'onRunComplete', {
-    result,
-    totalDuration: performance.now() - runStartTime,
-  });
+  if (maximumStepsError) {
+    runHookSilently(hooks, 'onRunError', {
+      error: maximumStepsError,
+      partialSteps: [...runState.steps],
+      conversation,
+    });
+  } else {
+    runHookSilently(hooks, 'onRunComplete', {
+      result,
+      totalDuration: performance.now() - runStartTime,
+    });
+  }
   return result;
 }

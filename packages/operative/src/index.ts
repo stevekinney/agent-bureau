@@ -1,5 +1,12 @@
-export type { AgentRun, CreateAgentRunOptions, RunEvent } from './agent-run';
-export { CompletedRunIterationError, createAgentRun } from './agent-run';
+export type {
+  AgentRun,
+  CreateAgentRunOptions,
+  DiagnosticAgentRun,
+  OutputMethod,
+  RunEvent,
+  UnwrappedValue,
+} from './agent-run';
+export { CompletedRunIterationError, createAgentRun, createDiagnosticAgentRun } from './agent-run';
 export type { AgentSession, RunRef } from './agent-session';
 export { createAgentSession, loadAgentSession, saveAgentSession } from './agent-session';
 export type {
@@ -154,18 +161,25 @@ export {
   TaskRoutedEvent,
 } from './create-supervisor';
 export type {
+  AgentRunErrorCode,
+  AgentRunErrorKind,
   AsyncDefinitionLoadCode,
   ClassifiedError,
   ErrorCategory,
   GuardrailTripwireDetail,
+  SerializedAgentRunError,
 } from './errors';
 export {
   AbortAgentRunError,
+  AgentRunError,
+  agentRunErrorToJSON,
   AsyncDefinitionLoadError,
   BudgetExceededError,
   classifyError,
   ElicitationDeniedError,
   GuardrailTripwireError,
+  MaximumStepsExceededError,
+  serializeAgentRunError,
   StandardSchemaValidationError,
 } from './errors';
 export type {
@@ -407,6 +421,7 @@ export {
   createToolPreFrame,
   mapFinishReasonToStatus,
   notificationLevelSchema,
+  parseRunFrame,
   RUN_ENVELOPE_SCHEMA_VERSION,
   runFrameSchema,
   runReportSchema,
@@ -414,6 +429,8 @@ export {
   stringifyError,
   summarizeToolInput,
   toolStatusSchema,
+  UnsupportedRunResultLegacyFieldError,
+  UnsupportedRunResultVersionError,
 } from './run-envelope';
 export { DEFAULT_MAXIMUM_STEPS } from './run-step';
 export type {
@@ -551,6 +568,7 @@ export type {
   RetryOptions,
   RunOptions,
   RunResult,
+  RunResultBase,
   SelectToolsHook,
   StepContext,
   StepResult,

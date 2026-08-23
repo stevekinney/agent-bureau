@@ -5,6 +5,7 @@ import type { EventMap, ForwardedEvent, ObservableLike, Observer, Subscription }
 
 import type { CostBudgetExceededEvent, CostBudgetThresholdEvent } from './cost-budget-monitor';
 import { estimateCacheHitRate } from './cost-estimation';
+import { type AgentRunError, type AgentRunErrorKind, toAgentRunError } from './errors';
 import type { GenerateResponse, RunResult, StepResult, TokenUsage } from './types';
 
 // ---------------------------------------------------------------------------
@@ -102,8 +103,9 @@ export class StepCompletedEvent extends Event {
   }
 }
 
-export class RunCompletedEvent extends Event {
+export class RunCompletedEvent<O = unknown, H extends boolean = true> extends Event {
   static readonly type = 'run.completed' as const;
+  readonly result: RunResult<O, H>;
   readonly conversation: Conversation;
   readonly steps: readonly StepResult[];
   readonly content: string;
@@ -113,10 +115,11 @@ export class RunCompletedEvent extends Event {
   readonly schemaValidation?: RunResult['schemaValidation'];
   /** See {@link RunResult.costEstimate}. */
   readonly costEstimate?: RunResult['costEstimate'];
-  /** See {@link RunResult.structuredOutput}. */
-  readonly structuredOutput?: unknown;
-  constructor(data: RunResult) {
+  /** See {@link RunResult.output}. */
+  readonly output?: unknown;
+  constructor(data: RunResult<O, H>) {
     super(RunCompletedEvent.type);
+    this.result = data;
     this.conversation = data.conversation;
     this.steps = data.steps;
     this.content = data.content;
@@ -125,24 +128,25 @@ export class RunCompletedEvent extends Event {
     this.error = data.error;
     this.schemaValidation = data.schemaValidation;
     this.costEstimate = data.costEstimate;
-    this.structuredOutput = data.structuredOutput;
+    this.output = 'output' in data ? data.output : undefined;
   }
 }
 
 export class RunErrorEvent extends Event {
   static readonly type = 'run.error' as const;
   readonly step: number;
-  readonly error: unknown;
-  constructor(step: number, error: unknown) {
+  readonly error: AgentRunError;
+  constructor(step: number, error: unknown, kind?: AgentRunErrorKind) {
     super(RunErrorEvent.type);
     this.step = step;
-    this.error = error;
+    this.error = toAgentRunError(error, { kind });
   }
 }
 
 export class RunAbortedEvent extends Event {
   static readonly type = 'run.aborted' as const;
   readonly step: number;
+  readonly error: AgentRunError;
   readonly reason?: string;
   // The conversation as it stood when the run aborted. On the durable path the
   // workflow mutates per-step checkpoint snapshots, never the launch-time input
@@ -162,13 +166,15 @@ export class RunAbortedEvent extends Event {
   constructor(
     step: number,
     conversation: Conversation,
-    reason?: string,
+    error: AgentRunError,
     usage?: TokenUsage,
     costEstimate?: RunResult['costEstimate'],
+    reason?: string,
   ) {
     super(RunAbortedEvent.type);
     this.step = step;
     this.conversation = conversation;
+    this.error = error;
     this.reason = reason;
     this.usage = usage;
     this.costEstimate = costEstimate;

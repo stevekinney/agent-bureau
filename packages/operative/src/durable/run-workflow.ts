@@ -4,6 +4,10 @@ import { Conversation, isConversation } from 'conversationalist';
 import { BudgetExceededError, ElicitationDeniedError, GuardrailTripwireError } from '../errors';
 import { RunErrorEvent } from '../events';
 import { buildStepDeps, createRunState } from '../loop';
+import {
+  UnsupportedRunResultLegacyFieldError,
+  UnsupportedRunResultVersionError,
+} from '../run-envelope';
 import { DEFAULT_MAXIMUM_STEPS, runStep } from '../run-step';
 import type { FinishReason } from '../types';
 import type { CheckpointStore } from './checkpoint-store';
@@ -143,7 +147,10 @@ export function isAgentRunWorkflowInput(value: unknown): value is AgentRunWorkfl
 }
 
 /** Plain, cloneable summary returned when the durable run completes. */
+export const AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION = 2 as const;
+
 export interface AgentRunWorkflowResult {
+  schemaVersion: typeof AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION;
   runId: string;
   steps: number;
   content: string;
@@ -180,7 +187,7 @@ export interface AgentRunWorkflowResult {
   /**
    * The `responseSchema`-validated structured output, when the run stopped
    * after a `responseSchema` was applied AND validation succeeded. Mirrors
-   * `RunResult.structuredOutput` on the in-memory path. Unlike
+   * `RunResult.output` on the in-memory path. Unlike
    * `schemaValidation.error`, this is already plain (JSON-parsed and
    * validated) data, so it crosses the checkpoint boundary unchanged — no
    * serialize/reconstruct step is needed the way `schemaValidation.error`
@@ -189,7 +196,7 @@ export interface AgentRunWorkflowResult {
    * faithfully — this is a durable-path constraint on schema authors, not a
    * bug: only JSON-serializable structured output round-trips.)
    */
-  structuredOutput?: unknown;
+  output?: unknown;
   /**
    * The note from a `scheduleWakeup` call, when the agent self-scheduled a
    * wakeup during this run (D6 — self-scheduling tools). Carries the note the
@@ -218,6 +225,25 @@ export interface AgentRunWorkflowResult {
     confidence: number;
     detail?: string;
   };
+}
+
+/**
+ * Normalize a workflow summary at the durable trust boundary.
+ */
+export function normalizeAgentRunWorkflowResult(value: unknown): AgentRunWorkflowResult {
+  if (typeof value !== 'object' || value === null) {
+    throw new Error('Invalid durable agent run workflow result');
+  }
+
+  const summary = value as Record<string, unknown>;
+  if (summary['schemaVersion'] !== AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION) {
+    throw new UnsupportedRunResultVersionError(summary['schemaVersion']);
+  }
+  if ('structuredOutput' in summary) {
+    throw new UnsupportedRunResultLegacyFieldError('structuredOutput', summary['schemaVersion']);
+  }
+
+  return value as AgentRunWorkflowResult;
 }
 
 /** Serialize an unknown error to a stable message string for the checkpoint. */
@@ -408,7 +434,7 @@ export function createRunWorkflow(
         let errorMessage: string | undefined;
         let abortReason: string | undefined;
         let schemaValidation: { success: boolean; error?: string } | undefined;
-        let structuredOutput: unknown;
+        let output: unknown;
         let tripwire: AgentRunWorkflowResult['tripwire'];
         // True when a terminal outcome (stop/abort/error) broke the loop early.
         // False means the loop exhausted `maximumSteps` naturally — the only case
@@ -534,7 +560,7 @@ export function createRunWorkflow(
                         : {}),
                     }
                   : undefined,
-              structuredOutput: outcome.kind === 'stop' ? outcome.structuredOutput : undefined,
+              output: outcome.kind === 'stop' ? outcome.output : undefined,
               record,
               conversationSnapshot: conversation.snapshot(),
               nextAccumulators: {
@@ -600,7 +626,7 @@ export function createRunWorkflow(
           if (outcome.kind === 'stop') {
             finishReason = stepResult.stopFinishReason ?? 'stop-condition';
             schemaValidation = stepResult.schemaValidation;
-            structuredOutput = stepResult.structuredOutput;
+            output = stepResult.output;
             stoppedEarly = true;
             break;
           }
@@ -654,7 +680,7 @@ export function createRunWorkflow(
                 conversationSnapshot: conversation.snapshot(),
               };
             } catch (error) {
-              deps.emitter?.dispatch(new RunErrorEvent(finalStep, error));
+              deps.emitter?.dispatch(new RunErrorEvent(finalStep, error, 'policy'));
               return {
                 kind: 'error' as const,
                 errorMessage: serializeError(error),
@@ -689,7 +715,7 @@ export function createRunWorkflow(
         // it guarantees exactly one park primitive fires regardless of accumulation
         // state, so the workflow cannot sleep AND then wait for a signal in sequence.
         //
-        // CRITICAL: Only park on successful / maximum-steps outcomes. A terminal
+        // CRITICAL: Only park on non-failed stop-condition / maximum-steps outcomes. A terminal
         // failure (`error`, `aborted`, `elicitation-denied`, `budget-exceeded`,
         // `tripwire`) must return immediately — parking on a failed/aborted run
         // would leave the Weft workflow status as `running` until the sleep/signal
@@ -714,6 +740,7 @@ export function createRunWorkflow(
         ctx.setAttribute('runId', runId);
 
         return {
+          schemaVersion: AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION,
           runId,
           steps: cursor.step,
           content: cursor.lastContent,
@@ -721,7 +748,7 @@ export function createRunWorkflow(
           ...(errorMessage !== undefined ? { errorMessage } : {}),
           ...(abortReason !== undefined ? { abortReason } : {}),
           ...(schemaValidation !== undefined ? { schemaValidation } : {}),
-          ...(structuredOutput !== undefined ? { structuredOutput } : {}),
+          ...(schemaValidation?.success ? { output } : {}),
           ...(tripwire !== undefined ? { tripwire } : {}),
           // Only include park metadata on non-failure outcomes: a failed/aborted run
           // never actually parks (the park block above is gated on !isFailureOutcome),

@@ -9,6 +9,7 @@ import {
 } from '@opentelemetry/api';
 
 import type { ActiveRun } from '../create-run';
+import { AgentRunError } from '../errors';
 import type { TokenUsage } from '../types';
 
 export type InstrumentationOptions = {
@@ -28,6 +29,10 @@ export type InstrumentationOptions = {
 type InstrumentableActiveRun = {
   addEventListener: ActiveRun['addEventListener'];
 };
+
+function getTelemetryError(error: unknown): unknown {
+  return error instanceof AgentRunError && error.cause instanceof Error ? error.cause : error;
+}
 
 /**
  * Subscribes to events on an ActiveRun and creates OpenTelemetry spans
@@ -283,14 +288,19 @@ export function instrument(
     'run.error',
     (event) => {
       const { error } = event;
+      const telemetryError = getTelemetryError(error);
       if (runSpan) {
         runSpan.setStatus({
           code: SpanStatusCode.ERROR,
-          message: error instanceof Error ? error.message : String(error),
+          message: telemetryError instanceof Error ? telemetryError.message : String(error),
         });
-        runSpan.setAttribute('error.type', error instanceof Error ? error.name : '_OTHER');
-        if (error instanceof Error) {
-          runSpan.recordException(error);
+        runSpan.setAttributes({
+          'error.type': telemetryError instanceof Error ? telemetryError.name : '_OTHER',
+          'operative.error.kind': error.kind,
+          'operative.error.code': error.code,
+        });
+        if (telemetryError instanceof Error) {
+          runSpan.recordException(telemetryError);
         }
       }
       endAllOpenSpans();
@@ -301,10 +311,19 @@ export function instrument(
   activeRun.addEventListener(
     'run.aborted',
     (event) => {
-      const { reason } = event;
+      const { error, reason } = event;
+      const telemetryError = getTelemetryError(error);
       if (runSpan) {
         runSpan.setAttribute('operative.abort_reason', reason ?? 'unknown');
-        runSpan.setStatus({ code: SpanStatusCode.OK, message: 'Aborted' });
+        runSpan.setAttributes({
+          'error.type': error.name,
+          'operative.error.kind': error.kind,
+          'operative.error.code': error.code,
+        });
+        runSpan.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
+        if (telemetryError instanceof Error) {
+          runSpan.recordException(telemetryError);
+        }
       }
       endAllOpenSpans();
     },
