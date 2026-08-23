@@ -298,6 +298,14 @@ describe('serializeActionDetail', () => {
     expect(result).toEqual(detail);
   });
 
+  it('serializes nested ordinary errors in other event details', () => {
+    expect(
+      serializeActionDetail('custom.event', {
+        nested: { error: new Error('nested failure') },
+      }),
+    ).toEqual({ nested: { error: 'nested failure' } });
+  });
+
   it('passes through primitives unchanged', () => {
     expect(serializeActionDetail('run.error', 'oops')).toBe('oops');
     expect(serializeActionDetail('run.error', null)).toBeNull();
