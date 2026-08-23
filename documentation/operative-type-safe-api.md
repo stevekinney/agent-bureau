@@ -475,15 +475,23 @@ rather than requiring every consumer of, say, `getRun` to know `D`.
 ```ts
 export type RunCompletedEvent<O = never, H extends boolean = false> = {
   result: RunResult<O, H>;
+  conversation: Conversation;
+  steps: readonly StepResult[];
+  content: string;
+  usage: TokenUsage;
+  finishReason: RunResult['finishReason'];
+  output?: O;
 };
 ```
 
-`RunCompletedEvent<O, H>` carries its payload as one nested `result` object.
-A listener reads `event.result.output`, not a separate structured-output field
-on the event. The runtime event's own `type: 'run.completed'`
-discriminant comes from the `Event` base class it extends (as it does today),
-not from this alias — this alias specifies only the new `result`-nested
-payload shape.
+`RunCompletedEvent<O, H>` carries the terminal payload twice on purpose: the
+canonical `event.result` object and the existing flattened runtime fields
+(`event.conversation`, `event.steps`, `event.content`, `event.usage`,
+`event.finishReason`, and, for schema-backed runs, `event.output`). New typed
+code should prefer `event.result.output` because it shares the same
+`RunResult<O, H>` conditional surface as `run.result()`. Existing event
+consumers can keep reading the flattened fields. There is no
+`event.structuredOutput` field.
 
 ## Compile-ready examples
 

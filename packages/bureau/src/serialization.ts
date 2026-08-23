@@ -181,6 +181,23 @@ function stripConversation(record: Record<string, unknown>): Record<string, unkn
   return rest;
 }
 
+function projectRunCompletionRecord(record: Record<string, unknown>): Record<string, unknown> {
+  const stripped = stripConversation(record);
+  const projected: Record<string, unknown> = { ...stripped };
+
+  if (Array.isArray(projected['steps'])) {
+    projected['steps'] = (projected['steps'] as Record<string, unknown>[]).map(stripConversation);
+  }
+
+  if (projected['result'] && typeof projected['result'] === 'object') {
+    projected['result'] = projectRunCompletionRecord(
+      projected['result'] as Record<string, unknown>,
+    );
+  }
+
+  return projected;
+}
+
 /**
  * Converts an `error` property inside a record to a JSON-safe string.
  * `Error` instances are replaced with their `message`; other non-string
@@ -222,16 +239,7 @@ export function serializeActionDetail(eventType: string, detail: unknown): unkno
   }
 
   if (eventType === 'run.completed') {
-    const stripped = stripConversation(record);
-
-    if (Array.isArray(stripped['steps'])) {
-      return toJsonSafe({
-        ...stripped,
-        steps: (stripped['steps'] as Record<string, unknown>[]).map(stripConversation),
-      });
-    }
-
-    return toJsonSafe(stripped);
+    return toJsonSafe(projectRunCompletionRecord(record));
   }
 
   if (

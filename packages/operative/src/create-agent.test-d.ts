@@ -60,11 +60,23 @@ const typedAgent = createAgent({
 });
 const typedRun = typedAgent.run('question');
 const typedOutput: Promise<{ answer: string }> = typedRun.output();
+const typedResultOutput: Promise<{ answer: string } | undefined> = typedRun
+  .result()
+  .then((result) => result.output);
 void typedOutput;
+void typedResultOutput;
 
 const untypedRun = agent.run('question');
 // @ts-expect-error — output() is only available when an output schema exists.
 void untypedRun.output;
+void untypedRun.result().then((result) => {
+  // @ts-expect-error — untyped results do not expose output.
+  void result.output;
+});
+
+declare const forwardedOptions: CreateAgentOptions;
+const forwardedAgent = createAgent(forwardedOptions);
+void forwardedAgent;
 
 // ---------------------------------------------------------------------------
 // 2. `RunOptions.toolbox` (the agent loop's own entry point) accepts the same

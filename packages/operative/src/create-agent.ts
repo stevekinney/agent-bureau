@@ -289,6 +289,7 @@ export function createAgent<O>(
   options: CreateAgentOptions & { output: ZodType<O> },
 ): StandaloneAgent<O, true>;
 export function createAgent(options: CreateAgentOptions & { output?: undefined }): StandaloneAgent;
+export function createAgent(options: CreateAgentOptions): StandaloneAgent<unknown, boolean>;
 export function createAgent(options: CreateAgentOptions): StandaloneAgent<unknown, boolean> {
   validateCreateAgentOptions(options);
 
@@ -365,15 +366,9 @@ export function createAgent(options: CreateAgentOptions): StandaloneAgent<unknow
       };
 
       const activeRun = createActiveRun(runOptions);
-      const run = createAgentRun<unknown, boolean>(activeRun, {
+      return createAgentRun<unknown, boolean>(activeRun, {
         hasOutput: output !== undefined,
       });
-      // Keep the runtime surface aligned with the type-level contract:
-      // `output()` exists only for agents configured with a response schema.
-      if (!output) {
-        delete (run as typeof run & { output?: unknown }).output;
-      }
-      return run;
     },
   };
 }

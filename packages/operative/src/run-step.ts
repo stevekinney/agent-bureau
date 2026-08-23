@@ -3,7 +3,7 @@ import { Conversation, materializeToolCalls } from 'conversationalist';
 import type { ToolCall } from 'interoperability';
 import type { ZodType } from 'zod';
 
-import { GuardrailTripwireError } from './errors';
+import { type AgentRunErrorKind, GuardrailTripwireError } from './errors';
 import {
   BackpressureAppliedEvent,
   BackpressureReleasedEvent,
@@ -148,7 +148,7 @@ export type StepOutcome =
       output?: unknown;
     }
   | { kind: 'abort'; reason?: string }
-  | { kind: 'error'; error: unknown };
+  | { kind: 'error'; error: unknown; errorKind?: AgentRunErrorKind };
 
 export function normalizeToArray<T>(value: T | T[] | undefined): T[] {
   if (!value) return [];
@@ -477,8 +477,8 @@ export async function runStep(
             shouldCompact = false;
           }
         } catch (error) {
-          emitter?.dispatch(new RunErrorEvent(step, error));
-          return { kind: 'error', error };
+          emitter?.dispatch(new RunErrorEvent(step, error, 'policy'));
+          return { kind: 'error', error, errorKind: 'policy' };
         }
       }
 
@@ -508,13 +508,13 @@ export async function runStep(
                 tokensFreed: tokensBefore - tokensAfter,
               });
             } catch (error) {
-              emitter?.dispatch(new RunErrorEvent(step, error));
-              return { kind: 'error', error };
+              emitter?.dispatch(new RunErrorEvent(step, error, 'policy'));
+              return { kind: 'error', error, errorKind: 'policy' };
             }
           }
         } catch (error) {
-          emitter?.dispatch(new RunErrorEvent(step, error));
-          return { kind: 'error', error };
+          emitter?.dispatch(new RunErrorEvent(step, error, 'policy'));
+          return { kind: 'error', error, errorKind: 'policy' };
         }
       }
     }
@@ -665,8 +665,8 @@ export async function runStep(
       // validateResponse tripwire path (below) never consults onError either.
       if (error instanceof GuardrailTripwireError) {
         backpressure?.onError(error);
-        emitter?.dispatch(new RunErrorEvent(step, error));
-        return { kind: 'error', error };
+        emitter?.dispatch(new RunErrorEvent(step, error, 'policy'));
+        return { kind: 'error', error, errorKind: 'policy' };
       }
 
       // onError recovery: sequential, first non-void return wins.
@@ -728,8 +728,8 @@ export async function runStep(
       if (signal?.aborted) {
         return { kind: 'abort', reason: signal.reason as string | undefined };
       }
-      emitter?.dispatch(new RunErrorEvent(step, error));
-      return { kind: 'error', error };
+      emitter?.dispatch(new RunErrorEvent(step, error, 'generate'));
+      return { kind: 'error', error, errorKind: 'generate' };
     }
   } while (shouldRetryStep);
 
@@ -760,8 +760,8 @@ export async function runStep(
       // before returning the error result so a tripwire-halted run still
       // reports the cost of the generate call that triggered it.
       accumulateUsage(runState, emitter, step, response.usage);
-      emitter?.dispatch(new RunErrorEvent(step, error));
-      return { kind: 'error', error };
+      emitter?.dispatch(new RunErrorEvent(step, error, 'output'));
+      return { kind: 'error', error, errorKind: 'output' };
     }
   }
   if (hooks?.has('validateResponse')) {
@@ -782,8 +782,8 @@ export async function runStep(
       // See the comment on the validateResponseHooks catch above — the
       // response has already been billed by the provider.
       accumulateUsage(runState, emitter, step, response.usage);
-      emitter?.dispatch(new RunErrorEvent(step, error));
-      return { kind: 'error', error };
+      emitter?.dispatch(new RunErrorEvent(step, error, 'output'));
+      return { kind: 'error', error, errorKind: 'output' };
     }
   }
 
@@ -831,8 +831,8 @@ export async function runStep(
           deps.collectAsync,
           'Tool execution aborted before a result could be produced (beforeToolExecution hook failed)',
         );
-        emitter?.dispatch(new RunErrorEvent(step, error));
-        return { kind: 'error', error };
+        emitter?.dispatch(new RunErrorEvent(step, error, 'tool'));
+        return { kind: 'error', error, errorKind: 'tool' };
       }
     }
     if (hooks?.has('beforeToolExecution')) {
@@ -853,8 +853,8 @@ export async function runStep(
           deps.collectAsync,
           'Tool execution aborted before a result could be produced (beforeToolExecution hook failed)',
         );
-        emitter?.dispatch(new RunErrorEvent(step, error));
-        return { kind: 'error', error };
+        emitter?.dispatch(new RunErrorEvent(step, error, 'tool'));
+        return { kind: 'error', error, errorKind: 'tool' };
       }
     }
 
@@ -968,8 +968,8 @@ export async function runStep(
             deps.collectAsync,
             'Tool execution failed before a result could be produced',
           );
-          emitter?.dispatch(new RunErrorEvent(step, error));
-          return { kind: 'error', error };
+          emitter?.dispatch(new RunErrorEvent(step, error, 'tool'));
+          return { kind: 'error', error, errorKind: 'tool' };
         }
       }
 
@@ -1019,8 +1019,8 @@ export async function runStep(
           } else {
             conversation.appendToolResults(results);
           }
-          emitter?.dispatch(new RunErrorEvent(step, error));
-          return { kind: 'error', error };
+          emitter?.dispatch(new RunErrorEvent(step, error, 'tool'));
+          return { kind: 'error', error, errorKind: 'tool' };
         }
       }
 
@@ -1051,8 +1051,8 @@ export async function runStep(
             });
           }
         } catch (error) {
-          emitter?.dispatch(new RunErrorEvent(step, error));
-          return { kind: 'error', error };
+          emitter?.dispatch(new RunErrorEvent(step, error, 'tool'));
+          return { kind: 'error', error, errorKind: 'tool' };
         }
       }
       if (hooks?.has('afterToolExecution')) {
@@ -1065,8 +1065,8 @@ export async function runStep(
             elicit,
           });
         } catch (error) {
-          emitter?.dispatch(new RunErrorEvent(step, error));
-          return { kind: 'error', error };
+          emitter?.dispatch(new RunErrorEvent(step, error, 'tool'));
+          return { kind: 'error', error, errorKind: 'tool' };
         }
       }
     }
@@ -1117,8 +1117,8 @@ export async function runStep(
   } catch (error) {
     emitter?.dispatch(new StepCompletedEvent(stepResult));
     runState.steps.push(stepResult);
-    emitter?.dispatch(new RunErrorEvent(step, error));
-    return { kind: 'error', error };
+    emitter?.dispatch(new RunErrorEvent(step, error, 'policy'));
+    return { kind: 'error', error, errorKind: 'policy' };
   }
   stepResult.final = shouldStop;
 
@@ -1130,16 +1130,16 @@ export async function runStep(
         await hook(stepResult);
       }
     } catch (error) {
-      emitter?.dispatch(new RunErrorEvent(step, error));
-      return { kind: 'error', error };
+      emitter?.dispatch(new RunErrorEvent(step, error, 'policy'));
+      return { kind: 'error', error, errorKind: 'policy' };
     }
   }
   if (hooks?.has('onStep')) {
     try {
       await hooks.run('onStep', stepResult);
     } catch (error) {
-      emitter?.dispatch(new RunErrorEvent(step, error));
-      return { kind: 'error', error };
+      emitter?.dispatch(new RunErrorEvent(step, error, 'policy'));
+      return { kind: 'error', error, errorKind: 'policy' };
     }
   }
 

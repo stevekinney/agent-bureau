@@ -4,7 +4,10 @@ import { Conversation, isConversation } from 'conversationalist';
 import { BudgetExceededError, ElicitationDeniedError, GuardrailTripwireError } from '../errors';
 import { RunErrorEvent } from '../events';
 import { buildStepDeps, createRunState } from '../loop';
-import { UnsupportedRunResultVersionError } from '../run-envelope';
+import {
+  UnsupportedRunResultLegacyFieldError,
+  UnsupportedRunResultVersionError,
+} from '../run-envelope';
 import { DEFAULT_MAXIMUM_STEPS, runStep } from '../run-step';
 import type { FinishReason } from '../types';
 import type { CheckpointStore } from './checkpoint-store';
@@ -237,7 +240,7 @@ export function normalizeAgentRunWorkflowResult(value: unknown): AgentRunWorkflo
     throw new UnsupportedRunResultVersionError(summary['schemaVersion']);
   }
   if ('structuredOutput' in summary) {
-    throw new UnsupportedRunResultVersionError(summary['schemaVersion']);
+    throw new UnsupportedRunResultLegacyFieldError('structuredOutput', summary['schemaVersion']);
   }
 
   return value as AgentRunWorkflowResult;
@@ -677,7 +680,7 @@ export function createRunWorkflow(
                 conversationSnapshot: conversation.snapshot(),
               };
             } catch (error) {
-              deps.emitter?.dispatch(new RunErrorEvent(finalStep, error));
+              deps.emitter?.dispatch(new RunErrorEvent(finalStep, error, 'policy'));
               return {
                 kind: 'error' as const,
                 errorMessage: serializeError(error),
@@ -745,7 +748,7 @@ export function createRunWorkflow(
           ...(errorMessage !== undefined ? { errorMessage } : {}),
           ...(abortReason !== undefined ? { abortReason } : {}),
           ...(schemaValidation !== undefined ? { schemaValidation } : {}),
-          ...(output !== undefined ? { output } : {}),
+          ...(schemaValidation?.success ? { output } : {}),
           ...(tripwire !== undefined ? { tripwire } : {}),
           // Only include park metadata on non-failure outcomes: a failed/aborted run
           // never actually parks (the park block above is gated on !isFailureOutcome),

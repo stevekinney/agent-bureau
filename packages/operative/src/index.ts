@@ -429,6 +429,7 @@ export {
   stringifyError,
   summarizeToolInput,
   toolStatusSchema,
+  UnsupportedRunResultLegacyFieldError,
   UnsupportedRunResultVersionError,
 } from './run-envelope';
 export { DEFAULT_MAXIMUM_STEPS } from './run-step';

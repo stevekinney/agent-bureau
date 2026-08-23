@@ -26,6 +26,7 @@ import type {
   SessionUpdateEvent,
   ToolStartedBubbleEvent,
 } from '../events';
+import { UnsupportedRunResultVersionError } from '../run-envelope';
 import type { GenerateFunction } from '../types';
 import { createSessionStore } from './create-session-store';
 import {
@@ -2858,6 +2859,56 @@ describe('AB-28: recover() reconciles a RunRef whose recovered run is already te
 
     const persisted = await store.load(sessionId);
     expect(persisted?.runs.find((r) => r.runId === runId)?.status).toBe('error');
+  });
+
+  it('contains unsupported terminal result versions as recover failures', async () => {
+    const sessionId = 'ab-28-unsupported-version-session';
+    const runId = `${sessionId}:0`;
+    const store = await seedRunningSession(sessionId, runId);
+    const emitter = new TypedEventTarget<OperativeEventMap>();
+    const events = collectEvents(emitter, 'session.recover');
+
+    const fakeEngine = {
+      resume: async () => {
+        throw alreadyTerminalError(runId, 'completed');
+      },
+      get: async (id: string) => ({
+        id,
+        status: 'completed',
+        result: {
+          schemaVersion: AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION + 1,
+          runId: id,
+          steps: 1,
+          content: '',
+          finishReason: 'stop-condition',
+        },
+      }),
+    } as unknown as AnyRunEngine;
+    const fakeCheckpointStore = {
+      loadCheckpoint: async () => ({
+        conversation: null,
+        cursor: { totalUsage: {}, lastContent: '', schemaAttempts: 0 },
+        steps: [],
+      }),
+    } as unknown as import('../durable/checkpoint-store').CheckpointStore;
+
+    const h = createSessionHandle(sessionId, {
+      store,
+      agentName: 'agent',
+      emitter,
+      engine: fakeEngine,
+      checkpointStore: fakeCheckpointStore,
+      runOptions: createTestRunOptions(),
+    });
+
+    expect(await h.recover()).toBeNull();
+    expect(events).toHaveLength(1);
+    expect((events[0] as SessionRecoverEvent).failures[0]?.error).toBeInstanceOf(
+      UnsupportedRunResultVersionError,
+    );
+
+    const persisted = await store.load(sessionId);
+    expect(persisted?.runs.find((r) => r.runId === runId)?.status).toBe('running');
   });
 
   it('reconciles a genuinely cancelled Weft-level workflow to "aborted"', async () => {

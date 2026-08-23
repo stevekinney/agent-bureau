@@ -23,6 +23,7 @@ import {
   ToolStartedBubbleEvent,
 } from '../events';
 import { createRunState } from '../loop';
+import { UnsupportedRunResultVersionError } from '../run-envelope';
 import {
   makeAbortResult,
   makeCompletedResult,
@@ -209,7 +210,7 @@ async function reconstructRunResult(
     // `responseSchema` run's validated value must survive result-only durable
     // paths (`resumeDurableRunResult`, `startDurableRunResult`), not just the
     // full lifecycle/finalize path (`driveReattachedRun`/`driveDurableRun`).
-    ...(summary.output !== undefined ? { output: summary.output } : {}),
+    ...('output' in summary ? { output: summary.output } : {}),
   };
 
   return { result, runState, conversation };
@@ -915,6 +916,9 @@ async function driveReattachedRun(
   try {
     summary = normalizeAgentRunWorkflowResult(await handle.result());
   } catch (error) {
+    if (error instanceof UnsupportedRunResultVersionError) {
+      throw error;
+    }
     // An ADAPTER-INITIATED abort (bureau.abortRun → engine.cancel) that ACTUALLY
     // terminalized this run is a real terminal: fire `run.aborted` so the gateway
     // listener persists `aborted`, rather than leaving the session looking

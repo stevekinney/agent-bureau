@@ -26,6 +26,7 @@ import {
   runReportSchema,
   stringifyError,
   summarizeToolInput,
+  UnsupportedRunResultLegacyFieldError,
   UnsupportedRunResultVersionError,
 } from '../src/run-envelope';
 
@@ -188,7 +189,7 @@ describe('buildRunReport', () => {
     expect(report.error).toBe('too many steps');
   });
 
-  it('drops a output value that cannot round-trip through JSON', () => {
+  it('drops an output value that cannot round-trip through JSON', () => {
     const circular: Record<string, unknown> = {};
     circular['self'] = circular;
     const report = buildRunReport({
@@ -247,6 +248,24 @@ describe('versioned frame parsing', () => {
         },
       }),
     ).toThrow(UnsupportedRunResultVersionError);
+  });
+
+  it('rejects a current-version frame containing legacy structuredOutput explicitly', () => {
+    expect(() =>
+      parseRunFrame({
+        schemaVersion: RUN_ENVELOPE_SCHEMA_VERSION,
+        type: 'run-finished',
+        runId: 'legacy-run',
+        timestamp: 1,
+        report: {
+          schemaVersion: RUN_ENVELOPE_SCHEMA_VERSION,
+          runId: 'legacy-run',
+          status: 'succeeded',
+          usage: { prompt: 1, completion: 2, total: 3 },
+          structuredOutput: { answer: 'legacy' },
+        },
+      }),
+    ).toThrow(UnsupportedRunResultLegacyFieldError);
   });
 
   it('rejects non-terminal v1 frames explicitly', () => {

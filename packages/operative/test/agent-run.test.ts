@@ -141,6 +141,35 @@ describe('AgentRun.unwrap() and output()', () => {
     await expect(run.output()).resolves.toEqual({ answer: 'validated' });
   });
 
+  it('preserves a validated undefined output', async () => {
+    const activeRun = createResolvedActiveRun({
+      content: '{"answer":"validated"}',
+      conversation: {} as never,
+      finishReason: 'stop-condition',
+      steps: [],
+      usage: { prompt: 0, completion: 0, total: 0 },
+      schemaValidation: { success: true },
+      output: undefined,
+    });
+    const run = createAgentRun<undefined, true>(activeRun, { hasOutput: true });
+
+    await expect(run.unwrap()).resolves.toBeUndefined();
+    await expect(run.output()).resolves.toBeUndefined();
+  });
+
+  it('omits output() from direct handles when no output schema is configured', () => {
+    const activeRun = createResolvedActiveRun({
+      content: 'plain text',
+      conversation: {} as never,
+      finishReason: 'stop-condition',
+      steps: [],
+      usage: { prompt: 0, completion: 0, total: 0 },
+    });
+    const run = createAgentRun(activeRun);
+
+    expect('output' in run).toBe(false);
+  });
+
   it('throws a synthesized missing-output error when unwrap() expects output but none exists', async () => {
     const activeRun = createResolvedActiveRun({
       content: '{"answer":"missing"}',

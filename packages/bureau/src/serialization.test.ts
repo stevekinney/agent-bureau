@@ -201,6 +201,40 @@ describe('serializeActionDetail', () => {
     expect(steps[1]!['content']).toBe('b');
   });
 
+  it('projects nested run.completed result without conversation graphs', () => {
+    const detail = {
+      conversation: { snapshot: () => ({}) },
+      result: {
+        conversation: { snapshot: () => ({}) },
+        steps: [
+          {
+            step: 1,
+            conversation: { snapshot: () => ({}) },
+            content: 'nested',
+            toolCalls: [],
+            results: [],
+            final: true,
+          },
+        ],
+        content: 'done',
+        usage: { prompt: 1, completion: 2, total: 3 },
+        finishReason: 'stop-condition',
+      },
+      steps: [],
+      content: 'done',
+      usage: { prompt: 1, completion: 2, total: 3 },
+      finishReason: 'stop-condition',
+    };
+
+    const result = serializeActionDetail('run.completed', detail) as Record<string, unknown>;
+    const nestedResult = result['result'] as Record<string, unknown>;
+    const nestedSteps = nestedResult['steps'] as Record<string, unknown>[];
+
+    expect(nestedResult).not.toHaveProperty('conversation');
+    expect(nestedSteps[0]).not.toHaveProperty('conversation');
+    expect(nestedResult['content']).toBe('done');
+  });
+
   it('keeps run.completed details JSON-safe after stripping conversations', () => {
     const detail = {
       conversation: { snapshot: () => ({}) },

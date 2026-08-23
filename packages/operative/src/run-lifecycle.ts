@@ -4,6 +4,7 @@ import { estimateCost, getModelPricing } from './cost-estimation';
 import {
   AbortAgentRunError,
   type AgentRunError,
+  type AgentRunErrorKind,
   BudgetExceededError,
   ElicitationDeniedError,
   GuardrailTripwireError,
@@ -77,7 +78,7 @@ export async function startRunLifecycle(
         maximumSteps: options.maximumSteps ?? DEFAULT_MAXIMUM_STEPS,
       });
     } catch (error) {
-      emitter?.dispatch(new RunErrorEvent(0, error));
+      emitter?.dispatch(new RunErrorEvent(0, error, 'contract'));
       return error;
     }
   }
@@ -139,8 +140,9 @@ export function makeErrorResult(
   emitter: EventDispatcher | undefined,
   error: unknown,
   costEstimation?: RunOptions['costEstimation'],
+  errorKind?: AgentRunErrorKind,
 ): RunResult {
-  const runError = toAgentRunError(error);
+  const runError = toAgentRunError(error, { kind: errorKind });
   runHookSilently(hooks, 'onRunError', {
     error: runError,
     partialSteps: [...runState.steps],
@@ -182,8 +184,8 @@ export function makeErrorResult(
 }
 
 /**
- * Build a successful terminal {@link RunResult} (`stop-condition` or
- * `maximum-steps`): emit `RunCompletedEvent` and fire the `onRunComplete` hook
+ * Build a terminal {@link RunResult} (`stop-condition` or `maximum-steps`):
+ * emit `RunCompletedEvent` and fire the appropriate run hook
  * with the total run duration. Mirrors `executeLoop`'s stop / maximum-steps
  * result construction.
  */
@@ -213,12 +215,20 @@ export function makeCompletedResult(
     finishReason,
     ...(maximumStepsError ? { error: maximumStepsError } : {}),
     ...(schemaValidation ? { schemaValidation } : {}),
-    ...(finishReason === 'stop-condition' && output !== undefined ? { output } : {}),
+    ...(finishReason === 'stop-condition' && schemaValidation?.success ? { output } : {}),
   };
   emitter?.dispatch(new RunCompletedEvent(result));
-  runHookSilently(hooks, 'onRunComplete', {
-    result,
-    totalDuration: performance.now() - runStartTime,
-  });
+  if (maximumStepsError) {
+    runHookSilently(hooks, 'onRunError', {
+      error: maximumStepsError,
+      partialSteps: [...runState.steps],
+      conversation,
+    });
+  } else {
+    runHookSilently(hooks, 'onRunComplete', {
+      result,
+      totalDuration: performance.now() - runStartTime,
+    });
+  }
   return result;
 }

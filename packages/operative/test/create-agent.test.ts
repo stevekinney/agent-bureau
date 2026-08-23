@@ -95,6 +95,7 @@ describe('createAgent', () => {
     expect(typeof handle.abort).toBe('function');
     expect(typeof handle[Symbol.asyncIterator]).toBe('function');
     expect(typeof handle[Symbol.dispose]).toBe('function');
+    expect('output' in handle).toBe(false);
   });
 
   it('result() returns a Promise that resolves to RunResult', async () => {

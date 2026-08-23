@@ -35,6 +35,26 @@ export class UnsupportedRunResultVersionError extends Error {
   }
 }
 
+export class UnsupportedRunResultLegacyFieldError extends UnsupportedRunResultVersionError {
+  readonly field: string;
+
+  constructor(field: string, version: unknown = RUN_ENVELOPE_SCHEMA_VERSION) {
+    super(version);
+    this.name = 'UnsupportedRunResultLegacyFieldError';
+    this.field = field;
+    this.message = `Unsupported run result legacy field "${field}" in schema version ${String(
+      version,
+    )}; expected current field "output".`;
+  }
+}
+
+function hasLegacyStructuredOutput(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null) return false;
+  const record = value as Record<string, unknown>;
+  if ('structuredOutput' in record) return true;
+  return hasLegacyStructuredOutput(record['report']);
+}
+
 // ---------------------------------------------------------------------------
 // Redacted tool input/output summaries
 // ---------------------------------------------------------------------------
@@ -189,19 +209,21 @@ export interface RunReport {
  * defined, so the envelope only guarantees JSON-safety, not the caller's
  * specific structured-output schema.
  */
-export const runReportSchema = z.object({
-  schemaVersion: z.literal(RUN_ENVELOPE_SCHEMA_VERSION),
-  runId: z.string(),
-  status: runReportStatusSchema,
-  finishReason: z.string().optional(),
-  usage: tokenUsageSchema,
-  costEstimate: costEstimateSchema.optional(),
-  effectiveModel: z.string().optional(),
-  effectiveEffort: z.string().optional(),
-  output: jsonValueSchema.optional(),
-  error: z.string().optional(),
-  transcript: conversationSchema.optional(),
-}) satisfies z.ZodType<RunReport>;
+export const runReportSchema = z
+  .object({
+    schemaVersion: z.literal(RUN_ENVELOPE_SCHEMA_VERSION),
+    runId: z.string(),
+    status: runReportStatusSchema,
+    finishReason: z.string().optional(),
+    usage: tokenUsageSchema,
+    costEstimate: costEstimateSchema.optional(),
+    effectiveModel: z.string().optional(),
+    effectiveEffort: z.string().optional(),
+    output: jsonValueSchema.optional(),
+    error: z.string().optional(),
+    transcript: conversationSchema.optional(),
+  })
+  .strict() satisfies z.ZodType<RunReport>;
 
 const runStartedFrameSchema = frameBaseSchema.extend({
   type: z.literal('run-started'),
@@ -256,10 +278,12 @@ const notificationFrameSchema = frameBaseSchema.extend({
   message: z.string(),
 });
 
-const runFinishedFrameSchema = frameBaseSchema.extend({
-  type: z.literal('run-finished'),
-  report: runReportSchema,
-}) satisfies z.ZodType<RunFinishedFrame>;
+const runFinishedFrameSchema = frameBaseSchema
+  .extend({
+    type: z.literal('run-finished'),
+    report: runReportSchema,
+  })
+  .strict() satisfies z.ZodType<RunFinishedFrame>;
 
 /**
  * Discriminated union of every versioned run-lifecycle frame. Every variant
@@ -279,6 +303,13 @@ export const runFrameSchema = z.discriminatedUnion('type', [
 
 /** Parse a durable frame and reject frames from an incompatible schema era. */
 export function parseRunFrame(input: unknown): RunFrame {
+  if (hasLegacyStructuredOutput(input)) {
+    const version =
+      typeof input === 'object' && input !== null && 'schemaVersion' in input
+        ? (input as { schemaVersion?: unknown }).schemaVersion
+        : undefined;
+    throw new UnsupportedRunResultLegacyFieldError('structuredOutput', version);
+  }
   const parsed = runFrameSchema.safeParse(input);
   if (parsed.success) return parsed.data;
   const version =

@@ -33,6 +33,7 @@ import {
   ToolStartedBubbleEvent,
 } from '../events';
 import type { OperativeHookMap } from '../hooks';
+import { UnsupportedRunResultVersionError } from '../run-envelope';
 import { createManualDurableEngine, spyEngine } from '../test/durable-engine';
 import { createMockGenerate } from '../test/index';
 import type { RunOptions, RunResult } from '../types';
@@ -1326,6 +1327,31 @@ describe('createRecoveredRunEventSurface', () => {
 });
 
 describe('reattachDurableActiveRun', () => {
+  it('rethrows unsupported recovered result versions', async () => {
+    const context = await buildContext();
+    try {
+      const handle = {
+        id: 'reattach-unsupported-version',
+        result: () =>
+          Promise.resolve({
+            schemaVersion: AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION + 1,
+            runId: 'reattach-unsupported-version',
+            steps: 0,
+            content: 'legacy',
+            finishReason: 'stop-condition',
+          }),
+      };
+      const recoveredRun = reattachDurableActiveRun(
+        { engine: context.engine, checkpointStore: context.checkpointStore },
+        { runId: 'reattach-unsupported-version', handle },
+      );
+
+      expect(recoveredRun.result).rejects.toThrow(UnsupportedRunResultVersionError);
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+
   it('fires run.aborted when the run is aborted via the adapter (committee round-2 finding 2)', async () => {
     const context = await buildContext();
     try {

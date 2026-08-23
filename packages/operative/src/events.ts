@@ -5,7 +5,7 @@ import type { EventMap, ForwardedEvent, ObservableLike, Observer, Subscription }
 
 import type { CostBudgetExceededEvent, CostBudgetThresholdEvent } from './cost-budget-monitor';
 import { estimateCacheHitRate } from './cost-estimation';
-import { type AgentRunError, toAgentRunError } from './errors';
+import { type AgentRunError, type AgentRunErrorKind, toAgentRunError } from './errors';
 import type { GenerateResponse, RunResult, StepResult, TokenUsage } from './types';
 
 // ---------------------------------------------------------------------------
@@ -136,10 +136,10 @@ export class RunErrorEvent extends Event {
   static readonly type = 'run.error' as const;
   readonly step: number;
   readonly error: AgentRunError;
-  constructor(step: number, error: unknown) {
+  constructor(step: number, error: unknown, kind?: AgentRunErrorKind) {
     super(RunErrorEvent.type);
     this.step = step;
-    this.error = toAgentRunError(error);
+    this.error = toAgentRunError(error, { kind });
   }
 }
 

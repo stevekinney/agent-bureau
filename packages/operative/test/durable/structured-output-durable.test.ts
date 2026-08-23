@@ -137,9 +137,42 @@ describe('durable result-only run helpers preserve output (regression PRRT_kwDOR
       );
 
       expect(result.output).toEqual({ answer: 'hi' });
+      expect(result.schemaValidation?.success).toBe(true);
     } finally {
       engine[Symbol.dispose]?.();
     }
+  });
+
+  it('resumeDurableRunResult: reconstructing a summary with validated undefined output preserves the key', async () => {
+    const result = await resumeDurableRunResult(
+      {
+        engine: {
+          resume: async () => ({
+            result: async () => ({
+              schemaVersion: AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION,
+              runId: 'structured-output-undefined-run',
+              steps: 1,
+              content: '{"answer":"hi"}',
+              finishReason: 'stop-condition',
+              schemaValidation: { success: true },
+              output: undefined,
+            }),
+          }),
+        } as never,
+        checkpointStore: {
+          loadCheckpoint: async () => ({
+            conversation: null,
+            cursor: { totalUsage: {}, lastContent: '{"answer":"hi"}', schemaAttempts: 0 },
+            steps: [],
+          }),
+        } as never,
+      },
+      'structured-output-undefined-run',
+    );
+
+    expect(result.schemaValidation?.success).toBe(true);
+    expect('output' in result).toBe(true);
+    expect(result.output).toBeUndefined();
   });
 
   it('NEUTER CHECK: no responseSchema means no output on the same code path', async () => {
@@ -251,6 +284,7 @@ describe('durable result-only run helpers preserve output (regression PRRT_kwDOR
         runId,
       );
       expect(result.output).toEqual({ answer: 'resumed' });
+      expect(result.schemaValidation?.success).toBe(true);
     } finally {
       engine2[Symbol.dispose]?.();
     }

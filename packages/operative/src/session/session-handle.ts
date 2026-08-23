@@ -940,8 +940,12 @@ export function createSessionHandle(
             // rejected and why regardless — the caller learns about every
             // rejection via `failures` on the event dispatched below, not
             // just the last one — then try older running refs either way.
-            await reconcileTerminalRunRef(store, engine, checkpointStore, sessionId, runningRef);
-            failures.push({ runId, error });
+            try {
+              await reconcileTerminalRunRef(store, engine, checkpointStore, sessionId, runningRef);
+              failures.push({ runId, error });
+            } catch (reconciliationError) {
+              failures.push({ runId, error: reconciliationError });
+            }
           }
         }
         if (failures.length > 0) {

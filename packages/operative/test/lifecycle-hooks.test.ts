@@ -7,7 +7,7 @@ import { z } from 'zod';
 
 import { noToolCalls } from '../src/conditions/predicates';
 import { createActiveRun } from '../src/create-run';
-import { AbortAgentRunError } from '../src/errors';
+import { AbortAgentRunError, MaximumStepsExceededError } from '../src/errors';
 import type { OperativeHookMap } from '../src/hooks';
 import type {
   AfterGenerateContext,
@@ -451,6 +451,26 @@ describe('onRunComplete hook', () => {
     expect(result.content).toBe('Hello');
     expect(result.finishReason).toBe('stop-condition');
   });
+
+  it('does not fire for maximum-steps failures', async () => {
+    const contexts: RunCompleteContext[] = [];
+    const hooks = new HookRegistry<OperativeHookMap>();
+
+    hooks.on('onRunComplete', async (context) => {
+      contexts.push(context);
+    });
+
+    const result = await run({
+      generate: async () => toolCallResponse([weatherToolCall('Denver')]),
+      toolbox: createTestToolbox([tool]),
+      conversation: new Conversation(),
+      maximumSteps: 1,
+      hooks,
+    });
+
+    expect(result.finishReason).toBe('maximum-steps');
+    expect(contexts).toHaveLength(0);
+  });
 });
 
 describe('onRunError hook', () => {
@@ -480,6 +500,51 @@ describe('onRunError hook', () => {
     expect(contexts[0].error).toBeInstanceOf(Error);
     expect(contexts[0].conversation).toBeInstanceOf(Conversation);
     expect(contexts[0].partialSteps).toBeDefined();
+  });
+
+  it('preserves output phase for validation hook failures', async () => {
+    const activeRun = createActiveRun({
+      generate: createMockGenerate([textResponse('Hello')]),
+      toolbox: createTestToolbox([]),
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+      validateResponse: async () => {
+        throw new Error('invalid response');
+      },
+    });
+    const errors: string[] = [];
+    activeRun.addEventListener('run.error', (event) => {
+      errors.push(event.error.kind);
+    });
+
+    const result = await activeRun.result;
+
+    expect(result.finishReason).toBe('error');
+    expect(errors).toEqual(['output']);
+    expect(result.error).toMatchObject({ kind: 'output' });
+  });
+
+  it('fires with the configured maximumSteps policy error when the loop reaches its cap', async () => {
+    const contexts: RunErrorContext[] = [];
+    const hooks = new HookRegistry<OperativeHookMap>();
+
+    hooks.on('onRunError', async (context) => {
+      contexts.push(context);
+    });
+
+    const result = await run({
+      generate: async () => toolCallResponse([weatherToolCall('Denver')]),
+      toolbox: createTestToolbox([tool]),
+      conversation: new Conversation(),
+      maximumSteps: 3,
+      hooks,
+    });
+
+    expect(result.finishReason).toBe('maximum-steps');
+    expect(result.error).toBeInstanceOf(MaximumStepsExceededError);
+    expect((result.error as Error).message).toContain('maximumSteps (3)');
+    expect(contexts).toHaveLength(1);
+    expect(contexts[0].error).toBe(result.error);
   });
 });
 

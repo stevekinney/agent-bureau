@@ -1,5 +1,6 @@
 import { Conversation, isConversation } from 'conversationalist';
 
+import { MaximumStepsExceededError } from './errors';
 import { RunErrorEvent } from './events';
 import {
   makeAbortResult,
@@ -124,7 +125,15 @@ export async function executeLoop(
       );
     }
     if (outcome.kind === 'error') {
-      return makeErrorResult(runState, conversation, hooks, emitter, outcome.error, costEstimation);
+      return makeErrorResult(
+        runState,
+        conversation,
+        hooks,
+        emitter,
+        outcome.error,
+        costEstimation,
+        outcome.errorKind,
+      );
     }
     if (outcome.kind === 'continue') {
       continue;
@@ -157,8 +166,16 @@ export async function executeLoop(
         conversation.appendAssistantMessage(finalContent);
       }
     } catch (error) {
-      emitter?.dispatch(new RunErrorEvent(runState.steps.length, error));
-      return makeErrorResult(runState, conversation, hooks, emitter, error, costEstimation);
+      emitter?.dispatch(new RunErrorEvent(runState.steps.length, error, 'policy'));
+      return makeErrorResult(
+        runState,
+        conversation,
+        hooks,
+        emitter,
+        error,
+        costEstimation,
+        'policy',
+      );
     }
   }
 
@@ -172,5 +189,6 @@ export async function executeLoop(
     undefined,
     undefined,
     costEstimation,
+    new MaximumStepsExceededError(maximumSteps),
   );
 }
