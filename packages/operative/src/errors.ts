@@ -32,6 +32,52 @@ export class AgentRunError extends Error {
   }
 }
 
+export type SerializedAgentRunError = {
+  name: string;
+  message: string;
+  kind: AgentRunErrorKind;
+  code: AgentRunErrorCode;
+  cause?: unknown;
+};
+
+function serializeAgentRunErrorCause(cause: unknown): unknown {
+  if (cause === undefined) return undefined;
+  if (cause instanceof AgentRunError) return agentRunErrorToJSON(cause);
+  if (cause instanceof Error) return { name: cause.name, message: cause.message };
+  if (
+    cause === null ||
+    typeof cause === 'string' ||
+    typeof cause === 'number' ||
+    typeof cause === 'boolean'
+  ) {
+    return cause;
+  }
+  if (typeof cause === 'bigint' || typeof cause === 'symbol') return String(cause);
+  try {
+    return JSON.parse(JSON.stringify(cause));
+  } catch {
+    return Object.prototype.toString.call(cause);
+  }
+}
+
+/** Converts an AgentRunError to a stable JSON-safe diagnostic shape. */
+export function agentRunErrorToJSON(error: AgentRunError): SerializedAgentRunError {
+  const serialized: SerializedAgentRunError = {
+    name: error.name,
+    message: error.message,
+    kind: error.kind,
+    code: error.code,
+  };
+  const cause = serializeAgentRunErrorCause(error.cause);
+  if (cause !== undefined) serialized.cause = cause;
+  return serialized;
+}
+
+/** Serializes an AgentRunError without dropping kind/code/cause metadata. */
+export function serializeAgentRunError(error: AgentRunError): string {
+  return JSON.stringify(agentRunErrorToJSON(error));
+}
+
 function formatUnknownErrorMessage(error: unknown): string {
   if (error instanceof Error) return error.message;
   if (typeof error === 'string') return error;

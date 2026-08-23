@@ -301,6 +301,7 @@ export function buildTerminalReportFromAbortedEvent(
     usage?: BuildRunReportInput['usage'];
     costEstimate?: BuildRunReportInput['costEstimate'];
     reason?: string;
+    error?: unknown;
     steps: RunState['steps'];
     conversation: { current: BuildRunReportInput['transcript'] };
   },
@@ -314,7 +315,7 @@ export function buildTerminalReportFromAbortedEvent(
     costEstimate: event.costEstimate,
     effectiveModel,
     effectiveEffort,
-    error: event.reason,
+    error: event.error !== undefined ? serializeUnknownError(event.error) : event.reason,
     transcript: event.conversation.current,
   });
 }

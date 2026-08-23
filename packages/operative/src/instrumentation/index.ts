@@ -311,10 +311,19 @@ export function instrument(
   activeRun.addEventListener(
     'run.aborted',
     (event) => {
-      const { reason } = event;
+      const { error, reason } = event;
+      const telemetryError = getTelemetryError(error);
       if (runSpan) {
         runSpan.setAttribute('operative.abort_reason', reason ?? 'unknown');
-        runSpan.setStatus({ code: SpanStatusCode.OK, message: 'Aborted' });
+        runSpan.setAttributes({
+          'error.type': error.name,
+          'operative.error.kind': error.kind,
+          'operative.error.code': error.code,
+        });
+        runSpan.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
+        if (telemetryError instanceof Error) {
+          runSpan.recordException(telemetryError);
+        }
       }
       endAllOpenSpans();
     },

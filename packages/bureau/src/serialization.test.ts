@@ -140,7 +140,12 @@ describe('serializeActionDetail', () => {
     expect(result).not.toHaveProperty('conversation');
     expect(result['step']).toBe(2);
     expect(result['reason']).toBe('cancelled');
-    expect(result['error']).toBe('cancelled');
+    expect(JSON.parse(result['error'] as string)).toMatchObject({
+      name: 'AbortAgentRunError',
+      message: 'cancelled',
+      kind: 'abort',
+      code: 'ABORTED',
+    });
   });
 
   it('strips conversation from run.completed details', () => {
@@ -446,6 +451,21 @@ describe('serializeUnknownError', () => {
     };
 
     expect(serializeUnknownError(value)).toBe('{"summary":"redacted view"}');
+  });
+
+  it('preserves typed AgentRunError details', () => {
+    const error = new AbortAgentRunError('cancelled', new Error('socket closed'));
+
+    expect(JSON.parse(serializeUnknownError(error))).toMatchObject({
+      name: 'AbortAgentRunError',
+      message: 'cancelled',
+      kind: 'abort',
+      code: 'ABORTED',
+      cause: {
+        name: 'Error',
+        message: 'socket closed',
+      },
+    });
   });
 });
 

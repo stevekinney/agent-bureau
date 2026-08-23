@@ -194,9 +194,11 @@ export function createStore(options: StoreOptions = {}): Store {
             break;
           }
           case 'run.aborted': {
+            const abortEvent = event as Event & { error: unknown };
             updated = {
               ...updated,
               status: 'aborted',
+              error: abortEvent.error,
             };
             break;
           }

@@ -167,16 +167,19 @@ export type {
   ClassifiedError,
   ErrorCategory,
   GuardrailTripwireDetail,
+  SerializedAgentRunError,
 } from './errors';
 export {
   AbortAgentRunError,
   AgentRunError,
+  agentRunErrorToJSON,
   AsyncDefinitionLoadError,
   BudgetExceededError,
   classifyError,
   ElicitationDeniedError,
   GuardrailTripwireError,
   MaximumStepsExceededError,
+  serializeAgentRunError,
   StandardSchemaValidationError,
 } from './errors';
 export type {

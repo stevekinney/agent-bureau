@@ -6,7 +6,12 @@ import { z } from 'zod';
 
 import { noToolCalls } from '../src/conditions/predicates';
 import { createActiveRun } from '../src/create-run';
-import { AgentRunError } from '../src/errors';
+import {
+  AbortAgentRunError,
+  AgentRunError,
+  agentRunErrorToJSON,
+  serializeAgentRunError,
+} from '../src/errors';
 import { createMockGenerate } from '../src/test/index';
 import type { GenerateResponse } from '../src/types';
 const run = (options: Parameters<typeof createActiveRun>[0]) => createActiveRun(options).result;
@@ -30,6 +35,66 @@ function toolCallResponse(
 }
 
 describe('error handling', () => {
+  it('serializes AgentRunError diagnostics with stable cause metadata', () => {
+    const uncased = new AbortAgentRunError('cancelled');
+    expect(agentRunErrorToJSON(uncased)).toEqual({
+      name: 'AbortAgentRunError',
+      message: 'cancelled',
+      kind: 'abort',
+      code: 'ABORTED',
+    });
+
+    expect(
+      agentRunErrorToJSON(
+        new AbortAgentRunError(
+          'wrapped',
+          new AgentRunError('inner', { kind: 'tool', code: 'UNKNOWN' }),
+        ),
+      ).cause,
+    ).toEqual({
+      name: 'AgentRunError',
+      message: 'inner',
+      kind: 'tool',
+      code: 'UNKNOWN',
+    });
+    expect(
+      agentRunErrorToJSON(new AbortAgentRunError('error', new Error('socket closed'))).cause,
+    ).toEqual({
+      name: 'Error',
+      message: 'socket closed',
+    });
+
+    expect(agentRunErrorToJSON(new AbortAgentRunError('null', null)).cause).toBeNull();
+    expect(agentRunErrorToJSON(new AbortAgentRunError('string', 'string cause')).cause).toBe(
+      'string cause',
+    );
+    expect(agentRunErrorToJSON(new AbortAgentRunError('number', 42)).cause).toBe(42);
+    expect(agentRunErrorToJSON(new AbortAgentRunError('boolean', false)).cause).toBe(false);
+    expect(agentRunErrorToJSON(new AbortAgentRunError('bigint', 42n)).cause).toBe('42');
+    expect(agentRunErrorToJSON(new AbortAgentRunError('symbol', Symbol('token'))).cause).toBe(
+      'Symbol(token)',
+    );
+
+    expect(
+      agentRunErrorToJSON(new AbortAgentRunError('object', { retryable: true })).cause,
+    ).toEqual({
+      retryable: true,
+    });
+
+    const circular: Record<string, unknown> = {};
+    circular['self'] = circular;
+    expect(agentRunErrorToJSON(new AbortAgentRunError('circular', circular)).cause).toBe(
+      '[object Object]',
+    );
+
+    expect(JSON.parse(serializeAgentRunError(new AbortAgentRunError('cancelled')))).toEqual({
+      name: 'AbortAgentRunError',
+      message: 'cancelled',
+      kind: 'abort',
+      code: 'ABORTED',
+    });
+  });
+
   it('terminates with error finish reason when generate throws', async () => {
     const generate = async () => {
       throw new Error('API rate limit exceeded');

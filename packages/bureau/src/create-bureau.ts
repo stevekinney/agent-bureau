@@ -1172,6 +1172,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
           usage: event.usage,
           costEstimate: event.costEstimate,
           reason: event.reason,
+          error: event.error,
           steps: store.getRun(runId)?.steps ?? [],
           conversation: event.conversation,
         });
@@ -1205,6 +1206,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
                 // aborts settles through THIS listener (settleRecoveredRun is gone),
                 // so the field must be written here, not only on the old recovery path.
                 lastFinishReason: 'aborted',
+                lastError: serializeUnknownError(event.error),
               },
               request.agentName,
               baseConversationHistory,
@@ -1342,6 +1344,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
         usage: event.usage,
         costEstimate: event.costEstimate,
         reason: event.reason,
+        error: event.error,
         steps: store.getRun(runId)?.steps ?? [],
         conversation: event.conversation,
       });
@@ -1361,6 +1364,7 @@ export async function createBureau(options: BureauOptions = {}): Promise<Bureau>
             lastRunId: runId,
             lastRunStatus: 'aborted',
             lastFinishReason: 'aborted',
+            lastError: serializeUnknownError(event.error),
           }),
         { runId, sessionId, status: 'aborted' },
       );

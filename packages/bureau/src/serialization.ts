@@ -1,3 +1,4 @@
+import { AgentRunError } from '@lostgradient/operative';
 import type { RunState } from '@lostgradient/operative/store';
 
 import type { BureauDiagnostic, DiagnosticSink, RunDetail, RunSummary } from './types';
@@ -33,6 +34,20 @@ function serializeTrackedObject<T extends object>(
   }
 }
 
+function serializeAgentRunErrorForBureau(error: AgentRunError): string {
+  return safeStringify({
+    name: error.name,
+    message: error.message,
+    kind: error.kind,
+    code: error.code,
+    ...(error.cause instanceof Error
+      ? { cause: { name: error.cause.name, message: error.cause.message } }
+      : error.cause !== undefined
+        ? { cause: toJsonSafe(error.cause) }
+        : {}),
+  });
+}
+
 function toJsonSafe(value: unknown, seen = new WeakSet<object>()): unknown {
   if (
     value === null ||
@@ -50,6 +65,10 @@ function toJsonSafe(value: unknown, seen = new WeakSet<object>()): unknown {
 
   if (typeof value === 'function') {
     return `[Function ${value.name || 'anonymous'}]`;
+  }
+
+  if (value instanceof AgentRunError) {
+    return serializeAgentRunErrorForBureau(value);
   }
 
   if (value instanceof Error) {
@@ -98,6 +117,10 @@ function toJsonSafe(value: unknown, seen = new WeakSet<object>()): unknown {
 }
 
 export function serializeUnknownError(error: unknown): string {
+  if (error instanceof AgentRunError) {
+    return serializeAgentRunErrorForBureau(error);
+  }
+
   if (error instanceof Error) {
     return error.message;
   }

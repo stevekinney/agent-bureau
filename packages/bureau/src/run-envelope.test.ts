@@ -5,6 +5,7 @@
  * `Bureau.getRunReport` / `run-envelope` `ServerFrame` surface they feed.
  */
 import {
+  AbortAgentRunError,
   type ActiveRun,
   BudgetExceededEvent,
   BudgetThresholdEvent,
@@ -429,13 +430,19 @@ describe('buildTerminalReportFromCompletedEvent / buildTerminalReportFromAborted
     const report = buildTerminalReportFromAbortedEvent('run-aborted-1', {
       usage: { prompt: 4, completion: 2, total: 6 },
       reason: 'user cancelled',
+      error: new AbortAgentRunError('user cancelled'),
       steps: [],
       conversation,
     });
 
     expect(report.status).toBe('aborted');
     expect(report.finishReason).toBe('aborted');
-    expect(report.error).toBe('user cancelled');
+    expect(JSON.parse(report.error ?? '')).toMatchObject({
+      name: 'AbortAgentRunError',
+      message: 'user cancelled',
+      kind: 'abort',
+      code: 'ABORTED',
+    });
     expect(report.usage).toEqual({ prompt: 4, completion: 2, total: 6 });
     expect(report.transcript?.ids.length).toBeGreaterThan(0);
   });

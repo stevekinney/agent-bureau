@@ -2152,7 +2152,16 @@ describe('createBureau', () => {
     const session = await bureau.getSession(run.sessionId);
     expect(session?.metadata['lastRunId']).toBe(run.id);
     expect(session?.metadata['lastRunStatus']).toBe('error');
-    expect(session?.metadata['lastError']).toBe('Explode');
+    expect(JSON.parse(session?.metadata['lastError'] as string)).toMatchObject({
+      name: 'AgentRunError',
+      message: 'Explode',
+      kind: 'generate',
+      code: 'UNKNOWN',
+      cause: {
+        name: 'Error',
+        message: 'Explode',
+      },
+    });
   });
 
   it('persists a guardrail tripwire halt as lastRunStatus: error with lastError set (regression PRRT_kwDORvupsc6PxCXP)', async () => {
@@ -2323,6 +2332,11 @@ describe('createBureau', () => {
     const session = await bureau.getSession(run.sessionId);
     expect(session?.metadata['lastRunStatus']).toBe('aborted');
     expect(session?.metadata['lastFinishReason']).toBe('aborted');
+    expect(JSON.parse(session?.metadata['lastError'] as string)).toMatchObject({
+      name: 'AbortAgentRunError',
+      kind: 'abort',
+      code: 'ABORTED',
+    });
   });
 
   it('persists the checkpointed conversation when a durable run is aborted after a checkpoint (regression PRRT_kwDORvupsc6Mddv3 / #113)', async () => {

@@ -83,7 +83,9 @@ export function createRunsStore(initialRuns: RunSummary[]): RunsStore {
             ? (detail.error ?? run.error)
             : frame.event === 'run.completed'
               ? (detail.error ?? run.error)
-              : run.error,
+              : frame.event === 'run.aborted'
+                ? (detail.error ?? run.error)
+                : run.error,
         status:
           frame.event === 'run.completed'
             ? 'completed'

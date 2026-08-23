@@ -214,6 +214,36 @@ describe('createChatStore', () => {
     expect(store.streamingAssistantContent).toBe('');
   });
 
+  it('sets an error on run.aborted and clears streaming', async () => {
+    const fetchMock = mock(() =>
+      Promise.resolve(new Response(JSON.stringify(makeRun({ id: 'run-1' })))),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const { store } = makeStore();
+    await store.send('question');
+
+    store.handleMessage({
+      type: 'stream:text-delta',
+      runSeq: 1,
+      runId: 'run-1',
+      content: 'partial',
+      accumulated: 'partial',
+    });
+    store.handleMessage({
+      type: 'event',
+      runId: 'run-1',
+      event: 'run.aborted',
+      detail: { error: '{"kind":"abort","code":"ABORTED","message":"cancelled"}' },
+      sequence: 1,
+      runSeq: 1,
+      timestamp: 1,
+    });
+
+    expect(store.error).toBe('{"kind":"abort","code":"ABORTED","message":"cancelled"}');
+    expect(store.streamingAssistantContent).toBe('');
+  });
+
   it('summarizes completed tool calls in the tool-activity log', async () => {
     const fetchMock = mock(() =>
       Promise.resolve(new Response(JSON.stringify(makeRun({ id: 'run-1' })))),

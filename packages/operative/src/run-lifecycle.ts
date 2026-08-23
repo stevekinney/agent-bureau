@@ -104,7 +104,8 @@ export function makeAbortResult(
     new RunAbortedEvent(step, conversation, error, runState.totalUsage, costEstimate),
   );
   runHookSilently(hooks, 'onRunAbort', {
-    reason,
+    reason: error.message,
+    error,
     partialSteps: [...runState.steps],
     conversation,
   });

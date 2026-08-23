@@ -3,6 +3,7 @@ import { conversationSchema, jsonValueSchema, tokenUsageSchema } from 'conversat
 import { z } from 'zod';
 
 import type { CostEstimate } from './cost-estimation';
+import { AgentRunError, serializeAgentRunError } from './errors';
 import type { FinishReason } from './types';
 
 /**
@@ -481,6 +482,7 @@ export function createRunFinishedFrame(
 
 /** Stringifies an arbitrary caught value into the `RunReport.error` string field. */
 export function stringifyError(error: unknown): string {
+  if (error instanceof AgentRunError) return serializeAgentRunError(error);
   if (error instanceof Error) return error.message;
   if (typeof error === 'string') return error;
   if (error === null || error === undefined) return 'null';

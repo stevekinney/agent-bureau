@@ -1,6 +1,7 @@
 import type { AnyToolbox } from 'armorer';
 import type { Conversation } from 'conversationalist';
 
+import type { AgentRunError } from '../errors';
 import type { ResponseFormat, ToolChoice } from '../structured-output/types';
 import type { GenerateResponse, RunResult, StepResult, TokenUsage } from '../types';
 
@@ -62,6 +63,7 @@ export interface RunErrorContext {
 /** Context passed to onRunAbort hooks. */
 export interface RunAbortContext {
   reason?: string;
+  error: AgentRunError;
   partialSteps: ReadonlyArray<StepResult>;
   conversation: Conversation;
 }
