@@ -2554,9 +2554,32 @@ describe('createBureau', () => {
       // The schedule is then visible through the read surface.
       const fetched = await bureau.getSchedule(summary!.id);
       expect(fetched?.id).toBe(summary!.id);
+      const listed = await bureau.listSchedules();
+      expect(listed?.items.some((schedule) => schedule.id === summary!.id)).toBe(true);
     } finally {
       bureau.dispose();
     }
+  });
+
+  it('exposes optional service getters and the completable event surface', async () => {
+    const bureau = await createBureau({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+    });
+
+    expect(bureau.auditTrail).toBeUndefined();
+    expect(bureau.webhookNotifier).toBeUndefined();
+    expect(bureau.onlineEvalSampler).toBeUndefined();
+    expect(bureau.completed).toBe(false);
+    expect(bureau.signal.aborted).toBe(false);
+
+    const subscription = bureau.subscribe('action', () => {});
+    subscription.unsubscribe();
+    bureau.complete();
+
+    expect(bureau.completed).toBe(true);
+    expect(bureau.signal.aborted).toBe(true);
+    bureau.dispose();
   });
 
   it('createSchedule registers a fixed-interval schedule for a weft duration spec', async () => {

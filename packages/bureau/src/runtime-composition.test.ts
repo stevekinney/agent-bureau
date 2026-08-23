@@ -68,6 +68,17 @@ async function saveRecoverableSession(sessionStore: SessionStore, runId: string)
 }
 
 describe('createRuntimeComposition', () => {
+  it('provides an unavailable toolbox that accepts empty calls and rejects tool calls', async () => {
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'ok', toolCalls: [] }),
+    });
+    const runRuntime = await runtime.createRunRuntime({ message: 'test', sessionId: 'test' });
+    expect(await Promise.resolve(runRuntime.toolbox.execute([]))).toEqual([]);
+    expect(() => runRuntime.toolbox.execute({ name: 'missing', arguments: {} })).toThrow(
+      'No toolbox configured but tool calls were received',
+    );
+  });
+
   it('does not create a stream event target for custom generate functions', async () => {
     const runtime = await createRuntimeComposition({
       generate: async () => ({ content: 'custom', toolCalls: [] }),
@@ -3346,6 +3357,38 @@ describe('AB-40: default guardrails preset', () => {
     });
 
     expect(runRuntime.streamEventTarget).toBeDefined();
+  });
+
+  it('executes the streaming provider pipeline and complexity routing branches', async () => {
+    const runtime = await createRuntimeComposition(
+      {
+        providers: [
+          { name: 'simple', provider: { provider: 'openai', model: 'cheap-model' } },
+          { name: 'complex', provider: { provider: 'anthropic', model: 'expensive-model' } },
+          { name: 'frontier', provider: { provider: 'gemini', model: 'frontier-model' } },
+        ],
+        routing: { type: 'complexity', simple: 'simple', complex: 'complex', frontier: 'frontier' },
+        guardrails: { mode: 'tripwire', output: { validators: [] } },
+        toolbox: createToolbox([], { context: {} }),
+      },
+      {
+        resolveProviderGenerate(provider) {
+          return createGenerateForProvider(provider);
+        },
+      },
+    );
+    const runRuntime = await runtime.createRunRuntime({
+      message: 'Write a short summary',
+      sessionId: 'complexity-routing',
+    });
+    const conversation = new Conversation();
+    conversation.appendUserMessage('Write a short summary');
+    const result = await runRuntime.generate({
+      conversation,
+      step: 0,
+      toolbox: runRuntime.toolbox,
+    });
+    expect(result.content).toBe('cheap-model');
   });
 
   it('a caller-supplied guardrails config replaces the default preset entirely', async () => {

@@ -477,7 +477,7 @@ type RoutingResult =
       onUsage: (usage: { total: number } | undefined) => void;
     };
 
-function createRoutingStrategy(configuration: RoutingConfiguration): RoutingResult {
+export function createRoutingStrategy(configuration: RoutingConfiguration): RoutingResult {
   switch (configuration.type) {
     case 'step-based':
       return {

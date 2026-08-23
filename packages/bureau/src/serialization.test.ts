@@ -419,6 +419,22 @@ describe('serializeUnknownError', () => {
     expect(serializeUnknownError(undefined)).toBe('null');
   });
 
+  it('serializes symbols instead of returning undefined', () => {
+    expect(serializeUnknownError(Symbol('boom'))).toBe('Symbol(boom)');
+  });
+
+  it('falls back to String when the host JSON serializer throws', () => {
+    const stringify = spyOn(JSON, 'stringify').mockImplementationOnce(() => {
+      throw new Error('serializer unavailable');
+    });
+    try {
+      expect(serializeUnknownError(Symbol('boom'))).toBe('Symbol(boom)');
+      expect(stringify).toHaveBeenCalledTimes(1);
+    } finally {
+      stringify.mockRestore();
+    }
+  });
+
   it('serializes an object with a toJSON method by calling it instead of walking its own properties', () => {
     const value = {
       internal: 'should never be visible',
