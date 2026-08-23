@@ -40,8 +40,9 @@ export interface SessionCleanupOptions {
  * A high-level store for agent sessions, built on top of ConditionalTextValueStore.
  *
  * Provides CRUD operations plus listing, filtering, metadata updates,
- * and time-based cleanup. All keys are namespaced under `agent-session:`
- * in the underlying store.
+ * and time-based cleanup. Session bodies are namespaced under `agent-session:`
+ * in the underlying store; the summary index is stored in the reserved
+ * `agent-session-index` key.
  */
 export interface SessionStore {
   /** Persist a session, merging on optimistic-concurrency conflicts. */

@@ -255,13 +255,33 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
     return `${KEY_PREFIX}${id}`;
   }
 
+  async function summariesForMutation(
+    summaryRaw: string | null,
+  ): Promise<Map<string, SessionSummary>> {
+    const parsed = parseSummaryIndex(summaryRaw);
+    if (parsed) return parsed;
+
+    // A malformed index cannot safely be edited in place: doing so would
+    // discard summaries for bodies that are still present. Rebuild it from
+    // the source of truth before applying the requested mutation.
+    const summaries = new Map<string, SessionSummary>();
+    const dataKeys = await store.list(KEY_PREFIX);
+    await Promise.all(
+      dataKeys.map(async (key) => {
+        const session = parseSession(await store.get(key));
+        if (session) summaries.set(session.id, toSummary(session));
+      }),
+    );
+    return summaries;
+  }
+
   async function commit(
     session: AgentSession,
     expectedValue: string | null,
     currentRevision: number,
     refreshUpdatedAt: boolean,
     expectedSummaryValue: string | null,
-    currentSummaries: Map<string, SessionSummary> | undefined,
+    currentSummaries: Map<string, SessionSummary>,
   ): Promise<AgentSession | undefined> {
     const next: AgentSession = {
       ...session,
@@ -300,7 +320,7 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
           current?.revision ?? 0,
           true,
           summaryRaw,
-          parseSummaryIndex(summaryRaw),
+          await summariesForMutation(summaryRaw),
         );
         if (committed) {
           Object.assign(session, committed);
@@ -333,7 +353,7 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
           current?.revision ?? 0,
           true,
           summaryRaw,
-          parseSummaryIndex(summaryRaw),
+          await summariesForMutation(summaryRaw),
         );
         if (committed) return committed;
       }
@@ -352,11 +372,10 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
           store.get(keyFor(id)),
           store.get(SUMMARY_INDEX_KEY),
         ]);
-        const summaries = parseSummaryIndex(summaryRaw);
-        const nextSummaries = summaries ? new Map(summaries) : undefined;
-        nextSummaries?.delete(id);
+        const nextSummaries = await summariesForMutation(summaryRaw);
+        nextSummaries.delete(id);
         const operations =
-          nextSummaries && nextSummaries.size > 0
+          nextSummaries.size > 0
             ? [
                 {
                   type: 'set' as const,

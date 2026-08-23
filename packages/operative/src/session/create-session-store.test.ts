@@ -430,7 +430,7 @@ describe('createSessionStore', () => {
 
     await store.delete(session.id);
     expect(await store.load(session.id)).toBeUndefined();
-    expect(await rawStore.has(`agent-session-index:${session.id}`)).toBe(false);
+    expect(await rawStore.has('agent-session-index')).toBe(false);
   });
 
   it('delete is a no-op for nonexistent session', async () => {
@@ -580,6 +580,36 @@ describe('createSessionStore', () => {
     expect(backfilled[0]!.messageCount).toBe(0);
   });
 
+  it('rebuilds a malformed index before save, update, or delete', async () => {
+    for (const operation of ['save', 'update', 'delete'] as const) {
+      const rawStore = textValueStore(new MemoryStorage());
+      const store = createSessionStore(rawStore);
+      const retained = makeSession({ id: `${operation}-retained` });
+      const changed = makeSession({ id: `${operation}-changed` });
+      await store.save(retained);
+      await store.save(changed);
+      await rawStore.set('agent-session-index', '{"summaries":{"broken":null}}');
+
+      if (operation === 'save') {
+        await store.save({ ...changed, agentName: 'updated-agent' });
+      } else if (operation === 'update') {
+        await store.update(changed.id, (session) =>
+          session ? { ...session, agentName: 'updated-agent' } : undefined,
+        );
+      } else {
+        await store.delete(changed.id);
+      }
+
+      const summaries = await store.list();
+      expect(summaries.map((summary) => summary.id)).toContain(retained.id);
+      if (operation === 'delete') {
+        expect(summaries.map((summary) => summary.id)).not.toContain(changed.id);
+      } else {
+        expect(summaries.map((summary) => summary.id)).toContain(changed.id);
+      }
+    }
+  });
+
   it('list filters by agentName', async () => {
     const store = createSessionStore(textValueStore(new MemoryStorage()));
 
@@ -706,7 +736,7 @@ describe('createSessionStore', () => {
     expect(await store.exists('old-b')).toBe(true);
   });
 
-  it('all keys use the agent-session: prefix in the underlying store', async () => {
+  it('stores bodies under the session prefix and summaries in the aggregate index', async () => {
     const kv = textValueStore(new MemoryStorage());
     const store = createSessionStore(kv);
     const session = makeSession({ id: 'prefix-test' });
@@ -716,6 +746,7 @@ describe('createSessionStore', () => {
     const keys = await kv.list('agent-session:');
     expect(keys.length).toBeGreaterThan(0);
     expect(keys.every((k) => k.startsWith('agent-session:'))).toBe(true);
+    expect(await kv.has('agent-session-index')).toBe(true);
   });
 
   it('list returns correct messageCount from conversation history', async () => {
