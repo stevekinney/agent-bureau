@@ -95,7 +95,7 @@ export type { CreateHandoffToolOptions } from './create-handoff-tool';
 export { createHandoffTool, extractHandoffTarget, HANDOFF_MARKER } from './create-handoff-tool';
 export type { CreateIdentityHookOptions } from './create-identity-hook';
 export { createIdentityHook } from './create-identity-hook';
-export type { CreateLazyGenerateOptions, GenerateModule } from './create-lazy-generate';
+export type { CreateLazyGenerateOptions, LazyGenerateLoader } from './create-lazy-generate';
 export { createLazyGenerate } from './create-lazy-generate';
 export type { CreateMcpElicitationResponderOptions } from './create-mcp-elicitation-responder';
 export { createMcpElicitationResponder } from './create-mcp-elicitation-responder';
@@ -160,6 +160,7 @@ export type {
   GuardrailTripwireDetail,
 } from './errors';
 export {
+  AbortAgentRunError,
   AsyncDefinitionLoadError,
   BudgetExceededError,
   classifyError,

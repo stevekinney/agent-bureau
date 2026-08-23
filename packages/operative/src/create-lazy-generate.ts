@@ -1,54 +1,54 @@
-import { AsyncDefinitionLoadError } from './errors.ts';
+import { AbortAgentRunError, AsyncDefinitionLoadError } from './errors.ts';
 import type { GenerateFunction } from './types.ts';
 
-/** A module which exports a GenerateFunction directly or as its default export. */
-export type GenerateModule = GenerateFunction | { default: GenerateFunction };
+export type LazyGenerateLoader = () => GenerateFunction | PromiseLike<GenerateFunction>;
 
 export interface CreateLazyGenerateOptions {
-  /** Signal used to cancel loading before or while the provider module imports. */
-  signal?: AbortSignal;
+  /** Human-readable label included in lazy loading error messages. */
+  label?: string;
 }
 
 function isGenerateFunction(value: unknown): value is GenerateFunction {
   return typeof value === 'function';
 }
 
-function getGenerateFunction(module: unknown): GenerateFunction {
-  const candidate =
-    typeof module === 'function' ? module : (module as { default?: unknown })?.default;
-  if (!isGenerateFunction(candidate)) {
+function validateGenerateFunction(value: unknown, label: string): GenerateFunction {
+  if (!isGenerateFunction(value)) {
     throw new AsyncDefinitionLoadError(
-      'INVALID_MODULE',
-      'The lazy generate loader must resolve to a callable GenerateFunction or a module with a callable default export',
+      'INVALID_EXPORT',
+      `Lazy generate loader "${label}" must resolve to a callable GenerateFunction`,
+      value,
     );
   }
-  return candidate;
+  return value;
+}
+
+function abortError(signal: AbortSignal): AbortAgentRunError {
+  return new AbortAgentRunError(
+    'The agent run was aborted while loading a lazy generate function',
+    signal.reason,
+  );
 }
 
 function throwIfAborted(signal: AbortSignal | undefined): void {
   if (signal?.aborted) {
-    throw new AsyncDefinitionLoadError(
-      'ABORTED',
-      'Loading the lazy generate function was aborted',
-      signal.reason,
-    );
+    throw abortError(signal);
   }
 }
 
 function awaitWithAbort<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
   if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(abortError(signal));
   return new Promise<T>((resolve, reject) => {
     const onAbort = (): void => {
       signal.removeEventListener('abort', onAbort);
-      reject(
-        new AsyncDefinitionLoadError(
-          'ABORTED',
-          'Loading the lazy generate function was aborted',
-          signal.reason,
-        ),
-      );
+      reject(abortError(signal));
     };
     signal.addEventListener('abort', onAbort, { once: true });
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
     void promise
       .then((value) => {
         signal.removeEventListener('abort', onAbort);
@@ -61,51 +61,61 @@ function awaitWithAbort<T>(promise: Promise<T>, signal: AbortSignal | undefined)
   });
 }
 
+type LazyGenerateState =
+  | { kind: 'unloaded' }
+  | { kind: 'loading'; pending: Promise<GenerateFunction> }
+  | { kind: 'loaded'; generate: GenerateFunction };
+
 /** Lazily loads and memoizes a GenerateFunction, sharing its first load across concurrent calls. */
 export function createLazyGenerate(
-  loader: () => Promise<GenerateModule>,
+  loader: LazyGenerateLoader,
   options: CreateLazyGenerateOptions = {},
 ): GenerateFunction {
-  let loaded: GenerateFunction | undefined;
-  let loading: Promise<GenerateFunction> | undefined;
+  const label = options.label ?? 'anonymous';
+  let state: LazyGenerateState = { kind: 'unloaded' };
 
   const resolve = (): Promise<GenerateFunction> => {
-    if (loaded) return Promise.resolve(loaded);
-    if (!loading) {
-      const current = (async () => {
-        let module: GenerateModule;
-        try {
-          module = await loader();
-        } catch (cause) {
-          throw new AsyncDefinitionLoadError(
-            'LOAD_FAILED',
-            'Failed to load the lazy generate function',
-            cause,
-          );
+    if (state.kind === 'loaded') return Promise.resolve(state.generate);
+    if (state.kind === 'loading') return state.pending;
+
+    const pending = (async () => {
+      let loaded: GenerateFunction;
+      try {
+        loaded = await loader();
+      } catch (cause) {
+        throw new AsyncDefinitionLoadError(
+          'LOAD_FAILED',
+          `Failed to load lazy generate function "${label}"`,
+          cause,
+        );
+      }
+
+      return validateGenerateFunction(loaded, label);
+    })();
+
+    state = { kind: 'loading', pending };
+    void pending.then(
+      (generate) => {
+        if (state.kind === 'loading' && state.pending === pending) {
+          state = { kind: 'loaded', generate };
         }
-        return getGenerateFunction(module);
-      })();
-      loading = current;
-      void current.then(
-        (generate) => {
-          if (loading === current) {
-            loaded = generate;
-            loading = undefined;
-          }
-        },
-        () => {
-          if (loading === current) loading = undefined;
-        },
-      );
-    }
-    return loading;
+      },
+      () => {
+        if (state.kind === 'loading' && state.pending === pending) {
+          state = { kind: 'unloaded' };
+        }
+      },
+    );
+    return pending;
   };
 
   return async (context) => {
-    const signal = options.signal ?? context.signal;
+    const { signal } = context;
     throwIfAborted(signal);
+
     const generate = await awaitWithAbort(resolve(), signal);
     throwIfAborted(signal);
+
     return generate(context);
   };
 }

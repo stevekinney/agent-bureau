@@ -14,10 +14,11 @@ export class BudgetExceededError extends Error {
   }
 }
 
-export type AsyncDefinitionLoadCode = 'ABORTED' | 'INVALID_MODULE' | 'LOAD_FAILED';
+export type AsyncDefinitionLoadCode = 'INVALID_EXPORT' | 'LOAD_FAILED';
 
 /** Raised when a lazily loaded agent definition cannot be resolved. */
 export class AsyncDefinitionLoadError extends Error {
+  readonly kind = 'load';
   readonly code: AsyncDefinitionLoadCode;
   override readonly cause: unknown;
 
@@ -25,6 +26,18 @@ export class AsyncDefinitionLoadError extends Error {
     super(message, { cause });
     this.name = 'AsyncDefinitionLoadError';
     this.code = code;
+    this.cause = cause;
+  }
+}
+
+/** Raised when an agent run is aborted before lazy generate loading can complete. */
+export class AbortAgentRunError extends Error {
+  readonly kind = 'abort';
+  override readonly cause: unknown;
+
+  constructor(message = 'The agent run was aborted', cause?: unknown) {
+    super(message, { cause });
+    this.name = 'AbortAgentRunError';
     this.cause = cause;
   }
 }

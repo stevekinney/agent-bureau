@@ -1,5 +1,5 @@
 ---
-'@lostgradient/operative': patch
+'@lostgradient/operative': minor
 ---
 
-Add `createLazyGenerate` for shared, retryable lazy loading of generate functions with abort and module validation errors.
+Add `createLazyGenerate` for shared, retryable lazy loading of selected generate functions with invocation-local abort handling.

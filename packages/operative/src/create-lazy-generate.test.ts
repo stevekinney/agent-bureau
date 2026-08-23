@@ -1,9 +1,18 @@
 import { describe, expect, it } from 'bun:test';
 
-import { AsyncDefinitionLoadError, createLazyGenerate } from './index';
-import type { GenerateFunction } from './types';
+import { AbortAgentRunError, AsyncDefinitionLoadError, createLazyGenerate } from './index';
+import type { GenerateContext, GenerateFunction, GenerateResponse } from './types';
 
-const response = { content: 'loaded', toolCalls: [] };
+const response = { content: 'loaded', toolCalls: [] } satisfies GenerateResponse;
+
+function createContext(signal?: AbortSignal): GenerateContext {
+  return {
+    conversation: {} as GenerateContext['conversation'],
+    step: 0,
+    signal,
+    toolbox: {} as GenerateContext['toolbox'],
+  };
+}
 
 async function expectResolves<T>(promise: Promise<T>, expected: Awaited<T>): Promise<void> {
   expect(await promise).toEqual(expected);
@@ -12,42 +21,57 @@ async function expectResolves<T>(promise: Promise<T>, expected: Awaited<T>): Pro
 async function expectRejects(
   promise: Promise<unknown>,
   expected: Record<string, unknown>,
-): Promise<void> {
+): Promise<unknown> {
   try {
     await promise;
     throw new Error('Expected promise to reject');
   } catch (error) {
     expect(error).toMatchObject(expected);
+    return error;
   }
 }
 
 describe('createLazyGenerate', () => {
-  it('loads a direct function once and caches it', async () => {
+  it('loads a direct function once and caches the successful result', async () => {
     let loads = 0;
     const generate: GenerateFunction = async () => response;
-    const lazy = createLazyGenerate(async () => {
+    const lazy = createLazyGenerate(() => {
       loads += 1;
       return generate;
     });
 
-    await expectResolves(lazy({} as never), response);
-    await expectResolves(lazy({} as never), response);
+    await expectResolves(lazy(createContext()), response);
+    await expectResolves(lazy(createContext()), response);
     expect(loads).toBe(1);
   });
 
-  it('shares concurrent loads', async () => {
+  it('loads a promise-like function once', async () => {
+    let loads = 0;
+    const generate: GenerateFunction = async () => response;
+    const lazy = createLazyGenerate(() => {
+      loads += 1;
+      return Promise.resolve(generate);
+    });
+
+    await expectResolves(lazy(createContext()), response);
+    await expectResolves(lazy(createContext()), response);
+    expect(loads).toBe(1);
+  });
+
+  it('shares the exact pending load across concurrent calls', async () => {
     let loads = 0;
     let release!: () => void;
     const pending = new Promise<void>((resolve) => (release = resolve));
     const lazy = createLazyGenerate(async () => {
       loads += 1;
       await pending;
-      return { default: async () => response };
+      return async () => response;
     });
 
-    const first = lazy({} as never);
-    const second = lazy({} as never);
+    const first = lazy(createContext());
+    const second = lazy(createContext());
     release();
+
     await expectResolves(Promise.all([first, second]), [response, response]);
     expect(loads).toBe(1);
   });
@@ -55,79 +79,75 @@ describe('createLazyGenerate', () => {
   it('retries after a failed load and preserves its cause', async () => {
     const cause = new Error('network');
     let loads = 0;
-    const lazy = createLazyGenerate(async () => {
-      loads += 1;
-      if (loads === 1) throw cause;
-      return async () => response;
-    });
+    const lazy = createLazyGenerate(
+      async () => {
+        loads += 1;
+        if (loads === 1) throw cause;
+        return async () => response;
+      },
+      { label: 'retrying-provider' },
+    );
 
-    await expectRejects(lazy({} as never), {
+    await expectRejects(lazy(createContext()), {
       name: 'AsyncDefinitionLoadError',
+      kind: 'load',
       code: 'LOAD_FAILED',
       cause,
+      message: 'Failed to load lazy generate function "retrying-provider"',
     });
-    await expectResolves(lazy({} as never), response);
+    await expectResolves(lazy(createContext()), response);
     expect(loads).toBe(2);
   });
 
-  it('rejects non-callable modules without caching the failure', async () => {
-    let loads = 0;
-    const lazy = createLazyGenerate(async () => {
-      loads += 1;
-      return loads === 1 ? ({ default: 42 } as never) : async () => response;
-    });
-
-    await expectRejects(lazy({} as never), {
-      name: 'AsyncDefinitionLoadError',
-      code: 'INVALID_MODULE',
-    });
-    await expectResolves(lazy({} as never), response);
-    expect(loads).toBe(2);
-  });
-
-  it('handles synchronous loader throws', async () => {
+  it('handles synchronous loader throws the same as asynchronous load failures', async () => {
     const cause = new Error('sync');
     const lazy = createLazyGenerate(() => {
       throw cause;
     });
 
-    await expectRejects(lazy({} as never), { code: 'LOAD_FAILED', cause });
+    await expectRejects(lazy(createContext()), {
+      name: 'AsyncDefinitionLoadError',
+      kind: 'load',
+      code: 'LOAD_FAILED',
+      cause,
+    });
   });
 
-  it('honors pre-aborted and during-load signals', async () => {
-    const pre = new AbortController();
-    pre.abort('before');
+  it('rejects non-callable loader results without caching the failure', async () => {
     let loads = 0;
-    const lazy = createLazyGenerate(
-      async () => {
-        loads += 1;
-        await Promise.resolve();
-        return async () => response;
-      },
-      { signal: pre.signal },
-    );
-    await expectRejects(lazy({} as never), { code: 'ABORTED', cause: 'before' });
-    expect(loads).toBe(0);
+    const lazy = createLazyGenerate(async () => {
+      loads += 1;
+      return loads === 1 ? (42 as never) : async () => response;
+    });
 
-    const during = new AbortController();
-    let release!: () => void;
-    const pending = new Promise<void>((resolve) => (release = resolve));
-    const retryable = createLazyGenerate(
-      async () => {
-        loads += 1;
-        await pending;
-        return async () => response;
-      },
-      { signal: during.signal },
-    );
-    const pendingResult = retryable({} as never);
-    during.abort('during');
-    release();
-    await expectRejects(pendingResult, { code: 'ABORTED', cause: 'during' });
-    expect(loads).toBe(1);
+    await expectRejects(lazy(createContext()), {
+      name: 'AsyncDefinitionLoadError',
+      kind: 'load',
+      code: 'INVALID_EXPORT',
+      cause: 42,
+    });
+    await expectResolves(lazy(createContext()), response);
+    expect(loads).toBe(2);
   });
 
-  it('aborts one concurrent caller without poisoning another caller', async () => {
+  it('throws AbortAgentRunError for an already-aborted invocation without starting the load', async () => {
+    const controller = new AbortController();
+    controller.abort('before');
+    let loads = 0;
+    const lazy = createLazyGenerate(async () => {
+      loads += 1;
+      return async () => response;
+    });
+
+    await expectRejects(lazy(createContext(controller.signal)), {
+      name: 'AbortAgentRunError',
+      kind: 'abort',
+      cause: 'before',
+    });
+    expect(loads).toBe(0);
+  });
+
+  it('aborts one loading invocation without poisoning another caller or the cache', async () => {
     const first = new AbortController();
     const second = new AbortController();
     let loads = 0;
@@ -139,26 +159,92 @@ describe('createLazyGenerate', () => {
       return async () => response;
     });
 
-    const firstResult = lazy({ signal: first.signal } as never);
-    const secondResult = lazy({ signal: second.signal } as never);
+    const firstResult = lazy(createContext(first.signal));
+    const secondResult = lazy(createContext(second.signal));
     first.abort('first caller');
     release();
-    await expectRejects(firstResult, { code: 'ABORTED', cause: 'first caller' });
+
+    await expectRejects(firstResult, {
+      name: 'AbortAgentRunError',
+      kind: 'abort',
+      cause: 'first caller',
+    });
     await expectResolves(secondResult, response);
+    await expectResolves(lazy(createContext()), response);
     expect(loads).toBe(1);
   });
 
-  it('forwards a shared load failure to an active caller', async () => {
+  it('lets an aborted loading invocation reject while the module still finishes and caches', async () => {
+    const controller = new AbortController();
+    let loads = 0;
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => (release = resolve));
+    const lazy = createLazyGenerate(async () => {
+      loads += 1;
+      await pending;
+      return async () => response;
+    });
+
+    const result = lazy(createContext(controller.signal));
+    controller.abort('during import');
+    release();
+
+    await expectRejects(result, {
+      name: 'AbortAgentRunError',
+      kind: 'abort',
+      cause: 'during import',
+    });
+    await expectResolves(lazy(createContext()), response);
+    expect(loads).toBe(1);
+  });
+
+  it('rechecks a signal that fires while subscribing to a pending load', async () => {
+    const controller = new AbortController();
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => (release = resolve));
+    const lazy = createLazyGenerate(async () => {
+      await pending;
+      return async () => response;
+    });
+
+    const signal = controller.signal;
+    const addEventListener = signal.addEventListener.bind(signal);
+    Object.defineProperty(signal, 'addEventListener', {
+      value: (...args: Parameters<AbortSignal['addEventListener']>) => {
+        controller.abort('subscribed');
+        addEventListener(...args);
+      },
+    });
+
+    const result = lazy(createContext(signal));
+    release();
+
+    await expectRejects(result, {
+      name: 'AbortAgentRunError',
+      kind: 'abort',
+      cause: 'subscribed',
+    });
+  });
+
+  it('forwards a shared load failure to active callers', async () => {
+    const controller = new AbortController();
     const lazy = createLazyGenerate(async () => {
       throw new Error('shared failure');
     });
-    const caller = new AbortController();
-    await expectRejects(lazy({ signal: caller.signal } as never), { code: 'LOAD_FAILED' });
+
+    await expectRejects(lazy(createContext(controller.signal)), {
+      name: 'AsyncDefinitionLoadError',
+      kind: 'load',
+      code: 'LOAD_FAILED',
+    });
   });
 
-  it('returns the exact GenerateFunction type', () => {
+  it('returns an ordinary GenerateFunction', () => {
     const lazy: GenerateFunction = createLazyGenerate(async () => async () => response);
     expect(lazy).toBeFunction();
+    expect('preload' in lazy).toBe(false);
+    expect('reset' in lazy).toBe(false);
     expect(AsyncDefinitionLoadError).toBeDefined();
+    expect(AbortAgentRunError).toBeDefined();
   });
 });
