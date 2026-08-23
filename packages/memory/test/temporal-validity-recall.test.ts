@@ -6,22 +6,22 @@ import type { Memory, MemoryRecordStorage } from '../src/types';
 
 const DIMENSION = 64;
 
-function createTestMemory(options?: { experimentalTemporalValidity?: boolean }) {
+function createTestMemory(options?: { temporalValidity?: boolean }) {
   const storage = createInMemoryMemoryRecordStorage();
   const embedder = createMockEmbedder(DIMENSION);
   const memory = createMemory({
     embedder,
     storage,
     dimension: DIMENSION,
-    experimentalTemporalValidity: options?.experimentalTemporalValidity ?? true,
+    temporalValidity: options?.temporalValidity ?? true,
   });
   return { memory, storage, embedder };
 }
 
-describe('AB-61 temporal fact-validity spike', () => {
+describe('temporal fact-validity', () => {
   describe('feature gating', () => {
     it('throws when metadata.supersedes is used without the flag enabled', async () => {
-      const { memory } = createTestMemory({ experimentalTemporalValidity: false });
+      const { memory } = createTestMemory({ temporalValidity: false });
       await memory.init();
 
       const original = await memory.remember('The team lead is Alex');
@@ -33,11 +33,11 @@ describe('AB-61 temporal fact-validity spike', () => {
         caught = error;
       }
       expect(caught).toBeInstanceOf(Error);
-      expect((caught as Error).message).toMatch(/experimentalTemporalValidity/);
+      expect((caught as Error).message).toMatch(/temporalValidity/);
     });
 
     it('ignores asOf when the flag is disabled (no filtering behavior change)', async () => {
-      const { memory } = createTestMemory({ experimentalTemporalValidity: false });
+      const { memory } = createTestMemory({ temporalValidity: false });
       await memory.init();
 
       await memory.remember('The team lead is Alex');
@@ -211,6 +211,74 @@ describe('AB-61 temporal fact-validity spike', () => {
 
       expect(beforeBackdate.map((r) => r.id)).not.toContain(backdated.id);
       expect(afterBackdate.map((r) => r.id)).toContain(backdated.id);
+    });
+
+    for (const vectorOnly of [false, true]) {
+      it(`returns K valid results after post-top-K shrinkage (${vectorOnly ? 'vectorOnly' : 'hybrid'})`, async () => {
+        const storage = createInMemoryMemoryRecordStorage();
+        const memory = createMemory({
+          embedder: () => [[1, 0]],
+          storage,
+          deduplicationThreshold: 2,
+          temporalValidity: true,
+        });
+        await memory.init();
+
+        for (let index = 0; index < 7; index++) {
+          await memory.remember('same fact', { validFrom: 1_000 + index });
+        }
+        const firstValid = await memory.remember('same fact', { validFrom: -1 });
+        const secondValid = await memory.remember('same fact', { validFrom: -1 });
+
+        const results = await memory.recall('same fact', {
+          asOf: 0,
+          limit: 2,
+          threshold: 0,
+          vectorOnly,
+        });
+
+        expect(results.map((result) => result.id)).toEqual([firstValid.id, secondValid.id]);
+      });
+    }
+
+    it('does not exceed bounded backend vector-search limits while refilling temporal results', async () => {
+      const backingStorage = createInMemoryMemoryRecordStorage();
+      let vectorSearchCalls = 0;
+      const storage: MemoryRecordStorage = {
+        ...backingStorage,
+        async searchByVector(vector, scope, options) {
+          vectorSearchCalls += 1;
+          if (options.limit > 200) {
+            throw new Error(`bounded backend rejected limit ${options.limit}`);
+          }
+          return backingStorage.searchByVector(vector, scope, options);
+        },
+      };
+      const memory = createMemory({
+        embedder: () => [[1, 0]],
+        storage,
+        deduplicationThreshold: 2,
+        temporalValidity: true,
+      });
+      await memory.init();
+
+      for (let index = 0; index < 201; index++) {
+        await memory.remember('same fact', { validFrom: 1_000 + index });
+      }
+      await memory.remember('same fact', { validFrom: -1 });
+      await memory.remember('same fact', { validFrom: -1 });
+      vectorSearchCalls = 0;
+
+      for (const vectorOnly of [false, true]) {
+        const results = await memory.recall('same fact', {
+          asOf: 0,
+          limit: 2,
+          threshold: 0,
+          vectorOnly,
+        });
+        expect(results).toHaveLength(2);
+      }
+      expect(vectorSearchCalls).toBe(0);
     });
   });
 });

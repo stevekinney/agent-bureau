@@ -111,6 +111,7 @@ interface CreateMemoryOptions {
   onConflict?: OnConflictHandler; // default: always 'keep-both'
   textSearchProvider?: TextSearchProvider;
   requireNamespace?: boolean; // default: false
+  temporalValidity?: boolean; // default: false
 }
 
 type OnConflictHandler = (
@@ -163,7 +164,10 @@ interface MemorySearchOptions {
   temporalDecay?: { halfLifeMilliseconds: number; evergreenExempt?: boolean };
   diversify?: { lambda: number }; // 1 = pure relevance, 0 = pure diversity
   vectorOnly?: boolean; // skip BM25 entirely
+  asOf?: number; // filter to facts valid at this epoch-millisecond timestamp
 }
+
+Set `temporalValidity: true` to enable fact-validity metadata and as-of recall. This option is default-off. The previous `experimentalTemporalValidity` option was renamed and is no longer accepted.
 
 interface MemoryListOptions {
   limit?: number; // default: 100

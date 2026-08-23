@@ -424,6 +424,7 @@ describe('createRunEngine', () => {
         checkpointStore,
         recover: false,
         startScheduler: true,
+        schedulerPollIntervalMs: DETECTION_SCHEDULER_POLL_INTERVAL_MS,
         runWorkflowVersion: 'v2',
         onWorkflowVersionMismatch: (event) => {
           mismatches.push(event);
@@ -492,6 +493,7 @@ describe('createRunEngine', () => {
         checkpointStore,
         recover: false,
         startScheduler: true,
+        schedulerPollIntervalMs: DETECTION_SCHEDULER_POLL_INTERVAL_MS,
         runWorkflowVersion: 'v1',
         onWorkflowVersionMismatch: (event) => {
           mismatches.push(event);
@@ -546,6 +548,7 @@ describe('createRunEngine', () => {
         checkpointStore,
         recover: false,
         startScheduler: true,
+        schedulerPollIntervalMs: DETECTION_SCHEDULER_POLL_INTERVAL_MS,
         runWorkflowVersion: 'v2',
         onWorkflowVersionMismatch: (event) => {
           mismatches.push(event);

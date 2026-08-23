@@ -1,8 +1,14 @@
+import { cosineSimilarity, type EmbeddingVectorLike } from 'interoperability';
+
 import type { HybridSearchCandidate, VectorSearchResult } from './hybrid-search';
 import { mergeHybridResults } from './hybrid-search';
 import { SOURCE_DOCUMENT_KEY } from './ingest';
 import { applyMaximalMarginalRelevance } from './maximal-marginal-relevance';
-import type { MemoryRecord, MemoryRecordScope } from './memory-record-storage';
+import type {
+  MemoryRecord,
+  MemoryRecordScope,
+  MemoryVectorSearchResult,
+} from './memory-record-storage';
 import { extractKeywords } from './query-expansion';
 import { applyTemporalDecay } from './temporal-decay';
 import { filterByValidity, stampSupersession } from './temporal-validity';
@@ -19,6 +25,21 @@ import type {
 
 const DEFAULT_DEDUPLICATION_THRESHOLD = 0.95;
 const DEFAULT_NAMESPACE = 'default';
+
+function rankRecordsByVector(
+  records: readonly MemoryRecord[],
+  queryVector: EmbeddingVectorLike,
+  threshold?: number,
+): MemoryVectorSearchResult[] {
+  return records
+    .map((record) => ({
+      id: record.id,
+      score: cosineSimilarity(queryVector, record.vector),
+      record,
+    }))
+    .filter((hit) => threshold === undefined || hit.score >= threshold)
+    .sort((left, right) => right.score - left.score);
+}
 
 function generateId(): string {
   return crypto.randomUUID();
@@ -50,7 +71,7 @@ function toMemoryMetadata(record: MemoryRecord): MemoryMetadata {
  */
 function buildStoredMetadata(metadata: Partial<MemoryMetadata>): Record<string, unknown> {
   // `namespace` lives on the record's own field; `supersedes` is a write-only
-  // directive consumed by remember() (AB-61 spike) and never persisted.
+  // directive consumed by remember() and never persisted.
   const { namespace: _namespace, supersedes: _supersedes, ...rest } = metadata;
   return { source: 'manual', ...rest };
 }
@@ -86,7 +107,7 @@ export function createMemory(options: CreateMemoryOptions): Memory {
     requireNamespace = false,
     conflictThreshold,
     onConflict,
-    experimentalTemporalValidity = false,
+    temporalValidity = false,
   } = options;
 
   if (conflictThreshold !== undefined && conflictThreshold >= deduplicationThreshold) {
@@ -150,10 +171,8 @@ export function createMemory(options: CreateMemoryOptions): Memory {
         );
       }
 
-      if (metadata?.supersedes !== undefined && !experimentalTemporalValidity) {
-        throw new Error(
-          'metadata.supersedes requires experimentalTemporalValidity to be enabled (AB-61 spike).',
-        );
+      if (metadata?.supersedes !== undefined && !temporalValidity) {
+        throw new Error('metadata.supersedes requires temporalValidity to be enabled.');
       }
 
       const namespace = metadata?.namespace ?? defaultNamespace;
@@ -238,10 +257,10 @@ export function createMemory(options: CreateMemoryOptions): Memory {
         await textSearchProvider.index(id, content, namespace);
       }
 
-      // AB-61 spike: stamp the superseded record as invalidated, pointing at
-      // the new record. Runs after the new record is durably stored so a
-      // failed stamp never leaves an orphaned fact with no successor.
-      if (experimentalTemporalValidity && metadata?.supersedes !== undefined) {
+      // Stamp the superseded record as invalidated, pointing at the new record.
+      // Runs after the new record is durably stored so a failed stamp never
+      // leaves an orphaned fact with no successor.
+      if (temporalValidity && metadata?.supersedes !== undefined) {
         const superseded = await storage.get(metadata.supersedes, scope);
         if (!superseded) {
           throw new Error(
@@ -320,19 +339,25 @@ export function createMemory(options: CreateMemoryOptions): Memory {
 
       const queryVector = await embed(query);
       const candidateMultiplier = 3;
-      const vectorResultLimit = limit * candidateMultiplier;
 
-      // AB-61 spike: resolve once so both search branches filter to the same
-      // instant. Only active when the flag is set — otherwise `asOf` is inert.
-      const asOf = experimentalTemporalValidity ? (mergedOptions.asOf ?? Date.now()) : undefined;
+      // Resolve once so both search branches filter to the same instant. Only
+      // active when the flag is set — otherwise `asOf` is inert.
+      const asOf = temporalValidity ? (mergedOptions.asOf ?? Date.now()) : undefined;
 
       // When vectorOnly is set, skip BM25 and return pure cosine similarity
       // scores filtered by the (cosine-semantics) threshold.
       if (mergedOptions.vectorOnly) {
-        const hits = await storage.searchByVector(queryVector, scope, {
-          limit: vectorResultLimit,
-          threshold,
-        });
+        // Indexed backends may cap one-shot search limits (Cloudflare caps at
+        // 200). Temporal validity needs the whole candidate set so invalid top
+        // hits cannot shrink K, so rank the paginatable canonical corpus
+        // locally instead of requesting an unbounded ANN top-K.
+        const hits =
+          asOf === undefined
+            ? await storage.searchByVector(queryVector, scope, {
+                limit: limit * candidateMultiplier,
+                threshold,
+              })
+            : rankRecordsByVector(await storage.list(scope), queryVector, threshold);
 
         let results: (MemorySearchResult & { vector?: number[] })[] = hits.map((hit) => ({
           id: hit.id,
@@ -367,6 +392,9 @@ export function createMemory(options: CreateMemoryOptions): Memory {
       // through storage, then merge.
       const corpus = await storage.list(scope);
       if (corpus.length === 0) return [];
+      // Validity filtering happens after hybrid ranking. Rank the canonical
+      // corpus locally when enabled so backend ANN limits cannot shrink K.
+      const vectorResultLimit = asOf === undefined ? limit * candidateMultiplier : corpus.length;
 
       const recordsById = new Map(corpus.map((record) => [record.id, record]));
       const candidates: HybridSearchCandidate[] = corpus.map((record) => ({
@@ -379,9 +407,10 @@ export function createMemory(options: CreateMemoryOptions): Memory {
       // Vector similarity search — no threshold here: the recall threshold is
       // applied to the COMBINED score by mergeHybridResults. Pre-filtering the
       // vector half would discard valid hybrid matches.
-      const vectorHits = await storage.searchByVector(queryVector, scope, {
-        limit: vectorResultLimit,
-      });
+      const vectorHits =
+        asOf === undefined
+          ? await storage.searchByVector(queryVector, scope, { limit: vectorResultLimit })
+          : rankRecordsByVector(corpus, queryVector);
       const vectorResults: VectorSearchResult[] = vectorHits.map((hit) => ({
         id: hit.id,
         score: hit.score,
@@ -420,7 +449,7 @@ export function createMemory(options: CreateMemoryOptions): Memory {
       const hybridResults = mergeHybridResults(vectorResults, textScores, candidates, {
         vectorWeight,
         textWeight,
-        limit: limit * candidateMultiplier,
+        limit: vectorResultLimit,
         threshold,
       });
 
