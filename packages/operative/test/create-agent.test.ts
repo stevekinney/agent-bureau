@@ -55,6 +55,17 @@ describe('createAgent', () => {
     expect(typeof agent.run).toBe('function');
   });
 
+  it('validates configured output and exposes output() at runtime', async () => {
+    const agent = createAgent({
+      generate: singleResponse('{"answer":"hello"}'),
+      output: z.object({ answer: z.string() }),
+      stopWhen: noToolCalls(),
+    });
+
+    const run = agent.run('test');
+    expect(await run.output()).toEqual({ answer: 'hello' });
+  });
+
   it('run() returns an AgentRun handle (not a Promise)', () => {
     const agent = createAgent({
       generate: singleResponse('hello'),

@@ -192,7 +192,7 @@ function validateCreateAgentOptions(options: CreateAgentOptions): void {
  * The runtime agent returned by `createAgent({...})`. Bureau-less, in-memory
  * only. Calling `.run(input)` starts a new ephemeral run each time.
  */
-export interface StandaloneAgent {
+export interface StandaloneAgent<O = never, H extends boolean = false> {
   /**
    * Start a new in-memory run.
    *
@@ -216,7 +216,7 @@ export interface StandaloneAgent {
    * Returns an `AgentRun` handle — NOT a Promise (non-thenable by design).
    * Access the result via `handle.result()`.
    */
-  run(input: string | { conversation: ConversationHistory }): AgentRun;
+  run(input: string | { conversation: ConversationHistory }): AgentRun<O, H>;
 }
 
 // Re-export AgentRun from agent-run.ts so callers who import from create-agent
@@ -285,7 +285,11 @@ export type { AgentRun };
  * // run — this package does not (yet) provide a safe helper for that step.
  * ```
  */
-export function createAgent(options: CreateAgentOptions): StandaloneAgent {
+export function createAgent<O>(
+  options: CreateAgentOptions & { output: ZodType<O> },
+): StandaloneAgent<O, true>;
+export function createAgent(options: CreateAgentOptions & { output?: undefined }): StandaloneAgent;
+export function createAgent(options: CreateAgentOptions): StandaloneAgent<unknown, boolean> {
   validateCreateAgentOptions(options);
 
   const {
@@ -311,7 +315,7 @@ export function createAgent(options: CreateAgentOptions): StandaloneAgent {
     : [];
 
   return {
-    run(input: string | { conversation: ConversationHistory }): AgentRun {
+    run(input: string | { conversation: ConversationHistory }): AgentRun<unknown, boolean> {
       // A caller-supplied `toolbox` is used AS-IS, shared across every run —
       // that's the point (see the `toolbox` option's doc comment: it's what
       // makes armorer's cross-request approval flow possible). Otherwise
@@ -361,7 +365,7 @@ export function createAgent(options: CreateAgentOptions): StandaloneAgent {
       };
 
       const activeRun = createActiveRun(runOptions);
-      const run = createAgentRun(activeRun);
+      const run = createAgentRun<unknown, boolean>(activeRun);
       // Keep the runtime surface aligned with the type-level contract:
       // `output()` exists only for agents configured with a response schema.
       if (!output) {

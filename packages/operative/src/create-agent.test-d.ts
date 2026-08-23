@@ -54,6 +54,18 @@ const agent = createAgent({
 });
 void agent;
 
+const typedAgent = createAgent({
+  generate: mockGenerate,
+  output: z.object({ answer: z.string() }),
+});
+const typedRun = typedAgent.run('question');
+const typedOutput: Promise<{ answer: string }> = typedRun.output();
+void typedOutput;
+
+const untypedRun = agent.run('question');
+// @ts-expect-error — output() is only available when an output schema exists.
+void untypedRun.output;
+
 // ---------------------------------------------------------------------------
 // 2. `RunOptions.toolbox` (the agent loop's own entry point) accepts the same
 //    concretely-typed toolbox with no cast.

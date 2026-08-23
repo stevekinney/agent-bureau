@@ -20,6 +20,7 @@ import {
   createToolPostFrame,
   createToolPreFrame,
   mapFinishReasonToStatus,
+  parseRunFrame,
   RUN_ENVELOPE_SCHEMA_VERSION,
   runFrameSchema,
   runReportSchema,
@@ -209,6 +210,35 @@ describe('buildRunReport', () => {
     const roundTripped = roundTrip(report);
     expect(roundTripped).toEqual(JSON.parse(JSON.stringify(report)));
     expect(() => runReportSchema.parse(roundTripped)).not.toThrow();
+  });
+});
+
+describe('versioned frame migration', () => {
+  it('migrates a persisted v1 structuredOutput report to v2 output', () => {
+    const frame = parseRunFrame({
+      schemaVersion: 1,
+      type: 'run-finished',
+      runId: 'legacy-run',
+      timestamp: 1,
+      report: {
+        schemaVersion: 1,
+        runId: 'legacy-run',
+        status: 'succeeded',
+        usage: { prompt: 1, completion: 2, total: 3 },
+        structuredOutput: { answer: 'legacy' },
+      },
+    });
+
+    expect(frame.schemaVersion).toBe(RUN_ENVELOPE_SCHEMA_VERSION);
+    expect(frame.type).toBe('run-finished');
+    expect(frame.report.output).toEqual({ answer: 'legacy' });
+    expect('structuredOutput' in frame.report).toBe(false);
+  });
+
+  it('rejects unknown envelope versions', () => {
+    expect(() => parseRunFrame({ schemaVersion: 99, type: 'run-started' })).toThrow(
+      'Unsupported run envelope schema version 99',
+    );
   });
 });
 

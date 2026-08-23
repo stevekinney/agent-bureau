@@ -20,7 +20,8 @@ import type { FinishReason } from './types';
  * reading frames over a pipe or WebSocket) should branch on `schemaVersion`
  * rather than assume the current shape.
  */
-export const RUN_ENVELOPE_SCHEMA_VERSION = 1 as const;
+export const RUN_ENVELOPE_SCHEMA_VERSION = 2 as const;
+const LEGACY_RUN_ENVELOPE_SCHEMA_VERSION = 1 as const;
 
 // ---------------------------------------------------------------------------
 // Redacted tool input/output summaries
@@ -264,8 +265,102 @@ export const runFrameSchema = z.discriminatedUnion('type', [
   runFinishedFrameSchema,
 ]) satisfies z.ZodType<RunFrame>;
 
+// Version 1 used `structuredOutput`. It remains readable, but is never emitted
+// again. Keeping this schema separate makes the migration explicit and avoids
+// accidentally accepting a v1 payload as a v2 frame.
+const legacyRunReportSchema = z.object({
+  schemaVersion: z.literal(LEGACY_RUN_ENVELOPE_SCHEMA_VERSION),
+  runId: z.string(),
+  status: runReportStatusSchema,
+  finishReason: z.string().optional(),
+  usage: tokenUsageSchema,
+  costEstimate: costEstimateSchema.optional(),
+  effectiveModel: z.string().optional(),
+  effectiveEffort: z.string().optional(),
+  structuredOutput: jsonValueSchema.optional(),
+  error: z.string().optional(),
+  transcript: conversationSchema.optional(),
+});
+const legacyFrameBaseSchema = z.object({
+  schemaVersion: z.literal(LEGACY_RUN_ENVELOPE_SCHEMA_VERSION),
+  runId: z.string(),
+  timestamp: z.number(),
+});
+const legacyRunFrameSchema = z.discriminatedUnion('type', [
+  legacyFrameBaseSchema.extend({
+    type: z.literal('run-started'),
+    sessionId: z.string().optional(),
+    agentName: z.string().optional(),
+  }),
+  legacyFrameBaseSchema.extend({
+    type: z.literal('step'),
+    step: z.number().int().min(0),
+    phase: z.enum(['started', 'completed']),
+    usage: tokenUsageSchema.optional(),
+  }),
+  legacyFrameBaseSchema.extend({
+    type: z.literal('assistant-chunk'),
+    step: z.number().int().min(0),
+    delta: z.string(),
+    accumulated: z.string(),
+  }),
+  legacyFrameBaseSchema.extend({
+    type: z.literal('assistant-final'),
+    step: z.number().int().min(0),
+    content: z.string(),
+  }),
+  legacyFrameBaseSchema.extend({
+    type: z.literal('tool-pre'),
+    step: z.number().int().min(0),
+    toolCallId: z.string(),
+    toolName: z.string(),
+    inputSummary: jsonValueSchema,
+  }),
+  legacyFrameBaseSchema.extend({
+    type: z.literal('tool-post'),
+    step: z.number().int().min(0),
+    toolCallId: z.string(),
+    toolName: z.string(),
+    status: toolStatusSchema,
+    durationMs: z.number().optional(),
+    resultSummary: jsonValueSchema.optional(),
+    error: z.string().optional(),
+  }),
+  legacyFrameBaseSchema.extend({
+    type: z.literal('notification'),
+    step: z.number().int().min(0).optional(),
+    level: notificationLevelSchema,
+    code: z.string(),
+    message: z.string(),
+  }),
+  legacyFrameBaseSchema.extend({ type: z.literal('run-finished'), report: legacyRunReportSchema }),
+]);
+
 /** Parse a durable frame and reject frames from an incompatible schema era. */
 export function parseRunFrame(input: unknown): RunFrame {
+  if (
+    typeof input === 'object' &&
+    input !== null &&
+    (input as { schemaVersion?: unknown }).schemaVersion === LEGACY_RUN_ENVELOPE_SCHEMA_VERSION
+  ) {
+    const legacy = legacyRunFrameSchema.parse(input);
+    if (legacy.type === 'run-finished') {
+      const { structuredOutput, ...report } = legacy.report;
+      return {
+        ...legacy,
+        schemaVersion: RUN_ENVELOPE_SCHEMA_VERSION,
+        report: {
+          ...report,
+          schemaVersion: RUN_ENVELOPE_SCHEMA_VERSION,
+          ...(structuredOutput !== undefined ? { output: structuredOutput } : {}),
+        },
+      };
+    }
+    return {
+      ...legacy,
+      schemaVersion: RUN_ENVELOPE_SCHEMA_VERSION,
+    };
+  }
   const parsed = runFrameSchema.safeParse(input);
   if (parsed.success) return parsed.data;
   const version =
