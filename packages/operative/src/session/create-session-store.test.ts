@@ -545,7 +545,7 @@ describe('createSessionStore', () => {
     expect(
       getKeys.filter((key) => key.startsWith('agent-session:') && key !== SUMMARY_INDEX_KEY),
     ).toHaveLength(5);
-    expect(listCalls).toBe(0);
+    expect(listCalls).toBe(1);
 
     const smallerBackingStore = textValueStore(new MemoryStorage());
     const smallerGetKeys: string[] = [];
@@ -570,7 +570,7 @@ describe('createSessionStore', () => {
     await smallerStore.list({ limit: 5 });
     expect(smallerGetKeys).toHaveLength(6);
     expect(smallerGetKeys[0]).toBe(SUMMARY_INDEX_KEY);
-    expect(smallerListCalls).toBe(0);
+    expect(smallerListCalls).toBe(1);
   });
 
   it('does not list an orphan summary when its session body is missing', async () => {
@@ -587,6 +587,60 @@ describe('createSessionStore', () => {
     await store.save(retained);
     const afterRepair = await store.list();
     expect(afterRepair.map((summary) => summary.id)).toEqual([retained.id]);
+  });
+
+  it('reconciles bodies written by an older writer after the index exists', async () => {
+    const rawStore = textValueStore(new MemoryStorage());
+    const store = createSessionStore(rawStore);
+    const indexed = makeSession({ id: 'indexed-before-upgrade' });
+    const legacy = makeSession({ id: 'legacy-during-upgrade' });
+    await store.save(indexed);
+    await rawStore.set(`agent-session:${legacy.id}`, JSON.stringify(legacy));
+
+    const summaries = await store.list({ limit: 10 });
+    const ids = summaries.map((summary) => summary.id);
+
+    expect(ids).toEqual([legacy.id, indexed.id]);
+    const index = JSON.parse((await rawStore.get(SUMMARY_INDEX_KEY))!);
+    expect(index.summaries).toHaveProperty(legacy.id);
+  });
+
+  it('does not advertise an indexed summary whose body id does not match', async () => {
+    const rawStore = textValueStore(new MemoryStorage());
+    const store = createSessionStore(rawStore);
+    const indexed = makeSession({ id: 'indexed-id' });
+    const different = makeSession({ id: 'different-id' });
+    await rawStore.set(`agent-session:${indexed.id}`, JSON.stringify(different));
+    await rawStore.set(SUMMARY_INDEX_KEY, summaryIndexPayload(indexed.id));
+
+    expect(await store.list({ limit: 10 })).toEqual([]);
+    expect(JSON.parse((await rawStore.get(SUMMARY_INDEX_KEY))!).summaries).not.toHaveProperty(
+      indexed.id,
+    );
+    expect(await rawStore.has(`agent-session:${indexed.id}`)).toBe(true);
+  });
+
+  it('bounds default listing reads to the default page size', async () => {
+    const backingStore = textValueStore(new MemoryStorage());
+    const getKeys: string[] = [];
+    const instrumentedStore = {
+      ...backingStore,
+      get: async (key: string) => {
+        getKeys.push(key);
+        return backingStore.get(key);
+      },
+    };
+    const store = createSessionStore(instrumentedStore);
+    for (let index = 0; index < 125; index += 1) {
+      await store.save(makeSession({ id: `default-page-${index}` }));
+    }
+    getKeys.length = 0;
+
+    const summaries = await store.list();
+
+    expect(summaries).toHaveLength(100);
+    expect(getKeys).toHaveLength(101);
+    expect(getKeys[0]).toBe(SUMMARY_INDEX_KEY);
   });
 
   it('keeps a concurrent save that wins during orphan repair', async () => {
@@ -975,6 +1029,20 @@ describe('createSessionStore', () => {
 
     expect(await store.exists('old-a')).toBe(false);
     expect(await store.exists('old-b')).toBe(true);
+  });
+
+  it('does not delete a different body when an embedded id mismatches its key', async () => {
+    const rawStore = textValueStore(new MemoryStorage());
+    const store = createSessionStore(rawStore);
+    const embedded = makeSession({
+      id: 'embedded-session',
+      updatedAt: '2024-01-01T00:00:00.000Z',
+    });
+    await rawStore.set('agent-session:enumerated-session', JSON.stringify(embedded));
+
+    expect(await store.cleanup({ olderThan: 24 * 60 * 60 * 1000 })).toBe(0);
+    expect(await rawStore.has('agent-session:enumerated-session')).toBe(true);
+    expect(await rawStore.has('agent-session:embedded-session')).toBe(false);
   });
 
   it('stores bodies under the session prefix and summaries in the aggregate index', async () => {

@@ -14,6 +14,7 @@ const KEY_PREFIX = 'agent-session:';
 const SUMMARY_INDEX_KEY = 'agent-session:summary-index';
 const MAXIMUM_SAVE_ATTEMPTS = 5;
 const MAXIMUM_INDEX_CONTENTION_ATTEMPTS = 50;
+const DEFAULT_SESSION_LIST_LIMIT = 100;
 const SUMMARY_FORMAT_VERSION = 1;
 
 export class SessionConflictError extends Error {
@@ -237,6 +238,10 @@ function serializeSummaryIndex(summaries: Map<string, SessionSummary>): string {
   });
 }
 
+function dataKeysForStore(keys: string[]): string[] {
+  return keys.filter((key) => key !== SUMMARY_INDEX_KEY);
+}
+
 /**
  * Creates a SessionStore backed by the given ConditionalTextValueStore.
  *
@@ -424,7 +429,7 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
             const id = key.slice(KEY_PREFIX.length);
             const raw = await store.get(key);
             const session = parseSession(raw);
-            if (!session) return;
+            if (!session || session.id !== id) return;
             rebuiltSummaries.set(id, toSummary(session));
           }),
         );
@@ -451,6 +456,43 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
             summaries = rebuiltSummaries;
           }
         }
+      } else {
+        const indexedIds = new Set(summaries.keys());
+        const unindexedKeys = dataKeysForStore(await store.list(KEY_PREFIX)).filter(
+          (key) => !indexedIds.has(key.slice(KEY_PREFIX.length)),
+        );
+        if (unindexedKeys.length > 0) {
+          const rebuiltSummaries = new Map<string, SessionSummary>();
+          const allDataKeys = dataKeysForStore(await store.list(KEY_PREFIX));
+          await Promise.all(
+            allDataKeys.map(async (key) => {
+              const id = key.slice(KEY_PREFIX.length);
+              const session = parseSession(await store.get(key));
+              if (session && session.id === id) rebuiltSummaries.set(id, toSummary(session));
+            }),
+          );
+          const rebuilt = await store.conditionalBatch(
+            [{ key: SUMMARY_INDEX_KEY, expectedValue: summaryRaw }],
+            [
+              {
+                type: 'set',
+                key: SUMMARY_INDEX_KEY,
+                value: serializeSummaryIndex(rebuiltSummaries),
+              },
+            ],
+          );
+          if (rebuilt) {
+            summaries = rebuiltSummaries;
+            summaryRaw = serializeSummaryIndex(summaries);
+          } else {
+            const latestRaw = await store.get(SUMMARY_INDEX_KEY);
+            const latestSummaries = parseSummaryIndex(latestRaw);
+            if (latestSummaries) {
+              summaries = latestSummaries;
+              summaryRaw = latestRaw;
+            }
+          }
+        }
       }
 
       // Filter by agentName when requested
@@ -474,14 +516,15 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
       // enough body keys to fill the requested page; legacy and malformed
       // indexes above still rebuild from every body key.
       const offset = options?.offset ?? 0;
-      const limit = options?.limit ?? filtered.length;
+      const limit = options?.limit ?? DEFAULT_SESSION_LIST_LIMIT;
       if (limit <= 0) return [];
       const page: SessionSummary[] = [];
       const missingIds: string[] = [];
       let seen = 0;
       for (const summary of filtered) {
         const body = await store.get(keyFor(summary.id));
-        if (body === null) {
+        const session = parseSession(body);
+        if (!session || session.id !== summary.id) {
           missingIds.push(summary.id);
           continue;
         }
@@ -505,7 +548,9 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
         if (!current) break;
         const stillMissing: string[] = [];
         for (const id of missingIds) {
-          if ((await store.get(keyFor(id))) === null) stillMissing.push(id);
+          const body = await store.get(keyFor(id));
+          const session = parseSession(body);
+          if (!session || session.id !== id) stillMissing.push(id);
         }
         if (stillMissing.length === 0) break;
         const repaired = new Map(current);
@@ -546,14 +591,15 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
 
       for (const key of keys) {
         const raw = await store.get(key);
+        const id = key.slice(KEY_PREFIX.length);
         const session = parseSession(raw);
-        if (!session) continue;
+        if (!session || session.id !== id) continue;
 
         if (options.agentName && session.agentName !== options.agentName) continue;
 
         const updatedAt = new Date(session.updatedAt).getTime();
         if (updatedAt < cutoff) {
-          await sessionStore.delete(session.id);
+          await sessionStore.delete(id);
           deleted++;
         }
       }
