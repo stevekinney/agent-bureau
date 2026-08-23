@@ -165,13 +165,13 @@ export interface RunReport {
   costEstimate?: CostEstimate | undefined;
   effectiveModel?: string | undefined;
   effectiveEffort?: string | undefined;
-  structuredOutput?: JSONValue | undefined;
+  output?: JSONValue | undefined;
   error?: string | undefined;
   transcript?: ConversationHistory | undefined;
 }
 
 /**
- * Zod schema for the terminal {@link RunReport}. `structuredOutput` is a
+ * Zod schema for the terminal {@link RunReport}. `output` is a
  * generic `jsonValueSchema` — the run's `responseSchema` shape is caller-
  * defined, so the envelope only guarantees JSON-safety, not the caller's
  * specific structured-output schema.
@@ -185,7 +185,7 @@ export const runReportSchema = z.object({
   costEstimate: costEstimateSchema.optional(),
   effectiveModel: z.string().optional(),
   effectiveEffort: z.string().optional(),
-  structuredOutput: jsonValueSchema.optional(),
+  output: jsonValueSchema.optional(),
   error: z.string().optional(),
   transcript: conversationSchema.optional(),
 }) satisfies z.ZodType<RunReport>;
@@ -263,6 +263,22 @@ export const runFrameSchema = z.discriminatedUnion('type', [
   notificationFrameSchema,
   runFinishedFrameSchema,
 ]) satisfies z.ZodType<RunFrame>;
+
+/** Parse a durable frame and reject frames from an incompatible schema era. */
+export function parseRunFrame(input: unknown): RunFrame {
+  const parsed = runFrameSchema.safeParse(input);
+  if (parsed.success) return parsed.data;
+  const version =
+    typeof input === 'object' && input !== null && 'schemaVersion' in input
+      ? (input as { schemaVersion?: unknown }).schemaVersion
+      : undefined;
+  if (version !== RUN_ENVELOPE_SCHEMA_VERSION) {
+    throw new Error(
+      `Unsupported run envelope schema version ${String(version)}; expected ${RUN_ENVELOPE_SCHEMA_VERSION}`,
+    );
+  }
+  throw parsed.error;
+}
 
 export type RunStartedFrame = z.infer<typeof runStartedFrameSchema>;
 export type StepFrame = z.infer<typeof stepFrameSchema>;
@@ -507,14 +523,14 @@ export interface BuildRunReportInput {
   costEstimate?: CostEstimate;
   effectiveModel?: string;
   effectiveEffort?: string;
-  structuredOutput?: unknown;
+  output?: unknown;
   error?: unknown;
   transcript?: ConversationHistory;
 }
 
 /**
  * Builds a JSON-safe {@link RunReport} from the pieces the loop (or a partial
- * accumulator on abrupt shutdown) has available. `structuredOutput` is passed
+ * accumulator on abrupt shutdown) has available. `output` is passed
  * through a JSON round-trip and silently dropped (not thrown) if it can't
  * serialize — the report itself must always be constructible.
  */
@@ -528,7 +544,7 @@ export function buildRunReport(input: BuildRunReportInput): RunReport {
     costEstimate: input.costEstimate,
     effectiveModel: input.effectiveModel,
     effectiveEffort: input.effectiveEffort,
-    structuredOutput: toJsonSafeOrUndefined(input.structuredOutput),
+    output: toJsonSafeOrUndefined(input.output),
     error: input.error !== undefined ? stringifyError(input.error) : undefined,
     transcript: input.transcript,
   };

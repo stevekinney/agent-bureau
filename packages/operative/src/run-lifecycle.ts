@@ -182,7 +182,7 @@ export function makeCompletedResult(
   finishReason: Extract<FinishReason, 'stop-condition' | 'maximum-steps'>,
   runStartTime: number,
   schemaValidation?: { success: boolean; error?: unknown },
-  structuredOutput?: unknown,
+  output?: unknown,
   costEstimation?: RunOptions['costEstimation'],
 ): RunResult {
   const costEstimate = computeCostEstimate(runState.totalUsage, costEstimation);
@@ -194,7 +194,7 @@ export function makeCompletedResult(
     ...(costEstimate ? { costEstimate } : {}),
     finishReason,
     ...(schemaValidation ? { schemaValidation } : {}),
-    ...(structuredOutput !== undefined ? { structuredOutput } : {}),
+    ...(output !== undefined ? { output } : {}),
   };
   emitter?.dispatch(new RunCompletedEvent(result));
   runHookSilently(hooks, 'onRunComplete', {

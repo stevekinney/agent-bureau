@@ -20,16 +20,16 @@ afterEach(async () => {
 
 const answerSchema = z.object({ answer: z.string() });
 
-describe('durable result-only run helpers preserve structuredOutput (regression PRRT_kwDORvupsc6PvrcT)', () => {
+describe('durable result-only run helpers preserve output (regression PRRT_kwDORvupsc6PvrcT)', () => {
   // `reconstructRunResult` (shared by `startDurableRunResult` and
   // `resumeDurableRunResult`) used to build the returned `RunResult` without
-  // `structuredOutput` at all — only the full lifecycle/finalize path
+  // `output` at all — only the full lifecycle/finalize path
   // (`driveDurableRun`/`driveReattachedRun`, used by `createDurableActiveRun`
   // and `reattachDurableActiveRun`) carried it through. A preemptable
   // scheduler run driven by the result-only helpers therefore silently lost
   // its validated `responseSchema` output.
 
-  it('startDurableRunResult: a completed run with a responseSchema carries structuredOutput', async () => {
+  it('startDurableRunResult: a completed run with a responseSchema carries output', async () => {
     const storage = new MemoryStorage();
     const checkpointStore = createCheckpointStore(
       textValueStore(storage, { disposeUnderlyingStorage: false }),
@@ -56,13 +56,13 @@ describe('durable result-only run helpers preserve structuredOutput (regression 
         },
       );
 
-      expect(result.structuredOutput).toEqual({ answer: 'hi' });
+      expect(result.output).toEqual({ answer: 'hi' });
     } finally {
       engine[Symbol.dispose]?.();
     }
   });
 
-  it('NEUTER CHECK: no responseSchema means no structuredOutput on the same code path', async () => {
+  it('NEUTER CHECK: no responseSchema means no output on the same code path', async () => {
     const storage = new MemoryStorage();
     const checkpointStore = createCheckpointStore(
       textValueStore(storage, { disposeUnderlyingStorage: false }),
@@ -85,13 +85,13 @@ describe('durable result-only run helpers preserve structuredOutput (regression 
         },
       );
 
-      expect(result.structuredOutput).toBeUndefined();
+      expect(result.output).toBeUndefined();
     } finally {
       engine[Symbol.dispose]?.();
     }
   });
 
-  it('resumeDurableRunResult: reconstructing a resumed run from its checkpoint carries structuredOutput', async () => {
+  it('resumeDurableRunResult: reconstructing a resumed run from its checkpoint carries output', async () => {
     // Mirrors a real preempt→resume: engine 1 starts the run and suspends it
     // (simulating a crash/preemption mid-flight), then a FRESH engine 2 over
     // the SAME storage resumes it via `resumeDurableRunResult` — the actual
@@ -170,7 +170,7 @@ describe('durable result-only run helpers preserve structuredOutput (regression 
         { engine: engine2, checkpointStore: checkpointStore2 },
         runId,
       );
-      expect(result.structuredOutput).toEqual({ answer: 'resumed' });
+      expect(result.output).toEqual({ answer: 'resumed' });
     } finally {
       engine2[Symbol.dispose]?.();
     }

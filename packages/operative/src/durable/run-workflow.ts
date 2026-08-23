@@ -180,7 +180,7 @@ export interface AgentRunWorkflowResult {
   /**
    * The `responseSchema`-validated structured output, when the run stopped
    * after a `responseSchema` was applied AND validation succeeded. Mirrors
-   * `RunResult.structuredOutput` on the in-memory path. Unlike
+   * `RunResult.output` on the in-memory path. Unlike
    * `schemaValidation.error`, this is already plain (JSON-parsed and
    * validated) data, so it crosses the checkpoint boundary unchanged — no
    * serialize/reconstruct step is needed the way `schemaValidation.error`
@@ -189,7 +189,7 @@ export interface AgentRunWorkflowResult {
    * faithfully — this is a durable-path constraint on schema authors, not a
    * bug: only JSON-serializable structured output round-trips.)
    */
-  structuredOutput?: unknown;
+  output?: unknown;
   /**
    * The note from a `scheduleWakeup` call, when the agent self-scheduled a
    * wakeup during this run (D6 — self-scheduling tools). Carries the note the
@@ -408,7 +408,7 @@ export function createRunWorkflow(
         let errorMessage: string | undefined;
         let abortReason: string | undefined;
         let schemaValidation: { success: boolean; error?: string } | undefined;
-        let structuredOutput: unknown;
+        let output: unknown;
         let tripwire: AgentRunWorkflowResult['tripwire'];
         // True when a terminal outcome (stop/abort/error) broke the loop early.
         // False means the loop exhausted `maximumSteps` naturally — the only case
@@ -534,7 +534,7 @@ export function createRunWorkflow(
                         : {}),
                     }
                   : undefined,
-              structuredOutput: outcome.kind === 'stop' ? outcome.structuredOutput : undefined,
+              output: outcome.kind === 'stop' ? outcome.output : undefined,
               record,
               conversationSnapshot: conversation.snapshot(),
               nextAccumulators: {
@@ -600,7 +600,7 @@ export function createRunWorkflow(
           if (outcome.kind === 'stop') {
             finishReason = stepResult.stopFinishReason ?? 'stop-condition';
             schemaValidation = stepResult.schemaValidation;
-            structuredOutput = stepResult.structuredOutput;
+            output = stepResult.output;
             stoppedEarly = true;
             break;
           }
@@ -721,7 +721,7 @@ export function createRunWorkflow(
           ...(errorMessage !== undefined ? { errorMessage } : {}),
           ...(abortReason !== undefined ? { abortReason } : {}),
           ...(schemaValidation !== undefined ? { schemaValidation } : {}),
-          ...(structuredOutput !== undefined ? { structuredOutput } : {}),
+          ...(output !== undefined ? { output } : {}),
           ...(tripwire !== undefined ? { tripwire } : {}),
           // Only include park metadata on non-failure outcomes: a failed/aborted run
           // never actually parks (the park block above is gated on !isFailureOutcome),

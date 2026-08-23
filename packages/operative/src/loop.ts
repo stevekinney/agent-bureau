@@ -138,7 +138,7 @@ export async function executeLoop(
         outcome.finishReason,
         runStartTime,
         outcome.schemaValidation,
-        outcome.structuredOutput,
+        outcome.output,
         costEstimation,
       );
     }

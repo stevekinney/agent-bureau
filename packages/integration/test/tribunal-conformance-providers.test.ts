@@ -156,7 +156,7 @@ async function runAgainstProvider(
     usage: result.usage,
     costEstimate: result.costEstimate,
     effectiveModel,
-    structuredOutput: result.structuredOutput,
+    output: result.output,
     transcript: result.conversation.current,
   });
 

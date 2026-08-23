@@ -142,7 +142,7 @@ describe('buildRunReport', () => {
       costEstimate,
       effectiveModel: 'claude-sonnet-5',
       effectiveEffort: 'medium',
-      structuredOutput: { answer: 4 },
+      output: { answer: 4 },
       transcript: sampleTranscript(),
     });
 
@@ -152,7 +152,7 @@ describe('buildRunReport', () => {
     expect(report.costEstimate).toEqual(costEstimate);
     expect(report.effectiveModel).toBe('claude-sonnet-5');
     expect(report.effectiveEffort).toBe('medium');
-    expect(report.structuredOutput).toEqual({ answer: 4 });
+    expect(report.output).toEqual({ answer: 4 });
     expect(report.error).toBeUndefined();
     expect(report.transcript?.ids.length).toBeGreaterThan(0);
 
@@ -170,16 +170,16 @@ describe('buildRunReport', () => {
     expect(report.error).toBe('provider timed out');
   });
 
-  it('drops a structuredOutput value that cannot round-trip through JSON', () => {
+  it('drops a output value that cannot round-trip through JSON', () => {
     const circular: Record<string, unknown> = {};
     circular['self'] = circular;
     const report = buildRunReport({
       runId: 'run-3',
       status: 'succeeded',
       usage,
-      structuredOutput: circular,
+      output: circular,
     });
-    expect(report.structuredOutput).toBeUndefined();
+    expect(report.output).toBeUndefined();
   });
 
   it('preserves tool-call/tool-result pair integrity in a partial transcript', () => {

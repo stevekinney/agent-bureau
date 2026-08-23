@@ -790,8 +790,8 @@ describe('createRun with durable routing', () => {
     }
   });
 
-  it('carries structuredOutput through to the durable RunResult (durable parity)', async () => {
-    // A run with a `responseSchema` produces `RunResult.structuredOutput` on the
+  it('carries output through to the durable RunResult (durable parity)', async () => {
+    // A run with a `responseSchema` produces `RunResult.output` on the
     // in-memory path (AB-95's "distinct field" requirement); the durable path
     // must surface the SAME validated value, unchanged (it's already plain JSON,
     // so unlike `schemaValidation.error` it needs no reconstruction).
@@ -811,15 +811,15 @@ describe('createRun with durable routing', () => {
       const result = await activeRun.result;
 
       expect(result.finishReason).toBe('stop-condition');
-      expect(result.structuredOutput).toEqual({ answer: '42' });
+      expect(result.output).toEqual({ answer: '42' });
     } finally {
       context.engine[Symbol.dispose]();
     }
   });
 
-  it('NEUTER CHECK: structuredOutput is absent on the durable path when validation fails', async () => {
+  it('NEUTER CHECK: output is absent on the durable path when validation fails', async () => {
     // Confirms the parity test above is exercising the real success path (a
-    // structuredOutput field that's ALWAYS present regardless of validation
+    // output field that's ALWAYS present regardless of validation
     // outcome would trivially pass the previous test too).
     const context = await buildContext();
     try {
@@ -839,7 +839,7 @@ describe('createRun with durable routing', () => {
 
       expect(result.finishReason).toBe('stop-condition');
       expect(result.schemaValidation?.success).toBe(false);
-      expect(result.structuredOutput).toBeUndefined();
+      expect(result.output).toBeUndefined();
     } finally {
       context.engine[Symbol.dispose]();
     }

@@ -1,6 +1,7 @@
 import type { AnyToolbox, HeadlessPermissionPolicyConfiguration, Tool } from 'armorer';
 import { createHeadlessPermissionPolicyHooks, createToolbox } from 'armorer';
 import { Conversation } from 'conversationalist';
+import type { ZodType } from 'zod';
 
 import type { AgentRun } from './agent-run';
 import { createAgentRun } from './agent-run';
@@ -55,6 +56,9 @@ export interface CreateAgentOptionsBase {
 
   /** Context window management (compaction). */
   contextManagement?: ContextManagementOptions;
+
+  /** Zod schema for the validated terminal `output` value. */
+  output?: ZodType<unknown>;
 }
 
 /**
@@ -284,7 +288,15 @@ export type { AgentRun };
 export function createAgent(options: CreateAgentOptions): StandaloneAgent {
   validateCreateAgentOptions(options);
 
-  const { generate, tools, toolbox: providedToolbox, instructions, permissions, ...rest } = options;
+  const {
+    generate,
+    tools,
+    toolbox: providedToolbox,
+    instructions,
+    permissions,
+    output,
+    ...rest
+  } = options;
 
   // Pre-compute tool entries once (pure transform — no per-run state).
   // The map key is canonical — override each tool's inner `.name` with the
@@ -344,11 +356,18 @@ export function createAgent(options: CreateAgentOptions): StandaloneAgent {
         generate,
         toolbox,
         conversation,
+        ...(output ? { responseSchema: output } : {}),
         ...rest,
       };
 
       const activeRun = createActiveRun(runOptions);
-      return createAgentRun(activeRun);
+      const run = createAgentRun(activeRun);
+      // Keep the runtime surface aligned with the type-level contract:
+      // `output()` exists only for agents configured with a response schema.
+      if (!output) {
+        delete (run as typeof run & { output?: unknown }).output;
+      }
+      return run;
     },
   };
 }

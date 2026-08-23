@@ -145,7 +145,7 @@ export type StepOutcome =
       finishReason: 'stop-condition';
       schemaValidation?: { success: boolean; error?: unknown };
       /** The validated structured output — set only on a successful `schemaValidation`. */
-      structuredOutput?: unknown;
+      output?: unknown;
     }
   | { kind: 'abort'; reason?: string }
   | { kind: 'error'; error: unknown };
@@ -1160,7 +1160,7 @@ export async function runStep(
         kind: 'stop',
         finishReason: 'stop-condition',
         schemaValidation: { success: true },
-        structuredOutput: validation.value,
+        output: validation.value,
       };
     }
 

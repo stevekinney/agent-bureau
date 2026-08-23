@@ -113,8 +113,8 @@ export class RunCompletedEvent extends Event {
   readonly schemaValidation?: RunResult['schemaValidation'];
   /** See {@link RunResult.costEstimate}. */
   readonly costEstimate?: RunResult['costEstimate'];
-  /** See {@link RunResult.structuredOutput}. */
-  readonly structuredOutput?: unknown;
+  /** See {@link RunResult.output}. */
+  readonly output?: unknown;
   constructor(data: RunResult) {
     super(RunCompletedEvent.type);
     this.conversation = data.conversation;
@@ -125,7 +125,7 @@ export class RunCompletedEvent extends Event {
     this.error = data.error;
     this.schemaValidation = data.schemaValidation;
     this.costEstimate = data.costEstimate;
-    this.structuredOutput = data.structuredOutput;
+    this.output = data.output;
   }
 }
 
