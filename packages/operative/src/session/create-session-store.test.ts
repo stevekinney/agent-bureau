@@ -53,6 +53,7 @@ describe('createSessionStore', () => {
     expect(error.name).toBe('SessionConflictError');
     expect(error.code).toBe('SessionConflictError');
     expect(error.message).toContain('session-1');
+    expect(error.message).toContain('committed');
   });
 
   it('save/load round trip preserves session data', async () => {
@@ -502,8 +503,13 @@ describe('createSessionStore', () => {
   it('lists current-format sessions through the summary index without reading bodies', async () => {
     const backingStore = textValueStore(new MemoryStorage());
     const getKeys: string[] = [];
+    let listCalls = 0;
     const instrumentedStore = {
       ...backingStore,
+      list: async (prefix?: string) => {
+        listCalls += 1;
+        return backingStore.list(prefix ?? '');
+      },
       get: async (key: string) => {
         getKeys.push(key);
         return backingStore.get(key);
@@ -515,16 +521,25 @@ describe('createSessionStore', () => {
       await store.save(makeSession({ id: `indexed-${index}` }));
     }
     getKeys.length = 0;
+    listCalls = 0;
 
     const summaries = await store.list({ limit: 5 });
 
     expect(summaries).toHaveLength(5);
-    expect(getKeys).toEqual(['agent-session-index']);
+    expect(getKeys).toHaveLength(6);
+    expect(getKeys[0]).toBe('agent-session-index');
+    expect(getKeys.filter((key) => key.startsWith('agent-session:'))).toHaveLength(5);
+    expect(listCalls).toBe(0);
 
     const smallerBackingStore = textValueStore(new MemoryStorage());
     const smallerGetKeys: string[] = [];
+    let smallerListCalls = 0;
     const smallerInstrumentedStore = {
       ...smallerBackingStore,
+      list: async (prefix?: string) => {
+        smallerListCalls += 1;
+        return smallerBackingStore.list(prefix ?? '');
+      },
       get: async (key: string) => {
         smallerGetKeys.push(key);
         return smallerBackingStore.get(key);
@@ -535,8 +550,11 @@ describe('createSessionStore', () => {
       await smallerStore.save(makeSession({ id: `small-${index}` }));
     }
     smallerGetKeys.length = 0;
+    smallerListCalls = 0;
     await smallerStore.list({ limit: 5 });
-    expect(smallerGetKeys).toEqual(['agent-session-index']);
+    expect(smallerGetKeys).toHaveLength(6);
+    expect(smallerGetKeys[0]).toBe('agent-session-index');
+    expect(smallerListCalls).toBe(0);
   });
 
   it('does not list an orphan summary when its session body is missing', async () => {
@@ -589,10 +607,12 @@ describe('createSessionStore', () => {
 
     const summaries = await store.list();
 
-    expect(summaries.map((summary) => summary.id)).toEqual([concurrent.id]);
+    expect(summaries).toEqual([]);
     expect(JSON.parse((await rawStore.get('agent-session-index'))!).summaries).toHaveProperty(
       concurrent.id,
     );
+    const repairedSummaries = await store.list();
+    expect(repairedSummaries.map((summary) => summary.id)).toEqual([concurrent.id]);
   });
 
   it('rebuilds array-shaped malformed indexes before list, save, and update', async () => {
@@ -622,6 +642,58 @@ describe('createSessionStore', () => {
         expect(ids).toContain(changed.id);
       }
     }
+  });
+
+  it('treats the top-level summary index version as authoritative', async () => {
+    const rawStore = textValueStore(new MemoryStorage());
+    const store = createSessionStore(rawStore);
+    const session = makeSession({ id: 'authoritative-version' });
+    await seedStoredSession(rawStore, session);
+    await rawStore.set(
+      'agent-session-index',
+      JSON.stringify({
+        formatVersion: 1,
+        summaries: {
+          [session.id]: {
+            id: session.id,
+            agentName: session.agentName,
+            messageCount: 0,
+            createdAt: session.createdAt,
+            updatedAt: session.updatedAt,
+            metadata: {},
+            formatVersion: 999,
+          },
+        },
+      }),
+    );
+
+    const summaries = await store.list();
+    expect(summaries.map((summary) => summary.id)).toEqual([session.id]);
+  });
+
+  it('reports an accurate conflict when delete cannot commit', async () => {
+    const backingStore = textValueStore(new MemoryStorage());
+    const session = makeSession({ id: 'delete-conflict' });
+    await backingStore.set(`agent-session:${session.id}`, JSON.stringify(session));
+    await backingStore.set('agent-session-index', summaryIndexPayload(session.id));
+    const conflictingStore = {
+      ...backingStore,
+      conditionalBatch: async () => false,
+    };
+    const store = createSessionStore(conflictingStore);
+
+    let error: unknown;
+    try {
+      await store.delete(session.id);
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toMatchObject({
+      code: 'SessionConflictError',
+      message: expect.stringContaining('deleted'),
+    });
+    expect(await backingStore.has(`agent-session:${session.id}`)).toBe(true);
+    expect(await backingStore.has('agent-session-index')).toBe(true);
   });
 
   it('uses the session id as a deterministic tie-break in either sort direction', async () => {

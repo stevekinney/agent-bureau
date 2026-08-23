@@ -18,8 +18,10 @@ const SUMMARY_FORMAT_VERSION = 1;
 export class SessionConflictError extends Error {
   readonly code = 'SessionConflictError';
 
-  constructor(sessionId: string) {
-    super(`Session "${sessionId}" could not be saved after ${MAXIMUM_SAVE_ATTEMPTS} conflicts.`);
+  constructor(sessionId: string, operation = 'committed') {
+    super(
+      `Session "${sessionId}" could not be ${operation} after ${MAXIMUM_SAVE_ATTEMPTS} conflicts.`,
+    );
     this.name = 'SessionConflictError';
   }
 }
@@ -168,38 +170,33 @@ function toSummary(session: AgentSession): SessionSummary {
   };
 }
 
-function parseSummary(raw: string | null): SessionSummary | undefined {
-  if (!raw) return undefined;
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    if (
-      typeof parsed !== 'object' ||
-      parsed === null ||
-      (parsed as Record<string, unknown>)['formatVersion'] !== SUMMARY_FORMAT_VERSION ||
-      typeof (parsed as Record<string, unknown>)['id'] !== 'string' ||
-      typeof (parsed as Record<string, unknown>)['agentName'] !== 'string' ||
-      typeof (parsed as Record<string, unknown>)['messageCount'] !== 'number' ||
-      !isValidDate((parsed as Record<string, unknown>)['createdAt']) ||
-      !isValidDate((parsed as Record<string, unknown>)['updatedAt'])
-    )
-      return undefined;
-    const record = parsed as Record<string, unknown>;
-    return {
-      id: record['id'] as string,
-      agentName: record['agentName'] as string,
-      messageCount: record['messageCount'] as number,
-      createdAt: record['createdAt'] as string,
-      updatedAt: record['updatedAt'] as string,
-      metadata:
-        typeof record['metadata'] === 'object' &&
-        record['metadata'] !== null &&
-        !Array.isArray(record['metadata'])
-          ? (record['metadata'] as Record<string, JSONValue>)
-          : {},
-    };
-  } catch {
+function parseSummaryRecord(
+  record: Record<string, unknown>,
+  expectedId?: string,
+): SessionSummary | undefined {
+  if (
+    record['formatVersion'] !== SUMMARY_FORMAT_VERSION ||
+    typeof record['id'] !== 'string' ||
+    (expectedId !== undefined && record['id'] !== expectedId) ||
+    typeof record['agentName'] !== 'string' ||
+    typeof record['messageCount'] !== 'number' ||
+    !isValidDate(record['createdAt']) ||
+    !isValidDate(record['updatedAt'])
+  )
     return undefined;
-  }
+  return {
+    id: record['id'],
+    agentName: record['agentName'],
+    messageCount: record['messageCount'],
+    createdAt: record['createdAt'] as string,
+    updatedAt: record['updatedAt'] as string,
+    metadata:
+      typeof record['metadata'] === 'object' &&
+      record['metadata'] !== null &&
+      !Array.isArray(record['metadata'])
+        ? (record['metadata'] as Record<string, JSONValue>)
+        : {},
+  };
 }
 
 function parseSummaryIndex(raw: string | null): Map<string, SessionSummary> | undefined {
@@ -219,13 +216,11 @@ function parseSummaryIndex(raw: string | null): Map<string, SessionSummary> | un
     const summaries = new Map<string, SessionSummary>();
     for (const [id, value] of Object.entries(record['summaries'] as Record<string, unknown>)) {
       if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
-      const summary = parseSummary(
-        JSON.stringify({
-          formatVersion: SUMMARY_FORMAT_VERSION,
-          ...(value as Record<string, unknown>),
-        }),
+      const summary = parseSummaryRecord(
+        { ...(value as Record<string, unknown>), formatVersion: SUMMARY_FORMAT_VERSION },
+        id,
       );
-      if (!summary || summary.id !== id) return undefined;
+      if (!summary) return undefined;
       summaries.set(id, summary);
     }
     return summaries;
@@ -395,14 +390,14 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
         );
         if (deleted) return;
       }
-      throw new SessionConflictError(id);
+      throw new SessionConflictError(id, 'deleted');
     },
 
     async list(options?: SessionListOptions): Promise<SessionSummary[]> {
-      let dataKeys = await store.list(KEY_PREFIX);
       let summaryRaw = await store.get(SUMMARY_INDEX_KEY);
       let summaries = parseSummaryIndex(summaryRaw);
       if (!summaries) {
+        const dataKeys = await store.list(KEY_PREFIX);
         summaries = new Map();
         await Promise.all(
           dataKeys.map(async (key) => {
@@ -420,36 +415,8 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
         if (rebuilt) summaryRaw = serializeSummaryIndex(summaries);
       }
 
-      // An index entry must never make a deleted or otherwise missing body
-      // visible. This also keeps orphaned records from surviving migrations
-      // from stores that predate the atomic data/index writes.
-      for (let attempt = 0; attempt < MAXIMUM_SAVE_ATTEMPTS; attempt += 1) {
-        const dataIds = new Set(dataKeys.map((key) => key.slice(KEY_PREFIX.length)));
-        const repaired = new Map(summaries);
-        for (const id of repaired.keys()) {
-          if (!dataIds.has(id)) repaired.delete(id);
-        }
-        if (repaired.size === summaries.size) break;
-
-        const committed = await store.conditionalBatch(
-          [{ key: SUMMARY_INDEX_KEY, expectedValue: summaryRaw }],
-          [{ type: 'set', key: SUMMARY_INDEX_KEY, value: serializeSummaryIndex(repaired) }],
-        );
-        if (committed) {
-          summaries = repaired;
-          break;
-        }
-
-        [dataKeys, summaryRaw] = await Promise.all([
-          store.list(KEY_PREFIX),
-          store.get(SUMMARY_INDEX_KEY),
-        ]);
-        summaries = parseSummaryIndex(summaryRaw);
-        if (!summaries) summaries = await summariesForMutation(summaryRaw);
-      }
-
       // Filter by agentName when requested
-      let filtered = options?.agentName
+      const filtered = options?.agentName
         ? [...summaries.values()].filter((s) => s.agentName === options.agentName)
         : [...summaries.values()];
 
@@ -464,12 +431,55 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
         return sortOrder === 'asc' ? a.id.localeCompare(b.id) : b.id.localeCompare(a.id);
       });
 
-      // Paginate
+      // A valid aggregate index is the complete candidate set. Read only
+      // enough body keys to fill the requested page; legacy and malformed
+      // indexes above still rebuild from every body key.
       const offset = options?.offset ?? 0;
       const limit = options?.limit ?? filtered.length;
-      filtered = filtered.slice(offset, offset + limit);
+      if (limit <= 0) return [];
+      const page: SessionSummary[] = [];
+      const missingIds: string[] = [];
+      let seen = 0;
+      for (const summary of filtered) {
+        const body = await store.get(keyFor(summary.id));
+        if (body === null) {
+          missingIds.push(summary.id);
+          continue;
+        }
+        if (seen < offset) {
+          seen += 1;
+          continue;
+        }
+        page.push(summary);
+        if (page.length >= limit) break;
+      }
 
-      return filtered;
+      // Remove only ids confirmed missing by the body reads. On a CAS
+      // conflict, reread both the index and each missing body so a concurrent
+      // save cannot be mistaken for an orphan and then pruned.
+      for (
+        let attempt = 0;
+        missingIds.length > 0 && attempt < MAXIMUM_SAVE_ATTEMPTS;
+        attempt += 1
+      ) {
+        const current = parseSummaryIndex(summaryRaw);
+        if (!current) break;
+        const stillMissing: string[] = [];
+        for (const id of missingIds) {
+          if ((await store.get(keyFor(id))) === null) stillMissing.push(id);
+        }
+        if (stillMissing.length === 0) break;
+        const repaired = new Map(current);
+        for (const id of stillMissing) repaired.delete(id);
+        const committed = await store.conditionalBatch(
+          [{ key: SUMMARY_INDEX_KEY, expectedValue: summaryRaw }],
+          [{ type: 'set', key: SUMMARY_INDEX_KEY, value: serializeSummaryIndex(repaired) }],
+        );
+        if (committed) break;
+        summaryRaw = await store.get(SUMMARY_INDEX_KEY);
+      }
+
+      return page;
     },
 
     async exists(id: string): Promise<boolean> {
