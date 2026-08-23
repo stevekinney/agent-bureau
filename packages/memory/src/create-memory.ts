@@ -1,8 +1,14 @@
+import { cosineSimilarity, type EmbeddingVectorLike } from 'interoperability';
+
 import type { HybridSearchCandidate, VectorSearchResult } from './hybrid-search';
 import { mergeHybridResults } from './hybrid-search';
 import { SOURCE_DOCUMENT_KEY } from './ingest';
 import { applyMaximalMarginalRelevance } from './maximal-marginal-relevance';
-import type { MemoryRecord, MemoryRecordScope } from './memory-record-storage';
+import type {
+  MemoryRecord,
+  MemoryRecordScope,
+  MemoryVectorSearchResult,
+} from './memory-record-storage';
 import { extractKeywords } from './query-expansion';
 import { applyTemporalDecay } from './temporal-decay';
 import { filterByValidity, stampSupersession } from './temporal-validity';
@@ -19,6 +25,21 @@ import type {
 
 const DEFAULT_DEDUPLICATION_THRESHOLD = 0.95;
 const DEFAULT_NAMESPACE = 'default';
+
+function rankRecordsByVector(
+  records: readonly MemoryRecord[],
+  queryVector: EmbeddingVectorLike,
+  threshold?: number,
+): MemoryVectorSearchResult[] {
+  return records
+    .map((record) => ({
+      id: record.id,
+      score: cosineSimilarity(queryVector, record.vector),
+      record,
+    }))
+    .filter((hit) => threshold === undefined || hit.score >= threshold)
+    .sort((left, right) => right.score - left.score);
+}
 
 function generateId(): string {
   return crypto.randomUUID();
@@ -326,14 +347,17 @@ export function createMemory(options: CreateMemoryOptions): Memory {
       // When vectorOnly is set, skip BM25 and return pure cosine similarity
       // scores filtered by the (cosine-semantics) threshold.
       if (mergedOptions.vectorOnly) {
-        // Validity filtering happens after vector ranking. Over-fetch the full
-        // scope when enabled so invalid records cannot shrink the final K.
-        const vectorResultLimit =
-          asOf === undefined ? limit * candidateMultiplier : await storage.count(scope);
-        const hits = await storage.searchByVector(queryVector, scope, {
-          limit: vectorResultLimit,
-          threshold,
-        });
+        // Indexed backends may cap one-shot search limits (Cloudflare caps at
+        // 200). Temporal validity needs the whole candidate set so invalid top
+        // hits cannot shrink K, so rank the paginatable canonical corpus
+        // locally instead of requesting an unbounded ANN top-K.
+        const hits =
+          asOf === undefined
+            ? await storage.searchByVector(queryVector, scope, {
+                limit: limit * candidateMultiplier,
+                threshold,
+              })
+            : rankRecordsByVector(await storage.list(scope), queryVector, threshold);
 
         let results: (MemorySearchResult & { vector?: number[] })[] = hits.map((hit) => ({
           id: hit.id,
@@ -368,8 +392,8 @@ export function createMemory(options: CreateMemoryOptions): Memory {
       // through storage, then merge.
       const corpus = await storage.list(scope);
       if (corpus.length === 0) return [];
-      // Validity filtering happens after hybrid ranking. Over-fetch the full
-      // scope when enabled so invalid records cannot shrink the final K.
+      // Validity filtering happens after hybrid ranking. Rank the canonical
+      // corpus locally when enabled so backend ANN limits cannot shrink K.
       const vectorResultLimit = asOf === undefined ? limit * candidateMultiplier : corpus.length;
 
       const recordsById = new Map(corpus.map((record) => [record.id, record]));
@@ -383,9 +407,10 @@ export function createMemory(options: CreateMemoryOptions): Memory {
       // Vector similarity search — no threshold here: the recall threshold is
       // applied to the COMBINED score by mergeHybridResults. Pre-filtering the
       // vector half would discard valid hybrid matches.
-      const vectorHits = await storage.searchByVector(queryVector, scope, {
-        limit: vectorResultLimit,
-      });
+      const vectorHits =
+        asOf === undefined
+          ? await storage.searchByVector(queryVector, scope, { limit: vectorResultLimit })
+          : rankRecordsByVector(corpus, queryVector);
       const vectorResults: VectorSearchResult[] = vectorHits.map((hit) => ({
         id: hit.id,
         score: hit.score,

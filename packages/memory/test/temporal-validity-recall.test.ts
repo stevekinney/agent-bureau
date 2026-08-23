@@ -240,5 +240,45 @@ describe('temporal fact-validity', () => {
         expect(results.map((result) => result.id)).toEqual([firstValid.id, secondValid.id]);
       });
     }
+
+    it('does not exceed bounded backend vector-search limits while refilling temporal results', async () => {
+      const backingStorage = createInMemoryMemoryRecordStorage();
+      let vectorSearchCalls = 0;
+      const storage: MemoryRecordStorage = {
+        ...backingStorage,
+        async searchByVector(vector, scope, options) {
+          vectorSearchCalls += 1;
+          if (options.limit > 200) {
+            throw new Error(`bounded backend rejected limit ${options.limit}`);
+          }
+          return backingStorage.searchByVector(vector, scope, options);
+        },
+      };
+      const memory = createMemory({
+        embedder: () => [[1, 0]],
+        storage,
+        deduplicationThreshold: 2,
+        temporalValidity: true,
+      });
+      await memory.init();
+
+      for (let index = 0; index < 201; index++) {
+        await memory.remember('same fact', { validFrom: 1_000 + index });
+      }
+      await memory.remember('same fact', { validFrom: -1 });
+      await memory.remember('same fact', { validFrom: -1 });
+      vectorSearchCalls = 0;
+
+      for (const vectorOnly of [false, true]) {
+        const results = await memory.recall('same fact', {
+          asOf: 0,
+          limit: 2,
+          threshold: 0,
+          vectorOnly,
+        });
+        expect(results).toHaveLength(2);
+      }
+      expect(vectorSearchCalls).toBe(0);
+    });
   });
 });
