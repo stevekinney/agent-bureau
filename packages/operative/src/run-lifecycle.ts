@@ -100,12 +100,20 @@ export function makeAbortResult(
   terminalError?: AgentRunError,
 ): RunResult {
   const costEstimate = computeCostEstimate(runState.totalUsage, costEstimation);
-  const error = terminalError ?? new AbortAgentRunError(reason);
+  const explicitReason = typeof reason === 'string' ? reason : undefined;
+  const error = terminalError ?? new AbortAgentRunError(explicitReason);
   emitter?.dispatch(
-    new RunAbortedEvent(step, conversation, error, runState.totalUsage, costEstimate),
+    new RunAbortedEvent(
+      step,
+      conversation,
+      error,
+      runState.totalUsage,
+      costEstimate,
+      explicitReason,
+    ),
   );
   runHookSilently(hooks, 'onRunAbort', {
-    reason: error.message,
+    reason: explicitReason,
     error,
     partialSteps: [...runState.steps],
     conversation,

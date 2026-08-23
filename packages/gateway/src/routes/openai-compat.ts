@@ -143,7 +143,28 @@ function formatSseErrorChunk(model: string, message: string): string {
 
 function formatRunErrorMessage(error: unknown, fallback: string): string {
   if (error instanceof Error) return error.message;
-  if (typeof error === 'string' && error.length > 0) return error;
+  if (typeof error === 'string' && error.length > 0) {
+    try {
+      const diagnostic = JSON.parse(error) as unknown;
+      if (
+        typeof diagnostic === 'object' &&
+        diagnostic !== null &&
+        'name' in diagnostic &&
+        typeof diagnostic.name === 'string' &&
+        'message' in diagnostic &&
+        typeof diagnostic.message === 'string' &&
+        'kind' in diagnostic &&
+        typeof diagnostic.kind === 'string' &&
+        'code' in diagnostic &&
+        typeof diagnostic.code === 'string'
+      ) {
+        return diagnostic.message;
+      }
+    } catch {
+      // Ordinary non-JSON error strings remain the public message.
+    }
+    return error;
+  }
   return fallback;
 }
 

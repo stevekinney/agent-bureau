@@ -150,6 +150,10 @@ export type StepOutcome =
   | { kind: 'abort'; reason?: string }
   | { kind: 'error'; error: unknown; errorKind?: AgentRunErrorKind };
 
+function explicitAbortReason(signal: AbortSignal | undefined): string | undefined {
+  return typeof signal?.reason === 'string' ? signal.reason : undefined;
+}
+
 export function normalizeToArray<T>(value: T | T[] | undefined): T[] {
   if (!value) return [];
   return Array.isArray(value) ? value : [value];
@@ -386,7 +390,7 @@ export async function runStep(
   const { signal, backpressure, hooks } = deps;
 
   if (signal?.aborted) {
-    return { kind: 'abort', reason: signal.reason as string | undefined };
+    return { kind: 'abort', reason: explicitAbortReason(signal) };
   }
 
   // Backpressure: wait before proceeding if the strategy requires it
@@ -395,7 +399,7 @@ export async function runStep(
     if (backpressureDelay > 0) {
       emitter?.dispatch(new BackpressureAppliedEvent(step, backpressureDelay));
       if (signal?.aborted) {
-        return { kind: 'abort', reason: signal.reason as string | undefined };
+        return { kind: 'abort', reason: explicitAbortReason(signal) };
       }
       await new Promise<void>((resolve) => {
         const timer = setTimeout(resolve, backpressureDelay);
@@ -408,7 +412,7 @@ export async function runStep(
         }
       });
       if (signal?.aborted) {
-        return { kind: 'abort', reason: signal.reason as string | undefined };
+        return { kind: 'abort', reason: explicitAbortReason(signal) };
       }
       emitter?.dispatch(new BackpressureReleasedEvent(step));
     }
@@ -726,7 +730,7 @@ export async function runStep(
 
       backpressure?.onError(error);
       if (signal?.aborted) {
-        return { kind: 'abort', reason: signal.reason as string | undefined };
+        return { kind: 'abort', reason: explicitAbortReason(signal) };
       }
       emitter?.dispatch(new RunErrorEvent(step, error, 'generate'));
       return { kind: 'error', error, errorKind: 'generate' };
@@ -788,13 +792,11 @@ export async function runStep(
   }
 
   if (signal?.aborted) {
-    return { kind: 'abort', reason: signal.reason as string | undefined };
+    return { kind: 'abort', reason: explicitAbortReason(signal) };
   }
 
   if (stepSignal.aborted && !signal?.aborted) {
-    emitter?.dispatch(
-      new StepAbortedEvent(step, stepAbortController.signal.reason as string | undefined),
-    );
+    emitter?.dispatch(new StepAbortedEvent(step, explicitAbortReason(stepAbortController.signal)));
     return { kind: 'continue' };
   }
 
@@ -1034,7 +1036,7 @@ export async function runStep(
 
       if (stepSignal.aborted && !signal?.aborted) {
         emitter?.dispatch(
-          new StepAbortedEvent(step, stepAbortController.signal.reason as string | undefined),
+          new StepAbortedEvent(step, explicitAbortReason(stepAbortController.signal)),
         );
         return { kind: 'continue' };
       }

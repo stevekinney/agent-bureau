@@ -728,6 +728,40 @@ describe('OpenAI-compat route (POST /v1/chat/completions)', () => {
       realGateway.bureau.dispose();
     });
 
+    it('extracts the message from a serialized abort diagnostic on the non-streaming path', async () => {
+      const realGateway = await createTestGateway({ generate: createMockGenerate() });
+      const { runState } = gatewayWithPreSettledRun({
+        status: 'aborted',
+        finishReason: 'aborted',
+        error: JSON.stringify({
+          name: 'AbortAgentRunError',
+          message: 'operator stopped it',
+          kind: 'abort',
+          code: 'ABORTED',
+        }),
+      });
+
+      const fakeBureau = {
+        ...realGateway.bureau,
+        createRun: async () => ({ id: 'pre-settled-run', sessionId: 'sess-1' }),
+        getRun: (id: string) =>
+          id === 'pre-settled-run' ? runState : realGateway.bureau.getRun(id),
+      } as unknown as typeof realGateway.bureau;
+
+      const gateway = await createTestGateway(fakeBureau);
+      const response = await requestJSON(gateway, '/v1/chat/completions', {
+        method: 'POST',
+        body: minimalRequest('bureau', 'Fast abort'),
+      });
+
+      expect(response.status).toBe(500);
+      const text = await response.text();
+      expect(text).toContain('operator stopped it');
+      expect(text).not.toContain('AbortAgentRunError');
+
+      realGateway.bureau.dispose();
+    });
+
     it('classifies a budget-exceeded run (store status completed) as an error, not success', async () => {
       // A budget-exceeded run lands in the store as status 'completed' but
       // finishReason 'budget-exceeded'. The immediate path must discriminate by

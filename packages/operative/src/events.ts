@@ -147,7 +147,7 @@ export class RunAbortedEvent extends Event {
   static readonly type = 'run.aborted' as const;
   readonly step: number;
   readonly error: AgentRunError;
-  readonly reason: string;
+  readonly reason?: string;
   // The conversation as it stood when the run aborted. On the durable path the
   // workflow mutates per-step checkpoint snapshots, never the launch-time input
   // instance, so listeners MUST persist this conversation (the reconstructed /
@@ -169,12 +169,13 @@ export class RunAbortedEvent extends Event {
     error: AgentRunError,
     usage?: TokenUsage,
     costEstimate?: RunResult['costEstimate'],
+    reason?: string,
   ) {
     super(RunAbortedEvent.type);
     this.step = step;
     this.conversation = conversation;
     this.error = error;
-    this.reason = error.message;
+    this.reason = reason;
     this.usage = usage;
     this.costEstimate = costEstimate;
   }

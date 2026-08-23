@@ -597,6 +597,35 @@ describe('onRunAbort hook', () => {
     expect(contexts[0].conversation).toBeInstanceOf(Conversation);
     expect(contexts[0].partialSteps).toBeDefined();
   });
+
+  it('preserves an omitted reason separately from the typed abort error', async () => {
+    const contexts: RunAbortContext[] = [];
+    const hooks = new HookRegistry<OperativeHookMap>();
+    hooks.on('onRunAbort', async (context) => {
+      contexts.push(context);
+    });
+
+    const activeRun = createActiveRun({
+      generate: createMockGenerate(),
+      toolbox: createTestToolbox([tool]),
+      conversation: new Conversation(),
+      hooks,
+    });
+    let eventReason: string | undefined = 'event-not-observed';
+    activeRun.addEventListener('run.aborted', (event) => {
+      eventReason = event.reason;
+    });
+
+    activeRun.abort();
+    const result = await activeRun.result;
+
+    expect(result.finishReason).toBe('aborted');
+    expect(result.error).toBeInstanceOf(AbortAgentRunError);
+    expect(contexts).toHaveLength(1);
+    expect(contexts[0].reason).toBeUndefined();
+    expect(contexts[0].error).toBe(result.error);
+    expect(eventReason).toBeUndefined();
+  });
 });
 
 describe('onError hook (error recovery)', () => {

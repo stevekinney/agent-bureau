@@ -1161,7 +1161,8 @@ async function driveDurableRun(
         hooks,
         emitter,
         runStartTime,
-        abortReason: signal.aborted ? String(signal.reason) : undefined,
+        abortReason:
+          signal.aborted && typeof signal.reason === 'string' ? signal.reason : undefined,
         costEstimation: options.costEstimation,
         terminalError: terminalErrorFromEvent,
       });
