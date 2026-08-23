@@ -5,6 +5,8 @@ import { Conversation, createConversationHistory } from 'conversationalist';
 import { createAgentSession } from '../agent-session';
 import { createSessionStore, SessionConflictError } from './create-session-store';
 
+const SUMMARY_INDEX_KEY = 'agent-session:summary-index';
+
 function makeSession(overrides: {
   agentName?: string;
   id?: string;
@@ -107,6 +109,18 @@ describe('createSessionStore', () => {
         (id, index) => loaded!.conversationHistory.messages[id]!.position === index,
       ),
     ).toEqual([true, true]);
+  });
+
+  it('does not exhaust save retries for unrelated concurrent sessions', async () => {
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
+    const sessions = Array.from({ length: 6 }, (_, index) =>
+      makeSession({ id: `unrelated-concurrent-${index}` }),
+    );
+
+    await Promise.all(sessions.map((session) => store.save(session)));
+
+    const summaries = await store.list();
+    expect(summaries.map((summary) => summary.id)).toHaveLength(sessions.length);
   });
 
   it('preserves metadata and conversation updates that interleave', async () => {
@@ -431,7 +445,7 @@ describe('createSessionStore', () => {
 
     await store.delete(session.id);
     expect(await store.load(session.id)).toBeUndefined();
-    expect(await rawStore.has('agent-session-index')).toBe(false);
+    expect(await rawStore.has(SUMMARY_INDEX_KEY)).toBe(false);
   });
 
   it('delete is a no-op for nonexistent session', async () => {
@@ -443,12 +457,12 @@ describe('createSessionStore', () => {
   it('delete cleans up an orphan summary when the session body is missing', async () => {
     const rawStore = textValueStore(new MemoryStorage());
     const store = createSessionStore(rawStore);
-    await rawStore.set('agent-session-index', summaryIndexPayload('orphan-session'));
+    await rawStore.set(SUMMARY_INDEX_KEY, summaryIndexPayload('orphan-session'));
 
     await store.delete('orphan-session');
 
     expect(await rawStore.has('agent-session:orphan-session')).toBe(false);
-    expect(await rawStore.has('agent-session-index')).toBe(false);
+    expect(await rawStore.has(SUMMARY_INDEX_KEY)).toBe(false);
   });
 
   it('exists returns true for saved sessions', async () => {
@@ -527,8 +541,10 @@ describe('createSessionStore', () => {
 
     expect(summaries).toHaveLength(5);
     expect(getKeys).toHaveLength(6);
-    expect(getKeys[0]).toBe('agent-session-index');
-    expect(getKeys.filter((key) => key.startsWith('agent-session:'))).toHaveLength(5);
+    expect(getKeys[0]).toBe(SUMMARY_INDEX_KEY);
+    expect(
+      getKeys.filter((key) => key.startsWith('agent-session:') && key !== SUMMARY_INDEX_KEY),
+    ).toHaveLength(5);
     expect(listCalls).toBe(0);
 
     const smallerBackingStore = textValueStore(new MemoryStorage());
@@ -553,17 +569,17 @@ describe('createSessionStore', () => {
     smallerListCalls = 0;
     await smallerStore.list({ limit: 5 });
     expect(smallerGetKeys).toHaveLength(6);
-    expect(smallerGetKeys[0]).toBe('agent-session-index');
+    expect(smallerGetKeys[0]).toBe(SUMMARY_INDEX_KEY);
     expect(smallerListCalls).toBe(0);
   });
 
   it('does not list an orphan summary when its session body is missing', async () => {
     const rawStore = textValueStore(new MemoryStorage());
     const store = createSessionStore(rawStore);
-    await rawStore.set('agent-session-index', summaryIndexPayload('orphan-session'));
+    await rawStore.set(SUMMARY_INDEX_KEY, summaryIndexPayload('orphan-session'));
 
     expect(await store.list()).toEqual([]);
-    expect(await rawStore.get('agent-session-index')).toBe(
+    expect(await rawStore.get(SUMMARY_INDEX_KEY)).toBe(
       JSON.stringify({ formatVersion: 1, summaries: {} }),
     );
 
@@ -578,7 +594,7 @@ describe('createSessionStore', () => {
     const concurrentStore = createSessionStore(rawStore);
     const concurrent = makeSession({ id: 'concurrent-repair-session' });
     const orphanIndex = summaryIndexPayload('orphan-session');
-    await rawStore.set('agent-session-index', orphanIndex);
+    await rawStore.set(SUMMARY_INDEX_KEY, orphanIndex);
     let injectSave = true;
     const instrumentedStore = {
       ...rawStore,
@@ -587,14 +603,14 @@ describe('createSessionStore', () => {
         operations: Parameters<typeof rawStore.conditionalBatch>[1],
       ) => {
         const repairsIndex = operations.some(
-          (operation) => operation.type === 'set' && operation.key === 'agent-session-index',
+          (operation) => operation.type === 'set' && operation.key === SUMMARY_INDEX_KEY,
         );
         if (
           injectSave &&
           repairsIndex &&
           conditions.some(
             (condition) =>
-              condition.key === 'agent-session-index' && condition.expectedValue === orphanIndex,
+              condition.key === SUMMARY_INDEX_KEY && condition.expectedValue === orphanIndex,
           )
         ) {
           injectSave = false;
@@ -608,7 +624,7 @@ describe('createSessionStore', () => {
     const summaries = await store.list();
 
     expect(summaries).toEqual([]);
-    expect(JSON.parse((await rawStore.get('agent-session-index'))!).summaries).toHaveProperty(
+    expect(JSON.parse((await rawStore.get(SUMMARY_INDEX_KEY))!).summaries).toHaveProperty(
       concurrent.id,
     );
     const repairedSummaries = await store.list();
@@ -624,7 +640,7 @@ describe('createSessionStore', () => {
         const changed = makeSession({ id: `${operation}-changed` });
         await store.save(retained);
         await store.save(changed);
-        await rawStore.set('agent-session-index', malformed);
+        await rawStore.set(SUMMARY_INDEX_KEY, malformed);
 
         if (operation === 'list') {
           await store.list();
@@ -650,7 +666,7 @@ describe('createSessionStore', () => {
     const session = makeSession({ id: 'authoritative-version' });
     await seedStoredSession(rawStore, session);
     await rawStore.set(
-      'agent-session-index',
+      SUMMARY_INDEX_KEY,
       JSON.stringify({
         formatVersion: 1,
         summaries: {
@@ -675,7 +691,7 @@ describe('createSessionStore', () => {
     const backingStore = textValueStore(new MemoryStorage());
     const session = makeSession({ id: 'delete-conflict' });
     await backingStore.set(`agent-session:${session.id}`, JSON.stringify(session));
-    await backingStore.set('agent-session-index', summaryIndexPayload(session.id));
+    await backingStore.set(SUMMARY_INDEX_KEY, summaryIndexPayload(session.id));
     const conflictingStore = {
       ...backingStore,
       conditionalBatch: async () => false,
@@ -693,7 +709,7 @@ describe('createSessionStore', () => {
       message: expect.stringContaining('deleted'),
     });
     expect(await backingStore.has(`agent-session:${session.id}`)).toBe(true);
-    expect(await backingStore.has('agent-session-index')).toBe(true);
+    expect(await backingStore.has(SUMMARY_INDEX_KEY)).toBe(true);
   });
 
   it('uses the session id as a deterministic tie-break in either sort direction', async () => {
@@ -716,6 +732,28 @@ describe('createSessionStore', () => {
     expect(descending.map((summary) => summary.id)).toEqual(['same-c', 'same-b', 'same-a']);
   });
 
+  it('orders canonically equivalent Unicode ids by code units', async () => {
+    const rawStore = textValueStore(new MemoryStorage());
+    const store = createSessionStore(rawStore);
+    const composed = makeSession({
+      id: 'same-\u00e9',
+      createdAt: '2025-01-01T00:00:00.000Z',
+      updatedAt: '2025-01-01T00:00:00.000Z',
+    });
+    const decomposed = makeSession({
+      id: 'same-e\u0301',
+      createdAt: '2025-01-01T00:00:00.000Z',
+      updatedAt: '2025-01-01T00:00:00.000Z',
+    });
+    await seedStoredSession(rawStore, composed);
+    await seedStoredSession(rawStore, decomposed);
+
+    const ascending = await store.list({ sortOrder: 'asc' });
+    expect(ascending.map((summary) => summary.id)).toEqual([decomposed.id, composed.id]);
+    const descending = await store.list({ sortOrder: 'desc' });
+    expect(descending.map((summary) => summary.id)).toEqual([composed.id, decomposed.id]);
+  });
+
   it('backfills a missing legacy summary index on the first list', async () => {
     const rawStore = textValueStore(new MemoryStorage());
     const store = createSessionStore(rawStore);
@@ -724,9 +762,63 @@ describe('createSessionStore', () => {
 
     const summaries = await store.list();
     expect(summaries[0]!.id).toBe(session.id);
-    expect(await rawStore.has('agent-session-index')).toBe(true);
+    expect(await rawStore.has(SUMMARY_INDEX_KEY)).toBe(true);
     const backfilled = await store.list();
     expect(backfilled[0]!.messageCount).toBe(0);
+  });
+
+  it('does not read or overwrite the old un-namespaced collision key', async () => {
+    const rawStore = textValueStore(new MemoryStorage());
+    const store = createSessionStore(rawStore);
+    const session = makeSession({ id: 'namespaced-index' });
+    const unrelatedValue = 'client-owned-value';
+    await rawStore.set('agent-session-index', unrelatedValue);
+    await seedStoredSession(rawStore, session);
+
+    const summaries = await store.list();
+    expect(summaries.map((summary) => summary.id)).toEqual([session.id]);
+    expect(await rawStore.get('agent-session-index')).toBe(unrelatedValue);
+    expect(await rawStore.has(SUMMARY_INDEX_KEY)).toBe(true);
+  });
+
+  it('does not replace a concurrent save during legacy index rebuild', async () => {
+    const rawStore = textValueStore(new MemoryStorage());
+    const retained = makeSession({ id: 'legacy-retained' });
+    const concurrent = makeSession({ id: 'legacy-concurrent' });
+    await seedStoredSession(rawStore, retained);
+    const concurrentStore = createSessionStore(rawStore);
+    let injectSave = true;
+    const instrumentedStore = {
+      ...rawStore,
+      conditionalBatch: async (
+        conditions: Parameters<typeof rawStore.conditionalBatch>[0],
+        operations: Parameters<typeof rawStore.conditionalBatch>[1],
+      ) => {
+        const rebuildsIndex = operations.some(
+          (operation) => operation.type === 'set' && operation.key === SUMMARY_INDEX_KEY,
+        );
+        if (
+          injectSave &&
+          rebuildsIndex &&
+          conditions.some(
+            (condition) => condition.key === SUMMARY_INDEX_KEY && condition.expectedValue === null,
+          )
+        ) {
+          injectSave = false;
+          await concurrentStore.save(concurrent);
+        }
+        return rawStore.conditionalBatch(conditions, operations);
+      },
+    };
+    const store = createSessionStore(instrumentedStore);
+
+    const summaries = await store.list();
+    const ids = summaries.map((summary) => summary.id);
+
+    expect(ids).toEqual([retained.id, concurrent.id]);
+    expect(JSON.parse((await rawStore.get(SUMMARY_INDEX_KEY))!).summaries).toHaveProperty(
+      concurrent.id,
+    );
   });
 
   it('rebuilds a malformed index before save, update, or delete', async () => {
@@ -737,7 +829,7 @@ describe('createSessionStore', () => {
       const changed = makeSession({ id: `${operation}-changed` });
       await store.save(retained);
       await store.save(changed);
-      await rawStore.set('agent-session-index', '{"summaries":{"broken":null}}');
+      await rawStore.set(SUMMARY_INDEX_KEY, '{"summaries":{"broken":null}}');
 
       if (operation === 'save') {
         await store.save({ ...changed, agentName: 'updated-agent' });
@@ -895,7 +987,7 @@ describe('createSessionStore', () => {
     const keys = await kv.list('agent-session:');
     expect(keys.length).toBeGreaterThan(0);
     expect(keys.every((k) => k.startsWith('agent-session:'))).toBe(true);
-    expect(await kv.has('agent-session-index')).toBe(true);
+    expect(await kv.has(SUMMARY_INDEX_KEY)).toBe(true);
   });
 
   it('list returns correct messageCount from conversation history', async () => {

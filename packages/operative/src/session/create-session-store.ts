@@ -11,8 +11,9 @@ import type {
 } from './types';
 
 const KEY_PREFIX = 'agent-session:';
-const SUMMARY_INDEX_KEY = 'agent-session-index';
+const SUMMARY_INDEX_KEY = 'agent-session:summary-index';
 const MAXIMUM_SAVE_ATTEMPTS = 5;
+const MAXIMUM_INDEX_CONTENTION_ATTEMPTS = 50;
 const SUMMARY_FORMAT_VERSION = 1;
 
 export class SessionConflictError extends Error {
@@ -262,7 +263,8 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
     // discard summaries for bodies that are still present. Rebuild it from
     // the source of truth before applying the requested mutation.
     const summaries = new Map<string, SessionSummary>();
-    const dataKeys = await store.list(KEY_PREFIX);
+    const listedKeys = await store.list(KEY_PREFIX);
+    const dataKeys = listedKeys.filter((key) => key !== SUMMARY_INDEX_KEY);
     await Promise.all(
       dataKeys.map(async (key) => {
         const session = parseSession(await store.get(key));
@@ -304,7 +306,9 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
 
   const sessionStore: SessionStore = {
     async save(session: AgentSession): Promise<void> {
-      for (let attempt = 1; attempt <= MAXIMUM_SAVE_ATTEMPTS; attempt += 1) {
+      let saveConflicts = 0;
+      let previousBodyRaw: string | null | undefined;
+      for (let attempt = 1; attempt <= MAXIMUM_INDEX_CONTENTION_ATTEMPTS; attempt += 1) {
         const [raw, summaryRaw] = await Promise.all([
           store.get(keyFor(session.id)),
           store.get(SUMMARY_INDEX_KEY),
@@ -323,6 +327,9 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
           Object.assign(session, committed);
           return;
         }
+        if (previousBodyRaw !== undefined && previousBodyRaw !== raw) saveConflicts += 1;
+        previousBodyRaw = raw;
+        if (saveConflicts >= MAXIMUM_SAVE_ATTEMPTS) throw new SessionConflictError(session.id);
       }
 
       throw new SessionConflictError(session.id);
@@ -334,7 +341,9 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
         session: AgentSession | undefined,
       ) => AgentSession | undefined | Promise<AgentSession | undefined>,
     ): Promise<AgentSession | undefined> {
-      for (let attempt = 1; attempt <= MAXIMUM_SAVE_ATTEMPTS; attempt += 1) {
+      let saveConflicts = 0;
+      let previousBodyRaw: string | null | undefined;
+      for (let attempt = 1; attempt <= MAXIMUM_INDEX_CONTENTION_ATTEMPTS; attempt += 1) {
         const [raw, summaryRaw] = await Promise.all([
           store.get(keyFor(id)),
           store.get(SUMMARY_INDEX_KEY),
@@ -353,6 +362,9 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
           await summariesForMutation(summaryRaw),
         );
         if (committed) return committed;
+        if (previousBodyRaw !== undefined && previousBodyRaw !== raw) saveConflicts += 1;
+        previousBodyRaw = raw;
+        if (saveConflicts >= MAXIMUM_SAVE_ATTEMPTS) throw new SessionConflictError(id);
       }
 
       throw new SessionConflictError(id);
@@ -364,7 +376,9 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
     },
 
     async delete(id: string): Promise<void> {
-      for (let attempt = 1; attempt <= MAXIMUM_SAVE_ATTEMPTS; attempt += 1) {
+      let deleteConflicts = 0;
+      let previousBodyRaw: string | null | undefined;
+      for (let attempt = 1; attempt <= MAXIMUM_INDEX_CONTENTION_ATTEMPTS; attempt += 1) {
         const [raw, summaryRaw] = await Promise.all([
           store.get(keyFor(id)),
           store.get(SUMMARY_INDEX_KEY),
@@ -389,6 +403,11 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
           [{ type: 'delete', key: keyFor(id) }, ...operations],
         );
         if (deleted) return;
+        if (previousBodyRaw !== undefined && previousBodyRaw !== raw) deleteConflicts += 1;
+        previousBodyRaw = raw;
+        if (deleteConflicts >= MAXIMUM_SAVE_ATTEMPTS) {
+          throw new SessionConflictError(id, 'deleted');
+        }
       }
       throw new SessionConflictError(id, 'deleted');
     },
@@ -397,22 +416,41 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
       let summaryRaw = await store.get(SUMMARY_INDEX_KEY);
       let summaries = parseSummaryIndex(summaryRaw);
       if (!summaries) {
-        const dataKeys = await store.list(KEY_PREFIX);
-        summaries = new Map();
+        const listedKeys = await store.list(KEY_PREFIX);
+        const dataKeys = listedKeys.filter((key) => key !== SUMMARY_INDEX_KEY);
+        const rebuiltSummaries = new Map<string, SessionSummary>();
         await Promise.all(
           dataKeys.map(async (key) => {
             const id = key.slice(KEY_PREFIX.length);
             const raw = await store.get(key);
             const session = parseSession(raw);
             if (!session) return;
-            summaries!.set(id, toSummary(session));
+            rebuiltSummaries.set(id, toSummary(session));
           }),
         );
         const rebuilt = await store.conditionalBatch(
           [{ key: SUMMARY_INDEX_KEY, expectedValue: summaryRaw }],
-          [{ type: 'set', key: SUMMARY_INDEX_KEY, value: serializeSummaryIndex(summaries) }],
+          [
+            {
+              type: 'set',
+              key: SUMMARY_INDEX_KEY,
+              value: serializeSummaryIndex(rebuiltSummaries),
+            },
+          ],
         );
-        if (rebuilt) summaryRaw = serializeSummaryIndex(summaries);
+        if (rebuilt) {
+          summaries = rebuiltSummaries;
+          summaryRaw = serializeSummaryIndex(summaries);
+        } else {
+          const latestRaw = await store.get(SUMMARY_INDEX_KEY);
+          const latestSummaries = parseSummaryIndex(latestRaw);
+          if (latestSummaries) {
+            summaries = latestSummaries;
+            summaryRaw = latestRaw;
+          } else {
+            summaries = rebuiltSummaries;
+          }
+        }
       }
 
       // Filter by agentName when requested
@@ -428,7 +466,8 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
         const bVal = new Date(b[sortBy]).getTime();
         const primary = sortOrder === 'asc' ? aVal - bVal : bVal - aVal;
         if (primary !== 0) return primary;
-        return sortOrder === 'asc' ? a.id.localeCompare(b.id) : b.id.localeCompare(a.id);
+        const compareIds = a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+        return sortOrder === 'asc' ? compareIds : -compareIds;
       });
 
       // A valid aggregate index is the complete candidate set. Read only
@@ -500,7 +539,8 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
     },
 
     async cleanup(options: SessionCleanupOptions): Promise<number> {
-      const keys = await store.list(KEY_PREFIX);
+      const listedKeys = await store.list(KEY_PREFIX);
+      const keys = listedKeys.filter((key) => key !== SUMMARY_INDEX_KEY);
       const cutoff = Date.now() - options.olderThan;
       let deleted = 0;
 
