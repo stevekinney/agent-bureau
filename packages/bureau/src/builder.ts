@@ -520,7 +520,7 @@ export function createBureau<
   // Tier 1: seed agents from the construction-time map.
   if (options?.agents) {
     for (const [name, agentOptions] of Object.entries(options.agents)) {
-      const { tools: agentToolsMap, instructions, skillPolicy } = agentOptions;
+      const { tools: agentToolsMap, instructions, skillPolicy, hooks } = agentOptions;
       // `generate` from AgentOptions is AgentGenerateFunction; structurally
       // identical to GenerateFunction at runtime.
       const agentGenerate = agentOptions.generate;
@@ -534,6 +534,7 @@ export function createBureau<
         name,
         instructions,
         generate: agentGenerate,
+        hooks,
         toolbox: agentToolbox,
         skillPolicy,
       });

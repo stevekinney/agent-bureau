@@ -567,6 +567,46 @@ const defaultRuntimeCompositionDependencies: RuntimeCompositionDependencies = {
   resolveProviderGenerate,
 };
 
+export type RuntimeCompositionTestingSeams = {
+  resolveRunServices(info: WorkflowServicesResolverInfo): Promise<WorkflowServicesResolution>;
+  buildScheduledRunServices(
+    info: WorkflowServicesResolverInfo,
+    store: SessionStore,
+    recoveredScheduleMarker?: unknown,
+  ): Promise<WorkflowServicesResolution>;
+  loadCommittedScheduledActiveSkills(
+    session: Awaited<ReturnType<SessionStore['load']>> | undefined,
+    runId: string,
+    recovering: boolean,
+  ): Promise<ActiveSkillEntry[] | undefined>;
+  setCompositionReady(value: boolean): void;
+  setSessionStore(store: SessionStore | undefined): void;
+  setBuildRunDepsFromSession(
+    override:
+      | ((
+          session: Awaited<ReturnType<SessionStore['load']>>,
+          runId?: string,
+          agentName?: string,
+        ) => Promise<DurableRunDeps | null>)
+      | undefined,
+  ): void;
+};
+
+const runtimeCompositionTestingSeams = new WeakMap<
+  RuntimeComposition,
+  RuntimeCompositionTestingSeams
+>();
+
+export function getRuntimeCompositionTestingSeams(
+  composition: RuntimeComposition,
+): RuntimeCompositionTestingSeams {
+  const seams = runtimeCompositionTestingSeams.get(composition);
+  if (!seams) {
+    throw new Error('Runtime composition testing seams are not registered for this composition');
+  }
+  return seams;
+}
+
 function messagesAreEqual(
   left: ConversationHistory['messages'][string],
   right: ConversationHistory['messages'][string],
@@ -994,30 +1034,6 @@ export interface RuntimeComposition {
     streamEventTarget: TypedEventTarget<StreamEventMap> | undefined;
     getActiveSkillEntries: () => ActiveSkillEntry[];
   }>;
-  __testing: {
-    resolveRunServices(info: WorkflowServicesResolverInfo): Promise<WorkflowServicesResolution>;
-    buildScheduledRunServices(
-      info: WorkflowServicesResolverInfo,
-      store: SessionStore,
-      recoveredScheduleMarker?: RecoveredScheduleMarker,
-    ): Promise<WorkflowServicesResolution>;
-    loadCommittedScheduledActiveSkills(
-      session: Awaited<ReturnType<SessionStore['load']>> | undefined,
-      runId: string,
-      recovering: boolean,
-    ): Promise<ActiveSkillEntry[] | undefined>;
-    setCompositionReady(value: boolean): void;
-    setSessionStore(store: SessionStore | undefined): void;
-    setBuildRunDepsFromSession(
-      override:
-        | ((
-            session: Awaited<ReturnType<SessionStore['load']>>,
-            runId?: string,
-            agentName?: string,
-          ) => Promise<DurableRunDeps | null>)
-        | undefined,
-    ): void;
-  };
 }
 
 export async function createRuntimeComposition(
@@ -2095,7 +2111,7 @@ export async function createRuntimeComposition(
   // so scheduler-poller ticks (and the bureau's subsequent `recoverAll()`) resolve.
   compositionReady = true;
 
-  return {
+  const composition: RuntimeComposition = {
     kv,
     durable,
     workflowVersionMismatches,
@@ -2124,19 +2140,28 @@ export async function createRuntimeComposition(
     systemPrompt,
     getToolSummaries,
     createRunRuntime,
-    __testing: {
-      resolveRunServices,
-      buildScheduledRunServices,
-      loadCommittedScheduledActiveSkills,
-      setCompositionReady(value: boolean) {
-        compositionReady = value;
-      },
-      setSessionStore(store: SessionStore | undefined) {
-        sessionStore = store;
-      },
-      setBuildRunDepsFromSession(override) {
-        buildRunDepsFromSessionOverride = override;
-      },
-    },
   };
+
+  runtimeCompositionTestingSeams.set(composition, {
+    resolveRunServices,
+    buildScheduledRunServices(info, store, recoveredScheduleMarker) {
+      return buildScheduledRunServices(
+        info,
+        store,
+        recoveredScheduleMarker as RecoveredScheduleMarker | undefined,
+      );
+    },
+    loadCommittedScheduledActiveSkills,
+    setCompositionReady(value: boolean) {
+      compositionReady = value;
+    },
+    setSessionStore(store: SessionStore | undefined) {
+      sessionStore = store;
+    },
+    setBuildRunDepsFromSession(override) {
+      buildRunDepsFromSessionOverride = override;
+    },
+  });
+
+  return composition;
 }

@@ -24,6 +24,8 @@
 //     type-checked (`tsc --noEmit`) but excluded from build and never executed
 //     by `bun test` (it is `.test-d.ts`, not `.test.ts`).
 
+import type { PrepareStepHook } from '@lostgradient/operative';
+
 import type { AgentConfig, AgentNameFor, AgentTable } from './builder/index.ts';
 import { createBureau } from './builder/index.ts';
 
@@ -39,9 +41,14 @@ import { createBureau } from './builder/index.ts';
 const tier1Bureau = createBureau({
   agents: { researcher: {} },
 });
+const tier1Hook: PrepareStepHook = async () => {};
+const tier1HookedBureau = createBureau({
+  agents: { hooked: { hooks: tier1Hook } },
+});
 
 // Registered name compiles.
 void tier1Bureau.run('researcher', 'Summarize the Q3 report');
+void tier1HookedBureau.run('hooked', 'Run with a construction-time hook');
 
 // @ts-expect-error — 'unregistered' is not in the closed agent table.
 void tier1Bureau.run('unregistered', 'this must fail');
@@ -111,4 +118,4 @@ void ('' as OpenNames satisfies string);
 // relaxed test-file overrides).
 // ---------------------------------------------------------------------------
 
-void [tier1Bureau, tier2Bureau];
+void [tier1Bureau, tier1HookedBureau, tier2Bureau];
