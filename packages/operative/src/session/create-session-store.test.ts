@@ -6,6 +6,7 @@ import { createAgentSession } from '../agent-session';
 import { createSessionStore, SessionConflictError } from './create-session-store';
 
 const SUMMARY_INDEX_KEY = 'agent-session:summary-index';
+const BODY_PREFIX = 'agent-session-v2:body:';
 
 function makeSession(overrides: {
   agentName?: string;
@@ -70,6 +71,30 @@ describe('createSessionStore', () => {
     expect(loaded!.agentName).toBe('round-trip-agent');
     expect(loaded!.conversationHistory).toEqual(session.conversationHistory);
     expect(loaded!.revision).toBe(1);
+  });
+
+  it('keeps legacy id body:x distinct from new id x', async () => {
+    const backing = textValueStore(new MemoryStorage());
+    const store = createSessionStore(backing);
+    const legacyId = 'body:x';
+    const newId = 'x';
+
+    await backing.set(`agent-session:${legacyId}`, JSON.stringify(makeSession({ id: legacyId })));
+    await store.save(makeSession({ id: newId }));
+
+    const loadedLegacy = await store.load(legacyId);
+    const loadedNew = await store.load(newId);
+    const summaries = await store.list({ limit: 10 });
+    expect(loadedLegacy?.id).toBe(legacyId);
+    expect(loadedNew?.id).toBe(newId);
+    expect(summaries.map((summary) => summary.id)).toEqual(
+      expect.arrayContaining([legacyId, newId]),
+    );
+
+    await store.delete(legacyId);
+    expect(await store.load(legacyId)).toBeUndefined();
+    const remaining = await store.load(newId);
+    expect(remaining?.id).toBe(newId);
   });
 
   it('merges stale concurrent conversation writers instead of dropping turns', async () => {
@@ -542,9 +567,7 @@ describe('createSessionStore', () => {
     expect(summaries).toHaveLength(5);
     expect(getKeys).toHaveLength(6);
     expect(getKeys[0]).toBe(SUMMARY_INDEX_KEY);
-    expect(
-      getKeys.filter((key) => key.startsWith('agent-session:') && key !== SUMMARY_INDEX_KEY),
-    ).toHaveLength(5);
+    expect(getKeys.filter((key) => key.startsWith(BODY_PREFIX))).toHaveLength(5);
     expect(listCalls).toBe(0);
 
     const smallerBackingStore = textValueStore(new MemoryStorage());

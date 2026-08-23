@@ -4,6 +4,22 @@ import { HTTPException } from 'hono/http-exception';
 
 import type { Bureau } from '../types';
 
+function parseNonNegativeInteger(value: string | undefined, name: string, allowZero: boolean) {
+  if (value === undefined) return undefined;
+  if (!/^\d+$/.test(value)) {
+    throw new HTTPException(400, {
+      message: `"${name}" must be a ${allowZero ? 'non-negative' : 'positive'} integer`,
+    });
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || (!allowZero && parsed === 0)) {
+    throw new HTTPException(400, {
+      message: `"${name}" must be a ${allowZero ? 'non-negative' : 'positive'} integer`,
+    });
+  }
+  return parsed;
+}
+
 /**
  * `list`/`get`/`delete` below reach NOT_CONFIGURED only via `requireSessionStore()`
  * (subject: 'persistence' — 503, an operator-fixable misconfiguration, see #254).
@@ -19,7 +35,9 @@ export function createSessionsRoutes(bureau: Bureau) {
 
   app.get('/', async (context) => {
     try {
-      const sessions = await bureau.listSessions();
+      const limit = parseNonNegativeInteger(context.req.query('limit'), 'limit', false);
+      const offset = parseNonNegativeInteger(context.req.query('offset'), 'offset', true);
+      const sessions = await bureau.listSessions({ limit, offset });
       return context.json(sessions, 200);
     } catch (error) {
       if (error instanceof BureauError && error.code === 'NOT_CONFIGURED') {

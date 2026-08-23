@@ -10,6 +10,7 @@ import type {
   Scheduler,
   SchedulerPriority,
   SchedulerState,
+  SessionListOptions,
   SessionStore,
   SessionSummary,
   StopCondition,
@@ -570,7 +571,7 @@ export interface Bureau {
    */
   runDurableMaintenance(now?: number): Promise<true | undefined>;
 
-  listSessions(): Promise<SessionSummary[]>;
+  listSessions(options?: SessionListOptions): Promise<SessionSummary[]>;
   getSession(id: string): Promise<AgentSession | undefined>;
   deleteSession(id: string): Promise<void>;
 

@@ -11,7 +11,9 @@ import type {
 } from './types';
 
 const KEY_PREFIX = 'agent-session:';
-const BODY_PREFIX = 'agent-session:body:';
+// Keep new body keys outside the legacy `agent-session:<id>` keyspace. This
+// makes ids such as `body:x` coexist with the encoded id `x`.
+const BODY_PREFIX = 'agent-session-v2:body:';
 const SUMMARY_INDEX_KEY = 'agent-session:summary-index';
 const MAXIMUM_SAVE_ATTEMPTS = 5;
 const MAXIMUM_INDEX_CONTENTION_ATTEMPTS = 50;
@@ -243,6 +245,14 @@ function dataKeysForStore(keys: string[]): string[] {
   return keys.filter((key) => key !== SUMMARY_INDEX_KEY);
 }
 
+async function listDataKeys(store: ConditionalTextValueStore): Promise<string[]> {
+  const [legacyKeys, currentKeys] = await Promise.all([
+    store.list(KEY_PREFIX),
+    store.list(BODY_PREFIX),
+  ]);
+  return dataKeysForStore([...new Set([...legacyKeys, ...currentKeys])]);
+}
+
 function idForDataKey(key: string): string | undefined {
   if (key.startsWith(BODY_PREFIX)) {
     try {
@@ -260,7 +270,7 @@ function idForDataKey(key: string): string | undefined {
 /**
  * Creates a SessionStore backed by the given ConditionalTextValueStore.
  *
- * Session bodies are stored under the encoded `agent-session:body:` namespace
+ * Session bodies are stored under the encoded `agent-session-v2:body:` namespace
  * (with legacy `agent-session:<id>` lookup for pre-index records) and the aggregate summary
  * index uses the reserved `agent-session:summary-index` key so both can coexist with
  * other data in the same store.
@@ -298,8 +308,7 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
     // discard summaries for bodies that are still present. Rebuild it from
     // the source of truth before applying the requested mutation.
     const summaries = new Map<string, SessionSummary>();
-    const listedKeys = await store.list(KEY_PREFIX);
-    const dataKeys = dataKeysForStore(listedKeys);
+    const dataKeys = await listDataKeys(store);
     await Promise.all(
       dataKeys.map(async (key) => {
         const id = idForDataKey(key);
@@ -452,8 +461,7 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
       let summaryRaw = await store.get(SUMMARY_INDEX_KEY);
       let summaries = parseSummaryIndex(summaryRaw);
       if (!summaries) {
-        const listedKeys = await store.list(KEY_PREFIX);
-        const dataKeys = dataKeysForStore(listedKeys);
+        const dataKeys = await listDataKeys(store);
         const rebuiltSummaries = new Map<string, SessionSummary>();
         const legacyIndexSession = parseSession(summaryRaw);
         const migratesLegacyIndexSession = legacyIndexSession?.id === 'summary-index';
@@ -601,8 +609,7 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
     },
 
     async cleanup(options: SessionCleanupOptions): Promise<number> {
-      const listedKeys = await store.list(KEY_PREFIX);
-      const keys = dataKeysForStore(listedKeys);
+      const keys = await listDataKeys(store);
       const cutoff = Date.now() - options.olderThan;
       let deleted = 0;
 
