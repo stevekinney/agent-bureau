@@ -73,6 +73,48 @@ describe('createSessionStore', () => {
     expect(loaded!.revision).toBe(1);
   });
 
+  it('round-trips an empty session id through an index rebuild', async () => {
+    const backing = textValueStore(new MemoryStorage());
+    const store = createSessionStore(backing);
+    const session = makeSession({ id: '' });
+
+    await store.save(session);
+    await backing.delete(SUMMARY_INDEX_KEY);
+
+    const summaries = await store.list({ limit: 10 });
+    const loaded = await store.load('');
+    expect(summaries.map((summary) => summary.id)).toEqual(['']);
+    expect(loaded?.id).toBe('');
+  });
+
+  it('round-trips an id containing an unpaired UTF-16 surrogate', async () => {
+    const backing = textValueStore(new MemoryStorage());
+    const store = createSessionStore(backing);
+    const id = `surrogate-${String.fromCharCode(0xd800)}`;
+
+    await store.save(makeSession({ id }));
+
+    const loaded = await store.load(id);
+    const summaries = await store.list({ limit: 10 });
+    expect(loaded?.id).toBe(id);
+    expect(await store.exists(id)).toBe(true);
+    expect(summaries.map((summary) => summary.id)).toEqual([id]);
+    await store.delete(id);
+    expect(await store.exists(id)).toBe(false);
+  });
+
+  it('ignores malformed encoded body keys during index rebuilds', async () => {
+    const backing = textValueStore(new MemoryStorage());
+    const store = createSessionStore(backing);
+    await backing.set(
+      'agent-session-v2:body:000g',
+      JSON.stringify(makeSession({ id: String.fromCharCode(0) })),
+    );
+
+    expect(await store.list({ limit: 10 })).toEqual([]);
+    expect(await backing.has('agent-session-v2:body:000g')).toBe(true);
+  });
+
   it('keeps legacy id body:x distinct from new id x', async () => {
     const backing = textValueStore(new MemoryStorage());
     const store = createSessionStore(backing);
@@ -95,6 +137,21 @@ describe('createSessionStore', () => {
     expect(await store.load(legacyId)).toBeUndefined();
     const remaining = await store.load(newId);
     expect(remaining?.id).toBe(newId);
+  });
+
+  it('delete removes both current and legacy representations of one id', async () => {
+    const backing = textValueStore(new MemoryStorage());
+    const store = createSessionStore(backing);
+    const id = 'dual';
+    const session = makeSession({ id });
+    await backing.set('agent-session-v2:body:006400750061006c', JSON.stringify(session));
+    await backing.set(`agent-session:${id}`, JSON.stringify(session));
+
+    await store.delete(id);
+
+    expect(await backing.has('agent-session-v2:body:006400750061006c')).toBe(false);
+    expect(await backing.has(`agent-session:${id}`)).toBe(false);
+    expect(await store.load(id)).toBeUndefined();
   });
 
   it('merges stale concurrent conversation writers instead of dropping turns', async () => {
@@ -324,6 +381,21 @@ describe('createSessionStore', () => {
 
     const loaded = await store.load(session.id);
     expect(loaded!.conversationHistory.metadata).toEqual({ status: 'new', staleOnly: true });
+  });
+
+  it('allows an asynchronous updater to mutate another session in the same store', async () => {
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
+    const primary = makeSession({ id: 'reentrant-update-primary' });
+    const nested = makeSession({ id: 'reentrant-update-nested' });
+    await store.save(primary);
+
+    const updated = await store.update(primary.id, async (current) => {
+      await store.save(nested);
+      return current ? { ...current, metadata: { updated: true } } : undefined;
+    });
+
+    expect(updated?.metadata).toEqual({ updated: true });
+    expect(await store.load(nested.id)).toBeDefined();
   });
 
   it('does not let stale saves revert current run statuses', async () => {
@@ -841,6 +913,56 @@ describe('createSessionStore', () => {
     expect(await rawStore.get(SUMMARY_INDEX_KEY)).toContain('"summaries"');
   });
 
+  it('migrates the reserved legacy id on a direct read before list is called', async () => {
+    const rawStore = textValueStore(new MemoryStorage());
+    const store = createSessionStore(rawStore);
+    const session = makeSession({ id: 'summary-index' });
+    const other = makeSession({ id: 'other-legacy-session' });
+    await seedStoredSession(rawStore, session);
+    await seedStoredSession(rawStore, other);
+
+    const migrated = await store.load(session.id);
+    expect(migrated?.id).toBe(session.id);
+    await store.updateMetadata(session.id, { migrated: true });
+    const updated = await store.load(session.id);
+    expect(updated?.metadata).toEqual({ migrated: true });
+    expect(await rawStore.get(SUMMARY_INDEX_KEY)).toContain('"summaries"');
+    const summaries = await store.list({ limit: 10 });
+    expect(summaries.map((summary) => summary.id)).toEqual(
+      expect.arrayContaining([session.id, other.id]),
+    );
+  });
+
+  it('migrates the reserved legacy id before saving an unrelated session', async () => {
+    const rawStore = textValueStore(new MemoryStorage());
+    const store = createSessionStore(rawStore);
+    const reserved = makeSession({ id: 'summary-index' });
+    await seedStoredSession(rawStore, reserved);
+
+    await store.save(makeSession({ id: 'unrelated-session' }));
+
+    const loadedReserved = await store.load(reserved.id);
+    const summaries = await store.list({ limit: 10 });
+    expect(loadedReserved?.id).toBe(reserved.id);
+    expect(summaries.map(({ id }) => id)).toEqual(
+      expect.arrayContaining([reserved.id, 'unrelated-session']),
+    );
+  });
+
+  it('exists migrates the reserved legacy id so cleanup can expire it', async () => {
+    const rawStore = textValueStore(new MemoryStorage());
+    const store = createSessionStore(rawStore);
+    const session = makeSession({
+      id: 'summary-index',
+      updatedAt: '2024-01-01T00:00:00.000Z',
+    });
+    await seedStoredSession(rawStore, session);
+
+    expect(await store.exists(session.id)).toBe(true);
+    expect(await store.cleanup({ olderThan: 24 * 60 * 60 * 1000 })).toBe(1);
+    expect(await store.exists(session.id)).toBe(false);
+  });
+
   it('does not read or overwrite the old un-namespaced collision key', async () => {
     const rawStore = textValueStore(new MemoryStorage());
     const store = createSessionStore(rawStore);
@@ -853,6 +975,21 @@ describe('createSessionStore', () => {
     expect(summaries.map((summary) => summary.id)).toEqual([session.id]);
     expect(await rawStore.get('agent-session-index')).toBe(unrelatedValue);
     expect(await rawStore.has(SUMMARY_INDEX_KEY)).toBe(true);
+  });
+
+  it('rejects an occupied v2 body key without overwriting client data', async () => {
+    const rawStore = textValueStore(new MemoryStorage());
+    const store = createSessionStore(rawStore);
+    const session = makeSession({ id: 'occupied' });
+    const occupiedKey = `${BODY_PREFIX}${[...session.id]
+      .map((character) => character.charCodeAt(0).toString(16).padStart(4, '0'))
+      .join('')}`;
+    await rawStore.set(occupiedKey, 'client-owned-value');
+
+    expect(store.save(session)).rejects.toThrow(/occupied by unrelated data/);
+    expect(await rawStore.get(occupiedKey)).toBe('client-owned-value');
+    expect(store.delete(session.id)).rejects.toThrow(/occupied by unrelated data/);
+    expect(await rawStore.get(occupiedKey)).toBe('client-owned-value');
   });
 
   it('does not replace a concurrent save during legacy index rebuild', async () => {
@@ -1001,6 +1138,21 @@ describe('createSessionStore', () => {
     await store.updateMetadata('nonexistent', { key: 'value' });
   });
 
+  it('rejects an updater result with a different session id', async () => {
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
+    const session = makeSession({ id: 'original-id' });
+    await store.save(session);
+
+    expect(
+      store.update(session.id, (current) =>
+        current ? { ...current, id: 'different-id' } : undefined,
+      ),
+    ).rejects.toThrow(/returned id "different-id"/);
+    const loaded = await store.load(session.id);
+    expect(loaded?.id).toBe(session.id);
+    expect(await store.load('different-id')).toBeUndefined();
+  });
+
   it('cleanup deletes old sessions and returns count', async () => {
     const rawStore = textValueStore(new MemoryStorage());
     const store = createSessionStore(rawStore);
@@ -1023,6 +1175,74 @@ describe('createSessionStore', () => {
 
     expect(await store.exists('old-session')).toBe(false);
     expect(await store.exists('recent-session')).toBe(true);
+  });
+
+  it('cleanup removes many expired sessions with one aggregate index mutation', async () => {
+    const rawStore = textValueStore(new MemoryStorage());
+    for (let index = 0; index < 20; index += 1) {
+      await seedStoredSession(
+        rawStore,
+        makeSession({
+          id: `expired-${index}`,
+          updatedAt: '2024-01-01T00:00:00.000Z',
+        }),
+      );
+    }
+    let conditionalBatchCalls = 0;
+    const instrumentedStore = {
+      ...rawStore,
+      conditionalBatch: async (
+        conditions: Parameters<typeof rawStore.conditionalBatch>[0],
+        operations: Parameters<typeof rawStore.conditionalBatch>[1],
+      ) => {
+        conditionalBatchCalls += 1;
+        return rawStore.conditionalBatch(conditions, operations);
+      },
+    };
+    const store = createSessionStore(instrumentedStore);
+
+    expect(await store.cleanup({ olderThan: 24 * 60 * 60 * 1000 })).toBe(20);
+    expect(conditionalBatchCalls).toBe(1);
+    expect(await store.list({ limit: 100 })).toEqual([]);
+  });
+
+  it('cleanup retains a logical session when either body representation is fresh', async () => {
+    const rawStore = textValueStore(new MemoryStorage());
+    const store = createSessionStore(rawStore);
+    const id = 'dual';
+    const fresh = makeSession({ id, updatedAt: new Date().toISOString() });
+    const expired = makeSession({ id, updatedAt: '2024-01-01T00:00:00.000Z' });
+    await store.save(fresh);
+    await rawStore.set(`agent-session:${id}`, JSON.stringify(expired));
+
+    expect(await store.cleanup({ olderThan: 24 * 60 * 60 * 1000 })).toBe(0);
+    const loaded = await store.load(id);
+    const summaries = await store.list({ limit: 10 });
+    expect(loaded?.updatedAt).toBe(fresh.updatedAt);
+    expect(summaries.map((summary) => summary.id)).toEqual([id]);
+  });
+
+  it('cleanup filters dual bodies using the canonical v2 agent name', async () => {
+    const rawStore = textValueStore(new MemoryStorage());
+    const store = createSessionStore(rawStore);
+    const id = 'dual-agent';
+    const canonical = makeSession({
+      id,
+      agentName: 'canonical-agent',
+      updatedAt: '2024-01-01T00:00:00.000Z',
+    });
+    const legacy = makeSession({
+      id,
+      agentName: 'legacy-agent',
+      updatedAt: '2024-02-01T00:00:00.000Z',
+    });
+    await store.save(canonical);
+    await rawStore.set(`agent-session:${id}`, JSON.stringify(legacy));
+
+    expect(await store.cleanup({ olderThan: 24 * 60 * 60 * 1000, agentName: 'legacy-agent' })).toBe(
+      0,
+    );
+    expect(await store.exists(id)).toBe(true);
   });
 
   it('cleanup filters by agentName', async () => {

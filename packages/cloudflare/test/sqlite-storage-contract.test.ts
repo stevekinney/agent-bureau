@@ -77,7 +77,7 @@ describe('CloudflareSqliteStorage extensions', () => {
     ).toThrow(/tableName must be a valid SQL identifier/);
   });
 
-  it('supports has, count, and bounded prefix deletion', async () => {
+  it('supports has, keys, count, and bounded prefix deletion', async () => {
     const storage = createCloudflareSqliteStorage({ sql: createSqliteDouble() });
     await storage.put('alpha:one', new Uint8Array([1]));
     await storage.put('alpha:two', new Uint8Array([2]));
@@ -85,6 +85,9 @@ describe('CloudflareSqliteStorage extensions', () => {
 
     expect(await storage.has?.('alpha:one')).toBe(true);
     expect(await storage.has?.('missing')).toBe(false);
+    const keys: string[] = [];
+    for await (const key of storage.keys?.('alpha:') ?? []) keys.push(key);
+    expect(keys).toEqual(['alpha:one', 'alpha:two']);
     expect(await storage.count?.('alpha:')).toBe(2);
     expect(await storage.deletePrefix?.('alpha:')).toBe(2);
     expect(await storage.count?.('alpha:')).toBe(0);
