@@ -11,7 +11,7 @@ import type {
 } from './types';
 
 const KEY_PREFIX = 'agent-session:';
-const SUMMARY_KEY_PREFIX = 'agent-session-index:';
+const SUMMARY_INDEX_KEY = 'agent-session-index';
 const MAXIMUM_SAVE_ATTEMPTS = 5;
 const SUMMARY_FORMAT_VERSION = 1;
 
@@ -202,11 +202,49 @@ function parseSummary(raw: string | null): SessionSummary | undefined {
   }
 }
 
+function parseSummaryIndex(raw: string | null): Map<string, SessionSummary> | undefined {
+  if (!raw) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== 'object' || parsed === null) return undefined;
+    const record = parsed as Record<string, unknown>;
+    if (
+      record['formatVersion'] !== SUMMARY_FORMAT_VERSION ||
+      typeof record['summaries'] !== 'object'
+    ) {
+      return undefined;
+    }
+    const summaries = new Map<string, SessionSummary>();
+    for (const [id, value] of Object.entries(record['summaries'] as Record<string, unknown>)) {
+      if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
+      const summary = parseSummary(
+        JSON.stringify({
+          formatVersion: SUMMARY_FORMAT_VERSION,
+          ...(value as Record<string, unknown>),
+        }),
+      );
+      if (!summary || summary.id !== id) return undefined;
+      summaries.set(id, summary);
+    }
+    return summaries;
+  } catch {
+    return undefined;
+  }
+}
+
+function serializeSummaryIndex(summaries: Map<string, SessionSummary>): string {
+  return JSON.stringify({
+    formatVersion: SUMMARY_FORMAT_VERSION,
+    summaries: Object.fromEntries(summaries),
+  });
+}
+
 /**
  * Creates a SessionStore backed by the given ConditionalTextValueStore.
  *
- * All keys are prefixed with `agent-session:` so session data can coexist
- * with other data in the same store.
+ * Session bodies are prefixed with `agent-session:` and the aggregate summary
+ * index uses the reserved `agent-session-index` key so both can coexist with
+ * other data in the same store.
  */
 export function createSessionStore(store: ConditionalTextValueStore): SessionStore {
   if (typeof store.conditionalBatch !== 'function') {
@@ -217,16 +255,13 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
     return `${KEY_PREFIX}${id}`;
   }
 
-  function summaryKeyFor(id: string): string {
-    return `${SUMMARY_KEY_PREFIX}${id}`;
-  }
-
   async function commit(
     session: AgentSession,
     expectedValue: string | null,
     currentRevision: number,
     refreshUpdatedAt: boolean,
     expectedSummaryValue: string | null,
+    currentSummaries: Map<string, SessionSummary> | undefined,
   ): Promise<AgentSession | undefined> {
     const next: AgentSession = {
       ...session,
@@ -236,14 +271,14 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
     const committed = await store.conditionalBatch(
       [
         { key: keyFor(next.id), expectedValue },
-        { key: summaryKeyFor(next.id), expectedValue: expectedSummaryValue },
+        { key: SUMMARY_INDEX_KEY, expectedValue: expectedSummaryValue },
       ],
       [
         { type: 'set', key: keyFor(next.id), value: JSON.stringify(next) },
         {
           type: 'set',
-          key: summaryKeyFor(next.id),
-          value: JSON.stringify({ formatVersion: SUMMARY_FORMAT_VERSION, ...toSummary(next) }),
+          key: SUMMARY_INDEX_KEY,
+          value: serializeSummaryIndex(new Map(currentSummaries).set(next.id, toSummary(next))),
         },
       ],
     );
@@ -255,11 +290,18 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
       for (let attempt = 1; attempt <= MAXIMUM_SAVE_ATTEMPTS; attempt += 1) {
         const [raw, summaryRaw] = await Promise.all([
           store.get(keyFor(session.id)),
-          store.get(summaryKeyFor(session.id)),
+          store.get(SUMMARY_INDEX_KEY),
         ]);
         const current = parseSession(raw);
         const candidate = current ? mergeSessions(current, session) : session;
-        const committed = await commit(candidate, raw, current?.revision ?? 0, true, summaryRaw);
+        const committed = await commit(
+          candidate,
+          raw,
+          current?.revision ?? 0,
+          true,
+          summaryRaw,
+          parseSummaryIndex(summaryRaw),
+        );
         if (committed) {
           Object.assign(session, committed);
           return;
@@ -278,14 +320,21 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
       for (let attempt = 1; attempt <= MAXIMUM_SAVE_ATTEMPTS; attempt += 1) {
         const [raw, summaryRaw] = await Promise.all([
           store.get(keyFor(id)),
-          store.get(summaryKeyFor(id)),
+          store.get(SUMMARY_INDEX_KEY),
         ]);
         const current = parseSession(raw);
         const candidate = await updater(current);
         if (!candidate) return undefined;
 
         const next = current ? mergeSessions(current, candidate) : candidate;
-        const committed = await commit(next, raw, current?.revision ?? 0, true, summaryRaw);
+        const committed = await commit(
+          next,
+          raw,
+          current?.revision ?? 0,
+          true,
+          summaryRaw,
+          parseSummaryIndex(summaryRaw),
+        );
         if (committed) return committed;
       }
 
@@ -301,17 +350,27 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
       for (let attempt = 1; attempt <= MAXIMUM_SAVE_ATTEMPTS; attempt += 1) {
         const [raw, summaryRaw] = await Promise.all([
           store.get(keyFor(id)),
-          store.get(summaryKeyFor(id)),
+          store.get(SUMMARY_INDEX_KEY),
         ]);
+        const summaries = parseSummaryIndex(summaryRaw);
+        const nextSummaries = summaries ? new Map(summaries) : undefined;
+        nextSummaries?.delete(id);
+        const operations =
+          nextSummaries && nextSummaries.size > 0
+            ? [
+                {
+                  type: 'set' as const,
+                  key: SUMMARY_INDEX_KEY,
+                  value: serializeSummaryIndex(nextSummaries),
+                },
+              ]
+            : [{ type: 'delete' as const, key: SUMMARY_INDEX_KEY }];
         const deleted = await store.conditionalBatch(
           [
             { key: keyFor(id), expectedValue: raw },
-            { key: summaryKeyFor(id), expectedValue: summaryRaw },
+            { key: SUMMARY_INDEX_KEY, expectedValue: summaryRaw },
           ],
-          [
-            { type: 'delete', key: keyFor(id) },
-            { type: 'delete', key: summaryKeyFor(id) },
-          ],
+          [{ type: 'delete', key: keyFor(id) }, ...operations],
         );
         if (deleted) return;
       }
@@ -319,46 +378,25 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
     },
 
     async list(options?: SessionListOptions): Promise<SessionSummary[]> {
-      const [dataKeys, summaryKeys] = await Promise.all([
-        store.list(KEY_PREFIX),
-        store.list(SUMMARY_KEY_PREFIX),
-      ]);
-      const summaries = new Map<string, SessionSummary>();
-      const summaryRaws = new Map<string, string | null>();
-      await Promise.all(
-        summaryKeys.map(async (key) => {
-          const id = key.slice(SUMMARY_KEY_PREFIX.length);
-          const raw = await store.get(key);
-          summaryRaws.set(id, raw);
-          const summary = parseSummary(raw);
-          if (summary) summaries.set(id, summary);
-        }),
-      );
-      const missingKeys = dataKeys.filter((key) => !summaries.has(key.slice(KEY_PREFIX.length)));
-      await Promise.all(
-        missingKeys.map(async (key) => {
-          const id = key.slice(KEY_PREFIX.length);
-          const raw = await store.get(key);
-          const session = parseSession(raw);
-          if (!session) return;
-          const summary = toSummary(session);
-          summaries.set(id, summary);
-          const repaired = await store.conditionalBatch(
-            [
-              { key, expectedValue: raw },
-              { key: summaryKeyFor(id), expectedValue: summaryRaws.get(id) ?? null },
-            ],
-            [
-              {
-                type: 'set',
-                key: summaryKeyFor(id),
-                value: JSON.stringify({ formatVersion: SUMMARY_FORMAT_VERSION, ...summary }),
-              },
-            ],
-          );
-          if (!repaired) summaryRaws.delete(id);
-        }),
-      );
+      const dataKeys = await store.list(KEY_PREFIX);
+      const summaryRaw = await store.get(SUMMARY_INDEX_KEY);
+      let summaries = parseSummaryIndex(summaryRaw);
+      if (!summaries) {
+        summaries = new Map();
+        await Promise.all(
+          dataKeys.map(async (key) => {
+            const id = key.slice(KEY_PREFIX.length);
+            const raw = await store.get(key);
+            const session = parseSession(raw);
+            if (!session) return;
+            summaries!.set(id, toSummary(session));
+          }),
+        );
+        await store.conditionalBatch(
+          [{ key: SUMMARY_INDEX_KEY, expectedValue: summaryRaw }],
+          [{ type: 'set', key: SUMMARY_INDEX_KEY, value: serializeSummaryIndex(summaries) }],
+        );
+      }
 
       // An index entry must never make a deleted or otherwise missing body
       // visible. This also keeps orphaned records from surviving migrations
@@ -423,18 +461,8 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
 
         const updatedAt = new Date(session.updatedAt).getTime();
         if (updatedAt < cutoff) {
-          const summaryRaw = await store.get(summaryKeyFor(session.id));
-          const removed = await store.conditionalBatch(
-            [
-              { key, expectedValue: raw },
-              { key: summaryKeyFor(session.id), expectedValue: summaryRaw },
-            ],
-            [
-              { type: 'delete', key },
-              { type: 'delete', key: summaryKeyFor(session.id) },
-            ],
-          );
-          if (removed) deleted++;
+          await sessionStore.delete(session.id);
+          deleted++;
         }
       }
 

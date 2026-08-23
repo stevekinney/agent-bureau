@@ -30,6 +30,22 @@ async function seedStoredSession(
   await store.set(`agent-session:${session.id}`, JSON.stringify(session));
 }
 
+function summaryIndexPayload(id: string): string {
+  return JSON.stringify({
+    formatVersion: 1,
+    summaries: {
+      [id]: {
+        id,
+        agentName: 'test-agent',
+        messageCount: 0,
+        createdAt: '2025-01-01T00:00:00.000Z',
+        updatedAt: '2025-01-01T00:00:00.000Z',
+        metadata: {},
+      },
+    },
+  });
+}
+
 describe('createSessionStore', () => {
   it('exposes a specific error for repeated session save conflicts', () => {
     const error = new SessionConflictError('session-1');
@@ -426,23 +442,12 @@ describe('createSessionStore', () => {
   it('delete cleans up an orphan summary when the session body is missing', async () => {
     const rawStore = textValueStore(new MemoryStorage());
     const store = createSessionStore(rawStore);
-    await rawStore.set(
-      'agent-session-index:orphan-session',
-      JSON.stringify({
-        formatVersion: 1,
-        id: 'orphan-session',
-        agentName: 'test-agent',
-        messageCount: 0,
-        createdAt: '2025-01-01T00:00:00.000Z',
-        updatedAt: '2025-01-01T00:00:00.000Z',
-        metadata: {},
-      }),
-    );
+    await rawStore.set('agent-session-index', summaryIndexPayload('orphan-session'));
 
     await store.delete('orphan-session');
 
     expect(await rawStore.has('agent-session:orphan-session')).toBe(false);
-    expect(await rawStore.has('agent-session-index:orphan-session')).toBe(false);
+    expect(await rawStore.has('agent-session-index')).toBe(false);
   });
 
   it('exists returns true for saved sessions', async () => {
@@ -514,25 +519,30 @@ describe('createSessionStore', () => {
     const summaries = await store.list({ limit: 5 });
 
     expect(summaries).toHaveLength(5);
-    expect(getKeys).toHaveLength(25);
-    expect(getKeys.every((key) => key.startsWith('agent-session-index:'))).toBe(true);
+    expect(getKeys).toEqual(['agent-session-index']);
+
+    const smallerBackingStore = textValueStore(new MemoryStorage());
+    const smallerGetKeys: string[] = [];
+    const smallerInstrumentedStore = {
+      ...smallerBackingStore,
+      get: async (key: string) => {
+        smallerGetKeys.push(key);
+        return smallerBackingStore.get(key);
+      },
+    };
+    const smallerStore = createSessionStore(smallerInstrumentedStore);
+    for (let index = 0; index < 5; index += 1) {
+      await smallerStore.save(makeSession({ id: `small-${index}` }));
+    }
+    smallerGetKeys.length = 0;
+    await smallerStore.list({ limit: 5 });
+    expect(smallerGetKeys).toEqual(['agent-session-index']);
   });
 
   it('does not list an orphan summary when its session body is missing', async () => {
     const rawStore = textValueStore(new MemoryStorage());
     const store = createSessionStore(rawStore);
-    await rawStore.set(
-      'agent-session-index:orphan-session',
-      JSON.stringify({
-        formatVersion: 1,
-        id: 'orphan-session',
-        agentName: 'test-agent',
-        messageCount: 0,
-        createdAt: '2025-01-01T00:00:00.000Z',
-        updatedAt: '2025-01-01T00:00:00.000Z',
-        metadata: {},
-      }),
-    );
+    await rawStore.set('agent-session-index', summaryIndexPayload('orphan-session'));
 
     expect(await store.list()).toEqual([]);
   });
@@ -565,7 +575,7 @@ describe('createSessionStore', () => {
 
     const summaries = await store.list();
     expect(summaries[0]!.id).toBe(session.id);
-    expect(await rawStore.has(`agent-session-index:${session.id}`)).toBe(true);
+    expect(await rawStore.has('agent-session-index')).toBe(true);
     const backfilled = await store.list();
     expect(backfilled[0]!.messageCount).toBe(0);
   });
