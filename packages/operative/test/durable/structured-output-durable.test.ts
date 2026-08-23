@@ -21,6 +21,12 @@ afterEach(async () => {
 const answerSchema = z.object({ answer: z.string() });
 
 describe('durable workflow result migration', () => {
+  it('rejects a non-object terminal summary at the durable boundary', () => {
+    expect(() => normalizeAgentRunWorkflowResult('not a summary')).toThrow(
+      'Invalid durable agent run workflow result',
+    );
+  });
+
   it('migrates a legacy terminal summary before resumed result reconstruction', () => {
     const summary = normalizeAgentRunWorkflowResult({
       runId: 'legacy-summary-run',
@@ -31,6 +37,19 @@ describe('durable workflow result migration', () => {
     });
 
     expect(summary.output).toEqual({ answer: 'legacy' });
+    expect('structuredOutput' in summary).toBe(false);
+  });
+
+  it('drops an explicitly undefined legacy structuredOutput field', () => {
+    const summary = normalizeAgentRunWorkflowResult({
+      runId: 'legacy-empty-summary-run',
+      steps: 1,
+      content: 'plain legacy',
+      finishReason: 'stop-condition',
+      structuredOutput: undefined,
+    });
+
+    expect(summary.output).toBeUndefined();
     expect('structuredOutput' in summary).toBe(false);
   });
 

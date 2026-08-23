@@ -240,6 +240,34 @@ describe('versioned frame migration', () => {
       'Unsupported run envelope schema version 99',
     );
   });
+
+  it('migrates non-terminal v1 frames by updating only the schema version', () => {
+    const frame = parseRunFrame({
+      schemaVersion: 1,
+      type: 'notification',
+      runId: 'legacy-run',
+      timestamp: 1,
+      level: 'info',
+      code: 'legacy.notice',
+      message: 'legacy frame',
+    });
+
+    expect(frame).toEqual({
+      schemaVersion: RUN_ENVELOPE_SCHEMA_VERSION,
+      type: 'notification',
+      runId: 'legacy-run',
+      timestamp: 1,
+      level: 'info',
+      code: 'legacy.notice',
+      message: 'legacy frame',
+    });
+  });
+
+  it('rethrows current-version validation errors instead of version errors', () => {
+    expect(() =>
+      parseRunFrame({ schemaVersion: RUN_ENVELOPE_SCHEMA_VERSION, type: 'run-started' }),
+    ).toThrow('timestamp');
+  });
 });
 
 describe('RunFrame constructors', () => {
