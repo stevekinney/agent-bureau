@@ -206,11 +206,13 @@ function parseSummaryIndex(raw: string | null): Map<string, SessionSummary> | un
   if (!raw) return undefined;
   try {
     const parsed: unknown = JSON.parse(raw);
-    if (typeof parsed !== 'object' || parsed === null) return undefined;
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return undefined;
     const record = parsed as Record<string, unknown>;
     if (
       record['formatVersion'] !== SUMMARY_FORMAT_VERSION ||
-      typeof record['summaries'] !== 'object'
+      typeof record['summaries'] !== 'object' ||
+      record['summaries'] === null ||
+      Array.isArray(record['summaries'])
     ) {
       return undefined;
     }
@@ -398,7 +400,7 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
 
     async list(options?: SessionListOptions): Promise<SessionSummary[]> {
       const dataKeys = await store.list(KEY_PREFIX);
-      const summaryRaw = await store.get(SUMMARY_INDEX_KEY);
+      let summaryRaw = await store.get(SUMMARY_INDEX_KEY);
       let summaries = parseSummaryIndex(summaryRaw);
       if (!summaries) {
         summaries = new Map();
@@ -411,18 +413,36 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
             summaries!.set(id, toSummary(session));
           }),
         );
-        await store.conditionalBatch(
+        const rebuilt = await store.conditionalBatch(
           [{ key: SUMMARY_INDEX_KEY, expectedValue: summaryRaw }],
           [{ type: 'set', key: SUMMARY_INDEX_KEY, value: serializeSummaryIndex(summaries) }],
         );
+        if (rebuilt) summaryRaw = serializeSummaryIndex(summaries);
       }
 
       // An index entry must never make a deleted or otherwise missing body
       // visible. This also keeps orphaned records from surviving migrations
       // from stores that predate the atomic data/index writes.
       const dataIds = new Set(dataKeys.map((key) => key.slice(KEY_PREFIX.length)));
-      for (const id of summaries.keys()) {
-        if (!dataIds.has(id)) summaries.delete(id);
+      for (let attempt = 0; attempt < MAXIMUM_SAVE_ATTEMPTS; attempt += 1) {
+        const repaired = new Map(summaries);
+        for (const id of repaired.keys()) {
+          if (!dataIds.has(id)) repaired.delete(id);
+        }
+        if (repaired.size === summaries.size) break;
+
+        const committed = await store.conditionalBatch(
+          [{ key: SUMMARY_INDEX_KEY, expectedValue: summaryRaw }],
+          [{ type: 'set', key: SUMMARY_INDEX_KEY, value: serializeSummaryIndex(repaired) }],
+        );
+        if (committed) {
+          summaries = repaired;
+          break;
+        }
+
+        summaryRaw = await store.get(SUMMARY_INDEX_KEY);
+        summaries = parseSummaryIndex(summaryRaw);
+        if (!summaries) summaries = await summariesForMutation(summaryRaw);
       }
 
       // Filter by agentName when requested

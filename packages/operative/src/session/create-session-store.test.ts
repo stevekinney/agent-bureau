@@ -545,6 +545,43 @@ describe('createSessionStore', () => {
     await rawStore.set('agent-session-index', summaryIndexPayload('orphan-session'));
 
     expect(await store.list()).toEqual([]);
+    expect(await rawStore.get('agent-session-index')).toBe(
+      JSON.stringify({ formatVersion: 1, summaries: {} }),
+    );
+
+    const retained = makeSession({ id: 'after-orphan-repair' });
+    await store.save(retained);
+    const afterRepair = await store.list();
+    expect(afterRepair.map((summary) => summary.id)).toEqual([retained.id]);
+  });
+
+  it('rebuilds array-shaped malformed indexes before list, save, and update', async () => {
+    for (const malformed of ['[]', '{"formatVersion":1,"summaries":[]}']) {
+      for (const operation of ['list', 'save', 'update'] as const) {
+        const rawStore = textValueStore(new MemoryStorage());
+        const store = createSessionStore(rawStore);
+        const retained = makeSession({ id: `${operation}-retained` });
+        const changed = makeSession({ id: `${operation}-changed` });
+        await store.save(retained);
+        await store.save(changed);
+        await rawStore.set('agent-session-index', malformed);
+
+        if (operation === 'list') {
+          await store.list();
+        } else if (operation === 'save') {
+          await store.save({ ...changed, agentName: 'updated-agent' });
+        } else {
+          await store.update(changed.id, (session) =>
+            session ? { ...session, agentName: 'updated-agent' } : undefined,
+          );
+        }
+
+        const summaries = await store.list();
+        const ids = summaries.map((summary) => summary.id);
+        expect(ids).toContain(retained.id);
+        expect(ids).toContain(changed.id);
+      }
+    }
   });
 
   it('uses the session id as a deterministic tie-break in either sort direction', async () => {
