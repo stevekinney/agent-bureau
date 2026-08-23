@@ -18,7 +18,7 @@ import {
 } from '../src/agent-run';
 import { noToolCalls } from '../src/conditions/predicates';
 import { type ActiveRun, createActiveRun as createRun } from '../src/create-run';
-import { MaximumStepsExceededError } from '../src/errors';
+import { AbortAgentRunError, MaximumStepsExceededError } from '../src/errors';
 import { createMockGenerate } from '../src/test/index';
 import type { GenerateResponse } from '../src/types';
 
@@ -585,6 +585,43 @@ describe('AgentRun.abort()', () => {
     ]);
     expect(['resolved', 'rejected']).toContain(settled);
     expect(abortSignal?.aborted).toBe(true);
+  });
+
+  it('emits a typed abort error and resolves result() with the same abort error contract', async () => {
+    let eventError: AbortAgentRunError | undefined;
+    const parkingGenerate = async (context: { signal?: AbortSignal }) => {
+      await new Promise<void>((_resolve, reject) => {
+        context.signal?.addEventListener(
+          'abort',
+          () => reject(new Error('generate observed abort')),
+          { once: true },
+        );
+      });
+      return textResponse('unreachable');
+    };
+
+    const activeRun = createRun({
+      generate: parkingGenerate,
+      toolbox: createTestToolbox([]),
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+    });
+    activeRun.addEventListener('run.aborted', (event) => {
+      eventError = event.error;
+    });
+    const run = createAgentRun(activeRun);
+
+    setTimeout(() => run.abort('user cancelled'), 10);
+
+    const result = await run.result();
+
+    expect(result.finishReason).toBe('aborted');
+    expect(result.error).toBeInstanceOf(AbortAgentRunError);
+    expect((result.error as AbortAgentRunError).kind).toBe('abort');
+    expect((result.error as AbortAgentRunError).code).toBe('ABORTED');
+    expect((result.error as AbortAgentRunError).message).toBe('user cancelled');
+    expect(eventError).toBeInstanceOf(AbortAgentRunError);
+    expect(eventError).toBe(result.error);
   });
 });
 

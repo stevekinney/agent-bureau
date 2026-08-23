@@ -24,7 +24,11 @@ import type {
   OperativeEventEmitter,
   RunOptions,
 } from '@lostgradient/operative';
-import { createActiveRun, MaximumStepsExceededError } from '@lostgradient/operative';
+import {
+  AbortAgentRunError,
+  createActiveRun,
+  MaximumStepsExceededError,
+} from '@lostgradient/operative';
 import { stopWhen } from '@lostgradient/operative/conditions';
 import type { DurableRunDeps } from '@lostgradient/operative/durable';
 import {
@@ -272,6 +276,7 @@ describe('abort propagation — aborting a run finalizes as aborted and stops ge
   it('createRun.abort() fires run.aborted and finalizes as aborted', async () => {
     const events: string[] = [];
     let finishReasonSeen: string | undefined;
+    let abortError: AbortAgentRunError | undefined;
 
     // Use a generate that parks until we let it proceed — gives us time to abort
     let allowProceed: (() => void) | undefined;
@@ -286,8 +291,9 @@ describe('abort propagation — aborting a run finalizes as aborted and stops ge
       }),
     );
 
-    activeRun.addEventListener('run.aborted', () => {
+    activeRun.addEventListener('run.aborted', (event) => {
       events.push('run.aborted');
+      abortError = event.error;
     });
     activeRun.addEventListener('run.completed', (event) => {
       events.push('run.completed');
@@ -304,6 +310,9 @@ describe('abort propagation — aborting a run finalizes as aborted and stops ge
     const result = await activeRun.result;
 
     expect(result.finishReason).toBe('aborted');
+    expect(result.error).toBeInstanceOf(AbortAgentRunError);
+    expect((result.error as AbortAgentRunError).code).toBe('ABORTED');
+    expect(abortError).toBe(result.error);
     // Either run.aborted or run.completed with aborted is acceptable
     expect(events.length).toBeGreaterThan(0);
   });

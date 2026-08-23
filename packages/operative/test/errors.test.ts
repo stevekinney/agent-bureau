@@ -6,6 +6,7 @@ import { z } from 'zod';
 
 import { noToolCalls } from '../src/conditions/predicates';
 import { createActiveRun } from '../src/create-run';
+import { AgentRunError } from '../src/errors';
 import { createMockGenerate } from '../src/test/index';
 import type { GenerateResponse } from '../src/types';
 const run = (options: Parameters<typeof createActiveRun>[0]) => createActiveRun(options).result;
@@ -177,8 +178,9 @@ describe('error handling', () => {
   });
 
   it('emits both run.error and run.completed for generic errors via createRun', async () => {
+    const thrownError = new Error('Generic network error');
     const generate = async () => {
-      throw new Error('Generic network error');
+      throw thrownError;
     };
 
     const toolbox = createToolbox([]);
@@ -192,9 +194,11 @@ describe('error handling', () => {
     });
 
     const receivedEvents: string[] = [];
+    let eventError: AgentRunError | undefined;
 
-    activeRun.addEventListener('run.error', () => {
+    activeRun.addEventListener('run.error', (event) => {
       receivedEvents.push('run.error');
+      eventError = event.error;
     });
 
     activeRun.addEventListener('run.completed', () => {
@@ -206,5 +210,9 @@ describe('error handling', () => {
     expect(result.finishReason).toBe('error');
     expect(receivedEvents).toContain('run.error');
     expect(receivedEvents).toContain('run.completed');
+    expect(eventError).toBeInstanceOf(AgentRunError);
+    expect(eventError?.kind).toBe('generate');
+    expect(eventError?.code).toBe('UNKNOWN');
+    expect(eventError?.cause).toBe(thrownError);
   });
 });

@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'bun:test';
 
-import { AbortAgentRunError, AsyncDefinitionLoadError, createLazyGenerate } from './index';
+import {
+  AbortAgentRunError,
+  AgentRunError,
+  AsyncDefinitionLoadError,
+  createLazyGenerate,
+} from './index';
 import type { GenerateContext, GenerateFunction, GenerateResponse } from './types';
 
 const response = { content: 'loaded', toolCalls: [] } satisfies GenerateResponse;
@@ -88,13 +93,15 @@ describe('createLazyGenerate', () => {
       { label: 'retrying-provider' },
     );
 
-    await expectRejects(lazy(createContext()), {
+    const error = await expectRejects(lazy(createContext()), {
       name: 'AsyncDefinitionLoadError',
       kind: 'load',
       code: 'LOAD_FAILED',
       cause,
       message: 'Failed to load lazy generate function "retrying-provider"',
     });
+    expect(error).toBeInstanceOf(AgentRunError);
+    expect(error).toBeInstanceOf(AsyncDefinitionLoadError);
     await expectResolves(lazy(createContext()), response);
     expect(loads).toBe(2);
   });
@@ -139,11 +146,14 @@ describe('createLazyGenerate', () => {
       return async () => response;
     });
 
-    await expectRejects(lazy(createContext(controller.signal)), {
+    const error = await expectRejects(lazy(createContext(controller.signal)), {
       name: 'AbortAgentRunError',
       kind: 'abort',
+      code: 'ABORTED',
       cause: 'before',
     });
+    expect(error).toBeInstanceOf(AgentRunError);
+    expect(error).toBeInstanceOf(AbortAgentRunError);
     expect(loads).toBe(0);
   });
 

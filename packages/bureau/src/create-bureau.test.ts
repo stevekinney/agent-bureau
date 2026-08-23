@@ -11,6 +11,7 @@ import type {
   Toolbox,
 } from '@lostgradient/operative';
 import {
+  AbortAgentRunError,
   createAgentSession,
   createSessionStore,
   DEFAULT_MAXIMUM_STEPS,
@@ -3977,7 +3978,9 @@ describe('createBureau review queue (AB-20)', () => {
     // Resuming a `ctx.waitForSignal` park runs the durable workflow straight
     // through to completion (it does not start a new step) — the run's
     // status leaving `'running'` is what marks it no longer parked.
-    emitter.dispatchEvent(new RunAbortedEvent(1, new Conversation(), 'resumed'));
+    emitter.dispatchEvent(
+      new RunAbortedEvent(1, new Conversation(), new AbortAgentRunError('resumed')),
+    );
 
     expect(bureau.listPendingReviews()).toHaveLength(0);
 
@@ -4200,7 +4203,9 @@ describe('createBureau review queue (AB-20)', () => {
     expect(bureau.listPendingReviews()).toHaveLength(0);
 
     // Terminate and delete the run — deleteRun refuses a still-`running` run.
-    first.emitter.dispatchEvent(new RunAbortedEvent(0, new Conversation(), 'test-cleanup'));
+    first.emitter.dispatchEvent(
+      new RunAbortedEvent(0, new Conversation(), new AbortAgentRunError('test-cleanup')),
+    );
     bureau.deleteRun(runId);
 
     // A new run REUSES the same run id and produces the exact same review id

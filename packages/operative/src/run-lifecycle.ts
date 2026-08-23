@@ -2,6 +2,7 @@ import type { Conversation } from 'conversationalist';
 
 import { estimateCost, getModelPricing } from './cost-estimation';
 import {
+  AbortAgentRunError,
   BudgetExceededError,
   ElicitationDeniedError,
   GuardrailTripwireError,
@@ -95,8 +96,9 @@ export function makeAbortResult(
   costEstimation?: RunOptions['costEstimation'],
 ): RunResult {
   const costEstimate = computeCostEstimate(runState.totalUsage, costEstimation);
+  const error = new AbortAgentRunError(reason);
   emitter?.dispatch(
-    new RunAbortedEvent(step, conversation, reason, runState.totalUsage, costEstimate),
+    new RunAbortedEvent(step, conversation, error, runState.totalUsage, costEstimate),
   );
   runHookSilently(hooks, 'onRunAbort', {
     reason,
@@ -110,6 +112,7 @@ export function makeAbortResult(
     usage: runState.totalUsage,
     ...(costEstimate ? { costEstimate } : {}),
     finishReason: 'aborted',
+    error,
   };
 }
 

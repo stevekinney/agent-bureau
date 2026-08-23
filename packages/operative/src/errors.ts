@@ -3,18 +3,46 @@ import { isToolCallParseError } from './providers/errors.ts';
 export type AgentRunErrorKind =
   'load' | 'contract' | 'generate' | 'tool' | 'abort' | 'output' | 'policy';
 
-export type AgentRunErrorCode = 'MAXIMUM_STEPS';
+export type AsyncDefinitionLoadCode = 'INVALID_EXPORT' | 'LOAD_FAILED';
+
+export type AgentRunErrorCode = AsyncDefinitionLoadCode | 'ABORTED' | 'MAXIMUM_STEPS' | 'UNKNOWN';
 
 export class AgentRunError extends Error {
   readonly kind: AgentRunErrorKind;
   readonly code: AgentRunErrorCode;
+  override readonly cause: unknown;
 
-  constructor(message: string, options: { kind: AgentRunErrorKind; code: AgentRunErrorCode }) {
-    super(message);
+  constructor(
+    message: string,
+    options: { kind: AgentRunErrorKind; code: AgentRunErrorCode; cause?: unknown },
+  ) {
+    super(message, { cause: options.cause });
     this.name = 'AgentRunError';
     this.kind = options.kind;
     this.code = options.code;
+    this.cause = options.cause;
   }
+}
+
+export function toAgentRunError(
+  error: unknown,
+  options: {
+    kind?: AgentRunErrorKind;
+    code?: AgentRunErrorCode;
+    message?: string;
+  } = {},
+): AgentRunError {
+  if (error instanceof AgentRunError) return error;
+
+  const message =
+    options.message ??
+    (error instanceof Error ? error.message : typeof error === 'string' ? error : String(error));
+
+  return new AgentRunError(message, {
+    kind: options.kind ?? 'generate',
+    code: options.code ?? 'UNKNOWN',
+    cause: error,
+  });
 }
 
 export class MaximumStepsExceededError extends AgentRunError {
@@ -41,31 +69,19 @@ export class BudgetExceededError extends Error {
   }
 }
 
-export type AsyncDefinitionLoadCode = 'INVALID_EXPORT' | 'LOAD_FAILED';
-
 /** Raised when a lazily loaded agent definition cannot be resolved. */
-export class AsyncDefinitionLoadError extends Error {
-  readonly kind = 'load';
-  readonly code: AsyncDefinitionLoadCode;
-  override readonly cause: unknown;
-
+export class AsyncDefinitionLoadError extends AgentRunError {
   constructor(code: AsyncDefinitionLoadCode, message: string, cause?: unknown) {
-    super(message, { cause });
+    super(message, { kind: 'load', code, cause });
     this.name = 'AsyncDefinitionLoadError';
-    this.code = code;
-    this.cause = cause;
   }
 }
 
 /** Raised when an agent run is aborted before lazy generate loading can complete. */
-export class AbortAgentRunError extends Error {
-  readonly kind = 'abort';
-  override readonly cause: unknown;
-
+export class AbortAgentRunError extends AgentRunError {
   constructor(message = 'The agent run was aborted', cause?: unknown) {
-    super(message, { cause });
+    super(message, { kind: 'abort', code: 'ABORTED', cause });
     this.name = 'AbortAgentRunError';
-    this.cause = cause;
   }
 }
 

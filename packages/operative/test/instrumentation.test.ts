@@ -481,6 +481,8 @@ describe('instrument', () => {
     expect(runSpan.status.code).toBe(SpanStatusCode.ERROR);
     expect(runSpan.status.message).toBe('LLM service unavailable');
     expect(runSpan.attributes['error.type']).toBe('Error');
+    expect(runSpan.attributes['operative.error.kind']).toBe('generate');
+    expect(runSpan.attributes['operative.error.code']).toBe('UNKNOWN');
     expect(runSpan.exceptions).toHaveLength(1);
     expect(runSpan.ended).toBe(true);
 

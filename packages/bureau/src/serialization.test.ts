@@ -1,4 +1,4 @@
-import type { ActiveRun } from '@lostgradient/operative';
+import { AbortAgentRunError, type ActiveRun } from '@lostgradient/operative';
 import type { RunState } from '@lostgradient/operative/store';
 import { afterEach, describe, expect, it, spyOn } from 'bun:test';
 
@@ -133,12 +133,14 @@ describe('serializeActionDetail', () => {
       step: 2,
       conversation: { snapshot: () => ({}) },
       reason: 'cancelled',
+      error: new AbortAgentRunError('cancelled'),
     };
 
     const result = serializeActionDetail('run.aborted', detail) as Record<string, unknown>;
     expect(result).not.toHaveProperty('conversation');
     expect(result['step']).toBe(2);
     expect(result['reason']).toBe('cancelled');
+    expect(result['error']).toBe('cancelled');
   });
 
   it('strips conversation from run.completed details', () => {

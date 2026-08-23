@@ -5,6 +5,7 @@ import type { EventMap, ForwardedEvent, ObservableLike, Observer, Subscription }
 
 import type { CostBudgetExceededEvent, CostBudgetThresholdEvent } from './cost-budget-monitor';
 import { estimateCacheHitRate } from './cost-estimation';
+import { type AgentRunError, toAgentRunError } from './errors';
 import type { GenerateResponse, RunResult, StepResult, TokenUsage } from './types';
 
 // ---------------------------------------------------------------------------
@@ -134,18 +135,19 @@ export class RunCompletedEvent<O = unknown, H extends boolean = true> extends Ev
 export class RunErrorEvent extends Event {
   static readonly type = 'run.error' as const;
   readonly step: number;
-  readonly error: unknown;
+  readonly error: AgentRunError;
   constructor(step: number, error: unknown) {
     super(RunErrorEvent.type);
     this.step = step;
-    this.error = error;
+    this.error = toAgentRunError(error);
   }
 }
 
 export class RunAbortedEvent extends Event {
   static readonly type = 'run.aborted' as const;
   readonly step: number;
-  readonly reason?: string;
+  readonly error: AgentRunError;
+  readonly reason: string;
   // The conversation as it stood when the run aborted. On the durable path the
   // workflow mutates per-step checkpoint snapshots, never the launch-time input
   // instance, so listeners MUST persist this conversation (the reconstructed /
@@ -164,14 +166,15 @@ export class RunAbortedEvent extends Event {
   constructor(
     step: number,
     conversation: Conversation,
-    reason?: string,
+    error: AgentRunError,
     usage?: TokenUsage,
     costEstimate?: RunResult['costEstimate'],
   ) {
     super(RunAbortedEvent.type);
     this.step = step;
     this.conversation = conversation;
-    this.reason = reason;
+    this.error = error;
+    this.reason = error.message;
     this.usage = usage;
     this.costEstimate = costEstimate;
   }
