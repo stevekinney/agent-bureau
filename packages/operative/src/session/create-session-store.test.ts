@@ -1047,16 +1047,20 @@ describe('createSessionStore', () => {
   it('supports a session id that matches the reserved index suffix', async () => {
     const rawStore = textValueStore(new MemoryStorage());
     const store = createSessionStore(rawStore);
+    const ordinarySession = makeSession({ id: 'ordinary-session' });
     const session = makeSession({ id: 'summary-index' });
 
+    await store.save(ordinarySession);
+    expect(await store.exists(session.id)).toBe(false);
     await store.save(session);
 
     expect(await store.load(session.id)).toBeDefined();
     const summaries = await store.list({ limit: 10 });
-    expect(summaries.map((summary) => summary.id)).toEqual([session.id]);
+    expect(summaries.map((summary) => summary.id)).toContain(session.id);
     await store.delete(session.id);
     expect(await store.load(session.id)).toBeUndefined();
-    expect(await rawStore.has(SUMMARY_INDEX_KEY)).toBe(false);
+    expect(await store.load(ordinarySession.id)).toBeDefined();
+    expect(await rawStore.has(SUMMARY_INDEX_KEY)).toBe(true);
   });
 
   it('list returns correct messageCount from conversation history', async () => {

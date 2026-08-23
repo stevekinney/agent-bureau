@@ -283,6 +283,7 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
     const raw = await store.get(key);
     if (raw !== null) return { raw, key };
     const legacyKey = legacyKeyFor(id);
+    if (legacyKey === SUMMARY_INDEX_KEY) return { raw: null, key };
     const legacyRaw = await store.get(legacyKey);
     return legacyRaw === null ? { raw: null, key } : { raw: legacyRaw, key: legacyKey };
   }
@@ -562,7 +563,11 @@ export function createSessionStore(store: ConditionalTextValueStore): SessionSto
     async exists(id: string): Promise<boolean> {
       // `has` is a required member of Weft's TextValueStore (0.2.1), so the
       // existence check needs no get-based fallback.
-      return (await store.has(keyFor(id))) || (await store.has(legacyKeyFor(id)));
+      const legacyKey = legacyKeyFor(id);
+      return (
+        (await store.has(keyFor(id))) ||
+        (legacyKey !== SUMMARY_INDEX_KEY && (await store.has(legacyKey)))
+      );
     },
 
     async updateMetadata(id: string, metadata: Record<string, JSONValue>): Promise<void> {
