@@ -894,7 +894,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
       ...(options?.requestContext
         ? {
             privilegedContext: Object.freeze({
-              ...options.requestContext,
+              ...freezeToolRequestContext(options.requestContext),
               revisions: Object.freeze({
                 catalog: catalogRevision,
                 toolbox: toolboxRevision,
@@ -1186,7 +1186,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
                     ? {
                         requestContext: freezeToolRequestContext(options.requestContext),
                         effectiveContext: Object.freeze({
-                          ...options.requestContext,
+                          ...freezeToolRequestContext(options.requestContext),
                           revisions: Object.freeze({
                             catalog: catalogRevision,
                             toolbox: toolboxRevision,

@@ -60,7 +60,6 @@ export type ToolResultCache = {
     execution: StartedToolExecution,
     ttl?: number,
   ): Promise<ToolResultCacheClaimResult>;
-  /** Mark a key as started before running a side effect. */
   /** Renew a started marker only when the fencing token still owns it. */
   renewStarted(
     key: string,

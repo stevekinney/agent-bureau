@@ -1009,12 +1009,15 @@ export function createTool<
           : {}),
         ...(options.effectiveContext
           ? {
-              effectiveContext: {
+              effectiveContext: Object.freeze({
                 ...options.effectiveContext,
                 ...(effectiveRequestContext
-                  ? { ...effectiveRequestContext, revisions: options.effectiveContext.revisions }
+                  ? {
+                      ...freezeToolRequestContext(effectiveRequestContext),
+                      revisions: options.effectiveContext.revisions,
+                    }
                   : {}),
-              },
+              }),
             }
           : {}),
         ...(options.durableOperationKey !== undefined
@@ -1928,7 +1931,8 @@ function policyPauseMatchesSatisfiedPause(
     return false;
   }
   return (
-    satisfiedPause.tier !== undefined && satisfiedPause.tier === decision[policyPauseTierSymbol]
+    satisfiedPause.tier !== undefined &&
+    satisfiedPause.tier === (decision[policyPauseTierSymbol] ?? 'tool')
   );
 }
 
